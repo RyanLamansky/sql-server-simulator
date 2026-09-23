@@ -412,7 +412,29 @@ internal sealed class Cast : Expression
                 ?? SimulatedSqlException.ArithmeticOverflow(targetType.ToString()!);
         }
 
+        coerced = NarrowToCodePage(coerced, sourceType, budgetCollation);
         return EnforceTargetMaxLength(coerced, targetType, targetMaxLength, sourceType, budgetCollation);
+    }
+
+    /// <summary>
+    /// A national string converted to an ANSI type takes the result
+    /// collation's code page — best-fit mapping and <c>?</c> included — as
+    /// part of the conversion rather than only when stored, so the converted
+    /// value compares as the stored one would: probe-confirmed 2026-09-23,
+    /// <c>CAST(N'Ā' AS varchar(5)) = 'A'</c> is true, and a
+    /// <c>COLLATE Greek_CI_AS</c> source keeps its Greek letters.
+    /// </summary>
+    private static SqlValue NarrowToCodePage(SqlValue coerced, SqlType sourceType, Collation? budgetCollation)
+    {
+        if (coerced.IsNull
+            || coerced.Type is not (VarcharSqlType or CharSqlType or TextSqlType)
+            || !SqlType.IsNationalStringCategory(sourceType)
+            || System.Text.Ascii.IsValid(coerced.AsString))
+        {
+            return coerced;
+        }
+        var encoding = (budgetCollation ?? coerced.Type.Collation ?? Collation.Baseline).StorageEncoding;
+        return SqlValue.FromString(coerced.Type, encoding.GetString(encoding.GetBytes(coerced.AsString)));
     }
 
     /// <summary>

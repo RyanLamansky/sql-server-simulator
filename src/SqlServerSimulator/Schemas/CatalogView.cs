@@ -49,18 +49,14 @@ internal sealed class CatalogView(
     public readonly bool MasterScoped = masterScoped;
 
     /// <summary>
-    /// Deterministic, process-stable <c>object_id</c> surfaced by
-    /// <c>OBJECT_ID('sys.&lt;view&gt;')</c>. Catalog views are registered
-    /// process-wide (not per-database) so they can't draw from a
-    /// <see cref="Database"/>'s object-id allocator; instead the id is a
-    /// 32-bit FNV-1a hash of the leaf name forced negative, keeping it stable
-    /// across runs and disjoint from the positive ids user objects allocate
-    /// (from 100). Load-bearing only for OBJECT_ID resolving to non-NULL —
-    /// SSMS's Query Store probe gates on
-    /// <c>OBJECT_ID(N'[sys].[database_query_store_options]') IS NOT NULL</c>.
-    /// Not byte-identical to real SQL Server's small fixed system-view ids.
+    /// The <c>object_id</c> <c>OBJECT_ID('sys.&lt;view&gt;')</c> surfaces: real's
+    /// fixed id from <see cref="CatalogViewObjectIds"/>, assigned by key once the
+    /// registry is built (<c>OBJECT_ID('sys.objects')</c> is −385). A view real
+    /// lacks keeps a 32-bit FNV-1a hash of its leaf name forced negative,
+    /// stable across runs and disjoint from the positive ids user objects
+    /// allocate.
     /// </summary>
-    public readonly int ObjectId = ComputeObjectId(name);
+    public int ObjectId = ComputeObjectId(name);
 
     private static int ComputeObjectId(string leafName)
     {

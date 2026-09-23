@@ -132,6 +132,7 @@ partial class Simulation
         var innerBatch = new BatchContext(bodyCommand, variables, new UdfFrame(SqlType.Int32))
         {
             SuppressDiagnosticsResolution = true,
+            ViewBody = true,
         };
         innerBatch.AdoptStatementFreezeFrom(outerBatch);
         var savedQuotedIdentifiers = connection.QuotedIdentifiers;
@@ -177,7 +178,7 @@ partial class Simulation
         connection.QuotedIdentifiers = view.UsesQuotedIdentifier;
         // Body errors attribute to the outer statement that referenced the view
         // (probe-confirmed: real reports the outer SELECT's line, no procedure).
-        var innerBatch = new BatchContext(bodyCommand, variables, dummyFrame) { SuppressDiagnosticsResolution = true };
+        var innerBatch = new BatchContext(bodyCommand, variables, dummyFrame) { SuppressDiagnosticsResolution = true, ViewBody = true };
         // The body is part of the referencing statement, not a statement of its
         // own, so its current-time calls read that statement's freeze.
         innerBatch.AdoptStatementFreezeFrom(outerBatch);

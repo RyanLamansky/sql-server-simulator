@@ -36,12 +36,13 @@ public class VarLengthRowTests
     [TestMethod]
     [DataRow("日本語", "???")]              // CJK: each char replaced with '?'
     [DataRow("🎉 emoji 🚀", "?? emoji ??")] // surrogate pairs each become two replacement bytes
-    [DataRow("Ω", "?")]                    // Greek omega isn't in CP1252
+    [DataRow("Ω", "O")]                    // Greek omega best-fits to O (probe-confirmed 2026-09-23)
     public void Varchar_OutOfCp1252_LossilyReplaced(string input, string expected)
     {
         // SQL Server's CP1252 collation can't represent characters outside
-        // Windows-1252; they're silently replaced with '?'. The simulator
-        // mirrors that lossy behavior — authentic over desirable.
+        // Windows-1252; each takes Windows' best-fit mapping where it has one
+        // and is otherwise replaced with '?'. The simulator mirrors that lossy
+        // behavior — authentic over desirable.
         var decoded = RowDecoder.DecodeRow([SqlType.Varchar], RowEncoder.EncodeRow([SqlType.Varchar], [SqlValue.FromVarchar(input)]));
         AreEqual(expected, decoded[0].AsString);
     }

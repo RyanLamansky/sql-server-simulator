@@ -18,7 +18,7 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// </remarks>
 internal sealed class JsonValue : Expression
 {
-    /// <summary>JSON_VALUE's <c>nvarchar(4000)</c> result cap; a longer scalar reads as NULL in lax mode.</summary>
+    /// <summary>JSON_VALUE's <c>nvarchar(4000)</c> result cap.</summary>
     private const int MaxScalarChars = 4000;
 
     private readonly Expression jsonInput;
@@ -33,6 +33,10 @@ internal sealed class JsonValue : Expression
     }
 
     internal override bool ParallelSafe => this.jsonInput.ParallelSafe && this.pathInput.ParallelSafe;
+
+    private static bool IsMaxForm(SqlType type) =>
+        type.IsLob
+        || type is VarcharSqlType { length: SqlType.MaxLengthSentinel } or NVarcharSqlType { length: SqlType.MaxLengthSentinel };
 
     public override SqlValue Run(RuntimeContext runtime)
     {
@@ -52,12 +56,18 @@ internal sealed class JsonValue : Expression
             {
                 return element.ValueKind switch
                 {
-                    // JSON_VALUE returns nvarchar(4000); a scalar string longer than
-                    // 4000 chars yields NULL in the default lax mode (probe-confirmed
-                    // against SQL Server 2025: 4000 → value, 4001 → NULL). Enforcing
-                    // the cap also keeps the length-0 result within the bounded wire
-                    // prefix — an uncapped multi-KB value would overflow it.
-                    JsonValueKind.String => element.GetString() is { Length: <= MaxScalarChars } s ? SqlValue.FromNVarchar(s) : SqlValue.Null(SqlType.NVarchar),
+                    // JSON_VALUE returns nvarchar(4000). A longer scalar string
+                    // splits by the input's type (probe-confirmed against SQL
+                    // Server 2025): over a MAX document it is NULL in the default
+                    // lax mode (4000 → value, 4001 → NULL), over a bounded one it
+                    // is cut to its first 4000 characters (2026-09-23). Either
+                    // way the result stays within the bounded wire prefix.
+                    JsonValueKind.String => element.GetString() switch
+                    {
+                        { Length: <= MaxScalarChars } s => SqlValue.FromNVarchar(s),
+                        { } s when !IsMaxForm(jsonValue.Type) => SqlValue.FromNVarchar(s[..MaxScalarChars]),
+                        _ => SqlValue.Null(SqlType.NVarchar),
+                    },
                     JsonValueKind.Number => SqlValue.FromNVarchar(element.GetRawText()),
                     JsonValueKind.True => SqlValue.FromNVarchar("true"),
                     JsonValueKind.False => SqlValue.FromNVarchar("false"),

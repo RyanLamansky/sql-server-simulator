@@ -22,7 +22,7 @@ internal sealed class Upper(ParserContext context) : Expression
         if (raw.IsNull)
             return SqlValue.Null(StringScalars.ResolveResultType(raw.Type, runtime.Batch));
         var value = StringScalars.CoerceToVarchar(raw, runtime.Batch, "upper");
-        var uppered = value.AsString.ToUpperInvariant();
+        var uppered = StringScalars.CaseMapping.ToUpper(value.AsString);
         return SqlValue.FromString(value.Type, uppered);
     }
 

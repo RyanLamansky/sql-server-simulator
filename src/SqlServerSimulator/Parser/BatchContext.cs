@@ -642,6 +642,13 @@ internal sealed class BatchContext
     public string ErrorProcedureName = "";
 
     /// <summary>
+    /// True for the batch a view's body parses in, whose query is nested in
+    /// its caller's the way a derived table is (see
+    /// <see cref="Selection"/>'s <c>TOP 100 PERCENT</c> rule).
+    /// </summary>
+    public bool ViewBody;
+
+    /// <summary>
     /// When set, a caught exception is <em>not</em> stamped at this batch's
     /// dispatch frame — it propagates unresolved so the enclosing invoking
     /// statement's frame attributes the line / procedure. Scalar-UDF,

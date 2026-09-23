@@ -595,4 +595,28 @@ public sealed class GroupingSetTests
         var ex = Throws<DbException>(() => _ = conn.CreateCommand(sql).ExecuteScalar());
         AreEqual(errorNumber.ToString(), ex.Data["HelpLink.EvtID"]);
     }
+
+    /// <summary>
+    /// Any written GROUP BY over no rows answers no rows — the empty set's
+    /// group exists over empty input only when GROUP BY is absent.
+    /// </summary>
+    [TestMethod]
+    [DataRow("group by ()")]
+    [DataRow("group by rollup(a)")]
+    [DataRow("group by cube(a)")]
+    [DataRow("group by grouping sets ((), (a))")]
+    [DataRow("group by a with rollup")]
+    public void WrittenGroupBy_OverNoRows_AnswersNoRows(string groupBy)
+        => AreEqual(0, new Simulation().ExecuteScalar($"select count(*) from (select count(*) c from (select 1 a where 1 = 0) t {groupBy}) q"));
+
+    /// <summary>A grouped-away grouping expression reads NULL in the subtotal row.</summary>
+    [TestMethod]
+    [DataRow("a + 1", "rollup(a + 1)")]
+    [DataRow("year(d)", "rollup(year(d))")]
+    public void GroupedAwayExpression_IsNullInTheTotalRow(string projection, string groupBy)
+        => AreEqual(1, new Simulation().ExecuteScalar($"""
+            select count(*) from (
+                select {projection} x from (values (1, cast('2024-01-01' as date)), (2, cast('2025-01-01' as date))) v(a, d) group by {groupBy}
+            ) q where x is null
+            """));
 }

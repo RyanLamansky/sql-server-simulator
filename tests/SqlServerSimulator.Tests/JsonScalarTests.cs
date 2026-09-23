@@ -407,4 +407,20 @@ public sealed class JsonScalarTests
             create table t (id int primary key, doc nvarchar(max) check (doc is null or isjson(doc) <> 0));
             insert t values (1, 'not json')
             """, 547);
+
+    /// <summary>
+    /// A scalar past 4000 characters is cut to 4000 over a bounded document and
+    /// NULL over a MAX one.
+    /// </summary>
+    [TestMethod]
+    [DataRow("replicate('x', 4001)", 4000)]
+    [DataRow("replicate(cast('x' as varchar(max)), 4001)", null)]
+    public void JsonValue_LongScalar(string value, int? expected)
+    {
+        var result = ExecuteScalar($"select len(json_value('{{\"a\":\"' + {value} + '\"}}', '$.a'))");
+        if (expected is { } length)
+            AreEqual(length, result);
+        else
+            AreEqual(DBNull.Value, result);
+    }
 }

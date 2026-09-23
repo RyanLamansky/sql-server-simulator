@@ -355,10 +355,12 @@ partial class SimulatedSqlException
     /// Mimics SQL Server error 517: <c>DATEADD</c>'s output value falls
     /// outside the date/time type's representable range. The type-name slot
     /// is the *input* column's type (e.g. <c>'date'</c>), not the abstract
-    /// SQL-server type family — verified by probe.
+    /// SQL-server type family — verified by probe. The state splits by family:
+    /// 1 for the legacy <c>datetime</c> / <c>smalldatetime</c>, 3 for the rest
+    /// (probe-confirmed 2026-09-23).
     /// </summary>
     internal static SimulatedSqlException DateAddOverflow(string typeName) =>
-        new($"Adding a value to a '{typeName}' column caused an overflow.", 517, 16, 3);
+        new($"Adding a value to a '{typeName}' column caused an overflow.", 517, 16, typeName is "datetime" or "smalldatetime" ? (byte)1 : (byte)3);
 
     /// <summary>
     /// Mimics SQL Server error 517 as <c>EOMONTH</c> raises it when its month
@@ -698,12 +700,12 @@ partial class SimulatedSqlException
         new($"The function '{functionLowerName}' is not a valid windowing function, and cannot be used with the OVER clause.", 4113, 15, 4);
 
     /// <summary>
-    /// Mimics SQL Server's Msg 9819 — <c>NTILE(N)</c> requires <c>N</c> to be
-    /// a positive number; raised at runtime when the bucket-count expression
-    /// evaluates to zero or negative.
+    /// Mimics SQL Server's Msg 4116 — <c>NTILE(N)</c> requires <c>N</c> to be a
+    /// positive integer, literal or variable alike. Probe-confirmed against SQL
+    /// Server 2025 (2026-09-23): Class 15, State 1.
     /// </summary>
     internal static SimulatedSqlException NTileBucketCountMustBePositive() =>
-        new("The function 'NTILE' must have a positive integer value.", 9819, 16, 1);
+        new("The function 'ntile' takes only a positive int or bigint expression as its input.", 4116, 15, 1);
 
     /// <summary>
     /// Mimics SQL Server's Msg 10752 — an explicit <c>ROWS</c> / <c>RANGE</c>

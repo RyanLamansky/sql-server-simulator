@@ -343,7 +343,7 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
         if (dayCount is < DateTimeSqlType.MinDayCount or > DateTimeSqlType.MaxDayCount)
             throw SimulatedSqlException.OutOfRangeDateTimeConversion(SqlType.DateTime);
 
-        var roundedTimeTicks = timeUnits * TimeSpan.TicksPerSecond / 300;
+        var roundedTimeTicks = ((timeUnits * TimeSpan.TicksPerSecond) + 150) / 300;
         var rounded = DateTimeSqlType.BaseDate.AddDays(dayCount).AddTicks(roundedTimeTicks);
         return new(SqlType.DateTime, rounded.Ticks, null, isNull: false);
     }

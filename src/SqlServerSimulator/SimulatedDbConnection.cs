@@ -600,6 +600,12 @@ public sealed class SimulatedDbConnection : DbConnection
     internal long SubqueryPlanExecutions;
 
     /// <summary>
+    /// The session's <c>RAND</c> generator: a seeded call resets it, and an
+    /// unseeded one continues from wherever the session left it.
+    /// </summary>
+    internal readonly Parser.Expressions.RandGenerator Rand = new();
+
+    /// <summary>
     /// Current nesting depth of in-flight scalar UDF / stored-proc / trigger
     /// / view calls on this connection. Incremented when
     /// <c>Simulation.InvokeScalarFunction</c> enters a body, decremented when

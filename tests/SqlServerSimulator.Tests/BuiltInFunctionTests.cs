@@ -377,4 +377,40 @@ public sealed class BuiltInFunctionTests
         new Simulation().AssertSqlError("select power(cast(2 as bigint), 200)", 8115, "Arithmetic overflow error converting expression to data type bigint.");
         Assert.Contains("Arithmetic overflow error for type int", new Simulation().AssertSqlError("select power(2, 62)", 232).Message);
     }
+
+    /// <summary>LOWER / UPPER map the dotted and dotless I the English way.</summary>
+    [TestMethod]
+    [DataRow("lower(N'İ')", "i")]
+    [DataRow("upper(N'ı')", "I")]
+    [DataRow("upper(N'ß')", "ß")]
+    public void CaseMapping_TurkishI(string expression, string expected)
+        => AreEqual(expected, ExecuteScalar($"select {expression}"));
+
+    /// <summary>
+    /// DATEADD reads a string date as datetime, and its overflow names that
+    /// type at the legacy family's state 1.
+    /// </summary>
+    [TestMethod]
+    public void DateAdd_StringDate_IsDatetime()
+    {
+        using var connection = new Simulation().CreateOpenConnection();
+        using var reader = connection.CreateCommand("select dateadd(day, 1, '2024-01-01')").ExecuteReader();
+        AreEqual("datetime", reader.GetDataTypeName(0));
+    }
+
+    [TestMethod]
+    [DataRow("'2024-01-01'", "datetime", 1)]
+    [DataRow("cast('2024-01-01' as date)", "date", 3)]
+    [DataRow("cast('2024-01-01' as smalldatetime)", "smalldatetime", 1)]
+    [DataRow("cast('2024-01-01' as datetime2)", "datetime2", 3)]
+    public void DateAdd_Overflow_StateByFamily(string source, string typeName, int state)
+    {
+        var ex = new Simulation().AssertSqlError($"select dateadd(year, 9000, {source})", 517);
+        AreEqual($"Adding a value to a '{typeName}' column caused an overflow.", ex.Message);
+        AreEqual(state, ex.State);
+    }
+
+    [TestMethod]
+    public void Len_MaxArgument_IsBigint()
+        => AreEqual(3L, ExecuteScalar("select len(cast('abc' as varchar(max)))"));
 }

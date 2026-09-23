@@ -83,13 +83,28 @@ internal static class MathScalars
         SqlType.IsStringCategory(value.Type) ? value.CoerceTo(SqlType.Float) : value;
 
     /// <summary>
+    /// A float rounded to zero from a non-zero input is positive zero on real,
+    /// where .NET keeps the input's sign — probe-confirmed 2026-09-23:
+    /// <c>CEILING(-0.5e0)</c> and <c>ROUND(-0.4e0, 0)</c> render <c>0</c>,
+    /// while <c>FLOOR(-0.0e0)</c> keeps its <c>-0</c>.
+    /// </summary>
+    public static double UnsignedZeroFromNonZero(double result, double input) =>
+        result == 0 && input != 0 ? 0.0 : result;
+
+    /// <summary>
     /// Returns <paramref name="applied"/> typed at <paramref name="resultType"/>
     /// — the post-widen integer category. Used by type-preserving math
     /// (<c>FLOOR</c>, <c>CEILING</c>, <c>ROUND</c>, <c>SIGN</c>) when the
     /// input is an integer category.
     /// </summary>
+    /// <remarks>
+    /// A value past <c>int</c>'s range is Msg 8115 rather than a wrapped one
+    /// (probe-confirmed 2026-09-23: <c>ROUND(2147483647, -1)</c>).
+    /// </remarks>
     public static SqlValue PromoteInteger(SqlType resultType, long applied) =>
-        resultType == SqlType.BigInt ? SqlValue.FromInt64(applied) : SqlValue.FromInt32((int)applied);
+        resultType == SqlType.BigInt ? SqlValue.FromInt64(applied)
+        : applied is < int.MinValue or > int.MaxValue ? throw SimulatedSqlException.ArithmeticOverflow("int")
+        : SqlValue.FromInt32((int)applied);
 
     /// <summary>
     /// Returns the integer value held by <paramref name="v"/> as a long.

@@ -159,6 +159,16 @@ internal static class StringScalars
     }
 
     /// <summary>
+    /// The case mapping <c>LOWER</c> / <c>UPPER</c> apply: English's rather
+    /// than the invariant culture's, which leaves the dotted and dotless I
+    /// unmapped — probe-confirmed 2026-09-23 against SQL Server 2025 under a
+    /// Latin1_General collation: <c>LOWER(N'İ')</c> is <c>i</c> and
+    /// <c>UPPER(N'ı')</c> is <c>I</c>, while <c>ß</c> stays itself. A Turkish
+    /// collation's own mapping isn't modeled.
+    /// </summary>
+    public static readonly System.Globalization.TextInfo CaseMapping = System.Globalization.CultureInfo.GetCultureInfo("en-US").TextInfo;
+
+    /// <summary>
     /// Narrows a scalar function's integer argument — a length, position,
     /// count, index or code point — to <c>int</c>. A value outside int range
     /// raises Msg 8115 the way real does, instead of leaking .NET's

@@ -62,7 +62,7 @@ internal readonly partial struct SqlValue
     private static string FormatDateSourceWithStyle(DateOnly date, int style) => style switch
     {
         0 or 100 or 9 or 109 => FormatLegacyDate(date),
-        13 or 113 => $"{date.Day,2} {date:MMM yyyy}",
+        13 or 113 => $"{date:dd MMM yyyy}",
         20 or 21 or 23 or 25 or 120 or 121 or 126 or 127 => date.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
         22 or 1 => date.ToString("MM/dd/yy", CultureInfo.InvariantCulture),
         101 => date.ToString("MM/dd/yyyy", CultureInfo.InvariantCulture),
@@ -108,7 +108,7 @@ internal readonly partial struct SqlValue
         {
             0 or 100 => $"{FormatLegacyDate(date)} {FormatAmPm12HourTime(time, paddedHour: true, includeSeconds: false, ':', "", spaceBeforeAmPm: false)}",
             9 or 109 => $"{FormatLegacyDate(date)} {FormatAmPm12HourTime(time, paddedHour: true, includeSeconds: true, ':', frac, spaceBeforeAmPm: false)}",
-            13 or 113 => $"{date.Day,2} {date:MMM yyyy} {Format24HourTime(time, ':', frac)}",
+            13 or 113 => $"{date:dd MMM yyyy} {Format24HourTime(time, ':', frac)}",
             20 or 120 => $"{date:yyyy-MM-dd} {Format24HourTime(time, '.', "")}",
             21 or 25 or 121 => $"{date:yyyy-MM-dd} {Format24HourTime(time, '.', frac)}",
             22 => $"{date:MM/dd/yy} {FormatAmPm12HourTime(time, paddedHour: true, includeSeconds: true, '.', "", spaceBeforeAmPm: true)}",
@@ -136,7 +136,7 @@ internal readonly partial struct SqlValue
         {
             0 or 100 => $"{FormatLegacyDate(date)} {FormatAmPm12HourTime(time, paddedHour: true, includeSeconds: false, '.', "", spaceBeforeAmPm: false)}",
             9 or 109 => $"{FormatLegacyDate(date)} {FormatAmPm12HourTime(time, paddedHour: true, includeSeconds: true, '.', frac, spaceBeforeAmPm: false)}",
-            13 or 113 => $"{date.Day,2} {date:MMM yyyy} {Format24HourTime(time, '.', frac)}",
+            13 or 113 => $"{date:dd MMM yyyy} {Format24HourTime(time, '.', frac)}",
             20 or 120 => $"{date:yyyy-MM-dd} {Format24HourTime(time, '.', "")}",
             21 or 25 or 121 => $"{date:yyyy-MM-dd} {Format24HourTime(time, '.', frac)}",
             22 => $"{date:MM/dd/yy} {FormatAmPm12HourTime(time, paddedHour: true, includeSeconds: true, '.', "", spaceBeforeAmPm: true)}",
@@ -197,7 +197,7 @@ internal readonly partial struct SqlValue
             22 => $"{date:MM/dd/yy} {FormatAmPm12HourTime(time, paddedHour: true, includeSeconds: true, '.', "", spaceBeforeAmPm: true)} {offset}",
             130 => $"{FormatHijriDateOnly(dto.DateTime, withMonthName: true)} {FormatAmPm12HourTime(time, paddedHour: true, includeSeconds: true, '.', frac, spaceBeforeAmPm: false)} {offset}",
             131 => $"{FormatHijriDateOnly(dto.DateTime, withMonthName: false)} {FormatAmPm12HourTime(time, paddedHour: true, includeSeconds: true, '.', frac, spaceBeforeAmPm: false)} {offset}",
-            13 or 113 => $"{date.Day,2} {date:MMM yyyy} {Format24HourTime(time, '.', frac)} {offset}",
+            13 or 113 => $"{date:dd MMM yyyy} {Format24HourTime(time, '.', frac)} {offset}",
             14 or 114 => $"{Format24HourTime(time, '.', frac)} {offset}",
             8 or 24 or 108 => $"{Format24HourTime(time, '.', "")} {offset}",
             20 or 120 => $"{date:yyyy-MM-dd} {Format24HourTime(time, '.', "")} {offset}",
@@ -254,10 +254,13 @@ internal readonly partial struct SqlValue
     /// <summary>
     /// Legacy <c>datetime</c>/<c>smalldatetime</c> always carries 3-digit
     /// milliseconds in style 9/13/14/109/113/114/21/25/121/130/131; the
-    /// helper centralizes the <c>"fff"</c> rendering.
+    /// helper centralizes the <c>"fff"</c> rendering. The stored 1/300-second
+    /// unit rounds to the nearest millisecond rather than truncating
+    /// (probe-confirmed 2026-09-23: <c>.678</c>, stored as 203/300, renders
+    /// <c>.677</c>), which never carries past <c>.997</c>.
     /// </summary>
     private static string LegacyMilliseconds(DateTime dt) =>
-        dt.Millisecond.ToString("000", CultureInfo.InvariantCulture);
+        (((dt.Ticks % TimeSpan.TicksPerSecond) + (TimeSpan.TicksPerMillisecond / 2)) / TimeSpan.TicksPerMillisecond).ToString("000", CultureInfo.InvariantCulture);
 
     /// <summary>
     /// Modern <c>datetime2</c> / <c>datetimeoffset</c> / <c>time</c> emit

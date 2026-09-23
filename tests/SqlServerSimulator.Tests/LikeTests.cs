@@ -280,4 +280,11 @@ public class LikeTests
         using var reader = command.ExecuteReader();
         Assert.AreEqual(expectedRows, reader.EnumerateRecords().Count());
     }
+
+    /// <summary>An escape with nothing after it makes the pattern match nothing.</summary>
+    [TestMethod]
+    [DataRow("'a!'")]
+    [DataRow("'a'")]
+    public void DanglingEscape_NeverMatches(string subject)
+        => Assert.AreEqual(0, new Simulation().ExecuteScalar($"select case when {subject} like 'a!' escape '!' then 1 else 0 end"));
 }

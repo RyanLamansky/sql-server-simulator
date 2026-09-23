@@ -435,8 +435,13 @@ internal abstract partial class Collation : IComparer<string>, IEqualityComparer
 
     /// <summary>
     /// Returns the encoder for <paramref name="codePage"/>, configured to match
-    /// SQL Server's lossy narrowing: an unrepresentable character becomes
-    /// <c>?</c> rather than throwing. Instances are interned per code page
+    /// SQL Server's lossy narrowing: under a single-byte code page a character
+    /// it lacks takes Windows' best-fit mapping where it has one (<c>Ā</c> →
+    /// <c>A</c>, <c>ł</c> → <c>l</c>, probe-confirmed 2026-09-23) — the
+    /// code-page encodings' own default fallback carries the same tables — and
+    /// otherwise becomes <c>?</c> rather than throwing. The double-byte code
+    /// pages take no best fit on real (<c>Ā</c> is <c>?</c> under CP932), so
+    /// they replace outright. Instances are interned per code page
     /// because <see cref="Encoding.GetEncoding(int, EncoderFallback, DecoderFallback)"/>
     /// allocates a fresh wrapper per call and the encoder sits on the row
     /// encode/decode path.
@@ -444,10 +449,9 @@ internal abstract partial class Collation : IComparer<string>, IEqualityComparer
     internal static Encoding AnsiEncoding(int codePage) =>
         codePage == 1252
             ? CharSqlType.Cp1252Encoder
-            : ansiEncodings.GetOrAdd(codePage, static cp => Encoding.GetEncoding(
-                cp,
-                new EncoderReplacementFallback("?"),
-                DecoderFallback.ReplacementFallback));
+            : ansiEncodings.GetOrAdd(codePage, static cp => Encoding.GetEncoding(cp) is { IsSingleByte: true } singleByte
+                ? singleByte
+                : Encoding.GetEncoding(cp, new EncoderReplacementFallback("?"), DecoderFallback.ReplacementFallback));
 
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<int, Encoding> ansiEncodings = new();
 

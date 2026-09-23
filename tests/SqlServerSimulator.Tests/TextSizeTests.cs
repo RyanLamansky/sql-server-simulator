@@ -138,7 +138,7 @@ public sealed class TextSizeTests
         using var reader = sim.ExecuteReader("set textsize 10; select datalength(v), len(v), v from t");
         IsTrue(reader.Read());
         AreEqual(100L, reader.GetInt64(0));
-        AreEqual(100, reader.GetInt32(1));
+        AreEqual(100L, reader.GetInt64(1));
         AreEqual(new string('x', 10), reader.GetValue(2));
     }
 
@@ -151,7 +151,7 @@ public sealed class TextSizeTests
             select len(@v), @v
             """);
         IsTrue(reader.Read());
-        AreEqual(100, reader.GetInt32(0));
+        AreEqual(100L, reader.GetInt64(0));
         AreEqual(new string('x', 10), reader.GetValue(1));
     }
 

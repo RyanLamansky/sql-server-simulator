@@ -17,10 +17,8 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// (<c>StatementContext.StatementScopedValues</c>, keyed by this instance) —
 /// per statement <em>execution</em>, not per instance, because a plan-cached
 /// <c>Selection</c> reuses one <see cref="Rand"/> across executions that must
-/// each draw a fresh value. With an argument, the seed value chooses the
-/// value via <see cref="Random"/> seeded from a hash; same-seed →
-/// same-value match is deterministic within a process lifetime but not
-/// byte-identical to SQL Server's undocumented seed algorithm. A NULL seed
+/// each draw a fresh value. The values themselves come from the session's
+/// <see cref="RandGenerator"/>, which reproduces real's sequence. A NULL seed
 /// yields NULL.
 /// </remarks>
 /// <remarks>Reference: https://learn.microsoft.com/en-us/sql/t-sql/functions/rand-transact-sql</remarks>
@@ -35,7 +33,6 @@ internal sealed class Rand : Expression
         this.seed = Parse(context);
     }
 
-    [SuppressMessage("Security", "CA5394:Do not use insecure randomness", Justification = "T-SQL RAND is a non-cryptographic pseudo-random source; the simulator faithfully implements the same documented contract.")]
     public override SqlValue Run(RuntimeContext runtime)
     {
         // Per-STATEMENT-EXECUTION freeze, held in the statement frame rather
@@ -50,37 +47,14 @@ internal sealed class Rand : Expression
         SqlValue result;
         if (this.seed is null)
         {
-            // System.Random.Shared is process-shared; the first call here
-            // picks one value and every later row reuses it for THIS Rand
-            // instance, which is what real SQL Server does for an unseeded
-            // RAND.
-            result = SqlValue.FromDouble(Random.Shared.NextDouble());
+            result = SqlValue.FromDouble(runtime.Batch.Connection.Rand.Next());
         }
         else
         {
             var seedValue = this.seed.Run(runtime);
-            if (seedValue.IsNull)
-            {
-                result = SqlValue.Null(SqlType.Float);
-            }
-            else
-            {
-                // Coerce to float — SQL Server accepts any integer / decimal /
-                // float / string-convertible-to-float; CoerceTo handles the
-                // category mapping. The .NET Random constructor takes int
-                // only, so the seed double is hashed into int range (the
-                // numeric value isn't byte-identical to real SQL Server's
-                // seed algorithm, but determinism per seed is preserved).
-                var asDouble = seedValue.CoerceTo(SqlType.Float).AsDouble;
-                // XOR-fold the 64 bits down to 32 — straight cast-to-int
-                // drops the high half, so small integer seeds like 1 and
-                // 999999 (whose mantissas live entirely in the high bits)
-                // collapse to the same 0 hash. Folding mixes both halves
-                // into the int Random expects.
-                var bits = BitConverter.DoubleToInt64Bits(asDouble);
-                var seedInt = unchecked((int)(bits ^ (bits >> 32)));
-                result = SqlValue.FromDouble(new Random(seedInt).NextDouble());
-            }
+            result = seedValue.IsNull
+                ? SqlValue.Null(SqlType.Float)
+                : SqlValue.FromDouble(runtime.Batch.Connection.Rand.Seed(ScalarArguments.CoerceToInt(seedValue)));
         }
 
         (frame.StatementScopedValues ??= new Dictionary<Expression, SqlValue>(ReferenceEqualityComparer.Instance))[this] = result;
@@ -92,4 +66,54 @@ internal sealed class Rand : Expression
     internal override string DebugDisplay() => this.seed is null
         ? "RAND()"
         : $"RAND({this.seed.DebugDisplay()})";
+}
+
+/// <summary>
+/// SQL Server's <c>RAND</c> generator, reverse-engineered from its outputs
+/// (probed 2026-09-23 against SQL Server 2025): L'Ecuyer's two combined
+/// multiplicative generators — Numerical Recipes' <c>ran2</c> without its
+/// shuffle table — whose difference is scaled by the single-precision-rounded
+/// constant <c>4.656613e-10</c> rather than an exact <c>1/2147483563</c>.
+/// <c>RAND(n)</c> restarts the first generator at <c>|n|</c> (12345 for 0,
+/// so <c>RAND(0)</c> equals <c>RAND(12345)</c> and <c>RAND(-1)</c> equals
+/// <c>RAND(1)</c>) and the second at 67890, then draws; <c>RAND(1)</c> is
+/// <c>0.7135919932129235</c>.
+/// </summary>
+internal sealed class RandGenerator
+{
+    private const int Modulus1 = 2147483563, Multiplier1 = 40014, Quotient1 = 53668, Remainder1 = 12211;
+    private const int Modulus2 = 2147483399, Multiplier2 = 40692, Quotient2 = 52774, Remainder2 = 3791;
+    private const double Scale = 4.656613e-10;
+
+    /// <summary>A session that never seeds starts somewhere arbitrary, as real's does.</summary>
+    private long state1 = ArbitraryStart();
+
+    private long state2 = 67890;
+
+    [SuppressMessage("Security", "CA5394:Do not use insecure randomness", Justification = "T-SQL RAND is a non-cryptographic pseudo-random source.")]
+    private static long ArbitraryStart() => Random.Shared.Next(1, Modulus1);
+
+    public double Seed(int seed)
+    {
+        this.state1 = seed == 0 ? 12345 : Math.Abs((long)seed);
+        this.state2 = 67890;
+        return this.Next();
+    }
+
+    public double Next()
+    {
+        // Schrage's method keeps each product inside 64 bits' comfortable range.
+        var k = this.state1 / Quotient1;
+        this.state1 = (Multiplier1 * (this.state1 - (k * Quotient1))) - (k * Remainder1);
+        if (this.state1 < 0)
+            this.state1 += Modulus1;
+        k = this.state2 / Quotient2;
+        this.state2 = (Multiplier2 * (this.state2 - (k * Quotient2))) - (k * Remainder2);
+        if (this.state2 < 0)
+            this.state2 += Modulus2;
+        var difference = this.state1 - this.state2;
+        if (difference < 1)
+            difference += Modulus1 - 1;
+        return difference * Scale;
+    }
 }

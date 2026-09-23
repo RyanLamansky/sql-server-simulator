@@ -78,7 +78,7 @@ internal sealed class DateTimeSqlType() : SqlType(SqlTypeCategory.DateTime, Type
     {
         var timeUnits = BinaryPrimitives.ReadUInt32LittleEndian(source);
         var dayCount = BinaryPrimitives.ReadInt32LittleEndian(source[4..]);
-        var timeTicks = timeUnits * TimeSpan.TicksPerSecond / 300;
+        var timeTicks = ((timeUnits * TimeSpan.TicksPerSecond) + 150) / 300;
         return SqlValue.FromDateTimeUnchecked(BaseDate.AddDays(dayCount).AddTicks(timeTicks));
     }
 

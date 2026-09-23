@@ -468,8 +468,17 @@ internal sealed class LikeMatcher
         while (i < body.Length)
         {
             var c = body[i];
-            if (escapeChar.HasValue && c == escapeChar.Value && i + 1 < body.Length)
+            if (escapeChar.HasValue && c == escapeChar.Value)
             {
+                // An escape with nothing after it makes the pattern match
+                // nothing, itself included (probe-confirmed 2026-09-23:
+                // `'a!' LIKE 'a!' ESCAPE '!'` is false).
+                if (i + 1 == body.Length)
+                {
+                    FlushLiteral(segments, literal);
+                    segments.Add(new Segment(SegmentKind.Never, string.Empty, null));
+                    break;
+                }
                 _ = literal.Append(body[i + 1]);
                 i += 2;
                 continue;

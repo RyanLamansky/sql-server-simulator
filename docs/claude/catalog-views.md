@@ -374,8 +374,8 @@ Probed *inlineable* despite looking otherwise, so deliberately not disqualifying
 - **Query Store** — all fourteen `sys.query_store_*` / `query_context_settings` / `database_query_store_*` views ship, with a live configuration behind `sys.database_query_store_options` and empty capture views behind the rest.
   See [Query Store](#query-store) below.
 - **`OBJECT_ID` resolves catalog views**: `OBJECT_ID('sys.<view>')` / `OBJECT_ID('[sys].[<view>]')` (and the `'V'`-typed form) return a non-NULL `int` for any registered `sys.*` / `INFORMATION_SCHEMA.*` catalog view, via `BatchContext.TryResolveCatalogView`.
-  The id is `CatalogView.ObjectId` — a process-stable 32-bit FNV-1a hash of the leaf name forced negative (catalog views are process-wide, not per-`Database`, so they can't draw from `Database.AllocateObjectId`; the negative range keeps them disjoint from the positive ids user objects allocate).
-  Not byte-identical to real SQL Server's small fixed system-view ids — the load-bearing property is non-NULL, which SSMS's Query Store probe gates on.
+  The id is real's own fixed one (`OBJECT_ID('sys.objects')` is −385), read from SQL Server 2025's `sys.all_objects` into `Schemas/CatalogViewObjectIds.cs` (2026-09-23); a view real lacks keeps a process-stable FNV-1a hash of its leaf name forced negative.
+  `COL_LENGTH` resolves a catalog view's columns the same way.
   Before this, `OBJECT_ID('sys.tables')` returned NULL (catalog views weren't reachable through `OBJECT_ID` at all).
 - **`xp_msver`** system procedure (`Simulation.XpMsver.cs`, dispatched via `ResolveSystemProcedureName` / `ParseExec` like the `sp_*` family): returns a single 20-row result set with columns `Index smallint`, `Name nvarchar`, `Internal_Value int` (nullable), `Character_Value nvarchar` (nullable) — the version / host-info table SSMS calls on connect.
   Callable as `xp_msver`, `dbo.xp_msver`, and `master.dbo.xp_msver` from any current database (the leaf resolves regardless of qualifier, matching real SQL Server's `sp_`/`xp_`-through-master resolution).

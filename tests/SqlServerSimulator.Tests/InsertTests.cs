@@ -149,17 +149,21 @@ public class InsertTests
         AreEqual(1, insert.ExecuteNonQuery());
     }
 
-    // Characters outside CP1252 are silently replaced with '?'.
+    // Characters outside CP1252 take Windows' best-fit mapping where one
+    // exists (Ω → O, probe-confirmed 2026-09-23) and are otherwise replaced
+    // with '?'.
     [TestMethod]
-    public void InsertVarchar_OutOfCp1252Char_StoresAsReplacement()
+    [DataRow("Ω", "O")]
+    [DataRow("中", "?")]
+    public void InsertVarchar_OutOfCp1252Char_StoresBestFitOrReplacement(string value, string stored)
     {
         using var connection = new Simulation().CreateOpenConnection();
         using var insert = connection.CreateCommand();
         insert.CommandText = "create table t ( v varchar(10) );insert t values ( @p )";
-        AddTypedParameter(insert, "p", DbType.AnsiString, "Ω");
+        AddTypedParameter(insert, "p", DbType.AnsiString, value);
         AreEqual(1, insert.ExecuteNonQuery());
 
-        AreEqual("?", connection.CreateCommand("select v from t").ExecuteScalar());
+        AreEqual(stored, connection.CreateCommand("select v from t").ExecuteScalar());
     }
 
     // nvarchar limit is UCS-2 code units; "café" is 4 code units → fits nvarchar(4).

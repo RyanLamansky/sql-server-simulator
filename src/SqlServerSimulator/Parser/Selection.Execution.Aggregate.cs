@@ -295,6 +295,16 @@ internal sealed partial class Selection
                 }
             }
 
+            // A column named only inside grouping expressions this set groups
+            // away reads as NULL, which makes the grouped-away expression over
+            // it NULL in a subtotal or total row — `SELECT a + 1 … GROUP BY
+            // ROLLUP(a + 1)` answers NULL in its total row (probe-confirmed
+            // 2026-09-23). Real matches the whole expression; reading the
+            // column instead differs only for a column shared between a kept
+            // and a grouped-away expression.
+            if (!NamedIn(currentGroupingSet, name) && NamedIn(fromClause.AllGroupingExpressions, name))
+                return SqlValue.Null(resolveColumnType(name));
+
             // Column referenced inside one of this (non-empty) set's
             // grouping expressions: resolve against the group's
             // representative row. ResolveAcrossTuple itself falls back
@@ -306,6 +316,28 @@ internal sealed partial class Selection
                     ? outerResolver(name)
                     : throw SimulatedSqlException.InvalidColumnName(name);
         }
+
+        // Whether any of the expressions names the column. Read from the
+        // rendered text rather than the reference walk, which doesn't descend
+        // into a function's arguments (`ROLLUP(YEAR(d))` has to find `d`); a
+        // spurious match is harmless, since only a column the grouping
+        // expressions cover can reach this test.
+        static bool NamedIn(IEnumerable<Expression> groupingExpressions, MultiPartName name)
+        {
+            foreach (var expression in groupingExpressions)
+            {
+                var text = expression.DebugDisplay();
+                for (var at = text.IndexOf(name.Leaf, StringComparison.OrdinalIgnoreCase); at >= 0; at = text.IndexOf(name.Leaf, at + 1, StringComparison.OrdinalIgnoreCase))
+                {
+                    var end = at + name.Leaf.Length;
+                    if ((at == 0 || !IsIdentifierChar(text[at - 1])) && (end == text.Length || !IsIdentifierChar(text[end])))
+                        return true;
+                }
+            }
+            return false;
+        }
+
+        static bool IsIdentifierChar(char c) => char.IsLetterOrDigit(c) || c is '_' or '@' or '#' or '$';
 
         var groupRuntime = new RuntimeContext(resolveByGroupKey, batch);
 
@@ -464,6 +496,16 @@ internal sealed partial class Selection
                     currentTuple = tuple;
                     Accumulate(groups, groupingSet, tuple, tupleIsShared: false);
                 }
+            }
+
+            // The whole-input group exists over no rows only when GROUP BY is
+            // absent: a written empty set — `GROUP BY ()`, or the grand total
+            // of ROLLUP / CUBE / GROUPING SETS — yields no row from empty input
+            // (probe-confirmed 2026-09-23 against SQL Server 2025).
+            if (fromClause.GroupingSets.Count > 0 && groupingSet.Length == 0
+                && groups.TryGetValue(SqlValueKey.Empty, out var wholeInputGroup) && wholeInputGroup.Representative is null)
+            {
+                _ = groups.Remove(SqlValueKey.Empty);
             }
 
             // Windowed grouped query: the windows run over this query's

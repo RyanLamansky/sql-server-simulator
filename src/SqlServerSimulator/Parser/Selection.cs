@@ -1544,9 +1544,22 @@ internal sealed partial class Selection
                     if (topExpression is not null && fromClause.OffsetExpression is not null)
                         throw SimulatedSqlException.TopAndOffsetMutuallyExclusive();
                     RejectSequenceDrawUnderOrderBy(context, fromClause, sequenceDrawsBefore, unwindowedSequenceDrawsBefore);
+                    // A nested query — a derived table or a view's body — whose
+                    // TOP is a constant 100 PERCENT keeps every row, so real
+                    // drops its ORDER BY and returns the rows in scan order
+                    // (probe-confirmed 2026-09-23, WITH TIES and parentheses
+                    // alike); at the top level the ORDER BY stands.
+                    if ((depth > 0 || context.Batch.ViewBody) && topPercent && topExpression is not null
+                        && ConstantFolding.TryFold(topExpression, context, out var topConstant)
+                        && !topConstant.IsNull && topConstant.CoerceTo(SqlType.Float).AsDouble == 100)
+                    {
+                        // Ties add nothing to every row.
+                        fromClause.OrderBy.Clear();
+                        topWithTies = false;
+                    }
                     ExpandStars(context.Batch.CurrentDatabase.Collation, expressions, sources);
                     JoinSpec[] joinArray = [.. joins];
-                    var plan = BuildSqlProjection(context.Batch, [.. sources], joinArray, expressions, fromClause, distinct, topExpression, topPercent, topWithTies, aggregates, windows, outerTypeResolver, ResolveAssignmentMode(expressions), intoTarget, context.ReadColumnSink, projectionDiscarded);
+                    var plan = BuildSqlProjection(context.Batch, [.. sources], joinArray, expressions, fromClause, distinct, topExpression, topPercent, topWithTies, aggregates, windows, outerTypeResolver, ResolveAssignmentMode(expressions), intoTarget, context.ReadColumnSink, projectionDiscarded, projectionUnread: projectionDiscarded);
                     // The decorrelated key plan an enclosing EXISTS / IN can
                     // answer itself from; null for every body that isn't
                     // equi-correlated, which is every top-level query.
@@ -1657,7 +1670,7 @@ internal sealed partial class Selection
             return BuildSqlProjection(context.Batch, [], [], expressions, fromClause, distinct,
                 topExpression, topPercent, topWithTies, aggregates, windows,
                 context.OuterTypeResolver ?? outerTypeResolver, ResolveAssignmentMode(expressions),
-                intoTarget, context.ReadColumnSink, projectionDiscarded);
+                intoTarget, context.ReadColumnSink, projectionDiscarded, projectionUnread: projectionDiscarded);
         }
 
         // A set operator one token past this branch refuses the whole statement
@@ -1693,7 +1706,7 @@ internal sealed partial class Selection
             ResolveRowCountLimit(fromClause.OffsetExpression, RowLimitKind.Offset, context.Batch),
             ResolveRowCountLimit(fromClause.FetchExpression, RowLimitKind.Fetch, context.Batch),
             ResolveAssignmentMode(expressions), intoTarget, context.OuterTypeResolver ?? outerTypeResolver,
-            containsSubquery);
+            containsSubquery, projectionDiscarded);
     }
 
     /// <summary>
@@ -4170,7 +4183,7 @@ internal sealed partial class Selection
     /// no-op for sort but its presence flips <see cref="HasOrderBy"/>
     /// so the set-op chain rejects per-branch ORDER BY (Msg 156).
     /// </summary>
-    private static Selection BuildSynthesizedSqlRow(BatchContext parseBatch, List<Expression> expressions, List<BooleanExpression> excluders, List<OrderBySpec> orderBy, int? topCount, int? offsetCount, int? fetchCount, bool isAssignmentOnly, MultiPartName? intoTarget, Func<MultiPartName, SqlType>? outerTypeResolver, bool containsSubquery)
+    private static Selection BuildSynthesizedSqlRow(BatchContext parseBatch, List<Expression> expressions, List<BooleanExpression> excluders, List<OrderBySpec> orderBy, int? topCount, int? offsetCount, int? fetchCount, bool isAssignmentOnly, MultiPartName? intoTarget, Func<MultiPartName, SqlType>? outerTypeResolver, bool containsSubquery, bool projectionDiscarded)
     {
         // The FROM-less SELECT path bakes projection values at parse time
         // (see the Run-then-GetSqlType loop below) — replaying that closure
@@ -4237,9 +4250,17 @@ internal sealed partial class Selection
         }
 
         // Values come from the executor instead when an outer reference is in
-        // play; only the types are needed here, and Run would throw on it.
-        for (var i = 0; !referencesOuterColumns && i < expressions.Count; i++)
+        // play; only the types are needed here, and Run would throw on it. An
+        // EXISTS never reads its select list, so real evaluates none of it —
+        // `EXISTS (SELECT 1/0)` is true (probe-confirmed 2026-09-23) — and the
+        // row it counts carries typed NULLs instead.
+        for (var i = 0; (projectionDiscarded || !referencesOuterColumns) && i < expressions.Count; i++)
         {
+            if (projectionDiscarded)
+            {
+                values[i] = SqlValue.Null(schema[i]);
+                continue;
+            }
             var raw = expressions[i].Run(parseRuntime);
             values[i] = raw.IsNull || raw.Type == schema[i] ? raw : raw.CoerceTo(schema[i]);
         }
@@ -4267,7 +4288,7 @@ internal sealed partial class Selection
                     return [];
             }
 
-            if (!referencesOuterColumns)
+            if (projectionDiscarded || !referencesOuterColumns)
                 return [RowEncoder.EncodeRow(schema, values)];
 
             // Deferred projection: evaluate against this invocation's outer row.

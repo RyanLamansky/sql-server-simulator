@@ -285,9 +285,9 @@ public sealed class WindowFunctionTests
         using var connection = SeededTies();
         using var reader = connection.CreateCommand(
             "select id, ntile(3) over(order by id) from t where id <= 6").ExecuteReader();
-        var byId = new Dictionary<int, int>();
+        var byId = new Dictionary<int, long>();
         while (reader.Read())
-            byId[reader.GetInt32(0)] = reader.GetInt32(1);
+            byId[reader.GetInt32(0)] = reader.GetInt64(1);
         AreEqual(1, byId[1]);
         AreEqual(1, byId[2]);
         AreEqual(2, byId[3]);
@@ -303,9 +303,9 @@ public sealed class WindowFunctionTests
         using var connection = SeededTies();
         using var reader = connection.CreateCommand(
             "select id, ntile(3) over(order by id) from t").ExecuteReader();
-        var byId = new Dictionary<int, int>();
+        var byId = new Dictionary<int, long>();
         while (reader.Read())
-            byId[reader.GetInt32(0)] = reader.GetInt32(1);
+            byId[reader.GetInt32(0)] = reader.GetInt64(1);
         // Bucket sizes: [3, 2, 2] → IDs 1,2,3 → bucket 1; 4,5 → 2; 6,7 → 3.
         AreEqual(1, byId[1]);
         AreEqual(1, byId[2]);
@@ -323,22 +323,27 @@ public sealed class WindowFunctionTests
         using var connection = SeededTies();
         using var reader = connection.CreateCommand(
             "select id, ntile(5) over(order by id) from t where id <= 3").ExecuteReader();
-        var byId = new Dictionary<int, int>();
+        var byId = new Dictionary<int, long>();
         while (reader.Read())
-            byId[reader.GetInt32(0)] = reader.GetInt32(1);
+            byId[reader.GetInt32(0)] = reader.GetInt64(1);
         AreEqual(1, byId[1]);
         AreEqual(2, byId[2]);
         AreEqual(3, byId[3]);
     }
 
     [TestMethod]
-    public void NTile_NonPositiveBucketCount_Raises9819()
+    public void NTile_NonPositiveBucketCount_RaisesMsg4116()
     {
         using var connection = SeededTies();
         var ex = Throws<DbException>(() =>
             _ = connection.CreateCommand("select ntile(0) over(order by id) from t").ExecuteScalar());
-        AreEqual("9819", ex.Data["HelpLink.EvtID"]);
+        AreEqual("4116", ex.Data["HelpLink.EvtID"]);
+        AreEqual("The function 'ntile' takes only a positive int or bigint expression as its input.", ex.Message);
     }
+
+    [TestMethod]
+    public void NTile_IsBigint()
+        => AreEqual(1L, new Simulation().ExecuteScalar("select ntile(2) over (order by (select 1))"));
 
     // === LAG / LEAD ===
 

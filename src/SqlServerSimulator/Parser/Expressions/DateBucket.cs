@@ -49,6 +49,7 @@ internal sealed class DateBucket : Expression
     public override SqlValue Run(RuntimeContext runtime)
     {
         var dateValue = this.date.Run(runtime);
+        _ = RejectStringDate(dateValue.Type);
         if (dateValue.IsNull)
             return SqlValue.Null(dateValue.Type);
         var width = this.bucketWidth.Run(runtime);
@@ -60,13 +61,44 @@ internal sealed class DateBucket : Expression
         var originValue = this.origin?.Run(runtime) ?? DefaultOriginFor(dateValue.Type);
         if (originValue.IsNull)
             return SqlValue.Null(dateValue.Type);
-        // Boundary count + floor to bucket
+        // The bucket is the latest origin + k * width at or before the date,
+        // counted in whole spans — probe-confirmed 2026-09-23: weeks are
+        // 7-day spans from the origin (1900-01-01 is a Monday), not the
+        // Sunday boundaries DATEDIFF counts, and an origin off midnight or
+        // mid-month shifts every hour, day and month bucket with it. The
+        // boundary count is a starting estimate at most one step out, which
+        // the two loops settle.
         var distance = DatePartKinds.Diff(this.kind, originValue, dateValue);
         var bucketOffset = (long)Math.Floor((double)distance / widthInt) * widthInt;
-        // DATEADD-style offset cast: clamp to int when within int range, else
-        // operate on long for bigint result paths.
-        return DatePartKinds.Add(this.kind, originValue, (int)bucketOffset);
+        var bucket = DatePartKinds.Add(this.kind, originValue, (int)bucketOffset);
+        while (Later(bucket, dateValue))
+        {
+            bucketOffset -= widthInt;
+            bucket = DatePartKinds.Add(this.kind, originValue, (int)bucketOffset);
+        }
+        while (NextBucketStart(originValue, bucketOffset + widthInt) is { } next && !Later(next, dateValue))
+        {
+            bucketOffset += widthInt;
+            bucket = next;
+        }
+        return bucket;
     }
+
+    private SqlValue? NextBucketStart(SqlValue origin, long offset)
+    {
+        try
+        {
+            return DatePartKinds.Add(this.kind, origin, (int)offset);
+        }
+        catch (SimulatedSqlException)
+        {
+            // Past the end of the range there is no later bucket.
+            return null;
+        }
+    }
+
+    private static bool Later(SqlValue candidate, SqlValue date) =>
+        candidate.CoerceTo(date.Type).CompareTo(date) > 0;
 
     private static SqlValue DefaultOriginFor(SqlType type) =>
         type == SqlType.Date ? SqlValue.FromDate(DefaultOriginDate)
@@ -77,7 +109,17 @@ internal sealed class DateBucket : Expression
         : SqlValue.FromDateTime(DefaultOriginDateTime);
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
-        DatePartKinds.ResolveImplicitDateType(this.date.GetSqlType(batch, resolveColumnType));
+        DatePartKinds.ResolveImplicitDateType(RejectStringDate(this.date.GetSqlType(batch, resolveColumnType)));
+
+    /// <summary>
+    /// Unlike the other date functions, DATE_BUCKET takes no string for its
+    /// date — Msg 8116, spelling the function <c>Date_Bucket</c>
+    /// (probe-confirmed 2026-09-23 against SQL Server 2025).
+    /// </summary>
+    private static SqlType RejectStringDate(SqlType dateType) =>
+        SqlType.IsStringCategory(dateType)
+            ? throw SimulatedSqlException.InvalidArgumentDataType(SimulatedSqlException.FamilyRootName(dateType), 3, "Date_Bucket")
+            : dateType;
 
     internal override string DebugDisplay() => $"DATE_BUCKET({this.keywordText}, {this.bucketWidth.DebugDisplay()}, {this.date.DebugDisplay()})";
 }

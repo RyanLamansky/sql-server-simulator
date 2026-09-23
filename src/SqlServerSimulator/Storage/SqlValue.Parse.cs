@@ -102,6 +102,14 @@ internal readonly partial struct SqlValue
             ? result
             : throw SimulatedSqlException.ConversionFailedSmallDateTimeFromString();
 
+    private static int CountDigits(ReadOnlySpan<char> text)
+    {
+        var count = 0;
+        while (count < text.Length && char.IsAsciiDigit(text[count]))
+            count++;
+        return count;
+    }
+
     /// <summary>
     /// Shared body of <see cref="ParseLegacyDateTime"/> and
     /// <see cref="ParseSmallDateTime"/>. Returns whether the string parsed;
@@ -117,6 +125,16 @@ internal readonly partial struct SqlValue
         {
             result = DateTimeSqlType.BaseDate;
             return true;
+        }
+        // The legacy pair reads at most three fractional-second digits, where
+        // datetime2 reads seven (probe-confirmed 2026-09-23: `.1234` is
+        // Msg 241 for datetime and smalldatetime alike).
+        if (value.LastIndexOf(':') is >= 0 and var lastColon
+            && value.IndexOf('.', lastColon) is >= 0 and var point
+            && CountDigits(value.AsSpan(point + 1)) > 3)
+        {
+            result = default;
+            return false;
         }
         if (DateTime.TryParseExact(value, dateTime2Formats, CultureInfo.InvariantCulture, DateTimeStyles.None, out result))
             return true;

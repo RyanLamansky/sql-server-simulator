@@ -173,9 +173,10 @@ internal static class DatePartKinds
     /// Parallel of <see cref="CoerceDateArgumentImplicit"/> for the static
     /// projection path: maps string types to <c>datetime2(7)</c> and
     /// integer types to legacy <c>datetime</c>; everything else passes
-    /// through. Used so <c>DATEADD</c>'s schema matches the runtime type
+    /// through. Used so a date function's schema matches the runtime type
     /// for the implicit-cast cases (a string-typed source projects as
-    /// datetime2 in real SQL Server, not the input's varchar).
+    /// datetime2, not the input's varchar — <c>DATEADD</c> is the exception,
+    /// reading a string as <c>datetime</c>).
     /// </summary>
     public static SqlType ResolveImplicitDateType(SqlType source) =>
         SqlType.IsStringCategory(source) ? SqlType.GetDateTime2(7)
@@ -317,6 +318,13 @@ internal static class DatePartKinds
         _ => type.ToString()!,
     };
 
+    private static int LegacyNanoseconds(TimeSpan time)
+    {
+        var fraction = time.Ticks % TimeSpan.TicksPerSecond;
+        var units300 = ((fraction * 300) + (TimeSpan.TicksPerSecond / 2)) / TimeSpan.TicksPerSecond;
+        return (int)(units300 * 1_000_000_000L / 300);
+    }
+
     /// <summary>
     /// Returns the integer extraction of <paramref name="kind"/> from the
     /// non-NULL value <paramref name="value"/>. Caller must have already
@@ -341,7 +349,12 @@ internal static class DatePartKinds
             // Higher-precision parts: derive from sub-second tick remainder.
             DatePartKind.Millisecond => (int)(time.Ticks % TimeSpan.TicksPerSecond / TimeSpan.TicksPerMillisecond),
             DatePartKind.Microsecond => (int)(time.Ticks % TimeSpan.TicksPerSecond / 10),
-            DatePartKind.Nanosecond => (int)(time.Ticks % TimeSpan.TicksPerSecond * 100),
+            // A datetime's fraction is a count of 1/300 seconds, and real
+            // scales that count rather than the rounded 100 ns ticks
+            // (probe-confirmed 2026-09-23: .123 is 37/300 s, 123333333 ns).
+            DatePartKind.Nanosecond => value.Type == SqlType.DateTime
+                ? LegacyNanoseconds(time)
+                : (int)(time.Ticks % TimeSpan.TicksPerSecond * 100),
             DatePartKind.TzOffset => offsetMinutes,
             _ => throw new NotSupportedException($"DATEPART({kind}) isn't implemented."),
         };

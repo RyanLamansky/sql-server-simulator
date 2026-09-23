@@ -85,9 +85,16 @@ internal sealed class ColLength : Expression
         var multiPart = new MultiPartName(parts[0]);
         for (var i = 1; i < parts.Length; i++)
             multiPart = multiPart.WithAddedPart(parts[i]);
-        if (!runtime.Batch.TryResolveTable(multiPart, out var table))
+        // A catalog view answers too — `COL_LENGTH('sys.objects', 'name')` is
+        // 256 (probe-confirmed 2026-09-23).
+        HeapColumn[] columns;
+        if (runtime.Batch.TryResolveTable(multiPart, out var table))
+            columns = table.Columns;
+        else if (runtime.Batch.TryResolveCatalogView(multiPart, out var view, out _))
+            columns = view.Columns;
+        else
             return SqlValue.Null(SqlType.SmallInt);
-        foreach (var col in table.Columns)
+        foreach (var col in columns)
         {
             if (BuiltInToken.Comparer.Equals(col.Name, colNameStr))
                 return SqlValue.FromInt16((short)EstimateColumnLength(col));
@@ -107,6 +114,9 @@ internal sealed class ColLength : Expression
         var t when t == SqlType.BigInt || t == SqlType.Float || t == SqlType.Money
                 || t == SqlType.DateTime || t == SqlType.RowVersion => 8,
         var t when t == SqlType.UniqueIdentifier => 16,
+        var t when t == SqlType.Bit || t == SqlType.TinyInt => 1,
+        var t when t == SqlType.SmallInt => 2,
+        SystemNameSqlType => 256,
         CharSqlType c => c.length,
         NCharSqlType nc => nc.length * 2,
         BinarySqlType bn => bn.length,

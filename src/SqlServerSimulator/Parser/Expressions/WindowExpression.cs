@@ -276,8 +276,7 @@ internal sealed class WindowExpression : Expression
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => this.Kind switch
     {
-        WindowKind.RowNumber or WindowKind.Rank or WindowKind.DenseRank => SqlType.BigInt,
-        WindowKind.NTile => SqlType.Int32,
+        WindowKind.RowNumber or WindowKind.Rank or WindowKind.DenseRank or WindowKind.NTile => SqlType.BigInt,
         WindowKind.CumeDist or WindowKind.PercentRank or WindowKind.PercentileCont => SqlType.Float,
         WindowKind.PercentileDisc => this.OrderBy[0].Expr!.GetSqlType(batch, resolveColumnType),
         WindowKind.Aggregate => this.AggregateInfo!.GetSqlType(batch, resolveColumnType),

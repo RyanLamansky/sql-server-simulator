@@ -1,6 +1,5 @@
 using SqlServerSimulator.Storage;
 using System.Diagnostics.CodeAnalysis;
-using System.Globalization;
 
 namespace SqlServerSimulator.Parser.Expressions;
 
@@ -24,7 +23,7 @@ internal sealed class Lower(ParserContext context) : Expression
         if (raw.IsNull)
             return SqlValue.Null(StringScalars.ResolveResultType(raw.Type, runtime.Batch));
         var value = StringScalars.CoerceToVarchar(raw, runtime.Batch, "lower");
-        var lowered = value.AsString.ToLower(CultureInfo.InvariantCulture);
+        var lowered = StringScalars.CaseMapping.ToLower(value.AsString);
         return SqlValue.FromString(value.Type, lowered);
     }
 

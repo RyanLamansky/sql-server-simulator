@@ -10,9 +10,10 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// encoding of an English-language input. Algorithm: keep the first
 /// letter (uppercased), then encode each subsequent consonant via the
 /// standard SOUNDEX digit map (B/F/P/V=1, C/G/J/K/Q/S/X/Z=2, D/T=3,
-/// L=4, M/N=5, R=6), skipping vowels (A/E/I/O/U/Y) and H/W; runs of
-/// identical-code letters collapse to one digit; result is padded with
-/// <c>0</c> or truncated to length 4. Empty input returns
+/// L=4, M/N=5, R=6), skipping vowels (A/E/I/O/U/Y) and H/W, which also
+/// separate runs; runs of identical-code letters collapse to one digit;
+/// the first non-letter after the first letter ends the code; result is
+/// padded with <c>0</c> or truncated to length 4. Empty input returns
 /// <c>'0000'</c>; NULL returns NULL.
 /// </summary>
 internal sealed class Soundex : Expression
@@ -64,9 +65,13 @@ internal sealed class Soundex : Expression
         var prevCode = Encode(first);
         for (var i = firstIdx + 1; i < source.Length && sb.Length < 4; i++)
         {
+            // Real's two departures from the textbook algorithm, probe-
+            // confirmed 2026-09-23: H and W separate a run of equal codes as a
+            // vowel does (`Ashcraft` is A226, not A261), and the first
+            // non-letter ends the code (`A-hc` is A000).
+            if (!char.IsLetter(source[i]))
+                break;
             var c = char.ToUpperInvariant(source[i]);
-            if (c is 'H' or 'W')
-                continue;
             var code = Encode(c);
             if (code == '0')
             {

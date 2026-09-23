@@ -54,4 +54,14 @@ public sealed class ColNameLengthTests
     [TestMethod]
     public void ColLength_NullArg_ReturnsNull()
         => AreEqual(DBNull.Value, new Simulation().ExecuteScalar("select col_length(null, 'col')"));
+
+    [TestMethod]
+    [DataRow("name", (short)256)]
+    [DataRow("object_id", (short)4)]
+    [DataRow("type", (short)2)]
+    [DataRow("type_desc", (short)120)]
+    [DataRow("is_ms_shipped", (short)1)]
+    [DataRow("create_date", (short)8)]
+    public void ColLength_CatalogView(string column, short expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar($"select col_length('sys.objects', '{column}')"));
 }

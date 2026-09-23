@@ -389,10 +389,7 @@ internal sealed class CharSqlType : SqlType
     private static Encoding LoadCp1252()
     {
         Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
-        return Encoding.GetEncoding(
-            1252,
-            new EncoderReplacementFallback("?"),
-            DecoderFallback.ReplacementFallback);
+        return Encoding.GetEncoding(1252);
     }
 }
 

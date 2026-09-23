@@ -21,7 +21,7 @@ internal sealed class Ceiling(ParserContext context) : Expression
         {
             SqlTypeCategory.Integer => MathScalars.PromoteInteger(resultType, MathScalars.AsLong(v)),
             SqlTypeCategory.Decimal or SqlTypeCategory.Money => MathScalars.FromDecimal38OrMoney(resultType, MathScalars.Ceiling(MathScalars.AsDecimal38OrMoney(v))),
-            SqlTypeCategory.Approximate => SqlValue.FromDouble(Math.Ceiling(MathScalars.AsDouble(v))),
+            SqlTypeCategory.Approximate => SqlValue.FromDouble(MathScalars.UnsignedZeroFromNonZero(Math.Ceiling(MathScalars.AsDouble(v)), MathScalars.AsDouble(v))),
             _ => throw new NotSupportedException($"CEILING doesn't support {v.Type}.")
         };
     }

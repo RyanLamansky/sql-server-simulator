@@ -103,9 +103,11 @@ public sealed class LegacyDateTimeTests
     [TestMethod]
     public void Cast_DateTimeToDateTime2_PreservesValue()
     {
-        // datetime → datetime2(7) is lossless; .997 input rounds to tick 299 = 9_966_666 ticks past second.
+        // datetime → datetime2(7): .997 input is 1/300-second unit 299, which
+        // rounds to the nearest 100 ns — 9_966_667 ticks past the second, as on
+        // real (probe-confirmed 2026-09-23).
         var value = (DateTime)ExecuteScalar("select cast(cast('2024-01-15 12:00:00.997' as datetime) as datetime2(7))")!;
-        var expectedTicks = new DateTime(2024, 1, 15, 12, 0, 0).Ticks + (299L * 10_000_000 / 300);
+        var expectedTicks = new DateTime(2024, 1, 15, 12, 0, 0).Ticks + (((299L * 10_000_000) + 150) / 300);
         AreEqual(expectedTicks, value.Ticks);
     }
 
@@ -364,4 +366,20 @@ public sealed class LegacyDateTimeTests
         AreEqual(1, reader.GetInt32(0));
         IsFalse(reader.Read());
     }
+
+    /// <summary>
+    /// A stored 1/300-second unit renders rounded to the millisecond, and style
+    /// 113 pads its day with a zero.
+    /// </summary>
+    [TestMethod]
+    [DataRow(121, "2024-01-02 03:04:05.677")]
+    [DataRow(113, "02 Jan 2024 03:04:05:677")]
+    [DataRow(109, "Jan  2 2024  3:04:05:677AM")]
+    [DataRow(126, "2024-01-02T03:04:05.677")]
+    public void Render_RoundsToTheMillisecond(int style, string expected)
+        => AreEqual(expected, ExecuteScalar($"select convert(varchar(30), cast('2024-01-02 03:04:05.678' as datetime), {style})"));
+
+    [TestMethod]
+    public void DatePartNanosecond_ScalesTheStoredUnit()
+        => AreEqual(123333333, ExecuteScalar("select datepart(nanosecond, cast('2024-01-02 03:04:05.123' as datetime))"));
 }

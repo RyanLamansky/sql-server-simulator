@@ -19,7 +19,7 @@ The adapter stays in-repo-but-unpublished as a deliberate demand signal, so don'
 ## Operating goal
 
 High-fidelity emulation.
-Authenticity over desirability — when SQL Server is quirky or lossy (CP1252 `?` replacement, ANSI trailing-space `=` padding, `LEN` excluding trailing spaces), mirror it.
+Authenticity over desirability — when SQL Server is quirky or lossy (CP1252 best-fit and `?` replacement, ANSI trailing-space `=` padding, `LEN` excluding trailing spaces), mirror it.
 Fidelity has caught real upstream bugs (EF Core 10's `Math.Sign(decimal)` mismatch) — when a probe feels wrong, verify against the reference before relaxing the simulator; matching a real cross-stack quirk is the feature, not a bug.
 EF Core trusts the simulator end-to-end (`*.Tests.EFCore` is the regression oracle, must stay green).
 Beyond that floor, priority is broad coverage weighted by popularity (user wins) × ease (thoroughness wins).

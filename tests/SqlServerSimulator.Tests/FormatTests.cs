@@ -73,4 +73,13 @@ public sealed class FormatTests
     [TestMethod]
     public void DateTimeCustomFormat()
         => AreEqual("12/05/2026 13:45", ExecuteScalar("select FORMAT(cast('2026-05-12T13:45:00' as datetime2), 'dd/MM/yyyy HH:mm')"));
+
+    /// <summary>The default number and percent precision is two digits, as Windows' culture data has it.</summary>
+    [TestMethod]
+    [DataRow("format(1234.5, 'N')", "1,234.50")]
+    [DataRow("format(1234.5, 'P')", "123,450.00%")]
+    [DataRow("format(1234.5, 'N', 'de-DE')", "1.234,50")]
+    [DataRow("format(1234.5e0, 'N')", "1,234.50")]
+    public void DefaultPrecision_IsTwo(string expression, string expected)
+        => AreEqual(expected, ExecuteScalar($"select {expression}"));
 }

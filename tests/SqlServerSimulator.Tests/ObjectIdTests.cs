@@ -513,4 +513,13 @@ public sealed class ObjectIdTests
             IsFalse(reader.IsDBNull(0));
         }
     }
+
+    /// <summary>A catalog view carries real's fixed object id.</summary>
+    [TestMethod]
+    [DataRow("sys.objects", -385)]
+    [DataRow("sys.tables", -386)]
+    [DataRow("sys.columns", -391)]
+    [DataRow("sysobjects", -105)]
+    public void CatalogView_HasRealsObjectId(string name, int expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar($"select object_id('{name}')"));
 }

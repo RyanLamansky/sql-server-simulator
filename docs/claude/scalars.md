@@ -97,7 +97,7 @@ Inside a `BEGIN TRY` block real swallows the failure outright — nothing raised
 **Not modeled**: the message language itself (every diagnostic stays English) and the `dateformat` half — `sys.syslanguages.dateformat` is projected but `SET DATEFORMAT` still parses-and-discards, so a language change doesn't move the date-string input order the way real's does.
 `sys.syslanguages`'s three name-list columns (`months` / `shortmonths` / `days`) are nullable on real and left NULL here for the same reason.
 
-**Implicit operand coercion** (date argument, all three functions): string operands route through `DatePartKinds.CoerceDateArgumentImplicit` → `CoerceTo(datetime2(7))`; integer operands → `CoerceTo(datetime)` (days-since-1900-01-01).
+**Implicit operand coercion** (date argument, all three functions): string operands route through `DatePartKinds.CoerceDateArgumentImplicit` → `CoerceTo(datetime2(7))`, except that `DATEADD` reads a string as `datetime` (its result type, and the type its Msg 517 names; probed 2026-09-23); integer operands → `CoerceTo(datetime)` (days-since-1900-01-01).
 `ParseDateTime2` also accepts a **bare time-of-day string** (`HH:mm[:ss[.fffffff]]`, anchored to 1900-01-01), so `DATEDIFF(second, '11:15:00', <time>)` / `DATEPART(microsecond, '11:15:00')` coerce like real (a Django DurationField/TimeField pattern) rather than raising Msg 241.
 Probe-confirmed against SQL Server 2025: `DATEPART(year, 0) = 1900`, `DATEADD(day, 1, 0) = 1900-01-02`, `DATEDIFF(day, 0, '2024-01-31') = 45320`.
 `DATEADD`'s offset (second) arg stays strict-int — string offsets raise Msg 9810 ("Argument data type varchar is invalid for argument 2 of dateadd function") just like real SQL Server.

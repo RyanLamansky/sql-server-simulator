@@ -10,7 +10,7 @@ NULL `json` or NULL path → NULL.
 A document that isn't JSON text raises Msg 13609 under either mode — see [Msg 13609](#msg-13609--the-document-isnt-json-text).
 JSON booleans render as lowercase `'true'`/`'false'`; numbers as raw text via `JsonElement.GetRawText`.
 Object/array matches → NULL in lax, **Msg 13623** State 2 in strict.
-**A scalar string longer than 4000 chars → SQL NULL in lax** (probe-confirmed against SQL Server 2025: 4000 → value, 4001 → NULL); enforcing the cap also keeps the length-0 result within the bounded TDS length prefix, so a multi-KB extracted value can't overflow it.
+**A scalar string longer than 4000 chars** is SQL NULL in lax mode over a MAX document (probe-confirmed against SQL Server 2025: 4000 → value, 4001 → NULL) and is cut to its first 4000 characters over a bounded one (2026-09-23); either way the result stays within the bounded TDS length prefix, so a multi-KB extracted value can't overflow it.
 
 `JSON_QUERY(json, path)` returns `nvarchar(max)` — complement of `JSON_VALUE`.
 Object/array match → raw JSON text via `JsonElement.GetRawText` (preserves the input's whitespace shape).

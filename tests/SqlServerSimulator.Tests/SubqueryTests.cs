@@ -401,4 +401,13 @@ public sealed class SubqueryTests
             "select p.id from parent as p where exists (select 1 from child as c where c.parent_id = p.id)"));
         CollectionAssert.AreEqual(new int?[] { 1 }, matched);
     }
+
+    /// <summary>An EXISTS body's select list is never evaluated.</summary>
+    [TestMethod]
+    [DataRow("select 1 where exists (select 1/0)")]
+    [DataRow("select 1 where exists (select 1/0, cast('x' as int))")]
+    [DataRow("create table t (a int); insert t values (1); select 1 where exists (select 1/0 from t)")]
+    [DataRow("create table t (a int); insert t values (1); select 1 where exists (select top 1 a / 0 y from t order by y)")]
+    public void Exists_NeverEvaluatesItsSelectList(string sql)
+        => AreEqual(1, new Simulation().ExecuteScalar(sql));
 }

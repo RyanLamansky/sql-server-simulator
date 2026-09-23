@@ -34,7 +34,8 @@ internal sealed class DateAdd : Expression
 
     public override SqlValue Run(RuntimeContext runtime)
     {
-        var value = DatePartKinds.CoerceDateArgumentImplicit(source.Run(runtime));
+        var raw = source.Run(runtime);
+        var value = DatePartKinds.CoerceDateArgumentImplicit(SqlType.IsStringCategory(raw.Type) ? raw.CoerceTo(SqlType.DateTime) : raw);
         var n = number.Run(runtime);
         if (value.IsNull || n.IsNull)
             return SqlValue.Null(value.Type);
@@ -43,8 +44,16 @@ internal sealed class DateAdd : Expression
         return DatePartKinds.Add(this.kind, value, nInt);
     }
 
+    /// <summary>
+    /// A string date argument reads as <c>datetime</c> here, where the other
+    /// date functions read it as <c>datetime2</c> — probe-confirmed
+    /// 2026-09-23: <c>DATEADD(day, 1, '2024-01-01')</c> is a <c>datetime</c>,
+    /// and a seven-digit fraction is Msg 241.
+    /// </summary>
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
-        DatePartKinds.ResolveImplicitDateType(source.GetSqlType(batch, resolveColumnType));
+        source.GetSqlType(batch, resolveColumnType) is var sourceType && SqlType.IsStringCategory(sourceType)
+            ? SqlType.DateTime
+            : DatePartKinds.ResolveImplicitDateType(sourceType);
 
     internal override string DebugDisplay() => $"DATEADD({this.keywordText}, {number.DebugDisplay()}, {source.DebugDisplay()})";
 }

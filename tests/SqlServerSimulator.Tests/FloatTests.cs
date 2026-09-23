@@ -387,4 +387,27 @@ public sealed class FloatTests
             2627);
         Assert.Contains("The duplicate key value is (1e+020).", ex.Message);
     }
+
+    /// <summary>A float result past the type's range is Msg 8115, never an infinity.</summary>
+    [TestMethod]
+    [DataRow("select 1e308 * 10", "float")]
+    [DataRow("select cast(1e308 as float) + cast(1e308 as float)", "float")]
+    [DataRow("select cast(3e38 as real) * cast(10 as real)", "real")]
+    public void Overflow_RaisesMsg8115(string sql, string typeName)
+        => new Simulation().AssertSqlError(sql, 8115, $"Arithmetic overflow error converting expression to data type {typeName}.");
+
+    /// <summary>
+    /// Rounding a non-zero value to zero gives positive zero, where a negative
+    /// zero input keeps its sign.
+    /// </summary>
+    [TestMethod]
+    [DataRow("ceiling(-0.5e0)", "0")]
+    [DataRow("round(-0.4e0, 0)", "0")]
+    [DataRow("floor(-0.0e0)", "-0")]
+    public void RoundedToZero_Sign(string expression, string expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar($"select cast({expression} as varchar(10))"));
+
+    [TestMethod]
+    public void RoundInteger_PastIntRange_RaisesMsg8115()
+        => new Simulation().AssertSqlError("select round(2147483647, -1)", 8115, "Arithmetic overflow error converting expression to data type int.");
 }

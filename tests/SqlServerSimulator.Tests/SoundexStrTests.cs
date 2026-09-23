@@ -105,4 +105,17 @@ public sealed class SoundexStrTests
     [DataRow("str(1e308, 5)", "*****")]
     public void Str_RoundsTheExactValueToSeventeenDigits(string call, string expected)
         => AreEqual(expected, new Simulation().ExecuteScalar($"select {call}"));
+
+    /// <summary>
+    /// H and W separate a run of equal codes as a vowel does, and a non-letter
+    /// ends the code.
+    /// </summary>
+    [TestMethod]
+    [DataRow("Ashcraft", "A226")]
+    [DataRow("Burroughs", "B622")]
+    [DataRow("Schwartz", "S632")]
+    [DataRow("A-hc", "A000")]
+    [DataRow("Awwc", "A200")]
+    public void Soundex_SqlServerRules(string input, string expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar($"select soundex('{input}')"));
 }

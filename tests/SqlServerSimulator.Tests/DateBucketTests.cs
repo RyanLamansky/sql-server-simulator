@@ -38,4 +38,25 @@ public sealed class DateBucketTests
     [TestMethod]
     public void DateBucket_WithOrigin_RespectsOrigin()
         => AreEqual(new DateTime(2024, 5, 15), new Simulation().ExecuteScalar("select date_bucket(day, 7, cast('2024-05-15' as date), cast('2024-05-15' as date))"));
+
+    /// <summary>
+    /// Buckets are whole spans from the origin: weeks count 7 days from the
+    /// origin's own weekday, and an origin off a boundary shifts every bucket.
+    /// </summary>
+    [TestMethod]
+    [DataRow("date_bucket(week, 2, cast('2024-05-05' as date))", "2024-04-22")]
+    [DataRow("date_bucket(week, 1, cast('2024-05-05' as date))", "2024-04-29")]
+    [DataRow("date_bucket(week, 1, cast('2024-05-05' as date), cast('2024-05-01' as date))", "2024-05-01")]
+    [DataRow("date_bucket(month, 1, cast('2024-05-05' as date), cast('2024-01-15' as date))", "2024-04-15")]
+    [DataRow("date_bucket(hour, 1, cast('2024-01-01 01:10' as datetime2), cast('2024-01-01 00:30' as datetime2))", "2024-01-01 00:30")]
+    [DataRow("date_bucket(week, 1, cast('1899-12-31' as date))", "1899-12-25")]
+    public void Bucket_CountsWholeSpansFromTheOrigin(string expression, string expected)
+        => AreEqual(DateTime.Parse(expected, System.Globalization.CultureInfo.InvariantCulture), new Simulation().ExecuteScalar($"select {expression}"));
+
+    [TestMethod]
+    public void StringDate_RaisesMsg8116()
+        => new Simulation().AssertSqlError(
+            "select date_bucket(day, 1, '2024-01-01 10:00')",
+            8116,
+            "Argument data type varchar is invalid for argument 3 of Date_Bucket function.");
 }

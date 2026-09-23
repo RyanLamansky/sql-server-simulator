@@ -212,7 +212,7 @@ public sealed class RegexpFunctionTests
     [DataRow("len(regexp_replace(cast(replicate(N'a', 3000) as nvarchar(4000)), 'a', 'bb'))", 4000)]
     [DataRow("len(regexp_substr(cast(replicate('a', 5000) as varchar(max)), 'a+'))", 5000)]
     public void ResultWidth_Matrix(string expression, int expected) =>
-        AreEqual(expected, new Simulation().ExecuteScalar<int>($"select {expression}"));
+        AreEqual(expected, Convert.ToInt32(new Simulation().ExecuteScalar($"select {expression}"), System.Globalization.CultureInfo.InvariantCulture));
 
     /// <summary>
     /// Regex matching ignores collation entirely: a case-insensitive column

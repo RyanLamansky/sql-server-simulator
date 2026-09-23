@@ -914,7 +914,8 @@ internal sealed partial class Selection
         bool isAssignmentOnly,
         MultiPartName? intoTarget,
         Dictionary<int, ColumnReadTarget>? readColumnSink,
-        bool projectionDiscarded = false)
+        bool projectionDiscarded = false,
+        bool projectionUnread = false)
     {
         RecordIndexedViewShape(parseBatch, sources, joins, fromClause, distinct, topExpression, aggregates);
 
@@ -1036,6 +1037,18 @@ internal sealed partial class Selection
         {
             outputSchema[i] = expressions[i].GetSqlType(parseBatch, readColumnSink is null ? ResolveColumnType : RecordingResolver);
             outputColumnNames[i] = expressions[i].Name;
+        }
+
+        // An EXISTS body only counts rows (`projectionUnread` — a semi-join's
+        // key plan discards its projection's collation but reads its values),
+        // so real never evaluates its select list — `EXISTS (SELECT 1/0 FROM t)` is true over a non-empty t
+        // (probe-confirmed 2026-09-23). Once the list is bound, each term
+        // becomes a typed NULL under its own name; a grouped or windowed body
+        // keeps its terms, which its aggregation machinery reads.
+        if (projectionUnread && aggregates.Count == 0 && windows.Count == 0)
+        {
+            for (var i = 0; i < expressions.Count; i++)
+                expressions[i] = new NamedExpression(new Value(SqlValue.Null(outputSchema[i])), outputColumnNames[i]);
         }
 
         // The select list is the *last* slot real settles: a WHERE / JOIN

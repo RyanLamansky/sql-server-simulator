@@ -54,7 +54,7 @@ internal sealed class Format : Expression
         if (valueValue.IsNull)
             return SqlValue.Null(SqlType.NVarchar);
 
-        var culture = this.culture is null ? CultureInfo.GetCultureInfo("en-US") : ResolveCulture(this.culture.Run(runtime));
+        var culture = WithWindowsDecimalDigits(this.culture is null ? CultureInfo.GetCultureInfo("en-US") : ResolveCulture(this.culture.Run(runtime)));
         var formatString = formatValue.AsString;
 
         try
@@ -69,6 +69,22 @@ internal sealed class Format : Expression
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.NVarchar;
+
+    /// <summary>
+    /// SQL Server formats through Windows' culture data, whose default number
+    /// and percent precision is two digits where ICU's is three —
+    /// probe-confirmed 2026-09-23 for en-US, de-DE, fr-FR, ja-JP and ar-SA:
+    /// <c>FORMAT(1234.5, 'N')</c> is <c>1,234.50</c>.
+    /// </summary>
+    private static CultureInfo WithWindowsDecimalDigits(CultureInfo culture)
+    {
+        if (culture.NumberFormat.NumberDecimalDigits == 2 && culture.NumberFormat.PercentDecimalDigits == 2)
+            return culture;
+        var adjusted = (CultureInfo)culture.Clone();
+        adjusted.NumberFormat.NumberDecimalDigits = 2;
+        adjusted.NumberFormat.PercentDecimalDigits = 2;
+        return adjusted;
+    }
 
     /// <summary>
     /// Picks the CLR culture for the formatter. A non-string argument

@@ -277,32 +277,14 @@ Already listed elsewhere here and not repeated: `DBCC CHECKIDENT`, parenthesized
 
 **Wrong results**:
 
-- `WHERE EXISTS (SELECT 1/0)` raises Msg 8134; real never evaluates an EXISTS select list.
-- A dangling escape (`'a!' LIKE 'a!' ESCAPE '!'`) matches here; real doesn't match.
-- `CAST(0.1 AS bit)` is 0 here; real treats any non-zero as 1.
-- `1e308 * 10` is `Infinity` here; real raises Msg 8115.
-- `ROUND(2147483647, -1)` wraps here; real raises Msg 8115.
-- `CEILING(-0.5e0)` renders `-0`; real `0`.
-- `RAND(seed)` follows a different sequence (`RAND(1)` is 0.7135919932129235 on real, and `RAND(-1)` equals `RAND(1)`).
-- `GROUP BY ()` over zero input rows answers one row here and none on real.
+- A non-persisted computed column that errors (`b AS a / 0`) fails the INSERT here — the write evaluates every computed column so OUTPUT, CHECK and key enforcement can read it — where real inserts and fails only a query that projects the column.
+- `GROUPING SETS ((a + 1), (a + 2))` projecting both expressions: the grouped-away one reads NULL on real, but a column shared with the kept expression still resolves here (the grouped-key resolver NULLs columns, not whole expressions).
+- `OBJECT_NAME(<catalog view id>)` is NULL here and the view's name on real, and `sys.all_objects` omits the system objects `sys.system_objects` lists (real's is the union).
 - `STRING_AGG`'s separator isn't checked: real requires a literal or variable (Msg 8733), a string (Msg 8116 on argument 2), and no `nvarchar` under a `varchar` operand (Msg 8116 naming `nvarchar`).
 - `CAST(<datetime2> AS datetime)` at the top of the range raises Msg 242 here; real clamps `9999-12-31 23:59:59.9999999` to `.997`, raising Msg 242 only from a string or `datetimeoffset` source.
   The simulator's Msg 242 also names `varchar` as the source where real names the actual type (`datetime2` → `smalldatetime`).
 - A `datetimeoffset` string whose UTC instant falls past the range (`'9999-12-31 23:59:59 -05:00'`) raises Msg 241 here; real raises Msg 8114 state 31.
-- `SELECT a + 1 … GROUP BY ROLLUP(a + 1)` raises Msg 207 — a grouped-away *expression* isn't NULLed in the rolled-up row, since the grouped-key resolver matches bare references only.
-- A non-persisted computed column that errors (`b AS a / 0`) fails even `SELECT a`; real fails only when the column is projected.
-- `DATEADD(day, n, '<string>')` returns `datetime2`; real `datetime`, which also names the type in its Msg 517.
-- `datetime` renders `.678` as `.676` where real renders `.677` (CONVERT styles 109 / 113 / 121 / 126 / 127 / 130 / 131), and style 113 pads the day as `' 2'` where real writes `'02'`.
-- `DATEPART(nanosecond, <datetime .123>)` is 123333300; real 123333333.
-- `DATE_BUCKET(week, 2, CAST('2024-05-05' AS date))` is 2024-05-06; real 2024-04-22.
-- `LOWER(N'İ')` keeps `İ`; real answers `i`.
-- `SOUNDEX('Ashcraft')` is `A261`; real `A226`, the H/W-separator rule.
-- `CAST(N'Ā' AS varchar)` is `?`; real best-fits it to `A`.
-- `FORMAT(1234.5, 'N')` and `'P'` render three decimals; real two, unknown culture included.
-- A `TOP 100 PERCENT … ORDER BY` view reads back sorted; real optimizes the ORDER BY away and returns scan order.
-- `JSON_VALUE` over a 5000-character string answers NULL; SQL Server 2025 returns it.
-- `OBJECT_ID('sys.objects')` is −1463410581 where real is −385, and `COL_LENGTH('sys.objects', 'name')` is NULL where real is 256.
-- Result types: `LEN` / `REPLICATE` over a MAX value, `NTILE`, and `OPENJSON`'s `type` column report `int`; real reports `bigint`, `bigint` and `tinyint`.
+- `LOWER` / `UPPER` use English case mapping under every collation; a Turkish collation's own mapping isn't modeled.
 
 **Real accepts, the simulator refuses**:
 
@@ -320,7 +302,7 @@ Already listed elsewhere here and not repeated: `DBCC CHECKIDENT`, parenthesized
 - CAST sources: a space-separated date-and-time string to `date` or `time` (`CAST('2024-12-31 23:59:59' AS date)`, only the `T` form parses here); more than seven fractional-second digits (real rounds at the seventh); `''` → `money` 0 and `date` 1900-01-01; `'12:00'` → `date`; `'1e2'` / `'1d2'` → `float`; month names (`'Jan 5 2024'`, `'5 January 2024'`, `'January 2024'`); `AM` / `PM` suffixes, including `'13:00 PM'`; two-digit years (`'01/01/49'` → 2049); `datetime` → `float` / `int` / `decimal`; `decimal` → `varbinary`.
 
 **Same error, different number, state or class**:
-`TRANSLATE` length mismatch 9828 (here 9819); `NTILE(0)` 4116 class 15 (here 9819); `ROW_NUMBER() OVER ()` 4112 (here 102); `decimal(39, 0)` 2717 (here 1001); `decimal(2, 3)` 192 (here 1002); `float(54)` accepted on real (here 1001); `TOP (<NULL variable>)` 1014 (here 1060); `TOP '1'` 102 (here 1060); `EXEC p @b = 1` 8145 (here 201); a string datetime out of range (`'2024'`, hour 25) 242 (here 241); `xml = xml` 305 (here 402); `$action` in an INSERT's OUTPUT 207 (here 4104); a bare `VALUES (1)` statement 156 (here 102); `DELETE … ORDER BY` 156 (here 102); `@t.a` 137 class 16 state 1 (here class 15 state 2); states differing on 506, 235, 9810, 9812, 8148, 2714 for a temp table, and 195.
+`TRANSLATE` length mismatch 9828 (here 9819); `ROW_NUMBER() OVER ()` 4112 (here 102); `decimal(39, 0)` 2717 (here 1001); `decimal(2, 3)` 192 (here 1002); `float(54)` accepted on real (here 1001); `TOP (<NULL variable>)` 1014 (here 1060); `TOP '1'` 102 (here 1060); `EXEC p @b = 1` 8145 (here 201); a string datetime out of range (`'2024'`, hour 25) 242 (here 241); `xml = xml` 305 (here 402); `$action` in an INSERT's OUTPUT 207 (here 4104); a bare `VALUES (1)` statement 156 (here 102); `DELETE … ORDER BY` 156 (here 102); `@t.a` 137 class 16 state 1 (here class 15 state 2); states differing on 506, 235, 9810, 9812, 8148, 2714 for a temp table, and 195.
 
 ### Result-set serialization: `FOR XML` / `FOR JSON`
 

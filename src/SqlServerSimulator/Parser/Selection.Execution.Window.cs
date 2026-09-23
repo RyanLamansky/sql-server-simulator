@@ -508,7 +508,7 @@ internal sealed partial class Selection
                                     : smallerSize == 0
                                         ? bucketCount
                                         : firstFewBuckets + ((p - (firstFewBuckets * (smallerSize + 1)) - 1) / smallerSize) + 1;
-                                results[indices[i]] = SqlValue.FromInt32(bucket);
+                                results[indices[i]] = SqlValue.FromInt64(bucket);
                             }
                         }
                     }

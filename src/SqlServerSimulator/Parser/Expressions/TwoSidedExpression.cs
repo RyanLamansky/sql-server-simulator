@@ -587,7 +587,14 @@ internal abstract class TwoSidedExpression : Expression
             '%' => r == 0.0 ? throw SimulatedSqlException.DivideByZero() : l % r,
             _ => throw new NotSupportedException($"Operator '{op}' on float operands isn't implemented."),
         };
-        return resultIsReal ? SqlValue.FromSingle((float)raw) : SqlValue.FromDouble(raw);
+        // A result past the type's range is Msg 8115 naming the type, never
+        // an infinity (probe-confirmed 2026-09-23: `1e308 * 10`).
+        if (resultIsReal)
+        {
+            var single = (float)raw;
+            return float.IsInfinity(single) ? throw SimulatedSqlException.ArithmeticOverflow("real") : SqlValue.FromSingle(single);
+        }
+        return double.IsInfinity(raw) ? throw SimulatedSqlException.ArithmeticOverflow("float") : SqlValue.FromDouble(raw);
     }
 
     private static double ToDouble(SqlValue v) =>

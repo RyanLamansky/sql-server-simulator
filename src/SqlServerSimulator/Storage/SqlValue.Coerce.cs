@@ -1122,6 +1122,11 @@ internal readonly partial struct SqlValue
         if (!SqlType.IsIntegerCategory(target))
             throw SimulatedSqlException.ExplicitConversionNotAllowed(this.Type, target);
 
+        // Any non-zero value is bit 1, a fraction included (probe-confirmed
+        // 2026-09-23: CAST(0.01 AS money) → 1); the integers truncate.
+        if (target == SqlType.Bit)
+            return FromBoolean(m != 0);
+
         // Money → integer truncates toward zero (consistent with decimal/float).
         var truncated = decimal.Truncate(m);
         try
@@ -1244,6 +1249,11 @@ internal readonly partial struct SqlValue
             return this.CoerceToSmallDateTime();
         if (!SqlType.IsIntegerCategory(target))
             throw SimulatedSqlException.ExplicitConversionNotAllowed(this.Type, target);
+
+        // Any non-zero value is bit 1, a fraction included (probe-confirmed
+        // 2026-09-23: 1e-10 → 1); the integers truncate.
+        if (target == SqlType.Bit)
+            return FromBoolean(d != 0);
 
         // Float → int truncates toward zero (verified 1.5 → 1, -1.5 → -1).
         var truncated = Math.Truncate(d);
@@ -1417,6 +1427,11 @@ internal readonly partial struct SqlValue
             return this.CoerceToSmallDateTime();
         if (!SqlType.IsIntegerCategory(target))
             throw SimulatedSqlException.ExplicitConversionNotAllowed(this.Type, target);
+
+        // Any non-zero value is bit 1, a fraction included (probe-confirmed
+        // 2026-09-23: 0.1 and -0.5 → 1), and no value is out of its range.
+        if (target == SqlType.Bit)
+            return FromBoolean(!d.IsZero);
 
         // Decimal → integer truncates toward zero (verified against
         // SQL Server 2025: 1.5 → 1, -1.5 → -1, 0.5 → 0). Range overflow
@@ -1708,11 +1723,11 @@ internal readonly partial struct SqlValue
         if (days is < MinDays or > MaxDays || ticks300 >= 300u * 86400)
             throw SimulatedSqlException.ConversionFailedFromBinaryToDateTime();
 
-        // 1/300-second granularity. The literal `TicksPerSecond / 300L`
-        // truncates because 10_000_000 / 300 isn't whole — keep the
-        // multiplication on the high side of the division.
+        // 1/300-second granularity, rounded to the nearest 100 ns as every
+        // datetime read is (10_000_000 / 300 isn't whole, so the
+        // multiplication stays on the high side of the division).
         var baseDate = new DateTime(1900, 1, 1).AddDays(days);
-        return baseDate.AddTicks(ticks300 * TimeSpan.TicksPerSecond / 300L);
+        return baseDate.AddTicks(((ticks300 * TimeSpan.TicksPerSecond) + 150) / 300L);
     }
 
     /// <summary>

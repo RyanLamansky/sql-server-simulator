@@ -584,4 +584,23 @@ public sealed class ViewTests
     [TestMethod]
     public void StarView_ColumnAddedToBase_IsNotReachableByName() =>
         _ = WithStarViewAfter("alter table t add d int").AssertSqlError("select d from v", 207);
+
+    /// <summary>
+    /// A view or derived table whose TOP is a constant 100 PERCENT keeps every
+    /// row, so its ORDER BY is dropped and the rows come back in scan order.
+    /// </summary>
+    [TestMethod]
+    [DataRow("select top 100 percent a from t order by a")]
+    [DataRow("select top (100) percent with ties a from t order by a")]
+    public void TopHundredPercent_DropsTheOrderBy(string body)
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create table t (a int); insert t values (3), (1), (2)", $"create view v as {body}");
+        using var reader = sim.ExecuteReader("select a from v");
+        var values = new List<int>();
+        while (reader.Read())
+            values.Add(reader.GetInt32(0));
+        CollectionAssert.AreEqual(new[] { 3, 1, 2 }, values);
+        Assert.AreEqual(3, sim.ExecuteScalar($"select top 1 a from ({body}) d"));
+    }
 }

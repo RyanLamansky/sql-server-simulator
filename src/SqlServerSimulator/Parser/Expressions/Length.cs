@@ -30,21 +30,30 @@ internal sealed class Length(ParserContext context) : Expression
         // NULL passes through any string function regardless of its underlying
         // type tag; the simulator's untyped NULL literal carries Type=Int32 so
         // the IsNull check has to come before the IsStringCategory check.
+        var resultType = ResultType(raw.Type);
         if (raw.IsNull)
-            return SqlValue.Null(SqlType.Int32);
+            return SqlValue.Null(resultType);
         var value = StringScalars.CoerceToVarchar(raw, runtime.Batch, "len");
         var trimmed = value.AsString.TrimEnd(' ');
         var length = value.Type.Collation?.IsSupplementaryCharacterAware == true
             ? SupplementaryCharacters.CodepointCount(trimmed)
             : trimmed.Length;
-        return SqlValue.FromInt32(length);
+        return resultType == SqlType.BigInt ? SqlValue.FromInt64(length) : SqlValue.FromInt32(length);
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
-    {
-        _ = StringScalars.BindArgument(source, batch, resolveColumnType, "len");
-        return SqlType.Int32;
-    }
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
+        ResultType(StringScalars.BindArgument(source, batch, resolveColumnType, "len"));
+
+    /// <summary>
+    /// <c>bigint</c> over a MAX argument, <c>int</c> otherwise (probe-confirmed
+    /// 2026-09-23 against SQL Server 2025).
+    /// </summary>
+    private static SqlType ResultType(SqlType argument) =>
+        argument is VarcharSqlType { length: SqlType.MaxLengthSentinel }
+            or NVarcharSqlType { length: SqlType.MaxLengthSentinel }
+            or VarbinarySqlType { length: SqlType.MaxLengthSentinel }
+            ? SqlType.BigInt
+            : SqlType.Int32;
 
     internal override string DebugDisplay() => $"LEN({source.DebugDisplay()})";
 

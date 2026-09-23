@@ -29,7 +29,7 @@ internal sealed partial class Selection
     /// documentation: 0=null, 1=string, 2=number, 3=true/false, 4=array,
     /// 5=object.
     /// </summary>
-    private static readonly SqlType[] OpenJsonDefaultSchema = [SqlType.NVarchar, SqlType.NVarchar, SqlType.Int32];
+    private static readonly SqlType[] OpenJsonDefaultSchema = [SqlType.NVarchar, SqlType.NVarchar, SqlType.TinyInt];
     private static readonly string[] OpenJsonDefaultColumnNames = ["key", "value", "type"];
 
     /// <summary>
@@ -167,7 +167,7 @@ internal sealed partial class Selection
                 JsonValueKind.Number => SqlValue.FromNVarchar(element.GetRawText()),
                 _ => SqlValue.FromNVarchar(element.GetRawText()),
             };
-            return RowEncoder.EncodeRow(schema, [keyValue, valueText, SqlValue.FromInt32(typeCode)]);
+            return RowEncoder.EncodeRow(schema, [keyValue, valueText, SqlValue.FromByte((byte)typeCode)]);
         }
 
         var values = new SqlValue[withColumns.Length];

@@ -61,7 +61,7 @@ internal sealed class Round : Expression
         {
             SqlTypeCategory.Integer => MathScalars.PromoteInteger(resultType, RoundLong(MathScalars.AsLong(v), len, truncate)),
             SqlTypeCategory.Decimal or SqlTypeCategory.Money => MathScalars.FromDecimal38OrMoney(resultType, RoundWithinPrecision(resultType, MathScalars.AsDecimal38OrMoney(v), len, truncate)),
-            SqlTypeCategory.Approximate => SqlValue.FromDouble(RoundDouble(MathScalars.AsDouble(v), len, truncate)),
+            SqlTypeCategory.Approximate => SqlValue.FromDouble(MathScalars.UnsignedZeroFromNonZero(RoundDouble(MathScalars.AsDouble(v), len, truncate), MathScalars.AsDouble(v))),
             _ => throw new NotSupportedException($"ROUND doesn't support {v.Type}.")
         };
     }
@@ -106,8 +106,15 @@ internal sealed class Round : Expression
         if (scale == 0) return 0;
         if (truncate) return value / scale * scale;
         var half = scale / 2;
-        var absRounded = (Math.Abs(value) + half) / scale * scale;
-        return value < 0 ? -absRounded : absRounded;
+        try
+        {
+            var absRounded = checked((Math.Abs(value) + half) / scale * scale);
+            return value < 0 ? -absRounded : absRounded;
+        }
+        catch (OverflowException)
+        {
+            throw SimulatedSqlException.ArithmeticOverflow("bigint");
+        }
     }
 
     private static double RoundDouble(double value, int length, bool truncate)

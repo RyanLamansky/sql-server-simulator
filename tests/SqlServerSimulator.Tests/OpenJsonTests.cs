@@ -14,20 +14,21 @@ public sealed class OpenJsonTests
     public void OpenJson_PrimitiveStringArray_DefaultSchema()
     {
         using var reader = new Simulation().ExecuteReader("select [key], [value], [type] from openjson('[\"a\",\"b\",\"c\"]')");
-        var rows = new List<(string key, string value, int type)>();
+        var rows = new List<(string key, string value, byte type)>();
         while (reader.Read())
-            rows.Add((reader.GetString(0), reader.GetString(1), reader.GetInt32(2)));
-        CollectionAssert.AreEqual(new[] { ("0", "a", 1), ("1", "b", 1), ("2", "c", 1) }, rows);
+            rows.Add((reader.GetString(0), reader.GetString(1), reader.GetByte(2)));
+        CollectionAssert.AreEqual(new[] { ("0", "a", (byte)1), ("1", "b", (byte)1), ("2", "c", (byte)1) }, rows);
     }
 
     [TestMethod]
     public void OpenJson_PrimitiveIntArray_DefaultSchemaTypeCode()
     {
         using var reader = new Simulation().ExecuteReader("select [type] from openjson('[1, 2, 3]')");
-        var types = new List<int>();
+        // The type code is tinyint, as on real (probe-confirmed 2026-09-23).
+        var types = new List<byte>();
         while (reader.Read())
-            types.Add(reader.GetInt32(0));
-        CollectionAssert.AreEqual(new[] { 2, 2, 2 }, types);
+            types.Add(reader.GetByte(0));
+        CollectionAssert.AreEqual(new byte[] { 2, 2, 2 }, types);
     }
 
     [TestMethod]

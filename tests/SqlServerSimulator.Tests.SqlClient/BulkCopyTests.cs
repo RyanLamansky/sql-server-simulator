@@ -398,7 +398,7 @@ public sealed class BulkCopyTests
         using (var bulk = new SqlBulkCopy(connection) { DestinationTableName = "t" })
             await bulk.WriteToServerAsync(data, TestContext.CancellationToken);
 
-        AreEqual(20000, Scalar(connection, "select len(big) from t"));
+        AreEqual(20000L, Scalar(connection, "select len(big) from t"));
     }
 
     [TestMethod]

@@ -772,4 +772,37 @@ public sealed class CastTests
     [TestMethod]
     public void CastVarbinaryToTime_RoundTripsViaWireFormat() =>
         AreEqual(new TimeSpan(19, 46, 29), ExecuteScalar("select cast(0x078058F3BFA5 as time(7))"));
+
+    /// <summary>Any non-zero number is bit 1, a fraction included.</summary>
+    [TestMethod]
+    [DataRow("0.1", true)]
+    [DataRow("-0.5", true)]
+    [DataRow("0.0", false)]
+    [DataRow("1e-10", true)]
+    [DataRow("cast(0.01 as money)", true)]
+    public void NumberToBit_AnyNonZeroIsOne(string source, bool expected)
+        => AreEqual(expected, ExecuteScalar($"select cast({source} as bit)"));
+
+    /// <summary>
+    /// A national string narrowed to an ANSI type takes the code page's
+    /// best-fit mapping as part of the conversion, so it compares as stored.
+    /// </summary>
+    [TestMethod]
+    [DataRow("N'Ā'", "A")]
+    [DataRow("N'ł'", "l")]
+    [DataRow("N'中'", "?")]
+    [DataRow("N'αβΩ' collate Greek_CI_AS", "αβΩ")]
+    public void NationalToVarchar_BestFits(string source, string expected)
+        => AreEqual(expected, ExecuteScalar($"select cast({source} as varchar(5))"));
+
+    [TestMethod]
+    public void NationalToVarchar_ComparesAsNarrowed()
+        => AreEqual(1, ExecuteScalar("select case when cast(N'Ā' as varchar(5)) = 'A' then 1 else 0 end"));
+
+    /// <summary>The legacy pair reads at most three fractional-second digits.</summary>
+    [TestMethod]
+    [DataRow("datetime", 241)]
+    [DataRow("smalldatetime", 295)]
+    public void StringToLegacyDateTime_FourFractionDigits_Refused(string type, int number)
+        => new Simulation().AssertSqlError($"select cast('2024-01-01 10:00:00.1234' as {type})", number);
 }
