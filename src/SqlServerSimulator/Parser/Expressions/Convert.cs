@@ -108,6 +108,7 @@ internal sealed class ConvertExpression : Expression
                         => sourceValue.CoerceMoneyToStringWithStyle(this.targetType, sc),
                     ({ Category: SqlTypeCategory.Approximate }, { Category: SqlTypeCategory.String })
                         => sourceValue.CoerceFloatToStringWithStyle(this.targetType, sc),
+                    (_, XmlSqlType) => CoerceToXmlWithStyle(sourceValue, sc),
                     (VarbinarySqlType or BinarySqlType or ImageSqlType, { Category: SqlTypeCategory.String })
                         => sourceValue.CoerceBinaryToStringWithStyle(this.targetType, sc),
                     ({ Category: SqlTypeCategory.String }, VarbinarySqlType or BinarySqlType)
@@ -122,6 +123,25 @@ internal sealed class ConvertExpression : Expression
         }
 
         return Cast.RecollateStringResult(coerced, this.targetType, sourceValue.Type, dbCollation);
+    }
+
+    /// <summary>
+    /// An <c>xml</c> target reads the style as whitespace and DTD handling
+    /// rather than as a text layout, so a binary source isn't rendered as hex.
+    /// Style 2's limited internal-subset DTD support isn't built: a DTD under
+    /// it raises <see cref="NotSupportedException"/> rather than the Msg 6359
+    /// the style exists to lift.
+    /// </summary>
+    private static SqlValue CoerceToXmlWithStyle(SqlValue source, int style)
+    {
+        try
+        {
+            return source.CoerceTo(SqlType.Xml);
+        }
+        catch (SimulatedSqlException ex) when (style == 2 && ex.Number == 6359)
+        {
+            throw new NotSupportedException("CONVERT to xml with style 2 (internal-subset DTD support) isn't built.");
+        }
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>

@@ -48,7 +48,7 @@ internal sealed class XmlSqlType() : SqlType(SqlTypeCategory.String, TypePairCla
 
     public override SqlValue Decode(ReadOnlySpan<byte> source) => SqlValue.FromXml(Encoding.Unicode.GetString(source));
 
-    public override SqlValue ConvertParameter(object raw) => SqlValue.FromXml((string)raw);
+    public override SqlValue ConvertParameter(object raw) => SqlValue.FromXml(XmlWellFormedness.Checked((string)raw, nationalSource: true));
 
     public override string ToString() => "xml";
 }

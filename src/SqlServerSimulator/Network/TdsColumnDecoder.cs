@@ -402,7 +402,7 @@ internal static class TdsColumnDecoder
             var value = Encoding.Unicode.GetString(bytes);
             if (value is ['\uFEFF', ..])
                 value = value[1..];
-            return SqlValue.FromXml(value);
+            return SqlValue.FromXml(XmlWellFormedness.Checked(value, nationalSource: true));
         }
 
         private static SqlType IntType(int declaredLength) => declaredLength switch

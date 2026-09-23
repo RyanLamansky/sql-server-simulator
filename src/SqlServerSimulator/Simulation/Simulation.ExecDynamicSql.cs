@@ -216,7 +216,7 @@ partial class Simulation
                 // message spells it the way the declaration did.
                 if (bound[i] is null)
                     throw SimulatedSqlException.ParameterizedQueryExpectsParameter(paramDefsText, sqlText, "@" + param.Name);
-                var initialValue = bound[i]!.Value.CoerceTo(param.Type);
+                var initialValue = BindParameterValue(bound[i]!.Value, param.Type, procedure: "");
                 var slot = new VariableSlot(param.Type, declaredMaxLength: null, initialValue, parameter: null);
                 preDeclared[param.Name] = slot;
                 if (param.IsOutput && boundOutputSlots[i] is { } caller)

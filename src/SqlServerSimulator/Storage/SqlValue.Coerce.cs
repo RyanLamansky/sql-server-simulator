@@ -94,7 +94,13 @@ internal readonly partial struct SqlValue
         // method returns. INSERT/UPDATE truncation (Msg 2628 / 8152) is
         // pre-checked at the column-write boundary before this method runs.
         if (SqlType.IsStringCategory(this.Type) && SqlType.IsStringCategory(target))
-            return FromString(target, this.AsString);
+        {
+            // Real parses every value it converts to xml, so a malformed one
+            // raises here rather than surviving to its first read.
+            return target is XmlSqlType && this.Type is not XmlSqlType
+                ? FromXml(XmlWellFormedness.Checked(this.AsString, SqlType.IsNationalStringCategory(this.Type)))
+                : FromString(target, this.AsString);
+        }
 
         // Binary ↔ binary crossings: binary(N) pads or truncates; varbinary
         // wraps the source bytes unchanged. image (the deprecated always-LOB
@@ -129,7 +135,12 @@ internal readonly partial struct SqlValue
             return FromSpatial(SpatialBinaryCodec.Decode(this.AsBytes, binaryToSpatial.IsGeography), binaryToSpatial.IsGeography);
 
         if (this.Type is VarbinarySqlType or BinarySqlType && SqlType.IsStringCategory(target))
-            return this.CoerceBinaryToStringWithStyle(target, 0);
+        {
+            var text = this.CoerceBinaryToStringWithStyle(target, 0);
+            return target is XmlSqlType
+                ? FromXml(XmlWellFormedness.Checked(text.AsString, nationalSource: this.AsBytes is [0xFF, 0xFE, ..]))
+                : text;
+        }
 
         // image → string: real disallows the explicit CAST outright (Msg 529)
         // rather than reinterpreting bytes the way varbinary does — image is
@@ -1270,7 +1281,7 @@ internal readonly partial struct SqlValue
                 System.Globalization.CultureInfo.InvariantCulture,
                 out var d) && !double.IsNaN(d) && !double.IsInfinity(d)
                     ? d
-                    : throw SimulatedSqlException.ConvertingDataTypeError(sourceType, "float");
+                    : throw SimulatedSqlException.StringConversionToNumberFailed(sourceType, "float");
 
     private SqlValue CoerceToDecimal(DecimalSqlType target) => this.Type switch
     {
@@ -1417,7 +1428,7 @@ internal readonly partial struct SqlValue
                 throw SimulatedSqlException.ArithmeticOverflowConverting(sourceType, "numeric", state: 6),
             Decimal38ParseOutcome.ExceedsDeclaredPrecision =>
                 throw SimulatedSqlException.ArithmeticOverflowConverting(sourceType, "numeric", state: 8),
-            _ => throw SimulatedSqlException.ConvertingDataTypeError(sourceType, "numeric"),
+            _ => throw SimulatedSqlException.StringConversionToNumberFailed(sourceType, "numeric"),
         };
 
     private SqlValue CoerceToUniqueIdentifier() => this.Type switch

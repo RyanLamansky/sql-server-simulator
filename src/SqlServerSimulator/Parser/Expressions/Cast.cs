@@ -537,5 +537,6 @@ internal sealed class Cast : Expression
         or 8115 // ArithmeticOverflow
         or 8169 // ConversionFailedFromStringToUniqueIdentifier
         or 8170 // InsufficientResultSpaceForUniqueIdentifier
+        or (>= 9400 and <= 9465) // XmlParsingFailed
         or 9807; // InputCharacterStringStyleMismatch
 }

@@ -501,6 +501,31 @@ public sealed class StoredProcedureTests
         AreEqual("8178", ex.Data["HelpLink.EvtID"]);
     }
 
+    /// <summary>
+    /// Binding converts each argument to its parameter's type, and any failure
+    /// is Msg 8114 state 5 at line 0 — not the Msg 245 / 220 / 241 a CAST of
+    /// the same value raises — while a malformed xml value keeps its own
+    /// parse error at line 0.
+    /// </summary>
+    [TestMethod]
+    [DataRow("exec sp_executesql N'select @i', N'@i int', @i = 'x'", 8114, "Error converting data type varchar to int.")]
+    [DataRow("exec sp_executesql N'select @i', N'@i tinyint', @i = 300", 8114, "Error converting data type int to tinyint.")]
+    [DataRow("exec sp_executesql N'select @d', N'@d date', @d = 'zzz'", 8114, "Error converting data type varchar to date.")]
+    [DataRow("exec sp_executesql N'select @x', N'@x xml', @x = '<a>'", 9400, "XML parsing: line 1, character 3, unexpected end of input")]
+    [DataRow("create proc p @i int as select @i;\nexec p @i = 'x'", 8114, "Error converting data type varchar to int.")]
+    [DataRow("create proc p @i tinyint as select @i;\nexec p 300", 8114, "Error converting data type int to tinyint.")]
+    [DataRow("create proc p @x xml as select @x;\nexec p @x = '<a>'", 9400, "XML parsing: line 1, character 3, unexpected end of input")]
+    public void ArgumentConversionFailure_ReportsAtLineZero(string sql, int number, string message)
+    {
+        var simulation = new Simulation();
+        var statements = sql.Split('\n');
+        for (var i = 0; i < statements.Length - 1; i++)
+            _ = simulation.ExecuteNonQuery(statements[i]);
+        var ex = simulation.AssertSqlError(statements[^1], number);
+        AreEqual(message, ex.Message);
+        AreEqual(0, ex.LineNumber);
+    }
+
     [TestMethod]
     public void SpExecuteSql_UndeclaredArgumentName_Raises8144()
     {

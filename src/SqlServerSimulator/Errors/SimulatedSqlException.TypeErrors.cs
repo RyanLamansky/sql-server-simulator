@@ -193,7 +193,7 @@ partial class SimulatedSqlException
     /// distinct Msg 295 path (see <see cref="ConversionFailedSmallDateTimeFromString"/>).
     /// </summary>
     internal static SimulatedSqlException ConversionFailedDateTimeFromString() =>
-        new("Conversion failed when converting date and/or time from character string.", 241, 16, 1);
+        new("Conversion failed when converting date and/or time from character string.", 241, 16, 1) { AbortsAsUnderXactAbort = true };
 
     /// <summary>
     /// Mimics SQL Server error 9807: <c>CONVERT(date-like, '...', N)</c>
@@ -201,10 +201,11 @@ partial class SimulatedSqlException
     /// specific style number's format. Distinct from Msg 241 (general bad
     /// format) — apps that explicitly check for style-specific input shape
     /// can distinguish "wrong format" from "not a date at all". Probe-
-    /// confirmed verbatim against SQL Server 2025 (2026-05-13).
+    /// confirmed verbatim against SQL Server 2025 (2026-05-13), and at state 0
+    /// (2026-09-23).
     /// </summary>
     internal static SimulatedSqlException InputCharacterStringStyleMismatch(int style) =>
-        new($"The input character string does not follow style {style}, either change the input character string or use a different style.", 9807, 16, 1);
+        new($"The input character string does not follow style {style}, either change the input character string or use a different style.", 9807, 16, 0);
 
     /// <summary>
     /// Mimics SQL Server error 295: the <c>smalldatetime</c>-specific
@@ -213,7 +214,7 @@ partial class SimulatedSqlException
     /// for this type — verified against SQL Server 2025.
     /// </summary>
     internal static SimulatedSqlException ConversionFailedSmallDateTimeFromString() =>
-        new("Conversion failed when converting character string to smalldatetime data type.", 295, 16, 3);
+        new("Conversion failed when converting character string to smalldatetime data type.", 295, 16, 3) { AbortsAsUnderXactAbort = true };
 
     /// <summary>
     /// Mimics SQL Server error 8169: a string couldn't be parsed as a
@@ -222,7 +223,7 @@ partial class SimulatedSqlException
     /// parens-instead-of-braces) — verified against SQL Server 2025.
     /// </summary>
     internal static SimulatedSqlException ConversionFailedFromStringToUniqueIdentifier() =>
-        new("Conversion failed when converting from a character string to uniqueidentifier.", 8169, 16, 2);
+        new("Conversion failed when converting from a character string to uniqueidentifier.", 8169, 16, 2) { AbortsAsUnderXactAbort = true };
 
     /// <summary>
     /// Mimics SQL Server error 210: a binary value whose bytes don't form a
@@ -241,6 +242,16 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException ConvertingDataTypeError(SqlType source, string targetWord) =>
         new($"Error converting data type {FamilyRootName(source)} to {targetWord}.", 8114, 16, 5);
+
+    /// <summary>
+    /// Msg 8114 as a <c>CAST</c> of a string to a number raises it — the one
+    /// form of the message that, like Msg 245 beside it, behaves as an error
+    /// under <c>SET XACT_ABORT ON</c> whatever the option says (probe-confirmed
+    /// 2026-09-23 against SQL Server 2025). The same message raised binding a
+    /// procedure or <c>sp_executesql</c> argument lets the batch carry on.
+    /// </summary>
+    internal static SimulatedSqlException StringConversionToNumberFailed(SqlType source, string targetWord) =>
+        new($"Error converting data type {FamilyRootName(source)} to {targetWord}.", 8114, 16, 5) { AbortsAsUnderXactAbort = true };
 
     /// <summary>
     /// Variant of <see cref="ConvertingDataTypeError(SqlType, string)"/>
@@ -459,7 +470,7 @@ partial class SimulatedSqlException
     /// instead — verified against SQL Server 2025.
     /// </summary>
     internal static SimulatedSqlException InsufficientResultSpaceForUniqueIdentifier() =>
-        new("Insufficient result space to convert uniqueidentifier value to char.", 8170, 16, 2);
+        new("Insufficient result space to convert uniqueidentifier value to char.", 8170, 16, 2) { AbortsAsUnderXactAbort = true };
 
     /// <summary>
     /// Mimics SQL Server error 234: a <c>money</c> / <c>smallmoney</c> source
@@ -546,7 +557,7 @@ partial class SimulatedSqlException
     /// (<c>varchar</c>, <c>nvarchar</c>, etc.).
     /// </summary>
     internal static SimulatedSqlException ConversionFailedFromString(SqlType sourceType, string sourceValue, SqlType targetType) =>
-        new($"Conversion failed when converting the {sourceType.SqlServerName} value '{sourceValue}' to data type {targetType.SqlServerName}.", 245, 16, 1);
+        new($"Conversion failed when converting the {sourceType.SqlServerName} value '{sourceValue}' to data type {targetType.SqlServerName}.", 245, 16, 1) { AbortsAsUnderXactAbort = true };
 
     /// <summary>
     /// Mimics SQL Server error 244: parsing a string succeeded but the

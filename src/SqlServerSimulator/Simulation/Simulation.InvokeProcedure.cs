@@ -176,7 +176,7 @@ partial class Simulation
                 tableVariables[param.Name] = clone;
                 continue;
             }
-            var coerced = boundValues[i]!.Value.CoerceTo(param.Type);
+            var coerced = BindParameterValue(boundValues[i]!.Value, param.Type, $"{procedure.Schema.Name}.{procedure.Name}");
             variables[param.Name] = new VariableSlot(param.Type, declaredMaxLength: param.DeclaredMaxLength, coerced, parameter: null);
         }
 
@@ -336,5 +336,34 @@ partial class Simulation
 
         foreach (var outcome in outcomes)
             yield return outcome;
+    }
+
+    /// <summary>
+    /// Converts an argument to its parameter's declared type the way real
+    /// binds a procedure or <c>sp_executesql</c> parameter, probed 2026-09-23
+    /// against SQL Server 2025: every conversion failure becomes Msg 8114
+    /// state 5 naming the two types (<c>'x'</c> for an <c>int</c> is not the
+    /// Msg 245 a CAST raises, and <c>300</c> for a <c>tinyint</c> not Msg
+    /// 220), while a malformed <c>xml</c> value keeps its own parse error —
+    /// both reported at line 0 and attributed to <paramref name="procedure"/>
+    /// (empty for <c>sp_executesql</c>).
+    /// </summary>
+    internal static SqlValue BindParameterValue(SqlValue value, SqlType target, string procedure)
+    {
+        try
+        {
+            return value.CoerceTo(target);
+        }
+        catch (SimulatedSqlException ex) when (ex.Number is 6359 or (>= 9400 and <= 9465))
+        {
+            ex.PreserveDiagnostics(0, procedure);
+            throw;
+        }
+        catch (Exception ex) when (ex is OverflowException || (ex is SimulatedSqlException sql && Parser.Expressions.Cast.IsConversionFailure(sql.Number)))
+        {
+            var converting = SimulatedSqlException.ConvertingDataTypeError(value.Type, SimulatedSqlException.FamilyRootName(target));
+            converting.PreserveDiagnostics(0, procedure);
+            throw converting;
+        }
     }
 }

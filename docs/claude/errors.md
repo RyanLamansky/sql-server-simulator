@@ -16,7 +16,8 @@ All semantics below are probe-confirmed against SQL Server 2025.
 | Two statements on one line | that shared line | |
 | `THROW n, m, s` (value form) | the THROW statement's line | |
 | `THROW;` (re-raise in CATCH) | the **original** error's line | not the re-raising statement's line |
-| Procedure body error | line relative to the whole **CREATE** statement (header lines counted) | + `Procedure = "dbo.<name>"` (schema-qualified) |
+| Procedure body error | line relative to the whole **CREATE** statement (header lines counted) | + `Procedure = "dbo.<name>"` (schema-qualified; real echoes the `EXEC`'s own spelling, so `exec p` reports `p` — a divergence) |
+| Procedure / `sp_executesql` argument that fails to convert | **0** | + `Procedure` for a procedure (Msg 8114, or an xml parse error) |
 | Trigger body error | CREATE-relative line | + `Procedure = "<name>"` (**unqualified** — the one asymmetry from procedures) |
 | **CREATE-time bind error** (the body error that aborts the CREATE) | CREATE-relative line | + `Procedure = "<name>"` — **unqualified for every module kind**, procedures included, so `CREATE PROCEDURE dbo.p` reports `p` where the same body failing at EXEC reports `dbo.p` |
 | Scalar-UDF / inline-TVF / multi-statement-TVF / view body error | the **outer invoking** statement's line | no `Procedure` — real inlines these for attribution (even the multi-statement TVF) |

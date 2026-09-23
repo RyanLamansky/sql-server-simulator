@@ -232,7 +232,7 @@ Not sim bugs (**fail on real too** — leave alone): boolean-expression `=` comp
 
 A hand-written corpus of 548 deliberately odd statements, run through the simulator's TDS listener and against SQL Server 2025 (17.0.4065.4) with identical SqlClient code on both sides, a fresh database per case, and every error routed through `InfoMessage` so a whole batch's output compares (probed 2026-09-23).
 The harness is local-only and not checked in; its three connection-killing findings shipped, and the accept-what-real-rejects half lives in the [over-permissive register](#over-permissive-register).
-Already listed elsewhere here and not repeated: `DBCC CHECKIDENT`, parenthesized set-op branches, `SET DATEFORMAT` carrying no effect, Msg 245 dooming the transaction, and the parse-phase batch divergence.
+Already listed elsewhere here and not repeated: `DBCC CHECKIDENT`, parenthesized set-op branches, `SET DATEFORMAT` carrying no effect, and the parse-phase batch divergence.
 
 **Type-pair neighbors** — found by the type-pair probes and left open (probed 2026-09-23):
 
@@ -249,9 +249,9 @@ Already listed elsewhere here and not repeated: `DBCC CHECKIDENT`, parenthesized
 - `CONVERT(varchar, <timestamp>, 1)` doesn't render hex.
 - The TDS UDT type name leaves the database part empty (`.sys.geography`; real sends `<db>.sys.geography`).
 
-**`xml` well-formedness** — a string converted to untyped `xml` isn't parsed at all, so `CAST('<a>' AS xml)` answers here and the client's `GetValue` then throws `XmlException`, and `DECLARE @x xml = '<a><b></a>'` succeeds.
-Real raises its XML-parsing family with a line and character position (probed 2026-09-23): Msg 9400 unexpected end of input, Msg 9436 mismatched end tag, Msg 9413 unquoted attribute, Msg 9448 undeclared entity, Msg 9455 illegal name character, Msg 9423 / Msg 9424 bad CDATA / comment, Msg 9438 misplaced XML declaration, Msg 9420 illegal character.
-Real accepts a fragment (`<a/><b/>`) and bare text, so the check is well-formedness rather than a single root element.
+**`xml` rendering** — well-formedness ships, but a converted value is stored as written rather than in real's canonical serialization; see [`xml.md`](xml.md#well-formedness) (its Not modeled yet list) for the rules probed 2026-09-23 and the SqlClient failure a kept `encoding="utf-8"` declaration causes.
+
+**Procedure attribution** — an error inside a procedure reports `Procedure` as the `EXEC` spelled the name on real (`exec p` → `p`, `exec dbo.p` → `dbo.p`, probed 2026-09-23); the simulator always schema-qualifies it.
 
 **Message stream**:
 
@@ -495,7 +495,6 @@ Real bugs / limitations against shipped behavior — fixes are concrete work, no
   Closing either wants the site-level refusal deferred to the end of the query spec, which needs a catch-all resolution point for the expression sites outside a `SELECT` (`PRINT`, a `SET` initializer) so a pending refusal can't leak as a silent acceptance.
 - **`SET LANGUAGE` doesn't move `SET DATEFORMAT`** — real carries the language's own date-part order (`sys.syslanguages.dateformat`, `dmy` for most of the set against us_english's `mdy`), which decides how an ambiguous date string parses.
   `SET LANGUAGE` itself ships, `@@DATEFIRST` coupling included (see [`scalars.md`](scalars.md#set-language-and-the-datefirst-it-moves)), and the column is projected; what's left is `SET DATEFORMAT` carrying semantic effect at all, which is the same seam the month / weekday names would need.
-- **Msg 245 is transaction-aborting on real without `XACT_ABORT`** — a conversion failure rolls the transaction back and reads `XACT_STATE()` −1 from a `CATCH` even under `SET XACT_ABORT OFF` (probed 2026-08-06), where the simulator treats it as statement-terminating like its neighbours until the option is on.
   Real's transaction-aborting list is wider than the one modeled member (Msg 8728); 245 is the one whose divergence a probe caught, and the rest of the list is unenumerated.
 - **`SET ROWCOUNT` caps a `MERGE`'s source rows rather than its actions** — real counts the actions it took, so a source row every `WHEN` clause declines consumes a slot of the cap here and none there (see [`query.md`](query.md#set-rowcount-n)).
   The three pending-action lists are built across several matching paths, so a shared running budget is what the exact rule wants.

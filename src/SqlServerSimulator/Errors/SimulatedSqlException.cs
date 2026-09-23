@@ -136,6 +136,16 @@ public sealed partial class SimulatedSqlException : DbException
     internal bool AbortsTransaction { get; private init; }
 
     /// <summary>
+    /// When <see langword="true"/>, this error behaves as every run-time error
+    /// does under <c>SET XACT_ABORT ON</c>, whatever the option says:
+    /// uncaught, it ends the batch and rolls the whole transaction stack back;
+    /// caught by a <c>TRY</c> frame, it dooms the transaction. Probe-confirmed
+    /// against SQL Server 2025 (2026-09-23) for the XML parsing family.
+    /// Internal — never part of the public <c>SqlException</c>-shaped surface.
+    /// </summary>
+    internal bool AbortsAsUnderXactAbort { get; private init; }
+
+    /// <summary>
     /// When <see langword="true"/>, this error came from a <c>RAISERROR</c>
     /// statement, the one raising construct <c>SET XACT_ABORT ON</c> does not
     /// promote: probed against SQL Server 2025, a severity-16 or severity-19

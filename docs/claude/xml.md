@@ -18,8 +18,7 @@ Type identity preserved through `sys.columns.user_type_id` / `sys.types`.
 
 **`Database.AllocateXmlCollectionId`** seeds at 65536 (probe-confirmed).
 
-**`HeapColumn.XmlSchemaCollection`** — nullable ref linking xml columns to their collection.
-Metadata only; the simulator does **not** validate xml payloads against the XSD.
+**`HeapColumn.XmlSchemaCollection`** — nullable ref linking xml columns to their collection; a write through it is validated and canonicalized — see [Typed writes](#typed-writes--validation-and-canonical-form).
 
 ### The value model: documents and fragments
 
@@ -987,12 +986,28 @@ A string that becomes `xml` loses a leading U+FEFF, wherever the conversion happ
 The same mark in an `nvarchar` column survives, so this belongs to the type conversion rather than to any input path; the strip therefore lives in `SqlValue.FromXml`, which every xml value funnels through.
 A mark that isn't leading is content and stays.
 
+## Well-formedness
+
+Every conversion of a value to `xml` parses it — `CAST` / `CONVERT`, a variable or column assignment, an `INSERT` / `UPDATE`, a procedure or `sp_executesql` argument, an `xml` parameter, and a binary source — so a malformed value raises there rather than at its first read (`Storage/XmlWellFormedness.cs`, whose remarks carry the position and precedence rules).
+Real raises its XML parsing family, Msg 9400–9465, as `XML parsing: line L, character C, <detail>`, and a `DOCTYPE` is Msg 6359 (probed 2026-09-23 against SQL Server 2025).
+The family behaves as any error does under `SET XACT_ABORT ON`, whatever the option says: uncaught it ends the batch and rolls the transaction back, caught it dooms the transaction — see [`transactions.md`](transactions.md#set-xact_abort).
+`TRY_CAST` / `TRY_CONVERT` answer NULL for it, and an argument bound to a parameter reports it at line 0, as real does.
+
+A `CONVERT` style against an `xml` target is whitespace and DTD handling, not a text layout, so a binary source is parsed rather than rendered as hex.
+
+### Not modeled yet
+
+- **Canonical rendering.** Real stores parsed XML and serializes it canonically — the declaration dropped, attributes double-quoted and single-spaced, whitespace-only text dropped (kept under `CONVERT` style 1), CDATA folded to escaped text, character references decoded, an empty element as `<a/>`.
+  The simulator stores the text as written, so `CAST('<a b=''x''></a>' AS xml)` reads back unchanged where real reads `<a b="x"/>`.
+  A kept declaration naming an 8-bit encoding also reaches SqlClient as UTF-16 text claiming that encoding, which its `GetValue` refuses.
+- **`CONVERT` style 2** — real's limited internal-subset DTD support, which strips the DTD, expands its entities and raises informational Msg 6338; a `DOCTYPE` under it raises `NotSupportedException`.
+
 ## Known gaps
 
 - **XQuery features beyond the expression subset** the evaluator models — see [its own list](#not-modeled-yet) (FLWOR, constructors in a read method's argument, `sql:` accessors, `xs:` constructor functions, named axes).
   `.modify()`'s paths run through the same evaluator, so the subset bounds the mutator too.
   [`OPENXML`](#openxml) is unaffected — its patterns are XPath 1.0 and run through the DOM's own engine.
-- **XSD validation** against `xml(schema_collection)` bindings — nothing validates an INSERT, an UPDATE or a `.modify()` edit, and a typed instance's paths carry untyped static types (see [`.modify()`'s divergences](#divergences-1)).
+- A typed instance's paths carry untyped static types (see [`.modify()`'s divergences](#divergences-1)).
 - **`ALTER XML SCHEMA COLLECTION ADD`** — incremental schema additions.
 - **`SELECTIVE XML INDEX`** variant (SQL Server 2014+).
 - The `.modify()` residue listed under [its divergences](#divergences-1): a multi-root insert result, attribute placement, the Msg 6305 / 2209 split, and the computed `element {…}` constructor.

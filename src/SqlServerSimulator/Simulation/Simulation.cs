@@ -2145,11 +2145,13 @@ public sealed partial class Simulation
     /// </list>
     /// Severity 15 is real's parse phase, which never reaches a transaction,
     /// and the two unconditional classes (deadlock victim, and the
-    /// transaction-aborting errors) already rolled back above.
+    /// transaction-aborting errors) already rolled back above. An error
+    /// marked <see cref="SimulatedSqlException.AbortsAsUnderXactAbort"/> takes
+    /// this path with the option off too.
     /// </summary>
     private static void ApplyXactAbortPromotion(SimulatedDbConnection connection, SimulatedSqlException ex)
     {
-        if (!connection.XactAbort
+        if (!(connection.XactAbort || ex.AbortsAsUnderXactAbort)
             || ex.XactAbortPromoted
             || ex.AbortsTransaction
             || ex.Class is not ((>= 11 and <= 14) or 16)

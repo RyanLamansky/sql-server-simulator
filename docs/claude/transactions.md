@@ -99,4 +99,6 @@ A doomed transaction then:
 
 The option also decides whether a client attention rolls an open transaction back — see the cancel bullet above.
 
-**Divergences.** Msg 245 is transaction-aborting on real *without* the option — a conversion failure rolls the transaction back and reads `XACT_STATE() = -1` from a `CATCH` even under `XACT_ABORT OFF` — where the simulator treats it as statement-terminating like its neighbours until the option is on.
+A few errors take this shape with the option **off** too, marked by `SimulatedSqlException.AbortsAsUnderXactAbort` — probed 2026-09-23: uncaught they end the batch and leave `@@TRANCOUNT` 0 with the transaction's writes undone, and caught they read `XACT_STATE() = -1`.
+They are the string-conversion failures — Msg 245, 241, 295, 8169, 8170, and Msg 8114 when a `CAST` of a string to a number raises it — and the XML parsing family (Msg 9400–9465 and Msg 6359, see [`xml.md`](xml.md#well-formedness)).
+Their overflow neighbours (Msg 220, 232, 242, 248, 8115) and Msg 9807 end only their statement, as does Msg 8114 raised binding a procedure or `sp_executesql` argument.

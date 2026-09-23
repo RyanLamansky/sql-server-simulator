@@ -1,10 +1,74 @@
 using System.Globalization;
 using SqlServerSimulator.Parser;
+using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator;
 
 partial class SimulatedSqlException
 {
+    /// <summary>
+    /// The 9400 family: a value converted to <c>xml</c> isn't well-formed.
+    /// Probe-confirmed against SQL Server 2025 (2026-09-23): Class 16, State
+    /// 1, <c>XML parsing: line L, character C, &lt;detail&gt;</c>, where the
+    /// position is the character the parser stopped on (the last one when the
+    /// input ran out), counted in characters rather than UTF-16 units and
+    /// restarting after each line break. An uncaught one ends the batch and
+    /// rolls the transaction back, and a caught one dooms it — the
+    /// <c>SET XACT_ABORT ON</c> shape whatever the option says.
+    /// </summary>
+    internal static SimulatedSqlException XmlParsingFailed(XmlParseError error, int line, int character)
+    {
+        var (number, detail) = error switch
+        {
+            XmlParseError.UnexpectedEndOfInput => (9400, "unexpected end of input"),
+            XmlParseError.UnrecognizedEncoding => (9401, "unrecognized encoding"),
+            XmlParseError.UnableToSwitchEncoding => (9402, "unable to switch the encoding"),
+            XmlParseError.WhitespaceExpected => (9410, "whitespace expected"),
+            XmlParseError.SemicolonExpected => (9411, "semicolon expected"),
+            XmlParseError.GreaterThanExpected => (9412, "'>' expected"),
+            XmlParseError.StringLiteralExpected => (9413, "A string literal was expected"),
+            XmlParseError.EqualExpected => (9414, "equal expected"),
+            XmlParseError.LessThanInAttributeValue => (9415, "well formed check: no '<' in attribute value"),
+            XmlParseError.HexadecimalDigitExpected => (9416, "hexadecimal digit expected"),
+            XmlParseError.DecimalDigitExpected => (9417, "decimal digit expected"),
+            XmlParseError.IllegalXmlCharacter => (9420, "illegal xml character"),
+            XmlParseError.IllegalNameCharacter => (9421, "illegal name character"),
+            XmlParseError.IncorrectDocumentSyntax => (9422, "incorrect document syntax"),
+            XmlParseError.IncorrectCDataSyntax => (9423, "incorrect CDATA section syntax"),
+            XmlParseError.IncorrectCommentSyntax => (9424, "incorrect comment syntax"),
+            XmlParseError.EndTagMismatch => (9436, "end tag does not match start tag"),
+            XmlParseError.DuplicateAttribute => (9437, "duplicate attribute"),
+            XmlParseError.XmlDeclarationNotAtBeginning => (9438, "text/xmldecl not at the beginning of input"),
+            XmlParseError.ReservedXmlName => (9439, "namespaces beginning with \"xml\" are reserved"),
+            XmlParseError.IncorrectXmlDeclarationSyntax => (9441, "incorrect xml declaration syntax"),
+            XmlParseError.UndeclaredEntity => (9448, "well formed check: undeclared entity"),
+            XmlParseError.IncorrectProcessingInstructionSyntax => (9451, "incorrect processing instruction syntax"),
+            XmlParseError.CDataEndInContent => (9454, "no ']]>' in element content"),
+            XmlParseError.IllegalQualifiedNameCharacter => (9455, "illegal qualified name character"),
+            XmlParseError.MultipleColons => (9456, "multiple colons in qualified name"),
+            XmlParseError.RedeclaredPrefix => (9458, "redeclared prefix"),
+            XmlParseError.UndeclaredPrefix => (9459, "undeclared prefix"),
+            XmlParseError.EmptyNamespaceUri => (9460, "non default namespace with empty uri"),
+            XmlParseError.XmlPrefixRebound => (9464, "XML namespace prefix 'xml' can only be associated with the URI http://www.w3.org/XML/1998/namespace. This URI cannot be used with other prefixes."),
+            _ => (9465, "XML namespace prefix 'xmlns' is reserved for use by XML."),
+        };
+        return new($"XML parsing: line {line.ToString(CultureInfo.InvariantCulture)}, character {character.ToString(CultureInfo.InvariantCulture)}, {detail}", number, 16, 1)
+        {
+            AbortsAsUnderXactAbort = true,
+        };
+    }
+
+    /// <summary>
+    /// Msg 6359: a value converted to <c>xml</c> carries a <c>DOCTYPE</c>,
+    /// which only <c>CONVERT</c> style 2 admits. Probe-confirmed against SQL
+    /// Server 2025 (2026-09-23), with or without an internal subset.
+    /// </summary>
+    internal static SimulatedSqlException XmlInternalSubsetDtdNotAllowed() =>
+        new("Parsing XML with internal subset DTDs not allowed. Use CONVERT with style option 2 to enable limited internal subset DTD support.", 6359, 16, 1)
+        {
+            AbortsAsUnderXactAbort = true,
+        };
+
     /// <summary>
     /// Msg 6809: a <c>FOR XML RAW</c> / <c>AUTO</c> projection contains a
     /// column with no name or alias (attribute-centric and element-centric
