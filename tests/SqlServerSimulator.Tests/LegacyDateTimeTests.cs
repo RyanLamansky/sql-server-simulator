@@ -382,4 +382,31 @@ public sealed class LegacyDateTimeTests
     [TestMethod]
     public void DatePartNanosecond_ScalesTheStoredUnit()
         => AreEqual(123333333, ExecuteScalar("select datepart(nanosecond, cast('2024-01-02 03:04:05.123' as datetime))"));
+
+    /// <summary>
+    /// A legacy date-time converts to a number as days since 1900-01-01, the
+    /// time the exact fraction of a day in its own units (probed 2026-09-24
+    /// against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("datetime", "2023-12-31T12:00:00", "int", "45290")]
+    [DataRow("datetime", "2023-12-31T12:00:00", "decimal(10, 4)", "45289.5000")]
+    [DataRow("datetime", "2023-12-31T12:00:00", "money", "45289.50")]
+    [DataRow("datetime", "2023-12-31T11:59:59.997", "numeric(38, 20)", "45289.49999996141975308642")]
+    [DataRow("datetime", "2023-12-31T11:59:59.997", "decimal(10, 2)", "45289.50")]
+    [DataRow("datetime", "1899-12-31T18:00:00", "decimal(10, 4)", "-0.2500")]
+    [DataRow("smalldatetime", "2023-12-31T12:00:00", "decimal(10, 4)", "45289.5000")]
+    public void Cast_ToExactNumber_CountsDays(string sourceType, string text, string targetType, string expected)
+        => AreEqual(expected, ExecuteScalar($"declare @d {sourceType} = '{text}'; select cast(cast(@d as {targetType}) as varchar(40))"));
+
+    [TestMethod]
+    [DataRow("2023-12-31T12:00:00", 45289.5)]
+    [DataRow("1899-12-31T18:00:00", -0.25)]
+    [DataRow("9999-12-31T23:59:59.997", 2958463.9999999614)]
+    public void Cast_ToFloat_CountsDays(string text, double expected)
+        => AreEqual(expected, ExecuteScalar($"declare @d datetime = '{text}'; select cast(@d as float)"));
+
+    [TestMethod]
+    public void Cast_ToNarrowDecimal_RaisesMsg8115()
+        => new Simulation().AssertSqlError("declare @d datetime = '2023-12-31'; select cast(@d as decimal(4, 0))", 8115);
 }

@@ -677,7 +677,15 @@ internal sealed partial class Selection
                                 }
                                 else
                                 {
-                                    results[indices[i]] = win.Operand.Run(runtimeAt(indices[targetIdx]));
+                                    var value = win.Operand.Run(runtimeAt(indices[targetIdx]));
+                                    // IGNORE NULLS steps on past a null target in
+                                    // the same direction; running out of partition
+                                    // from there is NULL, not the default, which
+                                    // only an out-of-partition first step takes
+                                    // (probed 2026-09-24 against SQL Server 2025).
+                                    while (win.IgnoreNulls && value.IsNull && (targetIdx += sign) >= 0 && targetIdx < indices.Count)
+                                        value = win.Operand.Run(runtimeAt(indices[targetIdx]));
+                                    results[indices[i]] = value.IsNull ? SqlValue.Null(operandType) : value;
                                 }
                             }
                         }
@@ -707,7 +715,15 @@ internal sealed partial class Selection
                                     continue;
                                 }
                                 var refIdx = isLast ? frameEnd : frameStart;
-                                results[indices[i]] = win.Operand.Run(runtimeAt(indices[refIdx]));
+                                var value = win.Operand.Run(runtimeAt(indices[refIdx]));
+                                // IGNORE NULLS answers the frame's first (or
+                                // last) non-null value, NULL when it has none.
+                                while (win.IgnoreNulls && value.IsNull && refIdx != (isLast ? frameStart : frameEnd))
+                                {
+                                    refIdx += isLast ? -1 : 1;
+                                    value = win.Operand.Run(runtimeAt(indices[refIdx]));
+                                }
+                                results[indices[i]] = value.IsNull ? SqlValue.Null(operandType) : value;
                             }
                         }
                     }

@@ -285,7 +285,7 @@ Probe-confirmed against SQL Server 2025.
 ```sql
 ALTER TABLE [schema.]table ADD [COLUMN] col TYPE [(N | MAX [, scale])]
     [NULL | NOT NULL]
-    [DEFAULT expr]
+    [DEFAULT expr [WITH VALUES]]
     [IDENTITY [(seed, increment)]]
     [CONSTRAINT name (CHECK (predicate) | UNIQUE | PRIMARY KEY | REFERENCES parent(cols))]
     [, col2 TYPE …]
@@ -305,12 +305,15 @@ Per-column backfill values:
 
 | Column kind | Backfill for existing rows |
 |-------------|----------------------------|
-| Nullable (regardless of DEFAULT) | NULL — DEFAULT only applies to future INSERTs |
+| Nullable | NULL — DEFAULT only applies to future INSERTs, unless it says `WITH VALUES` |
+| Nullable with `DEFAULT … WITH VALUES` | DEFAULT expression, as for NOT NULL |
 | NOT NULL with DEFAULT | DEFAULT expression evaluated once at ALTER time, snapshotted to every row |
 | NOT NULL IDENTITY | Sequential allocation: seed, seed+increment, seed+2·increment, … in heap-scan order |
 | NOT NULL ROWVERSION / TIMESTAMP | Per-row from the database-scoped rowversion counter |
 | NOT NULL without DEFAULT/IDENTITY/ROWVERSION on non-empty table | Msg 4901 (probe-confirmed) |
 | Computed (non-persisted) | No backfill — evaluated on read |
+
+`WITH VALUES` belongs to an added column's DEFAULT alone: on a column without one, in CREATE TABLE and in a table variable's declaration real reads `VALUES` as Msg 156 (probed 2026-09-24 against SQL Server 2025).
 
 The DEFAULT-evaluated-once rule is a probe-confirmed SQL Server quirk: `ALTER TABLE t ADD created datetime NOT NULL DEFAULT GETUTCDATE()` produces a single timestamp for every existing row, not a per-row evaluation.
 The simulator matches.

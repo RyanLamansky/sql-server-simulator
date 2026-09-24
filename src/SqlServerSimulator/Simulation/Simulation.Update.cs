@@ -117,7 +117,8 @@ partial class Simulation
         // rhs) so the per-row ResolveOriginal resolver evaluates the column's
         // pre-update value as the LHS — matches probe-confirmed
         // "UPDATE t SET v += rhs" semantics on a real SQL Server instance.
-        var rawAssignments = new List<(string ColumnName, Expression Expr)>();
+        // A clause assigning only a variable carries a null column name.
+        var rawAssignments = new List<(string? ColumnName, Expression Expr)>();
 
         // A subquery in a SET expression can reference the update target's
         // columns — `SET alias = (SELECT MAX(v) FROM (VALUES (t.name),(t.goes_by)) x(v))`
@@ -137,7 +138,14 @@ partial class Simulation
 
         while (true)
         {
-            if (context.GetNextRequired() is not StringToken first)
+            if (context.GetNextRequired() is AtPrefixedString variable)
+            {
+                ParseVariableSetClause(context, leadingIdent, variable, rawAssignments);
+                if (context.Token is Operator { Character: ',' })
+                    continue;
+                break;
+            }
+            if (context.Token is not StringToken first)
                 throw SimulatedSqlException.SyntaxErrorNear(context);
 
             // The assignment target carries the same multi-part grammar a read
@@ -241,6 +249,61 @@ partial class Simulation
     }
 
     /// <summary>
+    /// Parses a SET clause assigning a variable: <c>@v = expr</c>, a compound
+    /// <c>@v += expr</c>, or <c>@v = col = expr</c> (<c>@v = col += expr</c>),
+    /// which gives the column and the variable the same value. The first two
+    /// add a variable-only entry (no column name); the third adds the
+    /// column's entry, its expression the <see cref="AssignmentExpression"/>
+    /// that <c>ComputeUpdatedRow</c> runs among the variables. Entered on the
+    /// variable, left on the token after the clause.
+    /// </summary>
+    private static void ParseVariableSetClause(
+        ParserContext context,
+        MultiPartName leadingIdent,
+        AtPrefixedString variable,
+        List<(string? ColumnName, Expression Expr)> rawAssignments)
+    {
+        var slot = context.Batch.GetVariableSlot(variable.Value);
+        context.MoveNextRequired();
+        if (TryConsumeAssignmentOperator(context) is not char assignOp)
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        context.MoveNextRequired();
+
+        // `@v = col = expr` — a column name followed by an assignment
+        // operator, compound (`@v = col += expr`) or plain. Real takes neither
+        // a compound operator on the variable nor a second variable in the
+        // column's place (Msg 102 near each).
+        if (assignOp == '=' && context.Token is Name first)
+        {
+            var afterVariable = context.SaveCheckpoint();
+            var column = new MultiPartName(first.Value);
+            context.MoveNextRequired();
+            while (context.Token is Operator { Character: '.' } && context.GetNextRequired() is StringToken part)
+            {
+                column = column.WithAddedPart(part.Value);
+                context.MoveNextRequired();
+            }
+            if (TryConsumeAssignmentOperator(context) is char columnOp)
+            {
+                if (!Selection.QualifierIsDmlTarget(context.CurrentDatabase.Collation, leadingIdent, column))
+                    throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(column.ToString());
+                context.MoveNextRequired();
+                var value = Expression.Parse(context);
+                rawAssignments.Add((column.Leaf, new AssignmentExpression(slot, columnOp == '='
+                    ? value
+                    : TwoSidedExpression.FromCompoundOp(columnOp, new Reference(column), value))));
+                return;
+            }
+            context.RestoreCheckpoint(afterVariable);
+        }
+
+        var rhs = Expression.Parse(context);
+        rawAssignments.Add((null, new AssignmentExpression(slot, assignOp == '='
+            ? rhs
+            : TwoSidedExpression.FromCompoundOp(assignOp, new VariableReference(variable, context), rhs))));
+    }
+
+    /// <summary>
     /// Parses an UPDATE SET clause of the mutator shape
     /// <c>col.modify('&lt;xml-dml&gt;')</c> into the ordinary
     /// <c>(column, expression)</c> pair the rest of the pipeline consumes —
@@ -289,12 +352,12 @@ partial class Simulation
     private static void BindDeferredXmlMutators(
         ParserContext context,
         HeapTable table,
-        List<(string ColumnName, Expression Expr)> rawAssignments,
+        List<(string? ColumnName, Expression Expr)> rawAssignments,
         string writtenTargetName)
     {
         foreach (var (columnName, expr) in rawAssignments)
         {
-            if (expr is XmlModify mutator)
+            if (expr is XmlModify mutator && columnName is not null)
                 mutator.BindDeferredDml(context, XmlSchemaCollectionOf(context, table, columnName), $"{writtenTargetName}.{columnName}");
         }
     }
@@ -337,7 +400,7 @@ partial class Simulation
         ParserContext context,
         MultiPartName targetName,
         HeapTable table,
-        List<(string ColumnName, Expression Expr)> rawAssignments,
+        List<(string? ColumnName, Expression Expr)> rawAssignments,
         OutputProjection? output,
         Selection.DmlTopLimit? top,
         View? sourceView = null)
@@ -360,7 +423,7 @@ partial class Simulation
         {
             context.MoveNextRequired();
             if (context.Token is ReservedKeyword { Keyword: Keyword.Current })
-                positionedCursor = ParseWhereCurrentOf(context, table, [.. rawAssignments.Select(a => a.ColumnName)], sourceView);
+                positionedCursor = ParseWhereCurrentOf(context, table, [.. SetColumnNames(rawAssignments)], sourceView);
             else
                 where = Selection.ParseAndBindPredicate(context, targetTypeResolver);
         }
@@ -465,7 +528,7 @@ partial class Simulation
         if (positionedCursor is null)
             CheckSnapshotConflictOnTombstonedRows(context, table, where, sourceView);
 
-        return CommitUpdate(context, table, affected, output, [.. assignments.Select(a => a.Ordinal)], sourceView);
+        return CommitUpdate(context, table, affected, output, [.. SetColumnOrdinals(assignments)], sourceView);
     }
 
     /// <summary>
@@ -482,7 +545,7 @@ partial class Simulation
         MultiPartName targetName,
         HeapTable table,
         View? sourceView,
-        List<(string ColumnName, Expression Expr)> rawAssignments,
+        List<(string? ColumnName, Expression Expr)> rawAssignments,
         BooleanExpression? where)
     {
         var updateSecurable = context.Batch.IsSkipping
@@ -515,7 +578,7 @@ partial class Simulation
         PermissionEnforcement.CheckColumns(context.Batch, Permission.Select, read);
 
         var assigned = sourceView is not null ? new ColumnReadTarget(sourceView) : new ColumnReadTarget(table);
-        foreach (var (columnName, _) in rawAssignments)
+        foreach (var columnName in SetColumnNames(rawAssignments))
             assigned.Add(columnName);
         PermissionEnforcement.CheckColumns(context.Batch, Permission.Update, assigned);
     }
@@ -596,7 +659,7 @@ partial class Simulation
         ParserContext context,
         MultiPartName leadingIdent,
         HeapTable? leadingTable,
-        List<(string ColumnName, Expression Expr)> rawAssignments,
+        List<(string? ColumnName, Expression Expr)> rawAssignments,
         OutputProjection? output,
         Selection.DmlTopLimit? top)
     {
@@ -709,7 +772,7 @@ partial class Simulation
 
         ApplyDmlTopCap(top, affected, context.Batch);
 
-        return CommitUpdate(context, table, affected, output, [.. assignments.Select(a => a.Ordinal)], sourceView: null);
+        return CommitUpdate(context, table, affected, output, [.. SetColumnOrdinals(assignments)], sourceView: null);
     }
 
     /// <summary>
@@ -1089,7 +1152,7 @@ partial class Simulation
     }
 
     private static List<(int Ordinal, Expression Expr)> ResolveSetAssignments(
-        List<(string ColumnName, Expression Expr)> rawAssignments,
+        List<(string? ColumnName, Expression Expr)> rawAssignments,
         HeapTable table,
         Database database,
         View? sourceView = null)
@@ -1097,6 +1160,11 @@ partial class Simulation
         var assignments = new List<(int Ordinal, Expression Expr)>(rawAssignments.Count);
         foreach (var (colName, expr) in rawAssignments)
         {
+            if (colName is null)
+            {
+                assignments.Add((-1, expr));
+                continue;
+            }
             int columnOrdinal;
             if (sourceView is not null)
             {
@@ -1131,9 +1199,31 @@ partial class Simulation
             }
 
             RejectUnmodifiableSetTarget(table, columnOrdinal, database);
+            if (expr is AssignmentExpression { Slot.DeclaredType: var variableType } && variableType.SqlServerName != table.Columns[columnOrdinal].Type.SqlServerName)
+                throw SimulatedSqlException.ReceivingVariableTypeMismatch(variableType.SqlServerName, table.Columns[columnOrdinal].Type.SqlServerName, colName);
             assignments.Add((columnOrdinal, expr));
         }
         return assignments;
+    }
+
+    /// <summary>The columns a SET list writes, leaving out its variable-only assignments.</summary>
+    private static IEnumerable<string> SetColumnNames(List<(string? ColumnName, Expression Expr)> rawAssignments)
+    {
+        foreach (var (columnName, _) in rawAssignments)
+        {
+            if (columnName is not null)
+                yield return columnName;
+        }
+    }
+
+    /// <summary>The ordinals a resolved SET list writes, leaving out its variable-only assignments.</summary>
+    private static IEnumerable<int> SetColumnOrdinals(List<(int Ordinal, Expression Expr)> assignments)
+    {
+        foreach (var (ordinal, _) in assignments)
+        {
+            if (ordinal >= 0)
+                yield return ordinal;
+        }
     }
 
     /// <summary>
@@ -1199,7 +1289,7 @@ partial class Simulation
     /// error). Drives the read-implies-SELECT permission gate (probe M1c).
     /// </summary>
     private static bool AnySetExpressionReadsColumn(
-        List<(string ColumnName, Expression Expr)> rawAssignments, HeapTable table, BatchContext batch)
+        List<(string? ColumnName, Expression Expr)> rawAssignments, HeapTable table, BatchContext batch)
     {
         var readsColumn = false;
         SqlType Resolve(MultiPartName name)
@@ -1266,9 +1356,23 @@ partial class Simulation
         var newValues = new SqlValue[table.Columns.Length];
         Array.Copy(fullValues, newValues, fullValues.Length);
 
+        // Real assigns every variable first, in written order and against the
+        // pre-update row, and only then the columns, which read the variables
+        // as just assigned (probed 2026-09-24 against SQL Server 2025).
+        // `@v = col = expr` is an AssignmentExpression on its column's entry:
+        // the variable pass runs it, and the column takes the variable's value.
+        var runtime = new RuntimeContext(resolver, context.Batch);
+        foreach (var (_, expr) in assignments)
+        {
+            if (expr is AssignmentExpression variableAssignment)
+                _ = variableAssignment.Run(runtime);
+        }
+
         foreach (var (ordinal, expr) in assignments)
         {
-            var raw = expr.Run(new RuntimeContext(resolver, context.Batch));
+            if (ordinal < 0)
+                continue;
+            var raw = expr is AssignmentExpression { Slot: var assigned } ? assigned.Value : expr.Run(runtime);
             EnforceMaxLength(raw, table.Columns[ordinal], table, context.Connection);
             newValues[ordinal] = CoerceForInsert(raw, table.Columns[ordinal]);
         }

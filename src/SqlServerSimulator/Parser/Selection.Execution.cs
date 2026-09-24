@@ -1081,7 +1081,17 @@ internal sealed partial class Selection
         foreach (var excluder in fromClause.Excluders)
             excluder.Bind(parseBatch, ResolveColumnType);
         foreach (var join in joins)
-            join.OnPredicate?.Bind(parseBatch, ResolveColumnType);
+        {
+            if (join.OnPredicate is not { } on)
+                continue;
+            if (join.ScopeEnd < 0)
+            {
+                on.Bind(parseBatch, ResolveColumnType);
+                continue;
+            }
+            var onScope = sources[join.ScopeStart..join.ScopeEnd];
+            on.Bind(parseBatch, name => ResolveColumnTypeAcrossSources(onScope, name, scope.OuterTypeResolver));
+        }
         // A grouping term names a collation too, and real numbers those slots
         // from 2 — the grouped projection it builds carries one column ahead of
         // the keys (probe-confirmed: a lone `GROUP BY concat(a, b)` reports

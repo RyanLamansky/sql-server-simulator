@@ -409,4 +409,56 @@ public sealed class FloatTests
     [TestMethod]
     public void RoundInteger_PastIntRange_RaisesMsg8115()
         => new Simulation().AssertSqlError("select round(2147483647, -1)", 8115, "Arithmetic overflow error converting expression to data type int.");
+
+    /// <summary>
+    /// The lexer reads a numeric literal greedily, as real's does (probed
+    /// 2026-09-24 against SQL Server 2025): an exponent without digits is
+    /// zero, and what follows a literal's last digit is an alias.
+    /// </summary>
+    [TestMethod]
+    [DataRow("select 1e", 1.0)]
+    [DataRow("select 1e+", 1.0)]
+    [DataRow("select 1e-", 1.0)]
+    [DataRow("select 1.e2", 100.0)]
+    [DataRow("select 1e2e3", 100.0)]
+    [DataRow("select 1e+x", 1.0)]
+    public void Literal_GreedyExponent(string sql, double expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar(sql));
+
+    [TestMethod]
+    public void Literal_TrailingPointIsNumeric_AndLettersAfterItAnAlias()
+        => AreEqual("numeric|1|1", new Simulation().ExecuteScalar(
+            "select concat(cast(sql_variant_property(1., 'BaseType') as varchar), '|', a, '|', b) from (select 1.a, 1eb) t"));
+
+    [TestMethod]
+    [DataRow("select 1.. as v", 156)]
+    [DataRow("select 1.5.2", 102)]
+    public void Literal_SecondPoint_IsASyntaxError(string sql, int number)
+        => new Simulation().AssertSqlError(sql, number);
+
+    /// <summary>A D marks a string's exponent as an E does; only spaces surround the number.</summary>
+    [TestMethod]
+    [DataRow("1d2", 100.0)]
+    [DataRow("-1D+1", -10.0)]
+    [DataRow(".5d1", 5.0)]
+    [DataRow("1.e2", 100.0)]
+    [DataRow(" 1e2 ", 100.0)]
+    public void Cast_StringToFloat_DExponent(string text, double expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar($"select cast('{text}' as float)"));
+
+    [TestMethod]
+    [DataRow("1de2")]
+    [DataRow("1d")]
+    [DataRow("Infinity")]
+    [DataRow("1,000")]
+    public void Cast_StringToFloat_Unreadable_RaisesMsg8114(string text)
+        => new Simulation().AssertSqlError($"select cast('{text}' as float)", 8114);
+
+    [TestMethod]
+    public void Cast_TabToFloat_IsUnreadable()
+        => AreEqual(DBNull.Value, new Simulation().ExecuteScalar("select try_cast(char(9) as float)"));
+
+    [TestMethod]
+    public void Cast_StringPastFloatRange_RaisesMsg8115()
+        => new Simulation().AssertSqlError("select cast('1e400' as float)", 8115, "Arithmetic overflow error converting expression to data type float.");
 }

@@ -710,6 +710,8 @@ Cross-aggregate Msg 8711 isn't modeled (EF doesn't emit).
     The default frame is `RANGE UNBOUNDED PRECEDING TO CURRENT ROW` — under RANGE+CURRENT ROW the last row is the current row's last peer (by ORDER BY key), so `LAST_VALUE` over the default frame returns the current row's value (or peer-tie last).
     The intuitive "partition last" semantic requires `ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING`.
     Probe-confirmed against SQL Server 2025.
+  - **`IGNORE NULLS` / `RESPECT NULLS`** after the four functions' closing paren: `FIRST_VALUE` / `LAST_VALUE` take the first / last non-null value in the frame, and `LAG` / `LEAD` step the offset as usual and then past a null target in the same direction — the default applies only when that first step leaves the partition, and running off its end afterwards is NULL.
+    Any other function (ranking, aggregate-OVER) is Msg 16208 naming it and the treatment; without `OVER` the keywords are Msg 156 (probed 2026-09-24 against SQL Server 2025).
 - Ordered-set analytic functions — `PERCENTILE_CONT(p)` / `PERCENTILE_DISC(p) WITHIN GROUP (ORDER BY sort [ASC|DESC]) OVER ([PARTITION BY ...])`.
   Modeled as `WindowKind.PercentileCont` / `PercentileDisc` on `WindowExpression`: the percentile fraction lands in `PercentileArg`, the single `WITHIN GROUP` sort key reuses the `OrderBy` field, and the per-partition result is broadcast to every row (no per-row frame).
   The `OVER` clause is **mandatory** (Msg 10753 when absent) and may carry only `PARTITION BY` — an `ORDER BY` inside `OVER` is rejected with Msg 10758 (the ordering must come from `WITHIN GROUP`).

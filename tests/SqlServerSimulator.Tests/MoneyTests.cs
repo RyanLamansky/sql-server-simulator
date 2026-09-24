@@ -84,9 +84,17 @@ public sealed class MoneyTests
     }
 
     [TestMethod]
+    [DataRow("''")]
+    [DataRow("' '")]
+    [DataRow("'$'")]
+    [DataRow("'-'")]
+    [DataRow("','")]
+    public void Cast_StringToMoney_EmptyBodyIsZero(string literal)
+        => AreEqual(0m, ExecuteScalar<decimal>($"select cast({literal} as money)"));
+
+    [TestMethod]
     [DataRow("'abc'")]
     [DataRow("'5.5e2'")]
-    [DataRow("''")]
     public void Cast_StringToMoney_BadFormatRaisesMsg235(string literal)
     {
         var ex = Throws<SimulatedSqlException>(() => ExecuteScalar($"select cast({literal} as money)"));

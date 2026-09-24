@@ -49,16 +49,50 @@ internal sealed class IdentityState(long seed, long increment, bool notForReplic
         }
     }
 
-    /// <summary>Generates and reserves the next auto-incremented value.</summary>
-    public long GenerateNext()
+    /// <summary>
+    /// Generates and reserves the next auto-incremented value, raising
+    /// <see cref="OverflowException"/> without reserving it when it falls
+    /// outside <paramref name="columnType"/> — real leaves <c>IDENT_CURRENT</c>
+    /// at the last value that fit (probed 2026-09-24 against SQL Server 2025).
+    /// </summary>
+    public long GenerateNext(SqlType columnType)
     {
         lock (this.gate)
         {
-            this.highWaterMark = this.highWaterMark is long last
+            var next = this.highWaterMark is long last
                 ? checked(last + this.Increment)
                 : this.Seed;
-            return this.highWaterMark.Value;
+            if (!Fits(next, columnType))
+                throw new OverflowException();
+            this.highWaterMark = next;
+            return next;
         }
+    }
+
+    /// <summary>
+    /// Whether <paramref name="type"/> can carry an identity: the four
+    /// integer types, or <c>decimal</c> / <c>numeric</c> of scale 0.
+    /// </summary>
+    public static bool IsIdentityType(SqlType type) =>
+        type is TinyIntSqlType or SmallIntSqlType or Int32SqlType or BigIntSqlType or DecimalSqlType { scale: 0 };
+
+    /// <summary>Whether <paramref name="value"/> lies in identity type <paramref name="type"/>'s range.</summary>
+    public static bool Fits(Int128 value, SqlType type) => type switch
+    {
+        TinyIntSqlType => value >= byte.MinValue && value <= byte.MaxValue,
+        SmallIntSqlType => value >= short.MinValue && value <= short.MaxValue,
+        Int32SqlType => value >= int.MinValue && value <= int.MaxValue,
+        BigIntSqlType => value >= long.MinValue && value <= long.MaxValue,
+        DecimalSqlType d => Int128.Abs(value) < PowerOfTen(d.precision),
+        _ => false,
+    };
+
+    private static Int128 PowerOfTen(int exponent)
+    {
+        Int128 power = 1;
+        for (var i = 0; i < exponent; i++)
+            power *= 10;
+        return power;
     }
 
     /// <summary>

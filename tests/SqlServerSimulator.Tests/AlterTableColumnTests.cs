@@ -972,4 +972,28 @@ public sealed class AlterTableColumnTests
         AreEqual(1, sim.ExecuteScalar(
             $"select count(*) from sys.key_constraints where parent_object_id = object_id('t') and type = '{type}'"));
     }
+
+    // ---- DEFAULT … WITH VALUES (probed 2026-09-24 against SQL Server 2025) ----
+
+    [TestMethod]
+    public void AddColumn_DefaultWithValues_FillsExistingRows()
+        => AreEqual("8|9|7|-|5|4|-|0", new Simulation().ExecuteScalar("""
+            create table a (id int);
+            insert a values (1), (2);
+            alter table a add d int default 8 with values;
+            alter table a add e int null default 9 with values;
+            alter table a add f int not null default 7 with values;
+            alter table a add g int default 6;
+            alter table a add h int constraint df_h default 5 with values;
+            alter table a add j int default 4 with values, k int default 3;
+            alter table a add n int default 0 with values not null;
+            select top 1 concat(d, '|', e, '|', f, '|', isnull(cast(g as varchar), '-'), '|', h, '|', j, '|', isnull(cast(k as varchar), '-'), '|', n) from a
+            """));
+
+    [TestMethod]
+    [DataRow("create table a (id int); alter table a add i int with values")]
+    [DataRow("create table w (id int, x int default 1 with values)")]
+    [DataRow("declare @t table (id int default 1 with values)")]
+    public void WithValues_OutsideAnAddedDefault_RaisesMsg156(string sql)
+        => new Simulation().AssertSqlError(sql, 156, "Incorrect syntax near the keyword 'values'.");
 }

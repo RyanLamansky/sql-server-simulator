@@ -12,7 +12,8 @@ namespace SqlServerSimulator;
 /// <item>binary → integer family: big-endian, left-truncate to the target
 /// width, silent (never overflows).</item>
 /// <item>binary → money/smallmoney: raw scale-4 units.</item>
-/// <item>binary → decimal/numeric → Msg 8114; binary → float/real → Msg 529.</item>
+/// <item>binary ↔ decimal/numeric: real's own numeric byte form, anything
+/// else Msg 8114; binary → float/real → Msg 529.</item>
 /// <item>integer → binary(N): left-zero-pad/truncate to N; → varbinary(N):
 /// native width, left-truncate only when N narrower.</item>
 /// <item>arithmetic/bitwise with one binary + one integer operand converts
@@ -254,4 +255,25 @@ public sealed class BinaryIntegerConversionTests
     [TestMethod]
     public void NcharOfHexLiteral_ResolvesThroughVarbinaryToInt()
         => AreEqual("A", new Simulation().ExecuteScalar("select nchar(0x41)"));
+
+    // ---- decimal ↔ binary (probed 2026-09-24) -------------------------------
+
+    [TestMethod]
+    [DataRow("cast(cast(1.5 as decimal(5, 1)) as varbinary(20))", "0x050100010F000000")]
+    [DataRow("cast(cast(-1.5 as decimal(5, 1)) as varbinary)", "0x050100000F000000")]
+    [DataRow("cast(cast(0 as decimal(5, 1)) as varbinary)", "0x0501000100000000")]
+    [DataRow("cast(cast(1 as numeric(38, 10)) as varbinary(max))", "0x260A000100E40B5402000000")]
+    [DataRow("cast(cast(123 as decimal(20, 0)) as binary(20))", "0x000000000000000000000000140000017B000000")]
+    [DataRow("cast(cast(1.5 as decimal(5, 1)) as varbinary(2))", "0x0501")]
+    [DataRow("cast(cast(1.5 as decimal(5, 1)) as binary(2))", "0x0501")]
+    public void Decimal_ToBinary_WritesTheNumericByteForm(string expression, string expected)
+        => AreEqual(expected, Hex($"select {expression}"));
+
+    [TestMethod]
+    public void Decimal_ThroughVarbinary_RoundTrips()
+        => AreEqual(-12.345m, new Simulation().ExecuteScalar("select cast(cast(cast(-12.345 as decimal(9, 3)) as varbinary(20)) as decimal(9, 3))"));
+
+    [TestMethod]
+    public void NegativeZeroBytes_ToDecimal_RaisesMsg8114()
+        => new Simulation().AssertSqlError("select cast(0x05010000000000 as decimal(5, 1))", 8114);
 }

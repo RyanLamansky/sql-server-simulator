@@ -373,8 +373,8 @@ partial class Simulation
                 // An uncovered identity column generates its own value, as it
                 // does for a direct INSERT that omits it — the positional map
                 // skips identity columns entirely, and a column list may too.
-                targetValues[i] = column.Identity is { } identity
-                    ? CoerceForIdentity(identity.GenerateNext(), column)
+                targetValues[i] = column.Identity is not null
+                    ? CoerceForIdentity(GenerateIdentity(column), column)
                     : column.Default is { } defaultExpression
                         ? CoerceForInsert(defaultExpression.Run(new RuntimeContext(NoColumnResolver, this.batch)), column)
                         : SqlValue.Null(column.Type);

@@ -326,4 +326,48 @@ public sealed class IdentityTests
             set identity_insert t off;
             select count(*) from t
             """));
+
+    // ---- seed / increment validation and decimal identity (probed 2026-09-24) ----
+
+    [TestMethod]
+    [DataRow("int identity(1.5, 1)", 2752, 2)]
+    [DataRow("int identity(1.0, 1)", 2752, 2)]
+    [DataRow("int identity(3000000000, 1)", 2752, 1)]
+    [DataRow("tinyint identity(-1, 1)", 2752, 1)]
+    [DataRow("int identity(1, 1.5)", 2753, 3)]
+    [DataRow("int identity(1, 3000000000)", 2753, 1)]
+    [DataRow("int identity(1, 0)", 2753, 2)]
+    public void CreateTable_InvalidSeedOrIncrement(string column, int number, int state)
+        => AreEqual(state, new Simulation().AssertSqlError($"create table t (i {column})", number).State);
+
+    [TestMethod]
+    [DataRow("int identity(1e0, 1)")]
+    [DataRow("int identity(0x01, 1)")]
+    public void CreateTable_NonIntegerLiteralSeed_RaisesMsg102(string column)
+        => new Simulation().AssertSqlError($"create table t (i {column})", 102);
+
+    [TestMethod]
+    public void CreateTable_SignedSeed_Accepted()
+        => AreEqual(-1, new Simulation().ExecuteScalar("create table t (i int identity(- 1, 1), v int); insert t (v) values (1); select i from t"));
+
+    [TestMethod]
+    public void CreateTable_DecimalScaleZeroIdentity_Generates()
+        => AreEqual(99999m, new Simulation().ExecuteScalar("""
+            create table t (i decimal(5, 0) identity(99998, 1), v int);
+            insert t (v) values (1), (2);
+            select max(i) from t
+            """));
+
+    [TestMethod]
+    public void CreateTable_DecimalWithScale_RaisesMsg2749()
+        => new Simulation().AssertSqlError("create table t (i numeric(10, 2) identity(1, 1))", 2749);
+
+    [TestMethod]
+    public void Insert_DecimalIdentityOverflow_RaisesMsg8115_AndKeepsIdentCurrent()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (i decimal(5, 0) identity(99999, 1), v int); insert t (v) values (1)");
+        sim.AssertSqlError("insert t (v) values (2)", 8115, "Arithmetic overflow error converting IDENTITY to data type decimal.");
+        AreEqual(99999m, sim.ExecuteScalar("select ident_current('t')"));
+    }
 }

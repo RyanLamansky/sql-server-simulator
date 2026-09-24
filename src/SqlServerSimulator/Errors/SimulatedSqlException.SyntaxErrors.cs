@@ -305,6 +305,15 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException DateFormatInvalid(string value) =>
         new($"SET DATEFORMAT date order '{value}' is invalid.", 2741, 16, 1);
 
+    /// <summary>
+    /// Mimics SQL Server error 16208: <c>IGNORE NULLS</c> or <c>RESPECT NULLS</c>
+    /// on a function that takes neither — anything but <c>FIRST_VALUE</c>,
+    /// <c>LAST_VALUE</c>, <c>LAG</c> and <c>LEAD</c> (probed 2026-09-24 against
+    /// SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException NullTreatmentNotSupported(string functionLowerName, string treatment) =>
+        new($"The function '{functionLowerName}' does not support {treatment}.", 16208, 15, 1);
+
     internal static SimulatedSqlException DateFirstOutOfRange(long value) =>
         new($"SET DATEFIRST {value.ToString(System.Globalization.CultureInfo.InvariantCulture)} is out of range.", 2742, 16, 1);
 

@@ -533,16 +533,7 @@ partial class Simulation
                 }
                 else
                 {
-                    long generated;
-                    try
-                    {
-                        generated = identityColumn.Identity!.GenerateNext();
-                    }
-                    catch (OverflowException)
-                    {
-                        throw SimulatedSqlException.IdentityOverflow(identityColumn.Type.ToString()!);
-                    }
-
+                    var generated = GenerateIdentity(identityColumn);
                     rowValues[identityOrdinal] = CoerceForIdentity(generated, identityColumn);
                     lastIdentityValue = generated;
                 }

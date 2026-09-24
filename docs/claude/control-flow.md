@@ -379,21 +379,22 @@ Statement adjacency requires `;` before THROW (probe-confirmed: `select 1 throw 
 - Severity 11-18 → catchable error.
   Throws `SimulatedSqlException` with `Number=50000`, `Class=severity`, `State=state`.
   Caught by enclosing TRY/CATCH; outside TRY/CATCH, propagates out of the batch.
-- Severity 19-25 → Msg 2754 ("Error severity levels greater than 18 can only be specified by members of the sysadmin role, using the WITH LOG option").
-  The simulator has no principal model and uniformly applies the non-sysadmin gate here — apps connecting as non-sysadmin service accounts see the same wall on real SQL Server.
-- Severity > 25 → Msg 2754 (same path).
+- Severity 19 and up → Msg 2754 ("Error severity levels greater than 18 can only be specified by members of the sysadmin role, using the WITH LOG option") unless a sysadmin — or the in-process default session, which passes every server-scope gate — writes `WITH LOG`.
+  Severity 19 then raises like 11-18; 20 and up ends the connection on real, which isn't built yet (`NotSupportedException`).
 
-**State clamping**: state values outside `0..255` (including NULL and negative) silently clamp to 0 (probe-confirmed; real SQL Server doesn't raise here).
+**State**: NULL is 0, a negative state reports 1, and anything past 255 wraps modulo 256 — 300 reports 44 (probed 2026-09-24 against SQL Server 2025; real doesn't raise).
 
 **Format-specifier coverage** (`%[-][0][width][.precision][length]type`):
 - Types: `%s` (string), `%d` / `%i` (signed int), `%u` (unsigned int — negative int32 renders as uint32), `%o` (octal), `%x` / `%X` (hex lower/upper), `%%` (literal `%`).
-- Length modifiers: `l` (no-op — SQL Server's long is 32-bit), `I64` (bigint; bare `%d` with a bigint arg raises Msg 2786).
-- Width / precision / flags: right-align (default), `-` left-align, `0` zero-pad, `.N` for string precision (max chars from source) — all probe-confirmed.
+- Length modifiers: `l` (no-op — SQL Server's long is 32-bit), `I64` (bigint and nothing else: an int argument is Msg 2786, as a bigint is for bare `%d`).
+  A numeric literal argument past `int` or with a fraction arrives as `bigint`, truncated.
+- Width / precision / flags: right-align (default), `-` left-align, `0` zero-pad, `.N` for string precision (max chars from source) and for an integer's minimum digit count (which turns `0` off), `*` for either taken from the next argument — all probe-confirmed.
 - NULL substitution: renders the literal text `(null)` regardless of specifier; same for missing args (more specifiers than supplied args).
   Extra args beyond the specifier count are silently ignored.
-- Unsupported specifier letters (`%c`, `%p`, `%f`, trailing lone `%`) raise Msg 2787 with the offending spec text echoed.
+- Unsupported specifier letters (`%c`, `%p`, `%f`, trailing lone `%`), and a `.` with neither digits nor `*`, raise Msg 2787 echoing the format string from the `%` to its end.
   Real SQL Server's `%c` rejection was a probe surprise — it's documented in older references but not in SQL Server 2025's runtime.
 - Arg-type mismatch raises Msg 2786 with the 1-based parameter index ("The data type of substitution parameter N does not match the expected type of the format specification").
+- A substitution that isn't an integer (bit excluded), a string or a binary is Msg 2748 naming its type and its position among all the arguments — whether a specifier reads it or not, except a decimal, which is refused only when read.
 - More than 20 substitution args raises Msg 2747 ("Too many substitution parameters for RAISERROR. Cannot exceed 20 substitution parameters") — applied even when the format string has no specifiers.
 
 **msg_id matrix**: the simulator hasn't modeled the `sys.messages` registry or `sp_addmessage`, so every numeric `msg_id` falls into one of two error paths:
@@ -402,7 +403,7 @@ Statement adjacency requires `;` before THROW (probe-confirmed: `select 1 throw 
 - Inline-string form (`RAISERROR('text', …)`) always uses msg id 50000.
 
 **WITH options**: comma-separated list after the closing `)`.
-`LOG` raises Msg 2778 ("Only System Administrator can specify WITH LOG option for RAISERROR command") uniformly — probe-confirmed against the non-sysadmin reference connection.
+`LOG` raises Msg 2778 ("Only System Administrator can specify WITH LOG option for RAISERROR command") for a session that isn't a sysadmin, and is otherwise accepted with nothing logged.
 `NOWAIT` is accepted and ignored (no streaming model).
 `SETERROR` is the load-bearing option for severity ≤ 10: it forces `@@ERROR` to 50000 for the next statement to read; without it, sev ≤ 10 leaves `@@ERROR` untouched.
 

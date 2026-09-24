@@ -515,6 +515,11 @@ internal abstract class Expression : ExpressionNode
                         expression = WindowExpression.WrapAggregate(aggregate, context);
                         continue;
                     }
+                // IGNORE / RESPECT NULLS after an aggregate: Msg 16208, since
+                // no aggregate takes either.
+                case UnquotedString when expression is AggregateExpression refused
+                    && WindowExpression.ReadNullTreatment(context, refused.LowerName, supported: false):
+                    continue;
                 // WITHIN GROUP (ORDER BY ...) following an aggregate is the
                 // ordered-set aggregate postfix. STRING_AGG accepts it; every
                 // other aggregate kind raises Msg 10757. WITHIN is contextual

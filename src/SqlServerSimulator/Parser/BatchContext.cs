@@ -1870,7 +1870,7 @@ internal sealed class BatchContext
             // Identity columns get the next auto-allocated value.
             if (column.Identity is not null)
             {
-                fullValues[i] = Simulation.CoerceForIdentity(column.Identity.GenerateNext(), column);
+                fullValues[i] = Simulation.CoerceForIdentity(Simulation.GenerateIdentity(column), column);
                 continue;
             }
             fullValues[i] = sourceValues[i] is null or DBNull
@@ -1903,7 +1903,7 @@ internal sealed class BatchContext
                 throw SimulatedSqlException.InsertIntoIdentityColumnNotAllowedOnTableVariables();
             if (column.Identity is not null)
             {
-                fullValues[i] = Simulation.CoerceForIdentity(column.Identity.GenerateNext(), column);
+                fullValues[i] = Simulation.CoerceForIdentity(Simulation.GenerateIdentity(column), column);
                 continue;
             }
             fullValues[i] = sourceValues[i].IsNull ? SqlValue.Null(column.Type) : sourceValues[i].CoerceTo(column.Type);

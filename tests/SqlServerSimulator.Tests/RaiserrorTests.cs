@@ -9,9 +9,8 @@ namespace SqlServerSimulator;
 /// (≤ 10 informational vs ≥ 11 catchable), <c>WITH SETERROR</c>/<c>NOWAIT</c>/
 /// <c>LOG</c> option handling, the <c>msg_id</c> error matrix (Msg 2732 /
 /// 18054), and arg-validation paths (Msg 2786 / 2787 / 2747). Real SQL Server's
-/// sysadmin-gated paths (Msg 2754 for sev &gt; 18, Msg 2778 for WITH LOG) are
-/// raised uniformly here — the simulator has no principal model and matches
-/// the probe's non-sysadmin behavior.
+/// sysadmin-gated paths (Msg 2754 for sev &gt; 18, Msg 2778 for WITH LOG) pass
+/// for a sysadmin and for the in-process default session.
 /// </summary>
 [TestClass]
 public sealed class RaiserrorTests
@@ -106,9 +105,14 @@ public sealed class RaiserrorTests
             "declare @st int = null; begin try raiserror('x', 16, @st) end try begin catch select error_state() end catch"));
 
     [TestMethod]
-    public void NegativeState_ClampedTo0()
-        => AreEqual(0, new Simulation().ExecuteScalar(
-            "begin try raiserror('x', 16, -5) end try begin catch select error_state() end catch"));
+    [DataRow("-5", 1)]
+    [DataRow("-256", 1)]
+    [DataRow("300", 44)]
+    [DataRow("1000", 232)]
+    [DataRow("2147483647", 255)]
+    public void State_NegativeIs1_LargeWrapsModulo256(string state, int expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar(
+            $"begin try raiserror('x', 16, {state}) end try begin catch select error_state() end catch"));
 
     // ---- format specifiers ----
 
@@ -304,12 +308,24 @@ public sealed class RaiserrorTests
             "raiserror('info', 10, 1) with nowait; select @@error"));
 
     [TestMethod]
-    public void WithLog_Sev16_RaisesMsg2778()
-        => new Simulation().AssertSqlError("raiserror('x', 16, 1) with log", 2778);
+    public void WithLog_Sev16_Raises50000()
+        => new Simulation().AssertSqlError("raiserror('x', 16, 1) with log", 50000);
 
     [TestMethod]
-    public void WithLog_Sev10_RaisesMsg2778()
-        => new Simulation().AssertSqlError("raiserror('x', 10, 1) with log", 2778);
+    public void WithLog_Sev19_RaisesAtClass19()
+        => AreEqual(19, new Simulation().ExecuteScalar(
+            "begin try raiserror('x', 19, 1) with log end try begin catch select error_severity() end catch"));
+
+    [TestMethod]
+    [DataRow(10)]
+    [DataRow(16)]
+    public void WithLog_NotSysadmin_RaisesMsg2778(int severity)
+        => new Simulation().AssertSqlError($"""
+            create login lo with password = 'S3cret!Pass';
+            create user lo for login lo;
+            execute as login = 'lo';
+            raiserror('x', {severity}, 1) with log
+            """, 2778);
 
     [TestMethod]
     public void WithMultipleOptions_NowaitAndSetError_Works()
@@ -388,6 +404,53 @@ public sealed class RaiserrorTests
     [TestMethod]
     public void Raiserror_AfterReturn_DoesNotRaise()
         => _ = new Simulation().ExecuteNonQuery("return; raiserror('boom', 16, 1)");
+
+    // ---- `*` width and precision, integer precision ----
+
+    [TestMethod]
+    [DataRow("raiserror('[%*.*s]', 16, 1, 7, 3, 'abcdef')", "[    abc]")]
+    [DataRow("raiserror('[%-*d]', 16, 1, 6, 42)", "[42    ]")]
+    [DataRow("raiserror('[%0*d]', 16, 1, 6, 42)", "[000042]")]
+    [DataRow("raiserror('[%*s]', 16, 1, -8, 'abc')", "[abc]")]
+    [DataRow("raiserror('[%.*s]', 16, 1, -1, 'abc')", "[abc]")]
+    [DataRow("raiserror('[%*.*d]', 16, 1, 8, 5, 42)", "[   00042]")]
+    [DataRow("raiserror('[%.3d]', 16, 1, -4)", "[-004]")]
+    [DataRow("raiserror('[%08.3d]', 16, 1, 42)", "[     042]")]
+    [DataRow("raiserror('[%.0d]', 16, 1, 0)", "[]")]
+    [DataRow("raiserror('[%.3x]', 16, 1, 10)", "[00a]")]
+    public void Format_StarAndIntegerPrecision(string statement, string expected)
+        => AreEqual(expected, FormattedMessage(statement));
+
+    [TestMethod]
+    [DataRow("raiserror('%*s', 16, 1, 'x', 'abc')")]
+    [DataRow("raiserror('%*s', 16, 1, null, 'abc')")]
+    [DataRow("raiserror('%*s', 16, 1)")]
+    [DataRow("raiserror('%I64d', 16, 1, 42)")]
+    [DataRow("raiserror('%d', 16, 1, 4200000000)")]
+    public void Format_ArgumentOfTheWrongType_RaisesMsg2786(string statement)
+        => new Simulation().AssertSqlError(statement, 2786);
+
+    [TestMethod]
+    public void Format_FractionalLiteral_ArrivesAsBigInt()
+        => AreEqual("[5]", FormattedMessage("raiserror('[%I64d]', 16, 1, 5.5)"));
+
+    [TestMethod]
+    [DataRow("raiserror('[%c|] tail', 16, 1, 42)", "Invalid format specification: '%c|] tail'.")]
+    [DataRow("raiserror('[%**d]', 16, 1, 6, 42)", "Invalid format specification: '%**d]'.")]
+    [DataRow("raiserror('[%.s]', 16, 1, 'abc')", "Invalid format specification: '%.s]'.")]
+    public void Format_InvalidSpecification_NamesTheRestOfTheFormat(string statement, string message)
+        => new Simulation().AssertSqlError(statement, 2787, message);
+
+    [TestMethod]
+    [DataRow("declare @v datetime = 1; raiserror('x', 16, 1, @v)", "Cannot specify datetime data type (parameter 4) as a substitution parameter.")]
+    [DataRow("declare @v bit = 1; raiserror('%d', 16, 1, 5, @v)", "Cannot specify bit data type (parameter 5) as a substitution parameter.")]
+    [DataRow("declare @v decimal(10, 0) = 5; raiserror('%d', 16, 1, @v)", "Cannot specify decimal(10,0) data type (parameter 4) as a substitution parameter.")]
+    public void Format_DisallowedSubstitutionType_RaisesMsg2748(string statement, string message)
+        => new Simulation().AssertSqlError(statement, 2748, message);
+
+    [TestMethod]
+    public void Format_UnreadDecimalSubstitution_IsAccepted()
+        => AreEqual("x", FormattedMessage("declare @v numeric(5, 2) = 1; raiserror('x', 16, 1, @v)"));
 
     // ---- syntax errors / arg-position restrictions ----
 

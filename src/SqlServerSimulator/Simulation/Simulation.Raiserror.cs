@@ -32,15 +32,15 @@ partial class Simulation
     /// <item>Severity 11-18 → catchable error. Throws
     /// <see cref="SimulatedSqlException"/> with <c>Class = severity</c>,
     /// <c>Number = 50000</c>, <c>State = state</c>.</item>
-    /// <item>Severity 19-25 → Msg 2754 (requires sysadmin + <c>WITH LOG</c> —
-    /// the simulator has no principal model and matches the probe's
-    /// non-sysadmin behavior here, since apps connecting as a non-sysadmin
-    /// service account see the same wall on real SQL Server).</item>
-    /// <item>Severity &gt; 25 → Msg 2754 (same path as 19-25).</item>
+    /// <item>Severity 19 and up → Msg 2754 unless a sysadmin (or the
+    /// unrestricted in-process default) writes <c>WITH LOG</c>; severity 19
+    /// then raises as 11-18 does. Severity 20 and up ends the connection on
+    /// real, which isn't built yet and raises <see cref="NotSupportedException"/>.</item>
     /// </list>
     /// <para>
-    /// State clamping: NULL / out-of-range (&gt; 255) silently clamps to 0
-    /// (probe-confirmed — real SQL Server doesn't raise, just substitutes 0).
+    /// State: NULL is 0, a negative state reports 1, and anything past 255
+    /// wraps modulo 256 — <c>300</c> reports 44 (probed 2026-09-24 against
+    /// SQL Server 2025).
     /// </para>
     /// <para>
     /// <c>msg</c> dispatch: a string-typed value (or NULL — rendered as a
@@ -60,8 +60,9 @@ partial class Simulation
     /// </para>
     /// <para>
     /// <c>WITH</c> option handling (probe-confirmed): <c>LOG</c> raises Msg
-    /// 2778 (always — non-sysadmin connections see the same on real SQL
-    /// Server); <c>NOWAIT</c> is accepted and ignored (no streaming model);
+    /// 2778 for a session that isn't a sysadmin, whatever the severity, and
+    /// is otherwise accepted with nothing logged; <c>NOWAIT</c> is accepted
+    /// and ignored (no streaming model);
     /// <c>SETERROR</c> forces <c>@@ERROR</c> to 50000 for sev ≤ 10 (sev ≥ 11
     /// already populates <c>@@ERROR</c> through the standard error path).
     /// </para>
@@ -88,6 +89,20 @@ partial class Simulation
         }
         if (substitutions.Count > 20)
             throw SimulatedSqlException.RaiserrorTooManySubstitutionParameters();
+        // A substitution may be an integer (not bit), a string or a binary
+        // value, and any other type is Msg 2748 whether a specifier reads it or
+        // not — all but decimal, which MessageFormatter refuses only when
+        // consumed (probed 2026-09-24 against SQL Server 2025). The position
+        // counts the message, severity and state.
+        for (var i = 0; i < substitutions.Count; i++)
+        {
+            var type = substitutions[i].Type;
+            if (!((type.Category == SqlTypeCategory.Integer && type is not BitSqlType) || type.Category == SqlTypeCategory.String
+                || type is VarbinarySqlType or BinarySqlType or DecimalSqlType))
+            {
+                throw SimulatedSqlException.SubstitutionParameterTypeNotAllowed(type.SqlServerName, i + 4);
+            }
+        }
 
         if (context.Token is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -127,18 +142,29 @@ partial class Simulation
             return;
 
         // WITH LOG without sysadmin: probe-confirmed Msg 2778, fires even
-        // before severity validation (probe shows it from sev=10).
-        if (withLog)
+        // before severity validation (probe shows it from sev=10). The
+        // in-process default's dbo passes, as it does every server-scope gate.
+        var security = batch.Connection.Security;
+        var isSysadmin = security.EffectiveIsDbo || batch.Connection.Simulation.IsLoginSysadmin(security.Effective.LoginName);
+        if (withLog && !isSysadmin)
             throw SimulatedSqlException.RaiserrorLogRequiresSysadmin();
 
         // Severity: NULL or negative → 0 (informational, no error).
         var severity = CoerceToInt32OrNull(severityValue) is { } sev && sev >= 0 ? sev : 0;
         if (severity > 18)
-            throw SimulatedSqlException.RaiserrorSeverityRequiresSysadmin();
+        {
+            if (!withLog)
+                throw SimulatedSqlException.RaiserrorSeverityRequiresSysadmin();
+            if (severity > 19)
+                throw new NotSupportedException("RAISERROR with a severity of 20 or more ends the connection, which isn't modeled yet.");
+        }
 
-        // State: NULL or out-of-range → 0. Real SQL Server's accepted range
-        // is 0-255 (per docs) but values outside silently clamp (probe).
-        var state = (byte)(CoerceToInt32OrNull(stateValue) is { } st && st is >= 0 and <= 255 ? st : 0);
+        var state = CoerceToInt32OrNull(stateValue) switch
+        {
+            null => (byte)0,
+            < 0 => (byte)1,
+            var st => (byte)(st & 0xFF),
+        };
 
         // Resolve the message: string-typed values are inline format strings;
         // numeric values are msg_id lookups against the (unmodeled) registry.
@@ -191,7 +217,8 @@ partial class Simulation
     /// Parses one RAISERROR argument value at the current cursor. Accepted
     /// forms (matching real SQL Server's grammar, probe-confirmed via
     /// Msg 102 on <c>CAST</c> in arg position): a string / numeric
-    /// <see cref="Literal"/>, a signed <see cref="Numeric"/> literal, an
+    /// <see cref="Literal"/>, a signed <see cref="Numeric"/> literal (one past
+    /// <c>int</c> or with a fraction read as <c>bigint</c>), an
     /// <c>@variable</c> reference (read as its current value), or the
     /// <c>NULL</c> keyword. Leaves the cursor on the first un-consumed
     /// token (the trailing <c>,</c> or <c>)</c>).
@@ -219,7 +246,12 @@ partial class Simulation
                 value = lit.Value;
                 break;
             case Numeric num:
-                value = negate ? NegateNumeric(num.Value) : num.Value;
+                // A fractional literal arrives as bigint, truncated: `%I64d`
+                // prints 5.5 as 5 and `%d` refuses 5.0 (probed 2026-09-24
+                // against SQL Server 2025).
+                value = num.Value.Type is DecimalSqlType ? num.Value.CoerceTo(SqlType.BigInt) : num.Value;
+                if (negate)
+                    value = NegateNumeric(value);
                 break;
             case ReservedKeyword { Keyword: Keyword.Null }:
                 if (negate) throw SimulatedSqlException.SyntaxErrorNear(context);

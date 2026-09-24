@@ -42,6 +42,12 @@ Two positions accept a group:
 - **Right operand** (`A LEFT JOIN (B JOIN C ON c1) ON c2`) is the associativity-changing case.
   The connecting `JoinSpec` records `GroupCount` (the group's source count) and is inserted *ahead* of the interior joins the recursion appended (at the pre-recursion `joins.Count`, since the flat `joins.Count == sources.Count − 1` invariant doesn't hold mid-parse of an enclosing group).
 
+**Without parentheses** a join may nest the same way: `A LEFT JOIN B JOIN C ON c1 ON c2` is `A LEFT JOIN (B JOIN C ON c1) ON c2`, any depth deep.
+When a join's right source is followed by another join keyword instead of its `ON`, `ParseJoinClauses` recurses (`nested: true`) and the connecting `JoinSpec` takes the `GroupCount` the parenthesized form does; inside it, an `ON` after a `CROSS JOIN` or `APPLY` belongs to the enclosing join and ends the recursion.
+
+**Each `ON` binds only its own join's sources** — the slot range `JoinSpec.ScopeStart` .. `ScopeEnd`, which starts at the current comma item or group.
+Naming an earlier comma item (`FROM a, b JOIN c ON c.id = a.id`), an enclosing group's table from inside it, or a table that appears later in the chain is Msg 4104 on real; `WHERE` still sees every source (probed 2026-09-24 against SQL Server 2025).
+
 A group must contain at least one join — a parenthesized single source (`(t)`) is Msg 102 (`near ')'`), matching real.
 A group takes **no alias**: `(…) AS x` → Msg 156 near `AS`, `(…) x` → Msg 102 near the name.
 A comma inside the parens (`(A, B)`) is Msg 102 near `,` (real rejects it too).

@@ -18,18 +18,26 @@ namespace SqlServerSimulator.Parser;
 /// </para>
 /// <list type="bullet">
 /// <item><c>type</c>: one of <c>s d i u o x X</c>. <c>%c</c> and <c>%p</c> (and
-/// any other type letter) raise Msg 2787 — probe-confirmed verbatim.
-/// <c>%%</c> emits a literal <c>%</c>.</item>
+/// any other type letter) raise Msg 2787, whose text runs from the <c>%</c>
+/// to the end of the format string. <c>%%</c> emits a literal <c>%</c>.</item>
 /// <item><c>length</c>: <c>l</c> (long; same as bare on 32-bit-int SQL
-/// platforms) or <c>I64</c> (int64 — required for bigint args; bare <c>%d</c>
-/// with a bigint arg raises Msg 2786).</item>
+/// platforms) or <c>I64</c> (int64 — takes a bigint argument and nothing
+/// else; bare <c>%d</c> with a bigint arg raises Msg 2786).</item>
 /// <item><c>width</c>: minimum field width (pad with spaces, or zeros when
 /// the <c>0</c> flag is present).</item>
-/// <item><c>.precision</c>: for <c>%s</c>, max chars from the source; for
-/// numeric specifiers it's accepted but currently not honored
-/// (zero-pad-via-width is the common case and works).</item>
+/// <item><c>.precision</c>: for <c>%s</c>, max chars from the source; for the
+/// integer types the minimum digit count, zero-filled, which overrides the
+/// <c>0</c> flag (so <c>%.0d</c> prints 0 as nothing). A <c>.</c> with neither
+/// digits nor <c>*</c> is Msg 2787.</item>
+/// <item><c>*</c> in place of the width or precision digits takes it from the
+/// next argument, which must be a tinyint / smallint / int (else Msg 2786,
+/// NULL included). A negative one is ignored.</item>
 /// <item><c>-</c> flag: left-align (default is right-align).</item>
 /// </list>
+/// <para>
+/// The <c>*</c>, precision and 2787-text rules were probed 2026-09-24
+/// against SQL Server 2025.
+/// </para>
 /// <para>
 /// Argument-type matching: <c>%s</c> requires a string-category SqlValue;
 /// <c>%d / %i / %ld / %li / %u / %o / %x / %X</c> require tinyint / smallint /
@@ -94,26 +102,47 @@ internal static class MessageFormatter
             if (i >= format.Length)
                 throw SimulatedSqlException.RaiserrorInvalidFormatSpec(format[specStart..]);
 
-            // Width: optional run of digits.
+            // Width: optional run of digits, or `*` for the next argument.
             var width = 0;
-            while (i < format.Length && format[i] >= '0' && format[i] <= '9')
+            if (format[i] == '*')
             {
-                width = (width * 10) + (format[i] - '0');
+                width = Math.Max(0, TakeStarArg(arguments, ref argIndex));
                 i++;
+            }
+            else
+            {
+                while (i < format.Length && format[i] >= '0' && format[i] <= '9')
+                {
+                    width = (width * 10) + (format[i] - '0');
+                    i++;
+                }
             }
             if (i >= format.Length)
                 throw SimulatedSqlException.RaiserrorInvalidFormatSpec(format[specStart..]);
 
-            // Precision: optional `.digits`.
+            // Precision: optional `.digits` or `.*`.
             var precision = -1;
             if (format[i] == '.')
             {
                 i++;
-                precision = 0;
-                while (i < format.Length && format[i] >= '0' && format[i] <= '9')
+                if (i < format.Length && format[i] == '*')
                 {
-                    precision = (precision * 10) + (format[i] - '0');
+                    var starPrecision = TakeStarArg(arguments, ref argIndex);
+                    precision = starPrecision < 0 ? -1 : starPrecision;
                     i++;
+                }
+                else if (i < format.Length && format[i] >= '0' && format[i] <= '9')
+                {
+                    precision = 0;
+                    while (i < format.Length && format[i] >= '0' && format[i] <= '9')
+                    {
+                        precision = (precision * 10) + (format[i] - '0');
+                        i++;
+                    }
+                }
+                else
+                {
+                    throw SimulatedSqlException.RaiserrorInvalidFormatSpec(format[specStart..]);
                 }
                 if (i >= format.Length)
                     throw SimulatedSqlException.RaiserrorInvalidFormatSpec(format[specStart..]);
@@ -145,7 +174,7 @@ internal static class MessageFormatter
                 case 's':
                     {
                         if (isInt64)
-                            throw SimulatedSqlException.RaiserrorInvalidFormatSpec(format[specStart..(i + 1)]);
+                            throw SimulatedSqlException.RaiserrorInvalidFormatSpec(format[specStart..]);
                         var (text, isNullArg) = TakeStringArg(arguments, ref argIndex, oneBasedArgIndex);
                         if (!isNullArg && precision >= 0 && text.Length > precision)
                             text = text[..precision];
@@ -162,7 +191,7 @@ internal static class MessageFormatter
                             break;
                         }
                         var s = n.ToString(CultureInfo.InvariantCulture);
-                        rendered = PadNumber(s, width, leftAlign, zeroPad);
+                        rendered = PadNumber(s, width, precision, leftAlign, zeroPad);
                         break;
                     }
                 case 'u':
@@ -176,7 +205,7 @@ internal static class MessageFormatter
                         var s = isInt64
                             ? ((ulong)n).ToString(CultureInfo.InvariantCulture)
                             : ((uint)n).ToString(CultureInfo.InvariantCulture);
-                        rendered = PadNumber(s, width, leftAlign, zeroPad);
+                        rendered = PadNumber(s, width, precision, leftAlign, zeroPad);
                         break;
                     }
                 case 'o':
@@ -190,7 +219,7 @@ internal static class MessageFormatter
                         var s = isInt64
                             ? Convert.ToString(n, 8)
                             : Convert.ToString((int)n, 8);
-                        rendered = PadNumber(s, width, leftAlign, zeroPad);
+                        rendered = PadNumber(s, width, precision, leftAlign, zeroPad);
                         break;
                     }
                 case 'x':
@@ -207,13 +236,13 @@ internal static class MessageFormatter
                             : ((uint)n).ToString("x", CultureInfo.InvariantCulture);
                         if (typeChar == 'X')
                             hex = hex.ToUpperInvariant();
-                        rendered = PadNumber(hex, width, leftAlign, zeroPad);
+                        rendered = PadNumber(hex, width, precision, leftAlign, zeroPad);
                         break;
                     }
                 default:
                     // Unsupported type letter (%c, %p, %f, etc.). Real SQL
-                    // Server reports the full spec text including the `%`.
-                    throw SimulatedSqlException.RaiserrorInvalidFormatSpec(format[specStart..(i + 1)]);
+                    // Server reports the rest of the format string from the `%`.
+                    throw SimulatedSqlException.RaiserrorInvalidFormatSpec(format[specStart..]);
             }
             _ = output.Append(rendered);
         }
@@ -234,7 +263,7 @@ internal static class MessageFormatter
             argIndex++;
             return ("(null)", true);
         }
-        var arg = arguments[argIndex++];
+        var arg = RejectDecimal(arguments[argIndex++], oneBasedIndex);
         if (arg.IsNull)
             return ("(null)", true);
         return arg.Type.Category != SqlTypeCategory.String
@@ -243,29 +272,51 @@ internal static class MessageFormatter
     }
 
     /// <summary>
-    /// Reads the next substitution argument as an integer. <paramref name="acceptInt64"/>
-    /// gates the bigint specifier (<c>%I64d</c>): when true the bare 32-bit
-    /// integer types still work but bigint is also accepted; when false a
-    /// bigint arg raises Msg 2786 (matches real SQL Server: bare <c>%d</c> +
-    /// bigint → 2786 St 1, probe-confirmed). Returns
+    /// Reads the next substitution argument as an integer. <paramref name="isInt64"/>
+    /// is the bigint specifier (<c>%I64d</c>), which takes a bigint and
+    /// nothing else; without it a tinyint / smallint / int is required. Either
+    /// mismatch raises Msg 2786 (probe-confirmed against SQL Server 2025,
+    /// 2026-09-24: <c>%I64d</c> refuses an int, <c>%d</c> a bigint). Returns
     /// <c>(0, isNullArg: true)</c> on NULL/missing so the caller renders
     /// <c>(null)</c>.
     /// </summary>
-    private static (long value, bool isNullArg) TakeIntArg(List<SqlValue> arguments, ref int argIndex, int oneBasedIndex, bool acceptInt64)
+    private static (long value, bool isNullArg) TakeIntArg(List<SqlValue> arguments, ref int argIndex, int oneBasedIndex, bool isInt64)
     {
         if (argIndex >= arguments.Count)
         {
             argIndex++;
             return (0, true);
         }
-        var arg = arguments[argIndex++];
+        var arg = RejectDecimal(arguments[argIndex++], oneBasedIndex);
         if (arg.IsNull)
             return (0, true);
-        return arg.Type == SqlType.Int32 ? (arg.AsInt32, false)
+        return isInt64 ? (arg.Type == SqlType.BigInt ? (arg.AsInt64, false) : throw SimulatedSqlException.RaiserrorTypeMismatch(oneBasedIndex))
+            : arg.Type == SqlType.Int32 ? (arg.AsInt32, false)
             : arg.Type == SqlType.SmallInt ? (arg.AsInt16, false)
             : arg.Type == SqlType.TinyInt ? (arg.AsByte, false)
-            : acceptInt64 && arg.Type == SqlType.BigInt ? (arg.AsInt64, false)
             : throw SimulatedSqlException.RaiserrorTypeMismatch(oneBasedIndex);
+    }
+
+    /// <summary>
+    /// Refuses a decimal substitution a specifier consumes with Msg 2748,
+    /// whose position counts RAISERROR's message, severity and state. The
+    /// statement refuses the other disallowed types whether consumed or not.
+    /// </summary>
+    private static SqlValue RejectDecimal(SqlValue arg, int oneBasedIndex) =>
+        arg.Type is DecimalSqlType
+            ? throw SimulatedSqlException.SubstitutionParameterTypeNotAllowed(arg.Type.ToString()!, oneBasedIndex + 3)
+            : arg;
+
+    /// <summary>
+    /// Reads the next argument as a <c>*</c> width or precision: a tinyint /
+    /// smallint / int, where a NULL, missing or other-typed one is Msg 2786.
+    /// </summary>
+    private static int TakeStarArg(List<SqlValue> arguments, ref int argIndex)
+    {
+        var oneBasedIndex = argIndex + 1;
+        if (argIndex >= arguments.Count || arguments[argIndex].IsNull)
+            throw SimulatedSqlException.RaiserrorTypeMismatch(oneBasedIndex);
+        return (int)TakeIntArg(arguments, ref argIndex, oneBasedIndex, isInt64: false).value;
     }
 
     private static string PadString(string s, int width, bool leftAlign) =>
@@ -273,8 +324,17 @@ internal static class MessageFormatter
             ? s
             : leftAlign ? s.PadRight(width) : s.PadLeft(width);
 
-    private static string PadNumber(string s, int width, bool leftAlign, bool zeroPad)
+    private static string PadNumber(string s, int width, int precision, bool leftAlign, bool zeroPad)
     {
+        // A precision is the minimum digit count, and it turns the 0 flag off.
+        if (precision >= 0)
+        {
+            var negative = s.Length > 0 && s[0] == '-';
+            var digits = negative ? s[1..] : s;
+            digits = precision == 0 && digits == "0" ? "" : digits.PadLeft(precision, '0');
+            s = negative ? "-" + digits : digits;
+            zeroPad = false;
+        }
         if (width <= 0 || s.Length >= width)
             return s;
         if (leftAlign)

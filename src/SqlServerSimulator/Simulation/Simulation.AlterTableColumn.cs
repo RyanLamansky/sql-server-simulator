@@ -52,6 +52,7 @@ partial class Simulation
         var pendingChecks = new List<(string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition)>();
         var pendingComputed = new List<(int Index, string Name, Expression Expression, bool Persisted, bool Nullable, string Definition)>();
         var pendingForeignKeys = new List<PendingForeignKey>();
+        var withValuesColumns = new List<int>();
 
         HeapTable? table = null;
         var existingIdentityCount = 0;
@@ -77,7 +78,8 @@ partial class Simulation
                 pendingComputed,
                 pendingPeriod: null,
                 pendingForeignKeys,
-                ref identityCount);
+                ref identityCount,
+                withValuesColumns: withValuesColumns);
 
             if (context.Token is not Operator { Character: ',' })
                 break;
@@ -198,7 +200,7 @@ partial class Simulation
                 ResolveForeignKeys(table, shiftedForeignKeys, context);
             }
 
-            RewriteHeapForAddColumns(table, newColumns, existingCount, context);
+            RewriteHeapForAddColumns(table, newColumns, existingCount, withValuesColumns, context);
         }
         catch
         {
@@ -295,10 +297,11 @@ partial class Simulation
     /// DEFAULT-evaluated value (when NOT NULL) or a per-row identity value
     /// (when IDENTITY) — matches SQL Server's probe-confirmed semantic that
     /// DEFAULT on a nullable ADD does NOT backfill, only the NOT NULL form
-    /// does. After the rewrite, <paramref name="table"/>'s old <c>Heap</c>
+    /// does, unless the DEFAULT says <c>WITH VALUES</c>
+    /// (<paramref name="withValuesColumns"/>). After the rewrite, <paramref name="table"/>'s old <c>Heap</c>
     /// is discarded.
     /// </summary>
-    private static void RewriteHeapForAddColumns(HeapTable table, HeapColumn[] newColumns, int existingCount, ParserContext context)
+    private static void RewriteHeapForAddColumns(HeapTable table, HeapColumn[] newColumns, int existingCount, List<int> withValuesColumns, ParserContext context)
     {
         var anyRows = false;
         foreach (var _ in table.Heap.EnumerateRows())
@@ -309,7 +312,7 @@ partial class Simulation
         if (!anyRows)
             return;
 
-        // Pre-evaluate NOT-NULL DEFAULT expressions once (constant snapshot —
+        // Pre-evaluate the backfilled DEFAULT expressions once (constant snapshot —
         // probe-confirmed that GETDATE() in a DEFAULT backfill produces a
         // single timestamp for every existing row).
         var backfillValues = new SqlValue?[newColumns.Length];
@@ -321,7 +324,8 @@ partial class Simulation
             var c = newColumns[i];
             if (!c.IsStored)
                 continue;
-            if (c.Nullable)
+            // A nullable column takes its DEFAULT only under WITH VALUES.
+            if (c.Nullable && !withValuesColumns.Contains(i))
             {
                 backfillValues[i] = SqlValue.Null(c.Type);
                 continue;
@@ -368,8 +372,8 @@ partial class Simulation
                 var c = newColumns[i];
                 if (!c.IsStored)
                     continue;
-                newStoredValues[newStorageIndex] = c.Identity is { } identity
-                    ? CoerceForIdentity(identity.GenerateNext(), c)
+                newStoredValues[newStorageIndex] = c.Identity is not null
+                    ? CoerceForIdentity(GenerateIdentity(c), c)
                     : c.Type == SqlType.RowVersion
                         ? SqlValue.FromRowVersion(context.Batch.DatabaseFor(table).AllocateRowVersion())
                         : backfillValues[i] ?? SqlValue.Null(c.Type);

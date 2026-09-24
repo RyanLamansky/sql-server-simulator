@@ -1039,10 +1039,13 @@ partial class SimulatedSqlException
     /// <summary>
     /// Mimics SQL Server error 2749: the identity column's data type isn't in
     /// the supported list (int/bigint/smallint/tinyint/decimal-or-numeric with
-    /// scale 0). The message text is the literal SQL Server wording.
+    /// scale 0). The message text is the literal SQL Server wording. A column
+    /// declaration is state 2, naming the column; <c>SELECT … INTO</c>'s
+    /// <c>IDENTITY()</c> function is state 1 and names the type in the
+    /// column's slot (probed 2026-09-24 against SQL Server 2025).
     /// </summary>
-    internal static SimulatedSqlException IdentityInvalidType(string columnName) =>
-        new($"Identity column '{columnName}' must be of data type int, bigint, smallint, tinyint, or decimal or numeric with a scale of 0, unencrypted, and constrained to be nonnullable.", 2749, 16, 2);
+    internal static SimulatedSqlException IdentityInvalidType(string columnName, byte state = 2) =>
+        new($"Identity column '{columnName}' must be of data type int, bigint, smallint, tinyint, or decimal or numeric with a scale of 0, unencrypted, and constrained to be nonnullable.", 2749, 16, state);
 
     /// <summary>
     /// Mimics SQL Server error 2744: more than one column in a table was
@@ -1052,11 +1055,48 @@ partial class SimulatedSqlException
         new($"Multiple identity columns specified for table '{tableName}'. Only one identity column per table is allowed.", 2744, 16, 2);
 
     /// <summary>
-    /// Mimics SQL Server error 2753: <c>IDENTITY(seed, 0)</c> — increment
-    /// must be non-zero (negative is allowed).
+    /// Mimics SQL Server error 2752: an identity seed outside the column
+    /// type's range (state 1) or written with a fractional part (state 2).
     /// </summary>
-    internal static SimulatedSqlException IdentityInvalidIncrement(string columnName) =>
-        new($"Identity column '{columnName}' contains invalid INCREMENT.", 2753, 16, 2);
+    internal static SimulatedSqlException IdentityInvalidSeed(string columnName, byte state) =>
+        new($"Identity column '{columnName}' contains invalid SEED.", 2752, 16, state);
+
+    /// <summary>
+    /// Mimics SQL Server error 2753: an identity increment outside the column
+    /// type's range (state 1), zero (state 2) or written with a fractional
+    /// part (state 3). A negative increment is allowed.
+    /// </summary>
+    internal static SimulatedSqlException IdentityInvalidIncrement(string columnName, byte state) =>
+        new($"Identity column '{columnName}' contains invalid INCREMENT.", 2753, 16, state);
+
+    /// <summary>
+    /// Mimics SQL Server error 177: <c>IDENTITY(type, seed, increment)</c> in
+    /// the select list of a query without an <c>INTO</c> clause.
+    /// </summary>
+    internal static SimulatedSqlException IdentityFunctionWithoutInto() =>
+        new("The IDENTITY function can only be used when the SELECT statement has an INTO clause.", 177, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 1057: <c>SELECT … INTO</c> with the
+    /// <c>IDENTITY()</c> function whose query is a set operation.
+    /// </summary>
+    internal static SimulatedSqlException IdentityFunctionWithSetOperator() =>
+        new("The IDENTITY function cannot be used with a SELECT INTO statement containing a UNION, INTERSECT or EXCEPT operator.", 1057, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 8108: <c>SELECT … INTO</c>'s <c>IDENTITY()</c>
+    /// function alongside a column that inherits the identity property from
+    /// its source.
+    /// </summary>
+    internal static SimulatedSqlException IdentityFunctionWithInheritedIdentity(string tableName, string columnName) =>
+        new($"Cannot add identity column, using the SELECT INTO statement, to table '{tableName}', which already has column '{columnName}' that inherits the identity property.", 8108, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 8109: two <c>IDENTITY()</c> functions in one
+    /// <c>SELECT … INTO</c>.
+    /// </summary>
+    internal static SimulatedSqlException MultipleIdentityFunctions(string tableName) =>
+        new($"Attempting to add multiple identity columns to table '{tableName}' using the SELECT INTO statement.", 8109, 16, 1);
 
     /// <summary>
     /// Mimics SQL Server error 2761: the <c>ROWGUIDCOL</c> property was declared

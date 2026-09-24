@@ -6,6 +6,15 @@ namespace SqlServerSimulator;
 partial class SimulatedSqlException
 {
     /// <summary>
+    /// Mimics SQL Server error 425: <c>UPDATE … SET @v = col = expr</c> whose
+    /// variable is declared a different type from the column — real takes no
+    /// conversion there, not even a widening one (probed 2026-09-24 against
+    /// SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException ReceivingVariableTypeMismatch(string variableType, string columnType, string columnName) =>
+        new($"Data type {variableType} of receiving variable is not equal to the data type {columnType} of column '{columnName}'.", 425, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 8115: arithmetic overflow converting an
     /// expression into a narrower numeric data type.
     /// </summary>

@@ -1286,8 +1286,11 @@ internal sealed partial class Selection
             // zero-column SELECT behind. End-of-input isn't a keyword, so a
             // bare SELECT keeps its Msg 102; a `;` there is Msg 102 naming the
             // `;` (`SELECT;`, `SELECT 1,;` — probe-confirmed 2026-09-23).
-            if (elementExpected && context.Token is ReservedKeyword blocking && !CanBeginProjectionElement(blocking))
+            if (elementExpected && context.Token is ReservedKeyword blocking && !CanBeginProjectionElement(blocking)
+                && !(blocking.Keyword == Keyword.Identity && scope.AcceptsIdentityFunction))
+            {
                 throw SimulatedSqlException.SyntaxErrorNearKeyword(blocking);
+            }
             if (elementExpected && context.Token is Operator { Character: ';' })
                 throw SimulatedSqlException.SyntaxErrorNear(context);
 
@@ -1365,6 +1368,15 @@ internal sealed partial class Selection
                 case ReservedKeyword statementStart when !scope.Parenthesized && Simulation.IsStatementBoundary(statementStart):
                     goto ExitWhileTokenLoop;
 
+                // SELECT … INTO's IDENTITY(type [, seed, increment]) is a whole
+                // item and takes a column alias, so anything but an alias after
+                // it is a syntax error (probe-confirmed).
+                case ReservedKeyword { Keyword: Keyword.Identity } when scope.AcceptsIdentityFunction:
+                    expressions.Add(new IdentityFunction(context));
+                    if (context.Token is not (Name or Literal { Value.Type.Category: SqlTypeCategory.String } or ReservedKeyword { Keyword: Keyword.As }))
+                        throw context.Token is ReservedKeyword follower ? SimulatedSqlException.SyntaxErrorNearKeyword(follower) : SimulatedSqlException.SyntaxErrorNear(context);
+                    break;
+
                 case ReservedKeyword { Keyword: not Keyword.Null } keyword:
                     throw SimulatedSqlException.SyntaxErrorNearKeyword(keyword);
 
@@ -1423,7 +1435,7 @@ internal sealed partial class Selection
                         if (context.Token is Operator { Character: '=' })
                         {
                             context.MoveNextRequired();
-                            var rhs = Expression.Parse(context);
+                            var rhs = ParseAliasedProjection(context, scope);
                             expressions.Add(AssignColumnAlias(rhs, aliasCandidate.Value));
                         }
                         else
@@ -1447,7 +1459,7 @@ internal sealed partial class Selection
                         if (context.Token is Operator { Character: '=' })
                         {
                             context.MoveNextRequired();
-                            var rhs = Expression.Parse(context);
+                            var rhs = ParseAliasedProjection(context, scope);
                             expressions.Add(AssignColumnAlias(rhs, aliasLiteralCandidate.Value.AsString));
                         }
                         else
@@ -1547,6 +1559,7 @@ internal sealed partial class Selection
                         fromClause.OrderBy.Clear();
                         topWithTies = false;
                     }
+                    RejectMisplacedIdentityFunction(context, expressions, intoTarget);
                     ExpandStars(context.Batch.CurrentDatabase.Collation, expressions, sources);
                     JoinSpec[] joinArray = [.. joins];
                     var plan = BuildSqlProjection(context.Batch, [.. sources], joinArray, expressions, fromClause, distinct, topExpression, topPercent, topWithTies, aggregates, windows, scope, ResolveAssignmentMode(expressions), intoTarget, context.ReadColumnSink);
@@ -1629,6 +1642,7 @@ internal sealed partial class Selection
             throw SimulatedSqlException.SyntaxErrorNear(context);
         } while (context.GetNextOptional() is not null);
     ExitWhileTokenLoop:
+        RejectMisplacedIdentityFunction(context, expressions, intoTarget);
 
         // A comma that promised an element the input never supplied — real
         // reports Msg 102 at the comma itself. Reached when end-of-statement
@@ -1728,10 +1742,40 @@ internal sealed partial class Selection
     /// 1038. Shared by every select-list alias site: the AS form, the bare
     /// postfix form, and the alias-on-left <c>alias = expr</c> form.
     /// </summary>
-    private static NamedExpression AssignColumnAlias(Expression expression, string alias) =>
-        alias.Length == 0
-            ? throw SimulatedSqlException.EmptyColumnAlias()
-            : new NamedExpression(expression, alias);
+    private static NamedExpression AssignColumnAlias(Expression expression, string alias)
+    {
+        if (alias.Length == 0)
+            throw SimulatedSqlException.EmptyColumnAlias();
+        // The seed and increment errors name the column.
+        if (expression is IdentityFunction identity)
+            identity.Resolve(alias);
+        return new NamedExpression(expression, alias);
+    }
+
+    /// <summary>
+    /// Parses the value of the alias-on-left <c>alias = expr</c> form, which
+    /// may be <c>SELECT … INTO</c>'s <c>IDENTITY()</c> function.
+    /// </summary>
+    private static Expression ParseAliasedProjection(ParserContext context, QueryScope scope) =>
+        context.Token is ReservedKeyword { Keyword: Keyword.Identity } && scope.AcceptsIdentityFunction
+            ? new IdentityFunction(context)
+            : Expression.Parse(context);
+
+    /// <summary>
+    /// Refuses <c>SELECT … INTO</c>'s <c>IDENTITY()</c> function in a query
+    /// without <c>INTO</c> (Msg 177) or one a set operator follows (Msg 1057).
+    /// Called once the query's own clauses are read, so the cursor is on
+    /// whatever follows them.
+    /// </summary>
+    private static void RejectMisplacedIdentityFunction(ParserContext context, List<Expression> expressions, MultiPartName? intoTarget)
+    {
+        if (!expressions.Exists(expression => expression is NamedExpression { Inner: IdentityFunction }))
+            return;
+        if (intoTarget is null)
+            throw SimulatedSqlException.IdentityFunctionWithoutInto();
+        if (context.Token is ReservedKeyword { Keyword: Keyword.Union or Keyword.Intersect or Keyword.Except })
+            throw SimulatedSqlException.IdentityFunctionWithSetOperator();
+    }
 
     /// <summary>
     /// Reads a column-alias name from the token following <c>AS</c>: an
@@ -1915,6 +1959,11 @@ internal sealed partial class Selection
         List<JoinSpec> joins,
         List<Reference> siblingCandidates)
     {
+        // A chain's ON predicates see its own sources alone — not an earlier
+        // comma-separated item's, nor an enclosing chain's when this one is a
+        // group (probed 2026-09-24 against SQL Server 2025: each is Msg 4104).
+        var scopeStart = sources.Count;
+
         // A parenthesized join group as the leftmost item — `(A JOIN B ON …)
         // [LEFT] JOIN C …` — is a pure grammar grouping: a left-deep spine
         // already groups its left operand, so the group's interior sources /
@@ -1924,17 +1973,41 @@ internal sealed partial class Selection
         else
             sources.Add(ParseSourceCollectingColumnReads(context, scope, sources, siblingCandidates));
 
-        // Parse JOIN clauses. ParseSingleFromSource ends with the cursor at
-        // the lookahead-after-source token (e.g. WHERE, ORDER, JOIN, INNER,
-        // LEFT, CROSS, etc.). Loop while we see a JOIN-introducing keyword.
+        ParseJoinClauses(context, scope, sources, joins, siblingCandidates, scopeStart, nested: false);
+    }
+
+    /// <summary>
+    /// Parses the JOIN clauses after a chain's leftmost source.
+    /// ParseSingleFromSource ends with the cursor at the lookahead-after-source
+    /// token (e.g. WHERE, ORDER, JOIN, INNER, LEFT, CROSS, etc.), so this loops
+    /// while it sees a JOIN-introducing keyword, and stops at anything else — an
+    /// <c>ON</c> included, which is how a nested chain hands the <c>ON</c> it
+    /// doesn't own back to the join that does. <paramref name="scopeStart"/> is
+    /// the chain's first source, the earliest an ON predicate may see;
+    /// <paramref name="nested"/> marks an unparenthesized inner chain, where an
+    /// ON after a cross join or APPLY is the enclosing join's.
+    /// </summary>
+    private static void ParseJoinClauses(
+        ParserContext context,
+        QueryScope scope,
+        List<FromSource> sources,
+        List<JoinSpec> joins,
+        List<Reference> siblingCandidates,
+        int scopeStart,
+        bool nested)
+    {
         while (TryParseJoinKeyword(context, out var kind))
         {
             if (kind is JoinKind.CrossApply or JoinKind.OuterApply)
             {
                 sources.Add(ParseLateralFromSource(context, scope, sources));
-                if (context.Token is ReservedKeyword { Keyword: Keyword.On } onToken)
-                    throw SimulatedSqlException.SyntaxErrorNearKeyword(onToken);
                 joins.Add(new JoinSpec(kind, onPredicate: null));
+                if (context.Token is ReservedKeyword { Keyword: Keyword.On } onToken)
+                {
+                    if (nested)
+                        return;
+                    throw SimulatedSqlException.SyntaxErrorNearKeyword(onToken);
+                }
                 continue;
             }
 
@@ -1962,7 +2035,14 @@ internal sealed partial class Selection
                 if (kind == JoinKind.Cross)
                 {
                     if (context.Token is ReservedKeyword { Keyword: Keyword.On })
+                    {
+                        if (nested)
+                        {
+                            joins.Insert(groupJoinIndex, new JoinSpec(kind, null) { GroupCount = groupCount });
+                            return;
+                        }
                         throw SimulatedSqlException.SyntaxErrorNearKeyword((ReservedKeyword)context.Token);
+                    }
                 }
                 else if (context.Token is not ReservedKeyword { Keyword: Keyword.On })
                 {
@@ -1975,9 +2055,9 @@ internal sealed partial class Selection
                 else
                 {
                     context.MoveNextRequired();
-                    groupOn = ParseOnPredicateWithScope(context, sources, scope.OuterTypeResolver);
+                    groupOn = ParseOnPredicateWithScope(context, sources, scopeStart, scope.OuterTypeResolver);
                 }
-                joins.Insert(groupJoinIndex, new JoinSpec(kind, groupOn) { GroupCount = groupCount });
+                joins.Insert(groupJoinIndex, new JoinSpec(kind, groupOn) { GroupCount = groupCount, ScopeStart = scopeStart, ScopeEnd = sources.Count });
                 continue;
             }
 
@@ -1987,31 +2067,58 @@ internal sealed partial class Selection
             // play so a correlated derived table here is at least diagnosed
             // (NotSupportedException at execute time) rather than silently
             // resolving against a wrong scope.
+            var rightStart = sources.Count;
+            var joinIndex = joins.Count;
             sources.Add(ParseSourceCollectingColumnReads(context, scope, sources, siblingCandidates));
             BooleanExpression? on = null;
             if (kind == JoinKind.Cross)
             {
                 if (context.Token is ReservedKeyword { Keyword: Keyword.On })
+                {
+                    if (nested)
+                    {
+                        joins.Add(new JoinSpec(kind, null));
+                        return;
+                    }
                     throw SimulatedSqlException.SyntaxErrorNearKeyword((ReservedKeyword)context.Token);
+                }
             }
             else
             {
                 if (context.Token is not ReservedKeyword { Keyword: Keyword.On })
-                    throw SimulatedSqlException.SyntaxErrorNear(context);
-                context.MoveNextRequired();
-                // An ON predicate rejects NEXT VALUE FOR (Msg 11720), like the
-                // other clauses real names in that message.
-                var savedRejectInOn = context.EnterNextValueForScope(NextValueForScope.Clause);
-                try
                 {
-                    on = ParseOnPredicateWithScope(context, sources, scope.OuterTypeResolver);
+                    // Another join before this one's ON: `A LEFT JOIN B JOIN C
+                    // ON c1 ON c2` nests as `A LEFT JOIN (B JOIN C ON c1) ON c2`
+                    // does, the inner chain taking the first ON and this join
+                    // the next (probed 2026-09-24 against SQL Server 2025).
+                    ParseJoinClauses(context, scope, sources, joins, siblingCandidates, rightStart, nested: true);
+                    if (joins.Count == joinIndex || context.Token is not ReservedKeyword { Keyword: Keyword.On })
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                    joins.Insert(joinIndex, new JoinSpec(kind, ParseJoinOn(context, scope, sources, scopeStart)) { GroupCount = sources.Count - rightStart, ScopeStart = scopeStart, ScopeEnd = sources.Count });
+                    continue;
                 }
-                finally
-                {
-                    context.NextValueForRejection = savedRejectInOn;
-                }
+                on = ParseJoinOn(context, scope, sources, scopeStart);
             }
-            joins.Add(new JoinSpec(kind, on));
+            joins.Add(new JoinSpec(kind, on) { ScopeStart = scopeStart, ScopeEnd = sources.Count });
+        }
+    }
+
+    /// <summary>
+    /// Parses a join's <c>ON</c> predicate, the cursor on the <c>ON</c>. An ON
+    /// predicate rejects NEXT VALUE FOR (Msg 11720), like the other clauses
+    /// real names in that message.
+    /// </summary>
+    private static BooleanExpression ParseJoinOn(ParserContext context, QueryScope scope, List<FromSource> sources, int scopeStart)
+    {
+        context.MoveNextRequired();
+        var savedRejectInOn = context.EnterNextValueForScope(NextValueForScope.Clause);
+        try
+        {
+            return ParseOnPredicateWithScope(context, sources, scopeStart, scope.OuterTypeResolver);
+        }
+        finally
+        {
+            context.NextValueForRejection = savedRejectInOn;
         }
     }
 
@@ -2025,9 +2132,9 @@ internal sealed partial class Selection
     /// tbl.object_id)</c> inside an ON, which needs the outer <c>tbl</c> in
     /// scope for the inner query to bind.
     /// </summary>
-    private static BooleanExpression ParseOnPredicateWithScope(ParserContext context, List<FromSource> sources, Func<MultiPartName, SqlType>? outerTypeResolver)
+    private static BooleanExpression ParseOnPredicateWithScope(ParserContext context, List<FromSource> sources, int scopeStart, Func<MultiPartName, SqlType>? outerTypeResolver)
     {
-        var scope = sources.ToArray();
+        var scope = sources.GetRange(scopeStart, sources.Count - scopeStart).ToArray();
         var saved = context.OuterTypeResolver;
         context.OuterTypeResolver = name => ResolveColumnTypeAcrossSources(scope, name, outerTypeResolver);
         try

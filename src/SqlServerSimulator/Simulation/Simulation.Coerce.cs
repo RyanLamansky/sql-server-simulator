@@ -13,6 +13,22 @@ partial class Simulation
     /// declared integer type, raising the IDENTITY-specific Msg 8115 if the
     /// next value won't fit.
     /// </summary>
+    /// <summary>
+    /// Draws <paramref name="identityColumn"/>'s next identity value, raising
+    /// Msg 8115 when it would pass the column type's range.
+    /// </summary>
+    internal static long GenerateIdentity(HeapColumn identityColumn)
+    {
+        try
+        {
+            return identityColumn.Identity!.GenerateNext(identityColumn.Type);
+        }
+        catch (OverflowException)
+        {
+            throw SimulatedSqlException.IdentityOverflow(identityColumn.Type.SqlServerName);
+        }
+    }
+
     internal static SqlValue CoerceForIdentity(long value, HeapColumn identityColumn)
     {
         try
@@ -21,7 +37,7 @@ partial class Simulation
         }
         catch (OverflowException)
         {
-            throw SimulatedSqlException.IdentityOverflow(identityColumn.Type.ToString()!);
+            throw SimulatedSqlException.IdentityOverflow(identityColumn.Type.SqlServerName);
         }
     }
 

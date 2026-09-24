@@ -1076,7 +1076,11 @@ partial class Simulation
     /// <see cref="ParseColumnList"/> (CREATE TABLE / DECLARE @t TABLE /
     /// CREATE TYPE) and the ALTER-TABLE-ADD-COLUMN parser; the inline
     /// table-level constraint forks and the PERIOD form remain in the
-    /// caller because ADD COLUMN doesn't admit them.
+    /// caller because ADD COLUMN doesn't admit them. ADD COLUMN alone passes
+    /// <paramref name="withValuesColumns"/>, which collects the index of each
+    /// column whose DEFAULT carries <c>WITH VALUES</c>; elsewhere the clause is
+    /// Msg 156 near <c>VALUES</c>, as it is on a column without a DEFAULT
+    /// (probed 2026-09-24 against SQL Server 2025).
     /// </summary>
     internal static void ParseOneColumnIntoLists(
         ParserContext context,
@@ -1091,7 +1095,8 @@ partial class Simulation
         List<(string StartCol, string EndCol)>? pendingPeriod,
         List<PendingForeignKey>? pendingForeignKeys,
         ref int identityCount,
-        List<PendingInlineIndex>? pendingIndexes = null)
+        List<PendingInlineIndex>? pendingIndexes = null,
+        List<int>? withValuesColumns = null)
     {
         if (context.Token is not Name columnName)
             throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -1184,7 +1189,9 @@ partial class Simulation
         // columns or the column-list's closing paren). REFERENCES inside
         // a table-variable column raises Msg 102 explicitly (real SQL
         // Server's grammar disallows FKs there); CONSTRAINT-named likewise.
-        IdentityState? identity = null;
+        IdentitySpec? identitySpec = null;
+        var identityNotForReplication = false;
+        var withValues = false;
         bool? nullable = null;
         Expression? defaultExpression = null;
         string? defaultDefinition = null;
@@ -1226,8 +1233,8 @@ partial class Simulation
                     columnCollation = collationName;
                     context.MoveNextOptional();
                     continue;
-                case ReservedKeyword { Keyword: Keyword.Identity } when identity is null:
-                    identity = ParseIdentitySpec(context, columnName.Value);
+                case ReservedKeyword { Keyword: Keyword.Identity } when identitySpec is null:
+                    identitySpec = ParseIdentitySpec(context);
                     continue;
                 case UnquotedString { ContextualKeyword: ContextualKeyword.Generated } when generatedAs == GeneratedAlwaysAsRow.None:
                     if (isTableVariable || isTableType)
@@ -1271,7 +1278,7 @@ partial class Simulation
                         case ReservedKeyword { Keyword: Keyword.Null } when !nullable.HasValue:
                             nullable = false;
                             break;
-                        case ReservedKeyword { Keyword: Keyword.For } when identity is { NotForReplication: false }:
+                        case ReservedKeyword { Keyword: Keyword.For } when identitySpec is not null && !identityNotForReplication:
                             // IDENTITY(s, i) NOT FOR REPLICATION — replication
                             // isn't modeled, so the clause round-trips as
                             // metadata only. REPLICATION classifies as either a
@@ -1281,7 +1288,7 @@ partial class Simulation
                             {
                                 throw SimulatedSqlException.SyntaxErrorNear(context);
                             }
-                            identity = new IdentityState(identity.Seed, identity.Increment, notForReplication: true);
+                            identityNotForReplication = true;
                             break;
                         default:
                             throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -1306,6 +1313,20 @@ partial class Simulation
                     continue;
                 case ReservedKeyword { Keyword: Keyword.Default }:
                     throw SimulatedSqlException.MultipleColumnConstraints("DEFAULT", columnName.Value, tableName);
+                case ReservedKeyword { Keyword: Keyword.With } when !withValues:
+                    {
+                        var beforeWith = context.SaveCheckpoint();
+                        if (context.GetNextOptional() is not ReservedKeyword { Keyword: Keyword.Values } values)
+                        {
+                            context.RestoreCheckpoint(beforeWith);
+                            break;
+                        }
+                        if (withValuesColumns is null || defaultExpression is null)
+                            throw SimulatedSqlException.SyntaxErrorNearKeyword(values);
+                        withValues = true;
+                        context.MoveNextOptional();
+                        continue;
+                    }
                 case ReservedKeyword { Keyword: Keyword.Constraint } inlineConstraintKw when inlineFkName is null:
                     if (isTableType)
                         throw SimulatedSqlException.SyntaxErrorNearKeyword(inlineConstraintKw);
@@ -1403,19 +1424,21 @@ partial class Simulation
         // Alias-type-declared nullability propagates as the column default
         // when the column declaration omits an explicit NULL / NOT NULL.
         nullable ??= aliasIsNullable;
-        var actualNullable = nullable ?? (identity is null);
+        var actualNullable = nullable ?? (identitySpec is null);
 
         if (inlineKeyKind is KeyConstraintKind kind)
             pendingKeys.Add((kind, inlineKeyName, [heapColumns.Count], inlineKeyClustered, inlineKeyIgnoreDupKey, []));
 
-        if (identity is not null)
+        IdentityState? identity = null;
+        if (identitySpec is { } spec)
         {
             if (++identityCount > 1)
                 throw SimulatedSqlException.MultipleIdentityColumns(tableName);
             if (actualNullable)
                 throw SimulatedSqlException.IdentityOnNullableColumn(columnName.Value, tableName);
-            if (resolvedType != SqlType.Int32 && resolvedType != SqlType.BigInt && resolvedType != SqlType.SmallInt && resolvedType != SqlType.TinyInt)
+            if (!IdentityState.IsIdentityType(resolvedType))
                 throw SimulatedSqlException.IdentityInvalidType(columnName.Value);
+            identity = spec.Resolve(resolvedType, columnName.Value, identityNotForReplication);
         }
 
         if (isRowGuidCol)
@@ -1483,6 +1506,8 @@ partial class Simulation
                 definition: defaultDefinition,
                 createDate: context.Batch.CurrentStatement.UtcNow);
         }
+        if (withValues)
+            withValuesColumns!.Add(heapColumns.Count);
         heapColumns.Add(newColumn);
         explicitNull.Add(nullable == true);
     }
@@ -1682,30 +1707,17 @@ partial class Simulation
     /// (a nullability keyword, comma, or the column-list's closing paren).
     /// Bare <c>IDENTITY</c> is shorthand for <c>IDENTITY(1, 1)</c>.
     /// </summary>
-    private static IdentityState ParseIdentitySpec(ParserContext context, string columnName)
+    private static IdentitySpec ParseIdentitySpec(ParserContext context)
     {
-        long seed = 1;
-        long increment = 1;
-        var afterIdentity = context.GetNextRequired();
-        if (afterIdentity is Operator { Character: '(' })
-        {
-            context.MoveNextRequired();
-            seed = EvaluateLiteralBigInt(Expression.Parse(context), context.Batch);
-            if (context.Token is not Operator { Character: ',' })
-                throw SimulatedSqlException.SyntaxErrorNear(context);
-            context.MoveNextRequired();
-            increment = EvaluateLiteralBigInt(Expression.Parse(context), context.Batch);
-            if (context.Token is not Operator { Character: ')' })
-                throw SimulatedSqlException.SyntaxErrorNear(context);
-            context.MoveNextOptional();
-        }
-        return increment == 0
-            ? throw SimulatedSqlException.IdentityInvalidIncrement(columnName)
-            : new IdentityState(seed, increment);
+        if (context.GetNextRequired() is not Operator { Character: '(' })
+            return IdentitySpec.Default;
+        context.MoveNextRequired();
+        var spec = IdentitySpec.ReadArguments(context);
+        if (context.Token is not Operator { Character: ')' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        context.MoveNextOptional();
+        return spec;
     }
-
-    private static long EvaluateLiteralBigInt(Expression expression, BatchContext batch) =>
-        expression.Run(new RuntimeContext(name => throw SimulatedSqlException.InvalidColumnName(name), batch)).CoerceTo(SqlType.BigInt).AsInt64;
 
 
     /// <summary>

@@ -354,4 +354,90 @@ public sealed class SelectIntoTests
         using var other = sim.CreateOpenConnection();
         AreEqual(2, other.CreateCommand("select count(*) from ##g").ExecuteScalar());
     }
+
+    // ---- the IDENTITY() function (probed 2026-09-24 against SQL Server 2025) ----
+
+    [TestMethod]
+    public void IdentityFunction_NumbersRowsInTheQuerysOrder()
+        => AreEqual("5:2,7:1", new Simulation().ExecuteScalar("""
+            select identity(bigint, 5, 2) as i, x into t from (values (1), (2)) v(x) order by x desc;
+            select string_agg(concat(i, ':', x), ',') within group (order by i) from t
+            """));
+
+    [TestMethod]
+    public void IdentityFunction_MakesARealIdentityColumn()
+        => AreEqual("q|0|1|int|10|3|5", new Simulation().ExecuteScalar("""
+            select identity(int, 3, 1) 'q' into t from (values (1), (2)) v(x);
+            insert t default values;
+            select concat(c.name, '|', c.is_nullable, '|', c.is_identity, '|', type_name(c.system_type_id), '|', c.precision, '|',
+                          ic.seed_value, '|', ident_current('t'))
+            from sys.columns c join sys.identity_columns ic on ic.object_id = c.object_id and ic.column_id = c.column_id
+            where c.object_id = object_id('t')
+            """));
+
+    [TestMethod]
+    [DataRow("select identity(int) as i into t", "1")]
+    [DataRow("select i = identity(int, -1, -1) into t from (values (1), (2)) v(x)", "-2")]
+    [DataRow("select identity(numeric(5, 0), 1, 1) as i into t from (values (1), (2)) v(x)", "2")]
+    [DataRow("select identity(int, - 1, 1) as i into #t; select * into t from #t", "-1")]
+    public void IdentityFunction_Forms(string sql, string expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar($"{sql}; select cast(min(i) as varchar) from t where abs(i) = (select max(abs(i)) from t)"));
+
+    [TestMethod]
+    public void IdentityFunction_EmptyResult_LeavesIdentCurrentAtTheSeed()
+        => AreEqual(7m, new Simulation().ExecuteScalar("select identity(int, 7, 1) i into t from (values (1)) v(x) where 1 = 0; select ident_current('t')"));
+
+    [TestMethod]
+    [DataRow("select identity(int, 1, 1) as i", 177)]
+    [DataRow("create table d (i int); insert d select identity(int, 1, 1) as i", 177)]
+    [DataRow("select identity(int, 1, 1) as i, x into t from (values (1)) v(x) union all select 5, 6", 1057)]
+    [DataRow("select identity(int, 1, 1) i, identity(int, 1, 1) j into t", 8109)]
+    [DataRow("select identity(int, 1, 1) + 1 as x into t", 102)]
+    [DataRow("select identity(int, 1, 1), 2 as x into t", 102)]
+    [DataRow("select identity(int, 1, 1) into t", 156)]
+    [DataRow("select identity(int, 1) as i into t", 102)]
+    [DataRow("select identity(int, 1e0, 1) as i into t", 102)]
+    [DataRow("declare @s int = 1; select identity(int, @s, 1) as i into t", 102)]
+    [DataRow("select * into t from (select identity(int, 1, 1) as i) d", 156)]
+    [DataRow("select x into t from (values (1)) v(x) where identity(int, 1, 1) > 0", 156)]
+    [DataRow("select identity(tinyint, -1, 1) as i into t", 2752)]
+    [DataRow("select identity(int, 1.5, 1) as i into t", 2752)]
+    [DataRow("select identity(int, 1, 0) as i into t", 2753)]
+    [DataRow("select identity(int, 1, 2.0) as i into t", 2753)]
+    public void IdentityFunction_Refused(string sql, int number)
+        => new Simulation().AssertSqlError(sql, number);
+
+    [TestMethod]
+    [DataRow("varchar(10)", "varchar")]
+    [DataRow("decimal(10, 2)", "decimal")]
+    public void IdentityFunction_OtherType_RaisesMsg2749NamingIt(string type, string name)
+        => new Simulation().AssertSqlError($"select identity({type}, 1, 1) as i into t", 2749,
+            $"Identity column '{name}' must be of data type int, bigint, smallint, tinyint, or decimal or numeric with a scale of 0, unencrypted, and constrained to be nonnullable.");
+
+    [TestMethod]
+    public void IdentityFunction_BesideAnInheritedIdentity_RaisesMsg8108()
+        => new Simulation().AssertSqlError("""
+            create table s (id int identity, v int);
+            select identity(int, 1, 1) as i, id into t from s
+            """, 8108, "Cannot add identity column, using the SELECT INTO statement, to table 't', which already has column 'id' that inherits the identity property.");
+
+    [TestMethod]
+    public void IdentityFunction_TinyIntOverflow_RaisesMsg8115()
+        => new Simulation().AssertSqlError(
+            "select identity(tinyint, 250, 5) as i into t from (values (1), (2), (3)) v(x)",
+            8115, "Arithmetic overflow error converting IDENTITY to data type tinyint.");
+
+    [TestMethod]
+    public void IdentityFunction_RerunInALoop_NumbersEachTableFromTheSeed()
+        => AreEqual(4, new Simulation().ExecuteScalar("""
+            declare @n int = 0, @total int = 0;
+            while @n < 2
+            begin
+                select identity(int, 1, 1) as i into #t from (values (1), (2)) v(x);
+                set @total += (select max(i) from #t);
+                drop table #t;
+                set @n += 1;
+            end
+            select @total
+            """));
 }

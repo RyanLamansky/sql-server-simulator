@@ -229,6 +229,19 @@ internal readonly partial struct SqlValue
             return FromRowVersion(System.Buffers.Binary.BinaryPrimitives.ReadInt64BigEndian(this.CoerceTo(SqlType.GetBinary(8)).AsBytes));
         }
 
+        // decimal → binary: the numeric byte form DecodeNumericFromBytes reads
+        // back. binary(N) left-pads it with zeros like an integer, but a
+        // narrower target keeps its leading bytes (probe-confirmed against SQL
+        // Server 2025, 2026-09-24: CAST(CAST(1.5 AS decimal(5, 1)) AS
+        // binary(2)) is 0x0501).
+        if (this.Type is DecimalSqlType decimalSource && target is BinarySqlType or VarbinarySqlType)
+        {
+            var numeric = EncodeNumericToBytes(this.AsDecimal38, decimalSource);
+            return target is BinarySqlType decimalToBinary
+                ? FromBinary(decimalToBinary, numeric.Length < decimalToBinary.length ? RightAligned(numeric, decimalToBinary.length) : numeric)
+                : FromVarbinary(numeric);
+        }
+
         // datetime / smalldatetime → binary: the stored day / tick form, big
         // endian and right-aligned like an integer's — binary(N) pads or cuts
         // on the left, varbinary(N) only cuts (probe-confirmed against SQL
@@ -1068,6 +1081,7 @@ internal readonly partial struct SqlValue
         // Probe-confirmed 2026-07-14: <c>cast(0x01 as money) = 0.0001</c>,
         // <c>cast(0x01 as smallmoney) = 0.0001</c>.
         VarbinarySqlType or BinarySqlType => FromMoney(target, VarbinaryToMoneyUnits(this.AsBytes, target)),
+        DateTimeSqlType or SmallDateTimeSqlType => this.MoneyFromNonDecimalSource(target, this.LegacyDayCount(MoneySqlType.Scale)),
         _ => throw SimulatedSqlException.ExplicitConversionNotAllowed(this.Type, target),
     };
 
@@ -1160,6 +1174,9 @@ internal readonly partial struct SqlValue
     /// <item><c>'  $5.95  '</c> (surrounding whitespace) valid</item>
     /// <item><c>'$5,000.00'</c> (thousands comma) valid</item>
     /// <item><c>'5.5e2'</c> rejected</item>
+    /// <item>an empty body — <c>''</c>, whitespace, or a sign, symbol or
+    /// commas alone (<c>'$'</c>, <c>'-'</c>, <c>','</c>) — is 0 (probed
+    /// 2026-09-24)</item>
     /// </list>
     /// </summary>
     private static decimal ParseMoneyString(string source)
@@ -1193,12 +1210,10 @@ internal readonly partial struct SqlValue
                 buffer[written++] = c;
         }
         var body = buffer[..written];
-        // SQL Server's money parser does NOT accept scientific notation,
-        // and empty/whitespace-only bodies raise the money-specific Msg 235.
-        // Both conditions are folded into the single TryParse short-circuit
-        // so the analyzer's simplification rule stays satisfied.
-        return body.Length == 0
-            || body.IndexOfAny(['e', 'E']) >= 0
+        // SQL Server's money parser does NOT accept scientific notation.
+        if (body.Length == 0)
+            return 0;
+        return body.IndexOfAny(['e', 'E']) >= 0
             || !decimal.TryParse(
                 body,
                 System.Globalization.NumberStyles.AllowDecimalPoint | System.Globalization.NumberStyles.AllowLeadingWhite | System.Globalization.NumberStyles.AllowTrailingWhite,
@@ -1231,6 +1246,7 @@ internal readonly partial struct SqlValue
             _ when this.Type == SqlType.Float => this.AsDouble,
             _ when this.Type == SqlType.Real => this.AsSingle,
             _ when SqlType.IsMoneyCategory(this.Type) => (double)this.AsMoney,
+            DateTimeSqlType or SmallDateTimeSqlType => this.LegacyDayCountAsDouble(),
             _ => throw SimulatedSqlException.ExplicitConversionNotAllowed(this.Type, target),
         };
         return target == SqlType.Float ? FromDouble(d) : FromSingle((float)d);
@@ -1282,16 +1298,28 @@ internal readonly partial struct SqlValue
     /// rejects empty). <c>'inf'</c>/<c>'NaN'</c> are also rejected
     /// (verified Msg 8114 St 5 against SQL Server 2025).
     /// </summary>
-    private static double ParseStringToDouble(string source, SqlType sourceType) =>
-        source.Trim() is var trimmed && trimmed.Length == 0
-            ? 0.0
-            : double.TryParse(
-                trimmed,
-                System.Globalization.NumberStyles.Float | System.Globalization.NumberStyles.AllowLeadingSign,
-                System.Globalization.CultureInfo.InvariantCulture,
-                out var d) && !double.IsNaN(d) && !double.IsInfinity(d)
-                    ? d
-                    : throw SimulatedSqlException.StringConversionToNumberFailed(sourceType, "float");
+    private static double ParseStringToDouble(string source, SqlType sourceType)
+    {
+        // Only spaces surround the number: a tab is refused, as is an
+        // infinity or NaN symbol .NET would read.
+        var trimmed = source.Trim(' ');
+        if (trimmed.Length == 0)
+            return 0.0;
+        // A D marks the exponent as an E does (probed 2026-09-24 against SQL
+        // Server 2025: '1d2' and '-1D+1' read as 100 and -10).
+        if (trimmed.AsSpan().IndexOfAny('d', 'D') is >= 0 and var exponent)
+            trimmed = string.Concat(trimmed.AsSpan(0, exponent), "e", trimmed.AsSpan(exponent + 1));
+        if (!double.TryParse(
+            trimmed,
+            System.Globalization.NumberStyles.AllowLeadingSign | System.Globalization.NumberStyles.AllowDecimalPoint | System.Globalization.NumberStyles.AllowExponent,
+            System.Globalization.CultureInfo.InvariantCulture,
+            out var d) || double.IsNaN(d) || !trimmed.AsSpan().ContainsAnyInRange('0', '9'))
+        {
+            throw SimulatedSqlException.StringConversionToNumberFailed(sourceType, "float");
+        }
+        // A number past float's range is an overflow rather than unreadable.
+        return double.IsInfinity(d) ? throw SimulatedSqlException.ArithmeticOverflow("float") : d;
+    }
 
     /// <summary>
     /// A string or binary value converted to <c>xml</c>: parsed, so a
@@ -1380,8 +1408,50 @@ internal readonly partial struct SqlValue
         _ when this.Type == SqlType.Float => FromDecimal(target, FloatToDecimal38(this.AsDouble, target, SqlType.Float)),
         _ when this.Type == SqlType.Real => FromDecimal(target, FloatToDecimal38(this.AsSingle, target, SqlType.Real)),
         VarbinarySqlType or BinarySqlType or RowVersionSqlType => FromDecimal(target, RescaleOrOverflow(DecodeNumericFromBytes(this.AsBytes, this.Type), target, SqlType.Varbinary)),
+        DateTimeSqlType or SmallDateTimeSqlType => FromDecimal(target, RescaleOrOverflow(this.LegacyDayCount(target.scale), target, this.Type)),
         _ => throw SimulatedSqlException.ExplicitConversionNotAllowed(this.Type, target),
     };
+
+    /// <summary>
+    /// A legacy <c>datetime</c> / <c>smalldatetime</c> as the number it
+    /// converts to: days since 1900-01-01 with the time as the exact fraction
+    /// of a day — a datetime's 1/300-second granules over 25,920,000, a
+    /// smalldatetime's minutes over 1,440 — rounded half away from zero at
+    /// <paramref name="scale"/>. <c>2023-12-31 11:59:59.997</c> is
+    /// <c>45289.49999996141975308642</c> at scale 20, and
+    /// <c>1899-12-31 18:00</c> is <c>-0.25</c> (probed 2026-09-24 against SQL
+    /// Server 2025).
+    /// </summary>
+    private Decimal38 LegacyDayCount(int scale)
+    {
+        var (numerator, unitsPerDay) = this.LegacyDayUnits();
+        var scaled = numerator * System.Numerics.BigInteger.Pow(10, scale);
+        var quotient = System.Numerics.BigInteger.DivRem(System.Numerics.BigInteger.Abs(scaled), unitsPerDay, out var remainder);
+        if (remainder * 2 >= unitsPerDay)
+            quotient++;
+        return quotient >= System.Numerics.BigInteger.Pow(10, Decimal38.MaxPrecision)
+            ? throw SimulatedSqlException.ArithmeticOverflow("numeric")
+            : Decimal38.FromParts((UInt128)quotient, scaled.Sign < 0, scale);
+    }
+
+    /// <summary>The <see cref="LegacyDayCount"/> value as <c>float</c> reads it.</summary>
+    private double LegacyDayCountAsDouble()
+    {
+        var (numerator, unitsPerDay) = this.LegacyDayUnits();
+        return (double)numerator / unitsPerDay;
+    }
+
+    /// <summary>A legacy date-time as whole time units since 1900-01-01, and the units in a day.</summary>
+    private (System.Numerics.BigInteger Units, long UnitsPerDay) LegacyDayUnits()
+    {
+        if (this.Type is SmallDateTimeSqlType)
+        {
+            var small = this.AsSmallDateTime;
+            return (((System.Numerics.BigInteger)(small.Date - SmallDateTimeSqlType.BaseDate).Days * 1440) + (long)small.TimeOfDay.TotalMinutes, 1440);
+        }
+        var value = this.AsDateTime;
+        return (((System.Numerics.BigInteger)(value.Date - DateTimeSqlType.BaseDate).Days * DateTimeSqlType.TicksPerDay) + DateTimeSqlType.UnitsFromTicks(value.TimeOfDay.Ticks), DateTimeSqlType.TicksPerDay);
+    }
 
     /// <summary>
     /// <c>float</c> / <c>real</c> → <c>decimal</c>, reading the operand's
@@ -1642,7 +1712,8 @@ internal readonly partial struct SqlValue
     /// <c>CAST(&lt;decimal&gt; AS varbinary)</c> writes: precision, scale, a
     /// reserved byte, a sign byte (zero for negative), then the magnitude
     /// little-endian. Anything else — too short, a precision outside 1–38, a
-    /// scale past the precision, a magnitude wider than the precision — is
+    /// scale past the precision, a magnitude wider than the precision, a
+    /// negative zero (probed 2026-09-24) — is
     /// real's Msg 8114, spelled <c>varbinary</c> for either binary source and
     /// <c>timestamp</c> for a rowversion (probe-confirmed against SQL Server
     /// 2025, 2026-09-23).
@@ -1659,10 +1730,34 @@ internal readonly partial struct SqlValue
             magnitude = (magnitude << 8) | bytes[i];
         }
 
+        fits = fits && (magnitude != 0 || bytes[3] != 0);
         var value = fits ? Decimal38.FromParts(magnitude, bytes[3] == 0, scale) : default;
         return fits && value.SignificantDigits() <= precision
             ? value
             : throw SimulatedSqlException.ConvertingDataTypeError(source is RowVersionSqlType ? "timestamp" : "varbinary", "numeric");
+    }
+
+    /// <summary>
+    /// The inverse of <see cref="DecodeNumericFromBytes"/>: the declared
+    /// precision and scale, a zero byte, the sign (1 for zero or positive),
+    /// then the magnitude little-endian in as few four-byte words as hold it
+    /// — <c>CAST(CAST(1.5 AS decimal(5, 1)) AS varbinary)</c> is
+    /// <c>0x050100010F000000</c> (probe-confirmed against SQL Server 2025,
+    /// 2026-09-24).
+    /// </summary>
+    private static byte[] EncodeNumericToBytes(in Decimal38 value, DecimalSqlType type)
+    {
+        var magnitude = value.Magnitude;
+        var words = 1;
+        while (words < 4 && magnitude >> (32 * words) != 0)
+            words++;
+        var bytes = new byte[4 + (words * 4)];
+        bytes[0] = type.precision;
+        bytes[1] = type.scale;
+        bytes[3] = value.IsNegative ? (byte)0 : (byte)1;
+        for (var i = 0; i < words * 4; i++)
+            bytes[4 + i] = (byte)(magnitude >> (8 * i));
+        return bytes;
     }
 
     /// <summary>

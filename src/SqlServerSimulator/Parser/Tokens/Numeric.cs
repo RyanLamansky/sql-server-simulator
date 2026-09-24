@@ -13,8 +13,7 @@ namespace SqlServerSimulator.Parser.Tokens;
 /// <c>s = digits-after-decimal</c> (matching SQL Server's literal-type
 /// inference, verified against SQL Server 2025: <c>100.5 → decimal(4, 1)</c>,
 /// <c>0.5 → decimal(1, 1)</c>). Scientific-notation literals (e.g. <c>1e2</c>)
-/// produce a <c>float</c> in SQL Server, which the simulator hasn't modeled
-/// yet — those raise <see cref="NotSupportedException"/> for now.
+/// are <c>float</c>.
 /// </summary>
 internal sealed class Numeric : Token
 {
@@ -43,7 +42,11 @@ internal sealed class Numeric : Token
         var hasExponent = number.IndexOfAny(['e', 'E']) >= 0;
         if (hasExponent)
         {
-            this.Value = SqlValue.FromDouble(double.Parse(number, NumberStyles.Float, CultureInfo.InvariantCulture));
+            // An exponent written without digits (1e, 1e+) is zero.
+            this.Value = SqlValue.FromDouble(double.Parse(
+                char.IsAsciiDigit(number[^1]) ? number : $"{number}0",
+                NumberStyles.Float,
+                CultureInfo.InvariantCulture));
             return;
         }
 

@@ -23,6 +23,9 @@
 - **OUTPUT** supported only when the leading identifier resolves to a real table name; OUTPUT + alias-form multi-source → `NotSupportedException` (EF doesn't combine those).
 - **Multi-column SET evaluates RHS against pre-update snapshot** — `UPDATE t SET a = 100, b = a + 1` over `(a=10, b=20)` → `(a=100, b=11)`.
   Scalar subquery RHS sees pre-update state.
+- **Variables in the SET list** (`@x = expr`, `@x += expr`, `@x = col = expr`) are assigned first for each row, in written order and against the pre-update row, and only then are the columns evaluated, reading the variables as just assigned — so `SET v = @x, @x = @x + 1` writes the incremented value, and `SET @x = v = v + @x` is the running total.
+  The compound form gives the column the variable's value; the variable must be declared the column's own type (Msg 425 otherwise), and neither `@x += col = …` nor `@x = @y = …` parses (probed 2026-09-24 against SQL Server 2025).
+  A variable-only entry carries no column name, and `ComputeUpdatedRow` runs the two passes.
 - Identity update → Msg 8102.
   Computed update → Msg 271.
   Rowversion update → Msg 272.
@@ -296,6 +299,10 @@ Probe-confirmed schema-inference rules:
   The simulator parses this, propagates `IntoTarget` from the left branch through `CombineSetOps`, and strips identity on the combined dest schema.
   A right branch carrying its own INTO → Msg 156 (`Incorrect syntax near the keyword 'into'.`).
 - **INTO without FROM** works (`SELECT 1 AS x INTO #t`) — synthesized-row path threads `IntoTarget` through.
+- **The `IDENTITY(type [, seed, increment])` function** makes the destination's identity column (`Parser/Expressions/IdentityFunction.cs`).
+  Real takes it only as a whole select-list item of a statement-level query, with an alias (`AS i`, a bare alias or `i = IDENTITY(…)`); anywhere else the keyword is a syntax error, and a query without `INTO` is Msg 177 — an `INSERT … SELECT` source included.
+  The projection carries a typed NULL, which the copy replaces with the column's next value in the rows' order, so `ORDER BY` numbers them.
+  Seed and increment follow a column declaration's rules (`Parser/IdentitySpec.cs`), the type error is Msg 2749 at state 1 naming the type, a second call is Msg 8109, a column inheriting identity beside it Msg 8108, and a set operator Msg 1057 (probed 2026-09-24 against SQL Server 2025).
 - **Quirk**: CTE-wrapped single-heap source drops identity and nullability — the simulator's CTE bindings synthesize `HeapColumn` entries with `nullable: true` and no identity, so the analyzer can't peer through.
   Real SQL Server propagates both.
   Fix would require propagating column metadata through CTE bindings; future bundle.

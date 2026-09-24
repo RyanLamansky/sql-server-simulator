@@ -40,7 +40,7 @@ partial class Simulation
         ParserContext context,
         MultiPartName targetName,
         View view,
-        List<(string ColumnName, Expression Expr)> rawAssignments,
+        List<(string? ColumnName, Expression Expr)> rawAssignments,
         Selection.DmlTopLimit? top)
     {
         var batch = context.Batch;
@@ -70,7 +70,7 @@ partial class Simulation
         {
             context.MoveNextRequired();
             if (context.Token is ReservedKeyword { Keyword: Keyword.Current })
-                positionedCursor = ParseWhereCurrentOf(context, table, [.. rawAssignments.Select(a => a.ColumnName)], view);
+                positionedCursor = ParseWhereCurrentOf(context, table, [.. SetColumnNames(rawAssignments)], view);
             else
                 where = Selection.ParseAndBindPredicate(context, typeResolver);
         }
@@ -144,7 +144,7 @@ partial class Simulation
 
         ApplyDmlTopCap(top, affected, batch);
 
-        return CommitUpdate(context, table, affected, output: null, [.. assignments.Select(a => a.Ordinal)]);
+        return CommitUpdate(context, table, affected, output: null, [.. SetColumnOrdinals(assignments)]);
     }
 
     /// <summary>
@@ -159,13 +159,18 @@ partial class Simulation
     private static (int TargetIndex, List<(int Ordinal, Expression Expr)> Assignments) ResolveJoinViewSetTargets(
         BatchContext batch,
         JoinViewChain chain,
-        List<(string ColumnName, Expression Expr)> rawAssignments)
+        List<(string? ColumnName, Expression Expr)> rawAssignments)
     {
         var assignments = new List<(int Ordinal, Expression Expr)>(rawAssignments.Count);
         var targetIndex = -1;
 
         foreach (var (columnName, expr) in rawAssignments)
         {
+            if (columnName is null)
+            {
+                assignments.Add((-1, expr));
+                continue;
+            }
             var (sourceIndex, columnIndex) = DescendToBaseColumn(batch, chain, columnName);
             if (targetIndex >= 0 && targetIndex != sourceIndex)
                 throw SimulatedSqlException.ViewUpdateAffectsMultipleTables(chain.TargetName);

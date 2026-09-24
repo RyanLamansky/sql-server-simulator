@@ -19,7 +19,11 @@ partial class Selection
     /// COLMETADATA <c>fNullable</c> flag agree cell for cell.</item>
     /// </list>
     /// Validates the destination shape: every projection column must have a
-    /// name (Msg 1038), no duplicate names allowed (Msg 2705).
+    /// name (Msg 1038), no duplicate names allowed (Msg 2705). An
+    /// <see cref="IdentityFunction"/> item is the destination's identity
+    /// column, which is Msg 8109 for a second one and Msg 8108 beside a column
+    /// inheriting identity from its source (probed 2026-09-24 against SQL
+    /// Server 2025).
     /// </summary>
     /// <param name="targetName">Destination table name, for error messages.</param>
     /// <param name="projections">Projection expressions (already named, with stars expanded).</param>
@@ -60,6 +64,8 @@ partial class Selection
         }
 
         var nullabilityContext = new NullabilityContext(parseBatch, ResolveColumnNullable, resolveColumnType);
+        string? inheritedIdentity = null;
+        var identityFunctions = 0;
 
         for (var i = 0; i < projections.Count; i++)
         {
@@ -71,6 +77,12 @@ partial class Selection
 
             var nullable = projections[i].ResultIsNullable(nullabilityContext);
             IdentityState? identity = null;
+            if (projections[i] is NamedExpression { Inner: IdentityFunction { Identity: { } declared } })
+            {
+                if (++identityFunctions > 1)
+                    throw SimulatedSqlException.MultipleIdentityFunctions(targetName.Leaf);
+                identity = new IdentityState(declared.Seed, declared.Increment);
+            }
             // Direct column ref → maybe propagate identity. NamedExpression
             // wraps the parser's renaming; the underlying Reference is what
             // we care about for identity rules.
@@ -82,6 +94,7 @@ partial class Selection
                     // Each dest gets its own IdentityState starting fresh; the
                     // configured seed/increment match the source's.
                     identity = new IdentityState(sourceIdentity.Seed, sourceIdentity.Increment);
+                    inheritedIdentity ??= colName;
                 }
             }
 
@@ -93,7 +106,9 @@ partial class Selection
                 identity: identity);
         }
 
-        return destColumns;
+        return identityFunctions > 0 && inheritedIdentity is not null
+            ? throw SimulatedSqlException.IdentityFunctionWithInheritedIdentity(targetName.Leaf, inheritedIdentity)
+            : destColumns;
     }
 
     /// <summary>

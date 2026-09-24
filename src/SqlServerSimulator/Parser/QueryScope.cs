@@ -79,6 +79,14 @@ internal readonly struct QueryScope(QueryPosition position, Func<MultiPartName, 
     public bool NamesOutputCollation => this.Position is QueryPosition.Statement;
 
     /// <summary>
+    /// Whether the select list may hold <c>SELECT … INTO</c>'s
+    /// <c>IDENTITY()</c> function: a statement's own query and an
+    /// <c>INSERT</c> source, where a missing <c>INTO</c> is Msg 177. In any
+    /// other query the <c>IDENTITY</c> keyword is Msg 156 (probe-confirmed).
+    /// </summary>
+    public bool AcceptsIdentityFunction => this.Position is QueryPosition.Statement or QueryPosition.InsertSource or QueryPosition.ParenthesizedInsertSource;
+
+    /// <summary>
     /// Whether this query's rows are written to an <c>INSERT</c> target, which
     /// supplies the collation its string columns convert to.
     /// </summary>

@@ -215,17 +215,7 @@ partial class Simulation
 
             if (identityColumn is not null && !keepIdentity)
             {
-                long generated;
-                try
-                {
-                    generated = identityColumn.Identity!.GenerateNext();
-                }
-                catch (OverflowException)
-                {
-                    throw SimulatedSqlException.IdentityOverflow(identityColumn.Type.ToString()!);
-                }
-
-                rowValues[identityOrdinal] = CoerceForIdentity(generated, identityColumn);
+                rowValues[identityOrdinal] = CoerceForIdentity(GenerateIdentity(identityColumn), identityColumn);
             }
 
             for (var i = 0; i < table.Columns.Length; i++)

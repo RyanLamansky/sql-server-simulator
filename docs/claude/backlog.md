@@ -274,18 +274,19 @@ Already listed elsewhere here and not repeated: `DBCC CHECKIDENT` and parenthesi
 
 **Real accepts, the simulator refuses**:
 
-- Numeric literals `1e` and `1e+` (both 1.0 `float`) and `1.e2`; `.e1` is a column reference on real (Msg 4104), not a syntax error.
-- `a LEFT JOIN b JOIN c ON … ON …` — nested join-ON precedence.
-- `LAST_VALUE(x) IGNORE NULLS OVER (…)`.
-- `SELECT IDENTITY(int, 1, 1) AS id, … INTO`.
-- `ALTER TABLE … ADD c int DEFAULT 8 WITH VALUES`.
-- An `IDENTITY` column of `decimal(p, 0)` (Msg 2749 raised here).
+- `.e1` is a column reference on real (Msg 4104), a syntax error here.
 - Numbered procedures (`CREATE PROC p;2`, `EXEC p;2`).
-- `UPDATE t SET @x = a = a + @x`.
 - `sp_refreshview` (Msg 2812 here) — a drifted `SELECT *` view keeps its CREATE-time names until altered.
-- `RAISERROR` `%*.*s` width / precision (Msg 2787 here); state −1 should report 1 and 300 should report 44 (real reduces modulo 256).
-- `RAISERROR … WITH LOG` as sysadmin (Msg 2778 raised here).
-- CAST sources: `''` → `money` 0; `'1e2'` / `'1d2'` → `float`; `datetime` → `float` / `int` / `decimal`; `decimal` → `varbinary`.
+- A `decimal(p, 0)` identity seed or increment past `bigint`'s range (`NotSupportedException` here; the identity state is a `long`).
+- `RAISERROR` at severity 20 and up `WITH LOG`, which ends the connection on real (`NotSupportedException` here).
+
+**Smaller divergences found alongside** (probed 2026-09-24):
+
+- `LAG` over an operand typed only by `NULL` (`VALUES (1, null)`) answers NULL here; real raises Msg 8117 ("Operand data type NULL is invalid for lag operator").
+- `SQL_VARIANT_PROPERTY(<decimal column>, 'BaseType')` is `numeric` here where real keeps the declared spelling (`decimal`).
+- An identity overflow's Msg 8115 is followed by the class-0 Msg 3606 ("Arithmetic overflow occurred.") on real.
+- `UPDATE … SET @x += v = 1` is Msg 102 near `'='` here, near `'+='` on real; `IDENTITY(dbo.foo, 1, 1)` is Msg 243 here, Msg 102 near `'.'` on real.
+- `SUSER_SNAME()` is `dbo` for the in-process default session and `IS_SRVROLEMEMBER('sysadmin')` 0, where a real `sa` connection reports `sa` and 1.
 
 **Same error, different number, state or class**:
 `TRANSLATE` length mismatch 9828 (here 9819); `ROW_NUMBER() OVER ()` 4112 (here 102); `decimal(39, 0)` 2717 (here 1001); `decimal(2, 3)` 192 (here 1002); `float(54)` accepted on real (here 1001); `TOP (<NULL variable>)` 1014 (here 1060); `TOP '1'` 102 (here 1060); `xml = xml` 305 (here 402); `$action` in an INSERT's OUTPUT 207 (here 4104); a bare `VALUES (1)` statement 156 (here 102); `DELETE … ORDER BY` 156 (here 102); a one-part `DROP INDEX ix` 159 (here 102); `@t.a` 137 class 16 state 1 (here class 15 state 2); states differing on 506, 235, 9810, 9812, 8148, 2714 for a temp table, and 195.

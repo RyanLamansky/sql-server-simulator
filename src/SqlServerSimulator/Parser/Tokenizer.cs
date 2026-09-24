@@ -144,11 +144,13 @@ static class Tokenizer
     /// Parses a SQL numeric literal — integer (<c>123</c>), decimal-with-
     /// fractional-part (<c>123.456</c>), leading-dot fractional (<c>.5</c> =
     /// <c>0.5</c>), or scientific (<c>1.5e2</c>, <c>1E+10</c>). The starting
-    /// digit — or leading <c>.</c> — is at <paramref name="index"/>; scanning
-    /// advances through fractional and exponent parts only when the next
-    /// character actually fits the grammar, so a digit followed by a
-    /// non-numeric <c>.</c> (e.g. <c>1.alias</c>) leaves the dot for the
-    /// outer expression parser. The token's typed value is computed inside
+    /// digit — or leading <c>.</c> — is at <paramref name="index"/>. The scan
+    /// is as greedy as real's lexer (probed 2026-09-24 against SQL Server
+    /// 2025): after the digits it takes a <c>.</c> whatever follows, then any
+    /// digits, then an <c>e</c> / <c>E</c> with an optional sign and any
+    /// digits — so <c>1.</c> is <c>numeric</c>, <c>1e</c> and <c>1e+</c> are
+    /// the <c>float</c> 1, and <c>1.x</c> / <c>1ex</c> are a literal and an
+    /// alias. The token's typed value is computed inside
     /// <see cref="Numeric"/>'s constructor.
     /// </summary>
     private static Numeric ParseNumeric(string command, ref int index)
@@ -171,9 +173,7 @@ static class Tokenizer
             {
             }
 
-            // Fractional part: '.' followed by at least one digit. A bare '.'
-            // belongs to the surrounding expression (e.g. dotted-name reference).
-            if (index + 1 < command.Length && command[index] == '.' && command[index + 1] is >= '0' and <= '9')
+            if (index < command.Length && command[index] == '.')
             {
                 index++;
                 while (index < command.Length && command[index] is >= '0' and <= '9')
@@ -181,18 +181,13 @@ static class Tokenizer
             }
         }
 
-        // Exponent: 'e'/'E' followed by optional sign and at least one digit.
-        if (index < command.Length && (command[index] == 'e' || command[index] == 'E'))
+        if (index < command.Length && command[index] is 'e' or 'E')
         {
-            var afterExp = index + 1;
-            if (afterExp < command.Length && (command[afterExp] == '+' || command[afterExp] == '-'))
-                afterExp++;
-            if (afterExp < command.Length && command[afterExp] is >= '0' and <= '9')
-            {
-                index = afterExp;
-                while (index < command.Length && command[index] is >= '0' and <= '9')
-                    index++;
-            }
+            index++;
+            if (index < command.Length && command[index] is '+' or '-')
+                index++;
+            while (index < command.Length && command[index] is >= '0' and <= '9')
+                index++;
         }
 
         return new(command, start, index - start);

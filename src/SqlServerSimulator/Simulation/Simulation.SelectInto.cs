@@ -106,18 +106,31 @@ partial class Simulation
         // a page image only for this loop to decode it straight back — the
         // round trip landed on exactly the values the projection had computed.
         // Identity columns track source values via ObserveExplicit so the
-        // high-water mark survives the copy.
+        // high-water mark survives the copy. The one NULL an identity column
+        // is handed is IDENTITY()'s placeholder, which takes the next value in
+        // the rows' order — an inherited identity reads a NOT NULL column.
         var resultSet = selection.Execute(batch).WithRowCountLimit(batch.Connection.RowCountLimit);
         var rowCount = 0;
         var undoLog = batch.Connection.CurrentTransaction?.UndoLog;
         // One encoded-row buffer for the whole copy — Insert copies into the page.
         byte[]? encoded = null;
-        foreach (var sourceValues in resultSet.RowValues)
+        foreach (var row in resultSet.RowValues)
         {
+            var sourceValues = row;
             for (var i = 0; i < destColumns.Length; i++)
             {
-                if (destColumns[i].Identity is { } identity && !sourceValues[i].IsNull)
+                if (destColumns[i].Identity is not { } identity)
+                    continue;
+                if (sourceValues[i].IsNull)
+                {
+                    // The row may be one the plan baked, so the value goes in a copy.
+                    sourceValues = [.. sourceValues];
+                    sourceValues[i] = CoerceForIdentity(GenerateIdentity(destColumns[i]), destColumns[i]);
+                }
+                else
+                {
                     identity.ObserveExplicit(sourceValues[i].CoerceTo(SqlType.BigInt).AsInt64);
+                }
             }
             var length = RowEncoder.EncodeRowInto(destTable.StoredColumns, sourceValues, destTable.Heap, ref encoded);
             // Use the active undo log so a containing tx's ROLLBACK unwinds

@@ -143,6 +143,13 @@ internal sealed class WindowExpression : Expression
     /// </summary>
     public FrameSpec? Frame;
 
+    /// <summary>
+    /// <c>IGNORE NULLS</c>, which only the value pair and <c>LAG</c> /
+    /// <c>LEAD</c> take (<see cref="ReadNullTreatment"/>): the value pair then
+    /// answers the frame's first or last non-null value, and <c>LAG</c> /
+    /// <c>LEAD</c> step on past a null target until they reach a value.
+    /// </summary>
+    public readonly bool IgnoreNulls;
 
     private WindowExpression(
         WindowKind kind,
@@ -154,7 +161,8 @@ internal sealed class WindowExpression : Expression
         Expression? defaultArg = null,
         Expression? bucketCount = null,
         Expression? percentileArg = null,
-        FrameSpec? frame = null)
+        FrameSpec? frame = null,
+        bool ignoreNulls = false)
     {
         this.Kind = kind;
         this.PartitionBy = partitionBy;
@@ -166,6 +174,35 @@ internal sealed class WindowExpression : Expression
         this.BucketCount = bucketCount;
         this.PercentileArg = percentileArg;
         this.Frame = frame;
+        this.IgnoreNulls = ignoreNulls;
+    }
+
+    /// <summary>
+    /// Reads an optional <c>IGNORE NULLS</c> / <c>RESPECT NULLS</c> between a
+    /// window function's argument list and its <c>OVER</c>, the cursor on the
+    /// token after the closing <c>)</c> and left on the one after the clause;
+    /// returns whether it was <c>IGNORE NULLS</c>. Only the value pair and
+    /// <c>LAG</c> / <c>LEAD</c> take either, and any other function is Msg 16208
+    /// naming the one written (probed 2026-09-24 against SQL Server 2025).
+    /// </summary>
+    internal static bool ReadNullTreatment(ParserContext context, string functionLowerName, bool supported)
+    {
+        if (context.Token is not UnquotedString { Value: var word }
+            || !(word.Equals("IGNORE", StringComparison.OrdinalIgnoreCase) || word.Equals("RESPECT", StringComparison.OrdinalIgnoreCase)))
+        {
+            return false;
+        }
+        var checkpoint = context.SaveCheckpoint();
+        if (context.GetNextOptional() is not UnquotedString { Value: var nulls } || !nulls.Equals("NULLS", StringComparison.OrdinalIgnoreCase))
+        {
+            context.RestoreCheckpoint(checkpoint);
+            return false;
+        }
+        var ignore = word.Equals("IGNORE", StringComparison.OrdinalIgnoreCase);
+        if (!supported)
+            throw SimulatedSqlException.NullTreatmentNotSupported(functionLowerName, ignore ? "IGNORE NULLS" : "RESPECT NULLS");
+        context.MoveNextRequired();
+        return ignore;
     }
 
     private static WindowExpression Register(ParserContext context, WindowExpression expression)
@@ -322,7 +359,9 @@ internal sealed class WindowExpression : Expression
         var functionLowerName = LowerNameFor(kind);
         if (context.Token is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
-        if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Over })
+        context.MoveNextRequired();
+        _ = ReadNullTreatment(context, functionLowerName, supported: false);
+        if (context.Token is not ReservedKeyword { Keyword: Keyword.Over })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         if (TryParseWindowReference(context, functionLowerName) is { } reference)
             return RegisterNamedWindowReference(context, new WindowExpression(kind, [], [], aggregateInfo: null), reference);
@@ -356,7 +395,9 @@ internal sealed class WindowExpression : Expression
         var bucketCount = Expression.Parse(context);
         if (context.Token is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
-        if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Over })
+        context.MoveNextRequired();
+        _ = ReadNullTreatment(context, "ntile", supported: false);
+        if (context.Token is not ReservedKeyword { Keyword: Keyword.Over })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         if (TryParseWindowReference(context, "ntile") is { } reference)
             return RegisterNamedWindowReference(context, new WindowExpression(WindowKind.NTile, [], [], aggregateInfo: null, bucketCount: bucketCount), reference);
@@ -405,14 +446,16 @@ internal sealed class WindowExpression : Expression
         }
         if (context.Token is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
-        if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Over })
-            throw SimulatedSqlException.SyntaxErrorNear(context);
         var functionLowerName = LowerNameFor(kind);
+        context.MoveNextRequired();
+        var ignoreNulls = ReadNullTreatment(context, functionLowerName, supported: true);
+        if (context.Token is not ReservedKeyword { Keyword: Keyword.Over })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
         if (TryParseWindowReference(context, functionLowerName) is { } reference)
         {
             return RegisterNamedWindowReference(
                 context,
-                new WindowExpression(kind, [], [], aggregateInfo: null, operand: operand, offsetArg: offsetArg, defaultArg: defaultArg),
+                new WindowExpression(kind, [], [], aggregateInfo: null, operand: operand, offsetArg: offsetArg, defaultArg: defaultArg, ignoreNulls: ignoreNulls),
                 reference);
         }
 
@@ -427,7 +470,7 @@ internal sealed class WindowExpression : Expression
 
         return context.Token is not Operator { Character: ')' }
             ? throw SimulatedSqlException.SyntaxErrorNear(context)
-            : Register(context, new WindowExpression(kind, partitionBy, orderBy, aggregateInfo: null, operand: operand, offsetArg: offsetArg, defaultArg: defaultArg));
+            : Register(context, new WindowExpression(kind, partitionBy, orderBy, aggregateInfo: null, operand: operand, offsetArg: offsetArg, defaultArg: defaultArg, ignoreNulls: ignoreNulls));
     }
 
     /// <summary>
@@ -458,10 +501,12 @@ internal sealed class WindowExpression : Expression
         var operand = Expression.Parse(context);
         if (context.Token is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
-        if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Over })
-            throw SimulatedSqlException.SyntaxErrorNear(context);
+        context.MoveNextRequired();
+        var ignoreNulls = ReadNullTreatment(context, LowerNameFor(kind), supported: true);
+        if (context.Token is not ReservedKeyword { Keyword: Keyword.Over })
+            throw context.Token is ReservedKeyword notOver ? SimulatedSqlException.SyntaxErrorNearKeyword(notOver) : SimulatedSqlException.SyntaxErrorNear(context);
         if (TryParseWindowReference(context, frameRejectingFunction: null) is { } reference)
-            return RegisterNamedWindowReference(context, new WindowExpression(kind, [], [], aggregateInfo: null, operand: operand), reference);
+            return RegisterNamedWindowReference(context, new WindowExpression(kind, [], [], aggregateInfo: null, operand: operand, ignoreNulls: ignoreNulls), reference);
 
         var partitionBy = ParseOptionalPartitionBy(context);
         if (context.Token is not ReservedKeyword { Keyword: Keyword.Order })
@@ -474,7 +519,7 @@ internal sealed class WindowExpression : Expression
 
         return context.Token is not Operator { Character: ')' }
             ? throw SimulatedSqlException.SyntaxErrorNear(context)
-            : Register(context, new WindowExpression(kind, partitionBy, orderBy, aggregateInfo: null, operand: operand, frame: frame));
+            : Register(context, new WindowExpression(kind, partitionBy, orderBy, aggregateInfo: null, operand: operand, frame: frame, ignoreNulls: ignoreNulls));
     }
 
     /// <summary>
@@ -526,7 +571,9 @@ internal sealed class WindowExpression : Expression
         var orderBy = new[] { OrderBySpec.FromExpression(sortExpr, descending) };
 
         // OVER is mandatory for the ordered-set analytic functions.
-        if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Over })
+        context.MoveNextRequired();
+        _ = ReadNullTreatment(context, functionLowerName, supported: false);
+        if (context.Token is not ReservedKeyword { Keyword: Keyword.Over })
             throw SimulatedSqlException.FunctionMustHaveOverClause(functionLowerName);
         if (TryParseWindowReference(context, functionLowerName) is { } reference)
         {

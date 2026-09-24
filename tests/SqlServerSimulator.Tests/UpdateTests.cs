@@ -472,4 +472,41 @@ public sealed class UpdateTests
         _ = sim.ExecuteNonQuery("update au set alias = (select au.name)");
         AreEqual("James Smith", (string)sim.ExecuteScalar("select alias from au")!);
     }
+
+    // ---- variables in the SET list (probed 2026-09-24 against SQL Server 2025) ----
+
+    private const string VariableSeed = "create table u (id int, v int); insert u values (1, 10), (2, 20);";
+
+    private static string UpdatedRows(string statement) =>
+        (string)new Simulation().ExecuteScalar(
+            $"{VariableSeed} {statement}; select concat(@x, ':', string_agg(concat(id, '/', v), ',') within group (order by id)) from u")!;
+
+    [TestMethod]
+    [DataRow("declare @x int = 0; update u set @x = v = v + @x", "30:1/10,2/30")]
+    [DataRow("declare @x int = 0; update u set @x = v = 5, id = @x", "5:5/5,5/5")]
+    [DataRow("declare @x int = 1; update u set @x = @x + 1, v = @x", "3:1/2,2/3")]
+    [DataRow("declare @x int = 1; update u set v = @x, @x = @x + 1", "3:1/2,2/3")]
+    [DataRow("declare @x int = 0; update u set v = 100, @x = v", "20:1/100,2/100")]
+    [DataRow("declare @x int = 0; update u set id = @x, @x = v = id + 50", "52:51/51,52/52")]
+    [DataRow("declare @x int; update u set @x = v += 1", "21:1/11,2/21")]
+    [DataRow("declare @x int = 0; update u set @x += v", "30:1/10,2/20")]
+    [DataRow("declare @x int = 0; update u set @x = u.v = 3", "3:1/3,2/3")]
+    [DataRow("declare @x int = 0; update u set @x = v = 3 where 1 = 0", "0:1/10,2/20")]
+    public void VariablesAssignFirst_ThenColumnsReadThem(string statement, string expected)
+        => AreEqual(expected, UpdatedRows(statement));
+
+    [TestMethod]
+    public void VariableOnly_CountsTheRows()
+        => AreEqual("2|2", new Simulation().ExecuteScalar($"{VariableSeed} declare @x int; update u set @x = id; select concat(@x, '|', @@rowcount)"));
+
+    [TestMethod]
+    public void VariableOfAnotherType_RaisesMsg425()
+        => new Simulation().AssertSqlError($"{VariableSeed} declare @x bigint = 0; update u set @x = v = 1", 425,
+            "Data type bigint of receiving variable is not equal to the data type int of column 'v'.");
+
+    [TestMethod]
+    [DataRow("declare @x int; update u set @x += v = 1")]
+    [DataRow("declare @x int, @y int; update u set @x = @y = v")]
+    public void ChainedForms_RaiseMsg102(string statement)
+        => new Simulation().AssertSqlError($"{VariableSeed} {statement}", 102);
 }

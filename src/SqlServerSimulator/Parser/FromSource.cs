@@ -382,4 +382,18 @@ internal sealed class JoinSpec(JoinKind kind, BooleanExpression? onPredicate)
     /// group needs no marker because a left-deep spine already groups the left.
     /// </summary>
     public int GroupCount = 1;
+
+    /// <summary>
+    /// The flat <c>sources[]</c> range, <c>[ScopeStart, ScopeEnd)</c>, this
+    /// join's <see cref="OnPredicate"/> binds against: its own chain's sources
+    /// up to and including its right operand. An earlier comma-separated item,
+    /// an enclosing chain's sources when the join sits in a group, and a source
+    /// written after it are all out of reach (Msg 4104, probed 2026-09-24
+    /// against SQL Server 2025). <see cref="ScopeEnd"/> −1 sees every source,
+    /// for a join built other than by parsing an ON.
+    /// </summary>
+    public int ScopeStart;
+
+    /// <inheritdoc cref="ScopeStart"/>
+    public int ScopeEnd = -1;
 }
