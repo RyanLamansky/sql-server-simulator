@@ -13,7 +13,7 @@ The two are independent: a plan-cache hit never consults the memo (it doesn't pa
 
 ## Cache key
 
-`(string CommandText, string DatabaseName, string ParameterSignature, bool QuotedIdentifiers)` keyed by command text, the connection's current database, a parameter-type signature folded from each `SimulatedDbCommand.Parameters` entry's name + `DbType` + `Size` + `Precision` + `Scale` (declaration order), and the session's effective `QUOTED_IDENTIFIER` setting.
+`(string CommandText, string DatabaseName, string ParameterSignature, bool QuotedIdentifiers, DateOrder DateFormat)` keyed by command text, the connection's current database, a parameter-type signature folded from each `SimulatedDbCommand.Parameters` entry's name + `DbType` + `Size` + `Precision` + `Scale` (declaration order), the session's effective `QUOTED_IDENTIFIER` setting, and its `SET DATEFORMAT` order, which decides how a date string read while parsing reads.
 Any of those can affect parse-time type inference, so a mismatch demands a fresh parse.
 `QUOTED_IDENTIFIER` is in the key because it changes what the *same text* tokenizes to — `"x"` is a delimited identifier when on, a varchar literal when off — so a cached plan from one setting is wrong under the other.
 Backed by `ConcurrentDictionary` with the default ordinal-case-sensitive string comparer.

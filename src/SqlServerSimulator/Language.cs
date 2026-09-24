@@ -7,10 +7,9 @@ namespace SqlServerSimulator;
 /// </summary>
 /// <remarks>
 /// The 34 rows are a stock SQL Server 2025 instance's, captured verbatim
-/// (2026-08-08). <see cref="DateFirst"/> is the load-bearing column: a
-/// successful <c>SET LANGUAGE</c> carries it into the session's
-/// <c>@@DATEFIRST</c>. <see cref="DateFormat"/> is projected but drives
-/// nothing, since <c>SET DATEFORMAT</c> itself parses-and-discards.
+/// (2026-08-08). <see cref="DateFirst"/> and <see cref="DateFormat"/> are the
+/// load-bearing columns: a successful <c>SET LANGUAGE</c> carries them into
+/// the session's <c>@@DATEFIRST</c> and <c>SET DATEFORMAT</c> order.
 /// </remarks>
 internal sealed class Language(short langId, string name, string alias, string dateFormat, byte dateFirst, int lcid, short msgLangId)
 {

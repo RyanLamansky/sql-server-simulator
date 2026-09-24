@@ -268,7 +268,7 @@ Where an entry carries a second clause it is because that fact changes what you'
 - **Type promotion and arithmetic** — `Promote` / `PromoteForArithmetic`, `Storage/Decimal38`, decimal precision-scale, integer overflow and literal typing.
   `PromoteForArithmetic` is the single source of truth for both `GetSqlType` and the runtime; **they must agree**, because the row encoder rejects a type mismatch.
   Whether two types may unify, compare or meet in an operator — and which error real raises when not — is a probed per-class grid (`SqlType.PairRules.cs`), checked while compiling → [`arithmetic.md`](docs/claude/arithmetic.md).
-- **`Cast` / coercion** — CAST / CONVERT / TRY_* / PARSE, the per-style string→date input grammar, and the `float` / `real` → string style split.
+- **`Cast` / coercion** — CAST / CONVERT / TRY_* / PARSE, the string→date grammar with `SET DATEFORMAT` and the per-style CONVERT inputs, and the `float` / `real` → string style split.
   Conversion *legality* is settled from the two types while compiling, so a typed NULL and an empty rowset raise it too → [`casting.md`](docs/claude/casting.md).
 - **`SimulatedDbDataReader` client surface** — typed accessors, `GetOrdinal` precedence, and the client-side rounding and materialization divergences → [`data-reader.md`](docs/claude/data-reader.md).
 - **`Selection`, aggregates, window functions, set ops, CASE, OFFSET/FETCH, `TOP`, named windows, `TABLESAMPLE`, `SET ROWCOUNT`** — with the aggregate / GROUP BY binding rules and the frame-and-ordering gates.

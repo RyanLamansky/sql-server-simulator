@@ -1167,9 +1167,9 @@ internal static partial class BuiltInResources
                 zeroBig,
                 bitOn, // is_user_process
                 SqlValue.FromInt32(connection.TextSize),
-                SqlValue.FromNVarchar("us_english"),
-                SqlValue.FromNVarchar("mdy"),
-                SqlValue.FromInt16(7),
+                SqlValue.FromNVarchar(connection.Language.Name),
+                SqlValue.FromNVarchar(connection.DateFormat.Name),
+                SqlValue.FromInt16(connection.DateFirst),
                 connection.QuotedIdentifiers ? bitOn : bitOff,
                 connection.Arithabort ? bitOn : bitOff,
                 bitOn,  // ansi_null_dflt_on — SET ANSI_NULL_DFLT_ON/OFF is

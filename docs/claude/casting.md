@@ -177,9 +177,15 @@ Leading and trailing spaces are trimmed first, as real does, so a padded `char(N
 The failure numbers split by type: the newer four report Msg 241 for every string they refuse, while `datetime` / `smalldatetime` report Msg 241 / 295 for a string they can't read and Msg 242 for one naming a value that doesn't exist — including a few shapes real's tokenizer reads further than it looks (`'2024-12-31 23'`, `'Jan-05-2024'`, `'2024-12-31 .5'`).
 A `datetimeoffset` string whose offset carries its UTC instant outside years 1–9999 is Msg 8114 state 31.
 
+### `SET DATEFORMAT`
+
+A numeric date's three parts read in the session's `SET DATEFORMAT` order — a name, a string literal or a variable, case aside, Msg 2741 for anything but the six — which a module body's own `SET` changes for its duration only and `SET LANGUAGE` moves to the language's order unless the same batch set it first (probed 2026-09-24 against SQL Server 2025).
+The per-order rules, which differ between the legacy pair and the newer types, are on `DateTimeText.OrderNumericDate`; the matrix behind them was twenty-three strings under all six orders and five types, every cell matching.
+The conversion runs inside `SqlValue.CoerceTo`, which has no session, so each statement publishes the session's order as `DateOrder.Current`, an `AsyncLocal` rather than a thread-static so it flows into the parallel grouped accumulation.
+The plan cache keys on the order too, as real's does.
+
 ### Not modeled yet
 
-- **`SET DATEFORMAT` / a language's date order** — numeric dates always read month-day-year, us_english's order (see [`backlog.md`](backlog.md)).
 - **Month names in other languages** — only the English names are recognized.
 
 ## Conversion legality is settled while compiling

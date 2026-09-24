@@ -489,6 +489,14 @@ internal sealed class BatchContext
     public bool DateFirstSetExplicitly;
 
     /// <summary>
+    /// Whether this batch has run a <c>SET DATEFORMAT</c> of its own, which a
+    /// later <c>SET LANGUAGE</c> in the same batch then leaves alone — the same
+    /// batch-scoped precedence as <see cref="DateFirstSetExplicitly"/>, and
+    /// independent of it (probed 2026-09-24).
+    /// </summary>
+    public bool DateFormatSetExplicitly;
+
+    /// <summary>
     /// Shared empty label map for the overwhelming majority of batches, which
     /// declare none.
     /// </summary>

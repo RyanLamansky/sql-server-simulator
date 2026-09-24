@@ -229,7 +229,7 @@ Not sim bugs (**fail on real too** — leave alone): boolean-expression `=` comp
 
 A hand-written corpus of 548 deliberately odd statements, run through the simulator's TDS listener and against SQL Server 2025 (17.0.4065.4) with identical SqlClient code on both sides, a fresh database per case, and every error routed through `InfoMessage` so a whole batch's output compares (probed 2026-09-23).
 The harness is local-only and not checked in; its three connection-killing findings shipped, and the accept-what-real-rejects half lives in the [over-permissive register](#over-permissive-register).
-Already listed elsewhere here and not repeated: `DBCC CHECKIDENT`, parenthesized set-op branches, and `SET DATEFORMAT` carrying no effect.
+Already listed elsewhere here and not repeated: `DBCC CHECKIDENT` and parenthesized set-op branches.
 
 **Type-pair neighbors** — found by the type-pair probes and left open (probed 2026-09-23):
 
@@ -455,10 +455,6 @@ Real bugs / limitations against shipped behavior — fixes are concrete work, no
   A reference in a **restricted clause** (Msg 11720) or a **conditional arm** (Msg 11741) inside a statement that also carries an `ORDER BY` keeps its own message where real reports Msg 11723 — those two fire where the reference parses, which is before the `ORDER BY` is read, while `DISTINCT` and `TOP` are known by then and do report real's.
   A reference in a **windowed aggregate**'s argument (`SUM(NEXT VALUE FOR s) OVER ()`) is Msg 11725 where real is 11720, the trailing `OVER` likewise being read after the argument.
   Closing either wants the site-level refusal deferred to the end of the query spec, which needs a catch-all resolution point for the expression sites outside a `SELECT` (`PRINT`, a `SET` initializer) so a pending refusal can't leak as a silent acceptance.
-- **`SET LANGUAGE` doesn't move `SET DATEFORMAT`** — real carries the language's own date-part order (`sys.syslanguages.dateformat`, `dmy` for most of the set against us_english's `mdy`), which decides how an ambiguous date string parses.
-  `SET LANGUAGE` itself ships, `@@DATEFIRST` coupling included (see [`scalars.md`](scalars.md#set-language-and-the-datefirst-it-moves)), and the column is projected; what's left is `SET DATEFORMAT` carrying semantic effect at all, which is the same seam the month / weekday names would need.
-  The date-string grammar (`DateTimeText`) reads numeric dates in one order, `mdy`, and the conversion that calls it (`SqlValue.CoerceTo`) has no session to ask for another, so the work is threading the session's order down to that parse.
-  Real's transaction-aborting list is wider than the one modeled member (Msg 8728); 245 is the one whose divergence a probe caught, and the rest of the list is unenumerated.
 - **`SET ROWCOUNT` caps a `MERGE`'s source rows rather than its actions** — real counts the actions it took, so a source row every `WHEN` clause declines consumes a slot of the cap here and none there (see [`query.md`](query.md#set-rowcount-n)).
   The three pending-action lists are built across several matching paths, so a shared running budget is what the exact rule wants.
 - **An emptiness probe evaluates the body's projection where real doesn't** — real needs only whether a body yields a row for `EXISTS` and for a NULL-left-side `IN`, so `EXISTS (SELECT 1/0 FROM <non-empty>)` answers TRUE there and `NULL IN (SELECT 1/0 FROM <non-empty>)` answers UNKNOWN, while the simulator raises Msg 8134 from projecting the first row (probed 2026-08-05; a raising **WHERE** raises on both, since emptiness can't be known without it).

@@ -877,7 +877,7 @@ public sealed partial class Simulation
     /// fence most visibly. Anything but the default READ COMMITTED therefore
     /// skips both the lookup and the promotion and re-parses per execution.
     /// </para></summary>
-    private readonly struct PlanCacheKey(string commandText, string databaseName, string parameterSignature, bool quotedIdentifiers)
+    private readonly struct PlanCacheKey(string commandText, string databaseName, string parameterSignature, bool quotedIdentifiers, DateOrder dateFormat)
         : IEquatable<PlanCacheKey>
     {
         public readonly string CommandText = commandText;
@@ -885,12 +885,20 @@ public sealed partial class Simulation
         public readonly string ParameterSignature = parameterSignature;
         public readonly bool QuotedIdentifiers = quotedIdentifiers;
 
+        /// <summary>
+        /// The <c>SET DATEFORMAT</c> order, which real counts among the
+        /// options a plan is cached under: a date string read while parsing
+        /// reads differently under another.
+        /// </summary>
+        public readonly DateOrder DateFormat = dateFormat;
+
         // Implemented rather than inherited: this is a dictionary key, and
         // ValueType.Equals would box both sides and compare them by reflection.
         // Ordinal string comparison is what EqualityComparer<string>.Default
         // does, so the key keeps the exact identity it had before.
         public bool Equals(PlanCacheKey other) =>
             this.QuotedIdentifiers == other.QuotedIdentifiers
+            && this.DateFormat == other.DateFormat
             && string.Equals(this.CommandText, other.CommandText, StringComparison.Ordinal)
             && string.Equals(this.DatabaseName, other.DatabaseName, StringComparison.Ordinal)
             && string.Equals(this.ParameterSignature, other.ParameterSignature, StringComparison.Ordinal);
@@ -898,7 +906,7 @@ public sealed partial class Simulation
         public override bool Equals(object? obj) => obj is PlanCacheKey other && this.Equals(other);
 
         public override int GetHashCode() =>
-            HashCode.Combine(this.CommandText, this.DatabaseName, this.ParameterSignature, this.QuotedIdentifiers);
+            HashCode.Combine(this.CommandText, this.DatabaseName, this.ParameterSignature, this.QuotedIdentifiers, this.DateFormat);
     }
 
     /// <summary>Cache entry: the batch's parsed <see cref="Selection"/>s in
@@ -1192,7 +1200,7 @@ public sealed partial class Simulation
         if (Volatile.Read(ref this.SchemaVersion) != batch.PlanCacheSchemaVersion) return;
         // A cacheable batch is SELECTs only (no SET can be among them), so the
         // connection's live setting still equals the value at parse.
-        var key = new PlanCacheKey(text, dbName, paramSig, batch.Connection.QuotedIdentifiers);
+        var key = new PlanCacheKey(text, dbName, paramSig, batch.Connection.QuotedIdentifiers, batch.Connection.DateFormat);
         // Refresh-in-place semantics: when a DDL has invalidated the prior
         // entry under this key, the indexer overwrites without growing the
         // dictionary. The capacity cap therefore only gates fresh keys, not
@@ -1261,7 +1269,7 @@ public sealed partial class Simulation
             : command.Connection is { CurrentDatabase: { } currentDb } connection
                 && connection.SessionIsolationLevel == System.Data.IsolationLevel.ReadCommitted
                 && BuildPlanCacheParameterSignature(command) is { } sig
-                    ? new PlanCacheKey(command.CommandText, currentDb.Name, sig, connection.QuotedIdentifiers)
+                    ? new PlanCacheKey(command.CommandText, currentDb.Name, sig, connection.QuotedIdentifiers, connection.DateFormat)
                     : null;
 
     private static string? BuildPlanCacheParameterSignature(SimulatedDbCommand command)
@@ -1744,6 +1752,10 @@ public sealed partial class Simulation
         // ERROR_LINE() default when an error fires inside this statement.
         batch.CurrentStatement.StartLine = batch.Parser.Token?.LineNumber ?? 1;
         batch.CurrentStatement.StartIndex = batch.Parser.Token?.StartIndex ?? 0;
+        // The string → date-time conversion reads the session's order from
+        // here, having no session of its own; an unchanged order republishes
+        // for free.
+        DateOrder.Current = batch.Connection.DateFormat;
         batch.CurrentStatement.SuppressErrorReset = false;
         batch.CurrentStatement.ReportedIgnoredDuplicate = false;
         batch.CurrentStatement.ReportedNoiseWords = false;

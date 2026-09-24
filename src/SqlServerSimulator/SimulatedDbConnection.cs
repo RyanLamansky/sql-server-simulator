@@ -258,11 +258,22 @@ public sealed class SimulatedDbConnection : DbConnection
     internal byte DateFirst = 7;
 
     /// <summary>
+    /// Session-scoped <c>SET DATEFORMAT</c> order (default us_english's
+    /// <c>mdy</c>), which decides how a numeric date string's parts read. A
+    /// successful <c>SET LANGUAGE</c> moves it to the language's own unless the
+    /// batch set it explicitly, and scoping matches <see cref="XactAbort"/>
+    /// (probed 2026-09-24 against SQL Server 2025). Each statement publishes it
+    /// as <see cref="DateOrder.Current"/> for the conversion to read.
+    /// </summary>
+    internal DateOrder DateFormat = DateOrder.Mdy;
+
+    /// <summary>
     /// Session-scoped <c>SET LANGUAGE</c> value, defaulting to the instance's
     /// <c>us_english</c>. Read by <c>@@LANGUAGE</c> (the official name) and
     /// <c>@@LANGID</c>; a successful <c>SET LANGUAGE</c> also carries the
     /// language's own <see cref="Language.DateFirst"/> into
-    /// <see cref="DateFirst"/> unless the batch has set that explicitly.
+    /// <see cref="DateFirst"/> and its date order into <see cref="DateFormat"/>,
+    /// each unless the batch has set that explicitly.
     /// Message language itself isn't modeled — every diagnostic stays English.
     /// </summary>
     internal Language Language = Language.Default;
@@ -279,12 +290,14 @@ public sealed class SimulatedDbConnection : DbConnection
         private readonly bool xactAbort = connection.XactAbort;
         private readonly long rowCountLimit = connection.RowCountLimit;
         private readonly byte dateFirst = connection.DateFirst;
+        private readonly DateOrder dateFormat = connection.DateFormat;
 
         public void Restore(SimulatedDbConnection connection)
         {
             connection.XactAbort = this.xactAbort;
             connection.RowCountLimit = this.rowCountLimit;
             connection.DateFirst = this.dateFirst;
+            connection.DateFormat = this.dateFormat;
         }
     }
 

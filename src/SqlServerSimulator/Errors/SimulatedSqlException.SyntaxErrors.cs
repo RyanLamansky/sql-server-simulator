@@ -298,6 +298,13 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException DateFirstRequiresInteger() =>
         new("SET DATEFIRST option requires integer parameter.", 2743, 16, 3);
 
+    /// <summary>
+    /// Mimics SQL Server error 2741: <c>SET DATEFORMAT</c> naming no order of
+    /// the six (probed 2026-09-24 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException DateFormatInvalid(string value) =>
+        new($"SET DATEFORMAT date order '{value}' is invalid.", 2741, 16, 1);
+
     internal static SimulatedSqlException DateFirstOutOfRange(long value) =>
         new($"SET DATEFIRST {value.ToString(System.Globalization.CultureInfo.InvariantCulture)} is out of range.", 2742, 16, 1);
 

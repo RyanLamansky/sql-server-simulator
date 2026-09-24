@@ -49,8 +49,8 @@ internal readonly struct DateTimeText(DateOnly? date, long timeTicks, TimeSpan? 
     /// fourteen hours), a <c>Z</c> after any time, or a space before the ISO
     /// <c>T</c>.</item>
     /// </list>
-    /// Everything else is shared: numeric dates in month-day-year order
-    /// (DATEFORMAT isn't modeled, so us_english's <c>mdy</c> always), with a
+    /// Everything else is shared: numeric dates in the session's
+    /// <c>SET DATEFORMAT</c> order (see <c>OrderNumericDate</c>), with a
     /// one- or two-digit year pivoting at 50; year-first ISO forms; the six-
     /// and eight-digit unseparated forms; a bare four-digit year; English month
     /// names, three-letter or in full, around a day and year in the orders real
@@ -397,24 +397,75 @@ internal readonly struct DateTimeText(DateOnly? date, long timeTicks, TimeSpan? 
                 return DateTimeTextError.Syntax;
             var second = this.ReadNumber(out var secondDigits);
             var secondSeparator = this.ReadDateSeparator();
-            if (secondSeparator == '\0' || !this.StartsNumber() || secondDigits > 2)
+            if (secondSeparator == '\0' || !this.StartsNumber())
                 return DateTimeTextError.Syntax;
             // The newer types want one separator throughout.
             if (secondSeparator != separator && !legacy)
                 return DateTimeTextError.Syntax;
             var third = this.ReadNumber(out var thirdDigits);
+            return this.OrderNumericDate(legacy, first, firstDigits, second, secondDigits, third, thirdDigits, separator == '-' && secondSeparator == '-', out date, out isoDashes);
+        }
+
+        /// <summary>
+        /// Maps a three-part numeric date to year, month and day under the
+        /// session's <c>SET DATEFORMAT</c> (<see cref="DateOrder.Current"/>),
+        /// probed 2026-09-24 against SQL Server 2025 for all six orders:
+        /// <list type="bullet">
+        /// <item>A four-digit part is the year wherever it stands, and the other
+        /// two follow the order's month / day sequence — except that the newer
+        /// types read a year-first date as year-month-day under every order, as
+        /// the legacy pair does when an ISO <c>T</c> time or a <c>Z</c> follows
+        /// (so <c>'2024-11-12'</c> is 12 November to a <c>datetime</c> under
+        /// <c>dmy</c>).</item>
+        /// <item>The newer types take a year-last date only under <c>mdy</c>,
+        /// <c>dmy</c> and <c>ymd</c>, a year-middle one only under <c>myd</c>
+        /// and <c>dym</c>, and none of the two-digit-year forms under
+        /// <c>ydm</c>.</item>
+        /// <item>With no four-digit part the parts fill the order's positions.</item>
+        /// </list>
+        /// </summary>
+        private readonly DateTimeTextError OrderNumericDate(
+            bool legacy, int first, int firstDigits, int second, int secondDigits, int third, int thirdDigits, bool dashes, out DateOnly date, out bool isoDashes)
+        {
+            date = default;
+            isoDashes = false;
+            var order = DateOrder.Current;
 
             if (firstDigits == 4)
             {
-                if (thirdDigits > 2)
+                if (secondDigits > 2 || thirdDigits > 2)
                     return DateTimeTextError.Syntax;
-                isoDashes = separator == '-' && secondSeparator == '-';
-                return Build(first, second, third, out date);
+                isoDashes = dashes;
+                return !legacy || order.MonthBeforeDay || this.IsoSuffixFollows()
+                    ? Build(first, second, third, out date)
+                    : Build(first, third, second, out date);
             }
-            if (firstDigits > 2 || thirdDigits is 3 or > 4)
+            if (thirdDigits == 4)
+            {
+                if (firstDigits > 2 || secondDigits > 2 || (!legacy && order != DateOrder.Mdy && order != DateOrder.Dmy && order != DateOrder.Ymd))
+                    return DateTimeTextError.Syntax;
+                return order.MonthBeforeDay ? Build(third, first, second, out date) : Build(third, second, first, out date);
+            }
+            if (secondDigits == 4)
+            {
+                if (firstDigits > 2 || thirdDigits > 2 || (!legacy && order.YearPosition != 1))
+                    return DateTimeTextError.Syntax;
+                return order.MonthBeforeDay ? Build(second, first, third, out date) : Build(second, third, first, out date);
+            }
+            if (firstDigits > 2 || secondDigits > 2 || thirdDigits > 2 || (!legacy && order == DateOrder.Ydm))
                 return DateTimeTextError.Syntax;
-            return Build(Year(third, thirdDigits), first, second, out date);
+
+            Span<int> parts = [first, second, third];
+            Span<int> digits = [firstDigits, secondDigits, thirdDigits];
+            var year = Year(parts[order.YearPosition], digits[order.YearPosition]);
+            var earlier = order.YearPosition == 0 ? parts[1] : parts[0];
+            var later = order.YearPosition == 2 ? parts[1] : parts[2];
+            return order.MonthBeforeDay ? Build(year, earlier, later, out date) : Build(year, later, earlier, out date);
         }
+
+        /// <summary>Whether an ISO <c>T</c> time or a <c>Z</c> follows directly.</summary>
+        private readonly bool IsoSuffixFollows() =>
+            (this.Peek is 'T' or 't' && this.DigitFollows()) || this.PeekZ();
 
         /// <summary>Jan 5 2024, Jan 5, 2024, Jan 5 24, January 2024.</summary>
         private DateTimeTextError ParseMonthFirst(bool legacy, out DateOnly date)

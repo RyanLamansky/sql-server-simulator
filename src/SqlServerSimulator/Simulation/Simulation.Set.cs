@@ -144,15 +144,24 @@ partial class Simulation
             context.Batch.DateFirstSetExplicitly = true;
         }
 
+        // DATEFORMAT names the order a numeric date string's parts read in,
+        // from a bare name, a string literal or a variable, case aside.
+        if (firstName.Equals("DATEFORMAT", StringComparison.OrdinalIgnoreCase) && !context.Batch.IsSkipping
+            && ReadIdentifierOptionValue(context) is { } dateFormatName)
+        {
+            context.Connection.DateFormat = DateOrder.Find(dateFormatName) ?? throw SimulatedSqlException.DateFormatInvalid(dateFormatName);
+            context.Batch.DateFormatSetExplicitly = true;
+        }
+
         // LANGUAGE carries the session's language for @@LANGUAGE / @@LANGID and
         // — the load-bearing half — implicitly moves DATEFIRST to the one the
         // language declares, unless this batch has already set DATEFIRST
         // itself. The precedence is per batch, not per session: `SET DATEFIRST
         // 3` then `SET LANGUAGE German` in one batch stays 3, while the same
         // pair split across two batches ends at German's own 1 (both
-        // probe-confirmed). Neither the message language nor DATEFORMAT
-        // follows — diagnostics stay English and `SET DATEFORMAT` still
-        // parses-and-discards.
+        // probe-confirmed). DATEFORMAT moves to the language's own order under
+        // the same per-batch precedence, independently of DATEFIRST's; the
+        // message language doesn't follow, so diagnostics stay English.
         if (firstName.Equals("LANGUAGE", StringComparison.OrdinalIgnoreCase) && !context.Batch.IsSkipping
             && ReadIdentifierOptionValue(context) is { } languageName)
         {
@@ -162,6 +171,8 @@ partial class Simulation
                 context.Connection.PendingMessages.Enqueue(SimulatedSqlException.LanguageChangedMessage(context.Batch, language.Name));
                 if (!context.Batch.DateFirstSetExplicitly)
                     context.Connection.DateFirst = language.DateFirst;
+                if (!context.Batch.DateFormatSetExplicitly)
+                    context.Connection.DateFormat = DateOrder.Find(language.DateFormat)!;
             }
             else if (context.Batch.TryFrameDepth == 0)
             {

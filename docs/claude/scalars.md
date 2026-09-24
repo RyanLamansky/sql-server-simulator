@@ -87,6 +87,7 @@ What a successful one sets:
 - **`@@LANGUAGE`** — the *official* name, never the alias the statement was written with, so `SET LANGUAGE German` reads back `Deutsch`.
 - **`@@LANGID`** — the language's `langid` as `smallint`, 0 for the `us_english` default.
 - **`@@DATEFIRST`** — the language's own, which is the load-bearing coupling: German / French / most of the set are 1, while us_english / Japanese / Portuguese / Brazilian / both Chinese / Korean / Thai are 7.
+- **The date order** — the language's own `SET DATEFORMAT` order moves with it, under the same per-batch precedence as `DATEFIRST` and independently of it; see [`casting.md`](casting.md#set-dateformat).
 
 The DATEFIRST half yields to an **explicit `SET DATEFIRST` in the same batch**, and real scopes that precedence to the batch rather than the session: `SET DATEFIRST 3; SET LANGUAGE German` in one batch stays 3, while the same pair split across two batches ends on German's 1 (both probe-confirmed; the flag is `BatchContext.DateFirstSetExplicitly`).
 A `SET DATEFIRST` *after* the language simply wins as the later write.
@@ -94,8 +95,7 @@ A `SET DATEFIRST` *after* the language simply wins as the later write.
 An unrecognized name is **Msg 2740** class 16 state 1 (`SET LANGUAGE failed because '<n>' is not an official language name or a language alias on this SQL Server.`), and the batch carries on past it.
 Inside a `BEGIN TRY` block real swallows the failure outright — nothing raised, no `CATCH` entered, the statement no-ops and the body continues (probe-confirmed, dynamic SQL included) — while an `IF` / `WHILE` / `BEGIN…END` body is not a TRY frame and still raises.
 
-**Not modeled**: the message language itself (every diagnostic stays English) and the `dateformat` half — `sys.syslanguages.dateformat` is projected but `SET DATEFORMAT` still parses-and-discards, so a language change doesn't move the date-string input order the way real's does.
-`sys.syslanguages`'s three name-list columns (`months` / `shortmonths` / `days`) are nullable on real and left NULL here for the same reason.
+**Not modeled**: the message language itself (every diagnostic stays English), and month and weekday names in any language but English — so `sys.syslanguages`'s three name-list columns (`months` / `shortmonths` / `days`), nullable on real, are left NULL here.
 
 **Implicit operand coercion** (date argument, all three functions): string operands route through `DatePartKinds.CoerceDateArgumentImplicit` → `CoerceTo(datetime2(7))`, except that `DATEADD` reads a string as `datetime` (its result type, and the type its Msg 517 names; probed 2026-09-23); integer operands → `CoerceTo(datetime)` (days-since-1900-01-01).
 `ParseDateTime2` also accepts a **bare time-of-day string** (`HH:mm[:ss[.fffffff]]`, anchored to 1900-01-01), so `DATEDIFF(second, '11:15:00', <time>)` / `DATEPART(microsecond, '11:15:00')` coerce like real (a Django DurationField/TimeField pattern) rather than raising Msg 241.
