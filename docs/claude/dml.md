@@ -221,6 +221,9 @@ Result type is `numeric(38, 0)` matching real SQL Server's projection (covers ti
 `SET IDENTITY_INSERT <table> ON | OFF` (`Simulation.Set.cs`) sets / clears `SimulatedDbConnection.IdentityInsertTable`.
 ON validates the target: a table with no identity column raises **Msg 8106** (`TableHasNoIdentityForSet`, "Table 't' does not have the identity property. Cannot perform SET operation."); a second table while one is already held raises **Msg 8107** (`IdentityInsertAlreadyOn`) — both probe-confirmed against SQL Server 2025.
 
+`DBCC CHECKIDENT` (`Simulation.CheckIdent.cs`) reports and reseeds, and a reseed rolls back with its transaction though a generated value never does.
+The one rule that isn't a plain assignment: a table that hasn't generated a value since it was created or truncated takes the reseed value *itself* on its next insert, where one that has takes the value after it; the pending value shows through `IDENT_CURRENT` but not through CHECKIDENT's own report, which still says `NULL` (probed 2026-09-24).
+
 ## `@@ROWCOUNT` / `ROWCOUNT_BIG()`
 Both expose the row count of the most-recently-completed statement on the session via `SimulatedDbConnection.LastStatementRowCount`.
 `@@ROWCOUNT` projects as `int`; `ROWCOUNT_BIG()` (`Parser/Expressions/TransactionScalarFunctions.cs`) is its `bigint` sibling — same source, wider projection.

@@ -2783,6 +2783,7 @@ public sealed partial class Simulation
 
             case ReservedKeyword { Keyword: Keyword.Dbcc } when TryParseShrink(context, batch, out outcome):
             case ReservedKeyword { Keyword: Keyword.Dbcc } when TryParseShowStatistics(context, batch, out outcome):
+            case ReservedKeyword { Keyword: Keyword.Dbcc } when TryParseCheckIdent(context, batch, out outcome):
                 if (!batch.IsSkipping)
                 {
                     connection.LastStatementRowCount = 0;

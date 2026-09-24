@@ -317,8 +317,8 @@ partial class SimulatedSqlException
         new($"Could not find database '{databaseName}'. The database either does not exist, or was dropped before a statement tried to use it. Verify if the database exists by querying the sys.databases catalog view.", 2520, 16, 12);
 
     /// <summary>
-    /// Mimics SQL Server error 2501: <c>DBCC SHOW_STATISTICS</c> could not
-    /// resolve its first argument to a table or object. Probe-confirmed against
+    /// Mimics SQL Server error 2501: <c>DBCC SHOW_STATISTICS</c> or
+    /// <c>DBCC CHECKIDENT</c> could not resolve its first argument to a table or object. Probe-confirmed against
     /// SQL Server 2025: Class 16 State 45, and the name echoes the caller's raw
     /// (bracketed) input verbatim inside double quotes.
     /// </summary>
@@ -334,12 +334,20 @@ partial class SimulatedSqlException
         new($"Could not locate statistics '{statisticsName}' in the system catalogs.", 2767, 16, 1);
 
     /// <summary>
-    /// Mimics SQL Server error 2560: a <c>DBCC</c> statement's first parameter
-    /// is missing or NULL. Probe-confirmed against SQL Server 2025 for
-    /// <c>DBCC SHOW_STATISTICS(NULL, NULL)</c>: Class 16 State 9.
+    /// Mimics SQL Server error 2560: a <c>DBCC</c> statement's parameter is
+    /// unusable. Probe-confirmed against SQL Server 2025: state 9 for
+    /// <c>DBCC SHOW_STATISTICS(NULL, NULL)</c>'s missing first parameter, 14
+    /// for a <c>DBCC CHECKIDENT</c> reseed value outside the column's type.
     /// </summary>
-    internal static SimulatedSqlException DbccParameterIsIncorrect(int parameterNumber) =>
-        new($"Parameter {parameterNumber} is incorrect for this DBCC statement.", 2560, 16, 9);
+    internal static SimulatedSqlException DbccParameterIsIncorrect(int parameterNumber, byte state = 9) =>
+        new($"Parameter {parameterNumber} is incorrect for this DBCC statement.", 2560, 16, state);
+
+    /// <summary>
+    /// Mimics SQL Server error 7997: <c>DBCC CHECKIDENT</c> named a table with
+    /// no identity column (probed 2026-09-24 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException NoIdentityColumn(string tableName) =>
+        new($"'{tableName}' does not contain an identity column.", 7997, 16, 1);
 
     /// <summary>
     /// Mimics SQL Server error 2760: a statement referenced a schema that

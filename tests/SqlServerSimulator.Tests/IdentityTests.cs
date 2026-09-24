@@ -370,4 +370,63 @@ public sealed class IdentityTests
         sim.AssertSqlError("insert t (v) values (2)", 8115, "Arithmetic overflow error converting IDENTITY to data type decimal.");
         AreEqual(99999m, sim.ExecuteScalar("select ident_current('t')"));
     }
+
+    // ---- DBCC CHECKIDENT (probed 2026-09-24 against SQL Server 2025) ----
+
+    private static List<string> CheckIdentMessages(SimulatedDbConnection connection, string sql)
+    {
+        var messages = new List<string>();
+        void Collect(object? sender, SimulatedInfoMessageEventArgs e) => messages.Add(e.Message);
+        connection.InfoMessage += Collect;
+        _ = connection.CreateCommand(sql).ExecuteNonQuery();
+        connection.InfoMessage -= Collect;
+        return messages;
+    }
+
+    [TestMethod]
+    public void CheckIdent_ReportsTheCurrentAndColumnValues()
+    {
+        using var connection = (SimulatedDbConnection)new Simulation().CreateOpenConnection();
+        _ = connection.CreateCommand("create table cit (id int identity(1, 1), v int); insert cit (v) values (1), (2), (3)").ExecuteNonQuery();
+        CollectionAssert.AreEqual(
+            new[]
+            {
+                "Checking identity information: current identity value '3', current column value '3'.",
+                "DBCC execution completed. If DBCC printed error messages, contact your system administrator.",
+            },
+            CheckIdentMessages(connection, "dbcc checkident ('cit', noreseed)"));
+        CollectionAssert.AreEqual(
+            new[]
+            {
+                "Checking identity information: current identity value '3'.",
+                "DBCC execution completed. If DBCC printed error messages, contact your system administrator.",
+            },
+            CheckIdentMessages(connection, "dbcc checkident (cit, reseed, 10)"));
+        IsEmpty(CheckIdentMessages(connection, "dbcc checkident ('dbo.cit', reseed, 20) with no_infomsgs"));
+    }
+
+    [TestMethod]
+    [DataRow("insert cit (v) values (1); dbcc checkident ('cit', reseed, 10);", 11)]
+    [DataRow("dbcc checkident ('cit', reseed, 10);", 10)]
+    [DataRow("insert cit (v) values (1); truncate table cit; dbcc checkident ('cit', reseed, 0);", 0)]
+    [DataRow("insert cit (v) values (1); delete cit; dbcc checkident ('cit', reseed, 0);", 1)]
+    [DataRow("set identity_insert cit on; insert cit (id, v) values (50, 1); set identity_insert cit off; dbcc checkident ('cit', reseed, 5); dbcc checkident ('cit');", 51)]
+    public void CheckIdent_Reseed_SetsTheNextValue(string setup, int expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar($"create table cit (id int identity(1, 1), v int); {setup} insert cit (v) values (9); select id from cit where v = 9"));
+
+    [TestMethod]
+    public void CheckIdent_ReseedRollsBackWithItsTransaction()
+        => AreEqual(7m, new Simulation().ExecuteScalar("""
+            create table cit (id int identity(1, 1));
+            dbcc checkident ('cit', reseed, 7) with no_infomsgs;
+            begin tran; dbcc checkident ('cit', reseed, 50) with no_infomsgs; rollback;
+            select ident_current('cit')
+            """));
+
+    [TestMethod]
+    [DataRow("dbcc checkident ('nosuch')", 2501, "Cannot find a table or object with the name \"nosuch\". Check the system catalog.")]
+    [DataRow("create table cin (a int); dbcc checkident ('cin')", 7997, "'cin' does not contain an identity column.")]
+    [DataRow("create table cid (id tinyint identity(1, 1)); dbcc checkident ('cid', reseed, 300) with no_infomsgs", 2560, "Parameter 3 is incorrect for this DBCC statement.")]
+    public void CheckIdent_Refusals(string sql, int number, string message)
+        => new Simulation().AssertSqlError(sql, number, message);
 }

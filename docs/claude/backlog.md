@@ -198,8 +198,6 @@ Run the two sides **one at a time**: two runners against one endpoint share the 
 
 Roots **filed** (still open):
 
-- **`DBCC CHECKIDENT` isn't parsed** → Msg 102 near `CHECKIDENT`, failing Django's `sql_flush` (`backends.base.test_operations.SqlFlushTests.test_execute_sql_flush_statements`, `backends.tests.LongNameTest.test_sequence_name_length_limits_flush`).
-  The `RESEED` / `NORESEED` forms with `WITH NO_INFOMSGS`, and the informational row real prints, are the work.
 - **A `decimal` beyond .NET `decimal`'s range — closed.** `model_fields.test_decimalfield`'s `max_digits=38` model surfaced as `SqlServerSimulator: unhandled OverflowException` (Msg 50000); the exact-numeric type carries all 38 digits, so the value computes and stores, and the only remaining narrowing is the reader's, which is SqlClient's own shed-or-`OverflowException` rule — see [`arithmetic.md`](arithmetic.md#the-backing-type).
 - **Reverse delta: `expressions_window` — closed** (2026-08-05), and the filed diagnosis was wrong.
   `test_fail_update` has nothing to do with it: the poisoner is `test_key_transform`, whose `SUM(…) OVER (PARTITION BY <JSON_VALUE> ORDER BY <JSON_VALUE>)` orders a RANGE frame by an `nvarchar(max)` expression.
@@ -224,7 +222,7 @@ Not sim bugs (**fail on real too** — leave alone): boolean-expression `=` comp
 
 A hand-written corpus of 548 deliberately odd statements, run through the simulator's TDS listener and against SQL Server 2025 (17.0.4065.4) with identical SqlClient code on both sides, a fresh database per case, and every error routed through `InfoMessage` so a whole batch's output compares (probed 2026-09-23).
 The harness is local-only and not checked in; its three connection-killing findings shipped, and the accept-what-real-rejects half lives in the [over-permissive register](#over-permissive-register).
-Already listed elsewhere here and not repeated: `DBCC CHECKIDENT` and parenthesized set-op branches.
+Already listed elsewhere here and not repeated: parenthesized set-op branches.
 
 **Type-pair neighbors** — found by the type-pair probes and left open (probed 2026-09-23):
 

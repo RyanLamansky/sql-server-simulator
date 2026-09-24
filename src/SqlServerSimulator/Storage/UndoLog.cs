@@ -96,6 +96,14 @@ internal sealed class UndoLog
     public void RecordLocalTempTableRemoval(SimulatedDbConnection connection, HeapTable table) =>
         this.entries.Add(new LocalTempTableRemoval(connection, table));
 
+    /// <summary>
+    /// Records a <c>DBCC CHECKIDENT</c> reseed, which a rollback undoes
+    /// (probed 2026-09-24 against SQL Server 2025) though a generated value
+    /// never is.
+    /// </summary>
+    public void RecordIdentityReseed(IdentityState state, (long? HighWaterMark, long? ReseededStart) snapshot) =>
+        this.entries.Add(new IdentityReseed(state, snapshot));
+
     public void RecordTruncation(Heap heap, List<HeapPage> oldPages, List<HeapLobPage> oldLobPages, HashSet<(int Page, int Slot)> oldForwardTargets, int[] oldFreeLobPages, (IdentityState State, long? HighWaterMark)[] identitySnapshots) =>
         this.entries.Add(new HeapTruncation(heap, oldPages, oldLobPages, oldForwardTargets, oldFreeLobPages, identitySnapshots));
 
@@ -355,6 +363,11 @@ internal sealed class UndoLog
             this.Heap.Pages[this.PageIndex].MarkSlotReclaimable(this.SlotIndex);
             this.Heap.MarkPageReclaimable(this.PageIndex);
         }
+    }
+
+    private sealed class IdentityReseed(IdentityState state, (long? HighWaterMark, long? ReseededStart) snapshot) : UndoEntry
+    {
+        public override void Undo() => state.RestoreReseed(snapshot);
     }
 
     private sealed class TempTableCreation(ConcurrentDictionary<string, HeapTable> owner, string name) : UndoEntry

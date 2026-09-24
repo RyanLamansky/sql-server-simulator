@@ -34,6 +34,14 @@ internal sealed class IdentityState(long seed, long increment, bool notForReplic
 
     private long? highWaterMark;
 
+    /// <summary>
+    /// The value the next row takes when nothing has been generated since
+    /// the table was created or truncated — the seed, unless a
+    /// <c>DBCC CHECKIDENT … RESEED</c> named another; real hands such a table
+    /// the reseed value itself rather than the value after it.
+    /// </summary>
+    private long? reseededStart;
+
     private readonly Lock gate = new();
 
     /// <summary>
@@ -45,7 +53,7 @@ internal sealed class IdentityState(long seed, long increment, bool notForReplic
         get
         {
             lock (this.gate)
-                return this.highWaterMark ?? this.Seed;
+                return this.highWaterMark ?? this.reseededStart ?? this.Seed;
         }
     }
 
@@ -61,7 +69,7 @@ internal sealed class IdentityState(long seed, long increment, bool notForReplic
         {
             var next = this.highWaterMark is long last
                 ? checked(last + this.Increment)
-                : this.Seed;
+                : this.reseededStart ?? this.Seed;
             if (!Fits(next, columnType))
                 throw new OverflowException();
             this.highWaterMark = next;
@@ -136,6 +144,56 @@ internal sealed class IdentityState(long seed, long increment, bool notForReplic
     internal void Restore(long? value)
     {
         lock (this.gate)
+        {
             this.highWaterMark = value;
+            if (value is null)
+                this.reseededStart = null;
+        }
+    }
+
+    /// <summary>
+    /// The identity value <c>DBCC CHECKIDENT</c> reports: the last generated
+    /// value, or null when none has been since the table was created or
+    /// truncated — a pending reseed value included, which only
+    /// <c>IDENT_CURRENT</c> shows (probed 2026-09-24).
+    /// </summary>
+    internal long? Reported
+    {
+        get
+        {
+            lock (this.gate)
+                return this.highWaterMark;
+        }
+    }
+
+    /// <summary>Both halves of the position a reseed replaces, for its undo entry.</summary>
+    internal (long? HighWaterMark, long? ReseededStart) ReseedSnapshot()
+    {
+        lock (this.gate)
+            return (this.highWaterMark, this.reseededStart);
+    }
+
+    /// <summary>Puts back a <see cref="ReseedSnapshot"/>: a rolled-back reseed is undone.</summary>
+    internal void RestoreReseed((long? HighWaterMark, long? ReseededStart) snapshot)
+    {
+        lock (this.gate)
+            (this.highWaterMark, this.reseededStart) = snapshot;
+    }
+
+    /// <summary>
+    /// <c>DBCC CHECKIDENT … RESEED, value</c>: the next row takes
+    /// <paramref name="value"/> plus the increment, or <paramref name="value"/>
+    /// itself when no row has been generated since the table was created or
+    /// truncated (probed 2026-09-24 against SQL Server 2025).
+    /// </summary>
+    internal void Reseed(long value)
+    {
+        lock (this.gate)
+        {
+            if (this.highWaterMark is null)
+                this.reseededStart = value;
+            else
+                this.highWaterMark = value;
+        }
     }
 }
