@@ -39,10 +39,9 @@ Mirrors SqlClient's round-trip behavior for hand-rolled scripts that mutate para
 SELECT row counts populate after the dispatch materializes rows up-front (so the next statement in the batch sees the final count); DML mutations write their affected count; `SET` / `DECLARE @v = init` write 1; bare `DECLARE @v` (no initializer) preserves the prior count; transaction / DDL statements reset to 0.
 
 **`@@ERROR`**: error number of the most-recently-completed statement; `int`.
-Backed by `SimulatedDbConnection.LastErrorNumber`, which the per-statement TRY/CATCH dispatch wrapper sets to the caught error's number on failure and resets to 0 on successful completion.
-See the TRY/CATCH section for the live tracking details.
-Outside any TRY/CATCH the value stays 0 except after a `RAISERROR(..., sev ≤ 10, ...) WITH SETERROR` (which forces 50000 — the only path that surfaces a non-zero `@@ERROR` to the batch without entering CATCH; `StatementContext.SuppressErrorReset` skips the wrapper's reset for that one statement).
-Uncaught errors terminate the batch, so no path reads @@ERROR after a failure there.
+Backed by `SimulatedDbConnection.LastErrorNumber`, which the per-statement dispatch wrapper sets to a failed statement's number, whether a `CATCH` or the client receives the error, and resets to 0 when a statement succeeds.
+`StatementContext.SuppressErrorReset` exempts the statements that leave it alone: a `RAISERROR(..., sev ≤ 10, ...) WITH SETERROR`, which forces 50000; a `DECLARE` with no initializer; and an `EXEC` of a procedure or dynamic SQL, after which it reads whatever the body's last statement left.
+An `IF` or `WHILE` condition resets it, so the branch or loop body reads 0; a cursor `DECLARE` and one with any initializer reset it as statements do (all probed 2026-09-24 against SQL Server 2025).
 
 **`@@TRANCOUNT`** / **`XACT_STATE()`**: transaction-state surface.
 `@@TRANCOUNT` reads `SimulatedDbConnection.CurrentTransaction?.TranCount` as `int` (0 when no transaction is active).
@@ -252,7 +251,7 @@ An error that ends a procedure's or dynamic SQL's batch — a compile error, or 
 - **The walk stops at a deferred DML target** (`INSERT INTO <missing>`), since the recovery scan can't tell where that statement ends; real keeps compiling the statements after it, so an error past one surfaces here only when its statement runs.
 - **A deferred statement's bind error at run time** is catchable here, and ends the batch only for the name-resolution set; real's recompile errors can't be caught in their own scope and end the batch whatever their number (`CREATE TABLE t2 (a int); INSERT t2 VALUES (1, 2); PRINT 'after'` never prints on real).
 - **A procedure body compiles only at `CREATE`**; real compiles it again as a whole at its first execution, so a body statement naming a table created after the procedure fails there before the body's first statement runs.
-- **A statement error inside a procedure or dynamic SQL ends that body**, and the messages it had sent are lost; real finishes the body (`PRINT 'p1'; SELECT 1/0; PRINT 'p2'` sends both messages, then the error).
+- **An `INSERT … EXEC` body stops at its first error**, since the statement collects the body's rows rather than forwarding its outcomes; real runs that body on too, inserting what its later statements return (probed 2026-09-24).
 - **Creating a table twice in one batch**: real reports Msg 2714 while compiling for a `#temp`, and ends the batch at run time for a permanent table; here the first `CREATE` runs and the batch continues.
 
 ## Statement-terminating vs batch-aborting errors (unified continue-on-error)
@@ -263,7 +262,7 @@ Every top-level batch continues past a statement-terminating error, emitting a *
 Behavior was probed against real SQL Server 2025 + `Microsoft.Data.SqlClient` and treated as ground truth.
 
 `Simulation.CreateResultSetsForCommand(command, continueOnError = true)` defaults its flag to `true`; both the in-process front door (`SimulatedDbCommand`) and `TdsSession.StreamOutcomesAsync` set it, so both render the same stream.
-The flag marks a **top-level batch** (threaded onto `BatchContext.ContinueOnError`): child batches (proc / trigger / UDF / dynamic-SQL bodies) construct their own `BatchContext` and leave it `false`, so their errors **throw** and surface at the invoking statement rather than being emitted as outcomes (the parameter survives only because `TdsSession` — which must not be edited — passes it by name).
+The flag marks a **top-level batch** (threaded onto `BatchContext.ContinueOnError`), and a procedure or dynamic-SQL body inherits it as [below](#procedure-and-dynamic-sql-bodies); trigger, UDF and view bodies leave it `false`, so their errors **throw** and surface at the invoking statement rather than being emitted as outcomes (the parameter survives only because `TdsSession` — which must not be edited — passes it by name).
 
 **The seam** is `DispatchOneStatement`'s catch (`Simulation.cs`).
 Its materialize-then-catch wrapper (a) rolls back on deadlock class 13, (b) defers name-resolution errors in skip mode, (c) records the error into a `CATCH` frame when `TryFrameDepth > 0`.
@@ -299,13 +298,25 @@ See [`tds-endpoint.md`](tds-endpoint.md).
   The positional shape (Read throws, reader survives, tail clean) matches; the pre-error row count does not.
   Continuation is also what `SET XACT_ABORT ON` suspends: under the option a statement-terminating run-time error ends the batch and rolls the transaction back instead of continuing, and caught by a `TRY` frame it leaves the transaction doomed — see [`transactions.md`](transactions.md#set-xact_abort).
 
+### Procedure and dynamic-SQL bodies
+
+A procedure or dynamic-SQL body runs on past a statement-terminating error the way a batch does: `PRINT 'p1'; SELECT 1/0; PRINT 'p2'` sends `p1`, the error and `p2`, and the caller carries on after the `EXEC` (probed 2026-09-24 against SQL Server 2025).
+The body inherits continuation when its caller continues and has no `TRY` open (`ContinuesCalledBatch`), and its errors travel up among its outcomes to whichever front door renders them.
+An open `TRY` in the caller catches the body's first error and abandons the rest of the body.
+An error that ends the batch — an uncaught `THROW`, an `XACT_ABORT`-promoted error — ends every caller's batch too, while a name-resolution miss ends only the body's (`EndedCalledBatch`, above).
+
+Whatever a statement sent before an error that ends it reaches the client first, as real streams it: the dispatch wrapper collects a statement's outcomes as they arrive and sends them, with the messages it queued and any trigger body's result sets (`ProducedOutcomes`), ahead of the error on every path.
+That is what keeps a body's `PRINT`s and result sets ahead of the `CATCH` that caught its error, and a trigger body's ahead of the firing statement's error.
+
+A body's return status and `sp_executesql`'s are in [`programmable.md`](programmable.md#stored-procedures).
+
 ## TRY/CATCH + ERROR_*() + live @@ERROR + THROW
 `BEGIN TRY ... END TRY BEGIN CATCH ... END CATCH` blocks parse via `Simulation.TryCatch.cs:ParseTryCatch`.
 TRY and CATCH aren't reserved keywords (contextual identifiers), so the BEGIN dispatch site peeks the next token: `Tran`/`Transaction` routes to `TryParseBeginTransaction`, `TRY` (unquoted) routes here, `ATOMIC` raises `NotSupportedException`, anything else falls through to `ParseBeginBlock`.
 Probed against SQL Server 2025.
 
 **Catch boundary mechanism.**
-`DispatchOneStatement` is split into an outer wrapper + a `DispatchOneStatementCore` iterator (yield-return inside try/catch isn't legal in C#, so the wrapper materializes Core's outcomes via `[.. Core(...)]` and runs the C# `try { ... } catch (SimulatedSqlException ex) when (batch.TryFrameDepth > 0) { ... }` around that).
+`DispatchOneStatement` is split into an outer wrapper + a `DispatchOneStatementCore` iterator (yield-return inside try/catch isn't legal in C#, so the wrapper collects Core's outcomes into a list as they arrive and runs the C# `try { ... } catch (SimulatedSqlException ex) { ... }` around that, the TRY frame being one arm of the catch).
 On catch: captures into `BatchContext.InFlightError` (struct: number / message / severity / state / line / procedure), sets `BatchContext.ErrorSignaled = true` so `IsSkipping` picks it up, writes `Connection.LastErrorNumber = ex.Number` (backs live `@@ERROR`), then advances the cursor forward to the next statement boundary (`IsStatementBoundary`-token / `;` / EOB) so the outer dispatch loop can resume cleanly instead of re-dispatching the same partially-parsed statement (which infinite-loops).
 Successful statements clear `LastErrorNumber` back to 0.
 **This is exception-handling for actual error handling, not control-flow-via-exceptions** — the in-band signal "now run CATCH" still flows through the existing skip-mode flag plumbing.
@@ -334,9 +345,7 @@ Statement adjacency requires `;` before THROW (probe-confirmed: `select 1 throw 
   NULL on any arg surfaces a generic raised error; real SQL Server has more specific paths but apps rarely hit them.
 
 **Live @@ERROR.**
-`LastErrorExpression` reads `runtime.Batch.Connection.LastErrorNumber` instead of hardcoded 0.
-The wrap maintains the value: caught error → `LastErrorNumber = ex.Number`, successful statement → reset to 0, with `StatementContext.SuppressErrorReset` as the one opt-out (used by `RAISERROR ... WITH SETERROR` at sev ≤ 10 to land 50000 into the next statement's read).
-Outside any TRY/CATCH the value otherwise stays 0 because uncaught errors tear down the batch.
+`LastErrorExpression` reads `runtime.Batch.Connection.LastErrorNumber`, which a caught error sets like any other; which statements reset it is under [`@@ERROR`](#variables-declare--set--select-v--expr).
 
 **Grammar edges.**
 - Empty TRY body (`BEGIN TRY END TRY ...`) → **Msg 102** ("Incorrect syntax near 'try'") — probe-confirmed wording.

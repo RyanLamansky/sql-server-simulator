@@ -55,7 +55,6 @@ Probed through SqlClient 7 against SQL Server 2025 (2026-09-23):
 ### Not modeled yet
 
 - **Msg 5703 is English whatever the language**; real words it in the language being switched to (`Die Spracheneinstellung wurde in Deutsch geändert.`).
-- **Msg 282** (`The 'p' procedure attempted to return a status of NULL, which is not allowed. A status of 0 will be returned instead.`) was seen once from real under the edge-probe harness for `RETURN NULL`, and isn't sent here; four direct SqlClient probes of the same shape got no message, so the condition that sends it isn't known yet.
 - **Msg 8153 over a constant `VALUES` source grouped into single-row groups** isn't sent by real (`SELECT x, SUM(y) FROM (VALUES (1, NULL), (2, 3)) v(x, y) GROUP BY x`), which evaluates those groups while compiling; the same data in a table warns on both.
 
 ## Bind errors in a deferred statement are catchable here and aren't on real

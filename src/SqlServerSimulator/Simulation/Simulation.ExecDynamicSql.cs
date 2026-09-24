@@ -1,3 +1,4 @@
+using System.Runtime.ExceptionServices;
 using SqlServerSimulator.Parser;
 using SqlServerSimulator.Parser.Tokens;
 using SqlServerSimulator.Schemas;
@@ -23,7 +24,7 @@ partial class Simulation
     /// the token after the closing <c>)</c>. Skip-mode evaluates the
     /// expression (cursor advance) but suppresses the dispatch.
     /// </remarks>
-    private IEnumerable<SimulatedStatementOutcome> ParseExecDynamicSql(BatchContext batch, string? returnCodeVar, bool insertExecSource = false)
+    private IEnumerable<SimulatedStatementOutcome> ParseExecDynamicSql(BatchContext batch, bool insertExecSource = false)
     {
         var context = batch.Parser;
         if (context.Token is not Operator { Character: '(' })
@@ -53,15 +54,7 @@ partial class Simulation
         var dynamicBatch = ExecuteDynamicBatch(batch, sqlText, preDeclaredVariables: null);
         foreach (var outcome in resultSets is null ? dynamicBatch : ApplyResultSetsContract(dynamicBatch, resultSets))
             yield return outcome;
-
-        // EXEC (@sql) doesn't expose a return code in the standard sense
-        // (the dynamic batch is opaque to the caller); the caller's @rc
-        // is left at 0. Probe shows no observable rc from this form.
-        if (returnCodeVar is not null)
-        {
-            var rcSlot = batch.GetVariableSlot(returnCodeVar);
-            rcSlot.Value = SqlValue.FromInt32(0).CoerceTo(rcSlot.DeclaredType);
-        }
+        batch.CurrentStatement.SuppressErrorReset = true;
     }
 
     /// <summary>
@@ -231,23 +224,45 @@ partial class Simulation
                 throw SimulatedSqlException.TooManyArgumentsToFunction("");
         }
 
+        // The status sp_executesql returns is @@ERROR as its batch left it,
+        // including when an error of the batch's own ended it, so an error is
+        // held until the status is written (probed 2026-09-24 against
+        // SQL Server 2025), and what the batch sent before it still goes first.
         var dynamicBatch = ExecuteDynamicBatch(batch, sqlText, preDeclared);
-        foreach (var outcome in resultSets is null ? dynamicBatch : ApplyResultSetsContract(dynamicBatch, resultSets))
-            yield return outcome;
+        List<SimulatedStatementOutcome> outcomes = [];
+        SimulatedSqlException? failure = null;
+        try
+        {
+            foreach (var outcome in resultSets is null ? dynamicBatch : ApplyResultSetsContract(dynamicBatch, resultSets))
+                outcomes.Add(outcome);
+        }
+        catch (SimulatedSqlException ex)
+        {
+            failure = ex;
+        }
 
         // Writeback: sp_executesql's OUTPUT params copy the dynamic batch's
         // final variable values back to the caller's slots.
-        foreach (var (param, callerSlot) in outputBindings)
+        if (failure is null)
         {
-            if (preDeclared.TryGetValue(param.Name, out var slot))
-                callerSlot.Value = slot.Value.CoerceTo(callerSlot.DeclaredType);
+            foreach (var (param, callerSlot) in outputBindings)
+            {
+                if (preDeclared.TryGetValue(param.Name, out var slot))
+                    callerSlot.Value = slot.Value.CoerceTo(callerSlot.DeclaredType);
+            }
         }
 
-        if (returnCodeVar is not null)
+        if (returnCodeVar is not null && failure is null or { EndedCalledBatch: true })
         {
             var rcSlot = batch.GetVariableSlot(returnCodeVar);
-            rcSlot.Value = SqlValue.FromInt32(0).CoerceTo(rcSlot.DeclaredType);
+            rcSlot.Value = SqlValue.FromInt32(failure?.Number ?? batch.Connection.LastErrorNumber).CoerceTo(rcSlot.DeclaredType);
         }
+
+        foreach (var outcome in outcomes)
+            yield return outcome;
+        if (failure is not null)
+            ExceptionDispatchInfo.Throw(failure);
+        batch.CurrentStatement.SuppressErrorReset = true;
     }
 
     /// <summary>
@@ -428,7 +443,7 @@ partial class Simulation
             ? new Dictionary<string, VariableSlot>(BatchContext.VariableNameComparer)
             : new Dictionary<string, VariableSlot>(preDeclaredVariables, BatchContext.VariableNameComparer);
         var procFrame = new ProcFrame("<dynamic-sql>", isDynamicSql: true);
-        var innerBatch = new BatchContext(dynCommand, variables, procFrame);
+        var innerBatch = new BatchContext(dynCommand, variables, procFrame) { ContinueOnError = ContinuesCalledBatch(outerBatch) };
 
         connection.NestingLevel++;
         var enteredDatabase = connection.CurrentDatabase;
@@ -440,7 +455,9 @@ partial class Simulation
         // the same module scope (probe-confirmed: `EXEC('SET XACT_ABORT ON …')`
         // leaves the caller's @@OPTIONS bit clear).
         var enteredOptions = new SimulatedDbConnection.SessionOptionScope(connection);
-        List<SimulatedStatementOutcome> outcomes;
+        List<SimulatedStatementOutcome> outcomes = [];
+        SimulatedSqlException? batchError = null;
+        var compiled = false;
         try
         {
             // Dynamic SQL is a batch of its own and compiles as one; an error
@@ -450,10 +467,18 @@ partial class Simulation
                 compileError.EndedCalledBatch = true;
                 throw compileError;
             }
+            compiled = true;
 
+            // An error that ends the batch keeps what the batch sent before
+            // it, which reaches the caller ahead of the error.
             var parser = innerBatch.Parser;
             parser.MoveNextOptional();
-            outcomes = [.. DispatchStatementsUntil(innerBatch, endKeyword: null)];
+            foreach (var outcome in DispatchStatementsUntil(innerBatch, endKeyword: null))
+                outcomes.Add(outcome);
+        }
+        catch (SimulatedSqlException ex) when (compiled)
+        {
+            batchError = ex;
         }
         finally
         {
@@ -475,7 +500,7 @@ partial class Simulation
 
         // Copy any pre-declared variable's final value back to the caller's
         // slot (sp_executesql OUTPUT writeback path).
-        if (preDeclaredVariables is not null)
+        if (batchError is null && preDeclaredVariables is not null)
         {
             foreach (var (name, _) in preDeclaredVariables)
                 preDeclaredVariables[name] = variables[name];
@@ -490,6 +515,8 @@ partial class Simulation
         foreach (var outcome in outcomes)
             yield return outcome;
         yield return new SimulatedProcScopeBoundary(isEnter: false);
+        if (batchError is not null)
+            ExceptionDispatchInfo.Throw(batchError);
     }
 
     /// <summary>

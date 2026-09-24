@@ -102,7 +102,7 @@ partial class Simulation
             // The grammar is `EXEC [@rc = ] proc_name [args]` — probe-confirmed
             // against SQL Server 2025. Peek for `@var =` and consume both tokens
             // when present; the dynamic-SQL form `EXEC (@sql)` doesn't accept a
-            // return-code variable.
+            // return-code variable (Msg 102 on its `(`, probed 2026-09-24).
             if (context.Token is AtPrefixedString rcCandidate)
             {
                 var checkpoint = context.SaveCheckpoint();
@@ -124,11 +124,14 @@ partial class Simulation
             // behavior).
             if (context.Token is Operator { Character: '(' })
             {
+                if (returnCodeVar is not null)
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+
                 // Real refuses the string form inside a function (Msg 443
                 // 'EXECUTE STRING') while leaving `EXEC <proc>` and
                 // `EXEC sp_executesql` creatable — probe-confirmed.
                 FunctionBodyShape.NoteSideEffect(batch, "EXECUTE STRING", FunctionBodyShape.ControlOperatorState);
-                foreach (var outcome in ParseExecDynamicSql(batch, returnCodeVar, insertExecSource))
+                foreach (var outcome in ParseExecDynamicSql(batch, insertExecSource))
                     yield return outcome;
                 yield break;
             }
@@ -235,6 +238,7 @@ partial class Simulation
             batch, procedure, arguments, returnCodeVar, execSynonym is null ? writtenName : $"{procedure.Schema.Name}.{procedure.Name}", execSynonym);
         foreach (var outcome in resultSets is null ? invocation : ApplyResultSetsContract(invocation, resultSets))
             yield return outcome;
+        batch.CurrentStatement.SuppressErrorReset = true;
     }
 
     /// <summary>

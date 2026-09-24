@@ -41,6 +41,27 @@ public sealed class BatchErrorContinuationTests
     }
 
     [TestMethod]
+    public async Task ProcedureBody_RunsOnPastAnError_MessagesArriveInOrder()
+    {
+        var simulation = new Simulation();
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+        await using (var create = new SqlCommand("create procedure p as print 'p1'; select 1/0; print 'p2'", connection))
+            _ = await create.ExecuteNonQueryAsync(TestContext.CancellationToken);
+
+        // With user errors routed through InfoMessage, SqlClient reports the
+        // stream in the order the server sent it, which is real's: the body
+        // runs on past its error, then the caller does (probed 2026-09-24).
+        var received = new List<string>();
+        connection.FireInfoMessageEventOnUserErrors = true;
+        connection.InfoMessage += (_, e) => received.AddRange(e.Errors.Cast<SqlError>().Select(error => error.Message));
+        await using var command = new SqlCommand("exec p; print 'after'", connection);
+        _ = await command.ExecuteNonQueryAsync(TestContext.CancellationToken);
+
+        CollectionAssert.AreEqual(new[] { "p1", "Divide by zero error encountered.", "p2", "after" }, received);
+    }
+
+    [TestMethod]
     public async Task SmoStyleTempDropCleanup_AllRaise3701_SessionStaysUsable()
     {
         var simulation = new Simulation();

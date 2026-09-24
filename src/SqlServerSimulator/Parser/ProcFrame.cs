@@ -38,12 +38,27 @@ internal sealed class ProcFrame(string procedureName, bool isDynamicSql = false)
     public readonly string ProcedureName = procedureName;
 
     /// <summary>
-    /// The value the body's <c>RETURN &lt;expr&gt;</c> assigned (coerced to
-    /// <see cref="SqlType.Int32"/>), or 0 if dispatch completed without an
-    /// explicit RETURN. Probe-confirmed: real SQL Server defaults the
-    /// return code to 0; <c>RETURN NULL</c> also yields 0 (NULL coerces to
-    /// 0 in this slot, NOT propagated as DBNull). The call site reads this
-    /// after dispatch completes.
+    /// The value the body's <c>RETURN &lt;expr&gt;</c> assigned, or
+    /// <see langword="null"/> when the body ended without one (a bare
+    /// <c>RETURN</c> included). <c>RETURN NULL</c> lands 0 here, after Msg 282
+    /// says so. The call site reads this after dispatch completes, falling
+    /// back to <see cref="StatusWithoutReturnValue"/>.
     /// </summary>
-    public SqlValue ReturnCode = SqlValue.FromInt32(0);
+    public int? ReturnCode;
+
+    /// <summary>
+    /// The highest severity among the errors the body's own statements raised,
+    /// caught by its own <c>TRY</c> or not; 0 when none did. Errors a nested
+    /// procedure or dynamic SQL raised don't count, even when they reach this
+    /// body.
+    /// </summary>
+    public byte MaxErrorSeverity;
+
+    /// <summary>
+    /// The status a body without a <c>RETURN</c> value reports: 0, or
+    /// <c>10 - severity</c> for the most severe error its own statements raised
+    /// (−1 for severity 11 through −6 for 16), probed 2026-09-24 against
+    /// SQL Server 2025.
+    /// </summary>
+    public int StatusWithoutReturnValue => this.MaxErrorSeverity >= 11 ? 10 - this.MaxErrorSeverity : 0;
 }

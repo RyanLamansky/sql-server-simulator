@@ -197,6 +197,17 @@ public sealed partial class SimulatedSqlException : DbException
     internal bool EndedCalledBatch;
 
     /// <summary>
+    /// Set by the first dispatch frame that sees this error, which is the
+    /// scope whose statement raised it. Only that scope's procedure counts the
+    /// error toward the status it returns without a <c>RETURN</c> value
+    /// (<see cref="Parser.ProcFrame.MaxErrorSeverity"/>): one propagating out of
+    /// a nested procedure or dynamic SQL arrives already recorded, and real
+    /// leaves the caller's status at 0 for it (probed 2026-09-24 against
+    /// SQL Server 2025).
+    /// </summary>
+    internal bool RaisingScopeRecorded;
+
+    /// <summary>
     /// Guards <see cref="ResolveDiagnostics"/> against re-stamping. An error
     /// born inside a nested body (procedure / dynamic-SQL batch) is resolved at
     /// its own dispatch frame's catch boundary; as it propagates outward each

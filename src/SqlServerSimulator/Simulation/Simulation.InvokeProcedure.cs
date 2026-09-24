@@ -1,3 +1,4 @@
+using System.Runtime.ExceptionServices;
 using SqlServerSimulator.Parser;
 using SqlServerSimulator.Schemas;
 using SqlServerSimulator.Storage;
@@ -218,11 +219,11 @@ partial class Simulation
         PushProcedureExecuteAsFrame(connection, procedure, outerBatch.CurrentDatabase);
 
         var procFrame = new ProcFrame(procedure.Name);
-        List<SimulatedStatementOutcome> outcomes;
+        List<SimulatedStatementOutcome> outcomes = [];
+        SimulatedSqlException? bodyError = null;
         BatchContext? innerBatch = null;
         if (string.IsNullOrEmpty(procedure.BodyText))
         {
-            outcomes = [];
             connection.Security.RevertTo(savedImpersonationDepth);
         }
         else
@@ -246,6 +247,7 @@ partial class Simulation
                 // the procedure's name.
                 LineOffset = procedure.BodyLineOffset,
                 ErrorProcedureName = attributionName,
+                ContinueOnError = ContinuesCalledBatch(outerBatch),
             };
             // Seed cursor parameters as unallocated cursor variables in the
             // child frame; the body SETs and OPENs a cursor on each.
@@ -271,11 +273,18 @@ partial class Simulation
             // Materialize outcomes to a list so the try/finally cleanup
             // (NestingLevel decrement, OUTPUT param writeback, return-code
             // assignment) runs even when the iterator is partially consumed.
+            // An error that ends the body keeps what the body sent before it,
+            // which reaches the caller ahead of the error.
             try
             {
                 var parser = innerBatch.Parser;
                 parser.MoveNextOptional();
-                outcomes = [.. DispatchStatementsUntil(innerBatch, endKeyword: null)];
+                foreach (var outcome in DispatchStatementsUntil(innerBatch, endKeyword: null))
+                    outcomes.Add(outcome);
+            }
+            catch (SimulatedSqlException ex)
+            {
+                bodyError = ex;
             }
             finally
             {
@@ -302,7 +311,10 @@ partial class Simulation
         // back unless the caller actually passed OUTPUT (probe-confirmed:
         // the caller's var retains its original value if OUTPUT keyword
         // was omitted on the call site).
-        for (var i = 0; i < procedure.Parameters.Length; i++)
+        // An error that ended the body leaves the caller's variables as they
+        // were: no OUTPUT writeback and no return status.
+        var bodyCompleted = bodyError is null;
+        for (var i = 0; bodyCompleted && i < procedure.Parameters.Length; i++)
         {
             var param = procedure.Parameters[i];
             // Cursor OUTPUT parameter: bind the cursor the body assigned to the
@@ -332,24 +344,34 @@ partial class Simulation
         if (innerBatch is not null)
             TeardownFrameCursors(innerBatch);
 
-        // Return code: coerce the proc's RETURN value (or default 0) to
-        // int and store into the caller's `@rc` slot. Probe-confirmed:
-        // RETURN NULL coerces to 0 (NULL doesn't propagate to the return
-        // code), so the CoerceTo handles the NULL→0 fall-through via the
-        // standard coercion path… except CoerceTo turns NULL-of-X into
-        // NULL-of-int. Explicit fallback to 0 keeps that fidelity.
-        if (returnCodeVariableName is not null)
+        // Return status: the body's RETURN value, or the status its own
+        // errors earned it.
+        if (bodyCompleted && returnCodeVariableName is not null)
         {
             var rcSlot = outerBatch.GetVariableSlot(returnCodeVariableName);
-            var rc = procFrame.ReturnCode.IsNull
-                ? SqlValue.FromInt32(0)
-                : procFrame.ReturnCode.CoerceTo(SqlType.Int32);
-            rcSlot.Value = rc.CoerceTo(rcSlot.DeclaredType);
+            var rc = procFrame.ReturnCode ?? procFrame.StatusWithoutReturnValue;
+            rcSlot.Value = SqlValue.FromInt32(rc).CoerceTo(rcSlot.DeclaredType);
         }
 
         foreach (var outcome in outcomes)
             yield return outcome;
+        if (bodyError is not null)
+            ExceptionDispatchInfo.Throw(bodyError);
     }
+
+    /// <summary>
+    /// Whether a procedure or dynamic-SQL body called from
+    /// <paramref name="caller"/> runs on past a statement-terminating error the
+    /// way its caller would, sending the error among its outcomes (probed
+    /// 2026-09-24 against SQL Server 2025). It does when the caller itself
+    /// continues and no <c>TRY</c> in it is open, since an open one catches
+    /// the body's first error and abandons the rest. Real runs an
+    /// <c>INSERT … EXEC</c> body on too; that isn't built yet, since the
+    /// statement collects the body's rows rather than forwarding its outcomes,
+    /// so such a body stops at its first error.
+    /// </summary>
+    private static bool ContinuesCalledBatch(BatchContext caller)
+        => caller.ContinueOnError && caller.TryFrameDepth == 0 && !caller.Connection.InsertExecActive;
 
     /// <summary>
     /// Converts an argument to its parameter's declared type the way real

@@ -59,6 +59,10 @@ partial class Simulation
         var condResult = !outerSkipping
             && cond.Run(new RuntimeContext(NoColumnResolver, batch)) == true;
         batch.QueueNullEliminatedWarning();
+        // The condition is a statement of its own for @@ERROR: the branch it
+        // chose reads 0 (probed 2026-09-24 against SQL Server 2025).
+        if (!outerSkipping)
+            connection.LastErrorNumber = 0;
         var thenSkip = !condResult;
 
         var hadElse = false;
@@ -243,6 +247,8 @@ partial class Simulation
                     context.RestoreCheckpoint(bodyStart);
                     var condResult = cond.Run(new RuntimeContext(NoColumnResolver, batch)) == true;
                     batch.QueueNullEliminatedWarning();
+                    // As for IF, the body reads @@ERROR 0 after its condition.
+                    connection.LastErrorNumber = 0;
 
                     if (!condResult)
                     {
@@ -377,7 +383,9 @@ partial class Simulation
         // (compile-time check, same pattern as BREAK's Msg 135).
         if (!IsStatementBoundary(context.Token))
         {
-            if (batch.UdfFrame is null && batch.ProcFrame is null)
+            // Dynamic SQL runs under a procedure frame but refuses the value
+            // form as a batch does (probed 2026-09-24).
+            if (batch.UdfFrame is null && batch.ProcFrame is null or { IsDynamicSql: true })
                 throw SimulatedSqlException.ReturnWithValueNotAllowed();
 
             var valueExpr = Expression.Parse(context);
@@ -392,12 +400,15 @@ partial class Simulation
                 }
                 else
                 {
-                    // Procedure RETURN: coerce to int with NULL → 0 (probe-
-                    // confirmed against SQL Server 2025: `RETURN NULL` lands
-                    // 0 in the caller's @rc, not NULL). Msg 245 surfaces here
-                    // for non-coercible types like `RETURN 'abc'`.
+                    // Procedure RETURN: coerce to int, a NULL landing 0 in the
+                    // caller's @rc with Msg 282 saying so (probe-confirmed
+                    // against SQL Server 2025). Msg 245 surfaces here for
+                    // non-coercible types like `RETURN 'abc'`.
                     var coerced = raw.CoerceTo(SqlType.Int32);
-                    batch.ProcFrame!.ReturnCode = coerced.IsNull ? SqlValue.FromInt32(0) : coerced;
+                    var procFrame = batch.ProcFrame!;
+                    if (coerced.IsNull)
+                        batch.Connection.PendingMessages.Enqueue(SimulatedSqlException.NullReturnStatusMessage(batch, procFrame.ProcedureName));
+                    procFrame.ReturnCode = coerced.IsNull ? 0 : coerced.AsInt32;
                 }
                 batch.ReturnSignaled = true;
             }

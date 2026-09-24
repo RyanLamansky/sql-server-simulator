@@ -301,14 +301,21 @@ public sealed class WithResultSetsTests
     {
         var sim = new Simulation();
         sim.ExecuteBatches("create procedure dbo.p as select 1 as a");
-        AreEqual(DBNull.Value, sim.ExecuteScalar("""
+        using var reader = sim.ExecuteReader("""
             begin try
                 exec dbo.p with result sets ((x int), (y int));
             end try
             begin catch
                 select error_procedure();
             end catch
-            """));
+            """);
+
+        // The set the procedure did send reaches the client ahead of the error.
+        IsTrue(reader.Read());
+        AreEqual(1, reader.GetInt32(0));
+        IsTrue(reader.NextResult());
+        IsTrue(reader.Read());
+        AreEqual(DBNull.Value, reader.GetValue(0));
     }
 
     [TestMethod]

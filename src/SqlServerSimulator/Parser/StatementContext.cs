@@ -186,8 +186,10 @@ internal sealed class StatementContext
     /// at severities ≤ 10: the statement didn't throw (informational
     /// severities don't raise), but <c>WITH SETERROR</c> still forces
     /// <c>@@ERROR</c> to <c>50000</c> for the next statement to observe
-    /// (probe-confirmed against SQL Server 2025). Reset to false at the
-    /// start of each statement iteration by the dispatch loop.
+    /// (probe-confirmed against SQL Server 2025). An <c>EXEC</c> of a procedure
+    /// or of dynamic SQL sets it too: <c>@@ERROR</c> after one reads whatever
+    /// the body's last statement left (probed 2026-09-24). Reset to false at
+    /// the start of each statement iteration by the dispatch loop.
     /// </summary>
     public bool SuppressErrorReset;
 

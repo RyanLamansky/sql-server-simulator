@@ -6,6 +6,7 @@ using SqlServerSimulator.Schemas;
 using SqlServerSimulator.Storage;
 using System.Data;
 using System.Data.Common;
+using System.Runtime.ExceptionServices;
 using System.Security.Cryptography;
 
 namespace SqlServerSimulator;
@@ -1812,16 +1813,22 @@ public sealed partial class Simulation
         var opensConditional = shape is not null && NoteFunctionBodyStatement(batch, shape);
         if (opensConditional)
             shape!.ConditionalDepth++;
-        List<SimulatedStatementOutcome>? outcomes = null;
+        // Filled as the statement produces them, so what a failing statement
+        // sent before its error — a body's messages and result sets ahead of
+        // the error that ended it — still reaches the client first, as real
+        // streams it.
+        List<SimulatedStatementOutcome> outcomes = [];
         SimulatedSqlException? caught = null;
         SimulatedSqlException? continuedError = null;
+        SimulatedSqlException? propagated = null;
         var deferredNameError = false;
         var gatheredBindError = false;
         try
         {
             try
             {
-                outcomes = [.. DispatchOneStatementCore(batch, requireSemicolonBeforeCte, atBatchStart)];
+                foreach (var outcome in DispatchOneStatementCore(batch, requireSemicolonBeforeCte, atBatchStart))
+                    outcomes.Add(outcome);
                 // Database-scope DDL triggers fire after the statement's own
                 // work completed but inside its error handling, so a body-side
                 // error surfaces as the statement's (and reaches an enclosing
@@ -1849,6 +1856,12 @@ public sealed partial class Simulation
                         ? batch.Parser.Token?.LineNumber ?? batch.CurrentStatement.StartLine
                         : batch.CurrentStatement.StartLine;
                     ex.ResolveDiagnostics(diagnosticLine, batch.LineOffset, batch.ErrorProcedureName);
+                    if (!ex.RaisingScopeRecorded)
+                    {
+                        ex.RaisingScopeRecorded = true;
+                        if (!batch.IsSkipping && batch.ProcFrame is { } procFrame && ex.Class > procFrame.MaxErrorSeverity)
+                            procFrame.MaxErrorSeverity = ex.Class;
+                    }
                 }
                 // Class 13 = deadlock victim. Real SQL Server auto-rolls
                 // back the active transaction before propagating (probe-
@@ -1928,7 +1941,7 @@ public sealed partial class Simulation
                 {
                     caught = ex;
                 }
-                else if (batch.ContinueOnError && ((IsBatchAbortingNameResolution(ex) && !ex.EndedCalledBatch) || ex.TerminatesBatch || ex.XactAbortPromoted))
+                else if (batch.ContinueOnError && batch.ProcFrame is null && EndsBatch(ex))
                 {
                     // Batch-aborting error: a bind-class name-resolution
                     // failure (missing object / column / ambiguous / could-not-
@@ -1946,8 +1959,12 @@ public sealed partial class Simulation
                     continuedError = ex;
                     batch.BatchAborted = true;
                 }
-                else if (batch.ContinueOnError && IsStatementTerminating(ex))
+                else if (batch.ContinueOnError && !EndsBatch(ex) && IsStatementTerminating(ex))
                 {
+                    // A continuing procedure or dynamic-SQL body takes this arm
+                    // too, and its error travels up among the body's outcomes;
+                    // one that ends the batch propagates below instead, so it
+                    // unwinds every caller it reaches.
                     continuedError = ex;
                 }
                 else
@@ -1956,7 +1973,7 @@ public sealed partial class Simulation
                     // batch-aborting name-resolution error reaches.
                     if (batch.ProcFrame is not null && IsBatchAbortingNameResolution(ex))
                         ex.EndedCalledBatch = true;
-                    throw;
+                    propagated = ex;
                 }
             }
         }
@@ -1966,6 +1983,13 @@ public sealed partial class Simulation
             connection.CurrentExecutingThreadId = savedThreadId;
             if (opensConditional)
                 shape!.ConditionalDepth--;
+        }
+
+        if (propagated is not null)
+        {
+            foreach (var outcome in ProducedOutcomes(batch, outcomes))
+                yield return outcome;
+            ExceptionDispatchInfo.Throw(propagated);
         }
 
         if (deferredNameError || gatheredBindError)
@@ -1985,8 +2009,8 @@ public sealed partial class Simulation
             // guessed position as recovery noise.
             if (gatheredBindError)
                 batch.BindResumedCleanly = parser.Token is null or Operator { Character: ';' };
-            foreach (var message in DrainPendingMessages(connection))
-                yield return message;
+            foreach (var outcome in ProducedOutcomes(batch, outcomes))
+                yield return outcome;
             yield break;
         }
 
@@ -2014,8 +2038,8 @@ public sealed partial class Simulation
                 while (parser.Token is not null && !IsStatementBoundary(parser.Token))
                     parser.MoveNextOptional();
             }
-            foreach (var message in DrainPendingMessages(connection))
-                yield return message;
+            foreach (var outcome in ProducedOutcomes(batch, outcomes))
+                yield return outcome;
             yield return new SimulatedErrorOutcome(continuedError, batch.CurrentStatement.LeadingKeywordReturnsRows);
             if (!batch.BatchAborted && IsStatementTerminationNoticed(batch, continuedError))
                 yield return new SimulatedInfoOutcome(SimulatedSqlException.StatementTerminatedMessage(batch));
@@ -2062,8 +2086,8 @@ public sealed partial class Simulation
             var parser = batch.Parser;
             while (parser.Token is not null && !IsStatementBoundary(parser.Token))
                 parser.MoveNextOptional();
-            foreach (var message in DrainPendingMessages(connection))
-                yield return message;
+            foreach (var outcome in ProducedOutcomes(batch, outcomes))
+                yield return outcome;
             yield break;
         }
 
@@ -2084,7 +2108,7 @@ public sealed partial class Simulation
         // enclosing procedure, which a downstream projection (EXEC … WITH
         // RESULT SETS) attributes its errors to. Already-stamped results pass
         // through untouched so the innermost producing frame wins.
-        foreach (var o in outcomes!)
+        foreach (var o in outcomes)
         {
             // SET NOCOUNT ON suppresses the statement's count wherever a client
             // reads one. Recorded per outcome rather than read at consumption
@@ -2105,21 +2129,8 @@ public sealed partial class Simulation
             }
         }
 
-        // Messages the statement produced while it ran precede its results.
-        foreach (var message in DrainPendingMessages(connection))
-            yield return message;
-        foreach (var o in outcomes!)
-            yield return o;
-
-        // Result sets any trigger this statement fired produced, in the order
-        // the bodies ran. Drained here rather than inside the DML executor,
-        // which has only one outcome to return.
-        if (batch.PendingTriggerResultSets is { Count: > 0 } triggerResults)
-        {
-            batch.PendingTriggerResultSets = null;
-            foreach (var o in triggerResults)
-                yield return o;
-        }
+        foreach (var outcome in ProducedOutcomes(batch, outcomes))
+            yield return outcome;
 
         // Msg 8153 follows the rows of the statement whose aggregate dropped a
         // NULL. Cleared once sent, since an enclosing IF / BEGIN…END shares
@@ -2129,6 +2140,27 @@ public sealed partial class Simulation
             batch.CurrentStatement.NullEliminated = false;
             if (connection.AnsiWarnings)
                 yield return NullEliminatedWarning(batch);
+        }
+    }
+
+    /// <summary>
+    /// What a statement produced, in the order real sends it: the messages it
+    /// queued while it ran, its own outcomes, then the result sets any trigger
+    /// it fired produced, in the order the bodies ran (buffered on the batch
+    /// because the DML executor has only one outcome to return). A statement
+    /// that fails sends the same ahead of its error.
+    /// </summary>
+    private static IEnumerable<SimulatedStatementOutcome> ProducedOutcomes(BatchContext batch, List<SimulatedStatementOutcome> outcomes)
+    {
+        foreach (var message in DrainPendingMessages(batch.Connection))
+            yield return message;
+        foreach (var outcome in outcomes)
+            yield return outcome;
+        if (batch.PendingTriggerResultSets is { Count: > 0 } triggerResults)
+        {
+            batch.PendingTriggerResultSets = null;
+            foreach (var outcome in triggerResults)
+                yield return outcome;
         }
     }
 
@@ -2316,6 +2348,15 @@ public sealed partial class Simulation
     /// </summary>
     private static bool IsBatchAbortingNameResolution(SimulatedSqlException ex)
         => ex.Number is 195 or 207 or 208 or 209 or 4104 or 4121;
+
+    /// <summary>
+    /// True for an error that ends the whole batch rather than its statement:
+    /// a name-resolution miss the procedure or dynamic SQL it ended hasn't
+    /// already contained, an uncaught <c>THROW</c>, or an error
+    /// <c>SET XACT_ABORT ON</c> promoted.
+    /// </summary>
+    private static bool EndsBatch(SimulatedSqlException ex)
+        => (IsBatchAbortingNameResolution(ex) && !ex.EndedCalledBatch) || ex.TerminatesBatch || ex.XactAbortPromoted;
 
     private IEnumerable<SimulatedStatementOutcome> DispatchOneStatementCore(BatchContext batch, bool requireSemicolonBeforeCte, bool atBatchStart)
     {
@@ -2774,10 +2815,17 @@ public sealed partial class Simulation
                     }
                     else
                     {
-                        var initRowCount = TryParseDeclare(context);
-                        if (!batch.IsSkipping && initRowCount is int n)
-                            connection.LastStatementRowCount = n;
-                        // No initializer → @@ROWCOUNT preserved (probe-confirmed).
+                        // No initializer → @@ROWCOUNT and @@ERROR both
+                        // preserved (probe-confirmed; @@ERROR probed 2026-09-24).
+                        if (TryParseDeclare(context) is int n)
+                        {
+                            if (!batch.IsSkipping)
+                                connection.LastStatementRowCount = n;
+                        }
+                        else
+                        {
+                            batch.CurrentStatement.SuppressErrorReset = true;
+                        }
                         context.RejectTrailingToken();
                     }
                 }

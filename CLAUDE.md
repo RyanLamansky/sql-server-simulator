@@ -280,7 +280,7 @@ Where an entry carries a second clause it is because that fact changes what you'
   A deferred FROM source that can't change across one enumeration is materialized once; APPLY and a `NEWID()`-drawing plan aren't → [`joins.md`](docs/claude/joins.md).
 - **`PIVOT` / `UNPIVOT`** — both attach as a postfix wrapper on the derived-table `LateralPlan` seam → [`pivot.md`](docs/claude/pivot.md).
 - **UPDATE / DELETE / INSERT…SELECT / SELECT…INTO / MERGE / OUTPUT**, plus rowversion, the identity helpers and `@@ROWCOUNT` → [`dml.md`](docs/claude/dml.md).
-- **Variables, control flow, TRY/CATCH + THROW + ERROR_\*, `@@ERROR` / `@@TRANCOUNT` / `XACT_STATE`, WAITFOR, PRINT, GOTO, batch compilation**.
+- **Variables, control flow, TRY/CATCH + THROW + ERROR_\*, `@@ERROR` / `@@TRANCOUNT` / `XACT_STATE`, WAITFOR, PRINT, GOTO, batch compilation, statement errors inside procedure and dynamic-SQL bodies**.
   Every batch walks once in skip mode before it runs, so a check that reads session state or live rows (a cursor, `IDENTITY_INSERT`, a variable's value, a lock) must wait for `!IsSkipping` or it fails batches real runs → [`control-flow.md`](docs/claude/control-flow.md).
 - **Error diagnostics** — line-number rules per context, `Server` / `Procedure` population, `ERROR_LINE` / `ERROR_PROCEDURE` parity, and where informational messages (PRINT, Msg 3621 / 8153 …) land among a batch's results and errors → [`errors.md`](docs/claude/errors.md).
 - **Cursors** — the full lifecycle, the sensitivity / scrollability / concurrency matrix, cursor variables, multi-source and deferred-source cursors, `WHERE CURRENT OF`.

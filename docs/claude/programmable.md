@@ -515,15 +515,17 @@ Probed against SQL Server 2025.
 - At proc exit, OUTPUT-declared params whose call-site also passed OUTPUT copy the child batch's final variable value back to the caller's slot.
   **Probe-confirmed quirks**:
   - Caller that omits `OUTPUT` on an OUTPUT-declared parameter: writeback is suppressed (caller's variable retains its pre-EXEC value).
-  - Output param when proc throws after writing: the partial write is preserved (caller sees the mid-proc value).
+  - A body that runs on past a statement error writes back as usual; one an error ends — into the caller's `CATCH`, or by `THROW` — writes nothing back, and the caller's variable keeps its pre-`EXEC` value (probed 2026-09-24).
 - For `CommandType.StoredProcedure` callers (`SimulatedDbCommand.CommandType = StoredProcedure`), parameters with `ParameterDirection.Output` / `InputOutput` writeback to `DbParameter.Value` at end-of-call; `ParameterDirection.ReturnValue` captures the proc's return code (default 0).
 
 **RETURN semantics**:
 - Bare `RETURN` exits the procedure early; subsequent statements in the body don't execute (propagates through `IF` / `BEGIN…END` / `WHILE` via `BatchContext.ReturnSignaled`, same plumbing as bare-batch RETURN).
 - `RETURN <expr>` evaluates the expression, coerces to `int`, lands in `ProcFrame.ReturnCode`.
-  **Probe-confirmed: `RETURN NULL` yields 0 in the caller's `@rc`** — NULL coerces to 0 in this slot specifically (NOT propagated as `DBNull`), distinct from how NULL flows through other expression contexts.
+  **Probe-confirmed: `RETURN NULL` yields 0 in the caller's `@rc`**, and sends Msg 282 saying so — NULL coerces to 0 in this slot specifically (NOT propagated as `DBNull`), distinct from how NULL flows through other expression contexts.
 - `RETURN 'abc'` (non-coercible string) raises **Msg 245** at the proc body's RETURN statement.
-- Default return code (no explicit RETURN) is **0**.
+- A body that ends without a `RETURN` value, a bare `RETURN` included, returns 0 — or, when its own statements raised an error, `10 - severity` for the most severe of them: −6 after a severity-16 error, −1 after severity 11 (`ProcFrame.StatusWithoutReturnValue`, probed 2026-09-24 against SQL Server 2025).
+  An error counts even when the body's own `TRY` caught it, and doesn't when a procedure or dynamic SQL the body called raised it; a `RETURN` value set after the error wins.
+  A body an error ends assigns the caller's `@rc` nothing.
 - Value-form RETURN is also legal inside scalar UDF bodies (existing); the parse-time check accepts either `BatchContext.UdfFrame` or `BatchContext.ProcFrame` being non-null.
 
 **Multi-result-set forwarding**: a procedure body's `SELECT` statements yield result sets through the outer caller's iterator (`ExecuteReader().NextResult()` walks them).
@@ -660,7 +662,7 @@ A variable of any other type is **Msg 8199**, and a NULL or unparsable value is 
 
 ## Dynamic SQL (`EXEC (@sql)` / `sp_executesql`)
 Two re-tokenizing paths in `Simulation.ExecDynamicSql.cs`.
-Both run the dynamic batch inside its own child `BatchContext` (`ProcFrame` set for `RETURN` legality but the return code is discarded), share the outer connection's database / transaction state, and forward result sets to the outer caller.
+Both run the dynamic batch inside its own child `BatchContext` (a `ProcFrame` with `IsDynamicSql` set, where `RETURN <value>` is Msg 178 as in a batch), share the outer connection's database / transaction state, and forward result sets to the outer caller.
 **Outer `@`-variables are NOT visible** — probe-confirmed: a dynamic batch referencing an undeclared `@x` raises Msg 137.
 **The dynamic batch inherits the enclosing module's `QUOTED_IDENTIFIER`**, not the session's — an `EXEC ('SELECT "x"')` inside a procedure created under `SET QUOTED_IDENTIFIER OFF` reads a string literal even when the caller's session is ON (probe-confirmed).
 That falls out of how the capture is applied: invocation swaps the session flag for the body's duration, and the dynamic command seeds from the connection like any other ([`grammar.md`](grammar.md#per-object-creation-time-capture)).
@@ -671,13 +673,14 @@ That scoping is what lets `sp_MSforeachdb`'s `'USE [?]; …'` idiom run each com
 **`EXEC (<string-expr>)`**:
 - Operand evaluates in the outer batch's context (so `EXEC ('SELECT ' + @col + ' FROM t')` works), then the resulting string is dispatched as a fresh batch.
 - NULL string operand → silent no-op (matches real SQL Server's permissive handling).
-- The dynamic-SQL form doesn't expose a meaningful return code; `@rc = EXEC ('...')` writes 0 unconditionally.
+- The form takes no return-code variable: `EXEC @rc = ('...')` is Msg 102 near the `(`.
 
 **`EXEC sp_executesql N'sql', N'@p1 type [OUTPUT], ...', @p1 = value, @p2 = @callervar OUTPUT, ...`**:
 - First argument is the SQL text; second (optional) is a parameter-declaration string parsed by `ParseSpExecuteSqlParamDefinitions` (mini-parser: `@name type [OUTPUT]` entries, comma-separated).
 - Remaining arguments bind values to declared params (positional or named); `OUTPUT` keyword on an `@variable`-valued arg writes the dynamic batch's final variable value back to the caller's slot at exit.
 - The pre-declared `@`-variables exist as the dynamic batch's own `Variables` dict — they don't leak into the outer scope.
 - Probe-confirmed: `sp_executesql` works with no parameters (`EXEC sp_executesql N'SELECT 42'`).
+- Its return status is `@@ERROR` as the dynamic batch left it — 0 after a clean last statement, the error's number after an error that compiling or name resolution ended the batch with (probed 2026-09-24).
 - **The first two arguments bind by position and their names are not checked.**
   A `@name =` prefix is accepted and discarded, so `@stmt =`, `@statement =`, `@sql =` and even `@nonsense =` all run the same statement — probe-confirmed.
   Naming them doesn't reorder them either: `@params = N'select 5 as v', @stmt = N'@x int'` takes the *first written* argument as the statement, which Msg 8178 then quotes back as `'(@x int)select 5 as v'`.
