@@ -114,11 +114,11 @@ public sealed class SyntaxAlternativesTests
 
     [TestMethod]
     public void Synonym_NationalCharacter_ResolvesToNChar()
-        => AreEqual("a    ", new Simulation().ExecuteScalar("select cast(n'a' as national character(5))"));
+        => AreEqual("a    ", new Simulation().ExecuteScalar("select cast(N'a' as national character(5))"));
 
     [TestMethod]
     public void Synonym_NationalCharacterVarying_ResolvesToNVarchar()
-        => AreEqual("ab", new Simulation().ExecuteScalar("select cast(n'ab' as national character varying(5))"));
+        => AreEqual("ab", new Simulation().ExecuteScalar("select cast(N'ab' as national character varying(5))"));
 
     [TestMethod]
     public void Synonym_InCreateTable_CharacterVaryingColumn()

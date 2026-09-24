@@ -219,6 +219,7 @@ partial class Simulation
         // A CHECK predicate — inline or table-level — may not read a
         // non-persisted computed column (Msg 1764). Runs ahead of the Msg 8141
         // walk below, matching real's probed precedence.
+        BindCheckConstraints(context.Batch, heapColumns, pendingChecks);
         RejectChecksOverNonPersistedComputedColumns(context.Batch.CurrentDatabase.Collation, tableName.Leaf, heapColumns, pendingChecks);
 
         // Real SQL Server's Msg 8141 (probed against SQL Server 2025) rejects
@@ -1066,7 +1067,41 @@ partial class Simulation
             }
         }
 
+        RejectRepeatedColumnNames(context, tableName, heapColumns, pendingComputed);
         return context.Token is Operator { Character: ')' };
+    }
+
+    /// <summary>
+    /// Raises Msg 2705 for a column name the list repeats, naming the later
+    /// spelling — state 2 when a computed column is one of the pair, 3
+    /// otherwise (probed 2026-09-24 against SQL Server 2025). A computed
+    /// column's slot in <paramref name="heapColumns"/> is still a placeholder
+    /// here, so its name comes from <paramref name="pendingComputed"/>.
+    /// </summary>
+    private static void RejectRepeatedColumnNames(
+        ParserContext context,
+        string tableName,
+        List<HeapColumn?> heapColumns,
+        List<(int Index, string Name, Expression Expression, bool Persisted, bool Nullable, string Definition)> pendingComputed)
+    {
+        var names = new string[heapColumns.Count];
+        var computed = new bool[heapColumns.Count];
+        for (var i = 0; i < heapColumns.Count; i++)
+            names[i] = heapColumns[i]?.Name ?? "";
+        foreach (var (index, name, _, _, _, _) in pendingComputed)
+        {
+            names[index] = name;
+            computed[index] = true;
+        }
+        var collation = context.Batch.CurrentDatabase.Collation;
+        for (var i = 1; i < names.Length; i++)
+        {
+            for (var j = 0; j < i; j++)
+            {
+                if (collation.Equals(names[i], names[j]))
+                    throw SimulatedSqlException.DuplicateColumnInTable(names[i], tableName, computed[i] || computed[j] ? (byte)2 : (byte)3);
+            }
+        }
     }
 
     /// <summary>
@@ -1881,6 +1916,44 @@ partial class Simulation
     {
         foreach (var pending in pendingChecks)
             RejectCheckOverNonPersistedComputedColumn(collation, tableName, columns, pending.Predicate);
+    }
+
+    /// <summary>
+    /// Binds each CHECK predicate against the table's columns while compiling,
+    /// as real does: a name no column carries is Msg 207, and any other binder
+    /// error — an illegal conversion (Msg 529), say — arrives with the Msg 1750
+    /// trailer. Real's 207 beats the Msg 8141 peer-reference walk and carries
+    /// no trailer (probed 2026-09-24 against SQL Server 2025).
+    /// </summary>
+    internal static void BindCheckConstraints(
+        BatchContext batch,
+        List<HeapColumn?> columns,
+        List<(string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition)> pendingChecks)
+    {
+        foreach (var pending in pendingChecks)
+            BindCheckConstraint(batch, columns, pending.Predicate);
+    }
+
+    internal static void BindCheckConstraint(BatchContext batch, IReadOnlyList<HeapColumn?> columns, BooleanExpression predicate)
+    {
+        SqlType ResolveColumnType(MultiPartName name)
+        {
+            foreach (var column in columns)
+            {
+                if (column is not null && batch.CurrentDatabase.Collation.Equals(column.Name, name.Leaf))
+                    return column.Type;
+            }
+            throw SimulatedSqlException.InvalidColumnName(name);
+        }
+
+        try
+        {
+            predicate.Bind(batch, ResolveColumnType);
+        }
+        catch (SimulatedSqlException error) when (error.Number != 207)
+        {
+            throw SimulatedSqlException.FollowedByConstraintNotCreated(error, state: 0);
+        }
     }
 
     internal static void RejectCheckOverNonPersistedComputedColumn(

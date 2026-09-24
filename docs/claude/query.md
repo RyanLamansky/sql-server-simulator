@@ -322,6 +322,9 @@ A frame written in the *refinement* rather than inherited stays on the inline Ms
 **Qualifier-awareness is the recurring rule across every resolver here.** A name matched on its leaf alone binds to the wrong column whenever a join brings a same-named one into scope — silently, with no error. It applies in four places, all now qualifier-aware: the plain ORDER BY resolver, the grouped ORDER BY resolver, the grouped-key resolver behind a grouped *projection* (`SELECT p.name` binding to a `b.name` grouping key), and the DISTINCT select-list check.
 
 An **unqualified** term matches the select list first (output alias, then ordinal), falling back to a source column when it matches no output — SQL Server permits ordering by a non-selected source column.
+Only a **bare** term (parentheses aside) may name an output alias.
+A name inside any larger expression — `x + 1`, `-x`, `x COLLATE …`, a CASE — binds to the FROM sources alone, so it is **Msg 207** while compiling when only an alias carries it, followed by Msg 145 under DISTINCT, and it reads the source column when both do: `SELECT b AS a FROM t ORDER BY a + 0` sorts by `t.a` (probed 2026-09-24).
+The same holds for a grouped query's `ORDER BY s + 1` over `SUM(b) AS s`.
 A **qualified** term (`alias.col`) is a *source-column reference* and never matches an output alias: real orders `SELECT val AS id FROM ob t ORDER BY t.id` by `t`'s id column even though an output alias `id` exists (probe-confirmed).
 Matching on the leaf alone silently sorted by the wrong column whenever a join brought a same-named column into scope — `ORDER BY child.id` bound to the projected `parent.id`, which is the shape an ORM emits when ordering by a related model's field.
 
@@ -667,7 +670,7 @@ The one deliberate conservative miss: a column appearing only *inside* a compoun
 Oracle: `GroupByContainmentTests`; Msg 130 / 8117 / 164 aggregate-validation rules remain over-permissive (see [`backlog.md`](backlog.md)).
 
 **ORDER BY on a grouped query** sorts the full grouped stream (across all grouping sets) before TOP / OFFSET / FETCH, so `SELECT TOP (n) … GROUP BY … ORDER BY SUM(x) DESC` selects the correct rows in order.
-ORDER BY items resolve a select-list **alias** first (`ORDER BY Total`), then through the grouped-key / representative-row resolver — so an aggregate (`ORDER BY SUM(x)`, whose `AggregateExpression` is collected and bound like any projection aggregate), a grouped column, or a grouping expression all sort correctly.
+ORDER BY items resolve a select-list **alias** first (`ORDER BY Total`, bare terms only — see [ORDER BY term resolution](#order-by-term-resolution)), then through the grouped-key / representative-row resolver — so an aggregate (`ORDER BY SUM(x)`, whose `AggregateExpression` is collected and bound like any projection aggregate), a grouped column, or a grouping expression all sort correctly.
 Parse-time type-checking is alias-aware to match.
 
 `GROUPING(col)` / `GROUPING_ID(c1, ..., cN)` read the executor-published context off `BatchContext.GroupingSetExpressions` (current set's column list) and `BatchContext.AllGroupingExpressions` (union across query).

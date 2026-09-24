@@ -726,6 +726,8 @@ partial class Simulation
                     throw SimulatedSqlException.ColumnCannotBeModified(col.Name);
                 if (col.Type == SqlType.RowVersion)
                     throw SimulatedSqlException.CannotInsertExplicitTimestamp();
+                if (insertColumns.Contains(col))
+                    throw SimulatedSqlException.ColumnAssignedMoreThanOnce(col.Name);
                 insertColumns.Add(col);
                 var sep = context.GetNextRequired();
                 if (sep is Operator { Character: ')' })
@@ -905,6 +907,8 @@ partial class Simulation
                     throw SimulatedSqlException.ColumnCannotBeModified(targetColumn.Name);
                 if (targetColumn.Type == SqlType.RowVersion)
                     throw SimulatedSqlException.CannotUpdateTimestampColumn();
+                if (assignments.Exists(assignment => assignment.Ordinal == ordinal))
+                    throw SimulatedSqlException.ColumnAssignedMoreThanOnce(sourceView is null ? targetColumn.Name : columnName);
                 assignments.Add((ordinal, rhs));
 
                 if (context.Token is not Operator { Character: ',' })

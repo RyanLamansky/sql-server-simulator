@@ -2739,6 +2739,11 @@ internal sealed partial class Selection
                     // base object).
                     FoldSecurables(context, cteBinding.Plan);
 
+                    // A name the CTE projects twice is refused where it is
+                    // read, as a derived table's is — an unused CTE reports
+                    // Msg 422 instead (probed 2026-09-24).
+                    _ = RejectRepeatedColumnName(cteBinding.ColumnNames, cteBinding.Name);
+
                     var cteColumns = new HeapColumn[cteBinding.Plan.Schema.Length];
                     for (var ci = 0; ci < cteColumns.Length; ci++)
                         cteColumns[ci] = new HeapColumn(string.Empty, cteBinding.Plan.Schema[ci], maxLength: null, nullable: true);
@@ -3341,9 +3346,11 @@ internal sealed partial class Selection
                 if (string.IsNullOrEmpty(projectedNames[i]))
                     (unnamed ??= []).Add(i + 1);
             }
-            return unnamed is null
-                ? projectedNames
-                : throw SimulatedSqlException.NoColumnNamesSpecified(unnamed, qualifier);
+            if (unnamed is not null)
+                throw SimulatedSqlException.NoColumnNamesSpecified(unnamed, qualifier);
+            // The projection's own names must be distinct too (probed
+            // 2026-09-24: `(SELECT 1 x, 2 x) d` is Msg 8156).
+            return RejectRepeatedColumnName(projectedNames, qualifier);
         }
 
         var renamed = ParseColumnAliasList(context);
@@ -3351,16 +3358,21 @@ internal sealed partial class Selection
             throw SimulatedSqlException.HasMoreColumnsThanColumnList(qualifier);
         if (projectedNames.Length < renamed.Length)
             throw SimulatedSqlException.HasFewerColumnsThanColumnList(qualifier);
+        return RejectRepeatedColumnName(renamed, qualifier);
+    }
 
-        for (var i = 0; i < renamed.Length; i++)
+    /// <summary>Returns <paramref name="names"/>, raising Msg 8156 for the first one repeated.</summary>
+    private static string[] RejectRepeatedColumnName(string[] names, string qualifier)
+    {
+        for (var i = 0; i < names.Length; i++)
         {
             for (var j = 0; j < i; j++)
             {
-                if (Collation.Baseline.Equals(renamed[i], renamed[j]))
-                    throw SimulatedSqlException.ColumnSpecifiedMultipleTimes(renamed[i], qualifier);
+                if (Collation.Baseline.Equals(names[i], names[j]))
+                    throw SimulatedSqlException.ColumnSpecifiedMultipleTimes(names[i], qualifier);
             }
         }
-        return renamed;
+        return names;
     }
 
     /// <summary>
@@ -4306,6 +4318,13 @@ internal sealed partial class Selection
         // batch from plan-cache promotion.
         parseBatch.HasSessionScopedReference = true;
 
+        // Msg 108 while compiling, as on the FROM path.
+        foreach (var spec in orderBy)
+        {
+            if (spec.IsOrdinal && (spec.Ordinal < 1 || spec.Ordinal > expressions.Count))
+                throw SimulatedSqlException.OrderByPositionOutOfRange(spec.Ordinal);
+        }
+
         var values = new SqlValue[expressions.Count];
         var schema = new SqlType[expressions.Count];
         var columnNames = new string[expressions.Count];
@@ -4817,6 +4836,16 @@ internal readonly struct OrderBySpec
     public readonly int Ordinal;
     public readonly bool Descending;
 
+    /// <summary>
+    /// Whether the term is a bare column name (parentheses aside), the only
+    /// shape that may name a select-list alias: real binds a name inside any
+    /// larger expression — <c>x + 1</c>, <c>-x</c>, <c>x COLLATE …</c>, a
+    /// CASE — to the FROM sources alone, so it is Msg 207 when only an alias
+    /// carries it and reads the source column when both do. Probed against
+    /// SQL Server 2025 (2026-09-24).
+    /// </summary>
+    public readonly bool MayNameAlias;
+
     public bool IsOrdinal => this.Expr is null;
 
     private OrderBySpec(Expression? expr, int ordinal, bool descending)
@@ -4824,7 +4853,15 @@ internal readonly struct OrderBySpec
         this.Expr = expr;
         this.Ordinal = ordinal;
         this.Descending = descending;
+        this.MayNameAlias = IsBareReference(expr);
     }
+
+    private static bool IsBareReference(Expression? expr) => expr switch
+    {
+        Expressions.Parenthesized p => IsBareReference(p.Wrapped),
+        Expressions.Reference => true,
+        _ => false,
+    };
 
     public static OrderBySpec FromExpression(Expression expr, bool descending) => new(expr, 0, descending);
     public static OrderBySpec FromOrdinal(int ordinal, bool descending) => new(null, ordinal, descending);

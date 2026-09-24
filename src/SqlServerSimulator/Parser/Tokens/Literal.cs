@@ -58,7 +58,7 @@ internal sealed class Literal(SqlValue value, string command, int index, int len
             return source[0] switch
             {
                 '\'' or '"' => UnescapeBody(source[1..^1], source[0]),
-                'N' or 'n' => UnescapeBody(source[2..^1], '\''),
+                'N' => UnescapeBody(source[2..^1], '\''),
                 '0' when source.Length > 1 && source[1] is 'x' or 'X' => this.RenderBytes(),
                 _ => Clip(source),
             };

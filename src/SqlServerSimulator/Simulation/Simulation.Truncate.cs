@@ -79,6 +79,12 @@ partial class Simulation
             throw SimulatedSqlException.CannotFindObjectForAlter(name.Leaf);
         }
 
+        // Another table's FOREIGN KEY blocks the truncation even while it is
+        // disabled; only a self-reference is let through (probe-confirmed
+        // against SQL Server 2025).
+        if (table.IncomingForeignKeys.Exists(fk => fk.ChildTable != table))
+            throw SimulatedSqlException.CannotTruncateTableReferencedByForeignKey(name.Leaf);
+
         // Sch-M on the target for the duration of the statement — waits for
         // any concurrent Sch-S holders to drain before the destructive page-
         // swap and identity reset proceed.

@@ -51,6 +51,16 @@ public sealed class SimulatedDbTransaction : DbTransaction
     internal bool IsMarked;
 
     /// <summary>
+    /// The name the outermost <c>BEGIN TRAN</c> gave the transaction, or null.
+    /// <c>ROLLBACK TRAN</c> naming it rolls the whole transaction back; a
+    /// nested BEGIN's name is not recorded, so naming that one is Msg 6401.
+    /// Matched ordinally — real refuses <c>outer1</c> for <c>Outer1</c>
+    /// under a case-insensitive collation (probe-confirmed against SQL
+    /// Server 2025).
+    /// </summary>
+    internal string? Name;
+
+    /// <summary>
     /// SQL Server's uncommittable ("doomed") transaction state: set when an
     /// error raised under <c>SET XACT_ABORT ON</c> was caught by a
     /// <c>TRY</c> frame instead of ending the batch. The transaction stays

@@ -331,13 +331,14 @@ internal sealed partial class Selection
         // group's output (alias / select-list name first), then through
         // the grouped-key resolver — so ORDER BY can reference a select
         // alias, a grouped column, or a grouping expression.
+        var orderTermMayNameAlias = false;
         SqlValue ResolveOrderName(MultiPartName name)
         {
             // A qualified term names a source column, never an output
             // alias — the same rule the non-grouped ORDER BY follows.
             // Matching on the leaf alone made `ORDER BY publisher.name`
             // bind to a projected `book.name` across a join.
-            if (name.ImmediateQualifier is null)
+            if (name.ImmediateQualifier is null && orderTermMayNameAlias)
             {
                 for (var j = 0; j < outputColumnNames.Length; j++)
                 {
@@ -573,6 +574,7 @@ internal sealed partial class Selection
                     var orderKeys = topNGroups is null ? new SqlValue[orderByItems.Count] : orderKeyScratch;
                     for (var k = 0; k < orderByItems.Count; k++)
                     {
+                        orderTermMayNameAlias = orderByItems[k].MayNameAlias;
                         orderKeys[k] = orderByItems[k].IsOrdinal
                             ? projected[orderByItems[k].Ordinal - 1]
                             : orderByItems[k].Expr!.Run(orderRuntime);
@@ -652,6 +654,7 @@ internal sealed partial class Selection
                     var groupOrderKeys = new SqlValue[orderByItems.Count];
                     for (var k = 0; k < orderByItems.Count; k++)
                     {
+                        orderTermMayNameAlias = orderByItems[k].MayNameAlias;
                         groupOrderKeys[k] = orderByItems[k].IsOrdinal
                             ? projectedGroup[orderByItems[k].Ordinal - 1]
                             : orderByItems[k].Expr!.Run(orderRuntime);

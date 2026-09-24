@@ -25,6 +25,10 @@ internal sealed class Substring : Expression
     public Substring(ParserContext context)
     {
         this.source = Parse(context);
+        // Only the string slot refuses a bare NULL (a NULL start or length
+        // answers NULL), while compiling — probed against SQL Server 2025.
+        if (IsUntypedNullLiteral(this.source))
+            throw SimulatedSqlException.InvalidArgumentDataType("NULL", 1, "substring");
         ExpectArgumentSeparator(context);
         this.start = Parse(context.MoveNextRequiredReturnSelf());
         ExpectArgumentSeparator(context);

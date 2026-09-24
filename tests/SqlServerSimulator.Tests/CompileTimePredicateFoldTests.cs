@@ -510,8 +510,6 @@ public sealed class CompileTimePredicateFoldTests
     [DataRow("select nullif(b, a / 0) from t")]
     // A NULL the row supplies isn't a compile-time one.
     [DataRow("select nullif(nullif(b, b), a / 0) from t")]
-    // The bare NULL literal real refuses outright (Msg 4151) is left unfolded.
-    [DataRow("select nullif(null, a / 0) from t")]
     public void NullifWithoutAConstantNullFirstArgument_StillEvaluatesTheSecond(string sql) =>
         _ = Seeded().AssertSqlError(sql, 8134);
 

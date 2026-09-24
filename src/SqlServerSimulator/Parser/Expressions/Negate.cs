@@ -84,12 +84,29 @@ internal sealed class Negate(Expression operand) : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
         var operandType = this.Operand.GetSqlType(batch, resolveColumnType);
+        RejectNonNumeric(operandType);
         // The `0 - x` fallback typing already preserves money / smallmoney /
         // float / int / bigint and rejects strings/dates exactly as real does;
         // only the cases below diverge from that additive result and need a
         // preserved override.
         return PreservedResultType(operandType)
             ?? SqlType.PromoteForArithmetic(SqlType.Int32, operandType, '-');
+    }
+
+    /// <summary>
+    /// Refuses an operand outside the numeric families, as real does while
+    /// compiling even though <c>0 - x</c> would convert a string: a string or
+    /// binary <b>literal</b> (parentheses included) is Msg 403, any other
+    /// operand — a variable, a column, a CAST, <c>GETDATE()</c> — Msg 8117.
+    /// </summary>
+    private void RejectNonNumeric(SqlType operandType)
+    {
+        if (operandType.Category is SqlTypeCategory.Integer or SqlTypeCategory.Decimal or SqlTypeCategory.Money or SqlTypeCategory.Approximate)
+            return;
+
+        throw Unwrap(this.Operand) is Value { IsLiteral: true }
+            ? SimulatedSqlException.InvalidOperatorForDataType("minus", SimulatedSqlException.FamilyRootName(operandType))
+            : SimulatedSqlException.OperandDataTypeInvalid(operandType, "minus");
     }
 
     /// <summary>

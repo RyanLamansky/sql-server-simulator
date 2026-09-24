@@ -44,7 +44,9 @@ internal sealed class Coalesce : Expression
         }
         aggregateBounds.Add(context.AggregateCollector?.Count ?? 0);
         if (args.Count < 2)
-            throw new NotSupportedException("COALESCE requires at least two arguments.");
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        if (args.TrueForAll(IsUntypedNullLiteral))
+            throw SimulatedSqlException.AllCoalesceArgumentsAreNull();
         this.arguments = [.. args];
         // A constant-NULL argument drops out of the walk; the first constant
         // non-NULL one answers for the call. A fold that raises, or an argument

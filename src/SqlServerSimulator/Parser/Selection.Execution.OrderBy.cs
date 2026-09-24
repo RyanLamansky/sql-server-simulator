@@ -86,7 +86,7 @@ internal sealed partial class Selection
                 // all, which is Msg 145 — leaf-matching it against the output
                 // names accepted `SELECT DISTINCT val AS id … ORDER BY t.id`,
                 // which real rejects (probe-confirmed 2026-07-31).
-                if (name.ImmediateQualifier is null)
+                if (name.ImmediateQualifier is null && spec.MayNameAlias)
                 {
                     for (var j = 0; j < outputColumnNames.Length; j++)
                     {

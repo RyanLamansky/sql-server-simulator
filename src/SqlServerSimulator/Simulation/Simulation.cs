@@ -3026,11 +3026,27 @@ public sealed partial class Simulation
     /// Returns false if the next token isn't <c>TRAN</c> / <c>TRANSACTION</c>
     /// (the <c>case … when</c> dispatch falls through to a syntax error).
     /// </summary>
+    private const int MaxTransactionNameLength = 32;
+
+    /// <summary>
+    /// The transaction or savepoint name under the cursor, refused past 32
+    /// characters while compiling (Msg 103 state 2, probe-confirmed against
+    /// SQL Server 2025 for every statement that takes one).
+    /// </summary>
+    private static string ParseTransactionName(ParserContext context)
+    {
+        var name = ((Name)context.Token!).Value;
+        return name.Length > MaxTransactionNameLength
+            ? throw SimulatedSqlException.TransactionNameTooLong(name)
+            : name;
+    }
+
     private static bool TryParseSavepoint(ParserContext context)
     {
         if (!context.MoveNext() || context.Token is not ReservedKeyword { Keyword: Keyword.Tran or Keyword.Transaction })
             return false;
-        var name = context.GetNextRequired<Name>().Value;
+        _ = context.GetNextRequired<Name>();
+        var name = ParseTransactionName(context);
         context.MoveNextOptional();
 
         if (context.Batch.IsSkipping)
@@ -3084,9 +3100,15 @@ public sealed partial class Simulation
         // Optional name (BEGIN TRANSACTION my_tx, or @v holding one). Cosmetic;
         // consume and ignore — but whether one was written decides Msg 3901.
         var named = false;
+        string? literalName = null;
+        string? nameVariable = null;
         if (context.MoveNext() && context.Token is Name or AtPrefixedString)
         {
             named = true;
+            if (context.Token is AtPrefixedString variable)
+                nameVariable = variable.Value;
+            else
+                literalName = ParseTransactionName(context);
             context.MoveNextOptional();
         }
 
@@ -3123,10 +3145,16 @@ public sealed partial class Simulation
         }
         else
         {
+            // A name held in a variable is cut to the 32 characters a written
+            // one is refused past (probe-confirmed).
+            var name = literalName;
+            if (nameVariable is not null && context.Batch.GetVariableSlot(nameVariable).Value is { IsNull: false } held)
+                name = held.AsString.Length > MaxTransactionNameLength ? held.AsString[..MaxTransactionNameLength] : held.AsString;
             context.Connection.CurrentTransaction = new SimulatedDbTransaction(
                 context.Simulation, context.Connection, System.Data.IsolationLevel.Unspecified)
             {
                 IsMarked = marked,
+                Name = name,
             };
         }
         return true;
@@ -3147,9 +3175,13 @@ public sealed partial class Simulation
         if (context.MoveNext()
             && context.Token is ReservedKeyword { Keyword: Keyword.Tran or Keyword.Transaction })
         {
-            // Optional savepoint-style name. Consume and ignore.
+            // Optional name, which real ignores (any name commits) once it
+            // passes the length rule.
             if (context.MoveNext() && context.Token is Name)
+            {
+                _ = ParseTransactionName(context);
                 context.MoveNextOptional();
+            }
         }
         // COMMIT WORK is an ANSI-equivalent. WORK isn't reserved in the
         // simulator's keyword list; accept it as an unquoted identifier
@@ -3192,10 +3224,12 @@ public sealed partial class Simulation
         {
             if (context.Token is ReservedKeyword { Keyword: Keyword.Tran or Keyword.Transaction })
             {
-                if (context.MoveNext() && context.Token is Name nameToken)
+                if (context.MoveNext() && context.Token is Name)
                 {
-                    // Savepoint-name path: partial rollback to the saved position.
-                    var name = nameToken.Value;
+                    // Savepoint-name path: partial rollback to the saved
+                    // position; the outermost BEGIN's own name rolls the whole
+                    // transaction back.
+                    var name = ParseTransactionName(context);
                     context.MoveNextOptional();
 
                     if (context.Batch.IsSkipping)
@@ -3203,9 +3237,12 @@ public sealed partial class Simulation
 
                     var tx = context.Connection.CurrentTransaction
                         ?? throw SimulatedSqlException.NoCorrespondingBeginRollback();
-                    if (!tx.Savepoints.TryGetValue(name, out var marker))
+                    if (tx.Savepoints.TryGetValue(name, out var marker))
+                        tx.UndoLog.RollbackTo(marker);
+                    else if (string.Equals(tx.Name, name, StringComparison.Ordinal))
+                        tx.Rollback();
+                    else
                         throw SimulatedSqlException.CannotRollBackUnknownSavepoint(name);
-                    tx.UndoLog.RollbackTo(marker);
                     return true;
                 }
             }

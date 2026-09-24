@@ -106,6 +106,7 @@ partial class Simulation
         // Kept verbatim: Msg 8178 quotes the two argument strings exactly as
         // written, spacing included.
         var paramDefsText = "";
+        SqlType? paramDefsType = null;
         if (hasMoreArgs)
         {
             context.MoveNextRequired();
@@ -114,8 +115,11 @@ partial class Simulation
             else if (sawNamedArgument)
                 throw SimulatedSqlException.MustPassParameterAsNamed();
             var (paramDefsRaw, _) = ParseSpExecuteSqlValueArg(context, batch);
+            paramDefsType = paramDefsRaw.Type;
             var paramDefs = paramDefsRaw.CoerceTo(NVarcharSqlType.Get(-1, Collation.Baseline, Coercibility.CoercibleDefault));
-            if (!paramDefs.IsNull)
+            // A declaration argument of another type is refused when the call
+            // runs (Msg 214), so its text is never parsed as declarations.
+            if (!paramDefs.IsNull && SqlType.IsNationalStringCategory(paramDefsType))
             {
                 paramDefsText = paramDefs.AsString;
                 declaredParams = ParseSpExecuteSqlParamDefinitions(paramDefsText, batch.Connection);
@@ -147,6 +151,11 @@ partial class Simulation
         if (batch.IsSkipping)
             yield break;
 
+        if (!SqlType.IsNationalStringCategory(sqlRaw.Type))
+            throw SimulatedSqlException.SpExecuteSqlArgumentNotUnicode("@statement", 2);
+        if (paramDefsType is not null && !SqlType.IsNationalStringCategory(paramDefsType))
+            throw SimulatedSqlException.SpExecuteSqlArgumentNotUnicode("@params", 3);
+
         if (sqlValue.IsNull)
             yield break;
 
@@ -169,6 +178,8 @@ partial class Simulation
             // (probe-confirmed) — hence the flag rather than an immediate
             // throw.
             var sawUnknownName = false;
+            if (declaredParams.Count == 0 && argumentValues.Count > 0)
+                throw SimulatedSqlException.ArgumentsSuppliedToParameterlessRoutine("");
             foreach (var (name, value, outputSlot) in argumentValues)
             {
                 int idx;
@@ -176,7 +187,7 @@ partial class Simulation
                 {
                     idx = positional++;
                     if (idx >= declaredParams.Count)
-                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                        throw SimulatedSqlException.TooManyArgumentsToFunction("");
                 }
                 else
                 {
@@ -195,6 +206,9 @@ partial class Simulation
                         continue;
                     }
                 }
+                // A second value for one parameter is a surplus argument.
+                if (bound[idx] is not null)
+                    throw SimulatedSqlException.TooManyArgumentsToFunction("");
                 bound[idx] = value;
                 boundOutputSlots[idx] = outputSlot;
             }
@@ -283,7 +297,7 @@ partial class Simulation
         if (context.Token is not AtPrefixedString candidate)
             return null;
         var checkpoint = context.SaveCheckpoint();
-        context.MoveNextRequired();
+        context.MoveNextOptional();
         if (context.Token is Operator { Character: '=' })
         {
             context.MoveNextRequired();
@@ -333,6 +347,9 @@ partial class Simulation
     /// </summary>
     private static List<SpExecuteSqlParam> ParseSpExecuteSqlParamDefinitions(string source, SimulatedDbConnection connection)
     {
+        if (source.Length == 0)
+            return [];
+
         // Wrap the param-def string in a synthetic SimulatedDbCommand so the
         // tokenizer can walk it through ParserContext. Reuse the outer
         // connection's Simulation reference — we don't dispatch through this

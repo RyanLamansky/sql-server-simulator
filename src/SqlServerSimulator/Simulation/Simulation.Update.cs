@@ -277,7 +277,8 @@ partial class Simulation
         {
             var afterVariable = context.SaveCheckpoint();
             var column = new MultiPartName(first.Value);
-            context.MoveNextRequired();
+            // Optional: the name may be the whole value, ending the batch.
+            context.MoveNextOptional();
             while (context.Token is Operator { Character: '.' } && context.GetNextRequired() is StringToken part)
             {
                 column = column.WithAddedPart(part.Value);
@@ -1156,6 +1157,7 @@ partial class Simulation
         View? sourceView = null)
     {
         var assignments = new List<(int Ordinal, Expression Expr)>(rawAssignments.Count);
+        var assigned = new HashSet<int>();
         foreach (var (colName, expr) in rawAssignments)
         {
             if (colName is null)
@@ -1196,6 +1198,12 @@ partial class Simulation
                     throw SimulatedSqlException.InvalidColumnName(colName);
             }
 
+            if (!assigned.Add(columnOrdinal))
+            {
+                throw SimulatedSqlException.ColumnAssignedMoreThanOnce(sourceView is null
+                    ? table.Columns[columnOrdinal].Name
+                    : colName);
+            }
             RejectUnmodifiableSetTarget(table, columnOrdinal, database);
             if (expr is AssignmentExpression { Slot.DeclaredType: var variableType } && variableType.SqlServerName != table.Columns[columnOrdinal].Type.SqlServerName)
                 throw SimulatedSqlException.ReceivingVariableTypeMismatch(variableType.SqlServerName, table.Columns[columnOrdinal].Type.SqlServerName, colName);

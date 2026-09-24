@@ -10,6 +10,8 @@ A fourth arrives over the network: TDS Transaction Manager requests map onto the
   A cancel aborts the batch at a statement boundary, so already-committed statements' effects persist and un-run statements never fire; a single in-flight statement is not interrupted inside its row loop (materialization completes first — the reaction bound noted in [`tds-endpoint.md`](tds-endpoint.md#mid-stream-attention-cancel)), so it is not partial-rolled-back the way a mid-statement *error* is.
 - **Explicit txs**: `BEGIN TRAN` increments `TranCount`; only outermost `COMMIT` commits; `ROLLBACK` zeroes `TranCount` and walks the whole log.
   `SAVE TRAN <name>` + `ROLLBACK TRAN <name>` is the EF SaveChanges path inside an explicit tx.
+  `ROLLBACK TRAN <name>` naming the *outermost* `BEGIN TRAN`'s name rolls the whole transaction back; the name is matched case-sensitively (real refuses `outer1` for `Outer1` under a case-insensitive collation), while a savepoint name matches case-insensitively, and a nested `BEGIN TRAN`'s name is never recorded, so naming it is Msg 6401 (probed 2026-09-24).
+  A name held in a variable is cut to 32 characters; a written one past 32 is Msg 103 while compiling, on every statement that takes one.
   Parallel `BeginTransaction` → `InvalidOperationException`.
   `COMMIT`/`ROLLBACK` with no active tx → Msg 3902/3903.
 - `@@TRANCOUNT` reads connection depth as int.

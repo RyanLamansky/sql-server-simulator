@@ -107,6 +107,7 @@ partial class Simulation
             var visibleColumns = new List<HeapColumn?>(table.Columns.Length + heapColumns.Count);
             visibleColumns.AddRange(table.Columns);
             visibleColumns.AddRange(heapColumns);
+            BindCheckConstraints(context.Batch, visibleColumns, pendingChecks);
             RejectChecksOverNonPersistedComputedColumns(context.Batch.CurrentDatabase.Collation, table.Name, visibleColumns, pendingChecks);
         }
 

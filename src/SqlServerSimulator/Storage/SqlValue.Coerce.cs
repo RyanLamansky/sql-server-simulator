@@ -996,16 +996,19 @@ internal readonly partial struct SqlValue
         if (target == SqlType.Bit)
             return ParseStringToBit(source, sourceType);
 
-        if (string.IsNullOrWhiteSpace(source))
+        // Only spaces surround the digits: a tab, a line break or a
+        // non-breaking space is unreadable (probe-confirmed against SQL
+        // Server 2025, for varchar and nvarchar sources alike).
+        var trimmed = source.Trim(' ');
+        if (trimmed.Length == 0)
             return FromInt64(0).CoerceTo(target);
 
-        if (!long.TryParse(source, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed))
+        if (!long.TryParse(trimmed, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out var parsed))
         {
             // long.TryParse fails for both bad format and out-of-long-range.
             // BigInteger disambiguates: if it parses as BigInteger, it's
             // valid digits — overflow rather than format error.
-            var trimmed = source.Trim();
-            if (System.Numerics.BigInteger.TryParse(trimmed, NumberStyles.Integer, CultureInfo.InvariantCulture, out _))
+            if (System.Numerics.BigInteger.TryParse(trimmed, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out _))
                 throw OverflowOnConvert(sourceType, source, target);
             throw SimulatedSqlException.ConversionFailedFromString(sourceType, source, target);
         }
@@ -1029,7 +1032,7 @@ internal readonly partial struct SqlValue
     /// </summary>
     private static SqlValue ParseStringToBit(string source, SqlType sourceType)
     {
-        var trimmed = source.Trim();
+        var trimmed = source.Trim(' ');
         if (trimmed.Equals("true", StringComparison.OrdinalIgnoreCase))
             return FromBoolean(true);
         if (trimmed.Equals("false", StringComparison.OrdinalIgnoreCase))
@@ -1181,7 +1184,9 @@ internal readonly partial struct SqlValue
     /// </summary>
     private static decimal ParseMoneyString(string source)
     {
-        var span = source.AsSpan().Trim();
+        // Only spaces may lead the amount, while whitespace of any kind may
+        // trail it (probe-confirmed against SQL Server 2025).
+        var span = source.AsSpan().TrimStart(' ').TrimEnd();
         // Optional sign before currency symbol.
         var negative = false;
         if (span.Length > 0 && (span[0] == '+' || span[0] == '-'))
@@ -1209,14 +1214,14 @@ internal readonly partial struct SqlValue
             if (c != ',')
                 buffer[written++] = c;
         }
-        var body = buffer[..written];
+        var body = buffer[..written].TrimStart(' ');
         // SQL Server's money parser does NOT accept scientific notation.
         if (body.Length == 0)
             return 0;
         return body.IndexOfAny(['e', 'E']) >= 0
             || !decimal.TryParse(
                 body,
-                System.Globalization.NumberStyles.AllowDecimalPoint | System.Globalization.NumberStyles.AllowLeadingWhite | System.Globalization.NumberStyles.AllowTrailingWhite,
+                System.Globalization.NumberStyles.AllowDecimalPoint,
                 System.Globalization.CultureInfo.InvariantCulture,
                 out var d)
                     ? throw SimulatedSqlException.CannotConvertCharToMoney()
@@ -1240,7 +1245,7 @@ internal readonly partial struct SqlValue
         // 2025; differs from decimal, where empty raises Msg 8114).
         var d = this.Type switch
         {
-            _ when SqlType.IsStringCategory(this.Type) => ParseStringToDouble(this.AsString, this.Type),
+            _ when SqlType.IsStringCategory(this.Type) => ParseStringToDouble(this.AsString, this.Type, target),
             _ when SqlType.IsIntegerCategory(this.Type) => AsInt64Widened(this),
             DecimalSqlType => this.AsDecimal38.ToDouble(),
             _ when this.Type == SqlType.Float => this.AsDouble,
@@ -1298,13 +1303,24 @@ internal readonly partial struct SqlValue
     /// rejects empty). <c>'inf'</c>/<c>'NaN'</c> are also rejected
     /// (verified Msg 8114 St 5 against SQL Server 2025).
     /// </summary>
-    private static double ParseStringToDouble(string source, SqlType sourceType)
+    private static double ParseStringToDouble(string source, SqlType sourceType, SqlType target)
     {
-        // Only spaces surround the number: a tab is refused, as is an
-        // infinity or NaN symbol .NET would read.
-        var trimmed = source.Trim(' ');
-        if (trimmed.Length == 0)
+        // Whitespace of any kind may lead the number — a tab, a line break, a
+        // non-breaking or ideographic space — but only spaces may trail it,
+        // and a varchar non-breaking space leading a real is refused where
+        // it leads a float (probe-confirmed against SQL Server 2025). An
+        // infinity or NaN symbol .NET would read is refused too.
+        // A string of spaces alone reads as zero; any other whitespace-only
+        // string is unreadable.
+        if (source.AsSpan().Trim(' ').IsEmpty)
             return 0.0;
+        var leading = source.AsSpan();
+        while (leading.Length > 0 && char.IsWhiteSpace(leading[0])
+            && !(leading[0] == '\u00A0' && target == SqlType.Real && !SqlType.IsNationalStringCategory(sourceType)))
+        {
+            leading = leading[1..];
+        }
+        var trimmed = leading.TrimEnd(' ').ToString();
         // A D marks the exponent as an E does (probed 2026-09-24 against SQL
         // Server 2025: '1d2' and '-1D+1' read as 100 and -10).
         if (trimmed.AsSpan().IndexOfAny('d', 'D') is >= 0 and var exponent)
@@ -1576,8 +1592,13 @@ internal readonly partial struct SqlValue
     /// Fractional digits past the target's scale round half away from zero, and
     /// the digit count is judged after that rounding.
     /// </summary>
-    private static Decimal38 ParseDecimal(string source, SqlType sourceType, DecimalSqlType target) =>
-        Decimal38.TryParse(source, target.precision, target.scale, out var parsed) switch
+    private static Decimal38 ParseDecimal(string source, SqlType sourceType, DecimalSqlType target)
+    {
+        // Only spaces surround the number, as for the integer family; the
+        // shared parser also serves PARSE(), which trims every kind.
+        if (HasNonSpaceWhitespaceEdge(source))
+            throw SimulatedSqlException.StringConversionToNumberFailed(sourceType, "numeric");
+        return Decimal38.TryParse(source, target.precision, target.scale, out var parsed) switch
         {
             Decimal38ParseOutcome.Success => parsed,
             Decimal38ParseOutcome.ExceedsNumericDomain =>
@@ -1586,6 +1607,13 @@ internal readonly partial struct SqlValue
                 throw SimulatedSqlException.ArithmeticOverflowConverting(sourceType, "numeric", state: 8),
             _ => throw SimulatedSqlException.StringConversionToNumberFailed(sourceType, "numeric"),
         };
+    }
+
+    private static bool HasNonSpaceWhitespaceEdge(string source)
+    {
+        var trimmed = source.AsSpan().Trim(' ');
+        return trimmed.Length > 0 && (char.IsWhiteSpace(trimmed[0]) || char.IsWhiteSpace(trimmed[^1]));
+    }
 
     private SqlValue CoerceToUniqueIdentifier() => this.Type switch
     {
@@ -1618,9 +1646,9 @@ internal readonly partial struct SqlValue
     private static Guid ParseGuid(string source)
     {
         // .NET's Guid.TryParseExact silently trims leading whitespace; SQL
-        // Server's CAST does not. Reject the leading-whitespace case
-        // explicitly before delegating.
-        if (source.Length > 0 && source[0] == ' ')
+        // Server's CAST does not, of any kind (a tab, a non-breaking space).
+        // Reject the leading-whitespace case explicitly before delegating.
+        if (source.Length > 0 && char.IsWhiteSpace(source[0]))
             throw SimulatedSqlException.ConversionFailedFromStringToUniqueIdentifier();
         var trimmed = source.TrimEnd();
         return Guid.TryParseExact(trimmed, "D", out var g) || Guid.TryParseExact(trimmed, "B", out g)

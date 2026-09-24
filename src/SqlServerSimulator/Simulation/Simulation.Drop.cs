@@ -629,8 +629,9 @@ partial class Simulation
         // wrote it**, minus any brackets: `DROP TABLE t` reports 't' while
         // both `DROP TABLE dbo.t` and `DROP TABLE [dbo].[t]` report 'dbo.t'
         // (probe-confirmed against SQL Server 2025). Reporting the stored leaf
-        // matches only the unqualified spelling.
-        if (removedTable.IncomingForeignKeys.Count > 0)
+        // matches only the unqualified spelling. The table's own
+        // self-reference doesn't count; it goes with the table.
+        if (removedTable.IncomingForeignKeys.Exists(fk => fk.ChildTable != removedTable))
             throw SimulatedSqlException.CannotDropTableReferencedByForeignKey(name.ToString());
         // Schema-binding protection, which real applies after the FK gate
         // (probe-confirmed: a table that is both an FK parent and a

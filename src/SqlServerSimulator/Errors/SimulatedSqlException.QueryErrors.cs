@@ -859,6 +859,47 @@ partial class SimulatedSqlException
         new("At least one of the result expressions in a CASE specification must be an expression other than the NULL constant.", 8133, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server's Msg 8730 — a negative <c>LAG</c> / <c>LEAD</c>
+    /// offset, raised when the statement runs: state 1 for a written constant,
+    /// 2 for a variable or column. Probe-confirmed against SQL Server 2025
+    /// (2026-09-24).
+    /// </summary>
+    internal static SimulatedSqlException NegativeLagLeadOffset(byte state) =>
+        new("Offset parameter for Lag and Lead functions cannot be a negative value.", 8730, 16, state);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 10738 — an <c>INSERT … VALUES</c> list of more
+    /// than 1000 rows. Probe-confirmed against SQL Server 2025 (2026-09-24).
+    /// </summary>
+    internal static SimulatedSqlException TooManyInsertRowValues() =>
+        new("The number of row value expressions in the INSERT statement exceeds the maximum allowed number of 1000 row values.", 10738, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 4127 — every argument of a <c>COALESCE</c> is a
+    /// bare <c>NULL</c> literal (parentheses see through), raised while
+    /// compiling. Probe-confirmed against SQL Server 2025 (2026-09-24).
+    /// </summary>
+    internal static SimulatedSqlException AllCoalesceArgumentsAreNull() =>
+        new("At least one of the arguments to COALESCE must be an expression that is not the NULL constant.", 4127, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 8184 — every argument of a
+    /// <c>BINARY_CHECKSUM</c> is a bare <c>NULL</c> literal, leaving nothing to
+    /// hash; raised while compiling. Probe-confirmed against SQL Server 2025
+    /// (2026-09-24).
+    /// </summary>
+    internal static SimulatedSqlException NoComparableBinaryChecksumColumns() =>
+        new("Error in binarychecksum. There are no comparable columns in the binarychecksum input.", 8184, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 4151 — <c>NULLIF</c>'s first argument is a bare
+    /// <c>NULL</c> literal (parentheses see through), raised while compiling.
+    /// Probe-confirmed against SQL Server 2025 (2026-09-24).
+    /// </summary>
+    internal static SimulatedSqlException NullIfFirstArgumentIsNull() =>
+        new("The type of the first argument to NULLIF cannot be the NULL constant because the type of the first argument has to be known.", 4151, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server's Msg 148 — the string operand of <c>WAITFOR DELAY</c>
     /// (or <c>WAITFOR TIME</c>, not modeled) wasn't a valid time format. Probe-
     /// confirmed against SQL Server 2025 (2026-05-11): Class 15, State 1,
@@ -905,6 +946,15 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException CannotTruncateObjectDoesNotExist(string name) =>
         new($"Cannot find the object \"{name}\" because it does not exist or you do not have permissions.", 4701, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 214 — <c>sp_executesql</c>'s statement (state 2)
+    /// or parameter-declaration (state 3) argument isn't a Unicode string: a
+    /// <c>varchar</c>, a number, an untyped <c>NULL</c>. Raised when the call
+    /// runs. Probe-confirmed against SQL Server 2025 (2026-09-24).
+    /// </summary>
+    internal static SimulatedSqlException SpExecuteSqlArgumentNotUnicode(string parameterName, byte state) =>
+        new($"Procedure expects parameter '{parameterName}' of type 'ntext/nchar/nvarchar'.", 214, 16, state);
 
     /// <summary>
     /// Mimics SQL Server's Msg 214 — fired by <c>STRING_SPLIT</c> when the

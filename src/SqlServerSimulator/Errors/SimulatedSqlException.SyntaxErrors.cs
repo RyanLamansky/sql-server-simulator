@@ -55,10 +55,15 @@ partial class SimulatedSqlException
     /// <paramref name="lineNumber"/> is the tokenizer's line at the *opening*
     /// quote — probe-confirmed real SQL Server reports the line the literal
     /// opened on, even when its body runs across several lines to end of input
-    /// (SQL Server 2025, 2026-07-19).
+    /// (SQL Server 2025, 2026-07-19). Real follows it with a Msg 102 near the
+    /// same body, for <c>'</c>, <c>N'</c>, <c>"</c> and <c>[</c> alike
+    /// (probe-confirmed 2026-09-24).
     /// </summary>
     internal static SimulatedSqlException UnclosedStringLiteral(string body, int lineNumber) =>
-        WithLine(new($"Unclosed quotation mark after the character string '{body}'.", 105, 15, 1), lineNumber);
+        Aggregate([
+            WithLine(new($"Unclosed quotation mark after the character string '{body}'.", 105, 15, 1), lineNumber),
+            WithLine(new($"Incorrect syntax near '{body}'.", 102, 15, 1), lineNumber),
+        ]);
 
     /// <summary>
     /// Mimics SQL Server error 339: an <c>INSERT</c> supplied the <c>DEFAULT</c>

@@ -1154,12 +1154,17 @@ internal sealed partial class Selection
         // source columns), matching SQL Server and the runtime ComputeOrderKeys
         // — so `ORDER BY <select-alias>` and `ORDER BY <aggregate/expression>`
         // type-check here instead of failing as an unknown source column.
+        // Only a bare term may name an alias (OrderBySpec.MayNameAlias).
+        var orderTermMayNameAlias = false;
         SqlType ResolveOrderByType(MultiPartName name)
         {
-            for (var j = 0; j < outputColumnNames.Length; j++)
+            if (orderTermMayNameAlias)
             {
-                if (BuiltInToken.Equals(outputColumnNames[j], name.Leaf))
-                    return outputSchema[j];
+                for (var j = 0; j < outputColumnNames.Length; j++)
+                {
+                    if (BuiltInToken.Equals(outputColumnNames[j], name.Leaf))
+                        return outputSchema[j];
+                }
             }
 
             return ResolveColumnType(name);
@@ -1167,9 +1172,20 @@ internal sealed partial class Selection
 
         for (var i = 0; i < orderBy.Count; i++)
         {
-            var keyType = orderBy[i].IsOrdinal
-                ? outputSchema[orderBy[i].Ordinal - 1]
-                : orderBy[i].Expr!.GetSqlType(parseBatch, ResolveOrderByType);
+            orderTermMayNameAlias = orderBy[i].MayNameAlias;
+            SqlType keyType;
+            try
+            {
+                keyType = orderBy[i].IsOrdinal
+                    ? outputSchema[orderBy[i].Ordinal - 1]
+                    : orderBy[i].Expr!.GetSqlType(parseBatch, ResolveOrderByType);
+            }
+            catch (SimulatedSqlException unknown) when (distinct && unknown.Number == 207)
+            {
+                // Real follows the unknown name with DISTINCT's own complaint.
+                throw SimulatedSqlException.Aggregate([unknown, SimulatedSqlException.OrderByItemNotInSelectListWithDistinct()]);
+            }
+
             if (keyType.IsLob)
                 throw NotComparableInClause(keyType, "ORDER BY");
             RequireSettledOutputCollation(keyType, "ORDER BY", i + 1);

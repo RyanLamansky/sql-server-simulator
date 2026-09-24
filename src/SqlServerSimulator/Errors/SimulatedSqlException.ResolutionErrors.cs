@@ -7,6 +7,9 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException IdentifierTooLong(ReadOnlySpan<char> first128)
         => new($"The identifier that starts with '{first128}' is too long. Maximum length is 128.", 103, 15, 4);
 
+    internal static SimulatedSqlException TransactionNameTooLong(string name)
+        => new($"The identifier that starts with '{(name.Length > 128 ? name[..128] : name)}' is too long. Maximum length is 32.", 103, 15, 2);
+
     internal static SimulatedSqlException InvalidColumnName(string name) => new($"Invalid column name '{name}'.", 207, 16, 1);
 
     // Msg 207 renders only the leaf identifier — real SQL Server drops any
@@ -136,6 +139,15 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException TooManyArgumentsToFunction(string name, byte state = 2) =>
         new($"Procedure or function {name} has too many arguments specified.", 8144, 16, state);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 8146 — arguments passed to a routine that
+    /// declares no parameters; <c>sp_executesql</c> with an empty declaration
+    /// string leaves the name empty, hence the double space. Probe-confirmed
+    /// against SQL Server 2025 (2026-09-24).
+    /// </summary>
+    internal static SimulatedSqlException ArgumentsSuppliedToParameterlessRoutine(string name) =>
+        new($"Procedure {name} has no parameters and arguments were supplied.", 8146, 16, 1);
 
     /// <summary>
     /// Mimics SQL Server's Msg 8178 — an <c>sp_executesql</c> parameter that

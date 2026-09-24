@@ -48,7 +48,9 @@ static class Tokenizer
         index >= command.Length ? null : command[index] switch
         {
             ' ' or '\r' or '\n' or '\t' => ParseWhitespace(command, ref index),
-            'N' or 'n' when index + 1 < command.Length && command[index + 1] == '\'' => ParseNPrefixedStringLiteral(command, ref index, activeCollation),
+            // Only an uppercase N prefixes a Unicode literal: real reads `n'x'` as
+            // the identifier n followed by a string (probed against SQL Server 2025).
+            'N' when index + 1 < command.Length && command[index + 1] == '\'' => ParseNPrefixedStringLiteral(command, ref index, activeCollation),
             '_' or (>= 'A' and <= 'Z') or (>= 'a' and <= 'z') => ParseUnquotedStringOrReservedKeyword(command, ref index, compatibilityLevel),
             '0' when index + 1 < command.Length && (command[index + 1] == 'x' || command[index + 1] == 'X') => ParseHexLiteral(command, ref index),
             >= '0' and <= '9' => ParseNumeric(command, ref index),
@@ -494,8 +496,8 @@ static class Tokenizer
     /// Parses a bracket-delimited identifier: <c>[foo]</c>, with <c>]]</c>
     /// as the embedded-bracket escape. A properly-closed empty <c>[]</c>
     /// raises Msg 1038 (probe-confirmed at every identifier position, same
-    /// as the empty <c>""</c> form); an unclosed <c>[</c> at end-of-input
-    /// keeps its historically lenient empty-token behavior.
+    /// as the empty <c>""</c> form); an unclosed <c>[</c> is Msg 105, as an
+    /// unclosed quote is.
     /// </summary>
     private static DelimitedIdentifier ParseBracketDelimitedIdentifier(string command, ref int index)
     {
@@ -520,13 +522,13 @@ static class Tokenizer
             break;
         }
 
+        if (index >= command.Length)
+            throw SimulatedSqlException.UnclosedStringLiteral(builder.ToString(), Token.LineAt(command, start));
+
         var length = index - start;
-        if (index < command.Length)
-        {
-            index++;
-            if (builder.Length == 0)
-                throw SimulatedSqlException.EmptyColumnAlias();
-        }
+        index++;
+        if (builder.Length == 0)
+            throw SimulatedSqlException.EmptyColumnAlias();
 
         return new(builder.ToString(), command, start, length);
     }

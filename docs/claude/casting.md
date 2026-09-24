@@ -60,9 +60,24 @@ The guard is on the binary exponent rather than a `>= 1e38` magnitude test, sinc
 
 Load-bearing for ODBC / pyodbc callers, which bind a Python/CLR `float` parameter as `float`: a decimal-column insert (e.g. SQLAlchemy's) arrives as a float-to-decimal assignment.
 
+## Whitespace around a number, by target
+
+Which characters a string → number conversion trims differs by target, varchar and nvarchar alike (probed 2026-09-24 over every character 1–32 plus U+00A0 and U+3000 on each side):
+
+| target | leading | trailing |
+| --- | --- | --- |
+| integer family, `decimal`, `bit`, `datetime` | space | space |
+| `float` | any whitespace (tab through CR, NBSP, U+3000) | space |
+| `real` | as `float`, except a *varchar* NBSP | space |
+| `money` / `smallmoney` | space | any whitespace |
+| `uniqueidentifier` | nothing | anything past the 36th character |
+| `date` / `time` | space, tab | space, tab |
+
+A string of spaces alone reads as zero for `float` and the integer family; a tab alone is unreadable.
+
 ## String → `decimal` / `numeric`
 
-The accepted grammar is narrow: surrounding whitespace, one leading `+` or `-`, digits with at most one `.`, and nothing else.
+The accepted grammar is narrow: surrounding spaces, one leading `+` or `-`, digits with at most one `.`, and nothing else.
 A bare leading point (`'.5'`) and a bare trailing one (`'5.'`) read, and leading zeros are free at any count.
 Everything else is **Msg 8114 state 5** — `''`, `'   '`, `'.'`, `'abc'`, `'1,000'`, `'$1.00'`, `'(1)'`, `'++1'`, `'1+'`, `'1.2.3'`, and **every exponent form** (`'1e5'`, `'1E5'`, `'1.5e2'`), whatever the magnitude.
 

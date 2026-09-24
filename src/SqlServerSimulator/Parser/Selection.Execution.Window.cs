@@ -647,6 +647,8 @@ internal sealed partial class Selection
                         var lagOffset = win.OffsetArg is null
                             ? 1
                             : (int)EvaluateScalarArg(win.OffsetArg, rowCount, runtimeAt).CoerceTo(SqlType.BigInt).AsInt64;
+                        if (lagOffset < 0)
+                            throw SimulatedSqlException.NegativeLagLeadOffset(win.OffsetArg!.IsWrittenConstant ? (byte)1 : (byte)2);
                         var operandType = win.Operand!.GetSqlType(batch, resolveColumnType);
                         foreach (var (_, indices) in partitions)
                         {

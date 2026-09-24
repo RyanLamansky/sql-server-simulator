@@ -1850,6 +1850,14 @@ partial class SimulatedSqlException
         new($"Could not drop object '{tableName}' because it is referenced by a FOREIGN KEY constraint.", 3726, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server's Msg 4712 — <c>TRUNCATE TABLE</c> targeted a table
+    /// another table's FOREIGN KEY references, enabled or not, raised when the
+    /// statement runs. Probe-confirmed against SQL Server 2025 (2026-09-24).
+    /// </summary>
+    internal static SimulatedSqlException CannotTruncateTableReferencedByForeignKey(string tableName) =>
+        new($"Cannot truncate table '{tableName}' because it is being referenced by a FOREIGN KEY constraint.", 4712, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 1785: a newly declared FOREIGN KEY with a
     /// non-NO-ACTION referential action would close a cascade cycle or
     /// introduce multiple cascade paths to the same table. Real SQL Server
@@ -2314,6 +2322,21 @@ partial class SimulatedSqlException
         _ = sb.Append("ALTER TABLE DROP COLUMN ").Append(columnName).Append(" failed because one or more objects access this column.");
         return new(sb.ToString(), 5074, 16, 1);
     }
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 264 — an UPDATE's SET list or an INSERT's column
+    /// list names one column twice, raised while compiling and naming the
+    /// column as declared. Probe-confirmed against SQL Server 2025 (2026-09-24).
+    /// </summary>
+    internal static SimulatedSqlException ColumnAssignedMoreThanOnce(string columnName) =>
+        new($"The column name '{columnName}' is specified more than once in the SET clause or column list of an INSERT. A column cannot be assigned more than one value in the same clause. Modify the clause to make sure that a column is updated only once. If this statement updates or inserts columns into a view, column aliasing can conceal the duplication in your code.", 264, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 2705 for a column list — <c>CREATE TABLE</c>,
+    /// a table variable, a table type — that repeats a name.
+    /// </summary>
+    internal static SimulatedSqlException DuplicateColumnInTable(string columnName, string tableName, byte state) =>
+        new($"Column names in each table must be unique. Column name '{columnName}' in table '{tableName}' is specified more than once.", 2705, 16, state);
 
     /// <summary>
     /// Mimics SQL Server error 2705: <c>ALTER TABLE ADD col</c> named a

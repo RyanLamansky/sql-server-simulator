@@ -244,7 +244,6 @@ Already listed elsewhere here and not repeated: `DBCC CHECKIDENT` and parenthesi
 - The compile's remaining gaps (the walk stopping at a deferred DML target, a deferred statement's bind error staying catchable, procedure bodies compiled only at `CREATE`, a `#temp` created twice in one batch, an `INSERT … EXEC` body stopping at its first error) are listed in [`control-flow.md`](control-flow.md#not-modeled-yet).
 - Msg 319 where real reports Msg 336 for a CTE after an unterminated statement (`SELECT * FROM c WITH c2 AS (…) …`, real naming `c2`).
 - `TABLESAMPLE` over a derived table is Msg 102 near `(` where real's is Msg 156 near the keyword; `NATURAL JOIN` reports near `join` where real reports near `natural`.
-- A CTE whose query projects one name twice (`WITH c AS (SELECT 1 a, 2 a) …`) runs here; real raises Msg 8156.
 
 **Session options with no effect**:
 
@@ -329,9 +328,6 @@ Low priority / niche — simulatable (as placeholder constants or a small model)
   The DDL + catalog half is self-contained; the *enforcement* half — a principal without `UNMASK` reading the masked value instead of the real one — is the larger piece and would want its own permission wiring.
 - **A schema owner other than `dbo` doesn't break an ownership chain** — `CREATE SCHEMA … AUTHORIZATION` records the owner and `sys.schemas.principal_id` projects it, but `PermissionChecker` still assumes every object is dbo-owned (`ChainsAcross`'s comment says so outright), so a module in schema A reading a table in schema B owned by a different principal stays chained where real breaks the chain and checks the caller's own grant.
   Wiring it means threading the schema's `PrincipalId` into the same-database chain suppression, which touches every module invocation — see [`permissions.md`](permissions.md).
-- **A CHECK constraint's predicate isn't bound over an empty table** — `ALTER TABLE t ADD CHECK (nosuch > 0)` on a table with no rows succeeds, because the predicate's names resolve per row during the existing-data validation pass and there is no row to run it against; real binds the predicate and reports **Msg 207** whatever the table holds.
-  A populated table reports 207 correctly, so the gap is the empty-table path rather than the resolver.
-  The same shape closed for module bodies through CREATE-time binding (see [`programmable.md`](programmable.md)); a CHECK / computed-column / DEFAULT expression wants the equivalent.
 - **A mixed `ALTER TABLE … ADD` list of columns *and* constraints** — `ADD x int, CONSTRAINT ck CHECK (…)` is accepted by real; the simulator's column-add branch consumes the rest of the statement, so a constraint element after a column definition is a syntax error.
   The constraint-only multi-element list ships, with its rollback — see [`alter-table.md`](alter-table.md#multi-element-add).
 - **`CREATE SCHEMA`'s element rollback leaves permission rows behind** — an element list that granted a permission and then failed removes the schema (and the objects inside it) but not the `sys.database_permissions` rows keyed on those object ids, which are then unreachable.
@@ -348,27 +344,6 @@ Entries are verified against the simulator, so one that no longer reproduces is 
 - **Statement-permission residue** — every modeled CREATE / ALTER / DROP statement is gated (see [`permissions.md`](permissions.md#ddl-statement-gates)), but three securable classes real accepts a grant on have no GRANT surface here, so the alternative each offers isn't honored: `CONTROL ON TYPE::t` (DROP TYPE takes schema ALTER only), `CONTROL ON XML SCHEMA COLLECTION::c` (same), and `CONTROL ON <fulltext catalog>` (DROP FULLTEXT CATALOG takes `ALTER ANY FULLTEXT CATALOG` only).
   That direction is *under*-permissive, so it isn't a register entry — the register keeps it because closing it is the same piece of work.
   → [`permissions.md`](permissions.md#known-gaps).
-- **An unterminated delimited identifier tokenizes as if it closed** — `SELECT [abc` reads as the column `abc` and answers Msg 207 here, where real reports **Msg 105** (`Unclosed quotation mark after the character string 'abc'`, the same wording it uses for a character literal) followed by Msg 102 (probed 2026-08-05).
-  The `'…'` half already raises Msg 105; only the bracket form runs off the end silently.
-- **Found by the edge-case differential sweep** (probed 2026-09-23 against SQL Server 2025) — each accepted here, rejected on real with the error named:
-  an ORDER BY position past the select list, zero or negative (Msg 108);
-  duplicate column names in a derived table's projection (Msg 8156) and in `CREATE TABLE` (Msg 2705);
-  unary minus on a string, `-'1'` (Msg 403);
-  `NULLIF(NULL, …)` (Msg 4151) and `COALESCE(NULL, NULL)` (Msg 4127), with `COALESCE(NULL)` a syntax error (Msg 102) where the simulator fails internally;
-  `SUBSTRING(NULL, 1, 1)` and `CHECKSUM(NULL)` (Msg 8116);
-  a lowercase `n'x'`, which real reads as the column `n` followed by a string alias (Msg 207);
-  a select alias used inside an ORDER BY *expression* (`ORDER BY x + 0`, Msg 207 — a bare alias is fine);
-  `LAG` / `LEAD` with a negative offset (Msg 8730);
-  UNPIVOT over columns of differing types (Msg 8167);
-  one column assigned twice in an UPDATE's SET list (Msg 264);
-  more than 1000 rows in one `INSERT … VALUES` (Msg 10738);
-  `TRUNCATE TABLE` on a table a foreign key references (Msg 4712);
-  `sp_executesql` with a `varchar` statement (Msg 214) or a named parameter supplied twice (Msg 8144);
-  a transaction name longer than 32 characters (Msg 103);
-  a duplicate CTE name, or a CTE defined but never used (Msg 422 — real also never evaluates the unused body);
-  a tab before an integer string, `CAST(CHAR(9) + '1' AS int)` (Msg 245).
-- **A CHECK constraint carrying an illegal explicit conversion is created** — `ALTER TABLE t ADD CONSTRAINT ck CHECK (CAST(d AS int) > 0)` is **Msg 529** followed by **Msg 1750** on real and is accepted here (probed 2026-08-05).
-  The Msg 529 compile-time gate ships everywhere an expression's type is resolved (see [`casting.md`](casting.md#conversion-legality-is-settled-while-compiling)), and a computed column's expression goes through it; a CHECK predicate's operands are only typed when a row is measured against them.
 - **A character real weights and `CompareInfo` ignores compares equal to nothing** — `N'x' + NCHAR(0x00AD) = N'x'` (soft hyphen) is true here and false on real, so a row real excludes comes back (probed 2026-08-05, matrix re-run 2026-08-05 across the whole ignorable family).
   The probed set is the C0 controls U+0001..U+001F, U+200B, U+2007, U+00A0, U+2028, U+2029 and U+E0001 everywhere, plus U+00AD and U+200C on the pre-100 names only.
   It reaches the [character-matching scalars](collations.md#the-character-matching-string-scalars-search-under-the-collation-too) as well as `=` and `LIKE`'s literal runs, and the **reverse** direction exists too: `CompareInfo` folds NBSP onto a space where real holds them apart, so `TRIM(N' ' FROM …)` removes an NBSP real keeps.
@@ -392,12 +367,6 @@ Entries are verified against the simulator, so one that no longer reproduces is 
 - **A GROUP BY view's aggregate column is Msg 4403** where real reports **Msg 4406** — real splits by which column the write names, `SET <group-by column>` being 4403 and `SET <aggregate column>` 4406 since the aggregate is a derived field (probe-confirmed, through a chained view too).
   `RejectionReason` settles the whole view before any column is looked at, so the per-column gate never runs on a shape that already failed; letting the 4406 walk run first on an aggregate / DISTINCT body is the work.
   → [`programmable.md`](programmable.md#updatable-views-dml-through-views).
-- **A bare join-algorithm hint with no join type names the wrong token** — `FROM a HASH JOIN b` is Msg 102 near `join` where real is Msg 102 near `hash`, and `FROM a MERGE JOIN b` is Msg 102 near `join` where real is Msg 156 near the keyword `join`.
-  Both engines refuse the statement; the hint word is simply consumed as the source's alias before the failure, so the error lands one token later.
-  Reproducing it means recognizing a hint word in the alias position when `JOIN` follows — see [`query-hints.md`](query-hints.md#inline-join-algorithm-hints).
-- **A function call with a trailing comma reports the arity error, not the syntax error** — `ISNULL(1, 2,)` is Msg 174 (`requires 2 argument(s)`) where real is Msg 102 near `)`.
-  The argument-count check runs on what parsed, so the empty final argument is counted rather than rejected; real refuses the list first.
-  Both engines refuse the call, and only malformed input reaches it.
 - **A batch that is nothing but `@var <type>` is Msg 102 where real says Msg 137** — real parses `@x int` as a statement far enough to bind `@x` and reports the undeclared variable; the simulator's dispatcher rejects it as a syntax error at the `@x`.
   Reachable through `EXEC sp_executesql N'@x int'` and, more realistically, through an `sp_executesql` call whose two leading arguments were transposed — real runs the declaration string as the statement and reports 137, which is how the positional-binding rule was probed in the first place.
   Both engines refuse the batch either way; only the number and wording differ.

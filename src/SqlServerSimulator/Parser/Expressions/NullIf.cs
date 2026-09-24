@@ -33,9 +33,8 @@ internal sealed class NullIf : Expression
     /// which makes the <c>=</c> this desugars to UNKNOWN and so leaves the
     /// second argument unreachable — real answers NULL for
     /// <c>NULLIF(-CAST(NULL AS real), &lt;bad&gt;)</c> where the second argument
-    /// alone raises. A bare <c>NULL</c> literal is excluded because real refuses
-    /// that spelling outright (Msg 4151), so folding it would settle a shape
-    /// real never runs.
+    /// alone raises. (A bare <c>NULL</c> literal never gets here: real refuses
+    /// that spelling outright with Msg 4151.)
     /// </summary>
     private readonly bool constantNullFirst;
 
@@ -44,11 +43,13 @@ internal sealed class NullIf : Expression
     public NullIf(ParserContext context)
     {
         this.a = Parse(context);
+        if (IsUntypedNullLiteral(this.a))
+            throw SimulatedSqlException.NullIfFirstArgumentIsNull();
         if (context.Token is not Tokens.Operator { Character: ',' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         this.b = Parse(context.MoveNextRequiredReturnSelf());
         this.narrowedLiteralType = NarrowedLiteralType(this.a);
-        this.constantNullFirst = !IsBareNullLiteral(this.a) && ConstantFolding.FoldsToNull(this.a, context);
+        this.constantNullFirst = ConstantFolding.FoldsToNull(this.a, context);
     }
 
     /// <summary>

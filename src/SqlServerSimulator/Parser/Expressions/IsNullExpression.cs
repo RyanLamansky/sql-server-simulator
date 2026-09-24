@@ -28,8 +28,14 @@ internal sealed class IsNullExpression : Expression
         if (context.Token is not Tokens.Operator { Character: ',' })
             throw SimulatedSqlException.FunctionRequiresNArguments("isnull", 2);
         this.replacement = Parse(context.MoveNextRequiredReturnSelf());
-        if (context.Token is Tokens.Operator { Character: ',' })
-            throw SimulatedSqlException.FunctionRequiresNArguments("isnull", 2);
+        if (context.Token is not Tokens.Operator { Character: ',' })
+            return;
+
+        // Real reads the whole argument list before counting it, so a
+        // malformed surplus argument is its syntax error rather than Msg 174.
+        while (context.Token is Tokens.Operator { Character: ',' })
+            _ = Parse(context.MoveNextRequiredReturnSelf());
+        throw SimulatedSqlException.FunctionRequiresNArguments("isnull", 2);
     }
 
     internal override bool ParallelSafe => this.check.ParallelSafe && this.replacement.ParallelSafe;

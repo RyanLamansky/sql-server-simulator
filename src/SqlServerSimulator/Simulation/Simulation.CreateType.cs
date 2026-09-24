@@ -131,6 +131,7 @@ partial class Simulation
 
         // No CHECK predicate may read a non-persisted computed column —
         // Msg 1764, ahead of the Msg 8141 walk. Same as CREATE TABLE.
+        BindCheckConstraints(context.Batch, heapColumns, pendingChecks);
         RejectChecksOverNonPersistedComputedColumns(context.Batch.CurrentDatabase.Collation, typeName.Leaf, heapColumns, pendingChecks);
 
         // Inline-CHECK peer-ref check (Msg 8141) — same structural walk as

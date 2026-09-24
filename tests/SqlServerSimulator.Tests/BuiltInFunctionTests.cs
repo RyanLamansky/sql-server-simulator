@@ -92,7 +92,6 @@ public sealed class BuiltInFunctionTests
     [DataRow("left(null, 3)")]
     [DataRow("left('abc', null)")]
     [DataRow("right(null, 3)")]
-    [DataRow("substring(null, 1, 3)")]
     [DataRow("substring('abc', null, 3)")]
     [DataRow("substring('abc', 1, null)")]
     [DataRow("charindex(null, 'abc')")]

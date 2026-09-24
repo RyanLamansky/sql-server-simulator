@@ -66,7 +66,33 @@ internal sealed class Checksum : Expression
             list.Add(Parse(context.MoveNextRequiredReturnSelf()));
         if (context.Token is not Tokens.Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
+        RejectBareNulls(list, isBinary);
         this.args = [.. list];
+    }
+
+    /// <summary>
+    /// Real refuses a bare <c>NULL</c> argument while compiling:
+    /// <c>CHECKSUM</c> names each one (Msg 8116 state 4, all reported
+    /// together), while <c>BINARY_CHECKSUM</c> skips them and refuses only a
+    /// call left with nothing to hash (Msg 8184). Probed against SQL Server 2025.
+    /// </summary>
+    private static void RejectBareNulls(List<Expression> arguments, bool isBinary)
+    {
+        if (isBinary)
+        {
+            if (arguments.TrueForAll(IsUntypedNullLiteral))
+                throw SimulatedSqlException.NoComparableBinaryChecksumColumns();
+            return;
+        }
+
+        List<SimulatedSqlException>? errors = null;
+        for (var i = 0; i < arguments.Count; i++)
+        {
+            if (IsUntypedNullLiteral(arguments[i]))
+                (errors ??= []).Add(SimulatedSqlException.InvalidArgumentDataType("NULL", i + 1, "checksum", 4));
+        }
+        if (errors is not null)
+            throw SimulatedSqlException.Aggregate(errors);
     }
 
     public override SqlValue Run(RuntimeContext runtime)

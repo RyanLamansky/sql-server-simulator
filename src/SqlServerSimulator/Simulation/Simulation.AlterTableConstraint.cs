@@ -176,6 +176,7 @@ partial class Simulation
         AssertConstraintNameUnique(table, explicitName);
         // A CHECK may not read a non-persisted computed column — Msg 1764,
         // raised whether or not WITH NOCHECK skipped the data validation.
+        BindCheckConstraint(context.Batch, table.Columns, predicate);
         RejectCheckOverNonPersistedComputedColumn(context.Batch.CurrentDatabase.Collation, table.Name, table.Columns, predicate);
         var name = explicitName ?? AutoCheckName(table.Name, null, table.CheckConstraints.Count);
         var constraint = new CheckConstraint(name, predicate, null, context.CurrentDatabase.AllocateObjectId(), context.Batch.CurrentStatement.UtcNow)

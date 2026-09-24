@@ -546,6 +546,7 @@ internal sealed class Cast : Expression
     internal static bool IsConversionFailure(int number) => number is
         220    // ArithmeticOverflowForDataType (integer → tinyint/smallint)
         or 232 // ArithmeticOverflowForType (float/real/money → integer)
+        or 235 // money / smallmoney string syntax
         or 237 // InsufficientResultSpaceForMoneyToInt
         or 241 // ConversionFailedDateTimeFromString
         or 242 // ConversionToDateTimeOutOfRange
