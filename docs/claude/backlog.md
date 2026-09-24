@@ -165,12 +165,8 @@ Still open from what it surfaced:
 - **A reserved keyword's spelling in Msg 156**: the simulator echoes it as written, where real prints some in capitals regardless — `REFERENCES` and `CONSTRAINT` in a table variable's column list, `ON` in `ALTER DATABASE … SET` (probed 2026-09-24).
 - **Many-way joins do not scale**: `select5`'s 20-24-table equi-joins answer in milliseconds on real and exceed a 15-second `CommandTimeout` here, one of them running past a 40-second wall without honoring its own timeout.
   Not a correctness gap, but it is why the sweep's file list is `random/` rather than the whole corpus — see the join-strategy notes in [`joins.md`](joins.md).
-- **A `FROM`-less star is three behaviors real distinguishes and the simulator answers Msg 102 for all**: `SELECT *`, `SELECT 1, *` and `SELECT COUNT(*), *` are **Msg 263** ("Must specify table to select from."), `SELECT t.*` is **Msg 107**, and `EXISTS (SELECT *)` is legal.
-- **An integer literal padded past 12 characters is `numeric(significant_digits, 0)`**, not `int` — `SELECT 0000000000300` is `numeric(3, 0)` on real while the 11-character `00000000300` is `int`.
-  The rule belongs to the bare-literal tokenizer — see [`arithmetic.md`](arithmetic.md).
 - **Real answers a statement's binder errors together where the simulator raises the leading one alone** — `INSERT` reports 207 + 110, and 273 + 10709, as one multi-error response.
   The module-body bind already gathers every error of a *body*; this is the same shape for a single statement — see [`programmable.md`](programmable.md).
-- **`SELECT TOP (-1)`** returns no rows where real raises **Msg 127**; the DML `UPDATE` / `DELETE TOP (-1)` path already raises it, so only the SELECT site misses it.
 - **`FORMAT(x, 'P')` renders three decimal places where real renders two** (`0.000%` against `0.00%`, for positive zero as well), an invariant-culture percent-digits difference; changing FORMAT's culture defaults reaches every specifier, so it wants its own probe pass.
 
 **Five sweep divergences remain, each demonstrated irreducible** — real's own answer flips under something the simulator cannot legitimately model, so matching them would mean modeling plan selection rather than semantics.

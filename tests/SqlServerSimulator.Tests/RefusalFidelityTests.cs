@@ -400,4 +400,31 @@ public sealed class RefusalFidelityTests
     [DataRow("last_value(null)", "last_value")]
     public void OffsetAndValueFunctions_BareNullOperand_RaisesMsg8117(string call, string name)
         => new Simulation().AssertSqlError($"select {call} over (order by (select 1))", 8117, $"Operand data type NULL is invalid for {name} operator.");
+
+    // ---- a SELECT with no FROM clause to expand a star against ----
+
+    [TestMethod]
+    [DataRow("select *")]
+    [DataRow("select 1, *")]
+    [DataRow("select count(*), *")]
+    public void FromlessStar_RaisesMsg263(string sql)
+        => new Simulation().AssertSqlError(sql, 263, "Must specify table to select from.");
+
+    [TestMethod]
+    [DataRow("select t.*")]
+    [DataRow("select 1 where exists (select t.*)")]
+    public void FromlessQualifiedStar_RaisesMsg107(string sql)
+        => new Simulation().AssertSqlError(sql, 107, "The column prefix 't' does not match with a table name or alias name used in the query.");
+
+    [TestMethod]
+    public void FromlessStarInExists_IsNeverRead()
+        => AreEqual(1, new Simulation().ExecuteScalar("select 1 where exists (select *)"));
+
+    [TestMethod]
+    [DataRow("00000000300", "int", 10)]
+    [DataRow("000000000300", "numeric", 3)]
+    [DataRow("000000000001", "numeric", 1)]
+    [DataRow("0000000002147483647", "numeric", 10)]
+    public void IntegerLiteral_WrittenPastElevenCharacters_IsNumeric(string literal, string type, int precision)
+        => AreEqual($"{type}|{precision}", new Simulation().ExecuteScalar($"select concat(sql_variant_property({literal}, 'BaseType'), '|', sql_variant_property({literal}, 'Precision'))"));
 }

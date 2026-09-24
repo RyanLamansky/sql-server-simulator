@@ -282,6 +282,7 @@ SQL Server never types a bare integer literal `bigint` — it is `int` while the
 Only a CAST reaches `bigint`, so `SELECT 3000000000` and `SELECT CAST(3000000000 AS bigint)` advertise different wire types for the same value (NUMERICN at precision 10 vs BIGINT at precision 19).
 Leading zeros are excluded from the count (`0000000003000000000` → `numeric(10, 0)`) and a sign doesn't change it (`-3000000000` → `numeric(10, 0)`); past 38 digits real reports **Msg 1007** rather than letting the literal reach the type factory.
 Probe-confirmed against SQL Server 2025 via `sql_variant_property` and `sp_describe_first_result_set`.
+The written length decides too: a literal of more than eleven characters is numeric even when its value fits `int`, so `00000000300` is `int` and `000000000300` is `numeric(3, 0)` (probed 2026-09-24).
 
 The literal is always numeric-named rather than decimal-named, so it flows through the [numeric-vs-decimal](#numeric-vs-decimal-reported-type-name) metadata like any other literal, and its arithmetic follows the ordinary decimal formulas (`3000000000 + 1` → `numeric(11, 0)`, `* 2` → `numeric(12, 0)`, `/ 2` → `numeric(16, 6)`).
 Because the declared precision already equals the digit count, these literals carry **no** separate `IntegerLiteralDigitCount` annotation — the digit-count sizing above is only needed on the `int` branch, where the type's fixed `(10, 0)` would otherwise win.

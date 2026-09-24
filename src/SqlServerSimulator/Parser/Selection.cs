@@ -4318,6 +4318,19 @@ internal sealed partial class Selection
         // batch from plan-cache promotion.
         parseBatch.HasSessionScopedReference = true;
 
+        // A star with no FROM clause has nothing to expand: real refuses a
+        // bare one (Msg 263) and a qualified one (Msg 107), except that an
+        // EXISTS body's bare star is never read (probed 2026-09-24).
+        for (var i = 0; i < expressions.Count; i++)
+        {
+            if (expressions[i] is StarProjection star)
+            {
+                expressions[i] = star.Qualifier is null && scope.Position == QueryPosition.Exists
+                    ? new Value(SqlValue.FromInt32(1))
+                    : throw star.Unexpandable();
+            }
+        }
+
         // Msg 108 while compiling, as on the FROM path.
         foreach (var spec in orderBy)
         {

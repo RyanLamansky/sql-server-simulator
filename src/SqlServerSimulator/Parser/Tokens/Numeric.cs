@@ -80,7 +80,10 @@ internal sealed class Numeric : Token
         // precision an integer literal contributes when unified with a decimal.
         this.IntegerLiteralDigitCount = Math.Max(1, number.TrimStart('0').Length);
 
-        if (int.TryParse(number, out var int32))
+        // Written with more than eleven characters, a literal is numeric even
+        // when its value fits int: `00000000300` is int where `000000000300`
+        // is numeric(3, 0) (probed 2026-09-24 against SQL Server 2025).
+        if (number.Length <= 11 && int.TryParse(number, out var int32))
         {
             this.Value = SqlValue.FromInt32(int32);
             return;

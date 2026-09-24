@@ -883,6 +883,21 @@ partial class SimulatedSqlException
         new("Separator parameter for STRING_AGG must be a string literal or variable.", 8733, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server's Msg 263 — a bare <c>*</c> in a SELECT with no FROM
+    /// clause. Probe-confirmed against SQL Server 2025 (2026-09-24).
+    /// </summary>
+    internal static SimulatedSqlException MustSpecifyTableToSelectFrom() =>
+        new("Must specify table to select from.", 263, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 107 — a qualified <c>t.*</c> whose qualifier
+    /// names no source in scope. Probe-confirmed against SQL Server 2025
+    /// (2026-09-24).
+    /// </summary>
+    internal static SimulatedSqlException ColumnPrefixDoesNotMatch(string qualifier) =>
+        new($"The column prefix '{qualifier}' does not match with a table name or alias name used in the query.", 107, 15, 1);
+
+    /// <summary>
     /// Mimics SQL Server's Msg 4127 — every argument of a <c>COALESCE</c> is a
     /// bare <c>NULL</c> literal (parentheses see through), raised while
     /// compiling. Probe-confirmed against SQL Server 2025 (2026-09-24).

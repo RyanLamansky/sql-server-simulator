@@ -500,8 +500,7 @@ The row count is where the shapes diverge, and each is probe-confirmed:
 | `SELECT COUNT(*) GROUP BY ()` | `1` | the empty grouping set is one group over the whole rowset |
 | `SELECT COUNT(*) GROUP BY 1` | **Msg 164** | a GROUP BY item naming no column, the rule that leaves `()` as the only form a source-less query accepts |
 
-A star with no FROM to expand against is real's **Msg 263** ("Must specify table to select from.") where the simulator reports Msg 102 at the star — `SELECT *` and `SELECT 1, *` alike, and `SELECT COUNT(*), *` reaches the same Msg 102 through the routing above.
-Real splits a *qualified* star off from that: `SELECT t.*` is Msg 107, the unmatched-column-prefix error, and an `EXISTS (SELECT *)` body is legal (its projection is discarded), so the three cases don't share one answer.
+A star with no FROM to expand against is **Msg 263** ("Must specify table to select from.") — `SELECT *`, `SELECT 1, *` and, through the routing above, `SELECT COUNT(*), *` alike — while a *qualified* one (`SELECT t.*`) is Msg 107, the unmatched-column-prefix error, and an `EXISTS (SELECT *)` body is legal since its projection is never read (`StarProjection.Unexpandable`).
 
 Oracle: `SourcelessAggregateTests`.
 

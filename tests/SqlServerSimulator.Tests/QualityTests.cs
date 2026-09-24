@@ -540,7 +540,7 @@ public partial class QualityTests
     /// <c>sp_help</c> family's severity-10 texts, Msg 3604).
     /// </summary>
     private static readonly int[] CitedButNotRaised = [
-        107, 147, 185, 263, 336, 557, 596, 1784,
+        147, 185, 336, 557, 596, 1784,
         1789, 1909, 2023, 2247, 2390, 2396, 3604, 3606, 3607, 3609, 3920, 3997,
         4124, 4624, 4860, 4919, 4922, 5592, 6338, 6947,
         7222, 8105, 8622, 8628, 8711, 8729, 9341,
