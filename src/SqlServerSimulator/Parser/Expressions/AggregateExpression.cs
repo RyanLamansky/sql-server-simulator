@@ -317,8 +317,36 @@ internal sealed class AggregateExpression : Expression
     private SqlType BindStringAggArguments(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
         var operandType = StringScalars.BindArgument(this.Operand!, batch, resolveColumnType, "string_agg");
-        _ = StringScalars.BindArgument(this.Separator!, batch, resolveColumnType, "string_agg", argumentIndex: 2);
+        var separatorType = StringScalars.BindArgument(this.Separator!, batch, resolveColumnType, "string_agg", argumentIndex: 2);
+        RejectSeparator(this.Separator!, separatorType, operandType);
         return Aggregators.StringAggAggregator.ResultType(operandType, batch);
+    }
+
+    /// <summary>
+    /// STRING_AGG's separator is a string — never a Unicode one beside a
+    /// non-Unicode string operand — (Msg 8116), and then a variable or a
+    /// value real folds to a constant (Msg 8733): <c>','</c>, <c>',' + ','</c>,
+    /// <c>CHAR(44)</c> and a bare <c>NULL</c> pass, a column, <c>@s + @s</c>
+    /// and <c>UPPER(',')</c> don't. Both while compiling, the type first
+    /// (probed 2026-09-24 against SQL Server 2025).
+    /// </summary>
+    private static void RejectSeparator(Expression separator, SqlType separatorType, SqlType operandType)
+    {
+        if (IsUntypedNullLiteral(separator))
+            return;
+        if (separatorType.Category != SqlTypeCategory.String
+            || (SqlType.IsNationalStringCategory(separatorType)
+                && operandType.Category == SqlTypeCategory.String
+                && !SqlType.IsNationalStringCategory(operandType)))
+        {
+            throw SimulatedSqlException.InvalidArgumentDataType(SimulatedSqlException.FamilyRootName(separatorType), 2, "string_agg");
+        }
+
+        var bare = separator;
+        while (bare is Parenthesized parenthesized)
+            bare = parenthesized.Wrapped;
+        if (bare is not VariableReference && !separator.IsWrittenConstant)
+            throw SimulatedSqlException.StringAggSeparatorNotLiteralOrVariable();
     }
 
     // SUM / AVG / MIN / MAX preserve the operand's decimal-vs-numeric name; the other

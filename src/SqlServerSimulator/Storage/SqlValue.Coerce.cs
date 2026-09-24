@@ -357,11 +357,11 @@ internal readonly partial struct SqlValue
     private SqlValue CoerceToDateTime() => this.Type switch
     {
         _ when SqlType.IsStringCategory(this.Type) => FromDateTime(ParseLegacyDateTime(this.AsString)),
-        _ when this.Type == SqlType.Date => FromDateTime(this.AsDate.ToDateTime(TimeOnly.MinValue)),
+        _ when this.Type == SqlType.Date => FromDateTime(this.AsDate.ToDateTime(TimeOnly.MinValue), this.Type),
         _ when this.Type == SqlType.SmallDateTime => FromDateTime(this.AsSmallDateTime),
-        DateTime2SqlType => FromDateTime(this.AsDateTime2),
+        DateTime2SqlType => FromDateTime(this.AsDateTime2, this.Type),
         TimeSqlType => FromDateTime(new DateTime(1900, 1, 1).Add(this.AsTime)),
-        DateTimeOffsetSqlType => FromDateTime(this.AsDateTimeOffset.DateTime),
+        DateTimeOffsetSqlType => FromDateTime(this.AsDateTimeOffset.DateTime, this.Type),
         VarbinarySqlType or BinarySqlType => FromDateTime(DecodeLegacyDateTimeFromBytes(this.AsBytes)),
         _ when SqlType.IsIntegerCategory(this.Type) => CoerceIntegerDaysToDateTime(AsInt64Widened(this)),
         DecimalSqlType => CoerceFractionalDaysToDateTime(FractionalDaysOrOverflow(this.AsDecimal38, SqlType.DateTime)),
@@ -374,11 +374,11 @@ internal readonly partial struct SqlValue
     private SqlValue CoerceToSmallDateTime() => this.Type switch
     {
         _ when SqlType.IsStringCategory(this.Type) => FromSmallDateTime(ParseSmallDateTime(this.AsString)),
-        _ when this.Type == SqlType.Date => FromSmallDateTime(this.AsDate.ToDateTime(TimeOnly.MinValue)),
-        _ when this.Type == SqlType.DateTime => FromSmallDateTime(this.AsDateTime),
-        DateTime2SqlType => FromSmallDateTime(this.AsDateTime2),
+        _ when this.Type == SqlType.Date => FromSmallDateTime(this.AsDate.ToDateTime(TimeOnly.MinValue), this.Type),
+        _ when this.Type == SqlType.DateTime => FromSmallDateTime(this.AsDateTime, this.Type),
+        DateTime2SqlType => FromSmallDateTime(this.AsDateTime2, this.Type),
         TimeSqlType => FromSmallDateTime(new DateTime(1900, 1, 1).Add(this.AsTime)),
-        DateTimeOffsetSqlType => FromSmallDateTime(this.AsDateTimeOffset.DateTime),
+        DateTimeOffsetSqlType => FromSmallDateTime(this.AsDateTimeOffset.DateTime, this.Type),
         VarbinarySqlType or BinarySqlType => FromSmallDateTime(DecodeSmallDateTimeFromBytes(this.AsBytes, fromRowVersion: false)),
         _ when SqlType.IsIntegerCategory(this.Type) => CoerceIntegerDaysToSmallDateTime(AsInt64Widened(this)),
         DecimalSqlType => CoerceFractionalDaysToSmallDateTime(FractionalDaysOrOverflow(this.AsDecimal38, SqlType.SmallDateTime)),

@@ -875,6 +875,14 @@ partial class SimulatedSqlException
         new("The number of row value expressions in the INSERT statement exceeds the maximum allowed number of 1000 row values.", 10738, 15, 1);
 
     /// <summary>
+    /// Mimics SQL Server's Msg 8733 — a <c>STRING_AGG</c> separator that is
+    /// neither a variable nor a constant, raised while compiling.
+    /// Probe-confirmed against SQL Server 2025 (2026-09-24).
+    /// </summary>
+    internal static SimulatedSqlException StringAggSeparatorNotLiteralOrVariable() =>
+        new("Separator parameter for STRING_AGG must be a string literal or variable.", 8733, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server's Msg 4127 — every argument of a <c>COALESCE</c> is a
     /// bare <c>NULL</c> literal (parentheses see through), raised while
     /// compiling. Probe-confirmed against SQL Server 2025 (2026-09-24).

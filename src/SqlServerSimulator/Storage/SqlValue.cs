@@ -328,7 +328,16 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
     /// Msg 242 (the conversion-overflow message SQL Server uses for both
     /// string parses and direct binding paths).
     /// </summary>
-    public static SqlValue FromDateTime(DateTime value)
+    public static SqlValue FromDateTime(DateTime value) => FromDateTime(value, source: null);
+
+    /// <summary>
+    /// <see cref="FromDateTime(DateTime)"/> for a value converted from
+    /// <paramref name="source"/>, which Msg 242 names. A <c>datetime2</c>
+    /// whose rounding alone carries it past the last day clamps to
+    /// <c>9999-12-31 23:59:59.997</c> instead, as real does for that source
+    /// only (probed 2026-09-24 against SQL Server 2025).
+    /// </summary>
+    internal static SqlValue FromDateTime(DateTime value, SqlType? source)
     {
         // Split into day count + time-of-day so the * 300 arithmetic doesn't
         // overflow long for late dates.
@@ -340,8 +349,10 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
             dayCount++;
             timeUnits = 0;
         }
+        if (dayCount == DateTimeSqlType.MaxDayCount + 1 && timeUnits == 0 && source is DateTime2SqlType)
+            return new(SqlType.DateTime, DateTimeSqlType.FromParts(DateTimeSqlType.MaxDayCount, DateTimeSqlType.TicksPerDay - 1).Ticks, null, isNull: false);
         if (dayCount is < DateTimeSqlType.MinDayCount or > DateTimeSqlType.MaxDayCount)
-            throw SimulatedSqlException.OutOfRangeDateTimeConversion(SqlType.DateTime);
+            throw SimulatedSqlException.OutOfRangeDateTimeConversion(SqlType.DateTime, source);
 
         return new(SqlType.DateTime, DateTimeSqlType.FromParts(dayCount, timeUnits).Ticks, null, isNull: false);
     }
@@ -364,7 +375,13 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
     /// (the same conversion-overflow message SQL Server uses for <c>datetime</c>,
     /// with the type name swapped).
     /// </summary>
-    public static SqlValue FromSmallDateTime(DateTime value)
+    public static SqlValue FromSmallDateTime(DateTime value) => FromSmallDateTime(value, source: null);
+
+    /// <summary>
+    /// <see cref="FromSmallDateTime(DateTime)"/> for a value converted from
+    /// <paramref name="source"/>, which Msg 242 names.
+    /// </summary>
+    internal static SqlValue FromSmallDateTime(DateTime value, SqlType? source)
     {
         var dayCount = (int)(value.Date - SmallDateTimeSqlType.BaseDate).TotalDays;
         // Quantize to legacy 1/300s tick first so the .999/.998 boundary
@@ -388,7 +405,7 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
             minutes = 0;
         }
         if (dayCount is < 0 or > SmallDateTimeSqlType.MaxDayCount)
-            throw SimulatedSqlException.OutOfRangeDateTimeConversion(SqlType.SmallDateTime);
+            throw SimulatedSqlException.OutOfRangeDateTimeConversion(SqlType.SmallDateTime, source);
 
         var rounded = SmallDateTimeSqlType.BaseDate.AddDays(dayCount).AddMinutes(minutes);
         return new(SqlType.SmallDateTime, rounded.Ticks, null, isNull: false);

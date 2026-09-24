@@ -637,10 +637,11 @@ partial class SimulatedSqlException
     /// this rather than silently clamping. The <paramref name="target"/>
     /// parameter slots into the message text — Msg 242 is shared by
     /// <c>datetime</c> and <c>smalldatetime</c>, distinguished only by the
-    /// type name.
+    /// type name. <paramref name="source"/> names a non-string source, which
+    /// real names in place of <c>varchar</c> (probed 2026-09-24).
     /// </summary>
-    internal static SimulatedSqlException OutOfRangeDateTimeConversion(SqlType target) =>
-        new($"The conversion of a varchar data type to a {target} data type resulted in an out-of-range value.", 242, 16, 3);
+    internal static SimulatedSqlException OutOfRangeDateTimeConversion(SqlType target, SqlType? source = null) =>
+        new($"The conversion of a {(source is null ? "varchar" : FamilyRootName(source))} data type to a {target} data type resulted in an out-of-range value.", 242, 16, 3);
 
     /// <summary>
     /// Mimics SQL Server error 402: two operand types can't be combined in

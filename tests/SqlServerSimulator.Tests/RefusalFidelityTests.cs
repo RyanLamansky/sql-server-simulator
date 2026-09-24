@@ -364,4 +364,40 @@ public sealed class RefusalFidelityTests
     public void ValuesConstructorInFrom_TakesMoreThanAThousandRows()
         => AreEqual(1001, new Simulation().ExecuteScalar(
             $"select count(*) from (values {string.Join(", ", Enumerable.Range(0, 1001).Select(i => $"({i})"))}) x(a)"));
+
+    // ---- STRING_AGG's separator and the offset functions' operand ----
+
+    private const string AggRows = "create table sa (s varchar(10), n nvarchar(10), i int); insert sa values ('a', N'x', 1), ('b', N'y', 2);";
+
+    [TestMethod]
+    [DataRow("string_agg(s, n)", "nvarchar")]
+    [DataRow("string_agg(s, N',')", "nvarchar")]
+    [DataRow("string_agg(s, 1)", "int")]
+    [DataRow("string_agg(s, 0x2c)", "varbinary")]
+    public void StringAgg_SeparatorOfTheWrongType_RaisesMsg8116(string call, string type)
+        => new Simulation().AssertSqlError($"{AggRows} select {call} from sa", 8116, $"Argument data type {type} is invalid for argument 2 of string_agg function.");
+
+    [TestMethod]
+    [DataRow("string_agg(s, s)")]
+    [DataRow("string_agg(s, upper(','))")]
+    public void StringAgg_SeparatorNeitherConstantNorVariable_RaisesMsg8733(string call)
+        => new Simulation().AssertSqlError($"{AggRows} select {call} from sa where 1 = 0", 8733, "Separator parameter for STRING_AGG must be a string literal or variable.");
+
+    [TestMethod]
+    [DataRow("string_agg(s, ',' + ',')", "a,,b")]
+    [DataRow("string_agg(s, char(44))", "a,b")]
+    [DataRow("string_agg(s, (','))", "a,b")]
+    [DataRow("string_agg(s, null)", "ab")]
+    [DataRow("string_agg(n, ',')", "x,y")]
+    [DataRow("string_agg(i, N',')", "1,2")]
+    public void StringAgg_ConstantOrVariableSeparator_Aggregates(string call, string expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar($"{AggRows} select {call} within group (order by i) from sa"));
+
+    [TestMethod]
+    [DataRow("lag(null)", "lag")]
+    [DataRow("lead((null), 1, 5)", "lead")]
+    [DataRow("first_value(null)", "first_value")]
+    [DataRow("last_value(null)", "last_value")]
+    public void OffsetAndValueFunctions_BareNullOperand_RaisesMsg8117(string call, string name)
+        => new Simulation().AssertSqlError($"select {call} over (order by (select 1))", 8117, $"Operand data type NULL is invalid for {name} operator.");
 }

@@ -409,4 +409,17 @@ public sealed class LegacyDateTimeTests
     [TestMethod]
     public void Cast_ToNarrowDecimal_RaisesMsg8115()
         => new Simulation().AssertSqlError("declare @d datetime = '2023-12-31'; select cast(@d as decimal(4, 0))", 8115);
+
+    [TestMethod]
+    [DataRow("9999-12-31 23:59:59.9999999")]
+    [DataRow("9999-12-31 23:59:59.9989999")]
+    public void Cast_Datetime2RoundingPastTheLastDay_ClampsToTheLastTick(string value)
+        => AreEqual(new DateTime(9999, 12, 31, 23, 59, 59, 997), new Simulation().ExecuteScalar($"select cast(cast('{value}' as datetime2) as datetime)"));
+
+    [TestMethod]
+    [DataRow("select cast(cast('9999-12-31 23:59:59.9999999 +00:00' as datetimeoffset) as datetime)", "datetimeoffset", "datetime")]
+    [DataRow("select cast(cast('2079-06-06 23:59:30' as datetime2) as smalldatetime)", "datetime2", "smalldatetime")]
+    [DataRow("select cast('9999-12-31 23:59:59.999' as datetime)", "varchar", "datetime")]
+    public void Cast_OutOfRange_NamesTheSourceType(string sql, string source, string target)
+        => new Simulation().AssertSqlError(sql, 242, $"The conversion of a {source} data type to a {target} data type resulted in an out-of-range value.");
 }

@@ -256,9 +256,7 @@ Already listed elsewhere here and not repeated: `DBCC CHECKIDENT` and parenthesi
 - A non-persisted computed column that errors (`b AS a / 0`) fails the INSERT here — the write evaluates every computed column so OUTPUT, CHECK and key enforcement can read it — where real inserts and fails only a query that projects the column.
 - `GROUPING SETS ((a + 1), (a + 2))` projecting both expressions: the grouped-away one reads NULL on real, but a column shared with the kept expression still resolves here (the grouped-key resolver NULLs columns, not whole expressions).
 - `OBJECT_NAME(<catalog view id>)` is NULL here and the view's name on real, and `sys.all_objects` omits the system objects `sys.system_objects` lists (real's is the union).
-- `STRING_AGG`'s separator isn't checked: real requires a literal or variable (Msg 8733), a string (Msg 8116 on argument 2), and no `nvarchar` under a `varchar` operand (Msg 8116 naming `nvarchar`).
-- `CAST(<datetime2> AS datetime)` at the top of the range raises Msg 242 here; real clamps `9999-12-31 23:59:59.9999999` to `.997`, raising Msg 242 only from a string or `datetimeoffset` source.
-  The simulator's Msg 242 also names `varchar` as the source where real names the actual type (`datetime2` → `smalldatetime`).
+- `STRING_AGG(s, CAST(',' AS varchar(2)))` over a table is Msg 8733 on real and aggregates here; over a `VALUES` source real accepts it too, so what separates the two isn't settled (probed 2026-09-24).
 - `LOWER` / `UPPER` use English case mapping under every collation; a Turkish collation's own mapping isn't modeled.
 
 **Real accepts, the simulator refuses**:
@@ -271,7 +269,8 @@ Already listed elsewhere here and not repeated: `DBCC CHECKIDENT` and parenthesi
 
 **Smaller divergences found alongside** (probed 2026-09-24):
 
-- `LAG` over an operand typed only by `NULL` (`VALUES (1, null)`) answers NULL here; real raises Msg 8117 ("Operand data type NULL is invalid for lag operator").
+- `LAG` / `LEAD` / `FIRST_VALUE` / `LAST_VALUE` over a column typed only by `NULL` (`VALUES (1, null)`) answers NULL here; real raises Msg 8117 ("Operand data type NULL is invalid for lag operator").
+  A bare `NULL` operand raises it; a derived source's column doesn't carry that it was an untyped `NULL`.
 - `SQL_VARIANT_PROPERTY(<decimal column>, 'BaseType')` is `numeric` here where real keeps the declared spelling (`decimal`).
 - An identity overflow's Msg 8115 is followed by the class-0 Msg 3606 ("Arithmetic overflow occurred.") on real.
 - `UPDATE … SET @x += v = 1` is Msg 102 near `'='` here, near `'+='` on real; `IDENTITY(dbo.foo, 1, 1)` is Msg 243 here, Msg 102 near `'.'` on real.

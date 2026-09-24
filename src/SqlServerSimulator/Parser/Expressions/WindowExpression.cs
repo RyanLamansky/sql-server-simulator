@@ -317,7 +317,11 @@ internal sealed class WindowExpression : Expression
         WindowKind.CumeDist or WindowKind.PercentRank or WindowKind.PercentileCont => SqlType.Float,
         WindowKind.PercentileDisc => this.OrderBy[0].Expr!.GetSqlType(batch, resolveColumnType),
         WindowKind.Aggregate => this.AggregateInfo!.GetSqlType(batch, resolveColumnType),
-        WindowKind.Lag or WindowKind.Lead or WindowKind.FirstValue or WindowKind.LastValue => this.Operand!.GetSqlType(batch, resolveColumnType),
+        // A bare NULL has no type for the offset / value functions to carry
+        // (Msg 8117 state 3, probed 2026-09-24 against SQL Server 2025).
+        WindowKind.Lag or WindowKind.Lead or WindowKind.FirstValue or WindowKind.LastValue => IsUntypedNullLiteral(this.Operand!)
+            ? throw SimulatedSqlException.OperandDataTypeInvalid("NULL", LowerNameFor(this.Kind), 3)
+            : this.Operand!.GetSqlType(batch, resolveColumnType),
         _ => throw new InvalidOperationException($"Unknown window kind {this.Kind}."),
     };
 

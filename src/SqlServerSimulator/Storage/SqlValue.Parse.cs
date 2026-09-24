@@ -67,7 +67,7 @@ internal readonly partial struct SqlValue
     /// Reads <paramref name="value"/> as <c>datetime</c> does: Msg 241 for a
     /// string it can't read, Msg 242 for one naming a value that doesn't
     /// exist. The 1/300-second rounding and the 1753–9999 range are
-    /// <see cref="FromDateTime"/>'s.
+    /// <see cref="FromDateTime(DateTime)"/>'s.
     /// </summary>
     private static DateTime ParseLegacyDateTime(string value) =>
         DateTimeText.TryParse(value, legacy: true, out var text) switch
