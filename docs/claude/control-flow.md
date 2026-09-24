@@ -252,7 +252,7 @@ An error that ends a procedure's or dynamic SQL's batch — a compile error, or 
 - **A deferred statement's bind error at run time** is catchable here, and ends the batch only for the name-resolution set; real's recompile errors can't be caught in their own scope and end the batch whatever their number (`CREATE TABLE t2 (a int); INSERT t2 VALUES (1, 2); PRINT 'after'` never prints on real).
 - **A procedure body compiles only at `CREATE`**; real compiles it again as a whole at its first execution, so a body statement naming a table created after the procedure fails there before the body's first statement runs.
 - **An `INSERT … EXEC` body stops at its first error**, since the statement collects the body's rows rather than forwarding its outcomes; real runs that body on too, inserting what its later statements return (probed 2026-09-24).
-- **Creating a table twice in one batch**: real reports Msg 2714 while compiling for a `#temp`, and ends the batch at run time for a permanent table; here the first `CREATE` runs and the batch continues.
+- **Creating a `#temp` twice in one batch or module body**: real reports Msg 2714 state 1 while compiling, so nothing in the batch runs and a procedure body that does it is refused at `CREATE PROC`, even with a `DROP` between the two (probed 2026-09-24); here the first `CREATE` runs and the second's run-time Msg 2714 ends the batch.
 
 ## Statement-terminating vs batch-aborting errors (unified continue-on-error)
 

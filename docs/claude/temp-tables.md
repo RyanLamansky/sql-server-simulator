@@ -35,6 +35,11 @@ Lifecycle, cross-conn isolation, and Msg 208 from other sessions all probe-confi
   Probe-confirmed against SQL Server 2025 for procs, triggers, `EXEC('…')`, and `SELECT … INTO #t`.
   Mechanism: the body's `BatchContext` records the temps it created (`RegisterScopedTempTable`, gated by `ScopesTempTables` = has a proc / trigger frame, or the RPC ad-hoc-statement `ForceTempTableScope`), and each module-body dispatch drops them in its `finally` (`DropScopedTempTables`) — so it runs on a body error too.
   The RPC `sp_executesql` / `sp_execute` / `sp_prepexec` path (which builds a top-level command rather than a dynamic-SQL frame) opts in via `SimulatedDbCommand.ScopeTempTablesToBatch`, dropped in `CreateResultSetsForCommand`'s finally.
+- **A nested scope may create a `#foo` its caller already has** (probed 2026-09-24 against SQL Server 2025).
+  Its own hides the caller's — for its statements and for the modules it calls — until it's dropped or the scope ends, and then the name is the caller's again; a `DROP` with no table of the scope's own drops the caller's, and a `ROLLBACK` restores whichever was visible.
+  Only a second `#foo` in the *same* scope is Msg 2714.
+  `SimulatedDbConnection.TempTables` holds the visible table of each name and hides the rest behind it (`TryAddTempTable` / `RemoveTempTable`), each table carrying the scope that created it (`HeapTable.TempScopeId`); a scope drops its tables by object rather than name at exit, since the name may be the caller's again by then.
+  Real compiles the inner batch against the table visible *before* it runs, so a column only the inner table has is Msg 207 on both engines (`CREATE TABLE #t (b int); SELECT b FROM #t` inside `EXEC` while the caller holds `#t (a int)`), and so is a `CREATE PROC` whose body does the same in a session holding one.
 - **Bare `#`** is a valid temp-table name (one-char `#`).
   Identity / SCOPE_IDENTITY work identically to regular tables.
   CTE prefix, JOINs across multiple `#`-tables, all queries against `#foo` flow through the same Selection / Insert / Update / Delete / Merge machinery via `TryResolveTable`.

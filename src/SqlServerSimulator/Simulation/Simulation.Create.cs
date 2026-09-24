@@ -364,13 +364,15 @@ partial class Simulation
         };
         if (isGlobalTempTable)
             heapTable.OwnerSession = context.Batch.Connection.Session;
-        if (!destination.TryAdd(heapTable.Name, heapTable))
+        if (isLocalTempTable)
+            heapTable.TempScopeId = context.Batch.TempTableScopeId();
+        if (!(isLocalTempTable ? context.Batch.Connection.TryAddTempTable(heapTable) : destination.TryAdd(heapTable.Name, heapTable)))
             throw SimulatedSqlException.ThereIsAlreadyAnObject(heapTable.Name);
         // A local temp created inside a module body (proc / trigger / dynamic
         // SQL) is dropped when that module exits; register it so the body's
         // finally drops it.
         if (isLocalTempTable)
-            context.Batch.RegisterScopedTempTable(heapTable.Name);
+            context.Batch.RegisterScopedTempTable(heapTable);
 
         if (systemVersioning is { } versioning && historyDestination is not null && historySchema is not null)
         {
@@ -449,7 +451,12 @@ partial class Simulation
         // are undone by ROLLBACK on real SQL Server. Regular CREATE TABLE
         // isn't logged — a known asymmetry documented as a quirk.
         if (isTempTable && context.Connection.CurrentTransaction is { } tx)
-            tx.UndoLog.RecordTempTableCreation(destination, heapTable.Name);
+        {
+            if (isLocalTempTable)
+                tx.UndoLog.RecordLocalTempTableCreation(context.Connection, heapTable);
+            else
+                tx.UndoLog.RecordTempTableCreation(destination, heapTable.Name);
+        }
         // Real raises no DDL event for a temp table (tempdb owns it), only for
         // a permanent one in the current database.
         if (!isTempTable)

@@ -84,6 +84,18 @@ internal sealed class UndoLog
     public void RecordTempTableRemoval(ConcurrentDictionary<string, HeapTable> owner, string name, HeapTable table) =>
         this.entries.Add(new TempTableRemoval(owner, name, table));
 
+    /// <summary>
+    /// A local temp table's create and drop go through the session's registry
+    /// rather than a plain dictionary, so undoing one also restores which of
+    /// the same-named tables a nested scope hides is visible.
+    /// </summary>
+    public void RecordLocalTempTableCreation(SimulatedDbConnection connection, HeapTable table) =>
+        this.entries.Add(new LocalTempTableCreation(connection, table));
+
+    /// <inheritdoc cref="RecordLocalTempTableCreation"/>
+    public void RecordLocalTempTableRemoval(SimulatedDbConnection connection, HeapTable table) =>
+        this.entries.Add(new LocalTempTableRemoval(connection, table));
+
     public void RecordTruncation(Heap heap, List<HeapPage> oldPages, List<HeapLobPage> oldLobPages, HashSet<(int Page, int Slot)> oldForwardTargets, int[] oldFreeLobPages, (IdentityState State, long? HighWaterMark)[] identitySnapshots) =>
         this.entries.Add(new HeapTruncation(heap, oldPages, oldLobPages, oldForwardTargets, oldFreeLobPages, identitySnapshots));
 
@@ -351,6 +363,22 @@ internal sealed class UndoLog
         public readonly string Name = name;
 
         public override void Undo() => this.Owner.TryRemove(this.Name, out _);
+    }
+
+    private sealed class LocalTempTableCreation(SimulatedDbConnection connection, HeapTable table) : UndoEntry
+    {
+        public readonly SimulatedDbConnection Connection = connection;
+        public readonly HeapTable Table = table;
+
+        public override void Undo() => this.Connection.RemoveTempTable(this.Table);
+    }
+
+    private sealed class LocalTempTableRemoval(SimulatedDbConnection connection, HeapTable table) : UndoEntry
+    {
+        public readonly SimulatedDbConnection Connection = connection;
+        public readonly HeapTable Table = table;
+
+        public override void Undo() => this.Connection.ReinstateTempTable(this.Table);
     }
 
     private sealed class TempTableRemoval(ConcurrentDictionary<string, HeapTable> owner, string name, HeapTable table) : UndoEntry

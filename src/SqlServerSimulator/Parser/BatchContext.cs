@@ -690,7 +690,22 @@ internal sealed class BatchContext
     /// them; the session batch leaves this null and its temp tables live until
     /// the session ends (or an explicit <c>DROP</c>).
     /// </summary>
-    public List<string>? ScopedTempTableNames;
+    public List<HeapTable>? ScopedTempTables;
+
+    /// <summary>
+    /// The scope a local temp table this batch creates belongs to: 0 for the
+    /// session, whose batches share one scope, and a number of its own for
+    /// each module body (<see cref="ScopesTempTables"/>), drawn when the body
+    /// creates its first.
+    /// </summary>
+    public int TempTableScopeId()
+    {
+        if (this.tempTableScopeId == 0 && this.ScopesTempTables)
+            this.tempTableScopeId = ++this.Connection.LastTempTableScopeId;
+        return this.tempTableScopeId;
+    }
+
+    private int tempTableScopeId;
 
     /// <summary>
     /// Set on the top-level batch of an RPC <c>sp_executesql</c> / <c>sp_execute</c>
@@ -727,10 +742,10 @@ internal sealed class BatchContext
     /// <see cref="DropScopedTempTables"/> drops it at module exit. A no-op for
     /// the session batch, whose temp tables persist for the session.
     /// </summary>
-    public void RegisterScopedTempTable(string leaf)
+    public void RegisterScopedTempTable(HeapTable table)
     {
         if (this.ScopesTempTables)
-            (this.ScopedTempTableNames ??= []).Add(leaf);
+            (this.ScopedTempTables ??= []).Add(table);
     }
 
     /// <summary>
@@ -744,10 +759,12 @@ internal sealed class BatchContext
     /// </summary>
     public void DropScopedTempTables()
     {
-        if (this.ScopedTempTableNames is not { } names)
+        if (this.ScopedTempTables is not { } tables)
             return;
-        foreach (var name in names)
-            _ = this.Connection.TempTables.TryRemove(name, out _);
+        // By table rather than name: once the body's own is gone, the name may
+        // be a caller's again.
+        for (var i = tables.Count - 1; i >= 0; i--)
+            this.Connection.RemoveTempTable(tables[i]);
     }
 
     /// <summary>

@@ -250,7 +250,7 @@ Already listed elsewhere here and not repeated: `DBCC CHECKIDENT`, parenthesized
 
 **Batch compilation** ships ([`control-flow.md`](control-flow.md#batch-compilation)); what the sweep found past it:
 
-- The compile's remaining gaps (the walk stopping at a deferred DML target, a deferred statement's bind error staying catchable, procedure bodies compiled only at `CREATE`, a table created twice in one batch, an `INSERT … EXEC` body stopping at its first error) are listed in [`control-flow.md`](control-flow.md#not-modeled-yet).
+- The compile's remaining gaps (the walk stopping at a deferred DML target, a deferred statement's bind error staying catchable, procedure bodies compiled only at `CREATE`, a `#temp` created twice in one batch, an `INSERT … EXEC` body stopping at its first error) are listed in [`control-flow.md`](control-flow.md#not-modeled-yet).
 - Msg 319 where real reports Msg 336 for a CTE after an unterminated statement (`SELECT * FROM c WITH c2 AS (…) …`, real naming `c2`).
 - `TABLESAMPLE` over a derived table is Msg 102 near `(` where real's is Msg 156 near the keyword; `NATURAL JOIN` reports near `join` where real reports near `natural`.
 - A CTE whose query projects one name twice (`WITH c AS (SELECT 1 a, 2 a) …`) runs here; real raises Msg 8156.
@@ -441,7 +441,6 @@ Real bugs / limitations against shipped behavior — fixes are concrete work, no
   A constraint that can't be created — a name collision, or a primary key or unique constraint over duplicate keys (Msg 1505) — is followed by Msg 1750 on real.
   Msg 219 names the type with its schema here (`dbo.t`) where an unqualified `CREATE TYPE t` gets `t` on real.
 - **A `strict` `OPENJSON` path that doesn't resolve returns no rows here**; real raises Msg 13608 state 3.
-- **A `#temp` created inside dynamic SQL or a procedure can't shadow the caller's of the same name** — real creates the inner one (`CREATE TABLE #t …; EXEC('CREATE TABLE #t …')` runs clean), where the simulator raises Msg 2714 (probed 2026-09-24).
 
 - **`FORMAT`'s culture data is .NET's ICU set where real's is the .NET Framework's NLS set** — every divergence below is width-independent, reproducing for an `int`, a `money` and a narrow `decimal` alike, and each is what .NET itself produces for the same call (probed 2026-08-06):
   a default-precision `'P'` writes three fractional digits (`FORMAT(CAST(123.456 AS decimal(10, 3)), 'P')` → `12,345.600%`) where real writes two (`12,345.60%`), and a negative `'C'` under `en-US` writes `-$0.50` where real writes the parenthesized `($0.50)`.

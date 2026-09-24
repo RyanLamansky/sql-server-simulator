@@ -335,6 +335,14 @@ internal sealed class HeapTable : SchemaObject
     public SessionToken? OwnerSession;
 
     /// <summary>
+    /// For a local temp table, the scope that created it
+    /// (<see cref="Parser.BatchContext.TempTableScopeId"/>): a nested scope's
+    /// same-named table hides it rather than colliding with it
+    /// (<see cref="SimulatedDbConnection.TryAddTempTable"/>).
+    /// </summary>
+    public int TempScopeId;
+
+    /// <summary>
     /// The <see cref="Database"/> this table is registered in, stamped when it
     /// enters a <see cref="Schema.HeapTables"/> dict. Null for the tables that
     /// belong to no database — temp tables, table variables, table-valued

@@ -465,4 +465,67 @@ public sealed class TempTableTests
         Exec(conn, "insert #s values (1), (2)");
         AreEqual(2, CountRows(conn, "#s"));
     }
+
+    // A nested scope may create a #temp its caller already has: its own hides
+    // the caller's until it's dropped or the scope ends (probed 2026-09-24
+    // against SQL Server 2025).
+
+    [TestMethod]
+    public void NestedScope_ShadowsCallersTemp_ThenCallersIsVisibleAgain()
+    {
+        using var conn = new Simulation().CreateOpenConnection();
+        Exec(conn, "create table #t (a int); insert #t values (1)");
+        Exec(conn, "create procedure dbo.inner_p as select count(*) from #t");
+        Exec(conn, "create procedure dbo.p as begin create table #t (a int); insert #t values (2), (3), (4); exec dbo.inner_p; end");
+
+        // Real compiles the inner batch against the caller's #t, so a column
+        // only the inner table has would be Msg 207 on both engines; counts
+        // tell the tables apart instead.
+        using var reader = conn.CreateCommand("exec ('create table #t (b int); insert #t values (8), (9); select count(*) from #t'); exec dbo.p; select count(*) from #t").ExecuteReader();
+        IsTrue(reader.Read());
+        AreEqual(2, reader.GetInt32(0));
+        IsTrue(reader.NextResult());
+        IsTrue(reader.Read());
+        AreEqual(3, reader.GetInt32(0));
+        IsTrue(reader.NextResult());
+        IsTrue(reader.Read());
+        AreEqual(1, reader.GetInt32(0));
+    }
+
+    [TestMethod]
+    public void NestedScope_DroppingItsOwn_LeavesTheCallersVisibleAndIntact()
+    {
+        using var conn = new Simulation().CreateOpenConnection();
+        Exec(conn, "create table #t (a int); insert #t values (1)");
+        AreEqual(1, conn.CreateCommand("exec ('create table #t (b int); drop table #t; select a from #t')").ExecuteScalar());
+        AreEqual(1, CountRows(conn, "#t"));
+    }
+
+    [TestMethod]
+    public void NestedScope_CanDropTheCallersTemp()
+    {
+        using var conn = new Simulation().CreateOpenConnection();
+        Exec(conn, "create table #t (a int)");
+        Exec(conn, "exec ('drop table #t')");
+        AreEqual(208, Throws<SimulatedSqlException>(() => Exec(conn, "select * from #t")).Number);
+    }
+
+    [TestMethod]
+    public void NestedScope_SameNameTwice_RaisesMsg2714()
+    {
+        using var conn = new Simulation().CreateOpenConnection();
+        Exec(conn, "create table #t (a int)");
+        AreEqual(2714, Throws<SimulatedSqlException>(() => Exec(conn, "exec ('create table #t (b int); create table #t (c int)')")).Number);
+    }
+
+    [TestMethod]
+    public void Rollback_UndoesAShadowingCreateAndAShadowedDrop()
+    {
+        using var conn = new Simulation().CreateOpenConnection();
+        Exec(conn, "create table #t (a int); insert #t values (1)");
+        // The rollback brings back the inner, empty table rather than the caller's.
+        AreEqual(0, conn.CreateCommand("exec ('create table #t (b int); begin tran; drop table #t; rollback; select count(*) from #t')").ExecuteScalar());
+        Exec(conn, "begin tran; exec ('drop table #t'); rollback");
+        AreEqual(1, CountRows(conn, "#t"));
+    }
 }

@@ -638,7 +638,11 @@ partial class Simulation
         // a schema-bound body can't name one.
         if (!isTempTable && schema is not null)
             RejectDropOfSchemaBoundReferent(context.CurrentDatabase, removedTable, "DROP TABLE", name);
-        if (!destination.TryRemove(name.Leaf, out _))
+        if (isLocalTempTable)
+        {
+            context.Connection.RemoveTempTable(removedTable);
+        }
+        else if (!destination.TryRemove(name.Leaf, out _))
         {
             if (ifExists)
                 return;
@@ -649,7 +653,10 @@ partial class Simulation
         // documented for CREATE TABLE.
         if (isTempTable && context.Connection.CurrentTransaction is { } tx)
         {
-            tx.UndoLog.RecordTempTableRemoval(destination, name.Leaf, removedTable);
+            if (isLocalTempTable)
+                tx.UndoLog.RecordLocalTempTableRemoval(context.Connection, removedTable);
+            else
+                tx.UndoLog.RecordTempTableRemoval(destination, name.Leaf, removedTable);
         }
         else
         {

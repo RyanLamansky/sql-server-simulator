@@ -72,24 +72,31 @@ partial class Simulation
         };
         if (isGlobalTemp)
             destTable.OwnerSession = batch.Connection.Session;
+        if (isLocalTemp)
+            destTable.TempScopeId = batch.TempTableScopeId();
         // SELECT INTO creates a table, so it collides with every name in the
         // shared object namespace — a synonym, view or procedure of that name
         // raises Msg 2714 just as another table would (probe-confirmed).
         if (schema is not null && schema.HasNameInSharedNamespace(leaf))
             throw SimulatedSqlException.ThereIsAlreadyAnObject(leaf);
-        if (!destination.TryAdd(leaf, destTable))
+        if (!(isLocalTemp ? batch.Connection.TryAddTempTable(destTable) : destination.TryAdd(leaf, destTable)))
             throw SimulatedSqlException.ThereIsAlreadyAnObject(leaf);
         // A local temp created via SELECT INTO inside a module body is dropped
         // when that module exits (probe-confirmed, same as CREATE TABLE #t).
         if (isLocalTemp)
-            batch.RegisterScopedTempTable(leaf);
+            batch.RegisterScopedTempTable(destTable);
 
         // Temp-table SELECT INTO participates in transactional CREATE undo —
         // probe-confirmed that ROLLBACK undoes both local and global temp-table
         // CREATEs on real SQL Server, matching the asymmetry already documented
         // for regular CREATE TABLE which isn't logged.
         if ((isLocalTemp || isGlobalTemp) && batch.Connection.CurrentTransaction is { } tx)
-            tx.UndoLog.RecordTempTableCreation(destination, leaf);
+        {
+            if (isLocalTemp)
+                tx.UndoLog.RecordLocalTempTableCreation(batch.Connection, destTable);
+            else
+                tx.UndoLog.RecordTempTableCreation(destination, leaf);
+        }
 
         // Execute the SELECT and stream each row into the destination. Rows
         // arrive as SqlValue[] and are encoded through the destination's own

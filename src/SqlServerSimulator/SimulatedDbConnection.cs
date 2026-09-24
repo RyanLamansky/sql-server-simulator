@@ -509,6 +509,84 @@ public sealed class SimulatedDbConnection : DbConnection
     internal readonly ConcurrentDictionary<string, HeapTable> TempTables = new(BuiltInToken.Comparer);
 
     /// <summary>
+    /// The local temp tables a nested scope's same-named table hides, keyed by
+    /// name, most recently hidden last. A procedure, trigger or dynamic-SQL
+    /// body may create a <c>#temp</c> its caller already has; its statements,
+    /// and the modules it calls, then see its own, and the caller's is visible
+    /// again once that one is dropped or the body ends (probed 2026-09-24
+    /// against SQL Server 2025). <see cref="TempTables"/> holds only the
+    /// visible one of each name.
+    /// </summary>
+    private readonly Dictionary<string, List<HeapTable>> shadowedTempTables = new(BuiltInToken.Comparer);
+
+    /// <summary>Backs <see cref="Parser.BatchContext.TempTableScopeId"/>; 0 is the session's own scope.</summary>
+    internal int LastTempTableScopeId;
+
+    /// <summary>
+    /// Registers a local temp table created in the scope <paramref name="table"/>
+    /// names (<see cref="HeapTable.TempScopeId"/>), hiding a caller's
+    /// same-named table. False when the visible table of that name belongs to
+    /// the same scope, which is Msg 2714.
+    /// </summary>
+    internal bool TryAddTempTable(HeapTable table)
+    {
+        if (this.TempTables.TryGetValue(table.Name, out var visible))
+        {
+            if (visible.TempScopeId == table.TempScopeId)
+                return false;
+            this.Shadow(visible);
+        }
+        this.TempTables[table.Name] = table;
+        return true;
+    }
+
+    /// <summary>
+    /// Removes <paramref name="table"/>, making visible the table it hid, if
+    /// any. A table no longer registered — one its scope already dropped — is
+    /// left alone, so this serves a transaction's undo of the create as well.
+    /// </summary>
+    internal void RemoveTempTable(HeapTable table)
+    {
+        if (this.TempTables.TryGetValue(table.Name, out var visible) && visible == table)
+        {
+            if (this.shadowedTempTables.TryGetValue(table.Name, out var hidden))
+            {
+                this.TempTables[table.Name] = hidden[^1];
+                hidden.RemoveAt(hidden.Count - 1);
+                if (hidden.Count == 0)
+                    _ = this.shadowedTempTables.Remove(table.Name);
+            }
+            else
+            {
+                _ = this.TempTables.TryRemove(table.Name, out _);
+            }
+        }
+        else if (this.shadowedTempTables.TryGetValue(table.Name, out var hidden) && hidden.Remove(table) && hidden.Count == 0)
+        {
+            _ = this.shadowedTempTables.Remove(table.Name);
+        }
+    }
+
+    /// <summary>
+    /// Makes a dropped <paramref name="table"/> visible again, as a
+    /// transaction's undo of its <c>DROP</c> does: whatever became visible in
+    /// its place goes back into hiding.
+    /// </summary>
+    internal void ReinstateTempTable(HeapTable table)
+    {
+        if (this.TempTables.TryGetValue(table.Name, out var visible))
+            this.Shadow(visible);
+        this.TempTables[table.Name] = table;
+    }
+
+    private void Shadow(HeapTable table)
+    {
+        if (!this.shadowedTempTables.TryGetValue(table.Name, out var hidden))
+            this.shadowedTempTables[table.Name] = hidden = [];
+        hidden.Add(table);
+    }
+
+    /// <summary>
     /// Documents <c>sp_xml_preparedocument</c> has prepared on this session,
     /// keyed by the handle it handed back — the store <c>OPENXML</c> reads and
     /// <c>sp_xml_removedocument</c> releases. Session-scoped like
@@ -998,6 +1076,7 @@ public sealed class SimulatedDbConnection : DbConnection
             // releases each table's Heap and LOB pages for GC; nothing else
             // holds long-lived references to them after the connection ends.
             this.TempTables.Clear();
+            this.shadowedTempTables.Clear();
             // Prepared XML documents are session-scoped too; releasing them
             // here is what makes a session that forgot sp_xml_removedocument
             // stop holding its DOMs.
