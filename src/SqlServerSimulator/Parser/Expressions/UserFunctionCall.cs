@@ -47,7 +47,18 @@ internal sealed class UserFunctionCall(ScalarFunction function, Expression?[] ar
     /// </summary>
     private readonly Expression?[] arguments = arguments;
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => this.function.ReturnType;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        // An argument takes its parameter's type as an assignment does
+        // (probed 2026-09-24: a datetime passed to a decimal parameter is
+        // Msg 257).
+        for (var i = 0; i < this.arguments.Length && i < this.function.Parameters.Length; i++)
+        {
+            if (this.arguments[i] is { } argument)
+                AssignmentRules.RequireAssignable(argument, argument.GetSqlType(batch, resolveColumnType), this.function.Parameters[i].Type);
+        }
+        return this.function.ReturnType;
+    }
 
     public override SqlValue Run(RuntimeContext runtime)
     {

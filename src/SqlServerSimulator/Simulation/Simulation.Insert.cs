@@ -388,7 +388,10 @@ partial class Simulation
         // Ragged tuples defeat the positional arity check above, so Msg 10709
         // is what such a statement finally reports.
         if (valueTuples is not null)
+        {
             RejectRaggedValueTuples(valueTuples);
+            RejectUnassignableValues(valueTuples, destinationColumns, context.Batch);
+        }
 
         if (identityColumn is not null)
         {
@@ -899,6 +902,23 @@ partial class Simulation
             throw column.Type == SqlType.RowVersion
                 ? SimulatedSqlException.CannotInsertExplicitTimestamp()
                 : SimulatedSqlException.CannotInsertExplicitGeneratedAlways(QualifyTableName(destinationTable, context));
+        }
+    }
+
+    /// <summary>
+    /// Refuses a VALUES cell its column can't take without an explicit
+    /// conversion (Msg 206 / 257, see <see cref="AssignmentRules"/>) — settled
+    /// from the types, so a statement that inserts nothing still raises it.
+    /// </summary>
+    private static void RejectUnassignableValues(List<Expression[]> tuples, HeapColumn[] destinationColumns, BatchContext batch)
+    {
+        foreach (var tuple in tuples)
+        {
+            for (var i = 0; i < tuple.Length && i < destinationColumns.Length; i++)
+            {
+                if (tuple[i] is not Parser.Expressions.DefaultValueExpression)
+                    AssignmentRules.RequireAssignable(tuple[i], tuple[i].GetSqlType(batch, NoColumnTypeResolver), destinationColumns[i].Type);
+            }
         }
     }
 

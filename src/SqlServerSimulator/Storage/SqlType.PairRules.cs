@@ -29,6 +29,32 @@ partial class SqlType
     //
     // Columns:                    bit int exact approx ansi uni bin text image ts uid dt date time dt2 xml variant hid spatial
 
+    // Assign reads its source down the rows and its target across the
+    // columns, probed 2026-09-24 against SQL Server 2025 by declaring a
+    // variable of every type initialized from one of every other; the text /
+    // image classes and a timestamp target were left out (no variable takes
+    // them) and read as legal.
+    private static ReadOnlySpan<byte> AssignGrid =>
+        "..........C.CCCC.CC"u8 // bit
+        + "..........C.CCCC.CC"u8 // integer
+        + "..........C.CCCC.CC"u8 // exact numeric
+        + "..........C.CCCC.CC"u8 // approximate
+        + "......V............"u8 // ansi string
+        + "......V............"u8 // unicode string
+        + "...C........VVV...."u8 // binary
+        + "..................."u8 // text
+        + "..................."u8 // image
+        + "...C.C....C.CCCCCCC"u8 // timestamp
+        + "CCCC.......CCCCC.CC"u8 // uniqueidentifier
+        + "VVVV..V...C....C.CC"u8 // datetime / smalldatetime
+        + "CCCC..V...C..C.C.CC"u8 // date
+        + "CCCC..V...C.C..C.CC"u8 // time
+        + "CCCC..V...C....C.CC"u8 // datetime2 / datetimeoffset
+        + "CCCCVVV...CCCCC.CCC"u8 // xml
+        + "VVVVVVV...VVVVVC.CC"u8 // sql_variant
+        + "CCCCVVV...CCCCCCC.C"u8 // hierarchyid
+        + "CCCCVVV...CCCCCCCC."u8; // spatial
+
     private static ReadOnlySpan<byte> UnifyGrid =>
         ".......cc.c.CCCC.CC"u8 // bit
         + ".......cc.c.CCCC.CC"u8 // integer
@@ -175,8 +201,9 @@ partial class SqlType
         if (operation == TypePairOperation.Unify && leftType == rightType)
             return null;
 
-        if (operation is TypePairOperation.Unify or TypePairOperation.Compare
-            && (IsMaxLengthVariantPair(leftType, rightType) || IsMaxLengthVariantPair(rightType, leftType)))
+        if ((operation is TypePairOperation.Unify or TypePairOperation.Compare
+                && (IsMaxLengthVariantPair(leftType, rightType) || IsMaxLengthVariantPair(rightType, leftType)))
+            || (operation == TypePairOperation.Assign && IsMaxLengthVariantPair(leftType, rightType)))
         {
             return leftType is SqlVariantSqlType
                 ? SimulatedSqlException.OperandTypeClash(OperandName(right), OperandName(left))
@@ -190,6 +217,7 @@ partial class SqlType
             TypePairOperation.Add => AddGrid,
             TypePairOperation.Subtract => SubtractGrid,
             TypePairOperation.Modulo => ModuloGrid,
+            TypePairOperation.Assign => AssignGrid,
             _ => MultiplyDivideGrid,
         };
         System.Diagnostics.Debug.Assert(grid.Length == PairClassCount * PairClassCount, "A type-pair grid row has the wrong length.");

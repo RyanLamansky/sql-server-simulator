@@ -1493,6 +1493,10 @@ partial class Simulation
             resolvedType = resolvedType.WithCollation(resolvedCollation, Coercibility.Implicit);
         }
 
+        // A DEFAULT takes its column's type as an assignment does (probed
+        // 2026-09-24: a datetime DEFAULT on a decimal column is Msg 257).
+        if (defaultExpression is not null)
+            AssignmentRules.RequireAssignable(defaultExpression, defaultExpression.GetSqlType(context.Batch, NoColumnTypeResolver), resolvedType);
         var newColumn = new HeapColumn(columnName.Value, resolvedType, maxLength, actualNullable, identity, defaultExpression, generatedAs: generatedAs, isHidden: isHidden, collation: columnCollation, isRowGuidCol: isRowGuidCol);
         if (xmlSchemaCollection is not null)
             newColumn.XmlSchemaCollection = xmlSchemaCollection;

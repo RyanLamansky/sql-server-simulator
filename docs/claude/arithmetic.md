@@ -50,6 +50,12 @@ The one exception to class uniformity is folded in by hand: a MAX string or bina
 A grid over classes rather than a rule over the precedence chart plus a conversion table, because the two don't reproduce real: real's comparison refusals follow neither the unification's implicit-conversion answer (`time` with `datetime` unifies to `datetime` but compares as Msg 402; `date` with `xml` is Msg 206 to unify and Msg 402 to compare) nor any ordering the precedence chart offers, and the Msg 206 operand order in a comparison is a fixed per-pair order that no single rank explains.
 So each cell stores the number *and* the operand order real reports, and the grid is the spec — regenerating it from a probe run is the way to extend it.
 
+**Assignment is a seventh grid, and one-way.**
+A value entering a typed target — a variable (`DECLARE … =`, `SET`, `SELECT @v =`), a column an `INSERT … VALUES` or `UPDATE` writes, a column's `DEFAULT`, a scalar function's `RETURN` or argument, `ISNULL`'s replacement — takes the `Assign` grid, source down the rows and target across (`Parser/AssignmentRules.cs`).
+It is not the unification grid: `decimal` and `datetime` unify (so `COALESCE` answers) while `datetime` → `decimal` is Msg 257, which is also what `ISNULL(<decimal>, <datetime>)` reports.
+Probed 2026-09-24 against SQL Server 2025 over every ordered pair of 31 types by declaring a variable of each initialized from one of every other; all 930 cells, message text included, match, and a bare `NULL` is always assignable.
+Inside a function body a shape violation's Msg 443 reports alone, ahead of the return value's assignment error.
+
 What the cells say:
 
 - **Msg 206** `Operand type clash: X is incompatible with Y` — no conversion at all.

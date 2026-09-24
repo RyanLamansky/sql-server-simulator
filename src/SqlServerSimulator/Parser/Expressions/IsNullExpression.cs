@@ -53,11 +53,15 @@ internal sealed class IsNullExpression : Expression
     // (`ISNULL(1, 2.5)` stays int).
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
-        var t = IsUntypedNullLiteral(this.check)
-            ? this.replacement.GetSqlType(batch, resolveColumnType)
-            : this.check.GetSqlType(batch, resolveColumnType);
-        this.cachedResultType = t;
-        return t;
+        if (IsUntypedNullLiteral(this.check))
+            return this.cachedResultType = this.replacement.GetSqlType(batch, resolveColumnType);
+        var t = this.check.GetSqlType(batch, resolveColumnType);
+        // The replacement converts to the check's type the way an assignment
+        // does, so it's the one-way assignment rule that refuses a pair rather
+        // than the unification CASE and COALESCE apply (probed 2026-09-24:
+        // ISNULL(<decimal>, <datetime>) is Msg 257 where COALESCE answers).
+        AssignmentRules.RequireAssignable(this.replacement, this.replacement.GetSqlType(batch, resolveColumnType), t);
+        return this.cachedResultType = t;
     }
 
     internal override string DebugDisplay() => $"ISNULL({this.check.DebugDisplay()}, {this.replacement.DebugDisplay()})";

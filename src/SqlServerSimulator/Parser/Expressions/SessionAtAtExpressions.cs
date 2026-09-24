@@ -52,9 +52,8 @@ internal sealed class NestLevelExpression : Expression
 /// Backs <c>@@DBTS</c>: returns the current database's last-assigned
 /// rowversion as <c>binary(8)</c>. The 8-byte representation matches the
 /// rowversion encoding used by <see cref="RowVersionSqlType"/> — big-endian
-/// 64-bit. Reads <see cref="Database.AllocateRowVersion"/>'s underlying
-/// counter without advancing it (one-step lookback against the
-/// monotonically increasing value).
+/// 64-bit. Reads <see cref="Database.LastRowVersion"/>, so a read doesn't
+/// advance the counter.
 /// </summary>
 internal sealed class DbTsExpression : Expression
 {
@@ -62,18 +61,7 @@ internal sealed class DbTsExpression : Expression
 
     public override SqlValue Run(RuntimeContext runtime)
     {
-        // @@DBTS reports the LAST allocated value; bump-then-read gives the
-        // most recently used rowversion. Tested behavior on real SQL Server:
-        // value advances on every committed mutation that touches a
-        // rowversion column. The simulator's counter increments on
-        // AllocateRowVersion calls but never decrements, so peeking at the
-        // current state by allocating-and-reverting would over-count;
-        // instead, expose the next-to-be-allocated value minus 1.
-        var current = runtime.Batch.CurrentDatabase.AllocateRowVersion() - 1;
-        // Restore the counter by re-incrementing on subsequent allocations;
-        // the bump just made is harmless — rowversion values are advisory
-        // and monotonic, not packed. (Real SQL Server's @@DBTS read does
-        // NOT bump; this is a fidelity gap.)
+        var current = runtime.Batch.CurrentDatabase.LastRowVersion;
         var bytes = new byte[8];
         for (var i = 7; i >= 0; i--)
         {

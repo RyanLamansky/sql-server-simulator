@@ -864,7 +864,19 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
                             ? (Decimal38)this.reference! == (Decimal38)other.reference!
                             : this.Type == SqlType.HierarchyId
                                 ? ((byte[])this.reference!).AsSpan().SequenceEqual((byte[])other.reference!)
-                                : this.IdentityPrimitive == other.IdentityPrimitive && ReferenceContentEquals(this.reference, other.reference)));
+                                : IsBinaryString(this.Type)
+                                    ? WithoutTrailingZeros(this.AsBytes).SequenceEqual(WithoutTrailingZeros(other.AsBytes))
+                                    : this.IdentityPrimitive == other.IdentityPrimitive && ReferenceContentEquals(this.reference, other.reference)));
+
+    /// <summary>
+    /// True for the binary strings whose comparison zero-pads the shorter
+    /// operand — <c>0x0102 = 0x010200</c>, and <c>DISTINCT</c> keeps one of
+    /// them (probed 2026-09-24 against SQL Server 2025) — which is comparing
+    /// them with their trailing zero bytes set aside.
+    /// </summary>
+    private static bool IsBinaryString(SqlType type) => type is VarbinarySqlType or BinarySqlType or ImageSqlType;
+
+    private static ReadOnlySpan<byte> WithoutTrailingZeros(byte[] bytes) => bytes.AsSpan().TrimEnd((byte)0);
 
     /// <summary>
     /// The <see cref="primitive"/> payload with IEEE 754 negative zero folded
@@ -907,19 +919,17 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
     private static bool IsStringTypeRef(SqlType t) => t.Category == SqlTypeCategory.String;
 
     /// <summary>
-    /// True when two types differ only in the declared length of the same
-    /// variable- or fixed-length binary family (<c>varbinary(N)</c> vs
-    /// <c>varbinary(M)</c>, <c>binary(N)</c> vs <c>binary(M)</c>). Binary
-    /// equality / ordering compares the raw byte spans regardless of declared
-    /// length, so the type-identity guards in <see cref="Equals(SqlValue)"/> /
+    /// True when two types are both binary strings, differing at most in
+    /// declared length or fixedness (<c>varbinary(N)</c> vs <c>binary(M)</c>).
+    /// Binary equality / ordering compares the byte spans regardless of
+    /// declared length, so the type-identity guards in <see cref="Equals(SqlValue)"/> /
     /// <see cref="CompareTo(SqlValue)"/> admit these pairs — needed since two
     /// binary literals now carry their exact value width (<c>0x01</c> →
     /// <c>varbinary(1)</c>, <c>0x0100</c> → <c>varbinary(2)</c>) and
     /// <c>varbinary</c> coercion doesn't pin the target length.
     /// </summary>
     private static bool IsLengthOnlyBinaryVariance(SqlType a, SqlType b) =>
-        (a is VarbinarySqlType && b is VarbinarySqlType)
-            || (a is BinarySqlType && b is BinarySqlType);
+        a is VarbinarySqlType or BinarySqlType && b is VarbinarySqlType or BinarySqlType;
 
     /// <summary>
     /// Strips trailing ASCII spaces, modeling SQL Server's ANSI padding for
@@ -966,7 +976,7 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
                 SqlTypeCategory.UniqueIdentifier => new SqlGuid(this.AsGuid).CompareTo(new SqlGuid(other.AsGuid)),
                 SqlTypeCategory.Other => this.Type switch
                 {
-                    VarbinarySqlType or BinarySqlType or ImageSqlType => this.AsBytes.AsSpan().SequenceCompareTo(other.AsBytes),
+                    VarbinarySqlType or BinarySqlType or ImageSqlType => WithoutTrailingZeros(this.AsBytes).SequenceCompareTo(WithoutTrailingZeros(other.AsBytes)),
                     RowVersionSqlType => this.primitive.CompareTo(other.primitive),
                     // OrdPath's defining property: unsigned bytewise order equals
                     // depth-first tree order, so hierarchyid comparison is a memcmp.
@@ -1024,6 +1034,15 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
         // GROUP BY or a seek keys on the value.
         if (this.reference is null && !this.IsNull && this.Type is not SqlVariantSqlType)
             return HashCode.Combine(this.Type, this.IdentityPrimitive);
+
+        // A binary string hashes by its bytes alone, trailing zeros set aside,
+        // since equality ignores both those and the declared length.
+        if (!this.IsNull && IsBinaryString(this.Type))
+        {
+            var binaryHash = new HashCode();
+            binaryHash.AddBytes(WithoutTrailingZeros(this.AsBytes));
+            return binaryHash.ToHashCode();
+        }
 
         var hash = new HashCode();
         hash.Add(this.Type);

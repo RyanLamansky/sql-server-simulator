@@ -356,7 +356,8 @@ public class CrossDatabaseTests
     {
         // The rowversion counter is per-database (@@DBTS), so the cross-database
         // INSERT advances the target's and leaves the session's alone: the
-        // session table's second row is stamp 2, not 3.
+        // session table's second row is stamp 2002, not 2003 (a new
+        // database's counter stands at 2000).
         var sim = WriteFixture();
         _ = sim.ExecuteNonQuery("""
             create table dbo.local (id int primary key, r rowversion);
@@ -367,8 +368,8 @@ public class CrossDatabaseTests
             insert zdb.dbo.remote (id) values (1);
             insert dbo.local (id) values (2)
             """);
-        AreEqual(2L, sim.ExecuteScalar("select cast(r as bigint) from dbo.local where id = 2"));
-        AreEqual(1L, sim.ExecuteScalar("select cast(r as bigint) from zdb.dbo.remote where id = 1"));
+        AreEqual(2002L, sim.ExecuteScalar("select cast(r as bigint) from dbo.local where id = 2"));
+        AreEqual(2001L, sim.ExecuteScalar("select cast(r as bigint) from zdb.dbo.remote where id = 1"));
     }
 
     [TestMethod]

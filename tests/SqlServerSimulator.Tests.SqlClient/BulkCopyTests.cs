@@ -80,14 +80,14 @@ public sealed class BulkCopyTests
         AreEqual(20, reader.GetInt32(3)); // computed server-side
         AreEqual(3L, reader.GetInt64(4));
         AreEqual(12.34m, reader.GetDecimal(5));
-        AreEqual(1L, reader.GetInt64(6)); // rowversion stamped server-side
+        AreEqual(2001L, reader.GetInt64(6)); // rowversion stamped server-side, a new database counting from 2000
 
         IsTrue(await reader.ReadAsync(TestContext.CancellationToken));
         AreEqual(2, reader.GetInt32(0));
         AreEqual(40, reader.GetInt32(3)); // qty 20 * 2
         IsTrue(reader.IsDBNull(4));
         IsTrue(reader.IsDBNull(5));
-        AreEqual(2L, reader.GetInt64(6));
+        AreEqual(2002L, reader.GetInt64(6));
         IsFalse(await reader.ReadAsync(TestContext.CancellationToken));
     }
 

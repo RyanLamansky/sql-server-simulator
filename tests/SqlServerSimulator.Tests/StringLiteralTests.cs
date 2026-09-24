@@ -49,8 +49,9 @@ public class StringLiteralTests
     [TestMethod]
     [DataRow("0x0102 < 0x0103", 1)]
     [DataRow("0x0103 > 0x0102", 1)]
-    [DataRow("0x01 < 0x0100", 1)]                 // shorter is less when prefix matches (no padding)
-    [DataRow("0x0100 > 0x01", 1)]
+    [DataRow("0x01 < 0x0100", 0)]                 // the shorter side is zero-padded (probed 2026-09-24)
+    [DataRow("0x0100 > 0x01", 0)]
+    [DataRow("0x01 < 0x0101", 1)]
     [DataRow("0x01 = 0x01", 1)]
     public void VarbinaryOrdering(string condition, int expectedRows) =>
         AreEqual(expectedRows, new Simulation().ExecuteReader($"select 1 where {condition}").EnumerateRecords().Count());
@@ -67,7 +68,7 @@ public class StringLiteralTests
     [DataRow("0xDEAD = 0xDEAD", 1)]
     [DataRow("0xDEAD = 0xBEEF", 0)]
     [DataRow("0xdead = 0xDEAD", 1)]            // hex digits are case-insensitive in the literal
-    [DataRow("0x01 = 0x0100", 0)]              // no padding for varbinary
+    [DataRow("0x01 = 0x0100", 1)]              // trailing zero bytes don't count (probed 2026-09-24)
     [DataRow("0x = 0x", 1)]                    // bodiless 0x is the empty varbinary
     [DataRow("0x = 0xAB", 0)]                  // empty != non-empty
     public void VarbinaryEquality(string condition, int expectedRows) =>

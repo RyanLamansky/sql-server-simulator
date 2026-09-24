@@ -49,8 +49,8 @@ public sealed class ModuleDeterminismTests
     /// </summary>
     [TestMethod]
     [DataRow("cast(getdate() as int)")]
-    [DataRow("cast(sysdatetime() as int)")]
-    [DataRow("cast(sysutcdatetime() as int)")]
+    [DataRow("datediff(day, sysdatetime(), @d)")]
+    [DataRow("datediff(day, sysutcdatetime(), @d)")]
     [DataRow("cast(current_timestamp as int)")]
     [DataRow("@@spid")]
     [DataRow("@@rowcount")]

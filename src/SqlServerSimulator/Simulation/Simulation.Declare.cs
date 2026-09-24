@@ -141,7 +141,9 @@ partial class Simulation
                 var initExpression = Expression.Parse(context);
                 if (!context.Batch.IsSkipping)
                 {
-                    UnresolvedCollation.RequireAssignable(initExpression.GetSqlType(context.Batch, NoColumnTypeResolver));
+                    var initType = initExpression.GetSqlType(context.Batch, NoColumnTypeResolver);
+                    UnresolvedCollation.RequireAssignable(initType);
+                    AssignmentRules.RequireAssignable(initExpression, initType, declaredType);
                     initialValue = Parser.Expressions.Cast.ApplyCoercion(initExpression.Run(new RuntimeContext(NoColumnResolver, context.Batch)), declaredType, declaredMaxLength);
                     rowsAffected = 1; // initializer counts as one row for @@ROWCOUNT (probe-confirmed)
                 }

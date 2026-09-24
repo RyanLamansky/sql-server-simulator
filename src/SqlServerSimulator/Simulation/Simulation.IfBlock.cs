@@ -389,6 +389,22 @@ partial class Simulation
                 throw SimulatedSqlException.ReturnWithValueNotAllowed();
 
             var valueExpr = Expression.Parse(context);
+            // A scalar function's result takes its value as an assignment
+            // does, settled while the body binds at CREATE among the body's
+            // other binder errors — and not at all once the body broke a shape
+            // rule, whose Msg 443 real reports alone (probed 2026-09-24).
+            if (batch.UdfFrame is { } returnFrame && batch.FunctionBodyShape is not { Violations.Count: > 0 })
+            {
+                try
+                {
+                    AssignmentRules.RequireAssignable(valueExpr, valueExpr.GetSqlType(batch, NoColumnTypeResolver), returnFrame.ReturnType);
+                }
+                catch (SimulatedSqlException refused) when (refused.Number is 206 or 257 && batch.CreateTimeBindErrors is { } bindErrors)
+                {
+                    refused.ResolveDiagnostics(batch.CurrentStatement.StartLine, batch.LineOffset, batch.ErrorProcedureName);
+                    bindErrors.Add(refused);
+                }
+            }
             if (!batch.IsSkipping)
             {
                 var raw = valueExpr.Run(new RuntimeContext(

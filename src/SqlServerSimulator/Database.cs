@@ -187,7 +187,9 @@ internal sealed class Database
     /// </summary>
     public bool? VerboseTruncationWarnings;
 
-    private long rowVersionCounter;
+    // A new database's counter stands at 2000, so its first rowversion is 2001
+    // (probed 2026-09-24 against SQL Server 2025).
+    private long rowVersionCounter = 2000;
 
     /// <summary>
     /// Allocates the next <c>rowversion</c> counter value (also surfaced as
@@ -200,6 +202,9 @@ internal sealed class Database
     /// path.
     /// </summary>
     public long AllocateRowVersion() => Interlocked.Increment(ref this.rowVersionCounter);
+
+    /// <summary>The last rowversion allocated, which <c>@@DBTS</c> reports without advancing it.</summary>
+    public long LastRowVersion => Interlocked.Read(ref this.rowVersionCounter);
 
     /// <summary>
     /// <c>ALLOW_SNAPSHOT_ISOLATION</c> per-database setting. Default <c>false</c>;

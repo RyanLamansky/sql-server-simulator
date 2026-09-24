@@ -53,8 +53,8 @@ public sealed class StringWidthAlgebraTests
     [DataRow("0x0001 = 0x0001", 1)]
     [DataRow("0x01 = 0x0001", 0)]                   // different bytes → not equal
     [DataRow("0x0001 = cast(0x0001 as varbinary(8))", 1)]
-    [DataRow("0x01 < 0x0100", 1)]
-    [DataRow("0x0100 > 0x01", 1)]
+    [DataRow("0x01 < 0x0100", 0)]                   // the shorter side is zero-padded
+    [DataRow("0x0100 > 0x01", 0)]
     public void BinaryLengthVariance_ComparesByBytes(string condition, int expectedRows)
         => AreEqual(expectedRows, new Simulation().ExecuteReader($"select 1 where {condition}").EnumerateRecords().Count());
 }

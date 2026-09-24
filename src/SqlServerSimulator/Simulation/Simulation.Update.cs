@@ -414,8 +414,7 @@ partial class Simulation
         // than waiting for a row to reach the per-row resolver (so an empty
         // table and a module body at CREATE report them too).
         var targetTypeResolver = Selection.TargetColumnTypeResolver(context.Batch, targetName, table, sourceView);
-        foreach (var (_, expr) in rawAssignments)
-            UnresolvedCollation.RequireAssignable(expr.GetSqlType(context.Batch, targetTypeResolver));
+        BindSetValues(context.Batch, table, assignments, targetTypeResolver);
 
         BooleanExpression? where = null;
         PositionedCursorTarget? positionedCursor = null;
@@ -712,8 +711,7 @@ partial class Simulation
         // Compile-time bind of the predicate and the SET values — see
         // ExecuteUpdateAgainstTable for why.
         var tupleTypeResolver = Selection.ColumnTypeResolverFor(sources);
-        foreach (var (_, expr) in rawAssignments)
-            UnresolvedCollation.RequireAssignable(expr.GetSqlType(context.Batch, tupleTypeResolver));
+        BindSetValues(context.Batch, table, assignments, tupleTypeResolver);
 
         BooleanExpression? where = null;
         if (context.Token is ReservedKeyword { Keyword: Keyword.Where })
@@ -1204,6 +1202,23 @@ partial class Simulation
             assignments.Add((columnOrdinal, expr));
         }
         return assignments;
+    }
+
+    /// <summary>
+    /// Binds each SET value against <paramref name="resolveColumnType"/>: an
+    /// unresolved collation settles (Msg 456), and a column refuses a value it
+    /// can't take without an explicit conversion (Msg 206 / 257, see
+    /// <see cref="AssignmentRules"/>).
+    /// </summary>
+    private static void BindSetValues(BatchContext batch, HeapTable table, List<(int Ordinal, Expression Expr)> assignments, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        foreach (var (ordinal, expr) in assignments)
+        {
+            var type = expr.GetSqlType(batch, resolveColumnType);
+            UnresolvedCollation.RequireAssignable(type);
+            if (ordinal >= 0 && expr is not AssignmentExpression)
+                AssignmentRules.RequireAssignable(expr, type, table.Columns[ordinal].Type);
+        }
     }
 
     /// <summary>The columns a SET list writes, leaving out its variable-only assignments.</summary>

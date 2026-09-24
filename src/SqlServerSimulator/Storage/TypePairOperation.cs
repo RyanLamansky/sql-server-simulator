@@ -16,4 +16,11 @@ internal enum TypePairOperation : byte
     Multiply,
     Divide,
     Modulo,
+
+    /// <summary>
+    /// A value assigned to a typed target — a column, a variable, a parameter,
+    /// a function's result, <c>ISNULL</c>'s replacement — the left operand the
+    /// source and the right the target.
+    /// </summary>
+    Assign,
 }

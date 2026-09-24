@@ -681,7 +681,9 @@ partial class Simulation
             : TwoSidedExpression.FromCompoundOp(assignOp, new VariableReference(variableToken, context), rhs, context);
         // A subquery hands an unresolved collation on to the variable, which
         // settles it as any assignment target does (Msg 456 for varchar).
-        UnresolvedCollation.RequireAssignable(assignedExpr.GetSqlType(context.Batch, NoColumnTypeResolver));
+        var assignedType = assignedExpr.GetSqlType(context.Batch, NoColumnTypeResolver);
+        UnresolvedCollation.RequireAssignable(assignedType);
+        AssignmentRules.RequireAssignable(assignedExpr, assignedType, slot.DeclaredType);
         var rhsValue = assignedExpr.Run(new RuntimeContext(NoColumnResolver, context.Batch));
         slot.Assign(Cast.ApplyCoercion(rhsValue, slot.DeclaredType, slot.DeclaredMaxLength));
         return true;

@@ -207,8 +207,8 @@ EF `[Timestamp]` SaveChanges round-trips end-to-end.
 **`MIN_ACTIVE_ROWVERSION()`** returns the rowversion counter's current next-allocated value as `binary(8)` big-endian.
 Real SQL Server returns the minimum *active transaction's* lowest rowversion, which over-approximates to "current next-to-allocate" when no transactions are open; the simulator returns the current next-to-allocate value unconditionally — semantically equivalent for the common consumer (incremental-sync watermarks) since rowversion writes within an open transaction wouldn't be visible to readers anyway.
 
-**`@@DBTS`** returns the last-allocated rowversion value as `binary(8)` big-endian — the value `MIN_ACTIVE_ROWVERSION` reports as next-allocated, minus one.
-Implementation calls `Database.AllocateRowVersion() - 1`, which bumps the counter as a side effect (rowversion values are advisory and monotonic, so the spurious bump is harmless to the contract but is a fidelity gap from real SQL Server's non-bumping read).
+**`@@DBTS`** returns the last-allocated rowversion value as `binary(8)` big-endian — the value `MIN_ACTIVE_ROWVERSION` reports as next-allocated, minus one — and neither read advances the counter.
+A new database's counter stands at 2000, so `@@DBTS` reads `0x00000000000007D0` and the first rowversion is 2001 (probed 2026-09-24 against SQL Server 2025).
 Used by tooling watermarking via the "current high water" pattern (sync delta from `WHERE rv > @lastDbts`).
 
 ## Identity helpers (`@@IDENTITY` / `SCOPE_IDENTITY` / `IDENT_CURRENT` / `IDENT_INCR` / `IDENT_SEED`)

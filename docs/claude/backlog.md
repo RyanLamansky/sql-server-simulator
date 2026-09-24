@@ -228,17 +228,14 @@ Already listed elsewhere here and not repeated: `DBCC CHECKIDENT` and parenthesi
 
 **Type-pair neighbors** — found by the type-pair probes and left open (probed 2026-09-23):
 
-- `ISNULL` converts with the one-way assignment table, not the unification grid, so `ISNULL(<decimal>, <datetime>)` is Msg 257 on real and converts here.
 - The subquery side of `IN (SELECT …)` / `= ANY (…)` reports Msg 257 where real reports Msg 260 naming the inner column.
 - A `numeric` column is spelled `decimal` in type-pair messages; only `CAST … AS numeric` and literals report `numeric`.
-- Binary comparison doesn't zero-pad the shorter operand (`0x0102 = 0x010200` is true on real).
 - Under a SQL collation, a `varchar` containing `CHAR(0)` compares unequal to the same string without it.
 - A constant-folded `CASE WHEN 1 = 0 …` takes the ELSE arm's type on real.
 - Binary or padded `char` converted to `xml` isn't validated or whitespace-stripped, and a `hierarchyid` parse failure's Msg 6522 wording differs.
-- A new database's rowversion counter starts at 0; real's starts at 2000.
 - A `UNION` whose second branch fails at runtime raises before sending the first branch's rows; real sends them first.
-- `CONVERT(varchar, <timestamp>, 1)` doesn't render hex.
 - The TDS UDT type name leaves the database part empty (`.sys.geography`; real sends `<db>.sys.geography`).
+- The one-way assignment rule (`Assign` grid, [`arithmetic.md`](arithmetic.md#type-pair-legality)) isn't applied to an `INSERT … SELECT` or `MERGE` source, nor to a procedure's arguments, so a `datetime` reaching a `decimal` column or parameter that way converts here where real raises Msg 257 (probed 2026-09-24).
 
 **Message stream**: what's left — Msg 5703's localized wording and Msg 8153 over a constant `VALUES` grouping — is in [`errors.md`](errors.md#not-modeled-yet).
 

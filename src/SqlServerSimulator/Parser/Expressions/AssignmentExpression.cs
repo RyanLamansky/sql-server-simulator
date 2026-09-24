@@ -39,7 +39,9 @@ internal sealed class AssignmentExpression(VariableSlot slot, Expression source)
         // — that is what surfaces the assigned expression's own compile-time
         // errors, including a varchar whose collation never resolved (Msg 456;
         // an nvarchar one settles against the slot silently).
-        UnresolvedCollation.RequireAssignable(this.Source.GetSqlType(batch, resolveColumnType));
+        var sourceType = this.Source.GetSqlType(batch, resolveColumnType);
+        UnresolvedCollation.RequireAssignable(sourceType);
+        AssignmentRules.RequireAssignable(this.Source, sourceType, this.Slot.DeclaredType);
         return this.Slot.DeclaredType;
     }
 

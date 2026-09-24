@@ -23,7 +23,9 @@ internal sealed class MinActiveRowVersion : Expression
 
     public override SqlValue Run(RuntimeContext runtime)
     {
-        var current = runtime.Batch.CurrentDatabase.AllocateRowVersion();
+        // The next value to be allocated, read without allocating it: two
+        // calls answer alike (probed 2026-09-24 against SQL Server 2025).
+        var current = runtime.Batch.CurrentDatabase.LastRowVersion + 1;
         var bytes = new byte[8];
         for (var i = 7; i >= 0; i--)
         {
