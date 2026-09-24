@@ -1,0 +1,17 @@
+# Capture/replay pilot: the five proto select scripts plus a sample of the
+# random slice, including the two scripts that hold known-divergent records.
+test/select1.test
+test/select2.test
+test/select3.test
+test/select4.test
+test/select5.test
+test/random/aggregates/slt_good_87.test
+test/random/aggregates/slt_good_56.test
+test/random/aggregates/slt_good_105.test
+test/random/aggregates/slt_good_24.test
+test/random/expr/slt_good_24.test
+test/random/expr/slt_good_60.test
+test/random/groupby/slt_good_5.test
+test/random/select/slt_good_11.test
+test/random/select/slt_good_41.test
+test/random/select/slt_good_78.test

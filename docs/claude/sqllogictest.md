@@ -3,7 +3,7 @@
 SQLite's sqllogictest corpus — **7,195,342 query and 225,371 statement records** across 622 machine-generated scripts — replayed against the simulator and a live SQL Server side by side, diffing both directions.
 It reaches shapes no application emits: deep operator nesting, join-order permutations, sign chains, overflow edges, and a large body of `statement error` records that probe the *rejection* boundary rather than the answer.
 
-Neither the corpus nor the harness is checked in — the corpus is downloadable and the runner is local tooling under `.vs/`, with provenance, invocation and flags documented beside it.
+The harness is committed under [`tools/sqllogictest/`](../../tools/sqllogictest/README.md), whose README covers setting it up on a new machine and running it; the corpus and the captured references are downloaded and regenerated into a gitignored data directory rather than checked in.
 This file records only what would have to be re-derived rather than re-downloaded: why the oracle is built this way, and the methodology traps that produced wrong conclusions in practice.
 
 ## The corpus's own expected results are not the oracle

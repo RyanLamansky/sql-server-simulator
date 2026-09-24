@@ -31,6 +31,10 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SqlServerSimulator.Tests.Sq
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SqlServerSimulator.Tests.Smo", "tests\SqlServerSimulator.Tests.Smo\SqlServerSimulator.Tests.Smo.csproj", "{6297C6FC-9C79-4332-8F33-726B36B5639B}"
 EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tools", "tools", "{07C2787E-EAC7-C090-1BA3-A61EC2A24D84}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SltRunner", "tools\sqllogictest\runner\SltRunner.csproj", "{DEBA9AFF-0A60-4E36-83C7-C05D09DAB4E0}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -161,9 +165,24 @@ Global
 		{6297C6FC-9C79-4332-8F33-726B36B5639B}.Release|x64.Build.0 = Release|Any CPU
 		{6297C6FC-9C79-4332-8F33-726B36B5639B}.Release|x86.ActiveCfg = Release|Any CPU
 		{6297C6FC-9C79-4332-8F33-726B36B5639B}.Release|x86.Build.0 = Release|Any CPU
+		{DEBA9AFF-0A60-4E36-83C7-C05D09DAB4E0}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{DEBA9AFF-0A60-4E36-83C7-C05D09DAB4E0}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{DEBA9AFF-0A60-4E36-83C7-C05D09DAB4E0}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{DEBA9AFF-0A60-4E36-83C7-C05D09DAB4E0}.Debug|x64.Build.0 = Debug|Any CPU
+		{DEBA9AFF-0A60-4E36-83C7-C05D09DAB4E0}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{DEBA9AFF-0A60-4E36-83C7-C05D09DAB4E0}.Debug|x86.Build.0 = Debug|Any CPU
+		{DEBA9AFF-0A60-4E36-83C7-C05D09DAB4E0}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{DEBA9AFF-0A60-4E36-83C7-C05D09DAB4E0}.Release|Any CPU.Build.0 = Release|Any CPU
+		{DEBA9AFF-0A60-4E36-83C7-C05D09DAB4E0}.Release|x64.ActiveCfg = Release|Any CPU
+		{DEBA9AFF-0A60-4E36-83C7-C05D09DAB4E0}.Release|x64.Build.0 = Release|Any CPU
+		{DEBA9AFF-0A60-4E36-83C7-C05D09DAB4E0}.Release|x86.ActiveCfg = Release|Any CPU
+		{DEBA9AFF-0A60-4E36-83C7-C05D09DAB4E0}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{DEBA9AFF-0A60-4E36-83C7-C05D09DAB4E0} = {07C2787E-EAC7-C090-1BA3-A61EC2A24D84}
 	EndGlobalSection
 	GlobalSection(ExtensibilityGlobals) = postSolution
 		SolutionGuid = {7D515F78-501F-4281-B045-D91206221FA8}

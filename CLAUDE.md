@@ -61,6 +61,7 @@ dotnet test
 ```
 
 Projects live under `src/` (`SqlServerSimulator`, `SqlServerSimulator.EFCore`, `SqlServerSimulator.Analyzers`, `Example`) and `tests/`; the sln and both props files stay at the repo root, so `dotnet build` / `dotnet test` run from the root unchanged.
+`tools/` holds local tooling, in the sln under a `tools` folder so CI compiles it but outside the analyzer and test gates — [`tools/sqllogictest/`](tools/sqllogictest/README.md) is the differential sweep whose in-process replay (`./tools/sqllogictest/replay.sh`, about a minute) catches regressions across millions of generated queries the committed suites never write; run it before committing a change to parsing, binding or expression evaluation.
 Shared build settings live in the root `Directory.Build.props` (TargetFramework, nullable, warnings-as-errors, `EnforceCodeStyleInBuild=true` — so `dotnet build` runs the IDE / SSS / MSTEST analyzers and fails on violations); package versions are centralized in `Directory.Packages.props` (NuGet CPM), with deliberate per-project divergences as visible `VersionOverride`s (Tests.Smo pins SqlClient 5.1.x, SMO's supported line, while Tests.SqlClient tests the current 7.x — the reason those two projects stay separate).
 Csprojs carry only per-project content.
 No separate `dotnet format` pass — it catches nothing build doesn't.

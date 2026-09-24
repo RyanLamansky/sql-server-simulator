@@ -1,0 +1,6 @@
+<Project>
+  <!-- Isolation stop: prevents the walk-up from picking the repo root's
+       props (warnings-as-errors, analyzers, CPM). The solution builds the
+       runner so it can't rot unnoticed, but it is local tooling, not
+       product code held to the repo's rules. -->
+</Project>
