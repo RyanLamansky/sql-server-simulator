@@ -104,13 +104,32 @@ partial class Simulation
             // A multi-part name unambiguously means user-defined type (built-
             // in scalars are 1-part only); for 1-part names, table-type
             // lookup runs first with fallback to the scalar path.
-            if (context.Token is Name firstNameToken && TryParseDeclareTableTypeVariable(context, firstNameToken, variableName, variableIndex, reExecution))
+            SqlType declaredType;
+            int? declaredMaxLength;
+            XmlSchemaCollection? xmlSchemaCollection;
+            try
             {
-                sawScalar = true;
-                continue;
-            }
+                if (context.Token is Name firstNameToken && TryParseDeclareTableTypeVariable(context, firstNameToken, variableName, variableIndex, reExecution))
+                {
+                    sawScalar = true;
+                    continue;
+                }
 
-            var (declaredType, declaredMaxLength, xmlSchemaCollection) = ParseDeclareTypeSpec(context, variableName);
+                (declaredType, declaredMaxLength, xmlSchemaCollection) = ParseDeclareTypeSpec(context, variableName);
+            }
+            catch (SimulatedSqlException missingType) when (missingType.Number == 2715 && context.Batch.CreateTimeBindErrors is { } bindErrors)
+            {
+                // Binding without running, real reports the missing type and
+                // still declares the variable, so a later reference to it binds
+                // rather than raising Msg 137 (a table-type use raises Msg 1087,
+                // since the variable isn't a table) — probed 2026-09-24 against
+                // SQL Server 2025.
+                var batch = context.Batch;
+                missingType.ResolveDiagnostics(batch.CurrentStatement.StartLine, batch.LineOffset, batch.ErrorProcedureName);
+                bindErrors.Add(missingType);
+                SkipPastTypeSpec(context);
+                (declaredType, declaredMaxLength, xmlSchemaCollection) = (SqlType.SqlVariant, null, null);
+            }
 
             // Optional initializer.
             var initialValue = SqlValue.Null(declaredType);
@@ -242,6 +261,20 @@ partial class Simulation
     /// The type-resolver twin of <see cref="NoColumnResolver"/>, for binding
     /// a FROM-less condition (<c>IF</c> / <c>WHILE</c>) while compiling.
     /// </summary>
+    /// <summary>
+    /// Moves past the rest of a type spec whose lookup failed, to the
+    /// initializer, the next declaration, or the end of the statement.
+    /// </summary>
+    private static void SkipPastTypeSpec(ParserContext context)
+    {
+        while (context.Token is not (null or Operator { Character: ',' or '=' or ';' }) && !IsStatementBoundary(context.Token))
+        {
+            if (context.Token is Operator { Character: '(' })
+                SkipBalancedParens(context);
+            context.MoveNextOptional();
+        }
+    }
+
     internal static SqlType NoColumnTypeResolver(MultiPartName name) =>
         throw SimulatedSqlException.InvalidColumnName(name);
 

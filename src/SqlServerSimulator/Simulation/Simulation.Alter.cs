@@ -816,8 +816,10 @@ partial class Simulation
         if (context.Batch.IsSkipping)
         {
             // Walk past any option tokens so the dispatch loop's lookahead
-            // doesn't trip on them.
-            while (context.MoveNext() && context.Token is not (Operator { Character: ';' } or ReservedKeyword))
+            // doesn't trip on them. RESTART WITH and INCREMENT BY are the
+            // options that carry a reserved keyword.
+            while (context.MoveNext()
+                && context.Token is not (Operator { Character: ';' } or ReservedKeyword { Keyword: not (Keyword.With or Keyword.By) }))
             {
                 // no-op
             }

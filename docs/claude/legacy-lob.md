@@ -58,7 +58,7 @@ SQL Server settles a **constant** negative length while compiling and reports **
 A length that only turns negative at run time reports a different message per family: `LEFT` and `SUBSTRING` share **Msg 537** state 2 (`Invalid length parameter passed to the LEFT or SUBSTRING function.`) and `RIGHT` keeps **Msg 536** at state 2 with its own name capitalized (`Invalid length parameter passed to the RIGHT function.`).
 The binary form takes the same split.
 
-The simulator raises the constant case from the result-type resolution the three scalars share, so it fires over an empty rowset the way real's compile-time check does; real additionally aborts the whole batch there, where the simulator's is a statement error.
+The simulator raises the constant case from the result-type resolution the three scalars share, so it fires while the batch compiles, over an empty rowset and before any statement runs, the way real's check does.
 
 ## Text pointers: `TEXTPTR` / `TEXTVALID`
 

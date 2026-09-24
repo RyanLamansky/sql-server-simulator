@@ -172,8 +172,9 @@ A computed column is refused for merely being named, whatever its cell holds —
 The whole family is settled while the statement **compiles**, not when it runs: it fires from an untaken `IF` branch, and it aborts a `CREATE PROCEDURE` whose body carries it, leaving the module uncreated (see [CREATE-time body binding](programmable.md)).
 `RejectValuesArityMismatch` therefore reads the *parsed* tuples rather than the evaluated rows and runs regardless of skip state.
 
-**Divergence:** real compiles a whole batch before executing any of it, so a bad-arity statement stops its predecessors from running too; the simulator dispatches statement by statement, so only the offending statement is inert.
-Real also reports a statement offending several rules at once as a multi-error response (an unknown column name *and* a bad count come back as Msg 207 then Msg 110; a ragged constructor into a rowversion table as Msg 273 then Msg 10709) — the simulator raises the leading error alone.
+Both engines compile a whole batch before running any of it, so a bad-arity statement stops its predecessors from running too ([batch compilation](control-flow.md#batch-compilation)).
+
+**Divergence:** real reports a statement offending several rules at once as a multi-error response (an unknown column name *and* a bad count come back as Msg 207 then Msg 110; a ragged constructor into a rowversion table as Msg 273 then Msg 10709) — the simulator raises the leading error alone.
 
 ## `DEFAULT` as a `VALUES` element
 

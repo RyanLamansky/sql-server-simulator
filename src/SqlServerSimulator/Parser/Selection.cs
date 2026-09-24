@@ -2788,6 +2788,8 @@ internal sealed partial class Selection
                             SkipBalancedParens(context);
                         else
                             context.RestoreCheckpoint(probe);
+                        context.Batch.CurrentStatement.BindsDeferredSource = true;
+                        _ = ParseOptionalForSystemTime(context, heapTable: null);
                         var placeholderAlias = ConsumeOptionalAlias(context);
                         _ = ParseOptionalTableHints(context);
                         return FromSource.DeferredPlaceholder(placeholderAlias ?? objectName.Leaf);
@@ -4401,7 +4403,7 @@ internal sealed partial class Selection
     /// form approximated — real SQL Server pads temp-table names with their
     /// internal suffix).
     /// </remarks>
-    private static TemporalRowSource? ParseOptionalForSystemTime(ParserContext context, HeapTable heapTable)
+    private static TemporalRowSource? ParseOptionalForSystemTime(ParserContext context, HeapTable? heapTable)
     {
         // ConsumeOptionalAlias's contract: caller leaves cursor on the last
         // table-name segment. To peek for FOR SYSTEM_TIME without breaking
@@ -4419,43 +4421,52 @@ internal sealed partial class Selection
             context.RestoreCheckpoint(checkpoint);
             return null;
         }
-        if (heapTable.SystemVersioning is null)
-            throw SimulatedSqlException.ForSystemTimeRequiresVersionedTable(QualifiedNameFor(context, heapTable));
-        var historyTable = heapTable.SystemVersioning;
-        if (heapTable.PeriodColumns is not { } pc)
+        // A source deferred while compiling (heapTable null) still parses the
+        // clause: its grammar is checked then, the table when the statement runs.
+        if (heapTable is not null && (heapTable.SystemVersioning is null || heapTable.PeriodColumns is null))
             throw SimulatedSqlException.ForSystemTimeRequiresVersionedTable(QualifiedNameFor(context, heapTable));
 
         context.MoveNextRequired();
+        TemporalQueryKind kind;
+        Expression? lower = null;
+        Expression? upper = null;
         switch (context.Token)
         {
             // ALL: union of current + history rows, with only the
             // zero-duration filter every form applies.
             case ReservedKeyword { Keyword: Keyword.All }:
                 context.MoveNextOptional();
-                return new TemporalRowSource(heapTable, historyTable, pc, TemporalQueryKind.All, null, null, context.Batch);
+                kind = TemporalQueryKind.All;
+                break;
             // AS OF t: rows where start <= t < end.
             case ReservedKeyword { Keyword: Keyword.As }:
                 context.MoveNextRequired();
                 if (context.Token is not ReservedKeyword { Keyword: Keyword.Of })
                     throw TemporalSyntaxError(context);
                 context.MoveNextRequired();
-                return new TemporalRowSource(heapTable, historyTable, pc, TemporalQueryKind.AsOf, ParseTemporalTimeArgument(context), null, context.Batch);
+                kind = TemporalQueryKind.AsOf;
+                lower = ParseTemporalTimeArgument(context);
+                break;
             // BETWEEN t1 AND t2: rows active at any point in [t1, t2].
             case ReservedKeyword { Keyword: Keyword.Between }:
                 context.MoveNextRequired();
-                var betweenLower = ParseTemporalTimeArgument(context);
+                lower = ParseTemporalTimeArgument(context);
                 if (context.Token is not ReservedKeyword { Keyword: Keyword.And })
                     throw TemporalSyntaxError(context);
                 context.MoveNextRequired();
-                return new TemporalRowSource(heapTable, historyTable, pc, TemporalQueryKind.Between, betweenLower, ParseTemporalTimeArgument(context), context.Batch);
+                kind = TemporalQueryKind.Between;
+                upper = ParseTemporalTimeArgument(context);
+                break;
             // FROM t1 TO t2: same, with the upper bound exclusive.
             case ReservedKeyword { Keyword: Keyword.From }:
                 context.MoveNextRequired();
-                var fromLower = ParseTemporalTimeArgument(context);
+                lower = ParseTemporalTimeArgument(context);
                 if (context.Token is not ReservedKeyword { Keyword: Keyword.To })
                     throw TemporalSyntaxError(context);
                 context.MoveNextRequired();
-                return new TemporalRowSource(heapTable, historyTable, pc, TemporalQueryKind.FromTo, fromLower, ParseTemporalTimeArgument(context), context.Batch);
+                kind = TemporalQueryKind.FromTo;
+                upper = ParseTemporalTimeArgument(context);
+                break;
             // CONTAINED IN (t1, t2): rows whose whole validity period sits
             // inside the range. The parenthesized two-argument form is the
             // only spelling real accepts (bare arguments are Msg 102).
@@ -4467,18 +4478,23 @@ internal sealed partial class Selection
                 if (context.Token is not Operator { Character: '(' })
                     throw TemporalSyntaxError(context);
                 context.MoveNextRequired();
-                var containedLower = ParseTemporalTimeArgument(context);
+                lower = ParseTemporalTimeArgument(context);
                 if (context.Token is not Operator { Character: ',' })
                     throw TemporalSyntaxError(context);
                 context.MoveNextRequired();
-                var containedUpper = ParseTemporalTimeArgument(context);
+                upper = ParseTemporalTimeArgument(context);
                 if (context.Token is not Operator { Character: ')' })
                     throw TemporalSyntaxError(context);
                 context.MoveNextOptional();
-                return new TemporalRowSource(heapTable, historyTable, pc, TemporalQueryKind.ContainedIn, containedLower, containedUpper, context.Batch);
+                kind = TemporalQueryKind.ContainedIn;
+                break;
             default:
                 throw TemporalSyntaxError(context);
         }
+
+        return heapTable is null
+            ? null
+            : new TemporalRowSource(heapTable, heapTable.SystemVersioning!, heapTable.PeriodColumns!.Value, kind, lower, upper, context.Batch);
     }
 
     /// <summary>

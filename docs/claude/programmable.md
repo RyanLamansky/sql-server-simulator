@@ -38,6 +38,7 @@ Only *missing-object* resolution defers, which is real's deferred name resolutio
 Probe-confirmed end to end against SQL Server 2025 (2026-08-01) for procedures, scalar UDFs, multi-statement TVFs and DML / DDL triggers; views and inline TVFs never deferred anything (real binds them fully, Msg 208 included) and already did so here through their output-column inference.
 
 `Simulation.BindModuleBodyAtCreate` (in `Simulation.BindModuleBody.cs`) is the one implementation.
+Its walk, `BindWithoutRunning`, is also how every batch compiles before it runs ([`control-flow.md`](control-flow.md#batch-compilation)).
 It re-tokenizes the captured body on a throwaway child `BatchContext` built by the same per-kind constructor the invocation uses — so the body sees the frame it will run under — and runs it through the normal dispatch loop with **skip mode** on (`BatchContext.SkipModeFlag`) plus `BatchContext.CreateTimeBinding`.
 Skip mode is the existing "parse and resolve, don't execute" machinery the un-taken-`IF` path uses ([`control-flow.md`](control-flow.md)); `CreateTimeBinding` adds the behaviors specific to binding — permission enforcement off (a bind reads nothing, and real binds under the module's own ownership chain), stop-at-first-deferral (below), and the **`SET`-option gates off** (real accepts `CREATE PROCEDURE … AS INSERT <gated table>` under `QUOTED_IDENTIFIER OFF` and raises Msg 1934 only when the body runs, though a never-taken `IF` branch at top level *does* raise — see [`grammar.md`](grammar.md#set-option-gates--msg-1934--msg-1935)).
 

@@ -510,7 +510,7 @@ public sealed class CrossDatabasePermissionTests
         var ex = Throws<SimulatedSqlException>(() => connection.CreateCommand("""
             merge dbo.local as t
             using (select id from away.dbo.remote) as s on t.id = s.id
-            when matched then update set t.id = s.id
+            when matched then update set t.id = s.id;
             """).ExecuteNonQuery());
         AreEqual(229, ex.Number);
         AreEqual("The SELECT permission was denied on the object 'remote', database 'away', schema 'dbo'.", ex.Message);

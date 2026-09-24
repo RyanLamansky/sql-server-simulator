@@ -185,9 +185,6 @@ Two are per-row short-circuiting that flips with the *data*, not the text (a row
 The same comparison in a **`HAVING`** folds unconditionally — a HAVING always carries a grouping, so it never gets the trivial plan — which is why that position is closed and `WHERE` is not.
 Precisely-scoped list in the "Not folded yet" section of [`query.md`](query.md).
 
-The sweep also produced a **data-loss repro for the parse-phase batch divergence** [`control-flow.md`](control-flow.md) already lists as accepted: `INSERT INTO t VALUES(3,'z'); SELECT ~~~ FROM;` leaves the row inserted here and rejects the whole batch on real (Msg 156, and Msg 159 for the `DROP INDEX` shape), so the accepted-divergence rationale — that real tooling never sends invalid batches — now has a measured cost in silent state divergence rather than only in error timing.
-Runtime errors (Msg 208 deferred name, Msg 8134) correctly leave earlier statements applied on both, so the divergence is specifically parse-phase.
-
 ### Django ORM test-suite shakedown — surfaced gaps
 
 Running Django 5.1's own ORM test apps over the wire (mssql-django 1.7 / pyodbc) against the endpoint is a high-yield real-application oracle (harness: the runner's own `test_*` database via real `CREATE`/`DROP DATABASE` — no configuration override needed since those ship — plus an incremental failing-SQL logger wrapping `mssql.base.CursorWrapper.execute`).
@@ -232,7 +229,7 @@ Not sim bugs (**fail on real too** — leave alone): boolean-expression `=` comp
 
 A hand-written corpus of 548 deliberately odd statements, run through the simulator's TDS listener and against SQL Server 2025 (17.0.4065.4) with identical SqlClient code on both sides, a fresh database per case, and every error routed through `InfoMessage` so a whole batch's output compares (probed 2026-09-23).
 The harness is local-only and not checked in; its three connection-killing findings shipped, and the accept-what-real-rejects half lives in the [over-permissive register](#over-permissive-register).
-Already listed elsewhere here and not repeated: `DBCC CHECKIDENT`, parenthesized set-op branches, `SET DATEFORMAT` carrying no effect, and the parse-phase batch divergence.
+Already listed elsewhere here and not repeated: `DBCC CHECKIDENT`, parenthesized set-op branches, and `SET DATEFORMAT` carrying no effect.
 
 **Type-pair neighbors** — found by the type-pair probes and left open (probed 2026-09-23):
 
@@ -251,13 +248,13 @@ Already listed elsewhere here and not repeated: `DBCC CHECKIDENT`, parenthesized
 
 **Message stream**: what's left — Msg 5703's localized wording, the Msg 282 whose trigger isn't known yet, and Msg 8153 over a constant `VALUES` grouping — is in [`errors.md`](errors.md#not-modeled-yet).
 
-**Batch compilation** — real compiles the whole batch before running any of it, so a compile error means nothing runs:
+**Batch compilation** ships ([`control-flow.md`](control-flow.md#batch-compilation)); what the sweep found past it:
 
-- `SELECT top 0 1; SELECT top (1.5) 1` runs the first statement here; real answers Msg 1060 alone.
-- `SELECT 1; CREATE VIEW v AS SELECT 1 a` runs the SELECT, raises Msg 111 **and creates the view**; real raises Msg 111 alone.
-- CTE errors (Msg 8158 / 240 / 252) are followed by a spurious Msg 208; Msg 319 repeats and cascades into further Msg 102s; `NATURAL JOIN` and `TABLESAMPLE` over a derived table run the query and then raise.
-- `BEGIN TRY SELECT * FROM nope END TRY BEGIN CATCH … END CATCH` catches the Msg 208 here, where real's same-scope compile error isn't catchable.
-- `SELECT * FROM v; SELECT b FROM v` over a view whose base gained `b` runs the first statement; real raises Msg 207 for the batch.
+- A statement error inside a procedure or dynamic SQL ends that body here, losing the messages it had sent, where real finishes the body — the most consequential of the compile-adjacent gaps, since any procedure that tolerates an error mid-body behaves differently.
+  It and the compile's other gaps (the walk stopping at a deferred DML target, a deferred statement's bind error staying catchable, procedure bodies compiled only at `CREATE`, a table created twice in one batch) are listed in [`control-flow.md`](control-flow.md#not-modeled-yet).
+- Msg 319 where real reports Msg 336 for a CTE after an unterminated statement (`SELECT * FROM c WITH c2 AS (…) …`, real naming `c2`).
+- `TABLESAMPLE` over a derived table is Msg 102 near `(` where real's is Msg 156 near the keyword; `NATURAL JOIN` reports near `join` where real reports near `natural`.
+- A CTE whose query projects one name twice (`WITH c AS (SELECT 1 a, 2 a) …`) runs here; real raises Msg 8156.
 
 **Session options with no effect**:
 
@@ -294,7 +291,7 @@ Already listed elsewhere here and not repeated: `DBCC CHECKIDENT`, parenthesized
 - CAST sources: a space-separated date-and-time string to `date` or `time` (`CAST('2024-12-31 23:59:59' AS date)`, only the `T` form parses here); more than seven fractional-second digits (real rounds at the seventh); `''` → `money` 0 and `date` 1900-01-01; `'12:00'` → `date`; `'1e2'` / `'1d2'` → `float`; month names (`'Jan 5 2024'`, `'5 January 2024'`, `'January 2024'`); `AM` / `PM` suffixes, including `'13:00 PM'`; two-digit years (`'01/01/49'` → 2049); `datetime` → `float` / `int` / `decimal`; `decimal` → `varbinary`.
 
 **Same error, different number, state or class**:
-`TRANSLATE` length mismatch 9828 (here 9819); `ROW_NUMBER() OVER ()` 4112 (here 102); `decimal(39, 0)` 2717 (here 1001); `decimal(2, 3)` 192 (here 1002); `float(54)` accepted on real (here 1001); `TOP (<NULL variable>)` 1014 (here 1060); `TOP '1'` 102 (here 1060); a string datetime out of range (`'2024'`, hour 25) 242 (here 241); `xml = xml` 305 (here 402); `$action` in an INSERT's OUTPUT 207 (here 4104); a bare `VALUES (1)` statement 156 (here 102); `DELETE … ORDER BY` 156 (here 102); `@t.a` 137 class 16 state 1 (here class 15 state 2); states differing on 506, 235, 9810, 9812, 8148, 2714 for a temp table, and 195.
+`TRANSLATE` length mismatch 9828 (here 9819); `ROW_NUMBER() OVER ()` 4112 (here 102); `decimal(39, 0)` 2717 (here 1001); `decimal(2, 3)` 192 (here 1002); `float(54)` accepted on real (here 1001); `TOP (<NULL variable>)` 1014 (here 1060); `TOP '1'` 102 (here 1060); a string datetime out of range (`'2024'`, hour 25) 242 (here 241); `xml = xml` 305 (here 402); `$action` in an INSERT's OUTPUT 207 (here 4104); a bare `VALUES (1)` statement 156 (here 102); `DELETE … ORDER BY` 156 (here 102); a one-part `DROP INDEX ix` 159 (here 102); `@t.a` 137 class 16 state 1 (here class 15 state 2); states differing on 506, 235, 9810, 9812, 8148, 2714 for a temp table, and 195.
 
 ### Result-set serialization: `FOR XML` / `FOR JSON`
 

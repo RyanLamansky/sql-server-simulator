@@ -250,4 +250,42 @@ public sealed class GroupByContainmentTests
     [TestMethod]
     public void BareComponentInOrderBy_Msg8127()
         => Rejects("select count(*) from t group by a + 1 order by a", 8127, "\"t.a\"");
+
+    /// <summary>
+    /// A grouped query — a <c>GROUP BY</c>, <c>GROUP BY ()</c> included, or a
+    /// <c>HAVING</c> — checks the tree real folded, so a column only a
+    /// constant-decided CASE-family arm reads is never checked (probed
+    /// 2026-09-24).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select coalesce(a, 5, b) from t group by a")]
+    [DataRow("select coalesce(5, b) from t group by a")]
+    [DataRow("select coalesce(5, b), count(*) from t group by ()")]
+    [DataRow("select coalesce(5, b) from t having count(*) > 0")]
+    [DataRow("select case 16 when a then null when 67 then b end from t group by a")]
+    [DataRow("select case when null = b then null else a end from t group by a")]
+    [DataRow("select case when a is null then 1 when 71 is null then b end from t group by a")]
+    [DataRow("select case when a = 1 then 5 when 1 = 1 then 6 else b end from t group by a")]
+    [DataRow("select case a when cast(null as int) then b else 1 end from t group by a")]
+    [DataRow("select case cast(null as int) when b then 1 end from t group by a")]
+    [DataRow("select case b when cast(null as int) then 1 end from t group by a")]
+    [DataRow("select iif(1 = 0, b, a) from t group by a")]
+    [DataRow("select nullif(cast(null as int), b) from t group by a")]
+    public void GroupedQuery_FoldedAwayArm_Licensed(string select)
+        => _ = Run(select);
+
+    /// <summary>
+    /// What the fold keeps is still checked — a NULL or a raising constant
+    /// decides nothing, <c>ISNULL</c> isn't in the CASE family, and a taken
+    /// branch is read — and a bare scalar aggregate folds nothing first.
+    /// </summary>
+    [TestMethod]
+    [DataRow("select coalesce(a, null, b) from t group by a")]
+    [DataRow("select coalesce(a, 1/0, b) from t group by a")]
+    [DataRow("select isnull(5, b) from t group by a")]
+    [DataRow("select case 16 when a then null when 16 then b end from t group by a")]
+    [DataRow("select coalesce(5, b), count(*) from t")]
+    [DataRow("select case when 1 = 1 then 5 else b end, count(*) from t")]
+    public void FoldKeepsTheColumn_Msg8120(string select)
+        => Rejects(select, 8120, "'t.b'");
 }

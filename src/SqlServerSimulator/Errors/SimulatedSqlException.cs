@@ -187,6 +187,16 @@ public sealed partial class SimulatedSqlException : DbException
     internal bool XactAbortPromoted;
 
     /// <summary>
+    /// Set when this error ended the batch of the procedure or dynamic SQL it
+    /// was raised in, which is as far as real lets it reach: in the caller the
+    /// <c>EXEC</c> fails like any other statement and the caller's batch goes on
+    /// (probed 2026-09-24 against SQL Server 2025, for a missing table, a
+    /// missing column, and a compile error in <c>EXEC('…')</c> /
+    /// <c>sp_executesql</c>).
+    /// </summary>
+    internal bool EndedCalledBatch;
+
+    /// <summary>
     /// Guards <see cref="ResolveDiagnostics"/> against re-stamping. An error
     /// born inside a nested body (procedure / dynamic-SQL batch) is resolved at
     /// its own dispatch frame's catch boundary; as it propagates outward each

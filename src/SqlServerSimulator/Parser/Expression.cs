@@ -822,6 +822,18 @@ internal abstract class Expression : ExpressionNode
     internal virtual bool ResultIsNullable(NullabilityContext context) => true;
 
     /// <summary>
+    /// Adds to <paramref name="foldedAway"/> the operands real's compile-time
+    /// fold removes from this node: the CASE-family arms a constant condition
+    /// decides away, the same surviving-arm rule
+    /// <see cref="ResultIsNullable"/> applies. A grouped query's GROUP BY
+    /// containment check runs over the folded tree, so no column under one of
+    /// these is checked there (probed 2026-09-24 against SQL Server 2025).
+    /// </summary>
+    internal virtual void AddFoldedAwayOperands(NullabilityContext context, HashSet<ExpressionNode> foldedAway)
+    {
+    }
+
+    /// <summary>
     /// True when this expression's result — <b>if</b> it is decimal-family —
     /// is one SQL Server reports under the <c>numeric</c> type name rather than
     /// <c>decimal</c> (JDBC <c>getColumnTypeName</c> / the TDS COLMETADATA
@@ -1078,7 +1090,7 @@ internal abstract class Expression : ExpressionNode
         {
             if (node is AggregateExpression or WindowExpression)
                 return false;
-            if (node is Expression expression && visit.CoversSubtree?.Invoke(expression) == true)
+            if (visit.CoversSubtree?.Invoke(node) == true)
                 return false;
             if (shape.Column is { } name)
                 visit.OnReference(name);

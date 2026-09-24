@@ -9,9 +9,10 @@ namespace SqlServerSimulator;
 /// statement A, surfaces exactly one Msg 208, and does NOT run statement B —
 /// the missing object is a batch-aborting bind error, not a merely
 /// statement-terminating one (unlike Msg 3701 / 8134 / a severity-16 RAISERROR,
-/// which let the batch continue). Missing column (Msg 207), ambiguous column
-/// (Msg 209), and unbindable multi-part identifiers (Msg 4104) abort the same
-/// way. The in-process ADO surface now shares the wire's continue-on-error
+/// which let the batch continue). Against an object that exists, a missing
+/// column (Msg 207), ambiguous column (Msg 209), or unbindable multi-part
+/// identifier (Msg 4104) fails the batch's compile instead, so nothing in the
+/// batch runs. The in-process ADO surface now shares the wire's continue-on-error
 /// engine: it drains the batch and surfaces the aggregated error(s) at
 /// completion, so a batch-aborting miss still stops the following statements
 /// (the dispatch loop breaks) while a statement-terminating error lets them
@@ -52,8 +53,12 @@ public sealed class BatchErrorRecoveryTests
         AreEqual(1, connection.CreateCommand("select count(*) from marker").ExecuteScalar());
     }
 
+    /// <summary>
+    /// A missing column on an existing table fails the batch's compile, so
+    /// nothing in it runs, the statements ahead of it included.
+    /// </summary>
     [TestMethod]
-    public void MissingColumnMidBatch_AbortsBatch()
+    public void MissingColumnMidBatch_RunsNothing()
     {
         using var connection = new Simulation().CreateOpenConnection();
         _ = connection.CreateCommand("create table marker (n int)").ExecuteNonQuery();
@@ -62,26 +67,19 @@ public sealed class BatchErrorRecoveryTests
             "insert marker values (1); select no_such_col from marker; insert marker values (2)");
         var ex = Throws<SimulatedSqlException>(() => failing.ExecuteNonQuery());
         AreEqual(207, ex.Number);
-        AreEqual(1, connection.CreateCommand("select count(*) from marker").ExecuteScalar());
+        AreEqual(0, connection.CreateCommand("select count(*) from marker").ExecuteScalar());
     }
 
     [TestMethod]
-    public void SyntaxErrorMidBatch_Continues_FollowingRuns()
+    public void SyntaxErrorMidBatch_RunsNothing()
     {
-        // Accepted divergence: a true syntax error aborts the batch on real SQL
-        // Server (it fails at compile), but the simulator interleaves parse and
-        // execution and can't tell a parse-origin error (Msg 156, class 15)
-        // from a runtime one — so a mid-batch syntax error is statement-
-        // terminating and the batch continues. This is the same parse-vs-runtime
-        // divergence documented for the wire path; unifying the engine extends
-        // it to the in-process surface. The insert after the syntax error runs.
         using var connection = new Simulation().CreateOpenConnection();
         _ = connection.CreateCommand("create table marker (n int)").ExecuteNonQuery();
 
         using var failing = connection.CreateCommand(
             "insert marker values (1); select from; insert marker values (2)");
-        _ = Throws<SimulatedSqlException>(() => failing.ExecuteNonQuery());
-        AreEqual(2, connection.CreateCommand("select count(*) from marker").ExecuteScalar());
+        AreEqual(156, Throws<SimulatedSqlException>(() => failing.ExecuteNonQuery()).Number);
+        AreEqual(0, connection.CreateCommand("select count(*) from marker").ExecuteScalar());
     }
 
     /// <summary>
@@ -97,17 +95,17 @@ public sealed class BatchErrorRecoveryTests
             """));
 
     /// <summary>
-    /// A missing column on a <em>resolvable</em> table aborts the batch even
+    /// A missing column on a <em>resolvable</em> table fails the batch even
     /// from an un-taken IF branch. Probe-confirmed (SQL Server 2025,
     /// 2026-07-17): real SQL Server binds the columns of an existing table at
     /// compile time and raises Msg 207 regardless of the branch being dead, so
-    /// the statement after the IF never runs. Deferred name resolution applies
+    /// no statement in the batch runs. Deferred name resolution applies
     /// only when the base object is itself missing (see
     /// <see cref="SkipModeBranch_ToleratesMissingObject_Unchanged"/>) — a
     /// resolvable table's columns bind eagerly.
     /// </summary>
     [TestMethod]
-    public void SkipModeBranch_MissingColumnOnResolvableTable_AbortsBatch()
+    public void SkipModeBranch_MissingColumnOnResolvableTable_RunsNothing()
     {
         using var connection = new Simulation().CreateOpenConnection();
         _ = connection.CreateCommand("create table t (id int); create table marker (n int)").ExecuteNonQuery();
@@ -115,7 +113,7 @@ public sealed class BatchErrorRecoveryTests
             "insert marker values (1); if 1 = 0 select no_such_col from t; insert marker values (2)");
         var ex = Throws<SimulatedSqlException>(() => failing.ExecuteNonQuery());
         AreEqual(207, ex.Number);
-        AreEqual(1, connection.CreateCommand("select count(*) from marker").ExecuteScalar());
+        AreEqual(0, connection.CreateCommand("select count(*) from marker").ExecuteScalar());
     }
 
     [TestMethod]
@@ -124,8 +122,8 @@ public sealed class BatchErrorRecoveryTests
         // Msg 3701 (drop missing) is statement-terminating, not batch-aborting:
         // the batch continues past it on both front doors. In-process,
         // ExecuteNonQuery drains the whole batch — both inserts land — and
-        // surfaces the 3701 at completion. Contrast the batch-aborting bind
-        // errors above, where the following insert never runs.
+        // surfaces the 3701 at completion. Contrast the compile errors above,
+        // where no insert runs.
         using var connection = new Simulation().CreateOpenConnection();
         _ = connection.CreateCommand("create table marker (n int)").ExecuteNonQuery();
         using var failing = connection.CreateCommand(

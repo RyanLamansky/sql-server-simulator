@@ -184,7 +184,7 @@ The replay path is also where `PlanCacheHits` increments; misses increment in `C
 ## Capacity
 
 Hard cap at 1024 entries.
-New entries beyond cap are silently dropped (the indexer-set is guarded by a `ContainsKey || Count < cap` check).
+New entries beyond cap are silently dropped: a known key is refreshed through the indexer, and a new one is added only while `planCacheCount` — maintained on each successful add, since `ConcurrentDictionary.Count` takes every lock the dictionary holds — is under the cap.
 The cap is defensive — a stable EF app's working set is dozens of unique queries — and refresh-in-place via the indexer means DDL invalidation overwrites under the same key without growing the dictionary.
 
 No LRU.
@@ -193,7 +193,7 @@ If this becomes a real problem an LRU layer can land later.
 
 ## Test observability
 
-`Simulation.PlanCacheHits` and `PlanCacheMisses` (`long`, `Interlocked.Increment`-mutated) plus `PlanCacheCount` (live dict count) are `internal` and consumed by `PlanCacheTests` to assert hit / miss behavior at boundary conditions: identical-query replay, distinct CommandTexts get distinct entries, DDL invalidation, temp-table disqualification, table-variable disqualification, distinct parameter types get distinct entries, identical parameter types with different values still hit, result correctness across hit / miss, non-SELECT batch bypass.
+`Simulation.PlanCacheHits` and `PlanCacheMisses` (`long`, `Interlocked.Increment`-mutated) plus `PlanCacheCount` (the maintained entry count) are `internal` and consumed by `PlanCacheTests` to assert hit / miss behavior at boundary conditions: identical-query replay, distinct CommandTexts get distinct entries, DDL invalidation, temp-table disqualification, table-variable disqualification, distinct parameter types get distinct entries, identical parameter types with different values still hit, result correctness across hit / miss, non-SELECT batch bypass.
 The sequence rules add: a multi-SELECT batch caches as one entry whose replay reproduces both result sets, a trailing semicolon still caches, a batch mixing a SELECT with an `INSERT` or a `SET` doesn't, the replay refreshes per-statement state (two `RAND()` statements draw twice, on the cached path as on the uncached one), and `@@ROWCOUNT` after a replayed sequence reads the last statement's count.
 The shared-plan contract has its own section of tests there: parameterized TOP / OFFSET-FETCH replay resolves new values, RAND re-draws per execution, GETDATE reads the current clock on replay, recursive CTEs decline caching under either anchor shape, and two 8-worker concurrency tests hammer one cached aggregate / window plan asserting zero cross-execution contamination.
 

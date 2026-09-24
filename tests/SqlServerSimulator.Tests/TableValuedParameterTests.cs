@@ -1,5 +1,6 @@
 using System.Data;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
+using static SqlServerSimulator.TestHelpers;
 
 namespace SqlServerSimulator;
 
@@ -19,8 +20,8 @@ public sealed class TableValuedParameterTests
 
     [TestMethod]
     public void CreateType_Basic_Succeeds()
-        => AreEqual(0, new Simulation().ExecuteScalar(
-            "create type dbo.t1 as table (id int, v int); declare @x dbo.t1; select count(*) from @x"));
+        => AreEqual(0, WithType("create type dbo.t1 as table (id int, v int)").ExecuteScalar(
+            "declare @x dbo.t1; select count(*) from @x"));
 
     [TestMethod]
     public void CreateType_DuplicateName_RaisesMsg219()
@@ -81,13 +82,13 @@ public sealed class TableValuedParameterTests
 
     [TestMethod]
     public void Declare_TwoPartName_Works()
-        => AreEqual(2, new Simulation().ExecuteScalar(
-            "create type dbo.t1 as table (id int); declare @t dbo.t1; insert @t values (1), (2); select count(*) from @t"));
+        => AreEqual(2, WithType("create type dbo.t1 as table (id int)").ExecuteScalar(
+            "declare @t dbo.t1; insert @t values (1), (2); select count(*) from @t"));
 
     [TestMethod]
     public void Declare_OnePartName_Works()
-        => AreEqual(5, new Simulation().ExecuteScalar(
-            "create type dbo.t1 as table (id int); declare @t t1; insert @t values (5); select id from @t"));
+        => AreEqual(5, WithType("create type dbo.t1 as table (id int)").ExecuteScalar(
+            "declare @t t1; insert @t values (5); select id from @t"));
 
     [TestMethod]
     public void Declare_UnknownType_RaisesMsg2715()
@@ -97,31 +98,30 @@ public sealed class TableValuedParameterTests
 
     [TestMethod]
     public void Declare_PrimaryKey_Inherited_RaisesMsg2627()
-        => new Simulation().AssertSqlError(
-            "create type dbo.t1 as table (id int primary key, v int); declare @t dbo.t1; insert @t values (1, 10), (1, 20)",
+        => WithType("create type dbo.t1 as table (id int primary key, v int)").AssertSqlError(
+            "declare @t dbo.t1; insert @t values (1, 10), (1, 20)",
             2627);
 
     [TestMethod]
     public void Declare_Identity_Inherited_AutoIncrements()
-        => AreEqual(2, new Simulation().ExecuteScalar(
-            "create type dbo.t1 as table (id int identity(1,1), v int); declare @t dbo.t1; insert @t (v) values (10), (20); select id from @t order by id offset 1 rows fetch next 1 rows only"));
+        => AreEqual(2, WithType("create type dbo.t1 as table (id int identity(1,1), v int)").ExecuteScalar(
+            "declare @t dbo.t1; insert @t (v) values (10), (20); select id from @t order by id offset 1 rows fetch next 1 rows only"));
 
     [TestMethod]
     public void Declare_Check_Inherited_RaisesMsg547()
-        => new Simulation().AssertSqlError(
-            "create type dbo.t1 as table (id int, v int check (v > 0)); declare @t dbo.t1; insert @t values (1, -5)",
+        => WithType("create type dbo.t1 as table (id int, v int check (v > 0))").AssertSqlError(
+            "declare @t dbo.t1; insert @t values (1, -5)",
             547);
 
     [TestMethod]
     public void Declare_Computed_Inherited_Works()
-        => AreEqual(7, new Simulation().ExecuteScalar(
-            "create type dbo.t1 as table (a int, b int, c as a+b); declare @t dbo.t1; insert @t (a, b) values (3, 4); select c from @t"));
+        => AreEqual(7, WithType("create type dbo.t1 as table (a int, b int, c as a+b)").ExecuteScalar(
+            "declare @t dbo.t1; insert @t (a, b) values (3, 4); select c from @t"));
 
     [TestMethod]
     public void Declare_RowVersion_Inherited_AdvancesAcrossInserts()
     {
-        var rv1 = new Simulation().ExecuteScalar("""
-            create type dbo.t1 as table (id int, rv rowversion);
+        var rv1 = WithType("create type dbo.t1 as table (id int, rv rowversion)").ExecuteScalar("""
             declare @t dbo.t1;
             insert @t (id) values (1), (2);
             select max(cast(rv as bigint)) - min(cast(rv as bigint)) from @t
@@ -131,14 +131,14 @@ public sealed class TableValuedParameterTests
 
     [TestMethod]
     public void Declare_SetIdentityInsert_RaisesMsg102()
-        => new Simulation().AssertSqlError(
-            "create type dbo.t1 as table (id int identity); declare @t dbo.t1; set identity_insert @t on",
+        => WithType("create type dbo.t1 as table (id int identity)").AssertSqlError(
+            "declare @t dbo.t1; set identity_insert @t on",
             102);
 
     [TestMethod]
     public void Declare_MultiVar_WithTvpTypes_Works()
-        => new Simulation().ExecuteNonQuery(
-            "create type dbo.t1 as table (id int); declare @t1 dbo.t1, @t2 dbo.t1");
+        => WithType("create type dbo.t1 as table (id int)").ExecuteNonQuery(
+            "declare @t1 dbo.t1, @t2 dbo.t1");
 
     // ---- CREATE PROC TVP parameter ----
 

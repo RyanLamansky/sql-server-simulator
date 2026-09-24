@@ -123,6 +123,14 @@ internal sealed class NullIf : Expression
     internal override bool ResultIsNullable(NullabilityContext context) =>
         !context.TryFold(this, out var folded) || folded.IsNull;
 
+    // A constant NULL first argument folds the desugared CASE to NULL, which
+    // leaves the second argument unread.
+    internal override void AddFoldedAwayOperands(NullabilityContext context, HashSet<ExpressionNode> foldedAway)
+    {
+        if (this.constantNullFirst)
+            _ = foldedAway.Add(this.b);
+    }
+
     internal override string DebugDisplay() => $"NULLIF({this.a.DebugDisplay()}, {this.b.DebugDisplay()})";
 
     internal override void Describe(NodeShape shape) => shape.Child(this.a).Child(this.b);

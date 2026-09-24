@@ -1,4 +1,5 @@
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
+using static SqlServerSimulator.TestHelpers;
 
 namespace SqlServerSimulator;
 
@@ -13,13 +14,28 @@ namespace SqlServerSimulator;
 [TestClass]
 public class AliasTypeTests
 {
+    /// <summary>
+    /// A type created in the batch that uses it doesn't exist yet when real
+    /// compiles the batch, so nothing in the batch runs (probed 2026-09-24
+    /// against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void CreateTypeAndUseItInOneBatch_RaisesMsg2715()
+    {
+        var sim = new Simulation();
+        sim.AssertSqlError(
+            "CREATE TYPE dbo.Probe FROM int; CREATE TABLE t (c dbo.Probe)",
+            2715,
+            "Column, parameter, or variable #1: Cannot find data type dbo.Probe.");
+        AreEqual(0, sim.ExecuteScalar("SELECT COUNT(*) FROM sys.types WHERE name = 'Probe'"));
+    }
+
     [TestMethod]
     public void CreateAlias_NotNull_Then_ColumnInheritsNotNullByDefault()
     {
         // Probe-confirmed: column with no explicit nullability marker inherits
         // NOT NULL from the alias.
-        var ex = new Simulation().AssertSqlError("""
-            CREATE TYPE dbo.AccountNumber FROM nvarchar(15) NOT NULL;
+        var ex = WithType("CREATE TYPE dbo.AccountNumber FROM nvarchar(15) NOT NULL").AssertSqlError("""
             CREATE TABLE t (c dbo.AccountNumber);
             INSERT INTO t (c) VALUES (NULL);
             """, 515);
@@ -32,8 +48,7 @@ public class AliasTypeTests
     /// </summary>
     [TestMethod]
     public void CreateAlias_Bare_ColumnIsNullable()
-        => AreEqual(1, new Simulation().ExecuteScalar("""
-            CREATE TYPE dbo.Probe FROM int;
+        => AreEqual(1, WithType("CREATE TYPE dbo.Probe FROM int").ExecuteScalar("""
             CREATE TABLE t (c dbo.Probe);
             INSERT INTO t (c) VALUES (NULL);
             SELECT COUNT(*) FROM t WHERE c IS NULL
@@ -41,8 +56,7 @@ public class AliasTypeTests
 
     [TestMethod]
     public void CreateAlias_ExplicitNullKeyword_AliasIsNullable()
-        => AreEqual(1, new Simulation().ExecuteScalar("""
-            CREATE TYPE dbo.Probe FROM int NULL;
+        => AreEqual(1, WithType("CREATE TYPE dbo.Probe FROM int NULL").ExecuteScalar("""
             CREATE TABLE t (c dbo.Probe);
             INSERT INTO t (c) VALUES (NULL);
             SELECT COUNT(*) FROM t WHERE c IS NULL
@@ -55,8 +69,7 @@ public class AliasTypeTests
     /// </summary>
     [TestMethod]
     public void ColumnNullOverride_TrumpsAliasNotNull()
-        => AreEqual(1, new Simulation().ExecuteScalar("""
-            CREATE TYPE dbo.Tight FROM int NOT NULL;
+        => AreEqual(1, WithType("CREATE TYPE dbo.Tight FROM int NOT NULL").ExecuteScalar("""
             CREATE TABLE t (c dbo.Tight NULL);
             INSERT INTO t (c) VALUES (NULL);
             SELECT COUNT(*) FROM t WHERE c IS NULL
@@ -68,8 +81,7 @@ public class AliasTypeTests
     /// </summary>
     [TestMethod]
     public void UnqualifiedReference_Works()
-        => AreEqual(42, new Simulation().ExecuteScalar("""
-            CREATE TYPE dbo.Probe FROM int;
+        => AreEqual(42, WithType("CREATE TYPE dbo.Probe FROM int").ExecuteScalar("""
             CREATE TABLE t (c Probe);
             INSERT INTO t (c) VALUES (42);
             SELECT c FROM t
@@ -77,8 +89,7 @@ public class AliasTypeTests
 
     [TestMethod]
     public void QualifiedReference_Works()
-        => AreEqual(42, new Simulation().ExecuteScalar("""
-            CREATE TYPE dbo.Probe FROM int;
+        => AreEqual(42, WithType("CREATE TYPE dbo.Probe FROM int").ExecuteScalar("""
             CREATE TABLE t (c [dbo].[Probe]);
             INSERT INTO t (c) VALUES (42);
             SELECT c FROM t
@@ -89,8 +100,7 @@ public class AliasTypeTests
     {
         // Probe-confirmed verbatim: Msg 2716 St 3 with the alias's fully-
         // qualified name in the message.
-        var ex = new Simulation().AssertSqlError("""
-            CREATE TYPE dbo.Name FROM nvarchar(50) NOT NULL;
+        var ex = WithType("CREATE TYPE dbo.Name FROM nvarchar(50) NOT NULL").AssertSqlError("""
             CREATE TABLE t (c dbo.Name(100));
             """, 2716);
         Contains("dbo.Name", ex.Message);
@@ -178,8 +188,7 @@ public class AliasTypeTests
 
     [TestMethod]
     public void Declare_AliasTypedVariable_Works()
-        => AreEqual(42, new Simulation().ExecuteScalar("""
-            CREATE TYPE dbo.Probe FROM int;
+        => AreEqual(42, WithType("CREATE TYPE dbo.Probe FROM int").ExecuteScalar("""
             DECLARE @v dbo.Probe;
             SET @v = 42;
             SELECT @v
@@ -190,14 +199,15 @@ public class AliasTypeTests
     {
         // Smoke test for the AW alias-type set — all six should be declarable
         // and usable as column types end-to-end.
-        var sim = new Simulation();
-        _ = sim.ExecuteNonQuery("""
+        var sim = WithType("""
             CREATE TYPE dbo.AccountNumber FROM nvarchar(15) NOT NULL;
             CREATE TYPE dbo.Flag FROM bit NOT NULL;
             CREATE TYPE dbo.Name FROM nvarchar(50) NOT NULL;
             CREATE TYPE dbo.NameStyle FROM bit NOT NULL;
             CREATE TYPE dbo.OrderNumber FROM nvarchar(25) NOT NULL;
             CREATE TYPE dbo.Phone FROM nvarchar(25);
+            """);
+        _ = sim.ExecuteNonQuery("""
             CREATE TABLE dbo.Customer (
                 AccountNumber [dbo].[AccountNumber],
                 Title [dbo].[Name],
@@ -220,8 +230,8 @@ public class AliasTypeTests
         _ = sim.ExecuteNonQuery("""
             CREATE SCHEMA HR;
             """);
+        _ = sim.ExecuteNonQuery("CREATE TYPE HR.EmployeeId FROM int NOT NULL");
         _ = sim.ExecuteNonQuery("""
-            CREATE TYPE HR.EmployeeId FROM int NOT NULL;
             CREATE TABLE HR.Employee (Id HR.EmployeeId);
             INSERT INTO HR.Employee (Id) VALUES (1);
             """);

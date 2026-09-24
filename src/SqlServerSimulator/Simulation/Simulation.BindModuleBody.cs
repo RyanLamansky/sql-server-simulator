@@ -107,9 +107,6 @@ partial class Simulation
 
         var bindErrors = new List<SimulatedSqlException>();
         var bindBatch = buildBindBatch(bodyCommand);
-        bindBatch.SkipModeFlag = true;
-        bindBatch.CreateTimeBinding = true;
-        bindBatch.CreateTimeBindErrors = bindErrors;
         bindBatch.FunctionBodyShape = shape;
         bindBatch.LineOffset = bodyLineOffset;
         bindBatch.ErrorProcedureName = moduleName;
@@ -117,51 +114,21 @@ partial class Simulation
         // static type against the statement freeze; adopt the CREATE's own so
         // the bind reads a live instant rather than year 1.
         bindBatch.AdoptStatementFreezeFrom(outerContext.Batch);
+        // A user-defined function's body is one of the constructs real names in
+        // Msg 11719, and it refuses the CREATE (probe-confirmed, attributed to
+        // the function). A stored procedure's body is not — real runs
+        // `CREATE PROCEDURE p AS SELECT NEXT VALUE FOR s` and the proc draws a
+        // value per call.
+        if (rejectsNextValueFor)
+            _ = bindBatch.Parser.EnterNextValueForScope(NextValueForScope.Nested);
 
-        // Nesting counts while the bind walks the body so a body that calls
-        // back into module parsing can't recurse without bound.
-        connection.NestingLevel++;
-        try
-        {
-            var parser = bindBatch.Parser;
-            // A user-defined function's body is one of the constructs real
-            // names in Msg 11719, and it refuses the CREATE (probe-confirmed,
-            // attributed to the function). A stored procedure's body is not —
-            // real runs `CREATE PROCEDURE p AS SELECT NEXT VALUE FOR s` and the
-            // proc draws a value per call.
-            if (rejectsNextValueFor)
-                _ = parser.EnterNextValueForScope(NextValueForScope.Nested);
-            parser.MoveNextOptional();
-            foreach (var _ in DispatchStatementsUntil(bindBatch, endKeyword: null))
-            {
-                // Skip mode yields no outcomes; the enumeration exists only to
-                // drive the parse.
-            }
+        var walkedToEnd = this.BindWithoutRunning(bindBatch, bindErrors);
 
-            // Only a walk that reached the end of the body saw the statement
-            // the last-statement rule is about; a deferral abandoned partway
-            // (BatchAborted) leaves that rule unchecked.
-            if (shape is { } walked)
-                walked.WalkCompleted = !bindBatch.BatchAborted;
-        }
-        catch (NotSupportedException)
-        {
-            // An unmodeled feature in the body is a simulator gap, not real's
-            // binder speaking. Keep the module; the gap surfaces at invocation.
-        }
-        catch (SimulatedSqlException) when (bindErrors.Count > 0 && !bindBatch.BindResumedCleanly)
-        {
-            // A severity-15 error raised after a binder error was gathered,
-            // from a position the recovery scan guessed at — it may be a
-            // diagnostic against a fragment rather than against the body, so
-            // report what bound instead. Raised from a clean resume it
-            // propagates, which is real's parse phase preempting the binder's
-            // whole report.
-        }
-        finally
-        {
-            connection.NestingLevel--;
-        }
+        // Only a walk that reached the end of the body saw the statement the
+        // last-statement rule is about; a deferral abandoned partway
+        // (BatchAborted) leaves that rule unchecked.
+        if (shape is { } walked)
+            walked.WalkCompleted = walkedToEnd && !bindBatch.BatchAborted;
 
         // Shape violations queue behind the binder's own errors, so a body
         // carrying both reports every binder error first — real's own ordering.
@@ -180,6 +147,66 @@ partial class Simulation
 
         if (bindErrors.Count > 0)
             throw SimulatedSqlException.Aggregate(bindErrors);
+    }
+
+    /// <summary>
+    /// Walks <paramref name="bindBatch"/>'s text through the dispatch loop in
+    /// skip mode with <see cref="BatchContext.CreateTimeBinding"/> set, so every
+    /// statement parses and resolves its names but nothing runs, gathering
+    /// severity-16 binder errors on <paramref name="bindErrors"/>. A preempting
+    /// parse-phase error propagates. Answers whether the walk reached the end of
+    /// the text without an exception.
+    /// </summary>
+    /// <remarks>
+    /// A <see cref="NotSupportedException"/> names a feature the simulator hasn't
+    /// built rather than something real's binder rejects, so it ends the walk
+    /// quietly and the gap surfaces when the statement runs.
+    /// </remarks>
+    private bool BindWithoutRunning(BatchContext bindBatch, List<SimulatedSqlException> bindErrors)
+    {
+        bindBatch.SkipModeFlag = true;
+        bindBatch.CreateTimeBinding = true;
+        bindBatch.CreateTimeBindErrors = bindErrors;
+
+        // Nesting counts while the bind walks so a text that calls back into
+        // module parsing can't recurse without bound.
+        var connection = bindBatch.Connection;
+        connection.NestingLevel++;
+        try
+        {
+            bindBatch.Parser.MoveNextOptional();
+            foreach (var _ in DispatchStatementsUntil(bindBatch, endKeyword: null))
+            {
+                // Skip mode yields no outcomes; the enumeration exists only to
+                // drive the parse.
+            }
+            return true;
+        }
+        catch (NotSupportedException)
+        {
+            return false;
+        }
+        catch (SimulatedSqlException) when (bindBatch.BatchAborted)
+        {
+            // The walk was abandoned mid-statement (a deferral, or an error
+            // that ends the report), and an enclosing block's parser is
+            // reporting the unfinished statement it was left on.
+            return false;
+        }
+        catch (SimulatedSqlException) when (bindErrors.Count > 0 && !bindBatch.BindResumedCleanly)
+        {
+            // A severity-15 error raised after a binder error was gathered,
+            // from a position the recovery scan guessed at — it may be a
+            // diagnostic against a fragment rather than against the text, so
+            // report what bound instead. Raised from a clean resume it
+            // propagates, which is real's parse phase preempting the binder's
+            // whole report.
+            return false;
+        }
+        finally
+        {
+            connection.NestingLevel--;
+        }
     }
 
     /// <summary>

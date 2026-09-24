@@ -51,12 +51,14 @@ public sealed class TokenMemoTests
         using (connection)
         {
             const string sql = "insert t values (4, 40);";
-            var hitsBefore = sim.TokenMemo.Hits;
+            var missesBefore = sim.TokenMemo.Misses;
             _ = Run(connection, sql);
-            AreEqual(hitsBefore, sim.TokenMemo.Hits);
+            AreEqual(missesBefore + 1, sim.TokenMemo.Misses);
 
             _ = Run(connection, "delete t where id = 4;");
+            var hitsBefore = sim.TokenMemo.Hits;
             _ = Run(connection, sql);
+            AreEqual(missesBefore + 2, sim.TokenMemo.Misses);
             AreEqual(hitsBefore + 1, sim.TokenMemo.Hits);
         }
     }

@@ -716,10 +716,9 @@ A `CAST` does **not** resolve a conflict — the cast result inherits the source
 - **Msg 456 names the source type as its destination too.**
   The seam that raises it carries the value's type, not the target's, so a *cross-family* assignment (`insert <nvarchar col> select concat(<varchar pair>)`) reads `varchar value to varchar` where real reads `varchar value to nvarchar`.
   Number, State, the collation pair and the producing operator all match; the same-family assignment — much the more common one — is verbatim.
-- **A bind error is catchable here and isn't on real.**
-  Real compiles a batch as a unit, so Msg 468 / 457 / 8116 / 207 from a predicate are uncatchable bind-time failures — probe-confirmed that a `TRY` / `CATCH` around one never reaches the CATCH and the batch dies.
-  The simulator's dispatch loop compiles each statement as it reaches it, so the error is an ordinary catchable one.
-  Shared with every other compile-time error the simulator raises rather than specific to collation; see [`errors.md`](errors.md).
+- **A bind error in a statement over a table the batch creates is catchable here and isn't on real.**
+  Both engines compile the batch first, so a collation conflict against existing tables is uncatchable in both; a statement whose table didn't exist yet binds only when it runs, where real's error is still uncatchable and the simulator's is an ordinary one.
+  Shared with every other bind error rather than specific to collation; see [`errors.md`](errors.md#bind-errors-in-a-deferred-statement-are-catchable-here-and-arent-on-real).
 - **`text` / `ntext` columns can't be declared with an explicit COLLATE in the simulator.**
   Real SQL Server allows it; the simulator's single-instance modeling collapses all text/ntext to the default, so a `text` column stores CP1252 regardless of the clause.
   The clause is still *validated* — a Unicode-only collation on `text` raises Msg 459 from the column-declaration site (see [Unicode-only collations](#unicode-only-collations--msg-459)) — it just isn't pinned.

@@ -207,6 +207,49 @@ internal sealed class CaseExpression : Expression
             || ArmConversionIsNullable(this.elseBranch, promoted, context);
     }
 
+    // A branch whose condition folds FALSE or UNKNOWN drops out, condition and
+    // all; one that folds TRUE takes every branch after it, the ELSE included.
+    // A simple CASE compares with `=`, so a constant NULL on either side is
+    // UNKNOWN whatever the other holds, and once every branch has dropped out
+    // the CASE is its ELSE and the input is unread too.
+    internal override void AddFoldedAwayOperands(NullabilityContext context, HashSet<ExpressionNode> foldedAway)
+    {
+        var nullInput = this.input is not null && context.TryFold(this.input, out var inputValue) && inputValue.IsNull;
+        var everyBranchDropped = true;
+        for (var i = 0; i < this.thens.Length; i++)
+        {
+            if (nullInput || (this.compareValues is { } values && context.TryFold(values[i], out var compared) && compared.IsNull))
+            {
+                FoldAway(i);
+                continue;
+            }
+            if (!TryFoldWhen(context, i, out var branchTaken))
+            {
+                everyBranchDropped = false;
+                continue;
+            }
+            if (!branchTaken)
+            {
+                FoldAway(i);
+                continue;
+            }
+            for (var j = i + 1; j < this.thens.Length; j++)
+                FoldAway(j);
+            if (this.elseBranch is not null)
+                _ = foldedAway.Add(this.elseBranch);
+            return;
+        }
+
+        if (everyBranchDropped && this.input is not null)
+            _ = foldedAway.Add(this.input);
+
+        void FoldAway(int branch)
+        {
+            _ = foldedAway.Add(this.searchedWhens is { } whens ? whens[branch] : this.compareValues![branch]);
+            _ = foldedAway.Add(this.thens[branch]);
+        }
+    }
+
     /// <summary>
     /// Folds branch <paramref name="index"/>'s condition when real would have:
     /// a searched form's whole predicate, or a simple form's implicit

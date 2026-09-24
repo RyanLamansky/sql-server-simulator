@@ -577,7 +577,9 @@ partial class Simulation
     /// optimistic-conflict chain (Msg 16947 + 16934) when an OPTIMISTIC cursor's
     /// current row was modified out-of-band. Returns the validated cursor and
     /// the identity slot whose address in <see cref="Cursor.CurrentRids"/>
-    /// identifies the row to mutate.
+    /// identifies the row to mutate, or <see langword="null"/> in skip mode:
+    /// the cursor is looked up when the statement runs, so compiling a batch
+    /// that declares it doesn't find it missing.
     /// </summary>
     /// <remarks>
     /// The target is matched by the reference <em>as written</em>:
@@ -590,7 +592,7 @@ partial class Simulation
     /// of a view-over-view — while a derived table or CTE is transparent and
     /// the statement must name the base table.
     /// </remarks>
-    internal static PositionedCursorTarget ParseWhereCurrentOf(
+    internal static PositionedCursorTarget? ParseWhereCurrentOf(
         ParserContext context,
         HeapTable table,
         IReadOnlyList<string>? assignedColumns = null,
@@ -603,6 +605,8 @@ partial class Simulation
         var reference = ReadCursorReference(context);
 
         var batch = context.Batch;
+        if (batch.IsSkipping)
+            return null;
         var cursor = ResolveCursor(batch, reference);
         if (cursor.ReadOnly)
             throw SimulatedSqlException.CursorIsReadOnly();

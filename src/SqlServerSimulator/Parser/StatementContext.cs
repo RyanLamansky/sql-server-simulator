@@ -160,6 +160,13 @@ internal sealed class StatementContext
     public bool WritesRows;
 
     /// <summary>
+    /// Set in skip mode when a FROM source names an object that doesn't exist,
+    /// so the statement parsed over a placeholder. Real binds none of such a
+    /// statement until it runs, so a binder error it raises defers with it.
+    /// </summary>
+    public bool BindsDeferredSource;
+
+    /// <summary>
     /// 0-based character offset within the batch text where this statement's
     /// leading token starts (taken from <see cref="Token.StartIndex"/> of the
     /// leading token at dispatch time). The <c>CREATE</c> / <c>ALTER</c>

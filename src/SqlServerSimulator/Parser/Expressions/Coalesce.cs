@@ -142,6 +142,21 @@ internal sealed class Coalesce : Expression
         return this.arguments[^1].ResultIsNullable(context) || ArmConversionIsNullable(this.arguments[^1], promoted, context);
     }
 
+    // The desugared CASE's first constant non-NULL test is TRUE, so every
+    // argument behind that one is unreachable — whatever precedes it:
+    // `COALESCE(b, 5, a)` never reads `a`.
+    internal override void AddFoldedAwayOperands(NullabilityContext context, HashSet<ExpressionNode> foldedAway)
+    {
+        for (var i = 0; i < this.arguments.Length - 1; i++)
+        {
+            if (!context.TryFold(this.arguments[i], out var folded) || folded.IsNull)
+                continue;
+            for (var j = i + 1; j < this.arguments.Length; j++)
+                _ = foldedAway.Add(this.arguments[j]);
+            return;
+        }
+    }
+
     internal override string DebugDisplay() => $"COALESCE({string.Join(", ", this.arguments.Select(a => a.DebugDisplay()))})";
 
     internal override void Describe(NodeShape shape) => shape.Children(this.arguments);

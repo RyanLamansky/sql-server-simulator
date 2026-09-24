@@ -302,6 +302,11 @@ partial class Simulation
             where = Selection.ParseAndBindPredicate(context, Selection.ColumnTypeResolverFor(sources));
         }
 
+        // Skip mode has bound everything it needs; enumerating the join would
+        // run its sources, a NEXT VALUE FOR among them.
+        if (context.Batch.IsSkipping)
+            return new SimulatedNonQuery(0);
+
         sources = Selection.PrepareMutationJoinSources(sources, joins, where, targetIndex, context.Batch);
 
         var targetAddresses = new Dictionary<byte[], (int Page, int Slot)>(ReferenceEqualityComparer.Instance);

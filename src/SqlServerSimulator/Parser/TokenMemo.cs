@@ -38,6 +38,14 @@ internal sealed class TokenMemo
 
     private readonly ConcurrentDictionary<TokenMemoKey, Token[]> entries = new();
 
+    /// <summary>
+    /// How many entries <see cref="entries"/> holds, kept beside it because
+    /// <see cref="ConcurrentDictionary{TKey, TValue}.Count"/> takes every one of
+    /// the dictionary's locks, and a full memo asks on every fresh text.
+    /// Entries are never removed, so counting successful adds is exact.
+    /// </summary>
+    private int count;
+
     /// <summary>Test-observable: memo lookups that found a token sequence.</summary>
     public long Hits;
 
@@ -45,7 +53,7 @@ internal sealed class TokenMemo
     public long Misses;
 
     /// <summary>Test-observable: live entry count.</summary>
-    public int Count => this.entries.Count;
+    public int Count => Volatile.Read(ref this.count);
 
     /// <summary>
     /// The stored token sequence for <paramref name="key"/>, or
@@ -70,7 +78,7 @@ internal sealed class TokenMemo
     /// the collecting <see cref="List{T}"/> is allocated so a full memo costs
     /// a lookup and nothing else.
     /// </summary>
-    public bool HasCapacity => this.entries.Count < Capacity;
+    public bool HasCapacity => this.Count < Capacity;
 
     /// <summary>
     /// Stores a completed token sequence. Only ever called with the tokens of
@@ -81,8 +89,8 @@ internal sealed class TokenMemo
     /// </summary>
     public void Publish(in TokenMemoKey key, Token[] tokens)
     {
-        if (this.entries.Count < Capacity)
-            _ = this.entries.TryAdd(key, tokens);
+        if (this.HasCapacity && this.entries.TryAdd(key, tokens))
+            _ = Interlocked.Increment(ref this.count);
     }
 }
 

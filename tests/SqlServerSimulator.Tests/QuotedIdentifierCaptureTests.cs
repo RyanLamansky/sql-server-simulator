@@ -226,7 +226,7 @@ public sealed class QuotedIdentifierCaptureTests
             """);
         simulation.AssertSqlError("""
             set quoted_identifier off;
-            merge t as d using (select 1 as a) s on d.a = s.a when not matched then insert (a) values (s.a)
+            merge t as d using (select 1 as a) s on d.a = s.a when not matched then insert (a) values (s.a);
             """, 1934, Msg1934("MERGE"));
     }
 

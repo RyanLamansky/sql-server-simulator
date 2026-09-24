@@ -443,6 +443,14 @@ partial class Simulation
         List<SimulatedStatementOutcome> outcomes;
         try
         {
+            // Dynamic SQL is a batch of its own and compiles as one; an error
+            // compiling it is the EXEC's own, and the caller carries on.
+            if (this.CompileBatch(CompileContextFor(innerBatch, dynCommand), key: null) is { } compileError)
+            {
+                compileError.EndedCalledBatch = true;
+                throw compileError;
+            }
+
             var parser = innerBatch.Parser;
             parser.MoveNextOptional();
             outcomes = [.. DispatchStatementsUntil(innerBatch, endKeyword: null)];

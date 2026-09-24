@@ -69,6 +69,14 @@ partial class Simulation
     {
         if (!batch.TryResolveAliasType(qualifiedTypeName, out var alias))
         {
+            // A built-in type's only qualifier is sys; real names any other
+            // missing qualified type as written (probed 2026-09-24 against
+            // SQL Server 2025).
+            if (qualifiedTypeName.Count > 1 && columnName is not null
+                && !string.Equals(qualifiedTypeName.ImmediateQualifier, "sys", StringComparison.OrdinalIgnoreCase))
+            {
+                throw SimulatedSqlException.CannotFindDataType(qualifiedTypeName.ToString(), index);
+            }
             var (resolved, maxLength) = SqlType.GetByName(leafToken, declaredMaxLength, declaredScale, index, columnName);
             return (resolved, maxLength, null);
         }

@@ -614,6 +614,15 @@ The walk carries the covering predicate down the tree (`ColumnReferenceVisitor.C
 A node's identity is its `ShapeKey`: the tree's node kinds, their own state and their children, with each column keyed by the source column it resolves to.
 The walk reaches every expression kind (each describes its children through `ExpressionNode.Describe`), so a column inside a `CASE` arm, `COALESCE` or any scalar's argument is checked like any other (`SELECT COALESCE(a, 0) … GROUP BY b` is Msg 8120, probed 2026-09-23); it stops only at an aggregate, a window function and a subquery.
 
+In a **grouped** query — a `GROUP BY` (`GROUP BY ()` included) or a `HAVING` — real runs the check over the tree it folded, so a `CASE`-family operand a constant decides away is never checked (`Expression.AddFoldedAwayOperands`, probed 2026-09-24):
+- `COALESCE` drops every argument after its first constant non-NULL one, wherever that sits (`COALESCE(a, 5, b) … GROUP BY a` runs), while a `NULL` or a raising constant (`1 / 0`) decides nothing;
+- `CASE` and `IIF` drop a branch whose condition folds FALSE or UNKNOWN and every branch after one that folds TRUE; a simple `CASE` comparing a constant NULL on either side drops the branch, and once every branch is gone the input goes unchecked too;
+- `NULLIF` over a constant NULL drops its second argument.
+
+A bare **scalar aggregate** — aggregates with neither clause — folds nothing first: `SELECT COALESCE(5, b), COUNT(*) FROM t` is Msg 8120.
+
+**Divergence:** in a scalar aggregate real's answer can depend on select-list order — `SELECT COUNT(*), NULLIF(CAST(NULL AS int), b)` runs where `SELECT NULLIF(CAST(NULL AS int), b), COUNT(*)` is Msg 8120 (probed 2026-09-24); the simulator raises for both.
+
 The message names the object the FROM clause **wrote**, not the alias: `SELECT a, b FROM t AS x GROUP BY a` reports `'t.b'`, a self-join reports the table twice, a schema-qualified source keeps its schema (`'dbo.t.b'`), a view is named like a table (`FROM dbo.v AS x` reports `'dbo.v.b'`), and a source with no object of its own falls back to its alias (a derived table `'z.b'`, a table variable `'@t.b'`) — all probed 2026-08-05, the view and CTE rows 2026-08-08.
 A **CTE** sits between the two: it has a name of its own and reports it however the reference aliased it (`FROM c AS q` reports `'c.b'`).
 The same `FromSource.WrittenObjectName` answers the receiver name an XQuery diagnostic is bracketed with, probed independently and agreeing on every source kind — see [`xml.md`](xml.md#the-receiver-names-the-diagnostic).

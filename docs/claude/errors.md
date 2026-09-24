@@ -58,15 +58,14 @@ Probed through SqlClient 7 against SQL Server 2025 (2026-09-23):
 - **Msg 282** (`The 'p' procedure attempted to return a status of NULL, which is not allowed. A status of 0 will be returned instead.`) was seen once from real under the edge-probe harness for `RETURN NULL`, and isn't sent here; four direct SqlClient probes of the same shape got no message, so the condition that sends it isn't known yet.
 - **Msg 8153 over a constant `VALUES` source grouped into single-row groups** isn't sent by real (`SELECT x, SUM(y) FROM (VALUES (1, NULL), (2, 3)) v(x, y) GROUP BY x`), which evaluates those groups while compiling; the same data in a table warns on both.
 
-## Bind errors are catchable here and aren't on real
+## Bind errors in a deferred statement are catchable here and aren't on real
 
 Real compiles a whole batch before running any of it, so an error the binder raises kills the batch outright — a `TRY` / `CATCH` wrapping the failing statement never reaches the CATCH.
 Probe-confirmed for the collation-conflict pair (**Msg 468** / **457**) and for the legacy-LOB argument gate (**Msg 8116**), each raised over an empty rowset inside a `BEGIN TRY`: the batch dies with the error and the CATCH block's `PRINT` never runs.
+The simulator compiles the batch first too ([`control-flow.md`](control-flow.md#batch-compilation)), so those match.
 
-The simulator's dispatch loop compiles each statement as it reaches it, so the same error arrives mid-batch and is an ordinary catchable one.
-That divergence is structural (per-statement rather than per-batch compilation) and applies to every compile-time error the simulator raises, not just those three — closing it means a whole-batch compile pass ahead of execution.
-Coverage locking in the current behavior: `PredicateCompileTimeBindTests.BindError_IsCatchableHereButNotOnReal`.
-Statement *ordering* is unaffected — the error still precedes any row the statement would have produced.
+A statement naming an object that doesn't exist when the batch compiles binds only when it runs, on real and here alike, and there the two part: real's error from that late bind is still uncatchable in its own scope and ends the batch, while here it is an ordinary run-time error a `TRY` catches (`BEGIN TRY SELECT * FROM nope END TRY …` reaches its CATCH here).
+Coverage locking the compiled case: `PredicateCompileTimeBindTests.BindError_IsNotCatchable`.
 
 ## Capture design
 

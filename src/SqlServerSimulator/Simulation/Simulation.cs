@@ -828,6 +828,13 @@ public sealed partial class Simulation
     /// </summary>
     private readonly ConcurrentDictionary<PlanCacheKey, PlanCacheEntry> planCache = new();
 
+    /// <summary>
+    /// How many keys <see cref="planCache"/> holds, counted on add rather than
+    /// read from the dictionary, whose <c>Count</c> takes all its locks. Keys
+    /// are never removed, so the count is exact.
+    /// </summary>
+    private int planCacheCount;
+
     private const int PlanCacheCapacity = 1024;
 
     /// <summary>
@@ -852,7 +859,7 @@ public sealed partial class Simulation
     internal long PlanCacheMisses;
 
     /// <summary>Test-observable: live count of entries in the plan cache.</summary>
-    internal int PlanCacheCount => this.planCache.Count;
+    internal int PlanCacheCount => Volatile.Read(ref this.planCacheCount);
 
     /// <summary>Cache key for <see cref="planCache"/>. The schema-version
     /// is intentionally NOT part of the key — it sits on the entry so a stale
@@ -1114,6 +1121,15 @@ public sealed partial class Simulation
         var enteredOptions = new SimulatedDbConnection.SessionOptionScope(batch.Connection);
         try
         {
+            // Nothing runs when the batch doesn't compile; the error is the
+            // batch's whole response, raised at ExecuteReader like real's.
+            if (this.CompileBatch(CompileContextFor(batch, command), cacheKey) is { } compileError)
+            {
+                batch.Connection.LastErrorNumber = compileError.Number;
+                yield return new SimulatedErrorOutcome(compileError, rowReturning: false);
+                yield break;
+            }
+
             var context = batch.Parser;
             context.MoveNextOptional();
             foreach (var outcome in DispatchStatementsUntil(batch, endKeyword: null))
@@ -1180,8 +1196,11 @@ public sealed partial class Simulation
         // entry under this key, the indexer overwrites without growing the
         // dictionary. The capacity cap therefore only gates fresh keys, not
         // re-cached versions of an already-tracked one.
-        if (this.planCache.ContainsKey(key) || this.planCache.Count < PlanCacheCapacity)
-            this.planCache[key] = new PlanCacheEntry([.. plans], batch.PlanCacheSchemaVersion);
+        var entry = new PlanCacheEntry([.. plans], batch.PlanCacheSchemaVersion);
+        if (this.planCache.ContainsKey(key))
+            this.planCache[key] = entry;
+        else if (this.PlanCacheCount < PlanCacheCapacity && this.planCache.TryAdd(key, entry))
+            _ = Interlocked.Increment(ref this.planCacheCount);
     }
 
     /// <summary>
@@ -1729,6 +1748,7 @@ public sealed partial class Simulation
         batch.CurrentStatement.ReportedNoiseWords = false;
         batch.CurrentStatement.NullEliminated = false;
         batch.CurrentStatement.WritesRows = false;
+        batch.CurrentStatement.BindsDeferredSource = false;
         batch.CurrentStatement.PendingDdlEvents = null;
         batch.CurrentStatement.DdlTriggerCreatedThisStatement = null;
         // Classify the statement as row-returning from its leading token so a
@@ -1863,9 +1883,11 @@ public sealed partial class Simulation
                 // referenced something absent — drop the statement instead of
                 // surfacing the error. Checked ahead of the TRY-frame path: a
                 // skipped BEGIN TRY body must not activate its CATCH. Only
-                // name resolution defers — syntax / structural errors carry
-                // other numbers and still propagate.
-                if (batch.IsSkipping && IsDeferrableNameResolutionError(ex))
+                // name resolution defers, along with any binder error in a
+                // statement that parsed over a missing FROM source — syntax /
+                // structural errors carry other numbers and still propagate.
+                if (batch.IsSkipping
+                    && (IsDeferrableNameResolutionError(ex) || (IsBinderError(ex) && batch.CurrentStatement.BindsDeferredSource)))
                 {
                     deferredNameError = true;
                     // CREATE-time module binding stops at the first deferral.
@@ -1881,7 +1903,7 @@ public sealed partial class Simulation
                     if (batch.CreateTimeBinding)
                         batch.BatchAborted = true;
                 }
-                else if (batch.CreateTimeBindErrors is { } bindErrors && ex.Class == 16)
+                else if (batch.CreateTimeBindErrors is { } bindErrors && IsBinderError(ex))
                 {
                     // A module body reports every binder error it contains, so
                     // this one is gathered and the bind resumes at the next
@@ -1906,7 +1928,7 @@ public sealed partial class Simulation
                 {
                     caught = ex;
                 }
-                else if (batch.ContinueOnError && (IsBatchAbortingNameResolution(ex) || ex.TerminatesBatch || ex.XactAbortPromoted))
+                else if (batch.ContinueOnError && ((IsBatchAbortingNameResolution(ex) && !ex.EndedCalledBatch) || ex.TerminatesBatch || ex.XactAbortPromoted))
                 {
                     // Batch-aborting error: a bind-class name-resolution
                     // failure (missing object / column / ambiguous / could-not-
@@ -1930,6 +1952,10 @@ public sealed partial class Simulation
                 }
                 else
                 {
+                    // A procedure's or dynamic SQL's batch is as far as a
+                    // batch-aborting name-resolution error reaches.
+                    if (batch.ProcFrame is not null && IsBatchAbortingNameResolution(ex))
+                        ex.EndedCalledBatch = true;
                     throw;
                 }
             }
@@ -2176,17 +2202,10 @@ public sealed partial class Simulation
     /// (Msg 1205, class 13) is the one in-range exception — it aborts the batch
     /// — so it is excluded. Consulted on every top-level batch
     /// (<see cref="BatchContext.ContinueOnError"/>).
+    /// A syntax or bind error rarely reaches this: the batch compiles before it
+    /// runs (<see cref="CompileBatch"/>), so only a statement that compile
+    /// deferred raises one mid-batch.
     /// </summary>
-    /// <remarks>
-    /// Known divergence: a genuine syntax error (e.g. Msg 102, class 15)
-    /// occurring mid-batch continues over the wire rather than failing the
-    /// whole batch as real SQL Server does at compile time. The simulator
-    /// interleaves parse and execution (it never modeled a compile-then-run
-    /// split), and real tooling such as SMO never sends syntactically invalid
-    /// batches — the batches that rely on continuation (DROP #tmp cleanup,
-    /// etc.) are all runtime errors. Distinguishing parse-origin from
-    /// runtime-origin errors is out of scope.
-    /// </remarks>
     private static bool IsStatementTerminating(SimulatedSqlException ex)
         => ex.Class is >= 11 and <= 16 && ex.Number != 1205;
 
@@ -2267,6 +2286,16 @@ public sealed partial class Simulation
     }
 
     /// <summary>
+    /// True for an error real's binder raises and reports alongside the rest of
+    /// a batch's binder errors: severity 16, and the severity-15 Msg 1087, which
+    /// real gathers with them rather than letting it preempt the report the way
+    /// a syntax error or an undeclared scalar variable does (probed 2026-09-24
+    /// against SQL Server 2025).
+    /// </summary>
+    private static bool IsBinderError(SimulatedSqlException ex)
+        => ex.Class == 16 || ex.Number == 1087;
+
+    /// <summary>
     /// True for the bind-class name-resolution failures that abort the whole
     /// batch on real SQL Server rather than merely terminating their statement.
     /// Probe-confirmed against SQL Server 2025 (2026-07-16): with a
@@ -2281,11 +2310,9 @@ public sealed partial class Simulation
     /// on every top-level batch (<see cref="BatchContext.ContinueOnError"/>);
     /// both front doors surface the abort (the wire stops writing tokens, the
     /// in-process reader throws the emitted error).
-    /// Divergence: real fails Msg 207 / 209 / 4104 at compile time so even the
-    /// statements *before* the failure don't run, whereas the simulator
-    /// interleaves parse and execution and has already streamed them — the same
-    /// compile-vs-runtime divergence <see cref="IsStatementTerminating"/>
-    /// documents. The abort-the-rest behavior matches either way.
+    /// Against objects that exist when the batch compiles, these fail the
+    /// compile (<see cref="CompileBatch"/>) and nothing runs; what reaches
+    /// here is a statement the compile deferred.
     /// </summary>
     private static bool IsBatchAbortingNameResolution(SimulatedSqlException ex)
         => ex.Number is 195 or 207 or 208 or 209 or 4104 or 4121;

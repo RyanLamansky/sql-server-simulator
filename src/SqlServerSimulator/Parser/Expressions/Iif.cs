@@ -100,6 +100,12 @@ internal sealed class Iif : Expression
             || ArmConversionIsNullable(this.falseValue, promoted, context);
     }
 
+    internal override void AddFoldedAwayOperands(NullabilityContext context, HashSet<ExpressionNode> foldedAway)
+    {
+        if (context.TryFoldCondition(this.condition, out var branchTaken))
+            _ = foldedAway.Add(branchTaken ? this.falseValue : this.trueValue);
+    }
+
     internal override bool ResultReportsNumeric =>
         this.trueValue.ResultReportsNumeric || this.falseValue.ResultReportsNumeric;
 

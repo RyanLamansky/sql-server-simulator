@@ -216,9 +216,10 @@ internal sealed class BatchContext
     public bool SkipModeFlag;
 
     /// <summary>
-    /// True on the throwaway batch that binds a module body at
-    /// <c>CREATE</c> / <c>ALTER</c> time (see
-    /// <c>Simulation.BindModuleBodyAtCreate</c>). The batch also runs with
+    /// True on the throwaway batch that binds a text without running it: a
+    /// module body at <c>CREATE</c> / <c>ALTER</c> time
+    /// (<c>Simulation.BindModuleBodyAtCreate</c>), or a batch compiling before
+    /// it runs (<c>Simulation.CompileBatch</c>). The batch also runs with
     /// <see cref="SkipModeFlag"/> set, so every statement parses and resolves
     /// without mutating state; this flag adds the two behaviors that are
     /// specific to binding rather than to skipping:
@@ -235,15 +236,17 @@ internal sealed class BatchContext
     public bool CreateTimeBinding;
 
     /// <summary>
-    /// Binder errors gathered while a module body binds, non-null only on the
-    /// bind batch (<see cref="CreateTimeBinding"/>). Real reports <em>every</em>
+    /// Binder errors gathered while a module body or a batch binds, non-null
+    /// only on the bind batch (<see cref="CreateTimeBinding"/>). Real reports <em>every</em>
     /// binder error a body contains rather than stopping at the first
     /// (probe-confirmed: two statements with a bad column each report two
     /// Msg 207s, and a body <c>TRY</c> / <c>CATCH</c> shields neither — binding
     /// happens before any of it runs), so a statement's error is recorded here
     /// and the walk resumes at the next statement boundary. What lands in the
-    /// list is severity 16: real's parse-phase errors (severity 15) preempt the
-    /// whole report, so they keep propagating on sight.
+    /// list is a binder error (<c>Simulation.IsBinderError</c>, severity 16 and
+    /// Msg 1087): real's parse-phase errors preempt the whole report, so they
+    /// keep propagating on sight. A missing <c>DECLARE</c> type is gathered
+    /// where it is raised, so the variable is declared anyway.
     /// </summary>
     public List<SimulatedSqlException>? CreateTimeBindErrors;
 
@@ -382,6 +385,13 @@ internal sealed class BatchContext
     /// either condition disqualifies a batch identically.
     /// </summary>
     public bool HasSessionScopedReference;
+
+    /// <summary>
+    /// Whether a name in this batch was looked up as a local or global temp
+    /// table, found or not. What it bound to is the session's, so a compile of
+    /// the batch says nothing about the next session's run of the same text.
+    /// </summary>
+    public bool ResolvedTempTable;
 
     /// <summary>Plan-cache key component: the command text this batch was
     /// constructed for. Set by <c>CreateResultSetsForCommand</c> when the
@@ -902,6 +912,11 @@ internal sealed class BatchContext
     /// </remarks>
     public DataLockPlan AcquireDataLockIfApplicable(HeapTable table, Selection.TableHintInfo hints, bool isWrite)
     {
+        // A skipped statement — an un-taken branch, or a batch compiling before
+        // it runs — touches no rows, and a transaction-scoped lock taken for it
+        // would outlive it.
+        if (this.IsSkipping)
+            return DataLockPlan.Bypass;
         if (table.IsTableVariable || IsLocalTempName(table.Name))
             return DataLockPlan.Bypass;
         if (Simulation.SystemHeapTables.Values.Contains(table))
@@ -1982,6 +1997,7 @@ internal sealed class BatchContext
             // connection's TempTables dict, so a cross-session plan-cache
             // replay would project the wrong table.
             this.HasSessionScopedReference = true;
+            this.ResolvedTempTable = true;
             return this.Connection.TempTables.TryGetValue(name.Leaf, out table);
         }
 
@@ -1997,6 +2013,7 @@ internal sealed class BatchContext
             // SchemaVersion-tracked, so the plan-cache treats it as
             // session-scoped and declines.
             this.HasSessionScopedReference = true;
+            this.ResolvedTempTable = true;
             return this.Connection.Simulation.GlobalTempTables.TryGetValue(name.Leaf, out table);
         }
 

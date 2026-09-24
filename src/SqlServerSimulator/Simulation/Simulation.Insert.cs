@@ -398,10 +398,15 @@ partial class Simulation
             // to fire with IDENTITY_INSERT both ON and OFF.
             if (identityListed && valueTuples is not null && TupleColumnIsDefault(valueTuples, destinationColumns, identityColumn))
                 throw SimulatedSqlException.DefaultOrNullNotAllowedForIdentity();
-            if (identityListed && !identityInsertOn)
-                throw SimulatedSqlException.CannotInsertExplicitIdentity(destinationTable.Name);
-            if (!identityListed && identityInsertOn)
-                throw SimulatedSqlException.ExplicitIdentityRequired(destinationTable.Name);
+            // IDENTITY_INSERT is session state the statement reads when it
+            // runs, so a statement compiled without running checks neither.
+            if (!context.Batch.IsSkipping)
+            {
+                if (identityListed && !identityInsertOn)
+                    throw SimulatedSqlException.CannotInsertExplicitIdentity(destinationTable.Name);
+                if (!identityListed && identityInsertOn)
+                    throw SimulatedSqlException.ExplicitIdentityRequired(destinationTable.Name);
+            }
         }
 
         ApplyDmlTopCap(top, sourceRows, context.Batch);

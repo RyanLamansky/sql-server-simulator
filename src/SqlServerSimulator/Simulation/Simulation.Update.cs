@@ -659,6 +659,11 @@ partial class Simulation
             where = Selection.ParseAndBindPredicate(context, tupleTypeResolver);
         }
 
+        // Skip mode has bound everything it needs; enumerating the join would
+        // run its sources, a NEXT VALUE FOR among them.
+        if (context.Batch.IsSkipping)
+            return new SimulatedNonQuery(0);
+
         sources = Selection.PrepareMutationJoinSources(sources, joins, where, targetIndex, context.Batch);
 
         var targetAddresses = new Dictionary<byte[], (int Page, int Slot)>(ReferenceEqualityComparer.Instance);
@@ -716,6 +721,10 @@ partial class Simulation
     /// </summary>
     private static void ApplyDmlTopCap<T>(Selection.DmlTopLimit? top, List<T> rows, BatchContext batch)
     {
+        // The limit is read when the statement runs; a skipped statement's
+        // variables were declared but never assigned.
+        if (batch.IsSkipping)
+            return;
         var cap = top is { } limit ? Selection.ResolveDmlTopCap(limit, rows.Count, batch) : rows.Count;
         // SET ROWCOUNT caps a DML statement's affected rows the same way TOP
         // does, and the two compose as a minimum (probe-confirmed: TOP 5 under

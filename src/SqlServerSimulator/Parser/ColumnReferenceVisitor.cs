@@ -12,7 +12,7 @@ namespace SqlServerSimulator.Parser;
 /// <c>SELECT a</c> against the same clause — so the check has to be able to
 /// stop descending the moment a node matches a grouping expression.
 /// </remarks>
-internal sealed class ColumnReferenceVisitor(Action<MultiPartName> onReference, Func<Expression, bool>? coversSubtree)
+internal sealed class ColumnReferenceVisitor(Action<MultiPartName> onReference, Func<ExpressionNode, bool>? coversSubtree)
 {
     public readonly Action<MultiPartName> OnReference = onReference;
 
@@ -21,5 +21,5 @@ internal sealed class ColumnReferenceVisitor(Action<MultiPartName> onReference, 
     /// the whole subtree unvisited. Null for the plain enumeration, which every
     /// caller but the GROUP BY containment check uses.
     /// </summary>
-    public readonly Func<Expression, bool>? CoversSubtree = coversSubtree;
+    public readonly Func<ExpressionNode, bool>? CoversSubtree = coversSubtree;
 }

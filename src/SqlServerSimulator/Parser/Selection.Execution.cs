@@ -173,8 +173,17 @@ internal sealed partial class Selection
     /// <see cref="ColumnReferenceVisitor.CoversSubtree"/>, so every reference
     /// that reaches <c>Check</c> is one no grouping expression covered.
     /// </para>
+    /// <para>
+    /// In a grouped query — a <c>GROUP BY</c>, <c>GROUP BY ()</c> included, or a
+    /// <c>HAVING</c> — real checks the tree it folded, so
+    /// <paramref name="folds"/> is non-null there and a CASE-family arm the
+    /// fold removes (<see cref="Expression.AddFoldedAwayOperands"/>) goes
+    /// unchecked: <c>SELECT COALESCE(b, 5, a) … GROUP BY b</c> runs. A bare
+    /// scalar aggregate folds nothing first, so <c>SELECT COALESCE(5, a),
+    /// COUNT(*)</c> is Msg 8120 (probed 2026-09-24 against SQL Server 2025).
+    /// </para>
     /// </summary>
-    private static void ValidateGroupByReferences(FromSource[] sources, List<Expression> expressions, List<OrderBySpec> orderBy, string[] outputColumnNames, FromClause fromClause, List<WindowExpression> windows)
+    private static void ValidateGroupByReferences(FromSource[] sources, List<Expression> expressions, List<OrderBySpec> orderBy, string[] outputColumnNames, FromClause fromClause, List<WindowExpression> windows, NullabilityContext? folds)
     {
         var groupedBare = new HashSet<(int Source, int Column)>();
         var groupingKeys = new HashSet<ShapeKey>();
@@ -197,15 +206,28 @@ internal sealed partial class Selection
             }
         }
 
+        // A node's folded-away operands are recorded as the walk reaches the
+        // node, which is before it reaches them.
+        var foldedAway = new HashSet<ExpressionNode>(ReferenceEqualityComparer.Instance);
+
         // GROUPING() / GROUPING_ID() answer their own mismatch (Msg 8161), so
         // their arguments aren't this check's to report.
-        bool coversSubtree(Expression node) => node switch
+        bool coversSubtree(ExpressionNode node)
         {
-            Grouping or GroupingId => true,
-            NullIf { FoldedBeforeGroupingCheck: true } => true,
-            Reference => false,
-            _ => groupingKeys.Count != 0 && groupingKeys.Contains(GroupingKey(sources, node)),
-        };
+            if (foldedAway.Contains(node))
+                return true;
+            if (node is not Expression expression)
+                return false;
+            if (folds is { } context)
+                expression.AddFoldedAwayOperands(context, foldedAway);
+            return expression switch
+            {
+                Grouping or GroupingId => true,
+                NullIf { FoldedBeforeGroupingCheck: true } => true,
+                Reference => false,
+                _ => groupingKeys.Count != 0 && groupingKeys.Contains(GroupingKey(sources, expression)),
+            };
+        }
 
         void Check(MultiPartName name, Func<string, SimulatedSqlException> error)
         {
@@ -1167,7 +1189,12 @@ internal sealed partial class Selection
         // its other columns — and binds this at parse time, before any row is
         // read, so it runs here on the cached plan build.
         if (aggregates.Count > 0 || fromClause.GroupingSets.Count > 0 || fromClause.Having is not null)
-            ValidateGroupByReferences(sources, expressions, orderBy, outputColumnNames, fromClause, windows);
+        {
+            var grouped = fromClause.GroupingSets.Count > 0 || fromClause.Having is not null;
+            ValidateGroupByReferences(
+                sources, expressions, orderBy, outputColumnNames, fromClause, windows,
+                grouped ? new NullabilityContext(parseBatch, static _ => true, ResolveColumnType) : null);
+        }
 
         var offsetExpression = fromClause.OffsetExpression;
         var fetchExpression = fromClause.FetchExpression;

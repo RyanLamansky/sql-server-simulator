@@ -225,6 +225,36 @@ Real allows statement separators in that slot: `IF @o = 1 PRINT 'a'; ELSE PRINT 
 The separators are consumed only when an `ELSE` actually follows, so an IF with none leaves its terminator for the dispatch loop and the next statement still runs.
 An `ELSE IF` chain threads the same rule at every arm.
 
+## Batch compilation
+
+Real compiles a whole batch before running any of it, so an error its compiler raises is the batch's entire response: no statement runs, the ones before the error included, and a `TRY` / `CATCH` in the batch never sees it (probed 2026-09-24 against SQL Server 2025).
+`Simulation.CompileBatch` reproduces that ahead of the dispatch loop, for a top-level batch and for each dynamic-SQL batch (`EXEC('…')` / `sp_executesql`).
+The batch's text walks the dispatch loop once on a throwaway `BatchContext` in skip mode with `CreateTimeBinding` set — the walk a module body takes at `CREATE` ([`programmable.md`](programmable.md)) — and what it raises is yielded as one `SimulatedErrorOutcome` before anything runs, so `ExecuteReader` throws it.
+The report follows real's two phases:
+- Binder errors are gathered across every statement, in order (`IsBinderError`: severity 16, plus the severity-15 Msg 1087, which real gathers too).
+- A parse-phase error — a syntax error, an undeclared variable — preempts the report and comes back alone.
+
+A statement naming an object that doesn't exist when the batch compiles — a table the batch itself creates, a `#temp` a `SELECT … INTO` makes — binds when it runs, so the statements before it have run by then.
+Skip mode's placeholder source is that deferral, and a binder error in a statement over one defers with it (`StatementContext.BindsDeferredSource`).
+Everything else binds against the schema as the batch found it, which is where real's familiar same-batch traps come from: `ALTER TABLE t ADD b …; SELECT b FROM t` is Msg 207 with the column never added, a type created and used in one batch is Msg 2715, a table dropped and re-created with other columns binds its old definition, and `USE` doesn't change the database the rest of the batch compiles in.
+A variable whose `DECLARE` names a missing type is declared anyway, so later references bind rather than raising Msg 137.
+
+The walk runs nothing, so whatever a statement checks against session state or live rows waits for the run: `IDENTITY_INSERT`, a cursor's existence and position, a DML `TOP (@n)`, `NEXT VALUE FOR`, and data locks (`AcquireDataLockIfApplicable` bypasses in skip mode, since a transaction-scoped lock would outlive the statement it was taken for).
+
+A batch that compiled is remembered under its `PlanCacheKey` with the `SchemaVersion` it compiled under (`compiledBatches`), so a repeated text — every EF Core modification batch — skips the walk until DDL bumps the version.
+One that resolved a `#temp` isn't remembered, since what it bound to was the session's.
+The three per-simulation caches keep their own entry counts: `ConcurrentDictionary.Count` takes every lock the dictionary has, and reading it on each fresh text cost more than the walk itself.
+
+An error that ends a procedure's or dynamic SQL's batch — a compile error, or a missing object at run time — reaches no further: in the caller the `EXEC` fails like any statement, the caller's batch goes on, and a `TRY` around the `EXEC` catches it (`SimulatedSqlException.EndedCalledBatch`, probed 2026-09-24).
+
+### Not modeled yet
+
+- **The walk stops at a deferred DML target** (`INSERT INTO <missing>`), since the recovery scan can't tell where that statement ends; real keeps compiling the statements after it, so an error past one surfaces here only when its statement runs.
+- **A deferred statement's bind error at run time** is catchable here, and ends the batch only for the name-resolution set; real's recompile errors can't be caught in their own scope and end the batch whatever their number (`CREATE TABLE t2 (a int); INSERT t2 VALUES (1, 2); PRINT 'after'` never prints on real).
+- **A procedure body compiles only at `CREATE`**; real compiles it again as a whole at its first execution, so a body statement naming a table created after the procedure fails there before the body's first statement runs.
+- **A statement error inside a procedure or dynamic SQL ends that body**, and the messages it had sent are lost; real finishes the body (`PRINT 'p1'; SELECT 1/0; PRINT 'p2'` sends both messages, then the error).
+- **Creating a table twice in one batch**: real reports Msg 2714 while compiling for a `#temp`, and ends the batch at run time for a permanent table; here the first `CREATE` runs and the batch continues.
+
 ## Statement-terminating vs batch-aborting errors (unified continue-on-error)
 
 In SQL Server most errors are **statement-terminating, not batch-terminating**: the failed statement ends but the batch continues to the next one (unless `SET XACT_ABORT ON`, or a batch/connection-aborting severity).
@@ -242,7 +272,7 @@ This path deliberately does **not** touch `InFlightError` / `ErrorSignaled` — 
 
 **Batch-aborting errors** — a path sits *before* the statement-terminating one and stops the whole batch (emit the one error, set `BatchContext.BatchAborted`, `DispatchStatementsUntil` breaks on the flag, **no** cursor-recovery scan).
 Two kinds:
-- **Bind-class name-resolution misses** (`IsBatchAbortingNameResolution`: Msg 208 invalid object, 207 invalid column, 209 ambiguous column, 4104 unbindable multi-part identifier, 4121 unfound column/function, 195 unrecognized function).
+- **Bind-class name-resolution misses** (`IsBatchAbortingNameResolution`: Msg 208 invalid object, 207 invalid column, 209 ambiguous column, 4104 unbindable multi-part identifier, 4121 unfound column/function, 195 unrecognized function), which reach run time from a statement [batch compilation](#batch-compilation) deferred.
   Real SQL Server aborts the remaining batch (probe-confirmed: `SELECT 1; SELECT * FROM missing; SELECT 2` streams `1`, surfaces one Msg 208, never runs `SELECT 2` — contrast Msg 3701 / 8134 / a severity-16 RAISERROR, which continue).
 - **An uncaught `THROW`** (`SimulatedSqlException.TerminatesBatch`, set by the THROW factories).
   Real SQL Server's `THROW` terminates the batch even though it shares class 16 with a *continuing* `RAISERROR` — probe-confirmed (`… RAISERROR('x',16,1); INSERT; THROW 50001,'y',1; INSERT` runs two inserts, aggregates Msg 50000 + 50001, and skips the third).
@@ -265,10 +295,6 @@ Reader `Dispose` drains the batch's remaining statements (side effects persist) 
 See [`tds-endpoint.md`](tds-endpoint.md).
 
 **Known divergences** (accepted):
-- **A genuine syntax / compile error mid-batch continues** rather than failing the whole batch.
-  Real SQL Server fails the batch at compile time (Msg 102 / 156 / 108 / 116, etc.), but the simulator interleaves parse and execution — it never modeled a compile-then-run split — and the classification can't distinguish a parse-origin from a runtime-origin error (both are `SimulatedSqlException`s with a class in 11-16).
-  A consequence for the reader: a compile-error SELECT (`ORDER BY 0`, `TOP` before `DISTINCT`) is `RowReturning`, so it surfaces at `Read`, whereas real SQL Server throws it at `ExecuteReader`.
-  Real tooling never sends invalid batches; the batches that rely on continuation (`DROP #tmp` cleanup) are all runtime errors.
 - **Row materialization**: a SELECT that errors mid-scan (`SELECT 10/id …`) materializes its rows up front, so the error fires before any partial row is yielded — real SQL Server streams the rows preceding the failing one, then throws.
   The positional shape (Read throws, reader survives, tail clean) matches; the pre-error row count does not.
   Continuation is also what `SET XACT_ABORT ON` suspends: under the option a statement-terminating run-time error ends the batch and rolls the transaction back instead of continuing, and caught by a `TRY` frame it leaves the transaction doomed — see [`transactions.md`](transactions.md#set-xact_abort).

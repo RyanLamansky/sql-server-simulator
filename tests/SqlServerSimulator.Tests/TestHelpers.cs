@@ -7,6 +7,18 @@ internal static class TestHelpers
     public static T ExecuteScalar<T>(string commandText) where T : struct => new Simulation().ExecuteScalar<T>(commandText);
 
     /// <summary>
+    /// A simulation that has already run <paramref name="createTypes"/>. Real
+    /// compiles a batch before running any of it, so a type is usable only from
+    /// the batch after the one that creates it.
+    /// </summary>
+    public static Simulation WithType(string createTypes)
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery(createTypes);
+        return simulation;
+    }
+
+    /// <summary>
     /// Verifies that <paramref name="commandText"/> raises a <see cref="SimulatedSqlException"/> whose
     /// SQL Server error number matches <paramref name="errorNumber"/>. Returns the exception so callers can do additional
     /// message assertions (e.g. <c>Assert.StartsWith</c>).

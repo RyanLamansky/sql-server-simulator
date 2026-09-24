@@ -30,7 +30,7 @@ Each of these produced a wrong conclusion before it was understood, and each gen
   Per-(script, class) emit caps make the log a sample; only the summary carries counts.
   Reading the log as a count inflated a single root into "340 findings" once and "100" another time.
 - **State divergence has to taint the rest of a script.**
-  Real compiles a whole batch before running any of it while the simulator dispatches statement by statement, so a multi-statement record that errors on *both* engines can still have applied a different prefix to each.
+  A multi-statement record that errors on *both* engines can still have applied a different prefix to each: they part wherever one raises an error while the batch compiles and the other only when the statement runs.
   Without propagating that, every later mismatch reads as an independent wrong-answer bug — two "wrong `SUM`" findings were exactly this.
 - **Order-insensitive records must compare as sets.**
   The corpus's `rowsort` / `valuesort` modes do not assert order; treating a permutation as a divergence produced ~1,000 false positives.

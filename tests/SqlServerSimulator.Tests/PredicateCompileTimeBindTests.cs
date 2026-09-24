@@ -333,24 +333,20 @@ public sealed class PredicateCompileTimeBindTests
     }
 
     /// <summary>
-    /// <strong>Divergence.</strong> Real compiles a batch as a unit, so both
-    /// families are uncatchable bind-time failures — probe-confirmed that a
-    /// <c>TRY</c> / <c>CATCH</c> around either one never reaches the CATCH and
-    /// the batch dies. The simulator's dispatch loop compiles each statement
-    /// as it reaches it, so the error is an ordinary catchable one. Shared
-    /// with every other compile-time error the simulator raises, not specific
-    /// to these two.
+    /// Real compiles a batch as a unit, so both families are uncatchable
+    /// bind-time failures: a <c>TRY</c> / <c>CATCH</c> around either one never
+    /// reaches the CATCH and the batch dies (probe-confirmed).
     /// </summary>
     [TestMethod]
     [DataRow("select c1.y from c1, c2 where c1.x = c2.x", 468)]
     [DataRow("select len(nt) from lob", 8116)]
-    public void BindError_IsCatchableHereButNotOnReal(string sql, int expectedNumber)
-        => AreEqual(expectedNumber, EmptyFixture().ExecuteScalar<int>($"""
+    public void BindError_IsNotCatchable(string sql, int expectedNumber)
+        => _ = EmptyFixture().AssertSqlError($"""
             begin try
                 {sql};
             end try
             begin catch
                 select error_number();
             end catch
-            """));
+            """, expectedNumber);
 }
