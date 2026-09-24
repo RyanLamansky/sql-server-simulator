@@ -291,4 +291,17 @@ public sealed class OpenJsonTests
             ids.Add(reader.GetInt32(0));
         CollectionAssert.AreEqual(new[] { 1, 3 }, ids);
     }
+
+    [TestMethod]
+    [DataRow("select * from openjson(N'{\"b\":1}', 'strict $.a')", 13608, 3)]
+    [DataRow("select * from openjson(N'{\"a\":[1]}', 'strict $.a[3]')", 13608, 3)]
+    [DataRow("select * from openjson(N'{\"a\":1}', 'strict $.a')", 13611, 1)]
+    [DataRow("select * from openjson(N'{\"a\":null}', 'strict $.a')", 13611, 1)]
+    [DataRow("select * from openjson(N'{\"a\":\"x\"}', 'strict $.a') with (v int '$')", 13611, 2)]
+    public void StrictDocumentPath_RaisesWhereLaxOpensNothing(string query, int number, int state)
+    {
+        AreEqual(state, new Simulation().AssertSqlError(query, number).State);
+        using var reader = new Simulation().ExecuteReader(query.Replace("strict", "lax", StringComparison.Ordinal));
+        IsFalse(reader.Read());
+    }
 }

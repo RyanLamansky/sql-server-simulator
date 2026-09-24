@@ -75,6 +75,7 @@ Without WITH: default schema `(key nvarchar, value nvarchar, type int)` — type
 With WITH: column paths are root-relative — an **array root yields one row per element** (paths relative to the element), an **object root yields a single row** (paths relative to the root).
 Each column extracts via `$.<col-name>` (default) or explicit `'$path'`; primitive collections use `'$'`.
 A NULL document → zero rows; one that isn't JSON text → Msg 13609, State 4 or 3 — see [Msg 13609](#msg-13609--the-document-isnt-json-text).
+A document path that misses, or lands on a value that isn't an object or array (JSON `null` included), opens no rows in lax mode; in strict mode the miss is **Msg 13608 State 3** and the scalar **Msg 13611**, State 1 for the default schema and 2 with `WITH` (probed 2026-09-24 against SQL Server 2025).
 
 `AS JSON` column modifier — accepted only on `nvarchar(max)` (any other declared type raises **Msg 13618** at parse).
 Extracts the matched subtree via the shared `JsonSubtree.Extract` (the same rule backing `JSON_QUERY`): object/array → verbatim source text (whitespace and key order preserved, via `JsonElement.GetRawText`); JSON `null` → SQL NULL in both modes; any other (non-null) scalar → SQL NULL in lax, **Msg 13624** in strict; a missing path → SQL NULL in lax, **Msg 13608 State 6** in strict (the OPENJSON-context state, threaded through `JsonPath.Walk`'s `strictNotFoundState`; JSON_VALUE / JSON_QUERY report State 1 and JSON_MODIFY State 2).

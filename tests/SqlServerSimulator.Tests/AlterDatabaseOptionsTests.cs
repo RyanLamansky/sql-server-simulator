@@ -164,14 +164,42 @@ public class AlterDatabaseOptionsTests
     }
 
     [TestMethod]
-    public void UnknownDatabase_Raises5011()
+    [DataRow("SET READ_COMMITTED_SNAPSHOT ON")]
+    [DataRow("SET RECOVERY SIMPLE")]
+    [DataRow("SET SINGLE_USER")]
+    public void UnknownDatabase_Raises5011ThenMsg5069_AndNothingElse(string tail)
     {
-        // Real raises Msg 5011 (sev 14 state 5) then a trailing Msg 5069; the
-        // simulator surfaces the informative first error alone.
-        var ex = new Simulation().AssertSqlError("ALTER DATABASE nope SET READ_COMMITTED_SNAPSHOT ON", 5011);
+        // The whole statement is read before the refusal, so its SET tail
+        // isn't left behind to run as a statement of its own (probed
+        // 2026-09-24 against SQL Server 2025).
+        var ex = new Simulation().AssertSqlError($"ALTER DATABASE nope {tail}", 5011);
         AreEqual(14, ex.Class);
         AreEqual(5, ex.State);
         AreEqual("User does not have permission to alter database 'nope', the database does not exist, or the database is not in a state that allows access checks.", ex.Errors[0].Message);
+        CollectionAssert.AreEqual(new[] { 5011, 5069 }, ex.Errors.Cast<SimulatedError>().Select(error => error.Number).ToArray());
+    }
+
+    [TestMethod]
+    public void UnknownDatabase_Collate_RaisesMsg911()
+        => new Simulation().AssertSqlError(
+            "ALTER DATABASE nope COLLATE Latin1_General_CS_AS",
+            911,
+            "Database 'nope' does not exist. Make sure that the name is entered correctly.");
+
+    [TestMethod]
+    public void OneSet_TakesACommaSeparatedListAndATerminationClause()
+        => AreEqual("1|SIMPLE|1", new Simulation().ExecuteScalar("""
+            ALTER DATABASE CURRENT SET RECURSIVE_TRIGGERS ON, RECOVERY SIMPLE, TRUSTWORTHY ON WITH ROLLBACK IMMEDIATE;
+            select concat(is_recursive_triggers_on, '|', recovery_model_desc, '|', is_trustworthy_on) from sys.databases where name = db_name()
+            """));
+
+    [TestMethod]
+    public void SnapshotIsolationWithATerminationClause_RaisesMsg5083_AndChangesNothing()
+    {
+        var sim = new Simulation();
+        var ex = sim.AssertSqlError("ALTER DATABASE CURRENT SET RECOVERY SIMPLE, ALLOW_SNAPSHOT_ISOLATION ON WITH NO_WAIT", 5083);
+        CollectionAssert.AreEqual(new[] { 5083, 5069 }, ex.Errors.Cast<SimulatedError>().Select(error => error.Number).ToArray());
+        AreEqual("FULL|0", sim.ExecuteScalar("select concat(recovery_model_desc, '|', snapshot_isolation_state) from sys.databases where name = db_name()"));
     }
 
     // ---- TRUSTWORTHY / DB_CHAINING ----

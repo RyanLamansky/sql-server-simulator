@@ -75,7 +75,7 @@ public sealed class DisabledIndexTests
                 alter index ux on t disable;
                 insert t values (2, 1);
                 alter index ux on t rebuild
-                """, 1505).Message);
+                """, 1505).Errors[0].Message);
 
     [TestMethod]
     public void Rebuild_AfterTheDuplicateIsRemoved_Succeeds()

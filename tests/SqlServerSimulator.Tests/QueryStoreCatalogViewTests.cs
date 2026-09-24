@@ -282,7 +282,8 @@ public sealed class QueryStoreCatalogViewTests
     public void QueryStore_OnMasterOrTempdb_Raises12438(string database, string tail)
     {
         var ex = new Simulation().AssertSqlError($"alter database {database} set query_store {tail}", 12438);
-        AreEqual($"Cannot perform action because Query Store cannot be enabled on system database {database}.", ex.Message);
+        AreEqual($"Cannot perform action because Query Store cannot be enabled on system database {database}.", ex.Errors[0].Message);
+        AreEqual(5069, ex.Errors[1].Number);
     }
 
     /// <summary>A refusal leaves the configuration untouched.</summary>

@@ -104,8 +104,19 @@ internal sealed partial class Selection
             var result = path.Walk(root, scan, out var match);
             if (result is JsonWalkResult.Exhausted && scan.HasError)
                 throw SimulatedSqlException.JsonInvalidText(scan.BadCharacter, scan.BadPosition, searchState);
+            // Lax mode opens nothing where a strict path raises: a miss is
+            // Msg 13608 state 3, and a value that isn't an object or array —
+            // JSON null included — Msg 13611 (probed 2026-09-24 against
+            // SQL Server 2025).
+            var strict = path.Mode == JsonPathMode.Strict;
             if (result is JsonWalkResult.Exhausted or JsonWalkResult.Abandoned)
+            {
+                if (strict)
+                    throw SimulatedSqlException.JsonStrictPathNotFound(state: 3);
                 yield break;
+            }
+            if (strict && match.ValueKind is not (JsonValueKind.Object or JsonValueKind.Array))
+                throw SimulatedSqlException.JsonNotObjectOrArrayForOpenJson(withColumns is null ? (byte)1 : (byte)2);
             root = match;
             targetTruncated = result == JsonWalkResult.Truncated;
         }

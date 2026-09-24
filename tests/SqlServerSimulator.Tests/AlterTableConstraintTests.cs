@@ -386,4 +386,26 @@ public sealed class AlterTableConstraintTests
             insert t (id) values (1);
             select b from t where id = 1
             """));
+
+    [TestMethod]
+    [DataRow("alter table t drop constraint nope", 3728)]
+    [DataRow("alter table p drop constraint pk_p", 3725)]
+    public void RefusedConstraintDrop_IsFollowedByMsg3727(string statement, int number)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (a int); create table p (a int constraint pk_p primary key); create table c (a int references p)");
+        var ex = sim.AssertSqlError(statement, number);
+        CollectionAssert.AreEqual(new[] { number, 3727 }, ex.Errors.Cast<SimulatedError>().Select(error => error.Number).ToArray());
+    }
+
+    [TestMethod]
+    [DataRow("create unique index ux on t (a)")]
+    [DataRow("alter table t add constraint uq_t unique (a)")]
+    public void UniqueIndexOverDuplicates_EndsWithStatementTerminated(string statement)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (a int not null); insert t values (1), (1)");
+        var ex = sim.AssertSqlError(statement, 1505);
+        AreEqual(3621, ex.Errors[^1].Number);
+    }
 }

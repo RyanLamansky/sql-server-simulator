@@ -75,6 +75,15 @@ partial class SimulatedSqlException
         new("Object or array cannot be found in the specified JSON path.", 13624, 16, state) { AbortsAsUnderXactAbort = true };
 
     /// <summary>
+    /// Msg 13611: a <c>strict</c> OPENJSON document path resolved to a value
+    /// that isn't an object or array, JSON <c>null</c> included — state 1 for
+    /// the default schema, 2 with a <c>WITH</c> clause (probed 2026-09-24
+    /// against SQL Server 2025). Lax mode opens no rows instead.
+    /// </summary>
+    internal static SimulatedSqlException JsonNotObjectOrArrayForOpenJson(byte state) =>
+        new("Value referenced by JSON path is not an array or object and cannot be opened with OPENJSON.", 13611, 16, state) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>
     /// Msg 13609: the document argument of JSON_VALUE / JSON_QUERY /
     /// JSON_MODIFY / OPENJSON isn't JSON text, whatever the path's lax or
     /// strict prefix says. <paramref name="character"/> is the character the

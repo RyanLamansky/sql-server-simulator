@@ -69,13 +69,53 @@ partial class Simulation
         // only legal continuations are SET <option> and COLLATE <name>.
         if (afterDatabase is not (Name or ReservedKeyword { Keyword: Keyword.Current }))
             return false;
-        var target = ResolveAlterDatabaseTarget(context, afterDatabase);
-        return context.GetNextRequired() switch
+
+        // A target that can't be altered still has the rest of the statement
+        // read before the refusal, as real parses it before running it: skip
+        // mode walks the tail without applying it, so the error ends the whole
+        // statement rather than leaving a `SET …` tail to be dispatched as a
+        // statement of its own.
+        Database target;
+        SimulatedSqlException? refusal = null;
+        try
         {
-            ReservedKeyword { Keyword: Keyword.Set } => TryParseAlterDatabaseSet(context, target),
-            ReservedKeyword { Keyword: Keyword.Collate } => TryParseAlterDatabaseCollate(context, target),
-            _ => false,
-        };
+            target = ResolveAlterDatabaseTarget(context, afterDatabase);
+        }
+        catch (SimulatedSqlException ex) when (ex.Number == 5011)
+        {
+            refusal = ex;
+            target = context.CurrentDatabase;
+        }
+
+        var batch = context.Batch;
+        var savedSkip = batch.SkipModeFlag;
+        if (refusal is not null)
+            batch.SkipModeFlag = true;
+        bool parsed;
+        try
+        {
+            parsed = context.GetNextRequired() switch
+            {
+                ReservedKeyword { Keyword: Keyword.Set } => TryParseAlterDatabaseSet(context, target),
+                ReservedKeyword { Keyword: Keyword.Collate } when refusal is not null && afterDatabase is Name missing
+                    && !context.Connection.Simulation.Databases.ContainsKey(missing.Value)
+                    => throw SimulatedSqlException.DatabaseDoesNotExist(missing.Value),
+                ReservedKeyword { Keyword: Keyword.Collate } => TryParseAlterDatabaseCollate(context, target),
+                _ => false,
+            };
+        }
+        catch (SimulatedSqlException ex) when (ex.Number is 3906 or 12438)
+        {
+            throw SimulatedSqlException.FollowedByAlterDatabaseFailed(ex);
+        }
+        finally
+        {
+            batch.SkipModeFlag = savedSkip;
+        }
+
+        return parsed && refusal is not null
+            ? throw SimulatedSqlException.FollowedByAlterDatabaseFailed(refusal)
+            : parsed;
     }
 
     /// <summary>
@@ -84,10 +124,9 @@ partial class Simulation
     /// <see cref="Simulation"/> doesn't host raises Msg 5011 (state 5), and a
     /// principal without ALTER on the database it did find raises the same
     /// number at state 9 — probe-confirmed, so a restricted caller can't tell
-    /// the two apart. Real follows the refusal with a terminating Msg 5069
-    /// (<c>ALTER DATABASE statement failed.</c>); the simulator surfaces the
-    /// single 5011. Resolution is suppressed in skip mode, where the statement
-    /// parses but doesn't run.
+    /// the two apart. The caller follows the refusal with Msg 5069 once the
+    /// statement has parsed. Resolution is suppressed in skip mode, where the
+    /// statement parses but doesn't run.
     /// </summary>
     private static Database ResolveAlterDatabaseTarget(ParserContext context, Token afterDatabase)
     {
@@ -112,7 +151,68 @@ partial class Simulation
     /// </summary>
     private static bool TryParseAlterDatabaseSet(ParserContext context, Database target)
     {
+        // Whether the statement may run depends on how it ends — a termination
+        // clause refuses a snapshot-isolation change (Msg 5083, probed
+        // 2026-09-24 against SQL Server 2025) — while each option applies as it
+        // parses, so a skip-mode pass reads the whole statement first.
+        var batch = context.Batch;
+        var start = context.SaveCheckpoint();
+        var savedSkip = batch.SkipModeFlag;
+        batch.SkipModeFlag = true;
+        bool parsed;
+        bool changesSnapshotIsolation;
+        bool terminated;
+        try
+        {
+            parsed = TryParseAlterDatabaseSetList(context, target, out changesSnapshotIsolation, out terminated);
+        }
+        finally
+        {
+            batch.SkipModeFlag = savedSkip;
+        }
+        if (!parsed || batch.IsSkipping)
+            return parsed;
+        if (changesSnapshotIsolation && terminated)
+            throw SimulatedSqlException.FollowedByAlterDatabaseFailed(SimulatedSqlException.TerminationWithVersioningChange());
+
+        context.RestoreCheckpoint(start);
+        return TryParseAlterDatabaseSetList(context, target, out _, out _);
+    }
+
+    /// <summary>
+    /// The options of one <c>SET</c> — a comma-separated list (probed
+    /// 2026-09-24 against SQL Server 2025), each leaving the cursor on its own
+    /// last token — then an optional termination clause, which
+    /// <c>READ_ONLY</c> and its access-mode siblings read themselves.
+    /// </summary>
+    private static bool TryParseAlterDatabaseSetList(ParserContext context, Database target, out bool changesSnapshotIsolation, out bool terminated)
+    {
+        changesSnapshotIsolation = false;
+        while (true)
+        {
+            if (!TryParseAlterDatabaseSetOption(context, target, ref changesSnapshotIsolation))
+            {
+                terminated = false;
+                return false;
+            }
+            var afterOption = context.SaveCheckpoint();
+            if (context.GetNextOptional() is not Operator { Character: ',' })
+            {
+                context.RestoreCheckpoint(afterOption);
+                break;
+            }
+        }
+
+        var beforeTermination = context.SaveCheckpoint();
+        terminated = context.GetNextOptional() is ReservedKeyword { Keyword: Keyword.With };
+        context.RestoreCheckpoint(beforeTermination);
+        return ConsumeTerminationClause(context);
+    }
+
+    private static bool TryParseAlterDatabaseSetOption(ParserContext context, Database target, ref bool changesSnapshotIsolation)
+    {
         context.MoveNextRequired();
+        changesSnapshotIsolation |= context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Allow_Snapshot_Isolation };
         // Load-bearing options keep their dedicated handlers. Routing on
         // ContextualKeyword first means the existing 3 paths are unchanged
         // and the new parse-and-discard surface lives on a parallel dict.
@@ -160,7 +260,7 @@ partial class Simulation
     /// <summary>
     /// Parses <c>ALTER DATABASE name SET { READ_ONLY | READ_WRITE } [WITH &lt;termination&gt;]</c>
     /// — the access-mode shape (a bare state, no <c>=</c>), sharing
-    /// <see cref="ConsumeAccessModeTail"/> with SINGLE_USER / MULTI_USER /
+    /// <see cref="ConsumeTerminationClause"/> with SINGLE_USER / MULTI_USER /
     /// RESTRICTED_USER. Unlike those, this one is load-bearing:
     /// <see cref="Database.IsReadOnly"/> gates every write to the database.
     /// <para><c>master</c> and <c>tempdb</c> pin the option and raise
@@ -170,7 +270,7 @@ partial class Simulation
     /// </summary>
     private static bool TryParseAlterDatabaseSetAccessMode(ParserContext context, Database target, bool readOnly)
     {
-        if (!ConsumeAccessModeTail(context))
+        if (!ConsumeTerminationClause(context))
             return false;
         if (context.Batch.IsSkipping)
             return true;
@@ -234,10 +334,9 @@ partial class Simulation
     /// The probed real-server gates ALLOW_SNAPSHOT_ISOLATION ON behind a
     /// brief stabilization wait and READ_COMMITTED_SNAPSHOT ON behind a
     /// single-connection requirement; the simulator skips both — the flip
-    /// takes effect immediately. <c>WITH (NO_WAIT | ROLLBACK IMMEDIATE | ROLLBACK AFTER n)</c>
-    /// termination options are rejected by real SQL Server on versioning
-    /// state changes (Msg 5083); the simulator falls through and raises
-    /// <see cref="NotSupportedException"/> on the unexpected trailer.
+    /// takes effect immediately. A termination clause after the list is read
+    /// by <see cref="TryParseAlterDatabaseSetList"/>, which refuses it for
+    /// ALLOW_SNAPSHOT_ISOLATION (Msg 5083).
     /// TRUSTWORTHY and DB_CHAINING each refuse a set of system databases —
     /// see <see cref="RejectSystemDatabaseFlag"/>.
     /// </summary>
@@ -373,20 +472,20 @@ partial class Simulation
             context.GetNextRequired() is Name or ReservedKeyword,
         AlterDatabaseOptionKind.IntegerWithUnit => ConsumeIntegerWithUnit(context),
         AlterDatabaseOptionKind.QueryStore => ParseQueryStoreTail(context, target),
-        AlterDatabaseOptionKind.AccessMode => ConsumeAccessModeTail(context),
+        AlterDatabaseOptionKind.AccessMode => ConsumeTerminationClause(context),
         _ => false,
     };
 
     /// <summary>
-    /// Cursor on the access-mode name (SINGLE_USER / MULTI_USER /
-    /// RESTRICTED_USER), which is the whole option value. Consumes an optional
-    /// trailing <c>WITH &lt;termination&gt;</c> clause (ROLLBACK IMMEDIATE /
-    /// ROLLBACK AFTER n [SECONDS] / NO_WAIT), discarding every token up to the
-    /// statement boundary and leaving the cursor on the clause's last token
-    /// (or on the access-mode name when no WITH follows), per the
+    /// Cursor on an option's last token — an access-mode name (SINGLE_USER /
+    /// MULTI_USER / RESTRICTED_USER / READ_ONLY / READ_WRITE), or the end of a
+    /// <c>SET</c> list. Consumes an optional trailing
+    /// <c>WITH &lt;termination&gt;</c> clause (ROLLBACK IMMEDIATE /
+    /// ROLLBACK AFTER n [SECONDS] / NO_WAIT), leaving the cursor on the
+    /// clause's last token (or where it was when no WITH follows), per the
     /// leave-on-last-token convention the other tail consumers use.
     /// </summary>
-    private static bool ConsumeAccessModeTail(ParserContext context)
+    private static bool ConsumeTerminationClause(ParserContext context)
     {
         var beforeWith = context.SaveCheckpoint();
         if (context.GetNextOptional() is not ReservedKeyword { Keyword: Keyword.With })

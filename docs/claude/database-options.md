@@ -9,7 +9,9 @@ Real ships `master` / `tempdb` / `msdb` SIMPLE and `model` FULL, which every new
 
 `ALTER DATABASE <name>` lands on **that** database, not the session's — `CURRENT` names the session's (`ResolveAlterDatabaseTarget`).
 So a per-database flag is settable from anywhere, which is what lets one batch stage two databases' versioning options.
-A name the `Simulation` doesn't host raises **Msg 5011** sev 14 state 5 (`User does not have permission to alter database '<n>', the database does not exist, or the database is not in a state that allows access checks.`); real follows it with a trailing Msg 5069 (`ALTER DATABASE statement failed.`), which the simulator omits the way it omits the Msg 297 that trails a DMV denial.
+A name the `Simulation` doesn't host raises **Msg 5011** sev 14 state 5 (`User does not have permission to alter database '<n>', the database does not exist, or the database is not in a state that allows access checks.`), followed by Msg 5069 (`ALTER DATABASE statement failed.`), as are the other failures an `ALTER DATABASE` meets while running (`SimulatedSqlException.FollowedByAlterDatabaseFailed`).
+The rest of the statement is read in skip mode before the refusal, so its `SET …` tail isn't left behind to run as a statement of its own; a `COLLATE` over a missing name is **Msg 911** instead (probed 2026-09-24 against SQL Server 2025).
+One `SET` takes a comma-separated list of options and one trailing termination clause (`WITH NO_WAIT` / `ROLLBACK …`), which every option accepts but `ALLOW_SNAPSHOT_ISOLATION` (**Msg 5083**, and nothing in the list applies); the statement is read in skip mode first, since that refusal depends on its end.
 The name also governs the `COLLATE` clause below.
 
 ## Recognized options by value shape
@@ -109,7 +111,7 @@ Rejections, all real's own:
 
 | Statement | Error |
 |---|---|
-| any QUERY_STORE form on `master` / `tempdb` — `= OFF` and `CLEAR` included, all worded as being about enabling | **Msg 12438** class 16 state 1 — `Cannot perform action because Query Store cannot be enabled on system database <name>.` (real trails a Msg 5069 the simulator flattens away) |
+| any QUERY_STORE form on `master` / `tempdb` — `= OFF` and `CLEAR` included, all worded as being about enabling | **Msg 12438** class 16 state 1 — `Cannot perform action because Query Store cannot be enabled on system database <name>.` followed by Msg 5069 |
 | an unrecognized sub-option name, at either nesting level | **Msg 102** at the name |
 | `OPERATION_MODE = OFF`, `SIZE_BASED_CLEANUP_MODE = ON` | **Msg 156** — the value is a reserved keyword where the grammar wants an identifier |
 | `WAIT_STATS_CAPTURE_MODE = AUTO`, `OPERATION_MODE = BOGUS` | **Msg 102** |
@@ -152,7 +154,7 @@ The **full-text** statements report the subsystem's own **Msg 7690** instead (`F
 `master` and `tempdb` **pin** the option and raise **Msg 5058** class 16 for either value asked for — `Option '<READ_ONLY|READ_WRITE>' cannot be set in database '<n>'.` — at their own states, **5** for `master` and **4** for `tempdb`.
 `model` and `msdb` both accept it.
 
-`COMPATIBILITY_LEVEL` is the one `SET` option a read-only database itself refuses (Msg 3906, which real trails with a Msg 5069 the simulator omits like every other ALTER DATABASE failure).
+`COMPATIBILITY_LEVEL` is the one `SET` option a read-only database itself refuses (Msg 3906, followed by Msg 5069).
 `ALLOW_SNAPSHOT_ISOLATION`, `READ_COMMITTED_SNAPSHOT`, `RECURSIVE_TRIGGERS`, `ANSI_NULLS`, `RECOVERY` — and `READ_WRITE` itself — all move freely on one, probe-confirmed by reading the flags back.
 
 **A bacpac import lands writable.**

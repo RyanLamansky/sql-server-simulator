@@ -2041,10 +2041,7 @@ public sealed partial class Simulation
             foreach (var outcome in ProducedOutcomes(batch, outcomes))
                 yield return outcome;
             yield return new SimulatedErrorOutcome(continuedError, batch.CurrentStatement.LeadingKeywordReturnsRows);
-            // An error that escaped a trigger body still ends the firing
-            // statement first, so it says so even when the batch ends with it
-            // (probed 2026-09-24 against SQL Server 2025).
-            if ((!batch.BatchAborted || continuedError.EndedTriggerBody) && IsStatementTerminationNoticed(batch, continuedError))
+            if (IsStatementTerminationNoticed(batch, continuedError))
                 yield return new SimulatedInfoOutcome(SimulatedSqlException.StatementTerminatedMessage(batch));
             yield break;
         }
@@ -2201,11 +2198,17 @@ public sealed partial class Simulation
     /// <c>SELECT … INTO</c> or <c>ALTER TABLE … ALTER COLUMN</c> — and not for
     /// an error the statement's compilation raises (Msg 206, 213, 544), a
     /// <c>SELECT</c>'s own error, or one that ends the batch (probed
-    /// 2026-09-23 against SQL Server 2025).
+    /// 2026-09-23 against SQL Server 2025). Two exceptions to the last rule,
+    /// probed 2026-09-24: an error that escaped a trigger body ends the firing
+    /// statement first, so it says so even when the batch ends with it, and a
+    /// unique index that finds duplicate keys (Msg 1505) earns it whether
+    /// <c>CREATE INDEX</c> or a constraint built it, though it ends the batch.
     /// </summary>
     private static bool IsStatementTerminationNoticed(BatchContext batch, SimulatedSqlException error) =>
-        batch.CurrentStatement.WritesRows
-        && error.Number is 220 or 515 or 547 or 550 or 2601 or 2627 or 2628 or 8115 or 8134 or 8152 or 16947;
+        error.Number == 1505
+        || ((!batch.BatchAborted || error.EndedTriggerBody)
+            && batch.CurrentStatement.WritesRows
+            && error.Number is 220 or 515 or 547 or 550 or 2601 or 2627 or 2628 or 8115 or 8134 or 8152 or 16947);
 
     /// <summary>
     /// True for the parse-time error real SQL Server defers to bind time —

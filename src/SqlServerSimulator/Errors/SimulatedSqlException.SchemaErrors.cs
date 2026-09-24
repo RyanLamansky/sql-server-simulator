@@ -71,12 +71,48 @@ partial class SimulatedSqlException
     /// key, an unmatched or ill-typed foreign key, a second primary key or
     /// <c>ROWGUIDCOL</c> — as one exception, whose batch-ending behavior is
     /// <paramref name="error"/>'s. The trailer's state varies by the failure
-    /// (probed 2026-09-24 against SQL Server 2025); a <c>CATCH</c> reads the
-    /// trailer, the last error, as real's does.
+    /// (probed 2026-09-24 against SQL Server 2025).
     /// </summary>
-    internal static SimulatedSqlException FollowedByConstraintNotCreated(SimulatedSqlException error, byte state = 1)
+    internal static SimulatedSqlException FollowedByConstraintNotCreated(SimulatedSqlException error, byte state = 1) =>
+        FollowedBy(error, new("Could not create constraint or index. See previous errors.", 1750, 16, state));
+
+    /// <summary>
+    /// Pairs <paramref name="error"/> with the Msg 3727 real sends after a
+    /// constraint drop it refuses — a name that isn't a constraint (Msg 3728),
+    /// or a key a foreign key references (Msg 3725) — probed 2026-09-24
+    /// against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException FollowedByConstraintNotDropped(SimulatedSqlException error) =>
+        FollowedBy(error, new("Could not drop constraint. See previous errors.", 3727, 16, 0));
+
+    /// <summary>
+    /// Pairs <paramref name="error"/> with the Msg 5069 real sends after an
+    /// <c>ALTER DATABASE</c> fails running rather than parsing: its target
+    /// refused (Msg 5011), a read-only database (Msg 3906) or a system
+    /// database's Query Store (Msg 12438). A value the statement's own grammar
+    /// rules out, such as an unknown compatibility level (Msg 15048), gets none
+    /// (probed 2026-09-24 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException FollowedByAlterDatabaseFailed(SimulatedSqlException error) =>
+        FollowedBy(error, new("ALTER DATABASE statement failed.", 5069, 16, 1));
+
+    /// <summary>
+    /// Mimics SQL Server error 5083: an <c>ALTER DATABASE … SET
+    /// ALLOW_SNAPSHOT_ISOLATION</c> with a termination clause (<c>WITH NO_WAIT</c>
+    /// / <c>ROLLBACK …</c>), which every other probed option accepts (probed
+    /// 2026-09-24 against SQL Server 2025). Real follows it with Msg 5069.
+    /// </summary>
+    internal static SimulatedSqlException TerminationWithVersioningChange() =>
+        new("The termination option is not supported when making versioning state changes.", 5083, 16, 1);
+
+    /// <summary>
+    /// One exception carrying <paramref name="error"/>'s entries then
+    /// <paramref name="trailer"/>'s, whose batch-ending behavior is
+    /// <paramref name="error"/>'s; a <c>CATCH</c> reads the trailer, the last
+    /// entry, as real's does.
+    /// </summary>
+    private static SimulatedSqlException FollowedBy(SimulatedSqlException error, SimulatedSqlException trailer)
     {
-        var trailer = new SimulatedSqlException("Could not create constraint or index. See previous errors.", 1750, 16, state);
         List<SimulatedError> entries = [.. error.Errors, .. trailer.Errors];
         return new(string.Join(Environment.NewLine, entries.Select(entry => entry.Message)), System.Runtime.InteropServices.CollectionsMarshal.AsSpan(entries))
         {
@@ -1840,18 +1876,19 @@ partial class SimulatedSqlException
     /// <summary>
     /// Mimics SQL Server error 3728: <c>ALTER TABLE … DROP CONSTRAINT</c>
     /// named a constraint that doesn't exist on the target table. Probe-
-    /// confirmed wording — name appears single-quoted.
+    /// confirmed wording — name appears single-quoted — followed by Msg 3727.
     /// </summary>
     internal static SimulatedSqlException NotAConstraint(string name) =>
-        new($"'{name}' is not a constraint.", 3728, 16, 1);
+        FollowedByConstraintNotDropped(new($"'{name}' is not a constraint.", 3728, 16, 1));
 
     /// <summary>
     /// Mimics SQL Server error 3725: <c>ALTER TABLE … DROP CONSTRAINT</c>
     /// targeted a PRIMARY KEY / UNIQUE constraint still referenced by an
-    /// incoming FOREIGN KEY. Probe-confirmed wording verbatim.
+    /// incoming FOREIGN KEY. Probe-confirmed wording verbatim, followed by
+    /// Msg 3727.
     /// </summary>
     internal static SimulatedSqlException ConstraintReferencedByForeignKey(string constraintName, string referencingTable, string referencingFkName) =>
-        new($"The constraint '{constraintName}' is being referenced by table '{referencingTable}', foreign key constraint '{referencingFkName}'.", 3725, 16, 0);
+        FollowedByConstraintNotDropped(new($"The constraint '{constraintName}' is being referenced by table '{referencingTable}', foreign key constraint '{referencingFkName}'.", 3725, 16, 0));
 
     /// <summary>
     /// Mimics SQL Server error 4917: <c>ALTER TABLE … (CHECK | NOCHECK)

@@ -260,7 +260,6 @@ A user-written paren wrapping the expression yields a doubled pair (`DEFAULT (0)
 
 ## Fidelity gaps
 
-- **No Msg 3727 after a refused constraint drop** — real follows it with `"Could not drop constraint. See previous errors."`; the simulator sends only the primary error.
 - **`definition` columns hold original syntax, not SQL Server's canonical form** — see [Definition columns](#definition-columns).
   A schema-diff tool comparing the simulator's `([a]>(0))`-equivalent against a live server's normalized text will see a cosmetic difference even when the predicate is identical.
 - **`KeyConstraint.IsSystemNamed` is inferred from the name prefix** — `PK__` / `UQ__` → system-named.
