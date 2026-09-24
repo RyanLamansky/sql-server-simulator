@@ -247,6 +247,14 @@ partial class SimulatedSqlException
         new($"Error converting data type {FamilyRootName(source)} to {targetWord}.", 8114, 16, 5);
 
     /// <summary>
+    /// Msg 8114 state 31: a <c>datetimeoffset</c> string whose offset moves its
+    /// UTC instant outside years 1–9999 (<c>'9999-12-31 23:59:59 -05:00'</c>),
+    /// naming the string's own type (probed 2026-09-24 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException DateTimeOffsetUtcOutOfRange(SqlType source) =>
+        new($"Error converting data type {FamilyRootName(source)} to datetimeoffset.", 8114, 16, 31);
+
+    /// <summary>
     /// Msg 8114 as a <c>CAST</c> of a string to a number raises it — the one
     /// form of the message that, like Msg 245 beside it, behaves as an error
     /// under <c>SET XACT_ABORT ON</c> whatever the option says (probe-confirmed

@@ -239,7 +239,6 @@ Already listed elsewhere here and not repeated: `DBCC CHECKIDENT`, parenthesized
 - Binary comparison doesn't zero-pad the shorter operand (`0x0102 = 0x010200` is true on real).
 - Under a SQL collation, a `varchar` containing `CHAR(0)` compares unequal to the same string without it.
 - A constant-folded `CASE WHEN 1 = 0 …` takes the ELSE arm's type on real.
-- A `datetimeoffset` string without seconds (`'2024-01-01 06:00 +02:00'`) doesn't parse.
 - Binary or padded `char` converted to `xml` isn't validated or whitespace-stripped, and a `hierarchyid` parse failure's Msg 6522 wording differs.
 - A new database's rowversion counter starts at 0; real's starts at 2000.
 - A `UNION` whose second branch fails at runtime raises before sending the first branch's rows; real sends them first.
@@ -271,7 +270,6 @@ Already listed elsewhere here and not repeated: `DBCC CHECKIDENT`, parenthesized
 - `STRING_AGG`'s separator isn't checked: real requires a literal or variable (Msg 8733), a string (Msg 8116 on argument 2), and no `nvarchar` under a `varchar` operand (Msg 8116 naming `nvarchar`).
 - `CAST(<datetime2> AS datetime)` at the top of the range raises Msg 242 here; real clamps `9999-12-31 23:59:59.9999999` to `.997`, raising Msg 242 only from a string or `datetimeoffset` source.
   The simulator's Msg 242 also names `varchar` as the source where real names the actual type (`datetime2` → `smalldatetime`).
-- A `datetimeoffset` string whose UTC instant falls past the range (`'9999-12-31 23:59:59 -05:00'`) raises Msg 241 here; real raises Msg 8114 state 31.
 - `LOWER` / `UPPER` use English case mapping under every collation; a Turkish collation's own mapping isn't modeled.
 
 **Real accepts, the simulator refuses**:
@@ -287,10 +285,10 @@ Already listed elsewhere here and not repeated: `DBCC CHECKIDENT`, parenthesized
 - `sp_refreshview` (Msg 2812 here) — a drifted `SELECT *` view keeps its CREATE-time names until altered.
 - `RAISERROR` `%*.*s` width / precision (Msg 2787 here); state −1 should report 1 and 300 should report 44 (real reduces modulo 256).
 - `RAISERROR … WITH LOG` as sysadmin (Msg 2778 raised here).
-- CAST sources: a space-separated date-and-time string to `date` or `time` (`CAST('2024-12-31 23:59:59' AS date)`, only the `T` form parses here); more than seven fractional-second digits (real rounds at the seventh); `''` → `money` 0 and `date` 1900-01-01; `'12:00'` → `date`; `'1e2'` / `'1d2'` → `float`; month names (`'Jan 5 2024'`, `'5 January 2024'`, `'January 2024'`); `AM` / `PM` suffixes, including `'13:00 PM'`; two-digit years (`'01/01/49'` → 2049); `datetime` → `float` / `int` / `decimal`; `decimal` → `varbinary`.
+- CAST sources: `''` → `money` 0; `'1e2'` / `'1d2'` → `float`; `datetime` → `float` / `int` / `decimal`; `decimal` → `varbinary`.
 
 **Same error, different number, state or class**:
-`TRANSLATE` length mismatch 9828 (here 9819); `ROW_NUMBER() OVER ()` 4112 (here 102); `decimal(39, 0)` 2717 (here 1001); `decimal(2, 3)` 192 (here 1002); `float(54)` accepted on real (here 1001); `TOP (<NULL variable>)` 1014 (here 1060); `TOP '1'` 102 (here 1060); a string datetime out of range (`'2024'`, hour 25) 242 (here 241); `xml = xml` 305 (here 402); `$action` in an INSERT's OUTPUT 207 (here 4104); a bare `VALUES (1)` statement 156 (here 102); `DELETE … ORDER BY` 156 (here 102); a one-part `DROP INDEX ix` 159 (here 102); `@t.a` 137 class 16 state 1 (here class 15 state 2); states differing on 506, 235, 9810, 9812, 8148, 2714 for a temp table, and 195.
+`TRANSLATE` length mismatch 9828 (here 9819); `ROW_NUMBER() OVER ()` 4112 (here 102); `decimal(39, 0)` 2717 (here 1001); `decimal(2, 3)` 192 (here 1002); `float(54)` accepted on real (here 1001); `TOP (<NULL variable>)` 1014 (here 1060); `TOP '1'` 102 (here 1060); `xml = xml` 305 (here 402); `$action` in an INSERT's OUTPUT 207 (here 4104); a bare `VALUES (1)` statement 156 (here 102); `DELETE … ORDER BY` 156 (here 102); a one-part `DROP INDEX ix` 159 (here 102); `@t.a` 137 class 16 state 1 (here class 15 state 2); states differing on 506, 235, 9810, 9812, 8148, 2714 for a temp table, and 195.
 
 ### Result-set serialization: `FOR XML` / `FOR JSON`
 
@@ -459,6 +457,7 @@ Real bugs / limitations against shipped behavior — fixes are concrete work, no
   Closing either wants the site-level refusal deferred to the end of the query spec, which needs a catch-all resolution point for the expression sites outside a `SELECT` (`PRINT`, a `SET` initializer) so a pending refusal can't leak as a silent acceptance.
 - **`SET LANGUAGE` doesn't move `SET DATEFORMAT`** — real carries the language's own date-part order (`sys.syslanguages.dateformat`, `dmy` for most of the set against us_english's `mdy`), which decides how an ambiguous date string parses.
   `SET LANGUAGE` itself ships, `@@DATEFIRST` coupling included (see [`scalars.md`](scalars.md#set-language-and-the-datefirst-it-moves)), and the column is projected; what's left is `SET DATEFORMAT` carrying semantic effect at all, which is the same seam the month / weekday names would need.
+  The date-string grammar (`DateTimeText`) reads numeric dates in one order, `mdy`, and the conversion that calls it (`SqlValue.CoerceTo`) has no session to ask for another, so the work is threading the session's order down to that parse.
   Real's transaction-aborting list is wider than the one modeled member (Msg 8728); 245 is the one whose divergence a probe caught, and the rest of the list is unenumerated.
 - **`SET ROWCOUNT` caps a `MERGE`'s source rows rather than its actions** — real counts the actions it took, so a source row every `WHEN` clause declines consumes a slot of the cap here and none there (see [`query.md`](query.md#set-rowcount-n)).
   The three pending-action lists are built across several matching paths, so a shared running budget is what the exact rule wants.

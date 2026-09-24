@@ -408,7 +408,7 @@ internal readonly partial struct SqlValue
 
     private SqlValue CoerceToDateTimeOffset(DateTimeOffsetSqlType target) => this.Type switch
     {
-        _ when SqlType.IsStringCategory(this.Type) => FromDateTimeOffset(target, ParseDateTimeOffset(this.AsString)),
+        _ when SqlType.IsStringCategory(this.Type) => FromDateTimeOffset(target, ParseDateTimeOffset(this.AsString, this.Type)),
         // Casts up from offset-less types treat the source as a +00:00
         // wall-clock (no time-zone inference, matching SQL Server).
         _ when this.Type == SqlType.Date => FromDateTimeOffset(target, new DateTimeOffset(this.AsDate.ToDateTime(TimeOnly.MinValue), TimeSpan.Zero)),

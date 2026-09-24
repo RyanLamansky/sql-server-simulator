@@ -166,9 +166,21 @@ An ANSI string reaches `image` as its code-page bytes, and a string reaches `hie
 `money` / `smallmoney` → `float` / `real` converts rather than raising Msg 529.
 Probed 2026-09-23 against SQL Server 2025.
 
-## Date/time strings ignore surrounding spaces
+## Reading a date-time string
 
-Every date/time parse trims leading and trailing spaces first, as real does, so a padded `char(N)` value converts — `CAST('  2024-01-02  ' AS datetime)`, `CAST('12:34:56   ' AS time)` — and a `char(N)` column compares against a date column (probed 2026-09-23).
+Every string → date-time CAST reads through one grammar, `DateTimeText.TryParse`, whose XML doc lists what it accepts; the two legacy types and the four newer ones differ in both directions, so the grammar takes which it reads for.
+It was built against a differential matrix of some two hundred and sixty strings — ISO, numeric, unseparated, month-name, time-first, AM / PM, fractional, offset and malformed shapes — cast to all six types with `TRY_CAST` on SQL Server 2025, then every refused cell cast again for its error (probed 2026-09-24): every value and every error number matches, as does `ISDATE` over the same strings.
+A third of the matrix was a holdout written after the grammar, which surfaced its last four rules (the nine-digit fraction cap, a `T` time's attached offset, tabs as spaces for the newer types, `2024 Jun` as the first of the month).
+
+Leading and trailing spaces are trimmed first, as real does, so a padded `char(N)` value converts — `CAST('  2024-01-02  ' AS datetime)`, `CAST('12:34:56   ' AS time)` — and a `char(N)` column compares against a date column (probed 2026-09-23).
+
+The failure numbers split by type: the newer four report Msg 241 for every string they refuse, while `datetime` / `smalldatetime` report Msg 241 / 295 for a string they can't read and Msg 242 for one naming a value that doesn't exist — including a few shapes real's tokenizer reads further than it looks (`'2024-12-31 23'`, `'Jan-05-2024'`, `'2024-12-31 .5'`).
+A `datetimeoffset` string whose offset carries its UTC instant outside years 1–9999 is Msg 8114 state 31.
+
+### Not modeled yet
+
+- **`SET DATEFORMAT` / a language's date order** — numeric dates always read month-day-year, us_english's order (see [`backlog.md`](backlog.md)).
+- **Month names in other languages** — only the English names are recognized.
 
 ## Conversion legality is settled while compiling
 

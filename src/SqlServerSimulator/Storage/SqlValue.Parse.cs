@@ -21,142 +21,83 @@ internal readonly partial struct SqlValue
     }
 
     /// <summary>
-    /// Parses a string into a <see cref="DateOnly"/> using SQL Server's
-    /// invariant ISO-8601 forms: <c>yyyy-MM-dd</c> and <c>yyyyMMdd</c>, plus
-    /// <c>yyyy-MM-ddTHH:mm:ss[.fffffff]</c> (time portion discarded). SQL Server
-    /// accepts many additional locale-sensitive formats; the simulator handles
-    /// only the language-neutral ones for now and raises Msg 241 otherwise.
-    /// Every date/time parse here ignores surrounding spaces, as real does —
-    /// which is what lets a padded <c>char(N)</c> value convert
-    /// (probe-confirmed against SQL Server 2025, 2026-09-23).
+    /// Reads <paramref name="value"/> as one of the four newer date-time types
+    /// does (<see cref="DateTimeText.TryParse"/>), every failure Msg 241.
     /// </summary>
-    private static DateOnly ParseDate(string value) =>
-        DateOnly.TryParseExact(value = value.Trim(' '), dateFormats, CultureInfo.InvariantCulture, DateTimeStyles.None, out var date) ? date
-        : DateTime.TryParseExact(value, dateAsDateTimeFormats, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dt) ? DateOnly.FromDateTime(dt)
-        : throw SimulatedSqlException.ConversionFailedDateTimeFromString();
-
-    private static readonly string[] dateFormats =
-    [
-        "yyyy-MM-dd",
-        "yyyyMMdd",
-        // Year-first with a slash or dot separator: unambiguous (the 4-digit
-        // year leads, so no mdy/dmy locale assumption) and accepted by real
-        // SQL Server's default CAST/CONVERT. Fixes an ORM's `.dates()` /
-        // `.datetimes()` date-truncation, which builds `yyyy/MM/dd` strings and
-        // converts them to datetime2 (Django over mssql-django; date-only, so
-        // this shared array is the reach — ParseDateTime2 / ParseDate /
-        // TryParseLegacyDateTime all fall back to it).
-        "yyyy/M/d",
-        "yyyy.M.d",
-    ];
-
-    private static readonly string[] dateAsDateTimeFormats =
-    [
-        "yyyy-MM-ddTHH:mm:ss",
-        "yyyy-MM-ddTHH:mm:ss.f",
-        "yyyy-MM-ddTHH:mm:ss.ff",
-        "yyyy-MM-ddTHH:mm:ss.fff",
-        "yyyy-MM-ddTHH:mm:ss.ffff",
-        "yyyy-MM-ddTHH:mm:ss.fffff",
-        "yyyy-MM-ddTHH:mm:ss.ffffff",
-        "yyyy-MM-ddTHH:mm:ss.fffffff",
-    ];
-
-    /// <summary>
-    /// Parses a string into a <see cref="DateTime"/> for datetime2 storage,
-    /// accepting ISO-8601 forms with either <c>T</c> or space separator and
-    /// optional fractional seconds (1-7 digits). Date-only inputs are also
-    /// accepted (time defaults to midnight). Locale-sensitive forms aren't
-    /// modeled; out-of-range or unparseable inputs raise Msg 241.
-    /// </summary>
-    private static DateTime ParseDateTime2(string value) =>
-        DateTime.TryParseExact(value = value.Trim(' '), dateTime2Formats, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dt) ? dt
-        : DateOnly.TryParseExact(value, dateFormats, CultureInfo.InvariantCulture, DateTimeStyles.None, out var d) ? d.ToDateTime(TimeOnly.MinValue)
-        : TimeSpan.TryParseExact(value, timeFormats, CultureInfo.InvariantCulture, out var ts) && ts.Ticks is >= 0 and < TimeSpan.TicksPerDay ? DateTimeSqlType.BaseDate.Add(ts)
-        : throw SimulatedSqlException.ConversionFailedDateTimeFromString();
-
-    /// <summary>
-    /// Parses a string into a <see cref="DateTime"/> for legacy <c>datetime</c>
-    /// storage. Accepts the same forms as <see cref="ParseDateTime2"/>, plus
-    /// the legacy round-trip format <c>"MMM d yyyy h:mmtt"</c> (case-
-    /// insensitive — matches what cast(datetime → varchar) emits) and the
-    /// US slash forms <c>"M/d/yyyy"</c> / <c>"M/d/yyyy HH:mm:ss"</c>. Empty
-    /// strings convert to <c>1900-01-01 00:00</c> (matching SQL Server). The
-    /// year-only and date-with-time-and-no-seconds short-hands are also
-    /// accepted. Out-of-range or unparseable inputs raise Msg 241.
-    /// </summary>
-    private static DateTime ParseLegacyDateTime(string value) =>
-        TryParseLegacyDateTime(value, out var result)
-            ? result
+    private static DateTimeText ReadModernDateTimeText(string value) =>
+        DateTimeText.TryParse(value, legacy: false, out var text) == DateTimeTextError.None
+            ? text
             : throw SimulatedSqlException.ConversionFailedDateTimeFromString();
 
-    /// <summary>
-    /// Parses a string into a <see cref="DateTime"/> for <c>smalldatetime</c>
-    /// storage. Accepts the same forms as <see cref="ParseLegacyDateTime"/>;
-    /// the only divergence is the error path — SQL Server raises a distinct
-    /// <c>Msg 295</c> for <c>smalldatetime</c> instead of the <c>Msg 241</c>
-    /// used by every other date/time target.
-    /// </summary>
-    private static DateTime ParseSmallDateTime(string value) =>
-        TryParseLegacyDateTime(value, out var result)
-            ? result
-            : throw SimulatedSqlException.ConversionFailedSmallDateTimeFromString();
+    private static DateOnly ParseDate(string value) => ReadModernDateTimeText(value).DateOrBase;
 
-    private static int CountDigits(ReadOnlySpan<char> text)
+    private static DateTime ParseDateTime2(string value)
     {
-        var count = 0;
-        while (count < text.Length && char.IsAsciiDigit(text[count]))
-            count++;
-        return count;
+        var text = ReadModernDateTimeText(value);
+        // A fraction rounded up past 9999-12-31's last tick has nowhere to go.
+        return text.DateOrBase == DateOnly.MaxValue && text.TimeTicks >= TimeSpan.TicksPerDay
+            ? throw SimulatedSqlException.ConversionFailedDateTimeFromString()
+            : text.DateTime;
     }
 
     /// <summary>
-    /// Shared body of <see cref="ParseLegacyDateTime"/> and
-    /// <see cref="ParseSmallDateTime"/>. Returns whether the string parsed;
-    /// the caller throws the appropriate Msg-241/Msg-295 factory on failure.
-    /// Also reachable from <c>ISDATE</c>, which wraps with an additional
-    /// 1753-9999 year-range gate (the shared parser accepts pre-1753
-    /// values via the datetime2 paths).
+    /// A time-of-day that rounded up to midnight stays on the day's last tick,
+    /// where the date-bearing types carry it into the next day (probed
+    /// 2026-09-24 against SQL Server 2025).
+    /// </summary>
+    private static TimeSpan ParseTime(string value) =>
+        new(Math.Min(ReadModernDateTimeText(value).TimeTicks, TimeSpan.TicksPerDay - 1));
+
+    /// <summary>
+    /// With no offset written the value is <c>+00:00</c>; a <c>Z</c> is the
+    /// same. An offset carrying the UTC instant outside years 1–9999 is
+    /// Msg 8114 naming <paramref name="sourceType"/>.
+    /// </summary>
+    private static DateTimeOffset ParseDateTimeOffset(string value, SqlType sourceType)
+    {
+        var instant = ParseDateTime2(value);
+        var offset = ReadModernDateTimeText(value).Offset ?? TimeSpan.Zero;
+        var utc = instant.Ticks - offset.Ticks;
+        return utc < DateTime.MinValue.Ticks || utc > DateTime.MaxValue.Ticks
+            ? throw SimulatedSqlException.DateTimeOffsetUtcOutOfRange(sourceType)
+            : new DateTimeOffset(instant, offset);
+    }
+
+    /// <summary>
+    /// Reads <paramref name="value"/> as <c>datetime</c> does: Msg 241 for a
+    /// string it can't read, Msg 242 for one naming a value that doesn't
+    /// exist. The 1/300-second rounding and the 1753–9999 range are
+    /// <see cref="FromDateTime"/>'s.
+    /// </summary>
+    private static DateTime ParseLegacyDateTime(string value) =>
+        DateTimeText.TryParse(value, legacy: true, out var text) switch
+        {
+            DateTimeTextError.None => text.DateTime,
+            DateTimeTextError.Range => throw SimulatedSqlException.OutOfRangeDateTimeConversion(SqlType.DateTime),
+            _ => throw SimulatedSqlException.ConversionFailedDateTimeFromString(),
+        };
+
+    /// <summary>
+    /// As <see cref="ParseLegacyDateTime"/>, but a string it can't read is
+    /// <c>smalldatetime</c>'s own Msg 295.
+    /// </summary>
+    private static DateTime ParseSmallDateTime(string value) =>
+        DateTimeText.TryParse(value, legacy: true, out var text) switch
+        {
+            DateTimeTextError.None => text.DateTime,
+            DateTimeTextError.Range => throw SimulatedSqlException.OutOfRangeDateTimeConversion(SqlType.SmallDateTime),
+            _ => throw SimulatedSqlException.ConversionFailedSmallDateTimeFromString(),
+        };
+
+    /// <summary>
+    /// Whether <paramref name="value"/> reads as a <c>datetime</c> string, for
+    /// <c>ISDATE</c>, which applies the type's year range itself.
     /// </summary>
     internal static bool TryParseLegacyDateTime(string value, out DateTime result)
     {
-        value = value.Trim(' ');
-        if (value.Length == 0)
-        {
-            result = DateTimeSqlType.BaseDate;
-            return true;
-        }
-        // The legacy pair reads at most three fractional-second digits, where
-        // datetime2 reads seven (probe-confirmed 2026-09-23: `.1234` is
-        // Msg 241 for datetime and smalldatetime alike).
-        if (value.LastIndexOf(':') is >= 0 and var lastColon
-            && value.IndexOf('.', lastColon) is >= 0 and var point
-            && CountDigits(value.AsSpan(point + 1)) > 3)
-        {
-            result = default;
-            return false;
-        }
-        if (DateTime.TryParseExact(value, dateTime2Formats, CultureInfo.InvariantCulture, DateTimeStyles.None, out result))
-            return true;
-        if (DateOnly.TryParseExact(value, dateFormats, CultureInfo.InvariantCulture, DateTimeStyles.None, out var d))
-        {
-            result = d.ToDateTime(TimeOnly.MinValue);
-            return true;
-        }
-        if (DateTime.TryParseExact(value, legacyDateTimeFormats, CultureInfo.InvariantCulture, DateTimeStyles.AllowInnerWhite | DateTimeStyles.AllowWhiteSpaces, out result))
-            return true;
-        if (TimeSpan.TryParseExact(value, timeFormats, CultureInfo.InvariantCulture, out var ts) && ts.Ticks is >= 0 and < TimeSpan.TicksPerDay)
-        {
-            result = DateTimeSqlType.BaseDate.Add(ts);
-            return true;
-        }
-        if (int.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out var year) && year is >= 1753 and <= 9999)
-        {
-            result = new DateTime(year, 1, 1);
-            return true;
-        }
-        result = default;
-        return false;
+        var read = DateTimeText.TryParse(value, legacy: true, out var text) == DateTimeTextError.None;
+        result = read ? text.DateTime : default;
+        return read;
     }
 
     /// <summary>
@@ -190,109 +131,8 @@ internal readonly partial struct SqlValue
             value, value.Day, hour12, ampm);
     }
 
-    private static readonly string[] legacyDateTimeFormats =
-    [
-        "MMM d yyyy h:mmtt",
-        "MMM d yyyy h:mm:sstt",
-        "MMM d yyyy h:mm:ss.ffftt",
-        "M/d/yyyy",
-        "M/d/yyyy H:mm",
-        "M/d/yyyy H:mm:ss",
-        "M/d/yyyy H:mm:ss.fff",
-    ];
-
-    private static readonly string[] dateTime2Formats =
-    [
-        // No-seconds variant: SQL Server accepts both space-separated and
-        // T-separated date-and-time strings without the seconds component.
-        "yyyy-MM-dd HH:mm",
-        "yyyy-MM-ddTHH:mm",
-        "yyyy-MM-dd HH:mm:ss",
-        "yyyy-MM-dd HH:mm:ss.f",
-        "yyyy-MM-dd HH:mm:ss.ff",
-        "yyyy-MM-dd HH:mm:ss.fff",
-        "yyyy-MM-dd HH:mm:ss.ffff",
-        "yyyy-MM-dd HH:mm:ss.fffff",
-        "yyyy-MM-dd HH:mm:ss.ffffff",
-        "yyyy-MM-dd HH:mm:ss.fffffff",
-        "yyyy-MM-ddTHH:mm:ss",
-        "yyyy-MM-ddTHH:mm:ss.f",
-        "yyyy-MM-ddTHH:mm:ss.ff",
-        "yyyy-MM-ddTHH:mm:ss.fff",
-        "yyyy-MM-ddTHH:mm:ss.ffff",
-        "yyyy-MM-ddTHH:mm:ss.fffff",
-        "yyyy-MM-ddTHH:mm:ss.ffffff",
-        "yyyy-MM-ddTHH:mm:ss.fffffff",
-        // ISO 8601 with trailing 'Z' for UTC. EF Core 10 emits this form
-        // inline in FOR SYSTEM_TIME AS OF predicates. Real SQL Server
-        // accepts the Z marker and treats the value as UTC stored as-is.
-        "yyyy-MM-ddTHH:mm:ssZ",
-        "yyyy-MM-ddTHH:mm:ss.fZ",
-        "yyyy-MM-ddTHH:mm:ss.ffZ",
-        "yyyy-MM-ddTHH:mm:ss.fffZ",
-        "yyyy-MM-ddTHH:mm:ss.ffffZ",
-        "yyyy-MM-ddTHH:mm:ss.fffffZ",
-        "yyyy-MM-ddTHH:mm:ss.ffffffZ",
-        "yyyy-MM-ddTHH:mm:ss.fffffffZ",
-    ];
-
-    /// <summary>
-    /// Parses a string into a <see cref="TimeSpan"/> for time storage. Accepts
-    /// <c>HH:mm[:ss[.fffffff]]</c>; locale-sensitive forms aren't modeled.
-    /// Out-of-range or unparseable inputs raise Msg 241.
-    /// </summary>
-    private static TimeSpan ParseTime(string value) =>
-        TimeSpan.TryParseExact(value.Trim(' '), timeFormats, CultureInfo.InvariantCulture, out var ts) && ts.Ticks is >= 0 and < TimeSpan.TicksPerDay
-            ? ts
-            : throw SimulatedSqlException.ConversionFailedDateTimeFromString();
-
-    private static readonly string[] timeFormats =
-    [
-        @"hh\:mm\:ss",
-        @"hh\:mm\:ss\.f",
-        @"hh\:mm\:ss\.ff",
-        @"hh\:mm\:ss\.fff",
-        @"hh\:mm\:ss\.ffff",
-        @"hh\:mm\:ss\.fffff",
-        @"hh\:mm\:ss\.ffffff",
-        @"hh\:mm\:ss\.fffffff",
-        @"hh\:mm",
-    ];
-
     /// <summary>Date-time-with-offset format string with N fractional digits, matching SQL Server's default datetimeoffset(N) ToString.</summary>
     private static string FormatDateTimeOffset(DateTimeOffset value, int precision) =>
         value.ToString(precision == 0 ? "yyyy-MM-dd HH:mm:ss zzz" : "yyyy-MM-dd HH:mm:ss." + new string('f', precision) + " zzz", CultureInfo.InvariantCulture);
 
-    /// <summary>
-    /// Parses a string into a <see cref="DateTimeOffset"/> for datetimeoffset
-    /// storage. Accepts the same date-and-time forms as
-    /// <see cref="ParseDateTime2"/>, optionally followed by a space and a
-    /// signed <c>±HH:mm</c> offset (the SQL Server textual default). When the
-    /// offset is absent, SQL Server treats the value as <c>+00:00</c>.
-    /// </summary>
-    private static DateTimeOffset ParseDateTimeOffset(string value) =>
-        DateTimeOffset.TryParseExact(value = value.Trim(' '), dateTimeOffsetFormats, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dto) ? dto
-        : DateTime.TryParseExact(value, dateTime2Formats, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dt) ? new DateTimeOffset(dt, TimeSpan.Zero)
-        : DateOnly.TryParseExact(value, dateFormats, CultureInfo.InvariantCulture, DateTimeStyles.None, out var d) ? new DateTimeOffset(d.ToDateTime(TimeOnly.MinValue), TimeSpan.Zero)
-        : throw SimulatedSqlException.ConversionFailedDateTimeFromString();
-
-    private static readonly string[] dateTimeOffsetFormats =
-    [
-        "yyyy-MM-dd HH:mm:ss zzz",
-        "yyyy-MM-dd HH:mm:ss.f zzz",
-        "yyyy-MM-dd HH:mm:ss.ff zzz",
-        "yyyy-MM-dd HH:mm:ss.fff zzz",
-        "yyyy-MM-dd HH:mm:ss.ffff zzz",
-        "yyyy-MM-dd HH:mm:ss.fffff zzz",
-        "yyyy-MM-dd HH:mm:ss.ffffff zzz",
-        "yyyy-MM-dd HH:mm:ss.fffffff zzz",
-        "yyyy-MM-ddTHH:mm:sszzz",
-        "yyyy-MM-ddTHH:mm:ss.fzzz",
-        "yyyy-MM-ddTHH:mm:ss.ffzzz",
-        "yyyy-MM-ddTHH:mm:ss.fffzzz",
-        "yyyy-MM-ddTHH:mm:ss.ffffzzz",
-        "yyyy-MM-ddTHH:mm:ss.fffffzzz",
-        "yyyy-MM-ddTHH:mm:ss.ffffffzzz",
-        "yyyy-MM-ddTHH:mm:ss.fffffffzzz",
-    ];
 }
