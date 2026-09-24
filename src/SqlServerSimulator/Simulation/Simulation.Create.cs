@@ -306,6 +306,7 @@ partial class Simulation
         // database object-name namespace.
         if (!isTempTable && schema!.HasNameInSharedNamespace(tableName.Leaf))
             throw SimulatedSqlException.ThereIsAlreadyAnObject(tableName.Leaf);
+        RejectTakenConstraintNames(isTempTable ? null : schema, tableName.Leaf, heapColumns!, pendingKeys, pendingChecks, pendingForeignKeys);
 
         var keyConstraints = ResolveKeyConstraints(tableName.Leaf, heapColumns!, pendingKeys, context.CurrentDatabase, context.Batch.CurrentStatement.UtcNow);
         var checkConstraints = ResolveCheckConstraints(tableName.Leaf, pendingChecks, context.CurrentDatabase, context.Batch.CurrentStatement.UtcNow);
@@ -424,7 +425,7 @@ partial class Simulation
             if (pendingForeignKeys.Count > 0)
                 ResolveForeignKeys(heapTable, pendingForeignKeys, context);
             if (pendingIndexes.Count > 0)
-                AddInlineIndexes(context, heapTable, schema?.Name ?? Database.DefaultSchemaName, pendingIndexes);
+                AddInlineIndexes(context, heapTable, tableName.ToString(), pendingIndexes);
         }
         catch
         {
@@ -2547,6 +2548,55 @@ partial class Simulation
         return modifier.Keyword == Keyword.Clustered;
     }
 
+    /// <summary>
+    /// Rejects a <c>CREATE TABLE</c> that names two of its constraints alike
+    /// (Msg 8168), or names one after an object <paramref name="schema"/>
+    /// already holds or after the table itself (Msg 2714 then Msg 1750) —
+    /// probed 2026-09-24 against SQL Server 2025. A temp table passes no schema:
+    /// its constraints live in tempdb, which isn't modeled as a namespace.
+    /// </summary>
+    private static void RejectTakenConstraintNames(
+        Schema? schema,
+        string tableName,
+        List<HeapColumn?> heapColumns,
+        List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals, bool? Clustered, bool IgnoreDupKey, bool[] Descending)> pendingKeys,
+        List<(string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition)> pendingChecks,
+        List<PendingForeignKey> pendingForeignKeys)
+    {
+        List<string> names = [];
+        foreach (var key in pendingKeys)
+        {
+            if (key.Name is { } name)
+                names.Add(name);
+        }
+        foreach (var check in pendingChecks)
+        {
+            if (check.Name is { } name)
+                names.Add(name);
+        }
+        foreach (var foreignKey in pendingForeignKeys)
+        {
+            if (foreignKey.ConstraintName is { } name)
+                names.Add(name);
+        }
+        foreach (var column in heapColumns)
+        {
+            if (column?.DefaultConstraint is { IsSystemNamed: false } def)
+                names.Add(def.Name);
+        }
+
+        for (var i = 0; i < names.Count; i++)
+        {
+            for (var j = 0; j < i; j++)
+            {
+                if ((schema?.Database.Collation ?? Collation.Baseline).Equals(names[j], names[i]))
+                    throw SimulatedSqlException.DuplicateNameInStatement(names[i]);
+            }
+            if (schema is not null && (schema.HasNameInSharedNamespace(names[i]) || schema.Database.Collation.Equals(names[i], tableName)))
+                throw SimulatedSqlException.ConstraintNameTaken(names[i]);
+        }
+    }
+
     internal static string AutoConstraintName(string tableName, KeyConstraintKind kind, int[] fullOrdinals, IReadOnlyList<HeapColumn> heapColumns)
     {
         const ulong fnvOffset = 14695981039346656037;
@@ -2607,12 +2657,12 @@ partial class Simulation
                 // The implied column list is the referenced table's primary
                 // key, so a table carrying no primary key — a UNIQUE
                 // constraint included — reports real's Msg 1773 rather than
-                // the explicit-list Msg 1776, naming the object as
-                // schema.table.
+                // the explicit-list Msg 1776, naming the object as the
+                // statement wrote it.
                 var pk = ResolvePrimaryKey(referencedTable)
                     ?? throw SimulatedSqlException.ForeignKeyImplicitReferenceWithoutPrimaryKey(
                         pf.ConstraintName ?? AutoForeignKeyName(childTable.Name, pf.ChildColumnNames, pending.IndexOf(pf)),
-                        $"{SchemaNameOf(context.Batch.CurrentDatabase, referencedTable)}.{referencedTable.Name}");
+                        pf.ReferencedTable.ToString());
                 refOrdinals = StorageOrdinalsToFullOrdinals(referencedTable, pk.StorageOrdinals);
             }
             else

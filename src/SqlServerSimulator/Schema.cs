@@ -191,7 +191,45 @@ internal sealed class Schema
     /// Used by every CREATE path to raise Msg 2714 before allocating an
     /// ObjectId or writing into the relevant dict.
     /// </summary>
-    public bool HasNameInSharedNamespace(string leaf) => this.TryFindInSharedNamespace(leaf, out _);
+    /// <remarks>
+    /// Constraint names share the namespace too (probed 2026-09-24 against
+    /// SQL Server 2025), so a view can't take a constraint's name any more than
+    /// a constraint can take a view's.
+    /// </remarks>
+    public bool HasNameInSharedNamespace(string leaf) => this.TryFindInSharedNamespace(leaf, out _) || this.HasConstraintNamed(leaf);
+
+    /// <summary>
+    /// True when a key, check, foreign-key or default constraint on one of this
+    /// schema's tables is named <paramref name="leaf"/>.
+    /// </summary>
+    public bool HasConstraintNamed(string leaf)
+    {
+        var collation = this.Database.Collation;
+        foreach (var table in this.HeapTables.Values)
+        {
+            foreach (var key in table.KeyConstraints)
+            {
+                if (collation.Equals(key.Name, leaf))
+                    return true;
+            }
+            foreach (var check in table.CheckConstraints)
+            {
+                if (collation.Equals(check.Name, leaf))
+                    return true;
+            }
+            foreach (var foreignKey in table.OutgoingForeignKeys)
+            {
+                if (collation.Equals(foreignKey.Name, leaf))
+                    return true;
+            }
+            foreach (var column in table.Columns)
+            {
+                if (column.DefaultConstraint is { } def && collation.Equals(def.Name, leaf))
+                    return true;
+            }
+        }
+        return false;
+    }
 
     /// <summary>
     /// Collation-aware lookup of <paramref name="leaf"/> across this schema's

@@ -198,7 +198,7 @@ The referential actions are then restricted to the ones that never *write* the c
 Probed precedence among the four: **Msg 1776** (no matching parent key) beats **1764**, which beats **1765**, which beats **1715**.
 `ResolveForeignKeys` applies the three computed-column gates in that order, after the referenced-key check and before the SET DEFAULT / cascade-cycle ones.
 Placing them there covers `CREATE TABLE`'s table-level form, `ALTER TABLE … ADD CONSTRAINT`, and the `ALTER TABLE DROP COLUMN` ordinal-shift re-resolution from one site; the inline form's Msg 8183 fires earlier, in `ParseComputedColumnInlineConstraint`.
-As with Msg 1776, real's trailing informational **Msg 1750** (`Could not create constraint or index. See previous errors.`) is collapsed away.
+As with Msg 1776 and Msg 1773, it is followed by **Msg 1750** (`Could not create constraint or index. See previous errors.`), raised with it as one exception.
 
 Real also rejects a *non-persisted* computed **referenced** column with **Msg 1784**, which the simulator doesn't reach: a non-persisted computed column is a legal UNIQUE key here (see [`indexes.md`](indexes.md)), so the parent key exists and the FK binds to it.
 
@@ -280,7 +280,7 @@ Once tables exist:
 
 ## Fidelity gaps
 
-- *(the referenced-column order gap is closed — `ReferencedColumnsFormKey` matches in declared order, so `REFERENCES p(y, x)` against `UNIQUE (x, y)` raises **Msg 1776 State 1** as real does; probe-confirmed)*
+- *(the referenced-column order gap is closed — `ReferencedColumnsFormKey` matches in declared order, so `REFERENCES p(y, x)` against `UNIQUE (x, y)` raises **Msg 1776** as real does; probe-confirmed)*
 - **`OBJECT_ID(name, 'F')`** — Returns NULL.
   The handful of `F`-filter callers in the wild can use `select object_id from sys.foreign_keys where name = …` instead.
 - *(the `SET DEFAULT` gap is closed — a NOT NULL referencing column with no DEFAULT raises **Msg 1762** at declaration, matching real. The earlier note claimed Msg 1789; the probed number is 1762, and its text names the constraint in double quotes where Msg 1776 beside it uses single. A **nullable** referencing column without a default is accepted, since NULL is then the value SET DEFAULT sets.)*

@@ -192,12 +192,12 @@ partial class Simulation
         foreach (var existing in table.Indexes)
         {
             if (context.Batch.CurrentDatabase.Collation.Equals(existing.Name, indexName))
-                throw SimulatedSqlException.IndexAlreadyExists(indexName, qualifiedTableName);
+                throw SimulatedSqlException.IndexAlreadyExists(indexName, targetTableName.ToString());
         }
         foreach (var kc in table.KeyConstraints)
         {
             if (context.Batch.CurrentDatabase.Collation.Equals(kc.Name, indexName))
-                throw SimulatedSqlException.IndexAlreadyExists(indexName, qualifiedTableName);
+                throw SimulatedSqlException.IndexAlreadyExists(indexName, targetTableName.ToString());
         }
 
         // A table can carry at most one clustered index — a clustered PK/UQ
@@ -297,21 +297,20 @@ partial class Simulation
     /// (catalog metadata + seek acceleration); the inline grammar exposes no
     /// UNIQUE / INCLUDE / filter forms, so those stay defaulted.
     /// </summary>
-    private static void AddInlineIndexes(ParserContext context, HeapTable table, string schemaName, List<PendingInlineIndex> pendingIndexes)
+    private static void AddInlineIndexes(ParserContext context, HeapTable table, string writtenTableName, List<PendingInlineIndex> pendingIndexes)
     {
         var collation = context.Batch.CurrentDatabase.Collation;
-        var qualifiedTableName = $"{schemaName}.{table.Name}";
         foreach (var pending in pendingIndexes)
         {
             foreach (var existing in table.Indexes)
             {
                 if (collation.Equals(existing.Name, pending.Name))
-                    throw SimulatedSqlException.IndexAlreadyExists(pending.Name, qualifiedTableName);
+                    throw SimulatedSqlException.IndexAlreadyExists(pending.Name, writtenTableName);
             }
             foreach (var kc in table.KeyConstraints)
             {
                 if (collation.Equals(kc.Name, pending.Name))
-                    throw SimulatedSqlException.IndexAlreadyExists(pending.Name, qualifiedTableName);
+                    throw SimulatedSqlException.IndexAlreadyExists(pending.Name, writtenTableName);
             }
             if (pending.IsClustered)
             {

@@ -259,7 +259,7 @@ partial class Simulation
 
         var existed = triggerSchema.Triggers.TryGetValue(triggerName.Leaf, out var existing);
         if (!isAlter && !createOrAlter && triggerSchema.HasNameInSharedNamespace(triggerName.Leaf))
-            throw SimulatedSqlException.ThereIsAlreadyAnObject(triggerName.Leaf);
+            throw SimulatedSqlException.ThereIsAlreadyAnObject(triggerName.Leaf, state: 2);
         // Replacement rules, in real's own order (the parent-object resolution
         // above already reported Msg 8197 for a target that doesn't exist, which
         // real reports ahead of these — probe-confirmed): a name another object
@@ -518,7 +518,7 @@ partial class Simulation
         // from the caller (default dbo for unqualified names).
         var existed = context.CurrentDatabase.DdlTriggers.TryGetValue(triggerName.Leaf, out var existing);
         if (!isAlter && !createOrAlter && (existed || triggerSchema.HasNameInSharedNamespace(triggerName.Leaf)))
-            throw SimulatedSqlException.ThereIsAlreadyAnObject(triggerName.Leaf);
+            throw SimulatedSqlException.ThereIsAlreadyAnObject(triggerName.Leaf, state: 2);
         if (isAlter && !existed)
             throw SimulatedSqlException.InvalidObjectName(triggerName);
         // A database-scope DDL trigger is gated on ALTER ANY DATABASE DDL

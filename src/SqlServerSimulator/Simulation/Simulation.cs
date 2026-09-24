@@ -2060,13 +2060,18 @@ public sealed partial class Simulation
                 // The exception's diagnostics were resolved at the catch
                 // above, so ERROR_LINE() / ERROR_PROCEDURE() report the same
                 // values the exception carries (probe-confirmed parity).
+                // An error raised as several — a constraint failure and its
+                // Msg 1750, a CREATE SCHEMA failure and its Msg 2759 — is the
+                // last of them to ERROR_NUMBER() and its siblings, as on real
+                // (probed 2026-09-24 against SQL Server 2025).
+                var last = caught.Errors[^1];
                 batch.InFlightError = new CaughtError(
-                    caught.Number,
-                    caught.Message,
-                    caught.Class,
-                    caught.State,
-                    caught.LineNumber,
-                    caught.Procedure.Length == 0 ? null : caught.Procedure);
+                    last.Number,
+                    last.Message,
+                    last.Class,
+                    last.State,
+                    last.LineNumber,
+                    last.Procedure.Length == 0 ? null : last.Procedure);
                 batch.ErrorSignaled = true;
             }
             connection.LastErrorNumber = caught.Number;

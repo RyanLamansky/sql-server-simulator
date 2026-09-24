@@ -101,7 +101,7 @@ A **non-persisted** computed column is rejected, with the message depending on h
 Msg 1764 **beats Msg 8141**: an inline CHECK reaching a non-persisted computed peer reports the persistence failure, not the peer-reference one, so `RejectChecksOverNonPersistedComputedColumns` runs ahead of the peer-reference walk at every site.
 The peer-reference gate still wins when the peer is persisted or regular.
 `WITH NOCHECK` doesn't excuse Msg 1764 — real rejects the declaration itself, and the option only skips the existing-row scan.
-As with the FK family's Msg 1764, real's trailing informational **Msg 1750** (`Could not create constraint or index. See previous errors.`) is collapsed away.
+As with the FK family's Msg 1764, it is followed by **Msg 1750** (`Could not create constraint or index. See previous errors.`) — state 0 here, where the FK form's is 1 (probed 2026-09-24).
 
 Both gates reach `DECLARE @t TABLE` and `CREATE TYPE … AS TABLE` through the shared column parser, naming the variable (`'@t'`) or the type in the Msg 1764 text.
 The Msg 1764 walk shares `Expression.VisitColumnReferences` with the Msg 8141 gate.

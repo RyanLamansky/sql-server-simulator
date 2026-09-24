@@ -344,7 +344,7 @@ Low priority / niche — simulatable (as placeholder constants or a small model)
   The constraint-only multi-element list ships, with its rollback — see [`alter-table.md`](alter-table.md#multi-element-add).
 - **`CREATE SCHEMA`'s element rollback leaves permission rows behind** — an element list that granted a permission and then failed removes the schema (and the objects inside it) but not the `sys.database_permissions` rows keyed on those object ids, which are then unreachable.
   Real rolls the whole statement back including the grants.
-- **Real's terminating trailers after a refused ALTER TABLE** — Msg **1750** (`Could not create constraint or index. See previous errors.`) follows Msg 4925 / 4926 / 8111 / 1764 on real and the simulator omits it, as it omits Msg **5069** after `ALTER DATABASE`'s Msg 5011.
+- **Real's terminating trailers after a refused `ALTER`** — Msg **3727** (`Could not drop constraint. See previous errors.`) after a refused constraint drop and Msg **5069** after `ALTER DATABASE`'s Msg 5011 are omitted here.
   The first message is the load-bearing signal in each pair; the trailer is a client-visible second error a strict comparison would see.
 
 ## Over-permissive register
@@ -436,10 +436,8 @@ Real bugs / limitations against shipped behavior — fixes are concrete work, no
   and a **`WRITETEXT` of NULL** leaves the cell with no pointer where real keeps handing one out, since real's pointer reflects an allocated LOB root rather than a non-NULL value.
 - **A constant negative length is a statement error where real aborts the batch** — `SELECT SUBSTRING('abc', 1, -1)` is settled while compiling on both engines and reports the same Msg 536 (see [`legacy-lob.md`](legacy-lob.md#negative-length-msg-536-while-compiling-msg-537-at-run-time)), but real's is a batch-level compile failure that the same batch's `BEGIN TRY` can't catch, while the simulator's is an ordinary statement error.
   The runtime half (Msg 537 for `LEFT` / `SUBSTRING`, Msg 536 state 2 for `RIGHT`) matches on both engines.
-- **Name-collision messages differ in their details** (probed 2026-09-24 against SQL Server 2025).
-  Msg 2714 is state 6 here for every object kind, where real reports 3 for a view or procedure, 5 for a constraint and 8 for a sequence or synonym.
-  A constraint that can't be created — a name collision, or a primary key or unique constraint over duplicate keys (Msg 1505) — is followed by Msg 1750 on real.
-  Msg 219 names the type with its schema here (`dbo.t`) where an unqualified `CREATE TYPE t` gets `t` on real.
+- **Two `ROWGUIDCOL` columns added in one `ALTER TABLE`** report only Msg 2761 here; real sends Msg 8196 (`Duplicate column specified as ROWGUIDCOL.`) ahead of it (probed 2026-09-24).
+- **No Msg 3621 after a constraint-creating `ALTER TABLE` that fails on duplicate keys** — real follows its Msg 1505 and Msg 1750 with `The statement has been terminated.` (probed 2026-09-24).
 - **A `strict` `OPENJSON` path that doesn't resolve returns no rows here**; real raises Msg 13608 state 3.
 
 - **`FORMAT`'s culture data is .NET's ICU set where real's is the .NET Framework's NLS set** — every divergence below is width-independent, reproducing for an `int`, a `money` and a narrow `decimal` alike, and each is what .NET itself produces for the same call (probed 2026-08-06):

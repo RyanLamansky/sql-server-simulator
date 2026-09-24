@@ -211,8 +211,9 @@ public sealed class ForeignKeyTests
     /// <summary>
     /// The implied list is the primary key alone, so a parent carrying only a
     /// UNIQUE constraint has nothing to imply and real reports Msg 1773 — the
-    /// implicit-reference message, naming the object as <c>schema.table</c> —
-    /// rather than the explicit-list Msg 1776. Probed against SQL Server 2025.
+    /// implicit-reference message, naming the object as the statement wrote it
+    /// — rather than the explicit-list Msg 1776, and follows it with Msg 1750.
+    /// Probed against SQL Server 2025.
     /// </summary>
     [TestMethod]
     public void FkWithoutReferencedColumnList_ParentHasNoPrimaryKey_RaisesMsg1773()
@@ -222,8 +223,9 @@ public sealed class ForeignKeyTests
             create table c (pid int constraint fk_c_p references p)
             """, 1773);
         AreEqual(
-            "Foreign key 'fk_c_p' has implicit reference to object 'dbo.p' which does not have a primary key defined on it.",
-            ex.Message);
+            "Foreign key 'fk_c_p' has implicit reference to object 'p' which does not have a primary key defined on it.",
+            ex.Errors[0].Message);
+        AreEqual(1750, ex.Errors[1].Number);
     }
 
     /// <summary>
@@ -673,7 +675,8 @@ public sealed class ForeignKeyTests
             1776);
         Assert.AreEqual(
             "There are no primary or candidate keys in the referenced table 'p' that match the referencing column list in the foreign key 'fk_c'.",
-            ex.Message);
+            ex.Errors[0].Message);
+        Assert.AreEqual(1750, ex.Errors[1].Number);
     }
 
     /// <summary>Matching order stays accepted — the gate narrows nothing else.</summary>
@@ -822,7 +825,7 @@ public sealed class ForeignKeyTests
             create table c (id int not null primary key, base int not null, cc as base + 1,
                             constraint fk_c foreign key (cc) references p(id))
             """, 1764);
-        AreEqual("Computed Column 'cc' in table 'c' is invalid for use in 'FOREIGN KEY CONSTRAINT' because it is not persisted.", ex.Message);
+        AreEqual("Computed Column 'cc' in table 'c' is invalid for use in 'FOREIGN KEY CONSTRAINT' because it is not persisted.", ex.Errors[0].Message);
     }
 
     [TestMethod]
@@ -834,7 +837,7 @@ public sealed class ForeignKeyTests
             create table c (id int not null primary key, base int not null, cc as base + 1)
             """);
         var ex = sim.AssertSqlError("alter table c add constraint fk_c foreign key (cc) references p(id)", 1764);
-        AreEqual("Computed Column 'cc' in table 'c' is invalid for use in 'FOREIGN KEY CONSTRAINT' because it is not persisted.", ex.Message);
+        AreEqual("Computed Column 'cc' in table 'c' is invalid for use in 'FOREIGN KEY CONSTRAINT' because it is not persisted.", ex.Errors[0].Message);
     }
 
     [TestMethod]

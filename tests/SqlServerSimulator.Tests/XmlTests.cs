@@ -291,12 +291,12 @@ public sealed class XmlTests
     }
 
     [TestMethod]
-    public void CreateXmlIndex_DuplicateName_Raises2714()
+    public void CreateXmlIndex_DuplicateName_Raises1913()
     {
         var sim = new Simulation();
         _ = sim.ExecuteNonQuery("create table dbo.doc (id int not null primary key, body xml)");
         _ = sim.ExecuteNonQuery("create primary xml index pxml on dbo.doc(body)");
-        _ = sim.AssertSqlError("create primary xml index pxml on dbo.doc(body)", 2714);
+        AreEqual(201, sim.AssertSqlError("create primary xml index pxml on dbo.doc(body)", 1913).State);
     }
 
     [TestMethod]

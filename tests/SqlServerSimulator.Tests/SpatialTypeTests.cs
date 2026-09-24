@@ -231,15 +231,15 @@ public sealed class SpatialTypeTests
     }
 
     [TestMethod]
-    public void CreateSpatialIndex_DuplicateName_RaisesMsg2714()
+    public void CreateSpatialIndex_DuplicateName_RaisesMsg1913()
     {
         var sim = new Simulation();
         _ = sim.ExecuteNonQuery(@"
             create table dbo.shape (id int primary key, g geometry);
             create spatial index sp_g on dbo.shape(g) with (bounding_box = (0, 0, 10, 10))");
-        _ = sim.AssertSqlError(
+        AreEqual(211, sim.AssertSqlError(
             "create spatial index sp_g on dbo.shape(g) with (bounding_box = (0, 0, 5, 5))",
-            2714);
+            1913).State);
     }
 
     [TestMethod]

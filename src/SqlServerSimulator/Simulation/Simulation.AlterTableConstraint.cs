@@ -173,7 +173,7 @@ partial class Simulation
             return true;
         if (!context.Batch.TryResolveTable(tableName, out var table))
             throw SimulatedSqlException.CannotFindObjectForAlterTable(tableName.ToString());
-        AssertConstraintNameUnique(context, explicitName);
+        AssertConstraintNameUnique(table, explicitName);
         // A CHECK may not read a non-persisted computed column — Msg 1764,
         // raised whether or not WITH NOCHECK skipped the data validation.
         RejectCheckOverNonPersistedComputedColumn(context.Batch.CurrentDatabase.Collation, table.Name, table.Columns, predicate);
@@ -242,7 +242,7 @@ partial class Simulation
 
         if (!context.Batch.TryResolveTable(tableName, out var table))
             throw SimulatedSqlException.CannotFindObjectForAlterTable(tableName.ToString());
-        AssertConstraintNameUnique(context, explicitName);
+        AssertConstraintNameUnique(table, explicitName);
 
         // Resolve child column names → full ordinals against the live table.
         var childOrdinals = new int[childColumnNames.Count];
@@ -326,7 +326,7 @@ partial class Simulation
 
         if (!context.Batch.TryResolveTable(tableName, out var table))
             throw SimulatedSqlException.CannotFindObjectForAlterTable(tableName.ToString());
-        AssertConstraintNameUnique(context, explicitName);
+        AssertConstraintNameUnique(table, explicitName);
 
         // Resolve column names → full ordinals; UQ/PK column missing → Msg 1911.
         var fullOrdinals = new int[columnNames.Count];
@@ -444,7 +444,7 @@ partial class Simulation
 
         if (!context.Batch.TryResolveTable(tableName, out var table))
             throw SimulatedSqlException.CannotFindObjectForAlterTable(tableName.ToString());
-        AssertConstraintNameUnique(context, explicitName);
+        AssertConstraintNameUnique(table, explicitName);
 
         HeapColumn? targetColumn = null;
         foreach (var c in table.Columns)
@@ -473,39 +473,21 @@ partial class Simulation
     }
 
     /// <summary>
-    /// Rejects a duplicate constraint name within the database's object
-    /// namespace (Msg 2714). PK / UQ / FK / CHECK / DEFAULT all share the
-    /// same shared-namespace check — probe-confirmed against SQL Server 2025.
+    /// Rejects an explicit constraint name another object in the table's
+    /// schema holds — a constraint on any of its tables, or a table, view or
+    /// other object, since they share one namespace — with Msg 2714 then
+    /// Msg 1750; another schema may hold the same name (probed 2026-09-24
+    /// against SQL Server 2025). A temp table's constraints live in tempdb,
+    /// which isn't modeled as a namespace, so they aren't checked.
     /// </summary>
-    private static void AssertConstraintNameUnique(ParserContext context, string? candidateName)
+    private static void AssertConstraintNameUnique(HeapTable table, string? candidateName)
     {
-        if (candidateName is null)
+        if (candidateName is null || table.OwningDatabase is not { } database)
             return;
-        foreach (var schema in context.CurrentDatabase.Schemas.Values)
+        foreach (var schema in database.Schemas.Values)
         {
-            foreach (var t in schema.HeapTables.Values)
-            {
-                foreach (var k in t.KeyConstraints)
-                {
-                    if (context.Batch.CurrentDatabase.Collation.Equals(k.Name, candidateName))
-                        throw SimulatedSqlException.ThereIsAlreadyAnObject(candidateName);
-                }
-                foreach (var ck in t.CheckConstraints)
-                {
-                    if (context.Batch.CurrentDatabase.Collation.Equals(ck.Name, candidateName))
-                        throw SimulatedSqlException.ThereIsAlreadyAnObject(candidateName);
-                }
-                foreach (var fk in t.OutgoingForeignKeys)
-                {
-                    if (context.Batch.CurrentDatabase.Collation.Equals(fk.Name, candidateName))
-                        throw SimulatedSqlException.ThereIsAlreadyAnObject(candidateName);
-                }
-                foreach (var col in t.Columns)
-                {
-                    if (col.DefaultConstraint is { } df && context.Batch.CurrentDatabase.Collation.Equals(df.Name, candidateName))
-                        throw SimulatedSqlException.ThereIsAlreadyAnObject(candidateName);
-                }
-            }
+            if (schema.SchemaId == table.SchemaId && schema.HasNameInSharedNamespace(candidateName))
+                throw SimulatedSqlException.ConstraintNameTaken(candidateName);
         }
     }
 
@@ -547,7 +529,7 @@ partial class Simulation
             }
 
             if (!seen.Add(new SqlValueKey(key)))
-                throw SimulatedSqlException.DuplicateKeyOnCreate("dbo." + table.Name, constraint.Name, FormatIndexKeyValues(key));
+                throw SimulatedSqlException.FollowedByConstraintNotCreated(SimulatedSqlException.DuplicateKeyOnCreate("dbo." + table.Name, constraint.Name, FormatIndexKeyValues(key)));
         }
     }
 

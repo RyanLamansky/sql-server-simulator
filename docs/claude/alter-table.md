@@ -69,10 +69,9 @@ Default (`WITH CHECK`) scans the live heap before mutating:
 | `CHECK` | every existing row passes (UNKNOWN passes) | Msg 547 with `"ALTER TABLE statement"` prefix |
 | `DEFAULT` | column exists | Msg 1752 |
 | `DEFAULT` | column doesn't already have a DEFAULT | Msg 1781 |
-| any | constraint name unique across all schemas' tables | Msg 2714 |
+| any | constraint name free in the table's schema — among its constraints and every other object, which share one namespace, and another schema may hold it | Msg 2714 state 5 |
 
-Real SQL Server emits a trailing Msg 1750 / 1753 after the primary failure (`"Could not create constraint or index. See previous errors."`); the simulator emits only the primary error — same end state, single-error stream.
-Documented quirk.
+A failure to create a constraint is followed by Msg 1750 (`"Could not create constraint or index. See previous errors."`), raised as one exception with it (`SimulatedSqlException.FollowedByConstraintNotCreated`), whose state varies with the failure; a `CATCH` reads the 1750, the last of the pair (probed 2026-09-24 against SQL Server 2025).
 
 The Msg 547 verb difference is the only wording variance between INSERT-time CHECK / FK violations and ALTER-time existing-data violations.
 The constraint name, table reference, and column suffix follow the same format.
@@ -176,7 +175,7 @@ Probed refusals:
 | `ADD SPARSE` on a computed column | **Msg 4928** |
 | `ADD SPARSE` on a column carrying a DEFAULT | **Msg 11410** |
 
-Real follows Msg 4925 / 4926 with a terminating **Msg 1750**, which the simulator omits — the first message is the load-bearing signal.
+Both Msg 4925 and Msg 4926 are followed by **Msg 1750**, as a failed constraint is.
 
 `ADD | DROP PERSISTED` and `ADD | DROP MASKED` raise `NotSupportedException`; see [`backlog.md`](backlog.md) for the probe data.
 
@@ -261,8 +260,7 @@ A user-written paren wrapping the expression yields a doubled pair (`DEFAULT (0)
 
 ## Fidelity gaps
 
-- **Single primary error instead of error pair** — real SQL Server emits Msg X + trailing Msg 1750 / 3727 (`"Could not create constraint or index"` / `"Could not drop constraint"`); the simulator emits only Msg X.
-  Test code asserting on the primary error number works unchanged.
+- **No Msg 3727 after a refused constraint drop** — real follows it with `"Could not drop constraint. See previous errors."`; the simulator sends only the primary error.
 - **`definition` columns hold original syntax, not SQL Server's canonical form** — see [Definition columns](#definition-columns).
   A schema-diff tool comparing the simulator's `([a]>(0))`-equivalent against a live server's normalized text will see a cosmetic difference even when the predicate is identical.
 - **`KeyConstraint.IsSystemNamed` is inferred from the name prefix** — `PK__` / `UQ__` → system-named.

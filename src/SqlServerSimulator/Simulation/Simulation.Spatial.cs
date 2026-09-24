@@ -103,7 +103,7 @@ partial class Simulation
         foreach (var existing in table.SpatialIndexes)
         {
             if (context.Batch.CurrentDatabase.Collation.Equals(existing.Name, indexName))
-                throw SimulatedSqlException.ThereIsAlreadyAnObject(indexName);
+                throw SimulatedSqlException.IndexAlreadyExists(indexName, targetTableName.ToString(), state: 211);
         }
 
         var objectId = context.CurrentDatabase.AllocateObjectId();

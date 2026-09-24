@@ -47,7 +47,7 @@ partial class Simulation
         var leaf = synonymName.Leaf;
         var synonym = new Synonym(schema, leaf, context.CurrentDatabase.AllocateObjectId(), context.Batch.CurrentStatement.UtcNow, baseObject);
         if (schema.HasNameInSharedNamespace(leaf) || !schema.Synonyms.TryAdd(leaf, synonym))
-            throw SimulatedSqlException.SynonymNameTaken(leaf);
+            throw SimulatedSqlException.NameTakenEndingOnlyStatement(synonymName.ToString(), state: 8);
         // Real reports the base object as TargetObjectName with no type.
         RecordDdlEvent(context, "CREATE_SYNONYM", schema.Name, leaf, "SYNONYM", baseObject.Leaf);
         return true;

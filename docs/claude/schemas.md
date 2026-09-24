@@ -8,7 +8,7 @@ Every `Database` ships with three pre-populated schemas at conventional ids: `db
 User schemas allocate ids starting at 5 from `Database.AllocateSchemaId()` (a counter seeded so the next-allocated value is 5).
 Probed against SQL Server 2025.
 
-- **Duplicate `CREATE SCHEMA`** (case-insensitive) → **Msg 2714** (`"There is already an object named '<n>' in the database."` — same factory as duplicate CREATE TABLE; SQL Server shares the namespace).
+- **Duplicate `CREATE SCHEMA`** (case-insensitive) → **Msg 2714** (`"There is already an object named '<n>' in the database."`), which unlike a table's ends only its statement.
 - **Reserved schema names** (`dbo`, `sys`, `INFORMATION_SCHEMA`) → **Msg 2760** (`"The specified schema name \"<n>\" either does not exist or you do not have permission to use it."`).
   Wording is quirky for a CREATE (says "does not exist"), but probe-confirmed verbatim — real SQL Server resolves the principal first and these schemas tie to system principals.
 - **Three-part `db.schema.t`** routes the db segment through `Simulation.Databases` (case-insensitive).
@@ -131,9 +131,9 @@ Synonyms enroll in `Schema.SchemaObjects()`, so they take an `ObjectId` / `Creat
 
 ### Name collisions and DROP
 
-- **Either direction collides** → **Msg 2714** (`ThereIsAlreadyAnObject`): a `CREATE SYNONYM` over any existing object, and a `CREATE TABLE` / `CREATE VIEW` / `CREATE PROCEDURE` / `CREATE SEQUENCE` / `SELECT … INTO` over an existing synonym.
+- **Either direction collides** → **Msg 2714** (`ThereIsAlreadyAnObject`, or `NameTakenEndingOnlyStatement` for the synonym's own, which ends only its statement): a `CREATE SYNONYM` over any existing object, and a `CREATE TABLE` / `CREATE VIEW` / `CREATE PROCEDURE` / `CREATE SEQUENCE` / `SELECT … INTO` over an existing synonym.
   Both directions run through `Schema.HasNameInSharedNamespace`.
-  (Real varies the State per statement — 8 for CREATE SYNONYM / SEQUENCE, 6 for CREATE TABLE / SELECT INTO, 3 for CREATE VIEW / PROCEDURE — and qualifies the name in some of them; the simulator's single factory reports State 6 with the leaf name.)
+  The State follows the kind being created and the name is the leaf, but a synonym's or sequence's is named as the statement wrote it (`dbo.s`); see `SimulatedSqlException.ThereIsAlreadyAnObject`.
 - **DROP of the wrong kind** → **Msg 3705** (`CannotUseDropWithObjectKind`): `DROP TABLE syn` says "because 'syn' is a synonym. Use DROP SYNONYM.", `DROP SYNONYM t` says "is a table. Use DROP TABLE."
   The check is kind-general (probe-confirmed wording per kind: table / view / procedure / function / table valued function / sequence / trigger / synonym), so `DROP TABLE` over a view or sequence raises it too.
   `IF EXISTS` doesn't suppress it — the object exists, it's just the wrong kind.
@@ -153,7 +153,6 @@ A synonym takes no column list at all (Msg 1020), so every check through one is 
 - **A grant on the synonym isn't honored at use.** The DML / FROM permission gate checks the resolved *base* object, so a principal holding `SELECT` on the synonym but not on the base gets Msg 229 where real reads through.
   Closing it means carrying resolution provenance out of the redirect (`TryResolveTable` returns the base table with no record of the synonym it came through).
 - `base_object_name` expands an omitted middle segment: `FOR tempdb..t` stores `[tempdb].[dbo].[t]` where real keeps `[tempdb]..[t]`, because `MultiPartName` compresses empty segments at parse.
-- Msg 2714's State / name qualification per statement kind, as above.
 
 ## ALTER SCHEMA TRANSFER
 `ALTER SCHEMA <dest> TRANSFER [(OBJECT|TYPE)::] <source>.<obj>` moves a single object from one schema to another.

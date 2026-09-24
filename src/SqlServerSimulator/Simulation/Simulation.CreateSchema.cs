@@ -130,7 +130,7 @@ partial class Simulation
             PrincipalId = ownerPrincipalId,
         };
         if (!context.CurrentDatabase.Schemas.TryAdd(schemaName, schema))
-            throw SimulatedSqlException.ThereIsAlreadyAnObject(schemaName);
+            throw SimulatedSqlException.NameTakenEndingOnlyStatement(schemaName, state: 6);
 
         try
         {

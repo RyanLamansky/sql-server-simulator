@@ -44,7 +44,7 @@ CREATE TABLE t (id int PRIMARY KEY NONCLUSTERED, a int INDEX ixa);  -- alongside
 
 The parser collects each into a `PendingInlineIndex` (name, `CLUSTERED`/`NONCLUSTERED`, key columns) — the table-level form in `ParseColumnList` (`ParseTableLevelInlineIndex`), the column-level form as an `INDEX` case in the per-column constraint loop.
 After the `HeapTable` is built, `AddInlineIndexes` (`Simulation.CreateIndex.cs`) resolves the columns and appends the same `Index` a standalone CREATE INDEX would (catalog metadata + seek acceleration; no UNIQUE / INCLUDE / filter — the inline grammar exposes none).
-Column resolution, name-collision (Msg 2714 / 1911 wording via `IndexAlreadyExists` / `IndexColumnMissing`), and one-clustered-per-table (Msg 1902) run inside the CREATE TABLE atomic block, so a bad inline index rolls the table back.
+Column resolution, name-collision (Msg 1913 via `IndexAlreadyExists`, naming the table as the statement wrote it) and a missing column (Msg 1911 via `IndexColumnMissing`), and one-clustered-per-table (Msg 1902) run inside the CREATE TABLE atomic block, so a bad inline index rolls the table back.
 Inline indexes are **CREATE TABLE only** — table variables / table types leave the `INDEX` keyword to the column path, which rejects it.
 
 ## Disabled indexes

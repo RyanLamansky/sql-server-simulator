@@ -163,7 +163,7 @@ partial class Simulation
         // duplicate names across kinds raise Msg 2714. Check cross-kind before
         // the sequence-specific insert.
         if (schema.HasNameInSharedNamespace(sequence.Name) || !schema.Sequences.TryAdd(sequence.Name, sequence))
-            throw SimulatedSqlException.ThereIsAlreadyAnObject(sequence.Name);
+            throw SimulatedSqlException.ThereIsAlreadyAnObject(sequenceName.ToString(), state: 8);
         RecordDdlEvent(context, "CREATE_SEQUENCE", schema.Name, sequence.Name, "SEQUENCE");
         return true;
     }

@@ -26,23 +26,63 @@ partial class SimulatedSqlException
         new($"Valid values of the database compatibility level are 100, 110, 120, 130, 140, 150, 160 or 170.", 15048, 16, 1);
 
     /// <summary>
-    /// Msg 2714, an object name already taken.
+    /// Msg 2714, an object name already taken. The state names the kind of
+    /// object being created — 6 for a table or schema, 3 for a view, procedure
+    /// or function, 2 for a trigger, 8 for a sequence or synonym and 5 for a
+    /// constraint, which <see cref="ConstraintNameTaken"/> raises — and the name
+    /// is the leaf, but for a sequence or synonym as the statement wrote it
+    /// (probed 2026-09-24 against SQL Server 2025).
     /// Raised at run time it ends the batch as an error does under
-    /// <c>SET XACT_ABORT ON</c>, whatever the option says — probed 2026-09-24
-    /// against SQL Server 2025 for a table, view, procedure, sequence, check
-    /// constraint and <c>SELECT … INTO</c> target; a synonym's is
-    /// <see cref="SynonymNameTaken"/>.
+    /// <c>SET XACT_ABORT ON</c>, whatever the option says — probed the same day
+    /// for every kind but the two <see cref="NameTakenEndingOnlyStatement"/>
+    /// covers.
     /// </summary>
-    internal static SimulatedSqlException ThereIsAlreadyAnObject(string name) =>
-        new($"There is already an object named '{name}' in the database.", 2714, 16, 6) { AbortsAsUnderXactAbort = true };
+    internal static SimulatedSqlException ThereIsAlreadyAnObject(string name, byte state = 6) =>
+        new($"There is already an object named '{name}' in the database.", 2714, 16, state) { AbortsAsUnderXactAbort = true };
 
     /// <summary>
-    /// Msg 2714 for <c>CREATE SYNONYM</c>, which unlike the other objects' ends
-    /// only its statement and leaves the transaction committable (probed
+    /// Msg 2714 for <c>CREATE SYNONYM</c> (state 8) and <c>CREATE SCHEMA</c>
+    /// (state 6, followed there by Msg 2759), which unlike the other objects'
+    /// end only their statement and leave the transaction committable (probed
     /// 2026-09-24 against SQL Server 2025).
     /// </summary>
-    internal static SimulatedSqlException SynonymNameTaken(string name) =>
-        new($"There is already an object named '{name}' in the database.", 2714, 16, 6);
+    internal static SimulatedSqlException NameTakenEndingOnlyStatement(string name, byte state) =>
+        new($"There is already an object named '{name}' in the database.", 2714, 16, state);
+
+    /// <summary>
+    /// Msg 2714 state 5 for a constraint whose explicit name another object in
+    /// the schema holds — another constraint, or a table, view or any other
+    /// object, since they share one namespace — followed by Msg 1750 (probed
+    /// 2026-09-24 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException ConstraintNameTaken(string name) =>
+        FollowedByConstraintNotCreated(ThereIsAlreadyAnObject(name, state: 5));
+
+    /// <summary>
+    /// Mimics SQL Server error 8168: one <c>CREATE TABLE</c> names two of its
+    /// constraints alike (probed 2026-09-24 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException DuplicateNameInStatement(string name) =>
+        new($"Cannot create, drop, enable, or disable more than one constraint, column, index, or trigger named '{name}' in this context. Duplicate names are not allowed.", 8168, 16, 0);
+
+    /// <summary>
+    /// Pairs <paramref name="error"/> with the Msg 1750 real sends after every
+    /// failure to create a constraint or index — a name collision, a duplicate
+    /// key, an unmatched or ill-typed foreign key, a second primary key or
+    /// <c>ROWGUIDCOL</c> — as one exception, whose batch-ending behavior is
+    /// <paramref name="error"/>'s. The trailer's state varies by the failure
+    /// (probed 2026-09-24 against SQL Server 2025); a <c>CATCH</c> reads the
+    /// trailer, the last error, as real's does.
+    /// </summary>
+    internal static SimulatedSqlException FollowedByConstraintNotCreated(SimulatedSqlException error, byte state = 1)
+    {
+        var trailer = new SimulatedSqlException("Could not create constraint or index. See previous errors.", 1750, 16, state);
+        List<SimulatedError> entries = [.. error.Errors, .. trailer.Errors];
+        return new(string.Join(Environment.NewLine, entries.Select(entry => entry.Message)), System.Runtime.InteropServices.CollectionsMarshal.AsSpan(entries))
+        {
+            AbortsAsUnderXactAbort = error.AbortsAsUnderXactAbort,
+        };
+    }
 
     /// <summary>
     /// Mimics SQL Server error 2010: an <c>ALTER</c> (or the ALTER leg of a
@@ -1010,19 +1050,22 @@ partial class SimulatedSqlException
 
     /// <summary>
     /// Mimics SQL Server error 8110: more than one column or table-level
-    /// PRIMARY KEY clause was declared in a CREATE TABLE.
+    /// PRIMARY KEY clause was declared in a CREATE TABLE. State 0, probed
+    /// 2026-09-24 against SQL Server 2025.
     /// </summary>
     internal static SimulatedSqlException MultiplePrimaryKey(string tableName) =>
-        new($"Cannot add multiple PRIMARY KEY constraints to table '{tableName}'.", 8110, 16, 1);
+        new($"Cannot add multiple PRIMARY KEY constraints to table '{tableName}'.", 8110, 16, 0);
 
     /// <summary>
     /// Mimics SQL Server error 8111: a PRIMARY KEY constraint named a column
     /// that allows NULLs. Real SQL Server fires this only when the column was
     /// explicitly declared <c>NULL</c>; bare PK with no nullability stated
-    /// silently flips the column to NOT NULL instead.
+    /// silently flips the column to NOT NULL instead. Followed by Msg 1750
+    /// state 0 from both <c>CREATE TABLE</c> and <c>ALTER TABLE</c> (probed
+    /// 2026-09-24).
     /// </summary>
     internal static SimulatedSqlException PrimaryKeyOnNullableColumn(string tableName) =>
-        new($"Cannot define PRIMARY KEY constraint on nullable column in table '{tableName}'.", 8111, 16, 1);
+        FollowedByConstraintNotCreated(new($"Cannot define PRIMARY KEY constraint on nullable column in table '{tableName}'.", 8111, 16, 1), state: 0);
 
     /// <summary>
     /// Mimics SQL Server error 1919: a column whose type SQL Server doesn't
@@ -1621,26 +1664,25 @@ partial class SimulatedSqlException
     /// <summary>
     /// Mimics SQL Server error 1776: a FOREIGN KEY's referenced column list
     /// doesn't match any PRIMARY KEY or UNIQUE constraint on the referenced
-    /// table. Real SQL Server pairs this with a trailing Msg 1750 / 1753
-    /// "Could not create constraint or index"; the simulator collapses the
-    /// pair into a single Msg 1776 since the second is purely informational.
-    /// Probe-confirmed verbatim wording against SQL Server 2025.
+    /// table, followed by Msg 1750. Probe-confirmed verbatim wording against
+    /// SQL Server 2025, and the pair's states (0, then 1) on 2026-09-24.
     /// </summary>
     internal static SimulatedSqlException ForeignKeyNoMatchingKey(string referencedTable, string foreignKeyName) =>
-        new($"There are no primary or candidate keys in the referenced table '{referencedTable}' that match the referencing column list in the foreign key '{foreignKeyName}'.", 1776, 16, 1);
+        FollowedByConstraintNotCreated(new($"There are no primary or candidate keys in the referenced table '{referencedTable}' that match the referencing column list in the foreign key '{foreignKeyName}'.", 1776, 16, 0));
 
     /// <summary>
     /// Mimics SQL Server error 1773: a FOREIGN KEY written without a
     /// referenced column list points at a table carrying no PRIMARY KEY, so
     /// the implied column list has nothing to resolve against. Real reports
     /// this rather than Msg 1776, which is the explicit-list message, and
-    /// pairs it with the same trailing informational Msg 1750 the simulator
-    /// collapses away. Probe-confirmed verbatim wording against SQL Server
-    /// 2025 — a referenced table carrying only a UNIQUE constraint reports it
-    /// too, since the implied list reads the primary key alone.
+    /// follows it with the same Msg 1750. Probe-confirmed verbatim wording
+    /// against SQL Server 2025 — a referenced table carrying only a UNIQUE
+    /// constraint reports it too, since the implied list reads the primary key
+    /// alone — and the pair's states (0, then 1) and the referenced table named
+    /// as the statement wrote it on 2026-09-24.
     /// </summary>
     internal static SimulatedSqlException ForeignKeyImplicitReferenceWithoutPrimaryKey(string foreignKeyName, string referencedTable) =>
-        new($"Foreign key '{foreignKeyName}' has implicit reference to object '{referencedTable}' which does not have a primary key defined on it.", 1773, 16, 1);
+        FollowedByConstraintNotCreated(new($"Foreign key '{foreignKeyName}' has implicit reference to object '{referencedTable}' which does not have a primary key defined on it.", 1773, 16, 0));
 
     /// <summary>
     /// Mimics SQL Server error 1764: a FOREIGN KEY's referencing column is a
@@ -1648,11 +1690,11 @@ partial class SimulatedSqlException
     /// <c>CREATE TABLE</c> and <c>ALTER TABLE ADD CONSTRAINT</c> forms; the
     /// inline column form raises Msg 8183 at parse instead, before the
     /// constraint reaches resolution (probe-confirmed split). Msg 1776 wins
-    /// when both apply. Real pairs this with a trailing informational Msg 1750,
-    /// which the simulator collapses away as it does for Msg 1776.
+    /// when both apply. Real follows it with Msg 1750 state 1 (probed
+    /// 2026-09-24).
     /// </summary>
     internal static SimulatedSqlException ForeignKeyOnNonPersistedComputedColumn(string columnName, string tableName) =>
-        NonPersistedComputedColumnInConstraint(columnName, tableName, "FOREIGN KEY CONSTRAINT");
+        FollowedByConstraintNotCreated(NonPersistedComputedColumnInConstraint(columnName, tableName, "FOREIGN KEY CONSTRAINT"), state: 1);
 
     /// <summary>
     /// Mimics SQL Server error 1764 for a CHECK constraint whose predicate
@@ -1664,9 +1706,11 @@ partial class SimulatedSqlException
     /// non-persisted computed peer. A CHECK inline on the non-persisted
     /// column itself raises Msg 8183 at parse instead. Probe-confirmed to
     /// beat Msg 8141, so this walk runs ahead of the peer-reference gate.
+    /// Real follows it with Msg 1750 state 0 (probed 2026-09-24 for
+    /// <c>CREATE TABLE</c>).
     /// </summary>
     internal static SimulatedSqlException CheckConstraintOnNonPersistedComputedColumn(string columnName, string tableName) =>
-        NonPersistedComputedColumnInConstraint(columnName, tableName, "CHECK CONSTRAINT");
+        FollowedByConstraintNotCreated(NonPersistedComputedColumnInConstraint(columnName, tableName, "CHECK CONSTRAINT"), state: 0);
 
     /// <summary>
     /// Shared Msg 1764 body. Real names the offending constraint family in the
@@ -1722,10 +1766,10 @@ partial class SimulatedSqlException
     /// Mimics SQL Server error 1779: <c>ALTER TABLE … ADD CONSTRAINT … PRIMARY
     /// KEY</c> attempted to add a second PRIMARY KEY to a table that already
     /// declares one. Probe-confirmed verbatim wording against SQL Server 2025
-    /// (2026-05-13).
+    /// (2026-05-13); followed by Msg 1750 state 0 (probed 2026-09-24).
     /// </summary>
     internal static SimulatedSqlException PrimaryKeyAlreadyExists(string tableName) =>
-        new($"Table '{tableName}' already has a primary key defined on it.", 1779, 16, 0);
+        FollowedByConstraintNotCreated(new($"Table '{tableName}' already has a primary key defined on it.", 1779, 16, 0), state: 0);
 
     /// <summary>
     /// Mimics SQL Server error 1505: <c>ALTER TABLE … ADD CONSTRAINT …
@@ -1822,11 +1866,27 @@ partial class SimulatedSqlException
     /// <summary>
     /// Mimics SQL Server error 1913: <c>CREATE INDEX</c> with a name that
     /// already exists on the target table. Probe-confirmed verbatim
-    /// against SQL Server 2025 — message names the index and the
-    /// qualified table.
+    /// against SQL Server 2025 — message names the index and the table as
+    /// the statement wrote it, and the state is 1 for a relational index,
+    /// 211 for a spatial one and 201 for an XML one (probed 2026-09-24).
     /// </summary>
-    internal static SimulatedSqlException IndexAlreadyExists(string indexName, string qualifiedTableName) =>
-        new($"The operation failed because an index or statistics with name '{indexName}' already exists on table '{qualifiedTableName}'.", 1913, 16, 1);
+    internal static SimulatedSqlException IndexAlreadyExists(string indexName, string writtenTableName, byte state = 1) =>
+        new($"The operation failed because an index or statistics with name '{indexName}' already exists on table '{writtenTableName}'.", 1913, 16, state) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>
+    /// Mimics SQL Server error 7642: <c>CREATE FULLTEXT CATALOG</c> over a name
+    /// the database already has (probed 2026-09-24 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException FullTextCatalogAlreadyExists(string name) =>
+        new($"A full-text catalog named '{name}' already exists in this database. Use a different name.", 7642, 16, 2);
+
+    /// <summary>
+    /// Mimics SQL Server error 7652: a second <c>CREATE FULLTEXT INDEX</c> on a
+    /// table, named as the statement wrote it (probed 2026-09-24 against
+    /// SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException FullTextIndexAlreadyExists(string writtenTableName) =>
+        new($"A full-text index for table or indexed view '{writtenTableName}' has already been created.", 7652, 16, 1);
 
     /// <summary>
     /// Mimics SQL Server error 1916: <c>IGNORE_DUP_KEY</c> was set on a
@@ -2459,7 +2519,7 @@ partial class SimulatedSqlException
     /// statement's elements. Probe-confirmed verbatim in all four shapes.
     /// </summary>
     internal static SimulatedSqlException CreateSchemaFailed() =>
-        new("CREATE SCHEMA failed due to previous errors.", 2759, 16, 1);
+        new("CREATE SCHEMA failed due to previous errors.", 2759, 16, 0);
 
     /// <summary>
     /// Mimics SQL Server error 15138: <c>DROP USER</c> / <c>DROP ROLE</c> of a
@@ -2479,21 +2539,21 @@ partial class SimulatedSqlException
 
     /// <summary>
     /// Mimics SQL Server error 4925: <c>ALTER TABLE … ALTER COLUMN … ADD
-    /// ROWGUIDCOL</c> where the table already carries one. Real follows it with
-    /// a terminating Msg 1750, which the simulator omits. Probe-confirmed
-    /// verbatim.
+    /// ROWGUIDCOL</c> where the table already carries one, followed by Msg 1750.
+    /// Probe-confirmed verbatim, and both states 0 on 2026-09-24.
     /// </summary>
     internal static SimulatedSqlException TableAlreadyHasRowGuidCol(string tableName) =>
-        new($"ALTER TABLE ALTER COLUMN ADD ROWGUIDCOL failed because a column already exists in table '{tableName}' with ROWGUIDCOL property.", 4925, 16, 1);
+        FollowedByConstraintNotCreated(new($"ALTER TABLE ALTER COLUMN ADD ROWGUIDCOL failed because a column already exists in table '{tableName}' with ROWGUIDCOL property.", 4925, 16, 0), state: 0);
 
     /// <summary>
     /// Mimics SQL Server error 4926: <c>DROP ROWGUIDCOL</c> where no column
     /// carries the property. The message names the table but not the column the
     /// statement asked about — probe-confirmed, so real drops <i>the</i>
-    /// ROWGUIDCOL rather than the named column's.
+    /// ROWGUIDCOL rather than the named column's. Followed by Msg 1750; both
+    /// states 0 (probed 2026-09-24).
     /// </summary>
     internal static SimulatedSqlException NoRowGuidColToDrop(string tableName) =>
-        new($"ALTER TABLE ALTER COLUMN DROP ROWGUIDCOL failed because a column does not exist in table '{tableName}' with ROWGUIDCOL property.", 4926, 16, 1);
+        FollowedByConstraintNotCreated(new($"ALTER TABLE ALTER COLUMN DROP ROWGUIDCOL failed because a column does not exist in table '{tableName}' with ROWGUIDCOL property.", 4926, 16, 0), state: 0);
 
     /// <summary>
     /// Mimics SQL Server error 1731: a column real refuses to make sparse. The

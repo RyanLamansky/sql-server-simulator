@@ -58,11 +58,11 @@ public sealed class FullTextDdlTests
     }
 
     [TestMethod]
-    public void CreateFullTextCatalog_DuplicateName_Raises2714()
+    public void CreateFullTextCatalog_DuplicateName_Raises7642()
     {
         var sim = new Simulation();
         _ = sim.ExecuteNonQuery("create fulltext catalog mycat");
-        _ = sim.AssertSqlError("create fulltext catalog mycat", 2714);
+        sim.AssertSqlError("create fulltext catalog mycat", 7642, "A full-text catalog named 'mycat' already exists in this database. Use a different name.");
     }
 
     [TestMethod]
@@ -146,13 +146,14 @@ public sealed class FullTextDdlTests
     }
 
     [TestMethod]
-    public void CreateFullTextIndex_OnTableTwice_Raises2714()
+    public void CreateFullTextIndex_OnTableTwice_Raises7652()
     {
         var sim = BuildSimWithDoc();
         _ = sim.ExecuteNonQuery("create fulltext index on dbo.doc (body language 1033) key index pk_doc");
-        _ = sim.AssertSqlError(
+        sim.AssertSqlError(
             "create fulltext index on dbo.doc (body language 1033) key index pk_doc",
-            2714);
+            7652,
+            "A full-text index for table or indexed view 'dbo.doc' has already been created.");
     }
 
     [TestMethod]

@@ -151,7 +151,7 @@ partial class Simulation
             return true;
 
         if (schema.TableTypes.ContainsKey(typeName.Leaf) || schema.AliasTypes.ContainsKey(typeName.Leaf))
-            throw SimulatedSqlException.TypeAlreadyExists(fullName);
+            throw SimulatedSqlException.TypeAlreadyExists(typeName.ToString());
 
         var tableType = new TableType(
             schema,
@@ -274,9 +274,8 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return true;
 
-        var fullName = $"{schema.Name}.{typeName.Leaf}";
         if (schema.TableTypes.ContainsKey(typeName.Leaf) || schema.AliasTypes.ContainsKey(typeName.Leaf))
-            throw SimulatedSqlException.TypeAlreadyExists(fullName);
+            throw SimulatedSqlException.TypeAlreadyExists(typeName.ToString());
 
         schema.AliasTypes[typeName.Leaf] = new AliasType(
             schema,

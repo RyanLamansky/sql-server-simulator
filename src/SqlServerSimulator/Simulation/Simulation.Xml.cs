@@ -289,14 +289,10 @@ partial class Simulation
         if (ordinal < 0)
             throw SimulatedSqlException.InvalidColumnName(columnName);
 
-        // Duplicate index name on the same table raises Msg 1779 / 1913 in
-        // real SQL Server (probe-confirmed for xml indexes uses 1913 — the
-        // simulator surfaces the generic Msg 2714 since neither catalog
-        // error factory exists yet).
         foreach (var existing in table.XmlIndexes)
         {
             if (context.Batch.CurrentDatabase.Collation.Equals(existing.Name, indexName))
-                throw SimulatedSqlException.ThereIsAlreadyAnObject(indexName);
+                throw SimulatedSqlException.IndexAlreadyExists(indexName, tableName.ToString(), state: 201);
         }
 
         // A primary XML index owns an internal "node table" (sys.objects type

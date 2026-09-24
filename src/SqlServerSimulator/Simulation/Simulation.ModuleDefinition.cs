@@ -52,7 +52,7 @@ public sealed partial class Simulation
         if (existingOfDeclaredKind is { } existing)
         {
             if (!isAlter && !createOrAlter)
-                throw SimulatedSqlException.ThereIsAlreadyAnObject(name.Leaf);
+                throw SimulatedSqlException.ThereIsAlreadyAnObject(name.Leaf, state: 3);
             context.Batch.AcquireStatementLock(existing.SchemaLock, LockMode.SchemaModification);
             return existing is View or UserDefinedFunction
                 && SchemaBinding.FindReferencingModule(context.CurrentDatabase, existing) is { } referencing
@@ -63,7 +63,7 @@ public sealed partial class Simulation
         return schema.HasNameInSharedNamespace(name.Leaf)
             ? throw (isAlter || createOrAlter
                 ? SimulatedSqlException.CannotAlterIncompatibleObjectType(name)
-                : SimulatedSqlException.ThereIsAlreadyAnObject(name.Leaf))
+                : SimulatedSqlException.ThereIsAlreadyAnObject(name.Leaf, state: 3))
             : isAlter ? throw SimulatedSqlException.InvalidObjectName(name) : null;
     }
 

@@ -150,7 +150,7 @@ partial class Simulation
             throw SimulatedSqlException.FullTextUserDoesNotHavePermission();
 
         if (context.CurrentDatabase.FullTextCatalogs.ContainsKey(name))
-            throw SimulatedSqlException.ThereIsAlreadyAnObject(name);
+            throw SimulatedSqlException.FullTextCatalogAlreadyExists(name);
 
         if (!context.CurrentDatabase.Principals.TryGetValue(ownerName, out var owner))
             throw SimulatedSqlException.CannotFindPrincipal(ownerName);
@@ -345,7 +345,7 @@ partial class Simulation
         }
 
         if (table.FullTextIndex is not null)
-            throw SimulatedSqlException.ThereIsAlreadyAnObject($"FULLTEXT INDEX ON {tableName}");
+            throw SimulatedSqlException.FullTextIndexAlreadyExists(tableName.ToString());
 
         // Resolve the catalog. When no ON clause is present, use the default
         // catalog (matches real SQL Server semantics — Msg 9967 if no default
