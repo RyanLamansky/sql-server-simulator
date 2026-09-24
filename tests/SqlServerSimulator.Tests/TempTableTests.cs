@@ -528,4 +528,27 @@ public sealed class TempTableTests
         Exec(conn, "begin tran; exec ('drop table #t'); rollback");
         AreEqual(1, CountRows(conn, "#t"));
     }
+
+    // ---- tempdb's catalog (probed 2026-09-24) ----
+
+    [TestMethod]
+    [DataRow("select count(*) from tempdb.sys.columns where object_id = object_id('tempdb..#t')", 2)]
+    [DataRow("select count(*) from tempdb.sys.tables where name = '#t' and object_id = object_id('tempdb..#t')", 1)]
+    [DataRow("select count(*) from tempdb.information_schema.columns where table_name = '#t'", 2)]
+    [DataRow("select count(*) from tempdb.sys.indexes where object_id = object_id('tempdb..#t') and is_primary_key = 1", 1)]
+    [DataRow("select col_length('tempdb..#t', 'y')", 3)]
+    [DataRow("select count(*) from sys.tables where name like '#t%'", 0)]
+    public void TempdbCatalog_ListsTheSessionsTempTable(string query, int expected)
+        => AreEqual(expected, Convert.ToInt32(new Simulation().ExecuteScalar($"create table #t (x int primary key, y varchar(3)); {query}"), System.Globalization.CultureInfo.InvariantCulture));
+
+    [TestMethod]
+    public void TempdbCatalog_NamesATempTableById()
+        => AreEqual("#t|dbo", new Simulation().ExecuteScalar("""
+            create table #t (x int);
+            select concat(object_name(object_id('tempdb..#t'), db_id('tempdb')), '|', object_schema_name(object_id('tempdb..#t'), db_id('tempdb')))
+            """));
+
+    [TestMethod]
+    public void TempdbCatalog_ListsGlobalTempTables()
+        => AreEqual(1, new Simulation().ExecuteScalar("create table ##g (a int); select count(*) from tempdb.sys.tables where name = '##g'"));
 }

@@ -574,7 +574,7 @@ internal static partial class BuiltInResources
         var primaryDataSpace = SqlValue.FromInt32(1);
         foreach (var schema in database.Schemas.Values)
         {
-            foreach (var table in schema.HeapTables.Values)
+            foreach (var table in CatalogTables(schema, batch))
             {
                 if (hasIdFilter && table.ObjectId != wantObjectId)
                     continue;
@@ -693,11 +693,11 @@ internal static partial class BuiltInResources
     /// agrees with <c>sys.indexes</c>. Name is the constraint/index name (null
     /// only for the heap).
     /// </summary>
-    private static IEnumerable<(HeapTable Table, int IndexId, string? Name, bool IsHeap)> EnumerateTableIndexIdentities(Database database)
+    private static IEnumerable<(HeapTable Table, int IndexId, string? Name, bool IsHeap)> EnumerateTableIndexIdentities(Database database, Parser.BatchContext? batch)
     {
         foreach (var schema in database.Schemas.Values)
         {
-            foreach (var table in schema.HeapTables.Values)
+            foreach (var table in CatalogTables(schema, batch))
             {
                 foreach (var identity in table.IndexIdentities())
                     yield return (table, identity.IndexId, identity.Name, identity.IsHeap);
@@ -720,7 +720,7 @@ internal static partial class BuiltInResources
     {
         long reserved = 0, used = 0, data = 0, rows = 0;
         HeapTable? lastTable = null;
-        foreach (var (table, indexId, _, _) in EnumerateTableIndexIdentities(database))
+        foreach (var (table, indexId, _, _) in EnumerateTableIndexIdentities(database, batch: null))
         {
             var isBase = !ReferenceEquals(table, lastTable);
             lastTable = table;
@@ -758,7 +758,7 @@ internal static partial class BuiltInResources
         var noneDesc = SqlValue.FromNVarchar("NONE");
         var xmlOff = SqlValue.FromBoolean(false);
         var xmlOffDesc = SqlValue.FromVarchar(VarcharSqlType.Get(3, Collation.Catalog, Coercibility.Implicit), "OFF");
-        foreach (var (table, indexId, _, _) in EnumerateTableIndexIdentities(database))
+        foreach (var (table, indexId, _, _) in EnumerateTableIndexIdentities(database, batch))
         {
             var objectId = table.ObjectId;
             var partitionId = ((long)(uint)objectId << 16) | (uint)indexId;
@@ -794,7 +794,7 @@ internal static partial class BuiltInResources
     private static IEnumerable<(long ContainerId, byte Type, long TotalPages, long UsedPages, long DataPages)> EnumerateAllocationUnitData(Database database)
     {
         HeapTable? lastTable = null;
-        foreach (var (table, indexId, _, _) in EnumerateTableIndexIdentities(database))
+        foreach (var (table, indexId, _, _) in EnumerateTableIndexIdentities(database, batch: null))
         {
             var partitionId = ((long)(uint)table.ObjectId << 16) | (uint)indexId;
             long dataPages = table.Heap.Pages.Count;
@@ -856,7 +856,7 @@ internal static partial class BuiltInResources
         var partitionNumber = SqlValue.FromInt32(1);
         var zeroPages = SqlValue.FromInt64(0);
         HeapTable? lastTable = null;
-        foreach (var (table, indexId, _, _) in EnumerateTableIndexIdentities(database))
+        foreach (var (table, indexId, _, _) in EnumerateTableIndexIdentities(database, batch))
         {
             var isBase = !ReferenceEquals(table, lastTable);
             lastTable = table;
@@ -973,7 +973,7 @@ internal static partial class BuiltInResources
         var primaryRole = SqlValue.FromByte(1);
         var primaryRoleDesc = SqlValue.FromString(NVarcharSqlType.Get(60, Collation.Catalog, Coercibility.Implicit), "PRIMARY");
         var nullName = SqlValue.Null(SqlType.SystemName);
-        foreach (var (table, indexId, name, isHeap) in EnumerateTableIndexIdentities(database))
+        foreach (var (table, indexId, name, isHeap) in EnumerateTableIndexIdentities(database, batch))
         {
             if (isHeap)
                 continue;
@@ -1003,7 +1003,7 @@ internal static partial class BuiltInResources
         var trueBit = SqlValue.FromBoolean(true);
         foreach (var schema in database.Schemas.Values)
         {
-            foreach (var table in schema.HeapTables.Values)
+            foreach (var table in CatalogTables(schema, batch))
             {
                 var tableObjectId = SqlValue.FromInt32(table.ObjectId);
                 foreach (var statistic in table.UserStatistics)
@@ -1069,7 +1069,7 @@ internal static partial class BuiltInResources
         // table (sys.objects type IT), one per index, stats_id sequential
         // within that node table (probe-confirmed). DacFx's XML-index export
         // joins sys.stats to the node table by (object_id, name = index name).
-        foreach (var (internalTableObjectId, statsId, indexName) in EnumerateXmlIndexStats(database))
+        foreach (var (internalTableObjectId, statsId, indexName) in EnumerateXmlIndexStats(database, batch))
         {
             yield return
             [
@@ -1102,11 +1102,11 @@ internal static partial class BuiltInResources
     /// <see cref="EnumerateSysStats"/> and the internal-table + stats surface
     /// DacFx's XML-index reverse-engineering joins through.
     /// </summary>
-    private static IEnumerable<(int InternalTableObjectId, int StatsId, string IndexName)> EnumerateXmlIndexStats(Database database)
+    private static IEnumerable<(int InternalTableObjectId, int StatsId, string IndexName)> EnumerateXmlIndexStats(Database database, Parser.BatchContext batch)
     {
         foreach (var schema in database.Schemas.Values)
         {
-            foreach (var table in schema.HeapTables.Values)
+            foreach (var table in CatalogTables(schema, batch))
             {
                 if (table.XmlIndexes.Count == 0)
                     continue;
@@ -1149,7 +1149,7 @@ internal static partial class BuiltInResources
         _ = batch;
         foreach (var schema in database.Schemas.Values)
         {
-            foreach (var table in schema.HeapTables.Values)
+            foreach (var table in CatalogTables(schema, batch))
             {
                 var tableObjectId = SqlValue.FromInt32(table.ObjectId);
                 foreach (var identity in table.IndexIdentities())
@@ -1247,7 +1247,7 @@ internal static partial class BuiltInResources
         var nullByte = SqlValue.Null(SqlType.TinyInt);
         foreach (var schema in database.Schemas.Values)
         {
-            foreach (var table in schema.HeapTables.Values)
+            foreach (var table in CatalogTables(schema, batch))
             {
                 if (hasIdFilter && table.ObjectId != wantObjectId)
                     continue;

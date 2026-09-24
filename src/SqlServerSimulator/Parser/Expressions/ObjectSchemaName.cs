@@ -81,6 +81,15 @@ internal sealed class ObjectSchemaName : Expression
                     return SqlValue.FromString(SqlType.SystemName, schema.Name);
             }
         }
+        // A temp table lives in tempdb's catalog, under dbo.
+        if (database.Name == Simulation.TempdbDatabaseName)
+        {
+            foreach (var table in BuiltInResources.CatalogTables(database.Schemas[Database.DefaultSchemaName], runtime.Batch))
+            {
+                if (table.ObjectId == id)
+                    return SqlValue.FromString(SqlType.SystemName, Database.DefaultSchemaName);
+            }
+        }
         // A constraint id answers the schema of the table that owns it, whose
         // visibility it also follows.
         return ConstraintLookup.TryResolveById(database, id, out var constraint)

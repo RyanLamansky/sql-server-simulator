@@ -30,7 +30,7 @@ internal static partial class BuiltInResources
             new("end_column_id", SqlType.Int32, null, false),
         ], (batch, database) =>
             database.Schemas.Values
-                .SelectMany(s => s.HeapTables.Values)
+                .SelectMany(s => CatalogTables(s, batch))
                 .Where(t => t.PeriodColumns is not null && !t.IsHistoryTable && !t.PeriodInheritedFromBase)
                 .OrderBy(t => t.ObjectId)
                 .Select(t => new SqlValue[]
@@ -347,7 +347,7 @@ internal static partial class BuiltInResources
         var nullDefinition = SqlValue.Null(SqlType.NVarchar);
         foreach (var schema in database.Schemas.Values)
         {
-            foreach (var t in schema.HeapTables.Values.OrderBy(t => t.ObjectId))
+            foreach (var t in CatalogTables(schema, batch).OrderBy(t => t.ObjectId))
             {
                 var objectId = SqlValue.FromInt32(t.ObjectId);
                 foreach (var col in t.Columns)
@@ -386,7 +386,7 @@ internal static partial class BuiltInResources
         var nullLast = SqlValue.Null(SqlType.SqlVariant);
         foreach (var schema in database.Schemas.Values)
         {
-            foreach (var t in schema.HeapTables.Values.OrderBy(t => t.ObjectId))
+            foreach (var t in CatalogTables(schema, batch).OrderBy(t => t.ObjectId))
             {
                 var objectId = SqlValue.FromInt32(t.ObjectId);
                 foreach (var col in t.Columns)

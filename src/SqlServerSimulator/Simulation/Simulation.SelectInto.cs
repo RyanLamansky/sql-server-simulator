@@ -65,7 +65,7 @@ partial class Simulation
         // (probe-confirmed). A #temp destination resolves no schema and stays
         // legal.
         owningDatabase?.RejectWriteWhenReadOnly();
-        var destTable = new HeapTable(leaf, destColumns, (owningDatabase ?? batch.CurrentDatabase).AllocateObjectId())
+        var destTable = new HeapTable(leaf, destColumns, (owningDatabase ?? batch.Connection.Simulation.Databases[TempdbDatabaseName]).AllocateObjectId())
         {
             OwningDatabase = owningDatabase,
             UsesAnsiNulls = batch.Connection.AnsiNulls,

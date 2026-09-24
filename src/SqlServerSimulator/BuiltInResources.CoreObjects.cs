@@ -184,7 +184,7 @@ internal static partial class BuiltInResources
             new("history_retention_period_unit_desc", nvarchar60Catalog, 60, true),
         ], (batch, database) =>
             database.Schemas.Values
-                .SelectMany(s => s.HeapTables.Values)
+                .SelectMany(s => CatalogTables(s, batch))
                 .OrderBy(t => t.ObjectId)
                 .Select(t =>
                 {
@@ -491,7 +491,7 @@ internal static partial class BuiltInResources
             : dbDefaultCollation;
         foreach (var schema in database.Schemas.Values)
         {
-            foreach (var t in schema.HeapTables.Values.OrderBy(t => t.ObjectId))
+            foreach (var t in CatalogTables(schema, batch).OrderBy(t => t.ObjectId))
             {
                 if (hasIdFilter && t.ObjectId != wantObjectId)
                     continue;

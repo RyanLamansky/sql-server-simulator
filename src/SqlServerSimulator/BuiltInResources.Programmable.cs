@@ -1101,7 +1101,7 @@ internal static partial class BuiltInResources
         foreach (var schema in database.Schemas.Values)
         {
             var schemaName = SqlValue.FromSystemName(schema.Name);
-            foreach (var t in schema.HeapTables.Values.OrderBy(t => t.ObjectId))
+            foreach (var t in CatalogTables(schema, batch).OrderBy(t => t.ObjectId))
             {
                 yield return [
                     catalog,
@@ -1188,7 +1188,7 @@ internal static partial class BuiltInResources
         foreach (var schema in database.Schemas.Values)
         {
             var schemaName = SqlValue.FromSystemName(schema.Name);
-            foreach (var t in schema.HeapTables.Values.OrderBy(t => t.ObjectId))
+            foreach (var t in CatalogTables(schema, batch).OrderBy(t => t.ObjectId))
             {
                 var tableName = SqlValue.FromSystemName(t.Name);
                 for (var i = 0; i < t.Columns.Length; i++)

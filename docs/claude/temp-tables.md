@@ -44,6 +44,13 @@ Lifecycle, cross-conn isolation, and Msg 208 from other sessions all probe-confi
   Identity / SCOPE_IDENTITY work identically to regular tables.
   CTE prefix, JOINs across multiple `#`-tables, all queries against `#foo` flow through the same Selection / Insert / Update / Delete / Merge machinery via `TryResolveTable`.
 
+## `tempdb`'s catalog lists them
+
+`tempdb`'s catalog views and metadata scalars list the session's `#temp` tables and every `##` table under `dbo`, as real does, so the common probes work: `tempdb.sys.columns WHERE object_id = OBJECT_ID('tempdb..#t')`, `tempdb.INFORMATION_SCHEMA.COLUMNS`, `COL_LENGTH('tempdb..#t', 'c')`, `OBJECT_NAME(id, DB_ID('tempdb'))` (probed 2026-09-24 against SQL Server 2025).
+The views read them through `BuiltInResources.CatalogTables`, which appends them to `tempdb.dbo`'s own tables, and a temp table's id comes from `tempdb`'s counter so the two can't collide there.
+
+**Divergences**: real pads a `#temp`'s catalog name with underscores to 128 characters around a 12-digit per-table suffix (`#t_____…_000000000005`), where it keeps its written name here; real also lists other sessions' `#temp` tables, which don't appear here; and `EXEC tempdb..sp_help '#t'` is Msg 15009 here where real describes the table.
+
 ## Global temp tables (`##foo`)
 Instance-wide `ConcurrentDictionary<string, HeapTable> GlobalTempTables` on `Simulation`; routed by `BatchContext.TryResolveTable` via `IsGlobalTempName` (leading `##`, length ≥ 2 — bare `##` is a valid name, probe-confirmed).
 Any session can SELECT / INSERT / UPDATE / DELETE / DROP / TRUNCATE a `##foo` regardless of which session created it.

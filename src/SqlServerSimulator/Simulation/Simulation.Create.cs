@@ -348,12 +348,13 @@ partial class Simulation
         // A three-part CREATE TABLE lands in the named database, so the object
         // id comes from that database's counter and the table carries it as
         // its owner. Temp tables and table variables have no schema and so no
-        // owning database — they fall back to the session's.
+        // owning database; their ids come from tempdb's counter, the database
+        // whose catalog lists them.
         var owningDatabase = schema?.Database;
         var heapTable = new HeapTable(
             tableName.Leaf,
             [.. heapColumns!],
-            (owningDatabase ?? context.CurrentDatabase).AllocateObjectId(),
+            (owningDatabase ?? context.Connection.Simulation.Databases[TempdbDatabaseName]).AllocateObjectId(),
             schemaId,
             context.Batch.CurrentStatement.UtcNow,
             keyConstraints,

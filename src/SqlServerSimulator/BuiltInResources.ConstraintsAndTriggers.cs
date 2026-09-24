@@ -602,7 +602,7 @@ internal static partial class BuiltInResources
         foreach (var schema in database.Schemas.Values)
         {
             var schemaId = SqlValue.FromInt32(schema.SchemaId);
-            foreach (var table in schema.HeapTables.Values)
+            foreach (var table in CatalogTables(schema, batch))
             {
                 foreach (var fk in table.OutgoingForeignKeys.OrderBy(f => f.ObjectId))
                 {
@@ -696,7 +696,7 @@ internal static partial class BuiltInResources
     {
         foreach (var schema in database.Schemas.Values)
         {
-            foreach (var table in schema.HeapTables.Values)
+            foreach (var table in CatalogTables(schema, batch))
             {
                 foreach (var fk in table.OutgoingForeignKeys.OrderBy(f => f.ObjectId))
                 {
@@ -743,7 +743,7 @@ internal static partial class BuiltInResources
         foreach (var schema in database.Schemas.Values)
         {
             var schemaId = SqlValue.FromInt32(schema.SchemaId);
-            foreach (var table in schema.HeapTables.Values)
+            foreach (var table in CatalogTables(schema, batch))
             {
                 foreach (var ck in table.CheckConstraints.OrderBy(c => c.ObjectId))
                 {
@@ -805,7 +805,7 @@ internal static partial class BuiltInResources
         foreach (var schema in database.Schemas.Values)
         {
             var schemaId = SqlValue.FromInt32(schema.SchemaId);
-            foreach (var table in schema.HeapTables.Values)
+            foreach (var table in CatalogTables(schema, batch))
             {
                 // unique_index_id must point each constraint at ITS backing
                 // index in sys.indexes (DacFx's UQ query joins on it) — resolve
@@ -910,7 +910,7 @@ internal static partial class BuiltInResources
         foreach (var schema in database.Schemas.Values)
         {
             var schemaId = SqlValue.FromInt32(schema.SchemaId);
-            foreach (var table in schema.HeapTables.Values)
+            foreach (var table in CatalogTables(schema, batch))
             {
                 foreach (var col in table.Columns)
                 {
@@ -977,7 +977,7 @@ internal static partial class BuiltInResources
         foreach (var schema in database.Schemas.Values)
         {
             var schemaName = SqlValue.FromSystemName(schema.Name);
-            foreach (var table in schema.HeapTables.Values)
+            foreach (var table in CatalogTables(schema, batch))
             {
                 var tableName = SqlValue.FromSystemName(table.Name);
                 SqlValue[] Row(string constraintName, SqlValue constraintType) =>
@@ -1017,7 +1017,7 @@ internal static partial class BuiltInResources
         foreach (var schema in database.Schemas.Values)
         {
             var schemaName = SqlValue.FromSystemName(schema.Name);
-            foreach (var table in schema.HeapTables.Values)
+            foreach (var table in CatalogTables(schema, batch))
             {
                 var tableName = SqlValue.FromSystemName(table.Name);
                 SqlValue[] Row(string constraintName, string columnName, int ordinal) =>
@@ -1069,7 +1069,7 @@ internal static partial class BuiltInResources
         foreach (var schema in database.Schemas.Values)
         {
             var schemaName = SqlValue.FromSystemName(schema.Name);
-            foreach (var table in schema.HeapTables.Values)
+            foreach (var table in CatalogTables(schema, batch))
             {
                 var tableName = SqlValue.FromSystemName(table.Name);
                 SqlValue[] Row(string constraintName, string columnName) =>
@@ -1138,7 +1138,7 @@ internal static partial class BuiltInResources
         foreach (var schema in database.Schemas.Values)
         {
             var schemaName = SqlValue.FromSystemName(schema.Name);
-            foreach (var table in schema.HeapTables.Values)
+            foreach (var table in CatalogTables(schema, batch))
             {
                 var tableName = SqlValue.FromSystemName(table.Name);
                 SqlValue[] Row(string constraintName) =>
@@ -1176,7 +1176,7 @@ internal static partial class BuiltInResources
         foreach (var schema in database.Schemas.Values)
         {
             var schemaName = SqlValue.FromSystemName(schema.Name);
-            foreach (var table in schema.HeapTables.Values)
+            foreach (var table in CatalogTables(schema, batch))
             {
                 foreach (var fk in table.OutgoingForeignKeys.OrderBy(f => f.ObjectId))
                 {

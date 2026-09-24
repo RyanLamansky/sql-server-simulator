@@ -380,7 +380,7 @@ internal static partial class BuiltInResources
         var systemStoplistId = SqlValue.FromInt32(0);
         foreach (var schema in database.Schemas.Values)
         {
-            foreach (var table in schema.HeapTables.Values)
+            foreach (var table in CatalogTables(schema, batch))
             {
                 if (table.FullTextIndex is not { } fti)
                     continue;
@@ -416,7 +416,7 @@ internal static partial class BuiltInResources
         var falseBit = SqlValue.FromBoolean(false);
         foreach (var schema in database.Schemas.Values)
         {
-            foreach (var table in schema.HeapTables.Values)
+            foreach (var table in CatalogTables(schema, batch))
             {
                 if (table.FullTextIndex is not { } fti)
                     continue;
@@ -496,7 +496,7 @@ internal static partial class BuiltInResources
         var secondaryXmlDesc = SqlValue.FromNVarchar("SECONDARY_XML");
         foreach (var schema in database.Schemas.Values)
         {
-            foreach (var table in schema.HeapTables.Values)
+            foreach (var table in CatalogTables(schema, batch))
             {
                 if (table.XmlIndexes.Count == 0)
                     continue;
@@ -583,7 +583,7 @@ internal static partial class BuiltInResources
         var geographyTypeDesc = SqlValue.FromNVarchar("GEOGRAPHY");
         foreach (var schema in database.Schemas.Values)
         {
-            foreach (var table in schema.HeapTables.Values)
+            foreach (var table in CatalogTables(schema, batch))
             {
                 if (table.SpatialIndexes.Count == 0)
                     continue;
@@ -634,7 +634,7 @@ internal static partial class BuiltInResources
         var nullInt = SqlValue.Null(SqlType.Int32);
         foreach (var schema in database.Schemas.Values)
         {
-            foreach (var table in schema.HeapTables.Values)
+            foreach (var table in CatalogTables(schema, batch))
             {
                 if (table.SpatialIndexes.Count == 0)
                     continue;
