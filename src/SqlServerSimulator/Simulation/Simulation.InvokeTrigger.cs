@@ -263,7 +263,8 @@ partial class Simulation
                     trigger.ObjectId,
                     trigger.Timing == TriggerTiming.After,
                     affectedRowCount,
-                    trigger.UsesQuotedIdentifier);
+                    trigger.UsesQuotedIdentifier,
+                    trigger.UsesAnsiNulls);
             }
         }
         finally
@@ -307,6 +308,7 @@ partial class Simulation
     /// The trigger's creation-time <c>QUOTED_IDENTIFIER</c> capture, which the
     /// body parses under instead of the firing session's setting.
     /// </param>
+    /// <param name="usesAnsiNulls">The trigger's creation-time <c>ANSI_NULLS</c> capture, applied the same way.</param>
     private void RunOneTriggerBody(
         BatchContext outerBatch,
         Database bodyDatabase,
@@ -318,7 +320,8 @@ partial class Simulation
         int objectId,
         bool countsAsAfterFrame,
         int affectedRowCount,
-        bool usesQuotedIdentifier)
+        bool usesQuotedIdentifier,
+        bool usesAnsiNulls)
     {
         var connection = outerBatch.Connection;
         if (connection.NestingLevel >= SimulatedDbConnection.MaxNestingLevel)
@@ -340,6 +343,7 @@ partial class Simulation
         // SQL it EXECs, the plan-cache key, and the Msg 1934 gates — all of
         // which read the connection.
         var savedQuotedIdentifiers = connection.QuotedIdentifiers;
+        var savedAnsiNulls = connection.AnsiNulls;
         // SET NOCOUNT inside a trigger body reverts at trigger exit
         // (probe-confirmed): the near-universal `set nocount on` opening a
         // trigger leaves the firing statement's own count intact and doesn't
@@ -361,6 +365,7 @@ partial class Simulation
         {
             connection.CurrentDatabase = bodyDatabase;
             connection.QuotedIdentifiers = usesQuotedIdentifier;
+            connection.AnsiNulls = usesAnsiNulls;
             connection.NestingLevel++;
             connection.TriggerNestLevel++;
             connection.FiringTriggers.Add((objectId, countsAsAfterFrame));
@@ -413,6 +418,7 @@ partial class Simulation
         {
             connection.CurrentDatabase = savedDatabase;
             connection.QuotedIdentifiers = savedQuotedIdentifiers;
+            connection.AnsiNulls = savedAnsiNulls;
             connection.NoCount = savedNoCount;
             savedOptions.Restore(connection);
             connection.NestingLevel--;

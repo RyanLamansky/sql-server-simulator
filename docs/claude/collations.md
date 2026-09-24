@@ -492,7 +492,7 @@ Verified exhaustively: all **5540** names from `sys.fn_helpcollations()` report 
 
 - **The byte budget is the code page's.**
   `varchar(N)` counts N **bytes**, so under a DBCS page fewer characters fit: five CP932 kana need ten bytes, and `varchar(5)` holds two.
-  `Simulation.Coerce.EnforceMaxLength` measures with `GetByteCount`, and `Collation.ClipToByteBudget` does the clipping wherever a value is cut down — CAST/CONVERT to a narrower target, Msg 2628's `Truncated value:` prefix, and the `ALTER COLUMN` narrowing scan.
+  `Simulation.Coerce.EnforceMaxLength` measures with `GetByteCount`, and `Collation.ClipToByteBudget` does the clipping wherever a value is cut down — CAST/CONVERT to a narrower target, Msg 2628's `Truncated value:` prefix, a write under `SET ANSI_WARNINGS OFF` (which truncates where it would raise Msg 2628), and the `ALTER COLUMN` narrowing scan.
   It never splits a multi-byte character (or a surrogate pair), matching real: `CAST(<five kana> AS varchar(5))` yields two kana / four bytes, and the Msg 2628 text reports `'こん'`.
 - **String functions stay character-based.**
   `LEN`, `LEFT`, `RIGHT`, `SUBSTRING` count characters while `DATALENGTH` and the declared width count bytes — so `LEFT(v, 2)` over CP932 kana is two characters and four bytes.

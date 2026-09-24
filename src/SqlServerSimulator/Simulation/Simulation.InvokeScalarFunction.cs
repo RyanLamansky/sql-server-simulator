@@ -91,6 +91,8 @@ partial class Simulation
         // Restored in the finally below; see docs/claude/grammar.md.
         var savedQuotedIdentifiers = connection.QuotedIdentifiers;
         connection.QuotedIdentifiers = function.UsesQuotedIdentifier;
+        var savedAnsiNulls = connection.AnsiNulls;
+        connection.AnsiNulls = function.UsesAnsiNulls;
         // Errors inside a scalar-UDF body attribute to the outer invoking
         // statement (probe-confirmed: real reports the SELECT's line, no
         // procedure) — so this frame leaves the exception unresolved.
@@ -116,6 +118,7 @@ partial class Simulation
         {
             connection.NestingLevel--;
             connection.QuotedIdentifiers = savedQuotedIdentifiers;
+            connection.AnsiNulls = savedAnsiNulls;
             connection.Security.RevertTo(savedImpersonationDepth);
         }
 

@@ -133,6 +133,8 @@ partial class Simulation
         innerBatch.AdoptStatementFreezeFrom(outerBatch);
         var savedQuotedIdentifiers = connection.QuotedIdentifiers;
         connection.QuotedIdentifiers = view.UsesQuotedIdentifier;
+        var savedAnsiNulls = connection.AnsiNulls;
+        connection.AnsiNulls = view.UsesAnsiNulls;
         connection.NestingLevel++;
         try
         {
@@ -144,6 +146,7 @@ partial class Simulation
         {
             connection.NestingLevel--;
             connection.QuotedIdentifiers = savedQuotedIdentifiers;
+            connection.AnsiNulls = savedAnsiNulls;
             if (releaseStatementSchemaLocks)
                 innerBatch.ReleaseStatementSchemaLocks();
         }
@@ -172,6 +175,8 @@ partial class Simulation
         // Restored in the finally below; see docs/claude/grammar.md.
         var savedQuotedIdentifiers = connection.QuotedIdentifiers;
         connection.QuotedIdentifiers = view.UsesQuotedIdentifier;
+        var savedAnsiNulls = connection.AnsiNulls;
+        connection.AnsiNulls = view.UsesAnsiNulls;
         // Body errors attribute to the outer statement that referenced the view
         // (probe-confirmed: real reports the outer SELECT's line, no procedure).
         var innerBatch = new BatchContext(bodyCommand, variables, dummyFrame) { SuppressDiagnosticsResolution = true };
@@ -218,6 +223,7 @@ partial class Simulation
         {
             connection.NestingLevel--;
             connection.QuotedIdentifiers = savedQuotedIdentifiers;
+            connection.AnsiNulls = savedAnsiNulls;
             // The body's Sch-S / IS holds are recorded against this inner
             // batch, which the dispatch loop never sees — so without this the
             // referencing statement's own release leaves them behind and they

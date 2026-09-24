@@ -572,6 +572,8 @@ internal abstract class BooleanExpression : ExpressionNode
 
         // Regular comparison: RHS is a value expression.
         var right = Expression.Parse(context);
+        if (op is ComparisonOp.Equal or ComparisonOp.NotEqual && ComparesNullTolerantly(context, left, right))
+            return new NullTolerantEqualityExpression(left, right, negated: op == ComparisonOp.NotEqual);
         BooleanExpression comparison = op switch
         {
             ComparisonOp.Equal => new EqualityExpression(left, right),
@@ -751,6 +753,8 @@ internal abstract class BooleanExpression : ExpressionNode
         if (context.Token is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextOptional();
+        if (!context.Connection.AnsiNulls && (IsNullLiteralOrVariable(left) || candidates.Exists(IsNullLiteralOrVariable)))
+            return NullTolerantInList(left, candidates, negated);
         var inList = new InExpression(left, [.. candidates], negated, AnySelfReference(left, candidates));
         // `x IN (…)` is a chain of equalities, so it folds on the same rule the
         // comparison shapes do — but only where every equality it stands for is
@@ -764,6 +768,40 @@ internal abstract class BooleanExpression : ExpressionNode
         return Expression.IsNullConstant(left) || AllNullConstants(candidates)
             ? FoldToUnknown(inList)
             : inList;
+    }
+
+    /// <summary>
+    /// Whether <c>SET ANSI_NULLS OFF</c> makes this <c>=</c> / <c>&lt;&gt;</c>
+    /// two-valued: it does when either side is a bare <c>NULL</c> or a
+    /// variable, and nowhere else — a <c>CAST(NULL AS …)</c>, an expression
+    /// that yields NULL, a subquery and a column against a column all compare
+    /// as ANSI does (probed 2026-09-24 against SQL Server 2025). Decided while
+    /// parsing, which is when a module's captured setting is in force.
+    /// </summary>
+    private static bool ComparesNullTolerantly(ParserContext context, Expression left, Expression right) =>
+        !context.Connection.AnsiNulls && (IsNullLiteralOrVariable(left) || IsNullLiteralOrVariable(right));
+
+    private static bool IsNullLiteralOrVariable(Expression expression) =>
+        expression is VariableReference or Value { IsUntypedNull: true };
+
+    /// <summary>
+    /// <c>x [NOT] IN (…)</c> under <c>ANSI_NULLS OFF</c> with a bare NULL or a
+    /// variable on either side: the chain of equalities it stands for, each
+    /// such pair two-valued — so <c>x IN (1, NULL)</c> matches a NULL
+    /// <c>x</c>, and <c>x NOT IN (NULL)</c> every other row.
+    /// </summary>
+    private static BooleanExpression NullTolerantInList(Expression left, List<Expression> candidates, bool negated)
+    {
+        var equalities = new BooleanExpression[candidates.Count];
+        for (var i = 0; i < candidates.Count; i++)
+        {
+            var candidate = candidates[i];
+            equalities[i] = IsNullLiteralOrVariable(left) || IsNullLiteralOrVariable(candidate)
+                ? new NullTolerantEqualityExpression(left, candidate, negated: false)
+                : Expression.IsNullConstant(candidate) ? FoldToUnknown(new EqualityExpression(left, candidate)) : new EqualityExpression(left, candidate);
+        }
+        var chain = equalities.Length == 1 ? equalities[0] : new OrExpression(equalities);
+        return negated ? new NotExpression(chain) : chain;
     }
 
     /// <summary>Whether every element of an <c>IN</c> list is a NULL constant.</summary>
@@ -2617,6 +2655,35 @@ internal abstract class BooleanExpression : ExpressionNode
             r = right;
             return true;
         }
+    }
+
+    /// <summary>
+    /// <c>=</c> / <c>&lt;&gt;</c> under <c>SET ANSI_NULLS OFF</c> with a bare
+    /// NULL or a variable on one side (see <see cref="ComparesNullTolerantly"/>):
+    /// two NULLs are equal and a NULL is unequal to any value, so the answer is
+    /// never UNKNOWN. It offers no equality operands, which keeps it off the
+    /// seek and hash paths that would skip the NULL row it can match.
+    /// </summary>
+    private sealed class NullTolerantEqualityExpression(Expression left, Expression right, bool negated) : CompareExpression(left, right)
+    {
+        public override bool? Run(RuntimeContext runtime)
+        {
+            var l = this.left.Run(runtime);
+            var r = this.right.Run(runtime);
+            if (l.IsNull || r.IsNull)
+                return (l.IsNull && r.IsNull) != negated;
+            return negated
+                ? CompareValuesPromoted(l, r, this.OperatorName, static (a, b) => !a.Equals(b))
+                : CompareValuesPromoted(l, r, this.OperatorName, static (a, b) => a.Equals(b));
+        }
+
+        internal override BooleanExpression SettleFoldedNullComparisons(ParserContext context) => this;
+
+        internal override void Describe(NodeShape shape) => shape.Local(negated).Child(this.left).Child(this.right);
+
+        internal override string DebugDisplay() => $"{left.DebugDisplay()} {(negated ? "<>" : "=")} {right.DebugDisplay()}";
+
+        protected override string OperatorName => negated ? "not equal to" : "equal to";
     }
 
     private sealed class InequalityExpression(Expression left, Expression right) : CompareExpression(left, right)

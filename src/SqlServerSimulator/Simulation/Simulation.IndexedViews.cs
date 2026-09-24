@@ -224,6 +224,8 @@ partial class Simulation
         // its writes maintained against an ON-created indexed view.
         var savedQuotedIdentifiers = connection.QuotedIdentifiers;
         connection.QuotedIdentifiers = view.UsesQuotedIdentifier;
+        var savedAnsiNulls = connection.AnsiNulls;
+        connection.AnsiNulls = view.UsesAnsiNulls;
         var innerBatch = new BatchContext(bodyCommand, variables, dummyFrame) { SuppressDiagnosticsResolution = true };
         innerBatch.AdoptStatementFreezeFrom(outerBatch);
         connection.NestingLevel++;
@@ -248,6 +250,7 @@ partial class Simulation
             // waits forever.
             innerBatch.ReleaseStatementSchemaLocks();
             connection.QuotedIdentifiers = savedQuotedIdentifiers;
+            connection.AnsiNulls = savedAnsiNulls;
             connection.NestingLevel--;
         }
     }
@@ -292,6 +295,8 @@ partial class Simulation
         // its writes maintained against an ON-created indexed view.
         var savedQuotedIdentifiers = connection.QuotedIdentifiers;
         connection.QuotedIdentifiers = view.UsesQuotedIdentifier;
+        var savedAnsiNulls = connection.AnsiNulls;
+        connection.AnsiNulls = view.UsesAnsiNulls;
         var innerBatch = new BatchContext(bodyCommand, variables, dummyFrame) { SuppressDiagnosticsResolution = true };
         innerBatch.AdoptStatementFreezeFrom(outerBatch);
         var nestedViews = new HashSet<View>();
@@ -307,6 +312,7 @@ partial class Simulation
         {
             innerBatch.ReleaseStatementSchemaLocks();
             connection.QuotedIdentifiers = savedQuotedIdentifiers;
+            connection.AnsiNulls = savedAnsiNulls;
             connection.NestingLevel--;
         }
         foreach (var nested in nestedViews)

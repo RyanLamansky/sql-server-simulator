@@ -251,11 +251,8 @@ Already listed elsewhere here and not repeated: `DBCC CHECKIDENT` and parenthesi
 
 **Session options with no effect**:
 
-- `SET ANSI_NULLS OFF` — `NULL = NULL` and `@x = NULL` stay UNKNOWN.
-- `SET CONCAT_NULL_YIELDS_NULL OFF` — `'a' + NULL` stays NULL; separately, `'a' + NULL` is typed `int` here where real types it `varchar`.
-- `SET ARITHABORT OFF; SET ANSI_WARNINGS OFF` — `1/0` and `CAST(300 AS tinyint)` should answer NULL with Msg 3607 / 3606; `ANSI_WARNINGS OFF` alone should truncate an over-long insert silently.
-- `SET NUMERIC_ROUNDABORT ON` — `CAST(1.25 AS decimal(2,1))` should raise Msg 8115 rather than round.
-- `@@ROWCOUNT` read immediately after `SET NOCOUNT ON` is 1 here, 0 on real.
+- `SET ARITHABORT OFF; SET ANSI_WARNINGS OFF` — `1/0`, `1 % 0`, `CAST(300 AS tinyint)` and an overflowing `SUM` should answer NULL, the statement followed by the class-0 Msg 3606 / 3607 once each (probed 2026-09-24); either option ON keeps the error, which is what the simulator always raises.
+- `SET NUMERIC_ROUNDABORT ON` — `CAST(1.25 AS decimal(2,1))` should raise Msg 8115 state 7 ("converting numeric to data type numeric") rather than round.
 
 **Wrong results**:
 

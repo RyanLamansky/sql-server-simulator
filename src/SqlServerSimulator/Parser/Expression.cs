@@ -174,7 +174,7 @@ internal abstract class Expression : ExpressionNode
             }
             left = isConcat ? new Concatenate(left, right)
                 : shiftLeft is bool isLeftShift ? new BitShift(isLeftShift, left, right)
-                : TwoSidedExpression.FromCompoundOp(op, left, right);
+                : TwoSidedExpression.FromCompoundOp(op, left, right, context);
             tightness = BinaryTightness(context);
         }
         return left;

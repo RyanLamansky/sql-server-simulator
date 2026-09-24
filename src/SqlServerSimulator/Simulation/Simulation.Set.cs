@@ -10,26 +10,29 @@ namespace SqlServerSimulator;
 partial class Simulation
 {
     /// <summary>
-    /// Dispatches the four <c>SET</c> shapes: <c>SET @v = expr</c>
-    /// (variable assignment, has runtime effect via
-    /// <see cref="TryParseSetVariable"/>), <c>SET IDENTITY_INSERT t ON|OFF</c>
-    /// (session-state mutation, see <see cref="TryParseSetIdentityInsert"/>),
-    /// and the closed-list session / connection / planner option family
-    /// (<see cref="TryParseSetSessionOption"/>). The last family is
-    /// parse-and-discard: the simulator doesn't model locking / isolation /
-    /// language / dateformat / planner choice / warnings-on-rounding, so the
-    /// honest stance is to accept the canonical shapes and ignore. Returning
+    /// Dispatches the <c>SET</c> shapes: <c>SET @v = expr</c> (variable
+    /// assignment, <see cref="TryParseSetVariable"/>), <c>SET IDENTITY_INSERT
+    /// t ON|OFF</c> (<see cref="TryParseSetIdentityInsert"/>), and the
+    /// closed-list session / connection / planner option family
+    /// (<see cref="TryParseSetSessionOption"/>), of which the options with an
+    /// effect are handled by name there and the rest accepted and discarded.
+    /// <paramref name="assignsVariable"/> tells the variable form apart, which
+    /// leaves <c>@@ROWCOUNT</c> at 1 where the others reset it. Returning
     /// <c>false</c> falls through to the caller's <see cref="SimulatedSqlException.SyntaxErrorNear(ParserContext)"/>
     /// (Msg 102); explicit Msg 195 fires when an unrecognized option name
     /// appears followed by a recognizable value (ON/OFF/literal).
     /// </summary>
-    private static bool TryParseSet(ParserContext context) =>
-        context.GetNextRequired() switch
+    private static bool TryParseSet(ParserContext context, out bool assignsVariable)
+    {
+        var afterSet = context.GetNextRequired();
+        assignsVariable = afterSet is AtPrefixedString;
+        return afterSet switch
         {
             ReservedKeyword { Keyword: Keyword.Identity_Insert } => TryParseSetIdentityInsert(context),
             AtPrefixedString variableToken => TryParseSetVariable(context, variableToken),
-            var afterSet => TryParseSetSessionOption(context, afterSet),
+            _ => TryParseSetSessionOption(context, afterSet),
         };
+    }
 
     /// <summary>
     /// Parses <c>SET &lt;option&gt; ...</c> for every option in the closed
@@ -675,7 +678,7 @@ partial class Simulation
             return true;
         var assignedExpr = assignOp == '='
             ? rhs
-            : TwoSidedExpression.FromCompoundOp(assignOp, new VariableReference(variableToken, context), rhs);
+            : TwoSidedExpression.FromCompoundOp(assignOp, new VariableReference(variableToken, context), rhs, context);
         // A subquery hands an unresolved collation on to the variable, which
         // settles it as any assignment target does (Msg 456 for varchar).
         UnresolvedCollation.RequireAssignable(assignedExpr.GetSqlType(context.Batch, NoColumnTypeResolver));

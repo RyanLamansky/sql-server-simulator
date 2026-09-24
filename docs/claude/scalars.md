@@ -145,8 +145,8 @@ Arg-count rules → Msg 189: `CONCAT` requires 2-254 args; `CONCAT_WS` requires 
 CONCAT/CONCAT_WS are reachable from raw SQL (`FromSqlInterpolated` / direct command).
 
 ## String `+` operator (concatenation)
-**NULL-propagating** (matches default `CONCAT_NULL_YIELDS_NULL ON`; OFF setting not modeled).
-Result is `nvarchar` when either operand is national-string, else `varchar`.
+**NULL-propagating** under the default `CONCAT_NULL_YIELDS_NULL ON`; under OFF one NULL operand reads as empty, while two still give NULL and `||` ignores the option (probed 2026-09-24).
+Result is `nvarchar` when either operand is national-string, else `varchar`; a bare `NULL` beside a string counts as a one-character string of its family, so `'abc' + NULL` is `varchar(4)`.
 EF's dominant string-concat path.
 `text` / `ntext` / `image` / `varbinary` operands → Msg 402 (the [pair grids](arithmetic.md#type-pair-legality)).
 

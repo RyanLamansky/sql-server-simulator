@@ -116,7 +116,8 @@ partial class Simulation
                         trigger.ObjectId,
                         countsAsAfterFrame: false,
                         affectedRowCount: 0,
-                        trigger.UsesQuotedIdentifier);
+                        trigger.UsesQuotedIdentifier,
+                        trigger.UsesAnsiNulls);
                 }
             }
             finally

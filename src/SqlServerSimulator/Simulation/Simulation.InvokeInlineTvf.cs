@@ -106,6 +106,8 @@ partial class Simulation
         // Restored in the finally below; see docs/claude/grammar.md.
         var savedQuotedIdentifiers = connection.QuotedIdentifiers;
         connection.QuotedIdentifiers = function.UsesQuotedIdentifier;
+        var savedAnsiNulls = connection.AnsiNulls;
+        connection.AnsiNulls = function.UsesAnsiNulls;
         // Body errors attribute to the outer invoking statement (probe-
         // confirmed: real reports the referencing SELECT's line, no procedure).
         var innerBatch = new BatchContext(bodyCommand, variables, dummyFrame) { SuppressDiagnosticsResolution = true };
@@ -129,6 +131,7 @@ partial class Simulation
         {
             connection.NestingLevel--;
             connection.QuotedIdentifiers = savedQuotedIdentifiers;
+            connection.AnsiNulls = savedAnsiNulls;
             // As in the view body: the Sch-S / IS the body took are recorded
             // against this inner batch, which the dispatch loop never sees.
             innerBatch.ReleaseStatementSchemaLocks();

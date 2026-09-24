@@ -143,9 +143,11 @@ Constraint object ids resolve through `ObjectProperty.TryFindConstraint` (they a
 `OBJECTPROPERTYEX` gives the same answers.
 `OBJECT_ID('<constraint name>')` doesn't resolve a constraint, so the id comes from `sys.objects` (or `sys.default_constraints` for a DEFAULT, which `sys.objects` has no row for).
 
-**`ANSI_NULLS` captures alongside it, tables included, but only as metadata.**
+**`ANSI_NULLS` captures alongside it, tables included.**
 `SchemaObject.UsesAnsiNulls` records the session's `SET ANSI_NULLS` at every `CREATE` the same way — modules and tables both, since real answers 0 for a table created under OFF.
-Nothing behavioral rides on it: real freezes a module's `= NULL` comparison semantics to the capture, while the simulator doesn't model `SET ANSI_NULLS OFF` comparison semantics at all, so every comparison stays ANSI whatever the capture says.
+A module's body runs under its capture, swapped onto the connection beside `QUOTED_IDENTIFIER`, because the setting is read while parsing: under OFF, an `=` / `<>` with a bare `NULL` or a variable on either side is two-valued (two NULLs equal, a NULL unequal to any value), as are the equalities an `IN` list stands for, while a `CAST(NULL AS …)`, an expression yielding NULL, a subquery and a column against a column stay ANSI (probed 2026-09-24 against SQL Server 2025).
+Such a comparison is a node of its own (`NullTolerantEqualityExpression`) that offers no equality operands, which keeps it off the seek and hash paths that would skip the NULL row it matches.
+The plan cache keys on the setting, and on `CONCAT_NULL_YIELDS_NULL`, which a string `+` captures the same way.
 Catalog projection for both captures is in [`catalog-views.md`](catalog-views.md#creation-time-set-option-capture).
 
 ## `SET`-option gates — Msg 1934 / Msg 1935

@@ -240,6 +240,8 @@ partial class Simulation
             // Restored in the finally below; see docs/claude/grammar.md.
             var savedQuotedIdentifiers = connection.QuotedIdentifiers;
             connection.QuotedIdentifiers = procedure.UsesQuotedIdentifier;
+            var savedAnsiNulls = connection.AnsiNulls;
+            connection.AnsiNulls = procedure.UsesAnsiNulls;
             innerBatch = new BatchContext(bodyCommand, variables, procFrame, tableVariables)
             {
                 // Body errors report a line relative to the whole CREATE
@@ -290,6 +292,7 @@ partial class Simulation
             {
                 connection.NestingLevel--;
                 connection.QuotedIdentifiers = savedQuotedIdentifiers;
+                connection.AnsiNulls = savedAnsiNulls;
                 connection.TextSize = savedTextSize;
                 connection.NoCount = savedNoCount;
                 savedOptions.Restore(connection);

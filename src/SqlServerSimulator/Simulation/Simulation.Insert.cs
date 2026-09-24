@@ -507,7 +507,7 @@ partial class Simulation
                 }
 
                 var source = sourceRow[i];
-                EnforceMaxLength(source, targetColumn, destinationTable, context.Connection);
+                source = EnforceMaxLength(source, targetColumn, destinationTable, context.Connection);
                 var coerced = CoerceForInsert(source, targetColumn);
                 rowValues[ordinal] = coerced;
 

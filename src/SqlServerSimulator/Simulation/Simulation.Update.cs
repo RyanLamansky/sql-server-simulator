@@ -195,7 +195,7 @@ partial class Simulation
 
             context.MoveNextRequired();
             var rhs = Expression.Parse(context);
-            var finalExpr = assignOp == '=' ? rhs : TwoSidedExpression.FromCompoundOp(assignOp, lhsForCompound, rhs);
+            var finalExpr = assignOp == '=' ? rhs : TwoSidedExpression.FromCompoundOp(assignOp, lhsForCompound, rhs, context);
             rawAssignments.Add((columnName, finalExpr));
 
             if (context.Token is Operator { Character: ',' })
@@ -291,7 +291,7 @@ partial class Simulation
                 var value = Expression.Parse(context);
                 rawAssignments.Add((column.Leaf, new AssignmentExpression(slot, columnOp == '='
                     ? value
-                    : TwoSidedExpression.FromCompoundOp(columnOp, new Reference(column), value))));
+                    : TwoSidedExpression.FromCompoundOp(columnOp, new Reference(column), value, context))));
                 return;
             }
             context.RestoreCheckpoint(afterVariable);
@@ -300,7 +300,7 @@ partial class Simulation
         var rhs = Expression.Parse(context);
         rawAssignments.Add((null, new AssignmentExpression(slot, assignOp == '='
             ? rhs
-            : TwoSidedExpression.FromCompoundOp(assignOp, new VariableReference(variable, context), rhs))));
+            : TwoSidedExpression.FromCompoundOp(assignOp, new VariableReference(variable, context), rhs, context))));
     }
 
     /// <summary>
@@ -1373,7 +1373,7 @@ partial class Simulation
             if (ordinal < 0)
                 continue;
             var raw = expr is AssignmentExpression { Slot: var assigned } ? assigned.Value : expr.Run(runtime);
-            EnforceMaxLength(raw, table.Columns[ordinal], table, context.Connection);
+            raw = EnforceMaxLength(raw, table.Columns[ordinal], table, context.Connection);
             newValues[ordinal] = CoerceForInsert(raw, table.Columns[ordinal]);
         }
 

@@ -4,11 +4,19 @@ namespace SqlServerSimulator.Parser.Expressions;
 
 internal sealed class Add : TwoSidedExpression
 {
-    internal Add(Expression left, Expression right) : base(left, right) { }
+    /// <summary>
+    /// The session's <c>CONCAT_NULL_YIELDS_NULL</c> as parsing found it: when
+    /// off, a NULL string operand reads as empty (probed 2026-09-24 against
+    /// SQL Server 2025). The plan cache keys on the option.
+    /// </summary>
+    private readonly bool concatNullYieldsNull;
+
+    internal Add(Expression left, Expression right, bool concatNullYieldsNull) : base(left, right) =>
+        this.concatNullYieldsNull = concatNullYieldsNull;
 
     protected override SqlValue Run(SqlValue left, SqlValue right) =>
         IsStringConcatPair(left, right)
-            ? StringConcatenation(left, right)
+            ? StringConcatenation(left, right, this.concatNullYieldsNull)
             : left.Type.PairClass is TypePairClass.Binary or TypePairClass.Timestamp && right.Type.PairClass is TypePairClass.Binary or TypePairClass.Timestamp
                 ? BinaryConcatenation(left, right)
                 : AdditiveArithmetic(left, right, '+', static (a, b) => checked(a + b));
@@ -59,9 +67,9 @@ internal sealed class Add : TwoSidedExpression
     }
 
     /// <summary>
-    /// String <c>+</c> concatenation: NULL-propagating (matching SQL Server's
-    /// default <c>CONCAT_NULL_YIELDS_NULL ON</c>; the OFF setting isn't
-    /// modeled). Result type is delegated to
+    /// String <c>+</c> concatenation: NULL-propagating under SQL Server's
+    /// default <c>CONCAT_NULL_YIELDS_NULL ON</c>, a NULL operand reading as
+    /// empty under OFF. Result type is delegated to
     /// <see cref="SqlType.PromoteForArithmetic"/>, which preserves char(N) /
     /// nchar(N) length combination for fixed-length-pair concatenation.
     /// <c>text</c> / <c>ntext</c> operands raise Msg 402 matching real SQL
@@ -72,7 +80,7 @@ internal sealed class Add : TwoSidedExpression
     /// <c>'a    b    '</c> as a side-effect of the per-value rep — no special
     /// handling in this method.
     /// </summary>
-    private static SqlValue StringConcatenation(SqlValue left, SqlValue right)
+    private static SqlValue StringConcatenation(SqlValue left, SqlValue right, bool concatNullYieldsNull)
     {
         if (left.Type == SqlType.Text || left.Type == SqlType.NText || right.Type == SqlType.Text || right.Type == SqlType.NText)
             throw SimulatedSqlException.IncompatibleDataTypesInOperator(left.Type, right.Type, "add");
@@ -88,6 +96,9 @@ internal sealed class Add : TwoSidedExpression
         if (left.Type.Category == SqlTypeCategory.String && right.Type.Category == SqlTypeCategory.String)
             resultType = UnresolvedCollation.Settle(resultType, left.Type, right.Type, "add");
 
+        // Only one NULL reads as empty: two NULLs still concatenate to NULL.
+        if (!concatNullYieldsNull && left.IsNull != right.IsNull)
+            return SqlValue.FromString(resultType, (left.IsNull ? "" : left.AsString) + (right.IsNull ? "" : right.AsString));
         return left.IsNull || right.IsNull
             ? SqlValue.Null(resultType)
             : SqlValue.FromString(resultType, left.AsString + right.AsString);
@@ -98,16 +109,33 @@ internal sealed class Add : TwoSidedExpression
     /// Both-string pairs delegate to <see cref="SqlType.PromoteForArithmetic"/>
     /// (which preserves char/nchar length combination). Mixed string + NULL
     /// (a non-string-typed NULL on one side, reached via the bare-NULL rule
-    /// in <see cref="IsStringConcatPair"/>) collapses to length-less
-    /// varchar/nvarchar — the result is NULL anyway, so length doesn't matter.
+    /// in <see cref="IsStringConcatPair"/>) reads the NULL as a one-character
+    /// string of the other side's family, as <see cref="OneCharacterPartner"/>
+    /// types it statically.
     /// </summary>
     private static SqlType ResolveResultType(SqlType a, SqlType b)
     {
         if (a.Category == SqlTypeCategory.String && b.Category == SqlTypeCategory.String)
             return SqlType.PromoteForArithmetic(a, b, '+');
         var stringType = a.Category == SqlTypeCategory.String ? a : b;
-        return IsNationalString(stringType) ? SqlType.NVarchar : SqlType.Varchar;
+        var partner = OneCharacterPartner(stringType) ?? (IsNationalString(stringType) ? SqlType.NVarchar : SqlType.Varchar);
+        return a.Category == SqlTypeCategory.String
+            ? SqlType.PromoteForArithmetic(a, partner, '+')
+            : SqlType.PromoteForArithmetic(partner, b, '+');
     }
+
+    /// <summary>
+    /// The type a bare <c>NULL</c> takes beside <paramref name="stringType"/>
+    /// in <c>+</c>: a one-character <c>varchar</c> / <c>nvarchar</c> in its
+    /// collation, or null when <paramref name="stringType"/> isn't a
+    /// concatenable string.
+    /// </summary>
+    internal static SqlType? OneCharacterPartner(SqlType stringType) => stringType switch
+    {
+        VarcharSqlType or CharSqlType when stringType.Collation is { } collation => VarcharSqlType.Get(1, collation, stringType.Coercibility),
+        NVarcharSqlType or NCharSqlType when stringType.Collation is { } collation => NVarcharSqlType.Get(1, collation, stringType.Coercibility),
+        _ => null,
+    };
 
     private static bool IsNationalString(SqlType type) =>
         type is NVarcharSqlType or NCharSqlType || type == SqlType.NText;

@@ -114,6 +114,8 @@ partial class Simulation
         // Restored in the finally below; see docs/claude/grammar.md.
         var savedQuotedIdentifiers = connection.QuotedIdentifiers;
         connection.QuotedIdentifiers = function.UsesQuotedIdentifier;
+        var savedAnsiNulls = connection.AnsiNulls;
+        connection.AnsiNulls = function.UsesAnsiNulls;
         // MS-TVF body batches have no UdfFrame / ProcFrame — see Msg 178 note
         // on the dedicated BatchContext constructor's remarks.
         // Body errors attribute to the outer invoking statement (probe-
@@ -139,6 +141,7 @@ partial class Simulation
         {
             connection.NestingLevel--;
             connection.QuotedIdentifiers = savedQuotedIdentifiers;
+            connection.AnsiNulls = savedAnsiNulls;
         }
 
         // Yield the accumulated @r rows. Iterating the table-variable's Heap

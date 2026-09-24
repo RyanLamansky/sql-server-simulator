@@ -43,7 +43,9 @@ partial class Simulation
 
     /// <summary>
     /// Raises a truncation error when the SOURCE value's natural length would
-    /// exceed <paramref name="column"/>'s declared maximum. The check fires
+    /// exceed <paramref name="column"/>'s declared maximum — or, under
+    /// <c>SET ANSI_WARNINGS OFF</c>, returns it cut to fit; otherwise returns
+    /// it unchanged. The check fires
     /// pre-coerce so that <c>char(N)</c> / <c>nchar(N)</c> / <c>binary(N)</c>
     /// columns — whose CoerceTo silently truncates to match SQL Server's CAST
     /// semantics — still raise the bind-time truncation error. NULL values
@@ -61,22 +63,22 @@ partial class Simulation
     /// the column can hold for the common cases, and any genuine overflow
     /// surfaces as a coercion error instead.
     /// </remarks>
-    private static void EnforceMaxLength(SqlValue source, HeapColumn column, HeapTable table, SimulatedDbConnection connection)
+    private static SqlValue EnforceMaxLength(SqlValue source, HeapColumn column, HeapTable table, SimulatedDbConnection connection)
     {
         if (source.IsNull || column.MaxLength is not int max || max == SqlType.MaxLengthSentinel)
-            return;
+            return source;
 
         int actual;
         if (column.Type is VarbinarySqlType or BinarySqlType)
         {
             if (source.Type is not (VarbinarySqlType or BinarySqlType))
-                return;
+                return source;
             actual = source.AsBytes.Length;
         }
         else if (column.Type is VarcharSqlType or CharSqlType)
         {
             if (source.Type.Category != SqlTypeCategory.String)
-                return;
+                return source;
             // Route through the column collation's storage encoding so the
             // byte budget reflects what the column will actually store:
             // CP1252 for default / Latin1 / BIN / BIN2, UTF-8 for the three
@@ -89,18 +91,23 @@ partial class Simulation
         else if (column.Type is NVarcharSqlType or NCharSqlType or SystemNameSqlType)
         {
             if (source.Type.Category != SqlTypeCategory.String)
-                return;
+                return source;
             actual = source.AsString.Length;
         }
         else
         {
             // A hierarchyid carries a byte budget of its own that a string
             // source's text length says nothing about.
-            return;
+            return source;
         }
 
         if (actual <= max)
-            return;
+            return source;
+
+        // Under SET ANSI_WARNINGS OFF the write truncates silently, as a CAST
+        // does (probed 2026-09-24 against SQL Server 2025).
+        if (!connection.AnsiWarnings)
+            return TruncatedToColumn(source, column, max);
 
         if (!connection.IsVerboseTruncationActive())
             throw SimulatedSqlException.StringOrBinaryWouldBeTruncatedLegacy();
@@ -114,6 +121,21 @@ partial class Simulation
                 source.AsString,
                 max,
                 column.Type is VarcharSqlType or CharSqlType ? column.Type.Collation!.StorageEncoding : null);
+    }
+
+    /// <summary>
+    /// <paramref name="source"/> cut to <paramref name="column"/>'s declared
+    /// <paramref name="max"/> — bytes for a binary, bytes of the column's code
+    /// page for <c>varchar</c> / <c>char</c>, UTF-16 units otherwise.
+    /// </summary>
+    private static SqlValue TruncatedToColumn(SqlValue source, HeapColumn column, int max)
+    {
+        if (column.Type is VarbinarySqlType or BinarySqlType)
+            return SqlValue.FromVarbinary(source.AsBytes[..max]);
+        var text = source.AsString;
+        return SqlValue.FromString(source.Type, column.Type is VarcharSqlType or CharSqlType
+            ? Collation.ClipToByteBudget(text, max, column.Type.Collation!.StorageEncoding)
+            : text[..Math.Min(text.Length, max)]);
     }
 
     /// <summary>

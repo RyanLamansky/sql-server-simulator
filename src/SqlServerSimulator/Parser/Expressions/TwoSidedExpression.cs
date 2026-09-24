@@ -34,11 +34,13 @@ internal abstract class TwoSidedExpression : Expression
     /// compound-assignment operator's arithmetic step. Used by the SET and
     /// UPDATE-SET parsers: <c>SET @v += rhs</c> becomes
     /// <c>SET @v = FromCompoundOp('+', VariableReference(@v), rhs)</c> and the
-    /// existing assignment path runs unchanged.
+    /// existing assignment path runs unchanged. The parsing context supplies
+    /// the session's <c>CONCAT_NULL_YIELDS_NULL</c>, which a string
+    /// <c>+</c> captures.
     /// </summary>
-    internal static TwoSidedExpression FromCompoundOp(char op, Expression left, Expression right) => op switch
+    internal static TwoSidedExpression FromCompoundOp(char op, Expression left, Expression right, ParserContext context) => op switch
     {
-        '+' => new Add(left, right),
+        '+' => new Add(left, right, context.Connection.ConcatNullYieldsNull),
         '-' => new Subtract(left, right),
         '*' => new Multiply(left, right),
         '/' => new Divide(left, right),
@@ -220,6 +222,16 @@ internal abstract class TwoSidedExpression : Expression
     private SqlType CombineType(SqlType leftType, BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
         var rightType = this.right.GetSqlType(batch, resolveColumnType);
+        // A bare NULL beside a string in `+` is a one-character string of that
+        // string's family: 'abc' + NULL is varchar(4), N'a' + NULL nvarchar(2)
+        // (probed 2026-09-24 against SQL Server 2025).
+        if (this.Operator == '+')
+        {
+            if (this.left is Value { IsUntypedNull: true } && Add.OneCharacterPartner(rightType) is { } leftPartner)
+                leftType = leftPartner;
+            if (this.right is Value { IsUntypedNull: true } && Add.OneCharacterPartner(leftType) is { } rightPartner)
+                rightType = rightPartner;
+        }
         var result = SqlType.PromoteOperandsForArithmetic(
             PairOperand(this.left, ArithmeticOperandType(this.left, leftType, rightType), batch),
             PairOperand(this.right, ArithmeticOperandType(this.right, rightType, leftType), batch),

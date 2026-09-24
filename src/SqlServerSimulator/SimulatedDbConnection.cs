@@ -172,11 +172,10 @@ public sealed class SimulatedDbConnection : DbConnection
     /// <summary>
     /// Session-scoped <c>ANSI_NULLS</c> setting, surfaced by
     /// <c>SESSIONPROPERTY('ANSI_NULLS')</c>. Defaults to <see langword="true"/>
-    /// (a fresh SqlClient session reports 1 — probe-confirmed). The simulator
-    /// doesn't model the <c>= NULL</c>-comparison semantic this option governs;
-    /// the field exists so the option's recorded state reads back consistently,
-    /// and so each CREATE can stamp it onto the object's
-    /// <c>SchemaObject.UsesAnsiNulls</c> capture.
+    /// (a fresh SqlClient session reports 1 — probe-confirmed). A comparison
+    /// reads it while parsing to decide whether <c>= NULL</c> is two-valued,
+    /// each CREATE stamps it onto the object's <c>SchemaObject.UsesAnsiNulls</c>
+    /// capture, and a module invocation swaps that capture in for its body.
     /// Mutated by top-level <c>SET ANSI_NULLS ON|OFF</c> (including the comma-list
     /// form); like <c>QUOTED_IDENTIFIER</c>, SETs inside a procedure / function /
     /// trigger body or dynamic SQL don't write here.
@@ -210,8 +209,8 @@ public sealed class SimulatedDbConnection : DbConnection
     /// <summary>
     /// Session-scoped <c>CONCAT_NULL_YIELDS_NULL</c> setting (default
     /// <see langword="true"/>), surfaced by
-    /// <c>SESSIONPROPERTY('CONCAT_NULL_YIELDS_NULL')</c>. Recorded only.
-    /// Scoping mirrors <see cref="AnsiNulls"/>.
+    /// <c>SESSIONPROPERTY('CONCAT_NULL_YIELDS_NULL')</c>, and captured while
+    /// parsing by each string <c>+</c>. Scoping mirrors <see cref="AnsiNulls"/>.
     /// </summary>
     internal bool ConcatNullYieldsNull = true;
 
@@ -637,7 +636,8 @@ public sealed class SimulatedDbConnection : DbConnection
     /// <see cref="Simulation.CreateResultSetsForCommand"/>: DML mutations
     /// write their affected-row count; SELECT writes its produced-row count
     /// after the reader fully iterates; SELECT-assign writes the rows-scanned
-    /// count; <c>SET</c> and <c>DECLARE @v T = init</c> write 1; bare
+    /// count; <c>SET @v</c> and <c>DECLARE @v T = init</c> write 1, a SET of a
+    /// session option 0; bare
     /// <c>DECLARE @v T</c> (no initializer) leaves it unchanged; most other
     /// statement kinds reset to 0. Probe-confirmed against SQL Server 2025
     /// (2026-05-12).
