@@ -77,6 +77,7 @@ partial class Simulation
         var boundValues = new SqlValue?[procedure.Parameters.Length];
         var boundOutputSlots = new VariableSlot?[procedure.Parameters.Length];
         var boundIsDefault = new bool[procedure.Parameters.Length];
+        var boundIsUntypedNull = new bool[procedure.Parameters.Length];
         var boundTableValues = new HeapTable?[procedure.Parameters.Length];
         var boundCursorArgNames = new string?[procedure.Parameters.Length];
         // A binding error reports line 0 and names the procedure as the EXEC
@@ -121,6 +122,7 @@ partial class Simulation
             boundValues[paramIndex] = arg.Value;
             boundOutputSlots[paramIndex] = arg.OutputSlot;
             boundIsDefault[paramIndex] = arg.IsDefault;
+            boundIsUntypedNull[paramIndex] = arg.IsUntypedNull;
             boundTableValues[paramIndex] = arg.TableValue;
             boundCursorArgNames[paramIndex] = arg.CursorVariableName;
         }
@@ -195,6 +197,10 @@ partial class Simulation
                 tableVariables[param.Name] = clone;
                 continue;
             }
+            // A supplied value meets the parameter's one-way assignment rule
+            // as the call runs (probe-confirmed against SQL Server 2025).
+            if (!boundIsDefault[i] && !boundIsUntypedNull[i])
+                AssignmentRules.RequireAssignable(boundValues[i]!.Value.Type, param.Type);
             var coerced = BindParameterValue(boundValues[i]!.Value, param.Type, attributionName);
             variables[param.Name] = new VariableSlot(param.Type, declaredMaxLength: param.DeclaredMaxLength, coerced, parameter: null);
         }

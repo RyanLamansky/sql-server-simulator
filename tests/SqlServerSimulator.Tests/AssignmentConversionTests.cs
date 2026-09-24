@@ -51,6 +51,49 @@ public sealed class AssignmentConversionTests
         => new Simulation().AssertSqlError(sql, 257);
 
     [TestMethod]
+    [DataRow("insert t (d) select getdate()", 257)]
+    [DataRow("insert t (d) select getdate() where 1 = 0", 257)]
+    [DataRow("insert t (d) select getdate() union all select 1", 257)]
+    [DataRow("insert t (x) select 1", 206)]
+    [DataRow("insert t (i) select cast(null as date)", 206)]
+    [DataRow("merge t using (select getdate() dt) s on 1 = 0 when not matched then insert (d) values (s.dt);", 257)]
+    [DataRow("merge t using (select getdate() dt) s on 1 = 1 when matched then update set d = s.dt;", 257)]
+    public void QuerySourcedAssignment_RaisesWhileCompiling(string statement, int number)
+        => new Simulation().AssertSqlError($"create table t (d decimal(10, 2), x xml, i int); {statement}", number);
+
+    [TestMethod]
+    public void QuerySourcedBareNull_IsAssignable()
+        => AreEqual(1, new Simulation().ExecuteScalar("create table t (x xml); insert t (x) select null; select count(*) from t"));
+
+    [TestMethod]
+    [DataRow("declare @i int; exec p @i", 206)]
+    [DataRow("exec p 1", 206)]
+    [DataRow("declare @dt datetime = getdate(); exec p null, @dt", 257)]
+    [DataRow("declare @dt datetime = getdate(); exec p @d = @dt, @x = null", 257)]
+    public void ProcedureArgument_RaisesWhenTheCallRuns(string call, int number)
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create procedure p @x xml, @d decimal(10, 2) = 1 as select 1");
+        _ = sim.AssertSqlError(call, number);
+    }
+
+    [TestMethod]
+    public void ProcedureArgument_NullKeyword_IsAssignable()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create procedure p @x xml as select 1");
+        AreEqual(1, sim.ExecuteScalar("exec p null"));
+    }
+
+    [TestMethod]
+    public void SpExecuteSqlArgument_RaisesWhenTheCallRuns()
+        => new Simulation().AssertSqlError("declare @dt datetime = getdate(); exec sp_executesql N'select @d', N'@d decimal(10, 2)', @dt", 257);
+
+    [TestMethod]
+    public void SpExecuteSqlArgument_NullKeyword_IsAssignable()
+        => AreEqual(DBNull.Value, new Simulation().ExecuteScalar("exec sp_executesql N'select @x', N'@x xml', null"));
+
+    [TestMethod]
     public void EmptyUpdate_StillRaises()
         => new Simulation().AssertSqlError("create table t (x xml); update t set x = 1 where 1 = 0", 206);
 

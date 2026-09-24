@@ -145,8 +145,8 @@ partial class Simulation
             // count still has to match the view's shape first — the arity
             // diagnostics are the view's own, measured against its projection.
             ReservedKeyword { Keyword: Keyword.Values } => EvaluateArityCheckedTuples(context, destinationColumns, hasExplicitColumnList),
-            ReservedKeyword { Keyword: Keyword.Select } => ExecuteSelectSource(context, destinationColumns.Length, hasExplicitColumnList),
-            Operator { Character: '(' } => ExecuteParenthesizedSelectSource(context, destinationColumns.Length, hasExplicitColumnList),
+            ReservedKeyword { Keyword: Keyword.Select } => ExecuteSelectSource(context, destinationColumns, hasExplicitColumnList),
+            Operator { Character: '(' } => ExecuteParenthesizedSelectSource(context, destinationColumns, hasExplicitColumnList),
             _ => throw SimulatedSqlException.SyntaxErrorNear(context),
         };
 
@@ -375,9 +375,9 @@ partial class Simulation
         {
             sourceRows = context.Token switch
             {
-                ReservedKeyword { Keyword: Keyword.Select } => ExecuteSelectSource(context, destinationColumns.Length, hasExplicitColumnList, identityColumn, destinationTable),
+                ReservedKeyword { Keyword: Keyword.Select } => ExecuteSelectSource(context, destinationColumns, hasExplicitColumnList, identityColumn, destinationTable),
                 ReservedKeyword { Keyword: Keyword.Exec or Keyword.Execute } => ExecuteExecSource(context, destinationColumns.Length),
-                Operator { Character: '(' } => ExecuteParenthesizedSelectSource(context, destinationColumns.Length, hasExplicitColumnList, identityColumn, destinationTable),
+                Operator { Character: '(' } => ExecuteParenthesizedSelectSource(context, destinationColumns, hasExplicitColumnList, identityColumn, destinationTable),
                 _ => throw SimulatedSqlException.SyntaxErrorNear(context),
             };
         }
@@ -993,7 +993,7 @@ partial class Simulation
     /// </remarks>
     private static List<SqlValue[]> ExecuteParenthesizedSelectSource(
         ParserContext context,
-        int expectedColumnCount,
+        HeapColumn[] destinationColumns,
         bool hasExplicitColumnList,
         HeapColumn? identityColumn = null,
         HeapTable? destinationTable = null)
@@ -1011,7 +1011,7 @@ partial class Simulation
         // closing `)` as its terminator rather than as a stray token, and what
         // refuses the source query's own ORDER BY / FOR clause (Msg 156) while
         // anything nested inside it keeps the ordinary rules.
-        var rows = ExecuteSelectSource(context, expectedColumnCount, hasExplicitColumnList, identityColumn, destinationTable, QueryPosition.ParenthesizedInsertSource);
+        var rows = ExecuteSelectSource(context, destinationColumns, hasExplicitColumnList, identityColumn, destinationTable, QueryPosition.ParenthesizedInsertSource);
 
         while (depth > 0)
         {
@@ -1025,7 +1025,7 @@ partial class Simulation
 
     private static List<SqlValue[]> ExecuteSelectSource(
         ParserContext context,
-        int expectedColumnCount,
+        HeapColumn[] destinationColumns,
         bool hasExplicitColumnList,
         HeapColumn? identityColumn = null,
         HeapTable? destinationTable = null,
@@ -1040,6 +1040,7 @@ partial class Simulation
         // the mismatch is measured against the table definition and reports
         // Msg 213 — or Msg 8101 when the surplus would reach an identity
         // column — exactly as the VALUES form does (probe-confirmed).
+        var expectedColumnCount = destinationColumns.Length;
         if (selection.Schema.Length != expectedColumnCount)
         {
             if (hasExplicitColumnList)
@@ -1051,6 +1052,14 @@ partial class Simulation
             throw selection.Schema.Length > expectedColumnCount && identityColumn is not null && destinationTable is not null
                 ? SimulatedSqlException.ExplicitIdentityNeedsColumnList(destinationTable.Name)
                 : SimulatedSqlException.ColumnCountDoesNotMatchTableDefinition();
+        }
+
+        // Each projected column meets its target's one-way assignment rule
+        // while compiling, over an empty rowset too; a bare NULL is exempt.
+        for (var i = 0; i < expectedColumnCount; i++)
+        {
+            if (selection.ColumnIsUntypedNull is not { } untyped || !untyped[i])
+                AssignmentRules.RequireAssignable(selection.Schema[i], destinationColumns[i].Type);
         }
 
         // The arity checks above are binding, so they still run; running the

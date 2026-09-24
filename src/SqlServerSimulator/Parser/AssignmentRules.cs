@@ -28,4 +28,15 @@ internal static class AssignmentRules
         if (SqlType.OperandPairError(TypePairOperation.Assign, new TypePairOperand(sourceType, source), new TypePairOperand(target), "assign") is { } error)
             throw error;
     }
+
+    /// <summary>
+    /// The same rule for a source known only by its type — a query's column,
+    /// a procedure argument's value — which the caller has already cleared of
+    /// the untyped-<c>NULL</c> exemption.
+    /// </summary>
+    public static void RequireAssignable(SqlType sourceType, SqlType target)
+    {
+        if (SqlType.OperandPairError(TypePairOperation.Assign, new TypePairOperand(sourceType), new TypePairOperand(target), "assign") is { } error)
+            throw error;
+    }
 }

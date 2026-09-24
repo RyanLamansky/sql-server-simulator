@@ -235,7 +235,8 @@ Already listed elsewhere here and not repeated: `DBCC CHECKIDENT` and parenthesi
 - Binary or padded `char` converted to `xml` isn't validated or whitespace-stripped, and a `hierarchyid` parse failure's Msg 6522 wording differs.
 - A `UNION` whose second branch fails at runtime raises before sending the first branch's rows; real sends them first.
 - The TDS UDT type name leaves the database part empty (`.sys.geography`; real sends `<db>.sys.geography`).
-- The one-way assignment rule (`Assign` grid, [`arithmetic.md`](arithmetic.md#type-pair-legality)) isn't applied to an `INSERT … SELECT` or `MERGE` source, nor to a procedure's arguments, so a `datetime` reaching a `decimal` column or parameter that way converts here where real raises Msg 257 (probed 2026-09-24).
+- The one-way assignment rule (`Assign` grid, [`arithmetic.md`](arithmetic.md#type-pair-legality)) isn't applied to an `INSERT … EXEC` source, so a `datetime` result column reaching a `decimal` column converts here where real raises Msg 257 as the rows arrive (probed 2026-09-24).
+  A result set doesn't record which of its columns were a bare `NULL`, which the rule exempts, so the check needs that carried out of the procedure's `SELECT` first.
 
 **Message stream**: what's left — Msg 5703's localized wording and Msg 8153 over a constant `VALUES` grouping — is in [`errors.md`](errors.md#not-modeled-yet).
 

@@ -809,6 +809,14 @@ partial class Simulation
                     : SimulatedSqlException.MoreInsertColumnsThanValues();
         }
 
+        // Each value meets its column's one-way assignment rule while
+        // compiling (probe-confirmed against SQL Server 2025).
+        for (var i = 0; i < columns.Length; i++)
+        {
+            if (insertValues[i] is not Parser.Expressions.DefaultValueExpression)
+                AssignmentRules.RequireAssignable(insertValues[i], insertValues[i].GetSqlType(context.Batch, resolveType), columns[i].Type);
+        }
+
         return new WhenClause(kind, MergeActionKind.Insert, searchCondition, assignments: null, insertColumns: columns, insertValues: [.. insertValues]);
     }
 
@@ -907,6 +915,7 @@ partial class Simulation
                     throw SimulatedSqlException.ColumnCannotBeModified(targetColumn.Name);
                 if (targetColumn.Type == SqlType.RowVersion)
                     throw SimulatedSqlException.CannotUpdateTimestampColumn();
+                AssignmentRules.RequireAssignable(rhs, rhs.GetSqlType(context.Batch, resolveType), targetColumn.Type);
                 if (assignments.Exists(assignment => assignment.Ordinal == ordinal))
                     throw SimulatedSqlException.ColumnAssignedMoreThanOnce(sourceView is null ? targetColumn.Name : columnName);
                 assignments.Add((ordinal, rhs));

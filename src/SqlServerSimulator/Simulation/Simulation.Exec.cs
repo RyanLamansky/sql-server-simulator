@@ -392,6 +392,7 @@ partial class Simulation
         }
 
         SqlValue literalValue;
+        var untypedNull = false;
         switch (context.Token)
         {
             case Literal lit:
@@ -403,6 +404,7 @@ partial class Simulation
             case ReservedKeyword { Keyword: Keyword.Null }:
                 if (negate) throw SimulatedSqlException.SyntaxErrorNear(context);
                 literalValue = SqlValue.Null(SqlType.Int32);
+                untypedNull = true;
                 break;
             // A bare identifier in EXEC argument position is a legacy T-SQL
             // form: SQL Server treats it as a string constant of the
@@ -418,7 +420,7 @@ partial class Simulation
                 throw SimulatedSqlException.SyntaxErrorNear(context);
         }
         context.MoveNextOptional();
-        return new ProcArgument(name, isDefault: false, value: literalValue, outputSlot: null);
+        return new ProcArgument(name, isDefault: false, value: literalValue, outputSlot: null, isUntypedNull: untypedNull);
     }
 
     private static SqlValue NegateLiteral(SqlValue v) =>
@@ -437,11 +439,18 @@ partial class Simulation
 /// invocation writes the proc's final parameter value back into this slot
 /// at exit.
 /// </summary>
-internal readonly struct ProcArgument(string? name, bool isDefault, SqlValue value, VariableSlot? outputSlot, HeapTable? tableValue = null, string? cursorVariableName = null)
+internal readonly struct ProcArgument(string? name, bool isDefault, SqlValue value, VariableSlot? outputSlot, HeapTable? tableValue = null, string? cursorVariableName = null, bool isUntypedNull = false)
 {
     public readonly string? Name = name;
     public readonly bool IsDefault = isDefault;
     public readonly SqlValue Value = value;
+
+    /// <summary>
+    /// The argument is the <c>NULL</c> keyword, which has no type for the
+    /// parameter's assignment rule to judge; a NULL an ADO.NET or RPC
+    /// parameter carries is typed and judged like any value.
+    /// </summary>
+    public readonly bool IsUntypedNull = isUntypedNull;
     public readonly VariableSlot? OutputSlot = outputSlot;
 
     /// <summary>

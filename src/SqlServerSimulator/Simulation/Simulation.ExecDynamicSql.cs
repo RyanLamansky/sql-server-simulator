@@ -128,7 +128,7 @@ partial class Simulation
         }
 
         // Remaining args: positional/named values bound to declared params.
-        var argumentValues = new List<(string? Name, SqlValue Value, VariableSlot? OutputSlot)>();
+        var argumentValues = new List<(string? Name, SqlValue Value, VariableSlot? OutputSlot, bool IsUntypedNull)>();
         while (hasMoreArgs)
         {
             context.MoveNextRequired();
@@ -141,8 +141,9 @@ partial class Simulation
                 sawNamedArgument = true;
             else if (sawNamedArgument)
                 throw SimulatedSqlException.MustPassParameterAsNamed();
+            var isUntypedNull = context.Token is ReservedKeyword { Keyword: Keyword.Null };
             var (argValue, argOutputSlot) = ParseSpExecuteSqlValueArg(context, batch);
-            argumentValues.Add((argName, argValue, argOutputSlot));
+            argumentValues.Add((argName, argValue, argOutputSlot, isUntypedNull));
             hasMoreArgs = context.Token is Operator { Character: ',' };
         }
 
@@ -172,6 +173,7 @@ partial class Simulation
             var positional = 0;
             var bound = new SqlValue?[declaredParams.Count];
             var boundOutputSlots = new VariableSlot?[declaredParams.Count];
+            var boundIsUntypedNull = new bool[declaredParams.Count];
             // Real checks the declarations for completeness *before* it
             // complains about a name it doesn't recognize, so an unknown name
             // alongside a missing declared one reports the missing one
@@ -180,7 +182,7 @@ partial class Simulation
             var sawUnknownName = false;
             if (declaredParams.Count == 0 && argumentValues.Count > 0)
                 throw SimulatedSqlException.ArgumentsSuppliedToParameterlessRoutine("");
-            foreach (var (name, value, outputSlot) in argumentValues)
+            foreach (var (name, value, outputSlot, isUntypedNull) in argumentValues)
             {
                 int idx;
                 if (name is null)
@@ -211,6 +213,7 @@ partial class Simulation
                     throw SimulatedSqlException.TooManyArgumentsToFunction("");
                 bound[idx] = value;
                 boundOutputSlots[idx] = outputSlot;
+                boundIsUntypedNull[idx] = isUntypedNull;
             }
             for (var i = 0; i < declaredParams.Count; i++)
             {
@@ -223,6 +226,8 @@ partial class Simulation
                 // message spells it the way the declaration did.
                 if (bound[i] is null)
                     throw SimulatedSqlException.ParameterizedQueryExpectsParameter(paramDefsText, sqlText, "@" + param.Name);
+                if (!boundIsUntypedNull[i])
+                    AssignmentRules.RequireAssignable(bound[i]!.Value.Type, param.Type);
                 var initialValue = BindParameterValue(bound[i]!.Value, param.Type, procedure: "");
                 var slot = new VariableSlot(param.Type, declaredMaxLength: null, initialValue, parameter: null);
                 preDeclared[param.Name] = slot;
