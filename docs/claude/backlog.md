@@ -263,7 +263,6 @@ Already listed elsewhere here and not repeated: `DBCC CHECKIDENT` and parenthesi
 
 - `.e1` is a column reference on real (Msg 4104), a syntax error here.
 - Numbered procedures (`CREATE PROC p;2`, `EXEC p;2`).
-- `sp_refreshview` (Msg 2812 here) — a drifted `SELECT *` view keeps its CREATE-time names until altered.
 - A `decimal(p, 0)` identity seed or increment past `bigint`'s range (`NotSupportedException` here; the identity state is a `long`).
 - `RAISERROR` at severity 20 and up `WITH LOG`, which ends the connection on real (`NotSupportedException` here).
 

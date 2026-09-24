@@ -121,6 +121,19 @@ partial class SimulatedSqlException
         new("Must specify the table name and index name for the DROP INDEX statement.", 159, 15, 1);
 
     /// <summary>
+    /// Pairs a view body's binder error — a missing object (Msg 208), column
+    /// (Msg 207) or qualifier (Msg 4104) — with the Msg 4413 real sends after
+    /// it, naming only the outermost view a nested reference passed through,
+    /// so an inner view's trailer is replaced rather than repeated (probed
+    /// 2026-09-24 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException FollowedByViewBindingFailure(SimulatedSqlException error, string viewName)
+    {
+        List<SimulatedError> entries = [.. error.Errors.Where(entry => entry.Number != 4413)];
+        return FollowedBy(FromErrors(entries), new($"Could not use view or function '{viewName}' because of binding errors.", 4413, 16, 1));
+    }
+
+    /// <summary>
     /// One exception carrying <paramref name="error"/>'s entries then
     /// <paramref name="trailer"/>'s, whose batch-ending behavior is
     /// <paramref name="error"/>'s; a <c>CATCH</c> reads the trailer, the last

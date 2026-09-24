@@ -52,13 +52,26 @@ partial class Simulation
     /// base table serves its new first column under the old name, typed as
     /// the new column; a body left with fewer columns than recorded names is
     /// Msg 4502. <c>sp_refreshview</c> is what re-records the names on real.
-    /// A body that no longer binds returns the recorded columns unchanged, so
-    /// its own error surfaces at execution as it always has.
+    /// A body that no longer binds — a missing object, column or qualifier —
+    /// is that binder error followed by Msg 4413, while the referencing
+    /// statement compiles; any other failure returns the recorded columns
+    /// unchanged, so the body's own error surfaces at execution.
     /// </remarks>
     internal HeapColumn[] BindViewColumns(BatchContext outerBatch, View view)
     {
-        if (this.TryParseViewBodyPlan(outerBatch, view) is not { } plan)
+        Selection plan;
+        try
+        {
+            plan = ParseViewBodyPlan(outerBatch, view, releaseStatementSchemaLocks: true);
+        }
+        catch (SimulatedSqlException error) when (error.Number is 207 or 208 or 4104)
+        {
+            throw SimulatedSqlException.FollowedByViewBindingFailure(error, view.Name);
+        }
+        catch (Exception error) when (error is SimulatedSqlException or NotSupportedException)
+        {
             return view.OutputColumns;
+        }
 
         var recorded = view.OutputColumns;
         var bound = plan.Schema;
@@ -129,12 +142,14 @@ partial class Simulation
         bodyCommand.CommandText = view.BodyText;
 #pragma warning restore CA2100
         var variables = new Dictionary<string, VariableSlot>(BatchContext.VariableNameComparer);
-        var innerBatch = new BatchContext(bodyCommand, variables, new UdfFrame(SqlType.Int32)) { SuppressDiagnosticsResolution = true };
-        innerBatch.AdoptStatementFreezeFrom(outerBatch);
+        // The captured settings go on before the child batch exists, since
+        // it reads QUOTED_IDENTIFIER as it is built.
         var savedQuotedIdentifiers = connection.QuotedIdentifiers;
         connection.QuotedIdentifiers = view.UsesQuotedIdentifier;
         var savedAnsiNulls = connection.AnsiNulls;
         connection.AnsiNulls = view.UsesAnsiNulls;
+        var innerBatch = new BatchContext(bodyCommand, variables, new UdfFrame(SqlType.Int32)) { SuppressDiagnosticsResolution = true };
+        innerBatch.AdoptStatementFreezeFrom(outerBatch);
         connection.NestingLevel++;
         try
         {

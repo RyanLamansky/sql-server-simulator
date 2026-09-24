@@ -187,6 +187,8 @@ partial class Simulation
             "sp_MSforeachdb" => this.InvokeSpMsForEachDb(batch),
             "sp_MSforeachtable" => this.InvokeSpMsForEachTable(batch),
             "sp_pkeys" => InvokeSpPkeys(batch),
+            "sp_refreshsqlmodule" => this.InvokeSpRefreshSqlModule(batch),
+            "sp_refreshview" => this.InvokeSpRefreshView(batch),
             "sp_releaseapplock" => InvokeSpReleaseAppLock(batch, returnCodeVar),
             "sp_rename" => InvokeSpRename(batch),
             "sp_setapprole" => InvokeSpSetAppRole(batch),

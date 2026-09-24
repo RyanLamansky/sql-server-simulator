@@ -58,6 +58,10 @@ internal static partial class BuiltInResources
         // (Alembic's rename_table / alter_column, SSMS) emit it. Mutates
         // catalog state and surfaces the sev-10 "Caution" info message.
         "sp_rename",
+        // sp_refreshview / sp_refreshsqlmodule: rebind a module (a SELECT *
+        // view frozen at CREATE, above all) to its sources' current shape.
+        "sp_refreshview",
+        "sp_refreshsqlmodule",
         // sp_settriggerorder: pins a trigger first / last among the AFTER
         // triggers an action runs; see docs/claude/triggers.md.
         "sp_settriggerorder",

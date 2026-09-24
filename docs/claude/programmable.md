@@ -295,6 +295,9 @@ Probed against SQL Server 2025.
 - **A reference re-binds the body and maps it by position** (`Simulation.BindViewColumns`): the column *names and their count* are the ones recorded at CREATE, while each column's *type* is what the body projects now.
   Only a `SELECT *` body over a table changed since CREATE can drift, and real's positional mapping is observable there (probed 2026-09-23): a column added to the first table of `SELECT * FROM t CROSS JOIN u` reads under `u`'s recorded name, a dropped-and-recreated base table serves its new leading column under the old name and new type, a retyped column reads its new type, and a body left with fewer columns than recorded names is **Msg 4502**.
   A column added past the recorded ones isn't reachable by name (Msg 207).
+  A body that no longer binds — a dropped table, a renamed column — is its binder error (Msg 208 / 207 / 4104) followed by **Msg 4413** naming the outermost view, raised while the referencing statement compiles (probed 2026-09-24).
+- **`sp_refreshview` / `sp_refreshsqlmodule`** re-run the module's stored `CREATE` text as an `ALTER` under its captured `QUOTED_IDENTIFIER` / `ANSI_NULLS`, which is what re-records a drifted `SELECT *` view's names; a schema-bound module is left alone with the class-0 **Msg 2023**, an unresolvable name (or, for `sp_refreshview`, a non-view) is **Msg 15165**, and a body that no longer binds reports its binder error alone (probed 2026-09-24).
+  Since the refresh *is* an ALTER, it also fires an `ALTER_VIEW` / `ALTER_PROCEDURE` DDL trigger and advances `modify_date`, which hasn't been checked against real.
 - **WITH-clause options**: `SCHEMABINDING` is captured on `View.IsSchemaBound` (it gates `CREATE INDEX` on the view, surfaces through `sys.sql_modules.is_schema_bound` / `OBJECTPROPERTY(id,'IsSchemaBound')`, is the precondition `OBJECTPROPERTY(id,'IsDeterministic')` reads — see [`catalog-views.md`](catalog-views.md#isdeterministic) — and enrolls the body's references in the dependency gate, [Schema binding](#schema-binding-with-schemabinding)).
   `ENCRYPTION` / `VIEW_METADATA` parse-and-ignore.
   **`WITH CHECK OPTION`** (trailing the body) parses and records on `View.WithCheckOption`, enforced at DML time (Msg 550).
@@ -315,7 +318,6 @@ Probed against SQL Server 2025.
 
 **Fidelity gaps**:
 - **`VIEW_DEFINITION` always surfaces body text** even for WITH ENCRYPTION views (real SQL Server returns NULL for ENCRYPTION views).
-- **`sp_refreshview`** isn't built, so a drifted `SELECT *` view keeps its CREATE-time names until it's altered or re-created; real's `sp_refreshview` re-records them.
 
 ## Schema binding (`WITH SCHEMABINDING`)
 `WITH SCHEMABINDING` on a view, scalar function, inline TVF or multi-statement TVF pins everything the body names: the referenced objects can't be dropped, altered, renamed or moved while the module stands.
