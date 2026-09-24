@@ -436,12 +436,12 @@ Real bugs / limitations against shipped behavior — fixes are concrete work, no
   and a **`WRITETEXT` of NULL** leaves the cell with no pointer where real keeps handing one out, since real's pointer reflects an allocated LOB root rather than a non-NULL value.
 - **A constant negative length is a statement error where real aborts the batch** — `SELECT SUBSTRING('abc', 1, -1)` is settled while compiling on both engines and reports the same Msg 536 (see [`legacy-lob.md`](legacy-lob.md#negative-length-msg-536-while-compiling-msg-537-at-run-time)), but real's is a batch-level compile failure that the same batch's `BEGIN TRY` can't catch, while the simulator's is an ordinary statement error.
   The runtime half (Msg 537 for `LEFT` / `SUBSTRING`, Msg 536 state 2 for `RIGHT`) matches on both engines.
-- **More run-time errors end the batch on real than here** (probed 2026-09-24 against SQL Server 2025).
-  Uncaught, each of these ends the batch and rolls the transaction back, and caught, each dooms it — the conversion family's `SimulatedSqlException.AbortsAsUnderXactAbort` shape — where the simulator ends only the statement:
-  Msg 235 (`CAST('a' AS money)`), Msg 289 (`DATEFROMPARTS(2024, 13, 1)`), the JSON parse and path errors (Msg 13607, 13608, 13609, 13624), and a run-time Msg 2714 or Msg 1505 (`EXEC('CREATE TABLE t …')` over an existing `t`, or a unique index over duplicate keys).
-  Each factory needs its own probe before it takes the flag, since one number can come from sites that behave differently.
-- **Msg 8114 state 5 ends the batch here and only its statement on real** — a procedure argument that won't convert (`EXEC p 'x'` for an `int` parameter) shares the conversion family's flag through `ConvertingDataTypeError`, where real carries on after it and leaves the transaction standing (probed 2026-09-24).
-- **An error a trigger body leaves unhandled doesn't end the batch here** — real ends it and rolls the transaction back (`INSERT` into a table whose trigger divides by zero, then `PRINT`: the `PRINT` never runs, probed 2026-09-24); the simulator rolls back but runs the rest of the batch.
+- **Name-collision messages differ in their details** (probed 2026-09-24 against SQL Server 2025).
+  Msg 2714 is state 6 here for every object kind, where real reports 3 for a view or procedure, 5 for a constraint and 8 for a sequence or synonym.
+  A constraint that can't be created — a name collision, or a primary key or unique constraint over duplicate keys (Msg 1505) — is followed by Msg 1750 on real.
+  Msg 219 names the type with its schema here (`dbo.t`) where an unqualified `CREATE TYPE t` gets `t` on real.
+- **A `strict` `OPENJSON` path that doesn't resolve returns no rows here**; real raises Msg 13608 state 3.
+- **A `#temp` created inside dynamic SQL or a procedure can't shadow the caller's of the same name** — real creates the inner one (`CREATE TABLE #t …; EXEC('CREATE TABLE #t …')` runs clean), where the simulator raises Msg 2714 (probed 2026-09-24).
 
 - **`FORMAT`'s culture data is .NET's ICU set where real's is the .NET Framework's NLS set** — every divergence below is width-independent, reproducing for an `int`, a `money` and a narrow `decimal` alike, and each is what .NET itself produces for the same call (probed 2026-08-06):
   a default-precision `'P'` writes three fractional digits (`FORMAT(CAST(123.456 AS decimal(10, 3)), 'P')` → `12,345.600%`) where real writes two (`12,345.60%`), and a negative `'C'` under `en-US` writes `-$0.50` where real writes the parenthesized `($0.50)`.

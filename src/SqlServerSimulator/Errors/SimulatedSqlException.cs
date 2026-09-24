@@ -208,6 +208,14 @@ public sealed partial class SimulatedSqlException : DbException
     internal bool RaisingScopeRecorded;
 
     /// <summary>
+    /// Set when this error escaped a trigger body. The firing statement then
+    /// sends Msg 3621 after it even when the error ends the batch, where an
+    /// error ending the batch from the statement itself sends none (probed
+    /// 2026-09-24 against SQL Server 2025).
+    /// </summary>
+    internal bool EndedTriggerBody;
+
+    /// <summary>
     /// Guards <see cref="ResolveDiagnostics"/> against re-stamping. An error
     /// born inside a nested body (procedure / dynamic-SQL batch) is resolved at
     /// its own dispatch frame's catch boundary; as it propagates outward each

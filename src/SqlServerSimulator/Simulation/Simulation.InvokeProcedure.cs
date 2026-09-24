@@ -360,10 +360,12 @@ partial class Simulation
     }
 
     /// <summary>
-    /// Whether a procedure or dynamic-SQL body called from
+    /// Whether a procedure, trigger or dynamic-SQL body called from
     /// <paramref name="caller"/> runs on past a statement-terminating error the
     /// way its caller would, sending the error among its outcomes (probed
-    /// 2026-09-24 against SQL Server 2025). It does when the caller itself
+    /// 2026-09-24 against SQL Server 2025). A trigger body starts under
+    /// <c>XACT_ABORT ON</c>, so only an error that option exempts continues
+    /// there. It does when the caller itself
     /// continues and no <c>TRY</c> in it is open, since an open one catches
     /// the body's first error and abandons the rest. Real runs an
     /// <c>INSERT … EXEC</c> body on too; that isn't built yet, since the

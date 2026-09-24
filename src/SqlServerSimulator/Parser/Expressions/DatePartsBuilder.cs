@@ -228,7 +228,7 @@ internal sealed class DatePartsBuilder : Expression
             // Real SQL Server reuses State 3 for smalldatetime; not separately
             // probed, but smalldatetime traces follow datetime's State by
             // convention. Accept State 3 to avoid an over-claim.
-            throw SimulatedSqlException.CannotConstructFromParts("smalldatetime", state: 3);
+            throw SimulatedSqlException.CannotConstructFromParts("smalldatetime", state: 4);
         }
         return SqlValue.FromSmallDateTime(new DateTime(year, month, day, hour, minute, 0));
     }

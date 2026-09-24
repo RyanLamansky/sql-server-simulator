@@ -151,10 +151,13 @@ partial class SimulatedSqlException
     /// (e.g. <c>DATEFROMPARTS(2025, 2, 30)</c>, <c>TIMEFROMPARTS(24, ...)</c>).
     /// State numbers vary by target type: 1=date, 2=time, 3=datetime,
     /// 5=datetime2, 6=datetimeoffset (probe-confirmed against SQL Server 2025,
-    /// 2026-05-09).
+    /// 2026-05-09), and 4=smalldatetime (probed 2026-09-24).
+    /// Like the conversion family it behaves as an error does under
+    /// <c>SET XACT_ABORT ON</c> whatever the option says (probed 2026-09-24
+    /// against SQL Server 2025).
     /// </summary>
     internal static SimulatedSqlException CannotConstructFromParts(string typeName, byte state) =>
-        new($"Cannot construct data type {typeName}, some of the arguments have values which are not valid.", 289, 16, state);
+        new($"Cannot construct data type {typeName}, some of the arguments have values which are not valid.", 289, 16, state) { AbortsAsUnderXactAbort = true };
 
     /// <summary>
     /// Mimics SQL Server error 10760: the scale (precision) argument of a
@@ -309,9 +312,12 @@ partial class SimulatedSqlException
     /// smallmoney (e.g. <c>'5.5e2'</c>, <c>'abc'</c>). Distinct from
     /// Msg 8114 (decimal/float source error); the money-specific text
     /// emphasizes the "incorrect syntax" angle.
+    /// Like the conversion family it behaves as an error does under
+    /// <c>SET XACT_ABORT ON</c> whatever the option says (probed 2026-09-24
+    /// against SQL Server 2025).
     /// </summary>
     internal static SimulatedSqlException CannotConvertCharToMoney() =>
-        new("Cannot convert a char value to money. The char value has incorrect syntax.", 235, 16, 1);
+        new("Cannot convert a char value to money. The char value has incorrect syntax.", 235, 16, 0) { AbortsAsUnderXactAbort = true };
 
     /// <summary>
     /// Mimics SQL Server error 8134: division by zero in integer, decimal,

@@ -349,6 +349,13 @@ partial class Simulation
         // (probe-confirmed against SQL Server 2025 for a procedure body, whose
         // scoping a trigger body shares).
         var savedOptions = new SimulatedDbConnection.SessionOptionScope(connection);
+        // A body starts under XACT_ABORT ON whatever the session says, so an
+        // error it leaves unhandled — or one from a procedure or dynamic SQL it
+        // calls — ends the firing batch and rolls the transaction back, while
+        // RAISERROR stays exempt and a body's own SET XACT_ABORT OFF takes
+        // effect (@@OPTIONS reads 16384 in the body; probed 2026-09-24
+        // against SQL Server 2025).
+        connection.XactAbort = true;
         BatchContext? innerBatch = null;
         try
         {
@@ -376,22 +383,19 @@ partial class Simulation
                     // "dbo.tr" — the one asymmetry from stored procedures).
                     LineOffset = bodyLineOffset,
                     ErrorProcedureName = triggerName,
+                    ContinueOnError = ContinuesCalledBatch(outerBatch),
                 };
                 var parser = innerBatch.Parser;
                 parser.MoveNextOptional();
                 foreach (var bodyOutcome in DispatchStatementsUntil(innerBatch, endKeyword: null))
                 {
-                    // A body SELECT is the firing statement's result
-                    // set on real, so buffer it for the dispatcher to
-                    // yield once the statement completes. Rows-affected
-                    // outcomes stay discarded — the body's counts are
-                    // not the statement's.
-                    if (bodyOutcome is SimulatedQueryResult)
-                        (outerBatch.PendingTriggerResultSets ??= []).Add(bodyOutcome);
-                    // A body's messages reach the client ahead of the firing
-                    // statement's own outcome.
-                    else if (bodyOutcome is SimulatedInfoOutcome info)
-                        connection.PendingMessages.Enqueue(info.Message);
+                    // A body's result sets, messages and continued-past errors
+                    // are the firing statement's on real, so buffer them in
+                    // order for the dispatcher to yield when the statement
+                    // completes. Rows-affected outcomes stay discarded — the
+                    // body's counts are not the statement's.
+                    if (bodyOutcome is SimulatedQueryResult or SimulatedInfoOutcome or SimulatedErrorOutcome)
+                        (outerBatch.PendingTriggerOutcomes ??= []).Add(bodyOutcome);
                 }
                 // Real aborts the batch when any error of severity >= 11
                 // was raised while the body ran, even one the body's own
@@ -399,6 +403,11 @@ partial class Simulation
                 if (connection.TriggerBodyErrorRaised)
                     throw SimulatedSqlException.ErrorRaisedDuringTriggerExecution();
             }
+        }
+        catch (SimulatedSqlException ex)
+        {
+            ex.EndedTriggerBody = true;
+            throw;
         }
         finally
         {

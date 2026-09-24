@@ -25,7 +25,24 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException InvalidCompatibilityLevel() =>
         new($"Valid values of the database compatibility level are 100, 110, 120, 130, 140, 150, 160 or 170.", 15048, 16, 1);
 
-    internal static SimulatedSqlException ThereIsAlreadyAnObject(string name) => new($"There is already an object named '{name}' in the database.", 2714, 16, 6);
+    /// <summary>
+    /// Msg 2714, an object name already taken.
+    /// Raised at run time it ends the batch as an error does under
+    /// <c>SET XACT_ABORT ON</c>, whatever the option says — probed 2026-09-24
+    /// against SQL Server 2025 for a table, view, procedure, sequence, check
+    /// constraint and <c>SELECT … INTO</c> target; a synonym's is
+    /// <see cref="SynonymNameTaken"/>.
+    /// </summary>
+    internal static SimulatedSqlException ThereIsAlreadyAnObject(string name) =>
+        new($"There is already an object named '{name}' in the database.", 2714, 16, 6) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>
+    /// Msg 2714 for <c>CREATE SYNONYM</c>, which unlike the other objects' ends
+    /// only its statement and leaves the transaction committable (probed
+    /// 2026-09-24 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException SynonymNameTaken(string name) =>
+        new($"There is already an object named '{name}' in the database.", 2714, 16, 6);
 
     /// <summary>
     /// Mimics SQL Server error 2010: an <c>ALTER</c> (or the ALTER leg of a
@@ -596,9 +613,11 @@ partial class SimulatedSqlException
     /// "or you do not have permission to create it" tail mirrors the real
     /// server's permission/existence ambiguity (distinct from Msg 2714 which
     /// uses the cross-namespace object collision wording).
+    /// Like Msg 2714 it ends the batch as an error does under
+    /// <c>SET XACT_ABORT ON</c>, whatever the option says (probed 2026-09-24).
     /// </summary>
     internal static SimulatedSqlException TypeAlreadyExists(string fullName) =>
-        new($"The type '{fullName}' already exists, or you do not have permission to create it.", 219, 16, 1);
+        new($"The type '{fullName}' already exists, or you do not have permission to create it.", 219, 16, 1) { AbortsAsUnderXactAbort = true };
 
     /// <summary>
     /// Mimics SQL Server error 222: <c>CREATE TYPE name FROM &lt;basetype&gt;</c>
@@ -1717,9 +1736,12 @@ partial class SimulatedSqlException
     /// <c>CREATE UNIQUE INDEX ON &lt;view&gt;</c> over duplicate view rows.
     /// <paramref name="formattedKeyValues"/> is the rendered tuple text without
     /// enclosing parens (via <c>FormatIndexKeyValues</c>).
+    /// It behaves as an error does under
+    /// <c>SET XACT_ABORT ON</c> whatever the option says (probed 2026-09-24
+    /// against SQL Server 2025).
     /// </summary>
     internal static SimulatedSqlException DuplicateKeyOnCreate(string qualifiedTableName, string indexName, string formattedKeyValues) =>
-        new($"The CREATE UNIQUE INDEX statement terminated because a duplicate key was found for the object name '{qualifiedTableName}' and the index name '{indexName}'. The duplicate key value is ({formattedKeyValues}).", 1505, 16, 1);
+        new($"The CREATE UNIQUE INDEX statement terminated because a duplicate key was found for the object name '{qualifiedTableName}' and the index name '{indexName}'. The duplicate key value is ({formattedKeyValues}).", 1505, 16, 1) { AbortsAsUnderXactAbort = true };
 
     /// <summary>
     /// Mimics SQL Server error 1781: <c>ALTER TABLE … ADD CONSTRAINT …

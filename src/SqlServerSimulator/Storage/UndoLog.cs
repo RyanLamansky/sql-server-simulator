@@ -102,10 +102,15 @@ internal sealed class UndoLog
     /// including) <paramref name="position"/>, applying the inverse
     /// operation for each entry, and trims the log to that length. A
     /// position of 0 unwinds the entire log (equivalent to
-    /// <see cref="Rollback"/>).
+    /// <see cref="Rollback"/>). A position past the end is already undone:
+    /// an error inside a trigger body can roll the whole transaction back
+    /// before the firing statement unwinds to the marker it took.
     /// </summary>
     public void RollbackTo(int position)
     {
+        if (position >= this.entries.Count)
+            return;
+
         for (var i = this.entries.Count - 1; i >= position; i--)
             this.entries[i].Undo();
 

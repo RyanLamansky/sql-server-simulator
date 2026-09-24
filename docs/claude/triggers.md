@@ -171,8 +171,8 @@ Re-pinning the trigger that already holds a slot is not a conflict.
 A `SELECT` in a trigger body **is** the firing statement's result set — real hands it to the client, and several body SELECTs (or several firing triggers) each contribute one, so a plain `INSERT` can return rows.
 
 The body runs inside the DML executor, which returns a single outcome, so the sets can't be yielded in place.
-`RunTriggerBodies` buffers them on `BatchContext.PendingTriggerResultSets` and `DispatchOneStatement` drains that after the statement's own outcome.
-Only **query** results are buffered: the body's rows-affected counts stay discarded, because forwarding them would inflate the total the firing statement reports — the number an ORM reads back from `SaveChanges`.
+`RunTriggerBodies` buffers them on `BatchContext.PendingTriggerOutcomes`, with the body's messages and the errors it ran past, in the order the body sent them, and `DispatchOneStatement` drains that ahead of the statement's own outcome.
+The body's rows-affected counts stay discarded, because forwarding them would inflate the total the firing statement reports — the number an ORM reads back from `SaveChanges`.
 
 Order across several triggers isn't asserted anywhere: SQL Server leaves it unspecified without `sp_settriggerorder`, which isn't modeled.
 
@@ -201,6 +201,19 @@ An error of severity **11 or higher** raised while a body runs aborts the batch 
 Severity ≤ 10 is informational and leaves the unit intact (a caught `RAISERROR(…, 10, 1)` keeps both the body's writes and the firing statement's).
 An error the body leaves *un*handled propagates with its own number instead — an outer `CATCH` sees `ERROR_NUMBER()` 51000 for a body-side `THROW 51000`, with `ERROR_PROCEDURE()` naming the trigger — so Msg 3616 fires only for the swallowed case.
 An error caught inside a stored procedure the body called counts too, which is why `SimulatedDbConnection.TriggerBodyErrorRaised` is connection-scoped; it's saved and cleared per body so a handled error in one trigger doesn't condemn the next.
+
+## Errors in a trigger body
+
+A body starts under `SET XACT_ABORT ON` whatever the session says — `@@OPTIONS & 16384` reads 16384 inside it — so its errors follow that option's rules (probed 2026-09-24 against SQL Server 2025; [`transactions.md`](transactions.md#set-xact_abort)):
+- An error the body leaves unhandled ends the firing batch and rolls the transaction back, and so does one from a procedure or dynamic SQL the body calls, which inherit the option.
+  The firing statement still sends Msg 3621 after it, which an error ending the batch from the statement itself doesn't (`SimulatedSqlException.EndedTriggerBody`).
+- Caught by a `TRY` in the firing batch, it dooms the transaction.
+- `RAISERROR`, which the option exempts, lets the body run on the way a procedure body does ([`control-flow.md`](control-flow.md#procedure-and-dynamic-sql-bodies)): the error reaches the client among the body's output, and the firing statement keeps its rows.
+  So does any error after the body's own `SET XACT_ABORT OFF`.
+
+### Not modeled yet
+
+- **Msg 3621 after a non-writing statement's error in a body that turned `XACT_ABORT` off** — real sends it for the firing statement; here only an error escaping the body earns it.
 
 ## Change-detection intrinsics
 
@@ -256,7 +269,7 @@ Event types parse as bare identifiers and store verbatim in `DdlTrigger.EventTyp
 `Simulation.RecordDdlEvent` is called by each modeled DDL processor once its own work succeeded, appending a `DdlEventInfo` to `StatementContext.PendingDdlEvents`; `Simulation.FireDdlTriggers` drains that from the dispatch loop right after `DispatchOneStatementCore` returns.
 Recording after success and firing after the statement is what gives the probe-confirmed shape: **a failed DDL raises no event**, an un-taken `IF` branch raises none, and the body already sees the finished change (`OBJECT_ID` of the new table resolves inside a `CREATE_TABLE` body).
 The fire sits inside the dispatcher's own `try`, so a body error becomes the statement's error — reaching an enclosing `TRY` / `CATCH`, tripping Msg 3616 for a swallowed one, and carrying the trigger's unqualified name as `ERROR_PROCEDURE`.
-A body `SELECT` becomes the firing statement's result set through the same `PendingTriggerResultSets` buffer DML bodies use.
+A body `SELECT` becomes the firing statement's result set through the same `PendingTriggerOutcomes` buffer DML bodies use.
 
 Matching is on the **expanded leaf event set**, so `FOR DDL_TABLE_EVENTS` fires on exactly the `CREATE_TABLE` / `ALTER_TABLE` / `DROP_TABLE` rows it projects into `sys.trigger_events`.
 One statement can raise several events — `DROP TABLE a, b` raises one `DROP_TABLE` per name, each carrying the whole statement as `CommandText` (probe-confirmed) — and `SELECT … INTO` raises `CREATE_TABLE` while a `#temp` destination raises nothing.

@@ -62,6 +62,34 @@ public sealed class BatchErrorContinuationTests
     }
 
     [TestMethod]
+    public async Task TriggerBody_RunsOnPastRaiserror_OutputArrivesInBodyOrder()
+    {
+        var simulation = new Simulation();
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+        await using (var create = new SqlCommand("create table t (a int)", connection))
+            _ = await create.ExecuteNonQueryAsync(TestContext.CancellationToken);
+        await using (var create = new SqlCommand("create trigger tr on t after insert as begin print 'm1'; select 10; raiserror('r16', 16, 1); print 'm2'; select 20 end", connection))
+            _ = await create.ExecuteNonQueryAsync(TestContext.CancellationToken);
+
+        // Real sends the body's output in the order the body ran, then carries
+        // on after the firing statement (probed 2026-09-24).
+        var received = new List<string>();
+        connection.FireInfoMessageEventOnUserErrors = true;
+        connection.InfoMessage += (_, e) => received.AddRange(e.Errors.Cast<SqlError>().Select(error => error.Message));
+        await using var command = new SqlCommand("insert t values (1); print 'after'", connection);
+        await using var reader = await command.ExecuteReaderAsync(TestContext.CancellationToken);
+        do
+        {
+            while (await reader.ReadAsync(TestContext.CancellationToken))
+                received.Add(reader.GetInt32(0).ToString(System.Globalization.CultureInfo.InvariantCulture));
+        }
+        while (await reader.NextResultAsync(TestContext.CancellationToken));
+
+        CollectionAssert.AreEqual(new[] { "m1", "10", "r16", "m2", "20", "after" }, received);
+    }
+
+    [TestMethod]
     public async Task SmoStyleTempDropCleanup_AllRaise3701_SessionStaysUsable()
     {
         var simulation = new Simulation();

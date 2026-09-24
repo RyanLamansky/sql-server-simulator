@@ -262,7 +262,7 @@ Every top-level batch continues past a statement-terminating error, emitting a *
 Behavior was probed against real SQL Server 2025 + `Microsoft.Data.SqlClient` and treated as ground truth.
 
 `Simulation.CreateResultSetsForCommand(command, continueOnError = true)` defaults its flag to `true`; both the in-process front door (`SimulatedDbCommand`) and `TdsSession.StreamOutcomesAsync` set it, so both render the same stream.
-The flag marks a **top-level batch** (threaded onto `BatchContext.ContinueOnError`), and a procedure or dynamic-SQL body inherits it as [below](#procedure-and-dynamic-sql-bodies); trigger, UDF and view bodies leave it `false`, so their errors **throw** and surface at the invoking statement rather than being emitted as outcomes (the parameter survives only because `TdsSession` — which must not be edited — passes it by name).
+The flag marks a **top-level batch** (threaded onto `BatchContext.ContinueOnError`), and a procedure, trigger or dynamic-SQL body inherits it as [below](#procedure-and-dynamic-sql-bodies); UDF and view bodies leave it `false`, so their errors **throw** and surface at the invoking statement rather than being emitted as outcomes (the parameter survives only because `TdsSession` — which must not be edited — passes it by name).
 
 **The seam** is `DispatchOneStatement`'s catch (`Simulation.cs`).
 Its materialize-then-catch wrapper (a) rolls back on deadlock class 13, (b) defers name-resolution errors in skip mode, (c) records the error into a `CATCH` frame when `TryFrameDepth > 0`.
@@ -304,8 +304,9 @@ A procedure or dynamic-SQL body runs on past a statement-terminating error the w
 The body inherits continuation when its caller continues and has no `TRY` open (`ContinuesCalledBatch`), and its errors travel up among its outcomes to whichever front door renders them.
 An open `TRY` in the caller catches the body's first error and abandons the rest of the body.
 An error that ends the batch — an uncaught `THROW`, an `XACT_ABORT`-promoted error — ends every caller's batch too, while a name-resolution miss ends only the body's (`EndedCalledBatch`, above).
+A trigger body continues the same way, but it starts under `XACT_ABORT ON`, so only an error that option exempts gets to — see [`triggers.md`](triggers.md#errors-in-a-trigger-body).
 
-Whatever a statement sent before an error that ends it reaches the client first, as real streams it: the dispatch wrapper collects a statement's outcomes as they arrive and sends them, with the messages it queued and any trigger body's result sets (`ProducedOutcomes`), ahead of the error on every path.
+Whatever a statement sent before an error that ends it reaches the client first, as real streams it: the dispatch wrapper collects a statement's outcomes as they arrive and sends them, with the messages it queued and any trigger body's output (`ProducedOutcomes`), ahead of the error on every path.
 That is what keeps a body's `PRINT`s and result sets ahead of the `CATCH` that caught its error, and a trigger body's ahead of the firing statement's error.
 
 A body's return status and `sp_executesql`'s are in [`programmable.md`](programmable.md#stored-procedures).

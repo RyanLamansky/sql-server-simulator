@@ -1941,7 +1941,7 @@ public sealed partial class Simulation
                 {
                     caught = ex;
                 }
-                else if (batch.ContinueOnError && batch.ProcFrame is null && EndsBatch(ex))
+                else if (batch.ContinueOnError && batch.ProcFrame is null && batch.TriggerFrame is null && EndsBatch(ex))
                 {
                     // Batch-aborting error: a bind-class name-resolution
                     // failure (missing object / column / ambiguous / could-not-
@@ -1961,7 +1961,7 @@ public sealed partial class Simulation
                 }
                 else if (batch.ContinueOnError && !EndsBatch(ex) && IsStatementTerminating(ex))
                 {
-                    // A continuing procedure or dynamic-SQL body takes this arm
+                    // A continuing procedure, trigger or dynamic-SQL body takes this arm
                     // too, and its error travels up among the body's outcomes;
                     // one that ends the batch propagates below instead, so it
                     // unwinds every caller it reaches.
@@ -2041,7 +2041,10 @@ public sealed partial class Simulation
             foreach (var outcome in ProducedOutcomes(batch, outcomes))
                 yield return outcome;
             yield return new SimulatedErrorOutcome(continuedError, batch.CurrentStatement.LeadingKeywordReturnsRows);
-            if (!batch.BatchAborted && IsStatementTerminationNoticed(batch, continuedError))
+            // An error that escaped a trigger body still ends the firing
+            // statement first, so it says so even when the batch ends with it
+            // (probed 2026-09-24 against SQL Server 2025).
+            if ((!batch.BatchAborted || continuedError.EndedTriggerBody) && IsStatementTerminationNoticed(batch, continuedError))
                 yield return new SimulatedInfoOutcome(SimulatedSqlException.StatementTerminatedMessage(batch));
             yield break;
         }
@@ -2145,23 +2148,23 @@ public sealed partial class Simulation
 
     /// <summary>
     /// What a statement produced, in the order real sends it: the messages it
-    /// queued while it ran, its own outcomes, then the result sets any trigger
-    /// it fired produced, in the order the bodies ran (buffered on the batch
-    /// because the DML executor has only one outcome to return). A statement
-    /// that fails sends the same ahead of its error.
+    /// queued while it ran, what any trigger it fired sent, in the order the
+    /// bodies ran (buffered on the batch because the DML executor has only one
+    /// outcome to return), then its own outcomes. A statement that fails sends
+    /// the same ahead of its error.
     /// </summary>
     private static IEnumerable<SimulatedStatementOutcome> ProducedOutcomes(BatchContext batch, List<SimulatedStatementOutcome> outcomes)
     {
         foreach (var message in DrainPendingMessages(batch.Connection))
             yield return message;
-        foreach (var outcome in outcomes)
-            yield return outcome;
-        if (batch.PendingTriggerResultSets is { Count: > 0 } triggerResults)
+        if (batch.PendingTriggerOutcomes is { Count: > 0 } triggerOutcomes)
         {
-            batch.PendingTriggerResultSets = null;
-            foreach (var outcome in triggerResults)
+            batch.PendingTriggerOutcomes = null;
+            foreach (var outcome in triggerOutcomes)
                 yield return outcome;
         }
+        foreach (var outcome in outcomes)
+            yield return outcome;
     }
 
     /// <summary>Real's Msg 8153, closing the statement whose aggregate skipped a NULL.</summary>

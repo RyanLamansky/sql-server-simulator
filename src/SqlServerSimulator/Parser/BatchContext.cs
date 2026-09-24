@@ -649,16 +649,17 @@ internal sealed class BatchContext
     public TriggerFrame? TriggerFrame;
 
     /// <summary>
-    /// Result sets a trigger body produced while the current statement ran,
-    /// waiting to be handed to the client after that statement's own outcome.
-    /// A trigger fires from inside the DML executor, which returns a single
-    /// outcome, so the body's <c>SELECT</c>s can't be yielded in place — real
-    /// surfaces them as the firing statement's result sets, in trigger
-    /// registration order (probe-confirmed).
-    /// Only query results are buffered: forwarding the body's rows-affected
-    /// counts too would inflate the statement's reported total.
+    /// The result sets, messages and continued-past errors trigger bodies
+    /// produced while the current statement ran, in the order they ran,
+    /// waiting to be handed to the client ahead of that statement's own
+    /// outcome. A trigger fires from inside the DML executor, which returns a
+    /// single outcome, so the body's output can't be yielded in place — real
+    /// surfaces it as the firing statement's, in trigger registration order
+    /// (probe-confirmed).
+    /// The body's rows-affected counts aren't buffered: forwarding them would
+    /// inflate the statement's reported total.
     /// </summary>
-    public List<SimulatedStatementOutcome>? PendingTriggerResultSets;
+    public List<SimulatedStatementOutcome>? PendingTriggerOutcomes;
 
     /// <summary>
     /// Whether execution-time permission checks apply to statements dispatched

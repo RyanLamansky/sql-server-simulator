@@ -2,6 +2,10 @@ using System.Globalization;
 
 namespace SqlServerSimulator;
 
+// The path and document errors flagged AbortsAsUnderXactAbort below behave as
+// errors do under SET XACT_ABORT ON whatever the option says: uncaught, they
+// end the batch and roll the transaction back, and caught, they doom it
+// (probed 2026-09-24 against SQL Server 2025 for each flagged number).
 partial class SimulatedSqlException
 {
     /// <summary>
@@ -20,7 +24,8 @@ partial class SimulatedSqlException
             $"JSON path is not properly formatted. Unexpected character '{character}' is found at position {position.ToString(CultureInfo.InvariantCulture)}.",
             13607,
             16,
-            state);
+            state)
+        { AbortsAsUnderXactAbort = true };
 
     /// <summary>
     /// Msg 13608: SQL Server raises this when a <c>strict</c>-mode JSON
@@ -31,7 +36,7 @@ partial class SimulatedSqlException
     /// JSON_VALUE / JSON_QUERY default is state 1.
     /// </summary>
     internal static SimulatedSqlException JsonStrictPathNotFound(byte state = 1) =>
-        new("Property cannot be found on the specified JSON path.", 13608, 16, state);
+        new("Property cannot be found on the specified JSON path.", 13608, 16, state) { AbortsAsUnderXactAbort = true };
 
     /// <summary>
     /// Msg 13619: <c>JSON_MODIFY</c> refuses a path with no segments.
@@ -48,7 +53,7 @@ partial class SimulatedSqlException
     /// Lax mode leaves the document unchanged instead.
     /// </summary>
     internal static SimulatedSqlException JsonArrayNotFound() =>
-        new("Array cannot be found in the specified JSON path.", 13621, 16, 1);
+        new("Array cannot be found in the specified JSON path.", 13621, 16, 1) { AbortsAsUnderXactAbort = true };
 
     /// <summary>
     /// Msg 13623: a <c>strict</c>-mode JSON path under JSON_VALUE resolved to
@@ -57,7 +62,7 @@ partial class SimulatedSqlException
     /// SQL Server 2025.
     /// </summary>
     internal static SimulatedSqlException JsonScalarNotFound() =>
-        new("Scalar value cannot be found in the specified JSON path.", 13623, 16, 2);
+        new("Scalar value cannot be found in the specified JSON path.", 13623, 16, 2) { AbortsAsUnderXactAbort = true };
 
     /// <summary>
     /// Msg 13624: a <c>strict</c>-mode JSON path under JSON_QUERY (or an
@@ -67,7 +72,7 @@ partial class SimulatedSqlException
     /// both modes. JSON_QUERY reports State 2, an OPENJSON column State 1.
     /// </summary>
     internal static SimulatedSqlException JsonObjectOrArrayNotFound(byte state) =>
-        new("Object or array cannot be found in the specified JSON path.", 13624, 16, state);
+        new("Object or array cannot be found in the specified JSON path.", 13624, 16, state) { AbortsAsUnderXactAbort = true };
 
     /// <summary>
     /// Msg 13609: the document argument of JSON_VALUE / JSON_QUERY /
@@ -83,7 +88,8 @@ partial class SimulatedSqlException
             $"JSON text is not properly formatted. Unexpected character '{character}' is found at position {position.ToString(CultureInfo.InvariantCulture)}.",
             13609,
             16,
-            state);
+            state)
+        { AbortsAsUnderXactAbort = true };
 
     /// <summary>
     /// Msg 13638: <c>JSON_OBJECT</c> rejects a NULL key at runtime

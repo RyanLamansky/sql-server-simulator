@@ -100,5 +100,8 @@ A doomed transaction then:
 The option also decides whether a client attention rolls an open transaction back — see the cancel bullet above.
 
 A few errors take this shape with the option **off** too, marked by `SimulatedSqlException.AbortsAsUnderXactAbort` — probed 2026-09-23: uncaught they end the batch and leave `@@TRANCOUNT` 0 with the transaction's writes undone, and caught they read `XACT_STATE() = -1`.
-They are the string-conversion failures — Msg 245, 241, 295, 8169, 8170, and Msg 8114 when a `CAST` of a string to a number raises it — and the XML parsing family (Msg 9400–9465 and Msg 6359, see [`xml.md`](xml.md#well-formedness)).
-Their overflow neighbours (Msg 220, 232, 242, 248, 8115) and Msg 9807 end only their statement, as does Msg 8114 raised binding a procedure or `sp_executesql` argument.
+They are the string-conversion failures — Msg 245, 241, 295, 8169, 8170, 235, and Msg 8114 when a `CAST` of a string to a number raises it — and the XML parsing family (Msg 9400–9465 and Msg 6359, see [`xml.md`](xml.md#well-formedness)).
+Probed 2026-09-24 and flagged alongside them: the `*FROMPARTS` builders' Msg 289, the JSON path and document errors (Msg 13607, 13608, 13609, 13621, 13623, 13624), and the run-time name collisions — Msg 2714 for a table, view, procedure, sequence, constraint or `SELECT … INTO` target, Msg 219 for a type, and Msg 1505 for a unique index over duplicate keys.
+Their overflow neighbours (Msg 220, 232, 242, 248, 8115) and Msg 9807 end only their statement, as do Msg 8114 raised binding a procedure or `sp_executesql` argument and Msg 2714 for a synonym.
+
+A trigger body runs under the option whatever the session says — see [`triggers.md`](triggers.md#errors-in-a-trigger-body).
