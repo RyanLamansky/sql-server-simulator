@@ -136,6 +136,30 @@ internal sealed class StatementContext
     public bool ReportedIgnoredDuplicate;
 
     /// <summary>
+    /// Latched once a full-text predicate in this statement has reported the
+    /// words it ignored (Msg 9927), which real does once per statement however
+    /// many rows the predicate evaluates.
+    /// </summary>
+    public bool ReportedNoiseWords;
+
+    /// <summary>
+    /// Latched when an aggregate in this statement skipped a NULL input while
+    /// <c>ANSI_WARNINGS</c> was on. Real then sends Msg 8153 once, after the
+    /// statement's rows (probed 2026-09-23), so the dispatch loop reads this
+    /// only once the statement's outcomes have been yielded.
+    /// </summary>
+    public bool NullEliminated;
+
+    /// <summary>
+    /// Set by a statement that writes rows — <c>INSERT</c>, <c>UPDATE</c>,
+    /// <c>DELETE</c>, <c>MERGE</c>, <c>SELECT … INTO</c>, and the rewrite
+    /// <c>ALTER TABLE … ALTER COLUMN</c> runs — once it begins executing.
+    /// An execution error it then ends with is followed by Msg 3621
+    /// (see <c>Simulation.IsStatementTerminationNoticed</c>).
+    /// </summary>
+    public bool WritesRows;
+
+    /// <summary>
     /// 0-based character offset within the batch text where this statement's
     /// leading token starts (taken from <see cref="Token.StartIndex"/> of the
     /// leading token at dispatch time). The <c>CREATE</c> / <c>ALTER</c>

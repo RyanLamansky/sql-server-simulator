@@ -1,4 +1,3 @@
-using System.Data.Common;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 using static SqlServerSimulator.TestHelpers;
 
@@ -41,7 +40,7 @@ public sealed class CursorKeysetIdentityTests
                 """).ExecuteNonQuery();
             return "KEYSET";
         }
-        catch (DbException ex) when (ex.Data["HelpLink.EvtID"] is "16929")
+        catch (SimulatedSqlException ex) when (ex.Number == 16929)
         {
             return "STATIC";
         }
@@ -196,12 +195,12 @@ public sealed class CursorKeysetIdentityTests
         simulation.ExecuteBatches(KeylessSeed, "create view vt as select id, v from t;");
         using var connection = simulation.CreateOpenConnection();
         _ = connection.CreateCommand("declare c cursor keyset for select id, v from vt; open c;").ExecuteNonQuery();
-        var ex = Throws<DbException>(() => connection.CreateCommand("""
+        var ex = Throws<SimulatedSqlException>(() => connection.CreateCommand("""
             declare @id int, @v int;
             fetch next from c into @id, @v;
             update vt set v = 99 where current of c;
             """).ExecuteNonQuery());
-        AreEqual("16929", ex.Data["HelpLink.EvtID"]);
+        AreEqual(16929, ex.Number);
     }
 
     /// <summary>Every participating table must qualify: a join with one keyless

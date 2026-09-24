@@ -57,7 +57,7 @@ For tests with explicit `BEGIN TRAN` / `ROLLBACK` across multiple assertion poin
 
 ## Failure paths: use `AssertSqlError`
 
-Don't hand-roll `Throws<DbException>` + `ex.Data["HelpLink.EvtID"]` comparison.
+Don't hand-roll the throw-and-compare; where a test must (a reader, a specific connection), expect `SimulatedSqlException` — the simulator's only `DbException`, sealed — and compare `ex.Number`, not `ex.Data["HelpLink.EvtID"]`.
 The extension is in `Extensions.cs`:
 
 ```csharp
@@ -69,7 +69,8 @@ var ex = new Simulation().AssertSqlError("""
 Assert.Contains("FOREIGN KEY constraint", ex.Message);
 ```
 
-The overload `AssertSqlError(commandText, errorNumber, expectedMessage)` asserts the full message verbatim when the wording is the entire point of the test.
+The overload `AssertSqlError(commandText, errorNumber, expectedMessage)` asserts the error's own text verbatim (`Errors[0]`) when the wording is the entire point of the test.
+`ex.Message` joins every entry that followed, as SqlClient's does — a DML error's Msg 3621, a later `PRINT` — so assert on `Errors[0].Message` for one error's wording.
 
 ## Assertion idioms
 

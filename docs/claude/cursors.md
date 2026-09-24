@@ -344,5 +344,4 @@ A deferred body the cursor *can* follow warns about nothing, matching real: `DEC
 - **OPTIMISTIC over a forwarded (oversize) UPDATE**: detection reads `Heap.ReadSlotBytes` at the row's address.
   A fits-in-place rewrite returns the new bytes (conflict detected); an oversize rewrite that installs a forwarding pointer isn't followed by `ReadSlotBytes`, so such a change may go undetected.
   The common small-value case is exact.
-- **TYPE_WARNING coalescing**: the Msg 16956 info text merges with any other info messages in the same batch into one coalesced `InfoMessage` event (the simulator's standard info-message behavior), rather than a distinct message.
 - **DECLARE CURSOR inside an un-taken `IF` branch** still parses (and resolves names in) its SELECT — the same eager-resolution quirk all statements share.

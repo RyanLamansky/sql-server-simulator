@@ -89,7 +89,7 @@ public sealed class FixedLengthStringTests
             create table t (c char(5));
             insert t values ('toolong')
             """, 2628,
-            "String or binary data would be truncated in table 't', column 'c'. Truncated value: 'toolo'.");
+            "String or binary data would be truncated in table 'simulated.dbo.t', column 'c'. Truncated value: 'toolo'.");
 
     [TestMethod]
     public void Insert_OversizeNChar_RaisesTruncationError()
@@ -97,7 +97,7 @@ public sealed class FixedLengthStringTests
             create table t (c nchar(5));
             insert t values (N'toolong')
             """, 2628,
-            "String or binary data would be truncated in table 't', column 'c'. Truncated value: 'toolo'.");
+            "String or binary data would be truncated in table 'simulated.dbo.t', column 'c'. Truncated value: 'toolo'.");
 
     [TestMethod]
     public void Insert_OversizeBinary_RaisesTruncationError()
@@ -106,7 +106,7 @@ public sealed class FixedLengthStringTests
             create table t (b binary(5));
             insert t values (0x010203040506)
             """, 2628);
-        Assert.StartsWith("String or binary data would be truncated in table 't', column 'b'.", ex.Message);
+        Assert.StartsWith("String or binary data would be truncated in table 'simulated.dbo.t', column 'b'.", ex.Errors[0].Message);
     }
 
     [TestMethod]

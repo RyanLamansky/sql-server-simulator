@@ -31,7 +31,7 @@ public class CompatibilityLevelTests
             using var alter = connection.CreateCommand("alter database current set compatibility_level = 150");
             _ = alter.ExecuteNonQuery();
         });
-        Assert.AreEqual("String or binary data would be truncated.", ex.Message);
+        Assert.AreEqual("String or binary data would be truncated.", ex.Errors[0].Message);
     }
 
     [TestMethod]
@@ -66,7 +66,7 @@ public class CompatibilityLevelTests
             _ = connection.CreateCommand("dbcc traceon ( 460 )").ExecuteNonQuery();
             _ = connection.CreateCommand("dbcc traceoff ( 460 )").ExecuteNonQuery();
         });
-        Assert.AreEqual("String or binary data would be truncated.", ex.Message);
+        Assert.AreEqual("String or binary data would be truncated.", ex.Errors[0].Message);
     }
 
     [TestMethod]
@@ -78,7 +78,7 @@ public class CompatibilityLevelTests
         {
             _ = connection.CreateCommand("alter database scoped configuration set verbose_truncation_warnings = off").ExecuteNonQuery();
         });
-        Assert.AreEqual("String or binary data would be truncated.", ex.Message);
+        Assert.AreEqual("String or binary data would be truncated.", ex.Errors[0].Message);
     }
 
     [TestMethod]
@@ -102,7 +102,7 @@ public class CompatibilityLevelTests
             _ = connection.CreateCommand("dbcc traceon ( 460 )").ExecuteNonQuery();
             _ = connection.CreateCommand("alter database scoped configuration set verbose_truncation_warnings = off").ExecuteNonQuery();
         });
-        Assert.AreEqual("String or binary data would be truncated.", ex.Message);
+        Assert.AreEqual("String or binary data would be truncated.", ex.Errors[0].Message);
     }
 
     [TestMethod]
@@ -112,7 +112,7 @@ public class CompatibilityLevelTests
         // rejected value back — verified against real SQL Server 2025.
         using var connection = new Simulation().CreateOpenConnection();
         using var alter = connection.CreateCommand("alter database current set compatibility_level = 145");
-        var ex = Assert.Throws<DbException>(() => alter.ExecuteNonQuery());
+        var ex = Assert.Throws<SimulatedSqlException>(() => alter.ExecuteNonQuery());
         Assert.AreEqual("Valid values of the database compatibility level are 100, 110, 120, 130, 140, 150, 160 or 170.", ex.Message);
     }
 
@@ -131,10 +131,10 @@ public class CompatibilityLevelTests
     /// <summary>
     /// Runs <paramref name="configure"/> against a freshly created simulation,
     /// then attempts an INSERT that is guaranteed to truncate and returns the
-    /// resulting <see cref="DbException"/>. Centralizes the boilerplate so each
+    /// resulting <see cref="SimulatedSqlException"/>. Centralizes the boilerplate so each
     /// test focuses on the behavior it verifies.
     /// </summary>
-    private static DbException AssertTruncates(Action<DbConnection> configure)
+    private static SimulatedSqlException AssertTruncates(Action<DbConnection> configure)
     {
         using var connection = new Simulation().CreateOpenConnection();
         _ = connection.CreateCommand("create table t ( v varchar(5) )").ExecuteNonQuery();
@@ -149,6 +149,6 @@ public class CompatibilityLevelTests
         p.Value = "hello world"; // 11 bytes, varchar(5) = 5 → must truncate
         _ = insert.Parameters.Add(p);
 
-        return Assert.Throws<DbException>(() => insert.ExecuteNonQuery());
+        return Assert.Throws<SimulatedSqlException>(() => insert.ExecuteNonQuery());
     }
 }

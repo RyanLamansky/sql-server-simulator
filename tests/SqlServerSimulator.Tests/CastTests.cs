@@ -198,7 +198,7 @@ public sealed class CastTests
     [DataRow("'1.0'")]              // decimal point not accepted even for bit
     public void Cast_BadStringToBit_RaisesMsg245(string source)
     {
-        var ex = Throws<System.Data.Common.DbException>(() => ExecuteScalar($"select cast({source} as bit)"));
+        var ex = Throws<SimulatedSqlException>(() => ExecuteScalar($"select cast({source} as bit)"));
         Contains("Conversion failed", ex.Message);
         Contains("to data type bit", ex.Message);
     }
@@ -496,7 +496,7 @@ public sealed class CastTests
 
         IsTrue(reader.NextResult());
         IsTrue(reader.NextResult());
-        var ex = Throws<System.Data.Common.DbException>(() => reader.Read());
+        var ex = Throws<SimulatedSqlException>(() => reader.Read());
         AreEqual("Line 3: Specified scale 8 is invalid.", ex.Message);
     }
 
@@ -641,7 +641,7 @@ public sealed class CastTests
     [TestMethod]
     public void Cast_FloatToNarrowVarchar_RaisesMsg232()
     {
-        var ex = Throws<System.Data.Common.DbException>(() => ExecuteScalar("select cast(cast(1.5e30 as float) as varchar(5))"));
+        var ex = Throws<SimulatedSqlException>(() => ExecuteScalar("select cast(cast(1.5e30 as float) as varchar(5))"));
         Contains("Arithmetic overflow error for type varchar", ex.Message);
     }
 
@@ -713,7 +713,7 @@ public sealed class CastTests
     {
         // TRY_CAST swallows only the cast-level failure, not source-evaluation
         // errors. The inner CAST raises Msg 245 before the outer wrapper sees a value.
-        var ex = Throws<System.Data.Common.DbException>(() => ExecuteScalar("select try_cast(cast('abc' as int) as bigint)"));
+        var ex = Throws<SimulatedSqlException>(() => ExecuteScalar("select try_cast(cast('abc' as int) as bigint)"));
         Contains("Conversion failed", ex.Message);
     }
 

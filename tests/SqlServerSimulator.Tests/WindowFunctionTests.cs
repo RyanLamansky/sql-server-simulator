@@ -139,7 +139,7 @@ public sealed class WindowFunctionTests
     public void RowNumber_RequiresOver()
     {
         using var connection = SeededPosts();
-        _ = Throws<DbException>(() =>
+        _ = Throws<SimulatedSqlException>(() =>
             _ = connection.CreateCommand("select row_number() from posts").ExecuteScalar());
     }
 
@@ -148,7 +148,7 @@ public sealed class WindowFunctionTests
     {
         // ROW_NUMBER without ORDER BY in OVER is invalid SQL.
         using var connection = SeededPosts();
-        _ = Throws<DbException>(() =>
+        _ = Throws<SimulatedSqlException>(() =>
             _ = connection.CreateCommand("select row_number() over() from posts").ExecuteScalar());
     }
 
@@ -272,7 +272,7 @@ public sealed class WindowFunctionTests
     public void Rank_RequiresOrderByInsideOver()
     {
         using var connection = SeededTies();
-        _ = Throws<DbException>(() =>
+        _ = Throws<SimulatedSqlException>(() =>
             _ = connection.CreateCommand("select rank() over() from t").ExecuteScalar());
     }
 
@@ -335,9 +335,9 @@ public sealed class WindowFunctionTests
     public void NTile_NonPositiveBucketCount_RaisesMsg4116()
     {
         using var connection = SeededTies();
-        var ex = Throws<DbException>(() =>
+        var ex = Throws<SimulatedSqlException>(() =>
             _ = connection.CreateCommand("select ntile(0) over(order by id) from t").ExecuteScalar());
-        AreEqual("4116", ex.Data["HelpLink.EvtID"]);
+        AreEqual(4116, ex.Number);
         AreEqual("The function 'ntile' takes only a positive int or bigint expression as its input.", ex.Message);
     }
 

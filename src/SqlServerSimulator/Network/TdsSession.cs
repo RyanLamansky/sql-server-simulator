@@ -662,8 +662,8 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
 
     /// <summary>
     /// The session database when the current batch / RPC message began, for
-    /// detecting a mid-message <c>USE</c>. Emitted as ENVCHANGE type 1 +
-    /// INFO 5701 via <see cref="WriteSessionEnvChangesIfAny"/>, which must run
+    /// detecting a mid-message <c>USE</c>. Emitted as ENVCHANGE type 1 via
+    /// <see cref="WriteSessionEnvChangesIfAny"/>, which must run
     /// BEFORE the response's final DONE: SqlClient's token reader stalls
     /// until command timeout on an ENVCHANGE that arrives after the last
     /// DONE (probe-confirmed 2026-07-15 — the SSMS freeze on
@@ -674,9 +674,10 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
 
     /// <summary>
     /// Writes the session-state ENVCHANGEs a message may have earned: the
-    /// database-change ENVCHANGE + INFO 5701 when the session database differs
-    /// from <see cref="databaseAtMessageStart"/> (matching real's token order
-    /// for <c>USE</c> — ENVCHANGE, then INFO, then the statement's DONE), and
+    /// database-change ENVCHANGE when the session database differs from
+    /// <see cref="databaseAtMessageStart"/> (the <c>USE</c> statement's own
+    /// INFO 5701 is the engine's, and precedes it here where real sends it
+    /// after), and
     /// the transaction-ended ENVCHANGE when the engine ended the session's
     /// transaction underneath the TM layer. Idempotent — each arm records its
     /// new baseline, so the several call sites (per-final-DONE seams and error
@@ -689,7 +690,6 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
         if (this.databaseAtMessageStart is null || string.Equals(current, this.databaseAtMessageStart, StringComparison.Ordinal))
             return;
         writer.WriteEnvChange(Tds.EnvDatabase, current, this.databaseAtMessageStart);
-        writer.WriteErrorOrInfo(Tds.TokenInfo, 5701, 2, 0, $"Changed database context to '{current}'.", "SIMULATED", "", 1);
         this.databaseAtMessageStart = current;
     }
 
@@ -729,6 +729,20 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
 
         var hasOutcome = outcomes.MoveNext();
         var anyOutcome = hasOutcome;
+
+        // Steps past the outcome just written, first writing any message that
+        // closes it (Msg 8153) ahead of its DONE, where real sends it.
+        bool AdvancePastClosingMessages()
+        {
+            var more = outcomes.MoveNext();
+            while (more && outcomes.Current is SimulatedInfoOutcome { FollowsRows: true } closing)
+            {
+                var message = closing.Message;
+                writer.WriteErrorOrInfo(Tds.TokenInfo, message.Number, message.State, message.Class, message.Message, ServerName, message.Procedure, message.LineNumber);
+                more = outcomes.MoveNext();
+            }
+            return more;
+        }
         // Depth of EXEC('…') / sp_executesql scopes currently open: while > 0,
         // statement outcomes render with DONEINPROC (0xFF) instead of the
         // batch/RPC done token, matching real SQL Server's nested-proc discipline.
@@ -743,6 +757,15 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                 return true;
 
             var outcome = outcomes.Current;
+
+            // An informational message is an INFO token ahead of whatever the
+            // next outcome writes, and carries no DONE of its own.
+            if (outcome is SimulatedInfoOutcome info)
+            {
+                this.pendingInfoMessages.Enqueue(info.Message);
+                hasOutcome = outcomes.MoveNext();
+                continue;
+            }
 
             // Proc-scope markers bracket a dynamic-SQL body. Entry raises the
             // depth (no token); exit lowers it and closes the scope with
@@ -798,7 +821,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                     }
                 }
 
-                hasOutcome = outcomes.MoveNext();
+                hasOutcome = AdvancePastClosingMessages();
                 var queryStatus = this.OutcomeDoneStatus(hasOutcome, trailingTokensFollow);
                 // Real reports a result set's row count under DONE_COUNT and
                 // drops the flag (keeping the count itself) under NOCOUNT.
@@ -822,7 +845,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                 // then proceeds to the next outcome — real SQL Server's
                 // non-XACT_ABORT behavior for a failed statement mid-batch.
                 WriteErrors(writer, errorOutcome.Exception);
-                hasOutcome = outcomes.MoveNext();
+                hasOutcome = AdvancePastClosingMessages();
                 var status = (ushort)(this.OutcomeDoneStatus(hasOutcome, trailingTokensFollow) | Tds.DoneError);
                 if ((status & Tds.DoneMore) == 0)
                     this.WriteSessionEnvChangesIfAny(writer);
@@ -840,7 +863,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                 // MoveNext below, and its own SET NOCOUNT would otherwise decide
                 // this statement's DONE.
                 var suppressCount = outcome.CountSuppressed == true;
-                hasOutcome = outcomes.MoveNext();
+                hasOutcome = AdvancePastClosingMessages();
                 var status = this.OutcomeDoneStatus(hasOutcome, trailingTokensFollow);
                 if (affected >= 0 && !suppressCount)
                     status |= Tds.DoneCount;

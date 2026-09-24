@@ -1,4 +1,3 @@
-using System.Data.Common;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 
 namespace SqlServerSimulator;
@@ -116,18 +115,18 @@ public sealed class DistinctFromTests
     {
         // Promotion routes through CompareValuesPromoted; string→int conversion
         // fails with Msg 245 (same as regular `=` would).
-        var ex = Throws<DbException>(() =>
+        var ex = Throws<SimulatedSqlException>(() =>
             new Simulation().ExecuteScalar("select 1 where 'hello' is distinct from 5"));
-        AreEqual("245", ex.Data["HelpLink.EvtID"]);
+        AreEqual(245, ex.Number);
     }
 
     [TestMethod]
     public void MissingFromKeyword_SyntaxError()
     {
         // `IS DISTINCT rhs` without FROM → syntax error at rhs.
-        var ex = Throws<DbException>(() =>
+        var ex = Throws<SimulatedSqlException>(() =>
             new Simulation().ExecuteScalar("select 1 where 5 is distinct 5"));
-        AreEqual("102", ex.Data["HelpLink.EvtID"]);
+        AreEqual(102, ex.Number);
     }
 
     [TestMethod]

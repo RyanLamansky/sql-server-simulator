@@ -326,7 +326,7 @@ public sealed class CursorRowLimitTests
             delete t where id = 2;
             fetch next from c into @id, @v;
             update t set v = 1 where current of c;
-            """, 16947, "No rows were updated or deleted.\nThe statement has been terminated.");
+            """, 16947, "No rows were updated or deleted.");
 
     /// <summary>Past the end the cursor isn't on a hole, just unpositioned, so
     /// it stays Msg 16931 (probe-confirmed).</summary>

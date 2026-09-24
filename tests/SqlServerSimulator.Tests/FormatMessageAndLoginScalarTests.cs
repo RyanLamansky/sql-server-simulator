@@ -1,4 +1,3 @@
-using System.Data.Common;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 
 namespace SqlServerSimulator;
@@ -23,8 +22,8 @@ public sealed class FormatMessageAndLoginScalarTests
 
     private static void AssertMsg(string sql, int errorNumber)
     {
-        var ex = Throws<DbException>(() => Scalar(sql));
-        AreEqual(errorNumber.ToString(), ex.Data["HelpLink.EvtID"], $"expected Msg {errorNumber}");
+        var ex = Throws<SimulatedSqlException>(() => Scalar(sql));
+        AreEqual(errorNumber, ex.Number, $"expected Msg {errorNumber}");
     }
 
     // ---- FORMATMESSAGE: core specifiers ----
@@ -166,7 +165,7 @@ public sealed class FormatMessageAndLoginScalarTests
     [TestMethod]
     public void FormatMessage_Msg2748_MessageWordingAndParamIndex()
     {
-        var ex = Throws<DbException>(() => Scalar("select formatmessage('%d', cast(5 as float))"));
+        var ex = Throws<SimulatedSqlException>(() => Scalar("select formatmessage('%d', cast(5 as float))"));
         AreEqual("Cannot specify float data type (parameter 1) as a substitution parameter.", ex.Message);
     }
 

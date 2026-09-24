@@ -1,4 +1,3 @@
-using System.Data.Common;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 
 namespace SqlServerSimulator;
@@ -14,7 +13,6 @@ namespace SqlServerSimulator;
 [TestClass]
 public sealed class DisabledIndexTests
 {
-    private static string ErrorNumber(DbException exception) => (string)exception.Data["HelpLink.EvtID"]!;
 
     // --- a disabled nonclustered unique index stops being enforced ---
 
@@ -162,8 +160,8 @@ public sealed class DisabledIndexTests
             insert t values (1);
             alter index pk_t on t disable
             """);
-        var exception = Throws<DbException>(() => simulation.ExecuteNonQuery(statement));
-        AreEqual("8655", ErrorNumber(exception));
+        var exception = Throws<SimulatedSqlException>(() => simulation.ExecuteNonQuery(statement));
+        AreEqual(8655, exception.Number);
     }
 
     [TestMethod]
@@ -201,8 +199,8 @@ public sealed class DisabledIndexTests
             insert t values (1, 1);
             alter index all on t disable
             """);
-        var exception = Throws<DbException>(() => simulation.ExecuteNonQuery("select count(*) from t"));
-        AreEqual("8655", ErrorNumber(exception));
+        var exception = Throws<SimulatedSqlException>(() => simulation.ExecuteNonQuery("select count(*) from t"));
+        AreEqual(8655, exception.Number);
         // ALL REBUILD is the way back.
         _ = simulation.ExecuteNonQuery("alter index all on t rebuild");
         AreEqual(1, simulation.ExecuteScalar("select count(*) from t"));

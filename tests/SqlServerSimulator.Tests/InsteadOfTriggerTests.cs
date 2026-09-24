@@ -175,7 +175,7 @@ public sealed class InsteadOfTriggerTests
             as
                 throw 50000, 'bail', 1
             """).ExecuteNonQuery();
-        _ = Throws<DbException>(() =>
+        _ = Throws<SimulatedSqlException>(() =>
             _ = connection.CreateCommand("insert t (v) values (1)").ExecuteNonQuery());
 
         // Heap untouched (it would have been anyway with INSTEAD OF).
@@ -250,9 +250,9 @@ public sealed class InsteadOfTriggerTests
     {
         using var connection = Seeded();
         _ = connection.CreateCommand("create trigger tr_t1 on t instead of insert as select 1").ExecuteNonQuery();
-        var ex = Throws<DbException>(() =>
+        var ex = Throws<SimulatedSqlException>(() =>
             _ = connection.CreateCommand("create trigger tr_t2 on t instead of insert as select 1").ExecuteNonQuery());
-        AreEqual("2111", ex.Data["HelpLink.EvtID"]);
+        AreEqual(2111, ex.Number);
         Assert.Contains("on table 't'", ex.Message);
         Assert.Contains("INSTEAD OF INSERT", ex.Message);
     }
@@ -264,9 +264,9 @@ public sealed class InsteadOfTriggerTests
         // INSERT-only trigger collides on INSERT.
         using var connection = Seeded();
         _ = connection.CreateCommand("create trigger tr_t1 on t instead of insert, update as select 1").ExecuteNonQuery();
-        var ex = Throws<DbException>(() =>
+        var ex = Throws<SimulatedSqlException>(() =>
             _ = connection.CreateCommand("create trigger tr_t2 on t instead of insert as select 1").ExecuteNonQuery());
-        AreEqual("2111", ex.Data["HelpLink.EvtID"]);
+        AreEqual(2111, ex.Number);
     }
 
     [TestMethod]
@@ -283,9 +283,9 @@ public sealed class InsteadOfTriggerTests
     {
         using var connection = Seeded();
         _ = connection.CreateCommand("create view v_t as select id, v from t").ExecuteNonQuery();
-        var ex = Throws<DbException>(() =>
+        var ex = Throws<SimulatedSqlException>(() =>
             _ = connection.CreateCommand("create trigger tr_v on v_t after insert as select 1").ExecuteNonQuery());
-        AreEqual("8197", ex.Data["HelpLink.EvtID"]);
+        AreEqual(8197, ex.Number);
     }
 
     // === INSTEAD OF on a view ===
@@ -343,9 +343,9 @@ public sealed class InsteadOfTriggerTests
         using var connection = Seeded();
         _ = connection.CreateCommand("create view v_t as select id, v from t").ExecuteNonQuery();
         _ = connection.CreateCommand("create trigger tr_v1 on v_t instead of insert as select 1").ExecuteNonQuery();
-        var ex = Throws<DbException>(() =>
+        var ex = Throws<SimulatedSqlException>(() =>
             _ = connection.CreateCommand("create trigger tr_v2 on v_t instead of insert as select 1").ExecuteNonQuery());
-        AreEqual("2111", ex.Data["HelpLink.EvtID"]);
+        AreEqual(2111, ex.Number);
         Assert.Contains("on view 'v_t'", ex.Message);
     }
 

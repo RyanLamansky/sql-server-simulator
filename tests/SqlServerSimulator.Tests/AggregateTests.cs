@@ -98,8 +98,8 @@ public sealed class AggregateTests
     public void Sum_IntOverflow_RaisesMsg8115()
     {
         using var connection = Seeded("a int", "(2147483647), (1)");
-        var ex = Throws<DbException>(() => connection.CreateCommand("select sum(a) from t").ExecuteScalar());
-        AreEqual("8115", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => connection.CreateCommand("select sum(a) from t").ExecuteScalar());
+        AreEqual(8115, ex.Number);
     }
 
     [TestMethod]
@@ -166,8 +166,8 @@ public sealed class AggregateTests
     public void Max_OnText_RaisesMsg8117()
     {
         using var connection = Seeded("t text", "('x')");
-        var ex = Throws<DbException>(() => connection.CreateCommand("select max(t) from t").ExecuteScalar());
-        AreEqual("8117", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => connection.CreateCommand("select max(t) from t").ExecuteScalar());
+        AreEqual(8117, ex.Number);
     }
 
     [TestMethod]

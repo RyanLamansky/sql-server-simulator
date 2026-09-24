@@ -1,5 +1,3 @@
-using System.Data.Common;
-
 namespace SqlServerSimulator;
 
 /// <summary>
@@ -133,9 +131,9 @@ public sealed class DefaultClauseTests
     [TestMethod]
     public void NewSequentialId_BareSelect_RaisesMsg302()
     {
-        var ex = Assert.Throws<DbException>(() => new Simulation().ExecuteScalar("select newsequentialid()"));
+        var ex = Assert.Throws<SimulatedSqlException>(() => new Simulation().ExecuteScalar("select newsequentialid()"));
         Assert.AreEqual("The newsequentialid() built-in function can only be used in a DEFAULT expression for a column of type 'uniqueidentifier' in a CREATE TABLE or ALTER TABLE statement. It cannot be combined with other operators to form a complex scalar expression.", ex.Message);
-        Assert.AreEqual("302", ex.Data["HelpLink.EvtID"]);
+        Assert.AreEqual(302, ex.Number);
     }
 
     [TestMethod]

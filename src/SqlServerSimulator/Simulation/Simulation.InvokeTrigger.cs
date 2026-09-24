@@ -388,6 +388,10 @@ partial class Simulation
                     // not the statement's.
                     if (bodyOutcome is SimulatedQueryResult)
                         (outerBatch.PendingTriggerResultSets ??= []).Add(bodyOutcome);
+                    // A body's messages reach the client ahead of the firing
+                    // statement's own outcome.
+                    else if (bodyOutcome is SimulatedInfoOutcome info)
+                        connection.PendingMessages.Enqueue(info.Message);
                 }
                 // Real aborts the batch when any error of severity >= 11
                 // was raised while the body ran, even one the body's own

@@ -1122,6 +1122,8 @@ public sealed partial class Simulation
             // here: the CATCH ran, the batch carried on, and nothing rolled it
             // back. Real ends such a batch by rolling back and reporting
             // Msg 3998 after the batch's own results (probe-confirmed).
+            foreach (var message in DrainPendingMessages(batch.Connection))
+                yield return message;
             if (batch.Connection.CurrentTransaction is { Doomed: true } doomed)
             {
                 doomed.Rollback();
@@ -1138,11 +1140,8 @@ public sealed partial class Simulation
                 batch.Connection.NoCount = enteredNoCount;
                 enteredOptions.Restore(batch.Connection);
             }
-            // The flush has to run even when the consumer disposes the reader
-            // before fully draining the iterator (ExecuteScalar reads one row
-            // and disposes) — otherwise PRINT / sev-≤10 RAISERROR output that
-            // fired before the first SELECT silently vanishes.
-            batch.FlushPrintMessages();
+            // Whatever a consumer that stopped early left unread goes with it.
+            batch.Connection.PendingMessages.Clear();
             // An RPC ad-hoc statement (sp_executesql / sp_execute / sp_prepexec)
             // runs in a nested scope, so temp tables it created are dropped when
             // it finishes — the tedious `execSql` re-run-without-Msg-2714 case.
@@ -1309,6 +1308,7 @@ public sealed partial class Simulation
                 batch.CurrentStatement.SubqueryResults = null;
                 batch.CurrentStatement.CatalogViewRows = null;
                 batch.CurrentStatement.ComputedUniqueKeys = null;
+                batch.CurrentStatement.NullEliminated = false;
                 batch.RcsiStatementSnapshotXid = null;
                 batch.BumpRowStamp();
                 // The cached plan is shared across principals; re-run the
@@ -1324,14 +1324,19 @@ public sealed partial class Simulation
                 // Replay bypasses the dispatch loop, so it stamps the NOCOUNT
                 // suppression the loop's post-statement walk would have.
                 replayed.CountSuppressed = connection.NoCount;
+                foreach (var message in DrainPendingMessages(connection))
+                    yield return message;
                 yield return replayed;
+                if (batch.CurrentStatement.NullEliminated && connection.AnsiWarnings)
+                    yield return NullEliminatedWarning(batch);
             }
 
             WriteBackOutputParameters(batch);
         }
         finally
         {
-            batch.FlushPrintMessages();
+            // Whatever a consumer that stopped early left unread goes with it.
+            batch.Connection.PendingMessages.Clear();
         }
     }
 
@@ -1721,6 +1726,9 @@ public sealed partial class Simulation
         batch.CurrentStatement.StartIndex = batch.Parser.Token?.StartIndex ?? 0;
         batch.CurrentStatement.SuppressErrorReset = false;
         batch.CurrentStatement.ReportedIgnoredDuplicate = false;
+        batch.CurrentStatement.ReportedNoiseWords = false;
+        batch.CurrentStatement.NullEliminated = false;
+        batch.CurrentStatement.WritesRows = false;
         batch.CurrentStatement.PendingDdlEvents = null;
         batch.CurrentStatement.DdlTriggerCreatedThisStatement = null;
         // Classify the statement as row-returning from its leading token so a
@@ -1951,6 +1959,8 @@ public sealed partial class Simulation
             // guessed position as recovery noise.
             if (gatheredBindError)
                 batch.BindResumedCleanly = parser.Token is null or Operator { Character: ';' };
+            foreach (var message in DrainPendingMessages(connection))
+                yield return message;
             yield break;
         }
 
@@ -1978,7 +1988,11 @@ public sealed partial class Simulation
                 while (parser.Token is not null && !IsStatementBoundary(parser.Token))
                     parser.MoveNextOptional();
             }
+            foreach (var message in DrainPendingMessages(connection))
+                yield return message;
             yield return new SimulatedErrorOutcome(continuedError, batch.CurrentStatement.LeadingKeywordReturnsRows);
+            if (!batch.BatchAborted && IsStatementTerminationNoticed(batch, continuedError))
+                yield return new SimulatedInfoOutcome(SimulatedSqlException.StatementTerminatedMessage(batch));
             yield break;
         }
 
@@ -2022,6 +2036,8 @@ public sealed partial class Simulation
             var parser = batch.Parser;
             while (parser.Token is not null && !IsStatementBoundary(parser.Token))
                 parser.MoveNextOptional();
+            foreach (var message in DrainPendingMessages(connection))
+                yield return message;
             yield break;
         }
 
@@ -2063,6 +2079,9 @@ public sealed partial class Simulation
             }
         }
 
+        // Messages the statement produced while it ran precede its results.
+        foreach (var message in DrainPendingMessages(connection))
+            yield return message;
         foreach (var o in outcomes!)
             yield return o;
 
@@ -2075,7 +2094,52 @@ public sealed partial class Simulation
             foreach (var o in triggerResults)
                 yield return o;
         }
+
+        // Msg 8153 follows the rows of the statement whose aggregate dropped a
+        // NULL. Cleared once sent, since an enclosing IF / BEGIN…END shares
+        // this statement frame and would otherwise send it again.
+        if (batch.CurrentStatement.NullEliminated)
+        {
+            batch.CurrentStatement.NullEliminated = false;
+            if (connection.AnsiWarnings)
+                yield return NullEliminatedWarning(batch);
+        }
     }
+
+    /// <summary>Real's Msg 8153, closing the statement whose aggregate skipped a NULL.</summary>
+    private static SimulatedInfoOutcome NullEliminatedWarning(BatchContext batch) =>
+        new(SimulatedSqlException.NullEliminatedMessage(batch), followsRows: true);
+
+    /// <summary>
+    /// The messages the engine has queued so far, in order, as outcomes to
+    /// yield. See <see cref="SimulatedDbConnection.PendingMessages"/>.
+    /// </summary>
+    private static SimulatedInfoOutcome[] DrainPendingMessages(SimulatedDbConnection connection)
+    {
+        var queue = connection.PendingMessages;
+        if (queue.Count == 0)
+            return [];
+        var drained = new SimulatedInfoOutcome[queue.Count];
+        for (var i = 0; i < drained.Length; i++)
+            drained[i] = new SimulatedInfoOutcome(queue.Dequeue());
+        return drained;
+    }
+
+    /// <summary>
+    /// Whether real follows <paramref name="error"/> with Msg 3621 ("The
+    /// statement has been terminated."): it does when an execution error ends a
+    /// statement that writes rows — a constraint, key or <c>CHECK OPTION</c>
+    /// violation, a NULL into a NOT NULL column, a truncation, an arithmetic
+    /// overflow or a divide by zero, a positioned update that found no row —
+    /// from <c>INSERT</c>, <c>UPDATE</c>, <c>DELETE</c>, <c>MERGE</c>,
+    /// <c>SELECT … INTO</c> or <c>ALTER TABLE … ALTER COLUMN</c> — and not for
+    /// an error the statement's compilation raises (Msg 206, 213, 544), a
+    /// <c>SELECT</c>'s own error, or one that ends the batch (probed
+    /// 2026-09-23 against SQL Server 2025).
+    /// </summary>
+    private static bool IsStatementTerminationNoticed(BatchContext batch, SimulatedSqlException error) =>
+        batch.CurrentStatement.WritesRows
+        && error.Number is 220 or 515 or 547 or 550 or 2601 or 2627 or 2628 or 8115 or 8134 or 8152 or 16947;
 
     /// <summary>
     /// True for the parse-time error real SQL Server defers to bind time —
@@ -3057,6 +3121,7 @@ public sealed partial class Simulation
 
     private static SimulatedStatementOutcome RunMutation(ParserContext context, Func<ParserContext, SimulatedStatementOutcome> body)
     {
+        context.Batch.CurrentStatement.WritesRows = true;
         if (!context.Batch.IsSkipping)
             RejectWriteInDoomedTransaction(context.Connection);
         var tx = context.Connection.CurrentTransaction;

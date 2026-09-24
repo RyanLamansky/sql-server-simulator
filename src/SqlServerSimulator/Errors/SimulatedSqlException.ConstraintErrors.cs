@@ -104,10 +104,7 @@ partial class SimulatedSqlException
     /// whose key tuple already existed in a <c>CREATE UNIQUE INDEX</c>-
     /// declared index. Distinct from Msg 2627 (unique <em>constraint</em>
     /// violation) — same scenario semantically, different error number
-    /// per the surface. Probe-confirmed wording (the trailing
-    /// <c>"The statement has been terminated."</c> phrase is emitted as a
-    /// separate informational line by real SQL Server; the simulator
-    /// folds it into the primary error message).
+    /// per the surface. Probe-confirmed wording.
     /// </summary>
     internal static SimulatedSqlException ViolationOfUniqueIndex(string indexName, string qualifiedTableName, string formattedKeyValues) =>
         new($"Cannot insert duplicate key row in object '{qualifiedTableName}' with unique index '{indexName}'. The duplicate key value is ({formattedKeyValues}).", 2601, 14, 1);

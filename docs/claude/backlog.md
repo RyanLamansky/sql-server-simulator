@@ -249,15 +249,7 @@ Already listed elsewhere here and not repeated: `DBCC CHECKIDENT`, parenthesized
 - `CONVERT(varchar, <timestamp>, 1)` doesn't render hex.
 - The TDS UDT type name leaves the database part empty (`.sys.geography`; real sends `<db>.sys.geography`).
 
-**Message stream**:
-
-- **Msg 3621 "The statement has been terminated."** is never sent; real sends it (class 0) after every statement-terminating error — 547, 2627, 2628, 220 from `ALTER COLUMN`, 8134 from a persisted computed column's insert.
-- **Msg 8153** (`Warning: Null value is eliminated by an aggregate or other SET operation.`) is never sent for `SUM` / `COUNT(x)` / `COUNT(ALL x)` over a NULL.
-- Several `PRINT`s or low-severity `RAISERROR`s in one batch reach the client as **one** message joined with `\n`, and after the batch's result sets rather than in position.
-- `RAISERROR` at severity 10 arrives with class 10; real sends class 0.
-- Informational messages not sent: Msg 5703 on `SET LANGUAGE`, Msg 282 when a procedure returns NULL, Msg 11729 when a sequence's cache exceeds its remaining values.
-- Line numbers: GOTO label errors (Msg 132 / 133) report line 0 where real reports 1; errors binding a procedure call (Msg 201 / 8144 / 8145) report the batch line where real reports line 0 with `Procedure` set.
-- Msg 2628 names the table `'t'` where real names `'db.dbo.t'`, and for `ALTER COLUMN` real reports the truncated value as `''`.
+**Message stream**: what's left — Msg 5703's localized wording, the Msg 282 whose trigger isn't known yet, and Msg 8153 over a constant `VALUES` grouping — is in [`errors.md`](errors.md#not-modeled-yet).
 
 **Batch compilation** — real compiles the whole batch before running any of it, so a compile error means nothing runs:
 
@@ -302,7 +294,7 @@ Already listed elsewhere here and not repeated: `DBCC CHECKIDENT`, parenthesized
 - CAST sources: a space-separated date-and-time string to `date` or `time` (`CAST('2024-12-31 23:59:59' AS date)`, only the `T` form parses here); more than seven fractional-second digits (real rounds at the seventh); `''` → `money` 0 and `date` 1900-01-01; `'12:00'` → `date`; `'1e2'` / `'1d2'` → `float`; month names (`'Jan 5 2024'`, `'5 January 2024'`, `'January 2024'`); `AM` / `PM` suffixes, including `'13:00 PM'`; two-digit years (`'01/01/49'` → 2049); `datetime` → `float` / `int` / `decimal`; `decimal` → `varbinary`.
 
 **Same error, different number, state or class**:
-`TRANSLATE` length mismatch 9828 (here 9819); `ROW_NUMBER() OVER ()` 4112 (here 102); `decimal(39, 0)` 2717 (here 1001); `decimal(2, 3)` 192 (here 1002); `float(54)` accepted on real (here 1001); `TOP (<NULL variable>)` 1014 (here 1060); `TOP '1'` 102 (here 1060); `EXEC p @b = 1` 8145 (here 201); a string datetime out of range (`'2024'`, hour 25) 242 (here 241); `xml = xml` 305 (here 402); `$action` in an INSERT's OUTPUT 207 (here 4104); a bare `VALUES (1)` statement 156 (here 102); `DELETE … ORDER BY` 156 (here 102); `@t.a` 137 class 16 state 1 (here class 15 state 2); states differing on 506, 235, 9810, 9812, 8148, 2714 for a temp table, and 195.
+`TRANSLATE` length mismatch 9828 (here 9819); `ROW_NUMBER() OVER ()` 4112 (here 102); `decimal(39, 0)` 2717 (here 1001); `decimal(2, 3)` 192 (here 1002); `float(54)` accepted on real (here 1001); `TOP (<NULL variable>)` 1014 (here 1060); `TOP '1'` 102 (here 1060); a string datetime out of range (`'2024'`, hour 25) 242 (here 241); `xml = xml` 305 (here 402); `$action` in an INSERT's OUTPUT 207 (here 4104); a bare `VALUES (1)` statement 156 (here 102); `DELETE … ORDER BY` 156 (here 102); `@t.a` 137 class 16 state 1 (here class 15 state 2); states differing on 506, 235, 9810, 9812, 8148, 2714 for a temp table, and 195.
 
 ### Result-set serialization: `FOR XML` / `FOR JSON`
 

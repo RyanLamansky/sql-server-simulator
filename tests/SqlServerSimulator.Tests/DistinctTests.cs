@@ -1,4 +1,3 @@
-using System.Data.Common;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 
 namespace SqlServerSimulator;
@@ -139,7 +138,7 @@ public class DistinctTests
         _ = connection.CreateCommand("create table t ( a int, b int )").ExecuteNonQuery();
         _ = connection.CreateCommand("insert t values (1,30),(2,10),(3,20)").ExecuteNonQuery();
 
-        var ex = Throws<DbException>(() =>
+        var ex = Throws<SimulatedSqlException>(() =>
         {
             using var reader = connection.CreateCommand("select distinct a from t order by b").ExecuteReader();
             while (reader.Read()) { /* drain so the lazy ORDER-key resolver fires */ }
@@ -178,7 +177,7 @@ public class DistinctTests
 
         // SQL Server requires DISTINCT before TOP. Reversed order is a parse
         // failure (Msg 156 with "near 'distinct'").
-        var ex = Throws<DbException>(() =>
+        var ex = Throws<SimulatedSqlException>(() =>
             connection.CreateCommand("select top 2 distinct v from t").ExecuteReader().Read());
         AreEqual("Incorrect syntax near the keyword 'distinct'.", ex.Message);
     }

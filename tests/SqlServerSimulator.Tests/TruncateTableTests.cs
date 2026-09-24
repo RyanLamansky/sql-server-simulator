@@ -1,4 +1,3 @@
-using System.Data.Common;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 
 namespace SqlServerSimulator;
@@ -101,11 +100,11 @@ public sealed class TruncateTableTests
     [TestMethod]
     public void Truncate_WithWhere_SyntaxError()
     {
-        var ex = Throws<DbException>(() => new Simulation().ExecuteNonQuery("""
+        var ex = Throws<SimulatedSqlException>(() => new Simulation().ExecuteNonQuery("""
             create table t (id int);
             truncate table t where id = 1
             """));
-        AreEqual("102", ex.Data["HelpLink.EvtID"]);
+        AreEqual(102, ex.Number);
     }
 
     // ---- Transaction rollback ----

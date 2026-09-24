@@ -8,7 +8,7 @@ namespace SqlServerSimulator;
 public class InsertTests
 {
     [TestMethod]
-    public void InsertRequiresTableToExist() => Throws<DbException>(() =>
+    public void InsertRequiresTableToExist() => Throws<SimulatedSqlException>(() =>
         new Simulation().ExecuteNonQuery("insert t ( v ) values ( 1 )"));
 
     [TestMethod]
@@ -33,13 +33,13 @@ public class InsertTests
             .ExecuteNonQuery());
 
     [TestMethod]
-    public void InsertParameterizedNameMismatch() => Throws<DbException>(() => new Simulation()
+    public void InsertParameterizedNameMismatch() => Throws<SimulatedSqlException>(() => new Simulation()
         .CreateOpenConnection()
         .CreateCommand("create table t ( v int );insert t values ( @p0 )", ("p1", 1))
         .ExecuteNonQuery());
 
     [TestMethod]
-    public void InsertRequiresValidColumnNames() => Throws<DbException>(() =>
+    public void InsertRequiresValidColumnNames() => Throws<SimulatedSqlException>(() =>
         new Simulation().ExecuteNonQuery("create table t ( v int );insert t ( x ) values ( 1 )"));
 
     [TestMethod]
@@ -72,7 +72,7 @@ public class InsertTests
     [TestMethod]
     public void InsertCoercion_Int32LiteralIntoTinyInt_OverflowRaisesSqlException()
     {
-        var ex = Throws<DbException>(() => new Simulation().ExecuteNonQuery("""
+        var ex = Throws<SimulatedSqlException>(() => new Simulation().ExecuteNonQuery("""
             create table t ( v tinyint );
             insert t values ( 300 )
             """));
@@ -100,7 +100,7 @@ public class InsertTests
         insert.CommandText = "create table t ( v tinyint );insert t values ( @p )";
         AddTypedParameter(insert, "p", DbType.Int32, 300);
 
-        var ex = Throws<DbException>(() => insert.ExecuteNonQuery());
+        var ex = Throws<SimulatedSqlException>(() => insert.ExecuteNonQuery());
         Contains("Arithmetic overflow", ex.Message);
     }
 
@@ -122,8 +122,8 @@ public class InsertTests
         insert.CommandText = "create table t ( v varchar(5) );insert t values ( @p )";
         AddTypedParameter(insert, "p", DbType.AnsiString, "hello world");
 
-        var ex = Throws<DbException>(() => insert.ExecuteNonQuery());
-        AreEqual("String or binary data would be truncated in table 't', column 'v'. Truncated value: 'hello'.", ex.Message);
+        var ex = Throws<SimulatedSqlException>(() => insert.ExecuteNonQuery());
+        AreEqual("String or binary data would be truncated in table 'simulated.dbo.t', column 'v'. Truncated value: 'hello'.", ex.Errors[0].Message);
     }
 
     [TestMethod]
@@ -134,8 +134,8 @@ public class InsertTests
         insert.CommandText = "create table t ( v nvarchar(3) );insert t values ( @p )";
         AddTypedParameter(insert, "p", DbType.String, "héllo");
 
-        var ex = Throws<DbException>(() => insert.ExecuteNonQuery());
-        AreEqual("String or binary data would be truncated in table 't', column 'v'. Truncated value: 'hél'.", ex.Message);
+        var ex = Throws<SimulatedSqlException>(() => insert.ExecuteNonQuery());
+        AreEqual("String or binary data would be truncated in table 'simulated.dbo.t', column 'v'. Truncated value: 'hél'.", ex.Errors[0].Message);
     }
 
     // varchar uses Windows-1252; "café" is 4 bytes (every char in CP1252) and fits varchar(4).
@@ -218,8 +218,8 @@ public class InsertTests
         insert.CommandText = "create table t ( v varbinary(2) );insert t values ( @p )";
         AddTypedParameter(insert, "p", DbType.Binary, new byte[] { 0xDE, 0xAD, 0xBE, 0xEF });
 
-        var ex = Throws<DbException>(() => insert.ExecuteNonQuery());
-        AreEqual("String or binary data would be truncated in table 't', column 'v'. Truncated value: '0xDEAD'.", ex.Message);
+        var ex = Throws<SimulatedSqlException>(() => insert.ExecuteNonQuery());
+        AreEqual("String or binary data would be truncated in table 'simulated.dbo.t', column 'v'. Truncated value: '0xDEAD'.", ex.Errors[0].Message);
     }
 
     [TestMethod]

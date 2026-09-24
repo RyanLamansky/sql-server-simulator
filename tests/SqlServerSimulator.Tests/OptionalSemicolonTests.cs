@@ -124,11 +124,11 @@ public sealed class OptionalSemicolonTests
         // which means the test has to drive iteration past the first result
         // set; ExecuteScalar would short-circuit.
         using var conn = new Simulation().CreateOpenConnection();
-        var ex = Throws<System.Data.Common.DbException>(() =>
+        var ex = Throws<SimulatedSqlException>(() =>
             conn.CreateCommand(
                 "with c1 as (select 1 as x) select x from c1 with c2 as (select 2 as y) select y from c2")
                 .ExecuteNonQuery());
-        AreEqual("319", ex.Data["HelpLink.EvtID"]);
+        AreEqual(319, ex.Number);
     }
 
     [TestMethod]

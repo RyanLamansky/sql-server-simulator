@@ -78,7 +78,16 @@ partial class Simulation
         var boundIsDefault = new bool[procedure.Parameters.Length];
         var boundTableValues = new HeapTable?[procedure.Parameters.Length];
         var boundCursorArgNames = new string?[procedure.Parameters.Length];
+        // A binding error reports line 0 and names the procedure as the EXEC
+        // spelled it (probed 2026-09-23).
+        SimulatedSqlException BindingError(SimulatedSqlException error)
+        {
+            error.PreserveDiagnostics(0, attributionName);
+            return error;
+        }
+
         var positionalIndex = 0;
+        string? unknownArgument = null;
         foreach (var arg in arguments)
         {
             int paramIndex;
@@ -86,7 +95,7 @@ partial class Simulation
             {
                 paramIndex = positionalIndex++;
                 if (paramIndex >= procedure.Parameters.Length)
-                    throw SimulatedSqlException.TooManyArgumentsToFunction(procedure.Name);
+                    throw BindingError(SimulatedSqlException.TooManyArgumentsToFunction(procedure.Name));
             }
             else
             {
@@ -101,12 +110,11 @@ partial class Simulation
                 }
                 if (paramIndex < 0)
                 {
-                    // Unknown named arg — Msg 201 names the first
-                    // unsatisfied required parameter (real SQL Server's
-                    // wording references the first missing one). Since we
-                    // don't know which is unsatisfied yet, surface the
-                    // procedure's first parameter as the placeholder.
-                    throw SimulatedSqlException.ProcedureExpectsParameter(procedure.Name, procedure.Parameters[0].Name);
+                    // An unknown named argument is Msg 8145, but only once
+                    // every required parameter is known to be supplied — a
+                    // missing one reports Msg 201 first.
+                    unknownArgument ??= arg.Name;
+                    continue;
                 }
             }
             boundValues[paramIndex] = arg.Value;
@@ -138,7 +146,7 @@ partial class Simulation
             if (boundValues[i] is not null && !boundIsDefault[i])
                 continue;
             if (param.Default is null)
-                throw SimulatedSqlException.ProcedureExpectsParameter(procedure.Name, param.Name);
+                throw BindingError(SimulatedSqlException.ProcedureExpectsParameter(procedure.Name, param.Name));
             // Defaults are re-evaluated per call in the outer batch's
             // expression-evaluation context (mirrors scalar-UDF behavior).
             // Column refs inside a default would be invalid here; the
@@ -147,6 +155,8 @@ partial class Simulation
                 new RuntimeContext(_ => throw SimulatedSqlException.MustDeclareScalarVariable(""), outerBatch));
             boundValues[i] = defaultValue.CoerceTo(param.Type);
         }
+        if (unknownArgument is not null)
+            throw BindingError(SimulatedSqlException.NotAParameterForProcedure(unknownArgument, procedure.Name));
 
         // Seed the child batch's variable dictionary with the bound values,
         // coerced to each parameter's declared type. TVP parameters land in
@@ -282,11 +292,6 @@ partial class Simulation
                 // a body error), before control and the OUTPUT / return-code
                 // writeback return to the caller's security context.
                 connection.Security.RevertTo(savedImpersonationDepth);
-                // The proc body's PRINT buffer belongs to the inner batch, so
-                // the top-level flush in CreateResultSetsForCommand never sees
-                // it; deliver it here (also on error, matching the real
-                // server's flush-as-they-happen info tokens).
-                innerBatch.FlushPrintMessages();
             }
         }
 

@@ -61,7 +61,7 @@ public sealed partial class Simulation
         try
         {
             Dictionary<string, LabelTarget>? labels = null;
-            List<(string Name, int TryDepth)>? gotos = null;
+            List<(string Name, int TryDepth, int Line)>? gotos = null;
             // One stack for both nesting questions: a 'c' entry is a CASE
             // (whose END is not a block's), 'b' a BEGIN…END block, 't' a
             // BEGIN TRY / BEGIN CATCH. 'b' and 't' are exactly the constructs
@@ -91,11 +91,11 @@ public sealed partial class Simulation
                         if (open.Count > 0)
                             open.RemoveAt(open.Count - 1);
                         break;
-                    case ReservedKeyword { Keyword: Keyword.Goto }:
+                    case ReservedKeyword { Keyword: Keyword.Goto } gotoKeyword:
                         if (context.GetNextOptional() is UnquotedString target)
                         {
                             gotos ??= [];
-                            gotos.Add((target.Value, Count(open, 't')));
+                            gotos.Add((target.Value, Count(open, 't'), gotoKeyword.LineNumber));
                         }
                         break;
                     case UnquotedString candidate when parenDepth == 0:
@@ -111,7 +111,7 @@ public sealed partial class Simulation
                                     Count(open, 'b') + Count(open, 't'),
                                     Count(open, 't'));
                                 if (!labels.TryAdd(candidate.Value, declared))
-                                    throw SimulatedSqlException.DuplicateLabel(candidate.Value);
+                                    throw AtLine(SimulatedSqlException.DuplicateLabel(candidate.Value), candidate.LineNumber);
                                 continue;
                             }
                             context.RestoreCheckpoint(afterName);
@@ -123,14 +123,14 @@ public sealed partial class Simulation
 
             if (gotos is not null)
             {
-                foreach (var (name, tryDepth) in gotos)
+                foreach (var (name, tryDepth, line) in gotos)
                 {
                     if (labels is null || !labels.TryGetValue(name, out var declared))
-                        throw SimulatedSqlException.UndeclaredLabel(name);
+                        throw AtLine(SimulatedSqlException.UndeclaredLabel(name), line);
                     // A label enclosed in more TRY / CATCH scopes than the jump
                     // is sits inside one the jump would enter.
                     if (declared.TryDepth > tryDepth)
-                        throw SimulatedSqlException.GotoCannotJumpIntoTryOrCatch();
+                        throw AtLine(SimulatedSqlException.GotoCannotJumpIntoTryOrCatch(), line);
                 }
             }
 
@@ -140,6 +140,15 @@ public sealed partial class Simulation
         finally
         {
             context.RestoreCheckpoint(entry);
+        }
+
+        // The scan runs ahead of any statement's dispatch, so it stamps the
+        // line itself: the duplicate label's, or the offending GOTO's
+        // (probed 2026-09-23).
+        SimulatedSqlException AtLine(SimulatedSqlException error, int line)
+        {
+            error.ResolveDiagnostics(line, batch.LineOffset, batch.ErrorProcedureName);
+            return error;
         }
     }
 

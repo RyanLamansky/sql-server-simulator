@@ -24,9 +24,10 @@ namespace SqlServerSimulator.Schemas;
 /// SQL Server 2025 — the start_value IS the first emitted value).
 /// </para>
 /// <para>
-/// Cache options (<c>CACHE n</c> / <c>NO CACHE</c>) are accepted at parse
-/// but ignored — the simulator is in-process so the batched-allocation
-/// optimization that backs real SQL Server's CACHE semantics doesn't apply.
+/// Cache options (<c>CACHE n</c> / <c>NO CACHE</c>) don't batch allocation
+/// — the simulator is in-process so the optimization that backs real SQL
+/// Server's CACHE semantics doesn't apply — and are kept only for the
+/// Msg 11729 warning (<see cref="AllocatesShortFirstCache"/>).
 /// <c>is_cached</c> reports true (the SQL Server default) and
 /// <c>cache_size</c> reports <see cref="DBNull"/> through
 /// <c>sys.sequences</c>, matching the real server's behavior when no
@@ -74,6 +75,18 @@ internal sealed class Sequence(
     public long MinValue = minValue;
     public long MaxValue = maxValue;
     public bool Cycle = cycle;
+
+    /// <summary>
+    /// The declared cache size: <see langword="null"/> for the default, 0 for
+    /// <c>NO CACHE</c>.
+    /// </summary>
+    public long? CacheSize;
+
+    /// <summary>
+    /// Whether a value has been drawn since CREATE or the last <c>RESTART</c>,
+    /// which is when real allocates the first cache block.
+    /// </summary>
+    public bool FirstCacheAllocated;
 
     /// <summary>
     /// The next value to emit from <c>NEXT VALUE FOR</c>. Initially equals
@@ -142,10 +155,29 @@ internal sealed class Sequence(
     /// responsible for the per-row cache check before calling — this method
     /// always advances. Raises Msg 11728 when no-cycle and already exhausted.
     /// </summary>
+    /// <summary>
+    /// Whether this draw allocates the first cache block since CREATE or
+    /// <c>RESTART</c> and the block is longer than the values left — real's
+    /// Msg 11729. Probed 2026-09-23 against SQL Server 2025: the default cache
+    /// is 50 values, <c>NO CACHE</c> and <c>CYCLE</c> never warn, and a later
+    /// block that runs short doesn't warn again.
+    /// </summary>
+    public bool AllocatesShortFirstCache()
+    {
+        if (this.FirstCacheAllocated)
+            return false;
+        this.FirstCacheAllocated = true;
+        if (this.CacheSize == 0 || this.Cycle || this.IsExhausted)
+            return false;
+        var bound = this.Increment > 0 ? this.MaxValue : this.MinValue;
+        var available = (((Int128)bound - this.CurrentValue) / this.Increment) + 1;
+        return available < (this.CacheSize ?? 50);
+    }
+
     public SqlValue Advance()
     {
         if (this.IsExhausted)
-            throw SimulatedSqlException.SequenceExhausted(this.FullName);
+            throw SimulatedSqlException.SequenceExhausted(this.Name);
 
         var emit = this.CurrentValue;
         this.LastUsedValue = emit;

@@ -177,7 +177,7 @@ A cache hit short-circuits the full dispatch via `ReplayCachedSelection`:
 - `selection.Execute(batch)` runs the cached Selection.
   `MaterializeRows()` drains them, mirroring the standard path's `LastStatementRowCount` accounting — and, like the standard path, keeping the producer's own row form (see [`data-reader.md`](data-reader.md#the-row-form-the-reader-reads)).
 - Outcome shape: `SimulatedSqlResultSet` (the only shape we cache — assignment-only Selections never cache).
-- `WriteBackOutputParameters` and `FlushPrintMessages` run, same as the standard path.
+- `WriteBackOutputParameters` runs and queued messages are placed in the outcome stream, same as the standard path.
 
 The replay path is also where `PlanCacheHits` increments; misses increment in `CreateResultSetsForCommand` on the fall-through.
 

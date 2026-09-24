@@ -216,6 +216,6 @@ public sealed class ViewOverJoinViewDmlTests
             "create view dbo.vagg as select one_id, count(*) as c from dbo.many group by one_id",
             "create view dbo.vaggtop as select one_id as aid, c from dbo.vagg");
         var ex = simulation.AssertSqlError("update dbo.vaggtop set aid = 1 where aid = 1", 4403);
-        Assert.AreEqual("Cannot update the view or function 'dbo.vaggtop' because it contains aggregates, or a DISTINCT or GROUP BY clause, or PIVOT or UNPIVOT operator.", ex.Message);
+        Assert.AreEqual("Cannot update the view or function 'dbo.vaggtop' because it contains aggregates, or a DISTINCT or GROUP BY clause, or PIVOT or UNPIVOT operator.", ex.Errors[0].Message);
     }
 }

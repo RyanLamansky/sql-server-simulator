@@ -1,4 +1,3 @@
-using System.Data.Common;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 
 namespace SqlServerSimulator;
@@ -138,8 +137,8 @@ public sealed class AlterTableColumnTests
             alter table t add qty int constraint ck_qty check (qty is null or qty > 0)
             """);
         _ = sim.ExecuteNonQuery("insert t values (1, 5)");
-        var ex = Throws<DbException>(() => sim.ExecuteNonQuery("insert t values (2, -5)"));
-        AreEqual("547", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => sim.ExecuteNonQuery("insert t values (2, -5)"));
+        AreEqual(547, ex.Number);
     }
 
     [TestMethod]
@@ -153,8 +152,8 @@ public sealed class AlterTableColumnTests
             alter table c add p_ref int constraint fk_pref references p(pid);
             insert c values (10, 1)
             """);
-        var ex = Throws<DbException>(() => sim.ExecuteNonQuery("insert c values (20, 999)"));
-        AreEqual("547", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => sim.ExecuteNonQuery("insert c values (20, 999)"));
+        AreEqual(547, ex.Number);
     }
 
     [TestMethod]
@@ -292,8 +291,8 @@ public sealed class AlterTableColumnTests
             insert t values (1, 10, 100)
             """);
         // One blocker (b has DEFAULT) → both columns stay.
-        var ex = Throws<DbException>(() => sim.ExecuteNonQuery("alter table t drop column a, b"));
-        AreEqual("5074", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => sim.ExecuteNonQuery("alter table t drop column a, b"));
+        AreEqual(5074, ex.Number);
         AreEqual(3, sim.ExecuteScalar("select count(*) from sys.columns where object_id = object_id('t')"));
     }
 
@@ -356,8 +355,8 @@ public sealed class AlterTableColumnTests
             insert t values (1, 10, 100);
             alter table t drop column a
             """);
-        var ex = Throws<DbException>(() => sim.ExecuteNonQuery("insert t values (1, 200)"));
-        AreEqual("2627", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => sim.ExecuteNonQuery("insert t values (1, 200)"));
+        AreEqual(2627, ex.Number);
     }
 
     [TestMethod]
@@ -370,8 +369,8 @@ public sealed class AlterTableColumnTests
             insert t values (1, 10, 100);
             alter table t drop column mid
             """);
-        var ex = Throws<DbException>(() => sim.ExecuteNonQuery("insert t values (2, 100)"));
-        AreEqual("2601", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => sim.ExecuteNonQuery("insert t values (2, 100)"));
+        AreEqual(2601, ex.Number);
     }
 
     // --- ALTER COLUMN — type changes ---
@@ -432,8 +431,11 @@ public sealed class AlterTableColumnTests
             create table t (id int, v varchar(50));
             insert t values (1, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')
             """);
-        var ex = Throws<DbException>(() => sim.ExecuteNonQuery("alter table t alter column v varchar(10)"));
-        AreEqual("2628", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => sim.ExecuteNonQuery("alter table t alter column v varchar(10)"));
+        AreEqual(2628, ex.Number);
+        // Real names the table in full and reports no truncated value for
+        // ALTER COLUMN (probed 2026-09-23).
+        AreEqual("String or binary data would be truncated in table 'simulated.dbo.t', column 'v'. Truncated value: ''.", ex.Errors[0].Message);
     }
 
     [TestMethod]
@@ -453,8 +455,8 @@ public sealed class AlterTableColumnTests
             create table t (v int);
             insert t values (5), (500)
             """);
-        var ex = Throws<DbException>(() => sim.ExecuteNonQuery("alter table t alter column v tinyint"));
-        AreEqual("220", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => sim.ExecuteNonQuery("alter table t alter column v tinyint"));
+        AreEqual(220, ex.Number);
         Assert.Contains("tinyint", ex.Message);
         Assert.Contains("500", ex.Message);
     }
@@ -470,8 +472,8 @@ public sealed class AlterTableColumnTests
             create table t (v bigint);
             insert t values (3000000000)
             """);
-        var ex = Throws<DbException>(() => sim.ExecuteNonQuery("alter table t alter column v int"));
-        AreEqual("8115", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => sim.ExecuteNonQuery("alter table t alter column v int"));
+        AreEqual(8115, ex.Number);
         Assert.Contains("data type int", ex.Message);
     }
 
@@ -483,8 +485,8 @@ public sealed class AlterTableColumnTests
             create table t (v float);
             insert t values (300)
             """);
-        var ex = Throws<DbException>(() => sim.ExecuteNonQuery("alter table t alter column v tinyint"));
-        AreEqual("232", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => sim.ExecuteNonQuery("alter table t alter column v tinyint"));
+        AreEqual(232, ex.Number);
         Assert.Contains("value = 300.000000", ex.Message);
     }
 
@@ -496,8 +498,8 @@ public sealed class AlterTableColumnTests
             create table t (v varchar(20));
             insert t values ('hello'), ('123')
             """);
-        var ex = Throws<DbException>(() => sim.ExecuteNonQuery("alter table t alter column v int"));
-        AreEqual("245", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => sim.ExecuteNonQuery("alter table t alter column v int"));
+        AreEqual(245, ex.Number);
     }
 
     [TestMethod]
@@ -520,8 +522,8 @@ public sealed class AlterTableColumnTests
             create table t (v varchar(20));
             insert t values ('not-a-date')
             """);
-        var ex = Throws<DbException>(() => sim.ExecuteNonQuery("alter table t alter column v date"));
-        AreEqual("241", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => sim.ExecuteNonQuery("alter table t alter column v date"));
+        AreEqual(241, ex.Number);
     }
 
     [TestMethod]
@@ -544,8 +546,8 @@ public sealed class AlterTableColumnTests
             create table t (v decimal(10,2));
             insert t values (999.99)
             """);
-        var ex = Throws<DbException>(() => sim.ExecuteNonQuery("alter table t alter column v decimal(4,2)"));
-        AreEqual("8115", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => sim.ExecuteNonQuery("alter table t alter column v decimal(4,2)"));
+        AreEqual(8115, ex.Number);
     }
 
     // --- ALTER COLUMN — nullability ---
@@ -558,8 +560,8 @@ public sealed class AlterTableColumnTests
             create table t (id int, v varchar(10) null);
             insert t values (1, null), (2, 'x')
             """);
-        var ex = Throws<DbException>(() => sim.ExecuteNonQuery("alter table t alter column v varchar(10) not null"));
-        AreEqual("515", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => sim.ExecuteNonQuery("alter table t alter column v varchar(10) not null"));
+        AreEqual(515, ex.Number);
         Assert.Contains("v", ex.Message);
     }
 
@@ -573,8 +575,8 @@ public sealed class AlterTableColumnTests
             alter table t alter column v varchar(10) not null
             """);
         AreEqual(2, sim.ExecuteScalar("select count(*) from t where v is not null"));
-        var ex = Throws<DbException>(() => sim.ExecuteNonQuery("insert t (id) values (3)"));
-        AreEqual("515", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => sim.ExecuteNonQuery("insert t (id) values (3)"));
+        AreEqual(515, ex.Number);
     }
 
     [TestMethod]
@@ -602,8 +604,8 @@ public sealed class AlterTableColumnTests
             alter table t alter column v bigint;
             insert t values (1)
             """);
-        var ex = Throws<DbException>(() => sim.ExecuteNonQuery("insert t values (null)"));
-        AreEqual("515", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => sim.ExecuteNonQuery("insert t values (null)"));
+        AreEqual(515, ex.Number);
     }
 
     // --- ALTER COLUMN — blockers (Msg 5074) ---
@@ -613,8 +615,8 @@ public sealed class AlterTableColumnTests
     {
         var sim = new Simulation();
         _ = sim.ExecuteNonQuery("create table t (id int not null primary key)");
-        var ex = Throws<DbException>(() => sim.ExecuteNonQuery("alter table t alter column id bigint not null"));
-        AreEqual("5074", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => sim.ExecuteNonQuery("alter table t alter column id bigint not null"));
+        AreEqual(5074, ex.Number);
         Assert.Contains("object", ex.Message);
     }
 
@@ -626,8 +628,8 @@ public sealed class AlterTableColumnTests
             create table p (id int not null primary key);
             create table c (cid int primary key, pid int, constraint fk_c foreign key (pid) references p(id))
             """);
-        var ex = Throws<DbException>(() => sim.ExecuteNonQuery("alter table c alter column pid bigint"));
-        AreEqual("5074", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => sim.ExecuteNonQuery("alter table c alter column pid bigint"));
+        AreEqual(5074, ex.Number);
         Assert.Contains("fk_c", ex.Message);
     }
 
@@ -643,8 +645,8 @@ public sealed class AlterTableColumnTests
         _ = sim.ExecuteNonQuery("alter table p alter column v varchar(50)");
         // p.id IS referenced — PK blocks first; both PK and incoming FK
         // dependencies surface in the multi-blocker enumeration.
-        var ex = Throws<DbException>(() => sim.ExecuteNonQuery("alter table p alter column id bigint not null"));
-        AreEqual("5074", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => sim.ExecuteNonQuery("alter table p alter column id bigint not null"));
+        AreEqual(5074, ex.Number);
     }
 
     [TestMethod]
@@ -655,8 +657,8 @@ public sealed class AlterTableColumnTests
             create table t (id int primary key, v varchar(50));
             create index ix_v on t(v)
             """);
-        var ex = Throws<DbException>(() => sim.ExecuteNonQuery("alter table t alter column v nvarchar(50)"));
-        AreEqual("5074", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => sim.ExecuteNonQuery("alter table t alter column v nvarchar(50)"));
+        AreEqual(5074, ex.Number);
         Assert.Contains("ix_v", ex.Message);
         Assert.Contains("index", ex.Message);
     }
@@ -680,8 +682,8 @@ public sealed class AlterTableColumnTests
     {
         var sim = new Simulation();
         _ = sim.ExecuteNonQuery("create table t (a int, b as a * 2)");
-        var ex = Throws<DbException>(() => sim.ExecuteNonQuery("alter table t alter column a bigint"));
-        AreEqual("5074", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => sim.ExecuteNonQuery("alter table t alter column a bigint"));
+        AreEqual(5074, ex.Number);
         Assert.Contains("column 'b'", ex.Message);
     }
 
@@ -690,8 +692,8 @@ public sealed class AlterTableColumnTests
     {
         var sim = new Simulation();
         _ = sim.ExecuteNonQuery("create table t (a int, b as a * 2)");
-        var ex = Throws<DbException>(() => sim.ExecuteNonQuery("alter table t alter column b bigint"));
-        AreEqual("4928", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => sim.ExecuteNonQuery("alter table t alter column b bigint"));
+        AreEqual(4928, ex.Number);
         Assert.Contains("COMPUTED", ex.Message);
     }
 
@@ -700,8 +702,8 @@ public sealed class AlterTableColumnTests
     {
         var sim = new Simulation();
         _ = sim.ExecuteNonQuery("create table t (id int, v rowversion)");
-        var ex = Throws<DbException>(() => sim.ExecuteNonQuery("alter table t alter column v bigint"));
-        AreEqual("4928", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => sim.ExecuteNonQuery("alter table t alter column v bigint"));
+        AreEqual(4928, ex.Number);
         Assert.Contains("timestamp", ex.Message);
     }
 
@@ -712,8 +714,8 @@ public sealed class AlterTableColumnTests
     {
         var sim = new Simulation();
         _ = sim.ExecuteNonQuery("create table t (a int)");
-        var ex = Throws<DbException>(() => sim.ExecuteNonQuery("alter table t alter column missing bigint"));
-        AreEqual("4924", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => sim.ExecuteNonQuery("alter table t alter column missing bigint"));
+        AreEqual(4924, ex.Number);
         Assert.Contains("missing", ex.Message);
     }
 
@@ -729,8 +731,8 @@ public sealed class AlterTableColumnTests
             """);
         AreEqual("x", sim.ExecuteScalar("select v from t"));
         // CHECK constraint still enforced after the type change.
-        var ex = Throws<DbException>(() => sim.ExecuteNonQuery("insert t values (2, '')"));
-        AreEqual("547", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => sim.ExecuteNonQuery("insert t values (2, '')"));
+        AreEqual(547, ex.Number);
     }
 
     [TestMethod]

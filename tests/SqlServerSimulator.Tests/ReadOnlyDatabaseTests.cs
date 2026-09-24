@@ -111,7 +111,7 @@ public sealed class ReadOnlyDatabaseTests
             "create table dbo.t (id int)",
             "alter database current set read_only");
         var ex = simulation.AssertSqlError(create, 3906);
-        AreEqual("Failed to update database \"simulated\" because the database is read-only.", ex.Message);
+        AreEqual("Failed to update database \"simulated\" because the database is read-only.", ex.Errors[0].Message);
     }
 
     /// <summary>
@@ -225,7 +225,7 @@ public sealed class ReadOnlyDatabaseTests
     public void AlterTable_OnAReadOnlyDatabase_RaisesMsg3906AtState12(string statement)
     {
         var ex = WithReadOnlySelf().AssertSqlError(statement, 3906);
-        AreEqual(SelfRefusalMessage, ex.Message);
+        AreEqual(SelfRefusalMessage, ex.Errors[0].Message);
         AreEqual(12, ex.State);
     }
 

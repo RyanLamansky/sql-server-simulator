@@ -149,7 +149,7 @@ public sealed class CrossDatabasePermissionTests
         var ex = sim.AssertSqlError("use home; execute as user = 'homeuser'; select id from away.dbo.remote", 916);
         // The frame reports the impersonated user's login identity, which for a
         // FOR LOGIN user is the login name.
-        AreEqual("The server principal \"app\" is not able to access the database \"away\" under the current security context.", ex.Message);
+        AreEqual("The server principal \"app\" is not able to access the database \"away\" under the current security context.", ex.Errors[0].Message);
     }
 
     [TestMethod]
@@ -476,7 +476,7 @@ public sealed class CrossDatabasePermissionTests
         var ex = Throws<SimulatedSqlException>(() => connection.CreateCommand(
             "if exists (select * from away.dbo.remote) select 1 else select 0").ExecuteScalar());
         AreEqual(229, ex.Number);
-        AreEqual("The SELECT permission was denied on the object 'remote', database 'away', schema 'dbo'.", ex.Message);
+        AreEqual("The SELECT permission was denied on the object 'remote', database 'away', schema 'dbo'.", ex.Errors[0].Message);
     }
 
     [TestMethod]
@@ -537,7 +537,7 @@ public sealed class CrossDatabasePermissionTests
         CreateAwayUser(sim);
         _ = sim.ExecuteNonQuery("alter database home set trustworthy on");
         var ex = sim.AssertSqlError("use home; execute as user = 'homeuser'; select id from away.dbo.remote", 229);
-        AreEqual("The SELECT permission was denied on the object 'remote', database 'away', schema 'dbo'.", ex.Message);
+        AreEqual("The SELECT permission was denied on the object 'remote', database 'away', schema 'dbo'.", ex.Errors[0].Message);
     }
 
     [TestMethod]
@@ -546,7 +546,7 @@ public sealed class CrossDatabasePermissionTests
         var sim = TwoDatabaseFixture();
         _ = sim.ExecuteNonQuery("alter database home set trustworthy on");
         var ex = sim.AssertSqlError("use home; execute as user = 'homeuser'; select id from away.dbo.remote", 916);
-        AreEqual("The server principal \"app\" is not able to access the database \"away\" under the current security context.", ex.Message);
+        AreEqual("The server principal \"app\" is not able to access the database \"away\" under the current security context.", ex.Errors[0].Message);
     }
 
     [TestMethod]

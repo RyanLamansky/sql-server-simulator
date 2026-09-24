@@ -162,7 +162,7 @@ public sealed class MultiStatementTvfTests
         // bind reaches it through the same frame-less batch the invocation
         // uses, so the message arrives at the CREATE.
         using var connection = Open();
-        var ex = Throws<DbException>(() => connection.CreateCommand("""
+        var ex = Throws<SimulatedSqlException>(() => connection.CreateCommand("""
             create function dbo.fBadRet()
             returns @r table (Id int not null)
             as
@@ -170,7 +170,7 @@ public sealed class MultiStatementTvfTests
                 return 5;
             end
             """).ExecuteNonQuery());
-        AreEqual("178", ex.Data["HelpLink.EvtID"]);
+        AreEqual(178, ex.Number);
         AreEqual(0, connection.CreateCommand("select count(*) from sys.objects where name = 'fBadRet'").ExecuteScalar());
     }
 
@@ -193,8 +193,8 @@ public sealed class MultiStatementTvfTests
                 return;
             end
             """).ExecuteNonQuery();
-        var ex = Throws<DbException>(() => connection.CreateCommand("select * from dbo.fPk()").ExecuteReader().Read());
-        AreEqual("2627", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => connection.CreateCommand("select * from dbo.fPk()").ExecuteReader().Read());
+        AreEqual(2627, ex.Number);
     }
 
     [TestMethod]

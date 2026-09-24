@@ -162,7 +162,7 @@ public sealed class ApplyTests
     {
         // CROSS APPLY ... ON ... is not valid syntax (no ON for APPLY).
         using var connection = SeededBlogsPosts();
-        _ = Throws<DbException>(() =>
+        _ = Throws<SimulatedSqlException>(() =>
             _ = connection.CreateCommand(
                 "select 1 from blogs as b " +
                 "cross apply (select 1 from posts as p where p.blog_id = b.id) as p0 " +
@@ -173,7 +173,7 @@ public sealed class ApplyTests
     public void Apply_RequiresParenthesizedSelect()
     {
         using var connection = SeededBlogsPosts();
-        _ = Throws<DbException>(() =>
+        _ = Throws<SimulatedSqlException>(() =>
             _ = connection.CreateCommand(
                 "select 1 from blogs as b cross apply posts as p").ExecuteScalar());
     }
@@ -183,7 +183,7 @@ public sealed class ApplyTests
     {
         // OUTER alone (without LEFT/RIGHT/FULL preceding) only forms OUTER APPLY.
         using var connection = SeededBlogsPosts();
-        _ = Throws<DbException>(() =>
+        _ = Throws<SimulatedSqlException>(() =>
             _ = connection.CreateCommand(
                 "select 1 from blogs as b outer join posts as p on b.id = p.blog_id").ExecuteScalar());
     }

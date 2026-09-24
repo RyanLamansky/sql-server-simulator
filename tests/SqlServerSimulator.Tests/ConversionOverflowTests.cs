@@ -21,7 +21,7 @@ public sealed class ConversionOverflowTests
     public void Insert_IntIntoTinyint_RaisesMsg220WithValue()
     {
         var ex = new Simulation().AssertSqlError("create table t (c tinyint); insert t values (300)", 220);
-        AreEqual("Arithmetic overflow error for data type tinyint, value = 300.", ex.Message);
+        AreEqual("Arithmetic overflow error for data type tinyint, value = 300.", ex.Errors[0].Message);
         AreEqual((byte)2, ex.State);
     }
 
@@ -29,7 +29,7 @@ public sealed class ConversionOverflowTests
     public void Insert_IntIntoSmallint_RaisesMsg220State1()
     {
         var ex = new Simulation().AssertSqlError("create table t (c smallint); insert t values (70000)", 220);
-        AreEqual("Arithmetic overflow error for data type smallint, value = 70000.", ex.Message);
+        AreEqual("Arithmetic overflow error for data type smallint, value = 70000.", ex.Errors[0].Message);
         AreEqual((byte)1, ex.State);
     }
 
@@ -70,7 +70,7 @@ public sealed class ConversionOverflowTests
     {
         var ex = new Simulation().AssertSqlError(
             "create table t (c smallint); declare @m money = 70000; insert t values (@m)", 220);
-        AreEqual("Arithmetic overflow error for data type smallint, value = 700000000.", ex.Message);
+        AreEqual("Arithmetic overflow error for data type smallint, value = 700000000.", ex.Errors[0].Message);
         AreEqual((byte)7, ex.State);
     }
 

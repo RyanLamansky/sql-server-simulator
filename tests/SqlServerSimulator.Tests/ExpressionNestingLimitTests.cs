@@ -242,7 +242,7 @@ public sealed class ExpressionNestingLimitTests
         var ex = new Simulation().AssertSqlError($"select {NestedCase(11)}", 125);
         AreEqual(15, ex.Class);
         AreEqual(4, ex.State);
-        AreEqual("Case expressions may only be nested to level 10.", ex.Message);
+        AreEqual("Case expressions may only be nested to level 10.", ex.Errors[0].Message);
     }
 
     [TestMethod]

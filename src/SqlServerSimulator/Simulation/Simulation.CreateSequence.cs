@@ -39,6 +39,7 @@ partial class Simulation
         long? minValue = null;
         long? maxValue = null;
         var cycle = false;
+        long? cacheSize = null;
 
         while (context.MoveNext())
         {
@@ -72,9 +73,10 @@ partial class Simulation
                     {
                         // NO MIN/MAX/CYCLE/CACHE: parsed and treated as the
                         // default. NO CYCLE is explicit-default (sequence
-                        // stays no-cycle); NO CACHE is accepted (caching
-                        // isn't modeled anyway).
+                        // stays no-cycle); NO CACHE is kept for Msg 11729.
                         var afterNo = context.GetNextRequired();
+                        if (afterNo is UnquotedString { ContextualKeyword: ContextualKeyword.Cache })
+                            cacheSize = 0;
                         if (afterNo is not UnquotedString
                             {
                                 ContextualKeyword:
@@ -107,7 +109,7 @@ partial class Simulation
                             // followed. Restore and re-read so the helper
                             // sees CACHE as its anchor.
                             context.RestoreCheckpoint(afterCache);
-                            _ = ReadSignedIntegerLiteral(context);
+                            cacheSize = ReadSignedIntegerLiteral(context);
                         }
                         continue;
                     }
@@ -152,7 +154,10 @@ partial class Simulation
             increment,
             resolvedMin,
             resolvedMax,
-            cycle);
+            cycle)
+        {
+            CacheSize = cacheSize,
+        };
 
         // The object namespace is shared with tables / views / functions / procs;
         // duplicate names across kinds raise Msg 2714. Check cross-kind before

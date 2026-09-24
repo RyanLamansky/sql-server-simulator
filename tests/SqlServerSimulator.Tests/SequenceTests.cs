@@ -1,4 +1,3 @@
-using System.Data.Common;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 
 namespace SqlServerSimulator;
@@ -139,8 +138,8 @@ public sealed class SequenceTests
         AreEqual(1, simulation.ExecuteScalar<int>("select next value for s9"));
         AreEqual(2, simulation.ExecuteScalar<int>("select next value for s9"));
         AreEqual(3, simulation.ExecuteScalar<int>("select next value for s9"));
-        var ex = Throws<DbException>(() => simulation.ExecuteScalar("select next value for s9"));
-        AreEqual("11728", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => simulation.ExecuteScalar("select next value for s9"));
+        AreEqual(11728, ex.Number);
     }
 
     [TestMethod]
@@ -148,36 +147,36 @@ public sealed class SequenceTests
     {
         var simulation = new Simulation();
         _ = simulation.ExecuteNonQuery("create sequence sw as int start with 1");
-        var ex = Throws<DbException>(() => simulation.ExecuteScalar("select 1 where (next value for sw) > 0"));
-        AreEqual("11720", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => simulation.ExecuteScalar("select 1 where (next value for sw) > 0"));
+        AreEqual(11720, ex.Number);
     }
 
     [TestMethod]
     public void Create_IncrementZero_RaisesMsg11700()
     {
-        var ex = Throws<DbException>(() => new Simulation().ExecuteNonQuery("create sequence sz as int increment by 0"));
-        AreEqual("11700", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => new Simulation().ExecuteNonQuery("create sequence sz as int increment by 0"));
+        AreEqual(11700, ex.Number);
     }
 
     [TestMethod]
     public void Create_FloatType_RaisesMsg11702()
     {
-        var ex = Throws<DbException>(() => new Simulation().ExecuteNonQuery("create sequence sf as float"));
-        AreEqual("11702", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => new Simulation().ExecuteNonQuery("create sequence sf as float"));
+        AreEqual(11702, ex.Number);
     }
 
     [TestMethod]
     public void Create_DecimalWithScale_RaisesMsg11702()
     {
-        var ex = Throws<DbException>(() => new Simulation().ExecuteNonQuery("create sequence sd as decimal(10,2)"));
-        AreEqual("11702", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => new Simulation().ExecuteNonQuery("create sequence sd as decimal(10,2)"));
+        AreEqual(11702, ex.Number);
     }
 
     [TestMethod]
     public void Create_StartOutOfRange_RaisesMsg11703()
     {
-        var ex = Throws<DbException>(() => new Simulation().ExecuteNonQuery("create sequence sr as int start with 1 minvalue 10"));
-        AreEqual("11703", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => new Simulation().ExecuteNonQuery("create sequence sr as int start with 1 minvalue 10"));
+        AreEqual(11703, ex.Number);
     }
 
     [TestMethod]
@@ -185,15 +184,15 @@ public sealed class SequenceTests
     {
         var simulation = new Simulation();
         _ = simulation.ExecuteNonQuery("create sequence sdup as int");
-        var ex = Throws<DbException>(() => simulation.ExecuteNonQuery("create sequence sdup as int"));
-        AreEqual("2714", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => simulation.ExecuteNonQuery("create sequence sdup as int"));
+        AreEqual(2714, ex.Number);
     }
 
     [TestMethod]
     public void Drop_NonexistentWithoutIfExists_RaisesMsg3701()
     {
-        var ex = Throws<DbException>(() => new Simulation().ExecuteNonQuery("drop sequence does_not_exist"));
-        AreEqual("3701", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => new Simulation().ExecuteNonQuery("drop sequence does_not_exist"));
+        AreEqual(3701, ex.Number);
     }
 
     [TestMethod]
@@ -205,8 +204,8 @@ public sealed class SequenceTests
     {
         var simulation = new Simulation();
         _ = simulation.ExecuteNonQuery("create table tref (id int)");
-        var ex = Throws<DbException>(() => simulation.ExecuteScalar("select next value for tref"));
-        AreEqual("11726", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => simulation.ExecuteScalar("select next value for tref"));
+        AreEqual(11726, ex.Number);
     }
 
     [TestMethod]
@@ -256,8 +255,8 @@ public sealed class SequenceTests
         var simulation = new Simulation();
         _ = simulation.ExecuteNonQuery("create sequence sdr as int");
         _ = simulation.ExecuteNonQuery("drop sequence sdr");
-        var ex = Throws<DbException>(() => simulation.ExecuteScalar("select next value for sdr"));
-        AreEqual("208", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => simulation.ExecuteScalar("select next value for sdr"));
+        AreEqual(208, ex.Number);
     }
 
     /// <summary>
@@ -314,8 +313,8 @@ public sealed class SequenceTests
         _ = simulation.ExecuteNonQuery("create sequence sd as int start with 1 increment by 1 maxvalue 2 no cycle");
         AreEqual(1, simulation.ExecuteScalar<int>("select next value for sd"));
         AreEqual(2, simulation.ExecuteScalar<int>("select next value for sd"));
-        var ex = Throws<DbException>(() => simulation.ExecuteScalar("select next value for sd"));
-        AreEqual("11728", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => simulation.ExecuteScalar("select next value for sd"));
+        AreEqual(11728, ex.Number);
         _ = simulation.ExecuteNonQuery("alter sequence sd restart with 1");
         AreEqual(1, simulation.ExecuteScalar<int>("select next value for sd"));
     }

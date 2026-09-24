@@ -1,4 +1,3 @@
-using System.Data.Common;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 
 namespace SqlServerSimulator;
@@ -40,7 +39,7 @@ public class SimpleCommandTests
     [TestMethod]
     public void IncompleteSingleLineCommentCommand()
     {
-        _ = Throws<DbException>(() => new Simulation().ExecuteReader("-"));
+        _ = Throws<SimulatedSqlException>(() => new Simulation().ExecuteReader("-"));
     }
 
     [TestMethod]
@@ -93,7 +92,7 @@ public class SimpleCommandTests
     [TestMethod]
     public void MissingEndCommentMark()
     {
-        var x = Throws<DbException>(() => new Simulation().ExecuteScalar("/*"));
+        var x = Throws<SimulatedSqlException>(() => new Simulation().ExecuteScalar("/*"));
         AreEqual("Missing end comment mark '*/'.", x.Message);
     }
 }

@@ -583,10 +583,11 @@ partial class SimulatedSqlException
     /// <summary>
     /// Mimics SQL Server error 11728: a no-cycle sequence reached its
     /// boundary and a further <c>NEXT VALUE FOR</c> tried to advance past
-    /// it. Probe-confirmed verbatim wording.
+    /// it. Probe-confirmed verbatim wording; the name carries no schema, in
+    /// any schema (probed 2026-09-23).
     /// </summary>
-    internal static SimulatedSqlException SequenceExhausted(string fullName) =>
-        new($"The sequence object '{fullName}' has reached its minimum or maximum value. Restart the sequence object to allow new values to be generated.", 11728, 16, 1);
+    internal static SimulatedSqlException SequenceExhausted(string name) =>
+        new($"The sequence object '{name}' has reached its minimum or maximum value. Restart the sequence object to allow new values to be generated.", 11728, 16, 1);
 
     /// <summary>
     /// Mimics SQL Server error 219: <c>CREATE TYPE</c> targeted a name that
@@ -2199,8 +2200,7 @@ partial class SimulatedSqlException
     /// Mimics SQL Server error 515: <c>ALTER COLUMN</c> flipped a column to
     /// NOT NULL but at least one existing row holds NULL in that column.
     /// Probe-confirmed wording reuses the standard INSERT-NULL message
-    /// (<c>Cannot insert the value NULL into column 'X', table 'Y'</c>),
-    /// followed by the standard "statement has been terminated" line.
+    /// (<c>Cannot insert the value NULL into column 'X', table 'Y'</c>).
     /// </summary>
     internal static SimulatedSqlException AlterColumnNullInNonNullColumn(string columnName, string qualifiedTableName) =>
         new($"Cannot insert the value NULL into column '{columnName}', table '{qualifiedTableName}'; column does not allow nulls. UPDATE fails.", 515, 16, 2);

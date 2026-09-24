@@ -1,4 +1,3 @@
-using System.Data.Common;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 using static SqlServerSimulator.TestHelpers;
 
@@ -156,8 +155,8 @@ public sealed class VariableTests
     {
         using var conn = new Simulation().CreateOpenConnection();
         using var cmd = conn.CreateCommand("declare @x int = 99; select @x", ("@x", 1));
-        var ex = Throws<DbException>(cmd.ExecuteScalar);
-        AreEqual("134", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(cmd.ExecuteScalar);
+        AreEqual(134, ex.Number);
     }
 
     [TestMethod]

@@ -1445,7 +1445,7 @@ partial class Simulation
         foreach (var (ord, expr) in clause.Assignments!)
         {
             var raw = expr.Run(new RuntimeContext(name => resolveCombined(targetValues, sourceValues, name), context.Batch));
-            EnforceMaxLength(raw, destinationTable.Columns[ord], destinationTable.Name, context.Connection);
+            EnforceMaxLength(raw, destinationTable.Columns[ord], destinationTable, context.Connection);
             newValues[ord] = CoerceForInsert(raw, destinationTable.Columns[ord]);
         }
 
@@ -1538,7 +1538,7 @@ partial class Simulation
                 }
             }
             var source = clause.InsertValues![i].Run(new RuntimeContext(name => resolveCombined(null, sourceValues, name), context.Batch));
-            EnforceMaxLength(source, targetColumn, destinationTable.Name, context.Connection);
+            EnforceMaxLength(source, targetColumn, destinationTable, context.Connection);
             var coerced = CoerceForInsert(source, targetColumn);
             rowValues[ordinal] = coerced;
 

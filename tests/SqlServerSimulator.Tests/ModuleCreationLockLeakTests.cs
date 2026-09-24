@@ -78,7 +78,7 @@ public sealed class ModuleCreationLockLeakTests
     {
         var sim = Seeded();
         // Msg 4514: an inline TVF's projection column has no name.
-        _ = Throws<DbException>(() => sim.ExecuteNonQuery(
+        _ = Throws<SimulatedSqlException>(() => sim.ExecuteNonQuery(
             "create function dbo.f_bad (@x int) returns table as return (select a.id + 1 from t_a a)"));
         AreEqual(0, ResidualLocks(sim));
     }
@@ -163,12 +163,12 @@ public sealed class LockWaitCommandTimeoutTests
         using var command = blocked.CreateCommand("insert t values (2)");
         command.CommandTimeout = 1;
         var started = Stopwatch.StartNew();
-        var ex = Throws<DbException>(() => command.ExecuteNonQuery());
+        var ex = Throws<SimulatedSqlException>(() => command.ExecuteNonQuery());
         started.Stop();
 
         // Msg -2 is SqlClient's timeout surface, the same split the command
         // layer already makes between a timeout and a caller's Cancel().
-        AreEqual("-2", ex.Data["HelpLink.EvtID"]);
+        AreEqual(-2, ex.Number);
         // It has to have actually waited, and not run far past the deadline.
         IsGreaterThanOrEqualTo(TimeSpan.FromMilliseconds(500), started.Elapsed);
         IsLessThan(TimeSpan.FromSeconds(20), started.Elapsed);
@@ -189,8 +189,8 @@ public sealed class LockWaitCommandTimeoutTests
         _ = blocked.CreateCommand("set lock_timeout 200").ExecuteNonQuery();
         using var command = blocked.CreateCommand("insert t values (2)");
         command.CommandTimeout = 30;
-        var ex = Throws<DbException>(() => command.ExecuteNonQuery());
-        AreEqual("1222", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => command.ExecuteNonQuery());
+        AreEqual(1222, ex.Number);
 
         _ = holder.CreateCommand("rollback").ExecuteNonQuery();
     }

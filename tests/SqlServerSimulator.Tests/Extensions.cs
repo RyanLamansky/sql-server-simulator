@@ -121,11 +121,11 @@ static class Extensions
 
     public static void ValidateSyntaxError(this Simulation simulation, string commandText, string nearSyntax)
     {
-        var exception = Assert.Throws<DbException>(() => simulation.ExecuteScalar(commandText));
+        var exception = Assert.Throws<SimulatedSqlException>(() => simulation.ExecuteScalar(commandText));
 
-        Assert.AreEqual($"Incorrect syntax near '{nearSyntax}'.", exception.Message);
+        Assert.AreEqual($"Incorrect syntax near '{nearSyntax}'.", exception.Errors[0].Message);
 
-        // The following checks verify that the DbException matches what Microsoft.Data.SqlClient produces.
+        // The following checks verify that the exception's DbException surface matches what Microsoft.Data.SqlClient produces.
         Assert.AreEqual(unchecked((int)0x80131904), exception.HResult);
         Assert.AreEqual(unchecked((int)0x80131904), exception.ErrorCode);
         Assert.AreEqual("Core Microsoft SqlClient Data Provider", exception.Source);
@@ -164,12 +164,16 @@ static class Extensions
     }
 
     /// <summary>
-    /// Exact-message variant of <see cref="AssertSqlError(Simulation, string, int)"/>.
+    /// Exact-message variant of <see cref="AssertSqlError(Simulation, string, int)"/>,
+    /// comparing the text of the error <paramref name="errorNumber"/> names —
+    /// <c>Errors[0]</c>. The exception's own <c>Message</c> joins every entry
+    /// the batch sent after it too (Msg 3621, a following <c>PRINT</c>), as
+    /// SqlClient's does; <c>MessageStreamTests</c> covers that composition.
     /// </summary>
     public static void AssertSqlError(this Simulation simulation, string commandText, int errorNumber, string expectedMessage)
     {
         var ex = simulation.AssertSqlError(commandText, errorNumber);
-        Assert.AreEqual(expectedMessage, ex.Message);
+        Assert.AreEqual(expectedMessage, ex.Errors[0].Message);
     }
 
     /// <summary>

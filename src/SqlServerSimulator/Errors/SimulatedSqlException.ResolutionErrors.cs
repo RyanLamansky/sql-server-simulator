@@ -180,6 +180,15 @@ partial class SimulatedSqlException
         new($"Procedure or function '{procedureName}' expects parameter '@{parameterName}', which was not supplied.", 201, 16, 4);
 
     /// <summary>
+    /// Mimics SQL Server's Msg 8145 — an EXEC named an argument the procedure
+    /// has no parameter for, every required parameter being supplied (a
+    /// missing one is Msg 201 instead). Probed 2026-09-23 against SQL Server
+    /// 2025.
+    /// </summary>
+    internal static SimulatedSqlException NotAParameterForProcedure(string parameterName, string procedureName) =>
+        new($"@{parameterName} is not a parameter for procedure {procedureName}.", 8145, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server's Msg 8143 — a single EXEC supplied the same named
     /// argument twice. State 1, exact wording probe-confirmed.
     /// </summary>
@@ -277,10 +286,7 @@ partial class SimulatedSqlException
     /// in the view. Triggers a per-row check after the row is constructed
     /// (INSERT) or computed (UPDATE) against every CHECK OPTION-bearing
     /// level in the view chain; any miss raises this. Probe-confirmed
-    /// verbatim against SQL Server 2025; real SQL Server also fires the
-    /// follow-on Msg 3621 "The statement has been terminated" — the
-    /// simulator surfaces Msg 550 alone (Msg 3621 is the wrapper, not
-    /// load-bearing).
+    /// verbatim against SQL Server 2025.
     /// </summary>
     internal static SimulatedSqlException ViewCheckOptionViolation() =>
         new("The attempted insert or update failed because the target view either specifies WITH CHECK OPTION or spans a view that specifies WITH CHECK OPTION and one or more rows resulting from the operation did not qualify under the CHECK OPTION constraint.", 550, 16, 1);

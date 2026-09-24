@@ -1,4 +1,3 @@
-using System.Data.Common;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 using static SqlServerSimulator.TestHelpers;
 
@@ -67,23 +66,23 @@ public sealed class DatePartTests
     [TestMethod]
     public void DatePart_UnknownKeyword_RaisesMsg155()
     {
-        var ex = Throws<DbException>(() => ExecuteScalar("select datepart(badpart, getdate())"));
+        var ex = Throws<SimulatedSqlException>(() => ExecuteScalar("select datepart(badpart, getdate())"));
         AreEqual("'badpart' is not a recognized datepart option.", ex.Message);
-        AreEqual("155", ex.Data["HelpLink.EvtID"]);
+        AreEqual(155, ex.Number);
     }
 
     [TestMethod]
     public void DatePart_HourOnDate_RaisesMsg9810()
     {
-        var ex = Throws<DbException>(() => ExecuteScalar("select datepart(hour, cast('2024-06-15' as date))"));
+        var ex = Throws<SimulatedSqlException>(() => ExecuteScalar("select datepart(hour, cast('2024-06-15' as date))"));
         AreEqual("The datepart hour is not supported by date function datepart for data type date.", ex.Message);
-        AreEqual("9810", ex.Data["HelpLink.EvtID"]);
+        AreEqual(9810, ex.Number);
     }
 
     [TestMethod]
     public void DatePart_YearOnTime_RaisesMsg9810()
     {
-        var ex = Throws<DbException>(() => ExecuteScalar("select datepart(year, cast('13:45:30' as time))"));
+        var ex = Throws<SimulatedSqlException>(() => ExecuteScalar("select datepart(year, cast('13:45:30' as time))"));
         AreEqual("The datepart year is not supported by date function datepart for data type time.", ex.Message);
     }
 
@@ -118,24 +117,24 @@ public sealed class DatePartTests
     [TestMethod]
     public void DateAdd_HourOnDate_RaisesMsg9810()
     {
-        var ex = Throws<DbException>(() => ExecuteScalar("select dateadd(hour, 1, cast('2024-06-15' as date))"));
+        var ex = Throws<SimulatedSqlException>(() => ExecuteScalar("select dateadd(hour, 1, cast('2024-06-15' as date))"));
         AreEqual("The datepart hour is not supported by date function dateadd for data type date.", ex.Message);
-        AreEqual("9810", ex.Data["HelpLink.EvtID"]);
+        AreEqual(9810, ex.Number);
     }
 
     [TestMethod]
     public void DateAdd_DayOnTime_RaisesMsg9810()
     {
-        var ex = Throws<DbException>(() => ExecuteScalar("select dateadd(day, 1, cast('13:45' as time))"));
+        var ex = Throws<SimulatedSqlException>(() => ExecuteScalar("select dateadd(day, 1, cast('13:45' as time))"));
         AreEqual("The datepart day is not supported by date function dateadd for data type time.", ex.Message);
     }
 
     [TestMethod]
     public void DateAdd_YearOverflowOnDate_RaisesMsg517()
     {
-        var ex = Throws<DbException>(() => ExecuteScalar("select dateadd(year, 100000, cast('2024-06-15' as date))"));
+        var ex = Throws<SimulatedSqlException>(() => ExecuteScalar("select dateadd(year, 100000, cast('2024-06-15' as date))"));
         AreEqual("Adding a value to a 'date' column caused an overflow.", ex.Message);
-        AreEqual("517", ex.Data["HelpLink.EvtID"]);
+        AreEqual(517, ex.Number);
     }
 
     [TestMethod]

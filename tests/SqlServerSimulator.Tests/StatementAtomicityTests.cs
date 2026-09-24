@@ -27,7 +27,7 @@ public sealed class StatementAtomicityTests
         // First row inserts (id=1); second row violates PK. SQL Server rolls
         // back the entire statement → 0 rows. Without statement atomicity the
         // simulator would have left (1, 100) behind.
-        _ = Throws<DbException>(() =>
+        _ = Throws<SimulatedSqlException>(() =>
             _ = connection.CreateCommand("insert t values (1, 100), (1, 200), (3, 300)").ExecuteNonQuery());
         AreEqual(0, CountRows(connection, "t"));
     }
@@ -38,7 +38,7 @@ public sealed class StatementAtomicityTests
         using var connection = new Simulation().CreateOpenConnection();
         _ = connection.CreateCommand("create table t (id int, val int check (val < 100))").ExecuteNonQuery();
 
-        _ = Throws<DbException>(() =>
+        _ = Throws<SimulatedSqlException>(() =>
             _ = connection.CreateCommand("insert t values (1, 50), (2, 150), (3, 80)").ExecuteNonQuery());
         AreEqual(0, CountRows(connection, "t"));
     }
@@ -49,7 +49,7 @@ public sealed class StatementAtomicityTests
         using var connection = new Simulation().CreateOpenConnection();
         _ = connection.CreateCommand("create table t (id int, val int not null)").ExecuteNonQuery();
 
-        _ = Throws<DbException>(() =>
+        _ = Throws<SimulatedSqlException>(() =>
             _ = connection.CreateCommand("insert t values (1, 10), (2, null), (3, 30)").ExecuteNonQuery());
         AreEqual(0, CountRows(connection, "t"));
     }
@@ -65,7 +65,7 @@ public sealed class StatementAtomicityTests
             insert t values (1, 10), (2, 20), (3, 30)
             """).ExecuteNonQuery();
 
-        _ = Throws<DbException>(() =>
+        _ = Throws<SimulatedSqlException>(() =>
             _ = connection.CreateCommand("update t set id = 99 where id < 3").ExecuteNonQuery());
 
         // All three pre-update rows visible; no row got the new id=99.
@@ -102,7 +102,7 @@ public sealed class StatementAtomicityTests
             insert t values (5, 500)
             """).ExecuteNonQuery();
 
-        _ = Throws<DbException>(() =>
+        _ = Throws<SimulatedSqlException>(() =>
             _ = connection.CreateCommand(
                 "merge into t using (values (1, 10), (5, 50), (3, 30)) as src(id, val) " +
                 "on 1 = 0 " +
@@ -128,7 +128,7 @@ public sealed class StatementAtomicityTests
 
         // Second insert violates CHECK; statement rolls back. Identity should
         // still have advanced (the value 2 is "consumed" and gapped).
-        _ = Throws<DbException>(() =>
+        _ = Throws<SimulatedSqlException>(() =>
             _ = connection.CreateCommand("insert t (val) values (200)").ExecuteNonQuery());
 
         // Third insert: id should be 3, not 2 (matching SQL Server's gap behavior).
@@ -155,7 +155,7 @@ public sealed class StatementAtomicityTests
         // before the PK check rolls it back. A statement refused while binding
         // — a bad value count, or an explicit value for `rv` — would never
         // reach the counter at all.
-        _ = Throws<DbException>(() =>
+        _ = Throws<SimulatedSqlException>(() =>
             _ = connection.CreateCommand("insert t (id) values (1)").ExecuteNonQuery());
 
         _ = connection.CreateCommand("insert t (id) values (3)").ExecuteNonQuery();
@@ -178,7 +178,7 @@ public sealed class StatementAtomicityTests
             insert t values (1)
             """).ExecuteNonQuery();
 
-        _ = Throws<DbException>(() =>
+        _ = Throws<SimulatedSqlException>(() =>
             _ = connection.CreateCommand("insert t values (2), (1), (3)").ExecuteNonQuery());
 
         // A subsequent legitimate insert succeeds.

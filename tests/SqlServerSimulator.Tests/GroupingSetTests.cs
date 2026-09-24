@@ -218,8 +218,8 @@ public sealed class GroupingSetTests
         // Msg 8161 (same as when arg isn't in GROUP BY).
         using var conn = SeededSales();
         using var cmd = conn.CreateCommand("select grouping(region) from sales");
-        var ex = Throws<DbException>(() => cmd.ExecuteReader().Read());
-        AreEqual("8161", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => cmd.ExecuteReader().Read());
+        AreEqual(8161, ex.Number);
         AreEqual(
             "Argument 1 of the GROUPING function does not match any of the expressions in the GROUP BY clause.",
             ex.Message);
@@ -233,8 +233,8 @@ public sealed class GroupingSetTests
         using var conn = SeededSales();
         using var cmd = conn.CreateCommand(
             "select region, grouping(product) from sales group by region");
-        var ex = Throws<DbException>(() => cmd.ExecuteReader().Read());
-        AreEqual("8161", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => cmd.ExecuteReader().Read());
+        AreEqual(8161, ex.Number);
     }
 
     private static DbConnection SeededExpr()
@@ -314,8 +314,8 @@ public sealed class GroupingSetTests
         using var conn = SeededExpr();
         using var cmd = conn.CreateCommand(
             "select grouping(1 + a) g from t group by rollup(a + 1)");
-        var ex = Throws<DbException>(() => cmd.ExecuteReader().Read());
-        AreEqual("8161", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => cmd.ExecuteReader().Read());
+        AreEqual(8161, ex.Number);
     }
 
     [TestMethod]
@@ -350,8 +350,8 @@ public sealed class GroupingSetTests
         using var conn = SeededExpr();
         using var cmd = conn.CreateCommand(
             "select grouping(a + 2) g from t group by rollup(a + 1)");
-        var ex = Throws<DbException>(() => cmd.ExecuteReader().Read());
-        AreEqual("8161", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => cmd.ExecuteReader().Read());
+        AreEqual(8161, ex.Number);
     }
 
     [TestMethod]
@@ -616,8 +616,8 @@ public sealed class GroupingSetTests
     public void WindowOverGroupingSets_BindingRejections(string sql, int errorNumber)
     {
         using var conn = SeededSales();
-        var ex = Throws<DbException>(() => _ = conn.CreateCommand(sql).ExecuteScalar());
-        AreEqual(errorNumber.ToString(), ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => _ = conn.CreateCommand(sql).ExecuteScalar());
+        AreEqual(errorNumber, ex.Number);
     }
 
     /// <summary>

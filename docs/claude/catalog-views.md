@@ -497,8 +497,7 @@ Probed *inlineable* despite looking otherwise, so deliberately not disqualifying
     `TrimTrailingBlanks` reports `no` for `char` / `varchar` / `binary` / `varbinary` / `sql_variant` (ANSI_PADDING is always on) and `(n/a)` elsewhere — including `nchar` / `nvarchar`, matching real; `FixedLenNullInSource` reports the nullability for `char` / `varchar` / `binary` / `varbinary` and `(n/a)` elsewhere.
   - **Divergences.** An error one of these procs raises aborts the whole batch here; on real it is `raiserror` inside a procedure, so the proc returns and the **batch continues** (probe-confirmed for Msg 15009 / 15010 / 15330).
     This holds for the whole family, `sp_helpstats` and `sp_helprotect` included.
-    Real interleaves `print ' '` blanks between its result sets; the simulator omits them, since they carry no data and the batch-wide info-message coalescing would merge them into the meaningful severity-10 text.
-    Those severity-10 messages carry class 10 rather than the class 0 real's wire maps severity ≤ 10 to — the simulator's existing `RAISERROR` severity-to-class convention, shared with `PRINT`.
+    Real interleaves `print ' '` blanks between its result sets; the simulator omits them.
     The no-argument object list projects **user** objects and their constraints only; real also lists the ~2000 `sys` objects, the same user-object-parity shortcut `sp_stored_procedures` takes.
     `Owner` is `dbo` for every user schema (schemas carry no principal model) and the schema name for `sys` / `INFORMATION_SCHEMA`.
     `Table is referenced by views` lists the schema-bound views the simulator tracks as dependencies (indexed views); a non-indexed schema-bound view isn't tracked, so it falls to Msg 15647.

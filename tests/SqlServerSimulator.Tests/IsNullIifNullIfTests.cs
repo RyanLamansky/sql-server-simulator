@@ -1,4 +1,3 @@
-using System.Data.Common;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 using static SqlServerSimulator.TestHelpers;
 
@@ -24,7 +23,7 @@ public sealed class IsNullIifNullIfTests
     [TestMethod]
     public void IsNull_NullFirst_NonNumericString_RaisesMsg245()
     {
-        var ex = Throws<DbException>(() => ExecuteScalar("select isnull(cast(null as int), 'abc')"));
+        var ex = Throws<SimulatedSqlException>(() => ExecuteScalar("select isnull(cast(null as int), 'abc')"));
         StartsWith("Conversion failed when converting the varchar value 'abc'", ex.Message);
     }
 
@@ -52,17 +51,17 @@ public sealed class IsNullIifNullIfTests
     [TestMethod]
     public void IsNull_OneArg_RaisesMsg174()
     {
-        var ex = Throws<DbException>(() => ExecuteScalar("select isnull(5)"));
+        var ex = Throws<SimulatedSqlException>(() => ExecuteScalar("select isnull(5)"));
         AreEqual("The isnull function requires 2 argument(s).", ex.Message);
-        AreEqual("174", ex.Data["HelpLink.EvtID"]);
+        AreEqual(174, ex.Number);
     }
 
     [TestMethod]
     public void IsNull_ThreeArgs_RaisesMsg174()
     {
-        var ex = Throws<DbException>(() => ExecuteScalar("select isnull(null, null, 1)"));
+        var ex = Throws<SimulatedSqlException>(() => ExecuteScalar("select isnull(null, null, 1)"));
         AreEqual("The isnull function requires 2 argument(s).", ex.Message);
-        AreEqual("174", ex.Data["HelpLink.EvtID"]);
+        AreEqual(174, ex.Number);
     }
 
     [TestMethod]
@@ -146,13 +145,13 @@ public sealed class IsNullIifNullIfTests
     [TestMethod]
     public void Iif_TwoArgs_RaisesSyntax()
     {
-        _ = Throws<DbException>(() => ExecuteScalar("select iif(1=1, 'a')"));
+        _ = Throws<SimulatedSqlException>(() => ExecuteScalar("select iif(1=1, 'a')"));
     }
 
     [TestMethod]
     public void Iif_FourArgs_RaisesSyntax()
     {
-        _ = Throws<DbException>(() => ExecuteScalar("select iif(1=1, 'a', 'b', 'c')"));
+        _ = Throws<SimulatedSqlException>(() => ExecuteScalar("select iif(1=1, 'a', 'b', 'c')"));
     }
 
     [TestMethod]
@@ -204,13 +203,13 @@ public sealed class IsNullIifNullIfTests
     [TestMethod]
     public void NullIf_OneArg_RaisesSyntax()
     {
-        _ = Throws<DbException>(() => ExecuteScalar("select nullif(5)"));
+        _ = Throws<SimulatedSqlException>(() => ExecuteScalar("select nullif(5)"));
     }
 
     [TestMethod]
     public void NullIf_ThreeArgs_RaisesSyntax()
     {
-        _ = Throws<DbException>(() => ExecuteScalar("select nullif(1, 2, 3)"));
+        _ = Throws<SimulatedSqlException>(() => ExecuteScalar("select nullif(1, 2, 3)"));
     }
 
     // === Msg 8133 via IIF: IIF desugars to CASE so all-bare-NULL arms ===

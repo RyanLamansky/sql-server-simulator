@@ -155,7 +155,7 @@ public sealed class CollationCodePageTests
         sim.AssertSqlError(
             "insert t values (N'こんにちは')",
             2628,
-            "String or binary data would be truncated in table 't', column 'v'. Truncated value: 'こん'.");
+            "String or binary data would be truncated in table 'simulated.dbo.t', column 'v'. Truncated value: 'こん'.");
     }
 
     /// <summary>

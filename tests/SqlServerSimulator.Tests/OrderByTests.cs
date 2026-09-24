@@ -129,7 +129,7 @@ public class OrderByTests
     {
         using var connection = new Simulation().CreateOpenConnection();
         _ = connection.CreateCommand("create table t ( v int )").ExecuteNonQuery();
-        var ex = Throws<DbException>(() =>
+        var ex = Throws<SimulatedSqlException>(() =>
             connection.CreateCommand("select v from t order by 0").ExecuteReader().Read());
         AreEqual("The ORDER BY position number 0 is out of range of the number of items in the select list.", ex.Message);
     }
@@ -139,7 +139,7 @@ public class OrderByTests
     {
         using var connection = new Simulation().CreateOpenConnection();
         _ = connection.CreateCommand("create table t ( v int )").ExecuteNonQuery();
-        var ex = Throws<DbException>(() =>
+        var ex = Throws<SimulatedSqlException>(() =>
             connection.CreateCommand("select v from t order by 5").ExecuteReader().Read());
         AreEqual("The ORDER BY position number 5 is out of range of the number of items in the select list.", ex.Message);
     }

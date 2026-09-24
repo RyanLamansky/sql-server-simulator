@@ -139,4 +139,59 @@ public sealed class InfoMessageTests
         Contains("mid", messages);
         CollectionAssert.AreEqual(new[] { 1, 2 }, values);
     }
+
+    /// <summary>
+    /// Each message is its own INFO token, reaching SqlClient as its own event
+    /// in place: before the first result set, between result sets, and — for
+    /// Msg 8153 — ahead of the aggregate's DONE, so it fires before the next
+    /// statement's PRINT (probed 2026-09-23 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public async Task Messages_ArriveOnePerEventInPlace()
+    {
+        var simulation = new Simulation();
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+        var log = new List<string>();
+        connection.InfoMessage += (_, e) => log.Add($"{e.Errors.Count}:{e.Errors[0].Number}:{e.Errors[0].Class}:{e.Message}");
+
+        await using var command = new SqlCommand(
+            "print 'a'; raiserror('b', 10, 1); select sum(x) from (values (cast(null as int))) v(x); print 'c'",
+            connection);
+        await using (var reader = await command.ExecuteReaderAsync(TestContext.CancellationToken))
+        {
+            log.Add("returned");
+            while (await reader.NextResultAsync(TestContext.CancellationToken))
+            {
+            }
+        }
+
+        CollectionAssert.AreEqual(
+            new[]
+            {
+                "1:0:0:a",
+                "1:50000:0:b",
+                "returned",
+                "1:8153:0:Warning: Null value is eliminated by an aggregate or other SET operation.",
+                "1:0:0:c",
+            },
+            log);
+    }
+
+    /// <summary>
+    /// A statement-terminating DML error is followed by Msg 3621, which
+    /// SqlClient folds into the exception after the error.
+    /// </summary>
+    [TestMethod]
+    public async Task DmlError_CarriesStatementTerminated()
+    {
+        var simulation = new Simulation();
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+
+        await using var command = new SqlCommand("create table t (a int primary key); insert t values (1); insert t values (1)", connection);
+        var ex = await ThrowsAsync<SqlException>(() => command.ExecuteNonQueryAsync(TestContext.CancellationToken));
+        CollectionAssert.AreEqual(new[] { 2627, 3621 }, ex.Errors.Cast<SqlError>().Select(e => e.Number).ToArray());
+        AreEqual(0, ex.Errors[1].Class);
+    }
 }

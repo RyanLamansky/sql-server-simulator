@@ -1,4 +1,3 @@
-using System.Data.Common;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 
 namespace SqlServerSimulator;
@@ -333,7 +332,7 @@ public sealed class CollationMetadataTests
 
     [TestMethod]
     public void DatabasePropertyEx_MissingCloseParen_RaisesSyntaxError()
-        => _ = Throws<DbException>(() => new Simulation().ExecuteScalar(
+        => _ = Throws<SimulatedSqlException>(() => new Simulation().ExecuteScalar(
             "SELECT DATABASEPROPERTYEX('simulated', 'Status' extra"));
 
     // === COLLATIONPROPERTY(collation_name, property) ===

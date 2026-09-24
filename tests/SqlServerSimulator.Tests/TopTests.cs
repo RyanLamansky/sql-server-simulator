@@ -98,16 +98,16 @@ public class TopTests
         var sim = new Simulation();
         _ = sim.ExecuteNonQuery("create table t (v int)");
         _ = sim.ExecuteNonQuery("insert t values (1)");
-        var ex = Throws<System.Data.Common.DbException>(() => sim.ExecuteScalar("select top (v) v from t"));
-        AreEqual("4115", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => sim.ExecuteScalar("select top (v) v from t"));
+        AreEqual(4115, ex.Number);
     }
 
     [TestMethod]
     public void Top_NonIntegerExpression_RaisesMsg1060()
     {
         // TOP requires an integer; a string-typed expression triggers Msg 1060.
-        var ex = Throws<System.Data.Common.DbException>(() => new Simulation().ExecuteScalar("select top ('abc') 1"));
-        AreEqual("1060", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => new Simulation().ExecuteScalar("select top ('abc') 1"));
+        AreEqual(1060, ex.Number);
     }
 
     /// <summary>
@@ -125,8 +125,8 @@ public class TopTests
     {
         var sim = new Simulation();
         _ = sim.ExecuteNonQuery("create table t (v int)");
-        var ex = Throws<System.Data.Common.DbException>(() => sim.ExecuteScalar(commandText));
-        AreEqual("102", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => sim.ExecuteScalar(commandText));
+        AreEqual(102, ex.Number);
         AreEqual($"Incorrect syntax near '{operatorCharacter}'.", ex.Message);
     }
 

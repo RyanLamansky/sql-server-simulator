@@ -1,5 +1,3 @@
-using System.Data.Common;
-
 namespace SqlServerSimulator;
 
 /// <summary>
@@ -24,12 +22,12 @@ public sealed class CheckConstraintTests
     [TestMethod]
     public void Check_Inline_RejectsViolatingRow_RaisesMsg547()
     {
-        var ex = Assert.Throws<DbException>(() => new Simulation().ExecuteNonQuery("""
+        var ex = Assert.Throws<SimulatedSqlException>(() => new Simulation().ExecuteNonQuery("""
             create table t (qty int constraint ck_qty check (qty > 0));
             insert t values (-1)
             """));
-        Assert.AreEqual("The INSERT statement conflicted with the CHECK constraint \"ck_qty\". The conflict occurred in database \"simulated\", table \"dbo.t\", column 'qty'.", ex.Message);
-        Assert.AreEqual("547", ex.Data["HelpLink.EvtID"]);
+        Assert.AreEqual("The INSERT statement conflicted with the CHECK constraint \"ck_qty\". The conflict occurred in database \"simulated\", table \"dbo.t\", column 'qty'.", ex.Errors[0].Message);
+        Assert.AreEqual(547, ex.Number);
     }
 
     [TestMethod]
@@ -38,11 +36,11 @@ public sealed class CheckConstraintTests
         // Table-level CHECK references multiple columns and produces a
         // simpler Msg 547 (no "column 'X'" suffix), matching SQL Server's
         // wording.
-        var ex = Assert.Throws<DbException>(() => new Simulation().ExecuteNonQuery("""
+        var ex = Assert.Throws<SimulatedSqlException>(() => new Simulation().ExecuteNonQuery("""
             create table t (a int, b int, constraint ck_ab check (a < b));
             insert t values (5, 2)
             """));
-        Assert.AreEqual("The INSERT statement conflicted with the CHECK constraint \"ck_ab\". The conflict occurred in database \"simulated\", table \"dbo.t\".", ex.Message);
+        Assert.AreEqual("The INSERT statement conflicted with the CHECK constraint \"ck_ab\". The conflict occurred in database \"simulated\", table \"dbo.t\".", ex.Errors[0].Message);
     }
 
     [TestMethod]
@@ -67,10 +65,10 @@ public sealed class CheckConstraintTests
             insert t values (1, 1)
             """);
 
-        var failLeft = Assert.Throws<DbException>(() => simulation.ExecuteNonQuery("insert t values (-1, 5)"));
-        Assert.AreEqual("547", failLeft.Data["HelpLink.EvtID"]);
-        var failRight = Assert.Throws<DbException>(() => simulation.ExecuteNonQuery("insert t values (5, -1)"));
-        Assert.AreEqual("547", failRight.Data["HelpLink.EvtID"]);
+        var failLeft = Assert.Throws<SimulatedSqlException>(() => simulation.ExecuteNonQuery("insert t values (-1, 5)"));
+        Assert.AreEqual(547, failLeft.Number);
+        var failRight = Assert.Throws<SimulatedSqlException>(() => simulation.ExecuteNonQuery("insert t values (5, -1)"));
+        Assert.AreEqual(547, failRight.Number);
     }
 
     [TestMethod]
@@ -82,8 +80,8 @@ public sealed class CheckConstraintTests
             insert t values (5, -1), (-1, 5)
             """);
 
-        var ex = Assert.Throws<DbException>(() => simulation.ExecuteNonQuery("insert t values (-1, -1)"));
-        Assert.AreEqual("547", ex.Data["HelpLink.EvtID"]);
+        var ex = Assert.Throws<SimulatedSqlException>(() => simulation.ExecuteNonQuery("insert t values (-1, -1)"));
+        Assert.AreEqual(547, ex.Number);
     }
 
     [TestMethod]
@@ -95,8 +93,8 @@ public sealed class CheckConstraintTests
             insert t values (1), (-1)
             """);
 
-        var ex = Assert.Throws<DbException>(() => simulation.ExecuteNonQuery("insert t values (0)"));
-        Assert.AreEqual("547", ex.Data["HelpLink.EvtID"]);
+        var ex = Assert.Throws<SimulatedSqlException>(() => simulation.ExecuteNonQuery("insert t values (0)"));
+        Assert.AreEqual(547, ex.Number);
     }
 
     [TestMethod]
@@ -105,7 +103,7 @@ public sealed class CheckConstraintTests
         // Auto-name shape for inline CHECK: CK__<table8>__<col8>__<8 hex>.
         // Test asserts on prefix, leaving the 8-hex suffix unspecified
         // (deterministic FNV hash; cosmetic).
-        var ex = Assert.Throws<DbException>(() => new Simulation().ExecuteNonQuery("""
+        var ex = Assert.Throws<SimulatedSqlException>(() => new Simulation().ExecuteNonQuery("""
             create table t (qty int check (qty > 0));
             insert t values (-1)
             """));
@@ -115,7 +113,7 @@ public sealed class CheckConstraintTests
     [TestMethod]
     public void Check_Unnamed_TableLevel_AutoNameOmitsColumn()
     {
-        var ex = Assert.Throws<DbException>(() => new Simulation().ExecuteNonQuery("""
+        var ex = Assert.Throws<SimulatedSqlException>(() => new Simulation().ExecuteNonQuery("""
             create table t (a int, b int, check (a < b));
             insert t values (5, 2)
             """));
@@ -134,9 +132,9 @@ public sealed class CheckConstraintTests
             insert t values (5, 50)
             """);
 
-        var failA = Assert.Throws<DbException>(() => simulation.ExecuteNonQuery("insert t values (-1, 50)"));
+        var failA = Assert.Throws<SimulatedSqlException>(() => simulation.ExecuteNonQuery("insert t values (-1, 50)"));
         Assert.Contains("ck_a", failA.Message);
-        var failB = Assert.Throws<DbException>(() => simulation.ExecuteNonQuery("insert t values (5, 200)"));
+        var failB = Assert.Throws<SimulatedSqlException>(() => simulation.ExecuteNonQuery("insert t values (5, 200)"));
         Assert.Contains("ck_b", failB.Message);
     }
 
@@ -148,8 +146,8 @@ public sealed class CheckConstraintTests
             create table t (a int, b int, constraint ck check ((a > 0 or b > 0) and a + b < 100));
             insert t values (5, -1)
             """);
-        var ex = Assert.Throws<DbException>(() => simulation.ExecuteNonQuery("insert t values (50, 60)"));
-        Assert.AreEqual("547", ex.Data["HelpLink.EvtID"]);
+        var ex = Assert.Throws<SimulatedSqlException>(() => simulation.ExecuteNonQuery("insert t values (50, 60)"));
+        Assert.AreEqual(547, ex.Number);
     }
 
     [TestMethod]
@@ -158,9 +156,9 @@ public sealed class CheckConstraintTests
         // EF Core's batched MERGE-INSERT shape; CHECK enforcement must fire.
         var simulation = new Simulation();
         _ = simulation.ExecuteNonQuery("create table t (qty int constraint ck_qty check (qty > 0))");
-        var ex = Assert.Throws<DbException>(() =>
+        var ex = Assert.Throws<SimulatedSqlException>(() =>
             simulation.ExecuteNonQuery("merge into t using (values (-1)) as src (qty) on 1=0 when not matched then insert (qty) values (src.qty);"));
-        Assert.AreEqual("547", ex.Data["HelpLink.EvtID"]);
+        Assert.AreEqual(547, ex.Number);
     }
 
     [TestMethod]
@@ -174,8 +172,8 @@ public sealed class CheckConstraintTests
             insert t values ('A'), ('B')
             """);
 
-        var ex = Assert.Throws<DbException>(() => simulation.ExecuteNonQuery("insert t values ('C')"));
-        Assert.AreEqual("547", ex.Data["HelpLink.EvtID"]);
+        var ex = Assert.Throws<SimulatedSqlException>(() => simulation.ExecuteNonQuery("insert t values ('C')"));
+        Assert.AreEqual(547, ex.Number);
     }
 
     // Msg 8141: an inline column-level CHECK constraint may only reference
@@ -262,8 +260,8 @@ public sealed class CheckConstraintTests
             insert t values (1, 2)
             """);
 
-        var ex = Assert.Throws<DbException>(() => simulation.ExecuteNonQuery("insert t values (5, 3)"));
-        Assert.AreEqual("547", ex.Data["HelpLink.EvtID"]);
+        var ex = Assert.Throws<SimulatedSqlException>(() => simulation.ExecuteNonQuery("insert t values (5, 3)"));
+        Assert.AreEqual(547, ex.Number);
     }
 
     /// <summary>
@@ -287,28 +285,28 @@ public sealed class CheckConstraintTests
     [TestMethod]
     public void TableLevelCheck_ParenWrappedValueLhs_RejectsTwoSet()
     {
-        var ex = Assert.Throws<DbException>(() => new Simulation().ExecuteNonQuery("""
+        var ex = Assert.Throws<SimulatedSqlException>(() => new Simulation().ExecuteNonQuery("""
             create table t (a int, b int, c int,
                 constraint ck_one_only check (((case when a is null then 0 else 1 end
                         + case when b is null then 0 else 1 end)
                        + case when c is null then 0 else 1 end) = (1)));
             insert t values (1, 2, null)
             """));
-        Assert.AreEqual("547", ex.Data["HelpLink.EvtID"]);
+        Assert.AreEqual(547, ex.Number);
         Assert.Contains("ck_one_only", ex.Message);
     }
 
     [TestMethod]
     public void TableLevelCheck_ParenWrappedValueLhs_RejectsAllNull()
     {
-        var ex = Assert.Throws<DbException>(() => new Simulation().ExecuteNonQuery("""
+        var ex = Assert.Throws<SimulatedSqlException>(() => new Simulation().ExecuteNonQuery("""
             create table t (a int, b int, c int,
                 check (((case when a is null then 0 else 1 end
                         + case when b is null then 0 else 1 end)
                        + case when c is null then 0 else 1 end) = (1)));
             insert t values (null, null, null)
             """));
-        Assert.AreEqual("547", ex.Data["HelpLink.EvtID"]);
+        Assert.AreEqual(547, ex.Number);
     }
 
     // sys.check_constraints.definition holds the predicate's original syntax,

@@ -66,9 +66,9 @@ public sealed class WindowAggregateTests
             create table big (v int);
             insert big values (2000000000), (2000000000)
             """).ExecuteNonQuery();
-        var ex = Throws<DbException>(() =>
+        var ex = Throws<SimulatedSqlException>(() =>
             _ = connection.CreateCommand("select sum(v) over() from big").ExecuteScalar());
-        AreEqual("8115", ex.Data["HelpLink.EvtID"]);
+        AreEqual(8115, ex.Number);
     }
 
     [TestMethod]
@@ -299,8 +299,8 @@ public sealed class WindowAggregateTests
     public void WindowParserRejections(string sql, int errorNumber)
     {
         using var connection = SeededSales();
-        var ex = Throws<DbException>(() => _ = connection.CreateCommand(sql).ExecuteScalar());
-        AreEqual(errorNumber.ToString(), ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => _ = connection.CreateCommand(sql).ExecuteScalar());
+        AreEqual(errorNumber, ex.Number);
     }
 
     /// <summary>
@@ -315,10 +315,10 @@ public sealed class WindowAggregateTests
     public void WindowOperandMustSatisfyGroupByContainment()
     {
         using var connection = SeededSales();
-        var ex = Throws<DbException>(() => _ = connection
+        var ex = Throws<SimulatedSqlException>(() => _ = connection
             .CreateCommand("select region, sum(amount), sum(amount) over() from sales group by region")
             .ExecuteScalar());
-        AreEqual("8120", ex.Data["HelpLink.EvtID"]);
+        AreEqual(8120, ex.Number);
     }
 
     /// <summary>
@@ -328,10 +328,10 @@ public sealed class WindowAggregateTests
     public void WindowPartitionKeyMustSatisfyGroupByContainment()
     {
         using var connection = SeededSales();
-        var ex = Throws<DbException>(() => _ = connection
+        var ex = Throws<SimulatedSqlException>(() => _ = connection
             .CreateCommand("select region, sum(amount), row_number() over(partition by amount order by region) from sales group by region")
             .ExecuteScalar());
-        AreEqual("8120", ex.Data["HelpLink.EvtID"]);
+        AreEqual(8120, ex.Number);
     }
 
     /// <summary>
@@ -372,8 +372,8 @@ public sealed class WindowAggregateTests
     public void NestedAggregateWithoutOverIsRejected(string sql)
     {
         using var connection = SeededSales();
-        var ex = Throws<DbException>(() => _ = connection.CreateCommand(sql).ExecuteScalar());
-        AreEqual("130", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => _ = connection.CreateCommand(sql).ExecuteScalar());
+        AreEqual(130, ex.Number);
     }
 
     /// <summary>

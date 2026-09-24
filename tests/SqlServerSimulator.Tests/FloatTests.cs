@@ -1,4 +1,3 @@
-using System.Data.Common;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 using static SqlServerSimulator.TestHelpers;
 
@@ -48,7 +47,7 @@ public sealed class FloatTests
     [DataRow("'abc'")]
     public void Cast_BadStringToFloat_RaisesMsg8114(string literal)
     {
-        var ex = Throws<DbException>(() => ExecuteScalar($"select cast({literal} as float)"));
+        var ex = Throws<SimulatedSqlException>(() => ExecuteScalar($"select cast({literal} as float)"));
         AreEqual("Error converting data type varchar to float.", ex.Message);
     }
 
@@ -88,7 +87,7 @@ public sealed class FloatTests
     [TestMethod]
     public void FloatArithmetic_DivideByZero_RaisesMsg8134()
     {
-        var ex = Throws<DbException>(() => ExecuteScalar("select cast(1 as float) / cast(0 as float)"));
+        var ex = Throws<SimulatedSqlException>(() => ExecuteScalar("select cast(1 as float) / cast(0 as float)"));
         AreEqual("Divide by zero error encountered.", ex.Message);
     }
 

@@ -256,7 +256,7 @@ Severity ≤ 10 are informational (not raised as errors — they flow to `InfoMe
 No factory produces class ≥ 17, so the reachable batch-aborting cases are deadlock (concurrent sessions), `NotSupportedException` (any unmodeled feature; it propagates out of the stream to the caller / wire top-level `catch`), the name-resolution set, and an uncaught THROW.
 
 **In-process rendering** — `SimulatedDbCommand` + `SimulatedDbDataReader` convert the outcome stream to exceptions ([`data-reader.md`](data-reader.md) has the reader detail).
-`ExecuteNonQuery` / `ExecuteScalar` drain the whole batch (all side effects persist), then throw one `SimulatedSqlException` whose `Errors` collection aggregates every statement error in batch order (`SimulatedSqlException.FromErrors`; a lone error is rethrown as-is).
+`ExecuteNonQuery` / `ExecuteScalar` drain the whole batch (all side effects persist), then throw one `SimulatedSqlException` whose `Errors` collection aggregates every statement error in batch order, followed by the batch's informational messages (`SimulatedSqlException.Aggregate`; a lone error with no messages is rethrown as-is — see [`errors.md`](errors.md#the-message-stream)).
 `ExecuteScalar` returns the first result set's first value only when the batch produced no error.
 The reader surfaces errors **positionally**: a row-returning statement's error (SELECT / VALUES — `SimulatedErrorOutcome.RowReturning`, set from the leading token via `StatementContext.LeadingKeywordReturnsRows`) throws on the first `Read` and the reader survives to the next result set; a non-row-returning error (INSERT / UPDATE / DELETE / DDL) throws eagerly on the advance onto it (`ExecuteReader` or `NextResult`), matching how SqlClient surfaces an error token that no COLMETADATA precedes — and what lets EF Core's no-OUTPUT modification batches, which never call `Read`, still observe a failure.
 Reader `Dispose` drains the batch's remaining statements (side effects persist) and swallows their errors.
@@ -380,12 +380,13 @@ Matches real SQL Server's grammar (probe-confirmed).
   Apps that depend on the message being logged (real SQL Server writes to the Windows event log + SQL Server error log) get neither logging nor the implicit sysadmin permission grant.
 - System-message ids registered in real SQL Server's `sys.messages` (e.g. `RAISERROR(13001, 16, 1)` surfaces the system "file name" message text) fall through to Msg 18054 here.
 - Severity ≤ 10 messages are informational and flow to `SimulatedDbConnection.InfoMessage` (verified for both `RAISERROR('m', 10, 1)` and `RAISERROR('m', 0, 1)`) rather than being raised — matching the severity table above.
+  Severity 10 arrives with class 0, as every severity-10 message does on real; severities 1-9 keep their number (probed 2026-09-23).
   The behavioral effects (TRY/CATCH skip, `@@ERROR` via SETERROR) are preserved alongside the delivered text.
 - `NOWAIT` is structurally ignored (no streaming model); real SQL Server flushes the buffer immediately.
 
 ## `PRINT`
 `PRINT <expression>` parses + evaluates the operand and delivers the text to `SimulatedDbConnection.InfoMessage`, the simulator's stand-in for `SqlConnection.InfoMessage` (`DbConnection` defines no such event, so the shape is mirrored rather than inherited).
-Multiple PRINTs in one batch coalesce into a single newline-joined event.
+Each message is its own event, in its place among the batch's results — see [`errors.md`](errors.md#the-message-stream).
 The evaluation isn't a no-op: operand-side errors still surface — `PRINT 'val=' + 5` raises Msg 245 because the `+` operator's int-side promotion tries to parse `'val='` as int (probe-confirmed against SQL Server 2025).
 
 Probe-confirmed semantics:

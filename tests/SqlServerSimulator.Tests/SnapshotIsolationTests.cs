@@ -116,9 +116,9 @@ public sealed class SnapshotIsolationTests
 
         // SI writer tries to update the same row — the live version was
         // committed by another tx after our snapshot, so Msg 3960 fires.
-        var ex = Throws<System.Data.Common.DbException>(() =>
+        var ex = Throws<SimulatedSqlException>(() =>
             siConn.CreateCommand("update t set v = 300 where id = 1").ExecuteNonQuery());
-        AreEqual("3960", ex.Data["HelpLink.EvtID"]);
+        AreEqual(3960, ex.Number);
         AreEqual("Snapshot isolation transaction aborted due to update conflict. You cannot use snapshot isolation to access table 'dbo.t' directly or indirectly in database 'simulated' to update, delete, or insert the row that has been modified or deleted by another transaction. Retry the transaction or change the isolation level for the update/delete statement.", ex.Message);
 
         // Probe-confirmed auto-rollback: @@TRANCOUNT drops to 0.
@@ -145,9 +145,9 @@ public sealed class SnapshotIsolationTests
         using (var rcConn = sim.CreateOpenConnection())
             _ = rcConn.CreateCommand("update t set v = 200 where id = 1").ExecuteNonQuery();
 
-        var ex = Throws<System.Data.Common.DbException>(() =>
+        var ex = Throws<SimulatedSqlException>(() =>
             siConn.CreateCommand("delete from t where id = 1").ExecuteNonQuery());
-        AreEqual("3960", ex.Data["HelpLink.EvtID"]);
+        AreEqual(3960, ex.Number);
     }
 
     [TestMethod]
@@ -285,9 +285,9 @@ public sealed class SnapshotIsolationTests
 
         // SI snapshot still sees id=1; UPDATE on it must raise Msg 3960
         // (not silently succeed with 0 affected rows).
-        var ex = Throws<System.Data.Common.DbException>(() =>
+        var ex = Throws<SimulatedSqlException>(() =>
             siConn.CreateCommand("update t set v = 999 where id = 1").ExecuteNonQuery());
-        AreEqual("3960", ex.Data["HelpLink.EvtID"]);
+        AreEqual(3960, ex.Number);
         AreEqual(0, siConn.CreateCommand("select @@trancount").ExecuteScalar());
     }
 
@@ -307,9 +307,9 @@ public sealed class SnapshotIsolationTests
         using (var rc = sim.CreateOpenConnection())
             _ = rc.CreateCommand("delete from t where id = 1").ExecuteNonQuery();
 
-        var ex = Throws<System.Data.Common.DbException>(() =>
+        var ex = Throws<SimulatedSqlException>(() =>
             siConn.CreateCommand("delete from t where id = 1").ExecuteNonQuery());
-        AreEqual("3960", ex.Data["HelpLink.EvtID"]);
+        AreEqual(3960, ex.Number);
     }
 
     [TestMethod]

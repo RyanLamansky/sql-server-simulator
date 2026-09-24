@@ -1260,7 +1260,7 @@ partial class Simulation
         foreach (var (ordinal, expr) in assignments)
         {
             var raw = expr.Run(new RuntimeContext(resolver, context.Batch));
-            EnforceMaxLength(raw, table.Columns[ordinal], table.Name, context.Connection);
+            EnforceMaxLength(raw, table.Columns[ordinal], table, context.Connection);
             newValues[ordinal] = CoerceForInsert(raw, table.Columns[ordinal]);
         }
 

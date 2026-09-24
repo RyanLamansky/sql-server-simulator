@@ -14,10 +14,10 @@ public sealed class ScalarFunctionTests
 {
     private static DbConnection Open() => new Simulation().CreateOpenConnection();
 
-    private static DbException AssertSqlError(DbConnection connection, string sql, int errorNumber)
+    private static SimulatedSqlException AssertSqlError(DbConnection connection, string sql, int errorNumber)
     {
-        var ex = Throws<DbException>(() => connection.CreateCommand(sql).ExecuteScalar());
-        AreEqual(errorNumber.ToString(), ex.Data["HelpLink.EvtID"], $"expected Msg {errorNumber}");
+        var ex = Throws<SimulatedSqlException>(() => connection.CreateCommand(sql).ExecuteScalar());
+        AreEqual(errorNumber, ex.Number, $"expected Msg {errorNumber}");
         return ex;
     }
 
@@ -171,8 +171,8 @@ public sealed class ScalarFunctionTests
     public void Drop_Missing_Raises_Msg3701_With_Function_Wording()
     {
         using var connection = Open();
-        var ex = Throws<DbException>(() => connection.CreateCommand("drop function dbo.does_not_exist").ExecuteNonQuery());
-        AreEqual("3701", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => connection.CreateCommand("drop function dbo.does_not_exist").ExecuteNonQuery());
+        AreEqual(3701, ex.Number);
         Contains("Cannot drop the function 'dbo.does_not_exist'", ex.Message);
     }
 
@@ -188,9 +188,9 @@ public sealed class ScalarFunctionTests
     {
         using var connection = Open();
         _ = connection.CreateCommand("create function dbo.f(@x int) returns int as begin return @x end").ExecuteNonQuery();
-        var ex = Throws<DbException>(() =>
+        var ex = Throws<SimulatedSqlException>(() =>
             connection.CreateCommand("create function dbo.f(@x int) returns int as begin return @x end").ExecuteNonQuery());
-        AreEqual("2714", ex.Data["HelpLink.EvtID"]);
+        AreEqual(2714, ex.Number);
     }
 
     [TestMethod]

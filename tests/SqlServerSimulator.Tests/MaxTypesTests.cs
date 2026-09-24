@@ -337,7 +337,7 @@ public sealed class MaxTypesTests
         var simulation = new Simulation();
         _ = simulation.ExecuteNonQuery($"create table t ( v {columnType} )");
         var ex = simulation.AssertSqlError($"select {aggregate}(v) from t", 6210);
-        Assert.AreEqual($"CLR type '{columnType}' is not fully comparable.", ex.Message);
+        Assert.AreEqual($"CLR type '{columnType}' is not fully comparable.", ex.Errors[0].Message);
         Assert.AreEqual(2, ex.Errors.Count);
         Assert.AreEqual(8117, ex.Errors[1].Number);
         Assert.AreEqual($"Operand data type {columnType} is invalid for {aggregate} operator.", ex.Errors[1].Message);

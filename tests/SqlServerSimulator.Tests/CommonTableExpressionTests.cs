@@ -1,4 +1,3 @@
-using System.Data.Common;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 
 namespace SqlServerSimulator;
@@ -349,7 +348,7 @@ public sealed class CommonTableExpressionTests
         // First statement uses a CTE binding named 'c'; the second statement
         // should NOT see 'c' anymore — it must fail with a missing-table error.
         _ = simulation.ExecuteNonQuery("with c as (select id from src) select count(*) from c");
-        _ = Throws<DbException>(() => simulation.ExecuteNonQuery("select count(*) from c"));
+        _ = Throws<SimulatedSqlException>(() => simulation.ExecuteNonQuery("select count(*) from c"));
     }
 
     [TestMethod]
@@ -627,7 +626,7 @@ public sealed class CommonTableExpressionTests
     {
         var sim = WithBodySource();
         var derived = sim.AssertSqlError("select * from (with c as (select id from dbo.b) select id from c) d", 156);
-        AreEqual("Incorrect syntax near the keyword 'with'.", derived.Message);
+        AreEqual("Incorrect syntax near the keyword 'with'.", derived.Errors[0].Message);
         _ = sim.AssertSqlError("select (with c as (select max(id) m from dbo.b) select m from c)", 156);
         _ = sim.AssertSqlError("select id from dbo.b where id in (with c as (select id from dbo.b) select id from c)", 156);
 

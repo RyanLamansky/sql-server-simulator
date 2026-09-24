@@ -280,7 +280,7 @@ Where an entry carries a second clause it is because that fact changes what you'
 - **`PIVOT` / `UNPIVOT`** — both attach as a postfix wrapper on the derived-table `LateralPlan` seam → [`pivot.md`](docs/claude/pivot.md).
 - **UPDATE / DELETE / INSERT…SELECT / SELECT…INTO / MERGE / OUTPUT**, plus rowversion, the identity helpers and `@@ROWCOUNT` → [`dml.md`](docs/claude/dml.md).
 - **Variables, control flow, TRY/CATCH + THROW + ERROR_\*, `@@ERROR` / `@@TRANCOUNT` / `XACT_STATE`, WAITFOR, PRINT, GOTO** → [`control-flow.md`](docs/claude/control-flow.md).
-- **Error diagnostics** — line-number rules per context, `Server` / `Procedure` population, `ERROR_LINE` / `ERROR_PROCEDURE` parity → [`errors.md`](docs/claude/errors.md).
+- **Error diagnostics** — line-number rules per context, `Server` / `Procedure` population, `ERROR_LINE` / `ERROR_PROCEDURE` parity, and where informational messages (PRINT, Msg 3621 / 8153 …) land among a batch's results and errors → [`errors.md`](docs/claude/errors.md).
 - **Cursors** — the full lifecycle, the sensitivity / scrollability / concurrency matrix, cursor variables, multi-source and deferred-source cursors, `WHERE CURRENT OF`.
   Several ordinary shapes silently **convert** a cursor's sensitivity, and a keyless table converts it to read-only → [`cursors.md`](docs/claude/cursors.md).
 - **CTEs** — the shapes, the recursive member's restrictions, the declared column list's scoping, and where a `WITH` prefix may appear → [`ctes.md`](docs/claude/ctes.md).

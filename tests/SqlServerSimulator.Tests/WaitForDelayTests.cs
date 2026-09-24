@@ -1,4 +1,3 @@
-using System.Data.Common;
 using System.Diagnostics;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 
@@ -195,9 +194,9 @@ public sealed class WaitForDelayTests
     {
         // Real SQL Server raises Msg 102 here; the simulator routes through
         // the same Msg-102 factory (SyntaxErrorNear).
-        var ex = Throws<DbException>(
+        var ex = Throws<SimulatedSqlException>(
             () => _ = new Simulation().ExecuteNonQuery("waitfor delay 1"));
-        AreEqual("102", ex.Data["HelpLink.EvtID"]);
+        AreEqual(102, ex.Number);
     }
 
     [TestMethod]
@@ -208,15 +207,14 @@ public sealed class WaitForDelayTests
         // SyntaxErrorNear catch-all). Wording differs but rejection is
         // consistent — a hand-typed `waitfor delay null` is a programmer
         // error either way.
-        var ex = Throws<DbException>(
+        var ex = Throws<SimulatedSqlException>(
             () => _ = new Simulation().ExecuteNonQuery("waitfor delay null"));
-        var num = ex.Data["HelpLink.EvtID"] as string;
-        IsTrue(num is "102" or "156", $"Expected Msg 102 or 156, got {num}");
+        IsTrue(ex.Number is 102 or 156, $"Expected Msg 102 or 156, got {ex.Number}");
     }
 
     [TestMethod]
     public void Delay_CastOperand_SyntaxError()
-        => _ = Throws<DbException>(
+        => _ = Throws<SimulatedSqlException>(
             () => _ = new Simulation().ExecuteNonQuery(
                 "waitfor delay cast('00:00:00.050' as time)"));
 

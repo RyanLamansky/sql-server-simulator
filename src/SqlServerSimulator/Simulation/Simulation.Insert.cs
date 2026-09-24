@@ -502,7 +502,7 @@ partial class Simulation
                 }
 
                 var source = sourceRow[i];
-                EnforceMaxLength(source, targetColumn, destinationTable.Name, context.Connection);
+                EnforceMaxLength(source, targetColumn, destinationTable, context.Connection);
                 var coerced = CoerceForInsert(source, targetColumn);
                 rowValues[ordinal] = coerced;
 
@@ -1062,6 +1062,10 @@ partial class Simulation
         {
             foreach (var outcome in connection.Simulation.ParseExec(batch, insertExecSource: true))
             {
+                // The procedure's messages still reach the client, ahead of
+                // the INSERT's own outcome.
+                if (outcome is SimulatedInfoOutcome info)
+                    connection.PendingMessages.Enqueue(info.Message);
                 if (outcome is not SimulatedSqlResultSet resultSet)
                     continue;
                 if (resultSet.Schema.Length != expectedColumnCount)

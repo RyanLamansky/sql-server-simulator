@@ -154,6 +154,7 @@ public sealed class SimulatedDbCommand : DbCommand
     public override int ExecuteNonQuery()
     {
         List<SimulatedSqlException>? errors = null;
+        List<SimulatedError>? messages = null;
         var affected = 0;
         var counted = false;
         foreach (var outcome in simulation.CreateResultSetsForCommand(this))
@@ -163,6 +164,9 @@ public sealed class SimulatedDbCommand : DbCommand
                 case SimulatedErrorOutcome error:
                     (errors ??= []).Add(error.Exception);
                     break;
+                case SimulatedInfoOutcome info:
+                    (messages ??= []).Add(info.Message);
+                    break;
                 case { ClientRecordsAffected: >= 0 } counting:
                     affected += counting.ClientRecordsAffected;
                     counted = true;
@@ -171,9 +175,8 @@ public sealed class SimulatedDbCommand : DbCommand
         }
 
         ThrowIfExecutionCancelled();
-        return errors is not null
-            ? throw SimulatedSqlException.Aggregate(errors)
-            : counted ? affected : -1;
+        this.CompleteDrainedBatch(errors, messages);
+        return counted ? affected : -1;
     }
 
     /// <summary>
@@ -188,6 +191,7 @@ public sealed class SimulatedDbCommand : DbCommand
     public override object? ExecuteScalar()
     {
         List<SimulatedSqlException>? errors = null;
+        List<SimulatedError>? messages = null;
         object? scalar = null;
         var haveScalar = false;
         foreach (var outcome in simulation.CreateResultSetsForCommand(this))
@@ -196,6 +200,9 @@ public sealed class SimulatedDbCommand : DbCommand
             {
                 case SimulatedErrorOutcome error:
                     (errors ??= []).Add(error.Exception);
+                    break;
+                case SimulatedInfoOutcome info:
+                    (messages ??= []).Add(info.Message);
                     break;
                 case SimulatedQueryResult query when !haveScalar:
 #pragma warning disable CA2000 // The using disposes the returned cursor; a TextSizeCursor wrapper disposes its wrapped inner cursor, an ownership transfer the analyzer can't see.
@@ -219,7 +226,25 @@ public sealed class SimulatedDbCommand : DbCommand
         }
 
         ThrowIfExecutionCancelled();
-        return errors is not null ? throw SimulatedSqlException.Aggregate(errors) : scalar;
+        this.CompleteDrainedBatch(errors, messages);
+        return scalar;
+    }
+
+    /// <summary>
+    /// Ends a batch <see cref="ExecuteNonQuery"/> / <see cref="ExecuteScalar"/>
+    /// drained whole, the way SqlClient does: any error makes one exception
+    /// carrying every error and then every message the batch sent; otherwise
+    /// each message fires <see cref="SimulatedDbConnection.InfoMessage"/> in
+    /// order (probed 2026-09-23).
+    /// </summary>
+    private void CompleteDrainedBatch(List<SimulatedSqlException>? errors, List<SimulatedError>? messages)
+    {
+        if (errors is not null)
+            throw SimulatedSqlException.Aggregate(errors, messages);
+        if (messages is null)
+            return;
+        foreach (var message in messages)
+            this.Connection?.RaiseInfoMessage(message);
     }
 
     /// <summary>
@@ -240,7 +265,7 @@ public sealed class SimulatedDbCommand : DbCommand
         // the check costs no extra eagerness. Real SqlClient throws out of
         // ExecuteReader rather than handing back an empty reader, so a caller
         // can't mistake a cancelled batch for a zero-row answer.
-        var reader = new SimulatedDbDataReader(this.simulation.CreateResultSetsForCommand(this));
+        var reader = new SimulatedDbDataReader(this.simulation.CreateResultSetsForCommand(this), this.Connection);
         if (WasExecutionCancelled())
         {
             reader.Dispose();

@@ -61,9 +61,9 @@ public sealed class RowVersionTests
     [TestMethod]
     public void TwoRowVersionColumns_RaisesMsg2738()
     {
-        var ex = Throws<DbException>(() =>
+        var ex = Throws<SimulatedSqlException>(() =>
             _ = new Simulation().ExecuteNonQuery("create table t (rv1 rowversion, rv2 rowversion)"));
-        AreEqual("2738", ex.Data["HelpLink.EvtID"]);
+        AreEqual(2738, ex.Number);
     }
 
     // === Auto-generation on INSERT ===
@@ -90,11 +90,11 @@ public sealed class RowVersionTests
     [TestMethod]
     public void Insert_RowVersionListedExplicitly_RaisesMsg273()
     {
-        var ex = Throws<DbException>(() => _ = new Simulation().ExecuteNonQuery("""
+        var ex = Throws<SimulatedSqlException>(() => _ = new Simulation().ExecuteNonQuery("""
             create table t (id int, rv rowversion);
             insert t (id, rv) values (1, 0x00000000000000FF)
             """));
-        AreEqual("273", ex.Data["HelpLink.EvtID"]);
+        AreEqual(273, ex.Number);
     }
 
     // Insert without column list: a rowversion column keeps its position in
@@ -149,12 +149,12 @@ public sealed class RowVersionTests
     [TestMethod]
     public void Update_SetRowVersion_RaisesMsg272()
     {
-        var ex = Throws<DbException>(() => _ = new Simulation().ExecuteNonQuery("""
+        var ex = Throws<SimulatedSqlException>(() => _ = new Simulation().ExecuteNonQuery("""
             create table t (id int, rv rowversion);
             insert t (id) values (1);
             update t set rv = 0x00 where id = 1
             """));
-        AreEqual("272", ex.Data["HelpLink.EvtID"]);
+        AreEqual(272, ex.Number);
     }
 
     // === CAST outbound ===

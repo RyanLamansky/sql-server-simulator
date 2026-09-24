@@ -1,4 +1,3 @@
-using System.Data.Common;
 using SqlServerSimulator.Storage;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 using static SqlServerSimulator.Extensions;
@@ -164,10 +163,10 @@ public sealed class LockingTests
         _ = writer.CreateCommand("begin tran; insert t values (1)").ExecuteNonQuery();
 
         var ex = await Task.Run(() =>
-            Throws<DbException>(() =>
+            Throws<SimulatedSqlException>(() =>
                 reader.CreateCommand("set lock_timeout 0; select count(*) from t").ExecuteScalar()),
             TestContext.CancellationToken);
-        AreEqual("1222", ex.Data["HelpLink.EvtID"]);
+        AreEqual(1222, ex.Number);
         _ = writer.CreateCommand("rollback").ExecuteNonQuery();
     }
 
@@ -186,10 +185,10 @@ public sealed class LockingTests
         _ = writer.CreateCommand("begin tran; update t set v = 2 where id = 1").ExecuteNonQuery();
 
         var ex = await Task.Run(() =>
-            Throws<DbException>(() =>
+            Throws<SimulatedSqlException>(() =>
                 reader.CreateCommand("select v from t with (nowait, rowlock, updlock) where id = 1").ExecuteScalar()),
             TestContext.CancellationToken);
-        AreEqual("1222", ex.Data["HelpLink.EvtID"]);
+        AreEqual(1222, ex.Number);
 
         _ = writer.CreateCommand("rollback").ExecuteNonQuery();
     }
@@ -347,8 +346,8 @@ public sealed class LockingTests
         IsTrue(aError is null ^ bError is null);
         var victim = aError ?? bError;
         IsNotNull(victim);
-        var ex = IsInstanceOfType<DbException>(victim);
-        AreEqual("1205", ex.Data["HelpLink.EvtID"]);
+        var ex = IsInstanceOfType<SimulatedSqlException>(victim);
+        AreEqual(1205, ex.Number);
 
         // Clean up — the non-victim's tx is still alive.
         var survivor = aError is null ? connA : connB;
@@ -397,8 +396,8 @@ public sealed class LockingTests
         IsNotNull(loserError);
         // The winner threw nothing.
         IsTrue(errorA is null ^ errorB is null);
-        var dbException = IsInstanceOfType<DbException>(loserError);
-        AreEqual("3701", dbException.Data["HelpLink.EvtID"]);
+        var dbException = IsInstanceOfType<SimulatedSqlException>(loserError);
+        AreEqual(3701, dbException.Number);
     }
 
     [TestMethod]

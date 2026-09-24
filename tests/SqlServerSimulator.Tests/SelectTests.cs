@@ -200,7 +200,7 @@ public class SelectTests
     [TestMethod]
     public void IdentifierTooLong()
     {
-        var ex = Throws<DbException>(() => new Simulation().ExecuteScalar($"select 1 as {new string('z', 129)}"));
+        var ex = Throws<SimulatedSqlException>(() => new Simulation().ExecuteScalar($"select 1 as {new string('z', 129)}"));
         Contains("zzz", ex.Message);
     }
 
@@ -429,7 +429,7 @@ public class SelectTests
     {
         using var connection = new Simulation().CreateOpenConnection();
         _ = connection.CreateCommand("create table t (a int)").ExecuteNonQuery();
-        var ex = Throws<DbException>(() => connection.CreateCommand("select notbound.* from t").ExecuteReader().Read());
+        var ex = Throws<SimulatedSqlException>(() => connection.CreateCommand("select notbound.* from t").ExecuteReader().Read());
         AreEqual("The multi-part identifier \"notbound.*\" could not be bound.", ex.Message);
     }
 

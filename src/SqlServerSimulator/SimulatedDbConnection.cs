@@ -792,25 +792,32 @@ public sealed class SimulatedDbConnection : DbConnection
             || this.CurrentDatabase.CompatibilityLevel >= CompatibilityLevel.Sql160);
 
     /// <summary>
-    /// Fires once per batch when the batch contained at least one
-    /// <c>PRINT</c> or severity-0-10 <c>RAISERROR</c> statement that
-    /// produced output (the un-taken-IF / skip-mode path doesn't fire).
-    /// Multiple contributing statements in the batch coalesce into a single
-    /// event with the messages joined by <c>\n</c> — matches SqlClient's
-    /// <c>InfoMessage</c> probe behavior. Mirrors the shape of
-    /// <c>SqlConnection.InfoMessage</c> so consumers can subscribe
-    /// identically after casting a base-typed <see cref="DbConnection"/>
-    /// down to <see cref="SimulatedDbConnection"/>.
+    /// Fires once per informational message a command produces — a
+    /// <c>PRINT</c>, a severity-0-10 <c>RAISERROR</c>, a warning — as the
+    /// command's execution reaches it: during <c>ExecuteReader</c> for what
+    /// precedes the first result set and during <c>NextResult</c> for what
+    /// follows, in order with the results. As with SqlClient, a message that
+    /// shares a stretch of the batch with an error travels in that error's
+    /// exception instead, and <c>ExecuteNonQuery</c> / <c>ExecuteScalar</c>
+    /// deliver a batch's messages once it completes. Mirrors the shape of
+    /// <c>SqlConnection.InfoMessage</c> so consumers can subscribe identically
+    /// after casting a base-typed <see cref="DbConnection"/> down to
+    /// <see cref="SimulatedDbConnection"/>.
     /// </summary>
     public event EventHandler<SimulatedInfoMessageEventArgs>? InfoMessage;
 
     /// <summary>
-    /// Delivers a buffered <c>PRINT</c> / informational <c>RAISERROR</c>
-    /// batch to <see cref="InfoMessage"/> subscribers. Called from
-    /// <see cref="Parser.BatchContext.FlushPrintMessages"/> at the end of
-    /// each command's dispatch.
+    /// Informational messages the engine has produced and no statement has
+    /// yet placed in the outcome stream. The dispatch loop drains it around
+    /// each statement's outcomes; a wrapper that consumes a body's outcomes
+    /// itself (a trigger, <c>INSERT … EXEC</c>) hands the body's messages back
+    /// here so the enclosing statement places them.
     /// </summary>
-    internal void RaiseInfoMessage(SimulatedInfoMessageEventArgs args) => this.InfoMessage?.Invoke(this, args);
+    internal readonly Queue<SimulatedError> PendingMessages = new();
+
+    /// <summary>Delivers one message to <see cref="InfoMessage"/> subscribers.</summary>
+    internal void RaiseInfoMessage(SimulatedError message) =>
+        this.InfoMessage?.Invoke(this, new SimulatedInfoMessageEventArgs(new SimulatedErrorCollection([message])));
 
     private string connectionString = "";
     private string? pendingUserId;

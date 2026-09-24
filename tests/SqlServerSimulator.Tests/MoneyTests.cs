@@ -1,4 +1,3 @@
-using System.Data.Common;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 using static SqlServerSimulator.TestHelpers;
 
@@ -90,14 +89,14 @@ public sealed class MoneyTests
     [DataRow("''")]
     public void Cast_StringToMoney_BadFormatRaisesMsg235(string literal)
     {
-        var ex = Throws<DbException>(() => ExecuteScalar($"select cast({literal} as money)"));
+        var ex = Throws<SimulatedSqlException>(() => ExecuteScalar($"select cast({literal} as money)"));
         AreEqual("Cannot convert a char value to money. The char value has incorrect syntax.", ex.Message);
     }
 
     [TestMethod]
     public void Cast_OverflowToSmallMoney_RaisesMsg8115()
     {
-        var ex = Throws<DbException>(() => ExecuteScalar("select cast(214748.3648 as smallmoney)"));
+        var ex = Throws<SimulatedSqlException>(() => ExecuteScalar("select cast(214748.3648 as smallmoney)"));
         Assert.Contains("smallmoney", ex.Message);
     }
 

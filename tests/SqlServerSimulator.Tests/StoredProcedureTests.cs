@@ -17,10 +17,10 @@ public sealed class StoredProcedureTests
 {
     private static DbConnection Open() => new Simulation().CreateOpenConnection();
 
-    private static DbException AssertSqlError(DbConnection connection, string sql, int errorNumber)
+    private static SimulatedSqlException AssertSqlError(DbConnection connection, string sql, int errorNumber)
     {
-        var ex = Throws<DbException>(() => connection.CreateCommand(sql).ExecuteScalar());
-        AreEqual(errorNumber.ToString(), ex.Data["HelpLink.EvtID"], $"expected Msg {errorNumber}");
+        var ex = Throws<SimulatedSqlException>(() => connection.CreateCommand(sql).ExecuteScalar());
+        AreEqual(errorNumber, ex.Number, $"expected Msg {errorNumber}");
         return ex;
     }
 
@@ -132,6 +132,35 @@ public sealed class StoredProcedureTests
         using var connection = Open();
         _ = connection.CreateCommand("create procedure dbo.p @a int as select @a").ExecuteNonQuery();
         _ = AssertSqlError(connection, "exec dbo.p @nope = 1", 201);
+    }
+
+    /// <summary>
+    /// A named argument that names no parameter is Msg 8145 once every
+    /// required parameter is supplied (probed 2026-09-23).
+    /// </summary>
+    [TestMethod]
+    public void Exec_Unknown_Named_Param_WithEveryRequiredSupplied_Raises_Msg8145()
+    {
+        using var connection = Open();
+        _ = connection.CreateCommand("create procedure dbo.p @a int = 1 as select @a").ExecuteNonQuery();
+        AreEqual("@nope is not a parameter for procedure p.", AssertSqlError(connection, "exec dbo.p @nope = 1", 8145).Message);
+    }
+
+    /// <summary>
+    /// An argument-binding error reports line 0 and names the procedure as
+    /// the EXEC spelled it (probed 2026-09-23).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select 1\nexec dbo.p", 201, "dbo.p")]
+    [DataRow("exec P 1, 2", 8144, "P")]
+    [DataRow("exec [dbo].[p] @b = 1, @a = 1", 8145, "dbo.p")]
+    public void Exec_BindingErrors_ReportLineZeroAndTheCalledProcedure(string sql, int number, string procedure)
+    {
+        using var connection = Open();
+        _ = connection.CreateCommand("create procedure dbo.p @a int as select @a").ExecuteNonQuery();
+        var ex = AssertSqlError(connection, sql, number);
+        AreEqual(0, ex.LineNumber);
+        AreEqual(procedure, ex.Procedure);
     }
 
     [TestMethod]
@@ -456,9 +485,9 @@ public sealed class StoredProcedureTests
         // which argument became which: the first one *written* is the
         // statement whatever it was called (probe-confirmed).
         using var connection = Open();
-        var ex = Throws<DbException>(() => connection.CreateCommand(
+        var ex = Throws<SimulatedSqlException>(() => connection.CreateCommand(
             "exec sp_executesql @params = N'select 5 as v', @stmt = N'@x int'").ExecuteScalar());
-        AreEqual("8178", ex.Data["HelpLink.EvtID"]);
+        AreEqual(8178, ex.Number);
         StringContains(ex.Message, "'(@x int)select 5 as v'");
     }
 
@@ -468,9 +497,9 @@ public sealed class StoredProcedureTests
     public void SpExecuteSql_DeclaredParameterNotSupplied_Raises8178()
     {
         using var connection = Open();
-        var ex = Throws<DbException>(() => connection.CreateCommand(
+        var ex = Throws<SimulatedSqlException>(() => connection.CreateCommand(
             "exec sp_executesql N'select @x as v', N'@x int'").ExecuteScalar());
-        AreEqual("8178", ex.Data["HelpLink.EvtID"]);
+        AreEqual(8178, ex.Number);
         // The quoted text is the two argument strings verbatim.
         StringContains(ex.Message, "The parameterized query '(@x int)select @x as v' expects the parameter '@x', which was not supplied.");
     }
@@ -487,7 +516,7 @@ public sealed class StoredProcedureTests
     public void SpExecuteSql_SeveralMissing_NamesTheFirstDeclared()
     {
         using var connection = Open();
-        var ex = Throws<DbException>(() => connection.CreateCommand(
+        var ex = Throws<SimulatedSqlException>(() => connection.CreateCommand(
             "exec sp_executesql N'select @x + @y as v', N'@x int, @y int', @y = 2").ExecuteScalar());
         StringContains(ex.Message, "expects the parameter '@x'");
     }
@@ -496,9 +525,9 @@ public sealed class StoredProcedureTests
     public void SpExecuteSql_OutputParameterMustBeSuppliedToo()
     {
         using var connection = Open();
-        var ex = Throws<DbException>(() => connection.CreateCommand(
+        var ex = Throws<SimulatedSqlException>(() => connection.CreateCommand(
             "declare @o int; exec sp_executesql N'set @o = 1', N'@o int output'").ExecuteScalar());
-        AreEqual("8178", ex.Data["HelpLink.EvtID"]);
+        AreEqual(8178, ex.Number);
     }
 
     /// <summary>
@@ -554,9 +583,9 @@ public sealed class StoredProcedureTests
         using var connection = Open();
         // Real names an empty procedure here, so the message carries the
         // double space that leaves behind.
-        var ex = Throws<DbException>(() => connection.CreateCommand(
+        var ex = Throws<SimulatedSqlException>(() => connection.CreateCommand(
             "exec sp_executesql N'select 1 as v', N'@x int', @x = 1, @zz = 2").ExecuteScalar());
-        AreEqual("8144", ex.Data["HelpLink.EvtID"]);
+        AreEqual(8144, ex.Number);
         StringContains(ex.Message, "Procedure or function  has too many arguments specified.");
     }
 
@@ -565,9 +594,9 @@ public sealed class StoredProcedureTests
     {
         // Both are wrong; real reports the missing declaration first.
         using var connection = Open();
-        var ex = Throws<DbException>(() => connection.CreateCommand(
+        var ex = Throws<SimulatedSqlException>(() => connection.CreateCommand(
             "exec sp_executesql N'select @x as v', N'@x int', @zz = 1").ExecuteScalar());
-        AreEqual("8178", ex.Data["HelpLink.EvtID"]);
+        AreEqual(8178, ex.Number);
     }
 
     [TestMethod]
@@ -780,13 +809,13 @@ public sealed class StoredProcedureTests
         // BEGIN…END empty-body rule). The CREATE binds the body, so the
         // rejection lands there — real reports a body's syntax error at
         // CREATE too (probe-confirmed with the plain `select from t` shape).
-        var ex = Throws<DbException>(() => new Simulation().ExecuteNonQuery("""
+        var ex = Throws<SimulatedSqlException>(() => new Simulation().ExecuteNonQuery("""
             create procedure dbo.p
             as
             begin atomic with (transaction isolation level = snapshot, language = N'English')
             end
             """));
-        AreEqual("102", ex.Data["HelpLink.EvtID"]);
+        AreEqual(102, ex.Number);
     }
 
     [TestMethod]
@@ -796,8 +825,8 @@ public sealed class StoredProcedureTests
         using var cmd = conn.CreateCommand();
         cmd.CommandType = CommandType.StoredProcedure;
         cmd.CommandText = "no_such_proc";
-        var ex = Throws<DbException>(() => cmd.ExecuteNonQuery());
-        AreEqual("2812", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => cmd.ExecuteNonQuery());
+        AreEqual(2812, ex.Number);
     }
 
     [TestMethod]
@@ -809,8 +838,8 @@ public sealed class StoredProcedureTests
         using var cmd = conn.CreateCommand();
         cmd.CommandType = CommandType.StoredProcedure;
         cmd.CommandText = "123_not_a_name";
-        var ex = Throws<DbException>(() => cmd.ExecuteNonQuery());
-        AreEqual("2812", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => cmd.ExecuteNonQuery());
+        AreEqual(2812, ex.Number);
     }
 
     private static void StringContains(string actual, string needle)

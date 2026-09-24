@@ -1,4 +1,3 @@
-using System.Data.Common;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 using static SqlServerSimulator.TestHelpers;
 
@@ -276,8 +275,8 @@ public sealed class CursorBreadthTests
         _ = c1.CreateCommand("declare c cursor global optimistic for select id,a from t order by id for update; open c;").ExecuteNonQuery();
         _ = c1.CreateCommand("fetch next from c").ExecuteNonQuery();
         _ = c2.CreateCommand("update t set a = 999 where id = 1").ExecuteNonQuery();
-        var ex = Throws<DbException>(() => c1.CreateCommand("update t set a = 111 where current of c").ExecuteNonQuery());
-        AreEqual("16947", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => c1.CreateCommand("update t set a = 111 where current of c").ExecuteNonQuery());
+        AreEqual(16947, ex.Number);
     }
 
     [TestMethod]
@@ -290,8 +289,8 @@ public sealed class CursorBreadthTests
         _ = c1.CreateCommand("declare c cursor global optimistic for select id,a from t order by id for update; open c;").ExecuteNonQuery();
         _ = c1.CreateCommand("fetch next from c").ExecuteNonQuery();
         _ = c2.CreateCommand("update t set a = 888 where id = 1").ExecuteNonQuery();
-        var ex = Throws<DbException>(() => c1.CreateCommand("delete from t where current of c").ExecuteNonQuery());
-        AreEqual("16947", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => c1.CreateCommand("delete from t where current of c").ExecuteNonQuery());
+        AreEqual(16947, ex.Number);
     }
 
     [TestMethod]
@@ -318,8 +317,8 @@ public sealed class CursorBreadthTests
         _ = c1.CreateCommand("declare c cursor global optimistic for select id,a from t order by id for update; open c;").ExecuteNonQuery();
         _ = c1.CreateCommand("fetch next from c").ExecuteNonQuery();
         _ = c2.CreateCommand("update t set a = 999 where id = 1").ExecuteNonQuery();
-        var ex = Throws<DbException>(() => c1.CreateCommand("update t set a = 111 where current of c").ExecuteNonQuery());
-        AreEqual("16947", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => c1.CreateCommand("update t set a = 111 where current of c").ExecuteNonQuery());
+        AreEqual(16947, ex.Number);
     }
 
     // ---- SCROLL_LOCKS ----
@@ -337,10 +336,10 @@ public sealed class CursorBreadthTests
         _ = c1.CreateCommand("fetch next from c").ExecuteNonQuery();
 
         var ex = await Task.Run(() =>
-            Throws<DbException>(() =>
+            Throws<SimulatedSqlException>(() =>
                 c2.CreateCommand("set lock_timeout 0; update t set a = 5 where id = 1").ExecuteNonQuery()),
             TestContext.CancellationToken);
-        AreEqual("1222", ex.Data["HelpLink.EvtID"]);
+        AreEqual(1222, ex.Number);
     }
 
     [TestMethod]
@@ -370,10 +369,10 @@ public sealed class CursorBreadthTests
         // id=1 is now writable; id=2 blocks.
         AreEqual(1, c2.CreateCommand("set lock_timeout 0; update t set a = 5 where id = 1").ExecuteNonQuery());
         var ex = await Task.Run(() =>
-            Throws<DbException>(() =>
+            Throws<SimulatedSqlException>(() =>
                 c2.CreateCommand("set lock_timeout 0; update t set a = 5 where id = 2").ExecuteNonQuery()),
             TestContext.CancellationToken);
-        AreEqual("1222", ex.Data["HelpLink.EvtID"]);
+        AreEqual(1222, ex.Number);
     }
 
     [TestMethod]

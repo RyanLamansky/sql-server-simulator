@@ -102,7 +102,7 @@ public class StringLiteralTests
     [TestMethod]
     public void StringLiteral_Unclosed_RaisesError()
     {
-        var ex = Throws<System.Data.Common.DbException>(() => new Simulation().ExecuteReader("select 1 where 'unclosed = 1").EnumerateRecords().ToArray());
+        var ex = Throws<SimulatedSqlException>(() => new Simulation().ExecuteReader("select 1 where 'unclosed = 1").EnumerateRecords().ToArray());
         Assert.Contains("Unclosed quotation mark", ex.Message);
     }
 

@@ -1,4 +1,3 @@
-using System.Data.Common;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 
 namespace SqlServerSimulator;
@@ -37,8 +36,8 @@ public sealed class CreateIndexTests
             create unique index ix_a on t(a);
             insert t values (1, 10)
             """);
-        var ex = Throws<DbException>(() => sim.ExecuteNonQuery("insert t values (2, 10)"));
-        AreEqual("2601", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => sim.ExecuteNonQuery("insert t values (2, 10)"));
+        AreEqual(2601, ex.Number);
         Contains("ix_a", ex.Message);
     }
 
@@ -51,8 +50,8 @@ public sealed class CreateIndexTests
             create unique index ix_a on t(a);
             insert t values (1, null)
             """);
-        var ex = Throws<DbException>(() => sim.ExecuteNonQuery("insert t values (2, null)"));
-        AreEqual("2601", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => sim.ExecuteNonQuery("insert t values (2, null)"));
+        AreEqual(2601, ex.Number);
     }
 
     [TestMethod]
@@ -187,8 +186,8 @@ public sealed class CreateIndexTests
             create unique index ix_active_code on t(code) where status = 1;
             insert t values (1, 1, 50)
             """);
-        var ex = Throws<DbException>(() => sim.ExecuteNonQuery("insert t values (2, 1, 50)"));
-        AreEqual("2601", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => sim.ExecuteNonQuery("insert t values (2, 1, 50)"));
+        AreEqual(2601, ex.Number);
     }
 
     [TestMethod]
@@ -244,8 +243,8 @@ public sealed class CreateIndexTests
         _ = sim.ExecuteNonQuery("""
             create table t (id int not null constraint pk_t primary key, a int)
             """);
-        var ex = Throws<DbException>(() => sim.ExecuteNonQuery("create index pk_t on t(a)"));
-        AreEqual("1913", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => sim.ExecuteNonQuery("create index pk_t on t(a)"));
+        AreEqual(1913, ex.Number);
     }
 
     [TestMethod]
@@ -364,8 +363,8 @@ public sealed class CreateIndexTests
     {
         var sim = new Simulation();
         _ = sim.ExecuteNonQuery("create table t (id int not null constraint pk_t primary key)");
-        var ex = Throws<DbException>(() => sim.ExecuteNonQuery("drop index pk_t on t"));
-        AreEqual("3723", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => sim.ExecuteNonQuery("drop index pk_t on t"));
+        AreEqual(3723, ex.Number);
         Contains("PRIMARY KEY constraint enforcement", ex.Message);
     }
 
@@ -376,8 +375,8 @@ public sealed class CreateIndexTests
         _ = sim.ExecuteNonQuery("""
             create table t (id int not null primary key, a int not null, constraint uq_a unique (a))
             """);
-        var ex = Throws<DbException>(() => sim.ExecuteNonQuery("drop index uq_a on t"));
-        AreEqual("3723", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => sim.ExecuteNonQuery("drop index uq_a on t"));
+        AreEqual(3723, ex.Number);
         Contains("UNIQUE constraint enforcement", ex.Message);
     }
 
@@ -559,8 +558,8 @@ public sealed class CreateIndexTests
             create unique index ix_a on t(a);
             insert t values (1, 10), (2, 20)
             """);
-        var ex = Throws<DbException>(() => sim.ExecuteNonQuery("update t set a = 10 where id = 2"));
-        AreEqual("2601", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => sim.ExecuteNonQuery("update t set a = 10 where id = 2"));
+        AreEqual(2601, ex.Number);
     }
 
     [TestMethod]

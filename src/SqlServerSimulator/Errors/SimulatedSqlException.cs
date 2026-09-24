@@ -232,33 +232,34 @@ public sealed partial class SimulatedSqlException : DbException
     }
 
     /// <summary>
-    /// Aggregates the errors gathered while draining a batch to completion
-    /// into a single exception, mirroring how real SqlClient surfaces every
-    /// statement-terminating error of a batch through one
-    /// <c>SqlException.Errors</c> collection (in batch order). The first
-    /// entry supplies the top-level <see cref="Number"/> / <see cref="Class"/>
-    /// / <see cref="State"/> / <c>Message</c> — where SqlClient, which sees the
-    /// entries as separate tokens, builds its message by newline-joining all of
-    /// them (probe-confirmed), so an in-process caller reading
-    /// <c>Message</c> alone sees less than a wire caller does.
+    /// Aggregates the entries gathered while draining a stretch of a batch into
+    /// a single exception, mirroring how real SqlClient surfaces every
+    /// statement-terminating error of that stretch through one
+    /// <c>SqlException.Errors</c> collection. The first entry supplies the
+    /// top-level <see cref="Number"/> / <see cref="Class"/> / <see cref="State"/>,
+    /// and <c>Message</c> joins every entry's text with
+    /// <see cref="Environment.NewLine"/>, as SqlClient builds it
+    /// (probed 2026-09-23).
     /// </summary>
     internal static SimulatedSqlException FromErrors(List<SimulatedError> errors)
-        => new(errors[0].Message, System.Runtime.InteropServices.CollectionsMarshal.AsSpan(errors));
+        => new(string.Join(Environment.NewLine, errors.Select(error => error.Message)), System.Runtime.InteropServices.CollectionsMarshal.AsSpan(errors));
 
     /// <summary>
     /// Collapses several exceptions into one carrying all their entries in
-    /// order. A lone exception is handed back as-is (its own
-    /// <see cref="Errors"/> already carries its entries); several flatten
-    /// through <see cref="FromErrors"/>. The aggregate inherits its inputs'
-    /// diagnostics state, so entries already stamped with a line / procedure
-    /// (a module body's, say) aren't re-stamped by an enclosing frame.
+    /// order, followed by <paramref name="messages"/> — the informational
+    /// messages the same stretch of the batch sent, which SqlClient appends
+    /// after the errors rather than firing (Msg 3621 among them). A lone
+    /// exception with no messages is handed back as-is; otherwise the entries
+    /// flatten through <see cref="FromErrors"/>. The aggregate inherits its
+    /// inputs' diagnostics state, so entries already stamped with a line /
+    /// procedure (a module body's, say) aren't re-stamped by an enclosing frame.
     /// </summary>
-    internal static SimulatedSqlException Aggregate(List<SimulatedSqlException> errors)
+    internal static SimulatedSqlException Aggregate(List<SimulatedSqlException> errors, List<SimulatedError>? messages = null)
     {
-        if (errors.Count == 1)
+        if (errors.Count == 1 && messages is not { Count: > 0 })
             return errors[0];
 
-        var entries = new List<SimulatedError>(errors.Count);
+        var entries = new List<SimulatedError>(errors.Count + (messages?.Count ?? 0));
         var resolved = true;
         foreach (var error in errors)
         {
@@ -266,6 +267,8 @@ public sealed partial class SimulatedSqlException : DbException
             foreach (var entry in error.Errors)
                 entries.Add(entry);
         }
+        if (messages is not null)
+            entries.AddRange(messages);
 
         var aggregate = FromErrors(entries);
         aggregate.diagnosticsResolved = resolved;

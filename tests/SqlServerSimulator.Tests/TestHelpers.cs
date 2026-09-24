@@ -1,5 +1,3 @@
-using System.Data.Common;
-
 namespace SqlServerSimulator;
 
 internal static class TestHelpers
@@ -9,35 +7,35 @@ internal static class TestHelpers
     public static T ExecuteScalar<T>(string commandText) where T : struct => new Simulation().ExecuteScalar<T>(commandText);
 
     /// <summary>
-    /// Verifies that <paramref name="commandText"/> raises a <see cref="DbException"/> whose
-    /// SQL Server error number (carried in <c>Data["HelpLink.EvtID"]</c>) matches
-    /// <paramref name="errorNumber"/>. Returns the exception so callers can do additional
+    /// Verifies that <paramref name="commandText"/> raises a <see cref="SimulatedSqlException"/> whose
+    /// SQL Server error number matches <paramref name="errorNumber"/>. Returns the exception so callers can do additional
     /// message assertions (e.g. <c>Assert.StartsWith</c>).
     /// </summary>
-    public static DbException AssertSqlError(string commandText, int errorNumber)
+    public static SimulatedSqlException AssertSqlError(string commandText, int errorNumber)
     {
-        var ex = Assert.Throws<DbException>(() => ExecuteScalar(commandText));
-        Assert.AreEqual(errorNumber.ToString(), ex.Data["HelpLink.EvtID"]);
+        var ex = Assert.Throws<SimulatedSqlException>(() => ExecuteScalar(commandText));
+        Assert.AreEqual(errorNumber, ex.Number);
         return ex;
     }
 
     /// <summary>
-    /// Verifies that <paramref name="commandText"/> raises a <see cref="DbException"/> with
-    /// exact-match <paramref name="expectedMessage"/> and the given error number.
+    /// Verifies that <paramref name="commandText"/> raises a <see cref="SimulatedSqlException"/> with
+    /// the given error number, whose own text is exactly <paramref name="expectedMessage"/>
+    /// (the exception's <c>Message</c> joins the entries that follow it too).
     /// </summary>
     public static void AssertSqlError(string commandText, int errorNumber, string expectedMessage)
     {
         var ex = AssertSqlError(commandText, errorNumber);
-        Assert.AreEqual(expectedMessage, ex.Message);
+        Assert.AreEqual(expectedMessage, ex.Errors[0].Message);
     }
 
     /// <summary>
-    /// Verifies that <paramref name="commandText"/> raises a <see cref="DbException"/> with
+    /// Verifies that <paramref name="commandText"/> raises a <see cref="SimulatedSqlException"/> with
     /// the given <paramref name="expectedMessage"/>. For tests that don't pin an error number.
     /// </summary>
     public static void AssertSqlMessage(string commandText, string expectedMessage)
     {
-        var ex = Assert.Throws<DbException>(() => ExecuteScalar(commandText));
+        var ex = Assert.Throws<SimulatedSqlException>(() => ExecuteScalar(commandText));
         Assert.AreEqual(expectedMessage, ex.Message);
     }
 }

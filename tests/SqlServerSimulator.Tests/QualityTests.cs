@@ -529,19 +529,21 @@ public partial class QualityTests
     private static partial Regex SlugStripPattern { get; }
 
     /// <summary>
-    /// Message numbers the docs name but no factory raises: every one is a case
-    /// real SQL Server reports and the simulator doesn't yet, which is exactly
-    /// the kind of claim worth writing down because no amount of grepping this
-    /// repo would find it. Most carry their reasoning in
+    /// Message numbers the docs name but nothing under <c>Errors/</c> raises.
+    /// Most are a case real SQL Server reports and the simulator doesn't yet,
+    /// which is exactly the kind of claim worth writing down because no amount
+    /// of grepping this repo would find it; they carry their reasoning in
     /// <c>docs/claude/backlog.md</c>'s over-permissive register or in the
-    /// owning feature's <c>Not modeled yet</c> section.
+    /// owning feature's <c>Not modeled yet</c> section. The rest are
+    /// informational messages a feature builds where it sends them (the
+    /// <c>sp_help</c> family's severity-10 texts, Msg 3604).
     /// </summary>
     private static readonly int[] CitedButNotRaised = [
         107, 147, 159, 185, 263, 264, 282, 557, 596, 1784,
         1789, 1909, 2247, 2390, 2396, 3604, 3607, 3609, 3920, 3997,
-        4124, 4624, 4712, 4860, 4919, 4922, 5592, 5703, 6338, 6947,
-        7222, 8105, 8153, 8622, 8628, 8711, 8729, 8730, 8733, 9341,
-        9803, 9828, 10343, 10738, 11729, 13519, 15249, 15457, 15459, 15460,
+        4124, 4624, 4712, 4860, 4919, 4922, 5592, 6338, 6947,
+        7222, 8105, 8622, 8628, 8711, 8729, 8730, 8733, 9341,
+        9803, 9828, 10343, 10738, 13519, 15249, 15457, 15459, 15460,
         15461, 15469, 15470, 15471, 15472, 15477, 15574, 15575, 15622, 15647,
         16002, 16003, 16007, 16902, 16909, 16930, 16945, 16956, 16961,
     ];

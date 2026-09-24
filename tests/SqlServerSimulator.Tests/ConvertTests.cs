@@ -1,4 +1,3 @@
-using System.Data.Common;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 using static SqlServerSimulator.TestHelpers;
 
@@ -32,14 +31,14 @@ public sealed class ConvertTests
     [DataRow("'42.5'")]
     public void Convert_StringParseFailure_StillThrows(string source)
     {
-        var ex = Throws<DbException>(() => ExecuteScalar($"select convert(int, {source})"));
+        var ex = Throws<SimulatedSqlException>(() => ExecuteScalar($"select convert(int, {source})"));
         Contains("Conversion failed", ex.Message);
     }
 
     [TestMethod]
     public void Convert_NarrowingOverflow_StillThrows()
     {
-        var ex = Throws<DbException>(() => ExecuteScalar("select convert(tinyint, 300)"));
+        var ex = Throws<SimulatedSqlException>(() => ExecuteScalar("select convert(tinyint, 300)"));
         Contains("Arithmetic overflow", ex.Message);
     }
 
@@ -151,7 +150,7 @@ public sealed class ConvertTests
     public void TryConvert_ExplicitConversionNotAllowed_StillThrows()
     {
         // Msg 529: SQL Server still raises for type pairs where coercion is fundamentally disallowed, even under TRY_CONVERT.
-        var ex = Throws<DbException>(() => ExecuteScalar("select try_convert(date, 0)"));
+        var ex = Throws<SimulatedSqlException>(() => ExecuteScalar("select try_convert(date, 0)"));
         Contains("Explicit conversion", ex.Message);
     }
 
@@ -162,14 +161,14 @@ public sealed class ConvertTests
     [TestMethod]
     public void Convert_MissingArgs_RaisesSyntaxError()
     {
-        var ex = Throws<DbException>(() => ExecuteScalar("select convert(int)"));
+        var ex = Throws<SimulatedSqlException>(() => ExecuteScalar("select convert(int)"));
         Contains("syntax", ex.Message);
     }
 
     [TestMethod]
     public void Convert_BadTargetType_RaisesMsg243()
     {
-        var ex = Throws<DbException>(() => ExecuteScalar("select convert(notatype, 1)"));
+        var ex = Throws<SimulatedSqlException>(() => ExecuteScalar("select convert(notatype, 1)"));
         Contains("notatype", ex.Message);
     }
 
@@ -414,18 +413,18 @@ public sealed class ConvertTests
     [TestMethod]
     public void Convert_StringToDate_StyleMismatchRaisesMsg9807()
     {
-        var ex = Throws<DbException>(() => ExecuteScalar(
+        var ex = Throws<SimulatedSqlException>(() => ExecuteScalar(
             "select convert(date, '05/13/2026', 112)"));
-        AreEqual("9807", ex.Data["HelpLink.EvtID"]);
+        AreEqual(9807, ex.Number);
         Contains("style 112", ex.Message);
     }
 
     [TestMethod]
     public void Convert_StringToDate_NotADate_RaisesMsg241()
     {
-        var ex = Throws<DbException>(() => ExecuteScalar(
+        var ex = Throws<SimulatedSqlException>(() => ExecuteScalar(
             "select convert(date, 'nope', 112)"));
-        AreEqual("241", ex.Data["HelpLink.EvtID"]);
+        AreEqual(241, ex.Number);
     }
 
     [TestMethod]
@@ -454,8 +453,8 @@ public sealed class ConvertTests
     [TestMethod]
     public void Convert_MoneyStyle_UnknownStyle_RaisesMsg281()
     {
-        var ex = Throws<DbException>(() => ExecuteScalar("select convert(varchar(40), cast(1.5 as money), 99)"));
-        AreEqual("281", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => ExecuteScalar("select convert(varchar(40), cast(1.5 as money), 99)"));
+        AreEqual(281, ex.Number);
         Contains("money", ex.Message);
     }
 

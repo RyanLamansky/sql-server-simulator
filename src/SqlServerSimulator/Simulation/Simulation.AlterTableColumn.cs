@@ -886,6 +886,9 @@ partial class Simulation
         table.Columns = newColumns;
         table.RecomputeStorageProjections();
 
+        // The rewrite writes every row, so an error it ends with is followed
+        // by Msg 3621 as a DML statement's is.
+        context.Batch.CurrentStatement.WritesRows = true;
         try
         {
             RewriteHeapForAlterColumn(table, ordinal, newColumn, originalColumns);
@@ -1124,7 +1127,9 @@ partial class Simulation
                             && max != SqlType.MaxLengthSentinel
                             && (narrowingEncoding?.GetByteCount(coerced.AsString) ?? coerced.AsString.Length) > max)
                         {
-                            throw SimulatedSqlException.StringOrBinaryWouldBeTruncated(table.Name, newCol.Name, coerced.AsString, max, narrowingEncoding);
+                            // Real reports no truncated value for ALTER COLUMN
+                            // (probed 2026-09-23).
+                            throw SimulatedSqlException.StringOrBinaryWouldBeTruncated(QualifyForTruncationMessage(table), newCol.Name, string.Empty, max, narrowingEncoding);
                         }
 
                         newStoredValues[newStorageOrdinal] = coerced;

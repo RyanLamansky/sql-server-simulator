@@ -1,4 +1,3 @@
-using System.Data.Common;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 using static SqlServerSimulator.TestHelpers;
 
@@ -73,7 +72,7 @@ public sealed class PatIndexTests
     /// </summary>
     [TestMethod]
     public void UntypedNullSubject_RaisesMsg8116()
-        => AreEqual(8116, ConvertToInt(AssertSqlError("select PATINDEX('%a%', NULL)", 8116)));
+        => _ = AssertSqlError("select PATINDEX('%a%', NULL)", 8116);
 
     [TestMethod]
     public void TypedNullSubject_ReturnsNull()
@@ -99,6 +98,4 @@ public sealed class PatIndexTests
     [TestMethod]
     public void NVarcharPattern_AndNVarcharSubject_WorksAcrossUnicode()
         => AreEqual(2, ExecuteScalar<int>("select PATINDEX(N'%ñ%', N'xñy')"));
-
-    private static int ConvertToInt(DbException ex) => int.Parse(ex.Data["HelpLink.EvtID"]!.ToString()!);
 }

@@ -68,7 +68,7 @@ public sealed class JoinTests
 
     [TestMethod]
     public void InnerJoin_MissingOn_RaisesSyntaxError()
-        => _ = Throws<DbException>(() => _ = new Simulation().ExecuteScalar("""
+        => _ = Throws<SimulatedSqlException>(() => _ = new Simulation().ExecuteScalar("""
             create table a (id int);
             create table b (id int);
             select 1 from a inner join b
@@ -111,7 +111,7 @@ public sealed class JoinTests
 
     [TestMethod]
     public void CrossJoin_WithOn_RaisesSyntaxError()
-        => _ = Throws<DbException>(() => _ = new Simulation().ExecuteScalar("""
+        => _ = Throws<SimulatedSqlException>(() => _ = new Simulation().ExecuteScalar("""
             create table a (id int);
             create table b (id int);
             select 1 from a cross join b on 1=1
@@ -166,9 +166,9 @@ public sealed class JoinTests
     public void Ambiguous_UnqualifiedColumn_RaisesMsg209()
     {
         using var connection = SeededAB();
-        var ex = Throws<DbException>(() => _ = connection.CreateCommand(
+        var ex = Throws<SimulatedSqlException>(() => _ = connection.CreateCommand(
             "select id from a inner join b on a.id = b.a_id").ExecuteScalar());
-        AreEqual("209", ex.Data["HelpLink.EvtID"]);
+        AreEqual(209, ex.Number);
         AreEqual("Ambiguous column name 'id'.", ex.Message);
     }
 

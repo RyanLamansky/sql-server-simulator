@@ -462,7 +462,7 @@ internal sealed partial class Selection
                 }
 
                 var operand = aggregate.CountsRowsOnly ? null : aggregate.Operand;
-                state.Aggregators[i].Add(operand is null ? SqlValue.Null(SqlType.Int32) : operand.Run(rowRuntime));
+                state.Aggregators[i].Add(operand is null ? SqlValue.Null(SqlType.Int32) : aggregate.ObserveInput(operand.Run(rowRuntime), rowRuntime));
             }
         }
 

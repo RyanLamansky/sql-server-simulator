@@ -55,9 +55,9 @@ public sealed class ConnectionIsolationTests
 
         // SET IDENTITY_INSERT scopes to A. B still sees the column as a
         // generated identity and rejects an explicit value with Msg 544.
-        var ex = Throws<System.Data.Common.DbException>(
+        var ex = Throws<SimulatedSqlException>(
             () => connB.CreateCommand("insert t (id, x) values (99, 1)").ExecuteNonQuery());
-        AreEqual("544", ex.Data["HelpLink.EvtID"]);
+        AreEqual(544, ex.Number);
     }
 
     [TestMethod]

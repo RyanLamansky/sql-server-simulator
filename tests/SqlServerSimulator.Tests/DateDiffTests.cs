@@ -1,4 +1,3 @@
-using System.Data.Common;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 using static SqlServerSimulator.TestHelpers;
 
@@ -108,39 +107,39 @@ public sealed class DateDiffTests
     public void DateDiff_TzOffsetPart_RaisesMsg9806()
     {
         // tzoffset is rejected at the function level, regardless of operand type.
-        var ex = Throws<DbException>(() => ExecuteScalar("select datediff(tzoffset, cast('2024-01-01 00:00:00 +00:00' as datetimeoffset), cast('2024-06-15 00:00:00 +00:00' as datetimeoffset))"));
+        var ex = Throws<SimulatedSqlException>(() => ExecuteScalar("select datediff(tzoffset, cast('2024-01-01 00:00:00 +00:00' as datetimeoffset), cast('2024-06-15 00:00:00 +00:00' as datetimeoffset))"));
         AreEqual("The datepart tzoffset is not supported by date function datediff.", ex.Message);
-        AreEqual("9806", ex.Data["HelpLink.EvtID"]);
+        AreEqual(9806, ex.Number);
     }
 
     [TestMethod]
     public void DateDiff_IsoWeekPart_RaisesMsg9806()
     {
         // iso_week works in DATEPART/DATEADD but is unconditionally rejected by DATEDIFF.
-        var ex = Throws<DbException>(() => ExecuteScalar("select datediff(iso_week, '2024-06-15', '2024-06-22')"));
+        var ex = Throws<SimulatedSqlException>(() => ExecuteScalar("select datediff(iso_week, '2024-06-15', '2024-06-22')"));
         AreEqual("The datepart iso_week is not supported by date function datediff.", ex.Message);
-        AreEqual("9806", ex.Data["HelpLink.EvtID"]);
+        AreEqual(9806, ex.Number);
     }
 
     [TestMethod]
     public void DateDiffBig_TzOffset_MessageEmbedsFunctionName()
     {
-        var ex = Throws<DbException>(() => ExecuteScalar("select datediff_big(iso_week, '2024-06-15', '2024-06-22')"));
+        var ex = Throws<SimulatedSqlException>(() => ExecuteScalar("select datediff_big(iso_week, '2024-06-15', '2024-06-22')"));
         AreEqual("The datepart iso_week is not supported by date function datediff_big.", ex.Message);
     }
 
     [TestMethod]
     public void DateDiff_UnknownDatepart_RaisesMsg155()
     {
-        var ex = Throws<DbException>(() => ExecuteScalar("select datediff(badpart, '2024-01-01', '2024-06-15')"));
+        var ex = Throws<SimulatedSqlException>(() => ExecuteScalar("select datediff(badpart, '2024-01-01', '2024-06-15')"));
         AreEqual("'badpart' is not a recognized datediff option.", ex.Message);
-        AreEqual("155", ex.Data["HelpLink.EvtID"]);
+        AreEqual(155, ex.Number);
     }
 
     [TestMethod]
     public void DateDiffBig_UnknownDatepart_MessageSaysDatediffBig()
     {
-        var ex = Throws<DbException>(() => ExecuteScalar("select datediff_big(badpart, '2024-01-01', '2024-06-15')"));
+        var ex = Throws<SimulatedSqlException>(() => ExecuteScalar("select datediff_big(badpart, '2024-01-01', '2024-06-15')"));
         AreEqual("'badpart' is not a recognized datediff_big option.", ex.Message);
     }
 
@@ -148,7 +147,7 @@ public sealed class DateDiffTests
     public void DateAdd_UnknownDatepart_MessageSaysDateadd()
     {
         // Pre-DATEDIFF, this said "datepart option" — Msg 155 wording is per-caller.
-        var ex = Throws<DbException>(() => ExecuteScalar("select dateadd(badpart, 1, '2024-01-01')"));
+        var ex = Throws<SimulatedSqlException>(() => ExecuteScalar("select dateadd(badpart, 1, '2024-01-01')"));
         AreEqual("'badpart' is not a recognized dateadd option.", ex.Message);
     }
 
@@ -156,9 +155,9 @@ public sealed class DateDiffTests
     public void DateDiff_MillisecondOverflow_RaisesMsg535()
     {
         // ~25 days of ms is > int.MaxValue (probe boundary).
-        var ex = Throws<DbException>(() => ExecuteScalar("select datediff(millisecond, '2024-01-01', '2024-01-26')"));
+        var ex = Throws<SimulatedSqlException>(() => ExecuteScalar("select datediff(millisecond, '2024-01-01', '2024-01-26')"));
         AreEqual("The datediff function resulted in an overflow. The number of dateparts separating two date/time instances is too large. Try to use datediff with a less precise datepart.", ex.Message);
-        AreEqual("535", ex.Data["HelpLink.EvtID"]);
+        AreEqual(535, ex.Number);
     }
 
     [TestMethod]
@@ -176,8 +175,8 @@ public sealed class DateDiffTests
     public void DateDiffBig_NanosecondCenturies_OverflowsToMsg535()
     {
         // 0001 → 9999 in nanoseconds overflows even bigint; probe-confirmed Msg 535.
-        var ex = Throws<DbException>(() => ExecuteScalar("select datediff_big(nanosecond, cast('0001-01-01' as datetime2), cast('9999-12-31' as datetime2))"));
-        AreEqual("535", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => ExecuteScalar("select datediff_big(nanosecond, cast('0001-01-01' as datetime2), cast('9999-12-31' as datetime2))"));
+        AreEqual(535, ex.Number);
         AreEqual("The datediff_big function resulted in an overflow. The number of dateparts separating two date/time instances is too large. Try to use datediff_big with a less precise datepart.", ex.Message);
     }
 

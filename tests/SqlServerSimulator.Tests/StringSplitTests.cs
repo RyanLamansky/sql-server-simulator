@@ -91,24 +91,24 @@ public sealed class StringSplitTests
     public void NullSeparator_RaisesMsg214()
     {
         using var conn = new Simulation().CreateOpenConnection();
-        var ex = Throws<DbException>(() => ReadAll(conn.CreateCommand("select value from STRING_SPLIT('a,b', cast(NULL as varchar(1)))")));
-        AreEqual("214", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => ReadAll(conn.CreateCommand("select value from STRING_SPLIT('a,b', cast(NULL as varchar(1)))")));
+        AreEqual(214, ex.Number);
     }
 
     [TestMethod]
     public void MultiCharSeparator_RaisesMsg214()
     {
         using var conn = new Simulation().CreateOpenConnection();
-        var ex = Throws<DbException>(() => ReadAll(conn.CreateCommand("select value from STRING_SPLIT('a,,b,,c', ',,')")));
-        AreEqual("214", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => ReadAll(conn.CreateCommand("select value from STRING_SPLIT('a,,b,,c', ',,')")));
+        AreEqual(214, ex.Number);
     }
 
     [TestMethod]
     public void EmptySeparator_RaisesMsg214()
     {
         using var conn = new Simulation().CreateOpenConnection();
-        var ex = Throws<DbException>(() => ReadAll(conn.CreateCommand("select value from STRING_SPLIT('a,b', '')")));
-        AreEqual("214", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => ReadAll(conn.CreateCommand("select value from STRING_SPLIT('a,b', '')")));
+        AreEqual(214, ex.Number);
     }
 
     [TestMethod]
@@ -141,8 +141,8 @@ public sealed class StringSplitTests
     [TestMethod]
     public void EnableOrdinal_TwoOrHigher_RaisesMsg4199()
     {
-        var ex = Throws<DbException>(() => new Simulation().ExecuteScalar("select value from STRING_SPLIT('a,b', ',', 2)"));
-        AreEqual("4199", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => new Simulation().ExecuteScalar("select value from STRING_SPLIT('a,b', ',', 2)"));
+        AreEqual(4199, ex.Number);
     }
 
     [TestMethod]
@@ -193,8 +193,8 @@ public sealed class StringSplitTests
     [TestMethod]
     public void NonIntThirdArg_RaisesMsg8116()
     {
-        var ex = Throws<DbException>(() => new Simulation().ExecuteScalar("select value from STRING_SPLIT('a,b', ',', '1')"));
-        AreEqual("8116", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => new Simulation().ExecuteScalar("select value from STRING_SPLIT('a,b', ',', '1')"));
+        AreEqual(8116, ex.Number);
     }
 
     [TestMethod]

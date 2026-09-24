@@ -66,6 +66,29 @@ internal sealed class AggregateExpression : Expression
     public bool CountsRowsOnly;
 
     /// <summary>
+    /// False for an aggregate real doesn't report a skipped NULL for — a
+    /// PIVOT's (see <see cref="CreatePivotAggregate"/>) and one in an
+    /// <c>EXISTS</c> body.
+    /// </summary>
+    internal bool WarnsOnNullInput = true;
+
+    /// <summary>
+    /// Passes one operand value through, noting on the executing statement
+    /// when it is a NULL this aggregate skips with real's Msg 8153 warning —
+    /// every aggregate does but <c>COUNT(*)</c> (and a <c>COUNT</c> reduced to
+    /// it), <c>STRING_AGG</c> and the JSON aggregates (probed 2026-09-23).
+    /// </summary>
+    internal SqlValue ObserveInput(SqlValue value, RuntimeContext runtime)
+    {
+        if (value.IsNull && this.WarnsOnNullInput && !this.CountsRowsOnly && this.Operand is not null
+            && this.Kind is not (AggregateKind.StringAgg or AggregateKind.JsonArrayAgg or AggregateKind.JsonObjectAgg))
+        {
+            runtime.Batch.CurrentStatement.NullEliminated = true;
+        }
+        return value;
+    }
+
+    /// <summary>
     /// Set at parse time when this aggregate sits in a <c>CASE</c> arm — or
     /// behind a <c>COALESCE</c> argument — real settled as unreachable while
     /// compiling, so the aggregate pass must not evaluate its operand per row
@@ -159,9 +182,12 @@ internal sealed class AggregateExpression : Expression
     /// the token parser and the <c>AggregateCollector</c> registration — the
     /// PIVOT planner hands the built list straight to
     /// <c>Selection.BuildSqlProjection</c>.
+    /// These never raise Msg 8153: real's PIVOT doesn't, even over a NULL in
+    /// the value column (probed 2026-09-23), and the <c>CASE</c> hands the
+    /// aggregate a NULL for every row of another pivot column besides.
     /// </summary>
     internal static AggregateExpression CreatePivotAggregate(AggregateKind kind, Expression operand) =>
-        new(kind, operand, distinct: false, separator: null);
+        new(kind, operand, distinct: false, separator: null) { WarnsOnNullInput = false };
 
     /// <summary>
     /// Convenience overload that auto-registers the new instance with the

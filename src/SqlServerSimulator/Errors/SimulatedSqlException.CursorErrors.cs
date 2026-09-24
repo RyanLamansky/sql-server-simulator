@@ -97,16 +97,13 @@ partial class SimulatedSqlException
     /// A positioned <c>UPDATE</c> / <c>DELETE … WHERE CURRENT OF</c> found no
     /// row to mutate for the named table even though the cursor is positioned —
     /// the table's slot is the NULL-extended side of an outer join. Real
-    /// SQL Server raises <b>Msg 16947</b> (class 16, state 1) plus the standard
-    /// <b>Msg 3621</b> statement-terminated companion; unlike
+    /// SQL Server raises <b>Msg 16947</b> (class 16, state 1), which the
+    /// dispatch loop follows with the standard Msg 3621; unlike
     /// <see cref="CursorOptimisticConflict"/> there is no descriptive Msg 16934,
     /// since nothing was modified out-of-band (probe-confirmed).
     /// </summary>
     internal static SimulatedSqlException CursorNoRowsAffected() =>
-        new(
-            "No rows were updated or deleted.\nThe statement has been terminated.",
-            new SimulatedError(@class: 16, lineNumber: 0, "No rows were updated or deleted.", 16947, procedure: "", server: "", source: "Core Microsoft SqlClient Data Provider", state: 1),
-            new SimulatedError(@class: 0, lineNumber: 0, "The statement has been terminated.", 3621, procedure: "", server: "", source: "Core Microsoft SqlClient Data Provider", state: 0));
+        new("No rows were updated or deleted.", 16947, 16, 1);
 
     /// <summary>
     /// Msg 16932: a positioned <c>UPDATE … WHERE CURRENT OF</c> assigns a
@@ -123,16 +120,14 @@ partial class SimulatedSqlException
     /// chain (probe-confirmed against SQL Server 2025): the terminating
     /// <b>Msg 16947</b> (class 16, state 1, <c>"No rows were updated or
     /// deleted."</c>) — the number a SqlClient consumer catches — followed by
-    /// the descriptive class-0 <b>Msg 16934</b> and the standard <b>Msg
-    /// 3621</b> statement-terminated companion. The full chain is reproduced so
-    /// <c>SqlException.Errors</c> and <c>.Message</c> match.
+    /// the descriptive class-0 <b>Msg 16934</b>, and then the standard Msg 3621
+    /// the dispatch loop adds.
     /// </summary>
     internal static SimulatedSqlException CursorOptimisticConflict() =>
         new(
-            "No rows were updated or deleted.\nOptimistic concurrency check failed. The row was modified outside of this cursor.\nThe statement has been terminated.",
+            "No rows were updated or deleted.\nOptimistic concurrency check failed. The row was modified outside of this cursor.",
             new SimulatedError(@class: 16, lineNumber: 0, "No rows were updated or deleted.", 16947, procedure: "", server: "", source: "Core Microsoft SqlClient Data Provider", state: 1),
-            new SimulatedError(@class: 0, lineNumber: 0, "Optimistic concurrency check failed. The row was modified outside of this cursor.", 16934, procedure: "", server: "", source: "Core Microsoft SqlClient Data Provider", state: 1),
-            new SimulatedError(@class: 0, lineNumber: 0, "The statement has been terminated.", 3621, procedure: "", server: "", source: "Core Microsoft SqlClient Data Provider", state: 0));
+            new SimulatedError(@class: 0, lineNumber: 0, "Optimistic concurrency check failed. The row was modified outside of this cursor.", 16934, procedure: "", server: "", source: "Core Microsoft SqlClient Data Provider", state: 1));
 
     /// <summary>
     /// Msg 16950: a <c>FETCH</c> (or other cursor operation) named a cursor

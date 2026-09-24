@@ -444,8 +444,8 @@ public sealed class TableValuedParameterTests
         p.TypeName = "dbo.t1";
         _ = cmd.Parameters.Add(p);
 
-        var ex = Throws<System.Data.Common.DbException>(() => cmd.ExecuteNonQuery());
-        AreEqual("500", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => cmd.ExecuteNonQuery());
+        AreEqual(500, ex.Number);
     }
 
     [TestMethod]
@@ -486,8 +486,8 @@ public sealed class TableValuedParameterTests
         p.TypeName = "dbo.no_such_type";
         _ = cmd.Parameters.Add(p);
 
-        var ex = Throws<System.Data.Common.DbException>(() => cmd.ExecuteNonQuery());
-        AreEqual("2715", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => cmd.ExecuteNonQuery());
+        AreEqual(2715, ex.Number);
     }
 
     [TestMethod]
@@ -510,8 +510,8 @@ public sealed class TableValuedParameterTests
         p.TypeName = "dbo.t1";
         _ = cmd.Parameters.Add(p);
 
-        var ex = Throws<System.Data.Common.DbException>(() => cmd.ExecuteNonQuery());
-        AreEqual("1077", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => cmd.ExecuteNonQuery());
+        AreEqual(1077, ex.Number);
     }
 
     [TestMethod]
@@ -534,8 +534,8 @@ public sealed class TableValuedParameterTests
         p.TypeName = "dbo.t1";
         _ = cmd.Parameters.Add(p);
 
-        var ex = Throws<System.Data.Common.DbException>(() => cmd.ExecuteNonQuery());
-        AreEqual("515", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => cmd.ExecuteNonQuery());
+        AreEqual(515, ex.Number);
     }
 
     [TestMethod]
@@ -559,8 +559,8 @@ public sealed class TableValuedParameterTests
         p.TypeName = "dbo.t1";
         _ = cmd.Parameters.Add(p);
 
-        var ex = Throws<System.Data.Common.DbException>(() => cmd.ExecuteNonQuery());
-        AreEqual("2627", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => cmd.ExecuteNonQuery());
+        AreEqual(2627, ex.Number);
     }
 
     [TestMethod]
@@ -582,8 +582,8 @@ public sealed class TableValuedParameterTests
         p.TypeName = "dbo.t1";
         _ = cmd.Parameters.Add(p);
 
-        var ex = Throws<System.Data.Common.DbException>(() => cmd.ExecuteNonQuery());
-        AreEqual("547", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => cmd.ExecuteNonQuery());
+        AreEqual(547, ex.Number);
     }
 
     [TestMethod]

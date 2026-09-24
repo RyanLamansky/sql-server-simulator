@@ -390,7 +390,7 @@ public sealed class StatementPermissionGateTests
         var ex = sim.AssertSqlError("execute as user = 'u'; alter sequence dbo.s restart with 5", 15151);
         AreEqual((byte)16, ex.Class);
         AreEqual((byte)1, ex.State);
-        AreEqual("Cannot alter the sequence 's', because it does not exist or you do not have permission.", ex.Message);
+        AreEqual("Cannot alter the sequence 's', because it does not exist or you do not have permission.", ex.Errors[0].Message);
     }
 
     [TestMethod]
@@ -472,7 +472,7 @@ public sealed class StatementPermissionGateTests
         AreEqual((byte)9, ex.State);
         AreEqual(
             "User does not have permission to alter database 'simulated', the database does not exist, or the database is not in a state that allows access checks.",
-            ex.Message);
+            ex.Errors[0].Message);
     }
 
     [TestMethod]

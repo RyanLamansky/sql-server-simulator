@@ -34,6 +34,8 @@ partial class Simulation
             return;
 
         SwitchDatabase(context.Connection, nameToken.Value);
+        // Sent even when the database doesn't change (probed 2026-09-23).
+        context.Connection.PendingMessages.Enqueue(SimulatedSqlException.DatabaseContextChangedMessage(batch, context.Connection.CurrentDatabase.Name));
     }
 
     /// <summary>

@@ -459,7 +459,7 @@ public sealed class TryCatchTests
         conn.Open();
         using var cmd = conn.CreateCommand();
         cmd.CommandText = "select 1; throw 50000, 'msg', 1";
-        _ = Throws<System.Data.Common.DbException>(() =>
+        _ = Throws<SimulatedSqlException>(() =>
         {
             using var reader = cmd.ExecuteReader();
             while (reader.Read() || reader.NextResult()) { }

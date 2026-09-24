@@ -1,4 +1,3 @@
-using System.Data.Common;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 
 namespace SqlServerSimulator;
@@ -33,8 +32,6 @@ public sealed class KeyUniquenessSeekTests
             """);
         return simulation;
     }
-
-    private static string ErrorNumber(DbException exception) => (string)exception.Data["HelpLink.EvtID"]!;
 
     private static int RowCount(Simulation simulation)
     {
@@ -125,8 +122,8 @@ public sealed class KeyUniquenessSeekTests
             create unique index ix_a on t(a);
             insert t (id, a, pad) select value, value, 'x' from generate_series(1, {SeededRows})
             """);
-        var exception = Throws<DbException>(() => simulation.ExecuteNonQuery($"insert t values ({SeededRows + 1}, 137, 'x')"));
-        AreEqual("2601", ErrorNumber(exception));
+        var exception = Throws<SimulatedSqlException>(() => simulation.ExecuteNonQuery($"insert t values ({SeededRows + 1}, 137, 'x')"));
+        AreEqual(2601, exception.Number);
     }
 
     [TestMethod]
@@ -146,8 +143,8 @@ public sealed class KeyUniquenessSeekTests
         // -137 collides with an existing row, but both sides sit outside the filter.
         _ = simulation.ExecuteNonQuery("insert t values (5001, -137, 'x')");
 
-        var exception = Throws<DbException>(() => simulation.ExecuteNonQuery("insert t values (5002, 137, 'x')"));
-        AreEqual("2601", ErrorNumber(exception));
+        var exception = Throws<SimulatedSqlException>(() => simulation.ExecuteNonQuery("insert t values (5002, 137, 'x')"));
+        AreEqual(2601, exception.Number);
     }
 
     [TestMethod]
@@ -277,8 +274,8 @@ public sealed class KeyUniquenessSeekTests
             create unique index ix_a on t(a) where flag = 1;
             insert t (id, a, flag, pad) select value, value, 1, 'x' from generate_series(1, {SeededRows})
             """);
-        var exception = Throws<DbException>(() => simulation.ExecuteNonQuery("update t set a = 9001 where id in (5, 6)"));
-        AreEqual("2601", ErrorNumber(exception));
+        var exception = Throws<SimulatedSqlException>(() => simulation.ExecuteNonQuery("update t set a = 9001 where id in (5, 6)"));
+        AreEqual(2601, exception.Number);
     }
 
     [TestMethod]
@@ -309,21 +306,21 @@ public sealed class KeyUniquenessSeekTests
             insert t (id, a, flag, pad) select value, value, 1, 'x' from generate_series(1, {SeededRows});
             insert t values (9001, 7, 0, 'x')
             """);
-        var exception = Throws<DbException>(() => simulation.ExecuteNonQuery("update t set flag = 1 where id = 9001"));
-        AreEqual("2601", ErrorNumber(exception));
+        var exception = Throws<SimulatedSqlException>(() => simulation.ExecuteNonQuery("update t set flag = 1 where id = 9001"));
+        AreEqual(2601, exception.Number);
     }
 
     [TestMethod]
     public void Merge_UpdateIntoExistingKey_Raises()
     {
         var simulation = Seeded("create table t (id int constraint pk_t primary key, pad char(500))");
-        var exception = Throws<DbException>(() => simulation.ExecuteNonQuery("""
+        var exception = Throws<SimulatedSqlException>(() => simulation.ExecuteNonQuery("""
             merge t as target
             using (values (137, 42)) as source (findId, newId)
             on target.id = source.findId
             when matched then update set id = source.newId;
             """));
-        AreEqual("2627", ErrorNumber(exception));
+        AreEqual(2627, exception.Number);
     }
 
     [TestMethod]
@@ -341,7 +338,7 @@ public sealed class KeyUniquenessSeekTests
             insert t (id, mid, b, pad) select value, value, value, 'x' from generate_series(1, {SeededRows});
             alter table t drop column mid
             """);
-        var exception = Throws<DbException>(() => simulation.ExecuteNonQuery($"insert t values ({SeededRows + 1}, 137, 'x')"));
-        AreEqual("2601", ErrorNumber(exception));
+        var exception = Throws<SimulatedSqlException>(() => simulation.ExecuteNonQuery($"insert t values ({SeededRows + 1}, 137, 'x')"));
+        AreEqual(2601, exception.Number);
     }
 }

@@ -376,7 +376,7 @@ public sealed class UpdateTests
         var simulation = new Simulation();
         _ = simulation.ExecuteNonQuery("create table t (id int)");
 
-        var ex = Throws<DbException>(() => simulation.ExecuteNonQuery("update [unknown] set [unknown].[id] = 1"));
+        var ex = Throws<SimulatedSqlException>(() => simulation.ExecuteNonQuery("update [unknown] set [unknown].[id] = 1"));
         Contains("Invalid object name", ex.Message);
     }
 
@@ -407,7 +407,7 @@ public sealed class UpdateTests
             create table t (id int);
             create table u (id int)
             """);
-        var ex = Throws<DbException>(() =>
+        var ex = Throws<SimulatedSqlException>(() =>
             _ = simulation.ExecuteNonQuery("update [x] set [x].[id] = 1 from t as [a] inner join u as [b] on [a].[id] = [b].[id]"));
         Contains("Invalid object name", ex.Message);
     }

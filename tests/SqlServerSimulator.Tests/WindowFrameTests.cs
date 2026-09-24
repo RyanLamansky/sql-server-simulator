@@ -353,8 +353,8 @@ public sealed class WindowFrameTests
     public void Frame_RejectedOnRankingAndOffsetFunctions_Msg10752(string sql)
     {
         using var connection = SeededTies();
-        var ex = Throws<DbException>(() => _ = connection.CreateCommand(sql).ExecuteScalar());
-        AreEqual("10752", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => _ = connection.CreateCommand(sql).ExecuteScalar());
+        AreEqual(10752, ex.Number);
     }
 
     /// <summary>
@@ -413,9 +413,9 @@ public sealed class WindowFrameTests
     public void NonStarAggregate_FrameWithoutOrderBy_Raises10756(string aggregate)
     {
         using var connection = SeededTies();
-        var ex = Throws<DbException>(() => _ = connection.CreateCommand(
+        var ex = Throws<SimulatedSqlException>(() => _ = connection.CreateCommand(
             $"select {aggregate} over(partition by grp rows between unbounded preceding and current row) from t").ExecuteScalar());
-        AreEqual("10756", ex.Data["HelpLink.EvtID"]);
+        AreEqual(10756, ex.Number);
         AreEqual("Window frame with ROWS or RANGE must have an ORDER BY clause.", ex.Message);
     }
 
@@ -430,9 +430,9 @@ public sealed class WindowFrameTests
     public void FrameAsOnlyOverElement_Raises102(string aggregate)
     {
         using var connection = SeededTies();
-        var ex = Throws<DbException>(() => _ = connection.CreateCommand(
+        var ex = Throws<SimulatedSqlException>(() => _ = connection.CreateCommand(
             $"select {aggregate} over(rows between unbounded preceding and current row) from t").ExecuteScalar());
-        AreEqual("102", ex.Data["HelpLink.EvtID"]);
+        AreEqual(102, ex.Number);
     }
 
     /// <summary>
@@ -444,9 +444,9 @@ public sealed class WindowFrameTests
     public void StarCount_NamedWindowFrameWithoutOrderBy_Raises5364()
     {
         using var connection = SeededTies();
-        var ex = Throws<DbException>(() => _ = connection.CreateCommand(
+        var ex = Throws<SimulatedSqlException>(() => _ = connection.CreateCommand(
             "select count(*) over w from t window w as (partition by grp rows between unbounded preceding and current row)").ExecuteScalar());
-        AreEqual("5364", ex.Data["HelpLink.EvtID"]);
+        AreEqual(5364, ex.Number);
     }
 
     [TestMethod]
@@ -454,10 +454,10 @@ public sealed class WindowFrameTests
     {
         // RANGE restricted to UNBOUNDED + CURRENT ROW per probe.
         using var connection = SeededTies();
-        var ex = Throws<DbException>(() =>
+        var ex = Throws<SimulatedSqlException>(() =>
             _ = connection.CreateCommand(
                 "select sum(v) over(order by v range between 1 preceding and 1 following) from t").ExecuteScalar());
-        AreEqual("4194", ex.Data["HelpLink.EvtID"]);
+        AreEqual(4194, ex.Number);
     }
 
     [TestMethod]
@@ -465,10 +465,10 @@ public sealed class WindowFrameTests
     {
         // Semantically empty / inverted frame — SQL Server rejects up-front.
         using var connection = SeededTies();
-        var ex = Throws<DbException>(() =>
+        var ex = Throws<SimulatedSqlException>(() =>
             _ = connection.CreateCommand(
                 "select sum(v) over(order by id rows between 1 following and 1 preceding) from t").ExecuteScalar());
-        AreEqual("4193", ex.Data["HelpLink.EvtID"]);
+        AreEqual(4193, ex.Number);
     }
 
     [TestMethod]
@@ -476,10 +476,10 @@ public sealed class WindowFrameTests
     {
         // UNBOUNDED PRECEDING is invalid as an end bound — Msg 102 syntax.
         using var connection = SeededTies();
-        var ex = Throws<DbException>(() =>
+        var ex = Throws<SimulatedSqlException>(() =>
             _ = connection.CreateCommand(
                 "select sum(v) over(order by id rows between current row and unbounded preceding) from t").ExecuteScalar());
-        AreEqual("102", ex.Data["HelpLink.EvtID"]);
+        AreEqual(102, ex.Number);
     }
 
     [TestMethod]
@@ -487,7 +487,7 @@ public sealed class WindowFrameTests
     {
         // Same as FIRST_VALUE — value functions require ORDER BY.
         using var connection = SeededTies();
-        _ = Throws<DbException>(() =>
+        _ = Throws<SimulatedSqlException>(() =>
             _ = connection.CreateCommand(
                 "select last_value(v) over(partition by grp) from t").ExecuteScalar());
     }

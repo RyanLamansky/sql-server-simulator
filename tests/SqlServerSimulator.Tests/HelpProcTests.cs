@@ -337,11 +337,11 @@ public sealed class HelpProcTests
         HasCount(8, sets);
         AreEqual("iv", sets[7].Rows[0][0]);
         // A table with no dependent view falls to the severity-10 message,
-        // which coalesces with the batch's other sev-10 texts.
+        // one of the messages the procedure sends.
         var withoutView = new Simulation();
         withoutView.ExecuteBatches("create table dbo.t (a int)");
         Assert.Contains("No views with schema binding reference table 't'.",
-            RunHelp(withoutView, "exec sp_help 't'").Errors.Single().Message);
+            RunHelp(withoutView, "exec sp_help 't'").Errors.ConvertAll(e => e.Message));
     }
 
     [TestMethod]
@@ -527,13 +527,11 @@ public sealed class HelpProcTests
         sim.ExecuteBatches("create table dbo.t (a int)");
         var (sets, errors) = RunHelp(sim, "exec sp_helpconstraint 't', 'nomsg'");
         IsEmpty(sets);
-        // Both messages land in one coalesced info event carrying the first
-        // contributor's number — the simulator's batch-wide PRINT / sev-10
-        // coalescing semantic.
-        var error = errors.Single();
-        AreEqual(15469, error.Number);
-        Assert.Contains("No constraints are defined on object 't'", error.Message);
-        Assert.Contains("No foreign keys reference table 't'", error.Message);
+        HasCount(2, errors);
+        AreEqual(15469, errors[0].Number);
+        Assert.Contains("No constraints are defined on object 't'", errors[0].Message);
+        AreEqual(15470, errors[1].Number);
+        Assert.Contains("No foreign keys reference table 't'", errors[1].Message);
     }
 
     [TestMethod]

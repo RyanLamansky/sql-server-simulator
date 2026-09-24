@@ -233,8 +233,8 @@ public sealed class QuantifiedComparisonTests
     {
         using var conn = SeededTwoTables();
         using var cmd = conn.CreateCommand("select id from q1 where v > all (select id, x from q2)");
-        var ex = Throws<DbException>(() => cmd.ExecuteReader().Read());
-        AreEqual("116", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => cmd.ExecuteReader().Read());
+        AreEqual(116, ex.Number);
         AreEqual(
             "Only one expression can be specified in the select list when the subquery is not introduced with EXISTS.",
             ex.Message);
@@ -307,8 +307,8 @@ public sealed class QuantifiedComparisonTests
     {
         using var conn = SeededTwoTables();
         using var cmd = conn.CreateCommand("select id from q1 where 'x' = any (select x from q2 where x is not null)");
-        var ex = Throws<DbException>(() => cmd.ExecuteReader().Read());
-        AreEqual("245", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => cmd.ExecuteReader().Read());
+        AreEqual(245, ex.Number);
     }
 
 }

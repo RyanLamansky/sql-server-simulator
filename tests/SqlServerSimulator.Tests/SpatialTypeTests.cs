@@ -1,4 +1,3 @@
-using System.Data.Common;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 
 namespace SqlServerSimulator;
@@ -285,12 +284,12 @@ public sealed class SpatialTypeTests
 
     [TestMethod]
     public void GeometryStaticCall_MissingOpenParen_Throws()
-        => _ = Throws<DbException>(() => new Simulation().ExecuteScalar(
+        => _ = Throws<SimulatedSqlException>(() => new Simulation().ExecuteScalar(
             "select geometry::Parse 'POINT (0 0)'"));
 
     [TestMethod]
     public void GeographyStaticCall_TrailingGarbage_Throws()
-        => _ = Throws<DbException>(() => new Simulation().ExecuteScalar(
+        => _ = Throws<SimulatedSqlException>(() => new Simulation().ExecuteScalar(
             "select geography::Parse('POINT (0 0)' garbage)"));
 
     [TestMethod]

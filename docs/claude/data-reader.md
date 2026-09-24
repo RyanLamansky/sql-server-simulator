@@ -101,6 +101,7 @@ The reader consumes the unified continue-on-error outcome stream (see [`control-
   This matches SqlClient surfacing an error token that no COLMETADATA precedes, and is what lets EF Core's no-OUTPUT modification batches — which never call `Read` — observe a failed write.
 
 `ExecuteNonQuery` / `ExecuteScalar` bypass this positional model: they drain the whole outcome stream and aggregate every error into one `SimulatedSqlException` thrown at completion (`ExecuteScalar` returns the first result set's first value only when the batch had no error).
+Which informational messages ride along in an exception rather than firing as events is in [`errors.md`](errors.md#the-message-stream).
 
 **Dispose = statement-level drain**: closing the reader executes the batch's remaining statements (side effects persist) and swallows their errors — a disposed reader never throws.
 Row-level pull *inside* the statement the reader was parked on stays abandoned (unchanged; a non-draining reader still doesn't run a SELECT iterator's post-yield code — see [`plan-cache.md`](plan-cache.md)).

@@ -33,16 +33,16 @@ public sealed class ValuesDerivedTableTests
     /// <c>AssertSqlError</c> catches via the first-value read) surfaces.
     /// Returns the raised error's number.
     /// </summary>
-    private static string DrainError(string sql)
+    private static int DrainError(string sql)
     {
-        var ex = Throws<DbException>(() =>
+        var ex = Throws<SimulatedSqlException>(() =>
         {
             using var reader = new Simulation().ExecuteReader(sql);
             while (reader.Read())
             {
             }
         });
-        return (string)ex.Data["HelpLink.EvtID"]!;
+        return ex.Number;
     }
 
     [TestMethod]
@@ -160,7 +160,7 @@ public sealed class ValuesDerivedTableTests
     {
         // int wins over varchar by precedence (Promote → int); 'abc' then
         // fails to convert at runtime (Msg 245), matching SQL Server.
-        AreEqual("245", DrainError("select a from (values (1), ('abc')) v(a)"));
+        AreEqual(245, DrainError("select a from (values (1), ('abc')) v(a)"));
     }
 
     [TestMethod]

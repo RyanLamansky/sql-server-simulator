@@ -292,7 +292,7 @@ public sealed class CursorMultiSourceTests
             declare @id int, @w int;
             fetch next from c into @id, @w;
             update b set w = 5 where current of c;
-            """, 16947, "No rows were updated or deleted.\nThe statement has been terminated.");
+            """, 16947, "No rows were updated or deleted.");
 
     [TestMethod]
     public void PositionedDml_BeforeAnyFetch_StillRaises16931()

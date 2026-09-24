@@ -380,7 +380,7 @@ public sealed class MergeTests
                 """);
             Assert.Fail("expected PK violation");
         }
-        catch (System.Data.Common.DbException)
+        catch (SimulatedSqlException)
         {
             // expected
         }

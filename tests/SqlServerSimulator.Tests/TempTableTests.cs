@@ -61,8 +61,8 @@ public sealed class TempTableTests
             Exec(conn, "insert #t values (1)");
         }
         using var conn2 = sim.CreateOpenConnection();
-        var ex = Throws<DbException>(() => Exec(conn2, "select * from #t"));
-        AreEqual("208", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => Exec(conn2, "select * from #t"));
+        AreEqual(208, ex.Number);
     }
 
     [TestMethod]
@@ -73,8 +73,8 @@ public sealed class TempTableTests
         using var b = sim.CreateOpenConnection();
         Exec(a, "create table #shared (id int)");
         Exec(a, "insert #shared values (10)");
-        var ex = Throws<DbException>(() => Exec(b, "select * from #shared"));
-        AreEqual("208", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => Exec(b, "select * from #shared"));
+        AreEqual(208, ex.Number);
         Exec(b, "create table #shared (id int)");
         Exec(b, "insert #shared values (20)");
         AreEqual(10, (int)a.CreateCommand("select id from #shared").ExecuteScalar()!);
@@ -87,8 +87,8 @@ public sealed class TempTableTests
         using var conn = new Simulation().CreateOpenConnection();
         Exec(conn, "create table #t (id int)");
         AreEqual(-1, ExecRows(conn, "drop table #t"));
-        var ex = Throws<DbException>(() => Exec(conn, "select * from #t"));
-        AreEqual("208", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => Exec(conn, "select * from #t"));
+        AreEqual(208, ex.Number);
     }
 
     [TestMethod]
@@ -97,16 +97,16 @@ public sealed class TempTableTests
         using var conn = new Simulation().CreateOpenConnection();
         Exec(conn, "create table t (id int)");
         AreEqual(-1, ExecRows(conn, "drop table t"));
-        var ex = Throws<DbException>(() => Exec(conn, "select * from t"));
-        AreEqual("208", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => Exec(conn, "select * from t"));
+        AreEqual(208, ex.Number);
     }
 
     [TestMethod]
     public void DropTable_Missing_RaisesMsg3701()
     {
         using var conn = new Simulation().CreateOpenConnection();
-        var ex = Throws<DbException>(() => Exec(conn, "drop table #missing"));
-        AreEqual("3701", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => Exec(conn, "drop table #missing"));
+        AreEqual(3701, ex.Number);
         AreEqual("Cannot drop the table '#missing', because it does not exist or you do not have permission.", ex.Message);
     }
 
@@ -117,8 +117,8 @@ public sealed class TempTableTests
         // St 5 as the temp path above — probe-confirmed verbatim wording
         // against SQL Server 2025.
         using var conn = new Simulation().CreateOpenConnection();
-        var ex = Throws<DbException>(() => Exec(conn, "drop table missing_regular"));
-        AreEqual("3701", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => Exec(conn, "drop table missing_regular"));
+        AreEqual(3701, ex.Number);
         AreEqual("Cannot drop the table 'missing_regular', because it does not exist or you do not have permission.", ex.Message);
     }
 
@@ -150,8 +150,8 @@ public sealed class TempTableTests
         Exec(conn, "create table #a (id int)");
         Exec(conn, "create table #b (id int)");
         AreEqual(-1, ExecRows(conn, "drop table #a, #b"));
-        AreEqual("208", Throws<DbException>(() => Exec(conn, "select * from #a")).Data["HelpLink.EvtID"]);
-        AreEqual("208", Throws<DbException>(() => Exec(conn, "select * from #b")).Data["HelpLink.EvtID"]);
+        AreEqual(208, Throws<SimulatedSqlException>(() => Exec(conn, "select * from #a")).Number);
+        AreEqual(208, Throws<SimulatedSqlException>(() => Exec(conn, "select * from #b")).Number);
     }
 
     [TestMethod]
@@ -159,8 +159,8 @@ public sealed class TempTableTests
     {
         using var conn = new Simulation().CreateOpenConnection();
         Exec(conn, "create table #dup (id int)");
-        var ex = Throws<DbException>(() => Exec(conn, "create table #dup (id int)"));
-        AreEqual("2714", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => Exec(conn, "create table #dup (id int)"));
+        AreEqual(2714, ex.Number);
         AreEqual("There is already an object named '#dup' in the database.", ex.Message);
     }
 
@@ -231,8 +231,8 @@ public sealed class TempTableTests
             ExecInTx(conn, tx, "create table #created_in_tx (id int)");
             tx.Rollback();
         }
-        var ex = Throws<DbException>(() => Exec(conn, "select * from #created_in_tx"));
-        AreEqual("208", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => Exec(conn, "select * from #created_in_tx"));
+        AreEqual(208, ex.Number);
     }
 
     [TestMethod]
@@ -284,8 +284,8 @@ public sealed class TempTableTests
         using var other = sim.CreateOpenConnection();
         Exec(owner, "create table ##g (id int)");
         Exec(other, "drop table ##g");
-        var ex = Throws<DbException>(() => Exec(owner, "select * from ##g"));
-        AreEqual("208", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => Exec(owner, "select * from ##g"));
+        AreEqual(208, ex.Number);
     }
 
     [TestMethod]
@@ -302,8 +302,8 @@ public sealed class TempTableTests
             Exec(owner, "insert ##g values (1)");
             AreEqual(1, CountRows(witness, "##g"));
         }
-        var ex = Throws<DbException>(() => Exec(witness, "select * from ##g"));
-        AreEqual("208", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => Exec(witness, "select * from ##g"));
+        AreEqual(208, ex.Number);
     }
 
     [TestMethod]
@@ -313,8 +313,8 @@ public sealed class TempTableTests
         using var a = sim.CreateOpenConnection();
         using var b = sim.CreateOpenConnection();
         Exec(a, "create table ##dup (id int)");
-        var ex = Throws<DbException>(() => Exec(b, "create table ##dup (id int)"));
-        AreEqual("2714", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => Exec(b, "create table ##dup (id int)"));
+        AreEqual(2714, ex.Number);
         AreEqual("There is already an object named '##dup' in the database.", ex.Message);
     }
 
@@ -352,9 +352,9 @@ public sealed class TempTableTests
             tx.Rollback();
         }
         // Visible to neither session after rollback.
-        var ex = Throws<DbException>(() => Exec(owner, "select * from ##rb"));
-        AreEqual("208", ex.Data["HelpLink.EvtID"]);
-        AreEqual("208", Throws<DbException>(() => Exec(other, "select * from ##rb")).Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => Exec(owner, "select * from ##rb"));
+        AreEqual(208, ex.Number);
+        AreEqual(208, Throws<SimulatedSqlException>(() => Exec(other, "select * from ##rb")).Number);
     }
 
     [TestMethod]
@@ -398,8 +398,8 @@ public sealed class TempTableTests
         using var conn = new Simulation().CreateOpenConnection();
         Exec(conn, "create procedure dbo.p as begin create table #pt (a int); insert #pt values (1); end");
         Exec(conn, "exec dbo.p");
-        var ex = Throws<DbException>(() => Exec(conn, "select * from #pt"));
-        AreEqual("208", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => Exec(conn, "select * from #pt"));
+        AreEqual(208, ex.Number);
     }
 
     [TestMethod]
@@ -419,8 +419,8 @@ public sealed class TempTableTests
         using var conn = new Simulation().CreateOpenConnection();
         Exec(conn, "create procedure dbo.p as begin select 1 a into #si; end");
         Exec(conn, "exec dbo.p");
-        var ex = Throws<DbException>(() => Exec(conn, "select * from #si"));
-        AreEqual("208", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => Exec(conn, "select * from #si"));
+        AreEqual(208, ex.Number);
     }
 
     [TestMethod]
@@ -432,8 +432,8 @@ public sealed class TempTableTests
         // The nested proc sees the enclosing proc's temp during execution.
         AreEqual(2, conn.CreateCommand("exec dbo.outer_p").ExecuteScalar());
         // After the outer proc returns the session no longer sees it.
-        var ex = Throws<DbException>(() => Exec(conn, "select * from #outer"));
-        AreEqual("208", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => Exec(conn, "select * from #outer"));
+        AreEqual(208, ex.Number);
     }
 
     [TestMethod]
@@ -441,8 +441,8 @@ public sealed class TempTableTests
     {
         using var conn = new Simulation().CreateOpenConnection();
         Exec(conn, "exec ('create table #e (a int); insert #e values (5)')");
-        var ex = Throws<DbException>(() => Exec(conn, "select * from #e"));
-        AreEqual("208", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => Exec(conn, "select * from #e"));
+        AreEqual(208, ex.Number);
     }
 
     [TestMethod]
@@ -452,8 +452,8 @@ public sealed class TempTableTests
         Exec(conn, "create table dbo.t (id int)");
         Exec(conn, "create trigger dbo.tr on dbo.t after insert as begin create table #trg (a int); insert #trg values (1); end");
         Exec(conn, "insert dbo.t values (10)");
-        var ex = Throws<DbException>(() => Exec(conn, "select * from #trg"));
-        AreEqual("208", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => Exec(conn, "select * from #trg"));
+        AreEqual(208, ex.Number);
     }
 
     [TestMethod]

@@ -1,4 +1,3 @@
-using System.Data.Common;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 
 namespace SqlServerSimulator;
@@ -165,15 +164,15 @@ public sealed class CaseExpressionTests
     {
         // `case end` has no WHEN clauses; SQL Server raises Msg 156 near the
         // reserved keyword `end` (probe-confirmed against SQL Server 2025).
-        var ex = Throws<DbException>(() => _ = new Simulation().ExecuteScalar("select case end"));
-        AreEqual("156", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => _ = new Simulation().ExecuteScalar("select case end"));
+        AreEqual(156, ex.Number);
     }
 
     [TestMethod]
     public void Case_MissingEnd_RaisesSyntaxError()
     {
-        var ex = Throws<DbException>(() => _ = new Simulation().ExecuteScalar("select case when 1=1 then 'a'"));
-        AreEqual("102", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => _ = new Simulation().ExecuteScalar("select case when 1=1 then 'a'"));
+        AreEqual(102, ex.Number);
     }
 
     // === Msg 8133: every result expression is a bare NULL ===

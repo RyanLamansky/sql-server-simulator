@@ -724,7 +724,7 @@ public sealed class QueryHintTests
     public void BareParen_AColumnOfTheSourceItself_StillReportsMsg207()
         // The source is not in scope for its own arguments, so even a name the
         // table carries is an unresolvable column reference.
-        => AreEqual("Invalid column name 'a'.", new Simulation().AssertSqlError($"{SeekTable} select * from t (a)", 207).Message);
+        => AreEqual("Invalid column name 'a'.", new Simulation().AssertSqlError($"{SeekTable} select * from t (a)", 207).Errors[0].Message);
 
     [TestMethod]
     public void BareParen_SeveralUnknownNames_ReportOneMsg207Each()

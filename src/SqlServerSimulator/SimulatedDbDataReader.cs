@@ -17,16 +17,45 @@ namespace SqlServerSimulator;
 public sealed class SimulatedDbDataReader : DbDataReader
 {
     private readonly IEnumerator<SimulatedStatementOutcome> outcomes;
+    private readonly SimulatedDbConnection? connection;
+
+    /// <summary>
+    /// An outcome the constructor read past while gathering the messages that
+    /// follow an error, handed to the next advance instead of the stream's.
+    /// </summary>
+    private SimulatedStatementOutcome? pendingOutcome;
     private SimulatedQueryResult? currentResult;
     private RowCursor cursor = EmptyCursor.Instance;
     private int recordsAffected;
     private bool anyRecordsAffected;
     private bool closed;
 
-    internal SimulatedDbDataReader(IEnumerable<SimulatedStatementOutcome> outcomes)
+    internal SimulatedDbDataReader(IEnumerable<SimulatedStatementOutcome> outcomes, SimulatedDbConnection? connection)
     {
         this.outcomes = outcomes.GetEnumerator();
-        _ = this.AdvanceToNextResult();
+        this.connection = connection;
+        _ = this.AdvanceToNextResult(initial: true);
+    }
+
+    /// <summary>
+    /// The next outcome, whether one the constructor set aside or the
+    /// stream's own.
+    /// </summary>
+    private bool MoveToNextOutcome(out SimulatedStatementOutcome outcome)
+    {
+        if (this.pendingOutcome is { } pending)
+        {
+            this.pendingOutcome = null;
+            outcome = pending;
+            return true;
+        }
+        if (this.outcomes.MoveNext())
+        {
+            outcome = this.outcomes.Current;
+            return true;
+        }
+        outcome = null!;
+        return false;
     }
 
     /// <summary>
@@ -39,13 +68,23 @@ public sealed class SimulatedDbDataReader : DbDataReader
     /// on result-set boundaries. Executing statements as the enumerator
     /// advances is what persists their side effects.
     /// </summary>
-    private bool AdvanceToNextResult()
+    /// <param name="initial">
+    /// True for the advance <c>ExecuteReader</c> makes. SqlClient reads that
+    /// stretch of the batch to the first result set before surfacing anything,
+    /// so an error there carries the messages that follow it; a later advance
+    /// throws the error alone and the messages after it fire as events on the
+    /// advance after that (probed 2026-09-23).
+    /// </param>
+    private bool AdvanceToNextResult(bool initial = false)
     {
-        while (this.outcomes.MoveNext())
+        while (this.MoveToNextOutcome(out var outcome))
         {
-            this.Accumulate(this.outcomes.Current);
-            switch (this.outcomes.Current)
+            this.Accumulate(outcome);
+            switch (outcome)
             {
+                case SimulatedInfoOutcome info:
+                    this.connection?.RaiseInfoMessage(info.Message);
+                    continue;
                 case SimulatedQueryResult query:
                     this.currentResult = query;
                     this.cursor = query.CreateClientCursor();
@@ -71,7 +110,7 @@ public sealed class SimulatedDbDataReader : DbDataReader
                     // caller that catches and probes the reader sees it closed.
                     this.currentResult = null;
                     this.cursor = EmptyCursor.Instance;
-                    throw error.Exception;
+                    throw initial ? this.GatherUpToNextResult(error.Exception) : error.Exception;
             }
         }
 
@@ -475,8 +514,12 @@ public sealed class SimulatedDbDataReader : DbDataReader
         this.cursor.Dispose();
         try
         {
-            while (this.outcomes.MoveNext())
-                this.Accumulate(this.outcomes.Current);
+            while (this.MoveToNextOutcome(out var outcome))
+            {
+                this.Accumulate(outcome);
+                if (outcome is SimulatedInfoOutcome info)
+                    this.connection?.RaiseInfoMessage(info.Message);
+            }
         }
         catch (SimulatedSqlException)
         {
@@ -491,6 +534,38 @@ public sealed class SimulatedDbDataReader : DbDataReader
         }
 
         this.outcomes.Dispose();
+    }
+
+    /// <summary>
+    /// Reads on from an error <c>ExecuteReader</c> met to the next result set,
+    /// gathering the errors and messages on the way into the one exception
+    /// SqlClient raises for that stretch: its errors first, then its messages.
+    /// The outcome that ended the stretch is set aside for the next advance.
+    /// </summary>
+    private SimulatedSqlException GatherUpToNextResult(SimulatedSqlException first)
+    {
+        List<SimulatedSqlException> errors = [first];
+        List<SimulatedError> messages = [];
+        while (this.MoveToNextOutcome(out var outcome))
+        {
+            switch (outcome)
+            {
+                case SimulatedInfoOutcome info:
+                    messages.Add(info.Message);
+                    continue;
+                case SimulatedErrorOutcome { RowReturning: false } error:
+                    errors.Add(error.Exception);
+                    continue;
+                case SimulatedQueryResult or SimulatedErrorOutcome:
+                    this.pendingOutcome = outcome;
+                    break;
+                default:
+                    this.Accumulate(outcome);
+                    continue;
+            }
+            break;
+        }
+        return SimulatedSqlException.Aggregate(errors, messages);
     }
 
     private SqlType[] CurrentSchema => this.currentResult?.Schema ?? [];

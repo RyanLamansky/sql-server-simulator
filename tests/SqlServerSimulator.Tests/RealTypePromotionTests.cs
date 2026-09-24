@@ -70,7 +70,7 @@ public sealed class RealTypePromotionTests
                         _ = reader.Read();
                         AreEqual(reader.GetFieldType(0), reader.GetValue(0).GetType(), $"{left} {op} {right}");
                     }
-                    catch (DbException)
+                    catch (SimulatedSqlException)
                     {
                     }
                 }
@@ -136,9 +136,9 @@ public sealed class RealTypePromotionTests
     public void Modulo_TwoApproximateOperands_RaisesMsg8117NamingTheLeft(string left, string right, string named)
     {
         using var connection = OneRowOfEveryNumericType();
-        var ex = Throws<DbException>(() => connection.CreateCommand($"select {left} % {right} from t").ExecuteScalar());
+        var ex = Throws<SimulatedSqlException>(() => connection.CreateCommand($"select {left} % {right} from t").ExecuteScalar());
         AreEqual($"Operand data type {named} is invalid for modulo operator.", ex.Message);
-        AreEqual("8117", ex.Data["HelpLink.EvtID"]);
+        AreEqual(8117, ex.Number);
     }
 
     [TestMethod]
@@ -155,9 +155,9 @@ public sealed class RealTypePromotionTests
     public void Modulo_ApproximateWithExactNumeric_RaisesMsg402(string left, string right, string leftName, string rightName)
     {
         using var connection = OneRowOfEveryNumericType();
-        var ex = Throws<DbException>(() => connection.CreateCommand($"select {left} % {right} from t").ExecuteScalar());
+        var ex = Throws<SimulatedSqlException>(() => connection.CreateCommand($"select {left} % {right} from t").ExecuteScalar());
         AreEqual($"The data types {leftName} and {rightName} are incompatible in the modulo operator.", ex.Message);
-        AreEqual("402", ex.Data["HelpLink.EvtID"]);
+        AreEqual(402, ex.Number);
     }
 
     [TestMethod]
@@ -168,9 +168,9 @@ public sealed class RealTypePromotionTests
     public void Modulo_ApproximateWithStringOrBinary_RaisesMsg402(string expression, string leftName, string rightName)
     {
         using var connection = OneRowOfEveryNumericType();
-        var ex = Throws<DbException>(() => connection.CreateCommand($"select {expression} from t").ExecuteScalar());
+        var ex = Throws<SimulatedSqlException>(() => connection.CreateCommand($"select {expression} from t").ExecuteScalar());
         AreEqual($"The data types {leftName} and {rightName} are incompatible in the modulo operator.", ex.Message);
-        AreEqual("402", ex.Data["HelpLink.EvtID"]);
+        AreEqual(402, ex.Number);
     }
 
     [TestMethod]

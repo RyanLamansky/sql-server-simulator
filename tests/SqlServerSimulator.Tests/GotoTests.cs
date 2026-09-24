@@ -75,13 +75,25 @@ public sealed class GotoTests
         using var connection = (SimulatedDbConnection)new Simulation().CreateOpenConnection();
         connection.InfoMessage += (_, e) => messages.Add(e.Message);
         using var command = connection.CreateCommand("print 'a'; goto nosuchlabel;");
-        _ = Throws<System.Data.Common.DbException>(() => command.ExecuteNonQuery());
+        _ = Throws<SimulatedSqlException>(() => command.ExecuteNonQuery());
         IsEmpty(messages);
     }
 
     [TestMethod]
     public void UndeclaredLabel_UnderAnUntakenBranch_StillRaises()
         => _ = new Simulation().AssertSqlError("if 1 = 0 goto nosuchlabel; print 'b';", 133);
+
+    /// <summary>
+    /// The label pass reports the offending line: the GOTO's own for an
+    /// undeclared target, the second declaration's for a duplicate
+    /// (probed 2026-09-23).
+    /// </summary>
+    [TestMethod]
+    public void LabelErrors_ReportTheOffendingLine()
+    {
+        AreEqual(2, new Simulation().AssertSqlError("select 1\ngoto nowhere", 133).LineNumber);
+        AreEqual(3, new Simulation().AssertSqlError("select 1\nl: select 1\nl: select 2", 132).LineNumber);
+    }
 
     /// <summary>
     /// A duplicate label is <strong>Msg 132</strong>, likewise at compile time —

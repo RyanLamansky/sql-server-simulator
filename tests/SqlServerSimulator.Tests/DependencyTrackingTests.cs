@@ -816,10 +816,8 @@ public sealed class DependencyTrackingTests
 
     /// <summary>
     /// Each set carries a severity-10 header — Msg 15459 for the references set
-    /// and Msg 15460 for the referenced-by set. Both ride the batch's single
-    /// coalesced <c>InfoMessage</c> event (the simulator's batch-wide
-    /// info-message semantic, shared with PRINT), so the delivered error
-    /// carries the first header's number and both texts.
+    /// and Msg 15460 for the referenced-by set — delivered as its own message
+    /// with class 0, as severity 10 always arrives.
     /// </summary>
     [TestMethod]
     public void SpDepends_HeadersArriveAsSeverityTenInfoMessages()
@@ -830,11 +828,12 @@ public sealed class DependencyTrackingTests
         connection.InfoMessage += (_, e) => errors.AddRange(e.Errors);
         using var command = connection.CreateCommand("exec sp_depends 'dbo.p_read'");
         _ = command.ExecuteNonQuery();
-        HasCount(1, errors);
+        HasCount(2, errors);
         AreEqual(15459, errors[0].Number);
-        AreEqual((byte)10, errors[0].Class);
+        AreEqual((byte)0, errors[0].Class);
         Assert.Contains("In the current database, the specified object references the following:", errors[0].Message);
-        Assert.Contains("In the current database, the specified object is referenced by the following:", errors[0].Message);
+        AreEqual(15460, errors[1].Number);
+        Assert.Contains("In the current database, the specified object is referenced by the following:", errors[1].Message);
     }
 
     /// <summary>

@@ -187,9 +187,9 @@ public sealed class ParenthesizedJoinGroupTests
     {
         // A parenthesized join group cannot take an alias (probe: Msg 156 near AS).
         using var connection = SeededABCD();
-        var ex = Throws<DbException>(() => connection.CreateCommand(
+        var ex = Throws<SimulatedSqlException>(() => connection.CreateCommand(
             "select * from a left join (b join c on b.id=c.id) as x on a.id=b.id").ExecuteScalar());
-        AreEqual("156", ex.Data["HelpLink.EvtID"]);
+        AreEqual(156, ex.Number);
     }
 
     [TestMethod]
@@ -197,9 +197,9 @@ public sealed class ParenthesizedJoinGroupTests
     {
         // A bare-name alias on a group is also rejected (probe: Msg 102 near 'x').
         using var connection = SeededABCD();
-        var ex = Throws<DbException>(() => connection.CreateCommand(
+        var ex = Throws<SimulatedSqlException>(() => connection.CreateCommand(
             "select * from a left join (b join c on b.id=c.id) x on a.id=b.id").ExecuteScalar());
-        AreEqual("102", ex.Data["HelpLink.EvtID"]);
+        AreEqual(102, ex.Number);
     }
 
     [TestMethod]
@@ -208,8 +208,8 @@ public sealed class ParenthesizedJoinGroupTests
         // A parenthesized single source is not a join group — real rejects `(t)`
         // with Msg 102 (probe R4).
         using var connection = SeededABCD();
-        var ex = Throws<DbException>(() => connection.CreateCommand("select * from (a)").ExecuteScalar());
-        AreEqual("102", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => connection.CreateCommand("select * from (a)").ExecuteScalar());
+        AreEqual(102, ex.Number);
     }
 
     [TestMethod]

@@ -18,6 +18,8 @@ All semantics below are probe-confirmed against SQL Server 2025.
 | `THROW;` (re-raise in CATCH) | the **original** error's line | not the re-raising statement's line |
 | Procedure body error | line relative to the **batch that created it** — comments and blank lines ahead of the `CREATE` count | + `Procedure` = the name as the invoking `EXEC` spelled it, brackets dropped and case kept (`exec p` → `p`, `exec DBO.P` → `DBO.P`, probed 2026-09-23) |
 | Procedure / `sp_executesql` argument that fails to convert | **0** | + `Procedure` for a procedure (Msg 8114, or an xml parse error) |
+| Procedure call whose arguments don't bind (Msg 201 / 8144 / 8145) | **0** | + `Procedure` = the name as the `EXEC` spelled it (probed 2026-09-23) |
+| `GOTO` to an undeclared label (Msg 133) / a duplicate label (Msg 132) | the `GOTO`'s line / the second label's line | raised while the batch compiles, ahead of anything running (probed 2026-09-23) |
 | Trigger body error | creating-batch-relative line | + `Procedure = "<name>"` (**unqualified**) |
 | **CREATE-time bind error** (the body error that aborts the CREATE) | batch line | + `Procedure = "<name>"` — **unqualified for every module kind**, procedures included; a `CREATE TRIGGER` naming a missing parent (Msg 8197) is attributed the same way |
 | Scalar-UDF / inline-TVF / multi-statement-TVF / view body error | the **outer invoking** statement's line | no `Procedure` — real inlines these for attribution (even the multi-statement TVF) |
@@ -30,6 +32,31 @@ The wire ERROR/INFO token's server-name field carries `@@SERVERNAME` instead —
 
 `ERROR_PROCEDURE()` returns the same name as `SqlError.Procedure`; `ERROR_LINE()` returns the same line the exception carries.
 A `PRINT` or low-severity `RAISERROR` in a procedure body carries the procedure too.
+
+## The message stream
+
+Every informational message — `PRINT`, a severity-0-10 `RAISERROR`, and the engine's own (Msg 3621, 8153, 5701, 5703, 11729, the procedures' severity-10 texts) — is a `SimulatedInfoOutcome` in the outcome stream, placed where real sends its INFO token.
+The engine queues one on `SimulatedDbConnection.PendingMessages` as it happens, and the dispatch loop places the queue ahead of the statement's own outcomes.
+Probed through SqlClient 7 against SQL Server 2025 (2026-09-23):
+
+- **One event per message**, fired as the reader reaches it: during `ExecuteReader` for what precedes the first result set, during `NextResult` for what follows.
+- **Severity 10 arrives as class 0**; severities 1-9 keep their number.
+- **An error carries the messages of its stretch of the batch.**
+  `ExecuteNonQuery` / `ExecuteScalar` read the whole batch and, if anything failed, throw one exception holding every error and then every message, in order — a `PRINT` ahead of the first error included.
+  `ExecuteReader` fires the messages ahead of its error as events and throws the error with the messages after it, up to the next result set.
+  `NextResult` and `Read` throw the error alone; what follows fires on the next advance.
+  `Message` joins every entry with `Environment.NewLine`, as SqlClient's does.
+- **Msg 3621** (`The statement has been terminated.`, class 0, state 0) follows an execution error that ends a row-writing statement — `INSERT`, `UPDATE`, `DELETE`, `MERGE`, `SELECT … INTO`, and `ALTER TABLE … ALTER COLUMN`'s rewrite — but not a compilation error (Msg 206 / 213 / 544), a `SELECT`'s own error, a batch-ending one (a conversion failure, anything under `XACT_ABORT ON`) or one a `TRY` / `CATCH` handles.
+  Which numbers count is an explicit list (`Simulation.IsStatementTerminationNoticed`); it goes out after the error's DONE, which is why `NextResult` doesn't carry it.
+- **Msg 8153** (`Warning: Null value is eliminated by an aggregate or other SET operation.`) goes out once per statement whose aggregate skipped a NULL with `ANSI_WARNINGS` on, after the rows and before the statement's DONE — ahead of the body for an `IF` / `WHILE` condition.
+  Every aggregate warns but `COUNT(*)`, `STRING_AGG` and the JSON aggregates, window aggregates and a scalar subquery's included; an `EXISTS` body's and a `PIVOT`'s don't.
+- **Msg 5701** follows every `USE`, even of the current database, and **Msg 5703** every `SET LANGUAGE`.
+
+### Not modeled yet
+
+- **Msg 5703 is English whatever the language**; real words it in the language being switched to (`Die Spracheneinstellung wurde in Deutsch geändert.`).
+- **Msg 282** (`The 'p' procedure attempted to return a status of NULL, which is not allowed. A status of 0 will be returned instead.`) was seen once from real under the edge-probe harness for `RETURN NULL`, and isn't sent here; four direct SqlClient probes of the same shape got no message, so the condition that sends it isn't known yet.
+- **Msg 8153 over a constant `VALUES` source grouped into single-row groups** isn't sent by real (`SELECT x, SUM(y) FROM (VALUES (1, NULL), (2, 3)) v(x, y) GROUP BY x`), which evaluates those groups while compiling; the same data in a table warns on both.
 
 ## Bind errors are catchable here and aren't on real
 

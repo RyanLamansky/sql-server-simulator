@@ -178,7 +178,7 @@ public sealed class PermissionGapFillTests
     {
         var ex = CreateAsUserError(Seeded(), "create schema sx");
         AreEqual(15247, ex.Number);
-        AreEqual("User does not have permission to perform this action.", ex.Message);
+        AreEqual("User does not have permission to perform this action.", ex.Errors[0].Message);
     }
 
     [TestMethod]

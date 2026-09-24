@@ -324,8 +324,8 @@ public sealed class SelectIntoTests
             _ = cmd.ExecuteNonQuery();
             tx.Rollback();
         }
-        var ex = Throws<DbException>(() => conn.CreateCommand("select * from #t").ExecuteNonQuery());
-        AreEqual("208", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => conn.CreateCommand("select * from #t").ExecuteNonQuery());
+        AreEqual(208, ex.Number);
     }
 
     [TestMethod]

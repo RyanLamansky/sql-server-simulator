@@ -96,6 +96,8 @@ internal sealed class NextValueFor : Expression
         // value, so an enclosing uncorrelated subquery declines to replay its
         // result for the rest of the statement.
         batch.Connection.VolatileEvaluations++;
+        if (this.Sequence.AllocatesShortFirstCache())
+            batch.Connection.PendingMessages.Enqueue(SimulatedSqlException.SequenceCacheExceedsRangeMessage(batch, this.Sequence.Name));
         var value = this.Sequence.Advance();
         batch.SequenceRowCache[this.Sequence] = (batch.CurrentRowStamp, value);
         return value;

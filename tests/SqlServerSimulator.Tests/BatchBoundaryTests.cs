@@ -115,7 +115,7 @@ public class BatchBoundaryTests
     public void CreateOrAlter_UsesCreateLabelAndState(string statement, string expectedLabel, byte expectedState)
     {
         var exception = new Simulation().AssertSqlError($"declare @x int = 1; {statement}", 111);
-        AreEqual($"'{expectedLabel}' must be the first statement in a query batch.", exception.Message);
+        AreEqual($"'{expectedLabel}' must be the first statement in a query batch.", exception.Errors[0].Message);
         AreEqual(expectedState, exception.State);
     }
 

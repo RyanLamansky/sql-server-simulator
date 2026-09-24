@@ -1,4 +1,3 @@
-using System.Data.Common;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 using static SqlServerSimulator.TestHelpers;
 
@@ -113,7 +112,7 @@ public sealed class ImplicitCoercionTests
     public void Round_NonIntegerLength_RaisesMsg8116()
     {
         // ROUND's length arg stays strict-int — Msg 8116 on string.
-        var ex = Throws<DbException>(() => ExecuteScalar("select round(5.55, '1')"));
+        var ex = Throws<SimulatedSqlException>(() => ExecuteScalar("select round(5.55, '1')"));
         Assert.Contains("Argument data type", ex.Message);
         Assert.Contains("argument 2 of round", ex.Message);
     }
@@ -124,7 +123,7 @@ public sealed class ImplicitCoercionTests
         // ABS('abc') / CEILING('abc') route through the string-to-float
         // parser; bad text produces Msg 8114 ("Error converting data type
         // varchar to float.") — same code real SQL Server raises.
-        var ex = Throws<DbException>(() => ExecuteScalar("select abs('abc')"));
+        var ex = Throws<SimulatedSqlException>(() => ExecuteScalar("select abs('abc')"));
         Assert.Contains("Error converting data type", ex.Message);
     }
 
@@ -163,7 +162,7 @@ public sealed class ImplicitCoercionTests
     public void CharIndex_NonStringNeedle_StaysStrict()
     {
         // Real SQL Server rejects non-string needle (arg 1); simulator matches.
-        var ex = Throws<DbException>(() => ExecuteScalar("select charindex(2, 12345)"));
+        var ex = Throws<SimulatedSqlException>(() => ExecuteScalar("select charindex(2, 12345)"));
         Assert.Contains("argument 1 of charindex", ex.Message);
     }
 
@@ -201,7 +200,7 @@ public sealed class ImplicitCoercionTests
         // Server raises Msg 8116 on the implicit-coerce path; the
         // simulator's StringScalars.IsCoerceableToVarchar deliberately
         // excludes image to match.
-        var ex = Throws<DbException>(() => ExecuteScalar("select len(cast(0x010203 as image))"));
+        var ex = Throws<SimulatedSqlException>(() => ExecuteScalar("select len(cast(0x010203 as image))"));
         Assert.Contains("argument 1 of len", ex.Message);
     }
 

@@ -171,7 +171,7 @@ public class AlterDatabaseOptionsTests
         var ex = new Simulation().AssertSqlError("ALTER DATABASE nope SET READ_COMMITTED_SNAPSHOT ON", 5011);
         AreEqual(14, ex.Class);
         AreEqual(5, ex.State);
-        AreEqual("User does not have permission to alter database 'nope', the database does not exist, or the database is not in a state that allows access checks.", ex.Message);
+        AreEqual("User does not have permission to alter database 'nope', the database does not exist, or the database is not in a state that allows access checks.", ex.Errors[0].Message);
     }
 
     // ---- TRUSTWORTHY / DB_CHAINING ----

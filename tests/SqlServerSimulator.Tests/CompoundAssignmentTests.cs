@@ -1,4 +1,3 @@
-using System.Data.Common;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 using static SqlServerSimulator.TestHelpers;
 
@@ -96,8 +95,8 @@ public sealed class CompoundAssignmentTests
     [TestMethod]
     public void Variable_PlusSpaceEquals_RaisesMsg102()
     {
-        var ex = Throws<DbException>(() => ExecuteScalar("declare @v int = 10; set @v + = 5; select @v"));
-        AreEqual("102", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => ExecuteScalar("declare @v int = 10; set @v + = 5; select @v"));
+        AreEqual(102, ex.Number);
     }
 
     [TestMethod]

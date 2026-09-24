@@ -1,4 +1,3 @@
-using System.Data.Common;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 
 namespace SqlServerSimulator;
@@ -48,8 +47,8 @@ public sealed class AlterTableConstraintTests
         IsTrue((bool)sim.ExecuteScalar("select is_not_trusted from sys.check_constraints where name = 'ck_q'")!);
         // Existing bad row preserved; new INSERTs still enforced.
         AreEqual(1, sim.ExecuteScalar("select count(*) from t where qty < 0"));
-        var ex = Throws<DbException>(() => sim.ExecuteNonQuery("insert t values (2, -10)"));
-        AreEqual("547", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => sim.ExecuteNonQuery("insert t values (2, -10)"));
+        AreEqual(547, ex.Number);
     }
 
     [TestMethod]
@@ -270,8 +269,8 @@ public sealed class AlterTableConstraintTests
             alter table t add constraint ck_q1 check (qty > 0);
             alter table t add constraint ck_q2 check (qty < 100)
             """);
-        var ex = Throws<DbException>(() => sim.ExecuteNonQuery("alter table t drop constraint ck_q1, ck_missing"));
-        AreEqual("3728", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => sim.ExecuteNonQuery("alter table t drop constraint ck_q1, ck_missing"));
+        AreEqual(3728, ex.Number);
         AreEqual(2, sim.ExecuteScalar("select count(*) from sys.check_constraints where parent_object_id = object_id('t')"));
     }
 

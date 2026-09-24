@@ -1,4 +1,3 @@
-using System.Data.Common;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 
 namespace SqlServerSimulator;
@@ -37,8 +36,6 @@ public sealed class IgnoreDupKeyTests
         _ = command.ExecuteNonQuery();
         return errors;
     }
-
-    private static string ErrorNumber(DbException exception) => (string)exception.Data["HelpLink.EvtID"]!;
 
     // --- the skip itself ---
 
@@ -254,8 +251,8 @@ public sealed class IgnoreDupKeyTests
             insert t values (1, 1)
             """);
         AreEqual(0, simulation.ExecuteNonQuery("insert t values (1, 2)"));
-        var exception = Throws<DbException>(() => simulation.ExecuteNonQuery("insert t values (2, 1)"));
-        AreEqual("2601", ErrorNumber(exception));
+        var exception = Throws<SimulatedSqlException>(() => simulation.ExecuteNonQuery("insert t values (2, 1)"));
+        AreEqual(2601, exception.Number);
         AreEqual(1, simulation.ExecuteScalar("select count(*) from t"));
     }
 

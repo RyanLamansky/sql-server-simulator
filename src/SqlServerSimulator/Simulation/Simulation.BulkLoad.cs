@@ -207,7 +207,7 @@ partial class Simulation
                     continue;
                 }
 
-                EnforceMaxLength(source, targetColumn, table.Name, batch.Connection);
+                EnforceMaxLength(source, targetColumn, table, batch.Connection);
                 rowValues[ordinal] = CoerceForInsert(source, targetColumn);
                 if (ReferenceEquals(targetColumn, identityColumn))
                     identityColumn!.Identity!.ObserveExplicit(rowValues[ordinal].CoerceTo(SqlType.BigInt).AsInt64);

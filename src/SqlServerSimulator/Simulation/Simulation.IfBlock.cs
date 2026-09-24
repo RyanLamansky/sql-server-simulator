@@ -58,6 +58,7 @@ partial class Simulation
         var outerSkipping = batch.IsSkipping || bindError is not null;
         var condResult = !outerSkipping
             && cond.Run(new RuntimeContext(NoColumnResolver, batch)) == true;
+        batch.QueueNullEliminatedWarning();
         var thenSkip = !condResult;
 
         var hadElse = false;
@@ -241,6 +242,7 @@ partial class Simulation
 
                     context.RestoreCheckpoint(bodyStart);
                     var condResult = cond.Run(new RuntimeContext(NoColumnResolver, batch)) == true;
+                    batch.QueueNullEliminatedWarning();
 
                     if (!condResult)
                     {

@@ -186,6 +186,6 @@ public sealed class AnalyticWindowTests
 
     [TestMethod]
     public void CumeDist_WithoutOrderBy_IsRejected()
-        => Throws<DbException>(() => new Simulation().ExecuteScalar(
+        => Throws<SimulatedSqlException>(() => new Simulation().ExecuteScalar(
             "create table t (n int); insert t values (10),(20); select cume_dist() over (partition by n) from t"));
 }

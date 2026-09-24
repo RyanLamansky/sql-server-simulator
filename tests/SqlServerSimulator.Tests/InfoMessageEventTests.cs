@@ -4,22 +4,22 @@ namespace SqlServerSimulator;
 
 /// <summary>
 /// Public-API tests for the <see cref="SimulatedDbConnection.InfoMessage"/>
-/// event surface delivering buffered <c>PRINT</c> output and severity-0-10
+/// event surface delivering <c>PRINT</c> output and severity-0-10
 /// <c>RAISERROR</c> messages. Mirrors the shape of
 /// <c>SqlConnection.InfoMessage</c>: <see cref="SimulatedInfoMessageEventArgs.Errors"/>
 /// is the per-message collection, <see cref="SimulatedInfoMessageEventArgs.Message"/>
-/// is the joined-string shortcut.
+/// the first entry's text.
 /// </summary>
 /// <remarks>
-/// Probed against SQL Server 2025 (2026-05-14):
+/// Probed against SQL Server 2025 through SqlClient 7:
 /// <list type="bullet">
-/// <item>Multiple <c>PRINT</c>s in one batch coalesce into one event with
-/// messages joined by <c>\n</c>.</item>
+/// <item>Each message fires its own event, in batch order (2026-09-23).</item>
+/// <item>Severity 10 arrives as class 0 (2026-09-23).</item>
 /// <item>NULL operand emits a single space, not empty.</item>
 /// <item>Skip-mode IF suppresses the PRINT.</item>
-/// <item>Event fires once per <c>ExecuteNonQuery</c> command, after all
-/// statements complete (even when later statements roll back).</item>
 /// </list>
+/// Where a message sits relative to result sets and errors is
+/// <see cref="MessageStreamTests"/>' concern.
 /// </remarks>
 [TestClass]
 public sealed class InfoMessageEventTests
@@ -65,15 +65,14 @@ public sealed class InfoMessageEventTests
     }
 
     [TestMethod]
-    public void Print_TwoStatements_CoalesceWithLineFeed()
+    public void Print_TwoStatements_FireTwoEvents()
     {
         var (conn, captured) = NewWithCapture();
         _ = RunNonQuery(conn, "print 'first'; print 'second'");
-        HasCount(1, captured);
-        AreEqual("first\nsecond", captured[0].Message);
-        // Coalesces into one Errors entry whose Message carries both lines.
+        HasCount(2, captured);
+        AreEqual("first", captured[0].Message);
+        AreEqual("second", captured[1].Message);
         HasCount(1, captured[0].Errors);
-        AreEqual("first\nsecond", captured[0].Errors[0].Message);
     }
 
     [TestMethod]
@@ -142,7 +141,7 @@ public sealed class InfoMessageEventTests
     }
 
     [TestMethod]
-    public void Print_InsideWhile_CoalescesAllIterations()
+    public void Print_InsideWhile_FiresPerIteration()
     {
         var (conn, captured) = NewWithCapture();
         _ = RunNonQuery(conn, """
@@ -153,8 +152,7 @@ public sealed class InfoMessageEventTests
                 set @i = @i + 1;
             end
             """);
-        HasCount(1, captured);
-        AreEqual("iter 0\niter 1\niter 2", captured[0].Message);
+        CollectionAssert.AreEqual(new[] { "iter 0", "iter 1", "iter 2" }, captured.Select(e => e.Message).ToArray());
     }
 
     [TestMethod]
@@ -173,7 +171,7 @@ public sealed class InfoMessageEventTests
     }
 
     [TestMethod]
-    public void Print_BeforeAndAfterTryCatch_BothCoalesced()
+    public void Print_BeforeAndAfterTryCatch_BothDelivered()
     {
         var (conn, captured) = NewWithCapture();
         _ = RunNonQuery(conn, """
@@ -185,8 +183,7 @@ public sealed class InfoMessageEventTests
                 print 'caught';
             end catch
             """);
-        HasCount(1, captured);
-        AreEqual("before\ncaught", captured[0].Message);
+        CollectionAssert.AreEqual(new[] { "before", "caught" }, captured.Select(e => e.Message).ToArray());
     }
 
     [TestMethod]
@@ -203,18 +200,18 @@ public sealed class InfoMessageEventTests
     }
 
     [TestMethod]
-    public void Print_LineNumber_PointsToFirstPrint()
+    public void Print_LineNumber_PointsToEachPrint()
     {
         var (conn, captured) = NewWithCapture();
-        // Three lines, first PRINT on line 2 (after the leading select).
         _ = RunNonQuery(conn, """
             select 1;
             print 'first';
             print 'second'
             """);
-        HasCount(1, captured);
+        HasCount(2, captured);
         AreEqual(2, captured[0].LineNumber);
         AreEqual(2, captured[0].Errors[0].LineNumber);
+        AreEqual(3, captured[1].LineNumber);
     }
 
     [TestMethod]
@@ -251,13 +248,14 @@ public sealed class InfoMessageEventTests
     public void Raiserror_Severity10_FiresInfoEvent()
     {
         // Severity 0-10 RAISERROR doesn't throw; it routes through InfoMessage
-        // with Class = severity, Number = 50000, State = state argument.
+        // with Number = 50000 and State = state argument. Severity 10 arrives
+        // as class 0 (probed 2026-09-23).
         var (conn, captured) = NewWithCapture();
         _ = RunNonQuery(conn, "raiserror('progress', 10, 7)");
         HasCount(1, captured);
         AreEqual("progress", captured[0].Message);
         HasCount(1, captured[0].Errors);
-        AreEqual<byte>(10, captured[0].Errors[0].Class);
+        AreEqual<byte>(0, captured[0].Errors[0].Class);
         AreEqual<byte>(7, captured[0].Errors[0].State);
         AreEqual(50000, captured[0].Errors[0].Number);
     }
@@ -284,18 +282,17 @@ public sealed class InfoMessageEventTests
     }
 
     [TestMethod]
-    public void Raiserror_PrintMixedCoalesces_FirstContributorClassWins()
+    public void Raiserror_PrintMixed_EachKeepsItsOwnFields()
     {
-        // Mixed PRINT + sev-≤10 RAISERROR in one batch coalesce; the first
-        // contributor's metadata (here PRINT's class=0) wins on the single
-        // coalesced Errors entry.
+        // Severities 1-9 keep their class (probed 2026-09-23).
         var (conn, captured) = NewWithCapture();
         _ = RunNonQuery(conn, "print 'p'; raiserror('r', 8, 2)");
-        HasCount(1, captured);
-        AreEqual("p\nr", captured[0].Message);
-        HasCount(1, captured[0].Errors);
+        HasCount(2, captured);
         AreEqual<byte>(0, captured[0].Errors[0].Class);
         AreEqual<byte>(1, captured[0].Errors[0].State);
+        AreEqual("r", captured[1].Message);
+        AreEqual<byte>(8, captured[1].Errors[0].Class);
+        AreEqual<byte>(2, captured[1].Errors[0].State);
     }
 
     [TestMethod]
@@ -312,7 +309,7 @@ public sealed class InfoMessageEventTests
     {
         // Severity 11+ remains in the throwing-error path; no InfoMessage fires.
         var (conn, captured) = NewWithCapture();
-        _ = Throws<System.Data.Common.DbException>(() => RunNonQuery(conn, "raiserror('boom', 16, 1)"));
+        _ = Throws<SimulatedSqlException>(() => RunNonQuery(conn, "raiserror('boom', 16, 1)"));
         IsEmpty(captured);
     }
 

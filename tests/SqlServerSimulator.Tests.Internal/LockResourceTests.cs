@@ -48,9 +48,9 @@ public sealed class LockResourceTests
         var b = sim.CreateDbConnection();
         a.CurrentExecutingThreadId = -1;
         sim.LockManager.Acquire(resource, LockMode.SchemaModification, a.Session, 0);
-        var ex = Throws<DbException>(() =>
+        var ex = Throws<SimulatedSqlException>(() =>
             sim.LockManager.Acquire(resource, LockMode.SchemaStability, b.Session, 0));
-        AreEqual("1222", ex.Data["HelpLink.EvtID"]);
+        AreEqual(1222, ex.Number);
         AreEqual("Lock request time out period exceeded.", ex.Message);
         sim.LockManager.Release(resource, LockMode.SchemaModification, a.Session);
     }
@@ -64,9 +64,9 @@ public sealed class LockResourceTests
         var b = sim.CreateDbConnection();
         a.CurrentExecutingThreadId = -1;
         sim.LockManager.Acquire(resource, LockMode.Exclusive, a.Session, 0);
-        var ex = Throws<DbException>(() =>
+        var ex = Throws<SimulatedSqlException>(() =>
             sim.LockManager.Acquire(resource, LockMode.Exclusive, b.Session, 0));
-        AreEqual("1222", ex.Data["HelpLink.EvtID"]);
+        AreEqual(1222, ex.Number);
         sim.LockManager.Release(resource, LockMode.Exclusive, a.Session);
     }
 
@@ -79,7 +79,7 @@ public sealed class LockResourceTests
         var b = sim.CreateDbConnection();
         a.CurrentExecutingThreadId = -1;
         sim.LockManager.Acquire(resource, LockMode.Exclusive, a.Session, 0);
-        _ = Throws<DbException>(() =>
+        _ = Throws<SimulatedSqlException>(() =>
             sim.LockManager.Acquire(resource, LockMode.Shared, b.Session, 0));
         sim.LockManager.Release(resource, LockMode.Exclusive, a.Session);
     }
@@ -124,7 +124,7 @@ public sealed class LockResourceTests
         sim.LockManager.Release(resource, LockMode.SchemaStability, a.Session);
         var b = sim.CreateDbConnection();
         a.CurrentExecutingThreadId = -1;
-        _ = Throws<DbException>(() => sim.LockManager.Acquire(resource, LockMode.SchemaModification, b.Session, 0));
+        _ = Throws<SimulatedSqlException>(() => sim.LockManager.Acquire(resource, LockMode.SchemaModification, b.Session, 0));
         sim.LockManager.Release(resource, LockMode.SchemaStability, a.Session);
         sim.LockManager.Acquire(resource, LockMode.SchemaModification, b.Session, 0);
         sim.LockManager.Release(resource, LockMode.SchemaModification, b.Session);
@@ -160,9 +160,9 @@ public sealed class LockResourceTests
         var b = sim.CreateDbConnection();
         a.CurrentExecutingThreadId = Environment.CurrentManagedThreadId;
         sim.LockManager.Acquire(resource, LockMode.SchemaStability, a.Session, 0);
-        var ex = Throws<DbException>(() =>
+        var ex = Throws<SimulatedSqlException>(() =>
             sim.LockManager.Acquire(resource, LockMode.SchemaModification, b.Session, 10000));
-        AreEqual("1205", ex.Data["HelpLink.EvtID"]);
+        AreEqual(1205, ex.Number);
         Contains($"Process ID {b.Spid}", ex.Message);
         Contains("deadlocked on lock resources", ex.Message);
         sim.LockManager.Release(resource, LockMode.SchemaStability, a.Session);
@@ -189,9 +189,9 @@ public sealed class LockResourceTests
         b.WaitingOnResource = r1;
         try
         {
-            var ex = Throws<DbException>(() =>
+            var ex = Throws<SimulatedSqlException>(() =>
                 sim.LockManager.Acquire(r2, LockMode.Exclusive, caller.Session, timeoutMillis: 10000));
-            AreEqual("1205", ex.Data["HelpLink.EvtID"]);
+            AreEqual(1205, ex.Number);
             Contains($"Process ID {caller.Spid}", ex.Message);
         }
         finally
@@ -539,7 +539,7 @@ public sealed class LockResourceTests
         {
             var resource = new LockResource();
             sim.LockManager.Acquire(resource, LockMode.Update, a.Session, 0);
-            _ = Throws<DbException>(() => sim.LockManager.Acquire(resource, conflict, b.Session, 0));
+            _ = Throws<SimulatedSqlException>(() => sim.LockManager.Acquire(resource, conflict, b.Session, 0));
             sim.LockManager.Release(resource, LockMode.Update, a.Session);
         }
     }
@@ -562,7 +562,7 @@ public sealed class LockResourceTests
         // IS × X: conflict.
         var rx = new LockResource();
         sim.LockManager.Acquire(rx, LockMode.IntentShared, a.Session, 0);
-        _ = Throws<DbException>(() => sim.LockManager.Acquire(rx, LockMode.Exclusive, b.Session, 0));
+        _ = Throws<SimulatedSqlException>(() => sim.LockManager.Acquire(rx, LockMode.Exclusive, b.Session, 0));
         sim.LockManager.Release(rx, LockMode.IntentShared, a.Session);
     }
 
@@ -577,7 +577,7 @@ public sealed class LockResourceTests
         {
             var resource = new LockResource();
             sim.LockManager.Acquire(resource, LockMode.IntentExclusive, a.Session, 0);
-            _ = Throws<DbException>(() => sim.LockManager.Acquire(resource, conflict, b.Session, 0));
+            _ = Throws<SimulatedSqlException>(() => sim.LockManager.Acquire(resource, conflict, b.Session, 0));
             sim.LockManager.Release(resource, LockMode.IntentExclusive, a.Session);
         }
     }
@@ -600,7 +600,7 @@ public sealed class LockResourceTests
         {
             var resource = new LockResource();
             sim.LockManager.Acquire(resource, LockMode.SharedIntentExclusive, a.Session, 0);
-            _ = Throws<DbException>(() => sim.LockManager.Acquire(resource, conflict, b.Session, 0));
+            _ = Throws<SimulatedSqlException>(() => sim.LockManager.Acquire(resource, conflict, b.Session, 0));
             sim.LockManager.Release(resource, LockMode.SharedIntentExclusive, a.Session);
         }
     }

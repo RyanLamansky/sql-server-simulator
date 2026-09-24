@@ -107,7 +107,7 @@ public sealed class IndexedViewTests
     public void Insert_ProducingDuplicateViewKey_Msg2601_NamesViewAndIndex()
     {
         var ex = SeedIndexedView().AssertSqlError("insert dbo.b values (1, 99, 999)", 2601);
-        AreEqual("Cannot insert duplicate key row in object 'dbo.v' with unique index 'ix_v'. The duplicate key value is (1).", ex.Message);
+        AreEqual("Cannot insert duplicate key row in object 'dbo.v' with unique index 'ix_v'. The duplicate key value is (1).", ex.Errors[0].Message);
     }
 
     [TestMethod]

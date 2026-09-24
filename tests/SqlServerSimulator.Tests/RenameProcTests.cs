@@ -208,7 +208,7 @@ public sealed class RenameProcTests
     }
 
     [TestMethod]
-    public void Success_BuffersSev10CautionInfoMessage()
+    public void Success_SendsSev10CautionInfoMessage()
     {
         var conn = new Simulation().CreateDbConnection();
         conn.Open();
@@ -230,7 +230,8 @@ public sealed class RenameProcTests
         AreEqual("Caution: Changing any part of an object name could break scripts and stored procedures.", captured[0].Message);
         var error = captured[0].Errors[0];
         AreEqual(15477, error.Number);
-        AreEqual<byte>(10, error.Class);
+        // Severity 10 arrives as class 0 (probed 2026-09-23).
+        AreEqual<byte>(0, error.Class);
         AreEqual<byte>(1, error.State);
     }
 }

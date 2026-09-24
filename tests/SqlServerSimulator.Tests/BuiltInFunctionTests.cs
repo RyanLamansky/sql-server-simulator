@@ -1,5 +1,4 @@
-﻿using System.Data.Common;
-using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
+﻿using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 using static SqlServerSimulator.TestHelpers;
 
 namespace SqlServerSimulator;
@@ -10,7 +9,7 @@ public sealed class BuiltInFunctionTests
     [TestMethod]
     public void UnrecognizedBuiltInFunction()
     {
-        var exception = Throws<DbException>(() => ExecuteScalar<int>("select frog()"));
+        var exception = Throws<SimulatedSqlException>(() => ExecuteScalar<int>("select frog()"));
         AreEqual("'frog' is not a recognized built-in function name.", exception.Message);
     }
 

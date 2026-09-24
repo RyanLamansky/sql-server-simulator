@@ -390,7 +390,7 @@ public sealed class KeyRangeLockTests
         IsTrue(aError is null ^ bError is null);
         var victim = aError ?? bError;
         IsNotNull(victim);
-        AreEqual("1205", IsInstanceOfType<DbException>(victim).Data["HelpLink.EvtID"]);
+        AreEqual(1205, IsInstanceOfType<SimulatedSqlException>(victim).Number);
 
         _ = (aError is null ? connA : connB).CreateCommand("rollback").ExecuteNonQuery();
     }
@@ -405,8 +405,8 @@ public sealed class KeyRangeLockTests
         _ = reader.CreateCommand("set transaction isolation level serializable; begin tran; select count(*) from t where k between 15 and 25").ExecuteScalar();
         _ = writer.CreateCommand("set lock_timeout 0").ExecuteNonQuery();
 
-        var ex = Throws<DbException>(() => writer.CreateCommand("insert t values (22, 9)").ExecuteNonQuery());
-        AreEqual("1222", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => writer.CreateCommand("insert t values (22, 9)").ExecuteNonQuery());
+        AreEqual(1222, ex.Number);
 
         _ = reader.CreateCommand("rollback tran").ExecuteNonQuery();
     }

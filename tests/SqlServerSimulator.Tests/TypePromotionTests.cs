@@ -1,5 +1,4 @@
 using System.Data;
-using System.Data.Common;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 using static SqlServerSimulator.TestHelpers;
 
@@ -176,7 +175,7 @@ public class TypePromotionTests
     [DataRow("'0x05'")]  // hex notation: only 0x literal accepts hex
     public void Comparison_UnparseableString_RaisesMsg245(string literal)
     {
-        var ex = Throws<DbException>(() => ExecuteScalar($"select case when 5 = {literal} then 1 else 0 end"));
+        var ex = Throws<SimulatedSqlException>(() => ExecuteScalar($"select case when 5 = {literal} then 1 else 0 end"));
         StartsWith("Conversion failed when converting the varchar value", ex.Message);
         Contains("to data type int", ex.Message);
     }
@@ -279,7 +278,7 @@ public class TypePromotionTests
             insert t values ('5'), ('abc'), ('15')
             """).ExecuteNonQuery();
 
-        var ex = Throws<DbException>(() =>
+        var ex = Throws<SimulatedSqlException>(() =>
         {
             using var reader = connection.CreateCommand("select s from t where s = 5").ExecuteReader();
             while (reader.Read()) { }
@@ -337,7 +336,7 @@ public class TypePromotionTests
             insert t values (1, '{seedValue}')
             """).ExecuteNonQuery();
 
-        var ex = Throws<DbException>(() => connection.CreateCommand($"select id from t where {predicate}").ExecuteReader().Read());
+        var ex = Throws<SimulatedSqlException>(() => connection.CreateCommand($"select id from t where {predicate}").ExecuteReader().Read());
         AreEqual(expectedMessage, ex.Message);
     }
 }

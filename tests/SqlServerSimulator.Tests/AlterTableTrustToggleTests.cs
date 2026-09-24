@@ -1,4 +1,3 @@
-using System.Data.Common;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 
 namespace SqlServerSimulator;
@@ -79,8 +78,8 @@ public sealed class AlterTableTrustToggleTests
         IsFalse((bool)sim.ExecuteScalar("select is_disabled from sys.check_constraints where name = 'ck_q'")!);
         IsTrue((bool)sim.ExecuteScalar("select is_not_trusted from sys.check_constraints where name = 'ck_q'")!);
         // New rows are now enforced.
-        var ex = Throws<DbException>(() => sim.ExecuteNonQuery("insert t values (-10)"));
-        AreEqual("547", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => sim.ExecuteNonQuery("insert t values (-10)"));
+        AreEqual(547, ex.Number);
     }
 
     // --- WITH CHECK CHECK CONSTRAINT (re-validate + re-trust) ---
@@ -217,8 +216,8 @@ public sealed class AlterTableTrustToggleTests
             alter table t nocheck constraint ck_q
             """);
         IsTrue((bool)sim.ExecuteScalar("select is_disabled from sys.check_constraints where name = 'ck_q'")!);
-        var ex = Throws<DbException>(() => sim.ExecuteNonQuery("alter table t check constraint ck_q, missing"));
-        AreEqual("4917", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => sim.ExecuteNonQuery("alter table t check constraint ck_q, missing"));
+        AreEqual(4917, ex.Number);
         // ck_q was disabled before; the failed multi-toggle leaves it disabled.
         IsTrue((bool)sim.ExecuteScalar("select is_disabled from sys.check_constraints where name = 'ck_q'")!);
     }
@@ -246,7 +245,7 @@ public sealed class AlterTableTrustToggleTests
         AreEqual(3, sim.ExecuteScalar("select count(*) from c"));
         // After re-enable without WITH CHECK, IsNotTrusted = true; new
         // inserts enforce again so attempting a fresh orphan now fails.
-        var ex = Throws<DbException>(() => sim.ExecuteNonQuery("insert c values (40, 999, 1)"));
-        AreEqual("547", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => sim.ExecuteNonQuery("insert c values (40, 999, 1)"));
+        AreEqual(547, ex.Number);
     }
 }

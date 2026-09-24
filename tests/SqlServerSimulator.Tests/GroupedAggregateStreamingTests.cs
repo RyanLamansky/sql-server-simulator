@@ -231,9 +231,9 @@ public sealed class GroupedAggregateStreamingTests
             create table e (id int not null primary key, a int not null, s varchar(10) not null);
             insert e values (1, 0, '1'), (2, 5, '1'), (3, 5, '1'), (4, 5, '1'), (5, 5, 'xyz')
             """);
-        var error = Throws<System.Data.Common.DbException>(
+        var error = Throws<SimulatedSqlException>(
             () => simulation.ExecuteScalar("select sum(1 / a) from e where cast(s as int) > 0"));
-        AreEqual("8134", error.Data["HelpLink.EvtID"]);
+        AreEqual(8134, error.Number);
     }
 
     // ---- the decimal accumulation the streaming loop feeds ----
@@ -261,9 +261,9 @@ public sealed class GroupedAggregateStreamingTests
     [TestMethod]
     public void SumOfADecimalTooWideForItsTarget_StillOverflows()
     {
-        var error = Throws<System.Data.Common.DbException>(
+        var error = Throws<SimulatedSqlException>(
             () => Seeded().ExecuteScalar("select sum(cast(amount as decimal(38,37))) from g"));
-        AreEqual("8115", error.Data["HelpLink.EvtID"]);
+        AreEqual(8115, error.Number);
     }
 
     /// <summary>

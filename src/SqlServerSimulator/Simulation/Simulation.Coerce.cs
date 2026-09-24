@@ -45,7 +45,7 @@ partial class Simulation
     /// the column can hold for the common cases, and any genuine overflow
     /// surfaces as a coercion error instead.
     /// </remarks>
-    private static void EnforceMaxLength(SqlValue source, HeapColumn column, string tableName, SimulatedDbConnection connection)
+    private static void EnforceMaxLength(SqlValue source, HeapColumn column, HeapTable table, SimulatedDbConnection connection)
     {
         if (source.IsNull || column.MaxLength is not int max || max == SqlType.MaxLengthSentinel)
             return;
@@ -89,6 +89,7 @@ partial class Simulation
         if (!connection.IsVerboseTruncationActive())
             throw SimulatedSqlException.StringOrBinaryWouldBeTruncatedLegacy();
 
+        var tableName = QualifyForTruncationMessage(table);
         throw column.Type is VarbinarySqlType or BinarySqlType
             ? SimulatedSqlException.StringOrBinaryWouldBeTruncated(tableName, column.Name, source.AsBytes, max)
             : SimulatedSqlException.StringOrBinaryWouldBeTruncated(
@@ -265,6 +266,19 @@ partial class Simulation
             return QualifyTableName(table, owner);
         return $"{TempdbDatabaseName}.{Database.DefaultSchemaName}.{table.Name}";
     }
+
+    /// <summary>
+    /// The table name as Msg 2628 spells it: <c>database.schema.table</c>, a
+    /// temp table qualified into <c>tempdb.dbo</c> as for
+    /// <see cref="QualifyForNullMessage"/>, and a table variable likewise
+    /// (probed 2026-09-23). Real names a table variable by its internal
+    /// hashed name there (<c>tempdb.dbo.#B9CBEB0A</c>); the simulator writes
+    /// the variable's own name in that slot.
+    /// </summary>
+    internal static string QualifyForTruncationMessage(HeapTable table) =>
+        table.OwningDatabase is { } owner
+            ? QualifyTableName(table, owner)
+            : $"{TempdbDatabaseName}.{Database.DefaultSchemaName}.{table.Name}";
 
     /// <summary>
     /// The database name the constraint-violation messages (the Msg 547

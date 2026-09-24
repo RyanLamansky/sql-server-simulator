@@ -136,16 +136,16 @@ public sealed class SqlTransactionStatementTests
     public void Commit_WithoutActiveTx_RaisesMsg3902()
     {
         using var conn = NewSeededConnection();
-        var ex = Throws<DbException>(() => _ = conn.CreateCommand("commit").ExecuteNonQuery());
-        AreEqual("3902", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => _ = conn.CreateCommand("commit").ExecuteNonQuery());
+        AreEqual(3902, ex.Number);
     }
 
     [TestMethod]
     public void Rollback_WithoutActiveTx_RaisesMsg3903()
     {
         using var conn = NewSeededConnection();
-        var ex = Throws<DbException>(() => _ = conn.CreateCommand("rollback").ExecuteNonQuery());
-        AreEqual("3903", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => _ = conn.CreateCommand("rollback").ExecuteNonQuery());
+        AreEqual(3903, ex.Number);
     }
 
     [TestMethod]

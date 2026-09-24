@@ -139,34 +139,10 @@ internal sealed class BatchContext
         (this.BoundProjectionResults ??= new Dictionary<Expression, SqlValue>(ReferenceEqualityComparer.Instance))[expression] = value;
 
     /// <summary>
-    /// Buffer of message texts collected across this batch from <c>PRINT</c>
-    /// and severity-0-10 <c>RAISERROR</c> statements. Probe-confirmed
-    /// coalescing semantic: multiple contributing statements in one command
-    /// fire a single <see cref="SimulatedDbConnection.InfoMessage"/> event
-    /// at end of dispatch with all message texts joined by <c>\n</c> into
-    /// the <em>single</em> <see cref="SimulatedError"/> entry that
-    /// <see cref="SimulatedInfoMessageEventArgs.Errors"/> carries. Null when
-    /// no info statement has fired yet (avoids the per-batch allocation for
-    /// the typical info-less batch).
-    /// </summary>
-    private List<string>? pendingInfoMessages;
-
-    /// <summary>
-    /// Class / state / number / line / procedure of the <em>first</em>
-    /// contributing statement, captured when the first message is buffered —
-    /// a <c>PRINT</c> in a procedure body names the procedure, as real's does. Coalesced
-    /// events report through these fields; the first contributor's
-    /// diagnostic metadata wins (matching the probe-confirmed first-line
-    /// rule for the line-number field).
-    /// </summary>
-    private (byte Class, byte State, int Number, int LineNumber, string Procedure) firstInfoMetadata;
-
-    /// <summary>
-    /// Buffers a <c>PRINT</c>-emitted string against this batch's pending
-    /// info-message list with <c>PRINT</c>'s standard severity/number/state
-    /// defaults (class 0, number 0, state 1 — matching <c>SqlError</c>'s
-    /// fields for an inline <c>PRINT</c>). Caller has already formatted the
-    /// operand value into its display string (NULL → single space per probe).
+    /// Queues a <c>PRINT</c>-emitted string with <c>PRINT</c>'s standard
+    /// fields (class 0, number 0, state 1 — matching <c>SqlError</c>'s fields
+    /// for an inline <c>PRINT</c>). Caller has already formatted the operand
+    /// value into its display string (NULL → single space per probe).
     /// Skipped-IF / loop-control suppression is decided by the caller
     /// (<see cref="IsSkipping"/>), not here.
     /// </summary>
@@ -174,65 +150,60 @@ internal sealed class BatchContext
         AppendInfoError(@class: 0, state: 1, number: 0, message: text);
 
     /// <summary>
-    /// Buffers an informational message with caller-supplied class / state /
-    /// number. The <c>RAISERROR</c> sev-0-10 path uses this to carry the
-    /// statement's severity and state through to subscribers; the message
-    /// number defaults to <c>50000</c> for inline-string RAISERROR (mirrors
-    /// SqlClient). Multiple appends in one batch coalesce — only the first
-    /// call's class / state / number / line is retained for the single
-    /// surfaced <see cref="SimulatedError"/>.
+    /// Queues an informational message for the statement being dispatched,
+    /// attributed to its line and enclosing procedure; the dispatch loop
+    /// places it in the outcome stream ahead of the statement's own outcomes.
+    /// Severity 10 is delivered as class 0, as real sends it (probed
+    /// 2026-09-23: <c>RAISERROR(…, 10, …)</c>, Msg 8153, Msg 15477 all arrive
+    /// with class 0), while severities 1-9 keep their number.
     /// </summary>
-    internal void AppendInfoError(byte @class, byte state, int number, string message)
+    internal void AppendInfoError(byte @class, byte state, int number, string message) =>
+        this.Connection.PendingMessages.Enqueue(this.InfoMessage(@class, state, number, message));
+
+    /// <summary>
+    /// An informational message attributed to the statement being dispatched,
+    /// for a caller that places it itself rather than through
+    /// <see cref="SimulatedDbConnection.PendingMessages"/>.
+    /// </summary>
+    internal SimulatedError InfoMessage(byte @class, byte state, int number, string message) =>
+        new(
+            @class: @class == 10 ? (byte)0 : @class,
+            lineNumber: this.CurrentStatement.StartLine,
+            message: message,
+            number: number,
+            procedure: this.ErrorProcedureName,
+            server: this.Connection.DataSource,
+            source: "SqlServerSimulator",
+            state: state);
+
+    /// <summary>
+    /// Queues Msg 8153 now if an aggregate the statement ran so far skipped a
+    /// NULL — for an <c>IF</c> / <c>WHILE</c> condition, whose warning real
+    /// sends before the body's first message (probed 2026-09-23) rather than
+    /// after the statement as a query's.
+    /// </summary>
+    internal void QueueNullEliminatedWarning()
     {
-        if (this.pendingInfoMessages is null)
-        {
-            this.pendingInfoMessages = [];
-            this.firstInfoMetadata = (@class, state, number, this.CurrentStatement.StartLine, this.ErrorProcedureName);
-        }
-        this.pendingInfoMessages.Add(message);
+        if (!this.CurrentStatement.NullEliminated)
+            return;
+        this.CurrentStatement.NullEliminated = false;
+        if (this.Connection.AnsiWarnings)
+            this.Connection.PendingMessages.Enqueue(SimulatedSqlException.NullEliminatedMessage(this));
     }
 
     /// <summary>
-    /// Buffers real's severity-10 Msg 9927 once per batch. A full-text
+    /// Queues real's severity-10 Msg 9927 once per statement. A full-text
     /// predicate evaluates per row, and real reports the ignored words once for
-    /// the statement, so a repeat of the same text is dropped rather than
-    /// appended.
+    /// the statement.
     /// </summary>
     internal void AppendFullTextNoiseWordMessage()
     {
-        if (this.pendingInfoMessages?.Contains(SimulatedSqlException.FullTextNoiseWordMessage) == true)
+        if (this.CurrentStatement.ReportedNoiseWords)
             return;
+        this.CurrentStatement.ReportedNoiseWords = true;
         AppendInfoError(@class: 10, state: 1,
             SimulatedSqlException.FullTextNoiseWordMessageNumber,
             SimulatedSqlException.FullTextNoiseWordMessage);
-    }
-
-    /// <summary>
-    /// If any info statements buffered output during this batch, delivers
-    /// them to <see cref="SimulatedDbConnection.InfoMessage"/> subscribers
-    /// as a single event whose <see cref="SimulatedInfoMessageEventArgs.Errors"/>
-    /// carries one coalesced <see cref="SimulatedError"/> entry. No-op when
-    /// the buffer is empty. Called by
-    /// <see cref="Simulation.CreateResultSetsForCommand"/> after dispatch
-    /// completes.
-    /// </summary>
-    internal void FlushPrintMessages()
-    {
-        if (this.pendingInfoMessages is not { Count: > 0 } list)
-            return;
-        var joined = string.Join('\n', list);
-        var (firstClass, firstState, firstNumber, firstLine, firstProcedure) = this.firstInfoMetadata;
-        var errors = new SimulatedErrorCollection([new SimulatedError(
-            @class: firstClass,
-            lineNumber: firstLine,
-            message: joined,
-            number: firstNumber,
-            procedure: firstProcedure,
-            server: this.Connection.DataSource,
-            source: "SqlServerSimulator",
-            state: firstState)]);
-        this.Connection.RaiseInfoMessage(new SimulatedInfoMessageEventArgs(errors));
-        list.Clear();
     }
 
     /// <summary>

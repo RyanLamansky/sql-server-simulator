@@ -754,7 +754,7 @@ internal sealed partial class Selection
                                 {
                                     var operandValue = aggregate.Operand is null
                                         ? SqlValue.Null(SqlType.Int32)
-                                        : aggregate.Operand.Run(runtimeAt(i));
+                                        : aggregate.ObserveInput(aggregate.Operand.Run(runtimeAt(i)), runtimeAt(i));
                                     aggregator.Add(operandValue);
                                 }
                                 var partitionResult = aggregator.Result();
@@ -777,7 +777,7 @@ internal sealed partial class Selection
                             {
                                 operandByPos[p] = aggregate.Operand is null
                                     ? SqlValue.Null(SqlType.Int32)
-                                    : aggregate.Operand.Run(runtimeAt(indices[p]));
+                                    : aggregate.ObserveInput(aggregate.Operand.Run(runtimeAt(indices[p])), runtimeAt(indices[p]));
                             }
 
                             // The start advances (so rows leave the frame and the

@@ -21,6 +21,7 @@ Probed against SQL Server 2025.
   No-cycle exhaustion sticks (`Sequence.IsExhausted`) until `ALTER SEQUENCE … RESTART`; subsequent `NEXT VALUE FOR` → **Msg 11728**.
 - **`CACHE n` / `NO CACHE`**: parse-and-ignore (the simulator doesn't model the batched-allocation optimization that real SQL Server's CACHE represents).
   `sys.sequences.is_cached` reports `true` unconditionally; `cache_size` always NULL (matches real SQL Server's reported behavior when no explicit size is supplied).
+  The declared size is kept for one thing: the first draw after CREATE or `RESTART` sends real's **Msg 11729** (`The sequence object 's' cache size is greater than the number of available values.`) when the cache — 50 values by default — is longer than the values left before the bound, and neither `NO CACHE` nor `CYCLE` ever does (probed 2026-09-23).
 
 ## `NEXT VALUE FOR` semantics — per-row dedup
 

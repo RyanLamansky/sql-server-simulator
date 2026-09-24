@@ -353,12 +353,12 @@ public sealed class SubqueryTests
             """);
 
         using var connection = simulation.CreateOpenConnection();
-        var ex = Throws<DbException>(() =>
+        var ex = Throws<SimulatedSqlException>(() =>
         {
             using var reader = connection.CreateCommand("select (select b.val from b where b.id = a.id) from a").ExecuteReader();
             while (reader.Read()) { }
         });
-        AreEqual("512", ex.Data["HelpLink.EvtID"]);
+        AreEqual(512, ex.Number);
     }
 
     [TestMethod]

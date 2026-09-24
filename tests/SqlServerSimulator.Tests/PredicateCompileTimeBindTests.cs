@@ -55,7 +55,7 @@ public sealed class PredicateCompileTimeBindTests
     {
         var ex = EmptyFixture().AssertSqlError(sql, 468);
         AreEqual((byte)9, ex.State);
-        AreEqual($"Cannot resolve the collation conflict between \"{Cs}\" and \"{Ci}\" in the {operatorName} operation.", ex.Message);
+        AreEqual($"Cannot resolve the collation conflict between \"{Cs}\" and \"{Ci}\" in the {operatorName} operation.", ex.Errors[0].Message);
     }
 
     /// <summary>

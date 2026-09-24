@@ -96,7 +96,7 @@ public sealed class MergeCteTests
             merge into tgt using (with c as (select id, v from src) select * from c) s on tgt.id = s.id
             when not matched then insert (id, v) values (s.id, s.v);
             """, 156);
-        AreEqual("Incorrect syntax near the keyword 'with'.", ex.Message);
+        AreEqual("Incorrect syntax near the keyword 'with'.", ex.Errors[0].Message);
     }
 
     [TestMethod]

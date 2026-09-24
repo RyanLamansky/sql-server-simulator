@@ -1,4 +1,3 @@
-using System.Data.Common;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 
 namespace SqlServerSimulator;
@@ -646,8 +645,8 @@ public sealed class ForeignKeyTests
         // delete. Statement-atomic rollback restores the cascade-deleted
         // rows; the earlier successful delete inside the same tx persists
         // until ROLLBACK closes the tx.
-        var ex = Throws<DbException>(() => conn.CreateCommand("delete a where id = 1").ExecuteNonQuery());
-        AreEqual("547", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => conn.CreateCommand("delete a where id = 1").ExecuteNonQuery());
+        AreEqual(547, ex.Number);
         AreEqual(1, conn.CreateCommand("select count(*) from a").ExecuteScalar());
         AreEqual(1, conn.CreateCommand("select count(*) from b").ExecuteScalar());
         AreEqual(1, conn.CreateCommand("select @@trancount").ExecuteScalar());

@@ -55,7 +55,7 @@ public class CreateTableTests
     {
         // 2016 int columns × 4 bytes = 8064 bytes, beyond 8060-byte in-row record size — Msg 1701.
         var columns = string.Join(", ", Enumerable.Range(0, 2016).Select(i => $"c{i} int"));
-        var ex = Assert.Throws<System.Data.Common.DbException>(() => new Simulation().ExecuteNonQuery($"create table t ( {columns} )"));
+        var ex = Assert.Throws<SimulatedSqlException>(() => new Simulation().ExecuteNonQuery($"create table t ( {columns} )"));
         Assert.Contains("row size", ex.Message);
         Assert.Contains("8060", ex.Message);
     }

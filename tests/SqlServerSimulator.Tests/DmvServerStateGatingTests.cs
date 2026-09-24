@@ -44,7 +44,7 @@ public sealed class DmvServerStateGatingTests
     {
         var ex = Seeded().AssertSqlError(
             "use master; execute as login = 'srvl2'; select count(*) from sys.dm_os_waiting_tasks", 300);
-        AreEqual("VIEW SERVER PERFORMANCE STATE permission was denied on object 'server', database 'master'.", ex.Message);
+        AreEqual("VIEW SERVER PERFORMANCE STATE permission was denied on object 'server', database 'master'.", ex.Errors[0].Message);
     }
 
     [DataRow("sys.dm_tran_locks")]

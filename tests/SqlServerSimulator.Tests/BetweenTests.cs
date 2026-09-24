@@ -1,4 +1,3 @@
-using System.Data.Common;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 
 namespace SqlServerSimulator;
@@ -143,15 +142,15 @@ public sealed class BetweenTests
         _ = conn.CreateCommand("create table bt (v int check (v between 1 and 10))").ExecuteNonQuery();
         _ = conn.CreateCommand("insert bt values (5)").ExecuteNonQuery();
         using var cmd = conn.CreateCommand("insert bt values (11)");
-        var ex = Throws<DbException>(() => cmd.ExecuteNonQuery());
-        AreEqual("547", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => cmd.ExecuteNonQuery());
+        AreEqual(547, ex.Number);
     }
 
     [TestMethod]
     public void MissingAndKeyword_SyntaxError()
     {
         // `value BETWEEN lower upper` (no AND) → syntax error near upper.
-        var ex = Throws<DbException>(() => new Simulation().ExecuteScalar("select 1 where 5 between 1 10"));
-        AreEqual("102", ex.Data["HelpLink.EvtID"]);
+        var ex = Throws<SimulatedSqlException>(() => new Simulation().ExecuteScalar("select 1 where 5 between 1 10"));
+        AreEqual(102, ex.Number);
     }
 }

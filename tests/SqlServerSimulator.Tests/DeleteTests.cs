@@ -179,7 +179,7 @@ public sealed class DeleteTests
     {
         var simulation = new Simulation();
         _ = simulation.ExecuteNonQuery("create table t (id int)");
-        var ex = Throws<DbException>(() => simulation.ExecuteNonQuery("delete from [unknown]"));
+        var ex = Throws<SimulatedSqlException>(() => simulation.ExecuteNonQuery("delete from [unknown]"));
         Contains("Invalid object name", ex.Message);
     }
 
@@ -227,7 +227,7 @@ public sealed class DeleteTests
             create table t (id int);
             create table u (id int)
             """);
-        var ex = Throws<DbException>(() =>
+        var ex = Throws<SimulatedSqlException>(() =>
             _ = simulation.ExecuteNonQuery("delete [x] from t as [a] inner join u as [b] on [a].[id] = [b].[id]"));
         Contains("Invalid object name", ex.Message);
     }

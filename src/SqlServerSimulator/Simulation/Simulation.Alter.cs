@@ -866,6 +866,7 @@ partial class Simulation
                             sequence.CurrentValue = sequence.StartValue;
                         }
                         sequence.IsExhausted = false;
+                        sequence.FirstCacheAllocated = false;
                         // RESTART clears the runtime last-used marker (real
                         // reports last_used_value NULL after a restart, until
                         // the next NEXT VALUE FOR).
@@ -896,7 +897,10 @@ partial class Simulation
                             case UnquotedString { ContextualKeyword: ContextualKeyword.Cycle }:
                                 sequence.Cycle = false;
                                 continue;
-                            case UnquotedString { ContextualKeyword: ContextualKeyword.MinValue or ContextualKeyword.MaxValue or ContextualKeyword.Cache }:
+                            case UnquotedString { ContextualKeyword: ContextualKeyword.Cache }:
+                                sequence.CacheSize = 0;
+                                continue;
+                            case UnquotedString { ContextualKeyword: ContextualKeyword.MinValue or ContextualKeyword.MaxValue }:
                                 continue;
                             default:
                                 return false;
@@ -908,11 +912,12 @@ partial class Simulation
                         if (!context.MoveNext() || context.Token is not (Numeric or Operator { Character: '-' or '+' }))
                         {
                             context.RestoreCheckpoint(afterCache);
+                            sequence.CacheSize = null;
                         }
                         else
                         {
                             context.RestoreCheckpoint(afterCache);
-                            _ = ReadSignedIntegerLiteral(context);
+                            sequence.CacheSize = ReadSignedIntegerLiteral(context);
                         }
                         continue;
                     }

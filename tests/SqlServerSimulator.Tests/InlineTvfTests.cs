@@ -17,10 +17,10 @@ public sealed class InlineTvfTests
 {
     private static DbConnection Open() => new Simulation().CreateOpenConnection();
 
-    private static DbException AssertSqlError(DbConnection connection, string sql, int errorNumber)
+    private static SimulatedSqlException AssertSqlError(DbConnection connection, string sql, int errorNumber)
     {
-        var ex = Throws<DbException>(() => connection.CreateCommand(sql).ExecuteScalar());
-        AreEqual(errorNumber.ToString(), ex.Data["HelpLink.EvtID"], $"expected Msg {errorNumber}");
+        var ex = Throws<SimulatedSqlException>(() => connection.CreateCommand(sql).ExecuteScalar());
+        AreEqual(errorNumber, ex.Number, $"expected Msg {errorNumber}");
         return ex;
     }
 

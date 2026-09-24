@@ -616,9 +616,9 @@ public sealed class TriggerTests
                     throw 50001, 'negative not allowed', 1;
             end
             """).ExecuteNonQuery();
-        var ex = Throws<DbException>(() =>
+        var ex = Throws<SimulatedSqlException>(() =>
             _ = connection.CreateCommand("insert t_target values (5, -1)").ExecuteNonQuery());
-        AreEqual("50001", ex.Data["HelpLink.EvtID"]);
+        AreEqual(50001, ex.Number);
         // Row must NOT exist — trigger throw rolls back the DML.
         using var reader = connection.CreateCommand("select count(*) from t_target where id = 5").ExecuteReader();
         IsTrue(reader.Read());
@@ -680,9 +680,9 @@ public sealed class TriggerTests
     public void DropTrigger_Missing_Raises3701()
     {
         using var connection = Seeded();
-        var ex = Throws<DbException>(() =>
+        var ex = Throws<SimulatedSqlException>(() =>
             _ = connection.CreateCommand("drop trigger tr_nonexistent").ExecuteNonQuery());
-        AreEqual("3701", ex.Data["HelpLink.EvtID"]);
+        AreEqual(3701, ex.Number);
     }
 
     [TestMethod]
@@ -698,10 +698,10 @@ public sealed class TriggerTests
     public void CreateTrigger_OnMissingTable_Raises8197()
     {
         using var connection = Seeded();
-        var ex = Throws<DbException>(() =>
+        var ex = Throws<SimulatedSqlException>(() =>
             _ = connection.CreateCommand(
                 "create trigger tr_missing on no_such_table after insert as select 1").ExecuteNonQuery());
-        AreEqual("8197", ex.Data["HelpLink.EvtID"]);
+        AreEqual(8197, ex.Number);
     }
 
     [TestMethod]
@@ -709,9 +709,9 @@ public sealed class TriggerTests
     {
         using var connection = Seeded();
         _ = connection.CreateCommand("create trigger tr_t on t_target after insert as select 1").ExecuteNonQuery();
-        var ex = Throws<DbException>(() =>
+        var ex = Throws<SimulatedSqlException>(() =>
             _ = connection.CreateCommand("create trigger tr_t on t_target after insert as select 1").ExecuteNonQuery());
-        AreEqual("2714", ex.Data["HelpLink.EvtID"]);
+        AreEqual(2714, ex.Number);
     }
 
     // === ALTER TRIGGER ===
@@ -808,9 +808,9 @@ public sealed class TriggerTests
     public void Inserted_OutsideTrigger_Raises208()
     {
         using var connection = Seeded();
-        var ex = Throws<DbException>(() =>
+        var ex = Throws<SimulatedSqlException>(() =>
             _ = connection.CreateCommand("select * from inserted").ExecuteScalar());
-        AreEqual("208", ex.Data["HelpLink.EvtID"]);
+        AreEqual(208, ex.Number);
     }
 
     // === MERGE INSERT branch fires AFTER INSERT trigger ===

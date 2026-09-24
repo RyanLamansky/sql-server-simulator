@@ -1017,6 +1017,14 @@ internal sealed partial class Selection
                 expressions[i] = new NamedExpression(new Value(SqlValue.Null(outputSchema[i])), outputColumnNames[i]);
         }
 
+        // Nor does an EXISTS body's aggregate report a NULL it skipped
+        // (probed 2026-09-23).
+        if (scope.ProjectionUnread)
+        {
+            foreach (var aggregate in aggregates)
+                aggregate.WarnsOnNullInput = false;
+        }
+
         // The select list is the *last* slot real settles: a WHERE / JOIN
         // predicate's Msg 4191, a GROUP BY term's Msg 451 and an ORDER BY
         // term's all report ahead of it, and an ORDER BY naming the conflicted

@@ -257,7 +257,7 @@ public sealed class PrintStatementTests
     public void Print_ColumnName_RaisesMsg128(string commandText, string name)
     {
         var ex = new Simulation().AssertSqlError(commandText, 128);
-        AreEqual($"The name \"{name}\" is not permitted in this context. Valid expressions are constants, constant expressions, and (in some contexts) variables. Column names are not permitted.", ex.Message);
+        AreEqual($"The name \"{name}\" is not permitted in this context. Valid expressions are constants, constant expressions, and (in some contexts) variables. Column names are not permitted.", ex.Errors[0].Message);
         AreEqual((byte)15, ex.Class);
         AreEqual((byte)1, ex.State);
     }
@@ -276,7 +276,7 @@ public sealed class PrintStatementTests
     public void Print_Subquery_RaisesMsg1046(string commandText)
     {
         var ex = new Simulation().AssertSqlError(commandText, 1046);
-        AreEqual("Subqueries are not allowed in this context. Only scalar expressions are allowed.", ex.Message);
+        AreEqual("Subqueries are not allowed in this context. Only scalar expressions are allowed.", ex.Errors[0].Message);
         AreEqual((byte)15, ex.Class);
     }
 

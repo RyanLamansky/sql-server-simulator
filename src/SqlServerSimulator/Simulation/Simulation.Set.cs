@@ -159,6 +159,7 @@ partial class Simulation
             if (Language.Find(languageName) is { } language)
             {
                 context.Connection.Language = language;
+                context.Connection.PendingMessages.Enqueue(SimulatedSqlException.LanguageChangedMessage(context.Batch, language.Name));
                 if (!context.Batch.DateFirstSetExplicitly)
                     context.Connection.DateFirst = language.DateFirst;
             }

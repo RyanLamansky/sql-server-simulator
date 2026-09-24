@@ -74,7 +74,7 @@ public sealed class ExplicitTransactionTests
         using var tx = conn.BeginTransaction();
         RunInTx(conn, tx, "insert t values (1, 10)");
 
-        _ = Throws<DbException>(() => RunInTx(conn, tx, "insert t values (1, 99)"));
+        _ = Throws<SimulatedSqlException>(() => RunInTx(conn, tx, "insert t values (1, 99)"));
 
         RunInTx(conn, tx, "insert t values (3, 30)");
         tx.Commit();
