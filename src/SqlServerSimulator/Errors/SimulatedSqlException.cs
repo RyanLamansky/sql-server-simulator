@@ -1,3 +1,4 @@
+using System.Collections;
 using System.Data.Common;
 using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
@@ -61,15 +62,33 @@ public sealed partial class SimulatedSqlException : DbException
         this.Number = first.Number;
         this.Class = first.Class;
         this.State = first.State;
+    }
 
-        var data = this.Data;
+    private bool dataFilled;
 
-        data.Add("HelpLink.ProdName", "Microsoft SQL Server");
-        data.Add("HelpLink.ProdVer", "99.00.1000");
-        data.Add("HelpLink.EvtSrc", "MSSQLServer");
-        data.Add("HelpLink.EvtID", first.Number.ToString(CultureInfo.InvariantCulture));
-        data.Add("HelpLink.BaseHelpUrl", "https://go.microsoft.com/fwlink");
-        data.Add("HelpLink.LinkId", "20476");
+    /// <summary>
+    /// The <c>HelpLink.*</c> entries <c>SqlException</c> carries, then anything a caller adds.
+    /// </summary>
+    /// <remarks>
+    /// Filled on first read rather than at construction, since most catches never read it.
+    /// </remarks>
+    public override IDictionary Data
+    {
+        get
+        {
+            var data = base.Data;
+            if (this.dataFilled)
+                return data;
+
+            data["HelpLink.ProdName"] = "Microsoft SQL Server";
+            data["HelpLink.ProdVer"] = "99.00.1000";
+            data["HelpLink.EvtSrc"] = "MSSQLServer";
+            data["HelpLink.EvtID"] = this.Number.ToString(CultureInfo.InvariantCulture);
+            data["HelpLink.BaseHelpUrl"] = "https://go.microsoft.com/fwlink";
+            data["HelpLink.LinkId"] = "20476";
+            this.dataFilled = true;
+            return data;
+        }
     }
 
     /// <inheritdoc/>

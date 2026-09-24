@@ -299,4 +299,21 @@ public sealed class ErrorDiagnosticsTests
     [TestMethod]
     public void UnclosedBlockComment_LongerRun_ReportsFinalLine()
         => AreEqual(6, new Simulation().AssertSqlError("select 1\nselect 2\nselect 3\n/* a\nb\nc", 113).LineNumber);
+
+    /// <summary>
+    /// <see cref="System.Exception.Data"/> carries SqlClient's <c>HelpLink.*</c>
+    /// entries from its first read on, and later reads return the same
+    /// dictionary with a caller's own entries intact.
+    /// </summary>
+    [TestMethod]
+    public void Data_CarriesHelpLinkEntriesAndKeepsCallerEntries()
+    {
+        var ex = new Simulation().AssertSqlError("select 1/0", 8134);
+        var data = ex.Data;
+        AreEqual("8134", data["HelpLink.EvtID"]);
+        data["caller"] = 1;
+        AreSame(data, ex.Data);
+        HasCount(7, ex.Data);
+        AreEqual(1, ex.Data["caller"]);
+    }
 }

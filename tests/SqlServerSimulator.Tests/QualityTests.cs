@@ -121,6 +121,7 @@ public partial class QualityTests
             [typeof(SimulatedSqlException)] = [
                 nameof(SimulatedSqlException.ErrorCode),
                 nameof(SimulatedSqlException.IsTransient),
+                nameof(SimulatedSqlException.Data),
                 nameof(SimulatedSqlException.Number),
                 nameof(SimulatedSqlException.Class),
                 nameof(SimulatedSqlException.State),
