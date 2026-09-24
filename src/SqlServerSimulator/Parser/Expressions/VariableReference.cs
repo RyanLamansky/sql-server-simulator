@@ -25,7 +25,8 @@ internal sealed class VariableReference : Expression
     /// <summary>The name without its leading <c>@</c> — the Variables-dict key.</summary>
     public readonly string VariableName;
 
-    private readonly SqlType declaredType;
+    /// <summary>The variable's declared type, as parsing found it.</summary>
+    public readonly SqlType DeclaredType;
 
     public VariableReference(AtPrefixedString atPrefixed, ParserContext context)
     {
@@ -34,14 +35,14 @@ internal sealed class VariableReference : Expression
         this.VariableName = raw.StartsWith('@') ? raw[1..] : raw;
         // Parse-time validation (and capture of the declared type for
         // GetSqlType) — this is what raises Msg 137 if @v was never declared.
-        this.declaredType = context.Batch.GetVariableSlot(raw).DeclaredType;
+        this.DeclaredType = context.Batch.GetVariableSlot(raw).DeclaredType;
     }
 
     internal override bool ParallelSafe => true;
 
     public override SqlValue Run(RuntimeContext runtime) => runtime.Batch.Variables[this.VariableName].Value;
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => this.declaredType;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => this.DeclaredType;
 
     internal override string DebugDisplay() => $"@{this.VariableName}";
 

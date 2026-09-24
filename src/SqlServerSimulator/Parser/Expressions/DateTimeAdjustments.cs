@@ -37,7 +37,10 @@ internal sealed class DateTrunc : Expression
             return SqlValue.Null(raw.Type);
         var value = DatePartKinds.CoerceDateArgumentImplicit(raw);
         var t = value.Type;
+        DatePartKinds.RequireCompatible(this.kind, this.keywordText, t, "datetrunc");
         var dateFirst = runtime.Batch.Connection.DateFirst;
+        if (t is TimeSqlType)
+            return SqlValue.FromTime(t, TruncateDateTime(new DateTime(1900, 1, 1).Add(value.AsTime), this.kind, dateFirst).TimeOfDay);
         if (t == SqlType.Date)
             return SqlValue.FromDate(TruncateDate(value.AsDate, this.kind, dateFirst));
         if (t == SqlType.DateTime)
@@ -70,7 +73,7 @@ internal sealed class DateTrunc : Expression
         DatePartKind.DayOfYear or DatePartKind.Day or DatePartKind.Weekday => d,
         DatePartKind.Week => d.AddDays(1 - DatePartKinds.WeekdayNumber(d, dateFirst)),
         DatePartKind.IsoWeek => d.AddDays(-(d.DayOfWeek == DayOfWeek.Sunday ? 6 : (int)d.DayOfWeek - 1)),
-        _ => throw SimulatedSqlException.DatepartNotSupportedForType("datetrunc", "datetrunc", "date"),
+        _ => throw new InvalidOperationException($"RequireCompatible admits no {k} for a date."),
     };
 
     private static DateTime TruncateDateTime(DateTime dt, DatePartKind k, int dateFirst) => k switch
@@ -127,46 +130,39 @@ internal sealed class SwitchOffset : Expression
         return SqlValue.FromDateTimeOffset(v.Type, adjusted);
     }
 
-    internal static int ParseOffsetMinutes(SqlValue v)
+    /// <summary>
+    /// Reads the offset argument of <paramref name="functionName"/>
+    /// (<c>switchoffset</c> or <c>todatetimeoffset</c>) as minutes. A string
+    /// must be exactly <c>[+|-]hh:mm</c> — no padding, no other width, minutes
+    /// under 60 — and within ±14:00; anything else is Msg 9812, whose state
+    /// tells the function and a string from a number apart (probed 2026-09-24
+    /// against SQL Server 2025).
+    /// </summary>
+    internal static int ParseOffsetMinutes(SqlValue v, string functionName)
     {
+        var isSwitch = functionName == "switchoffset";
         if (SqlType.IsStringCategory(v.Type))
         {
-            var s = v.CoerceTo(SqlType.NVarchar).AsString.Trim();
-            var sign = 1;
-            if (s.StartsWith('+'))
+            var s = v.CoerceTo(SqlType.NVarchar).AsString;
+            var invalid = SimulatedSqlException.InvalidTimeZone(functionName, isSwitch ? (byte)0 : (byte)2);
+            if (s.Length != 6 || s[0] is not ('+' or '-') || s[3] != ':'
+                || !char.IsAsciiDigit(s[1]) || !char.IsAsciiDigit(s[2]) || !char.IsAsciiDigit(s[4]) || !char.IsAsciiDigit(s[5]))
             {
-                s = s[1..];
+                throw invalid;
             }
-            else if (s.StartsWith('-'))
-            {
-                sign = -1;
-                s = s[1..];
-            }
-            var colonIdx = s.IndexOf(':', StringComparison.Ordinal);
-            return colonIdx < 0
-                ? sign * int.Parse(s, System.Globalization.CultureInfo.InvariantCulture)
-                : sign * ((int.Parse(s[..colonIdx], System.Globalization.CultureInfo.InvariantCulture) * 60)
-                    + int.Parse(s[(colonIdx + 1)..], System.Globalization.CultureInfo.InvariantCulture));
+            var hours = ((s[1] - '0') * 10) + (s[2] - '0');
+            var minutes = ((s[4] - '0') * 10) + (s[5] - '0');
+            var total = (hours * 60) + minutes;
+            return minutes >= 60 || total > 840 ? throw invalid : s[0] == '-' ? -total : total;
         }
         // The minute offset is declared smallint, so an out-of-range one
         // reports that narrowing rather than an int one — Msg 8115 naming
         // smallint for a bigint argument, the value-bearing Msg 220 for an
         // int argument (probe-confirmed 2026-07-31).
-        return ScalarArguments.CoerceToSmallInt(v);
-    }
-
-    /// <summary>
-    /// Parses the offset and enforces SQL Server's legal ±14:00 range,
-    /// raising Msg 9812 (named for <paramref name="functionName"/>) when it
-    /// is exceeded — instead of letting <see cref="DateTimeOffset"/> throw an
-    /// internal <see cref="ArgumentOutOfRangeException"/>.
-    /// </summary>
-    internal static int ParseOffsetMinutes(SqlValue v, string functionName)
-    {
-        var minutes = ParseOffsetMinutes(v);
-        return minutes is < -840 or > 840
-            ? throw SimulatedSqlException.InvalidTimeZone(functionName)
-            : minutes;
+        var count = ScalarArguments.CoerceToSmallInt(v);
+        return count is < -840 or > 840
+            ? throw SimulatedSqlException.InvalidTimeZone(functionName, isSwitch ? (byte)1 : (byte)3)
+            : count;
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>

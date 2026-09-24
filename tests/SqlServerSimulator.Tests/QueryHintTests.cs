@@ -585,18 +585,18 @@ public sealed class QueryHintTests
     }
 
     [TestMethod]
-    public void Insert_HintAfterColumnList_RaisesMsg102()
+    public void Insert_HintAfterColumnList_RaisesMsg156()
         => new Simulation().AssertSqlError("""
             create table t (id int identity primary key, name nvarchar(50));
             insert into t (name) with (tablock) values (N'a')
-            """, 102);
+            """, 156);
 
     [TestMethod]
-    public void Insert_HintOnTableVariable_RaisesMsg102()
+    public void Insert_HintOnTableVariable_RaisesMsg156()
         => new Simulation().AssertSqlError("""
             declare @t table (id int, name nvarchar(50));
             insert into @t with (tablock) values (1, N'a')
-            """, 102);
+            """, 156);
 
     [TestMethod]
     public void Insert_HintOnTempTable_AcceptsAsNoop()
@@ -660,14 +660,14 @@ public sealed class QueryHintTests
             """));
 
     [TestMethod]
-    public void Merge_AliasThenHint_RaisesMsg102()
+    public void Merge_AliasThenHint_RaisesMsg156()
         => new Simulation().AssertSqlError("""
             create table tgt (id int primary key, v int);
             create table src (id int primary key, v int);
             merge into tgt as t with (tablock)
             using (select id, v from src) as s on s.id = t.id
             when not matched by target then insert (id, v) values (s.id, s.v);
-            """, 102);
+            """, 156);
 
     [TestMethod]
     public void Merge_LegacyParenForm_RaisesMsg102()

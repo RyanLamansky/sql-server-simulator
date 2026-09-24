@@ -1923,7 +1923,9 @@ internal sealed class BatchContext
     public VariableSlot GetVariableSlot(string name) =>
         Variables.TryGetValue(name, out var slot)
         ? slot
-        : throw SimulatedSqlException.MustDeclareScalarVariable(name);
+        : throw (this.TableVariables.ContainsKey(name)
+            ? SimulatedSqlException.TableVariableUsedAsScalar(name)
+            : SimulatedSqlException.MustDeclareScalarVariable(name));
 
     /// <summary>
     /// Recognizes a local temp-table name (<c>#foo</c>, including bare

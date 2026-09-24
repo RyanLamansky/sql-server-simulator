@@ -203,7 +203,7 @@ internal sealed class Cast : Expression
         // Null columnName signals CAST/CONVERT context: errors use Msg 243
         // (unknown type), 291 (length on fixed type), and the
         // "type"/"convert specification" wording for Msg 131 size errors.
-        return SqlType.GetByName(typeName, declaredMaxLength, declaredScale, 1, columnName: null);
+        return SqlType.GetByName(typeName, declaredMaxLength, declaredScale, 1, TypeSpecSite.Cast, columnName: null);
     }
 
     /// <summary>

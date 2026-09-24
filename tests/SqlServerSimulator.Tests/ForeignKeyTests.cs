@@ -459,10 +459,10 @@ public sealed class ForeignKeyTests
             """));
 
     [TestMethod]
-    public void FkInsideTableVariable_Msg102()
+    public void FkInsideTableVariable_Msg156()
         => new Simulation().AssertSqlError(
             "declare @t table (id int not null primary key, p_id int not null references something(id))",
-            102);
+            156);
 
     [TestMethod]
     public void MergeFkViolation_RaisesMerge547()

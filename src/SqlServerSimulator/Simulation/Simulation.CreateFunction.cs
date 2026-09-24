@@ -88,7 +88,7 @@ partial class Simulation
         {
             while (true)
             {
-                parameters.Add(ParseParameter(context));
+                parameters.Add(ParseParameter(context, parameters.Count + 1));
                 if (context.Token is Operator { Character: ')' })
                     break;
                 if (context.Token is not Operator { Character: ',' })
@@ -280,7 +280,7 @@ partial class Simulation
     /// </summary>
     private static bool ParseScalarTail(ParserContext context, Schema schema, MultiPartName functionName, List<UdfParameter> parameters, bool isAlter, bool createOrAlter)
     {
-        var returnType = ParseFunctionReturnType(context);
+        var returnType = ParseFunctionReturnType(context, ordinal: 0);
 
         // Optional WITH option [, option …] clause. RETURNS NULL ON NULL INPUT
         // is the only option that affects runtime semantics (NULL-propagation
@@ -750,14 +750,14 @@ partial class Simulation
     /// or parameter name token. Cursor on exit: the trailing <c>,</c> or
     /// <c>)</c> separator (caller decides which).
     /// </summary>
-    private static UdfParameter ParseParameter(ParserContext context)
+    private static UdfParameter ParseParameter(ParserContext context, int ordinal)
     {
         if (context.Token is not AtPrefixedString variable)
             throw SimulatedSqlException.SyntaxErrorNear(context);
         var name = variable.Value;
         context.MoveNextRequired();
 
-        var paramType = ParseFunctionReturnType(context);
+        var paramType = ParseFunctionReturnType(context, ordinal);
 
         Expression? defaultExpression = null;
         if (context.Token is Operator { Character: '=' })
@@ -774,8 +774,10 @@ partial class Simulation
     /// followed by <c>(N)</c> / <c>(N, S)</c> / <c>(MAX)</c>. Cursor on entry:
     /// the type-name token. Cursor on exit: the first token past the type
     /// (e.g. <c>WITH</c>, <c>AS</c>, <c>=</c>, <c>,</c>, <c>)</c>).
+    /// <paramref name="ordinal"/> is the parameter's position, 0 for the
+    /// return type.
     /// </summary>
-    private static SqlType ParseFunctionReturnType(ParserContext context)
+    private static SqlType ParseFunctionReturnType(ParserContext context, int ordinal)
     {
         var (qualifiedTypeName, typeName) = TypeNameSynonyms.ReadTypeName(context);
         context.MoveNextRequired();
@@ -809,7 +811,7 @@ partial class Simulation
 
         var (resolvedType, _, _) = ResolveTypeReference(
             context.Batch, qualifiedTypeName, typeName, declaredMaxLength, declaredScale,
-            index: 1, columnName: null);
+            index: ordinal, TypeSpecSite.Scalar, columnName: null);
         return resolvedType;
     }
 }

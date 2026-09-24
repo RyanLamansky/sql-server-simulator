@@ -933,14 +933,34 @@ internal sealed partial class Selection
         }
 
         var resolved = expression.Run(new RuntimeContext(name => throw SimulatedSqlException.ColumnReferenceNotAllowed(name), batch));
-        var count = ClampRowCount(resolved);
+        if (kind == RowLimitKind.Offset && (resolved.IsNull || !IsRowCountType(resolved.Type)))
+            throw SimulatedSqlException.OffsetRequiresInteger();
+        var count = ClampRowCount(resolved, expression);
+        // What a written count is settles while compiling: a FETCH below one is
+        // Msg 10744 there, where a variable's is a run-time Msg 127 and a zero
+        // variable fetches nothing (probed 2026-09-24 against SQL Server 2025).
         return kind switch
         {
             RowLimitKind.Offset when count < 0 => throw SimulatedSqlException.OffsetMustNotBeNegative(),
-            RowLimitKind.Fetch when count < 1 => throw SimulatedSqlException.FetchMustBeGreaterThanZero(),
+            RowLimitKind.Fetch when count < 1 && expression.IsWrittenConstant => throw SimulatedSqlException.FetchMustBeGreaterThanZero(),
+            _ when count < 0 => throw SimulatedSqlException.TopRowCountMustNotBeNegative(),
             _ => count,
         };
     }
+
+    private static bool IsRowCountType(SqlType type) =>
+        SqlType.IsIntegerCategory(type) || type is DecimalSqlType { scale: 0 };
+
+    /// <summary>
+    /// The error a NULL <c>TOP</c> / <c>FETCH</c> count raises: an integer
+    /// that turned out NULL while running is Msg 1014, and a written NULL —
+    /// or one of another type — the compile-time Msg 1060 (probed 2026-09-24
+    /// against SQL Server 2025).
+    /// </summary>
+    private static SimulatedSqlException NullRowCount(SqlValue resolved, Expression expression) =>
+        !expression.IsWrittenConstant && SqlType.IsIntegerCategory(resolved.Type)
+            ? SimulatedSqlException.TopClauseInvalidValue()
+            : SimulatedSqlException.TopFetchRequiresInteger();
 
     /// <summary>
     /// The row count a <c>TOP</c> / <c>OFFSET</c> / <c>FETCH</c> operand
@@ -950,13 +970,15 @@ internal sealed partial class Selection
     /// ordinary accepted row count — narrowing the operand to <c>bigint</c>
     /// (a 20-digit literal overflows there with Msg 8115 naming
     /// <c>bigint</c>). A fractional scale is the grammar's Msg 1060, as is
-    /// any other family and NULL. The result clamps to <c>int</c>: no
+    /// any other family; NULL is <see cref="NullRowCount"/>'s. The result clamps to <c>int</c>: no
     /// simulated row source reaches 2^31 rows, so a wider cap or offset is
     /// indistinguishable from the clamp.
     /// </summary>
-    private static int ClampRowCount(SqlValue resolved)
+    private static int ClampRowCount(SqlValue resolved, Expression expression)
     {
-        if (resolved.IsNull || !(SqlType.IsIntegerCategory(resolved.Type) || resolved.Type is DecimalSqlType { scale: 0 }))
+        if (resolved.IsNull)
+            throw NullRowCount(resolved, expression);
+        if (!IsRowCountType(resolved.Type))
             throw SimulatedSqlException.TopFetchRequiresInteger();
         var wide = resolved.CoerceTo(SqlType.BigInt).AsInt64;
         return wide > int.MaxValue ? int.MaxValue
@@ -1063,7 +1085,8 @@ internal sealed partial class Selection
     /// Resolves a DML <c>TOP</c> limit to a concrete row cap given the number
     /// of candidate rows already collected. Validates the value the way SQL
     /// Server does: a non-PERCENT value must be a non-negative integer
-    /// (Msg 1060 for non-integer / NULL, Msg 127 for negative); a PERCENT
+    /// (Msg 1060 for non-integer, <see cref="NullRowCount"/> for NULL, Msg 127
+    /// for negative); a PERCENT
     /// value must be numeric in [0, 100] (Msg 1031, Msg 1014 for NULL), and
     /// the cap is <c>ceil(candidateCount * pct / 100)</c> — probe-confirmed
     /// against SQL Server 2025.
@@ -1080,8 +1103,8 @@ internal sealed partial class Selection
                 ? throw SimulatedSqlException.TopPercentOutOfRange()
                 : (int)Math.Ceiling(candidateCount * pct / 100.0);
         }
-        var count = resolved.IsNull || !(SqlType.IsIntegerCategory(resolved.Type) || resolved.Type is DecimalSqlType { scale: 0 })
-            ? throw SimulatedSqlException.TopFetchRequiresInteger()
+        var count = resolved.IsNull ? throw NullRowCount(resolved, limit.Expression)
+            : !IsRowCountType(resolved.Type) ? throw SimulatedSqlException.TopFetchRequiresInteger()
             : resolved.CoerceTo(SqlType.BigInt).AsInt64;
         return count < 0
             ? throw SimulatedSqlException.TopRowCountMustNotBeNegative()
@@ -1136,7 +1159,9 @@ internal sealed partial class Selection
             try
             {
                 context.RecursiveBranchConstructs.TopOrOffset = true;
-                if (context.MoveNextRequiredReturnSelf().Token is Operator { Character: '+' or '-' or '~' })
+                // A string literal is no legacy count either (`TOP '1'`, Msg 102
+                // near it; probed 2026-09-24).
+                if (context.MoveNextRequiredReturnSelf().Token is Operator { Character: '+' or '-' or '~' } or Literal { Value.Type.Category: SqlTypeCategory.String })
                     throw SimulatedSqlException.SyntaxErrorNear(context);
                 topExpression = Expression.ParsePrimary(context);
             }

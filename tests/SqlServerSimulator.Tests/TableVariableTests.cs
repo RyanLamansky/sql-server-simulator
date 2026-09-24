@@ -116,16 +116,16 @@ public sealed class TableVariableTests
     // ---- rejection paths ----
 
     [TestMethod]
-    public void NamedConstraint_RaisesMsg102()
+    public void NamedConstraint_RaisesMsg156()
         => new Simulation().AssertSqlError(
             "declare @t table (id int constraint pk1 primary key)",
-            102);
+            156);
 
     [TestMethod]
-    public void NamedTableLevelConstraint_RaisesMsg102()
+    public void NamedTableLevelConstraint_RaisesMsg156()
         => new Simulation().AssertSqlError(
             "declare @t table (id int, constraint pk1 primary key (id))",
-            102);
+            156);
 
     [TestMethod]
     public void MultiVariableDeclare_RaisesMsg102()

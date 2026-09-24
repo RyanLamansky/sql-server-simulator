@@ -368,13 +368,7 @@ internal sealed class WindowExpression : Expression
 
         var partitionBy = ParseOptionalPartitionBy(context);
 
-        // Ranking functions require ORDER BY inside OVER; SQL Server raises Msg
-        // 4112. The simulator surfaces a generic syntax error to keep the
-        // error-factory surface lean — EF Core never emits these without ORDER BY.
-        if (context.Token is not ReservedKeyword { Keyword: Keyword.Order })
-            throw SimulatedSqlException.SyntaxErrorNear(context);
-        if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.By })
-            throw SimulatedSqlException.SyntaxErrorNear(context);
+        ExpectOrderBy(context, functionLowerName, partitionBy.Length > 0, rejectsFrame: true);
         var orderBy = ParseOrderByList(context);
 
         RejectFrameSpec(context, functionLowerName);
@@ -382,6 +376,30 @@ internal sealed class WindowExpression : Expression
         return context.Token is not Operator { Character: ')' }
             ? throw SimulatedSqlException.SyntaxErrorNear(context)
             : Register(context, new WindowExpression(kind, partitionBy, orderBy, aggregateInfo: null));
+    }
+
+    /// <summary>
+    /// Consumes the <c>ORDER BY</c> keywords an ordering-dependent function's
+    /// <c>OVER</c> requires. An <c>OVER</c> that closes without one is Msg
+    /// 4112, as is a frame after <c>PARTITION BY</c> for a function that takes
+    /// one, where a function refusing frames reports the frame; a frame with
+    /// no <c>PARTITION BY</c> ahead of it, and anything else, is a syntax
+    /// error (probed 2026-09-24 against SQL Server 2025).
+    /// </summary>
+    private static void ExpectOrderBy(ParserContext context, string functionLowerName, bool hasPartition, bool rejectsFrame)
+    {
+        if (context.Token is Operator { Character: ')' })
+            throw SimulatedSqlException.FunctionMustHaveOverWithOrderBy(functionLowerName);
+        if (hasPartition && context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Rows or ContextualKeyword.Range })
+        {
+            if (rejectsFrame)
+                RejectFrameSpec(context, functionLowerName);
+            throw SimulatedSqlException.FunctionMustHaveOverWithOrderBy(functionLowerName);
+        }
+        if (context.Token is not ReservedKeyword { Keyword: Keyword.Order })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.By })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
     }
 
     /// <summary>
@@ -403,10 +421,7 @@ internal sealed class WindowExpression : Expression
             return RegisterNamedWindowReference(context, new WindowExpression(WindowKind.NTile, [], [], aggregateInfo: null, bucketCount: bucketCount), reference);
 
         var partitionBy = ParseOptionalPartitionBy(context);
-        if (context.Token is not ReservedKeyword { Keyword: Keyword.Order })
-            throw SimulatedSqlException.SyntaxErrorNear(context);
-        if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.By })
-            throw SimulatedSqlException.SyntaxErrorNear(context);
+        ExpectOrderBy(context, "ntile", partitionBy.Length > 0, rejectsFrame: true);
         var orderBy = ParseOrderByList(context);
 
         RejectFrameSpec(context, "ntile");
@@ -460,10 +475,7 @@ internal sealed class WindowExpression : Expression
         }
 
         var partitionBy = ParseOptionalPartitionBy(context);
-        if (context.Token is not ReservedKeyword { Keyword: Keyword.Order })
-            throw SimulatedSqlException.SyntaxErrorNear(context);
-        if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.By })
-            throw SimulatedSqlException.SyntaxErrorNear(context);
+        ExpectOrderBy(context, functionLowerName, partitionBy.Length > 0, rejectsFrame: true);
         var orderBy = ParseOrderByList(context);
 
         RejectFrameSpec(context, functionLowerName);
@@ -509,10 +521,7 @@ internal sealed class WindowExpression : Expression
             return RegisterNamedWindowReference(context, new WindowExpression(kind, [], [], aggregateInfo: null, operand: operand, ignoreNulls: ignoreNulls), reference);
 
         var partitionBy = ParseOptionalPartitionBy(context);
-        if (context.Token is not ReservedKeyword { Keyword: Keyword.Order })
-            throw SimulatedSqlException.SyntaxErrorNear(context);
-        if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.By })
-            throw SimulatedSqlException.SyntaxErrorNear(context);
+        ExpectOrderBy(context, LowerNameFor(kind), partitionBy.Length > 0, rejectsFrame: false);
         var orderBy = ParseOrderByList(context);
 
         var frame = ParseOptionalFrameSpec(context, orderByPresent: true);
@@ -878,7 +887,7 @@ internal sealed class WindowExpression : Expression
     private static void RejectFrameSpec(ParserContext context, string functionLowerName)
     {
         if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Rows or ContextualKeyword.Range })
-            throw SimulatedSqlException.FunctionMayNotHaveWindowFrame(functionLowerName);
+            throw SimulatedSqlException.FunctionMayNotHaveWindowFrame(functionLowerName, isRankingFamily: functionLowerName is not ("lag" or "lead" or "percentile_cont" or "percentile_disc"));
     }
 
     /// <summary>

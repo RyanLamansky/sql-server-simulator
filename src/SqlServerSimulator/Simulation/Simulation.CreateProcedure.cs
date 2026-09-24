@@ -103,7 +103,7 @@ partial class Simulation
             if (!openParen && context.Token is ReservedKeyword { Keyword: Keyword.With or Keyword.As })
                 break;
 
-            parameters.Add(ParseProcedureParameter(context));
+            parameters.Add(ParseProcedureParameter(context, parameters.Count + 1));
 
             if (context.Token is Operator { Character: ',' })
             {
@@ -209,7 +209,7 @@ partial class Simulation
     /// <c>@</c> or parameter name token. Cursor on exit: the trailing
     /// separator (<c>,</c>, <c>)</c>, or the <c>WITH</c>/<c>AS</c> keyword).
     /// </summary>
-    private static ProcedureParameter ParseProcedureParameter(ParserContext context)
+    private static ProcedureParameter ParseProcedureParameter(ParserContext context, int ordinal)
     {
         if (context.Token is not AtPrefixedString variable)
             throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -253,7 +253,7 @@ partial class Simulation
             return new ProcedureParameter(name, SqlType.Int32, declaredMaxLength: null, defaultExpression: null, isOutput: false, tableType: tableType);
         }
 
-        var (paramType, declaredMaxLength) = ParseProcedureParameterType(context);
+        var (paramType, declaredMaxLength) = ParseProcedureParameterType(context, ordinal);
 
         Expression? defaultExpression = null;
         if (context.Token is Operator { Character: '=' })
@@ -324,7 +324,7 @@ partial class Simulation
     /// <see cref="ProcedureParameter.DeclaredMaxLength"/> for catalog-view
     /// surfaces).
     /// </summary>
-    private static (SqlType Type, int? DeclaredMaxLength) ParseProcedureParameterType(ParserContext context)
+    private static (SqlType Type, int? DeclaredMaxLength) ParseProcedureParameterType(ParserContext context, int ordinal)
     {
         var (qualifiedTypeName, typeName) = TypeNameSynonyms.ReadTypeName(context);
         context.MoveNextRequired();
@@ -358,7 +358,7 @@ partial class Simulation
 
         var (resolvedType, _, _) = ResolveTypeReference(
             context.Batch, qualifiedTypeName, typeName, declaredMaxLength, declaredScale,
-            index: 1, columnName: null);
+            index: ordinal, TypeSpecSite.Scalar, columnName: null);
         return (resolvedType, declaredMaxLength);
     }
 

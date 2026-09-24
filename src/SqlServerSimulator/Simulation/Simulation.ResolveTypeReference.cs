@@ -43,6 +43,7 @@ partial class Simulation
     /// 1-based column / parameter index for Msg 2715 / 2716 message
     /// composition (e.g. <c>"Column, parameter, or variable #N"</c>).
     /// </param>
+    /// <param name="site">Where the spec is written; see <see cref="TypeSpecSite"/>.</param>
     /// <param name="columnName">
     /// Column / parameter / variable name for Msg 131 width-overflow
     /// composition. Null at sites that don't carry a name (CAST/CONVERT
@@ -65,6 +66,7 @@ partial class Simulation
         int? declaredMaxLength,
         int? declaredScale,
         int index,
+        TypeSpecSite site,
         string? columnName)
     {
         if (!batch.TryResolveAliasType(qualifiedTypeName, out var alias))
@@ -77,7 +79,7 @@ partial class Simulation
             {
                 throw SimulatedSqlException.CannotFindDataType(qualifiedTypeName.ToString(), index);
             }
-            var (resolved, maxLength) = SqlType.GetByName(leafToken, declaredMaxLength, declaredScale, index, columnName);
+            var (resolved, maxLength) = SqlType.GetByName(leafToken, declaredMaxLength, declaredScale, index, site, columnName);
             return (resolved, maxLength, null);
         }
         return declaredMaxLength is not null || declaredScale is not null

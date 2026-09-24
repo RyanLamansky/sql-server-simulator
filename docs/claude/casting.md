@@ -189,6 +189,13 @@ The plan cache keys on the order too, as real's does.
 
 - **Month names in other languages** — only the English names are recognized.
 
+## A precision or scale past its type's range
+
+What real raises depends on where the type is written, so `SqlType.GetByName` takes a `TypeSpecSite` (probed 2026-09-24 against SQL Server 2025).
+A `CAST` / `CONVERT` target written with a lone precision past the maximum **clamps** to it — `numeric(39)` is `numeric(38, 0)`, `float(54)` is `float` — while one written with a scale is Msg 2717.
+A variable, a parameter or an alias type raises Msg 2750 for a lone precision (numbered among the batch's variables, the routine's parameters, or `#0` followed by Msg 225 for an alias type) and Msg 2717 with a scale; a column raises Msg 2750 either way, numbered by its ordinal.
+A scale past the precision is Msg 192 outside a column and Msg 183 naming the column inside one, and a `DECLARE` refused this way still declares its variable, so a later reference doesn't add Msg 137.
+
 ## Conversion legality is settled while compiling
 
 **Msg 529** (`"Explicit conversion from data type {source} to {target} is not allowed."`, class 16 state 1, bare family-root names on both sides) is decided from the two *types* — no value enters into it.

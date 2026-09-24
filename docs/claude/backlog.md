@@ -162,12 +162,7 @@ Re-run it after any bundle touching the parser, the expression evaluator or the 
 
 Still open from what it surfaced:
 
-- **One trailing garbage identifier after a completed clause is swallowed**: `SELECT a FROM t zzz qqq`, and the same after `WHERE` / `GROUP BY` / `ORDER BY` / a comma-FROM list, return rows where real raises Msg 102 at the second identifier.
-  Exactly one extra identifier is consumed, and the no-`FROM` path is already tight (`SELECT 1 zzz qqq` is Msg 102 on both).
-  This is the identifier half of the trailing-token rule [`grammar.md`](grammar.md) records as narrowed to value literals — now with concrete shapes.
-- **Msg 102 where real raises Msg 156 naming the keyword**, at a residue of sites (`NOT`, `NULL`, `INTO`, `OR`, `UPDATE`, `DELETE`, `INSERT`); the simulator already reports Msg 156 correctly elsewhere, so this is site-specific rather than a missing error.
-  Also `DROP INDEX <1-part>` is real's Msg 159, the simulator's Msg 102, and `CREATE PROCEDURE p BEGIN …` — the procedure form that omits the body's `AS`, which [`programmable.md`](programmable.md#the-body-introducing-as-is-optional) covers for functions — is real's Msg 156 near `BEGIN` against the simulator's Msg 102 (probed 2026-08-06).
-  The `the keyword` wording is Msg 156's own text rather than a variant of Msg 102's, so a site reporting the wrong number reports the wrong wording with it.
+- **A reserved keyword's spelling in Msg 156**: the simulator echoes it as written, where real prints some in capitals regardless — `REFERENCES` and `CONSTRAINT` in a table variable's column list, `ON` in `ALTER DATABASE … SET` (probed 2026-09-24).
 - **Many-way joins do not scale**: `select5`'s 20-24-table equi-joins answer in milliseconds on real and exceed a 15-second `CommandTimeout` here, one of them running past a 40-second wall without honoring its own timeout.
   Not a correctness gap, but it is why the sweep's file list is `random/` rather than the whole corpus — see the join-strategy notes in [`joins.md`](joins.md).
 - **A `FROM`-less star is three behaviors real distinguishes and the simulator answers Msg 102 for all**: `SELECT *`, `SELECT 1, *` and `SELECT COUNT(*), *` are **Msg 263** ("Must specify table to select from."), `SELECT t.*` is **Msg 107**, and `EXISTS (SELECT *)` is legal.
@@ -288,8 +283,12 @@ Already listed elsewhere here and not repeated: `DBCC CHECKIDENT` and parenthesi
 - `UPDATE … SET @x += v = 1` is Msg 102 near `'='` here, near `'+='` on real; `IDENTITY(dbo.foo, 1, 1)` is Msg 243 here, Msg 102 near `'.'` on real.
 - `SUSER_SNAME()` is `dbo` for the in-process default session and `IS_SRVROLEMEMBER('sysadmin')` 0, where a real `sa` connection reports `sa` and 1.
 
-**Same error, different number, state or class**:
-`TRANSLATE` length mismatch 9828 (here 9819); `ROW_NUMBER() OVER ()` 4112 (here 102); `decimal(39, 0)` 2717 (here 1001); `decimal(2, 3)` 192 (here 1002); `float(54)` accepted on real (here 1001); `TOP (<NULL variable>)` 1014 (here 1060); `TOP '1'` 102 (here 1060); `xml = xml` 305 (here 402); `$action` in an INSERT's OUTPUT 207 (here 4104); a bare `VALUES (1)` statement 156 (here 102); `DELETE … ORDER BY` 156 (here 102); a one-part `DROP INDEX ix` 159 (here 102); `@t.a` 137 class 16 state 1 (here class 15 state 2); states differing on 506, 235, 9810, 9812, 8148, 2714 for a temp table, and 195.
+**Same error, different number, state or class** (probed 2026-09-24):
+
+- `BEGIN ATOMIC` outside a natively compiled module is Msg 10782 on real; an empty one here is Msg 102.
+- Real follows a table hint the grammar refuses (`INSERT t (c) WITH (TABLOCK) …`, `MERGE t AS a WITH (…)`) with Msg 319 after its Msg 156, and an empty `BEGIN TRY … END TRY` with a second Msg 102 near `catch`.
+- `ALTER TABLE <missing> ADD c decimal(39, 0)` reports the precision (Msg 2750) here, the missing table (Msg 4902) on real.
+- `CREATE FUNCTION` with a refused parameter type is followed by Msg 178 on real, since the body's `RETURN` then parses outside a function.
 
 ### Result-set serialization: `FOR XML` / `FOR JSON`
 

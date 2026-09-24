@@ -88,13 +88,12 @@ public sealed class InlineJoinHintTests
         => _ = Seeded().AssertSqlError("select count(*) from jh1 a cross merge join jh2 b", 156);
 
     [TestMethod]
-    [DataRow("merge join")]
-    [DataRow("hash join")]
-    [DataRow("loop join")]
-    public void TheJoinTypeKeywordIsRequired(string join)
-        // A bare hint with no INNER / LEFT / RIGHT / FULL is refused. Both
-        // engines refuse; real names the hint word (and, for the reserved
-        // MERGE, reports Msg 156) where this names `join` — recorded in
-        // backlog.md rather than reproduced, since only the naming differs.
-        => _ = Seeded().AssertSqlError($"select count(*) from jh1 a {join} jh2 b on b.id = a.id", 102);
+    [DataRow("merge join", "Incorrect syntax near the keyword 'join'.")]
+    [DataRow("hash join", "Incorrect syntax near 'hash'.")]
+    [DataRow("loop join", "Incorrect syntax near 'loop'.")]
+    public void TheJoinTypeKeywordIsRequired(string join, string message)
+        // A bare hint with no INNER / LEFT / RIGHT / FULL is refused: the
+        // unreserved hint word is left over after the alias, and the reserved
+        // MERGE opens a statement whose next token is JOIN (probed 2026-09-24).
+        => Seeded().AssertSqlError($"select count(*) from jh1 a {join} jh2 b on b.id = a.id", message.Contains("keyword", StringComparison.Ordinal) ? 156 : 102, message);
 }

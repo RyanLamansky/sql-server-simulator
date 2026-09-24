@@ -115,6 +115,31 @@ partial class SimulatedSqlException
         new($"The size ({requested}) given to the type '{typeName}' exceeds the maximum allowed for any data type ({max}).", 131, 15, 3);
 
     /// <summary>
+    /// Mimics SQL Server error 2750: a column, variable or parameter declared
+    /// with a precision past its type's maximum. <paramref name="index"/> is
+    /// the column's, variable's or parameter's ordinal, and 0 for an alias
+    /// type.
+    /// </summary>
+    internal static SimulatedSqlException PrecisionExceedsMaximum(int index, int requested, int maximum) =>
+        new($"Column or parameter #{index}: Specified column precision {requested} is greater than the maximum precision of {maximum}.", 2750, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 2717 for a <c>decimal(p, s)</c> /
+    /// <c>numeric(p, s)</c> spec outside a column whose precision passes 38,
+    /// naming the type as written.
+    /// </summary>
+    internal static SimulatedSqlException TypeSizeExceedsMaximum(int requested, string typeName, int maximum) =>
+        new($"The size ({requested}) given to the type '{typeName}' exceeds the maximum allowed ({maximum}).", 2717, 16, 1);
+
+    /// <summary>Mimics SQL Server error 192: a scale past the precision outside a column declaration.</summary>
+    internal static SimulatedSqlException ScaleExceedsPrecision() =>
+        new("The scale must be less than or equal to the precision.", 192, 15, 1);
+
+    /// <summary>Mimics SQL Server error 183: a column's scale past its precision.</summary>
+    internal static SimulatedSqlException ColumnScaleOutOfRange(int scale, string columnName, int precision) =>
+        new($"The scale ({scale}) for column '{columnName}' must be within the range 0 to {precision}.", 183, 15, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 2717: an <c>nvarchar</c> column exceeds the
     /// 4000-character cap. Distinct error code from the
     /// <c>varchar</c> / <c>varbinary</c> path; uses "parameter" wording even
@@ -712,8 +737,8 @@ partial class SimulatedSqlException
     /// TODATETIMEOFFSET falls outside the legal ±14:00 range. The builtin
     /// function name appears lowercase in the message.
     /// </summary>
-    internal static SimulatedSqlException InvalidTimeZone(string function) =>
-        new($"The timezone provided to builtin function {function} is invalid.", 9812, 16, 1);
+    internal static SimulatedSqlException InvalidTimeZone(string function, byte state) =>
+        new($"The timezone provided to builtin function {function} is invalid.", 9812, 16, state);
 
     /// <summary>
     /// Mimics SQL Server error 6522: an input to a hierarchyid method
@@ -931,12 +956,12 @@ partial class SimulatedSqlException
         new("Parameter 3 in function 'set_bit' must be 0 or 1.", 9839, 16, 1);
 
     /// <summary>
-    /// Mimics SQL Server's Msg 9819 — <c>TRANSLATE(input, chars, translations)</c>
+    /// Mimics SQL Server's Msg 9828 — <c>TRANSLATE(input, chars, translations)</c>
     /// raises this when <c>chars</c> and <c>translations</c> have unequal
     /// length. Verbatim wording verified against SQL Server 2025 (2026-05-22).
     /// </summary>
     internal static SimulatedSqlException TranslateUnequalChars() =>
-        new("The second and third arguments of the TRANSLATE built-in function must contain an equal number of characters.", 9819, 16, 1);
+        new("The second and third arguments of the TRANSLATE built-in function must contain an equal number of characters.", 9828, 16, 1);
 
     /// <summary>
     /// Mimics SQL Server's Msg 9819 (variant used by <c>PARSE</c>) — fires

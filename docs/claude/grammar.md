@@ -239,9 +239,14 @@ Marked kinds, each probe-confirmed against SQL Server 2025 (2026-08-06) by placi
 Two mechanics are load-bearing.
 The flag is read **unconditionally** at the end of every statement, not only when a non-boundary token is present: leaving it set when a statement ends on a boundary would carry the claim into the *next* statement and reject its legitimate tail (an `INSERT` followed by `SET NOCOUNT ON` reported Msg 102 near `on` until it was cleared).
 And a statement that raises can't rely on the check at all, since it never returns to the dispatch loop — `THROW` therefore rejects its own trailing token where it finishes parsing its argument list, which is also where real finds it (`THROW 50000, 'm', 1 zzz` reports near `'zzz'`, never message `'m'`).
-The general "any unconsumed trailing token → Msg 102" rule remains wrong: flipping the default rejects ~1100 legitimate cases across the suite, because dozens of parsers end on a last-consumed token and the parenthesized-join FROM form leaves its alias dangling.
-The narrow fix: a completed top-level SELECT that left the cursor on a **value literal** (`Numeric` / `Literal`) — which a well-formed SELECT never does — raises Msg 102, matching real for `SELECT … LIMIT n` and `SELECT … OFFSET n` (both Msg 102 without an ORDER BY on real).
-An identifier or other token still routes through the normalizer; the alias-swallow case it used to leave open (`SELECT 1 xyz 2` parsing as two columns) is now caught inside the projection loop instead — see [Select-list element positions](#select-list-element-positions).
+The general "any unconsumed trailing token → Msg 102" rule remains wrong: flipping the default rejects ~1100 legitimate cases across the suite, because dozens of parsers end on a last-consumed token.
+The narrow fix: a completed top-level SELECT that left the cursor on a **value literal or a name** (`Numeric` / `Literal` / `Name`) — which a well-formed SELECT never does — raises Msg 102, matching real for `SELECT … LIMIT n`, `SELECT … OFFSET n` (both Msg 102 without an ORDER BY on real) and a stray word after a clause or an alias (`FROM t a zzz`, `WHERE 1 = 1 zzz`, probed 2026-09-24).
+A parenthesized join group's alias is no exception: real refuses it with the same Msg 102.
+The alias-swallow case inside the select list (`SELECT 1 xyz 2` parsing as two columns) is caught inside the projection loop instead — see [Select-list element positions](#select-list-element-positions).
+
+**A reserved keyword the parser stands on is named as one.**
+`SyntaxErrorNear(ParserContext)` reports Msg 156 ("near the keyword") for a `ReservedKeyword` at the cursor, wherever the construct broke — a bare `VALUES` statement, `DELETE … ORDER BY`, `TRUNCATE … WHERE` — which is real's rule (probed 2026-09-24 against SQL Server 2025).
+Two positions keep Msg 102: the last token named at the end of the input (`SELECT` alone), and an `END` at statement position (an empty `BEGIN … END`, a stray `END`), which real names as a plain token though an `END` inside an expression (`CASE END`) is Msg 156.
 
 **A binding error the statement owes waits for that check.**
 Real parses a batch before binding any of it, so a syntax error past a clause outranks the clause's own binding error: `GROUP BY 'a' 'b'` is Msg 102 at `'b'` where `GROUP BY 'a'` alone is Msg 164, and the same holds for the Msg 144 shape `GROUP BY (SELECT …) 'b'` (all three probe-confirmed).

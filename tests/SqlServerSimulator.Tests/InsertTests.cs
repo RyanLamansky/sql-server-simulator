@@ -803,5 +803,5 @@ public class InsertTests
         => new Simulation().AssertSqlError("""
             declare @t table (id int);
             insert into @t (select 7)
-            """, 102);
+            """, 156);
 }

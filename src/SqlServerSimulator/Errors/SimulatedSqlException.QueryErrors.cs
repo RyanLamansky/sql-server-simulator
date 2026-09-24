@@ -142,8 +142,8 @@ partial class SimulatedSqlException
 
     /// <summary>
     /// Mimics SQL Server's Msg 127 — a <c>TOP (n)</c> / <c>FETCH</c> row-count
-    /// value resolved to a negative number. Reached by DML <c>TOP</c> (the
-    /// simulator's SELECT <c>TOP</c> path doesn't range-check). Wording verbatim.
+    /// value resolved to a negative number. A written negative <c>FETCH</c>
+    /// count is Msg 10744 instead. Wording verbatim.
     /// </summary>
     internal static SimulatedSqlException TopRowCountMustNotBeNegative() =>
         new("A TOP N or FETCH rowcount value may not be negative.", 127, 15, 1);
@@ -162,6 +162,13 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException TopClauseInvalidValue() =>
         new("A TOP or FETCH clause contains an invalid value.", 1014, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 10743 — an <c>OFFSET</c> count that isn't an
+    /// integer, NULL included (probed 2026-09-24 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException OffsetRequiresInteger() =>
+        new("The number of rows provided for a OFFSET clause must be an integer.", 10743, 15, 1);
 
     /// <summary>
     /// Mimics SQL Server's Msg 1062 — <c>TOP N WITH TIES</c> used without a
@@ -201,6 +208,13 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException NamedWindowMayNotHaveWindowFrame(string functionLowerName, bool isRankingFamily) =>
         new($"The function '{functionLowerName}' may not have a window frame.", 4106, 15, isRankingFamily ? (byte)2 : (byte)1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 4112 — an ORDER-BY-requiring window function
+    /// whose inline <c>OVER (…)</c> has no <c>ORDER BY</c>.
+    /// </summary>
+    internal static SimulatedSqlException FunctionMustHaveOverWithOrderBy(string functionLowerName) =>
+        new($"The function '{functionLowerName}' must have an OVER clause with ORDER BY.", 4112, 15, 1);
 
     /// <summary>
     /// Mimics SQL Server's Msg 5366 — an ORDER-BY-requiring window function
@@ -336,10 +350,11 @@ partial class SimulatedSqlException
     /// <summary>
     /// Mimics SQL Server error 9810: a datepart keyword is incompatible with
     /// the date-family argument's data type (e.g. <c>DATEPART(hour, dateCol)</c>
-    /// against a <c>date</c> column has no time component to extract).
+    /// against a <c>date</c> column has no time component to extract). The
+    /// state is per function and type; see <c>DatePartKinds.RequireCompatible</c>.
     /// </summary>
-    internal static SimulatedSqlException DatepartNotSupportedForType(string datepart, string function, string typeName) =>
-        new($"The datepart {datepart} is not supported by date function {function} for data type {typeName}.", 9810, 16, 1);
+    internal static SimulatedSqlException DatepartNotSupportedForType(string datepart, string function, string typeName, byte state) =>
+        new($"The datepart {datepart} is not supported by date function {function} for data type {typeName}.", 9810, 16, state);
 
     /// <summary>
     /// Mimics SQL Server error 9806: a datepart keyword is unconditionally
@@ -386,10 +401,11 @@ partial class SimulatedSqlException
     /// Mimics SQL Server error 506: the <c>ESCAPE</c> clause of a <c>LIKE</c>
     /// predicate received a value that wasn't exactly one character (empty,
     /// multi-char). The displayed value is whatever the expression evaluated
-    /// to; SQL Server quotes it with double quotes in the message.
+    /// to; SQL Server quotes it with double quotes in the message. State 1,
+    /// literal or not (probed 2026-09-24 against SQL Server 2025).
     /// </summary>
     internal static SimulatedSqlException InvalidEscapeCharacter(string value) =>
-        new($"The invalid escape character \"{value}\" was specified in a LIKE predicate.", 506, 16, 2);
+        new($"The invalid escape character \"{value}\" was specified in a LIKE predicate.", 506, 16, 1);
 
     /// <summary>
     /// Mimics SQL Server error 145: an <c>ORDER BY</c> item references a
@@ -713,12 +729,11 @@ partial class SimulatedSqlException
     /// one (ranking functions: <c>row_number</c> / <c>rank</c> /
     /// <c>dense_rank</c> / <c>ntile</c>; offset functions: <c>lag</c> /
     /// <c>lead</c>). Probe-confirmed against SQL Server 2025 (2026-05-12):
-    /// Class 15, State 1 for LAG/LEAD and State 3 for ranking; the simulator
-    /// uses State 1 uniformly (matching the LAG/LEAD probe; State 3 vs 1
-    /// isn't routed through any caller behavior).
+    /// Class 15, State 1 for LAG/LEAD and State 3 for the ranking and
+    /// distribution family.
     /// </summary>
-    internal static SimulatedSqlException FunctionMayNotHaveWindowFrame(string functionLowerName) =>
-        new($"The function '{functionLowerName}' may not have a window frame.", 10752, 15, 1);
+    internal static SimulatedSqlException FunctionMayNotHaveWindowFrame(string functionLowerName, bool isRankingFamily) =>
+        new($"The function '{functionLowerName}' may not have a window frame.", 10752, 15, isRankingFamily ? (byte)3 : (byte)1);
 
     /// <summary>
     /// Mimics SQL Server's Msg 10756 — an explicit <c>ROWS</c> or <c>RANGE</c>

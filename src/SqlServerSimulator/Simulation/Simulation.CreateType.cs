@@ -260,7 +260,11 @@ partial class Simulation
         {
             (resolvedType, resolvedMaxLength) = SqlType.GetByName(
                 baseLeafToken, declaredMaxLength, declaredScale,
-                index: 1, columnName: typeName.Leaf);
+                index: 0, TypeSpecSite.Scalar, columnName: typeName.Leaf);
+        }
+        catch (SimulatedSqlException ex) when (ex.Number == 2750)
+        {
+            throw SimulatedSqlException.FollowedByUdtParametersInvalid(ex, typeName.Leaf);
         }
         catch (SimulatedSqlException ex) when (ex.Number is 2715 or 243 or 102)
         {

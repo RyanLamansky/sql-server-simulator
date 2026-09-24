@@ -206,8 +206,21 @@ internal static class DatePartKinds
             _ => throw new NotSupportedException($"DATEPART/DATEADD doesn't accept operand type {type}."),
         };
         if (!ok)
-            throw SimulatedSqlException.DatepartNotSupportedForType(keywordText, functionLowerName, FamilyRootName(type));
+            throw SimulatedSqlException.DatepartNotSupportedForType(keywordText, functionLowerName, FamilyRootName(type), IncompatibleDatepartState(functionLowerName, type, kind));
     }
+
+    /// <summary>
+    /// The state real's Msg 9810 carries, which names the function and the
+    /// operand type between them (probed 2026-09-24 against SQL Server 2025).
+    /// </summary>
+    private static byte IncompatibleDatepartState(string functionName, SqlType type, DatePartKind kind) => functionName switch
+    {
+        "dateadd" => IsTzPart(kind) ? (byte)0 : (byte)1,
+        "datename" => type == SqlType.Date ? (byte)4 : type is TimeSqlType ? (byte)5 : (byte)7,
+        "datepart" => type == SqlType.Date ? (byte)2 : type is TimeSqlType ? (byte)3 : (byte)6,
+        "datetrunc" => 10,
+        _ => 1,
+    };
 
     /// <summary>
     /// Enforces the function-level subset rule for <c>DATEDIFF</c> /

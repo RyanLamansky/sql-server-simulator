@@ -461,8 +461,10 @@ partial class Simulation
         // a non-empty body.
         while (context.Token is Operator { Character: ';' })
             context.MoveNextOptional();
+        // A statement-position END is named as a plain token (Msg 102),
+        // not as a keyword (probed 2026-09-24 against SQL Server 2025).
         if (context.Token is ReservedKeyword { Keyword: Keyword.End })
-            throw SimulatedSqlException.SyntaxErrorNear(context);
+            throw SimulatedSqlException.SyntaxErrorNear(context.Token);
 
         foreach (var o in DispatchStatementsUntil(batch, endKeyword: Keyword.End))
             yield return o;
@@ -537,8 +539,10 @@ partial class Simulation
         // empty body rejected, statements dispatched until END.
         while (context.Token is Operator { Character: ';' })
             context.MoveNextOptional();
+        // A statement-position END is named as a plain token (Msg 102),
+        // not as a keyword (probed 2026-09-24 against SQL Server 2025).
         if (context.Token is ReservedKeyword { Keyword: Keyword.End })
-            throw SimulatedSqlException.SyntaxErrorNear(context);
+            throw SimulatedSqlException.SyntaxErrorNear(context.Token);
 
         foreach (var o in DispatchStatementsUntil(batch, endKeyword: Keyword.End))
             yield return o;

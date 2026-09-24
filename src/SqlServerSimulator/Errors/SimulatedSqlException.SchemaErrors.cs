@@ -106,6 +106,21 @@ partial class SimulatedSqlException
         new("The termination option is not supported when making versioning state changes.", 5083, 16, 1);
 
     /// <summary>
+    /// Pairs <paramref name="error"/> with the Msg 225 real sends after an
+    /// alias type's base type is refused (probed 2026-09-24 against SQL
+    /// Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException FollowedByUdtParametersInvalid(SimulatedSqlException error, string typeName) =>
+        FollowedBy(error, new($"The parameters supplied for the UDT \"{typeName}\" are not valid.", 225, 16, 1));
+
+    /// <summary>
+    /// Mimics SQL Server error 159: a one-part <c>DROP INDEX</c> name with no
+    /// <c>ON table</c> (probed 2026-09-24 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException DropIndexNeedsTableAndIndex() =>
+        new("Must specify the table name and index name for the DROP INDEX statement.", 159, 15, 1);
+
+    /// <summary>
     /// One exception carrying <paramref name="error"/>'s entries then
     /// <paramref name="trailer"/>'s, whose batch-ending behavior is
     /// <paramref name="error"/>'s; a <c>CATCH</c> reads the trailer, the last
@@ -1026,7 +1041,14 @@ partial class SimulatedSqlException
     /// (<c>CHECK</c> / <c>DEFAULT</c> / <c>UNIQUE</c> / <c>PRIMARY KEY</c>).
     /// </summary>
     internal static SimulatedSqlException MultipleColumnConstraints(string constraintKind, string columnName, string tableName) =>
-        new($"More than one column {constraintKind} constraint specified for column '{columnName}', table '{tableName}'.", 8148, 16, 1);
+        constraintKind == "PRIMARY KEY"
+            ? FollowedBy(MultipleColumnConstraintsAlone(constraintKind, columnName, tableName), MultiplePrimaryKey(tableName))
+            : MultipleColumnConstraintsAlone(constraintKind, columnName, tableName);
+
+    // Real follows a doubled column PRIMARY KEY with Msg 8110 (probed
+    // 2026-09-24 against SQL Server 2025); state 0 for every kind.
+    private static SimulatedSqlException MultipleColumnConstraintsAlone(string constraintKind, string columnName, string tableName) =>
+        new($"More than one column {constraintKind} constraint specified for column '{columnName}', table '{tableName}'.", 8148, 16, 0);
 
     /// <summary>
     /// Mimics SQL Server error 8151: one column definition carries both an

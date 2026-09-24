@@ -80,14 +80,18 @@ public class OutputClauseTests
     }
 
     [TestMethod]
-    public void InsertOutput_UnprefixedColumnReference_RaisesMsg4104()
-    {
-        var ex = new Simulation().AssertSqlError("""
+    public void InsertOutput_UnprefixedColumnReference_RaisesMsg207()
+        => new Simulation().AssertSqlError("""
             create table t ( a int );
             insert t output a values (1)
-            """, 4104);
-        Assert.Contains("could not be bound", ex.Message);
-    }
+            """, 207, "Invalid column name 'a'.");
+
+    [TestMethod]
+    [DataRow("insert t output inserted.foo values (1)")]
+    [DataRow("update t set a = 1 output inserted.foo")]
+    [DataRow("delete t output deleted.foo")]
+    public void Output_PseudoTableUnknownColumn_RaisesMsg207(string statement)
+        => new Simulation().AssertSqlError($"create table t (a int); {statement}", 207, "Invalid column name 'foo'.");
 
     [TestMethod]
     public void InsertOutput_DeletedReference_RaisesMsg4104()

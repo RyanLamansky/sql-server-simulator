@@ -139,7 +139,7 @@ public class AlterDatabaseOptionsTests
     {
         // Probe-confirmed: SQL Server 2025 requires `= ON|OFF` for this option.
         _ = new Simulation().AssertSqlError(
-            "ALTER DATABASE simulated SET ACCELERATED_DATABASE_RECOVERY ON", 102);
+            "ALTER DATABASE simulated SET ACCELERATED_DATABASE_RECOVERY ON", 156);
     }
 
     [TestMethod]

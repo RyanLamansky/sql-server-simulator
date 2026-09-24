@@ -413,6 +413,11 @@ internal abstract class Expression : ExpressionNode
                                 expression = SpatialMethodCall.Property(expression, name.Value);
                                 continue;
                             }
+                            // A scalar variable of a type without members:
+                            // real refuses the dot itself (probed 2026-09-24
+                            // against SQL Server 2025).
+                            if (expression is VariableReference { DeclaredType: not (XmlSqlType or SpatialSqlType or HierarchyIdSqlType) } memberless)
+                                throw SimulatedSqlException.CannotCallMethodsOn(SimulatedSqlException.FamilyRootName(memberless.DeclaredType));
                             if (expression is not Reference reference)
                                 throw SimulatedSqlException.SyntaxErrorNear(context);
                             reference.AddMultiPartComponent(name);

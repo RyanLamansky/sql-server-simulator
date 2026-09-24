@@ -182,7 +182,7 @@ partial class Simulation
             }
             var (resolvedType, resolvedMaxLength, _) = ResolveTypeReference(
                 batch, qualifiedTypeName, typeLeaf, declaredMaxLength, declaredScale,
-                index: types.Count + 1, columnName: columnName.Value);
+                index: types.Count + 1, TypeSpecSite.Column, columnName: columnName.Value);
 
             // Real's messages spell the declared type canonically, not as
             // written: an uppercase NVARCHAR(2) and the ANSI synonym

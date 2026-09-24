@@ -715,7 +715,7 @@ partial class Simulation
                 // index, the remaining left segments name the table. A missing
                 // index still raises Msg 3701 through DropOneIndex.
                 if (firstName.Count < 2)
-                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                    throw SimulatedSqlException.DropIndexNeedsTableAndIndex();
                 indexName = firstName.Leaf;
                 tableName = WithoutLeaf(firstName);
             }
@@ -759,15 +759,13 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return;
 
-        string qualifiedTableName;
         if (!context.Batch.TryResolveTable(tableName, out var table))
         {
             if (ifExists)
                 return;
-            qualifiedTableName = tableName.Count >= 2
-                ? $"{tableName.ImmediateQualifier}.{tableName.Leaf}"
-                : $"{Database.DefaultSchemaName}.{tableName.Leaf}";
-            throw SimulatedSqlException.CannotDropIndexDoesNotExist(qualifiedTableName, indexName, state: 6);
+            // Msg 3701 names the table as written, missing or not (probed
+            // 2026-09-24 against SQL Server 2025).
+            throw SimulatedSqlException.CannotDropIndexDoesNotExist(tableName.ToString(), indexName, state: 6);
         }
 
         // DROP INDEX is gated on ALTER of the parent table; real reports the
@@ -775,7 +773,7 @@ partial class Simulation
         if (!PermissionEnforcement.HasObjectAlter(context.Batch, context.Batch.DatabaseFor(table), table.ObjectId, table.SchemaId))
             throw SimulatedSqlException.CannotFindObjectForAlterIndex($"{tableName}.{indexName}");
 
-        qualifiedTableName = FormatQualifiedTableName(tableName, table);
+        var qualifiedTableName = FormatQualifiedTableName(tableName, table);
         foreach (var kc in table.KeyConstraints)
         {
             if (context.Batch.CurrentDatabase.Collation.Equals(kc.Name, indexName))
@@ -800,7 +798,7 @@ partial class Simulation
 
         if (ifExists)
             return;
-        throw SimulatedSqlException.CannotDropIndexDoesNotExist(qualifiedTableName, indexName, state: 7);
+        throw SimulatedSqlException.CannotDropIndexDoesNotExist(tableName.ToString(), indexName, state: 7);
     }
 
     /// <summary>

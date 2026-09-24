@@ -40,6 +40,14 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException MustDeclareScalarVariable(string name) => new($"Must declare the scalar variable \"@{name}\".", 137, 15, 2);
 
     /// <summary>
+    /// Mimics SQL Server error 137 for a table variable read as a scalar —
+    /// <c>SELECT @t</c>, <c>SET @t = 1</c>, <c>@t.a</c> — which real reports
+    /// at class 16 state 1 where an undeclared name is class 15 state 2
+    /// (probed 2026-09-24 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException TableVariableUsedAsScalar(string name) => new($"Must declare the scalar variable \"@{name}\".", 137, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server's Msg 1087 — fired when a DML target or FROM source
     /// references a table-variable name (<c>@t</c>) that hasn't been
     /// <c>DECLARE</c>d in the current batch. Note the <c>@</c> prefix is

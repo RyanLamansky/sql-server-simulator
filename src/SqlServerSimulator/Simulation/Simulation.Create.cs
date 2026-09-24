@@ -1080,7 +1080,9 @@ partial class Simulation
     /// <paramref name="withValuesColumns"/>, which collects the index of each
     /// column whose DEFAULT carries <c>WITH VALUES</c>; elsewhere the clause is
     /// Msg 156 near <c>VALUES</c>, as it is on a column without a DEFAULT
-    /// (probed 2026-09-24 against SQL Server 2025).
+    /// (probed 2026-09-24 against SQL Server 2025). ADD COLUMN also passes
+    /// <paramref name="ordinalOffset"/>, the table's existing column count,
+    /// since real numbers an added column by its place in the whole table.
     /// </summary>
     internal static void ParseOneColumnIntoLists(
         ParserContext context,
@@ -1096,7 +1098,8 @@ partial class Simulation
         List<PendingForeignKey>? pendingForeignKeys,
         ref int identityCount,
         List<PendingInlineIndex>? pendingIndexes = null,
-        List<int>? withValuesColumns = null)
+        List<int>? withValuesColumns = null,
+        int ordinalOffset = 0)
     {
         if (context.Token is not Name columnName)
             throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -1420,7 +1423,7 @@ partial class Simulation
 
         var (resolvedType, maxLength, aliasIsNullable) = ResolveTypeReference(
             context.Batch, qualifiedTypeName, typeName, declaredMaxLength, declaredScale,
-            index: heapColumns.Count + 1, columnName: columnName.Value);
+            index: ordinalOffset + heapColumns.Count + 1, TypeSpecSite.Column, columnName: columnName.Value);
         // Alias-type-declared nullability propagates as the column default
         // when the column declaration omits an explicit NULL / NOT NULL.
         nullable ??= aliasIsNullable;

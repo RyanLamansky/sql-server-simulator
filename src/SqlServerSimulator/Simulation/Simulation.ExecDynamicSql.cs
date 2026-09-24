@@ -353,7 +353,7 @@ partial class Simulation
             defContext.MoveNextRequired();
 
             // Type parsing reuses the procedure-parameter type grammar.
-            var (type, _) = ParseSpExecuteSqlParamType(defContext);
+            var (type, _) = ParseSpExecuteSqlParamType(defContext, parameters.Count + 1);
 
             var isOutput = false;
             if (defContext.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Output or ContextualKeyword.Out })
@@ -379,7 +379,7 @@ partial class Simulation
     /// string. Shape mirrors <see cref="ParseProcedureParameterType"/> but
     /// without the optional default expression.
     /// </summary>
-    private static (SqlType Type, int? DeclaredMaxLength) ParseSpExecuteSqlParamType(ParserContext context)
+    private static (SqlType Type, int? DeclaredMaxLength) ParseSpExecuteSqlParamType(ParserContext context, int ordinal)
     {
         var (qualifiedTypeName, typeName) = TypeNameSynonyms.ReadTypeName(context);
         context.MoveNextOptional();
@@ -413,7 +413,7 @@ partial class Simulation
 
         var (resolvedType, _, _) = ResolveTypeReference(
             context.Batch, qualifiedTypeName, typeName, declaredMaxLength, declaredScale,
-            index: 1, columnName: null);
+            index: ordinal, TypeSpecSite.Scalar, columnName: null);
         return (resolvedType, declaredMaxLength);
     }
 

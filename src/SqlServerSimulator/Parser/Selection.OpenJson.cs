@@ -343,7 +343,7 @@ internal sealed partial class Selection
 
             var (resolvedType, _, _) = Simulation.ResolveTypeReference(
                 context.Batch, qualifiedTypeName, typeNameToken, declaredMaxLength, declaredScale,
-                index: columns.Count + 1, columnName: columnName);
+                index: columns.Count + 1, TypeSpecSite.Column, columnName: columnName);
 
             // Optional per-column path literal; defaults to `$.<column-name>`.
             JsonPath path;

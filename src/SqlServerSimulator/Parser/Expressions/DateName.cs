@@ -70,9 +70,14 @@ internal sealed class DateName : Expression
             // other unit reads the number DATEPART would, DATEFIRST included
             // (week moves with it).
             DatePartKind.Weekday => SqlValue.FromNVarchar(ResultType, DayOfWeekNames[DatePartKinds.Extract(this.kind, value) - 1]),
+            // The offset reads as real writes it, ±hh:mm (probed 2026-09-24).
+            DatePartKind.TzOffset => SqlValue.FromNVarchar(ResultType, FormatOffset(DatePartKinds.Extract(this.kind, value))),
             _ => SqlValue.FromNVarchar(ResultType, DatePartKinds.Extract(this.kind, value, runtime.Batch.Connection.DateFirst).ToString(CultureInfo.InvariantCulture)),
         };
     }
+
+    private static string FormatOffset(int minutes) =>
+        $"{(minutes < 0 ? '-' : '+')}{Math.Abs(minutes) / 60:00}:{Math.Abs(minutes) % 60:00}";
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => ResultType;
 

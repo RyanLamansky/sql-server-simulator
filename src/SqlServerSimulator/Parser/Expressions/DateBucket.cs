@@ -52,6 +52,8 @@ internal sealed class DateBucket : Expression
         _ = RejectStringDate(dateValue.Type);
         if (dateValue.IsNull)
             return SqlValue.Null(dateValue.Type);
+        // Real spells the function Date_Bucket in this one message.
+        DatePartKinds.RequireCompatible(this.kind, this.keywordText, dateValue.Type, "Date_Bucket");
         var width = this.bucketWidth.Run(runtime);
         if (width.IsNull)
             return SqlValue.Null(dateValue.Type);

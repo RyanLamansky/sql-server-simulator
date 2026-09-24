@@ -680,7 +680,15 @@ internal abstract partial class SqlType
     /// The second integer in a two-arg type spec — only <c>decimal(p, s)</c>
     /// and <c>numeric(p, s)</c> use it today.
     /// </param>
-    /// <param name="index">1-based column index. Used for column-context errors only.</param>
+    /// <param name="index">
+    /// 1-based column, variable or parameter ordinal (0 for an alias type),
+    /// for the errors that name one.
+    /// </param>
+    /// <param name="site">
+    /// Where the spec is written, which picks the error an out-of-range
+    /// <c>decimal</c> / <c>float</c> precision or scale raises (see
+    /// <see cref="TypeSpecSite"/>).
+    /// </param>
     /// <param name="columnName">
     /// Unquoted column name when called from a column declaration; null when
     /// called from a CAST/CONVERT expression. Selects the SQL Server error
@@ -699,7 +707,7 @@ internal abstract partial class SqlType
     /// no length was supplied for a variable-length type, or the supplied length
     /// is out of range for the type.
     /// </exception>
-    public static (SqlType Type, int? MaxLength) GetByName(Name name, int? declaredMaxLength, int? declaredScale, int index, string? columnName)
+    public static (SqlType Type, int? MaxLength) GetByName(Name name, int? declaredMaxLength, int? declaredScale, int index, TypeSpecSite site, string? columnName)
     {
         Span<char> upper = stackalloc char[name.Span.Length];
         var resolvedName = name.Span.ToUpperInvariant(upper);
@@ -736,9 +744,11 @@ internal abstract partial class SqlType
         if (resolvedName == 5 && upper.SequenceEqual("FLOAT"))
         {
             var mantissaBits = declaredMaxLength ?? 53;
-            return mantissaBits is < 1 or > 53
-                ? throw SimulatedSqlException.LengthOrPrecisionSpecificationInvalid(mantissaBits, name.LineNumber)
-                : (mantissaBits <= 24 ? Real : Float, null);
+            if (mantissaBits < 1)
+                throw SimulatedSqlException.LengthOrPrecisionSpecificationInvalid(mantissaBits, name.LineNumber);
+            if (mantissaBits > 53 && site != TypeSpecSite.Cast)
+                throw SimulatedSqlException.PrecisionExceedsMaximum(index, mantissaBits, 53);
+            return (mantissaBits <= 24 ? Real : Float, null);
         }
 
         // decimal(p, s) and numeric(p, s) — same backing type, parsed
@@ -748,11 +758,25 @@ internal abstract partial class SqlType
         {
             var precision = declaredMaxLength ?? 18;
             var scale = declaredScale ?? 0;
-            return precision is < 1 or > 38
-                ? throw SimulatedSqlException.LengthOrPrecisionSpecificationInvalid(precision, name.LineNumber)
-                : scale < 0 || scale > precision
-                    ? throw SimulatedSqlException.InvalidScale(scale, name.LineNumber)
-                    : ((SqlType, int?))(GetDecimal(precision, scale), null);
+            if (precision < 1)
+                throw SimulatedSqlException.LengthOrPrecisionSpecificationInvalid(precision, name.LineNumber);
+            if (precision > 38)
+            {
+                precision = site switch
+                {
+                    TypeSpecSite.Column => throw SimulatedSqlException.PrecisionExceedsMaximum(index, precision, 38),
+                    _ when declaredScale is not null => throw SimulatedSqlException.TypeSizeExceedsMaximum(precision, resolvedName == 7 && upper[0] == 'N' ? "numeric" : "decimal", 38),
+                    TypeSpecSite.Scalar => throw SimulatedSqlException.PrecisionExceedsMaximum(index, precision, 38),
+                    _ => 38,
+                };
+            }
+            if (scale > precision)
+            {
+                throw site == TypeSpecSite.Column
+                    ? SimulatedSqlException.ColumnScaleOutOfRange(scale, columnName!, precision)
+                    : SimulatedSqlException.ScaleExceedsPrecision();
+            }
+            return (GetDecimal(precision, scale), null);
         }
 
         // Fixed-length char/nchar/binary parameterize on the declared length —

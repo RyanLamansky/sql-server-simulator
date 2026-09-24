@@ -67,7 +67,7 @@ public sealed class SkipModeNameResolutionTests
     /// </summary>
     [TestMethod]
     public void SkippedBranch_SyntaxErrorStillRaises()
-        => new Simulation().AssertSqlError("if 1 = 0 select * from select 'ok'", 102);
+        => new Simulation().AssertSqlError("if 1 = 0 select * from select 'ok'", 156);
 
     [TestMethod]
     public void SkippedBranch_UnknownInsertTarget_Tolerated()

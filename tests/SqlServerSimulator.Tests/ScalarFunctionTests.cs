@@ -387,11 +387,11 @@ public sealed class ScalarFunctionTests
     }
 
     [TestMethod]
-    public void Procedure_WithoutAs_RaisesMsg102()
-        => AreEqual("Incorrect syntax near 'BEGIN'.", new Simulation().AssertSqlError("""
+    public void Procedure_WithoutAs_RaisesMsg156()
+        => AreEqual("Incorrect syntax near the keyword 'BEGIN'.", new Simulation().AssertSqlError("""
             create procedure dbo.p
             BEGIN
                 select 1 as v
             end
-            """, 102).Message);
+            """, 156).Message);
 }

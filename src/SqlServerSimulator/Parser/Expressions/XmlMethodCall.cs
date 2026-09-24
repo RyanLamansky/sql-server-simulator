@@ -342,7 +342,7 @@ internal sealed class XmlMethodCall : Expression
                 _ = NextToken();
             }
         }
-        return SqlType.GetByName(typeName, declaredMaxLength, declaredScale, 1, columnName: null);
+        return SqlType.GetByName(typeName, declaredMaxLength, declaredScale, 1, TypeSpecSite.Cast, columnName: null);
     }
 }
 

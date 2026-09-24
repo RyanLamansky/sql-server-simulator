@@ -148,8 +148,18 @@ public sealed class SsmsProgrammabilityNodeCatalogTests
               (sys.assembly_types a inner join sys.assembly_types b on a.is_user_defined = 1)
               left outer join sys.objects s1 on s1.object_id = a.default_object_id and s1.type = 'D'
               left outer join sys.objects s2 on s2.object_id = a.rule_object_id and s2.type = 'R'
-            ) q
+            )
             """));
+
+    /// <summary>A join group takes no alias, however deep (probed 2026-09-24).</summary>
+    [TestMethod]
+    public void AssemblyTypes_AliasedJoinGroup_RaisesMsg102()
+        => new Simulation().AssertSqlError("""
+            select count(*) from (
+              (sys.assembly_types a inner join sys.assembly_types b on a.is_user_defined = 1)
+              left outer join sys.objects s1 on s1.object_id = a.default_object_id and s1.type = 'D'
+            ) q
+            """, 102, "Incorrect syntax near 'q'.");
 
     /// <summary>
     /// Probe-confirmed (SQL Server 2025) column shape added to

@@ -182,7 +182,9 @@ partial class Simulation
                 if (context.Batch.CurrentDatabase.Collation.Equals(table.Columns[i].Name, reference.Leaf))
                     return table.Columns[i].Type;
             }
-            throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(reference.ToString());
+            // A pseudo-table's unknown column is Msg 207 on the leaf (probed
+            // 2026-09-24 against SQL Server 2025).
+            throw SimulatedSqlException.InvalidColumnName(new MultiPartName(reference.Leaf));
         }
 
         var schema = new SqlType[expressions.Count];
@@ -423,6 +425,11 @@ partial class Simulation
 
         SqlType ResolveOutputType(MultiPartName name)
         {
+            // An unqualified name, or INSERTED's unknown column, is Msg 207 on
+            // the leaf; any other qualifier is Msg 4104 (probed 2026-09-24
+            // against SQL Server 2025).
+            if (name.Count == 1)
+                throw SimulatedSqlException.InvalidColumnName(name);
             if (BuiltInToken.Equals(name.ImmediateQualifier, "INSERTED"))
             {
                 for (var i = 0; i < destinationTable.Columns.Length; i++)
@@ -430,6 +437,7 @@ partial class Simulation
                     if (context.Batch.CurrentDatabase.Collation.Equals(destinationTable.Columns[i].Name, name.Leaf))
                         return destinationTable.Columns[i].Type;
                 }
+                throw SimulatedSqlException.InvalidColumnName(new MultiPartName(name.Leaf));
             }
             else if (sourceColumnNames is var (sourceAlias, sourceCols, sourceTypes) && context.Batch.CurrentDatabase.Collation.Equals(name.ImmediateQualifier, sourceAlias))
             {

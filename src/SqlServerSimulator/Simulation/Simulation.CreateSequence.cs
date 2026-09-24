@@ -211,7 +211,7 @@ partial class Simulation
 
         var (resolved, _, _) = ResolveTypeReference(
             context.Batch, qualifiedTypeName, typeName, declaredMaxLength, declaredScale,
-            index: 1, columnName: typeName.Value);
+            index: 1, TypeSpecSite.Scalar, columnName: typeName.Value);
         return resolved switch
         {
             TinyIntSqlType or SmallIntSqlType or Int32SqlType or BigIntSqlType => resolved,

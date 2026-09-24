@@ -64,11 +64,12 @@ partial class Simulation
         context.MoveNextRequired(); // consume TRY
 
         // Drain leading separators inside TRY body. An empty body (BEGIN TRY
-        // ; END TRY or BEGIN TRY END TRY) raises Msg 102 — probe-confirmed.
+        // ; END TRY or BEGIN TRY END TRY) raises Msg 102 naming the TRY that
+        // closes it (probed 2026-09-24 against SQL Server 2025).
         while (context.Token is Operator { Character: ';' })
             context.MoveNextOptional();
         if (IsEndTry(context))
-            throw SimulatedSqlException.SyntaxErrorNear(context);
+            throw SimulatedSqlException.SyntaxErrorNear(context.GetNextRequired());
 
         // Save outer error state for nested TRY/CATCH: a re-throw from an
         // inner CATCH must surface to the outer CATCH with the re-thrown

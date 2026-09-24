@@ -104,7 +104,7 @@ public sealed class TruncateTableTests
             create table t (id int);
             truncate table t where id = 1
             """));
-        AreEqual(102, ex.Number);
+        AreEqual(156, ex.Number);
     }
 
     // ---- Transaction rollback ----

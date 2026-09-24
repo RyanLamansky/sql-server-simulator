@@ -54,14 +54,13 @@ partial class Simulation
         var pendingForeignKeys = new List<PendingForeignKey>();
         var withValuesColumns = new List<int>();
 
-        HeapTable? table = null;
+        // Resolved in skip mode too, for the ordinals a column error names;
+        // only a run reports the table missing.
         var existingIdentityCount = 0;
-        if (!context.Batch.IsSkipping)
-        {
-            if (!context.Batch.TryResolveTable(tableName, out table))
-                throw SimulatedSqlException.CannotFindObjectForAlterTable(tableName.ToString());
+        if (context.Batch.TryResolveTable(tableName, out var table))
             existingIdentityCount = table.IdentityOrdinal >= 0 ? 1 : 0;
-        }
+        else if (!context.Batch.IsSkipping)
+            throw SimulatedSqlException.CannotFindObjectForAlterTable(tableName.ToString());
         var identityCount = existingIdentityCount;
 
         while (true)
@@ -79,7 +78,8 @@ partial class Simulation
                 pendingPeriod: null,
                 pendingForeignKeys,
                 ref identityCount,
-                withValuesColumns: withValuesColumns);
+                withValuesColumns: withValuesColumns,
+                ordinalOffset: table?.Columns.Length ?? 0);
 
             if (context.Token is not Operator { Character: ',' })
                 break;
@@ -812,7 +812,7 @@ partial class Simulation
 
         var (newType, newMaxLength, aliasIsNullable) = ResolveTypeReference(
             context.Batch, qualifiedTypeName, typeName, declaredMaxLength, declaredScale,
-            index: ordinal + 1, columnName: columnName);
+            index: ordinal + 1, TypeSpecSite.Column, columnName: columnName);
         // For ALTER COLUMN, the precedence is: explicit NULL/NOT NULL on the
         // ALTER clause wins; otherwise alias-default; otherwise preserve
         // existing column nullability. Matches column-on-CREATE-TABLE

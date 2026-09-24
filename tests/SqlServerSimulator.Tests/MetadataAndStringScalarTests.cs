@@ -91,6 +91,6 @@ public sealed class MetadataAndStringScalarTests
         => AreEqual(DBNull.Value, new Simulation().ExecuteScalar("select translate(cast(null as varchar(10)), 'a', 'b')"));
 
     [TestMethod]
-    public void Translate_UnequalLengths_RaisesMsg9819()
-        => new Simulation().AssertSqlError("select translate('abcd', 'abc', 'xy')", 9819);
+    public void Translate_UnequalLengths_RaisesMsg9828()
+        => new Simulation().AssertSqlError("select translate('abcd', 'abc', 'xy')", 9828);
 }

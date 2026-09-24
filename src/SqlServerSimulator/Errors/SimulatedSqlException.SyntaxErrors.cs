@@ -123,9 +123,14 @@ partial class SimulatedSqlException
     /// Msg 102 naming the parser's current token, falling back to the last
     /// token the batch produced once the input has run out — real names the
     /// token it last consumed rather than an empty slot (probed 2026-08-05:
-    /// <c>SELECT 1 WHERE 1 IN (1</c> → <c>near '1'</c>).
+    /// <c>SELECT 1 WHERE 1 IN (1</c> → <c>near '1'</c>). A reserved keyword
+    /// the parser stands on is named as one, Msg 156, whichever construct it
+    /// broke (probed 2026-09-24 against SQL Server 2025: a bare
+    /// <c>VALUES</c> statement, <c>DELETE … ORDER BY</c>) — but not the last
+    /// token named at the end of the input (<c>SELECT</c> alone is Msg 102).
     /// </summary>
-    internal static SimulatedSqlException SyntaxErrorNear(ParserContext context) => SyntaxErrorNear(context.Token ?? context.LastToken);
+    internal static SimulatedSqlException SyntaxErrorNear(ParserContext context) =>
+        context.Token is ReservedKeyword keyword ? SyntaxErrorNearKeyword(keyword) : SyntaxErrorNear(context.Token ?? context.LastToken);
 
     /// <summary>
     /// Mimics SQL Server error 102, naming the offending token. The name comes
