@@ -70,6 +70,7 @@ internal static partial class BuiltInResources
         RegisterServerAndDatabases(views);
         RegisterQueryStore(views);
         RegisterLegacyCompat(views);
+        ApplyRealColumnOrder(views);
         ApplyMetadataVisibility(views);
         ApplyDmvGating(views);
         foreach (var (key, view) in views)

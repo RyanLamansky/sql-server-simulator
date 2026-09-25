@@ -138,6 +138,52 @@ internal sealed class CatalogView(
     /// after construction.
     /// </summary>
     public readonly bool StableWithinStatement = !name.StartsWith("dm_", StringComparison.Ordinal);
+
+    /// <summary>
+    /// This view with its columns presented in <paramref name="order"/>, each
+    /// generated row permuted to match; a column the order doesn't name keeps
+    /// its relative place after the named ones. Raises when the order names a
+    /// column the view lacks, so a renamed declaration can't silently fall
+    /// out of it.
+    /// </summary>
+    public CatalogView InColumnOrder(string[] order)
+    {
+        var positions = new int[this.Columns.Length];
+        var used = new bool[this.Columns.Length];
+        var next = 0;
+        foreach (var name in order)
+        {
+            var ordinal = Array.FindIndex(this.Columns, column => BuiltInToken.Equals(column.Name, name));
+            if (ordinal < 0)
+                throw new InvalidOperationException($"Catalog view {this.Name} has no column {name}.");
+            positions[next++] = ordinal;
+            used[ordinal] = true;
+        }
+        for (var i = 0; i < used.Length; i++)
+        {
+            if (!used[i])
+                positions[next++] = i;
+        }
+
+        var columns = Array.ConvertAll(positions, ordinal => this.Columns[ordinal]);
+        var generator = this.RowGenerator;
+        var filtered = this.FilteredRowGenerator;
+        return new CatalogView(
+            this.Name,
+            columns,
+            (batch, database) => generator(batch, database).Select(row => Permute(row, positions)),
+            this.MasterScoped,
+            filtered is null ? null : (batch, database, filter) => filtered(batch, database, filter).Select(row => Permute(row, positions)),
+            this.PushdownColumns);
+    }
+
+    private static SqlValue[] Permute(SqlValue[] row, int[] positions)
+    {
+        var permuted = new SqlValue[positions.Length];
+        for (var i = 0; i < positions.Length; i++)
+            permuted[i] = row[positions[i]];
+        return permuted;
+    }
 }
 
 /// <summary>

@@ -1272,4 +1272,30 @@ public sealed class CatalogViewTests
     [TestMethod]
     public void ExtendedSystemProcedures_AreTypedX()
         => AreEqual(2, new Simulation().ExecuteScalar("select count(*) from sys.system_objects where name in ('sp_executesql', 'xp_msver', 'sp_help') and type = 'X'"));
+
+    [TestMethod]
+    public void SelectStar_ListsColumnsInRealsOrder()
+    {
+        using var reader = new Simulation().ExecuteReader("select top 0 * from sys.objects; select top 0 * from sys.columns");
+        CollectionAssert.AreEqual(
+            new[] { "name", "object_id", "principal_id", "schema_id", "parent_object_id", "type" },
+            Enumerable.Range(0, 6).Select(reader.GetName).ToArray());
+        IsTrue(reader.NextResult());
+        CollectionAssert.AreEqual(
+            new[] { "scale", "collation_name", "is_nullable", "is_ansi_padded" },
+            Enumerable.Range(7, 4).Select(reader.GetName).ToArray());
+    }
+
+    [TestMethod]
+    public void ReorderedView_KeepsEachValueUnderItsColumn()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches("create table t (a int)");
+        AreEqual("t|1|0", simulation.ExecuteScalar("select concat(name, '|', schema_id, '|', is_ms_shipped) from sys.objects where object_id = object_id('t')"));
+        AreEqual("t|1|0", simulation.ExecuteScalar("select concat(name, '|', schema_id, '|', is_ms_shipped) from sys.objects where name = 't'"));
+    }
+
+    [TestMethod]
+    public void ReorderedView_ColumnIdFollowsRealsOrder()
+        => AreEqual(1, new Simulation().ExecuteScalar("select columnproperty(object_id('sys.objects'), 'name', 'ColumnId')"));
 }
