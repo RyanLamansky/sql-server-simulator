@@ -255,7 +255,7 @@ Already listed elsewhere here and not repeated: parenthesized set-op branches.
 
 - `LAG` / `LEAD` / `FIRST_VALUE` / `LAST_VALUE` over a column typed only by `NULL` (`VALUES (1, null)`) answers NULL here; real raises Msg 8117 ("Operand data type NULL is invalid for lag operator").
   A bare `NULL` operand raises it; a derived source's column doesn't carry that it was an untyped `NULL`.
-- `SQL_VARIANT_PROPERTY(<decimal column>, 'BaseType')` is `numeric` here where real keeps the declared spelling (`decimal`).
+- A stored `sql_variant` doesn't keep a decimal value's `decimal` / `numeric` name, so `SQL_VARIANT_PROPERTY(<variant>, 'BaseType')` reads `numeric` for a variant holding `CAST(… AS decimal)`, where real reads `decimal`; a direct argument reports its own spelling.
 - An identity overflow's Msg 8115 is followed by the class-0 Msg 3606 ("Arithmetic overflow occurred.") on real.
 - `UPDATE … SET @x += v = 1` is Msg 102 near `'='` here, near `'+='` on real; `IDENTITY(dbo.foo, 1, 1)` is Msg 243 here, Msg 102 near `'.'` on real.
 - `SUSER_SNAME()` is `dbo` for the in-process default session and `IS_SRVROLEMEMBER('sysadmin')` 0, where a real `sa` connection reports `sa` and 1.

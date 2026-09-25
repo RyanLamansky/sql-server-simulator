@@ -96,4 +96,13 @@ public sealed class NumericSpellingTests
         AreEqual("a:numeric:numeric,b:decimal:decimal", ColumnTypes(sim, "pnt"));
         AreEqual("numeric", sim.ExecuteScalar("select dbo.fn(1) as v into fnt; select type_name(system_type_id) from sys.columns where object_id = object_id('fnt')"));
     }
+
+    [TestMethod]
+    public void SqlVariantBaseType_ReportsTheArgumentsSpelling()
+        => AreEqual("decimal|numeric|decimal|numeric|decimal|numeric", new Simulation().ExecuteScalar($"""
+            {Table} insert nm values (1, 1);
+            select concat(sql_variant_property(d, 'BaseType'), '|', sql_variant_property(n, 'BaseType'), '|',
+                sql_variant_property(cast(1 as decimal(5, 1)), 'BaseType'), '|', sql_variant_property(1.5, 'BaseType'), '|',
+                sql_variant_property(d + 1, 'BaseType'), '|', sql_variant_property(n + d, 'BaseType')) from nm
+            """));
 }
