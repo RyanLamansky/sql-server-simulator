@@ -48,6 +48,19 @@ public sealed class ServerPrincipalCatalogViewTests
     }
 
     [TestMethod]
+    public void UserSids_JoinToTheirLogin_OrCarryTheirOwnAuthority()
+        => AreEqual("app_user:app_login:16|loose:S-1-9-3|r:S-1-9-4", new Simulation().ExecuteScalar("""
+            create login app_login with password = 'P@ssw0rd1';
+            create user app_user for login app_login;
+            create user loose without login;
+            create role r;
+            select string_agg(u.name + ':' + coalesce(l.name + ':' + str(datalength(u.sid), 2), 'S-1-9-' + str(cast(substring(u.sid, 9, 1) as int), 1)), '|')
+                within group (order by u.name)
+            from sys.database_principals u left join sys.server_principals l on l.sid = u.sid
+            where u.name in ('app_user', 'loose', 'r')
+            """));
+
+    [TestMethod]
     public void TwoLogins_GetDistinctIdsAndSids()
     {
         var sim = new Simulation();

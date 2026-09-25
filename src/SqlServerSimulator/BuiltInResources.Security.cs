@@ -606,25 +606,35 @@ internal static partial class BuiltInResources
     /// <summary>
     /// The 12-byte prefix of a database-scoped SID — revision 1, five
     /// sub-authorities, authority 9 (SECURITY_RESOURCE_MANAGER), first
-    /// sub-authority 4 — shared by every user and role
-    /// <c>sys.database_principals</c> reports.
+    /// sub-authority 4 — which a <c>WITHOUT LOGIN</c> user's sid overwrites
+    /// with 3.
     /// </summary>
     private static readonly byte[] DatabasePrincipalSidPrefix =
         [0x01, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x09, 0x04, 0x00, 0x00, 0x00];
 
     /// <summary>
-    /// Derives the deterministic 28-byte <c>S-1-9-4-…</c> sid a database user
-    /// or role reports. A fixed role encodes its principal_id in the final
-    /// sub-authority over three zero words, matching real's layout
-    /// (<c>db_owner</c> = <c>…00000000 00000000 00000000 00400000</c>);
-    /// everything else fills the four words from the same per-quadrant FNV-1a
-    /// hash <see cref="DeriveLoginSid"/> uses, so the same name always maps to
-    /// the same bytes.
+    /// Derives the deterministic sid a database user or role reports.
+    /// A user mapped to a login shares that login's 16-byte sid, which is what
+    /// joins the two catalogs.
+    /// Everything else is a 28-byte <c>S-1-9-…</c> sid: <c>S-1-9-3</c> for a
+    /// <c>WITHOUT LOGIN</c> user (the binary form of its
+    /// <see cref="DatabasePrincipal.SecurityIdentifierString"/>) and
+    /// <c>S-1-9-4</c> for a role.
+    /// A fixed role encodes its principal_id in the final sub-authority over
+    /// three zero words, matching real's layout (<c>db_owner</c> =
+    /// <c>…00000000 00000000 00000000 00400000</c>); everything else fills the
+    /// four words from the same per-quadrant FNV-1a hash
+    /// <see cref="DeriveLoginSid"/> uses, so the same name always maps to the
+    /// same bytes.
     /// </summary>
     private static byte[] DeriveDatabasePrincipalSid(DatabasePrincipal principal)
     {
+        if (principal.LoginName is { } login)
+            return DeriveLoginSid(login);
         var sid = new byte[DatabasePrincipalSidPrefix.Length + 16];
         DatabasePrincipalSidPrefix.CopyTo(sid, 0);
+        if (principal.SecurityIdentifierString is not null)
+            sid[8] = 3;
         var body = sid.AsSpan(DatabasePrincipalSidPrefix.Length);
         if (principal.IsFixedRole && principal.PrincipalId != 0)
         {

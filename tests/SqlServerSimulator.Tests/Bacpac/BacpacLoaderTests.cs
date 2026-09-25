@@ -806,6 +806,68 @@ public class BacpacLoaderTests
     }
 
     [TestMethod]
+    public void LoginUserAndRoleMembership_Import()
+    {
+        static Stream Principals() => BacpacBuilder.Create()
+            .Login("app_login")
+            .User("app_user", loginName: "app_login")
+            .User("loose_user")
+            .Role("readers")
+            .RoleMember("readers", "app_user")
+            .RoleMember("db_datareader", "loose_user")
+            .Build();
+
+        var sim = new Simulation();
+        using (var bacpac = Principals())
+        {
+            sim.ImportBacpac(bacpac, out var diag);
+            IsEmpty(diag.Skipped);
+        }
+        AreEqual("app_login", sim.ExecuteScalar("""
+            SELECT l.name FROM sys.database_principals u
+            JOIN sys.server_principals l ON l.sid = u.sid
+            WHERE u.name = 'app_user'
+            """));
+        AreEqual(2, sim.ExecuteScalar("""
+            SELECT COUNT(*) FROM sys.database_role_members m
+            JOIN sys.database_principals r ON r.principal_id = m.role_principal_id
+            JOIN sys.database_principals u ON u.principal_id = m.member_principal_id
+            WHERE r.name + '/' + u.name IN ('readers/app_user', 'db_datareader/loose_user')
+            """));
+
+        // The login is server-scoped, so a second import into another
+        // database finds it already there and maps its user to it.
+        using (var bacpac = Principals())
+        {
+            sim.ImportBacpac(bacpac, out var diag, new BacpacImportOptions { DatabaseName = "second" });
+            IsEmpty(diag.Skipped);
+        }
+        AreEqual(1, sim.ExecuteScalar("SELECT COUNT(*) FROM sys.server_principals WHERE name = 'app_login'"));
+        AreEqual(1, sim.ExecuteScalar("SELECT COUNT(*) FROM second.sys.database_principals WHERE name = 'app_user'"));
+    }
+
+    [TestMethod]
+    public void Statistic_Imports_OverItsColumns()
+    {
+        using var bacpac = BacpacBuilder.Create()
+            .Table("dbo", "T", t => t.Column("A", "int").Column("B", "int"))
+            .Statistic("dbo", "T", "ST_T_B_A", "B", "A")
+            .Build();
+
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
+        if (diag.Skipped.Count > 0)
+            Fail("Unexpected Skipped: " + string.Join("; ", diag.Skipped.Select(s => $"{s.ElementType}/{s.ElementName}: {s.Reason}")));
+        AreEqual("B,A", sim.ExecuteScalar("""
+            SELECT STRING_AGG(c.name, ',') WITHIN GROUP (ORDER BY sc.stats_column_id)
+            FROM sys.stats s
+            JOIN sys.stats_columns sc ON sc.object_id = s.object_id AND sc.stats_id = s.stats_id
+            JOIN sys.columns c ON c.object_id = sc.object_id AND c.column_id = sc.column_id
+            WHERE s.name = 'ST_T_B_A'
+            """));
+    }
+
+    [TestMethod]
     public void SequenceBackedDefault_Applies_On_Insert()
     {
         // Sequence in phase 1, DEFAULT bound to NEXT VALUE FOR in phase 3 —

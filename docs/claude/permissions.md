@@ -564,8 +564,8 @@ Three of those follow per-principal rules real reports (probe-confirmed against 
 
 - `default_schema_name` is `dbo` for `dbo` and every user, `guest` for `guest`, an application role's own declared schema, and NULL for roles and the `sys` / `INFORMATION_SCHEMA` catalog principals.
 - `authentication_type` / `_desc` is `1` / `INSTANCE` for `dbo` and `0` / `NONE` for everything else — never NULL.
-- `sid` is the well-known `0x01` for `dbo` and `0x00` for `guest`, NULL for the two catalog principals, and a 28-byte `S-1-9-4-…` database-scoped SID for every user and role.
-  That SID is deterministic: a fixed database role encodes its principal_id in the final sub-authority the way real does (`db_owner` → `…00400000`), and everything else fills the four trailing words from the same per-quadrant FNV-1a hash `BuiltInResources.DeriveLoginSid` uses for logins.
+- `sid` is the well-known `0x01` for `dbo` and `0x00` for `guest`, NULL for the two catalog principals, the login's own 16-byte sid for a `FOR LOGIN` user (so the two catalogs join on it), a 28-byte `S-1-9-3-…` SID for a `WITHOUT LOGIN` user, and a 28-byte `S-1-9-4-…` SID for a role (probed 2026-09-25 against SQL Server 2025).
+  Each SID is deterministic: a fixed database role encodes its principal_id in the final sub-authority the way real does (`db_owner` → `…00400000`), and everything else fills the four trailing words from the same per-quadrant FNV-1a hash `BuiltInResources.DeriveLoginSid` uses for logins.
   The bytes are stable per name but don't byte-match a real instance's.
 `owning_principal_id` is **dbo (1) for database roles** (`type='R'`), NULL otherwise — probe-confirmed on WWI's custom roles.
 This is load-bearing for bacpac export: DacFx's `SqlRole` reverse-engineering filters `USER_NAME(owning_principal_id) != N'cdc'`, and a NULL owner makes that predicate UNKNOWN, silently dropping every role from the model (WWI's 9 custom roles vanished until this was fixed).
@@ -648,8 +648,7 @@ The current-principal / id scalars read the session's effective principal; `HAS_
 - `SYSTEM_USER` — same shape, reserved + no parens.
 - `USER` — same shape, reserved + no parens.
 - `USER_NAME([id])` — zero-arg returns `'dbo'`; with an arg, looks up `Database.Principals` by id (matching `DatabasePrincipal.PrincipalId`) and returns the name or NULL.
-- `SUSER_NAME([id])` / `SUSER_SNAME([sid])` — both return `'dbo'` for the no-arg form.
-  `SUSER_NAME(id)` resolves through `Database.Principals` by principal_id; `SUSER_SNAME(sid)` accepts a binary SID arg but the simulator has no SID model, so it always returns `'dbo'` for non-NULL input and NULL for NULL input.
+- `SUSER_NAME([id])` / `SUSER_SNAME([sid])` — the effective login for the no-arg form, else the `sys.server_principals` row carrying that id or sid (NULL when none does).
 - `ORIGINAL_LOGIN()` — returns `'dbo'`.
 
 **Principal-id scalars** (`Parser/Expressions/PrincipalIdScalars.cs`):

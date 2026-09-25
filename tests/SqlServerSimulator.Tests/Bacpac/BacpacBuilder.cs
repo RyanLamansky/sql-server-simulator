@@ -48,6 +48,7 @@ public sealed partial class BacpacBuilder
     private readonly List<FullTextIndexDef> _fullTextIndexes = [];
     private readonly List<(string ElementType, string Name)> _silentlySkipped = [];
     private readonly List<(string ElementType, string Name)> _unknownElements = [];
+    private readonly List<XElement> _principalElements = [];
     private string? _dspName;
 
     private BacpacBuilder() { }
@@ -218,6 +219,76 @@ public sealed partial class BacpacBuilder
             _roleAuthorizers[roleName] = ownerPrincipal;
         return this;
     }
+
+    /// <summary>
+    /// Emits a <c>SqlLogin</c> element carrying DacFx's generated placeholder
+    /// <c>Password</c> property; <paramref name="password"/> null omits it.
+    /// </summary>
+    public BacpacBuilder Login(string loginName, string? password = "Placeholder!1")
+    {
+        var element = new XElement(XName.Get("Element", ModelNs),
+            new XAttribute("Type", "SqlLogin"),
+            new XAttribute("Name", $"[{loginName}]"));
+        if (password is not null)
+            element.Add(new XElement(XName.Get("Property", ModelNs), new XAttribute("Name", "Password"), new XAttribute("Value", password)));
+        _principalElements.Add(element);
+        return this;
+    }
+
+    /// <summary>
+    /// Emits a <c>SqlUser</c> element whose <c>Login</c> relationship names
+    /// <paramref name="loginName"/>; null makes a loginless user.
+    /// </summary>
+    public BacpacBuilder User(string userName, string? loginName = null)
+    {
+        var element = new XElement(XName.Get("Element", ModelNs),
+            new XAttribute("Type", "SqlUser"),
+            new XAttribute("Name", $"[{userName}]"));
+        if (loginName is not null)
+            element.Add(Reference("Login", $"[{loginName}]"));
+        _principalElements.Add(element);
+        return this;
+    }
+
+    /// <summary>
+    /// Emits a nameless <c>SqlRoleMembership</c> element adding
+    /// <paramref name="memberName"/> to <paramref name="roleName"/>.
+    /// </summary>
+    public BacpacBuilder RoleMember(string roleName, string memberName)
+    {
+        _principalElements.Add(new XElement(XName.Get("Element", ModelNs),
+            new XAttribute("Type", "SqlRoleMembership"),
+            Reference("Member", $"[{memberName}]"),
+            Reference("Role", $"[{roleName}]")));
+        return this;
+    }
+
+    /// <summary>
+    /// Emits a <c>SqlStatistic</c> element over <paramref name="columns"/> of
+    /// the named table, in the three-part-name shape DacFx exports.
+    /// </summary>
+    public BacpacBuilder Statistic(string schemaName, string tableName, string statisticName, params string[] columns)
+    {
+        var table = $"[{schemaName}].[{tableName}]";
+        var columnsRel = new XElement(XName.Get("Relationship", ModelNs), new XAttribute("Name", "Columns"));
+        foreach (var column in columns)
+        {
+            columnsRel.Add(new XElement(XName.Get("Entry", ModelNs),
+                new XElement(XName.Get("References", ModelNs), new XAttribute("Name", $"{table}.[{column}]"))));
+        }
+        _principalElements.Add(new XElement(XName.Get("Element", ModelNs),
+            new XAttribute("Type", "SqlStatistic"),
+            new XAttribute("Name", $"{table}.[{statisticName}]"),
+            columnsRel,
+            Reference("Subject", table)));
+        return this;
+    }
+
+    private static XElement Reference(string relationship, string name)
+        => new(XName.Get("Relationship", ModelNs),
+            new XAttribute("Name", relationship),
+            new XElement(XName.Get("Entry", ModelNs),
+                new XElement(XName.Get("References", ModelNs), new XAttribute("Name", name))));
 
     /// <summary>
     /// Adds a CREATE TYPE … AS TABLE (cols [, PRIMARY KEY (cols)]) emission.
@@ -530,6 +601,9 @@ public sealed partial class BacpacBuilder
 
         foreach (var role in _roles)
             model.Add(BuildRoleElement(ns, role, _roleAuthorizers.GetValueOrDefault(role)));
+
+        foreach (var principal in _principalElements)
+            model.Add(principal);
 
         foreach (var tt in _tableTypes)
             model.Add(BuildTableTypeElement(ns, tt));
