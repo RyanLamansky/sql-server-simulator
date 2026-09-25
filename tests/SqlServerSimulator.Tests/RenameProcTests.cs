@@ -234,4 +234,49 @@ public sealed class RenameProcTests
         AreEqual<byte>(0, error.Class);
         AreEqual<byte>(1, error.State);
     }
+
+    /// <summary>
+    /// The NULL and <c>OBJECT</c> types rename any object in the schema
+    /// namespace and any constraint, leaving a module's stored definition as
+    /// it was (probed 2026-09-25 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void AnyObjectOrConstraint_Renames()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table t (id int constraint pk_t primary key, v int constraint df_t default 0 constraint ck_t check (v >= 0))",
+            "create sequence dbo.s",
+            "create view dbo.v as select 1 as a",
+            "create procedure dbo.p as select 7",
+            "create function dbo.f() returns int as begin return 1 end",
+            "create synonym dbo.syn for dbo.t",
+            "create trigger dbo.tr on t after insert as print 'x'");
+        foreach (var (from, to) in new[] { ("s", "s2"), ("v", "v2"), ("p", "p2"), ("f", "f2"), ("syn", "syn2"), ("tr", "tr2"), ("pk_t", "pk_t2"), ("df_t", "df_t2"), ("ck_t", "ck_t2") })
+            _ = sim.ExecuteNonQuery($"exec sp_rename 'dbo.{from}', '{to}', 'OBJECT'");
+        AreEqual(9, sim.ExecuteScalar("select count(*) from sys.objects where name in ('s2','v2','p2','f2','syn2','tr2','pk_t2','df_t2','ck_t2')"));
+        AreEqual(7, sim.ExecuteScalar("exec p2"));
+        AreEqual("create procedure dbo.p as select 7", sim.ExecuteScalar("select definition from sys.sql_modules where object_id = object_id('p2')"));
+    }
+
+    [TestMethod]
+    public void ObjectType_NotFound_Raises15248()
+        => new Simulation().AssertSqlError("exec sp_rename 'dbo.nosuch', 'x', 'OBJECT'", 15248, "Either the parameter @objname is ambiguous or the claimed @objtype (OBJECT) is wrong.");
+
+    [TestMethod]
+    public void Recompile_AnswersForAnObject()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (id int)");
+        sim.AssertSqlError("exec sp_recompile 'dbo.nosuch'", 15165, "Could not find object 'dbo.nosuch' or you do not have permission.");
+        using var connection = sim.CreateDbConnection();
+        connection.Open();
+        var messages = new List<string>();
+        connection.InfoMessage += (_, e) => messages.Add(e.Message);
+        using var command = connection.CreateCommand();
+        command.CommandText = "exec sp_recompile '[dbo].[t]'";
+        _ = command.ExecuteNonQuery();
+        CollectionAssert.AreEqual(new[] { "Object '[dbo].[t]' was successfully marked for recompilation." }, messages);
+    }
 }
+

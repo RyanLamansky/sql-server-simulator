@@ -12,7 +12,8 @@ namespace SqlServerSimulator.Storage;
 /// </summary>
 internal sealed class CheckConstraint(string name, BooleanExpression predicate, string? inlineColumn, int objectId, DateTime createDate)
 {
-    public readonly string Name = name;
+    /// <summary>Mutable for sp_rename.</summary>
+    public string Name = name;
 
     /// <summary>
     /// UTC creation timestamp — the declaring statement's frozen

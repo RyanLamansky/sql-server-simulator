@@ -14,6 +14,31 @@ partial class Simulation
         this.InvokeRefreshModule(batch, "sp_refreshview", "viewname", viewsOnly: true);
 
     /// <summary>
+    /// <c>sp_recompile @objname</c>: there are no cached plans to mark beyond
+    /// the plan cache's own schema-versioning, so it only answers — the class-0
+    /// Msg 15070 for an object in the schema namespace, Msg 15165 otherwise,
+    /// each naming the argument as passed (probed 2026-09-25 against SQL
+    /// Server 2025).
+    /// </summary>
+    private static IEnumerable<SimulatedStatementOutcome> InvokeSpRecompile(BatchContext batch)
+    {
+        var arguments = ParseExecArguments(batch.Parser, batch);
+        if (batch.IsSkipping)
+            yield break;
+
+        var (objectName, _) = ParseHelpArgs(arguments, "sp_recompile", firstName: "objname");
+        if (objectName is null)
+            throw SimulatedSqlException.ProcedureExpectsParameter("sp_recompile", "objname");
+        if (!Parser.Expressions.ObjectId.TryParseObjectName(objectName, out var name)
+            || !batch.TryResolveSchema(name, out var schema)
+            || !schema.TryFindInSharedNamespace(name.Leaf, out _))
+        {
+            throw SimulatedSqlException.CouldNotFindObjectOrNoPermission(objectName);
+        }
+        batch.Connection.PendingMessages.Enqueue(SimulatedSqlException.MarkedForRecompilationMessage(batch, objectName));
+    }
+
+    /// <summary>
     /// <c>sp_refreshsqlmodule @name</c> — the same rebinding for any module
     /// with a stored definition: a view, procedure, function or DML trigger.
     /// </summary>
@@ -55,7 +80,8 @@ partial class Simulation
 
         if (module is View { IsSchemaBound: true } or UserDefinedFunction { IsSchemaBound: true })
         {
-            batch.AppendInfoError(@class: 0, state: 1, number: 2023, message: $"Metadata was not updated for the schema-bound object '{module.Name}'.");
+            // Named as the argument spelled it (probed 2026-09-25).
+            batch.AppendInfoError(@class: 0, state: 1, number: 2023, message: $"Metadata was not updated for the schema-bound object '{objectName}'.");
             yield break;
         }
 

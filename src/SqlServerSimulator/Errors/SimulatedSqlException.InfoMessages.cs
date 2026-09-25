@@ -32,6 +32,10 @@ partial class SimulatedSqlException
     internal static SimulatedError DivisionByZeroOccurredMessage(BatchContext batch) =>
         batch.InfoMessage(@class: 0, state: 0, number: 3607, "Division by zero occurred.");
 
+    /// <summary>Msg 15070, <c>sp_recompile</c>'s confirmation, naming the object as passed.</summary>
+    internal static SimulatedError MarkedForRecompilationMessage(BatchContext batch, string objectName) =>
+        batch.InfoMessage(@class: 0, state: 1, number: 15070, $"Object '{objectName}' was successfully marked for recompilation.");
+
     /// <summary>Msg 5701, after every <c>USE</c>.</summary>
     internal static SimulatedError DatabaseContextChangedMessage(BatchContext batch, string databaseName) =>
         batch.InfoMessage(@class: 0, state: 1, number: 5701, $"Changed database context to '{databaseName}'.");

@@ -232,6 +232,7 @@ internal static class CatalogViewObjectIds
         ["sp_MSforeachdb"] = -835749359,
         ["sp_MSforeachtable"] = -776307597,
         ["sp_pkeys"] = -578325919,
+        ["sp_recompile"] = -440656617,
         ["sp_refreshsqlmodule"] = -419385653,
         ["sp_refreshview"] = -745630534,
         ["sp_releaseapplock"] = -395959103,

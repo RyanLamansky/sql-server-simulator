@@ -46,7 +46,8 @@ internal sealed class ForeignKey(
     bool isSystemNamed,
     DateTime createDate)
 {
-    public readonly string Name = name;
+    /// <summary>Mutable for sp_rename.</summary>
+    public string Name = name;
 
     /// <summary>
     /// UTC creation timestamp — the declaring statement's frozen

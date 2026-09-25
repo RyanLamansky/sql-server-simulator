@@ -247,7 +247,7 @@ Probe-confirmed rules:
 - An **`ALTER TABLE … ADD CONSTRAINT`** carries the later instant; the parent table's own `modify_date` advances alongside.
 - A **trust toggle** (`ALTER TABLE … {NOCHECK|CHECK} CONSTRAINT`, either direction, `ALL` included) advances the constraint's `modify_date` alone, leaving `create_date` put.
 
-**Not modeled yet.** Real also advances a constraint's `modify_date` on an `sp_rename` of it, which the simulator can't reach: `sp_rename`'s object form resolves only heap tables, so renaming a constraint raises Msg 15225 (or `NotSupportedException` for the `@objtype = 'OBJECT'` spelling) before any date could move.
+An `sp_rename` of a constraint advances its `modify_date` too (see [`catalog-views.md`](catalog-views.md)).
 A **DEFAULT** constraint also has no `sys.objects` row here, so only `sys.default_constraints` carries its dates.
 
 ## Definition columns

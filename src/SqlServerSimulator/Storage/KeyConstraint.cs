@@ -42,7 +42,8 @@ internal sealed class KeyConstraint(KeyConstraintKind kind, string name, int[] s
     /// </summary>
     public DateTime ModifyDate = createDate;
 
-    public readonly string Name = name;
+    /// <summary>Mutable for sp_rename.</summary>
+    public string Name = name;
 
     public readonly int[] StorageOrdinals = storageOrdinals;
 

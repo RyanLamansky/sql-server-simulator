@@ -65,6 +65,9 @@ internal static partial class BuiltInResources
         // view frozen at CREATE, above all) to its sources' current shape.
         "sp_refreshview",
         "sp_refreshsqlmodule",
+        // sp_recompile: marks an object's plans for recompilation — answered
+        // with its confirmation, there being nothing further to mark.
+        "sp_recompile",
         // sp_settriggerorder: pins a trigger first / last among the AFTER
         // triggers an action runs; see docs/claude/triggers.md.
         "sp_settriggerorder",

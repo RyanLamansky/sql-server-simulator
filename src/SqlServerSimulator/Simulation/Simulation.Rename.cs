@@ -70,10 +70,10 @@ partial class Simulation
         if (string.IsNullOrEmpty(objName) || string.IsNullOrEmpty(newName))
             throw SimulatedSqlException.InvalidProcedureParameters("sp_rename");
 
-        if (objType is null)
+        if (objType is null || BuiltInToken.Equals(objType, "OBJECT"))
         {
-            RenameTable(batch, objName, newName);
-            RecordRenameEvent(batch, objName, "TABLE");
+            var renamedKind = RenameObject(batch, objName, newName, objType);
+            RecordRenameEvent(batch, objName, renamedKind);
         }
         else if (BuiltInToken.Equals(objType, "COLUMN"))
         {
@@ -139,42 +139,122 @@ partial class Simulation
         return (objName, newName, objType);
     }
 
-    private void RenameTable(BatchContext batch, string objName, string newName)
+    /// <summary>
+    /// Renames any object in a schema's shared namespace — a table, view,
+    /// procedure, function, sequence, synonym or DML trigger — or a constraint
+    /// on one of its tables, the NULL / <c>OBJECT</c> <c>@objtype</c> forms
+    /// (probed 2026-09-25 against SQL Server 2025). The object's
+    /// <c>modify_date</c> advances; a module's stored definition keeps the
+    /// name it was created with, as real's does. Returns
+    /// the RENAME event's object type. Nothing by the name is Msg 15225 with
+    /// the NULL type and Msg 15248 naming <c>OBJECT</c>.
+    /// </summary>
+    private string RenameObject(BatchContext batch, string objName, string newName, string? objType)
     {
         var database = batch.CurrentDatabase;
-        if (!ObjectId.TryParseObjectName(objName, out var name)
-            || !batch.TryResolveSchema(name, out var schema)
-            || !schema.HeapTables.TryGetValue(name.Leaf, out var table))
+        SimulatedSqlException NotFound() => objType is null
+            ? SimulatedSqlException.RenameItemNotFound(objName, database.Name, "(null)")
+            : SimulatedSqlException.RenameAmbiguousOrWrongType("OBJECT");
+        if (!ObjectId.TryParseObjectName(objName, out var name) || !batch.TryResolveSchema(name, out var schema))
+            throw NotFound();
+
+        if (schema.TryFindInSharedNamespace(name.Leaf, out var found))
         {
-            throw SimulatedSqlException.RenameItemNotFound(objName, database.Name, "(null)");
+            // sp_rename is gated on ALTER of the object (schema ALTER / object
+            // CONTROL cover it) and reports the same not-found record a missing
+            // object earns — probe-confirmed, so nothing about the object's
+            // existence leaks.
+            if (!PermissionEnforcement.HasObjectAlter(batch, database, found.ObjectId, found.SchemaId))
+                throw NotFound();
+            // Collision is against the whole shared object namespace
+            // (probe-confirmed: renaming a table onto a view name also raises
+            // Msg 15335 "as a object").
+            if (schema.HasNameInSharedNamespace(newName))
+                throw SimulatedSqlException.RenameDuplicateName(newName, "object");
+            // A schema-bound module's reference is by name, so real refuses to
+            // rename out from under one — Msg 15336, echoing @objname as passed.
+            if (SchemaBinding.FindReferencingModule(database, found) is not null)
+                throw SimulatedSqlException.RenameParticipatesInEnforcedDependencies(objName);
+
+            // Real refuses a read-only database only once the rename has
+            // otherwise been accepted: an unresolvable @objname still reports
+            // its own Msg 15225 / 15248 (probe-confirmed).
+            database.RejectWriteWhenReadOnly();
+            var kind = found switch
+            {
+                HeapTable table => Move(schema.HeapTables, table, "TABLE"),
+                View view => Move(schema.Views, view, "VIEW"),
+                Procedure procedure => Move(schema.Procedures, procedure, "PROCEDURE"),
+                UserDefinedFunction function => Move(schema.Functions, function, "FUNCTION"),
+                Sequence sequence => Move(schema.Sequences, sequence, "SEQUENCE"),
+                Synonym synonym => Move(schema.Synonyms, synonym, "SYNONYM"),
+                Trigger trigger => Move(schema.Triggers, trigger, "TRIGGER"),
+                _ => throw NotFound(),
+            };
+            BumpSchemaVersion();
+            return kind;
+
+            string Move<T>(System.Collections.Concurrent.ConcurrentDictionary<string, T> objects, T renamed, string eventType)
+                where T : SchemaObject
+            {
+                if (renamed is HeapTable table)
+                    batch.AcquireStatementLock(table.SchemaLock, LockMode.SchemaModification);
+                _ = objects.TryRemove(renamed.Name, out _);
+                renamed.Name = newName;
+                renamed.ModifyDate = batch.CurrentStatement.UtcNow;
+                objects[newName] = renamed;
+                return eventType;
+            }
         }
 
-        // sp_rename is gated on ALTER of the object (schema ALTER / object
-        // CONTROL cover it) and reports the same Msg 15225 not-found record a
-        // missing object earns — probe-confirmed, so nothing about the object's
-        // existence leaks.
-        if (!PermissionEnforcement.HasObjectAlter(batch, database, table.ObjectId, table.SchemaId))
-            throw SimulatedSqlException.RenameItemNotFound(objName, database.Name, "(null)");
+        // A constraint shares the namespace but lives on its table.
+        var collation = database.Collation;
+        foreach (var table in schema.HeapTables.Values)
+        {
+            var eventType = RenameConstraintOn(table);
+            if (eventType is null)
+                continue;
+            BumpSchemaVersion();
+            return eventType;
+        }
+        throw NotFound();
 
-        // Collision is against the whole shared object namespace (probe-confirmed:
-        // renaming a table onto a view name also raises Msg 15335 "as a object").
-        if (schema.HasNameInSharedNamespace(newName))
-            throw SimulatedSqlException.RenameDuplicateName(newName, "object");
+        string? RenameConstraintOn(HeapTable table)
+        {
+            foreach (var key in table.KeyConstraints)
+            {
+                if (collation.Equals(key.Name, name.Leaf))
+                    return RenameConstraint(table, now => (key.Name, key.ModifyDate) = (newName, now), key.Kind == KeyConstraintKind.PrimaryKey ? "PRIMARY KEY CONSTRAINT" : "UNIQUE KEY CONSTRAINT");
+            }
+            foreach (var check in table.CheckConstraints)
+            {
+                if (collation.Equals(check.Name, name.Leaf))
+                    return RenameConstraint(table, now => (check.Name, check.ModifyDate) = (newName, now), "CHECK CONSTRAINT");
+            }
+            foreach (var foreignKey in table.OutgoingForeignKeys)
+            {
+                if (collation.Equals(foreignKey.Name, name.Leaf))
+                    return RenameConstraint(table, now => (foreignKey.Name, foreignKey.ModifyDate) = (newName, now), "FOREIGN KEY CONSTRAINT");
+            }
+            foreach (var column in table.Columns)
+            {
+                if (column.DefaultConstraint is { } defaultConstraint && collation.Equals(defaultConstraint.Name, name.Leaf))
+                    return RenameConstraint(table, now => (defaultConstraint.Name, defaultConstraint.ModifyDate) = (newName, now), "DEFAULT");
+            }
+            return null;
+        }
 
-        // A schema-bound module's reference is by name, so real refuses to
-        // rename out from under one — Msg 15336, echoing @objname as passed.
-        if (SchemaBinding.FindReferencingModule(database, table) is not null)
-            throw SimulatedSqlException.RenameParticipatesInEnforcedDependencies(objName);
-
-        // Real refuses a read-only database only once the rename has otherwise
-        // been accepted: an unresolvable @objname still reports its own Msg
-        // 15225 / 15248 (probe-confirmed).
-        database.RejectWriteWhenReadOnly();
-        batch.AcquireStatementLock(table.SchemaLock, LockMode.SchemaModification);
-        _ = schema.HeapTables.TryRemove(table.Name, out _);
-        table.Name = newName;
-        schema.HeapTables[newName] = table;
-        BumpSchemaVersion();
+        string RenameConstraint(HeapTable table, Action<DateTime> rename, string eventType)
+        {
+            if (!PermissionEnforcement.HasObjectAlter(batch, database, table.ObjectId, table.SchemaId))
+                throw NotFound();
+            if (schema.HasNameInSharedNamespace(newName))
+                throw SimulatedSqlException.RenameDuplicateName(newName, "object");
+            database.RejectWriteWhenReadOnly();
+            batch.AcquireStatementLock(table.SchemaLock, LockMode.SchemaModification);
+            rename(batch.CurrentStatement.UtcNow);
+            return eventType;
+        }
     }
 
     private void RenameColumn(BatchContext batch, string objName, string newName)
