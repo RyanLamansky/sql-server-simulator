@@ -11,7 +11,7 @@ Storage, two static factories, six instance methods, comparison, and `ORDER BY` 
 **Instance methods**:
 - `.GetLevel()` → `smallint` (segment count).
 - `.GetAncestor(n)` → ancestor path n levels up; raises Msg 6522 on `n < 0` or `n > level`.
-- `.GetDescendant(child1, child2)` → a fresh descendant path between two siblings; covers all four `(NULL, NULL)` / `(c, NULL)` / `(NULL, c)` / `(c1, c2)` combinations probe-confirmed against AW's `[HumanResources].[Employee]` data.
+- `.GetDescendant(child1, child2)` → a fresh descendant path between two siblings, in all four `(NULL, NULL)` / `(c, NULL)` / `(NULL, c)` / `(c1, c2)` combinations; between two dotted siblings the label is real's generator's own (`LabelBetween`, matched against SQL Server 2025 across 120 random ordered pairs on 2026-09-25).
 - `.IsDescendantOf(other)` → `bit`.
 - `.GetReparentedValue(oldRoot, newRoot)` → the path with its `oldRoot` prefix swapped for `newRoot`; NULL for a NULL argument.
 

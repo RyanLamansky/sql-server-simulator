@@ -419,4 +419,23 @@ public sealed class HierarchyIdTests
         simulation.AssertSqlError("declare @h hierarchyid = '/1/'; select @h.IsDescendantOf(1)", 206, "Operand type clash: int is incompatible with hierarchyid");
         simulation.AssertSqlError("declare @h hierarchyid = '/1/'; select @h.GetAncestor('x')", 245, "Conversion failed when converting the varchar value 'x' to data type int.");
     }
+
+    /// <summary>
+    /// The label placed between two siblings, as SQL Server 2025 generates it
+    /// (probed 2026-09-25, and matched across 120 random ordered pairs).
+    /// </summary>
+    [TestMethod]
+    [DataRow("/1/", "/1/1/", "/1/2/", "/1/1.1/")]
+    [DataRow("/1/", "/1/2/", "/1/4/", "/1/3/")]
+    [DataRow("/1/", "/1/2.1/", "/1/3/", "/1/2.2/")]
+    [DataRow("/1/", "/1/2/", "/1/2.1/", "/1/2.0/")]
+    [DataRow("/1/", "/1/2.1/", "/1/2.2/", "/1/2.1.1/")]
+    [DataRow("/1/", "/1/2.1/", "/1/2.3/", "/1/2.2/")]
+    [DataRow("/1/", "/1/2.1.3/", "/1/2.2/", "/1/2.1.4/")]
+    [DataRow("/1/", "/1/2.1/", "/1/2.1.5/", "/1/2.1.4/")]
+    [DataRow("/1/", "/1/2/", "/1/3.1/", "/1/2.1/")]
+    [DataRow("/1/", "/1/-1/", "/1/1/", "/1/0/")]
+    [DataRow("/", "/1.1/", "/1.2/", "/1.1.1/")]
+    public void GetDescendant_BetweenSiblings_MatchesRealsGenerator(string parent, string child1, string child2, string expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar($"declare @h hierarchyid = '{parent}'; select @h.GetDescendant('{child1}', '{child2}').ToString()"));
 }

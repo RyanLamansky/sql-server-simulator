@@ -180,26 +180,35 @@ internal sealed class HierarchyIdMethodCall : Expression
         if (cmp >= 0)
             throw SimulatedSqlException.HierarchyIdDescendantOutOfOrder(HierarchyIdSqlType.PathToString(c1), HierarchyIdSqlType.PathToString(c2));
 
-        // Look at the last segment's main label (index 0). If they differ by
-        // > 1, pick the integer midpoint (matches probe: `/1/`.GetDescendant(`/1/2/`, `/1/4/`) = `/1/3/`).
-        if (seg1.Length == 1 && seg2.Length == 1)
-        {
-            // Both are simple integers (no sub-ordinals).
-            if (seg2[0] - seg1[0] > 1)
-                return AppendSegment(selfPath, [seg1[0] + 1]);
-            // Adjacent → extend c1 with sub-ordinal 1: e.g. /1/.GetDescendant(/1/2/, /1/3/) = /1/2.1/
-            return AppendSegment(selfPath, [seg1[0], 1]);
-        }
+        return AppendSegment(selfPath, LabelBetween(seg1, seg2));
+    }
 
-        // For more complex sub-ordinal cases (rare under AW), conservatively
-        // extend c1 with [+1] at the deepest sub-ordinal position. Real
-        // SQL Server's algorithm here is more subtle but isn't exercised by
-        // the AW baseline; the current rule produces a result strictly
-        // greater than c1 and (typically) less than c2.
-        var extended = new long[seg1.Length + 1];
-        Array.Copy(seg1, extended, seg1.Length);
-        extended[^1] = 1;
-        return AppendSegment(selfPath, extended);
+    /// <summary>
+    /// The label real's generator places between two sibling labels, walking
+    /// their components together (probed 2026-09-25 against SQL Server 2025
+    /// across dotted and root-level siblings): past a shared prefix, a first
+    /// child that runs out takes the second's next component less one
+    /// (<c>2</c>, <c>2.1</c> → <c>2.0</c>); a gap wider than one takes the
+    /// first child's component plus one (<c>2.1</c>, <c>2.3</c> → <c>2.2</c>);
+    /// and a gap of exactly one steps below that component instead — the first
+    /// child's next component plus one, or a new <c>.1</c> when it has none
+    /// (<c>2.1.3</c>, <c>2.2</c> → <c>2.1.4</c>; <c>2.1</c>, <c>2.2</c> →
+    /// <c>2.1.1</c>).
+    /// </summary>
+    private static long[] LabelBetween(long[] low, long[] high)
+    {
+        for (var i = 0; ; i++)
+        {
+            if (i == low.Length)
+                return [.. high.AsSpan(0, i), high[i] - 1];
+            if (low[i] == high[i])
+                continue;
+            if (high[i] - low[i] > 1)
+                return [.. low.AsSpan(0, i), low[i] + 1];
+            return i + 1 < low.Length
+                ? [.. low.AsSpan(0, i + 1), low[i + 1] + 1]
+                : [.. low.AsSpan(0, i + 1), 1];
+        }
     }
 
     private SqlValue RunIsDescendantOf(long[][] selfPath, RuntimeContext runtime)
