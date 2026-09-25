@@ -1284,10 +1284,14 @@ internal sealed partial class Selection
             : null;
 
         // Updatable-view shape capture: single source, no JOINs, no DISTINCT,
-        // no aggregates / windows / GROUP BY / HAVING. TOP / OFFSET / FETCH are
-        // allowed (SQL Server treats TOP views as updatable — probe-confirmed).
-        // ORDER BY allowed too (it only affects reads). View.cs consumes this
-        // to derive Msg 4403 / 4405 / 4406 metadata at CREATE VIEW.
+        // no aggregates / GROUP BY / HAVING. A window function leaves the body
+        // writable on real, but only to the rows it yields, which the
+        // per-base-row write path can't select (ViewUpdatabilityRejection.
+        // RowSelective). A TOP / OFFSET / FETCH row limit keeps the profile —
+        // a positioned write through it names its row exactly — and the view
+        // records the limit instead (View.IsRowLimited). ORDER BY alone only
+        // affects reads. View.cs consumes this to derive Msg 4403 / 4405 / 4406
+        // metadata at CREATE VIEW.
         var (updatabilityProfile, updatabilityRejection) = ComputeViewUpdatabilityProfile(
             sources, joins, expressions, fromClause, distinct, aggregates, windows);
 
@@ -1767,7 +1771,7 @@ internal sealed partial class Selection
         if (fromClause.GroupingSets.Count > 0 || fromClause.Having is not null)
             return (null, ViewUpdatabilityRejection.GroupBy);
         if (windows.Count > 0)
-            return (null, ViewUpdatabilityRejection.UnsupportedShape);
+            return (null, ViewUpdatabilityRejection.RowSelective);
 
         var profile = new ViewUpdatabilityProfile(
             sources: sources,

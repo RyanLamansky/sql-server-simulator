@@ -19,6 +19,12 @@ namespace SqlServerSimulator.Parser;
 /// <item><see cref="UnsupportedShape"/> — catch-all (set ops, window
 /// functions, HAVING, derived-table-as-source, CTE) — DML raises
 /// Msg 4403 as the closest message.</item>
+/// <item><see cref="RowSelective"/> — a single-source body whose window
+/// function computes over the whole row set. Real writes through it to the
+/// rows the body yields; the simulator's per-base-row path can't, so DML
+/// raises <see cref="NotSupportedException"/>. A <c>TOP</c> / <c>OFFSET</c>
+/// body keeps its profile and is marked <c>View.IsRowLimited</c>
+/// instead.</item>
 /// <item><see cref="None"/> — the profile is non-null.</item>
 /// </list>
 /// Note Msg 4406 ("derived or constant field") is per-touched-column, not
@@ -33,6 +39,7 @@ internal enum ViewUpdatabilityRejection
     GroupBy,
     MultipleSources,
     UnsupportedShape,
+    RowSelective,
 }
 
 /// <summary>

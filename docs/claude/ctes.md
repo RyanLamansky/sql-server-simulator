@@ -79,6 +79,12 @@ A stored body that parses outside the dispatch loop (a view, an inline TVF, a cu
 One divergence remains: real doesn't bind an unread CTE's body at all, so `WITH c AS (SELECT * FROM nosuchtable) SELECT 1` is Msg 422 there and Msg 208 here.
 Both refuse.
 
+## DML through a CTE
+
+A DML statement whose target is one of its own CTEs writes through it exactly as through a view with that body (probed 2026-09-25 against SQL Server 2025): `WITH d AS (SELECT id, v FROM t WHERE id = 1) DELETE FROM d WHERE v = 2` deletes from `t`, `UPDATE d` and `INSERT INTO d` pass through too, a derived column is Msg 4406 and an aggregate body Msg 4403.
+`Simulation.TryResolveCteTarget` builds the unstored view from the CTE's plan with the same analysis `CREATE VIEW` runs, so every rule under [updatable views](programmable.md#updatable-views-dml-through-views) applies, including the refusal of a row-limited or windowed body.
+A CTE reading several sources refuses where real would pass an `UPDATE` through to one of them, since the join-view path re-parses a stored view's text.
+
 ## Where a prefix may appear
 
 A **statement** may carry one, and so may a **stored body** — but a *parenthesized query* may not, on real or here.

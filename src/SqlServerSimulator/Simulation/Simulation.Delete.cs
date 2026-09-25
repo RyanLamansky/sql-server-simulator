@@ -35,7 +35,7 @@ partial class Simulation
 
         View? leadingView = null;
         HeapTable? leadingTable;
-        if (context.Batch.TryResolveView(leadingIdent, out var resolvedView))
+        if (TryResolveCteTarget(context, leadingIdent, out var resolvedView) || context.Batch.TryResolveView(leadingIdent, out resolvedView))
         {
             if (HasInsteadOfTrigger(context.Batch, resolvedView, TriggerActions.Delete)
                 && resolvedView.BaseTable is null)
@@ -44,9 +44,12 @@ partial class Simulation
             }
             if (resolvedView.BaseTable is not { } baseTable)
             {
-                throw resolvedView.RejectionReason == ViewUpdatabilityRejection.MultipleSources
-                    ? SimulatedSqlException.ViewUpdateAffectsMultipleTables(leadingIdent.ToString())
-                    : SimulatedSqlException.CannotUpdateNonUpdatableView(leadingIdent.ToString());
+                throw resolvedView.RejectionReason switch
+                {
+                    ViewUpdatabilityRejection.MultipleSources => SimulatedSqlException.ViewUpdateAffectsMultipleTables(leadingIdent.ToString()),
+                    ViewUpdatabilityRejection.RowSelective => RowSelectiveViewWriteNotModeled(leadingIdent.ToString()),
+                    _ => SimulatedSqlException.CannotUpdateNonUpdatableView(leadingIdent.ToString()),
+                };
             }
             leadingView = resolvedView;
             leadingTable = baseTable;
@@ -123,6 +126,8 @@ partial class Simulation
             else
                 where = Selection.ParseAndBindPredicate(context, Selection.TargetColumnTypeResolver(context.Batch, targetName, table, sourceView));
         }
+        if (positionedCursor is null)
+            RejectRowLimitedViewWrite(context, sourceView, targetName);
 
         // DELETE reads the target when it has a WHERE clause — real then
         // also requires SELECT, checked first so the SELECT denial surfaces

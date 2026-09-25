@@ -2475,8 +2475,10 @@ public sealed partial class Simulation
     /// the failure stream their results and the single error surfaces, but the
     /// statements after it never execute — for Msg 208 (invalid object),
     /// Msg 207 (invalid column), Msg 209 (ambiguous column), Msg 4104 (multi-
-    /// part identifier could not be bound), and Msg 4121 (cannot find the
-    /// column / function). Contrast the statement-terminating errors that DO
+    /// part identifier could not be bound), Msg 4121 (cannot find the
+    /// column / function), and the view-write refusals Msg 4403 / 4405 / 4406,
+    /// which a write through a CTE over a table the batch creates meets only
+    /// when it runs (probed 2026-09-25). Contrast the statement-terminating errors that DO
     /// let the batch continue: Msg 3701 (drop missing), Msg 8134 (divide by
     /// zero), Msg 2812 (EXEC missing proc), a severity-16 RAISERROR. Consulted
     /// on every top-level batch (<see cref="BatchContext.ContinueOnError"/>);
@@ -2487,7 +2489,7 @@ public sealed partial class Simulation
     /// here is a statement the compile deferred.
     /// </summary>
     private static bool IsBatchAbortingNameResolution(SimulatedSqlException ex)
-        => ex.Number is 195 or 207 or 208 or 209 or 4104 or 4121;
+        => ex.Number is 195 or 207 or 208 or 209 or 4104 or 4121 or 4403 or 4405 or 4406;
 
     /// <summary>
     /// True for an error that ends the whole batch rather than its statement:

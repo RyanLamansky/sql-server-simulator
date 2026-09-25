@@ -54,13 +54,19 @@ partial class Simulation
         // way INSERT / UPDATE / DELETE through view do.
         View? sourceView = null;
         HeapTable destinationTable;
-        if (context.Batch.TryResolveView(destinationName, out var resolvedView))
+        if (TryResolveCteTarget(context, destinationName, out var resolvedView) || context.Batch.TryResolveView(destinationName, out resolvedView))
         {
             sourceView = resolvedView;
             destinationTable = resolvedView.BaseTable
-                ?? throw (resolvedView.RejectionReason == ViewUpdatabilityRejection.MultipleSources
-                    ? SimulatedSqlException.ViewUpdateAffectsMultipleTables(destinationName.ToString())
-                    : SimulatedSqlException.CannotUpdateNonUpdatableView(destinationName.ToString()));
+                ?? throw (resolvedView.RejectionReason switch
+                {
+                    ViewUpdatabilityRejection.MultipleSources => SimulatedSqlException.ViewUpdateAffectsMultipleTables(destinationName.ToString()),
+                    ViewUpdatabilityRejection.RowSelective => RowSelectiveViewWriteNotModeled(destinationName.ToString()),
+                    _ => SimulatedSqlException.CannotUpdateNonUpdatableView(destinationName.ToString()),
+                });
+            // A MERGE matches against the rows the view yields, so its limit
+            // applies to every action.
+            RejectRowLimitedViewWrite(context, resolvedView, destinationName);
         }
         else
         {
@@ -891,7 +897,7 @@ partial class Simulation
                         throw SimulatedSqlException.InvalidColumnName(columnName);
                     var baseOrd = sourceView.BaseColumnOrdinals[matched];
                     if (baseOrd < 0)
-                        throw SimulatedSqlException.ViewDmlTouchesDerivedField($"{sourceView.Schema.Name}.{sourceView.Name}");
+                        throw SimulatedSqlException.ViewDmlTouchesDerivedField(DerivedFieldViewLabel(sourceView));
                     ordinal = baseOrd;
                 }
                 else

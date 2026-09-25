@@ -56,7 +56,7 @@ partial class Simulation
         // source join, which the existing alias-form path can't represent.
         View? leadingView = null;
         HeapTable? leadingTable;
-        if (context.Batch.TryResolveView(leadingIdent, out var resolvedView))
+        if (TryResolveCteTarget(context, leadingIdent, out var resolvedView) || context.Batch.TryResolveView(leadingIdent, out resolvedView))
         {
             // INSTEAD OF UPDATE on a view replaces the heap-write path; the
             // trigger body is responsible for any base-table mutations. The
@@ -437,6 +437,8 @@ partial class Simulation
                 where = Selection.ParseAndBindPredicate(context, targetTypeResolver);
         }
 
+        if (positionedCursor is null)
+            RejectRowLimitedViewWrite(context, sourceView, targetName);
         CheckUpdatePermissions(context, targetName, table, sourceView, rawAssignments, where);
 
         var affected = new List<(int PageIndex, int SlotIndex, SqlValue[] FullNew, SqlValue[]? FullOld)>();
@@ -1190,7 +1192,7 @@ partial class Simulation
                     throw SimulatedSqlException.InvalidColumnName(colName);
                 columnOrdinal = sourceView.BaseColumnOrdinals[viewOrd];
                 if (columnOrdinal < 0)
-                    throw SimulatedSqlException.ViewDmlTouchesDerivedField($"{sourceView.Schema.Name}.{sourceView.Name}");
+                    throw SimulatedSqlException.ViewDmlTouchesDerivedField(DerivedFieldViewLabel(sourceView));
             }
             else
             {

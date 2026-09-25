@@ -231,6 +231,7 @@ partial class Simulation
             DerivedOutputColumns = baseTable is null && rejectionReason != ViewUpdatabilityRejection.MultipleSources
                 ? DerivedOutputColumnsOf(bodySelection)
                 : null,
+            IsRowLimited = IsRowLimitedBody(bodySelection),
         };
         if (replaced is not null)
         {

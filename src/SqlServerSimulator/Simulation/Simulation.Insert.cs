@@ -39,7 +39,7 @@ partial class Simulation
         if (!BatchContext.IsTableVariableName(destinationName.Leaf))
             Selection.ValidateDmlTargetHints(Selection.ParseOptionalTableHints(context, allowLegacyParenForm: false));
 
-        if (context.Batch.TryResolveView(destinationName, out var destinationView))
+        if (TryResolveCteTarget(context, destinationName, out var destinationView) || context.Batch.TryResolveView(destinationName, out destinationView))
             return ProcessViewInsert(destinationView, context, top, destinationName);
         if (!context.Batch.TryResolveTable(destinationName, out var destinationTable))
         {
@@ -1182,7 +1182,7 @@ partial class Simulation
             {
                 var baseOrd = destinationView.BaseColumnOrdinals[i];
                 return baseOrd < 0
-                    ? throw SimulatedSqlException.ViewDmlTouchesDerivedField($"{destinationView.Schema.Name}.{destinationView.Name}")
+                    ? throw SimulatedSqlException.ViewDmlTouchesDerivedField(DerivedFieldViewLabel(destinationView))
                     : destinationTable.Columns[baseOrd];
             }
         }

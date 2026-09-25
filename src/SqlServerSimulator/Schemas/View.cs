@@ -188,6 +188,17 @@ internal sealed class View(
     public bool[]? DerivedOutputColumns;
 
     /// <summary>
+    /// The body (or a view it reads) limits its rows with <c>TOP</c> /
+    /// <c>OFFSET</c>. Real writes through such a view to the rows the limit
+    /// yields; the per-base-row write path takes every row the view's filter
+    /// admits, so an <c>UPDATE</c> / <c>DELETE</c> / <c>MERGE</c> through it
+    /// raises <see cref="NotSupportedException"/> unless it is positioned
+    /// (<c>WHERE CURRENT OF</c>), and an <c>INSERT</c>, which the limit
+    /// doesn't reach, goes through.
+    /// </summary>
+    public bool IsRowLimited;
+
+    /// <summary>
     /// True when the body reads several FROM sources but is otherwise
     /// DML-eligible (no DISTINCT / aggregate / GROUP BY / HAVING / window /
     /// set op). <see cref="BaseTable"/> is null and

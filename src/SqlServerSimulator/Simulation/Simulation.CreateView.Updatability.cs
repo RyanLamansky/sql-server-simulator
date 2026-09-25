@@ -78,6 +78,12 @@ partial class Simulation
             // carries the same pair the join view itself does.
             return (null, [], ViewUpdatabilityRejection.MultipleSources, null, null, true);
         }
+        else if (source.BackingView is { RejectionReason: ViewUpdatabilityRejection.RowSelective })
+        {
+            // A view over a windowed view writes to the rows the inner one
+            // yields, which is the same unbuilt path.
+            return (null, [], ViewUpdatabilityRejection.RowSelective, null, null, false);
+        }
         else
         {
             // Source is a derived table, CTE, OPENJSON, TVF, catalog view,
@@ -243,9 +249,11 @@ partial class Simulation
     /// the cursor on the token after the view's name; the messages name the
     /// view as the statement wrote it, as real's do.
     /// </summary>
-    private static SimulatedSqlException RefuseNonUpdatableViewWrite(ParserContext context, View view, MultiPartName writtenName, bool isUpdate)
+    private static Exception RefuseNonUpdatableViewWrite(ParserContext context, View view, MultiPartName writtenName, bool isUpdate)
     {
         var viewLabel = writtenName.ToString();
+        if (view.RejectionReason == ViewUpdatabilityRejection.RowSelective)
+            return RowSelectiveViewWriteNotModeled(viewLabel);
         if (view.DerivedOutputColumns is { } derivedColumns)
         {
             var checkpoint = context.SaveCheckpoint();
@@ -273,6 +281,40 @@ partial class Simulation
             ? SimulatedSqlException.ViewUpdateAffectsMultipleTables(viewLabel)
             : SimulatedSqlException.CannotUpdateNonUpdatableView(viewLabel);
     }
+
+    /// <summary>
+    /// The name a Msg 4406 over an updatable view's derived column carries: a
+    /// CTE target bare, as its statement wrote it, and a stored view
+    /// schema-qualified — where real names the stored view as written too.
+    /// </summary>
+    private static string DerivedFieldViewLabel(View view) =>
+        view.ObjectId == 0 ? view.Name : $"{view.Schema.Name}.{view.Name}";
+
+    /// <summary>
+    /// Whether a view body limits its rows, directly or through the single
+    /// view it reads (<see cref="View.IsRowLimited"/>).
+    /// </summary>
+    private static bool IsRowLimitedBody(Selection body) =>
+        body.HasTopOrOffsetOrFetch
+        || (body.UpdatabilityProfile is { Sources: [{ BackingView.IsRowLimited: true }] });
+
+    /// <summary>
+    /// Refuses a non-positioned UPDATE / DELETE / MERGE through a row-limited
+    /// view (<see cref="View.IsRowLimited"/>) when it runs.
+    /// </summary>
+    private static void RejectRowLimitedViewWrite(ParserContext context, View? view, MultiPartName writtenName)
+    {
+        if (view is { IsRowLimited: true } && !context.Batch.IsSkipping)
+            throw RowSelectiveViewWriteNotModeled(writtenName.ToString());
+    }
+
+    /// <summary>
+    /// The write real makes through a body whose <c>TOP</c> / <c>OFFSET</c> or
+    /// window function picks its rows, which the simulator refuses rather than
+    /// write to every row the body reads.
+    /// </summary>
+    private static NotSupportedException RowSelectiveViewWriteNotModeled(string viewLabel) =>
+        new($"DML through '{viewLabel}' isn't modeled: its body selects rows with TOP / OFFSET or computes over them with a window function, and SQL Server writes only to the rows that body yields.");
 
     /// <summary>The leaf names an UPDATE's SET list assigns, read from the cursor on; null when no SET follows.</summary>
     private static List<string>? PeekSetTargets(ParserContext context)
@@ -350,5 +392,47 @@ partial class Simulation
             };
         }
         _ = context.GetNextOptional();
+    }
+
+    /// <summary>
+    /// Resolves a DML target named by one of the statement's own CTEs as an
+    /// unstored view over the CTE's body: real writes through a CTE exactly as
+    /// through a view with that body — a plain single-table projection passes
+    /// through to the table, a derived column is Msg 4406 and an aggregate body
+    /// Msg 4403 (probed 2026-09-25 against SQL Server 2025). A CTE reading
+    /// several sources doesn't take the join-view path, which re-parses a
+    /// stored view's text.
+    /// </summary>
+    private static bool TryResolveCteTarget(ParserContext context, MultiPartName name, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out View? view)
+    {
+        view = null;
+        if (name.Count != 1 || context.CteBindings is not { } bindings || !bindings.TryGetValue(name.Leaf, out var binding) || binding.Plan is not { } body)
+            return false;
+        if (binding.DmlTarget is null)
+        {
+            var collation = context.CurrentDatabase.Collation;
+            var (baseTable, baseColumnOrdinals, rejection, visibilityCheck, checkOptionCheck, _) = AnalyzeViewUpdatability(collation, body, withCheckOption: false);
+            binding.DmlTarget = new View(
+                context.CurrentDatabase.Schemas[Database.DefaultSchemaName],
+                binding.Name,
+                objectId: 0,
+                ComputeViewOutputColumns(collation, body, [.. binding.ColumnNames], binding.Name),
+                bodyText: string.Empty,
+                withCheckOption: false,
+                isSchemaBound: false,
+                createDate: default,
+                baseTable,
+                baseColumnOrdinals,
+                rejection,
+                visibilityCheck,
+                checkOptionCheck,
+                isJoinUpdatable: false)
+            {
+                DerivedOutputColumns = baseTable is null && rejection != ViewUpdatabilityRejection.MultipleSources ? DerivedOutputColumnsOf(body) : null,
+                IsRowLimited = IsRowLimitedBody(body),
+            };
+        }
+        view = binding.DmlTarget;
+        return true;
     }
 }

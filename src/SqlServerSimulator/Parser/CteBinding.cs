@@ -46,6 +46,12 @@ internal sealed class CteBinding(string name, string[] columnNames)
     public Selection? Plan;
 
     /// <summary>
+    /// The CTE analyzed as an unstored view, built the first time a DML
+    /// statement names it as its target.
+    /// </summary>
+    public Schemas.View? DmlTarget;
+
+    /// <summary>
     /// Per-column types of the body, captured from the anchor branch in a
     /// recursive CTE so subsequent recursive branches can self-reference
     /// with a known schema. Null until the anchor parse completes.
