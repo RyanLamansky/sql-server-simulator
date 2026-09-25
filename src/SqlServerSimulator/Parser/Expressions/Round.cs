@@ -43,18 +43,16 @@ internal sealed class Round : Expression
 
         var lenValue = this.length.Run(runtime);
         if (lenValue.IsNull) return SqlValue.Null(resultType);
-        if (lenValue.Type.Category != SqlTypeCategory.Integer)
-            throw SimulatedSqlException.InvalidArgumentDataType(SqlTypeFamilyName(lenValue.Type), 2, "round");
-        var len = (int)Math.Clamp(MathScalars.AsLong(lenValue), -Decimal38.MaxPrecision, Decimal38.MaxPrecision);
+        // A decimal, money or float length truncates to int the way CAST does
+        // (probed 2026-09-25: ROUND(12.345, 2.7) rounds to 2 places).
+        var len = Math.Clamp(ScalarArguments.CoerceToInt(lenValue), -Decimal38.MaxPrecision, Decimal38.MaxPrecision);
 
         var truncate = false;
         if (this.function is not null)
         {
             var fv = this.function.Run(runtime);
             if (fv.IsNull) return SqlValue.Null(resultType);
-            if (fv.Type.Category != SqlTypeCategory.Integer)
-                throw SimulatedSqlException.InvalidArgumentDataType(SqlTypeFamilyName(fv.Type), 3, "round");
-            truncate = MathScalars.AsLong(fv) != 0;
+            truncate = ScalarArguments.CoerceToInt(fv) != 0;
         }
 
         return resultType.Category switch
@@ -67,7 +65,12 @@ internal sealed class Round : Expression
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
-        => MathScalars.WidenForResult(AssignmentRules.ArgumentType(this.value, SqlType.Float, batch, resolveColumnType));
+    {
+        ScalarArguments.RequireNumericSlot(this.length, batch, resolveColumnType, "round", 2, NumericSlot.AnyNumber);
+        if (this.function is not null)
+            ScalarArguments.RequireNumericSlot(this.function, batch, resolveColumnType, "round", 3, NumericSlot.AnyNumber);
+        return MathScalars.WidenForResult(AssignmentRules.ArgumentType(this.value, SqlType.Float, batch, resolveColumnType));
+    }
 
     internal override bool ResultReportsNumeric => this.value.ResultReportsNumeric;
 
@@ -139,12 +142,4 @@ internal sealed class Round : Expression
             result *= 10;
         return result;
     }
-
-    private static string SqlTypeFamilyName(SqlType t) => t.Category switch
-    {
-        SqlTypeCategory.String => "varchar",
-        SqlTypeCategory.DateTime => "datetime",
-        SqlTypeCategory.UniqueIdentifier => "uniqueidentifier",
-        _ => t.SqlServerName,
-    };
 }

@@ -47,6 +47,7 @@ internal sealed class Choose : Expression
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
+        _ = AssignmentRules.ArgumentType(this.indexExpr, SqlType.Int32, batch, resolveColumnType);
         var t = this.values[0].GetSqlType(batch, resolveColumnType);
         for (var i = 1; i < this.values.Length; i++)
             t = SqlType.Promote(t, this.values[i].GetSqlType(batch, resolveColumnType));

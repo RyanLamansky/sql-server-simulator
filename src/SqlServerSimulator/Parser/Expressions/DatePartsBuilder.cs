@@ -119,7 +119,14 @@ internal sealed class DatePartsBuilder : Expression
         }
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => this.resultType;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        // Each part converts to int the way an assignment does (probed
+        // 2026-09-25: a datetime part is Msg 257).
+        foreach (var argument in this.arguments)
+            _ = AssignmentRules.ArgumentType(argument, SqlType.Int32, batch, resolveColumnType);
+        return this.resultType;
+    }
 
     public override SqlValue Run(RuntimeContext runtime)
     {

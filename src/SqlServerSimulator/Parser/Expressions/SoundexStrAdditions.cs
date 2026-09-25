@@ -327,6 +327,10 @@ internal sealed class Str : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
         _ = AssignmentRules.ArgumentType(this.numArg, SqlType.Float, batch, resolveColumnType);
+        if (this.lengthArg is not null)
+            ScalarArguments.RequireNumericSlot(this.lengthArg, batch, resolveColumnType, "str", 2, NumericSlot.Integer);
+        if (this.decimalsArg is not null)
+            ScalarArguments.RequireNumericSlot(this.decimalsArg, batch, resolveColumnType, "str", 3, NumericSlot.Integer);
         return StringScalars.SizedResultType(SqlType.Varchar, this.projectedLength, batch);
     }
 
@@ -335,7 +339,7 @@ internal sealed class Str : Expression
         if (lengthArg is null)
             return 10;
         if (ConstantFolding.TryFold(lengthArg, context, out var constant) && !constant.IsNull
-            && (SqlType.IsIntegerCategory(constant.Type) || constant.Type is DecimalSqlType || SqlType.IsMoneyCategory(constant.Type)))
+            && SqlType.IsIntegerCategory(constant.Type))
         {
             try
             {

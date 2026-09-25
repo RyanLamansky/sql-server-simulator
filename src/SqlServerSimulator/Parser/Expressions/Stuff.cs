@@ -77,11 +77,16 @@ internal sealed class Stuff : Expression
         return SqlValue.FromString(resultType, result);
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
-        ResolveResultType(
-            StringScalars.ResolveResultType(StringScalars.BindCoercedArgument(this.input, batch, resolveColumnType, "stuff"), batch),
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        var inputType = StringScalars.ResolveResultType(StringScalars.BindCoercedArgument(this.input, batch, resolveColumnType, "stuff"), batch);
+        ScalarArguments.RequireNumericSlot(this.start, batch, resolveColumnType, "stuff", 2, NumericSlot.IntegerOrDecimal);
+        ScalarArguments.RequireNumericSlot(this.length, batch, resolveColumnType, "stuff", 3, NumericSlot.IntegerOrDecimal);
+        return ResolveResultType(
+            inputType,
             StringScalars.ResolveResultType(StringScalars.BindCoercedArgument(this.replacement, batch, resolveColumnType, "stuff", argumentIndex: 4), batch),
             batch);
+    }
 
     /// <summary>
     /// STUFF's projected width follows SQL Server's probed rule: the deletion

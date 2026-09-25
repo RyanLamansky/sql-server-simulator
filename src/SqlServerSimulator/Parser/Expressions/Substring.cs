@@ -105,8 +105,13 @@ internal sealed class Substring : Expression
 
     private static bool IsBinarySource(SqlType type) => type is VarbinarySqlType or BinarySqlType or ImageSqlType;
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
-        ResolveResultType(StringScalars.RequireStringArgument(source, source.GetSqlType(batch, resolveColumnType), "substring", 1, acceptsBinary: true), batch);
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        var sourceType = StringScalars.RequireStringArgument(source, source.GetSqlType(batch, resolveColumnType), "substring", 1, acceptsBinary: true);
+        ScalarArguments.RequireNumericSlot(start, batch, resolveColumnType, "substring", 2, NumericSlot.IntegerOrDecimal);
+        ScalarArguments.RequireNumericSlot(length, batch, resolveColumnType, "substring", 3, NumericSlot.IntegerOrDecimal);
+        return ResolveResultType(sourceType, batch);
+    }
 
     /// <summary>
     /// SUBSTRING preserves the input's string family; a constant length

@@ -80,6 +80,8 @@ internal sealed class CharIndex : Expression
         var haystackType = haystack.GetSqlType(batch, resolveColumnType);
         StringScalars.RejectLegacyLobInCoercion(haystackType, "charindex", argumentIndex: 2, allowLegacyLob: true);
         StringScalars.RequireSettledCollation(haystackType, "charindex");
+        if (start is not null)
+            ScalarArguments.RequireNumericSlot(start, batch, resolveColumnType, "charindex", 3, NumericSlot.IntegerOrDecimal);
         return SqlType.Int32;
     }
 

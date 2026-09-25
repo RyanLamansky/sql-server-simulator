@@ -187,6 +187,7 @@ internal sealed class GetBit : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
         _ = BitOperandHelpers.RequireOperand(this.numArg, batch, resolveColumnType, "get_bit", acceptsBinary: false);
+        ScalarArguments.RequireNumericSlot(this.positionArg, batch, resolveColumnType, "get_bit", 2, NumericSlot.Integer);
         return SqlType.Bit;
     }
 
@@ -240,8 +241,11 @@ internal sealed class SetBit : Expression
         return UnsignedBitsToTyped(bits, v.Type);
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
-        BitOperandHelpers.RequireOperand(this.numArg, batch, resolveColumnType, "set_bit", acceptsBinary: false);
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        ScalarArguments.RequireNumericSlot(this.positionArg, batch, resolveColumnType, "set_bit", 2, NumericSlot.Integer);
+        return BitOperandHelpers.RequireOperand(this.numArg, batch, resolveColumnType, "set_bit", acceptsBinary: false);
+    }
 
     internal override string DebugDisplay() => $"SET_BIT({this.numArg.DebugDisplay()}, {this.positionArg.DebugDisplay()})";
 
@@ -332,8 +336,11 @@ internal sealed class BitShift : Expression
         return SetBit.UnsignedBitsToTyped(result, v.Type);
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
-        BitOperandHelpers.RequireOperand(this.numArg, batch, resolveColumnType, this.functionName, acceptsBinary: false);
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        ScalarArguments.RequireNumericSlot(this.shiftArg, batch, resolveColumnType, this.functionName, 2, NumericSlot.Integer);
+        return BitOperandHelpers.RequireOperand(this.numArg, batch, resolveColumnType, this.functionName, acceptsBinary: false);
+    }
 
     internal override string DebugDisplay() => $"{(this.isLeftShift ? "LEFT_SHIFT" : "RIGHT_SHIFT")}({this.numArg.DebugDisplay()}, {this.shiftArg.DebugDisplay()})";
 

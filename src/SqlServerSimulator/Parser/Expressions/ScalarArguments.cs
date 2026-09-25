@@ -22,6 +22,33 @@ namespace SqlServerSimulator.Parser.Expressions;
 internal static class ScalarArguments
 {
     /// <summary>
+    /// The compile-time type rule of a position / length / count slot, which
+    /// takes fewer types than an <c>int</c> conversion would: a <c>bit</c>, a
+    /// string, a binary or a date is Msg 8116 naming the type as real spells
+    /// it, and <paramref name="accepts"/> says which numbers besides the
+    /// integers pass (probed 2026-09-25 against SQL Server 2025 — SUBSTRING /
+    /// STUFF / CHARINDEX positions take a <c>decimal</c> but no <c>money</c>
+    /// or <c>float</c>, STR's length and decimals only an integer, ROUND's
+    /// length and function and DATEADD's number any number). A bare
+    /// <c>NULL</c> passes.
+    /// </summary>
+    public static void RequireNumericSlot(Expression argument, BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType, string functionName, int argumentIndex, NumericSlot accepts)
+    {
+        if (Expression.IsUntypedNullLiteral(argument))
+            return;
+        var type = argument.GetSqlType(batch, resolveColumnType);
+        var accepted = type.Category switch
+        {
+            SqlTypeCategory.Integer => type != SqlType.Bit,
+            SqlTypeCategory.Decimal => accepts != NumericSlot.Integer,
+            SqlTypeCategory.Money or SqlTypeCategory.Approximate => accepts == NumericSlot.AnyNumber,
+            _ => false,
+        };
+        if (!accepted)
+            throw SimulatedSqlException.InvalidArgumentDataType(SqlType.OperandName(type, argument), argumentIndex, functionName);
+    }
+
+    /// <summary>
     /// Narrows to <c>int</c> — the declared type of nearly every id /
     /// position / count parameter.
     /// </summary>
@@ -117,4 +144,17 @@ internal static class ScalarArguments
                 ?? SimulatedSqlException.ArithmeticOverflow(target.SqlServerName);
         }
     }
+}
+
+/// <summary>Which numbers besides the integers a slot checked by <see cref="ScalarArguments.RequireNumericSlot"/> accepts.</summary>
+internal enum NumericSlot
+{
+    /// <summary>The integer types alone, <c>bit</c> excepted.</summary>
+    Integer,
+
+    /// <summary>The integers and <c>decimal</c> / <c>numeric</c>.</summary>
+    IntegerOrDecimal,
+
+    /// <summary>Every number but <c>bit</c>.</summary>
+    AnyNumber,
 }

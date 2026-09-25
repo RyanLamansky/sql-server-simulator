@@ -218,7 +218,7 @@ public sealed class BuiltInFunctionTests
     [DataRow("select char(3000000000)")]
     [DataRow("select nchar(3000000000)")]
     [DataRow("select parsename('a.b', 3000000000)")]
-    [DataRow("select str(1.5, 3000000000, 2)")]
+    [DataRow("select str(1.5, cast(3000000000 as bigint), 2)")]
     [DataRow("select left('abcdef', 3000000000)")]
     [DataRow("select right('abcdef', 3000000000)")]
     public void OutOfIntRangeArgument_RaisesArithmeticOverflow(string sql)

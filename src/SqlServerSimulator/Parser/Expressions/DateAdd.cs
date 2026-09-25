@@ -50,10 +50,13 @@ internal sealed class DateAdd : Expression
     /// 2026-09-23: <c>DATEADD(day, 1, '2024-01-01')</c> is a <c>datetime</c>,
     /// and a seven-digit fraction is Msg 241.
     /// </summary>
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
-        AssignmentRules.ArgumentType(this.source, SqlType.DateTime, batch, resolveColumnType) is var sourceType && SqlType.IsStringCategory(sourceType)
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        ScalarArguments.RequireNumericSlot(this.number, batch, resolveColumnType, "dateadd", 2, NumericSlot.AnyNumber);
+        return AssignmentRules.ArgumentType(this.source, SqlType.DateTime, batch, resolveColumnType) is var sourceType && SqlType.IsStringCategory(sourceType)
             ? SqlType.DateTime
             : DatePartKinds.ResolveImplicitDateType(sourceType);
+    }
 
     internal override string DebugDisplay() => $"DATEADD({this.keywordText}, {number.DebugDisplay()}, {source.DebugDisplay()})";
 

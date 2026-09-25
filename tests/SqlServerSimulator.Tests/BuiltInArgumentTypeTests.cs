@@ -217,5 +217,35 @@ public sealed class BuiltInArgumentTypeTests
     [TestMethod]
     public void TypeName_OfTheTableIds_AnswersAsReal()
         => AreEqual("table|table type|void type", new Simulation().ExecuteScalar("select concat_ws('|', type_name(1), type_name(243), type_name(0))"));
+
+    // ---- position / length / count slots ----
+
+    [TestMethod]
+    [DataRow("substring('abcdef', cast(2 as money), 2)", "money", 2, "substring")]
+    [DataRow("substring('abcdef', 2, '2')", "varchar", 3, "substring")]
+    [DataRow("stuff('abcdef', 1e0, 1, 'X')", "float", 2, "stuff")]
+    [DataRow("stuff('abcdef', 2, cast(1 as bit), 'X')", "bit", 3, "stuff")]
+    [DataRow("charindex('b', 'abcb', getdate())", "datetime", 3, "charindex")]
+    [DataRow("str(12.345, 2.5)", "numeric", 2, "str")]
+    [DataRow("str(12.345, 8, cast(2 as money))", "money", 3, "str")]
+    [DataRow("round(12.345, cast(1 as bit))", "bit", 2, "round")]
+    [DataRow("round(12.345, 1, cast(null as varchar(5)))", "varchar", 3, "round")]
+    [DataRow("dateadd(day, 0x02, '2020-01-01')", "varbinary", 2, "dateadd")]
+    [DataRow("get_bit(5, 2.5)", "numeric", 2, "get_bit")]
+    public void NumericSlot_OfARefusedType_RaisesMsg8116(string call, string type, int index, string function)
+        => new Simulation().AssertSqlError($"select {call}", 8116, $"Argument data type {type} is invalid for argument {index} of {function} function.");
+
+    [TestMethod]
+    public void NumericSlot_AcceptedNumbers_StillAnswer()
+        => AreEqual("bc|aXcdef|4|12.350|12.300|2020-01-03", new Simulation().ExecuteScalar("""
+            select concat_ws('|', substring('abcdef', 2.5, 2), stuff('abcdef', cast(2 as bigint), 1, 'X'), charindex('b', 'abcb', 3.0),
+                round(12.345, 2.7), round(12.345, 1, 2e0), convert(varchar(10), dateadd(day, 2.5, cast('2020-01-01' as date)), 23))
+            """));
+
+    [TestMethod]
+    [DataRow("datefromparts(getdate(), 1, 1)", "datetime")]
+    [DataRow("choose(getdate(), 'a', 'b')", "datetime")]
+    public void IntPart_FromADatetime_RaisesMsg257(string call, string type)
+        => new Simulation().AssertSqlError($"select {call}", 257, $"Implicit conversion from data type {type} to int is not allowed. Use the CONVERT function to run this query.");
 }
 

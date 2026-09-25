@@ -302,6 +302,7 @@ The math family's value is declared `float` (whatever type the result keeps), a 
 The metadata functions follow the same rule: an object / schema / database / user / type / column id is `int` (`FILEGROUP_NAME`'s `smallint`), a name `nvarchar`, an `OBJECTPROPERTY` / `SERVERPROPERTY` / `SESSIONPROPERTY` / `CONNECTIONPROPERTY` property name `varchar`, and `SUSER_SNAME`'s sid `varbinary`.
 A date, a binary, xml or a `uniqueidentifier` meeting `float` is Msg 206; a `sql_variant` is Msg 257, or Msg 260 when it is a column of the query.
 The date functions then read every accepted number and a binary as `datetime`, not only an integer: `DAY(1.5)` is 2 and `DATEADD(day, 1, 0x01)` is 1900-01-02.
+A position / length / count slot is narrower than an `int` conversion (`ScalarArguments.RequireNumericSlot`): SUBSTRING / STUFF / CHARINDEX positions take an integer or a decimal, STR's length and decimals and the bit functions' positions an integer only, and ROUND's length and function and DATEADD's number any number, while a `bit`, a string, a binary or a date is Msg 8116 in every one of them.
 `DATETRUNC`, `DATE_BUCKET` and `EOMONTH` are the exception: they take a date (a string too, save `DATE_BUCKET`; not a `time` for `EOMONTH`) and nothing else, so a number is Msg 8116 rather than a conversion.
 
 ## Integer arguments outside the parameter's range
@@ -322,7 +323,7 @@ The `smallint` exceptions are `FILEGROUP_NAME`'s filegroup id, `INDEXKEY_PROPERT
 
 Probe-confirmed 2026-07-31 across: the string scalars (SUBSTRING, CHARINDEX, STUFF, REPLICATE, SPACE, CHOOSE, CHAR, NCHAR, PARSENAME, STR, LEFT, RIGHT); the catalog-id scalars (COL_NAME, COLUMNPROPERTY, OBJECT_NAME, OBJECT_SCHEMA_NAME, OBJECT_DEFINITION, OBJECTPROPERTY, OBJECTPROPERTYEX, SCHEMA_NAME, DB_NAME, TYPE_NAME, FILE_NAME, FILEGROUP_NAME, USER_NAME, INDEX_COL, INDEXPROPERTY, INDEXKEY_PROPERTY, STATS_DATE, `fn_virtualfilestats`); the date scalars (EOMONTH, DATE_BUCKET, the `*FROMPARTS` family, SWITCHOFFSET, TODATETIMEOFFSET); CONVERT's style argument; the spatial index / SRID arguments (`STPointN`, `geometry::Point`, `SET @g.STSrid`); and `fn_varbintohexsubstring`'s offset and length.
 
-Three sites answer differently, each probe-confirmed:
+Three sites answer differently, each probe-confirmed (and STR refuses a `numeric` length outright — see the slot rule above):
 
 - **The bit-manipulation family never narrows at all** — see [Bit manipulation](#bit-manipulation-argument-rules) below.
 - **A system procedure's parameter** reports **Msg 8114** state 5 naming both families (`Error converting data type numeric to int.` for a bare literal, `… bigint to int.` for a `CAST(… AS bigint)`) rather than the arithmetic-overflow family, via `ScalarArguments.CoerceProcedureParameter`.
