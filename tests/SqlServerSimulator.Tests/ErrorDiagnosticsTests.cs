@@ -111,7 +111,7 @@ public sealed class ErrorDiagnosticsTests
     public void ProcedureBodyError_NamesTheProcedureAsInvoked(string exec, string expected)
     {
         var sim = new Simulation();
-        sim.ExecuteBatches("create procedure dbo.p_boom as select 1 / 0");
+        sim.ExecuteBatches("create procedure dbo.p_boom as declare @z int = 1 / 0");
         AreEqual(expected, sim.AssertSqlError(exec, 8134).Procedure);
         AreEqual(expected, sim.ExecuteScalar($"begin try {exec} end try begin catch select error_procedure() end catch"));
     }

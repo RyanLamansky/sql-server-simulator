@@ -100,9 +100,13 @@ The simulator classifies SELECT and leaves every other kind `0`; see [`tds-endpo
 The reader consumes the unified continue-on-error outcome stream (see [`control-flow.md`](control-flow.md)), so a mid-batch statement error is a `SimulatedErrorOutcome` in the stream rather than a throw.
 `AdvanceToNextResult` (the constructor's and `NextResult`'s shared step) skips pure `SimulatedNonQuery` outcomes and stops on either a `SimulatedQueryResult` or a `SimulatedErrorOutcome`, mirroring SqlClient's positional error model:
 
-- **Row-returning error** (`SimulatedErrorOutcome.RowReturning` — the failed statement was a SELECT / VALUES, which real SQL Server frames with COLMETADATA before the error): the reader advances *onto* the failed statement (the advance returns `true`) and the first `Read` throws, via an internal `ErrorCursor` whose first `MoveNext` throws and then reports no rows.
+- **A SELECT whose rows fail at run time** has already sent its COLMETADATA and the rows before the failing one on real, and sends the error before the result set's DONE (probed 2026-09-25 against SQL Server 2025).
+  The statement keeps the rows its materialization produced and yields them as a result set marked `SimulatedSqlResultSet.EndedByError` — an empty one carrying the plan's metadata when the first row failed, or the plan itself — and the error follows it; `Read` after the last row throws that error, and the TDS endpoint writes it ahead of the result set's DONE.
+  Inside a `TRY` the partial result set still goes out ahead of the `CATCH` output, as real sends it, so `ExecuteScalar` over `BEGIN TRY SELECT CAST('x' AS int) END TRY BEGIN CATCH SELECT 2 END CATCH` is NULL on both.
+  A FROM-less SELECT, whose values are computed while it parses, keeps a value's error for the plan to raise when it runs, past its row limit and WHERE.
+  Rows buffered for an ORDER BY are projected before sorting, so none precede the error there where real may deliver the rows it sorted ahead of the failing one.
+- **Row-returning error** otherwise (`SimulatedErrorOutcome.RowReturning` — a SELECT / VALUES that failed before producing a plan): the reader advances *onto* the failed statement (the advance returns `true`) and the first `Read` throws, via an internal `ErrorCursor` whose first `MoveNext` throws and then reports no rows.
   The reader **survives** — a following `NextResult` reaches the next result set and reads clean.
-  (`Read`-throws, reader-survives is the same shape as a SELECT that errors mid-scan, except materialization means zero partial rows precede the throw — see the divergence below.)
 - **Non-row-returning error** (INSERT / UPDATE / DELETE / DDL — no result-set envelope): the error throws *eagerly* on the advance itself, so `ExecuteReader` (the constructor's advance) or `NextResult` throws rather than a later `Read`.
   This matches SqlClient surfacing an error token that no COLMETADATA precedes, and is what lets EF Core's no-OUTPUT modification batches — which never call `Read` — observe a failed write.
 

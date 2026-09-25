@@ -1,4 +1,5 @@
 using System.Collections;
+using System.Runtime.ExceptionServices;
 using SqlServerSimulator.Parser.Expressions;
 using SqlServerSimulator.Parser.Tokens;
 using SqlServerSimulator.Schemas;
@@ -4506,6 +4507,12 @@ internal sealed partial class Selection
         // EXISTS never reads its select list, so real evaluates none of it —
         // `EXISTS (SELECT 1/0)` is true (probe-confirmed 2026-09-23) — and the
         // row it counts carries typed NULLs instead.
+        //
+        // A value that raises is a runtime error on real, sent after the
+        // column metadata (probed 2026-09-25: `SELECT 1; SELECT 10/0` returns
+        // the 1 first), so the bake keeps the error for the plan to raise when
+        // it runs — past its row limit and WHERE, which may mean never.
+        ExceptionDispatchInfo? bakeFailure = null;
         for (var i = 0; (scope.ProjectionUnread || !referencesOuterColumns) && i < expressions.Count; i++)
         {
             if (scope.ProjectionUnread)
@@ -4513,8 +4520,16 @@ internal sealed partial class Selection
                 values[i] = SqlValue.Null(schema[i]);
                 continue;
             }
-            var raw = expressions[i].Run(parseRuntime);
-            values[i] = raw.IsNull || raw.Type == schema[i] ? raw : raw.CoerceTo(schema[i]);
+            try
+            {
+                var raw = expressions[i].Run(parseRuntime);
+                values[i] = raw.IsNull || raw.Type == schema[i] ? raw : raw.CoerceTo(schema[i]);
+            }
+            catch (SimulatedSqlException error)
+            {
+                bakeFailure = ExceptionDispatchInfo.Capture(error);
+                break;
+            }
         }
 
         return new Selection(schema, columnNames,
@@ -4540,6 +4555,7 @@ internal sealed partial class Selection
                     return [];
             }
 
+            bakeFailure?.Throw();
             if (scope.ProjectionUnread || !referencesOuterColumns)
                 return [RowEncoder.EncodeRow(schema, values)];
 

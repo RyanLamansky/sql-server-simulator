@@ -424,9 +424,6 @@ Real bugs / limitations against shipped behavior — fixes are concrete work, no
 - **`OBJECTPROPERTY(id, 'IsDeterministic')` — the converted expression's own type** — the module walk ships whole, the `CAST` / `CONVERT` style rule included (see [`catalog-views.md`](catalog-views.md#isdeterministic)).
   The named target type and the style read off the token stream exactly; the *source* expression's type is inferred from the evidence its extent carries, which leaves four shapes undecided and reading deterministic: a column name the body's referenced tables don't carry (a CTE or derived table's own output, an alias-type column), a user function whose return type isn't its argument's, a style written as a constant expression (`121 + 0`, which real folds), and an ANSI type synonym (`character varying`).
   Closing them wants the source extent bound as an expression rather than classified from tokens.
-- **Runtime-error streaming shape** — a per-row runtime error (`SELECT 10/0`, arithmetic overflow) is emitted by real *after* COLMETADATA, so a streaming client surfaces it while draining rows; the simulator raises it at execute-time before any COLMETADATA, so the client sees it from the initial execute call.
-  Message / number / class match; only the wire position differs.
-  Deferred — deep change to statement execution ordering, low practical impact.
 - **Trailing-space MIN/MAX representative** — for a group of values differing only in trailing spaces (sort-equal under SQL Server), MIN/MAX returns a different byte-variant than the live server's scan-order representative.
   Surfaced by the AdventureWorks crosscheck on synthetic XML data (`vJobCandidateEducation._max_Edu_Loc_CountryRegion`).
   Needs trailing-space-insensitive compare + SQL Server's unspecified MAX-tie scan-order.

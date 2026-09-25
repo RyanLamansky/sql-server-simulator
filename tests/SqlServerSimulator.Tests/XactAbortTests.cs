@@ -177,7 +177,7 @@ public sealed class XactAbortTests
             SET XACT_ABORT ON;
             BEGIN TRAN;
             BEGIN TRY
-                SELECT 1 / 0;
+                DECLARE @z int = 1 / 0;
             END TRY
             BEGIN CATCH
                 BEGIN TRY
@@ -219,7 +219,7 @@ public sealed class XactAbortTests
             SET XACT_ABORT ON;
             BEGIN TRAN;
             BEGIN TRY
-                SELECT 1 / 0;
+                DECLARE @z int = 1 / 0;
             END TRY
             BEGIN CATCH
                 BEGIN TRY
@@ -249,7 +249,7 @@ public sealed class XactAbortTests
             SET XACT_ABORT ON;
             BEGIN TRAN;
             BEGIN TRY
-                SELECT 1 / 0;
+                DECLARE @z int = 1 / 0;
             END TRY
             BEGIN CATCH
                 BEGIN TRY
@@ -272,7 +272,7 @@ public sealed class XactAbortTests
             SET XACT_ABORT ON;
             BEGIN TRAN;
             BEGIN TRY
-                SELECT 1 / 0;
+                DECLARE @z int = 1 / 0;
             END TRY
             BEGIN CATCH
                 SELECT COUNT(*) FROM parent;
@@ -294,7 +294,7 @@ public sealed class XactAbortTests
             BEGIN TRAN;
             INSERT INTO t (id, v) VALUES (3, 1);
             BEGIN TRY
-                SELECT 1 / 0;
+                DECLARE @z int = 1 / 0;
             END TRY
             BEGIN CATCH
             END CATCH
@@ -318,7 +318,7 @@ public sealed class XactAbortTests
             SET XACT_ABORT ON;
             BEGIN TRAN;
             BEGIN TRY
-                SELECT 1 / 0;
+                DECLARE @z int = 1 / 0;
             END TRY
             BEGIN CATCH
                 ROLLBACK;

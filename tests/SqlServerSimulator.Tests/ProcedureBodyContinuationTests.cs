@@ -100,6 +100,10 @@ public sealed class ProcedureBodyContinuationTests
         using var reader = simulation.ExecuteReader("begin try exec p end try begin catch select error_number() end catch");
         IsTrue(reader.Read());
         AreEqual(1, reader.GetInt32(0));
+        // The failing SELECT's own result set — its metadata went out before
+        // its first row failed — is empty, then the CATCH's.
+        IsTrue(reader.NextResult());
+        IsFalse(reader.Read());
         IsTrue(reader.NextResult());
         IsTrue(reader.Read());
         AreEqual(8134, reader.GetInt32(0));
@@ -115,7 +119,10 @@ public sealed class ProcedureBodyContinuationTests
         using var reader = simulation.ExecuteReader("insert t values (1)");
         IsTrue(reader.Read());
         AreEqual(7, reader.GetInt32(0));
-        AreEqual(8134, Throws<SimulatedSqlException>(() => reader.NextResult()).Number);
+        // The failing SELECT sent its metadata, so its error surfaces from the
+        // Read on its empty result set (probed 2026-09-25 against SQL Server 2025).
+        IsTrue(reader.NextResult());
+        AreEqual(8134, Throws<SimulatedSqlException>(() => reader.Read()).Number);
     }
 
     [TestMethod]

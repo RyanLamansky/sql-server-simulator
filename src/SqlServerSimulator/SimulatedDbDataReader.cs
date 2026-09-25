@@ -471,7 +471,26 @@ public sealed class SimulatedDbDataReader : DbDataReader
     }
 
     /// <inheritdoc/>
-    public override bool Read() => this.cursor.MoveNext();
+    public override bool Read()
+    {
+        if (this.cursor.MoveNext())
+            return true;
+
+        // A result set its own statement's error cut short: real sends that
+        // error before the result set ends, so the Read after its last row
+        // throws it rather than a later NextResult.
+        if (this.currentResult is SimulatedSqlResultSet { EndedByError: true } && this.MoveToNextOutcome(out var next))
+        {
+            if (next is SimulatedErrorOutcome cutShort)
+            {
+                this.currentResult = null;
+                this.cursor = EmptyCursor.Instance;
+                throw cutShort.Exception;
+            }
+            this.pendingOutcome = next;
+        }
+        return false;
+    }
 
     /// <summary>
     /// Folds one pulled outcome into <see cref="RecordsAffected"/>. Called for

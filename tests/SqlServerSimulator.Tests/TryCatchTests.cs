@@ -20,7 +20,7 @@ public sealed class TryCatchTests
     [TestMethod]
     public void Try_BadConversion_Caught_ReturnsCatchBody()
         => AreEqual(2, new Simulation().ExecuteScalar(
-            "begin try select cast('abc' as int) end try begin catch select 2 end catch"));
+            "begin try declare @tv int = cast('abc' as int) end try begin catch select 2 end catch"));
 
     [TestMethod]
     public void Try_ConversionError_Caught()
@@ -49,30 +49,30 @@ public sealed class TryCatchTests
     [TestMethod]
     public void ErrorNumber_BadConversion_Returns245()
         => AreEqual(245, new Simulation().ExecuteScalar(
-            "begin try select cast('abc' as int) end try begin catch select error_number() end catch"));
+            "begin try declare @tv int = cast('abc' as int) end try begin catch select error_number() end catch"));
 
     [TestMethod]
     public void ErrorMessage_BadConversion_ReturnsMessage()
     {
         var msg = (string?)new Simulation().ExecuteScalar(
-            "begin try select cast('abc' as int) end try begin catch select error_message() end catch");
+            "begin try declare @tv int = cast('abc' as int) end try begin catch select error_message() end catch");
         Contains("Conversion failed", msg!, StringComparison.OrdinalIgnoreCase);
     }
 
     [TestMethod]
     public void ErrorSeverity_Returns16()
         => AreEqual(16, new Simulation().ExecuteScalar(
-            "begin try select cast('abc' as int) end try begin catch select error_severity() end catch"));
+            "begin try declare @tv int = cast('abc' as int) end try begin catch select error_severity() end catch"));
 
     [TestMethod]
     public void ErrorState_BadConversion_Returns1()
         => AreEqual(1, new Simulation().ExecuteScalar(
-            "begin try select cast('abc' as int) end try begin catch select error_state() end catch"));
+            "begin try declare @tv int = cast('abc' as int) end try begin catch select error_state() end catch"));
 
     [TestMethod]
     public void ErrorLine_SingleLineBatch_Returns1()
         => AreEqual(1, new Simulation().ExecuteScalar(
-            "begin try select cast('abc' as int) end try begin catch select error_line() end catch"));
+            "begin try declare @tv int = cast('abc' as int) end try begin catch select error_line() end catch"));
 
     /// <summary>
     /// The failing SET is on batch line 3; ERROR_LINE() reports it, not the
@@ -98,7 +98,7 @@ public sealed class TryCatchTests
     public void ErrorProcedure_OutsideProc_ReturnsNull()
     {
         using var reader = new Simulation().ExecuteReader(
-            "begin try select cast('abc' as int) end try begin catch select error_procedure() end catch");
+            "begin try declare @tv int = cast('abc' as int) end try begin catch select error_procedure() end catch");
         IsTrue(reader.Read());
         IsTrue(reader.IsDBNull(0));
     }
@@ -118,7 +118,7 @@ public sealed class TryCatchTests
     [TestMethod]
     public void AtAtError_InsideCatch_ReturnsErrorNumber()
         => AreEqual(245, new Simulation().ExecuteScalar(
-            "begin try select cast('abc' as int) end try begin catch select @@error end catch"));
+            "begin try declare @tv int = cast('abc' as int) end try begin catch select @@error end catch"));
 
     [TestMethod]
     public void AtAtError_AfterCatch_Returns0()
@@ -127,7 +127,7 @@ public sealed class TryCatchTests
         // That SELECT succeeds, so @@ERROR resets to 0 immediately after.
         // The follow-up SELECT @@ERROR reads 0.
         using var reader = new Simulation().ExecuteReader(
-            "begin try select cast('abc' as int) end try begin catch select @@error as inside end catch; select @@error as after");
+            "begin try declare @tv int = cast('abc' as int) end try begin catch select @@error as inside end catch; select @@error as after");
         IsTrue(reader.Read());
         AreEqual(245, reader.GetInt32(0));
         IsTrue(reader.NextResult());
@@ -149,7 +149,7 @@ public sealed class TryCatchTests
         // completion without an error, and its CATCH is skipped. Result:
         // nothing visible to the caller.
         using var reader = new Simulation().ExecuteReader(
-            "begin try begin try select cast('abc' as int) end try begin catch end catch end try begin catch select 'outer' end catch");
+            "begin try begin try declare @tv int = cast('abc' as int) end try begin catch end catch end try begin catch select 'outer' end catch");
         // No row set produced.
         IsFalse(reader.Read());
     }
@@ -157,7 +157,7 @@ public sealed class TryCatchTests
     [TestMethod]
     public void NestedTry_InnerRethrows_OuterCatches()
         => AreEqual(245, new Simulation().ExecuteScalar(
-            "begin try begin try select cast('abc' as int) end try begin catch throw end catch end try begin catch select error_number() end catch"));
+            "begin try begin try declare @tv int = cast('abc' as int) end try begin catch throw end catch end try begin catch select error_number() end catch"));
 
     [TestMethod]
     public void NestedTry_InnerCatchOwnError_OuterDoesntSee()
@@ -165,7 +165,7 @@ public sealed class TryCatchTests
         // Inner CATCH absorbs the bad conversion, then the outer CATCH
         // won't run since the outer TRY block completes normally.
         using var reader = new Simulation().ExecuteReader(
-            "begin try begin try select cast('abc' as int) end try begin catch select 'inner-caught' end catch end try begin catch select 'outer' end catch");
+            "begin try begin try declare @tv int = cast('abc' as int) end try begin catch select 'inner-caught' end catch end try begin catch select 'outer' end catch");
         IsTrue(reader.Read());
         AreEqual("inner-caught", reader.GetString(0));
         IsFalse(reader.NextResult());
@@ -200,7 +200,7 @@ public sealed class TryCatchTests
     {
         // Bare `throw` re-raises out of the batch (no outer TRY/CATCH).
         var ex = new Simulation().AssertSqlError(
-            "begin try select cast('abc' as int) end try begin catch throw end catch", 245);
+            "begin try declare @tv int = cast('abc' as int) end try begin catch throw end catch", 245);
         Contains("Conversion failed", ex.Message, StringComparison.OrdinalIgnoreCase);
     }
 
@@ -335,7 +335,7 @@ public sealed class TryCatchTests
     [TestMethod]
     public void CaseInsensitiveTryAndCatch()
         => AreEqual(2, new Simulation().ExecuteScalar(
-            "BEGIN TrY SELECT cast('abc' as int) END try BEGIN catch SELECT 2 END Catch"));
+            "BEGIN TrY DECLARE @tv int = cast('abc' as int) END try BEGIN catch SELECT 2 END Catch"));
 
     [TestMethod]
     public void EmptyCatch_NoError_NoOutput()
@@ -386,7 +386,7 @@ public sealed class TryCatchTests
         // doesn't execute (skip-mode gates the actual evaluation), so CATCH
         // never fires.
         using var reader = new Simulation().ExecuteReader(
-            "if 1=0 begin try select cast('abc' as int) end try begin catch select 'caught' end catch select 'after'");
+            "if 1=0 begin try declare @tv int = cast('abc' as int) end try begin catch select 'caught' end catch select 'after'");
         IsTrue(reader.Read());
         AreEqual("after", reader.GetString(0));
     }
@@ -399,7 +399,7 @@ public sealed class TryCatchTests
         using var reader = new Simulation().ExecuteReader("""
             create table #t (id int);
             begin try
-                select cast('abc' as int)
+                declare @tv int = cast('abc' as int)
                 insert into #t values (999)
                 select 'after-error-in-try'
             end try

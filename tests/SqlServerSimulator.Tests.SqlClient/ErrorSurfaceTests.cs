@@ -198,4 +198,25 @@ public sealed class ErrorSurfaceTests
         AreEqual(20, ex.Class);
         AreEqual(System.Data.ConnectionState.Closed, connection.State);
     }
+
+    /// <summary>
+    /// A SELECT's run-time error arrives after its column metadata and the
+    /// rows before it, ahead of the result set's DONE, so SqlClient reads
+    /// those rows and throws from the next <c>Read</c> — not from
+    /// <c>ExecuteReader</c>, even when the failing row is the first.
+    /// </summary>
+    [TestMethod]
+    [DataRow("select 10/0 as x", 0)]
+    [DataRow("select a, 10 / (a - 2) from (values (1), (2), (3)) v(a)", 1)]
+    public async Task SelectRuntimeError_ThrowsFromReadAfterTheRowsBeforeIt(string sql, int rowsBefore)
+    {
+        var simulation = new Simulation();
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+        await using var command = new SqlCommand(sql, connection);
+        await using var reader = await command.ExecuteReaderAsync(TestContext.CancellationToken);
+        for (var i = 0; i < rowsBefore; i++)
+            IsTrue(await reader.ReadAsync(TestContext.CancellationToken));
+        AreEqual(8134, (await ThrowsAsync<SqlException>(() => reader.ReadAsync(TestContext.CancellationToken))).Number);
+    }
 }

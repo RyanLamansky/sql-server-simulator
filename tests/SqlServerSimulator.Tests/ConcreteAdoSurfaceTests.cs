@@ -145,9 +145,9 @@ public sealed class ConcreteAdoSurfaceTests
 
     /// <summary>
     /// A reader positioned before any <c>Read</c> — and one positioned on a
-    /// statement that failed — reports no fields and no rows, and indexing a
-    /// row that isn't there is an <see cref="InvalidOperationException"/>
-    /// rather than an out-of-range one.
+    /// statement that failed — reports no rows, and indexing a row that isn't
+    /// there is an <see cref="InvalidOperationException"/> rather than an
+    /// out-of-range one.
     /// </summary>
     [TestMethod]
     public void Reader_BeforeFirstReadAndOnAFailedStatement_ReportNoRowAndNoFields()
@@ -157,13 +157,14 @@ public sealed class ConcreteAdoSurfaceTests
         IsFalse(beforeAny.Read());
         _ = ThrowsExactly<InvalidOperationException>(() => beforeAny.GetValue(0));
 
-        // The second statement fails, so NextResult lands the reader on the
-        // error position: no fields, no rows, and Read throws the carried error.
+        // The second statement fails on its first row, after real has sent its
+        // column metadata: NextResult lands on it with its field, no rows, and
+        // Read throws the carried error (probed 2026-09-25 against SQL Server 2025).
         using var failing = connection.CreateCommand("select 1; select cast('x' as int);").ExecuteReader();
         IsTrue(failing.Read());
         IsFalse(failing.Read());
         IsTrue(failing.NextResult());
-        AreEqual(0, failing.FieldCount);
+        AreEqual(1, failing.FieldCount);
         IsFalse(failing.HasRows);
         _ = ThrowsExactly<InvalidOperationException>(() => failing.GetValue(0));
         AreEqual(245, ThrowsExactly<SimulatedSqlException>(() => failing.Read()).Number);
@@ -184,5 +185,25 @@ public sealed class ConcreteAdoSurfaceTests
         IsTrue(reader.HasRows);
         IsTrue(reader.Read());
         AreEqual("abcd", reader.GetString(0));
+    }
+
+    /// <summary>
+    /// A SELECT whose row fails partway has already sent its metadata and the
+    /// rows before the failure, so they read, and the error surfaces from the
+    /// Read after the last of them — also on a cached plan's replay (probed
+    /// 2026-09-25 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void Reader_RowsBeforeAFailingRow_ReadAheadOfItsError()
+    {
+        using var connection = OpenConcrete();
+        for (var run = 0; run < 3; run++)
+        {
+            using var reader = connection.CreateCommand("select a, 10 / (a - 2) from (values (1), (2), (3)) v(a)").ExecuteReader();
+            AreEqual(2, reader.FieldCount);
+            IsTrue(reader.Read());
+            AreEqual(1, reader.GetInt32(0));
+            AreEqual(8134, ThrowsExactly<SimulatedSqlException>(() => reader.Read()).Number);
+        }
     }
 }

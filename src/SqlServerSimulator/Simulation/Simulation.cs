@@ -1380,8 +1380,27 @@ public sealed partial class Simulation
                 // SELECT permission check against the replaying session's
                 // current principal.
                 PermissionEnforcement.CheckReadSources(batch, selection.ReferencedSecurables, selection.ReadColumnsByObject);
-                var executed = selection.Execute(batch).WithRowCountLimit(connection.RowCountLimit);
-                var rowCount = executed.MaterializeRows();
+                // As in the dispatch loop, rows before a failing one go out
+                // ahead of its error (see EndedByError).
+                SimulatedSqlResultSet? executed = null;
+                SimulatedSqlException? cutShort = null;
+                int rowCount;
+                try
+                {
+                    executed = selection.Execute(batch).WithRowCountLimit(connection.RowCountLimit);
+                    rowCount = executed.MaterializeRows();
+                }
+                catch (SimulatedSqlException error) when (!selection.IsAssignmentOnly)
+                {
+                    cutShort = error;
+                    rowCount = 0;
+                    executed ??= new SimulatedSqlResultSet(selection.Schema, selection.ColumnNames, new List<byte[]>())
+                    {
+                        ColumnNullability = selection.ColumnNullability,
+                        ColumnReportsNumeric = selection.ColumnReportsNumeric,
+                    };
+                    executed.EndedByError = true;
+                }
                 connection.LastStatementRowCount = rowCount;
                 var replayed = selection.IsAssignmentOnly
                     ? new SimulatedNonQuery(rowCount, countsRowsReturned: true)
@@ -1392,6 +1411,8 @@ public sealed partial class Simulation
                 foreach (var message in DrainPendingMessages(connection))
                     yield return message;
                 yield return replayed;
+                if (cutShort is not null)
+                    ExceptionDispatchInfo.Throw(cutShort);
                 if (batch.CurrentStatement.NullEliminated && connection.AnsiWarnings)
                     yield return NullEliminatedWarning(batch);
                 foreach (var notice in ArithmeticNotices(batch))
@@ -2627,8 +2648,29 @@ public sealed partial class Simulation
                     // the rows a `SELECT @v = …` assignment walks
                     // (probe-confirmed: the assignment keeps the value from the
                     // last row inside the cap, and @@ROWCOUNT reads the cap).
-                    var executed = selection.Execute(batch).WithRowCountLimit(connection.RowCountLimit);
-                    var rowCount = executed.MaterializeRows();
+                    // A row that raises ends the statement, but real has sent
+                    // the column metadata and the rows before it by then, so
+                    // they go out ahead of the error (see EndedByError) — an
+                    // empty result set when the plan failed before its first.
+                    SimulatedSqlResultSet? executed = null;
+                    SimulatedSqlException? cutShort = null;
+                    int rowCount;
+                    try
+                    {
+                        executed = selection.Execute(batch).WithRowCountLimit(connection.RowCountLimit);
+                        rowCount = executed.MaterializeRows();
+                    }
+                    catch (SimulatedSqlException error) when (!selection.IsAssignmentOnly)
+                    {
+                        cutShort = error;
+                        rowCount = 0;
+                        executed ??= new SimulatedSqlResultSet(selection.Schema, selection.ColumnNames, new List<byte[]>())
+                        {
+                            ColumnNullability = selection.ColumnNullability,
+                            ColumnReportsNumeric = selection.ColumnReportsNumeric,
+                        };
+                        executed.EndedByError = true;
+                    }
                     connection.LastStatementRowCount = rowCount;
                     outcome = selection.IsAssignmentOnly
                         ? new SimulatedNonQuery(rowCount, countsRowsReturned: true)
@@ -2659,6 +2701,8 @@ public sealed partial class Simulation
                         }
                     }
                     yield return outcome;
+                    if (cutShort is not null)
+                        ExceptionDispatchInfo.Throw(cutShort);
                     break;
                 }
 

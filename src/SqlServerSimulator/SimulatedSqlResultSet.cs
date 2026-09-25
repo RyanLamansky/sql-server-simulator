@@ -96,19 +96,41 @@ internal sealed class SimulatedSqlResultSet : SimulatedQueryResult
         return this;
     }
 
+    /// <remarks>
+    /// A row that raises leaves the rows before it in place, so a statement
+    /// its own error cut short can still send them (see <see cref="EndedByError"/>).
+    /// </remarks>
     public int MaterializeRows()
     {
         if (this.rowValues is { } values)
         {
-            var list = values as List<SqlValue[]> ?? [.. values];
+            if (values is List<SqlValue[]> ready)
+                return ready.Count;
+            List<SqlValue[]> list = [];
             this.rowValues = list;
+            foreach (var row in values)
+                list.Add(row);
             return list.Count;
         }
 
-        var bytes = this.rowBytes as List<byte[]> ?? [.. this.rowBytes!];
+        if (this.rowBytes is List<byte[]> readyBytes)
+            return readyBytes.Count;
+        List<byte[]> bytes = [];
+        var source = this.rowBytes!;
         this.rowBytes = bytes;
+        foreach (var row in source)
+            bytes.Add(row);
         return bytes.Count;
     }
+
+    /// <summary>
+    /// Set when the statement's own error cut these rows short. Real sends a
+    /// SELECT's column metadata and each row as it produces it, so the rows
+    /// before the failing one reach the client and the error arrives before
+    /// the result set ends: the client's <c>Read</c> after the last row
+    /// throws it (probed 2026-09-25 against SQL Server 2025).
+    /// </summary>
+    public bool EndedByError;
 
     public override RowCursor CreateCursor() => this.rowValues is { } values
         ? new ValueArrayCursor(this.schema, values.GetEnumerator())
