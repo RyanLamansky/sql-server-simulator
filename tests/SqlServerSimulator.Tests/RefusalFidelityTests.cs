@@ -455,4 +455,12 @@ public sealed class RefusalFidelityTests
     public void InSubquery_IllegalConversion_NamesTheColumnInMsg260(string query)
         => new Simulation().AssertSqlError($"create table ib (v varchar(10), r rowversion); {query}", 260,
             "Disallowed implicit conversion from data type varchar to data type timestamp, table 'ib', column 'v'. Use the CONVERT function to run this query.");
+
+    [TestMethod]
+    [DataRow("with c as (select 1 a) select * from c with c2 as (select 2 b) select * from c2", 336)]
+    [DataRow("create table t336 (a int); select * from t336 with c2 as (select 2 b) select * from c2", 336)]
+    [DataRow("select 1 with c2 as (select 2 b) select * from c2", 319)]
+    [DataRow("create table t336 (a int); select * from t336 with (nolock) with c2 as (select 2 b) select * from c2", 319)]
+    public void CteAfterAnUnterminatedStatement_NamesTheCteAfterAFromSource(string sql, int number)
+        => new Simulation().AssertSqlError(sql, number);
 }

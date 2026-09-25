@@ -385,6 +385,15 @@ partial class SimulatedSqlException
         new("Incorrect syntax near the keyword 'with'. If this statement is a common table expression, an xmlnamespaces clause or a change tracking context clause, the previous statement must be terminated with a semicolon.", 319, 15, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 336: the <c>WITH</c> of a CTE follows a FROM
+    /// source of an unterminated statement, where a table hint could have
+    /// opened, so real names the CTE rather than the keyword Msg 319 names
+    /// (probed 2026-09-24).
+    /// </summary>
+    internal static SimulatedSqlException CteAfterUnterminatedStatement(string cteName) =>
+        new($"Incorrect syntax near '{cteName}'. If this is intended to be a common table expression, you need to explicitly terminate the previous statement with a semi-colon.", 336, 15, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 5324: a <c>MERGE</c> statement had a
     /// <c>WHEN MATCHED</c> (or <c>WHEN NOT MATCHED BY SOURCE</c>) clause
     /// carrying a search condition appear <em>after</em> a clause of the

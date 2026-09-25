@@ -2749,6 +2749,15 @@ internal sealed partial class Selection
                         cteColumns[ci] = new HeapColumn(string.Empty, cteBinding.Plan.Schema[ci], maxLength: null, nullable: true, spelledNumeric: cteBinding.Plan.ColumnReportsNumeric is { } cteNumeric && cteNumeric[ci]);
 
                     var cteAlias = ConsumeOptionalAlias(context);
+                    // A CTE reference takes no hints, so a WITH after it is the
+                    // start of another CTE the statement ran into (Msg 336).
+                    if (context.Token is ReservedKeyword { Keyword: Keyword.With })
+                    {
+                        var afterWith = context.SaveCheckpoint();
+                        if (context.GetNextOptional() is Name nextCte)
+                            throw SimulatedSqlException.CteAfterUnterminatedStatement(nextCte.Value);
+                        context.RestoreCheckpoint(afterWith);
+                    }
 
                     return new FromSource(
                         qualifier: cteAlias ?? cteBinding.Name,

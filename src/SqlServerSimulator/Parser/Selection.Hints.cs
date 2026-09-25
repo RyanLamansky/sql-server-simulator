@@ -310,7 +310,11 @@ internal sealed partial class Selection
         var info = default(TableHintInfo);
         if (context.Token is ReservedKeyword { Keyword: Keyword.With })
         {
-            if (context.GetNextRequired() is not Operator { Character: '(' })
+            // A name after the hint position's WITH is a CTE the previous
+            // statement ran into (Msg 336, probed 2026-09-24).
+            if (context.GetNextRequired() is Name cteName)
+                throw SimulatedSqlException.CteAfterUnterminatedStatement(cteName.Value);
+            if (context.Token is not Operator { Character: '(' })
                 throw SimulatedSqlException.SyntaxErrorNear(context);
             context.MoveNextRequired();
             ConsumeTableHintListBody(context, ref info, legacyForm: false);

@@ -116,19 +116,19 @@ public sealed class OptionalSemicolonTests
             "Incorrect syntax near the keyword 'with'. If this statement is a common table expression, an xmlnamespaces clause or a change tracking context clause, the previous statement must be terminated with a semicolon.");
 
     [TestMethod]
-    public void TwoCtesWithoutSemicolon_RaisesMsg319()
+    public void TwoCtesWithoutSemicolon_RaisesMsg336()
     {
         // Even when both statements are CTE-prefixed, the second WITH still
-        // requires a `;` to separate it from the prior statement. The error
-        // surfaces when the dispatch loop advances to the second WITH —
-        // which means the test has to drive iteration past the first result
-        // set; ExecuteScalar would short-circuit.
+        // requires a `;` to separate it from the prior statement. Right after
+        // a FROM source it is Msg 336 naming the CTE (probed 2026-09-24), and
+        // the test drives iteration past the first result set, since
+        // ExecuteScalar would short-circuit.
         using var conn = new Simulation().CreateOpenConnection();
         var ex = Throws<SimulatedSqlException>(() =>
             conn.CreateCommand(
                 "with c1 as (select 1 as x) select x from c1 with c2 as (select 2 as y) select y from c2")
                 .ExecuteNonQuery());
-        AreEqual(319, ex.Number);
+        AreEqual(336, ex.Number);
     }
 
     [TestMethod]
