@@ -588,7 +588,9 @@ internal static partial class BuiltInResources
                     : isGuest ? GuestSid
                     : isCatalogPrincipal ? nullSid
                     : SqlValue.FromVarbinary(DeriveDatabasePrincipalSid(p)),
-                p.IsFixedRole ? trueBit : falseBit,
+                // public (principal_id 0) reports is_fixed_role 0 although it
+                // is a fixed role (probed 2026-09-25), as at the server level.
+                p.IsFixedRole && p.PrincipalId != 0 ? trueBit : falseBit,
                 isDbo ? authInstance : authNone,
                 isDbo ? authInstanceDesc : authNoneDesc,
                 nullLanguageName,

@@ -143,7 +143,7 @@ public sealed class PermissionStatementTests
     public void SysDatabasePrincipals_HasFixedPrincipalsPreSeeded()
     {
         var sim = new Simulation();
-        AreEqual(1, sim.ExecuteScalar("select count(*) from sys.database_principals where name = 'public' and is_fixed_role = 1"));
+        AreEqual(1, sim.ExecuteScalar("select count(*) from sys.database_principals where name = 'public' and is_fixed_role = 0"));
         AreEqual(1, sim.ExecuteScalar("select count(*) from sys.database_principals where name = 'dbo'"));
         AreEqual(0, sim.ExecuteScalar("select principal_id from sys.database_principals where name = 'public'"));
         AreEqual(1, sim.ExecuteScalar("select principal_id from sys.database_principals where name = 'dbo'"));
