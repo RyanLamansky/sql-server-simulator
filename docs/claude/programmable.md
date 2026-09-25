@@ -371,8 +371,11 @@ Probed against SQL Server 2025.
 - Exactly one FROM source (a heap table OR another updatable view) — a multi-source body, and a chain whose bottom is one, take the [join-view DML](#dml-through-a-join-view) path instead.
 - No DISTINCT, no aggregates, no GROUP BY, no HAVING, no window functions, no set-op chain.
   ORDER BY alone is allowed (it only affects reads).
-  A TOP / OFFSET / FETCH row limit or a window function leaves the body updatable on real, but only to the rows the body yields (`DELETE` through a `TOP 1` view deletes one row; `DELETE … WHERE rn > 1` through a `ROW_NUMBER()` view dedupes — probed 2026-09-25); the per-base-row write path can't select those, so an `UPDATE` / `DELETE` / `MERGE` through one raises `NotSupportedException` rather than write every row the filter admits (`View.IsRowLimited`, `ViewUpdatabilityRejection.RowSelective`).
-  A positioned write (`WHERE CURRENT OF`) through a row-limited view names its row exactly and goes through, and so does an `INSERT`, which the limit doesn't reach.
+  A TOP / OFFSET / FETCH row limit or a window function leaves the body updatable on real, but only to the rows the body yields (`DELETE` through a `TOP 1` view deletes one row; `DELETE … WHERE rn > 1` through a `ROW_NUMBER()` view dedupes — probed 2026-09-25).
+  Such a view is marked (`View.IsRowLimited` / `View.IsWindowed`), and an `UPDATE` / `DELETE` through it runs the body once and pairs each output row with the base row it came from (`MaterializeRowSelectiveViewRows`): a windowed body's rows by heap order, a row-limited body's by matching direct columns.
+  The write then takes only those rows, and its `WHERE` / `SET` read the body's derived columns (`rn`) off them; writing a derived column is still Msg 4406.
+  A limit that chose between rows its projection can't tell apart (a `TOP 1 id … ORDER BY v` over two `id = 1` rows) raises `NotSupportedException` rather than guess, as does a `MERGE` through either shape.
+  A positioned write (`WHERE CURRENT OF`) names its row exactly, and an `INSERT` isn't reached by the limit, so both go through as before.
 - Every column referenced in any WHERE clause up the chain maps to a real base-table column (no WHERE that references an upstream derived projection).
 
 Selection-side capture is `Selection.UpdatabilityProfile` (set in `BuildSqlProjection` when shape-eligible) + `Selection.UpdatabilityRejection` (drives Msg 4403 vs Msg 4405 vs Msg 4406 at the DML site).

@@ -483,9 +483,12 @@ internal sealed partial class Selection
                     if (collation.Equals(sourceView.OutputColumns[v].Name, name.Leaf))
                     {
                         var baseOrdinal = sourceView.BaseColumnOrdinals[v];
-                        return baseOrdinal < 0
-                            ? throw SimulatedSqlException.InvalidColumnName(name)
-                            : ColumnTypeWithMaxLength(table.Columns[baseOrdinal]);
+                        // A windowed or row-limited view's write reads its
+                        // derived columns (a ROW_NUMBER's rn) off the body's
+                        // own rows.
+                        return baseOrdinal >= 0 ? ColumnTypeWithMaxLength(table.Columns[baseOrdinal])
+                            : sourceView is { IsWindowed: true } or { IsRowLimited: true } ? ColumnTypeWithMaxLength(sourceView.OutputColumns[v])
+                            : throw SimulatedSqlException.InvalidColumnName(name);
                     }
                 }
                 throw SimulatedSqlException.InvalidColumnName(name);
@@ -1284,16 +1287,14 @@ internal sealed partial class Selection
             : null;
 
         // Updatable-view shape capture: single source, no JOINs, no DISTINCT,
-        // no aggregates / GROUP BY / HAVING. A window function leaves the body
-        // writable on real, but only to the rows it yields, which the
-        // per-base-row write path can't select (ViewUpdatabilityRejection.
-        // RowSelective). A TOP / OFFSET / FETCH row limit keeps the profile —
-        // a positioned write through it names its row exactly — and the view
-        // records the limit instead (View.IsRowLimited). ORDER BY alone only
-        // affects reads. View.cs consumes this to derive Msg 4403 / 4405 / 4406
-        // metadata at CREATE VIEW.
+        // no aggregates / GROUP BY / HAVING. A window function or a TOP /
+        // OFFSET / FETCH row limit keeps the profile — the window's columns are
+        // derived, and the view records either shape (View.IsWindowed /
+        // View.IsRowLimited) for the write path, since real writes only to the
+        // rows such a body yields. ORDER BY alone only affects reads. View.cs
+        // consumes this to derive Msg 4403 / 4405 / 4406 metadata at CREATE VIEW.
         var (updatabilityProfile, updatabilityRejection) = ComputeViewUpdatabilityProfile(
-            sources, joins, expressions, fromClause, distinct, aggregates, windows);
+            sources, joins, expressions, fromClause, distinct, aggregates);
 
         var columnNullability = ComputeColumnNullability(expressions, sources, joins, fromClause.GroupingSetsWritten, parseBatch, ResolveColumnType);
 
@@ -1390,6 +1391,7 @@ internal sealed partial class Selection
         selection.AutoSourceNames = AutoSourceNamesOf(sources);
         (selection.AutoColumnSource, selection.AutoColumnOrdinal) = AutoColumnBindingOf(expressions, sources);
         selection.IsGrouped = aggregates.Count > 0 || fromClause.GroupingSets.Count > 0 || fromClause.Having is not null;
+        selection.HasWindows = windows.Count > 0;
         // A plain SELECT-project-filter body can carry an enclosing statement's
         // WHERE conjunct: it applies its projection and its own WHERE to every
         // row and nothing else, so an extra filter there is the same filter one
@@ -1761,8 +1763,7 @@ internal sealed partial class Selection
         List<Expression> expressions,
         FromClause fromClause,
         bool distinct,
-        List<AggregateExpression> aggregates,
-        List<WindowExpression> windows)
+        List<AggregateExpression> aggregates)
     {
         if (distinct)
             return (null, ViewUpdatabilityRejection.Distinct);
@@ -1770,8 +1771,6 @@ internal sealed partial class Selection
             return (null, ViewUpdatabilityRejection.Aggregate);
         if (fromClause.GroupingSets.Count > 0 || fromClause.Having is not null)
             return (null, ViewUpdatabilityRejection.GroupBy);
-        if (windows.Count > 0)
-            return (null, ViewUpdatabilityRejection.RowSelective);
 
         var profile = new ViewUpdatabilityProfile(
             sources: sources,

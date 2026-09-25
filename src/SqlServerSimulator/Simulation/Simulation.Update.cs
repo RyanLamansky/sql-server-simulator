@@ -437,8 +437,6 @@ partial class Simulation
                 where = Selection.ParseAndBindPredicate(context, targetTypeResolver);
         }
 
-        if (positionedCursor is null)
-            RejectRowLimitedViewWrite(context, sourceView, targetName);
         CheckUpdatePermissions(context, targetName, table, sourceView, rawAssignments, where);
 
         var affected = new List<(int PageIndex, int SlotIndex, SqlValue[] FullNew, SqlValue[]? FullOld)>();
@@ -460,6 +458,7 @@ partial class Simulation
         // resolved above.
         if (context.Batch.IsSkipping)
             rowSource = [];
+        var viewRows = MaterializeRowSelectiveViewRows(context, sourceView, table, positionedCursor is not null);
         foreach (var (pageIndex, slotIndex, rowBytes) in rowSource)
         {
             // Positioned UPDATE (WHERE CURRENT OF): target only the row the
@@ -476,6 +475,11 @@ partial class Simulation
             if (sourceView?.VisibilityCheck is { } vis && !vis(fullValues, context.Batch))
                 continue;
 
+            // A windowed or row-limited target writes only to the rows its body yields.
+            SqlValue[]? viewRow = null;
+            if (viewRows is not null && !viewRows.TryGetValue((pageIndex, slotIndex), out viewRow))
+                continue;
+
             SqlValue ResolveOriginal(MultiPartName name)
             {
                 if (sourceView is not null)
@@ -485,8 +489,8 @@ partial class Simulation
                         if (context.Batch.CurrentDatabase.Collation.Equals(sourceView.OutputColumns[v].Name, name.Leaf))
                         {
                             var baseOrd = sourceView.BaseColumnOrdinals[v];
-                            return baseOrd < 0
-                                ? throw SimulatedSqlException.InvalidColumnName(name)
+                            return viewRow is not null ? viewRow[v]
+                                : baseOrd < 0 ? throw SimulatedSqlException.InvalidColumnName(name)
                                 : fullValues[baseOrd];
                         }
                     }

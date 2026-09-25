@@ -82,7 +82,7 @@ Both refuse.
 ## DML through a CTE
 
 A DML statement whose target is one of its own CTEs writes through it exactly as through a view with that body (probed 2026-09-25 against SQL Server 2025): `WITH d AS (SELECT id, v FROM t WHERE id = 1) DELETE FROM d WHERE v = 2` deletes from `t`, `UPDATE d` and `INSERT INTO d` pass through too, a derived column is Msg 4406 and an aggregate body Msg 4403.
-`Simulation.TryResolveCteTarget` builds the unstored view from the CTE's plan with the same analysis `CREATE VIEW` runs, so every rule under [updatable views](programmable.md#updatable-views-dml-through-views) applies, including the refusal of a row-limited or windowed body.
+`Simulation.TryResolveCteTarget` builds the unstored view from the CTE's plan with the same analysis `CREATE VIEW` runs, so every rule under [updatable views](programmable.md#updatable-views-dml-through-views) applies — including the row-limited and windowed bodies, which is what makes the dedupe idiom `WITH d AS (SELECT *, ROW_NUMBER() OVER (PARTITION BY k ORDER BY v) rn FROM t) DELETE FROM d WHERE rn > 1` work.
 A CTE reading several sources refuses where real would pass an `UPDATE` through to one of them, since the join-view path re-parses a stored view's text.
 
 ## Where a prefix may appear

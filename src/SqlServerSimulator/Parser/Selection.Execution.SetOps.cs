@@ -23,6 +23,12 @@ internal sealed partial class Selection
     internal bool IsGrouped;
 
     /// <summary>
+    /// The projection carries a window function — which a write through the
+    /// body as a view or CTE target has to read off the body's own rows.
+    /// </summary>
+    internal bool HasWindows;
+
+    /// <summary>
     /// The FROM sources of the branch whose projections this plan's output
     /// columns come from — the leftmost branch of a set-op chain, since that's
     /// where the combined result takes its column names. A top-level ORDER BY

@@ -78,12 +78,6 @@ partial class Simulation
             // carries the same pair the join view itself does.
             return (null, [], ViewUpdatabilityRejection.MultipleSources, null, null, true);
         }
-        else if (source.BackingView is { RejectionReason: ViewUpdatabilityRejection.RowSelective })
-        {
-            // A view over a windowed view writes to the rows the inner one
-            // yields, which is the same unbuilt path.
-            return (null, [], ViewUpdatabilityRejection.RowSelective, null, null, false);
-        }
         else
         {
             // Source is a derived table, CTE, OPENJSON, TVF, catalog view,
@@ -249,11 +243,9 @@ partial class Simulation
     /// the cursor on the token after the view's name; the messages name the
     /// view as the statement wrote it, as real's do.
     /// </summary>
-    private static Exception RefuseNonUpdatableViewWrite(ParserContext context, View view, MultiPartName writtenName, bool isUpdate)
+    private static SimulatedSqlException RefuseNonUpdatableViewWrite(ParserContext context, View view, MultiPartName writtenName, bool isUpdate)
     {
         var viewLabel = writtenName.ToString();
-        if (view.RejectionReason == ViewUpdatabilityRejection.RowSelective)
-            return RowSelectiveViewWriteNotModeled(viewLabel);
         if (view.DerivedOutputColumns is { } derivedColumns)
         {
             var checkpoint = context.SaveCheckpoint();
@@ -299,13 +291,121 @@ partial class Simulation
         || (body.UpdatabilityProfile is { Sources: [{ BackingView.IsRowLimited: true }] });
 
     /// <summary>
-    /// Refuses a non-positioned UPDATE / DELETE / MERGE through a row-limited
-    /// view (<see cref="View.IsRowLimited"/>) when it runs.
+    /// Whether a view body projects a window function, directly or through
+    /// the single view it reads (<see cref="View.IsWindowed"/>).
     /// </summary>
-    private static void RejectRowLimitedViewWrite(ParserContext context, View? view, MultiPartName writtenName)
+    private static bool IsWindowedBody(Selection body) =>
+        body.HasWindows
+        || (body.UpdatabilityProfile is { Sources: [{ BackingView.IsWindowed: true }] });
+
+    /// <summary>
+    /// Refuses a MERGE through a row-limited or windowed view when it runs:
+    /// its matching reads the rows the body yields, which only the DELETE /
+    /// UPDATE path pairs back to base rows.
+    /// </summary>
+    private static void RejectRowSelectiveMergeTarget(ParserContext context, View view, MultiPartName writtenName)
     {
-        if (view is { IsRowLimited: true } && !context.Batch.IsSkipping)
+        if (view is { IsRowLimited: true } or { IsWindowed: true } && !context.Batch.IsSkipping)
             throw RowSelectiveViewWriteNotModeled(writtenName.ToString());
+    }
+
+    /// <summary>
+    /// The rows a windowed or row-limited view or CTE yields, keyed by the base
+    /// row each came from, for a DELETE / UPDATE through it: real writes to
+    /// exactly those rows and reads the derived columns (a <c>ROW_NUMBER()</c>'s
+    /// <c>rn</c>) off them (probed 2026-09-25 against SQL Server 2025). Null
+    /// when the target is neither, or the write is positioned.
+    /// </summary>
+    /// <remarks>
+    /// The body runs once. A windowed body's rows arrive in the base heap's
+    /// order — the window stage places each result back on its input row — so
+    /// they pair, in order, with the base rows the view's filter admits. A
+    /// row-limited body yields a subset in its own order, so each of its rows
+    /// is matched to an unclaimed base row whose direct columns agree; when two
+    /// candidates differ in a column the body didn't project, which one the
+    /// limit chose can't be told from its output, and the write refuses rather
+    /// than guess.
+    /// </remarks>
+    private static Dictionary<(int Page, int Slot), SqlValue[]>? MaterializeRowSelectiveViewRows(ParserContext context, View? view, HeapTable table, bool positioned)
+    {
+        if (view is not ({ IsWindowed: true } or { IsRowLimited: true }) || positioned || context.Batch.IsSkipping)
+            return null;
+        var body = view.UnstoredBody ?? context.Connection.Simulation.ParseViewBodyPlan(context.Batch, view);
+        var outputRows = body.Execute(context.Batch, null).RowValues.ToList();
+        var visible = new List<((int Page, int Slot) Address, SqlValue[] Values)>();
+        foreach (var (page, slot, bytes) in table.Heap.EnumerateRowsWithAddress())
+        {
+            var values = DecodeFullRow(table, bytes);
+            EvaluateComputedColumns(table, values, context.Batch);
+            if (view.VisibilityCheck is not { } isVisible || isVisible(values, context.Batch))
+                visible.Add(((page, slot), values));
+        }
+
+        var rows = new Dictionary<(int Page, int Slot), SqlValue[]>();
+        if (!view.IsRowLimited)
+        {
+            if (visible.Count != outputRows.Count)
+                throw RowSelectiveViewWriteNotModeled(view.Name);
+            for (var i = 0; i < visible.Count; i++)
+            {
+                if (!DirectColumnsAgree(view, outputRows[i], visible[i].Values))
+                    throw RowSelectiveViewWriteNotModeled(view.Name);
+                rows[visible[i].Address] = outputRows[i];
+            }
+            return rows;
+        }
+
+        var claimed = new bool[visible.Count];
+        foreach (var output in outputRows)
+        {
+            var match = -1;
+            for (var i = 0; i < visible.Count; i++)
+            {
+                if (claimed[i] || !DirectColumnsAgree(view, output, visible[i].Values))
+                    continue;
+                if (match < 0)
+                    match = i;
+                else if (!IdenticalRows(visible[match].Values, visible[i].Values))
+                    throw RowSelectiveViewWriteNotModeled(view.Name);
+            }
+            if (match < 0)
+                throw RowSelectiveViewWriteNotModeled(view.Name);
+            claimed[match] = true;
+            rows[visible[match].Address] = output;
+        }
+        return rows;
+    }
+
+    /// <summary>Two base rows equal in every column, strings compared ordinally.</summary>
+    private static bool IdenticalRows(SqlValue[] left, SqlValue[] right)
+    {
+        for (var k = 0; k < left.Length; k++)
+        {
+            if (left[k].IsNull != right[k].IsNull)
+                return false;
+            if (left[k].IsNull)
+                continue;
+            if (SqlType.IsStringCategory(left[k].Type)
+                ? !string.Equals(left[k].AsString, right[k].AsString, StringComparison.Ordinal)
+                : !left[k].Equals(right[k]))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static bool DirectColumnsAgree(View view, SqlValue[] viewRow, SqlValue[] baseRow)
+    {
+        for (var v = 0; v < view.BaseColumnOrdinals.Length; v++)
+        {
+            if (view.BaseColumnOrdinals[v] is var ordinal and >= 0
+                && (viewRow[v].IsNull != baseRow[ordinal].IsNull || (!viewRow[v].IsNull && !viewRow[v].Equals(baseRow[ordinal]))))
+            {
+                return false;
+            }
+        }
+        return true;
     }
 
     /// <summary>
@@ -314,7 +414,7 @@ partial class Simulation
     /// write to every row the body reads.
     /// </summary>
     private static NotSupportedException RowSelectiveViewWriteNotModeled(string viewLabel) =>
-        new($"DML through '{viewLabel}' isn't modeled: its body selects rows with TOP / OFFSET or computes over them with a window function, and SQL Server writes only to the rows that body yields.");
+        new($"DML through '{viewLabel}' isn't modeled for this shape: its body selects rows with TOP / OFFSET or computes over them with a window function, and SQL Server writes only to the rows that body yields.");
 
     /// <summary>The leaf names an UPDATE's SET list assigns, read from the cursor on; null when no SET follows.</summary>
     private static List<string>? PeekSetTargets(ParserContext context)
@@ -430,6 +530,8 @@ partial class Simulation
             {
                 DerivedOutputColumns = baseTable is null && rejection != ViewUpdatabilityRejection.MultipleSources ? DerivedOutputColumnsOf(body) : null,
                 IsRowLimited = IsRowLimitedBody(body),
+                IsWindowed = IsWindowedBody(body),
+                UnstoredBody = body,
             };
         }
         view = binding.DmlTarget;

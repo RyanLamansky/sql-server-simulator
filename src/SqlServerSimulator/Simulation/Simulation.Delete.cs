@@ -44,12 +44,9 @@ partial class Simulation
             }
             if (resolvedView.BaseTable is not { } baseTable)
             {
-                throw resolvedView.RejectionReason switch
-                {
-                    ViewUpdatabilityRejection.MultipleSources => SimulatedSqlException.ViewUpdateAffectsMultipleTables(leadingIdent.ToString()),
-                    ViewUpdatabilityRejection.RowSelective => RowSelectiveViewWriteNotModeled(leadingIdent.ToString()),
-                    _ => SimulatedSqlException.CannotUpdateNonUpdatableView(leadingIdent.ToString()),
-                };
+                throw resolvedView.RejectionReason == ViewUpdatabilityRejection.MultipleSources
+                    ? SimulatedSqlException.ViewUpdateAffectsMultipleTables(leadingIdent.ToString())
+                    : SimulatedSqlException.CannotUpdateNonUpdatableView(leadingIdent.ToString());
             }
             leadingView = resolvedView;
             leadingTable = baseTable;
@@ -126,8 +123,6 @@ partial class Simulation
             else
                 where = Selection.ParseAndBindPredicate(context, Selection.TargetColumnTypeResolver(context.Batch, targetName, table, sourceView));
         }
-        if (positionedCursor is null)
-            RejectRowLimitedViewWrite(context, sourceView, targetName);
 
         // DELETE reads the target when it has a WHERE clause — real then
         // also requires SELECT, checked first so the SELECT denial surfaces
@@ -178,6 +173,7 @@ partial class Simulation
         // binds at CREATE time.
         if (context.Batch.IsSkipping)
             rowSource = [];
+        var viewRows = MaterializeRowSelectiveViewRows(context, sourceView, table, positionedCursor is not null);
         foreach (var (pageIndex, slotIndex, rowBytes) in rowSource)
         {
             // Positioned DELETE (WHERE CURRENT OF): only the cursor's row.
@@ -196,6 +192,11 @@ partial class Simulation
             if (sourceView?.VisibilityCheck is { } vis && !vis(fullValues!, context.Batch))
                 continue;
 
+            // A windowed or row-limited target writes only to the rows its body yields.
+            SqlValue[]? viewRow = null;
+            if (viewRows is not null && !viewRows.TryGetValue((pageIndex, slotIndex), out viewRow))
+                continue;
+
             if (where is not null)
             {
                 var localValues = fullValues!;
@@ -208,8 +209,8 @@ partial class Simulation
                             if (context.Batch.CurrentDatabase.Collation.Equals(sourceView.OutputColumns[v].Name, name.Leaf))
                             {
                                 var baseOrd = sourceView.BaseColumnOrdinals[v];
-                                return baseOrd < 0
-                                    ? throw SimulatedSqlException.InvalidColumnName(name)
+                                return viewRow is not null ? viewRow[v]
+                                    : baseOrd < 0 ? throw SimulatedSqlException.InvalidColumnName(name)
                                     : localValues[baseOrd];
                             }
                         }

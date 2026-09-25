@@ -58,15 +58,12 @@ partial class Simulation
         {
             sourceView = resolvedView;
             destinationTable = resolvedView.BaseTable
-                ?? throw (resolvedView.RejectionReason switch
-                {
-                    ViewUpdatabilityRejection.MultipleSources => SimulatedSqlException.ViewUpdateAffectsMultipleTables(destinationName.ToString()),
-                    ViewUpdatabilityRejection.RowSelective => RowSelectiveViewWriteNotModeled(destinationName.ToString()),
-                    _ => SimulatedSqlException.CannotUpdateNonUpdatableView(destinationName.ToString()),
-                });
-            // A MERGE matches against the rows the view yields, so its limit
-            // applies to every action.
-            RejectRowLimitedViewWrite(context, resolvedView, destinationName);
+                ?? throw (resolvedView.RejectionReason == ViewUpdatabilityRejection.MultipleSources
+                    ? SimulatedSqlException.ViewUpdateAffectsMultipleTables(destinationName.ToString())
+                    : SimulatedSqlException.CannotUpdateNonUpdatableView(destinationName.ToString()));
+            // A MERGE matches against the rows the view yields, so its row
+            // limit or window applies to every action.
+            RejectRowSelectiveMergeTarget(context, resolvedView, destinationName);
         }
         else
         {

@@ -232,6 +232,7 @@ partial class Simulation
                 ? DerivedOutputColumnsOf(bodySelection)
                 : null,
             IsRowLimited = IsRowLimitedBody(bodySelection),
+            IsWindowed = IsWindowedBody(bodySelection),
         };
         if (replaced is not null)
         {

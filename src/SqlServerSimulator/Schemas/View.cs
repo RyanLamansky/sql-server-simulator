@@ -199,6 +199,18 @@ internal sealed class View(
     public bool IsRowLimited;
 
     /// <summary>
+    /// The body (or a view it reads) projects a window function. A
+    /// <c>DELETE</c> / <c>UPDATE</c> through it runs the body once and writes
+    /// to the base rows its output rows came from, reading the window columns
+    /// off them; a <c>MERGE</c> through it raises
+    /// <see cref="NotSupportedException"/>.
+    /// </summary>
+    public bool IsWindowed;
+
+    /// <summary>The parsed body of a CTE target, which has no stored text to re-parse; null for a stored view.</summary>
+    public Parser.Selection? UnstoredBody;
+
+    /// <summary>
     /// True when the body reads several FROM sources but is otherwise
     /// DML-eligible (no DISTINCT / aggregate / GROUP BY / HAVING / window /
     /// set op). <see cref="BaseTable"/> is null and
