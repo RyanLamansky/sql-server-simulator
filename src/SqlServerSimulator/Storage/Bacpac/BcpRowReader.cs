@@ -290,7 +290,7 @@ internal static class BcpRowReader
         return kind switch
         {
             EightBytePayload.VarcharMax => SqlValue.FromVarchar(Encoding.Unicode.GetString(data)),
-            EightBytePayload.NVarcharMax => SqlValue.FromNVarchar(Encoding.Unicode.GetString(data)),
+            EightBytePayload.NVarcharMax => SqlValue.FromNVarchar(SystemNameSqlType.Utf16LeDecode(data)),
             EightBytePayload.VarbinaryMax => SqlValue.FromVarbinary(data),
             EightBytePayload.Xml => SqlValue.FromXml(Encoding.Unicode.GetString(data)),
             EightBytePayload.Geography => Spatial.SpatialBinaryCodec.TryDecode(data, isGeography: true) is { } geographyValue
@@ -444,7 +444,7 @@ internal static class BcpRowReader
         // factory; DATALENGTH semantics still derive from the SqlType, so
         // a varchar(128) decoded from "++bTDOq..." reports 43 bytes the
         // way SQL Server does, not 86.
-        var text = Encoding.Unicode.GetString(data);
+        var text = SystemNameSqlType.Utf16LeDecode(data);
         return type switch
         {
             VarcharSqlType => SqlValue.FromVarchar(text),

@@ -608,7 +608,7 @@ internal static class TdsTypeCodec
                 if (value.IsNull)
                     writer.WriteUInt64(ulong.MaxValue);
                 else
-                    WritePlpChunks(writer, System.Text.Encoding.Unicode.GetBytes(value.AsString));
+                    WritePlpChunks(writer, SystemNameSqlType.Utf16LeBytes(value.AsString));
                 break;
             case SqlVariantSqlType:
                 WriteVariant(writer, value);
@@ -635,7 +635,7 @@ internal static class TdsTypeCodec
                 WriteLegacyLob(writer, value.IsNull ? null : TdsCollationCodec.For(tx.Collation).WireEncoding.GetBytes(value.AsString));
                 break;
             case NTextSqlType:
-                WriteLegacyLob(writer, value.IsNull ? null : System.Text.Encoding.Unicode.GetBytes(value.AsString));
+                WriteLegacyLob(writer, value.IsNull ? null : SystemNameSqlType.Utf16LeBytes(value.AsString));
                 break;
             case ImageSqlType:
                 WriteLegacyLob(writer, value.IsNull ? null : value.AsBytes);
@@ -875,7 +875,7 @@ internal static class TdsTypeCodec
     {
         var codec = TdsCollationCodec.For(collation);
         var data = national
-            ? System.Text.Encoding.Unicode.GetBytes(inner.AsString)
+            ? SystemNameSqlType.Utf16LeBytes(inner.AsString)
             : codec.WireEncoding.GetBytes(inner.AsString);
         var body = new byte[2 + 7 + data.Length];
         body[0] = typeToken;
@@ -1005,7 +1005,7 @@ internal static class TdsTypeCodec
             if (value.IsNull)
                 writer.WriteUInt64(ulong.MaxValue);
             else
-                WritePlpChunks(writer, System.Text.Encoding.Unicode.GetBytes(value.AsString));
+                WritePlpChunks(writer, SystemNameSqlType.Utf16LeBytes(value.AsString));
             return;
         }
 

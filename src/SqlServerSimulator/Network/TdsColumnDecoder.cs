@@ -235,7 +235,7 @@ internal static class TdsColumnDecoder
             return token switch
             {
                 0x22 => SqlValue.FromVarbinary(data.ToArray()),
-                0x63 => SqlValue.FromNVarchar(Encoding.Unicode.GetString(data)),
+                0x63 => SqlValue.FromNVarchar(SystemNameSqlType.Utf16LeDecode(data)),
                 _ => SqlValue.FromVarchar((utf8 ? Encoding.UTF8 : CharSqlType.Cp1252Encoder).GetString(data)),
             };
         }
@@ -370,7 +370,7 @@ internal static class TdsColumnDecoder
         private SqlValue ReadNationalString(TdsValueReader reader)
         {
             var bytes = this.ReadStringBytes(reader);
-            return bytes is null ? SqlValue.Null(SqlType.NVarchar) : SqlValue.FromNVarchar(Encoding.Unicode.GetString(bytes));
+            return bytes is null ? SqlValue.Null(SqlType.NVarchar) : SqlValue.FromNVarchar(SystemNameSqlType.Utf16LeDecode(bytes));
         }
 
         private byte[]? ReadStringBytes(TdsValueReader reader)
@@ -398,7 +398,7 @@ internal static class TdsColumnDecoder
             var bytes = TdsWireValue.ReadPlp(reader);
             if (bytes is null)
                 return SqlValue.Null(SqlType.Xml);
-            var value = Encoding.Unicode.GetString(bytes);
+            var value = SystemNameSqlType.Utf16LeDecode(bytes);
             if (value is ['\uFEFF', ..])
                 value = value[1..];
             return SqlValue.FromXml(XmlWellFormedness.Canonical(value, nationalSource: true));

@@ -119,18 +119,19 @@ internal sealed class Translate : Expression
             return SqlValue.Null(resultType);
         var charsStr = chars.CoerceTo(SqlType.NVarchar).AsString;
         var transStr = translations.CoerceTo(SqlType.NVarchar).AsString;
+        var inputStr = input.CoerceTo(SqlType.NVarchar).AsString;
+        var collation = StringScalars.CollationFor(runtime.Batch, input.Type, chars.Type, translations.Type);
+        if (collation.IsSupplementaryCharacterAware)
+            return SqlValue.FromString(resultType, TranslateByCodePoint(inputStr, charsStr, transStr, collation));
         if (charsStr.Length != transStr.Length)
             throw SimulatedSqlException.TranslateUnequalChars();
-        var inputStr = input.CoerceTo(SqlType.NVarchar).AsString;
         // Each input character is looked up in the character list under the
         // collation the three arguments resolve to, and the substitution is
         // taken from the *position* the lookup reports — probe-confirmed
         // against SQL Server 2025 that an explicit COLLATE on any of the three
         // decides the whole call, and that the fold is the collation's own
         // (case, accent, kanatype, width), not an ordinal match.
-        var matcher = new Collation.ElementMatcher(
-            StringScalars.CollationFor(runtime.Batch, input.Type, chars.Type, translations.Type),
-            charsStr);
+        var matcher = new Collation.ElementMatcher(collation, charsStr);
         var sb = new StringBuilder(inputStr.Length);
         for (var i = 0; i < inputStr.Length; i++)
         {
@@ -138,6 +139,63 @@ internal sealed class Translate : Expression
             _ = idx >= 0 ? sb.Append(transStr[idx]) : sb.Append(inputStr[i]);
         }
         return SqlValue.FromString(resultType, sb.ToString());
+    }
+
+    /// <summary>
+    /// TRANSLATE under an <c>_SC</c> collation, where a surrogate pair is one
+    /// character in all three arguments: it counts once toward the Msg 9828
+    /// length check, maps to and from a whole character, and a lone half in the
+    /// input matches only a lone half in the list, never a pair's (probed
+    /// 2026-09-25 against SQL Server 2025).
+    /// The first position a character appears at in the list wins, as it does
+    /// by code unit.
+    /// </summary>
+    private static string TranslateByCodePoint(string input, string chars, string translations, Collation collation)
+    {
+        var charStarts = ElementStarts(chars);
+        var translationStarts = ElementStarts(translations);
+        if (charStarts.Count != translationStarts.Count)
+            throw SimulatedSqlException.TranslateUnequalChars();
+        translationStarts.Add(translations.Length);
+        var matcher = new Collation.ElementMatcher(collation, chars);
+        var sb = new StringBuilder(input.Length);
+        for (var i = 0; i < input.Length;)
+        {
+            var element = input.AsSpan(i, ElementLength(input, i));
+            var position = char.IsSurrogate(element[0]) ? IndexOfSurrogateElement(chars, charStarts, element) : charStarts.BinarySearch(matcher.IndexOf(element));
+            _ = position >= 0
+                ? sb.Append(translations.AsSpan(translationStarts[position], translationStarts[position + 1] - translationStarts[position]))
+                : sb.Append(element);
+            i += element.Length;
+        }
+        return sb.ToString();
+    }
+
+    /// <summary>The code-unit offset each character of <paramref name="text"/> starts at, a surrogate pair counting as one.</summary>
+    private static List<int> ElementStarts(string text)
+    {
+        var starts = new List<int>(text.Length);
+        for (var i = 0; i < text.Length; i += ElementLength(text, i))
+            starts.Add(i);
+        return starts;
+    }
+
+    private static int ElementLength(string text, int index)
+        => index + 1 < text.Length && char.IsSurrogatePair(text[index], text[index + 1]) ? 2 : 1;
+
+    /// <summary>
+    /// The list position of a surrogate pair or lone half, compared ordinally
+    /// and only against whole list characters, so a lone half never matches
+    /// half of a pair.
+    /// </summary>
+    private static int IndexOfSurrogateElement(string chars, List<int> charStarts, ReadOnlySpan<char> element)
+    {
+        for (var position = 0; position < charStarts.Count; position++)
+        {
+            if (chars.AsSpan(charStarts[position], ElementLength(chars, charStarts[position])).SequenceEqual(element))
+                return position;
+        }
+        return -1;
     }
 
     // The bound result type, which a MAX input's value doesn't carry at runtime.

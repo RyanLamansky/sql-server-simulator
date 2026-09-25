@@ -425,14 +425,14 @@ internal sealed class TdsRpcRequest
         if (maxLength == 0xFFFF)
         {
             var bytes = TdsWireValue.ReadPlp(reader);
-            var value = bytes is null ? null : Encoding.Unicode.GetString(bytes);
+            var value = bytes is null ? null : SystemNameSqlType.Utf16LeDecode(bytes);
             return new TdsRpcParameter(name, isOutput, dbType, value, size: -1);
         }
 
         var length = reader.ReadUInt16();
         return length == 0xFFFF
             ? new TdsRpcParameter(name, isOutput, dbType, null, size: maxLength / 2)
-            : new TdsRpcParameter(name, isOutput, dbType, Encoding.Unicode.GetString(reader.ReadBytes(length)), size: maxLength / 2);
+            : new TdsRpcParameter(name, isOutput, dbType, SystemNameSqlType.Utf16LeDecode(reader.ReadBytes(length)), size: maxLength / 2);
     }
 
     private static TdsRpcParameter DecodeBinary(TdsValueReader reader, string name, bool isOutput)
@@ -461,7 +461,7 @@ internal sealed class TdsRpcRequest
         }
 
         var bytes = TdsWireValue.ReadPlp(reader);
-        var value = bytes is null ? null : Encoding.Unicode.GetString(bytes);
+        var value = bytes is null ? null : SystemNameSqlType.Utf16LeDecode(bytes);
         // SqlClient prefixes xml parameter content with a UTF-16 BOM; the
         // server treats it as an encoding signal, not document content.
         if (value is ['\uFEFF', ..])

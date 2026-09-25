@@ -264,6 +264,6 @@ public sealed class ErrorFidelityTests
     }
 
     [TestMethod]
-    public void TranslateLengthMismatch_RaisesMsg9828()
-        => new Simulation().AssertSqlError("select translate('abc', 'ab', 'x')", 9828);
+    public void TranslateLengthMismatch_RaisesMsg9828State3()
+        => AreEqual(3, new Simulation().AssertSqlError("select translate('abc', 'ab', 'x')", 9828).State);
 }

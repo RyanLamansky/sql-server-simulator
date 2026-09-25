@@ -63,13 +63,23 @@ internal sealed partial class Selection
         var sepValue = separator.Run(runtime);
         if (sepValue.IsNull
             || !SqlType.IsStringCategory(sepValue.Type)
-            || sepValue.AsString.Length != 1)
+            || sepValue.AsString.Length is not (1 or 2))
         {
             throw SimulatedSqlException.StringSplitSeparatorMustBeSingleChar();
         }
         var separatorString = sepValue.AsString;
 
         var inputValue = input.Run(runtime);
+        var collation = StringScalars.CollationFor(batch, inputValue.Type, sepValue.Type);
+
+        // A surrogate pair is one character under an _SC collation, which the
+        // input's collation can settle as well as the separator's own
+        // (probed 2026-09-25 against SQL Server 2025); anywhere else it is two.
+        if (separatorString.Length == 2
+            && !(char.IsSurrogatePair(separatorString[0], separatorString[1]) && collation.IsSupplementaryCharacterAware))
+        {
+            throw SimulatedSqlException.StringSplitSeparatorMustBeSingleChar();
+        }
         if (inputValue.IsNull)
             yield break;
         if (!SqlType.IsStringCategory(inputValue.Type))
@@ -92,7 +102,6 @@ internal sealed partial class Selection
         // however much of the input the match ate: splitting N'assb' on ß on
         // real yields `a` and `sb`, where REPLACE of the same pair eats both
         // units (probe-confirmed against SQL Server 2025).
-        var collation = StringScalars.CollationFor(batch, inputValue.Type, sepValue.Type);
         var ordinal = 1L;
         var start = 0;
         while (true)

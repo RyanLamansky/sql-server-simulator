@@ -93,7 +93,7 @@ internal sealed class HashBytes : Expression
                 bytes = value.IsNull ? null : value.AsBytes;
                 return true;
             case NVarcharSqlType or NCharSqlType or NTextSqlType or SystemNameSqlType:
-                bytes = value.IsNull ? null : System.Text.Encoding.Unicode.GetBytes(value.AsString);
+                bytes = value.IsNull ? null : SystemNameSqlType.Utf16LeBytes(value.AsString);
                 return true;
             case VarcharSqlType or CharSqlType or TextSqlType:
                 // The collation's own code page, so hashing a Turkish column

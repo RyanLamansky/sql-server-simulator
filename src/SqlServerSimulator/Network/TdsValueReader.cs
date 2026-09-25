@@ -1,5 +1,5 @@
 using System.Buffers.Binary;
-using System.Text;
+using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator.Network;
 
@@ -43,7 +43,7 @@ internal sealed class TdsValueReader(byte[] data)
 
     /// <summary>Reads <paramref name="charCount"/> UCS-2 characters as a string.</summary>
     public string ReadUcs2(int charCount) =>
-        charCount == 0 ? "" : Encoding.Unicode.GetString(this.ReadBytes(charCount * 2));
+        charCount == 0 ? "" : SystemNameSqlType.Utf16LeDecode(this.ReadBytes(charCount * 2));
 
     private static InvalidDataException Truncated() =>
         new("The TDS payload ends before a value was fully read.");

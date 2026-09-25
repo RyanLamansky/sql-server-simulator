@@ -135,7 +135,7 @@ internal sealed class SqlVariantSqlType() : SqlType(SqlTypeCategory.Other, TypeP
             case SystemNameSqlType:
                 {
                     destination[0] = KindSysname;
-                    var bytes = Encoding.Unicode.GetBytes(inner.AsString);
+                    var bytes = SystemNameSqlType.Utf16LeBytes(inner.AsString);
                     BinaryPrimitives.WriteInt32LittleEndian(destination.Slice(1, 4), bytes.Length);
                     bytes.CopyTo(destination[5..]);
                     return 5 + bytes.Length;

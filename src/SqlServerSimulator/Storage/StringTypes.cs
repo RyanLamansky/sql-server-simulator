@@ -173,6 +173,9 @@ internal sealed class SystemNameSqlType() : SqlType(SqlTypeCategory.String, Type
         return src.Length;
     }
 
+    /// <summary><see cref="Utf16LeEncode"/> into a fresh array.</summary>
+    internal static byte[] Utf16LeBytes(string value) => MemoryMarshal.AsBytes(value.AsSpan()).ToArray();
+
     /// <summary>Inverse of <see cref="Utf16LeEncode"/>: reinterprets the byte span as <c>char</c>s without surrogate validation.</summary>
     internal static string Utf16LeDecode(ReadOnlySpan<byte> source) =>
         new(MemoryMarshal.Cast<byte, char>(source));

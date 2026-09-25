@@ -258,6 +258,50 @@ public sealed class StringScalarCollationTests
     public void Trim_NullCharacterSetYieldsNull(string expression)
         => IsTrue(new Simulation().ExecuteScalar($"select {expression}") is null or DBNull);
 
+    /// <summary>
+    /// Under an _SC collation a surrogate pair is one character: TRANSLATE
+    /// counts, maps and substitutes it whole, and a lone half in the input
+    /// matches only a lone half in the list. Expected bytes are SQL Server
+    /// 2025's.
+    /// </summary>
+    [TestMethod]
+    [DataRow("translate(N'x' + @p collate Latin1_General_100_CI_AS_SC, @p, N'Z')", "78005A00")]
+    [DataRow("translate(N'x' + @p collate Latin1_General_100_CI_AS_SC, N'a' + @p, N'ZQ')", "78005100")]
+    [DataRow("translate(N'x' + @p collate Latin1_General_100_CI_AS_SC, @p + N'x', N'Z' + @p)", "3DD800DE5A00")]
+    [DataRow("translate(N'x' + @p collate Latin1_General_100_CI_AS_SC, N'x', @p)", "3DD800DE3DD800DE")]
+    [DataRow("translate(N'x' + @p collate Latin1_General_100_CI_AS_SC, @p + @p, N'QR')", "78005100")]
+    [DataRow("translate(N'x' + nchar(55357) + N'y' collate Latin1_General_100_CI_AS_SC, @p, N'Q')", "78003DD87900")]
+    public void Translate_UnderSupplementaryCollation_WalksByCodePoint(string expression, string expectedHex)
+        => AreEqual(expectedHex, Convert.ToHexString((byte[])new Simulation().ExecuteScalar(
+            $"declare @p nvarchar(2) = nchar(55357) + nchar(56832); select convert(varbinary(20), {expression})")!));
+
+    [TestMethod]
+    public void Translate_UnderSupplementaryCollation_CountsAPairOnceForTheLengthCheck()
+        => new Simulation().AssertSqlError(
+            "declare @p nvarchar(2) = nchar(55357) + nchar(56832); select translate(N'x' + @p collate Latin1_General_100_CI_AS_SC, @p, N'ZQ')",
+            9828);
+
+    /// <summary>
+    /// A surrogate-pair separator is one character when the collation the
+    /// input and separator resolve to is _SC, whichever of the two carries it,
+    /// and Msg 214 otherwise.
+    /// </summary>
+    [TestMethod]
+    [DataRow("N'a' + @p + N'b' collate Latin1_General_100_CI_AS_SC, @p collate Latin1_General_100_CI_AS_SC")]
+    [DataRow("N'a' + @p + N'b', @p collate Latin1_General_100_CI_AS_SC")]
+    [DataRow("N'a' + @p + N'b' collate Latin1_General_100_CI_AS_SC, @p")]
+    public void StringSplit_TakesASurrogatePairSeparatorUnderSupplementaryCollation(string arguments)
+        => AreEqual("a/b", new Simulation().ExecuteScalar(
+            $"declare @p nvarchar(2) = nchar(55357) + nchar(56832); select string_agg(value, '/') from string_split({arguments})"));
+
+    [TestMethod]
+    [DataRow("N'a' + @p + N'b', @p")]
+    [DataRow("cast(null as nvarchar(10)), @p")]
+    public void StringSplit_RefusesASurrogatePairSeparatorOtherwise(string arguments)
+        => new Simulation().AssertSqlError(
+            $"declare @p nvarchar(2) = nchar(55357) + nchar(56832); select value from string_split({arguments})",
+            214);
+
     private static int Scalar(string expression) =>
         new Simulation().ExecuteScalar<int>($"select {expression}");
 

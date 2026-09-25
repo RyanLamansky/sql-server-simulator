@@ -1007,10 +1007,11 @@ partial class SimulatedSqlException
     /// <summary>
     /// Mimics SQL Server's Msg 9828 — <c>TRANSLATE(input, chars, translations)</c>
     /// raises this when <c>chars</c> and <c>translations</c> have unequal
-    /// length. Verbatim wording verified against SQL Server 2025 (2026-05-22).
+    /// length. Verbatim wording verified against SQL Server 2025 (2026-05-22);
+    /// state 3 under every collation (probed 2026-09-25).
     /// </summary>
     internal static SimulatedSqlException TranslateUnequalChars() =>
-        new("The second and third arguments of the TRANSLATE built-in function must contain an equal number of characters.", 9828, 16, 1);
+        new("The second and third arguments of the TRANSLATE built-in function must contain an equal number of characters.", 9828, 16, 3);
 
     /// <summary>
     /// Mimics SQL Server's Msg 9819 (variant used by <c>PARSE</c>) — fires

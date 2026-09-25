@@ -1108,4 +1108,28 @@ public sealed class CastTests
         IsTrue(reader.Read());
         AreEqual("01020000|01020000|0102|0A000000", string.Join("|", Enumerable.Range(0, 4).Select(i => Convert.ToHexString((byte[])reader.GetValue(i)))));
     }
+
+    /// <summary>
+    /// A lone surrogate survives every conversion between Unicode text and
+    /// bytes as its raw UTF-16 unit, where a .NET encoder would substitute
+    /// U+FFFD; the hash, the sql_variant image and COMPRESS read the same
+    /// bytes (values are SQL Server 2025's).
+    /// </summary>
+    [TestMethod]
+    public void LoneSurrogate_KeepsItsCodeUnitBetweenTextAndBytes()
+    {
+        using var reader = new Simulation().ExecuteReader("""
+            select unicode(convert(nvarchar(5), 0x3DD8)), unicode(cast(0x00DE7900 as nvarchar(5))),
+                convert(varbinary(20), N'x' + nchar(55357)), hashbytes('MD5', N'x' + nchar(55357)),
+                convert(varbinary(20), cast(N'x' + nchar(55357) as sql_variant)),
+                unicode(substring(cast(decompress(compress(N'x' + nchar(55357))) as nvarchar(5)), 2, 1))
+            """);
+        IsTrue(reader.Read());
+        AreEqual(55357, reader.GetInt32(0));
+        AreEqual(56832, reader.GetInt32(1));
+        AreEqual("78003DD8", Convert.ToHexString((byte[])reader.GetValue(2)));
+        AreEqual("CD44D42421C4E5A5113051F60A9B241C", Convert.ToHexString((byte[])reader.GetValue(3)));
+        AreEqual("78003DD8", Convert.ToHexString((byte[])reader.GetValue(4)));
+        AreEqual(55357, reader.GetInt32(5));
+    }
 }

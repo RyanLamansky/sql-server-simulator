@@ -1,5 +1,4 @@
 using System.Globalization;
-using System.Text;
 
 namespace SqlServerSimulator.Storage;
 
@@ -440,10 +439,10 @@ internal readonly partial struct SqlValue
     private static string DecodeUtf16WithOddTailPadded(byte[] bytes)
     {
         if (bytes.Length % 2 == 0)
-            return Encoding.Unicode.GetString(bytes);
+            return SystemNameSqlType.Utf16LeDecode(bytes);
         var padded = new byte[bytes.Length + 1];
         bytes.CopyTo(padded, 0);
-        return Encoding.Unicode.GetString(padded);
+        return SystemNameSqlType.Utf16LeDecode(padded);
     }
 
     internal SqlValue CoerceBinaryToStringWithStyle(SqlType target, int style)
@@ -479,7 +478,7 @@ internal readonly partial struct SqlValue
         var sourceIsUnicode = this.Type is NVarcharSqlType or NCharSqlType or SystemNameSqlType;
         var bytes = style switch
         {
-            0 => sourceIsUnicode ? Encoding.Unicode.GetBytes(s) : (this.Type.Collation ?? Collation.Baseline).StorageEncoding.GetBytes(s),
+            0 => sourceIsUnicode ? SystemNameSqlType.Utf16LeBytes(s) : (this.Type.Collation ?? Collation.Baseline).StorageEncoding.GetBytes(s),
             1 => ParseHexWithPrefix(s, requirePrefix: true),
             2 => ParseHexWithPrefix(s, requirePrefix: false),
             _ => throw SimulatedSqlException.InvalidStyleForCharacterString(style, sourceIsUnicode ? "nvarchar" : "varchar"),

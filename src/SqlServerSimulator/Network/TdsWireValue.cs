@@ -240,7 +240,7 @@ internal static class TdsWireValue
         var maxLength = reader.ReadUInt16();
         for (var i = 7; i < propBytes; i++)
             _ = reader.ReadByte();
-        var text = Encoding.Unicode.GetString(reader.ReadBytes(maxLength));
+        var text = SystemNameSqlType.Utf16LeDecode(reader.ReadBytes(maxLength));
         return fixedWidth
             ? SqlValue.FromString(NCharSqlType.Get(text.Length, Collation.Baseline, Coercibility.Implicit), text)
             : SqlValue.FromNVarchar(text);

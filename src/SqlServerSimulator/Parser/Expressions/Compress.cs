@@ -50,13 +50,13 @@ internal sealed class Compress(ParserContext context) : Expression
         if (value.Type is VarbinarySqlType or BinarySqlType or ImageSqlType)
             return value.AsBytes;
         if (value.Type is NVarcharSqlType or NCharSqlType or NTextSqlType or SystemNameSqlType)
-            return System.Text.Encoding.Unicode.GetBytes(value.AsString);
+            return SystemNameSqlType.Utf16LeBytes(value.AsString);
         // varchar / char / text → the collation's own code page, matching the
         // bytes SQL Server stores and therefore compresses.
         if (value.Type is VarcharSqlType or CharSqlType or TextSqlType)
             return (value.Type.Collation ?? Collation.Baseline).StorageEncoding.GetBytes(value.AsString);
         // Every other type was refused while compiling.
-        return System.Text.Encoding.Unicode.GetBytes(value.AsString);
+        return SystemNameSqlType.Utf16LeBytes(value.AsString);
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)

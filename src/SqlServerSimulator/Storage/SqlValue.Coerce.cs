@@ -2090,7 +2090,7 @@ internal readonly partial struct SqlValue
     /// </remarks>
     private static byte[] EncodeStringForBinary(string source, SqlType sourceType) =>
         sourceType is NVarcharSqlType or NCharSqlType or NTextSqlType or SystemNameSqlType
-            ? System.Text.Encoding.Unicode.GetBytes(source)
+            ? SystemNameSqlType.Utf16LeBytes(source)
             : (sourceType.Collation ?? Collation.Baseline).StorageEncoding.GetBytes(source);
 
     /// <summary>

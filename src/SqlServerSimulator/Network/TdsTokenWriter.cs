@@ -1,5 +1,5 @@
 using System.Buffers.Binary;
-using System.Text;
+using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator.Network;
 
@@ -128,7 +128,7 @@ internal sealed class TdsTokenWriter(TdsPacketTransport transport)
     {
         var byteCount = value.Length * 2;
         this.Ensure(byteCount);
-        _ = Encoding.Unicode.GetBytes(value, this.buffer.AsSpan(this.length));
+        _ = SystemNameSqlType.Utf16LeEncode(value, this.buffer.AsSpan(this.length));
         this.length += byteCount;
     }
 

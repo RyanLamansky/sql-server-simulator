@@ -138,6 +138,8 @@ Each caller applies its own rule to that length, and they genuinely differ:
 
 **`TRANSLATE` and the `TRIM` family ask a different question**: they walk their input one code unit at a time and ask whether the *character set* holds that character, which is `Collation.IndexOfElement` — a search whose subject is the set.
 So a combining mark is its own candidate (a decomposed `café` keeps its mark and only the base letter is substituted or stripped), and `TRANSLATE` substitutes by the **position** the search reports rather than by a member index.
+Under an `_SC` collation `TRANSLATE` walks code points instead, in all three arguments: a surrogate pair counts once toward the Msg 9828 length check and maps whole, and a lone half matches only a lone half in the list, never half of a pair (probed 2026-09-25 against SQL Server 2025).
+`STRING_SPLIT` likewise takes a surrogate pair as its one-character separator exactly when the resolved collation is `_SC`, whichever argument carries it.
 
 **A weightless needle is not found.**
 An empty string, and a bare combining mark under an accent-insensitive collation, match at every position with zero length as far as `CompareInfo` is concerned; real reports not-found for both, so the match length is what the miss is keyed on rather than a special case per caller (`CHARINDEX(N'', N'abc')` and `CHARINDEX(NCHAR(0x0301), N'abc')` are each 0).
@@ -574,6 +576,7 @@ Probe-confirmed against SQL Server 2025.
 The non-`_SC_` path stays on .NET's native code-unit operations (`string.Length`, `Substring`, `IndexOf`, etc.), which already match real SQL Server's non-`_SC_` semantics.
 
 **Lone-surrogate preservation:** the nvarchar / nchar / sysname / ntext row encoders byte-copy UTF-16 LE directly (`SystemNameSqlType.Utf16LeEncode` / `Utf16LeDecode` via `MemoryMarshal.AsBytes`) instead of routing through `Encoding.Unicode.GetBytes`, which silently rewrites lone surrogates to `U+FFFD` via its `EncoderReplacementFallback`.
+Every other place Unicode text meets bytes takes the same helpers — `CAST` / `CONVERT` in both directions, `HASHBYTES`, `COMPRESS`, the `sql_variant` image, the TDS reader and writer and the BCP reader — since real keeps the raw unit through all of them (`CONVERT(varbinary, N'x' + NCHAR(55357))` is `0x78003DD8`, probed 2026-09-25).
 Real SQL Server preserves lone surrogates end-to-end (probe-confirmed: `SUBSTRING(N'😀X', 1, 1)` on a non-`_SC_` column round-trips through `sys.columns` storage with the lone high surrogate intact); the byte-copy path keeps the simulator's fidelity bar.
 
 ## KS / WS suffix dispatch
