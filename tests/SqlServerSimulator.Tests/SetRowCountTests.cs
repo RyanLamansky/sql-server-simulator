@@ -218,4 +218,21 @@ public sealed class SetRowCountTests
         var ex = Throws<SimulatedSqlException>(command.ExecuteScalar);
         AreEqual(11739, ex.Number);
     }
+
+    /// <summary>
+    /// A MERGE's cap counts the actions it takes: a declined source row costs
+    /// nothing, and a NOT MATCHED BY SOURCE delete counts like any other
+    /// (probed 2026-09-25 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("insert ms values (1, 10), (2, 22), (4, 44), (5, 55); set rowcount 2; merge mt using ms on mt.id = ms.id when matched and mt.v <> ms.v then update set v = ms.v when not matched then insert values (ms.id, ms.v)", "2|1:10,2:22,3:30,4:44")]
+    [DataRow("insert ms values (1, 11), (4, 44); set rowcount 1; merge mt using ms on mt.id = ms.id when matched then update set v = ms.v when not matched by source then delete", "1|1:11,2:20,3:30")]
+    public void MergeCapCountsActions(string merge, string expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar($"""
+            create table mt (id int primary key, v int); create table ms (id int, v int);
+            insert mt values (1, 10), (2, 20), (3, 30);
+            {merge};
+            declare @n int = @@rowcount; set rowcount 0;
+            select concat(@n, '|', string_agg(concat(id, ':', v), ',') within group (order by id)) from mt
+            """));
 }

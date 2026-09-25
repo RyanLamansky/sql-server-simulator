@@ -1136,13 +1136,6 @@ partial class Simulation
             return new SimulatedNonQuery(0);
 
         var sourceRows = materializeSource(context.Batch);
-        // SET ROWCOUNT caps a MERGE as it caps every other DML statement
-        // (probe-confirmed: ROWCOUNT 2 over six matching source rows updates
-        // two). Real counts the actions it took; the cap lands on the source
-        // rows here instead, which agrees whenever each source row draws an
-        // action and otherwise lets a declining row consume a slot of the cap.
-        if (context.Connection.RowCountLimit is > 0 and var mergeLimit && mergeLimit < sourceRows.Count)
-            sourceRows.RemoveRange((int)mergeLimit, sourceRows.Count - (int)mergeLimit);
         var sourceMatched = new bool[sourceRows.Count];
         var defaultTargetName = sourceView?.Name ?? destinationTable.Name;
 
@@ -1186,6 +1179,14 @@ partial class Simulation
         var pendingInserts = new List<(SqlValue[] NewValues, SqlValue[]? SourceValues)>();
         var pendingUpdates = new List<(int Page, int Slot, SqlValue[] OldValues, SqlValue[] NewValues, SqlValue[]? SourceValues)>();
         var pendingDeletes = new List<(int Page, int Slot, SqlValue[] OldValues, SqlValue[]? SourceValues)>();
+
+        // SET ROWCOUNT caps the actions a MERGE takes, in the order it takes
+        // them: a source row every WHEN clause declines consumes nothing, and a
+        // NOT MATCHED BY SOURCE delete counts like any other action (probed
+        // 2026-09-25 against SQL Server 2025). Each apply step below queues at
+        // most one action, so checking before each step caps exactly.
+        var actionLimit = context.Connection.RowCountLimit is > 0 and var limit ? limit : long.MaxValue;
+        bool ActionCapReached() => pendingInserts.Count + pendingUpdates.Count + pendingDeletes.Count >= actionLimit;
 
         // Phase A finds, per matched target row, the source rows it matches, then
         // applies the WHEN MATCHED / WHEN NOT MATCHED BY SOURCE action. When the
@@ -1238,6 +1239,8 @@ partial class Simulation
                 // discovery order, but with no per-target source loop.
                 foreach (var (pageIndex, slotIndex, rowBytes) in destinationTable.Heap.EnumerateRowsWithAddress())
                 {
+                    if (ActionCapReached())
+                        break;
                     var targetValues = DecodeFullRow(destinationTable, rowBytes);
                     EvaluateComputedColumns(destinationTable, targetValues, context.Batch);
                     if (matchedByTarget.TryGetValue((pageIndex, slotIndex), out var matchedSources))
@@ -1259,6 +1262,8 @@ partial class Simulation
                 // the scan path's.
                 foreach (var address in matchedByTarget.Keys.OrderBy(a => a.Page).ThenBy(a => a.Slot))
                 {
+                    if (ActionCapReached())
+                        break;
                     var targetValues = DecodeFullRow(destinationTable, destinationTable.Heap.ReadSlotBytes(address.Page, address.Slot)!);
                     EvaluateComputedColumns(destinationTable, targetValues, context.Batch);
                     ApplyMergeMatched(context, destinationTable, sourceView, whenClauses, address.Page, address.Slot, targetValues, sourceRows, matchedByTarget[address], ResolveCombined, pendingUpdates, pendingDeletes);
@@ -1287,6 +1292,8 @@ partial class Simulation
 
             foreach (var (pageIndex, slotIndex, rowBytes) in destinationTable.Heap.EnumerateRowsWithAddress())
             {
+                if (ActionCapReached())
+                    break;
                 var targetValues = DecodeFullRow(destinationTable, rowBytes);
                 EvaluateComputedColumns(destinationTable, targetValues, context.Batch);
 
@@ -1356,7 +1363,7 @@ partial class Simulation
             // INSTEAD OF INSERT fires against the view when applicable;
             // otherwise the action targets the base table directly.
             var insteadOfInsertTarget = (SchemaObject?)sourceView ?? destinationTable;
-            for (var si = 0; si < sourceRows.Count; si++)
+            for (var si = 0; si < sourceRows.Count && !ActionCapReached(); si++)
             {
                 if (sourceMatched[si])
                     continue;

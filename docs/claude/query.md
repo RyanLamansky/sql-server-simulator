@@ -264,9 +264,11 @@ Probed against SQL Server 2025 (2026-08-06).
 - **The cap is on what the statement emits, not what it reads**: `SELECT COUNT(*)` under `ROWCOUNT 3` still answers over the whole table and reports one row.
 - `@@ROWCOUNT` reports the capped count.
 - Every row-emitting shape takes it — a plain `SELECT`, an `OFFSET … FETCH`, a `SELECT … INTO`, a `SELECT @v = …` assignment (which then keeps the last row inside the cap), and `INSERT` / `UPDATE` / `DELETE` / `MERGE`.
+- A `MERGE` counts the **actions** it takes, in the order it takes them: a source row every `WHEN` clause declines costs nothing, and a `NOT MATCHED BY SOURCE` delete counts like any other action (probed 2026-09-25).
+  Which rows fill the cap follows each engine's processing order — real's comes from its join plan (key order over a primary key), the simulator's is target order and then the unmatched source rows.
 - `NEXT VALUE FOR` under an active cap is **Msg 11739**, the message real writes naming all three sources ("if ROWCOUNT option has been set, or the query contains TOP or OFFSET").
 
-Enforcement is two seams, not sprinkled checks: `SimulatedSqlResultSet.WithRowCountLimit` wraps the statement's own row sequence lazily at the SELECT / `SELECT … INTO` dispatch, and `ApplyDmlTopCap` — the list every `INSERT` / `UPDATE` / `DELETE` already collects its rows through — folds the session cap in beside `TOP`.
+Enforcement is three seams, not sprinkled checks: `SimulatedSqlResultSet.WithRowCountLimit` wraps the statement's own row sequence lazily at the SELECT / `SELECT … INTO` dispatch, `ApplyDmlTopCap` — the list every `INSERT` / `UPDATE` / `DELETE` already collects its rows through — folds the session cap in beside `TOP`, and `MERGE` stops queuing actions once its pending lists hold the cap.
 Inner plans (a join's sources, a subquery, a view body) are untouched, matching real.
 
 **Scoping.** The cap persists into a called procedure, while a body's own `SET ROWCOUNT` reverts when it returns — dynamic SQL the same — through `SimulatedDbConnection.SessionOptionScope`, shared with `XACT_ABORT` and `DATEFIRST`.
