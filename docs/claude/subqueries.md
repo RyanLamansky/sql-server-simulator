@@ -71,10 +71,10 @@ Per correlation key, a key no inner row carries (a NULL-component key included) 
 Probed against SQL Server 2025 (2026-08-05): `NULL IN (SELECT v FROM t WHERE 1 = 0)` is `F` and `NULL NOT IN (…)` is `T`, the same pair over a non-empty body is `U` in both directions, and a body whose only row is NULL is non-empty and therefore `U`.
 A `TOP 0` body and a `(VALUES …) WHERE 1 = 0` body are two more ways to be empty.
 
-**Divergence — the emptiness probe reads one row.**
-Real needs the body's *shape* and not its values, so a projection that raises answers UNKNOWN there (`NULL IN (SELECT 1/0 FROM <non-empty>)`) where the simulator raises Msg 8134 from projecting the first row.
-Its **WHERE** raises on both, since emptiness can't be known without evaluating it.
-`EXISTS` carries the same divergence for the same reason and pre-dates this.
+**The emptiness probe doesn't project.**
+Real needs the body's *shape* and not its values, so a projection that raises answers anyway: `NULL IN (SELECT 1/0 FROM <non-empty>)` is UNKNOWN and `EXISTS (SELECT 1/0 FROM <non-empty>)` TRUE, aggregates, windows, `DISTINCT` and a `TOP … ORDER BY` body included (probed 2026-09-25).
+`Selection.HasAnyRow` asks a plan for that: it marks the plan on `BatchContext.ExistenceProbe` while draining it, and a SELECT body so marked projects nothing unless an `ORDER BY` reads the projection; its WHERE, joins, `HAVING` and row limit still run, so a raising **WHERE** or `HAVING` raises on both.
+The probe leaves the uncorrelated-subquery memo alone, since a later non-NULL left side needs the values.
 
 ### The hashed `IN` probe
 

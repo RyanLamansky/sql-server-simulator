@@ -276,6 +276,13 @@ internal sealed class BatchContext
     public bool NativelyCompiledBody;
 
     /// <summary>
+    /// The plan an emptiness probe (<see cref="Selection.HasAnyRow"/>) is
+    /// draining, which answers without evaluating its projection; null
+    /// otherwise. A nested plan the probe runs is never it.
+    /// </summary>
+    public Selection? ExistenceProbe;
+
+    /// <summary>
     /// Binder errors gathered while a module body or a batch binds, non-null
     /// only on the bind batch (<see cref="CreateTimeBinding"/>). Real reports <em>every</em>
     /// binder error a body contains rather than stopping at the first

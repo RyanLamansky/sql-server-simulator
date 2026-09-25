@@ -457,6 +457,31 @@ internal sealed partial class Selection
             : new SimulatedSqlResultSet(this.Schema, this.ColumnNames, this.rowSource!(batch, outerResolver)) { ColumnNullability = this.ColumnNullability, ColumnReportsNumeric = this.ColumnReportsNumeric };
 
     /// <summary>
+    /// Whether the plan yields a row — the question an emptiness probe asks,
+    /// which is all <c>EXISTS</c> and a NULL left side of <c>IN</c> need. Real
+    /// answers it without evaluating the body's projection, so
+    /// <c>EXISTS (SELECT 1/0 FROM t)</c> is TRUE over a non-empty <c>t</c>
+    /// (probed 2026-08-05 against SQL Server 2025); a plain
+    /// SELECT-project-filter body without ORDER BY skips its projection here
+    /// the same way, while its WHERE, joins and row limit still run.
+    /// </summary>
+    internal bool HasAnyRow(BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver)
+    {
+        var previous = batch.ExistenceProbe;
+        batch.ExistenceProbe = this;
+        try
+        {
+            return this.valueRowSource is { } values
+                ? values(batch, outerResolver).Any()
+                : this.rowSource!(batch, outerResolver).Any();
+        }
+        finally
+        {
+            batch.ExistenceProbe = previous;
+        }
+    }
+
+    /// <summary>
     /// Creates a <see cref="Selection"/> from a series of tokens. Follows the
     /// lookahead contract documented on <see cref="ParserContext"/>: on
     /// return, <see cref="ParserContext.Token"/> is the first token not

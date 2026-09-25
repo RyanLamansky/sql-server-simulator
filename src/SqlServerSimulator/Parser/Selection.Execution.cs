@@ -1282,6 +1282,9 @@ internal sealed partial class Selection
         // real; only the row work is skipped.
         var resultIsProvablyEmpty = fromClause.Having?.IsNeverTrue == true;
 
+        // The plan the closure below belongs to, for recognizing an emptiness
+        // probe of it (see HasAnyRow); assigned once the plan exists.
+        Selection? self = null;
         var selection = new Selection(outputSchema, outputColumnNames,
             hasOrderBy: orderBy.Count > 0,
             hasTopOrOffsetOrFetch: topExpression is not null || offsetExpression is not null || fetchExpression is not null,
@@ -1325,11 +1328,15 @@ internal sealed partial class Selection
                 // outer row and the equi-join hash path can key them.
                 // Correlated sources are left untouched.
                 execSources = MaterializeUncorrelatedDeferredSources(execSources, joins, batch, outerResolver);
+                // An emptiness probe of this plan (HasAnyRow) needs its rows,
+                // not their values, so it projects nothing — unless an ORDER BY
+                // reads the projection.
+                var projection = orderBy.Count == 0 && ReferenceEquals(batch.ExistenceProbe, self) ? [] : expressions;
                 return aggregates.Count > 0 || fromClause.GroupingSets.Count > 0 || fromClause.Having is not null
-                    ? BuildAggregateProjectionRows(execSources, joins, ResolveColumnType, expressions, fromClause, outputColumnNames, orderBy, aggregates, windows, windowOperandTypes, windowResultTypes, top, offsetCount, fetchCount, distinct, batch, outerResolver)
+                    ? BuildAggregateProjectionRows(execSources, joins, ResolveColumnType, projection, fromClause, outputColumnNames, orderBy, aggregates, windows, windowOperandTypes, windowResultTypes, top, offsetCount, fetchCount, distinct, batch, outerResolver)
                     : windows.Count > 0
-                        ? ProjectWindowedRows(execSources, joins, expressions, fromClause.Excluders, outputColumnNames, orderBy, distinct, top, offsetCount, fetchCount, windows, windowOperandTypes, windowResultTypes, batch, outerResolver)
-                        : ProjectSqlRows(execSources, joins, expressions, fromClause.Excluders, outputColumnNames, orderBy, distinct, top, offsetCount, fetchCount, batch, outerResolver);
+                        ? ProjectWindowedRows(execSources, joins, projection, fromClause.Excluders, outputColumnNames, orderBy, distinct, top, offsetCount, fetchCount, windows, windowOperandTypes, windowResultTypes, batch, outerResolver)
+                        : ProjectSqlRows(execSources, joins, projection, fromClause.Excluders, outputColumnNames, orderBy, distinct, top, offsetCount, fetchCount, batch, outerResolver);
             },
             isAssignmentOnly,
             intoTarget,
@@ -1347,6 +1354,7 @@ internal sealed partial class Selection
                 : null);
         if (selection.CursorShape is not null)
             selection.CursorOrderBy = orderBy;
+        self = selection;
         selection.ColumnNullability = columnNullability;
         selection.ProjectionExpressions = [.. expressions];
         selection.ColumnIntegerLiteralDigits = LiteralDigitsOf(expressions);

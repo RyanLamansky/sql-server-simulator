@@ -116,4 +116,35 @@ public sealed class NullInSubqueryTests
                 from o where o.id in (3, 10)) x
             """));
     }
+
+    // An emptiness probe needs the body's rows, not their values, so a
+    // projection that would raise never runs; the WHERE and HAVING still do
+    // (probed 2026-09-25 against SQL Server 2025).
+    [TestMethod]
+    [DataRow("exists (select 1/0 from t)", "T")]
+    [DataRow("exists (select 1/0 from t where a > 5)", "F")]
+    [DataRow("exists (select distinct 1/0 from t)", "T")]
+    [DataRow("exists (select count(*)/0 from t)", "T")]
+    [DataRow("exists (select a/0 from t group by a having count(*) > 1)", "T")]
+    [DataRow("exists (select a/0 from t group by a having count(*) > 5)", "F")]
+    [DataRow("exists (select row_number() over (order by a)/0 from t)", "T")]
+    [DataRow("exists (select 1/0 from t union select 2)", "T")]
+    [DataRow("null in (select 1/0 from t)", "U")]
+    [DataRow("null not in (select 1/0 from t)", "U")]
+    public void EmptinessProbe_DoesNotEvaluateTheProjection(string predicate, string expected)
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table t (a int); insert t values (1), (2), (2)");
+        AreEqual(expected, simulation.ExecuteScalar($"select case when {predicate} then 'T' when not ({predicate}) then 'F' else 'U' end"));
+    }
+
+    [TestMethod]
+    [DataRow("exists (select 1 from t where 1/0 = 1)")]
+    [DataRow("exists (select a from t group by a having count(*)/0 > 1)")]
+    public void EmptinessProbe_StillEvaluatesTheFilter(string predicate)
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table t (a int); insert t values (1), (2), (2)");
+        _ = simulation.AssertSqlError($"select case when {predicate} then 1 else 0 end", 8134);
+    }
 }

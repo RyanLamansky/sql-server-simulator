@@ -1944,7 +1944,7 @@ internal abstract class BooleanExpression : ExpressionNode
             if (memo.Result is { } cached)
                 return (bool)cached;
 
-            var any = inner.Execute(runtime.Batch, memo.ResolverFor(runtime)).RowBytes.Any();
+            var any = inner.HasAnyRow(runtime.Batch, memo.ResolverFor(runtime));
             memo.Remember(runtime, this, any);
             return any;
         }
@@ -2088,7 +2088,7 @@ internal abstract class BooleanExpression : ExpressionNode
             // UNKNOWN — including per correlation key, so a NULL-keyed outer
             // row whose group is empty answers `NOT IN` TRUE.
             if (src.IsNull)
-                return this.NullLeftSide(runtime, src.Type);
+                return this.NullLeftSide(runtime);
 
             // Past the per-row threshold an equi-correlated body answers from
             // the per-key value groups its decorrelated plan built once. A NULL
@@ -2123,14 +2123,13 @@ internal abstract class BooleanExpression : ExpressionNode
         /// the statement's materialized memo, and the per-row execution — so
         /// the transform and the memo answer identically here too.
         /// <para>
-        /// The per-row execution reads one row rather than none, which is where
-        /// this parts company with real: real needs the body's <em>shape</em>
-        /// and not its values, so a projection that raises (<c>SELECT 1/0</c>)
-        /// answers UNKNOWN there and raises here. Its <c>WHERE</c> raises on
-        /// both, since emptiness can't be known without evaluating it.
+        /// Real needs the body's <em>shape</em> and not its values, so a
+        /// projection that raises (<c>SELECT 1/0</c>) answers UNKNOWN — which
+        /// <see cref="Selection.HasAnyRow"/> reproduces — while a raising
+        /// <c>WHERE</c> raises, since emptiness can't be known without it.
         /// </para>
         /// </summary>
-        private bool? NullLeftSide(RuntimeContext runtime, SqlType sourceType)
+        private bool? NullLeftSide(RuntimeContext runtime)
         {
             // Decorrelated: a key no inner row carries — a NULL-component key
             // included — selects nothing, which is the empty case. A key that
@@ -2142,19 +2141,12 @@ internal abstract class BooleanExpression : ExpressionNode
                 return keyHasNull || !index.TryGetGroup(key, out _) ? negated : null;
             }
 
+            // An emptiness probe leaves the memo alone: it doesn't read the
+            // values a later non-NULL left side needs.
             var memo = UncorrelatedSubqueryCache.Open(runtime, this);
             if (memo.Result is { } cached)
                 return IsEmpty((InnerColumnValues)cached) ? negated : null;
-            if (memo.Probe is not { } probe)
-            {
-                foreach (var _ in inner.Execute(runtime.Batch, runtime.ResolveColumn).RowBytes)
-                    return null;
-                return negated;
-            }
-
-            var values = new InnerColumnValues(inner.Execute(runtime.Batch, probe.Resolver), sourceType);
-            memo.Remember(runtime, this, values);
-            return IsEmpty(values) ? negated : null;
+            return inner.HasAnyRow(runtime.Batch, memo.Probe is { } probe ? probe.Resolver : runtime.ResolveColumn) ? null : negated;
         }
 
         private static bool IsEmpty(InnerColumnValues values) => values.Values.Length == 0 && !values.SawNull;
