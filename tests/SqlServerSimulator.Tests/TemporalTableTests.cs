@@ -1304,6 +1304,7 @@ public sealed class TemporalTableTests
     [TestMethod]
     [DataRow("Id int not null, Vf datetime2 not null, Vt datetime2 not null", "Vf, Vt", 13597, "Temporal SYSTEM_TIME period is already defined on table 'simulated.dbo.q'.", true)]
     [DataRow("Id int not null, Vf datetime2 not null, Vt datetime2 not null", "Vf, nosuch", 4924, "ADD PERIOD FOR SYSTEM_TIME failed because column 'nosuch' does not exist in table 'q'.", false)]
+    [DataRow("Id int not null, Vf datetime2 not null, Vt datetime2 not null", "nosuch, Vt", 4924, "ADD PERIOD FOR SYSTEM_TIME failed because column 'nosuch' does not exist in table 'q'.", false)]
     [DataRow("Id int not null, Vf datetime not null, Vt datetime2 not null", "Vf, Vt", 13501, "Temporal generated always column 'Vf' has invalid data type.", false)]
     [DataRow("Id int not null, Vf datetime2 null, Vt int not null", "Vf, Vt", 13587, "Period column 'Vf' in a system-versioned temporal table cannot be nullable.", false)]
     [DataRow("Id int not null, Vf datetime2(3) not null, Vt datetime2(7) not null", "Vf, Vt", 13513, "SYSTEM_TIME period columns cannot have different datatype precision.", false)]
@@ -1389,4 +1390,15 @@ public sealed class TemporalTableTests
         sim.AssertSqlError("alter table t set (system_versioning = on (history_table = dbo.h))", 13525,
             "Setting SYSTEM_VERSIONING to ON failed because column 'v' has data type nvarchar(10) in history table 'simulated.dbo.h' which is different from corresponding column type nvarchar(max) in table 'simulated.dbo.t'.");
     }
+
+    [TestMethod]
+    [DataRow("a, Vt", 5)]
+    [DataRow("Vf, b", 6)]
+    public void AddPeriod_MissingColumn_StateNamesThePosition(string periodColumns, int state)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table q (Id int not null, Vf datetime2 not null, Vt datetime2 not null)");
+        AreEqual((byte)state, sim.AssertSqlError($"alter table q add period for system_time ({periodColumns})", 4924).State);
+    }
 }
+

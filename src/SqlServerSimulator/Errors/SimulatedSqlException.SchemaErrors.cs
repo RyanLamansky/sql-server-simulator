@@ -86,6 +86,14 @@ partial class SimulatedSqlException
         FollowedBy(error, new("Could not drop constraint. See previous errors.", 3727, 16, 0));
 
     /// <summary>
+    /// Mimics SQL Server error 3748, then Msg 3727: <c>DROP CONSTRAINT … WITH
+    /// (…)</c> names a nonclustered key constraint, whose index takes none of
+    /// the clustered drop's options (probed 2026-09-25 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException DropNonClusteredWithClusteredClause(string constraintName) =>
+        FollowedByConstraintNotDropped(new($"Cannot drop non-clustered index '{constraintName}' using drop clustered index clause.", 3748, 16, 2));
+
+    /// <summary>
     /// Pairs <paramref name="error"/> with the Msg 5069 real sends after an
     /// <c>ALTER DATABASE</c> fails running rather than parsing: its target
     /// refused (Msg 5011), a read-only database (Msg 3906) or a system
@@ -1544,11 +1552,11 @@ partial class SimulatedSqlException
     /// Mimics SQL Server error 4924: <c>ALTER TABLE … ADD PERIOD FOR
     /// SYSTEM_TIME</c> named a column the table doesn't have — which a computed
     /// column counts as, real not offering one as a period candidate at all.
-    /// The table is named unqualified, as the sibling 4924 forms name it.
-    /// Probe-confirmed.
+    /// The table is named unqualified, as the sibling 4924 forms name it, at
+    /// state 5 for the start column and 6 for the end (probed 2026-09-25).
     /// </summary>
-    internal static SimulatedSqlException AddPeriodColumnDoesNotExist(string columnName, string tableName) =>
-        new($"ADD PERIOD FOR SYSTEM_TIME failed because column '{columnName}' does not exist in table '{tableName}'.", 4924, 16, 1);
+    internal static SimulatedSqlException AddPeriodColumnDoesNotExist(string columnName, string tableName, byte state) =>
+        new($"ADD PERIOD FOR SYSTEM_TIME failed because column '{columnName}' does not exist in table '{tableName}'.", 4924, 16, state);
 
     /// <summary>
     /// Mimics SQL Server error 13536: <c>INSERT</c> supplied an explicit

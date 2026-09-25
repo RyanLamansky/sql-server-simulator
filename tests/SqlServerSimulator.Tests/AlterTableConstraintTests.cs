@@ -408,4 +408,23 @@ public sealed class AlterTableConstraintTests
         var ex = sim.AssertSqlError(statement, 1505);
         AreEqual(3621, ex.Errors[^1].Number);
     }
+
+    /// <summary>
+    /// <c>DROP CONSTRAINT … WITH (…)</c> takes the index options for a
+    /// clustered key or any other constraint, but a nonclustered key refuses
+    /// them (probed 2026-09-25 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void DropConstraint_WithOptions()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (id int constraint pk primary key, v int constraint ck check (v > 0), w int constraint uq unique)");
+        _ = sim.ExecuteNonQuery("alter table t drop constraint pk with (online = off); alter table t drop constraint ck with (online = off)");
+        var error = sim.AssertSqlError("alter table t drop constraint uq with (maxdop = 1)", 3748);
+        CollectionAssert.AreEqual(
+            new[] { "3748: Cannot drop non-clustered index 'uq' using drop clustered index clause.", "3727: Could not drop constraint. See previous errors." },
+            error.Errors.Cast<SimulatedError>().Select(e => $"{e.Number}: {e.Message}").ToArray());
+        AreEqual("uq", sim.ExecuteScalar("select name from sys.objects where parent_object_id = object_id('t')"));
+    }
 }
+

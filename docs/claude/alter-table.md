@@ -1,6 +1,6 @@
 # ALTER TABLE
 
-`ALTER TABLE` ships ten modeled shapes: `SET (SYSTEM_VERSIONING = OFF | ON (HISTORY_TABLE = name [, DATA_CONSISTENCY_CHECK = ON|OFF]))` (see [`temporal-tables.md`](temporal-tables.md)), `[WITH CHECK | WITH NOCHECK] ADD [CONSTRAINT name] (PRIMARY KEY | UNIQUE | FOREIGN KEY | CHECK | DEFAULT) [, …]` (multi-element constraint list — see [Multi-element ADD](#multi-element-add)), `DROP CONSTRAINT [IF EXISTS] name [, …]`, `[WITH CHECK | WITH NOCHECK] (CHECK | NOCHECK) CONSTRAINT (ALL | name [, …])` (trust toggling), `ADD [COLUMN] col TYPE [, …]` (multi-column add — see [Column ops](#column-ops)), `DROP COLUMN [IF EXISTS] col [, …]` (multi-column drop with dependency rejection), `ALTER COLUMN col TYPE[(prec[,scale])] [COLLATE coll] [NULL|NOT NULL]` (single-column type / nullability change — see [ALTER COLUMN](#alter-column)), `ALTER COLUMN col { ADD | DROP } { ROWGUIDCOL | SPARSE }` (see [Column attributes](#column-attributes)), `DROP PERIOD FOR SYSTEM_TIME` (see [DROP PERIOD FOR SYSTEM_TIME](#drop-period-for-system_time)), and `REBUILD` (see [REBUILD](#rebuild)).
+`ALTER TABLE` ships these modeled shapes: `SET (SYSTEM_VERSIONING = OFF | ON (HISTORY_TABLE = name [, DATA_CONSISTENCY_CHECK = ON|OFF]))` (see [`temporal-tables.md`](temporal-tables.md)), `SET (LOCK_ESCALATION = TABLE | DISABLE | AUTO)`, `{ ENABLE | DISABLE } TRIGGER { ALL | name [, …] }` (see [`triggers.md`](triggers.md)), `[WITH CHECK | WITH NOCHECK] ADD [CONSTRAINT name] (PRIMARY KEY | UNIQUE | FOREIGN KEY | CHECK | DEFAULT) [, …]` (multi-element constraint list — see [Multi-element ADD](#multi-element-add)), `DROP CONSTRAINT [IF EXISTS] name [, …]`, `[WITH CHECK | WITH NOCHECK] (CHECK | NOCHECK) CONSTRAINT (ALL | name [, …])` (trust toggling), `ADD [COLUMN] col TYPE [, …]` (multi-column add — see [Column ops](#column-ops)), `DROP COLUMN [IF EXISTS] col [, …]` (multi-column drop with dependency rejection), `ALTER COLUMN col TYPE[(prec[,scale])] [COLLATE coll] [NULL|NOT NULL]` (single-column type / nullability change — see [ALTER COLUMN](#alter-column)), `ALTER COLUMN col { ADD | DROP } { ROWGUIDCOL | SPARSE }` (see [Column attributes](#column-attributes)), `DROP PERIOD FOR SYSTEM_TIME` (see [DROP PERIOD FOR SYSTEM_TIME](#drop-period-for-system_time)), and `REBUILD` (see [REBUILD](#rebuild)).
 `SWITCH PARTITION` and the `ALTER COLUMN col ADD/DROP {PERSISTED|MASKED}` sub-clause forms raise `NotSupportedException`.
 Probe-confirmed against SQL Server 2025.
 
@@ -123,9 +123,11 @@ ALTER TABLE Orders CHECK CONSTRAINT ALL;
 ## DROP CONSTRAINT
 
 ```sql
-ALTER TABLE t DROP CONSTRAINT name [, name ...]
+ALTER TABLE t DROP CONSTRAINT name [, name ...] [WITH (index_option [, …])]
 ALTER TABLE t DROP CONSTRAINT IF EXISTS name
 ```
+
+The `WITH` options (`ONLINE`, `MAXDOP`, …) are parsed and discarded; a nonclustered key constraint refuses them with Msg 3748 then Msg 3727, while a clustered one or any other constraint takes them (probed 2026-09-25).
 
 Name lookup walks all four families on the target table in order:
 

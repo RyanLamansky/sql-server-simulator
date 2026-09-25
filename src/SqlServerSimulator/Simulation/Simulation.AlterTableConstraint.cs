@@ -702,6 +702,12 @@ partial class Simulation
             context.MoveNextOptional();
         }
 
+        // WITH (ONLINE = …, MAXDOP = …) — options for the index a key
+        // constraint drops, discarded, which a nonclustered one refuses
+        // (probed 2026-09-25 against SQL Server 2025).
+        var withOptions = context.Token is ReservedKeyword { Keyword: Keyword.With };
+        _ = ParseOptionalIndexWithClause(context);
+
         if (context.Batch.IsSkipping)
             return true;
 
@@ -723,6 +729,8 @@ partial class Simulation
             }
             if (action.Family == DropConstraintFamily.Key && IsKeyReferencedByForeignKey(table, action.Key!, out var refTable, out var refFkName))
                 throw SimulatedSqlException.ConstraintReferencedByForeignKey(action.Key!.Name, refTable, refFkName);
+            if (withOptions && action.Family == DropConstraintFamily.Key && !action.Key!.IsClustered)
+                throw SimulatedSqlException.DropNonClusteredWithClusteredClause(action.Key.Name);
             planned.Add(action);
         }
 
@@ -1033,8 +1041,8 @@ partial class Simulation
             throw SimulatedSqlException.TemporalPeriodAlreadyDefined(QualifyTableName(table, context.CurrentDatabase));
 
         var collation = context.CurrentDatabase.Collation;
-        var startOrdinal = RequirePeriodColumn(table, collation, startName.Value, tableName.Leaf);
-        var endOrdinal = RequirePeriodColumn(table, collation, endName.Value, tableName.Leaf);
+        var startOrdinal = RequirePeriodColumn(table, collation, startName.Value, tableName.Leaf, missingState: 5);
+        var endOrdinal = RequirePeriodColumn(table, collation, endName.Value, tableName.Leaf, missingState: 6);
         if (((DateTime2SqlType)table.Columns[startOrdinal].Type).precision
             != ((DateTime2SqlType)table.Columns[endOrdinal].Type).precision)
         {
@@ -1059,7 +1067,7 @@ partial class Simulation
     /// checked against everything a period column has to be. A computed column
     /// reports as absent — real doesn't offer one as a candidate.
     /// </summary>
-    private static int RequirePeriodColumn(HeapTable table, Collation collation, string columnName, string tableLeaf)
+    private static int RequirePeriodColumn(HeapTable table, Collation collation, string columnName, string tableLeaf, byte missingState)
     {
         for (var i = 0; i < table.Columns.Length; i++)
         {
@@ -1073,7 +1081,7 @@ partial class Simulation
                 : i;
         }
 
-        throw SimulatedSqlException.AddPeriodColumnDoesNotExist(columnName, tableLeaf);
+        throw SimulatedSqlException.AddPeriodColumnDoesNotExist(columnName, tableLeaf, missingState);
     }
 
     /// <summary>
