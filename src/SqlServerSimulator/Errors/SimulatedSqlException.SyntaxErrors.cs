@@ -122,7 +122,7 @@ partial class SimulatedSqlException
     /// the SELECT INTO + UNION rejection path (INTO is only valid on the
     /// first branch of a set-op chain).
     /// </summary>
-    internal static SimulatedSqlException SyntaxErrorNearKeyword(string keyword) => new($"Incorrect syntax near the keyword '{keyword}'.", 156, 15, 1);
+    internal static SimulatedSqlException SyntaxErrorNearKeyword(string keyword, byte state = 1) => new($"Incorrect syntax near the keyword '{keyword}'.", 156, 15, state);
 
     /// <summary>
     /// Msg 102 naming the parser's current token, falling back to the last

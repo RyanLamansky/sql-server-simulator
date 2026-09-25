@@ -162,7 +162,6 @@ Re-run it after any bundle touching the parser, the expression evaluator or the 
 
 Still open from what it surfaced:
 
-- **A reserved keyword's spelling in Msg 156**: the simulator echoes it as written, where real prints some in capitals regardless — `REFERENCES` and `CONSTRAINT` in a table variable's column list, `ON` in `ALTER DATABASE … SET` (probed 2026-09-24).
 - **Many-way joins do not scale**: `select5`'s 20-24-table equi-joins answer in milliseconds on real and exceed a 15-second `CommandTimeout` here, one of them running past a 40-second wall without honoring its own timeout.
   Not a correctness gap, but it is why the sweep's file list is `random/` rather than the whole corpus — see the join-strategy notes in [`joins.md`](joins.md).
 - **Real answers a statement's binder errors together where the simulator raises the leading one alone** — `INSERT` reports 207 + 110, and 273 + 10709, as one multi-error response.

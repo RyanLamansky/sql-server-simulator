@@ -467,4 +467,17 @@ public sealed class RefusalFidelityTests
     [TestMethod]
     public void TableSample_OnADerivedTable_RaisesMsg156()
         => new Simulation().AssertSqlError("select * from (select 1 a) d tablesample (10 percent)", 156, "Incorrect syntax near the keyword 'tablesample'.");
+
+    [TestMethod]
+    [DataRow("declare @t table (a int references x(a))", "REFERENCES", 1)]
+    [DataRow("declare @t table (a int constraint c primary key)", "CONSTRAINT", 1)]
+    [DataRow("declare @t table (a int, constraint c primary key (a))", "CONSTRAINT", 2)]
+    [DataRow("declare @t table (a int foreign key references x(a))", "FOREIGN", 1)]
+    [DataRow("create type tt1 as table (a int references x(a))", "REFERENCES", 1)]
+    public void TableVariableRefusal_SpellsTheKeywordInCapitals(string sql, string keyword, int state)
+    {
+        var ex = new Simulation().AssertSqlError(sql, 156);
+        AreEqual($"Incorrect syntax near the keyword '{keyword}'.", ex.Errors[0].Message);
+        AreEqual((byte)state, ex.Errors[0].State);
+    }
 }

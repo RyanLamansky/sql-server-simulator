@@ -986,12 +986,12 @@ partial class Simulation
             // expectation. Inside DECLARE @t TABLE the `CONSTRAINT` form
             // raises Msg 102 (probe-confirmed: real SQL Server's grammar
             // disallows named constraints in table-variable declarations).
-            if (context.Token is ReservedKeyword { Keyword: Keyword.Constraint } constraintKw && (isTableVariable || isTableType))
-                throw isTableType ? SimulatedSqlException.SyntaxErrorNearKeyword(constraintKw) : SimulatedSqlException.SyntaxErrorNear(context);
+            if (context.Token is ReservedKeyword { Keyword: Keyword.Constraint } && (isTableVariable || isTableType))
+                throw SimulatedSqlException.SyntaxErrorNearKeyword("CONSTRAINT", state: 2);
             // Bare table-level FOREIGN KEY in a table variable / table type:
             // Msg 102 (probe-confirmed grammar disallows FKs in those contexts).
-            if (context.Token is ReservedKeyword { Keyword: Keyword.Foreign } foreignKw && (isTableVariable || isTableType))
-                throw isTableType ? SimulatedSqlException.SyntaxErrorNearKeyword(foreignKw) : SimulatedSqlException.SyntaxErrorNear(context);
+            if (context.Token is ReservedKeyword { Keyword: Keyword.Foreign } && (isTableVariable || isTableType))
+                throw SimulatedSqlException.SyntaxErrorNearKeyword("FOREIGN");
             if (context.Token is ReservedKeyword { Keyword: Keyword.Constraint or Keyword.Primary or Keyword.Unique or Keyword.Check or Keyword.Foreign })
             {
                 ParseTableLevelConstraint(context, heapColumns, pendingKeys, pendingChecks, pendingComputed, pendingForeignKeys);
@@ -1373,10 +1373,8 @@ partial class Simulation
                         continue;
                     }
                 case ReservedKeyword { Keyword: Keyword.Constraint } inlineConstraintKw when inlineFkName is null:
-                    if (isTableType)
-                        throw SimulatedSqlException.SyntaxErrorNearKeyword(inlineConstraintKw);
-                    if (isTableVariable)
-                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                    if (isTableType || isTableVariable)
+                        throw SimulatedSqlException.SyntaxErrorNearKeyword("CONSTRAINT");
                     if (context.GetNextRequired() is not Name namedConstraint)
                         throw SimulatedSqlException.SyntaxErrorNear(context);
                     context.MoveNextRequired();
@@ -1445,8 +1443,10 @@ partial class Simulation
                     pendingChecks.Add((null, inlineCheck.Predicate, columnName.Value, inlineCheck.Definition));
                     inlineCheckSeen = true;
                     continue;
+                // Real spells the refused keyword in capitals however it was
+                // written (probed 2026-09-24).
                 case ReservedKeyword { Keyword: Keyword.Foreign or Keyword.References } referencesKw when isTableVariable || isTableType:
-                    throw isTableType ? SimulatedSqlException.SyntaxErrorNearKeyword(referencesKw) : SimulatedSqlException.SyntaxErrorNear(context);
+                    throw SimulatedSqlException.SyntaxErrorNearKeyword(referencesKw.Keyword == Keyword.Foreign ? "FOREIGN" : "REFERENCES");
                 case ReservedKeyword { Keyword: Keyword.Foreign or Keyword.References }:
                     ConsumeOptionalForeignKeyNoisePhrase(context);
                     ParseInlineForeignKeyTail(context, columnName.Value, heapColumns.Count, inlineFkName: inlineFkName, pendingForeignKeys);
