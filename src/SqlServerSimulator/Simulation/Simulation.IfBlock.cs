@@ -523,11 +523,13 @@ partial class Simulation
         var context = batch.Parser;
         context.MoveNextRequired(); // consume BEGIN
         // Only a module body may hold one: at batch level, dynamic SQL
-        // included, ATOMIC is a syntax error (probed 2026-09-25 against SQL
-        // Server 2025). A body of a module that isn't natively compiled takes
-        // it here, where real raises Msg 10782.
+        // included, ATOMIC is a syntax error, and a module that isn't natively
+        // compiled refuses it as it binds at CREATE (Msg 10782) — probed
+        // 2026-09-25 against SQL Server 2025. A body that runs has passed that.
         if (batch.UdfFrame is null && batch.TriggerFrame is null && batch.ProcFrame is not { IsDynamicSql: false })
             throw SimulatedSqlException.SyntaxErrorNear(context);
+        if (batch.CreateTimeBinding && !batch.NativelyCompiledBody)
+            throw SimulatedSqlException.BeginAtomicOutsideNativeModule();
         context.MoveNextRequired(); // consume ATOMIC
 
         // Optional WITH (...) options block. Real SQL Server requires this

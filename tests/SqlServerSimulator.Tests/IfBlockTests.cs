@@ -182,6 +182,21 @@ public sealed class IfBlockTests
     public void BeginAtomic_OutsideAModuleBody_IsMsg102AtAtomic(string sql)
         => new Simulation().ValidateSyntaxError(sql, "atomic");
 
+    // Inside a module that isn't natively compiled, the block is refused as
+    // the module compiles, so nothing is created (probed 2026-09-25 against
+    // SQL Server 2025).
+    [TestMethod]
+    [DataRow("create procedure p as begin atomic with (transaction isolation level = snapshot, language = N'us_english') select 1 end")]
+    [DataRow("create function f() returns int as begin atomic with (transaction isolation level = snapshot, language = N'us_english') return 1 end")]
+    [DataRow("create trigger tr on t after insert as begin atomic with (transaction isolation level = snapshot, language = N'us_english') select 1 end")]
+    public void BeginAtomic_InAModuleNotNativelyCompiled_IsMsg10782(string sql)
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table t (a int)");
+        simulation.AssertSqlError(sql, 10782, "BEGIN ATOMIC is supported only in natively compiled modules.");
+        AreEqual(1, simulation.ExecuteScalar("select count(*) from sys.objects where is_ms_shipped = 0"));
+    }
+
     [TestMethod]
     public void BeginDistributedTran_RoutesToTheTransactionPath()
         // The BEGIN disambiguation sends DISTRIBUTED to TryParseBeginTransaction

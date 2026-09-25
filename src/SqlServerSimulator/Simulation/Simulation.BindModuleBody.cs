@@ -221,7 +221,8 @@ partial class Simulation
         string procedureName,
         List<ProcedureParameter> parameters,
         string bodyText,
-        int bodyLineOffset)
+        int bodyLineOffset,
+        bool nativelyCompiled)
     {
         var outerBatch = outerContext.Batch;
         var variables = new Dictionary<string, VariableSlot>(BatchContext.VariableNameComparer);
@@ -243,7 +244,10 @@ partial class Simulation
 
         BindModuleBodyAtCreate(outerContext, bodyText, procedureName, bodyLineOffset, bodyCommand =>
         {
-            var batch = new BatchContext(bodyCommand, variables, new ProcFrame(procedureName), tableVariables);
+            var batch = new BatchContext(bodyCommand, variables, new ProcFrame(procedureName), tableVariables)
+            {
+                NativelyCompiledBody = nativelyCompiled,
+            };
             foreach (var param in parameters)
             {
                 if (param.IsCursor)

@@ -486,6 +486,8 @@ Probed against SQL Server 2025.
   Separately, the handlers also capture the *full* original statement text into `SchemaObject.DefinitionText` (verb normalized to `CREATE`) for `OBJECT_DEFINITION` / `sys.sql_modules` / `INFORMATION_SCHEMA.ROUTINES.ROUTINE_DEFINITION` — see [`catalog-views.md`](catalog-views.md).
 - **Parens around parameter list optional**: `CREATE PROC p (@x int)` and `CREATE PROC p @x int` are equivalent.
 - **WITH options** (`RECOMPILE`, `ENCRYPTION`, `EXECUTE AS CALLER|SELF|OWNER|'name'`, `FOR REPLICATION`) parse-and-ignore — the simulator doesn't model query-planner / security / replication semantics.
+- **`NATIVE_COMPILATION`** admits a `BEGIN ATOMIC [WITH (…)]` body, which runs as a plain `BEGIN … END` block; real's in-memory OLTP prerequisites (Msg 41337 without a `MEMORY_OPTIMIZED_DATA` filegroup) aren't modeled.
+  Anywhere else the block is refused as real refuses it (probed 2026-09-25): a procedure, function or trigger body without it is Msg 10782 as the module binds at `CREATE`, and a batch or dynamic-SQL string is Msg 102 at `ATOMIC`.
 - **`CREATE OR ALTER`** is an upsert: creates when missing, replaces when present — see [Replacing a module](#replacing-a-module--alter--create-or-alter) for what the replacement preserves.
 - **Bare `CREATE PROC` on existing name** raises **Msg 2714** (same factory as duplicate CREATE TABLE).
 - **Bare `ALTER PROC` on missing name** raises **Msg 208** (NOT Msg 3701 — distinct from DROP); on a name another object kind holds, **Msg 2010**.

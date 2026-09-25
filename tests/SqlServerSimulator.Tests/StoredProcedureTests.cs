@@ -839,13 +839,13 @@ public sealed class StoredProcedureTests
     public void BeginAtomic_Without_With_Options_Block_Parses()
     {
         // The grammar allows BEGIN ATOMIC without a WITH (...) options
-        // block (future ATOMIC use cases outside natively-compiled procs).
-        // Verify the path doesn't reject.
+        // block. Verify the path doesn't reject.
         var sim = new Simulation();
         sim.ExecuteBatches(
             "create table t (id int)",
             """
             create procedure dbo.p
+            with native_compilation, schemabinding
             as
             begin atomic
                 insert into t values (42);
@@ -864,6 +864,7 @@ public sealed class StoredProcedureTests
         // CREATE too (probe-confirmed with the plain `select from t` shape).
         var ex = Throws<SimulatedSqlException>(() => new Simulation().ExecuteNonQuery("""
             create procedure dbo.p
+            with native_compilation, schemabinding
             as
             begin atomic with (transaction isolation level = snapshot, language = N'English')
             end

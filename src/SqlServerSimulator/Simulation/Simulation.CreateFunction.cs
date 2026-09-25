@@ -185,6 +185,10 @@ partial class Simulation
 
         var commandText = context.Command.CommandText;
         context.MoveNextRequired(); // step past BEGIN
+        // A function can't be natively compiled here, so its body can't open
+        // with BEGIN ATOMIC (probed 2026-09-25 against SQL Server 2025).
+        if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Atomic })
+            throw SimulatedSqlException.BeginAtomicOutsideNativeModule();
         var bodyStart = context.Token.StartIndex;
         var depth = 1;
         var caseDepth = 0;
@@ -367,6 +371,10 @@ partial class Simulation
 
         var commandText = context.Command.CommandText;
         context.MoveNextRequired(); // step past BEGIN
+        // A function can't be natively compiled here, so its body can't open
+        // with BEGIN ATOMIC (probed 2026-09-25 against SQL Server 2025).
+        if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Atomic })
+            throw SimulatedSqlException.BeginAtomicOutsideNativeModule();
         var bodyStart = context.Token.StartIndex;
         var depth = 1;
         var caseDepth = 0;

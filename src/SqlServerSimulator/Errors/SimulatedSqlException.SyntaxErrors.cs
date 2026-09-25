@@ -125,6 +125,14 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException SyntaxErrorNearKeyword(string keyword, byte state = 1) => new($"Incorrect syntax near the keyword '{keyword}'.", 156, 15, state);
 
     /// <summary>
+    /// Mimics SQL Server's Msg 10782 — a <c>BEGIN ATOMIC</c> block in the body
+    /// of a module that isn't natively compiled, raised as the module compiles.
+    /// Severity 15, state 1, probed 2026-09-25 against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException BeginAtomicOutsideNativeModule() =>
+        new("BEGIN ATOMIC is supported only in natively compiled modules.", 10782, 15, 1);
+
+    /// <summary>
     /// Msg 102 naming the parser's current token, falling back to the last
     /// token the batch produced once the input has run out — real names the
     /// token it last consumed rather than an empty slot (probed 2026-08-05:

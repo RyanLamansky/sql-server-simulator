@@ -268,6 +268,14 @@ internal sealed class BatchContext
     public bool CreateTimeBinding;
 
     /// <summary>
+    /// Set while a <c>NATIVE_COMPILATION</c> procedure's body binds at
+    /// <c>CREATE</c>, the one module body that may hold <c>BEGIN ATOMIC</c>.
+    /// Any other module refuses the block there (Msg 10782), so a body that
+    /// runs later already passed the check.
+    /// </summary>
+    public bool NativelyCompiledBody;
+
+    /// <summary>
     /// Binder errors gathered while a module body or a batch binds, non-null
     /// only on the bind batch (<see cref="CreateTimeBinding"/>). Real reports <em>every</em>
     /// binder error a body contains rather than stopping at the first

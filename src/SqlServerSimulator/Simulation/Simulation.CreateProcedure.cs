@@ -124,8 +124,9 @@ partial class Simulation
         // REPLICATION are parse-and-ignore; EXECUTE AS is captured and applied
         // as an impersonation frame around the body at invocation.
         string? executeAsClause = null;
+        var nativelyCompiled = false;
         if (context.Token is ReservedKeyword { Keyword: Keyword.With })
-            executeAsClause = ParseProcedureWithOptions(context);
+            executeAsClause = ParseProcedureWithOptions(context, out nativelyCompiled);
 
         if (context.Token is not ReservedKeyword { Keyword: Keyword.As })
             throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -167,7 +168,7 @@ partial class Simulation
         // real reports a body error rather than Msg 2714 for a plain CREATE over
         // an existing name, and rather than Msg 208 for a bare ALTER of a name
         // that doesn't exist.
-        context.Simulation.BindProcedureBodyAtCreate(context, procName.Leaf, parameters, bodyText, bodyLineOffset);
+        context.Simulation.BindProcedureBodyAtCreate(context, procName.Leaf, parameters, bodyText, bodyLineOffset, nativelyCompiled);
 
         // CREATE-only (no OR ALTER) collides with any existing object of the
         // same name (procs share the namespace with tables / views /
@@ -368,26 +369,32 @@ partial class Simulation
     /// <c>AS</c>. <c>RECOMPILE</c> / <c>ENCRYPTION</c> / <c>SCHEMABINDING</c> /
     /// <c>NATIVE_COMPILATION</c> / <c>FOR REPLICATION</c> parse-and-ignore;
     /// <c>EXECUTE AS CALLER|SELF|OWNER|'name'</c> is captured and returned (the
-    /// invocation applies it as an impersonation frame). Cursor on entry: the
+    /// invocation applies it as an impersonation frame), and
+    /// <paramref name="nativelyCompiled"/> reports <c>NATIVE_COMPILATION</c>,
+    /// which admits a <c>BEGIN ATOMIC</c> body. Cursor on entry: the
     /// <c>WITH</c> keyword; cursor on exit: the <c>AS</c> keyword.
     /// </summary>
-    private static string? ParseProcedureWithOptions(ParserContext context)
+    private static string? ParseProcedureWithOptions(ParserContext context, out bool nativelyCompiled)
     {
         string? executeAsClause = null;
+        nativelyCompiled = false;
         context.MoveNextRequired();
         while (true)
         {
             switch (context.Token)
             {
+                case UnquotedString { ContextualKeyword: ContextualKeyword.Native_Compilation }:
+                    // Native compilation has no code path of its own here; it
+                    // admits the BEGIN ATOMIC body block, which runs as the
+                    // regular BEGIN…END flow.
+                    nativelyCompiled = true;
+                    context.MoveNextRequired();
+                    break;
                 case UnquotedString { ContextualKeyword: ContextualKeyword.Recompile }:
                 case UnquotedString { ContextualKeyword: ContextualKeyword.Encryption }:
                 case UnquotedString { ContextualKeyword: ContextualKeyword.SchemaBinding }:
-                case UnquotedString { ContextualKeyword: ContextualKeyword.Native_Compilation }:
-                    // SCHEMABINDING / NATIVE_COMPILATION parse-and-ignore: the
-                    // simulator doesn't model schema-binding enforcement or
-                    // native-compilation code paths. NATIVE_COMPILATION pairs
-                    // with a BEGIN ATOMIC body block (which the dispatcher
-                    // handles by re-using the regular BEGIN…END flow).
+                    // SCHEMABINDING parse-and-ignore: the simulator doesn't
+                    // model schema-binding enforcement for procedures.
                     context.MoveNextRequired();
                     break;
                 case ReservedKeyword { Keyword: Keyword.Execute }:
