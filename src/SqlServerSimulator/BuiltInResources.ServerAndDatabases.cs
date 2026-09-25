@@ -411,6 +411,48 @@ internal static partial class BuiltInResources
             new("label", SqlType.NVarchar, 255, true),
         ], EnumerateSysDmExecRequests);
 
+        // The transaction DMVs (probed 2026-09-25 against SQL Server 2025) list
+        // each session's user transaction under the id CURRENT_TRANSACTION_ID()
+        // reports, plus the querying statement's own autocommit transaction.
+        Sys("dm_tran_active_transactions",
+        [
+            new("transaction_id", SqlType.BigInt, null, false),
+            new("name", SqlType.NVarchar, 32, false),
+            new("transaction_begin_time", SqlType.DateTime, null, false),
+            new("transaction_type", SqlType.Int32, null, false),
+            new("transaction_uow", SqlType.UniqueIdentifier, null, true),
+            new("transaction_state", SqlType.Int32, null, false),
+            new("transaction_status", SqlType.Int32, null, false),
+            new("transaction_status2", SqlType.Int32, null, false),
+            new("dtc_state", SqlType.Int32, null, false),
+            new("dtc_status", SqlType.Int32, null, false),
+            new("dtc_isolation_level", SqlType.Int32, null, false),
+            new("filestream_transaction_id", SqlType.Varbinary, 128, true),
+        ], EnumerateSysDmTranActiveTransactions);
+
+        Sys("dm_tran_session_transactions",
+        [
+            new("session_id", SqlType.Int32, null, false),
+            new("transaction_id", SqlType.BigInt, null, false),
+            new("transaction_descriptor", SqlType.GetBinary(8), null, false),
+            new("enlist_count", SqlType.Int32, null, false),
+            new("is_user_transaction", SqlType.Bit, null, false),
+            new("is_local", SqlType.Bit, null, false),
+            new("is_enlisted", SqlType.Bit, null, false),
+            new("is_bound", SqlType.Bit, null, false),
+            new("open_transaction_count", SqlType.Int32, null, false),
+        ], EnumerateSysDmTranSessionTransactions);
+
+        Sys("dm_tran_current_transaction",
+        [
+            new("transaction_id", SqlType.BigInt, null, true),
+            new("transaction_sequence_num", SqlType.BigInt, null, true),
+            new("transaction_is_snapshot", SqlType.Bit, null, true),
+            new("first_snapshot_sequence_num", SqlType.BigInt, null, true),
+            new("last_transaction_sequence_num", SqlType.BigInt, null, true),
+            new("first_useful_sequence_num", SqlType.BigInt, null, true),
+        ], EnumerateSysDmTranCurrentTransaction);
+
         // sys.configurations: server-scoped static server-configuration
         // catalog. value / minimum / maximum / value_in_use are sql_variant,
         // matching real SQL Server — every option carries an inner base type of

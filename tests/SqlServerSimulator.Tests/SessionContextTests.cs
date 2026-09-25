@@ -42,7 +42,7 @@ public sealed class SessionContextTests
         using var reader = new Simulation().ExecuteReader("select connectionproperty('net_transport')");
         AreEqual("sql_variant", reader.GetDataTypeName(0));
         IsTrue(reader.Read());
-        AreEqual("TCP", reader.GetValue(0));
+        AreEqual("Shared memory", reader.GetValue(0));
     }
 
     [TestMethod]
@@ -88,8 +88,11 @@ public sealed class SessionContextTests
     [TestMethod]
     public void ConnectionProperty_KnownAndUnknown()
     {
-        AreEqual("TCP", ExecuteScalar("select connectionproperty('net_transport')"));
+        // An in-process connection answers as real's shared-memory transport.
+        AreEqual("Shared memory", ExecuteScalar("select connectionproperty('net_transport')"));
         AreEqual("TSQL", ExecuteScalar("select connectionproperty('protocol_type')"));
+        AreEqual("<local machine>|varchar", ExecuteScalar("select concat(cast(connectionproperty('client_net_address') as varchar(50)), '|', cast(sql_variant_property(connectionproperty('client_net_address'), 'BaseType') as varchar(20)))"));
+        _ = IsInstanceOfType<DBNull>(ExecuteScalar("select connectionproperty('local_tcp_port')"));
         _ = IsInstanceOfType<DBNull>(ExecuteScalar("select connectionproperty('bogus')"));
     }
 

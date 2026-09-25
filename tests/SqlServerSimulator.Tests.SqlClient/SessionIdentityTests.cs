@@ -116,4 +116,21 @@ public sealed class SessionIdentityTests
             $"TCP|TRUE|SQL|127.0.0.1|127.0.0.1|{listener.Port}|1946157060|8000|counted|port",
             string.Join("|", Enumerable.Range(0, reader.FieldCount).Select(reader.GetValue)));
     }
+
+    /// <summary>
+    /// <c>CONNECTIONPROPERTY</c> reads the same transport, with real's base
+    /// types: a <c>varchar</c> client address and a <c>smallint</c> port, which
+    /// an ephemeral listener port past 32767 wraps.
+    /// </summary>
+    [TestMethod]
+    public async Task ConnectionProperty_ReportsTheTcpTransport()
+    {
+        var simulation = new Simulation();
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+        await using var command = new SqlCommand(
+            "select concat(cast(connectionproperty('net_transport') as varchar(20)), '|', cast(connectionproperty('client_net_address') as varchar(50)), '|', cast(sql_variant_property(connectionproperty('client_net_address'), 'BaseType') as varchar(20)),"
+            + " '|', cast(connectionproperty('local_net_address') as varchar(50)), '|', cast(connectionproperty('local_tcp_port') as int) & 65535, '|', cast(sql_variant_property(connectionproperty('local_tcp_port'), 'BaseType') as varchar(20)))", connection);
+        AreEqual($"TCP|127.0.0.1|varchar|127.0.0.1|{listener.Port}|smallint", await command.ExecuteScalarAsync(TestContext.CancellationToken));
+    }
 }

@@ -705,10 +705,9 @@ These carry real per-session state on `SimulatedDbConnection` (not placeholder c
 - **`CONTEXT_INFO()`** + **`SET CONTEXT_INFO <binary>`** — the legacy single 128-byte slot.
   NULL until set; once set, SQL Server stores exactly 128 bytes (right-padded / truncated), so `DATALENGTH(CONTEXT_INFO())` is always 128 afterward.
   Only the literal-binary `SET` form is modeled — a `@var` value side isn't accepted by the SET value parser.
-- **`CONNECTIONPROPERTY(name)`** — `sql_variant` (like real).
-  The modeled properties carry an `nvarchar` inner: probe-confirmed `net_transport` = `'TCP'`, `protocol_type` = `'TSQL'`; `auth_scheme` / `physical_net_transport` report placeholder constants.
-  Address / port properties (real types them `nvarchar` / `smallint`) are unmodeled and, like unknown names, return a NULL `sql_variant`.
-- **`CURRENT_TRANSACTION_ID()`** — bigint, approximated by the database's monotonic commit counter (a plausible increasing value, not a stable per-transaction id — apps use it for correlation, not correctness).
+- **`CONNECTIONPROPERTY(name)`** — `sql_variant` (like real), reading the same transport `sys.dm_exec_connections` reports ([`catalog-views.md`](catalog-views.md)): `TCP` and the endpoints over the TDS endpoint, real's `Shared memory` shape in-process.
+  Real's base types hold: `nvarchar` throughout, but a `varchar` `client_net_address` and a `smallint` `local_tcp_port` (probed 2026-09-25).
+- **`CURRENT_TRANSACTION_ID()`** — bigint from a server-wide counter: one id per user transaction, drawn at its BEGIN, and a fresh one for each autocommit statement that asks; `sys.dm_tran_current_transaction` / `dm_tran_active_transactions` / `dm_tran_session_transactions` list the same ids (probed 2026-09-25).
 - **`CURRENT_REQUEST_ID()`** — int, returns 0 (the simulator doesn't multiplex requests per session; probe-confirmed value for a single-request session).
 
 **`SESSION_ID()` is deliberately not modeled** — it's not a box-product function (raises Msg 195 on SQL Server 2025; it's a dedicated-SQL-pool / cloud surface).

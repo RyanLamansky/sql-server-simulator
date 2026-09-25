@@ -577,6 +577,15 @@ public sealed partial class Simulation
     /// </summary>
     internal long AllocateTransactionCommitId() => Interlocked.Increment(ref this.transactionCommitCounter);
 
+    private long transactionIdCounter;
+
+    /// <summary>
+    /// Draws the next id from the server-wide counter <c>CURRENT_TRANSACTION_ID()</c>
+    /// and the transaction DMVs report: one per user transaction at its BEGIN,
+    /// and one per autocommit statement that asks.
+    /// </summary>
+    internal long AllocateTransactionId() => Interlocked.Increment(ref this.transactionIdCounter);
+
     /// <summary>
     /// Reads the current value of the commit-id counter without advancing it.
     /// Used to stamp a snapshot at first read under SNAPSHOT isolation and at
@@ -1346,6 +1355,7 @@ public sealed partial class Simulation
                 // the single-statement dispatch value for ERROR_LINE parity.
                 batch.CurrentStatement.UtcNow = DateTime.UtcNow;
                 batch.CurrentStatement.StartLine = 1;
+                batch.CurrentStatement.AutocommitTransactionId = 0;
                 batch.CurrentStatement.StatementScopedValues = null;
                 batch.CurrentStatement.SubqueryResults = null;
                 batch.CurrentStatement.CatalogViewRows = null;
@@ -2448,6 +2458,7 @@ public sealed partial class Simulation
         batch.CurrentStatement.StatementScopedValues = null;
         batch.CurrentStatement.SubqueryResults = null;
         batch.CurrentStatement.CatalogViewRows = null;
+        batch.CurrentStatement.AutocommitTransactionId = 0;
 
         // WITH prefix applies to the immediately-following SELECT / INSERT /
         // UPDATE / DELETE / MERGE. ParseCteBindings sets context.CteBindings

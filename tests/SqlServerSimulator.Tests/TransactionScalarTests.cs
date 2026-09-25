@@ -60,4 +60,35 @@ public sealed class TransactionScalarTests
         IsTrue(reader.Read());
         AreEqual("smallint", reader.GetDataTypeName(0));
     }
+
+    // CURRENT_TRANSACTION_ID() is stable across a user transaction and fresh
+    // for each autocommit statement, and the transaction DMVs list the same id
+    // (probed 2026-09-25 against SQL Server 2025).
+    [TestMethod]
+    public void CurrentTransactionId_MatchesTheTransactionDmvs()
+    {
+        using var connection = new Simulation().CreateOpenConnection();
+        long Id(string sql) => (long)connection.CreateCommand(sql).ExecuteScalar()!;
+        var first = Id("select current_transaction_id()");
+        var second = Id("select current_transaction_id()");
+        IsGreaterThan(first, second);
+
+        _ = connection.CreateCommand("begin tran named").ExecuteNonQuery();
+        var inside = Id("select current_transaction_id()");
+        AreEqual(inside, Id("select current_transaction_id()"));
+        AreEqual(inside, Id("select transaction_id from sys.dm_tran_current_transaction"));
+        AreEqual(
+            $"named|1|2|258|-1",
+            connection.CreateCommand($"select concat(name, '|', transaction_type, '|', transaction_state, '|', transaction_status2, '|', dtc_isolation_level) from sys.dm_tran_active_transactions where transaction_id = {inside}").ExecuteScalar());
+        _ = connection.CreateCommand("begin tran").ExecuteNonQuery();
+        AreEqual(
+            $"{inside}|0x0100000033000000|1",
+            connection.CreateCommand("select concat(transaction_id, '|', convert(varchar(20), transaction_descriptor, 1), '|', open_transaction_count) from sys.dm_tran_session_transactions where session_id = @@spid").ExecuteScalar());
+        _ = connection.CreateCommand("commit; commit").ExecuteNonQuery();
+
+        AreEqual(0, connection.CreateCommand("select count(*) from sys.dm_tran_session_transactions").ExecuteScalar());
+        AreEqual(
+            "SELECT|2|0|0|same",
+            connection.CreateCommand("select concat(name, '|', transaction_type, '|', transaction_status2, '|', dtc_isolation_level, '|', iif(transaction_id = current_transaction_id(), 'same', 'other')) from sys.dm_tran_active_transactions").ExecuteScalar());
+    }
 }

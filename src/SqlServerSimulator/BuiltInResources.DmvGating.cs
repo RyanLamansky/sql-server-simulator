@@ -27,7 +27,10 @@ internal static partial class BuiltInResources
         ("sys.dm_os_sys_info", DmvGateKind.ServerState),
         ("sys.dm_os_waiting_tasks", DmvGateKind.ServerState),
         ("sys.dm_tran_active_snapshot_database_transactions", DmvGateKind.ServerState),
+        ("sys.dm_tran_active_transactions", DmvGateKind.ServerState),
+        ("sys.dm_tran_current_transaction", DmvGateKind.ServerState),
         ("sys.dm_tran_locks", DmvGateKind.ServerState),
+        ("sys.dm_tran_session_transactions", DmvGateKind.ServerState),
         ("sys.dm_tran_version_store", DmvGateKind.ServerState),
         ("sys.dm_tran_version_store_space_usage", DmvGateKind.ServerState),
     ];

@@ -68,15 +68,14 @@ internal sealed class ContextInfoFunction : Expression
 }
 
 /// <summary>
-/// SQL <c>CONNECTIONPROPERTY('property')</c>: returns connection-level
-/// attributes. Like real SQL Server, the result is <c>sql_variant</c>
-/// (<see cref="SqlType.SqlVariant"/>); the modeled properties carry an inner
-/// <c>nvarchar</c> base type (probe-confirmed — the port / address properties
-/// real types as <c>smallint</c> / <c>nvarchar</c> are unmodeled and return
-/// NULL). The in-process connection has no real network identity, so
-/// transport-shaped properties report fixed placeholder constants
-/// (probe-confirmed <c>net_transport = 'TCP'</c>, <c>protocol_type = 'TSQL'</c>);
-/// an unknown or unmodeled property → NULL <c>sql_variant</c>.
+/// SQL <c>CONNECTIONPROPERTY('property')</c>: the connection-level attributes
+/// <c>sys.dm_exec_connections</c> reports for the session, as
+/// <c>sql_variant</c> with real's base types — <c>nvarchar</c> but for a
+/// <c>varchar</c> <c>client_net_address</c> and a <c>smallint</c>
+/// <c>local_tcp_port</c> (probed 2026-09-25 against SQL Server 2025). A
+/// TDS-endpoint session reports its TCP transport; an in-process one real's
+/// shared-memory shape, with no addresses or port. An unknown or unmodeled
+/// property is a NULL <c>sql_variant</c>.
 /// </summary>
 internal sealed class ConnectionProperty : Expression
 {
@@ -96,19 +95,21 @@ internal sealed class ConnectionProperty : Expression
             return SqlValue.Null(SqlType.SqlVariant);
         var name = n.CoerceTo(SqlType.NVarchar).AsString;
         // Longer than any recognized property name; also bounds the stackalloc
-        // against an adversarially long argument. The null-valued modeled
-        // properties (local_net_address / local_tcp_port / client_net_address /
-        // sni_consumer_node) fall to the default arm — same NULL sql_variant
-        // an unknown name yields.
+        // against an adversarially long argument. sni_consumer_node, and the
+        // local address and port of a connection with none, fall to the
+        // default arm — the same NULL sql_variant an unknown name yields.
         if (name.Length > 32)
             return SqlValue.Null(SqlType.SqlVariant);
         Span<char> upper = stackalloc char[name.Length];
         _ = name.AsSpan().ToUpperInvariant(upper);
+        var transport = runtime.Batch.Connection.Transport;
         return upper switch
         {
             "AUTH_SCHEME" => SqlValue.FromVariant(SqlValue.FromNVarchar("SQL")),
-            "NET_TRANSPORT" => SqlValue.FromVariant(SqlValue.FromNVarchar("TCP")),
-            "PHYSICAL_NET_TRANSPORT" => SqlValue.FromVariant(SqlValue.FromNVarchar("TCP")),
+            "CLIENT_NET_ADDRESS" => SqlValue.FromVariant(SqlValue.FromVarchar(transport.Client is { } client ? client.Address.ToString() : "<local machine>")),
+            "LOCAL_NET_ADDRESS" when transport.Local is { } local => SqlValue.FromVariant(SqlValue.FromNVarchar(local.Address.ToString())),
+            "LOCAL_TCP_PORT" when transport.Local is { } local => SqlValue.FromVariant(SqlValue.FromInt16(unchecked((short)local.Port))),
+            "NET_TRANSPORT" or "PHYSICAL_NET_TRANSPORT" => SqlValue.FromVariant(SqlValue.FromNVarchar(transport.Client is null ? "Shared memory" : "TCP")),
             "PROTOCOL_TYPE" => SqlValue.FromVariant(SqlValue.FromNVarchar("TSQL")),
             _ => SqlValue.Null(SqlType.SqlVariant),
         };
@@ -126,11 +127,10 @@ internal sealed class ConnectionProperty : Expression
 }
 
 /// <summary>
-/// SQL <c>CURRENT_TRANSACTION_ID()</c>: returns a <c>bigint</c> transaction
-/// identifier. Apps use it for logging / correlation, not correctness; the
-/// simulator approximates it with the instance's monotonic commit counter
-/// (<see cref="Simulation.CurrentTransactionCommitId"/>) — a plausible,
-/// increasing value rather than a stable per-transaction id.
+/// SQL <c>CURRENT_TRANSACTION_ID()</c>: the <c>bigint</c> id of the running
+/// statement's transaction — stable across a user transaction, fresh for each
+/// autocommit statement, and the id the transaction DMVs list it under
+/// (probed 2026-09-25 against SQL Server 2025).
 /// </summary>
 internal sealed class CurrentTransactionId : Expression
 {
@@ -141,7 +141,7 @@ internal sealed class CurrentTransactionId : Expression
     }
 
     public override SqlValue Run(RuntimeContext runtime) =>
-        SqlValue.FromInt64(runtime.Batch.Connection.Simulation.CurrentTransactionCommitId);
+        SqlValue.FromInt64(runtime.Batch.CurrentTransactionId());
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.BigInt;
 

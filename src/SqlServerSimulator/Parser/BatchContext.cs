@@ -1501,6 +1501,21 @@ internal sealed class BatchContext
     /// <summary>The connection executing this batch.</summary>
     public SimulatedDbConnection Connection => this.Parser.Connection;
 
+    /// <summary>
+    /// The id of the transaction the running statement is in: the session's
+    /// user transaction's, or else the statement's own autocommit one, drawn
+    /// on first ask.
+    /// </summary>
+    internal long CurrentTransactionId()
+    {
+        if (this.Connection.CurrentTransaction is { } transaction)
+            return transaction.TransactionId;
+        var statement = this.CurrentStatement;
+        if (statement.AutocommitTransactionId == 0)
+            statement.AutocommitTransactionId = this.Connection.Simulation.AllocateTransactionId();
+        return statement.AutocommitTransactionId;
+    }
+
     /// <summary>The database this batch is executing against.</summary>
     public Database CurrentDatabase => this.Parser.CurrentDatabase;
 

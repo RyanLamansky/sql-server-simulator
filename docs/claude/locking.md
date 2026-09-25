@@ -519,6 +519,9 @@ Three DMVs cover version-store state, with column shapes probe-confirmed against
 - **`sys.dm_tran_version_store_space_usage`**: one row per database aggregating payload bytes — `reserved_page_count` = ceil(bytes / 8192) approximates the buffer-pool figure that real SQL Server reports, `reserved_space_kb` = ceil(bytes / 1024).
   Always yields one row (matches probe — empty stores show as `0` not row-empty).
 - **`sys.dm_tran_active_snapshot_database_transactions`**: one row per active SI tx with `tx.SnapshotXid != null`.
+- **`sys.dm_tran_active_transactions`** / **`sys.dm_tran_session_transactions`** / **`sys.dm_tran_current_transaction`** (probed 2026-09-25 against SQL Server 2025): each session's user transaction under its `CURRENT_TRANSACTION_ID()`, named as its outermost BEGIN named it (`user_transaction` otherwise), plus the querying statement's autocommit transaction, named for the statement and read-only for a SELECT.
+  A nested BEGIN still reads `open_transaction_count` 1, as real's does; `dm_tran_current_transaction` reports a SNAPSHOT transaction's stamp and the commit counter as the version sequence.
+  Real's system transactions (worktables, the version-store cleanup) aren't listed.
   Columns: `transaction_id` (synthesized from object hash code), `transaction_sequence_num` (= `tx.SnapshotXid`), `commit_sequence_num` (NULL — tx is still in flight), `session_id` (= `tx.connection.Spid`), `is_snapshot` (always true — RCSI per-statement snapshots aren't tracked, matching real server behavior for this DMV), `first_snapshot_sequence_num` (NULL), `max_version_chain_traversed` / `average_version_chain_traversed` / `elapsed_time_seconds` (0 — simulator doesn't instrument those).
 
 ### Version-store garbage collection

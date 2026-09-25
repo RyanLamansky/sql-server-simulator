@@ -116,6 +116,14 @@ internal sealed class StatementContext
     public DateTime UtcNow = DateTime.UtcNow;
 
     /// <summary>
+    /// The id of the autocommit transaction this statement runs in when the
+    /// session has no user transaction, drawn from the server-wide counter on
+    /// first read and 0 until then; cleared alongside the <see cref="UtcNow"/>
+    /// refresh, so each autocommit statement reports an id of its own.
+    /// </summary>
+    public long AutocommitTransactionId;
+
+    /// <summary>
     /// 1-based line within the batch where this statement started (taken
     /// from <see cref="Token.LineNumber"/> of the leading token at dispatch
     /// time). Used as the default for <c>ERROR_LINE()</c> when an error fires

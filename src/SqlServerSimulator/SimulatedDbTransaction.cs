@@ -19,8 +19,15 @@ public sealed class SimulatedDbTransaction : DbTransaction
         this.simulation = simulation;
         this.Connection = connection;
         this.IsolationLevel = isolationLevel;
+        this.TransactionId = simulation.AllocateTransactionId();
     }
     internal readonly Simulation simulation;
+
+    /// <summary>The id <c>CURRENT_TRANSACTION_ID()</c> and the transaction DMVs report, drawn at BEGIN.</summary>
+    internal readonly long TransactionId;
+
+    /// <summary>When the transaction began, <c>sys.dm_tran_active_transactions.transaction_begin_time</c>.</summary>
+    internal readonly DateTime BeginTimeUtc = DateTime.UtcNow;
 
     /// <summary>
     /// Cross-statement undo log for this transaction. Statements executed
