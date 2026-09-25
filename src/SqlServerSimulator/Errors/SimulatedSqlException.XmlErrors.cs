@@ -886,6 +886,14 @@ partial class SimulatedSqlException
         new($"XML Validation: Unexpected element(s): {name}. Location: {location}", 6923, 16, 1);
 
     /// <summary>
+    /// Msg 6911: a child an <c>xsd:all</c> group's member already took,
+    /// again — each member takes one. Named against the repeated occurrence.
+    /// Probed 2026-09-25 against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException XmlValidationDuplicateInAll(string name, string location) =>
+        new($"XML Validation: Found duplicate element '{name}' in all content model. Location: {location}", 6911, 16, 1);
+
+    /// <summary>
     /// Msg 6908: the content model still required an element when the parent
     /// ended. Named against the parent, not the missing child.
     /// </summary>

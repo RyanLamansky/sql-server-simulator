@@ -414,4 +414,28 @@ public sealed class XmlTypedValidationTests
             6913,
             "XML Validation: Declaration not found for element '{urn:inner}nope'. Location: /*:outer[1]/*:nope[1]");
     }
+
+    // An xsd:all group takes each member once in any order: a repeat is Msg
+    // 6911, a missing required member Msg 6908 naming only it, and the
+    // expected list runs its names together (probed 2026-09-25 against SQL
+    // Server 2025).
+    [TestMethod]
+    [DataRow("<r><b>q</b><a>1</a></r>", null, null)]
+    [DataRow("<r><b>q</b></r>", 6908, "XML Validation: Invalid content. Expected element(s): 'a'. Location: /*:r[1]")]
+    [DataRow("<r/>", 6908, "XML Validation: Invalid content. Expected element(s): 'a','b'. Location: /*:r[1]")]
+    [DataRow("<r><a>1</a><b>q</b><b>z</b></r>", 6911, "XML Validation: Found duplicate element 'b' in all content model. Location: /*:r[1]/*:b[2]")]
+    public void AllContentModel_TakesEachMemberOnce(string document, int? number, string? message)
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            create xml schema collection xa as N'<xsd:schema xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+            <xsd:element name="r"><xsd:complexType><xsd:all><xsd:element name="a" type="xsd:int"/><xsd:element name="b" minOccurs="0" type="xsd:string"/></xsd:all></xsd:complexType></xsd:element>
+            </xsd:schema>'
+            """);
+        var sql = $"declare @x xml(xa) = N'{document}'; select 1";
+        if (number is { } expected)
+            simulation.AssertSqlError(sql, expected, message!);
+        else
+            AreEqual(1, simulation.ExecuteScalar(sql));
+    }
 }

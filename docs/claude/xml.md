@@ -330,7 +330,7 @@ Zero is always scientific (`0.0E0`), signed when it was written signed.
 
 ### The validation errors
 
-Eight messages, each carrying real's own location trail — `/*:r[1]/*:a[1]` per element with same-named siblings numbered from one, `/*:r[1]/@*:k` for an attribute, and a namespaced name written `{uri}local`.
+Nine messages, each carrying real's own location trail — `/*:r[1]/*:a[1]` per element with same-named siblings numbered from one, `/*:r[1]/@*:k` for an attribute, and a namespaced name written `{uri}local`.
 
 | condition | error |
 |---|---|
@@ -342,8 +342,11 @@ Eight messages, each carrying real's own location trail — `/*:r[1]/*:a[1]` per
 | a `use="required"` attribute left out | **Msg 6906** `Required attribute 'k' is missing. Location: …` |
 | a root element the collection declares nowhere — including one written in no namespace against a qualified schema, which real refuses rather than skipping — or a `strict` wildcard's child that nothing declares | **Msg 6913** `Declaration not found for element '…'. Location: …` |
 | character data inside an element-only type | **Msg 6909** `Text node is not allowed at this location, …` |
+| a second child an `xsd:all` member already took | **Msg 6911** `Found duplicate element 'b' in all content model. Location: …` (against the repeat); a required member left untaken is Msg 6908 naming only the missing ones |
 
 The expected-element list names what the model would have taken **at the position the walk stopped at**, not every name in the content particle — and a wildcard writes itself into it as `{uri}*` per namespace it names.
+Its names run together as `'x','y'`, no space after the comma (probed 2026-09-25).
+**Divergence**: real also lists the optional elements a sequence skipped on the way — `<s/>` against `m?, n` is `'n','m'` there and `'n'` here.
 That list is also what splits the two leftover-child errors: a model still willing to take something is Msg 6965 naming it, while one whose every particle has reached its `maxOccurs` has nothing to offer and reports Msg 6923.
 So against `dec?`, `<v><nope/></v>` is 6965 and `<v><dec>1</dec><nope/></v>` is 6923 (each probed on its own).
 

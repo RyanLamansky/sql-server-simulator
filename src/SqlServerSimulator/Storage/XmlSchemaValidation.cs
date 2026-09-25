@@ -410,22 +410,44 @@ internal static class XmlSchemaValidation
                 return AnyBranchIsOptional(choice);
 
             case XmlSchemaAll all:
-                var matchedAny = false;
+                // Each member takes at most one child, in any order: a child a
+                // member already took is Msg 6911, and a required member left
+                // untaken is Msg 6908 naming just those (probed 2026-09-25).
+                List<XmlSchemaParticle> taken = [];
                 bool progressed;
                 do
                 {
                     progressed = false;
                     foreach (var item in all.Items)
                     {
-                        if (item is not XmlSchemaParticle inner)
+                        if (item is not XmlSchemaParticle inner || taken.Contains(inner))
                             continue;
                         var before = cursor.Index;
                         if (MatchOnce(inner, cursor, parent) && cursor.Index > before)
-                            progressed = matchedAny = true;
+                        {
+                            progressed = true;
+                            taken.Add(inner);
+                        }
                     }
                 }
                 while (progressed);
-                return matchedAny || AllItemsAreOptional(all);
+
+                if (cursor.Index < cursor.Children.Length && taken.Exists(inner => inner is XmlSchemaElement declaration && NameOf(declaration) == cursor.Children[cursor.Index].Name))
+                {
+                    var repeated = cursor.Children[cursor.Index];
+                    throw SimulatedSqlException.XmlValidationDuplicateInAll(QualifiedName(repeated.Name), LocationOf(repeated));
+                }
+                if (taken.Count == 0)
+                    return AllItemsAreOptional(all);
+                List<string> missing = [];
+                foreach (var item in all.Items)
+                {
+                    if (item is XmlSchemaElement { MinOccurs: > 0 } required && !taken.Contains(required))
+                        missing.Add(QualifiedName(NameOf(required)));
+                }
+                if (missing.Count > 0)
+                    throw SimulatedSqlException.XmlValidationIncompleteContent(string.Join("','", missing), LocationOf(parent));
+                return true;
 
             default:
                 return false;
@@ -521,7 +543,8 @@ internal static class XmlSchemaValidation
     {
         var names = new List<string>();
         Collect(particle, names);
-        return string.Join("', '", names);
+        // Real runs the names together: 'x','y' (probed 2026-09-25).
+        return string.Join("','", names);
 
         static void Collect(XmlSchemaParticle particle, List<string> into)
         {
@@ -683,7 +706,7 @@ internal static class XmlSchemaValidation
         }
 
         public string ExpectedHere() =>
-            this.expectedAt == this.Index ? string.Join("', '", this.expectedHere) : string.Empty;
+            this.expectedAt == this.Index ? string.Join("','", this.expectedHere) : string.Empty;
 
         public void Rewind(int index)
         {
