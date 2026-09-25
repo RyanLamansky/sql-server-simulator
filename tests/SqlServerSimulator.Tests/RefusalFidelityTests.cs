@@ -486,4 +486,19 @@ public sealed class RefusalFidelityTests
     [DataRow("select 1 from (select 1 a) t where .e1 = 1", ".e1")]
     public void LeadingDotName_IsAMultiPartIdentifier(string sql, string name)
         => new Simulation().AssertSqlError(sql, 4104, $"The multi-part identifier \"{name}\" could not be bound.");
+
+    [TestMethod]
+    [DataRow("order by b range between unbounded preceding and current row", 902)]
+    [DataRow("order by c range between unbounded preceding and current row", 8000)]
+    [DataRow("order by a, d range between unbounded preceding and current row", 904)]
+    [DataRow("order by b", 902)]
+    public void RangeFrame_OrderByPast900Bytes_RaisesMsg8729(string over, int bytes)
+        => new Simulation().AssertSqlError($"create table rw (a nvarchar(450), b nvarchar(451), c varchar(8000), d int); select sum(d) over ({over}) from rw", 8729,
+            $"ORDER BY list of RANGE window frame has total size of {bytes} bytes. Largest size supported is 900 bytes.");
+
+    [TestMethod]
+    [DataRow("order by a range between unbounded preceding and current row")]
+    [DataRow("order by b rows between unbounded preceding and current row")]
+    public void RangeFrame_WithinTheLimitOrRows_Runs(string over)
+        => AreEqual(0, new Simulation().ExecuteScalar($"create table rw (a nvarchar(450), b nvarchar(451), d int); select count(*) from (select sum(d) over ({over}) s from rw) x"));
 }

@@ -251,7 +251,6 @@ Full rules in [INSERT value counts](#insert-value-counts).
 Empty source → silent success, rows-affected 0.
 Mid-source constraint violations trigger statement-level rollback.
 EF doesn't emit `INSERT…SELECT` from SaveChanges; reachable from raw SQL and bulk-copy patterns.
-CTE-prefix INSERTs not modeled.
 
 ## INSERT … EXEC
 `INSERT [INTO] target [(cols)] EXEC[UTE] <proc | (dynamic-sql)> [args]` appends the result sets the executed code yields into the target — the third source-kind arm alongside `VALUES` / `SELECT` (`Simulation.Insert.cs:ExecuteExecSource`).
@@ -410,6 +409,4 @@ EF Core's `ExecuteUpdate` / `ExecuteDelete` for batched single-statement DML emi
 
 - `WHEN NOT MATCHED BY SOURCE` with `THEN INSERT` — Msg 10711 (parsing rejects).
 - MERGE into a view ships for a single-base updatable view (`MergeViewTests`); `OUTPUT` through a view target raises `NotSupportedException`, and a join-view target is Msg 4405 where real accepts one naming a single base table — see [`programmable.md`](programmable.md#dml-through-a-join-view).
-- `OUTPUT … INTO @t` with `$action` — the existing `OUTPUT INTO @t` path uses `MutationOutputProjection`, which doesn't carry the `$action` slot.
-  INTO-less OUTPUT works fully.
 - Multi-statement WHEN-clause bodies (real SQL Server only allows the one DML action per WHEN — same restriction here).

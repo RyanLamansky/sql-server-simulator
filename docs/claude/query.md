@@ -769,7 +769,7 @@ Probed against SQL Server 2025 (2026-08-05); the line it draws is narrow enough 
 Msg 8728 is also a member of the **transaction-aborting** error class — it rolls the session's whole transaction stack back and a `BEGIN TRY` can't catch it.
 See [`transactions.md`](transactions.md#the-transaction-aborting-error-class) for the probed evidence and the neighbours that don't behave that way.
 
-**Not modeled yet:** the sibling size rule, **Msg 8729** ("ORDER BY list of RANGE window frame has total size of N bytes. Largest size supported is 900 bytes."), which fires when the RANGE ORDER BY list's declared byte widths sum past 900 — `nvarchar(450)` (900 bytes) passes, `nvarchar(451)` (902) and `varchar(8000)` don't, two keys sum, and the LOB check wins when both apply.
+The sibling size rule is **Msg 8729** ("ORDER BY list of RANGE window frame has total size of N bytes. Largest size supported is 900 bytes."), which fires when the RANGE ORDER BY list's declared byte widths sum past 900 — `nvarchar(450)` (900 bytes) passes, `nvarchar(451)` (902) and `varchar(8000)` don't, two keys sum, and the LOB check wins when both apply.
 It is transaction-aborting in the same way.
 Closing it wants a declared-byte-width answer for an arbitrary expression's `SqlType`, which the length-unspecified container forms (see the declared-string-widths entry in [`backlog.md`](backlog.md)) don't currently give — and a wrong width there would refuse a query real accepts.
 

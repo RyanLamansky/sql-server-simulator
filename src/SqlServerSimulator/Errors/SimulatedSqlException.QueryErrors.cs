@@ -830,6 +830,14 @@ partial class SimulatedSqlException
         new("Windowed functions, aggregates and NEXT VALUE FOR functions do not support constants as ORDER BY clause expressions.", 5309, 15, 1);
 
     /// <summary>
+    /// Mimics SQL Server's Msg 8729 — a RANGE window frame's ORDER BY keys
+    /// declare more than 900 bytes between them, raised while compiling.
+    /// Probe-confirmed against SQL Server 2025 (2026-09-24).
+    /// </summary>
+    internal static SimulatedSqlException RangeFrameOrderByTooWide(int totalBytes) =>
+        new($"ORDER BY list of RANGE window frame has total size of {totalBytes} bytes. Largest size supported is 900 bytes.", 8729, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server's Msg 8728 — a window whose frame is <c>RANGE</c>
     /// (written, or the default an <c>ORDER BY</c> confers on a frame-taking
     /// function) orders by an expression of a MAX / LOB type. Probe-confirmed

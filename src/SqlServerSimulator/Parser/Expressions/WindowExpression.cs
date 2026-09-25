@@ -258,6 +258,32 @@ internal sealed class WindowExpression : Expression
                 if (term.Expr is { } expression && IsMaxFormType(TermType(context, expression)))
                     throw SimulatedSqlException.RangeFrameOrderByCannotContainLobType();
             }
+
+            // …and the keys' declared widths may not sum past 900 bytes
+            // (Msg 8729, probed 2026-09-24: nvarchar(450) passes, nvarchar(451)
+            // is 902 bytes, and two keys add up).
+            var totalBytes = 0;
+            foreach (var term in window.OrderBy)
+            {
+                if (term.Expr is not { } expression || TermType(context, expression) is not { } type)
+                {
+                    totalBytes = 0;
+                    break;
+                }
+                try
+                {
+                    totalBytes += BuiltInResources.GetSysColumnMetadata(new HeapColumn(string.Empty, type, maxLength: null, nullable: true)).MaxLength;
+                }
+                catch (NotSupportedException)
+                {
+                    // A type with no catalog width (sql_variant, a CLR type)
+                    // leaves the check undecided rather than guessed.
+                    totalBytes = 0;
+                    break;
+                }
+            }
+            if (totalBytes > 900)
+                throw SimulatedSqlException.RangeFrameOrderByTooWide(totalBytes);
         }
     }
 
