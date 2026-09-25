@@ -196,6 +196,11 @@ partial class SqlType
     /// raises none of those, so it may pass anything.</param>
     public static SimulatedSqlException? OperandPairError(TypePairOperation operation, TypePairOperand left, TypePairOperand right, string operatorName)
     {
+        if (operation == TypePairOperation.Compare)
+        {
+            left = NarrowedIntegerLiteral(left);
+            right = NarrowedIntegerLiteral(right);
+        }
         var leftType = left.Type;
         var rightType = right.Type;
         if (operation == TypePairOperation.Unify && leftType == rightType)
@@ -242,6 +247,33 @@ partial class SqlType
     /// </summary>
     public static SimulatedSqlException? PairError(TypePairOperation operation, SqlType left, SqlType right, string operatorName) =>
         OperandPairError(operation, new TypePairOperand(left), new TypePairOperand(right), operatorName);
+
+    /// <summary>
+    /// A comparison types an integer literal by its value, which is the type
+    /// its refusal names: 0 through 255 is <c>tinyint</c>, the rest of the
+    /// 16-bit range (a negated literal included) <c>smallint</c>, and anything
+    /// wider <c>int</c> — in a WHERE, a CASE or an IF alike, though arithmetic
+    /// keeps <c>int</c> (probed 2026-09-25 against SQL Server 2025:
+    /// <c>date = 0</c> names tinyint, <c>date = -1</c> smallint). All three
+    /// share a pair class, so only the name changes.
+    /// </summary>
+    private static TypePairOperand NarrowedIntegerLiteral(TypePairOperand operand)
+    {
+        var source = operand.Source;
+        while (source is Parser.Expressions.Parenthesized parenthesized)
+            source = parenthesized.Wrapped;
+        var negated = false;
+        if (source is Parser.Expressions.Negate negate)
+        {
+            negated = true;
+            source = negate.Operand;
+        }
+        if (source is not Parser.Expressions.Value { IsLiteral: true, IsUntypedNull: false } literal || literal.Constant.Type != Int32)
+            return operand;
+        var value = negated ? -(long)literal.Constant.AsInt32 : literal.Constant.AsInt32;
+        SqlType narrowed = value is >= 0 and <= byte.MaxValue ? TinyInt : value is >= short.MinValue and <= short.MaxValue ? SmallInt : Int32;
+        return new TypePairOperand(narrowed, operand.Source, operand.SourceTable, operand.SourceColumn);
+    }
 
     private static bool IsMaxLengthVariantPair(SqlType maxSide, SqlType variantSide) =>
         variantSide is SqlVariantSqlType

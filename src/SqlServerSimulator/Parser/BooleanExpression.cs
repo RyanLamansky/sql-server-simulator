@@ -1846,8 +1846,14 @@ internal abstract class BooleanExpression : ExpressionNode
         internal override void Bind(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
         {
             var sourceType = source.GetSqlType(batch, resolveColumnType);
-            foreach (var candidate in candidates)
-                RequireComparable(source, sourceType, candidate, candidate.GetSqlType(batch, resolveColumnType), batch, "equal to");
+            var candidateTypes = new SqlType[candidates.Length];
+            for (var i = 0; i < candidates.Length; i++)
+                candidateTypes[i] = candidates[i].GetSqlType(batch, resolveColumnType);
+            // Real reports the last candidate that can't be compared, so the
+            // list is checked from its end (probed 2026-09-25 against SQL
+            // Server 2025: `d IN (NEWID(), 1)` names tinyint).
+            for (var i = candidates.Length - 1; i >= 0; i--)
+                RequireComparable(source, sourceType, candidates[i], candidateTypes[i], batch, "equal to");
         }
 
         internal override string DebugDisplay()

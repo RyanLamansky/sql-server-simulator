@@ -81,7 +81,23 @@ public class TypePromotionTests
     [DataRow("time(0)", "12:00:00", "time")]
     [DataRow("datetimeoffset(0)", "2024-01-15", "datetimeoffset")]
     public void IntLiteralAgainstNonLegacyDateColumn_RaisesMsg206(string columnType, string seed, string rootType)
-        => AssertWhereError(columnType, seed, "d = 0", $"Operand type clash: {rootType} is incompatible with int");
+        => AssertWhereError(columnType, seed, "d = 0", $"Operand type clash: {rootType} is incompatible with tinyint");
+
+    [TestMethod]
+    [DataRow("d = 5", "tinyint")]
+    [DataRow("d = -1", "smallint")]
+    [DataRow("d = 300", "smallint")]
+    [DataRow("d = 70000", "int")]
+    [DataRow("d between 300 and 70000", "smallint")]
+    [DataRow("d in (2, 300, 70000)", "int")]
+    [DataRow("d in (70000, 300, 2)", "tinyint")]
+    [DataRow("d in (newid(), 1)", "tinyint")]
+    public void ComparedIntegerLiteral_IsNamedByItsValue(string predicate, string literalType)
+        => AssertWhereError("date", "2024-01-15", predicate, $"Operand type clash: date is incompatible with {literalType}");
+
+    [TestMethod]
+    public void ArithmeticIntegerLiteral_KeepsInt()
+        => new Simulation().AssertSqlError("select cast('2024-01-15' as date) + 1", 206, "Operand type clash: date is incompatible with int");
 
     [TestMethod]
     [DataRow("date", "2024-01-15", "cast('2024-01-15 00:00:00' as datetime2(7))", true)]

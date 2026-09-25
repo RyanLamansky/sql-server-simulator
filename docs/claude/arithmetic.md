@@ -49,6 +49,7 @@ The one exception to class uniformity is folded in by hand: a MAX string or bina
 
 A grid over classes rather than a rule over the precedence chart plus a conversion table, because the two don't reproduce real: real's comparison refusals follow neither the unification's implicit-conversion answer (`time` with `datetime` unifies to `datetime` but compares as Msg 402; `date` with `xml` is Msg 206 to unify and Msg 402 to compare) nor any ordering the precedence chart offers, and the Msg 206 operand order in a comparison is a fixed per-pair order that no single rank explains.
 So each cell stores the number *and* the operand order real reports, and the grid is the spec — regenerating it from a probe run is the way to extend it.
+A comparison's refusal names an integer literal by its value — `tinyint` for 0–255, `smallint` for the rest of the 16-bit range, then `int` — while arithmetic keeps `int`, and an `IN` list reports its *last* refusing candidate (probed 2026-09-25 against SQL Server 2025); both only change which name a message carries, since the three integer types share a class.
 
 **Assignment is a seventh grid, and one-way.**
 A value entering a typed target — a variable (`DECLARE … =`, `SET`, `SELECT @v =`), a column an `INSERT … VALUES` / `INSERT … SELECT`, `UPDATE` or `MERGE` writes, a column's `DEFAULT`, a scalar function's `RETURN` or argument, `ISNULL`'s replacement — takes the `Assign` grid, source down the rows and target across (`Parser/AssignmentRules.cs`).
