@@ -260,13 +260,15 @@ internal sealed class Checksum : Expression
     /// under <c>SQL_Latin1_General_CP1_CI_AS</c>: the primary weight in the low
     /// byte (a letter's case folded) and the accent in the high one, so
     /// <c>'a'</c> is 142, <c>'A'</c> 142 and <c>'é'</c> <c>0x392</c> — read off
-    /// <c>CHECKSUM(CHAR(n))</c> for every byte on SQL Server 2025, 2026-09-25.
+    /// <c>CHECKSUM(CHAR(n))</c> for every byte on SQL Server 2025, 2026-09-25,
+    /// save the space, which that call trims away and <c>CHECKSUM(' x')</c>
+    /// shows to weigh 32.
     /// </summary>
     private static ReadOnlySpan<ushort> Cp1252CiAsChecksumWeight =>
     [
         0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
         16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31,
-        0, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47,
+        32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47,
         132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 48, 49, 50, 51, 52, 53,
         54, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156,
         157, 158, 159, 160, 161, 162, 163, 164, 165, 166, 167, 55, 56, 57, 58, 59,

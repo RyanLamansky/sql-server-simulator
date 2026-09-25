@@ -50,18 +50,13 @@ internal sealed class Soundex : Expression
     {
         if (string.IsNullOrEmpty(source))
             return "0000";
-        var sb = new StringBuilder(4);
-        var firstIdx = -1;
-        for (var i = 0; i < source.Length; i++)
-        {
-            if (char.IsLetter(source[i]))
-            {
-                firstIdx = i;
-                break;
-            }
-        }
-        if (firstIdx < 0)
+        // A code starts from the first character, which must be a letter:
+        // ' a', '1a' and '[a]' are all 0000 (probed 2026-09-25 against SQL
+        // Server 2025).
+        if (!char.IsLetter(source[0]))
             return "0000";
+        var sb = new StringBuilder(4);
+        var firstIdx = 0;
         var first = char.ToUpperInvariant(source[firstIdx]);
         _ = sb.Append(first);
         var prevCode = Encode(first);

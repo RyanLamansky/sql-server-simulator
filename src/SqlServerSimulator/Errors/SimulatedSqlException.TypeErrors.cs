@@ -464,7 +464,7 @@ partial class SimulatedSqlException
     /// and this is the int cell. Same text as Msg 234's string-target
     /// variant, different error number (probe-confirmed 2026-07-31).
     /// </summary>
-    internal static SimulatedSqlException InsufficientResultSpaceForMoneyToInt() => InsufficientResultSpaceForMoney("int", 1);
+    internal static SimulatedSqlException InsufficientResultSpaceForMoneyToInt() => MoneyPastIntegerRange("int", 1);
 
     /// <summary>
     /// Msg 237 for any integer target, whose state names it: 1 <c>int</c>, 2
@@ -472,7 +472,7 @@ partial class SimulatedSqlException
     /// <c>int</c>'s range reports whichever of them it meets (probed
     /// 2026-09-25 against SQL Server 2025).
     /// </summary>
-    internal static SimulatedSqlException InsufficientResultSpaceForMoney(string target, byte state) =>
+    internal static SimulatedSqlException MoneyPastIntegerRange(string target, byte state) =>
         new($"There is insufficient result space to convert a money value to {target}.", 237, 16, state);
 
     /// <summary>
@@ -559,6 +559,14 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException InsufficientResultSpaceForMoney(string targetType) =>
         new($"There is insufficient result space to convert a money value to {targetType}.", 234, 16, 2);
+
+    /// <summary>
+    /// Mimics SQL Server error 9809: <c>CONVERT</c> of a binary to a string
+    /// under a style other than 0 / 1 / 2, naming the target's family
+    /// (probed 2026-09-25 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException StyleNotSupportedFromBinary(int style, string targetTypeWord) =>
+        new($"The style {style.ToString(CultureInfo.InvariantCulture)} is not supported for conversions from varbinary to {targetTypeWord}.", 9809, 16, 1);
 
     /// <summary>
     /// Mimics SQL Server error 281: a non-zero, non-120/121 style number

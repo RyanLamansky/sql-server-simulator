@@ -2703,7 +2703,11 @@ internal abstract class BooleanExpression : ExpressionNode
         var common = SqlType.Promote(left, right);
         return (common == SqlType.TinyInt || common == SqlType.SmallInt) && (WidensSmallInteger(left) || WidensSmallInteger(right))
             ? SqlType.Int32
-            : common;
+            // An integer beside a smallmoney compares as money, so an int past
+            // smallmoney's range compares rather than overflowing.
+            : common == SqlType.SmallMoney && (SqlType.IsIntegerCategory(left) || SqlType.IsIntegerCategory(right))
+                ? SqlType.Money
+                : common;
     }
 
     private static bool WidensSmallInteger(SqlType type) =>

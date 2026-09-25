@@ -346,7 +346,10 @@ internal readonly partial struct SqlValue
             2 => FormatFloatScientific(value, totalSignificantDigits: 16),
             3 => FormatFloatScientific(value, totalSignificantDigits: 17),
             126 => FormatFloatScientific(value, totalSignificantDigits: isReal ? 8 : 16),
-            _ => throw SimulatedSqlException.InvalidStyleForCharacterString(style, isReal ? "real" : "float"),
+            // 128 and 129 have renderings of their own that aren't modeled;
+            // every other style formats as style 0 (probed 2026-09-25).
+            128 or 129 => throw SimulatedSqlException.InvalidStyleForCharacterString(style, isReal ? "real" : "float"),
+            _ => FormatFloatStyle0(value),
         };
     }
 
@@ -453,7 +456,7 @@ internal readonly partial struct SqlValue
                 : (target.Collation ?? Collation.Baseline).StorageEncoding.GetString(bytes),
             1 => "0x" + Convert.ToHexString(bytes),
             2 => Convert.ToHexString(bytes),
-            _ => throw SimulatedSqlException.InvalidStyleForCharacterString(style, "varbinary"),
+            _ => throw SimulatedSqlException.StyleNotSupportedFromBinary(style, target is NVarcharSqlType or NCharSqlType or SystemNameSqlType ? "nvarchar" : "varchar"),
         };
         return FromString(target, formatted);
     }

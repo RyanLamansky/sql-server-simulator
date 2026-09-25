@@ -860,5 +860,34 @@ public sealed class CastTests
     [TestMethod]
     public void SysnameSource_IsNamedNvarchar()
         => new Simulation().AssertSqlError("select cast(sql_variant_property(1, 'BaseType') as float)", 8114, "Error converting data type nvarchar to float.");
+
+    // ---- a number into a narrow string, probed 2026-09-25 ----
+
+    [TestMethod]
+    [DataRow("123", "char(2)", "*")]
+    [DataRow("123", "varchar(2)", "*")]
+    public void IntegerIntoANarrowAnsiString_IsAnAsterisk(string value, string target, string expected)
+        => AreEqual(expected, ((string)new Simulation().ExecuteScalar($"select cast({value} as {target})")!).TrimEnd());
+
+    [TestMethod]
+    [DataRow("1.25", "char(2)", 8115)]
+    [DataRow("cast(123.5 as money)", "char(2)", 234)]
+    [DataRow("123e0", "char(2)", 232)]
+    [DataRow("123", "nchar(2)", 8115)]
+    [DataRow("123e0", "nvarchar(2)", 8115)]
+    public void NumberIntoANarrowString_Overflows(string value, string target, int error)
+        => _ = new Simulation().AssertSqlError($"select cast({value} as {target})", error);
+
+    [TestMethod]
+    public void FloatIntoANarrowVarchar_NamesItsValueAtState2()
+    {
+        var error = new Simulation().AssertSqlError("select cast(123e0 as varchar(2))", 232);
+        AreEqual("Arithmetic overflow error for type varchar, value = 123.000000.", error.Errors[0].Message);
+        AreEqual((byte)2, error.Errors[0].State);
+    }
+
+    [TestMethod]
+    public void IntegerComparedWithSmallMoney_ComparesAsMoney()
+        => AreEqual(1, new Simulation().ExecuteScalar("select case when 2147483647 > cast(2.25 as smallmoney) then 1 else 0 end"));
 }
 

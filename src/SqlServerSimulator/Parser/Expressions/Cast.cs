@@ -413,6 +413,23 @@ internal sealed class Cast : Expression
                 throw SimulatedSqlException.ArithmeticOverflow("nvarchar");
         }
 
+        // A number into a fixed-length char / nchar overflows exactly as into
+        // the var form of the same length — the '*' of an int, the numeric
+        // Msg 8115, money's Msg 234, float's Msg 232 — where the padding
+        // would otherwise truncate it silently (probed 2026-09-25 against
+        // SQL Server 2025).
+        if (!value.IsNull
+            && value.Type.Category is SqlTypeCategory.Integer or SqlTypeCategory.Decimal or SqlTypeCategory.Money or SqlTypeCategory.Approximate
+            && targetType is CharSqlType { length: > 0 } or NCharSqlType { length: > 0 })
+        {
+            var length = targetType is CharSqlType fixedChar ? fixedChar.length : ((NCharSqlType)targetType).length;
+            var collation = targetType.Collation ?? Collation.Baseline;
+            SqlType varTarget = targetType is CharSqlType
+                ? VarcharSqlType.Get(length, collation, targetType.Coercibility)
+                : NVarcharSqlType.Get(length, collation, targetType.Coercibility);
+            return ApplyCoercion(value, varTarget, length, budgetCollation).CoerceTo(targetType);
+        }
+
         var sourceType = value.Type;
         SqlValue coerced;
         try
@@ -531,8 +548,12 @@ internal sealed class Cast : Expression
                     => throw SimulatedSqlException.ArithmeticOverflowToTarget(familyName, state: 5),
                 SqlTypeCategory.Money
                     => throw SimulatedSqlException.InsufficientResultSpaceForMoney(familyName),
+                // float / real names its value into a varchar and takes the
+                // generic form into an nvarchar (probed 2026-09-25).
+                SqlTypeCategory.Approximate when targetType is NVarcharSqlType
+                    => throw SimulatedSqlException.ArithmeticOverflow(familyName),
                 SqlTypeCategory.Approximate
-                    => throw SimulatedSqlException.ArithmeticOverflowForType(familyName, FormatApproximateForOverflow(text)),
+                    => throw SimulatedSqlException.ArithmeticOverflowForType(familyName, FormatApproximateForOverflow(text), state: 2),
                 _ => coerced,
             };
         }

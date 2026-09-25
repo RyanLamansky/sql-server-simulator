@@ -426,6 +426,7 @@ This is the *argument* rule; the slots these types can't reach at all — sortin
 ## SOUNDEX-family + STR + TRANSLATE + STRING_ESCAPE
 
 - **`SOUNDEX(s)`** (`Parser/Expressions/SoundexStrAdditions.cs`) — returns a 4-character `varchar` SOUNDEX code under the standard algorithm (first letter uppercased, then the consonant-digit map B/F/P/V=1, C/G/J/K/Q/S/X/Z=2, D/T=3, L=4, M/N=5, R=6, vowels/H/W skipped, runs of identical-code letters collapsed, padded with `0` or truncated to length 4).
+  A string whose first character isn't a letter is `0000` — a leading space included (probed 2026-09-25 against SQL Server 2025).
   Empty input → `'0000'`.
   NULL → NULL.
 - **`DIFFERENCE(s1, s2)`** — counts matching positions (0–4) between the two strings' SOUNDEX codes.

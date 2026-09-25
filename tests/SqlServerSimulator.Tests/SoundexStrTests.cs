@@ -118,4 +118,12 @@ public sealed class SoundexStrTests
     [DataRow("Awwc", "A200")]
     public void Soundex_SqlServerRules(string input, string expected)
         => AreEqual(expected, new Simulation().ExecuteScalar($"select soundex('{input}')"));
+
+    [TestMethod]
+    [DataRow("' a'")]
+    [DataRow("'1a'")]
+    [DataRow("'[a]'")]
+    public void Soundex_OfAStringNotStartingWithALetter_IsZeros(string value)
+        => AreEqual("0000", new Simulation().ExecuteScalar($"select soundex({value})"));
 }
+

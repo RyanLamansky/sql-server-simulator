@@ -92,6 +92,8 @@ public sealed class ChecksumAndRowVersionTests
     [DataRow("'é'", 914)]
     [DataRow("'€'", 66)]
     [DataRow("'abcdefgh'", 1721285341)]
+    [DataRow("' x'", 677)]
+    [DataRow("'  x'", 8869)]
     [DataRow("1, 2", 18)]
     [DataRow("cast('2020-01-01' as date)", 43829)]
     public void Checksum_MatchesRealsFold(string arguments, int expected)

@@ -451,12 +451,8 @@ public sealed class ConvertTests
         => AreEqual("1,234.56", ExecuteScalar("select convert(varchar(40), cast(1234.56 as smallmoney), 1)"));
 
     [TestMethod]
-    public void Convert_MoneyStyle_UnknownStyle_RaisesMsg281()
-    {
-        var ex = Throws<SimulatedSqlException>(() => ExecuteScalar("select convert(varchar(40), cast(1.5 as money), 99)"));
-        AreEqual(281, ex.Number);
-        Contains("money", ex.Message);
-    }
+    public void Convert_MoneyStyle_UnknownStyle_FormatsAsStyle0()
+        => AreEqual("1.50|1.5000", ExecuteScalar("select concat(convert(varchar(40), cast(1.5 as money), 99), '|', convert(varchar(40), cast(1.5 as money), 126))"));
 
     [TestMethod]
     public void Convert_NullStringSource_WithStyle_ReturnsNull()
@@ -695,17 +691,13 @@ public sealed class ConvertTests
     [TestMethod]
     [DataRow(99)]
     [DataRow(200)]
-    public void Convert_Float_UnknownStyle_RaisesMsg281(int style) =>
-        AssertSqlMessage(
-            $"select convert(varchar(40), cast(1.0 as float), {style})",
-            $"{style} is not a valid style number when converting from float to a character string.");
+    public void Convert_Float_UnknownStyle_FormatsAsStyle0(int style) =>
+        AreEqual("1234.5", ExecuteScalar($"select convert(varchar(40), cast(1234.5 as float), {style})"));
 
     [TestMethod]
     [DataRow(99)]
-    public void Convert_Real_UnknownStyle_RaisesMsg281(int style) =>
-        AssertSqlMessage(
-            $"select convert(varchar(40), cast(1.0 as real), {style})",
-            $"{style} is not a valid style number when converting from real to a character string.");
+    public void Convert_Real_UnknownStyle_FormatsAsStyle0(int style) =>
+        AreEqual("1.5", ExecuteScalar($"select convert(varchar(40), cast(1.5 as real), {style})"));
 
     [TestMethod]
     [DataRow(1, "0xAABBCC")]
@@ -726,10 +718,10 @@ public sealed class ConvertTests
 
     [TestMethod]
     [DataRow(99)]
-    public void Convert_Varbinary_UnknownStyle_RaisesMsg281(int style) =>
+    public void Convert_Varbinary_UnknownStyle_RaisesMsg9809(int style) =>
         AssertSqlMessage(
             $"select convert(varchar(40), cast(0xAB as varbinary(8)), {style})",
-            $"{style} is not a valid style number when converting from varbinary to a character string.");
+            $"The style {style} is not supported for conversions from varbinary to varchar.");
 
     /// <summary>
     /// Each CP1252 byte preserved verbatim; "0xAABBCC"u8 = { 0x30, 0x78, 0x41, 0x41, 0x42, 0x42, 0x43, 0x43 }.

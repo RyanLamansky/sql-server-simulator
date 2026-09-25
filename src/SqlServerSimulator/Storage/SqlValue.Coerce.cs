@@ -594,8 +594,9 @@ internal readonly partial struct SqlValue
         {
             0 => value.ToString("F2", CultureInfo.InvariantCulture),
             1 => value.ToString("N2", CultureInfo.InvariantCulture),
-            2 => value.ToString("F4", CultureInfo.InvariantCulture),
-            _ => throw SimulatedSqlException.InvalidStyleForCharacterString(style, "money"),
+            2 or 126 => value.ToString("F4", CultureInfo.InvariantCulture),
+            // Any other style formats as style 0 (probed 2026-09-25).
+            _ => value.ToString("F2", CultureInfo.InvariantCulture),
         };
         return FromString(target, formatted);
     }
@@ -1162,9 +1163,9 @@ internal readonly partial struct SqlValue
             // int); within it, the narrower two keep their own messages.
             if ((target == SqlType.Int32 ? rounded : m) is < int.MinValue or > int.MaxValue)
             {
-                throw target == SqlType.TinyInt ? SimulatedSqlException.InsufficientResultSpaceForMoney("tinyint", 3)
-                    : target == SqlType.SmallInt ? SimulatedSqlException.InsufficientResultSpaceForMoney("smallint", 2)
-                    : SimulatedSqlException.InsufficientResultSpaceForMoney("int", 1);
+                throw target == SqlType.TinyInt ? SimulatedSqlException.MoneyPastIntegerRange("tinyint", 3)
+                    : target == SqlType.SmallInt ? SimulatedSqlException.MoneyPastIntegerRange("smallint", 2)
+                    : SimulatedSqlException.MoneyPastIntegerRange("int", 1);
             }
             if (target == SqlType.TinyInt && rounded is < 0 or > byte.MaxValue)
                 throw SimulatedSqlException.ArithmeticOverflowForType("tinyint", m.ToString("F6", System.Globalization.CultureInfo.InvariantCulture), state: 11);
