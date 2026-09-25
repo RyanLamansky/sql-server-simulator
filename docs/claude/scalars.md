@@ -291,8 +291,8 @@ A scalar UDF that patindexes its own `varchar` parameter is the shape that meets
   The culture's separators, group sizes and default digit counts come off its `NumberFormatInfo`, and the decoration around the digits — currency symbol, percent sign, the sign patterns — comes from asking .NET to format `1` and `-1` under the same specifier, so the wide path carries whatever the narrow path would have written around it.
   `D` / `X` / `R` raise the `FormatException` .NET raises and answer NULL; a custom pattern carrying scientific notation over a wide value raises `NotSupportedException`.
 
-  **Divergences**, all of them shared with the narrow path and none width-related — SQL Server's FORMAT runs on the .NET Framework's NLS culture data where the simulator runs on .NET's ICU data:
-  a default-precision `'P'` writes three fractional digits against real's two (`FORMAT(CAST(123.456 AS decimal(10, 3)), 'P')` is `12,345.600%` against `12,345.60%`), a negative `'C'` under `en-US` writes `-$0.50` against real's parenthesized `($0.50)`, `FORMAT(0, '#')` is empty against real's `0`, and `FORMAT(CAST(0 AS decimal(5, 0)), 'P')` is `0.000%` against real's `000.00%`.
+  SQL Server's FORMAT runs on Windows' NLS culture data where the simulator runs on .NET's ICU data; `Format.WithWindowsDecimalDigits` patches the number-format cells known to differ (default digits, the no-break group separator, the yen sign, en-US's parenthesized negative currency), which both paths read.
+  **Divergence**: `FORMAT(CAST(0 AS decimal(5, 0)), 'P')` is `0.00%` against real's `000.00%` (probed 2026-09-24).
 
 ## Integer arguments outside the parameter's range
 

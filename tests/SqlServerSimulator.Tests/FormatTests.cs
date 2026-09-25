@@ -82,4 +82,14 @@ public sealed class FormatTests
     [DataRow("format(1234.5e0, 'N')", "1,234.50")]
     public void DefaultPrecision_IsTwo(string expression, string expected)
         => AreEqual(expected, ExecuteScalar($"select {expression}"));
+
+    /// <summary>The other number-format cells where Windows' culture data differs from ICU's (probed 2026-09-24).</summary>
+    [TestMethod]
+    [DataRow("format(-1234.5, 'C')", "($1,234.50)")]
+    [DataRow("format(-1234.5, 'C', 'en-GB')", "-£1,234.50")]
+    [DataRow("format(-1234.5, 'C', 'ja-JP')", "-\u00A51,235")]
+    [DataRow("format(1234.5, 'N', 'fr-FR')", "1\u00A0234,50")]
+    [DataRow("format(-1234.5, 'C', 'fr-FR')", "-1\u00A0234,50 €")]
+    public void CultureCells_FollowWindows(string expression, string expected)
+        => AreEqual(expected, ExecuteScalar($"select {expression}"));
 }

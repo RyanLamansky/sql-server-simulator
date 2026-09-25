@@ -71,20 +71,44 @@ internal sealed class Format : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.NVarchar;
 
     /// <summary>
-    /// SQL Server formats through Windows' culture data, whose default number
-    /// and percent precision is two digits where ICU's is three —
-    /// probe-confirmed 2026-09-23 for en-US, de-DE, fr-FR, ja-JP and ar-SA:
-    /// <c>FORMAT(1234.5, 'N')</c> is <c>1,234.50</c>.
+    /// SQL Server formats through Windows' culture data, which differs from
+    /// ICU's in a few number-format cells: two default number and percent
+    /// digits where ICU has three (probe-confirmed 2026-09-23 for en-US,
+    /// de-DE, fr-FR, ja-JP and ar-SA: <c>FORMAT(1234.5, 'N')</c> is
+    /// <c>1,234.50</c>), a no-break space (U+00A0) as the group separator
+    /// where ICU has the narrow one (U+202F, fr-FR / fr-CH), the yen sign as
+    /// U+00A5 where ICU has the fullwidth U+FFE5, and en-US's negative
+    /// currency in parentheses (<c>($1,234.50)</c>) — the last three probed
+    /// 2026-09-24 against SQL Server 2025.
     /// </summary>
     private static CultureInfo WithWindowsDecimalDigits(CultureInfo culture)
     {
-        if (culture.NumberFormat.NumberDecimalDigits == 2 && culture.NumberFormat.PercentDecimalDigits == 2)
+        var format = culture.NumberFormat;
+        var parenthesizedCurrency = culture.Name == "en-US" && format.CurrencyNegativePattern != 0;
+        if (format.NumberDecimalDigits == 2 && format.PercentDecimalDigits == 2
+            && format.NumberGroupSeparator != NarrowNoBreakSpace && format.CurrencyGroupSeparator != NarrowNoBreakSpace
+            && format.PercentGroupSeparator != NarrowNoBreakSpace && format.CurrencySymbol != FullwidthYen
+            && !parenthesizedCurrency)
+        {
             return culture;
+        }
+
         var adjusted = (CultureInfo)culture.Clone();
-        adjusted.NumberFormat.NumberDecimalDigits = 2;
-        adjusted.NumberFormat.PercentDecimalDigits = 2;
+        var adjustedFormat = adjusted.NumberFormat;
+        adjustedFormat.NumberDecimalDigits = 2;
+        adjustedFormat.PercentDecimalDigits = 2;
+        adjustedFormat.NumberGroupSeparator = adjustedFormat.NumberGroupSeparator.Replace(NarrowNoBreakSpace, "\u00A0", StringComparison.Ordinal);
+        adjustedFormat.CurrencyGroupSeparator = adjustedFormat.CurrencyGroupSeparator.Replace(NarrowNoBreakSpace, "\u00A0", StringComparison.Ordinal);
+        adjustedFormat.PercentGroupSeparator = adjustedFormat.PercentGroupSeparator.Replace(NarrowNoBreakSpace, "\u00A0", StringComparison.Ordinal);
+        adjustedFormat.CurrencySymbol = adjustedFormat.CurrencySymbol.Replace(FullwidthYen, "\u00A5", StringComparison.Ordinal);
+        if (parenthesizedCurrency)
+            adjustedFormat.CurrencyNegativePattern = 0;
         return adjusted;
     }
+
+    private const string NarrowNoBreakSpace = "\u202F";
+
+    private const string FullwidthYen = "\uFFE5";
 
     /// <summary>
     /// Picks the CLR culture for the formatter. A non-string argument

@@ -167,7 +167,6 @@ Still open from what it surfaced:
   Not a correctness gap, but it is why the sweep's file list is `random/` rather than the whole corpus — see the join-strategy notes in [`joins.md`](joins.md).
 - **Real answers a statement's binder errors together where the simulator raises the leading one alone** — `INSERT` reports 207 + 110, and 273 + 10709, as one multi-error response.
   The module-body bind already gathers every error of a *body*; this is the same shape for a single statement — see [`programmable.md`](programmable.md).
-- **`FORMAT(x, 'P')` renders three decimal places where real renders two** (`0.000%` against `0.00%`, for positive zero as well), an invariant-culture percent-digits difference; changing FORMAT's culture defaults reaches every specifier, so it wants its own probe pass.
 
 **Five sweep divergences remain, each demonstrated irreducible** — real's own answer flips under something the simulator cannot legitimately model, so matching them would mean modeling plan selection rather than semantics.
 Two are the trivial-plan boundary: `WHERE <overflow> <= 18 / CAST(NULL AS int)` raises as written, and answers 0 rows the moment `DISTINCT`, `GROUP BY`, `TOP 2` or a join is added — while `ORDER BY` / `MAX()` / `COUNT(*)` leave it raising.
