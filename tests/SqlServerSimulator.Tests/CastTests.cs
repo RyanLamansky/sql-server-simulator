@@ -898,5 +898,20 @@ public sealed class CastTests
     [DataRow("cast(cast(1.5 as money) as varbinary(8))", "0x0000000000003A98")]
     public void ApproximateOrMoneyToBinary_LaysOutItsBigEndianBytes(string expression, string expected)
         => AreEqual(expected, new Simulation().ExecuteScalar($"select convert(varchar(40), {expression}, 1)"));
+
+    [TestMethod]
+    [DataRow("'300' > ti", 244)]
+    [DataRow("'a' > ti", 245)]
+    [DataRow("'70000' > si", 244)]
+    public void StringComparedWithASmallIntegerColumn_ConvertsToTheColumnsType(string predicate, int error)
+        => _ = new Simulation().AssertSqlError($"create table t (ti tinyint, si smallint); insert t values (1, 1); select count(*) from t where {predicate}", error);
+
+    [TestMethod]
+    public void BinaryComparedWithASmallintColumn_ComparesAsSmallint()
+        => AreEqual(0, new Simulation().ExecuteScalar("create table t (vb varbinary(4), si smallint); insert t values (0xFF00, 1); select count(*) from t where vb > si"));
+
+    [TestMethod]
+    public void StringComparedWithASmallIntegerVariable_ComparesAsInt()
+        => AreEqual(1, new Simulation().ExecuteScalar("declare @t tinyint = 1; select case when '300' > @t then 1 else 0 end"));
 }
 

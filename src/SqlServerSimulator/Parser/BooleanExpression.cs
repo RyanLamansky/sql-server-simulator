@@ -1798,6 +1798,11 @@ internal abstract class BooleanExpression : ExpressionNode
     /// </summary>
     private sealed class InExpression(Expression source, Expression[] candidates, bool negated, bool selfReferenced) : BooleanExpression
     {
+        // Which operands read no column, settled on first use; see
+        // ComparisonType for why a comparison cares.
+        private bool? sourceIsConstant;
+        private bool[]? candidatesAreConstant;
+
         internal override bool ParallelSafe => this.OperandExpressionsParallelSafe;
 
         internal override bool IsWrittenConstant => source.IsWrittenConstant && AllWrittenConstant(candidates);
@@ -1829,15 +1834,17 @@ internal abstract class BooleanExpression : ExpressionNode
             if (src.IsNull)
                 return null;
             var sawNull = false;
-            foreach (var candidate in candidates)
+            var sourceIsConstant = this.sourceIsConstant ??= IsRuntimeConstant(source);
+            var candidatesAreConstant = this.candidatesAreConstant ??= Array.ConvertAll(candidates, IsRuntimeConstant);
+            for (var i = 0; i < candidates.Length; i++)
             {
-                var c = candidate.Run(runtime);
+                var c = candidates[i].Run(runtime);
                 if (c.IsNull)
                 {
                     sawNull = true;
                     continue;
                 }
-                if (CompareValuesPromoted(src, c, "equal to", static (l, r) => l.Equals(r)) == true)
+                if (CompareValuesPromoted(src, c, "equal to", static (l, r) => l.Equals(r), leftIsConstant: sourceIsConstant, rightIsConstant: candidatesAreConstant[i]) == true)
                     return !negated;
             }
             return sawNull ? null : negated;
@@ -2579,7 +2586,11 @@ internal abstract class BooleanExpression : ExpressionNode
                 this.OperatorName,
                 compare,
                 this.leftPromotion,
-                this.rightPromotion);
+                this.rightPromotion,
+                this.leftIsConstant ??= IsRuntimeConstant(this.left),
+                this.rightIsConstant ??= IsRuntimeConstant(this.right));
+
+        private bool? leftIsConstant, rightIsConstant;
 
         /// <summary>
         /// The name real SQL Server weaves into a Msg 402 / Msg 468 raised
@@ -2634,7 +2645,9 @@ internal abstract class BooleanExpression : ExpressionNode
         string operatorName,
         Func<SqlValue, SqlValue, bool> compare,
         StringCoercionMemo? leftMemo = null,
-        StringCoercionMemo? rightMemo = null)
+        StringCoercionMemo? rightMemo = null,
+        bool leftIsConstant = false,
+        bool rightIsConstant = false)
     {
         // Either operand sql_variant: real converts a base-typed side UP to
         // sql_variant (probe-confirmed as CONVERT_IMPLICIT(sql_variant, …) in
@@ -2684,7 +2697,7 @@ internal abstract class BooleanExpression : ExpressionNode
         // why a missing memo just means the old behavior.
         if (SqlType.PairError(TypePairOperation.Compare, l.Type, r.Type, operatorName) is { } error)
             throw error;
-        var common = ComparisonType(l.Type, r.Type);
+        var common = ComparisonType(l.Type, r.Type, leftIsConstant, rightIsConstant);
         return compare(
             leftMemo is null ? l.CoerceTo(common) : leftMemo.Coerce(l, common),
             rightMemo is null ? r.CoerceTo(common) : rightMemo.Coerce(r, common));
@@ -2692,22 +2705,41 @@ internal abstract class BooleanExpression : ExpressionNode
 
     /// <summary>
     /// The type two differently-typed operands compare in: the unification's,
-    /// save that a string or a binary beside a <c>tinyint</c> or
-    /// <c>smallint</c> compares as <c>int</c> — `'300' = CAST(1 AS tinyint)`
-    /// is false rather than the overflow arithmetic and unification report,
-    /// and `0xFF00 > CAST(-3 AS smallint)` reads the binary as 65280 (probed
-    /// 2026-09-25 against SQL Server 2025).
+    /// save that a string or a binary beside a <em>constant</em>
+    /// <c>tinyint</c> or <c>smallint</c> — a literal, a variable, anything
+    /// reading no column — compares as <c>int</c>: `'300' = CAST(1 AS
+    /// tinyint)` is false and `0xFF00 > CAST(-3 AS smallint)` reads the binary
+    /// as 65280, while `'300' > ti` over a tinyint column overflows as
+    /// unification does (probed 2026-09-25 against SQL Server 2025).
     /// </summary>
-    internal static SqlType ComparisonType(SqlType left, SqlType right)
+    internal static SqlType ComparisonType(SqlType left, SqlType right, bool leftIsConstant = false, bool rightIsConstant = false)
     {
         var common = SqlType.Promote(left, right);
-        return (common == SqlType.TinyInt || common == SqlType.SmallInt) && (WidensSmallInteger(left) || WidensSmallInteger(right))
+        return (common == SqlType.TinyInt || common == SqlType.SmallInt)
+            && ((WidensSmallInteger(left) && rightIsConstant) || (WidensSmallInteger(right) && leftIsConstant))
             ? SqlType.Int32
             // An integer beside a smallmoney compares as money, so an int past
             // smallmoney's range compares rather than overflowing.
             : common == SqlType.SmallMoney && (SqlType.IsIntegerCategory(left) || SqlType.IsIntegerCategory(right))
                 ? SqlType.Money
                 : common;
+    }
+
+    /// <summary>
+    /// Whether <paramref name="expression"/> reads no column — a literal, a
+    /// variable or a function of them — which is what a comparison's
+    /// small-integer widening asks of the integer side.
+    /// </summary>
+    private static bool IsRuntimeConstant(Expression expression)
+    {
+        var constant = true;
+        expression.Walk((node, _) =>
+        {
+            if (node is Reference or ScalarSubqueryExpression)
+                constant = false;
+            return constant;
+        });
+        return constant;
     }
 
     private static bool WidensSmallInteger(SqlType type) =>

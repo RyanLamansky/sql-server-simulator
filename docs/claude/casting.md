@@ -68,7 +68,7 @@ Load-bearing for ODBC / pyodbc callers, which bind a Python/CLR `float` paramete
 
 The target picks the message (probed 2026-09-25 against SQL Server 2025): `tinyint` / `smallint` / `int` / `bit` report Msg 245 naming the value, `bigint` — like `decimal` / `numeric` / `float` / `real`, each named as itself — Msg 8114 naming only the types, `money` Msg 235 and `smallmoney` a message of its own, Msg 293.
 A `char` / `nchar` source is named `varchar` / `nvarchar` in all of them, column or CAST alike.
-A string compared with a `tinyint` or `smallint` converts to `int` rather than to the narrow type — `'300' = CAST(1 AS tinyint)` is false — while arithmetic and unification keep the narrow type and overflow (`BooleanExpression.ComparisonType`).
+A string or a binary compared with a *constant* `tinyint` or `smallint` — a literal, a variable, anything reading no column — converts to `int` rather than to the narrow type (`'300' = CAST(1 AS tinyint)` is false), while against a column-derived one it takes the narrow type and overflows as arithmetic and unification do (`'300' > ti` is Msg 244); an integer compared with `smallmoney` compares as `money` either way (`BooleanExpression.ComparisonType`).
 
 ## Whitespace around a number, by target
 
