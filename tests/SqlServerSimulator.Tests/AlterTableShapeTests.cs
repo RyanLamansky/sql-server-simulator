@@ -225,6 +225,68 @@ public sealed class AlterTableShapeTests
         AreEqual(0, simulation.ExecuteScalar("select count(*) from sys.default_constraints where parent_object_id = object_id('t')"));
     }
 
+    // A list may mix column definitions and constraint elements in any order:
+    // real adds every column first, so a constraint can name a column the
+    // list defines after it (probed 2026-09-25 against SQL Server 2025).
+    [TestMethod]
+    public void MixedAdd_CreatesColumnsAndConstraintsInAnyOrder()
+        => AreEqual("a,x,y,z|CK__t__z,ck_x,DF__t__y,uq_x", ExecuteScalar("""
+            create table t (a int);
+            alter table t add check (z > 0), x int, constraint ck_x check (x > 0), y int not null default 5, constraint uq_x unique (x), z int;
+            select concat((select string_agg(name, ',') within group (order by column_id) from sys.columns where object_id = object_id('t')), '|',
+                (select string_agg(left(name, iif(name like '%[_][_]%[_][_]%', len(name) - charindex('_', reverse(name)) - 1, len(name))), ',') within group (order by name) from sys.objects where parent_object_id = object_id('t')))
+            """));
+
+    [TestMethod]
+    public void MixedAdd_APrimaryKeyMakesItsAddedColumnNotNull()
+        => AreEqual("0|PRIMARY_KEY_CONSTRAINT", ExecuteScalar("""
+            create table t (a int);
+            alter table t add primary key (z), z int;
+            select concat(columnproperty(object_id('t'), 'z', 'AllowsNull'), '|', (select type_desc from sys.key_constraints where parent_object_id = object_id('t')))
+            """));
+
+    [TestMethod]
+    public void MixedAdd_APrimaryKeyOverAnAddedColumnOfANonEmptyTable_Raises4901()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table t (a int); insert t values (1)");
+        _ = simulation.AssertSqlError("alter table t add x int, primary key (x)", 4901);
+        AreEqual(1, simulation.ExecuteScalar("select count(*) from sys.columns where object_id = object_id('t')"));
+    }
+
+    [TestMethod]
+    [DataRow("alter table t add x int, constraint ck check (nosuch > 0), y int", 207)]
+    [DataRow("alter table t add x int default 1 with values, constraint ck check (x > 5)", 547)]
+    [DataRow("alter table t add x int, y int, constraint fk foreign key (x) references missing(id)", 1767)]
+    public void MixedAdd_AFailingElementLeavesNoColumnBehind(string sql, int number)
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table t (a int); insert t values (-1)");
+        _ = simulation.AssertSqlError(sql, number);
+        AreEqual("a|-1|0", simulation.ExecuteScalar(
+            "select concat((select string_agg(name, ',') from sys.columns where object_id = object_id('t')), '|', (select a from t), '|', (select count(*) from sys.objects where parent_object_id = object_id('t')))"));
+    }
+
+    [TestMethod]
+    public void MixedAdd_ABareIdentityMayEndTheList()
+        => AreEqual(2, ExecuteScalar("""
+            create table t (a int not null); insert t values (7), (8);
+            alter table t add x int, primary key (a), y int identity;
+            select max(y) from t
+            """));
+
+    [TestMethod]
+    [DataRow("alter table t add a int", "Column names in each table must be unique. Column name 'a' in table 't' is specified more than once.", 4)]
+    [DataRow("alter table t add x int, x int", "Column names in each table must be unique. Column name 'x' in table 't' is specified more than once.", 3)]
+    public void AddColumn_RepeatedName_IsMsg2705(string sql, string message, int state)
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table t (a int)");
+        var ex = simulation.AssertSqlError(sql, 2705);
+        AreEqual(message, ex.Message);
+        AreEqual((byte)state, ex.State);
+    }
+
     // --- DROP PERIOD FOR SYSTEM_TIME ---
 
     private const string Versioned = """

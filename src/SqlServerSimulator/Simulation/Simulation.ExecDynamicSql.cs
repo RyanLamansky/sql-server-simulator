@@ -218,14 +218,17 @@ partial class Simulation
             for (var i = 0; i < declaredParams.Count; i++)
             {
                 var param = declaredParams[i];
-                // Every declared parameter has to be supplied — an explicit
-                // NULL counts, an omission does not, and OUTPUT parameters are
-                // no exception. Where several are missing real names the first
+                // Every declared parameter without a default has to be
+                // supplied — an explicit NULL counts, an omission does not,
+                // and OUTPUT parameters are no exception. Where several are missing real names the first
                 // declared one, which is what this loop's order gives.
                 // The stored name is unprefixed (it keys a variable slot); the
                 // message spells it the way the declaration did.
                 if (bound[i] is null)
-                    throw SimulatedSqlException.ParameterizedQueryExpectsParameter(paramDefsText, sqlText, "@" + param.Name);
+                {
+                    bound[i] = param.Default ?? throw SimulatedSqlException.ParameterizedQueryExpectsParameter(paramDefsText, sqlText, "@" + param.Name);
+                    boundIsUntypedNull[i] = bound[i]!.Value.IsNull;
+                }
                 if (!boundIsUntypedNull[i])
                     AssignmentRules.RequireAssignable(bound[i]!.Value.Type, param.Type);
                 var initialValue = BindParameterValue(bound[i]!.Value, param.Type, procedure: "");
@@ -378,6 +381,16 @@ partial class Simulation
             // Type parsing reuses the procedure-parameter type grammar.
             var (type, _) = ParseSpExecuteSqlParamType(defContext, parameters.Count + 1);
 
+            // A default comes before OUTPUT and is a constant, as a procedure
+            // parameter's is: `@p int = 5 OUTPUT` (probed 2026-09-25 against
+            // SQL Server 2025).
+            SqlValue? defaultValue = null;
+            if (defContext.Token is Operator { Character: '=' })
+            {
+                defaultValue = ParseSpExecuteSqlParamDefault(defContext);
+                defContext.MoveNextRequired();
+            }
+
             var isOutput = false;
             if (defContext.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Output or ContextualKeyword.Out })
             {
@@ -385,7 +398,7 @@ partial class Simulation
                 defContext.MoveNextOptional();
             }
 
-            parameters.Add(new SpExecuteSqlParam(name.Value, type, isOutput));
+            parameters.Add(new SpExecuteSqlParam(name.Value, type, isOutput, defaultValue));
 
             if (defContext.Token is Operator { Character: ',' })
             {
@@ -398,6 +411,34 @@ partial class Simulation
                 throw SimulatedSqlException.BatchParametersNotValid();
             return parameters;
         }
+    }
+
+    /// <summary>
+    /// Reads a parameter declaration's <c>= constant</c> default, entered on the
+    /// <c>=</c> and leaving the cursor on the constant: a literal, a signed
+    /// number, <c>NULL</c>, or <c>DEFAULT</c>, which reads as NULL. A
+    /// variable is Msg 137 and anything else a syntax error at it.
+    /// </summary>
+    private static SqlValue ParseSpExecuteSqlParamDefault(ParserContext context)
+    {
+        var negate = false;
+        if (context.GetNextRequired() is Operator { Character: '-' or '+' } sign)
+        {
+            negate = sign.Character == '-';
+            context.MoveNextRequired();
+            if (context.Token is not Numeric)
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+        }
+        return context.Token switch
+        {
+            Numeric number => negate
+                ? Parser.Expressions.Negate.Of(new Parser.Expressions.Value(number.Value, number.IntegerLiteralDigitCount)).Run(new RuntimeContext(static name => throw SimulatedSqlException.InvalidColumnName(name), context.Batch))
+                : number.Value,
+            Literal { Value: var literal } => literal,
+            ReservedKeyword { Keyword: Keyword.Null or Keyword.Default } => SqlValue.Null(SqlType.Int32),
+            AtPrefixedString variable => throw SimulatedSqlException.MustDeclareScalarVariable(variable.Value.TrimStart('@')),
+            _ => throw SimulatedSqlException.SyntaxErrorNear(context),
+        };
     }
 
     /// <summary>
@@ -551,10 +592,13 @@ partial class Simulation
     /// sp_executesql params have no defaults — every declared param must be
     /// bound by a positional/named arg.
     /// </summary>
-    private readonly struct SpExecuteSqlParam(string name, SqlType type, bool isOutput)
+    private readonly struct SpExecuteSqlParam(string name, SqlType type, bool isOutput, SqlValue? defaultValue)
     {
         public readonly string Name = name;
         public readonly SqlType Type = type;
         public readonly bool IsOutput = isOutput;
+
+        /// <summary>The declaration's constant default, which an unsupplied parameter takes in place of Msg 8178.</summary>
+        public readonly SqlValue? Default = defaultValue;
     }
 }

@@ -426,5 +426,41 @@ public sealed class AlterTableConstraintTests
             error.Errors.Cast<SimulatedError>().Select(e => $"{e.Number}: {e.Message}").ToArray());
         AreEqual("uq", sim.ExecuteScalar("select name from sys.objects where parent_object_id = object_id('t')"));
     }
-}
 
+    // A table-level CHECK reading one column is that column's CHECK on real:
+    // its auto-name carries the column, parent_column_id names it and Msg 547
+    // ends with it; one over two columns stays table-level (probed 2026-09-25
+    // against SQL Server 2025).
+    [TestMethod]
+    public void SingleColumnTableLevelCheck_IsFiledAsAColumnCheck()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table t (a int, b int, check (a > 0), check (a > b)); alter table t add check (b > 0)");
+        AreEqual("0:CK__t__|1:CK__t__a__|2:CK__t__b__", simulation.ExecuteScalar(
+            "select string_agg(concat(parent_column_id, ':', left(name, len(name) - 8)), '|') within group (order by parent_column_id) from sys.check_constraints where parent_object_id = object_id('t')"));
+        simulation.AssertSqlError("insert t values (-1, -2)", 547,
+            "The INSERT statement conflicted with the CHECK constraint \"" + simulation.ExecuteScalar("select name from sys.check_constraints where parent_column_id = 1") + "\". The conflict occurred in database \"simulated\", table \"dbo.t\", column 'a'.");
+    }
+
+    [TestMethod]
+    public void AddCheck_ViolatedByExistingRows_NamesItsOneColumn()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table t (a int, b int); insert t values (6, 1)");
+        simulation.AssertSqlError("alter table t add constraint ck check (a > 7)", 547,
+            "The ALTER TABLE statement conflicted with the CHECK constraint \"ck\". The conflict occurred in database \"simulated\", table \"dbo.t\", column 'a'.");
+        simulation.AssertSqlError("alter table t add constraint ck2 check (a < b)", 547,
+            "The ALTER TABLE statement conflicted with the CHECK constraint \"ck2\". The conflict occurred in database \"simulated\", table \"dbo.t\".");
+    }
+
+    [TestMethod]
+    [DataRow("create table c (a int, foreign key (a) references missing(id))", "FK__c__a__")]
+    [DataRow("create table c (a int); alter table c add constraint fk foreign key (a) references missing(id)", "fk")]
+    public void ForeignKey_ToAMissingTable_IsMsg1767Then1750(string sql, string namePrefix)
+    {
+        var ex = new Simulation().AssertSqlError(sql, 1767);
+        StartsWith($"Foreign key '{namePrefix}", ex.Errors[0].Message);
+        EndsWith("' references invalid table 'missing'.", ex.Errors[0].Message);
+        AreEqual(1750, ex.Errors[1].Number);
+    }
+}

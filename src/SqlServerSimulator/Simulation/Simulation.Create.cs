@@ -1104,21 +1104,7 @@ partial class Simulation
             foreach (var ordinal in pending.FullOrdinals)
             {
                 if (heapColumns[ordinal] is { } column && column.Nullable && !explicitNull[ordinal])
-                {
-                    heapColumns[ordinal] = new HeapColumn(
-                        column.Name,
-                        column.Type,
-                        column.MaxLength,
-                        nullable: false,
-                        identity: column.Identity,
-                        defaultExpression: column.Default,
-                        computedExpression: column.Computed,
-                        isPersisted: column.IsPersisted,
-                        generatedAs: column.GeneratedAs,
-                        isHidden: column.IsHidden,
-                        computedDefinition: column.ComputedDefinition,
-                        spelledNumeric: column.SpelledNumeric);
-                }
+                    heapColumns[ordinal] = WithNotNull(column);
             }
         }
 
@@ -1836,7 +1822,8 @@ partial class Simulation
     /// </summary>
     private static IdentitySpec ParseIdentitySpec(ParserContext context)
     {
-        if (context.GetNextRequired() is not Operator { Character: '(' })
+        // A bare IDENTITY may end the statement: `ALTER TABLE t ADD c int IDENTITY`.
+        if (context.GetNextOptional() is not Operator { Character: '(' })
             return IdentitySpec.Default;
         context.MoveNextRequired();
         var spec = IdentitySpec.ReadArguments(context);
@@ -2057,6 +2044,27 @@ partial class Simulation
             }));
     }
 
+    /// <summary>
+    /// The one column a table-level CHECK reads, or null when it reads none or
+    /// several. Real files such a constraint as that column's — its auto-name
+    /// carries the column, <c>sys.check_constraints.parent_column_id</c> and
+    /// <c>sp_helpconstraint</c> name it, and its Msg 547 ends <c>column 'a'</c>
+    /// (probed 2026-09-25 against SQL Server 2025).
+    /// </summary>
+    internal static string? SingleCheckedColumn(Collation collation, BooleanExpression predicate)
+    {
+        string? single = null;
+        var several = false;
+        predicate.VisitOperandExpressions(operand => operand.VisitColumnReferences(reference =>
+        {
+            if (single is null)
+                single = reference.Leaf;
+            else if (!collation.Equals(single, reference.Leaf))
+                several = true;
+        }));
+        return several ? null : single;
+    }
+
     internal static CheckConstraint[] ResolveCheckConstraints(
         string tableName,
         IReadOnlyList<(string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition)> pendingChecks,
@@ -2070,8 +2078,9 @@ partial class Simulation
         for (var c = 0; c < pendingChecks.Count; c++)
         {
             var pending = pendingChecks[c];
-            var name = pending.Name ?? AutoCheckName(tableName, pending.InlineColumn, c);
-            resolved[c] = new CheckConstraint(name, pending.Predicate, pending.InlineColumn, database.AllocateObjectId(), createDate)
+            var column = pending.InlineColumn ?? SingleCheckedColumn(database.Collation, pending.Predicate);
+            var name = pending.Name ?? AutoCheckName(tableName, column, c);
+            resolved[c] = new CheckConstraint(name, pending.Predicate, column, database.AllocateObjectId(), createDate)
             {
                 Definition = pending.Definition,
                 IsSystemNamed = pending.Name is null,
@@ -2877,7 +2886,9 @@ partial class Simulation
                 // already in its dict at this point, so TryResolveTable
                 // succeeds for the self-reference path; falling through means
                 // the referenced name truly doesn't resolve.
-                throw SimulatedSqlException.InvalidObjectName(pf.ReferencedTable);
+                throw SimulatedSqlException.ForeignKeyReferencesInvalidTable(
+                    pf.ConstraintName ?? AutoForeignKeyName(childTable.Name, pf.ChildColumnNames, pending.IndexOf(pf)),
+                    pf.ReferencedTable.ToString());
             }
             // FK column count = referenced column count. If the referenced
             // column list was omitted, default to the parent's PRIMARY KEY
@@ -3369,4 +3380,27 @@ partial class Simulation
         if (!Schemas.ModuleDeterminism.IsComputedColumnDeterministic(context.CurrentDatabase, [.. resolved], definition))
             throw SimulatedSqlException.ComputedColumnCannotBePersisted(columnName, tableName);
     }
+
+    /// <summary>A column a table-level <c>PRIMARY KEY</c> promotes to NOT NULL, otherwise as declared.</summary>
+    private static HeapColumn WithNotNull(HeapColumn column) =>
+        new(
+            column.Name,
+            column.Type,
+            column.MaxLength,
+            nullable: false,
+            identity: column.Identity,
+            defaultExpression: column.Default,
+            computedExpression: column.Computed,
+            isPersisted: column.IsPersisted,
+            generatedAs: column.GeneratedAs,
+            isHidden: column.IsHidden,
+            collation: column.Collation,
+            computedDefinition: column.ComputedDefinition,
+            isRowGuidCol: column.IsRowGuidCol,
+            spelledNumeric: column.SpelledNumeric)
+        {
+            IsSparse = column.IsSparse,
+            DefaultConstraint = column.DefaultConstraint,
+            XmlSchemaCollection = column.XmlSchemaCollection,
+        };
 }

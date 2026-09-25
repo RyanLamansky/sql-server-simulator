@@ -52,7 +52,7 @@ Self-referencing FKs are supported (the parent table is already in its schema di
 
 ## Validation at CREATE
 
-1. **Referenced table must exist** — `MultiPartName` lookup against the live schema dict; missing → Msg 208.
+1. **Referenced table must exist** — `MultiPartName` lookup against the live schema dict; missing → Msg 1767 naming the constraint and the table as written, then Msg 1750 (probed 2026-09-25).
 2. **Referenced column set must form a PRIMARY KEY or UNIQUE** — multiset compare against `referencedTable.KeyConstraints`.
    Mismatch → Msg 1776.
 3. **Cascade-cycle / multiple-path check** — see below. → Msg 1785.

@@ -519,6 +519,23 @@ public sealed class StoredProcedureTests
     public void SpExecuteSql_MalformedDeclarations_AreASyntaxError(string declarations, string near)
         => new Simulation().ValidateSyntaxError($"exec sp_executesql N'select 1', N'{declarations}'", near);
 
+    // A declaration may carry a constant default, before OUTPUT, which an
+    // unsupplied parameter takes (probed 2026-09-25 against SQL Server 2025).
+    [TestMethod]
+    [DataRow("N'@a int, @b int = 5', @a = 1", "1|5")]
+    [DataRow("N'@a int = -5, @b varchar(5) = ''xy'''", "-5|xy")]
+    [DataRow("N'@a int = null, @b int = default output'", "|")]
+    [DataRow("N'@a int = 5 output, @b int = 6', @b = 7", "5|7")]
+    public void SpExecuteSql_DeclarationDefaults_FillUnsuppliedParameters(string arguments, string expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar($"exec sp_executesql N'select concat(@a, ''|'', @b)', {arguments}"));
+
+    [TestMethod]
+    [DataRow("N'@b int output = 5'", 102)]
+    [DataRow("N'@b int = 1+1'", 102)]
+    [DataRow("N'@b int = @x'", 137)]
+    public void SpExecuteSql_DeclarationDefault_IsAConstantBeforeOutput(string declarations, int number)
+        => _ = new Simulation().AssertSqlError($"exec sp_executesql N'select @b', {declarations}", number);
+
     [TestMethod]
     public void SpExecuteSql_TextAfterTheDeclarationList_Raises4124()
         => new Simulation().AssertSqlError("exec sp_executesql N'select 1', N'@p int) select (1'", 4124, "The parameters supplied for the batch are not valid.");

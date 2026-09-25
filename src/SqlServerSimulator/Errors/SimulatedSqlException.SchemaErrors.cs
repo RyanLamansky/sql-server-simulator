@@ -1991,6 +1991,15 @@ partial class SimulatedSqlException
         new($"Column '{columnName}' in table '{tableName}' is invalid for creating a default constraint.", 1752, 16, 0);
 
     /// <summary>
+    /// Mimics SQL Server error 1767: a <c>FOREIGN KEY</c> — declared by
+    /// <c>CREATE TABLE</c> or added by <c>ALTER TABLE</c> — referencing a
+    /// table that doesn't exist, named as written, then Msg 1750 state 1.
+    /// Probed 2026-09-25 against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException ForeignKeyReferencesInvalidTable(string foreignKeyName, string referencedTable) =>
+        FollowedByConstraintNotCreated(new($"Foreign key '{foreignKeyName}' references invalid table '{referencedTable}'.", 1767, 16, 0));
+
+    /// <summary>
     /// Mimics SQL Server error 1769: <c>ADD CONSTRAINT … FOREIGN KEY (col)
     /// REFERENCES …</c> named a child column that doesn't exist on the
     /// referencing table.
@@ -2430,18 +2439,11 @@ partial class SimulatedSqlException
 
     /// <summary>
     /// Mimics SQL Server error 2705 for a column list — <c>CREATE TABLE</c>,
-    /// a table variable, a table type — that repeats a name.
+    /// a table variable, a table type, an <c>ALTER TABLE … ADD</c> list — that
+    /// repeats a name, or an ADD naming a column the table already has.
     /// </summary>
     internal static SimulatedSqlException DuplicateColumnInTable(string columnName, string tableName, byte state) =>
         new($"Column names in each table must be unique. Column name '{columnName}' in table '{tableName}' is specified more than once.", 2705, 16, state);
-
-    /// <summary>
-    /// Mimics SQL Server error 2705: <c>ALTER TABLE ADD col</c> named a
-    /// column that already exists on the target table (or a duplicate
-    /// within the same multi-column ADD). Probe-confirmed verbatim.
-    /// </summary>
-    internal static SimulatedSqlException ColumnNamesMustBeUnique(string columnName, string qualifiedTableName) =>
-        new($"Column names in each table must be unique. Column name '{columnName}' in table '{qualifiedTableName}' is specified more than once.", 2705, 16, 4);
 
     /// <summary>
     /// Mimics SQL Server error 4924: <c>ALTER TABLE ALTER COLUMN</c> named

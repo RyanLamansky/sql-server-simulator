@@ -8,18 +8,23 @@ partial class Simulation
 {
     /// <summary>
     /// Parses <c>ALTER TABLE [schema.]name [WITH CHECK | WITH NOCHECK] ADD
-    /// [CONSTRAINT name] (PRIMARY KEY | UNIQUE | FOREIGN KEY | CHECK | DEFAULT)
-    /// …</c>. Cursor on the <c>ADD</c> keyword on entry. Single constraint
-    /// per ADD — comma-separated multi-constraint ADD raises
-    /// <see cref="NotSupportedException"/>.
+    /// &lt;element&gt; [, …]</c>, where each element is a column definition or
+    /// a <c>[CONSTRAINT name] (PRIMARY KEY | UNIQUE | FOREIGN KEY | CHECK |
+    /// DEFAULT)</c> body, in any mix and order. Cursor on the <c>ADD</c>
+    /// keyword on entry.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// Each family branch parses inline (no pending list intermediate),
-    /// resolves the live <see cref="HeapTable"/> via
-    /// <see cref="BatchContext.TryResolveTable"/> with the ALTER-TABLE error
-    /// path (Msg 4902), validates names + existing data, then appends to the
-    /// table's mutable constraint lists.
+    /// Real applies the list as a whole rather than in writing order: every
+    /// column is added first, so a constraint may name a column defined after
+    /// it, and a table-level <c>PRIMARY KEY</c> over an added column makes it
+    /// NOT NULL (probed 2026-09-25 against SQL Server 2025). So the list is
+    /// read once — column definitions collected, each constraint element
+    /// parsed in skip mode with its start remembered — then the columns are
+    /// added and each constraint element re-parsed at its start and applied.
+    /// The statement is atomic: an element that raises leaves none of the
+    /// others behind (probe-confirmed for a binder error and for a CHECK the
+    /// existing rows violate).
     /// </para>
     /// <para>
     /// <c>WITH NOCHECK</c> applies only to FK and CHECK adds — it bypasses
@@ -39,44 +44,110 @@ partial class Simulation
         if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Period })
             return ParseAddPeriod(context, tableName);
 
-        // A column-add carries its own comma list (and its own rollback), so it
-        // consumes the rest of the statement; a constraint list loops here.
-        if (context.Token is ReservedKeyword { Keyword: Keyword.Column }
-            or Name or UnquotedString)
+        // `ALTER TABLE … ADD` takes no COLUMN keyword — unlike `DROP COLUMN` /
+        // `ALTER COLUMN`, the ADD form names the column directly. Real SQL
+        // Server rejects `ADD COLUMN c TYPE` with Msg 156 near COLUMN
+        // (probe-confirmed against SQL Server 2025).
+        if (context.Token is ReservedKeyword { Keyword: Keyword.Column } columnKeyword)
+            throw SimulatedSqlException.SyntaxErrorNearKeyword(columnKeyword);
+
+        var batch = context.Batch;
+        AddedColumns? columns = null;
+        List<ParserContext.Checkpoint> constraintStarts = [];
+        List<string>? primaryKeyColumns = null;
+        while (true)
         {
-            return ParseAddColumns(context, tableName);
+            if (context.Token is Name or UnquotedString)
+            {
+                (columns ??= new AddedColumns(context, tableName)).ParseOne(context);
+            }
+            else
+            {
+                var start = context.SaveCheckpoint();
+                constraintStarts.Add(start);
+                NotePrimaryKeyColumns(context, ref primaryKeyColumns);
+                context.RestoreCheckpoint(start);
+                var wasSkipping = batch.SkipModeFlag;
+                batch.SkipModeFlag = true;
+                try
+                {
+                    _ = ParseOneAddedConstraint(context, tableName, withNoCheck);
+                }
+                finally
+                {
+                    batch.SkipModeFlag = wasSkipping;
+                }
+            }
+            if (context.Token is not Operator { Character: ',' })
+                break;
+            context.MoveNextRequired();
         }
 
+        // The list ends at its first unconsumed token, so a stray one is
+        // Msg 102 / 156 there — `UNIQUE (w) WHERE …` names the WHERE (probed
+        // 2026-09-25 against SQL Server 2025).
+        context.RejectTrailingToken();
+        if (batch.IsSkipping)
+            return true;
+
+        var end = context.SaveCheckpoint();
         var undo = AlterTableAddUndo.Capture(context, tableName);
+        AddedColumnsUndo? columnsUndo = null;
         try
         {
-            while (true)
+            if (columns is { Table: not null })
+                columnsUndo = ApplyAddedColumns(context, columns, primaryKeyColumns);
+            foreach (var start in constraintStarts)
             {
+                context.RestoreCheckpoint(start);
                 _ = ParseOneAddedConstraint(context, tableName, withNoCheck);
-                if (context.Token is not Operator { Character: ',' })
-                {
-                    // The list ends at its first unconsumed token, so a stray
-                    // one is Msg 102 / 156 there — `UNIQUE (w) WHERE …` names
-                    // the WHERE (probed 2026-09-25 against SQL Server 2025).
-                    context.RejectTrailingToken();
-                    return true;
-                }
-                context.MoveNextRequired();
             }
         }
         catch
         {
             undo.Restore();
+            columnsUndo?.Restore();
             throw;
+        }
+        context.RestoreCheckpoint(end);
+        return true;
+    }
+
+    /// <summary>
+    /// When the element at the cursor is a <c>PRIMARY KEY</c>, adds the names
+    /// in its column list to <paramref name="names"/>, so the columns the same
+    /// ADD list defines can be made NOT NULL before they're added. Leaves the
+    /// cursor anywhere; the caller restores it.
+    /// </summary>
+    private static void NotePrimaryKeyColumns(ParserContext context, ref List<string>? names)
+    {
+        if (context.Token is ReservedKeyword { Keyword: Keyword.Constraint })
+        {
+            _ = context.GetNextRequired();
+            context.MoveNextRequired();
+        }
+        if (context.Token is not ReservedKeyword { Keyword: Keyword.Primary }
+            || context.GetNextOptional() is not ReservedKeyword { Keyword: Keyword.Key })
+        {
+            return;
+        }
+        context.MoveNextOptional();
+        if (context.Token is ReservedKeyword { Keyword: Keyword.Clustered or Keyword.NonClustered })
+            context.MoveNextOptional();
+        if (context.Token is not Operator { Character: '(' })
+            return;
+        while (context.GetNextOptional() is Name column)
+        {
+            (names ??= []).Add(column.Value);
+            if (context.GetNextOptional() is ReservedKeyword { Keyword: Keyword.Asc or Keyword.Desc })
+                context.MoveNextOptional();
+            if (context.Token is not Operator { Character: ',' })
+                return;
         }
     }
 
     /// <summary>
-    /// Parses one element of an <c>ALTER TABLE … ADD</c> constraint list.
-    /// Real's grammar takes any number of them separated by commas, and the
-    /// statement is atomic — a later element that raises leaves none of the
-    /// earlier ones behind (probe-confirmed for both a binder error and a
-    /// CHECK the existing rows violate).
+    /// Parses one constraint element of an <c>ALTER TABLE … ADD</c> list.
     /// </summary>
     private static bool ParseOneAddedConstraint(ParserContext context, MultiPartName tableName, bool withNoCheck)
     {
@@ -101,10 +172,11 @@ partial class Simulation
     }
 
     /// <summary>
-    /// The state an <c>ALTER TABLE … ADD &lt;constraint list&gt;</c> has to put
-    /// back when a later element raises: the three constraint lists' lengths
-    /// and each column's DEFAULT, which a <c>DEFAULT … FOR</c> element writes
-    /// onto the column instance rather than into a list.
+    /// The constraint state an <c>ALTER TABLE … ADD</c> list has to put back
+    /// when an element raises: the three constraint lists' lengths and each
+    /// existing column's DEFAULT, which a <c>DEFAULT … FOR</c> element writes
+    /// onto the column instance rather than into a list. The columns the list
+    /// adds come back through <see cref="AddedColumnsUndo"/>.
     /// </summary>
     private sealed class AlterTableAddUndo(
         HeapTable? table,
@@ -184,8 +256,9 @@ partial class Simulation
         // raised whether or not WITH NOCHECK skipped the data validation.
         BindCheckConstraint(context.Batch, table.Columns, predicate);
         RejectCheckOverNonPersistedComputedColumn(context.Batch.CurrentDatabase.Collation, table.Name, table.Columns, predicate);
-        var name = explicitName ?? AutoCheckName(table.Name, null, table.CheckConstraints.Count);
-        var constraint = new CheckConstraint(name, predicate, null, context.CurrentDatabase.AllocateObjectId(), context.Batch.CurrentStatement.UtcNow)
+        var column = SingleCheckedColumn(context.Batch.CurrentDatabase.Collation, predicate);
+        var name = explicitName ?? AutoCheckName(table.Name, column, table.CheckConstraints.Count);
+        var constraint = new CheckConstraint(name, predicate, column, context.CurrentDatabase.AllocateObjectId(), context.Batch.CurrentStatement.UtcNow)
         {
             IsSystemNamed = explicitName is null,
             IsNotTrusted = withNoCheck,

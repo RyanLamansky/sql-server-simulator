@@ -8,87 +8,93 @@ namespace SqlServerSimulator;
 partial class Simulation
 {
     /// <summary>
-    /// Parses <c>ALTER TABLE … ADD [COLUMN] col1 TYPE [constraints], col2 TYPE
-    /// [constraints], …</c>. Cursor on entry is the first non-CONSTRAINT
-    /// token after <c>ADD</c> (typically the column-name identifier; an
-    /// optional <c>COLUMN</c> keyword is accepted and skipped). Routed from
-    /// <see cref="TryParseAlterTableAddConstraint"/> when the post-ADD token
-    /// isn't a constraint keyword.
+    /// The column definitions of one <c>ALTER TABLE … ADD</c> list, collected
+    /// element by element while <see cref="TryParseAlterTableAddConstraint"/>
+    /// walks the list and applied together by <see cref="ApplyAddedColumns"/>
+    /// before any constraint element of the list runs.
     /// </summary>
     /// <remarks>
-    /// <para>
     /// Column definition grammar is the same as <c>CREATE TABLE</c>'s column-
     /// list path — type with optional length / scale; any combination of
     /// <c>IDENTITY</c> / <c>NULL</c>|<c>NOT NULL</c> / <c>DEFAULT</c> /
     /// <c>PRIMARY KEY</c>|<c>UNIQUE</c> / <c>CHECK</c> / <c>REFERENCES</c> /
     /// <c>CONSTRAINT</c>-name forms; computed columns via <c>name AS expr</c>.
     /// Shared via <see cref="ParseOneColumnIntoLists"/>.
-    /// </para>
-    /// <para>
-    /// Apply phase enforces Msg 2705 (duplicate column name on the table) and
-    /// Msg 4901 (NOT NULL without DEFAULT / IDENTITY / ROWVERSION on a non-
-    /// empty table). New PK / UNIQUE / CHECK / FK declarations are resolved
-    /// via the same pipelines CREATE TABLE uses, with full ordinals shifted
-    /// by the existing column count. After the schema mutation, every row
-    /// in the heap is re-encoded against the new schema — the simulator
-    /// goes the eager rewrite path regardless of column nullability or
-    /// DEFAULT shape, which keeps <see cref="RowDecoder"/> simple at the
-    /// cost of an O(rows) scan (real SQL Server has a metadata-only
-    /// optimization for many shapes — documented as a fidelity gap).
-    /// </para>
     /// </remarks>
-    private static bool ParseAddColumns(ParserContext context, MultiPartName tableName)
+    private sealed class AddedColumns
     {
-        // `ALTER TABLE … ADD` takes no COLUMN keyword — unlike `DROP COLUMN` /
-        // `ALTER COLUMN`, the ADD form names the column directly. Real SQL
-        // Server rejects `ADD COLUMN c TYPE` with Msg 156 near COLUMN
-        // (probe-confirmed against SQL Server 2025).
-        if (context.Token is ReservedKeyword { Keyword: Keyword.Column } columnKeyword)
-            throw SimulatedSqlException.SyntaxErrorNearKeyword(columnKeyword);
+        public readonly HeapTable? Table;
+        public readonly MultiPartName TableName;
+        public readonly List<HeapColumn?> HeapColumns = [];
+        public readonly List<bool> ExplicitNull = [];
+        public readonly List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals, bool? Clustered, bool IgnoreDupKey, bool[] Descending)> PendingKeys = [];
+        public readonly List<(string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition)> PendingChecks = [];
+        public readonly List<(int Index, string Name, Expression Expression, bool Persisted, bool Nullable, string Definition)> PendingComputed = [];
+        public readonly List<PendingForeignKey> PendingForeignKeys = [];
+        public readonly List<int> WithValuesColumns = [];
+        private int identityCount;
 
-        var heapColumns = new List<HeapColumn?>();
-        var explicitNull = new List<bool>();
-        var pendingKeys = new List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals, bool? Clustered, bool IgnoreDupKey, bool[] Descending)>();
-        var pendingChecks = new List<(string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition)>();
-        var pendingComputed = new List<(int Index, string Name, Expression Expression, bool Persisted, bool Nullable, string Definition)>();
-        var pendingForeignKeys = new List<PendingForeignKey>();
-        var withValuesColumns = new List<int>();
-
-        // Resolved in skip mode too, for the ordinals a column error names;
-        // only a run reports the table missing.
-        var existingIdentityCount = 0;
-        if (context.Batch.TryResolveTable(tableName, out var table))
-            existingIdentityCount = table.IdentityOrdinal >= 0 ? 1 : 0;
-        else if (!context.Batch.IsSkipping)
-            throw SimulatedSqlException.CannotFindObjectForAlterTable(tableName.ToString());
-        var identityCount = existingIdentityCount;
-
-        while (true)
+        public AddedColumns(ParserContext context, MultiPartName tableName)
         {
-            ParseOneColumnIntoLists(
-                context,
-                table?.Name ?? tableName.Leaf,
-                isTableVariable: false,
-                isTableType: false,
-                heapColumns,
-                explicitNull,
-                pendingKeys,
-                pendingChecks,
-                pendingComputed,
-                pendingPeriod: null,
-                pendingForeignKeys,
-                ref identityCount,
-                withValuesColumns: withValuesColumns,
-                ordinalOffset: table?.Columns.Length ?? 0);
-
-            if (context.Token is not Operator { Character: ',' })
-                break;
-            context.MoveNextRequired();
+            this.TableName = tableName;
+            // Resolved in skip mode too, for the ordinals a column error names;
+            // only a run reports the table missing.
+            if (context.Batch.TryResolveTable(tableName, out var table))
+            {
+                this.Table = table;
+                this.identityCount = table.IdentityOrdinal >= 0 ? 1 : 0;
+            }
+            else if (!context.Batch.IsSkipping)
+            {
+                throw SimulatedSqlException.CannotFindObjectForAlterTable(tableName.ToString());
+            }
         }
 
-        if (context.Batch.IsSkipping || table is null)
-            return true;
+        /// <summary>Parses one column definition, leaving the cursor on the token after it.</summary>
+        public void ParseOne(ParserContext context) =>
+            ParseOneColumnIntoLists(
+                context,
+                this.Table?.Name ?? this.TableName.Leaf,
+                isTableVariable: false,
+                isTableType: false,
+                this.HeapColumns,
+                this.ExplicitNull,
+                this.PendingKeys,
+                this.PendingChecks,
+                this.PendingComputed,
+                pendingPeriod: null,
+                this.PendingForeignKeys,
+                ref this.identityCount,
+                withValuesColumns: this.WithValuesColumns,
+                ordinalOffset: this.Table?.Columns.Length ?? 0);
+    }
 
+    /// <summary>
+    /// Adds the columns an <c>ALTER TABLE … ADD</c> list defined, with their
+    /// inline constraints, and re-encodes every row against the widened
+    /// schema. A column the list's table-level <c>PRIMARY KEY</c> names
+    /// (<paramref name="primaryKeyColumns"/>) is NOT NULL unless declared
+    /// <c>NULL</c>, as <c>CREATE TABLE</c> promotes one (probed 2026-09-25
+    /// against SQL Server 2025). Returns what puts the table's columns and
+    /// rows back if a later element of the list fails; a failure here puts
+    /// them back itself.
+    /// </summary>
+    /// <remarks>
+    /// Enforces Msg 2705 (duplicate column name on the table) and Msg 4901
+    /// (NOT NULL without DEFAULT / IDENTITY / ROWVERSION on a non-empty
+    /// table). New PK / UNIQUE / CHECK / FK declarations are resolved via the
+    /// same pipelines CREATE TABLE uses, with full ordinals shifted by the
+    /// existing column count. The rewrite is eager regardless of column
+    /// nullability or DEFAULT shape, which keeps <see cref="RowDecoder"/>
+    /// simple at the cost of an O(rows) scan (real has a metadata-only
+    /// optimization for many shapes).
+    /// </remarks>
+    private static AddedColumnsUndo ApplyAddedColumns(ParserContext context, AddedColumns added, List<string>? primaryKeyColumns)
+    {
+        var table = added.Table!;
+        var heapColumns = added.HeapColumns;
+        var pendingChecks = added.PendingChecks;
+        var collation = context.Batch.CurrentDatabase.Collation;
         var tableIsEmpty = true;
         foreach (var _ in table.Heap.EnumerateRows())
         {
@@ -96,8 +102,17 @@ partial class Simulation
             break;
         }
 
-        if (pendingComputed.Count > 0)
-            ResolveComputedColumnsForAddColumn(context.Batch, context.Batch.CurrentDatabase.Collation, table, heapColumns, pendingComputed);
+        if (added.PendingComputed.Count > 0)
+            ResolveComputedColumnsForAddColumn(context.Batch, collation, table, heapColumns, added.PendingComputed);
+
+        if (primaryKeyColumns is not null)
+        {
+            for (var i = 0; i < heapColumns.Count; i++)
+            {
+                if (heapColumns[i] is { Nullable: true } column && !added.ExplicitNull[i] && primaryKeyColumns.Exists(name => collation.Equals(name, column.Name)))
+                    heapColumns[i] = WithNotNull(column);
+            }
+        }
 
         // An added column's inline CHECK may not read a non-persisted computed
         // column — Msg 1764, over the pre-existing columns as well as the ones
@@ -108,7 +123,7 @@ partial class Simulation
             visibleColumns.AddRange(table.Columns);
             visibleColumns.AddRange(heapColumns);
             BindCheckConstraints(context.Batch, visibleColumns, pendingChecks);
-            RejectChecksOverNonPersistedComputedColumns(context.Batch.CurrentDatabase.Collation, table.Name, visibleColumns, pendingChecks);
+            RejectChecksOverNonPersistedComputedColumns(collation, table.Name, visibleColumns, pendingChecks);
         }
 
         var existingCount = table.Columns.Length;
@@ -120,18 +135,19 @@ partial class Simulation
             newColumns[i] = heapColumns[i]!;
         }
 
-        var qualifiedTableName = $"{Database.DefaultSchemaName}.{table.Name}";
+        // State 4 for a name the table already has, 3 for one the list repeats
+        // (probed 2026-09-25 against SQL Server 2025).
         for (var i = 0; i < newColumns.Length; i++)
         {
             foreach (var existing in table.Columns)
             {
-                if (context.Batch.CurrentDatabase.Collation.Equals(existing.Name, newColumns[i].Name))
-                    throw SimulatedSqlException.ColumnNamesMustBeUnique(newColumns[i].Name, qualifiedTableName);
+                if (collation.Equals(existing.Name, newColumns[i].Name))
+                    throw SimulatedSqlException.DuplicateColumnInTable(newColumns[i].Name, table.Name, 4);
             }
             for (var j = 0; j < i; j++)
             {
-                if (context.Batch.CurrentDatabase.Collation.Equals(newColumns[j].Name, newColumns[i].Name))
-                    throw SimulatedSqlException.ColumnNamesMustBeUnique(newColumns[i].Name, qualifiedTableName);
+                if (collation.Equals(newColumns[j].Name, newColumns[i].Name))
+                    throw SimulatedSqlException.DuplicateColumnInTable(newColumns[i].Name, table.Name, 3);
             }
         }
 
@@ -149,7 +165,7 @@ partial class Simulation
 
         // Shift PK / UQ FullOrdinals to the combined-column index space.
         var shiftedKeys = new List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals, bool? Clustered, bool IgnoreDupKey, bool[] Descending)>();
-        foreach (var k in pendingKeys)
+        foreach (var k in added.PendingKeys)
         {
             var shifted = new int[k.FullOrdinals.Length];
             for (var i = 0; i < k.FullOrdinals.Length; i++)
@@ -157,11 +173,10 @@ partial class Simulation
             shiftedKeys.Add((k.Kind, k.Name, shifted, k.Clustered, k.IgnoreDupKey, k.Descending));
         }
 
-        var originalColumns = table.Columns;
+        var undo = new AddedColumnsUndo(table);
         var originalKeyCount = table.KeyConstraints.Count;
         var originalCheckCount = table.CheckConstraints.Count;
         var originalFkCount = table.OutgoingForeignKeys.Count;
-        var originalMaxColumnId = table.MaxColumnIdUsed;
 
         var combined = new HeapColumn[existingCount + newColumns.Length];
         Array.Copy(table.Columns, combined, existingCount);
@@ -188,10 +203,10 @@ partial class Simulation
                     table.CheckConstraints.Add(ck);
             }
 
-            if (pendingForeignKeys.Count > 0)
+            if (added.PendingForeignKeys.Count > 0)
             {
                 var shiftedForeignKeys = new List<PendingForeignKey>();
-                foreach (var pf in pendingForeignKeys)
+                foreach (var pf in added.PendingForeignKeys)
                 {
                     var shifted = new int[pf.ChildFullOrdinals.Length];
                     for (var i = 0; i < shifted.Length; i++)
@@ -201,15 +216,13 @@ partial class Simulation
                 ResolveForeignKeys(table, shiftedForeignKeys, context);
             }
 
-            RewriteHeapForAddColumns(table, newColumns, existingCount, withValuesColumns, context);
+            RewriteHeapForAddColumns(table, newColumns, existingCount, added.WithValuesColumns, context);
         }
         catch
         {
             // Roll back partial schema mutation on any post-mutate failure —
             // including the watermark, so a failed ADD doesn't consume ids.
-            table.Columns = originalColumns;
-            table.RecomputeStorageProjections();
-            table.MaxColumnIdUsed = originalMaxColumnId;
+            undo.Restore();
             while (table.KeyConstraints.Count > originalKeyCount)
                 table.KeyConstraints.RemoveAt(table.KeyConstraints.Count - 1);
             while (table.CheckConstraints.Count > originalCheckCount)
@@ -223,7 +236,29 @@ partial class Simulation
             throw;
         }
 
-        return true;
+        return undo;
+    }
+
+    /// <summary>
+    /// What <see cref="ApplyAddedColumns"/> changed about the table itself —
+    /// its column array, the column-id watermark and its rows, which the
+    /// rewrite moved to a fresh <see cref="Heap"/> — so a later element of
+    /// the same ADD list that fails can put them back. The constraint lists
+    /// are the caller's to restore.
+    /// </summary>
+    private sealed class AddedColumnsUndo(HeapTable table)
+    {
+        private readonly HeapColumn[] columns = table.Columns;
+        private readonly int maxColumnId = table.MaxColumnIdUsed;
+        private readonly Heap heap = table.Heap;
+
+        public void Restore()
+        {
+            table.Columns = this.columns;
+            table.RecomputeStorageProjections();
+            table.MaxColumnIdUsed = this.maxColumnId;
+            table.Heap = this.heap;
+        }
     }
 
     private static void ResolveComputedColumnsForAddColumn(

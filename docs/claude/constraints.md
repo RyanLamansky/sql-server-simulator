@@ -3,6 +3,7 @@
 Sibling deep-dives: [`foreign-keys.md`](foreign-keys.md) (the FK family in full), [`indexes.md`](indexes.md) (seek acceleration mechanics), [`alter-table.md`](alter-table.md) (ADD/DROP CONSTRAINT incl. trust toggling).
 
 - `CHECK`: inline single-column + table-level; Msg 547 per row on definitely-false predicate (UNKNOWN passes — opposite of WHERE).
+  A table-level CHECK that reads exactly one column is filed as that column's, as real files it (probed 2026-09-25): its auto-name carries the column, `sys.check_constraints.parent_column_id` and `sp_helpconstraint` name it, and its Msg 547 ends `column 'a'`.
   Inline column-level CHECK may only reference its owning column — peer refs raise **Msg 8141** at CREATE TABLE (probe-confirmed).
   The walker (`Expression.VisitColumnReferences` + `BooleanExpression.VisitOperandExpressions`) reaches every expression kind, so a peer inside `DATEPART` or a nested `CASE` is caught at CREATE as on real.
   Table-level CHECK has no peer restriction.

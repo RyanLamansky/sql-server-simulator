@@ -37,10 +37,10 @@ internal sealed class CheckConstraint(string name, BooleanExpression predicate, 
     public readonly BooleanExpression Predicate = predicate;
 
     /// <summary>
-    /// For inline column-level CHECK (<c>col int CHECK (...)</c>), the
-    /// declaring column's name; the simulator weaves it into Msg 547 as
-    /// <c>column 'X'</c>. Null for table-level CHECK constraints, where the
-    /// message omits the column suffix — matching real SQL Server.
+    /// The column a column-level CHECK belongs to — the declaring column of an
+    /// inline <c>col int CHECK (...)</c>, or the one column a table-level CHECK
+    /// reads, which real files the same way. Msg 547 ends <c>column 'X'</c>
+    /// for one; null for a CHECK over several columns, where it doesn't.
     /// </summary>
     public readonly string? InlineColumn = inlineColumn;
 

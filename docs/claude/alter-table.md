@@ -152,12 +152,15 @@ Probe-confirmed.
 
 ## Multi-element ADD
 
-`ADD` takes any number of comma-separated constraint elements — `ADD CONSTRAINT pk PRIMARY KEY (a), CONSTRAINT ck CHECK (b > 0), CHECK (c > 0)` — mixing every `<body>` form including `DEFAULT … FOR`.
+`ADD` takes any number of comma-separated elements — column definitions and constraint bodies (every form, `DEFAULT … FOR` included) in any mix and order: `ADD x int, CONSTRAINT ck CHECK (x > 0), y int NOT NULL DEFAULT 5, UNIQUE (x)`.
 
-The statement is **atomic**, which is the part worth having: a later element that raises leaves none of the earlier ones behind (probe-confirmed for a binder error and for a CHECK the existing rows violate).
-`AlterTableAddUndo` captures the three constraint lists' lengths plus each column's `Default` / `DefaultConstraint` — a `DEFAULT … FOR` element writes onto the column instance rather than into a list — and puts them back on the way out.
+Real applies the list as a whole rather than in writing order (probed 2026-09-25 against SQL Server 2025): every column is added first, so a constraint may name a column the list defines after it, and a table-level `PRIMARY KEY` over an added column makes that column NOT NULL, as `CREATE TABLE` does — which on a non-empty table is Msg 4901 for it.
+`TryParseAlterTableAddConstraint` reads the list once, collecting column definitions and parsing each constraint element in skip mode with its start remembered, then adds the columns and re-parses each constraint element at its start to apply it.
 
-A column-add list is a separate branch and consumes the rest of the statement, so a list mixing column definitions with constraint elements (`ADD x int, CONSTRAINT ck CHECK (…)`) is not built yet.
+The statement is **atomic**: an element that raises leaves none of the others behind (probe-confirmed for a binder error, a CHECK the existing rows violate, and a foreign key to a missing table).
+`AlterTableAddUndo` captures the three constraint lists' lengths plus each existing column's `Default` / `DefaultConstraint` — a `DEFAULT … FOR` element writes onto the column instance rather than into a list — and `AddedColumnsUndo` the column array, the column-id watermark and the `Heap` the row rewrite replaced.
+
+**Divergence**: a list declaring two primary keys reports only the second's problem here, where real leads with Msg 8110 (`Cannot add multiple PRIMARY KEY constraints`) before carrying on to it.
 
 ## Column attributes
 

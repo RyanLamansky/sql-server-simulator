@@ -311,8 +311,6 @@ Low priority / niche — simulatable (as placeholder constants or a small model)
   The DDL + catalog half is self-contained; the *enforcement* half — a principal without `UNMASK` reading the masked value instead of the real one — is the larger piece and would want its own permission wiring.
 - **A schema owner other than `dbo` doesn't break an ownership chain** — `CREATE SCHEMA … AUTHORIZATION` records the owner and `sys.schemas.principal_id` projects it, but `PermissionChecker` still assumes every object is dbo-owned (`ChainsAcross`'s comment says so outright), so a module in schema A reading a table in schema B owned by a different principal stays chained where real breaks the chain and checks the caller's own grant.
   Wiring it means threading the schema's `PrincipalId` into the same-database chain suppression, which touches every module invocation — see [`permissions.md`](permissions.md).
-- **A mixed `ALTER TABLE … ADD` list of columns *and* constraints** — `ADD x int, CONSTRAINT ck CHECK (…)` is accepted by real; the simulator's column-add branch consumes the rest of the statement, so a constraint element after a column definition is a syntax error.
-  The constraint-only multi-element list ships, with its rollback — see [`alter-table.md`](alter-table.md#multi-element-add).
 - **`CREATE SCHEMA`'s element rollback leaves permission rows behind** — an element list that granted a permission and then failed removes the schema (and the objects inside it) but not the `sys.database_permissions` rows keyed on those object ids, which are then unreachable.
   Real rolls the whole statement back including the grants.
 - **`ALTER DATABASE … MODIFY NAME`** is Msg 102 here; real renames the database (and reports Msg 911 for a missing one).
@@ -350,9 +348,8 @@ Entries are verified against the simulator, so one that no longer reproduces is 
 - **A batch that is nothing but `@var <type>` is Msg 102 where real says Msg 137** — real parses `@x int` as a statement far enough to bind `@x` and reports the undeclared variable; the simulator's dispatcher rejects it as a syntax error at the `@x`.
   Reachable through `EXEC sp_executesql N'@x int'` and, more realistically, through an `sp_executesql` call whose two leading arguments were transposed — real runs the declaration string as the statement and reports 137, which is how the positional-binding rule was probed in the first place.
   Both engines refuse the batch either way; only the number and wording differ.
-- **An `sp_executesql` declaration string that isn't a declaration list reports the mini-parser's own Msg 102** rather than real's Msg 137 / **Msg 4124** (`The parameters supplied for the batch are not valid.`).
-  Real evidently validates the string as a whole before reading entries out of it; `ParseSpExecuteSqlParamDefinitions` fails at whichever token it reaches first.
-  Only malformed input reaches this.
+- **An `sp_executesql` declaration string that is itself a query** (`N'select 2'`, the transposed-arguments shape) is Msg 156 at its first keyword here, where real reads `(select 2)` as a complete parenthesized expression and reports the text after it as **Msg 4124** (probed 2026-09-25).
+  The declaration parse otherwise follows real's `(<declarations>)` reading: a list that ends early is Msg 102 near its closing `)`, and text after a complete list is Msg 4124.
 
 ## Fidelity gaps in shipped behavior
 
