@@ -446,4 +446,14 @@ public sealed class SelectIntoTests
     [TestMethod]
     public void IdentityFunction_SchemaQualifiedType_IsMsg102AtTheDot()
         => new Simulation().ValidateSyntaxError("select identity(dbo.foo, 1, 1) as id into #t", ".");
+
+    [TestMethod]
+    public void CharacterColumns_KeepTheirCollationInSysColumns()
+        => AreEqual("Latin1_General_BIN;Japanese_CI_AS;SQL_Latin1_General_CP1_CI_AS|Latin1_General_BIN", new Simulation().ExecuteScalar("""
+            create table t (a varchar(10) collate Latin1_General_BIN, b nvarchar(5) collate Japanese_CI_AS, c varchar(3));
+            select a, b, c into u from t;
+            select a into #v from t;
+            select (select string_agg(collation_name, ';') within group (order by column_id) from sys.columns where object_id = object_id('u'))
+                + '|' + (select collation_name from tempdb.sys.columns where object_id = object_id('tempdb..#v'))
+            """));
 }

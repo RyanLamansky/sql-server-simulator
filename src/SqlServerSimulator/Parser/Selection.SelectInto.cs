@@ -104,6 +104,12 @@ partial class Selection
                 maxLength: null,
                 nullable: nullable,
                 identity: identity,
+                // A character column keeps its expression's collation, which
+                // sys.columns reports (probed 2026-09-25 against SQL Server
+                // 2025: a Latin1_General_BIN source copies as Latin1_General_BIN).
+                collation: outputSchema[i] is VarcharSqlType or NVarcharSqlType or CharSqlType or NCharSqlType
+                    ? outputSchema[i].Collation?.Name
+                    : null,
                 spelledNumeric: projections[i].ResultReportsNumeric);
         }
 
