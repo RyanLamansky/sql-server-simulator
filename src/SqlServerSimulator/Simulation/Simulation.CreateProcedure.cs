@@ -253,6 +253,7 @@ partial class Simulation
             return new ProcedureParameter(name, SqlType.Int32, declaredMaxLength: null, defaultExpression: null, isOutput: false, tableType: tableType);
         }
 
+        var spelledNumeric = IsNumericTypeWord(context.Token);
         var (paramType, declaredMaxLength) = ParseProcedureParameterType(context, ordinal);
 
         Expression? defaultExpression = null;
@@ -273,7 +274,7 @@ partial class Simulation
             context.MoveNextRequired();
         }
 
-        return new ProcedureParameter(name, paramType, declaredMaxLength, defaultExpression, isOutput);
+        return new ProcedureParameter(name, paramType, declaredMaxLength, defaultExpression, isOutput) { SpelledNumeric = spelledNumeric };
     }
 
     /// <summary>

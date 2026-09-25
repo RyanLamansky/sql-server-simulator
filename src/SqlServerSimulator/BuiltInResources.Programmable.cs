@@ -978,8 +978,8 @@ internal static partial class BuiltInResources
                         procObjectId,
                         SqlValue.FromSystemName("@" + param.Name),
                         SqlValue.FromInt32(i + 1),
-                        SqlValue.FromByte(isTvp ? (byte)243 : param.Type.SystemTypeId),
-                        SqlValue.FromInt32(isTvp ? param.TableType!.UserTypeId : param.Type.UserTypeId),
+                        SqlValue.FromByte(isTvp ? (byte)243 : SpelledTypeId(param.Type, param.SpelledNumeric)),
+                        SqlValue.FromInt32(isTvp ? param.TableType!.UserTypeId : SpelledTypeId(param.Type, param.SpelledNumeric) is 108 ? 108 : param.Type.UserTypeId),
                         SqlValue.FromInt16(maxLength),
                         SqlValue.FromByte(precision),
                         SqlValue.FromByte(scale),
@@ -1011,8 +1011,8 @@ internal static partial class BuiltInResources
                         fnObjectId,
                         emptyName,
                         SqlValue.FromInt32(0),
-                        SqlValue.FromByte(scalarFn.ReturnType.SystemTypeId),
-                        SqlValue.FromInt32(scalarFn.ReturnType.UserTypeId),
+                        SqlValue.FromByte(SpelledTypeId(scalarFn.ReturnType, scalarFn.ReturnSpelledNumeric)),
+                        SqlValue.FromInt32(SpelledTypeId(scalarFn.ReturnType, scalarFn.ReturnSpelledNumeric) is 108 ? 108 : scalarFn.ReturnType.UserTypeId),
                         SqlValue.FromInt16(returnMaxLength),
                         SqlValue.FromByte(returnPrecision),
                         SqlValue.FromByte(returnScale),
@@ -1037,8 +1037,8 @@ internal static partial class BuiltInResources
                         fnObjectId,
                         SqlValue.FromSystemName("@" + p.Name),
                         SqlValue.FromInt32(i + 1),
-                        SqlValue.FromByte(p.Type.SystemTypeId),
-                        SqlValue.FromInt32(p.Type.UserTypeId),
+                        SqlValue.FromByte(SpelledTypeId(p.Type, p.SpelledNumeric)),
+                        SqlValue.FromInt32(SpelledTypeId(p.Type, p.SpelledNumeric) is 108 ? 108 : p.Type.UserTypeId),
                         SqlValue.FromInt16(maxLength),
                         SqlValue.FromByte(precision),
                         SqlValue.FromByte(scale),
@@ -1166,7 +1166,7 @@ internal static partial class BuiltInResources
                 SqlValue.FromInt32(position),
                 col.DefaultConstraint?.Definition is { } defaultText ? SqlValue.FromNVarchar(defaultText) : nullString,
                 col.Nullable ? yesNullable : noNullable,
-                col.TypeName == "numeric" ? SqlValue.FromSystemName("numeric") : IsoDataTypeName(col.Type),
+                IsoDataTypeName(col.Type, col.SpelledNumeric),
                 charLength is int cl ? SqlValue.FromInt32(cl) : nullInt32,
                 octetLength is int ol ? SqlValue.FromInt32(ol) : nullInt32,
                 numericPrecision is byte np ? SqlValue.FromByte(np) : nullByte,
@@ -1319,7 +1319,7 @@ internal static partial class BuiltInResources
             foreach (var fn in schema.Functions.Values.OrderBy(f => f.ObjectId))
             {
                 var dataType = fn is ScalarFunction scalarFn
-                    ? IsoDataTypeName(scalarFn.ReturnType)
+                    ? IsoDataTypeName(scalarFn.ReturnType, scalarFn.ReturnSpelledNumeric)
                     : tableDataType;
                 var name = SqlValue.FromSystemName(fn.Name);
                 yield return [
@@ -1381,7 +1381,7 @@ internal static partial class BuiltInResources
                         SqlValue.FromInt32(i + 1),
                         param.IsOutput ? modeInOut : modeIn,
                         SqlValue.FromSystemName("@" + param.Name),
-                        IsoDataTypeName(param.Type),
+                        IsoDataTypeName(param.Type, param.SpelledNumeric),
                         ParameterCharacterLength(param.Type) is int len ? SqlValue.FromInt32(len) : nullInt,
                     ];
                 }
@@ -1400,7 +1400,7 @@ internal static partial class BuiltInResources
                         SqlValue.FromInt32(0),
                         modeOut,
                         SqlValue.FromSystemName(string.Empty),
-                        IsoDataTypeName(scalar.ReturnType),
+                        IsoDataTypeName(scalar.ReturnType, scalar.ReturnSpelledNumeric),
                         ParameterCharacterLength(scalar.ReturnType) is int returnLen ? SqlValue.FromInt32(returnLen) : nullInt,
                     ];
                 }
@@ -1415,7 +1415,7 @@ internal static partial class BuiltInResources
                         SqlValue.FromInt32(i + 1),
                         modeIn,
                         SqlValue.FromSystemName("@" + param.Name),
-                        IsoDataTypeName(param.Type),
+                        IsoDataTypeName(param.Type, param.SpelledNumeric),
                         ParameterCharacterLength(param.Type) is int paramLen ? SqlValue.FromInt32(paramLen) : nullInt,
                     ];
                 }
@@ -1431,6 +1431,13 @@ internal static partial class BuiltInResources
     /// views keep the alias instead, which is why this doesn't live on
     /// <see cref="SqlType.SqlServerName"/>.
     /// </summary>
+    /// <summary>A type's catalog id with a <c>numeric</c> spelling honored: 108 rather than 106.</summary>
+    private static byte SpelledTypeId(SqlType type, bool spelledNumeric) =>
+        spelledNumeric && type is DecimalSqlType ? (byte)108 : type.SystemTypeId;
+
+    private static SqlValue IsoDataTypeName(SqlType type, bool spelledNumeric) =>
+        spelledNumeric && type is DecimalSqlType ? SqlValue.FromSystemName("numeric") : IsoDataTypeName(type);
+
     private static SqlValue IsoDataTypeName(SqlType type) =>
         SqlValue.FromSystemName(type == SqlType.SystemName ? "nvarchar" : type.SqlServerName);
 

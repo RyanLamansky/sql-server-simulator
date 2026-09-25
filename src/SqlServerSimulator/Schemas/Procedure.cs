@@ -93,6 +93,9 @@ internal sealed class ProcedureParameter(string name, SqlType type, int? declare
     public readonly string Name = name;
     public readonly SqlType Type = type;
 
+    /// <summary>Declared <c>numeric</c> rather than <c>decimal</c>; see <see cref="HeapColumn.SpelledNumeric"/>.</summary>
+    public bool SpelledNumeric;
+
     /// <summary>
     /// True when the parameter is a cursor parameter (<c>@c CURSOR VARYING
     /// OUTPUT</c>). Cursor parameters are output-only (real SQL Server requires

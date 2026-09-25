@@ -329,7 +329,8 @@ It rides `Expression.ResultReportsNumeric` (a structural recursion, default `fal
 The catalog reads it — `sys.columns` reports type 108 and `INFORMATION_SCHEMA.COLUMNS.DATA_TYPE` `numeric`, as `sp_help` does — and a projection that is a bare reference to such a column reports numeric, which is what carries it on through views, derived tables and `SELECT … INTO` (all probed 2026-09-24).
 A set operation's column and a `VALUES` constructor's column take the name of their **first decimal-family** branch or row — `SELECT 2.0 UNION ALL SELECT CAST(1 AS decimal(5, 1))` is numeric and the reverse decimal, while an `int` first branch leaves the choice to the next (probed 2026-09-24).
 A reference reports its column's spelling like a literal does once the plan marks it against its sources (`Reference.MarkNumericSpelled`), so the structural rules above carry it: `n + d`, `n * 2`, `AVG(n)`, `SUM(n) OVER ()`, a scalar subquery over `n` and a computed column over `n` are all numeric.
-**Not modeled yet**: a procedure's or function's numeric parameter and return type and an alias type over numeric still read `decimal`, and so does the operand name in a type-pair message, which is raised while binding — before the marking runs.
+Procedure and function parameters and a scalar function's return type keep the spelling too — in `sys.parameters`, `INFORMATION_SCHEMA.PARAMETERS` / `ROUTINES`, the parameter's variable inside the body and a call's value.
+**Not modeled yet**: an alias type over numeric reads `decimal`, and so does the operand name in a type-pair message, which is raised while binding — before the marking runs.
 
 ### Unary minus preserves the operand's type
 Unary minus is a dedicated `Negate` node, not `0 - x` — negating through a subtraction against a typed `int` zero would inflate an exact-numeric's precision by one (the additive `+1`) and re-type integers against `(10, 0)`.

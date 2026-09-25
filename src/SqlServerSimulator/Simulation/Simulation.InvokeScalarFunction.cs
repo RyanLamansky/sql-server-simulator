@@ -80,7 +80,7 @@ partial class Simulation
                 ? defaultExpr.Run(new RuntimeContext(_ => throw SimulatedSqlException.MustDeclareScalarVariable(""), outerBatch))
                     .CoerceTo(param.Type)
                 : argValues[i];
-            variables[param.Name] = new VariableSlot(param.Type, declaredMaxLength: null, value, parameter: null);
+            variables[param.Name] = new VariableSlot(param.Type, declaredMaxLength: null, value, parameter: null) { SpelledNumeric = param.SpelledNumeric };
         }
 
         var udfFrame = new UdfFrame(function.ReturnType);

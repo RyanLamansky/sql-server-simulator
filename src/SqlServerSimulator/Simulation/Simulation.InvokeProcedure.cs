@@ -202,7 +202,7 @@ partial class Simulation
             if (!boundIsDefault[i] && !boundIsUntypedNull[i])
                 AssignmentRules.RequireAssignable(boundValues[i]!.Value.Type, param.Type);
             var coerced = BindParameterValue(boundValues[i]!.Value, param.Type, attributionName);
-            variables[param.Name] = new VariableSlot(param.Type, declaredMaxLength: param.DeclaredMaxLength, coerced, parameter: null);
+            variables[param.Name] = new VariableSlot(param.Type, declaredMaxLength: param.DeclaredMaxLength, coerced, parameter: null) { SpelledNumeric = param.SpelledNumeric };
         }
 
         // Synthesize a command wrapping the proc body and a child batch.

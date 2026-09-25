@@ -97,6 +97,9 @@ internal sealed class ScalarFunction(
 
     public readonly SqlType ReturnType = returnType;
 
+    /// <summary>The return type was written <c>numeric</c>, which a call reports (probed 2026-09-24).</summary>
+    public bool ReturnSpelledNumeric;
+
     /// <summary>
     /// True when the function was declared with
     /// <c>WITH RETURNS NULL ON NULL INPUT</c>. At call time, if any argument
@@ -283,6 +286,9 @@ internal sealed class MultiStatementTableValuedFunction(
 /// </summary>
 internal sealed class UdfParameter(string name, SqlType type, Expression? defaultExpression)
 {
+    /// <summary>Declared <c>numeric</c> rather than <c>decimal</c>; see <see cref="HeapColumn.SpelledNumeric"/>.</summary>
+    public bool SpelledNumeric;
+
     public readonly string Name = name;
     public readonly SqlType Type = type;
 

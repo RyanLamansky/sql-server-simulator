@@ -280,6 +280,7 @@ partial class Simulation
     /// </summary>
     private static bool ParseScalarTail(ParserContext context, Schema schema, MultiPartName functionName, List<UdfParameter> parameters, bool isAlter, bool createOrAlter)
     {
+        var returnSpelledNumeric = IsNumericTypeWord(context.Token);
         var returnType = ParseFunctionReturnType(context, ordinal: 0);
 
         // Optional WITH option [, option …] clause. RETURNS NULL ON NULL INPUT
@@ -442,6 +443,7 @@ partial class Simulation
             IsSchemaBound = isSchemaBound,
             UsesQuotedIdentifier = context.QuotedIdentifiers,
             UsesAnsiNulls = context.Batch.Connection.AnsiNulls,
+            ReturnSpelledNumeric = returnSpelledNumeric,
         };
         if (replaced is not null)
             function.ModifyDate = context.Batch.CurrentStatement.UtcNow;
@@ -691,7 +693,7 @@ partial class Simulation
         for (var i = 0; i < parameters.Length; i++)
         {
             var p = parameters[i];
-            variables[p.Name] = new VariableSlot(p.Type, declaredMaxLength: null, SqlValue.Null(p.Type), parameter: null);
+            variables[p.Name] = new VariableSlot(p.Type, declaredMaxLength: null, SqlValue.Null(p.Type), parameter: null) { SpelledNumeric = p.SpelledNumeric };
         }
 
         // Use the scalar-UDF body batch constructor — it accepts a synthesized
@@ -757,6 +759,7 @@ partial class Simulation
         var name = variable.Value;
         context.MoveNextRequired();
 
+        var spelledNumeric = IsNumericTypeWord(context.Token);
         var paramType = ParseFunctionReturnType(context, ordinal);
 
         Expression? defaultExpression = null;
@@ -765,7 +768,7 @@ partial class Simulation
             context.MoveNextRequired();
             defaultExpression = Expression.Parse(context);
         }
-        return new UdfParameter(name, paramType, defaultExpression);
+        return new UdfParameter(name, paramType, defaultExpression) { SpelledNumeric = spelledNumeric };
     }
 
     /// <summary>

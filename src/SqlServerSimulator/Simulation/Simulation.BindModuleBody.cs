@@ -235,8 +235,10 @@ partial class Simulation
                 tableVariables[param.Name] = tvpType.Clone("@" + param.Name, outerBatch, isTableValuedParameter: true);
                 continue;
             }
-            variables[param.Name] = new VariableSlot(
-                param.Type, param.DeclaredMaxLength, SqlValue.Null(param.Type), parameter: null);
+            variables[param.Name] = new VariableSlot(param.Type, param.DeclaredMaxLength, SqlValue.Null(param.Type), parameter: null)
+            {
+                SpelledNumeric = param.SpelledNumeric,
+            };
         }
 
         BindModuleBodyAtCreate(outerContext, bodyText, procedureName, bodyLineOffset, bodyCommand =>
@@ -332,7 +334,7 @@ partial class Simulation
     {
         var variables = new Dictionary<string, VariableSlot>(BatchContext.VariableNameComparer);
         foreach (var param in parameters)
-            variables[param.Name] = new VariableSlot(param.Type, declaredMaxLength: null, SqlValue.Null(param.Type), parameter: null);
+            variables[param.Name] = new VariableSlot(param.Type, declaredMaxLength: null, SqlValue.Null(param.Type), parameter: null) { SpelledNumeric = param.SpelledNumeric };
         return variables;
     }
 }

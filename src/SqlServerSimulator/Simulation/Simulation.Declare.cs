@@ -116,7 +116,7 @@ partial class Simulation
                     continue;
                 }
 
-                spelledNumeric = context.Token is Name { Value: var typeWord } && string.Equals(typeWord, "numeric", StringComparison.OrdinalIgnoreCase);
+                spelledNumeric = IsNumericTypeWord(context.Token);
                 (declaredType, declaredMaxLength, xmlSchemaCollection) = ParseDeclareTypeSpec(context, variableName);
             }
             catch (SimulatedSqlException missingType) when (missingType.Number is 2715 or 2717 or 2750 && context.Batch.CreateTimeBindErrors is { } bindErrors)
@@ -255,6 +255,14 @@ partial class Simulation
             ? throw SimulatedSqlException.LegacyLobTypeInvalidForLocals()
             : (resolved, maxLength, xmlSchemaCollection);
     }
+
+    /// <summary>
+    /// Whether the type about to be parsed is written <c>numeric</c> — the
+    /// spelling a variable, parameter or return type keeps though it shares
+    /// <c>decimal</c>'s type.
+    /// </summary>
+    internal static bool IsNumericTypeWord(Token? token) =>
+        token is Name { Value: var word } && string.Equals(word, "numeric", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// Column resolver passed when running an expression that has no FROM

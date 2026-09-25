@@ -80,4 +80,20 @@ public sealed class NumericSpellingTests
     [TestMethod]
     public void ComputedColumn_OverANumericColumn_IsNumeric()
         => AreEqual("numeric", new Simulation().ExecuteScalar("create table cn (n numeric(5, 2), c as n * 2); select type_name(system_type_id) from sys.columns where name = 'c'"));
+
+    [TestMethod]
+    public void ParametersAndReturnTypes_KeepTheirNames()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create procedure pn @a numeric(5, 2), @b decimal(5, 2) as select @a as a, @b as b into pnt",
+            "create function fn(@a numeric(5, 2)) returns numeric(6, 2) as begin return @a end",
+            "exec pn 1, 2");
+        AreEqual("pn@a:numeric,pn@b:decimal,fn:numeric,fn@a:numeric", sim.ExecuteScalar("""
+            select string_agg(concat(object_name(object_id), name, ':', type_name(system_type_id)), ',') within group (order by object_id, parameter_id)
+            from sys.parameters where object_id in (object_id('pn'), object_id('fn'))
+            """));
+        AreEqual("a:numeric:numeric,b:decimal:decimal", ColumnTypes(sim, "pnt"));
+        AreEqual("numeric", sim.ExecuteScalar("select dbo.fn(1) as v into fnt; select type_name(system_type_id) from sys.columns where object_id = object_id('fnt')"));
+    }
 }
