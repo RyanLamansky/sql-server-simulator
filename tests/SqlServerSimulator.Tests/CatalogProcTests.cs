@@ -334,13 +334,16 @@ public sealed class CatalogProcTests
     }
 
     [TestMethod]
-    public void SpStatistics_NoIndexName_SummaryRowOnly()
+    public void SpStatistics_NullIndexName_SummaryRowOnly()
     {
-        // @index_name is a LIKE pattern; NULL / omitted yields the summary row
-        // alone (probe-confirmed against SQL Server 2025).
-        var rows = Run(NewIndexedFixture(), "exec sp_statistics_100 @table_name='cust'");
+        // @index_name is a LIKE pattern defaulting to '%': an explicit NULL
+        // yields the summary row alone, an omitted one every index (probed
+        // 2026-09-25 against SQL Server 2025).
+        var rows = Run(NewIndexedFixture(), "exec sp_statistics_100 @table_name='cust', @index_name = null");
         HasCount(1, rows);
         AreEqual((short)0, rows[0]["TYPE"]);
+        HasCount(5, Run(NewIndexedFixture(), "exec sp_statistics_100 @table_name='cust'"));
+        HasCount(5, Run(NewIndexedFixture(), "exec sp_statistics 'cust'"));
     }
 
     [TestMethod]
@@ -475,4 +478,47 @@ public sealed class CatalogProcTests
         AreEqual("PROCEDURE_QUALIFIER", reader.GetName(0));
         AreEqual("PROCEDURE_TYPE", reader.GetName(7));
     }
+
+    private static Simulation NewForeignKeyFixture()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table fkp (a int, b int, u int unique, constraint pk_fkp primary key (a, b));
+            create table fkc (id int, x int, y int, z int,
+                constraint fk_c1 foreign key (x, y) references fkp (a, b) on delete cascade on update set null,
+                constraint fk_c2 foreign key (z) references fkp (u));
+            create table fkc2 (q int constraint fk_q references fkp (u) on delete set default);
+            """);
+        return sim;
+    }
+
+    private static string FkeysSummary(List<Dictionary<string, object?>> rows) => string.Join(";", rows.ConvertAll(r =>
+        $"{r["FKTABLE_NAME"]}.{r["FKCOLUMN_NAME"]}>{r["PKTABLE_NAME"]}.{r["PKCOLUMN_NAME"]}:{r["KEY_SEQ"]}:{r["UPDATE_RULE"]}:{r["DELETE_RULE"]}:{r["FK_NAME"]}"));
+
+    [TestMethod]
+    public void SpFkeys_ByPrimaryKeyTable_SortsByForeignKeyTableAndMapsEveryRule()
+        => AreEqual(
+            "fkc.x>fkp.a:1:2:0:fk_c1;fkc.z>fkp.u:1:1:1:fk_c2;fkc.y>fkp.b:2:2:0:fk_c1;fkc2.q>fkp.u:1:1:3:fk_q",
+            FkeysSummary(Run(NewForeignKeyFixture(), "exec sp_fkeys @pktable_name = 'fkp'")));
+
+    [TestMethod]
+    public void SpFkeys_ByForeignKeyTableOnly_ReadsOnlyCascade()
+        => AreEqual(
+            "fkc.x>fkp.a:1:1:0:fk_c1;fkc.z>fkp.u:1:1:1:fk_c2;fkc.y>fkp.b:2:1:0:fk_c1",
+            FkeysSummary(Run(NewForeignKeyFixture(), "exec sp_fkeys @fktable_name = 'fkc'")));
+
+    [TestMethod]
+    public void SpFkeys_NamesTheReferencedKeyAndMatchesNamesExactly()
+    {
+        var sim = NewForeignKeyFixture();
+        var rows = Run(sim, "exec sp_fkeys 'FKP', 'DBO', @fktable_name = 'fkc2'");
+        HasCount(1, rows);
+        StartsWith("UQ__fkp__", (string)rows[0]["PK_NAME"]!);
+        AreEqual((short)7, rows[0]["DEFERRABILITY"]);
+        IsEmpty(Run(sim, "exec sp_fkeys @pktable_name = 'fk%'"));
+    }
+
+    [TestMethod]
+    public void SpFkeys_NeedsATableName()
+        => TestHelpers.AssertSqlError("exec sp_fkeys", 15252, "The primary or foreign key table name must be given.");
 }

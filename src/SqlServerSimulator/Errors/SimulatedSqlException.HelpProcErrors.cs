@@ -25,6 +25,14 @@ partial class SimulatedSqlException
         new("The database name component of the object qualifier must be the name of the current database.", 15250, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server's Msg 15252 — <c>sp_fkeys</c> given neither a
+    /// primary-key nor a foreign-key table name. The message carries no
+    /// substitution.
+    /// </summary>
+    internal static SimulatedSqlException ForeignKeyTableNameRequired() =>
+        new("The primary or foreign key table name must be given.", 15252, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server's Msg 15197 — <c>sp_helptext</c> on an object that
     /// stores no definition text (a table, a sequence, a synonym). Real
     /// reaches it by finding no <c>syscomments</c> rows for the object.

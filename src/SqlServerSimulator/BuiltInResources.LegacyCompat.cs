@@ -102,6 +102,9 @@ internal static partial class BuiltInResources
         // them to enumerate the current database's keys, indexes, and stored
         // procedures.
         "sp_pkeys",
+        // sp_fkeys: SQLForeignKeys — JDBC's getImportedKeys / getExportedKeys.
+        "sp_fkeys",
+        "sp_statistics",
         "sp_statistics_100",
         "sp_stored_procedures",
         // The sp_help family — the formatted-metadata procs interactive

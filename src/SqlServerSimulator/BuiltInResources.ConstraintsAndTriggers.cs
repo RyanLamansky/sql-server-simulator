@@ -646,7 +646,7 @@ internal static partial class BuiltInResources
     /// constraint's own id — probe-confirmed against SQL Server 2025. Falls
     /// back to 1 when nothing matches.
     /// </summary>
-    private static int ResolveForeignKeyIndexId(ForeignKey fk)
+    internal static int ResolveForeignKeyIndexId(ForeignKey fk)
     {
         var referenced = fk.ReferencedTable;
         var wanted = fk.ReferencedColumnOrdinals;

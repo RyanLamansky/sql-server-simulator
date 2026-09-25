@@ -679,26 +679,29 @@ partial class Simulation
     /// <summary>
     /// Handles <c>EXEC sp_statistics_100 @table_name [, @table_owner]
     /// [, @table_qualifier] [, @index_name] [, @is_unique] [, @accuracy]
-    /// [, @ODBCVer]</c> — the proc ODBC's <c>SQLStatistics</c> / JDBC's
+    /// [, @ODBCVer]</c> and its older twin <c>sp_statistics</c>, which real
+    /// answers identically for the rowstore indexes the simulator models —
+    /// the proc ODBC's <c>SQLStatistics</c> / JDBC's
     /// <c>getIndexInfo</c> call. Emits a table-cardinality summary row first
     /// (<c>TYPE = 0</c>, index columns NULL), then one row per index key column
     /// (<c>TYPE = 1</c> clustered / <c>3</c> nonclustered, <c>COLLATION</c>
     /// 'A'/'D', <c>NON_UNIQUE</c> 0/1). <c>@table_name</c> is an exact
     /// identifier; <c>@index_name</c> is a LIKE pattern over the index rows
-    /// (a NULL / omitted value emits the summary row alone — probe-confirmed);
+    /// (default <c>'%'</c>; an explicit NULL emits the summary row alone —
+    /// probed 2026-09-25);
     /// <c>@is_unique = 'Y'</c> restricts to unique indexes (the summary row is
     /// always emitted). <c>CARDINALITY</c> is the
     /// live row count for the table / clustered index (NULL for nonclustered)
     /// and <c>PAGES</c> is the heap's data-page count — an approximation, since
     /// the simulator keeps no separate clustered-index or statistics storage.
     /// </summary>
-    private static IEnumerable<SimulatedStatementOutcome> InvokeSpStatistics100(BatchContext batch)
+    private static IEnumerable<SimulatedStatementOutcome> InvokeSpStatistics(BatchContext batch, string procedureName)
     {
         var arguments = ParseExecArguments(batch.Parser, batch);
         if (batch.IsSkipping)
             yield break;
 
-        var (tableName, tableOwner, tableQualifier, indexName, uniqueOnly) = ParseSpStatisticsArgs(arguments);
+        var (tableName, tableOwner, tableQualifier, indexName, uniqueOnly) = ParseSpStatisticsArgs(arguments, procedureName);
         var database = batch.CurrentDatabase;
         var collation = database.Collation;
         var qualifier = SqlValue.FromSystemName(database.Name);
@@ -742,10 +745,9 @@ partial class Simulation
             SqlValue.FromInt16(0), nullShort, nullName, nullChar, cardinality, pages, nullFilter,
         ]);
 
-        // @index_name is a LIKE pattern applied to the index rows; a NULL /
-        // omitted @index_name emits the summary row alone (probe-confirmed:
-        // JDBC getIndexInfo passes '%' to get every index, and no argument
-        // yields the summary only). The summary row above is always present.
+        // @index_name is a LIKE pattern applied to the index rows; an explicit
+        // NULL emits the summary row alone. The summary row above is always
+        // present.
         if (indexName is null)
             return;
         var indexPattern = CompileCatalogPattern(indexName);
@@ -830,9 +832,12 @@ partial class Simulation
     }
 
     private static (string? Name, string? Owner, string? Qualifier, string? IndexName, bool UniqueOnly) ParseSpStatisticsArgs(
-        List<ProcArgument> arguments)
+        List<ProcArgument> arguments, string procedureName)
     {
-        string? name = null, owner = null, qualifier = null, indexName = null;
+        // @index_name defaults to '%', so an omitted or DEFAULT argument lists
+        // every index and only an explicit NULL leaves the summary row alone
+        // (probed 2026-09-25 against SQL Server 2025).
+        string? name = null, owner = null, qualifier = null, indexName = "%";
         var uniqueOnly = false;
         var positional = 0;
         foreach (var arg in arguments)
@@ -844,11 +849,11 @@ partial class Simulation
                     case 0: name = CatalogStringArg(arg); break;
                     case 1: owner = CatalogStringArg(arg); break;
                     case 2: qualifier = CatalogStringArg(arg); break;
-                    case 3: indexName = CatalogStringArg(arg); break;
+                    case 3: indexName = arg.IsDefault ? "%" : CatalogStringArg(arg); break;
                     case 4: uniqueOnly = CatalogIsUnique(arg); break;
                     case 5: break; // @accuracy — no live statistics to tune
                     case 6: break; // @ODBCVer — result shape is version-invariant
-                    default: throw SimulatedSqlException.InvalidProcedureParameters("sp_statistics_100");
+                    default: throw SimulatedSqlException.InvalidProcedureParameters(procedureName);
                 }
 
                 continue;
@@ -859,11 +864,11 @@ partial class Simulation
                 case var n when BuiltInToken.Equals(n, "table_name"): name = CatalogStringArg(arg); break;
                 case var n when BuiltInToken.Equals(n, "table_owner"): owner = CatalogStringArg(arg); break;
                 case var n when BuiltInToken.Equals(n, "table_qualifier"): qualifier = CatalogStringArg(arg); break;
-                case var n when BuiltInToken.Equals(n, "index_name"): indexName = CatalogStringArg(arg); break;
+                case var n when BuiltInToken.Equals(n, "index_name"): indexName = arg.IsDefault ? "%" : CatalogStringArg(arg); break;
                 case var n when BuiltInToken.Equals(n, "is_unique"): uniqueOnly = CatalogIsUnique(arg); break;
                 case var n when BuiltInToken.Equals(n, "accuracy"): break;
                 case var n when BuiltInToken.Equals(n, "ODBCVer"): break;
-                default: throw SimulatedSqlException.InvalidProcedureParameters("sp_statistics_100");
+                default: throw SimulatedSqlException.InvalidProcedureParameters(procedureName);
             }
         }
 
