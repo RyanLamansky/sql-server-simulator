@@ -506,10 +506,9 @@ Probed against SQL Server 2025.
 - **EXEC in expression position** (`SELECT EXEC p`) → Msg 156 via the standard non-statement-start path.
 
 **Error matrix at EXEC**:
-- **Msg 201** (`"Procedure or function 'X' expects parameter '@Y', which was not supplied."`) for an unknown named arg OR a missing required parameter (no default).
-  State 4.
+- The argument count is judged first: any argument to a procedure declaring no parameters is **Msg 8146** state 2, and more arguments than parameters **Msg 8144** (`"Procedure or function X has too many arguments specified."`), named ones included (probed 2026-09-25 against SQL Server 2025).
+- **Msg 201** (`"Procedure or function 'X' expects parameter '@Y', which was not supplied."`) for a missing required parameter (no default), state 4, and only then **Msg 8145** for a named argument matching no parameter.
 - **Msg 8143** (`"Parameter '@X' was supplied multiple times."`) for duplicate named args.
-- **Msg 8144** (`"Procedure or function X has too many arguments specified."`) for too many positional args (same factory as scalar UDFs, but the proc name renders without single-quote wrapping in real SQL Server; the simulator's existing factory is close enough).
 - **Msg 119** (mixing named-then-positional) — verbatim wording probe-confirmed.
 
 **OUTPUT parameters**:

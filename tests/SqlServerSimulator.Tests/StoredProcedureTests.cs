@@ -147,13 +147,30 @@ public sealed class StoredProcedureTests
     }
 
     /// <summary>
+    /// The argument count is judged before any name: more arguments than
+    /// parameters is Msg 8144 even when one names no parameter, and any
+    /// argument to a procedure declaring none is Msg 8146 (probed 2026-09-25
+    /// against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("create procedure p @a int as select @a", "exec p @a = 1, @zz = 1", 8144, "Procedure or function p has too many arguments specified.")]
+    [DataRow("create procedure p @a int = 0, @b int = 0 as select @a", "exec p @zz = 1, @a = 2, @b = 3", 8144, "Procedure or function p has too many arguments specified.")]
+    [DataRow("create procedure p as select 1", "exec p @zz = 1", 8146, "Procedure p has no parameters and arguments were supplied.")]
+    [DataRow("create procedure p as select 1", "exec p 1", 8146, "Procedure p has no parameters and arguments were supplied.")]
+    public void Exec_ArgumentCount_IsJudgedBeforeNames(string create, string exec, int number, string message)
+    {
+        using var connection = Open();
+        _ = connection.CreateCommand(create).ExecuteNonQuery();
+        AreEqual(message, AssertSqlError(connection, exec, number).Message);
+    }
+
+    /// <summary>
     /// An argument-binding error reports line 0 and names the procedure as
     /// the EXEC spelled it (probed 2026-09-23).
     /// </summary>
     [TestMethod]
     [DataRow("select 1\nexec dbo.p", 201, "dbo.p")]
     [DataRow("exec P 1, 2", 8144, "P")]
-    [DataRow("exec [dbo].[p] @b = 1, @a = 1", 8145, "dbo.p")]
     public void Exec_BindingErrors_ReportLineZeroAndTheCalledProcedure(string sql, int number, string procedure)
     {
         using var connection = Open();

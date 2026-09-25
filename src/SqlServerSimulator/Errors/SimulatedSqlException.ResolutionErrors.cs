@@ -143,11 +143,12 @@ partial class SimulatedSqlException
     /// <summary>
     /// Mimics SQL Server's Msg 8146 — arguments passed to a routine that
     /// declares no parameters; <c>sp_executesql</c> with an empty declaration
-    /// string leaves the name empty, hence the double space. Probe-confirmed
-    /// against SQL Server 2025 (2026-09-24).
+    /// string leaves the name empty, hence the double space, and reports state
+    /// 1 where an <c>EXEC</c> of a procedure reports state 2. Probe-confirmed
+    /// against SQL Server 2025 (2026-09-24, 2026-09-25).
     /// </summary>
-    internal static SimulatedSqlException ArgumentsSuppliedToParameterlessRoutine(string name) =>
-        new($"Procedure {name} has no parameters and arguments were supplied.", 8146, 16, 1);
+    internal static SimulatedSqlException ArgumentsSuppliedToParameterlessRoutine(string name, byte state = 1) =>
+        new($"Procedure {name} has no parameters and arguments were supplied.", 8146, 16, state);
 
     /// <summary>
     /// Mimics SQL Server's Msg 8178 — an <c>sp_executesql</c> parameter that

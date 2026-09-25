@@ -354,9 +354,6 @@ Entries are verified against the simulator, so one that no longer reproduces is 
 - **An `sp_executesql` declaration string that isn't a declaration list reports the mini-parser's own Msg 102** rather than real's Msg 137 / **Msg 4124** (`The parameters supplied for the batch are not valid.`).
   Real evidently validates the string as a whole before reading entries out of it; `ParseSpExecuteSqlParamDefinitions` fails at whichever token it reaches first.
   Only malformed input reaches this.
-- **`EXEC <proc>` with an unrecognized argument name reports the wrong parameter in Msg 201** — for `exec p @a = 1, @zz = 2` against `p @a int, @b int`, real names `'@b'` (the first declared parameter still unbound) and the simulator names `'@a'`, as though the successful binding had been discarded.
-  The message is right in every case where all the names are known (probed across three parameters, with and without defaults, in and out of order); it is only the unknown-name path that misreports.
-  Distinct from the `sp_executesql` argument-binding path, which now matches.
 
 ## Fidelity gaps in shipped behavior
 

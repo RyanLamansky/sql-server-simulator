@@ -26,10 +26,11 @@ partial class Simulation
     /// <item>Once any positional bind happens, named args may follow (mixed
     /// is fine going positional → named); the reverse fires Msg 119 at
     /// parse.</item>
-    /// <item>Unknown parameter name in a named-arg fires Msg 201 ("expects
-    /// parameter '@X'").</item>
-    /// <item>Missing required parameter (no default) fires Msg 201.</item>
-    /// <item>Too many positional args fires Msg 8144.</item>
+    /// <item>The count is checked before any name: an argument to a
+    /// procedure declaring no parameters fires Msg 8146, more arguments than
+    /// it declares Msg 8144 (probed 2026-09-25).</item>
+    /// <item>Missing required parameter (no default) fires Msg 201, and only
+    /// then an unknown parameter name Msg 8145.</item>
     /// <item>Duplicate named arg fires Msg 8143 (at parse, not here).</item>
     /// <item>Recursion past 32 fires Msg 217.</item>
     /// </list>
@@ -88,6 +89,11 @@ partial class Simulation
             return error;
         }
 
+        if (arguments.Count > 0 && procedure.Parameters.Length == 0)
+            throw BindingError(SimulatedSqlException.ArgumentsSuppliedToParameterlessRoutine(procedure.Name, state: 2));
+        if (arguments.Count > procedure.Parameters.Length)
+            throw BindingError(SimulatedSqlException.TooManyArgumentsToFunction(procedure.Name));
+
         var positionalIndex = 0;
         string? unknownArgument = null;
         foreach (var arg in arguments)
@@ -96,8 +102,6 @@ partial class Simulation
             if (arg.Name is null)
             {
                 paramIndex = positionalIndex++;
-                if (paramIndex >= procedure.Parameters.Length)
-                    throw BindingError(SimulatedSqlException.TooManyArgumentsToFunction(procedure.Name));
             }
             else
             {
