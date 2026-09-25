@@ -1726,31 +1726,36 @@ internal readonly partial struct SqlValue
     //   and (for datetimeoffset only) a 2-byte signed little-endian offset
     //   in minutes. datetimeoffset stores time + date as UTC; the offset
     //   shifts back to the original wall-clock during round-trip.
+    //
+    // Bytes the layout can't read are real's Msg 241, the same failure a
+    // string reports (probed 2026-09-25 against SQL Server 2025: 0x01 and
+    // 0xFF0A0B0C to date). Real also reads some longer all-zero forms and a
+    // few other lengths the layout above doesn't, which aren't modeled.
 
     private static DateOnly DecodeDateFromBytes(byte[] bytes) =>
         bytes.Length != 3
-            ? throw new NotSupportedException($"CAST(varbinary(…) AS date) requires exactly 3 bytes; got {bytes.Length}.")
+            ? throw SimulatedSqlException.ConversionFailedDateTimeFromString()
             : DateOnly.MinValue.AddDays((int)ReadLittleEndianUInt(bytes, 0, 3));
 
     private static TimeSpan DecodeTimeFromBytes(byte[] bytes)
     {
         if (bytes.Length < 1)
-            throw new NotSupportedException($"CAST(varbinary(…) AS time) requires at least 1 byte; got {bytes.Length}.");
+            throw SimulatedSqlException.ConversionFailedDateTimeFromString();
         var scale = bytes[0];
         var timeBytes = TimeWidthForScale(scale);
         return bytes.Length != 1 + timeBytes
-            ? throw new NotSupportedException($"CAST(varbinary(…) AS time({scale})) requires {1 + timeBytes} bytes; got {bytes.Length}.")
+            ? throw SimulatedSqlException.ConversionFailedDateTimeFromString()
             : DecodeTimeOfDay(bytes, 1, timeBytes, scale);
     }
 
     private static DateTime DecodeDateTime2FromBytes(byte[] bytes)
     {
         if (bytes.Length < 4)
-            throw new NotSupportedException($"CAST(varbinary(…) AS datetime2) requires at least 4 bytes; got {bytes.Length}.");
+            throw SimulatedSqlException.ConversionFailedDateTimeFromString();
         var scale = bytes[0];
         var timeBytes = TimeWidthForScale(scale);
         if (bytes.Length != 1 + timeBytes + 3)
-            throw new NotSupportedException($"CAST(varbinary(…) AS datetime2({scale})) requires {1 + timeBytes + 3} bytes; got {bytes.Length}.");
+            throw SimulatedSqlException.ConversionFailedDateTimeFromString();
         var time = DecodeTimeOfDay(bytes, 1, timeBytes, scale);
         var date = DateOnly.MinValue.AddDays((int)ReadLittleEndianUInt(bytes, 1 + timeBytes, 3));
         return date.ToDateTime(TimeOnly.MinValue).Add(time);
@@ -1759,11 +1764,11 @@ internal readonly partial struct SqlValue
     private static DateTimeOffset DecodeDateTimeOffsetFromBytes(byte[] bytes)
     {
         if (bytes.Length < 6)
-            throw new NotSupportedException($"CAST(varbinary(…) AS datetimeoffset) requires at least 6 bytes; got {bytes.Length}.");
+            throw SimulatedSqlException.ConversionFailedDateTimeFromString();
         var scale = bytes[0];
         var timeBytes = TimeWidthForScale(scale);
         if (bytes.Length != 1 + timeBytes + 3 + 2)
-            throw new NotSupportedException($"CAST(varbinary(…) AS datetimeoffset({scale})) requires {1 + timeBytes + 5} bytes; got {bytes.Length}.");
+            throw SimulatedSqlException.ConversionFailedDateTimeFromString();
         var utcTime = DecodeTimeOfDay(bytes, 1, timeBytes, scale);
         var utcDate = DateOnly.MinValue.AddDays((int)ReadLittleEndianUInt(bytes, 1 + timeBytes, 3));
         var offsetMinutes = (short)(bytes[1 + timeBytes + 3] | (bytes[1 + timeBytes + 4] << 8));
@@ -1911,7 +1916,7 @@ internal readonly partial struct SqlValue
         <= 2 => 3,
         <= 4 => 4,
         <= 7 => 5,
-        _ => throw new NotSupportedException($"varbinary→time/datetime2/datetimeoffset scale must be 0–7; got {scale}."),
+        _ => throw SimulatedSqlException.ConversionFailedDateTimeFromString(),
     };
 
     private static TimeSpan DecodeTimeOfDay(byte[] bytes, int offset, int width, byte scale)

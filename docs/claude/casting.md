@@ -148,6 +148,9 @@ Decoders live next to `VarbinaryToGuid` in `Storage/SqlValue.Coerce.cs`.
 The reverse direction is modeled for the legacy pair only: `datetime` / `smalldatetime` → `binary(N)` / `varbinary(N)` writes the same big-endian form right-aligned, `binary(N)` padding or cutting on the left and `varbinary(N)` only cutting (`CAST(<datetime> AS binary(4))` keeps the time half).
 The other date types → binary isn't modeled — no production scripts emit that direction; `bcp` and BACPAC do the encoding upstream.
 
+Bytes the layout can't read are Msg 241, the failure a string reports (probed 2026-09-25 against SQL Server 2025).
+**Not modeled yet**: real also reads a few other lengths — an all-zero `0x00000000` as `0001-01-01`, a five-byte time — which the simulator refuses with that Msg 241.
+
 ## String ↔ binary CAST
 
 Both directions are in `SqlValue.CoerceTo` (style 0, the default CAST form):

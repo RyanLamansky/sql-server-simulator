@@ -38,7 +38,7 @@ internal sealed class DateTrunc : Expression
             return SqlValue.Null(raw.Type);
         var value = DatePartKinds.CoerceDateArgumentImplicit(raw);
         var t = value.Type;
-        DatePartKinds.RequireCompatible(this.kind, this.keywordText, t, "datetrunc");
+        DatePartKinds.RequireCompatible(this.kind, t, "datetrunc");
         var dateFirst = runtime.Batch.Connection.DateFirst;
         if (t is TimeSqlType)
             return SqlValue.FromTime(t, TruncateDateTime(new DateTime(1900, 1, 1).Add(value.AsTime), this.kind, dateFirst).TimeOfDay);

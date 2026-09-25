@@ -63,6 +63,7 @@ internal static class DatePartKinds
                 "D" => DatePartKind.Day,
                 "N" => DatePartKind.Minute,
                 "S" => DatePartKind.Second,
+                "W" => DatePartKind.Weekday,
                 _ => null,
             },
             2 => upper switch
@@ -216,7 +217,7 @@ internal static class DatePartKinds
     /// <item><description><c>datetimeoffset(N)</c>: date, time, and tzoffset.</description></item>
     /// </list>
     /// </summary>
-    public static void RequireCompatible(DatePartKind kind, string keywordText, SqlType type, string functionLowerName)
+    public static void RequireCompatible(DatePartKind kind, SqlType type, string functionLowerName)
     {
         var ok = type switch
         {
@@ -229,8 +230,32 @@ internal static class DatePartKinds
             _ => throw new NotSupportedException($"DATEPART/DATEADD doesn't accept operand type {type}."),
         };
         if (!ok)
-            throw SimulatedSqlException.DatepartNotSupportedForType(keywordText, functionLowerName, FamilyRootName(type), IncompatibleDatepartState(functionLowerName, type, kind));
+            throw SimulatedSqlException.DatepartNotSupportedForType(CanonicalName(kind), functionLowerName, FamilyRootName(type), IncompatibleDatepartState(functionLowerName, type, kind));
     }
+
+    /// <summary>
+    /// The datepart's own name, which real's Msg 9810 reports whatever
+    /// abbreviation the statement wrote (probed 2026-09-25 against SQL Server
+    /// 2025: <c>DATEPART(dy, …)</c> names dayofyear).
+    /// </summary>
+    private static string CanonicalName(DatePartKind kind) => kind switch
+    {
+        DatePartKind.Year => "year",
+        DatePartKind.Quarter => "quarter",
+        DatePartKind.Month => "month",
+        DatePartKind.DayOfYear => "dayofyear",
+        DatePartKind.Day => "day",
+        DatePartKind.Week => "week",
+        DatePartKind.IsoWeek => "iso_week",
+        DatePartKind.Weekday => "weekday",
+        DatePartKind.Hour => "hour",
+        DatePartKind.Minute => "minute",
+        DatePartKind.Second => "second",
+        DatePartKind.Millisecond => "millisecond",
+        DatePartKind.Microsecond => "microsecond",
+        DatePartKind.Nanosecond => "nanosecond",
+        _ => "tzoffset",
+    };
 
     /// <summary>
     /// The state real's Msg 9810 carries, which names the function and the

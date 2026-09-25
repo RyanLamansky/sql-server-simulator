@@ -268,5 +268,38 @@ public sealed class BuiltInArgumentTypeTests
     [DataRow("hashbytes('MD5', 1.5)", "numeric")]
     public void HashBytes_NamesTheInputTypeWithoutItsLength(string call, string type)
         => new Simulation().AssertSqlError($"select {call}", 8116, $"Argument data type {type} is invalid for argument 2 of hashbytes function.");
+
+    [TestMethod]
+    [DataRow("choose(2, null, 'x')", "x")]
+    [DataRow("least(null, 'b')", "b")]
+    [DataRow("greatest('a', null, 'c')", "c")]
+    public void BareNullArm_TakesNoPartInTheType(string call, string expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar($"select {call}"));
+
+    [TestMethod]
+    public void DateAdd_OfABareNullNumber_RaisesMsg8116()
+        => new Simulation().AssertSqlError("select dateadd(day, null, getdate())", 8116, "Argument data type NULL is invalid for argument 2 of dateadd function.");
+
+    [TestMethod]
+    [DataRow("dy", "dayofyear")]
+    [DataRow("yy", "year")]
+    [DataRow("w", "weekday")]
+    [DataRow("isowk", "iso_week")]
+    public void DatePart_RefusalNamesTheCanonicalPart(string abbreviation, string name)
+        => new Simulation().AssertSqlError($"select datepart({abbreviation}, cast('10:00' as time))", 9810, $"The datepart {name} is not supported by date function datepart for data type time.");
+
+    [TestMethod]
+    public void DatePart_AcceptsWForWeekday()
+        => AreEqual(4, new Simulation().ExecuteScalar("set datefirst 7; select datepart(w, cast('2020-01-01' as date))"));
+
+    [TestMethod]
+    public void Unicode_ReadsABinaryAsUtf16()
+        => AreEqual(35615, new Simulation().ExecuteScalar("select unicode(0x1F8B)"));
+
+    [TestMethod]
+    [DataRow("0x01")]
+    [DataRow("0xFF0A0B0C")]
+    public void BinaryToDate_ThatTheLayoutCannotRead_RaisesMsg241(string bytes)
+        => _ = new Simulation().AssertSqlError($"select cast({bytes} as date)", 241);
 }
 

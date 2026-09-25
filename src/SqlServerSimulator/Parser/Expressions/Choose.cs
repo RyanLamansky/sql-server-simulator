@@ -48,9 +48,16 @@ internal sealed class Choose : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
         _ = AssignmentRules.ArgumentType(this.indexExpr, SqlType.Int32, batch, resolveColumnType);
-        var t = this.values[0].GetSqlType(batch, resolveColumnType);
-        for (var i = 1; i < this.values.Length; i++)
-            t = SqlType.Promote(t, this.values[i].GetSqlType(batch, resolveColumnType));
+        // A bare NULL has no type to contribute (probed 2026-09-25 against
+        // SQL Server 2025: CHOOSE(2, NULL, 'x') is 'x').
+        SqlType? t = null;
+        foreach (var value in this.values)
+        {
+            var type = value.GetSqlType(batch, resolveColumnType);
+            if (!IsUntypedNullLiteral(value))
+                t = t is null ? type : SqlType.Promote(t, type);
+        }
+        t ??= this.values[0].GetSqlType(batch, resolveColumnType);
         this.cachedResultType = t;
         this.namingArm = FirstDecimalArm(this.values, batch, resolveColumnType);
         return t;

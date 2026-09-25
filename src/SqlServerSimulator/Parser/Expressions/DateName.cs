@@ -60,7 +60,7 @@ internal sealed class DateName : Expression
         var value = DatePartKinds.CoerceDateArgumentImplicit(this.source.Run(runtime));
         if (value.IsNull)
             return SqlValue.Null(ResultType);
-        DatePartKinds.RequireCompatible(this.kind, this.keywordText, value.Type, "datename");
+        DatePartKinds.RequireCompatible(this.kind, value.Type, "datename");
         return this.kind switch
         {
             DatePartKind.Month => SqlValue.FromNVarchar(ResultType, MonthNames[DatePartKinds.Extract(this.kind, value) - 1]),

@@ -46,18 +46,23 @@ internal sealed class GreatestLeast : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
         var branches = new (SqlType, int)[this.arguments.Length];
+        var count = 0;
         for (var i = 0; i < this.arguments.Length; i++)
         {
             var type = this.arguments[i].GetSqlType(batch, resolveColumnType);
+            // A bare NULL has no type to contribute (probed 2026-09-25 against
+            // SQL Server 2025: LEAST(NULL, 'b') is 'b').
+            if (IsUntypedNullLiteral(this.arguments[i]))
+                continue;
 
             // The types real can't compare are refused as arguments before any
             // pair is unified — Msg 8116 naming the first such argument
             // (probe-confirmed against SQL Server 2025, 2026-09-23).
             if (type.IsLob)
                 throw SimulatedSqlException.InvalidArgumentDataType(type.SqlServerName, i + 1, this.isLeast ? "least" : "greatest", state: 4);
-            branches[i] = (type, IntegerLiteralDigits(this.arguments[i]));
+            branches[count++] = (type, IntegerLiteralDigits(this.arguments[i]));
         }
-        this.cachedResultType = SqlType.PromoteBranches(branches);
+        this.cachedResultType = SqlType.PromoteBranches(branches.AsSpan(0, count));
         this.namingArm = FirstDecimalArm(this.arguments, batch, resolveColumnType);
         return this.cachedResultType;
     }

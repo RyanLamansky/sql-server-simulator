@@ -27,7 +27,9 @@ internal sealed class UnicodeCodepoint(ParserContext context) : Expression
         StringScalars.RejectLegacyLob(v, "unicode");
         if (v.IsNull)
             return SqlValue.Null(SqlType.Int32);
-        var s = SqlType.IsStringCategory(v.Type) ? v.AsString : v.CoerceTo(SqlType.Varchar).AsString;
+        // UNICODE takes an nvarchar, so a binary reads as UTF-16 (probed
+        // 2026-09-25 against SQL Server 2025: UNICODE(0x1F8B) is 35615).
+        var s = SqlType.IsStringCategory(v.Type) ? v.AsString : v.CoerceTo(SqlType.NVarchar).AsString;
         return s.Length == 0
             ? SqlValue.Null(SqlType.Int32)
             : SqlValue.FromInt32(v.Type.Collation?.IsSupplementaryCharacterAware == true

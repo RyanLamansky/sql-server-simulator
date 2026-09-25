@@ -41,7 +41,7 @@ internal sealed class DateAdd : Expression
         var value = DatePartKinds.CoerceDateArgumentImplicit(SqlType.IsStringCategory(raw.Type) ? raw.CoerceTo(SqlType.DateTime) : raw);
         if (value.IsNull || n.IsNull)
             return SqlValue.Null(value.Type);
-        DatePartKinds.RequireCompatible(this.kind, this.keywordText, value.Type, "dateadd");
+        DatePartKinds.RequireCompatible(this.kind, value.Type, "dateadd");
         var nInt = DatePartKinds.CoerceCount(n, value.Type);
         return DatePartKinds.Add(this.kind, value, nInt);
     }
@@ -59,6 +59,10 @@ internal sealed class DateAdd : Expression
         // 2026-09-25 against SQL Server 2025).
         _ = this.number.GetSqlType(batch, resolveColumnType);
         var sourceType = AssignmentRules.ArgumentType(this.source, SqlType.DateTime, batch, resolveColumnType);
+        // A bare NULL has no type to add (probed 2026-09-25 against SQL Server
+        // 2025: DATEADD(day, NULL, x) is Msg 8116 naming NULL).
+        if (IsUntypedNullLiteral(this.number))
+            throw SimulatedSqlException.InvalidArgumentDataType("NULL", 2, "dateadd");
         ScalarArguments.RequireNumericSlot(this.number, batch, resolveColumnType, "dateadd", 2, NumericSlot.AnyNumber);
         return SqlType.IsStringCategory(sourceType) ? SqlType.DateTime : DatePartKinds.ResolveImplicitDateType(sourceType);
     }
