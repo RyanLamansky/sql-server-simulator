@@ -1982,7 +1982,11 @@ internal abstract class Expression : ExpressionNode
             context.UnwindowedSequenceDrawsParsed++;
             return nvf;
         }
-        if (context.GetNextRequired() is not Operator { Character: '(' })
+        // A named window (`OVER w`) is accepted as real accepts it (probed
+        // 2026-09-24); like the inline body, the ordering it names is discarded.
+        if (context.GetNextRequired() is Name)
+            return nvf;
+        if (context.Token is not Operator { Character: '(' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextRequired();
         _ = WindowExpression.ParseWindowBody(context);

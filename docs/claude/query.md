@@ -311,7 +311,7 @@ Real answers this position with its own error numbers rather than the inline one
 A frame written in the *refinement* rather than inherited stays on the inline Msg 10752 path, and the refinement's ORDER BY reaches the same Msg 5308 / 5309 constant gate an inline one does.
 `PERCENTILE_CONT` / `PERCENTILE_DISC` take only PARTITION BY from the definition — their ordering always comes from WITHIN GROUP.
 
-**Not modeled yet**: `NEXT VALUE FOR seq OVER w` (real accepts a named window there; the simulator's OVER-after-NEXT-VALUE-FOR parse takes only the inline body) → Msg 102.
+`NEXT VALUE FOR seq OVER w` takes a named window too; like the inline body, the ordering it names is discarded, so values follow the row order (probed 2026-09-24).
 
 ## `TABLESAMPLE`
 - `TABLESAMPLE [SYSTEM] (n PERCENT | n ROWS) [REPEATABLE (seed)]` on a FROM source parses and is **discarded** — the query returns every row.

@@ -501,4 +501,17 @@ public sealed class RefusalFidelityTests
     [DataRow("order by b rows between unbounded preceding and current row")]
     public void RangeFrame_WithinTheLimitOrRows_Runs(string over)
         => AreEqual(0, new Simulation().ExecuteScalar($"create table rw (a nvarchar(450), b nvarchar(451), d int); select count(*) from (select sum(d) over ({over}) s from rw) x"));
+
+    [TestMethod]
+    public void NextValueFor_OverANamedWindow_Parses()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create sequence nsq start with 1");
+        using var reader = sim.ExecuteReader("select next value for nsq over w as n from (values (3), (1), (2)) t(v) window w as (order by v)");
+        var values = new List<long>();
+        while (reader.Read())
+            values.Add(Convert.ToInt64(reader.GetValue(0), System.Globalization.CultureInfo.InvariantCulture));
+        values.Sort();
+        CollectionAssert.AreEqual(new long[] { 1, 2, 3 }, values);
+    }
 }
