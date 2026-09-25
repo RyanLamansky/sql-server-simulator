@@ -2855,15 +2855,20 @@ internal abstract class BooleanExpression : ExpressionNode
             char? escapeChar = null;
             if (this.escape is not null)
             {
+                // A NULL escape escapes nothing, and any other type converts
+                // to varchar(1) with that conversion's own overflow errors
+                // (probed 2026-09-25 against SQL Server 2025: ESCAPE 1 is '1',
+                // ESCAPE 1.5 is Msg 8115).
                 var e = this.escape.Run(runtime);
-                if (e.IsNull)
-                    return null;
-                if (e.Type.Category != SqlTypeCategory.String)
-                    throw SimulatedSqlException.OperandTypeClash(l.Type, e.Type);
-                var s = e.AsString;
-                if (s.Length != 1)
-                    throw SimulatedSqlException.InvalidEscapeCharacter(s);
-                escapeChar = s[0];
+                if (!e.IsNull)
+                {
+                    if (e.Type.Category != SqlTypeCategory.String)
+                        e = Expressions.Cast.ApplyCoercion(e, VarcharSqlType.Get(1, runtime.Batch.CurrentDatabase.Collation, Coercibility.CoercibleDefault), targetMaxLength: 1);
+                    var s = e.AsString;
+                    if (s.Length != 1)
+                        throw SimulatedSqlException.InvalidEscapeCharacter(s);
+                    escapeChar = s[0];
+                }
             }
 
             // Resolve the effective collation from each operand's runtime
@@ -2893,13 +2898,15 @@ internal abstract class BooleanExpression : ExpressionNode
         /// trio — that exemption is written into Msg 306's own wording — but
         /// refuses <c>xml</c> and the spatial pair in either slot, reporting the
         /// ordinary argument-type <b>Msg 8116</b> against argument 1 (the
-        /// subject) or 2 (the pattern). Real binds it while compiling, so it
-        /// runs here rather than per value, and an <c>ESCAPE</c> clause doesn't
-        /// change which argument is named.
+        /// subject), 2 (the pattern) or 3 (the escape). A <c>sql_variant</c> is
+        /// refused the same way (probed 2026-09-25 against SQL Server 2025).
+        /// Real binds it while compiling, so it runs here rather than per
+        /// value, and an <c>ESCAPE</c> clause doesn't change which argument is
+        /// named.
         /// </summary>
         private static void RejectUncomparableLikeArgument(SqlType type, int argumentIndex)
         {
-            if (type.IsLob && !type.IsLegacyLob)
+            if ((type.IsLob && !type.IsLegacyLob) || type is SqlVariantSqlType)
                 throw SimulatedSqlException.InvalidArgumentDataType(type.SqlServerName, argumentIndex, "like");
         }
 
@@ -2929,7 +2936,8 @@ internal abstract class BooleanExpression : ExpressionNode
             RejectUncomparableLikeArgument(leftType, 1);
             RejectUncomparableLikeArgument(rightType, 2);
             RequireResolvableCollation(leftType, rightType, "like");
-            _ = this.escape?.GetSqlType(batch, resolveColumnType);
+            if (this.escape is not null)
+                RejectUncomparableLikeArgument(this.escape.GetSqlType(batch, resolveColumnType), 3);
         }
     }
 }

@@ -287,4 +287,30 @@ public class LikeTests
     [DataRow("'a'")]
     public void DanglingEscape_NeverMatches(string subject)
         => Assert.AreEqual(0, new Simulation().ExecuteScalar($"select case when {subject} like 'a!' escape '!' then 1 else 0 end"));
+
+    [TestMethod]
+    [DataRow("'a_' like 'a1_' escape 1", 1)]
+    [DataRow("'a' like 'a' escape getdate()", 1)]
+    [DataRow("'a' like 'a' escape 0x31", 1)]
+    [DataRow("'a' like 'a' escape null", 1)]
+    [DataRow("'a%' like 'a!%' escape null", 0)]
+    public void Escape_OfAnyType_ReadsAsOneVarcharCharacter(string predicate, int expected)
+        => Assert.AreEqual(expected, new Simulation().ExecuteScalar($"select case when {predicate} then 1 else 0 end"));
+
+    [TestMethod]
+    [DataRow("1.5", 8115)]
+    [DataRow("cast(1 as money)", 234)]
+    public void Escape_ANumberTooWideForOneCharacter_RaisesTheConversionsOverflow(string escape, int error)
+        => _ = new Simulation().AssertSqlError($"select case when 'a' like 'a' escape {escape} then 1 else 0 end", error);
+
+    [TestMethod]
+    [DataRow("cast(1 as sql_variant) like '1%'", 1)]
+    [DataRow("'1' like cast(1 as sql_variant)", 2)]
+    public void SqlVariantOperand_RaisesMsg8116(string predicate, int index)
+        => new Simulation().AssertSqlError($"select case when {predicate} then 1 else 0 end", 8116, $"Argument data type sql_variant is invalid for argument {index} of like function.");
+
+    [TestMethod]
+    public void XmlEscape_RaisesMsg8116()
+        => new Simulation().AssertSqlError("select case when 'a' like 'a' escape cast('<a/>' as xml) then 1 else 0 end", 8116, "Argument data type xml is invalid for argument 3 of like function.");
 }
+

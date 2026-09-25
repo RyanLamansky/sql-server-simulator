@@ -98,6 +98,7 @@ An empty `[]` and an unterminated `[` never match, real's silent failure.
 
 **Wildcards and the escape character are matched by code point**, never through the collation: a fullwidth `％` is a literal, and `ESCAPE N'e'` makes neither the pattern's `E` nor its `é` an escape.
 What an escape protects is still an ordinary literal that compares under the collation.
+The escape itself converts to `varchar(1)` whatever its type — `ESCAPE 1` is `'1'`, a date escapes with its first character, and `ESCAPE 1.5` or a `money` raises that conversion's own overflow (Msg 8115 / 234) — and a NULL escape escapes nothing; a `sql_variant` or `xml` in any of the three slots is Msg 8116 against the "like function" (probed 2026-09-25 against SQL Server 2025).
 
 **Trailing-space slack is the non-Unicode family's.**
 A subject may carry trailing U+0020 the pattern didn't consume — `'x  ' LIKE 'x'` — but a single `nvarchar` / `nchar` operand makes the comparison Unicode and the slack disappears: `N'x  ' LIKE N'x'`, `N'x  ' LIKE 'x'` and `'x  ' LIKE N'x'` all answer no.
