@@ -49,4 +49,17 @@ public sealed class RowGuidColTests
             "create table t (a uniqueidentifier rowguidcol, b uniqueidentifier rowguidcol)", 8196);
         Assert.Contains("Duplicate column specified as ROWGUIDCOL", ex.Message);
     }
+
+    // A table holds one ROWGUIDCOL, so adding another column with it — alone
+    // or two in one list — is Msg 8196, state 16 against the existing one
+    // (probed 2026-09-25 against SQL Server 2025).
+    [TestMethod]
+    [DataRow("create table t (a uniqueidentifier rowguidcol)", "alter table t add b uniqueidentifier rowguidcol", 16)]
+    [DataRow("create table t (a int)", "alter table t add b uniqueidentifier rowguidcol, c uniqueidentifier rowguidcol", 1)]
+    public void AddingASecondRowGuidCol_RaisesMsg8196(string create, string alter, int state)
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery(create);
+        AreEqual((byte)state, simulation.AssertSqlError(alter, 8196).State);
+    }
 }

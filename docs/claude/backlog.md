@@ -365,7 +365,6 @@ Real bugs / limitations against shipped behavior — fixes are concrete work, no
   and a **`WRITETEXT` of NULL** leaves the cell with no pointer where real keeps handing one out, since real's pointer reflects an allocated LOB root rather than a non-NULL value.
 - **A constant negative length is a statement error where real aborts the batch** — `SELECT SUBSTRING('abc', 1, -1)` is settled while compiling on both engines and reports the same Msg 536 (see [`legacy-lob.md`](legacy-lob.md#negative-length-msg-536-while-compiling-msg-537-at-run-time)), but real's is a batch-level compile failure that the same batch's `BEGIN TRY` can't catch, while the simulator's is an ordinary statement error.
   The runtime half (Msg 537 for `LEFT` / `SUBSTRING`, Msg 536 for `RIGHT`) matches on both engines.
-- **Two `ROWGUIDCOL` columns added in one `ALTER TABLE`** report only Msg 2761 here; real sends Msg 8196 (`Duplicate column specified as ROWGUIDCOL.`) ahead of it (probed 2026-09-24).
 
 - **`FORMAT`'s culture data is .NET's ICU set where real's is the .NET Framework's NLS set** — every divergence below is width-independent, reproducing for an `int`, a `money` and a narrow `decimal` alike, and each is what .NET itself produces for the same call (probed 2026-08-06):
   a default-precision `'P'` writes three fractional digits (`FORMAT(CAST(123.456 AS decimal(10, 3)), 'P')` → `12,345.600%`) where real writes two (`12,345.60%`), and a negative `'C'` under `en-US` writes `-$0.50` where real writes the parenthesized `($0.50)`.

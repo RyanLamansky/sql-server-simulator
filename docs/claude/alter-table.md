@@ -175,6 +175,7 @@ Probed refusals:
 | --- | --- |
 | Either form on a column the table doesn't have | **Msg 4924** State 1 (the PERSISTED form's is State 2) |
 | `ADD ROWGUIDCOL` where the table already carries one | **Msg 4925** |
+| `ADD <column> uniqueidentifier ROWGUIDCOL` where the table already carries one | **Msg 8196** State 16 (State 1 when the `ADD` list itself repeats it, as `CREATE TABLE` reports) |
 | `ADD ROWGUIDCOL` on a non-`uniqueidentifier` column | **Msg 2761** |
 | `DROP ROWGUIDCOL` where no column carries it | **Msg 4926** — and it names the table, not the column the statement asked about, so real drops *the* ROWGUIDCOL rather than the named column's |
 | `ADD SPARSE` on a NOT NULL / IDENTITY / ROWGUIDCOL column, or one typed `text` / `ntext` / `image` / `geometry` / `geography` | **Msg 1731**, whose message carries the whole rule rather than naming which half was violated |

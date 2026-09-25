@@ -129,6 +129,10 @@ partial class Simulation
             newColumns[i] = heapColumns[i]!;
         }
 
+        // A table holds one ROWGUIDCOL; adding a second is Msg 8196 state 16.
+        if (Array.Exists(newColumns, column => column.IsRowGuidCol) && Array.Exists(table.Columns, column => column.IsRowGuidCol))
+            throw SimulatedSqlException.MultipleRowGuidColumns(16);
+
         // State 4 for a name the table already has, 3 for one the list repeats
         // (probed 2026-09-25 against SQL Server 2025).
         for (var i = 0; i < newColumns.Length; i++)

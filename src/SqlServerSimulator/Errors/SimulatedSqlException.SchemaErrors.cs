@@ -1207,11 +1207,12 @@ partial class SimulatedSqlException
 
     /// <summary>
     /// Mimics SQL Server error 8196: more than one column in a table was
-    /// declared with the <c>ROWGUIDCOL</c> property. Probe-confirmed wording /
-    /// number / state (SQL Server 2025, 2026-07-17).
+    /// declared with the <c>ROWGUIDCOL</c> property — state 1 within one
+    /// column list, 16 for an <c>ALTER TABLE … ADD</c> onto a table that
+    /// already has one (SQL Server 2025, probed 2026-07-17 and 2026-09-25).
     /// </summary>
-    internal static SimulatedSqlException MultipleRowGuidColumns() =>
-        new("Duplicate column specified as ROWGUIDCOL.", 8196, 16, 1);
+    internal static SimulatedSqlException MultipleRowGuidColumns(byte state = 1) =>
+        new("Duplicate column specified as ROWGUIDCOL.", 8196, 16, state);
 
     /// <summary>
     /// Mimics SQL Server error 8115's IDENTITY-specific wording: the next
