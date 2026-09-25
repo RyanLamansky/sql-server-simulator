@@ -257,17 +257,18 @@ partial class Simulation
     }
 
     /// <summary>
-    /// Builds the indexes declared inline in a CREATE TABLE (the table-level
-    /// <c>INDEX ix (cols)</c> and column-level <c>col type INDEX ix</c> forms)
-    /// against the freshly-created <paramref name="table"/>. Each maps to the
+    /// Builds the indexes declared inline in a CREATE TABLE, a table variable
+    /// or a table type's instance (the table-level <c>INDEX ix (cols)</c> and
+    /// column-level <c>col type INDEX ix</c> forms) against the freshly-created
+    /// <paramref name="table"/>. Each maps to the
     /// same <see cref="StoredIndex"/> the standalone CREATE INDEX builds
     /// (catalog metadata + seek acceleration), <c>UNIQUE</c>, <c>INCLUDE</c>, a
     /// filter and <c>IGNORE_DUP_KEY</c> included; the table is empty, so there
     /// are no existing rows for a unique one to check.
     /// </summary>
-    private static void AddInlineIndexes(ParserContext context, HeapTable table, string writtenTableName, List<PendingInlineIndex> pendingIndexes)
+    internal static void AddInlineIndexes(BatchContext batch, HeapTable table, string writtenTableName, IReadOnlyList<PendingInlineIndex> pendingIndexes)
     {
-        var collation = context.Batch.CurrentDatabase.Collation;
+        var collation = batch.CurrentDatabase.Collation;
         foreach (var pending in pendingIndexes)
         {
             foreach (var existing in table.Indexes)
@@ -289,7 +290,7 @@ partial class Simulation
                     throw SimulatedSqlException.MoreThanOneClusteredIndex(table.Name, existingClustered);
             }
             if (pending.Filter is not null)
-                RejectComputedColumnInIndexFilter(context.Batch, table, pending.Name, writtenTableName, pending.Filter);
+                RejectComputedColumnInIndexFilter(batch, table, pending.Name, writtenTableName, pending.Filter);
 
             RejectDuplicateIndexColumns(collation, [.. pending.Columns.Select(static c => c.ColumnName)], pending.IncludeColumnNames, inline: true);
 
@@ -309,7 +310,7 @@ partial class Simulation
             }
             table.Indexes.Add(new StoredIndex(
                 pending.Name,
-                context.CurrentDatabase.AllocateObjectId(),
+                batch.CurrentDatabase.AllocateObjectId(),
                 pending.IsUnique,
                 pending.IsClustered,
                 keyColumns,

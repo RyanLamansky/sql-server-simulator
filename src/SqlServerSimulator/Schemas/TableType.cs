@@ -51,7 +51,8 @@ internal sealed class TableType(
     HeapColumn[] columns,
     (KeyConstraintKind Kind, string? Name, int[] FullOrdinals, bool? Clustered, bool IgnoreDupKey, bool[] Descending)[] pendingKeys,
     (string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition)[] pendingChecks,
-    int[] keyConstraintObjectIds)
+    int[] keyConstraintObjectIds,
+    Simulation.PendingInlineIndex[] pendingIndexes)
     : SchemaObject(name, typeTableObjectId, schema.SchemaId, createDate)
 {
     public Schema Schema = schema;
@@ -105,6 +106,12 @@ internal sealed class TableType(
     public readonly (string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition)[] PendingChecks = pendingChecks;
 
     /// <summary>
+    /// Inline <c>INDEX</c> clauses captured at CREATE TYPE time, built afresh
+    /// on each <see cref="Clone"/> so a unique one holds per <c>@t</c>.
+    /// </summary>
+    public readonly Simulation.PendingInlineIndex[] PendingIndexes = pendingIndexes;
+
+    /// <summary>
     /// Materializes a fresh <see cref="HeapTable"/> for one <c>DECLARE @t
     /// MyType</c> / TVP-parameter / Structured-ADO.NET binding. The resulting
     /// table carries <see cref="HeapTable.IsTableVariable"/> = true so DML
@@ -114,8 +121,9 @@ internal sealed class TableType(
     /// <paramref name="fullName"/>; the column shape is shared by reference
     /// (immutable post-CREATE TYPE).
     /// </summary>
-    public HeapTable Clone(string fullName, BatchContext batch, bool isTableValuedParameter = false) =>
-        new(
+    public HeapTable Clone(string fullName, BatchContext batch, bool isTableValuedParameter = false)
+    {
+        var table = new HeapTable(
             fullName,
             this.Columns,
             batch.CurrentDatabase.AllocateObjectId(),
@@ -125,4 +133,7 @@ internal sealed class TableType(
             checkConstraints: Simulation.ResolveCheckConstraints(fullName, this.PendingChecks, batch.CurrentDatabase, batch.CurrentStatement.UtcNow),
             isTableVariable: true,
             isTableValuedParameter: isTableValuedParameter);
+        Simulation.AddInlineIndexes(batch, table, fullName, this.PendingIndexes);
+        return table;
+    }
 }

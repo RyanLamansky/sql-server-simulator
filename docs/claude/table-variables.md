@@ -44,6 +44,8 @@ Coverage:
 - **Computed columns (`col AS expr [PERSISTED [NOT NULL]]`)** — non-persisted columns evaluate per-read; the PERSISTED keyword is accepted but functionally a no-op for table variables (no on-disk store, so the storage distinction doesn't matter).
 - **`rowversion` / `timestamp`** — backed by the database-scoped 8-byte counter, same as regular tables.
   Two rowversion columns in one `@t` raise Msg 2738.
+- **Inline `INDEX`** in both forms, with CREATE TABLE's grammar and enforcement (see [`indexes.md`](indexes.md)) — a unique one raises Msg 2601 naming `dbo.@t` (probed 2026-09-25).
+  A table type takes them too and builds them per instance; a multi-statement function's return table raises `NotSupportedException`.
 
 Rejected at parse time (probe-confirmed against real SQL Server's grammar):
 - **`CONSTRAINT name`** (named constraints, inline or table-level) → Msg 102 ("Incorrect syntax near 'CONSTRAINT'").
@@ -118,6 +120,7 @@ The defaulted value is coerced into the target column's type via the same `Coerc
 
 ## Fidelity gaps remaining
 
+- A table type's backing table lists none of its indexes in `sys.indexes` — not its PRIMARY KEY's, nor an inline `INDEX` — where real lists both under `sys.table_types.type_table_object_id`.
 - `@t` doesn't appear in `sys.tables` / `INFORMATION_SCHEMA.TABLES`.
   Real SQL Server doesn't surface table variables there either, so this is fidelity-aligned.
 - Auto-generated constraint names follow the simulator's convention (`PK__@t__<16hex>` / `UQ__@t__<16hex>` / `CK__@t__<col>__<8hex>`) — same shape as regular tables.

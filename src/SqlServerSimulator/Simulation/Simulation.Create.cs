@@ -431,7 +431,7 @@ partial class Simulation
             if (pendingForeignKeys.Count > 0)
                 ResolveForeignKeys(heapTable, pendingForeignKeys, context);
             if (pendingIndexes.Count > 0)
-                AddInlineIndexes(context, heapTable, tableName.ToString(), pendingIndexes);
+                AddInlineIndexes(context.Batch, heapTable, tableName.ToString(), pendingIndexes);
         }
         catch
         {
@@ -1048,9 +1048,9 @@ partial class Simulation
             }
 
             // Table-level inline index: `INDEX name [UNIQUE] [CLUSTERED | NONCLUSTERED]
-            // (col [ASC | DESC], …)`. Only accepted in CREATE TABLE (where
-            // pendingIndexes is supplied); table variables / table types leave
-            // it to the column path, which rejects the INDEX keyword.
+            // (col [ASC | DESC], …)`, for the callers that supply
+            // pendingIndexes; the others leave it to the column path, which
+            // rejects the INDEX keyword.
             if (context.Token is ReservedKeyword { Keyword: Keyword.Index } && pendingIndexes is not null)
             {
                 pendingIndexes.Add(ParseTableLevelInlineIndex(context, tableName));
@@ -2669,6 +2669,11 @@ partial class Simulation
     /// <c>INDEX name (cols)</c> or the column-level <c>col type INDEX name</c>
     /// form. Columns are captured by name and resolved to the built table
     /// after the column list is complete (see <c>AddInlineIndexes</c>).
+    /// </summary>
+    /// <summary>
+    /// An index an inline <c>INDEX</c> clause declared, kept until the table it
+    /// lands on exists — once for a CREATE TABLE or table variable, once per
+    /// instance for a table type.
     /// </summary>
     internal sealed class PendingInlineIndex(
         string name,

@@ -79,7 +79,8 @@ partial class Simulation
         var pendingKeys = new List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals, bool? Clustered, bool IgnoreDupKey, bool[] Descending)>();
         var pendingChecks = new List<(string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition)>();
 
-        if (!ParseColumnList(context, typeName.Leaf, isTableVariable: false, isTableType: true, heapColumns, pendingKeys, pendingChecks, pendingComputed))
+        var pendingIndexes = new List<PendingInlineIndex>();
+        if (!ParseColumnList(context, typeName.Leaf, isTableVariable: false, isTableType: true, heapColumns, pendingKeys, pendingChecks, pendingComputed, pendingIndexes: pendingIndexes))
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
         context.MoveNextOptional();
@@ -167,7 +168,8 @@ partial class Simulation
             // constraints hold a stable identity in sys.key_constraints. The
             // constraints themselves are re-resolved per clone (each @t gets
             // its own), but the catalog reports the type's, not a clone's.
-            keyConstraintObjectIds: [.. pendingKeys.Select(_ => context.CurrentDatabase.AllocateObjectId())]);
+            keyConstraintObjectIds: [.. pendingKeys.Select(_ => context.CurrentDatabase.AllocateObjectId())],
+            pendingIndexes: [.. pendingIndexes]);
         schema.TableTypes[typeName.Leaf] = tableType;
         RecordDdlEvent(context, "CREATE_TYPE", schema.Name, typeName.Leaf, "TYPE");
         return true;

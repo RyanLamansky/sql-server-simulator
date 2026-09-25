@@ -51,7 +51,7 @@ The parser collects each into a `PendingInlineIndex` through `ParseInlineIndexBo
 After the `HeapTable` is built, `AddInlineIndexes` (`Simulation.CreateIndex.cs`) resolves the columns and appends the same `Index` a standalone CREATE INDEX would (catalog metadata + seek acceleration, uniqueness and the filter enforced).
 An index naming one column twice is **Msg 1909** — state 1 within the key list, state 2 when the `INCLUDE` list repeats a key or itself, naming the repeat as written — standalone or inline (inline adds Msg 1750).
 Column resolution, name-collision (Msg 1913 via `IndexAlreadyExists`, naming the table as the statement wrote it) and a missing column (Msg 1911 via `IndexColumnMissing`), and one-clustered-per-table (Msg 1902) run inside the CREATE TABLE atomic block, so a bad inline index rolls the table back.
-Inline indexes are **CREATE TABLE only** — table variables / table types leave the `INDEX` keyword to the column path, which rejects it.
+Table variables and table types take inline indexes too (a table type builds them per instance); a multi-statement function's return table raises `NotSupportedException` for one.
 
 ## Disabled indexes
 

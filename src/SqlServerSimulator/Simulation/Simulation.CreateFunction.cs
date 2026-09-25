@@ -161,12 +161,16 @@ partial class Simulation
         // cursor advances past the closing `)`. The helper returns false in
         // skip mode AFTER consuming the column list — the body still needs
         // to be captured below.
+        var returnTableIndexes = new List<PendingInlineIndex>();
         var hasResolvedColumns = TryParseTableVariableColumnsAndConstraints(
             context,
             "@" + returnVariableName,
             out var outputColumns,
             out var keyConstraints,
-            out var checkConstraints);
+            out var checkConstraints,
+            returnTableIndexes);
+        if (returnTableIndexes.Count > 0)
+            throw new NotSupportedException("An inline INDEX on a multi-statement function's return table isn't modeled.");
 
         // Optional WITH-clause (SCHEMABINDING is captured for
         // sys.sql_modules / OBJECTPROPERTY; ENCRYPTION parse-and-discards).

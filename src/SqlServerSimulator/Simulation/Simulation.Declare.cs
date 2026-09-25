@@ -388,7 +388,8 @@ partial class Simulation
         // so an un-taken IF branch still registers @t (probe-confirmed
         // against SQL Server 2025). Only CREATE FUNCTION's RETURNS @r TABLE
         // caller uses the skip signal, to avoid registering the function.
-        _ = TryParseTableVariableColumnsAndConstraints(context, fullName, out var columns, out var keyConstraints, out var checkConstraints);
+        var pendingIndexes = new List<PendingInlineIndex>();
+        _ = TryParseTableVariableColumnsAndConstraints(context, fullName, out var columns, out var keyConstraints, out var checkConstraints, pendingIndexes);
 
         var heapTable = new HeapTable(
             fullName,
@@ -399,6 +400,7 @@ partial class Simulation
             keyConstraints: keyConstraints,
             checkConstraints: checkConstraints,
             isTableVariable: true);
+        AddInlineIndexes(context.Batch, heapTable, fullName, pendingIndexes);
         // A re-executed DECLARE does not empty the table: real accumulates
         // across the loop's passes (probe-confirmed — three inserts in a
         // three-pass loop leave three rows). The column list is still parsed,
@@ -412,7 +414,9 @@ partial class Simulation
     /// and <c>CREATE FUNCTION ... RETURNS @r TABLE</c>. Cursor on entry: the
     /// <c>TABLE</c> reserved keyword. Cursor on exit: one token past the
     /// closing <c>)</c>. <paramref name="fullName"/> is the surface name
-    /// reported in error messages (e.g. <c>"@r"</c>). The out-params are
+    /// reported in error messages (e.g. <c>"@r"</c>). Inline indexes collect
+    /// into <paramref name="pendingIndexes"/> where the caller passes one; a
+    /// caller that doesn't refuses them. The out-params are
     /// populated unconditionally; the return value is <see langword="false"/>
     /// under <see cref="BatchContext.IsSkipping"/> (an un-taken IF branch) so
     /// the CREATE FUNCTION caller can avoid registering the function, while
@@ -423,7 +427,8 @@ partial class Simulation
         string fullName,
         out HeapColumn[] resolvedColumns,
         out KeyConstraint[] keyConstraints,
-        out CheckConstraint[] checkConstraints)
+        out CheckConstraint[] checkConstraints,
+        List<PendingInlineIndex>? pendingIndexes = null)
     {
         resolvedColumns = [];
         keyConstraints = [];
@@ -438,7 +443,7 @@ partial class Simulation
         var pendingKeys = new List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals, bool? Clustered, bool IgnoreDupKey, bool[] Descending)>();
         var pendingChecks = new List<(string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition)>();
 
-        if (!ParseColumnList(context, fullName, isTableVariable: true, isTableType: false, heapColumns, pendingKeys, pendingChecks, pendingComputed))
+        if (!ParseColumnList(context, fullName, isTableVariable: true, isTableType: false, heapColumns, pendingKeys, pendingChecks, pendingComputed, pendingIndexes: pendingIndexes))
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
         context.MoveNextOptional();

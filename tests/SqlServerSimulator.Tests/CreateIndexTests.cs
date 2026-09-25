@@ -958,4 +958,24 @@ public sealed class CreateIndexTests
     [DataRow("with (data_compression = none, xml_compression = off)")]
     public void TableStorageOptions_AreAccepted(string options)
         => AreEqual(1, new Simulation().ExecuteScalar($"create table t (id int primary key, x xml) {options}; insert t values (1, null); select count(*) from t"));
+
+    /// <summary>
+    /// A table variable and a table type take inline indexes, enforcing a
+    /// unique one per variable (probed 2026-09-25 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void InlineIndex_OnATableVariable_Enforces()
+        => new Simulation().AssertSqlError(
+            "declare @t table (id int, v int, index ix unique (v) include (id) where v > 0); insert @t values (1, 1), (2, 1)",
+            2601,
+            "Cannot insert duplicate key row in object 'dbo.@t' with unique index 'ix'. The duplicate key value is (1).");
+
+    [TestMethod]
+    public void InlineIndex_OnATableType_HoldsPerInstance()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create type dbo.tt as table (id int primary key, v int, index ix unique (v))");
+        AreEqual(2, sim.ExecuteScalar("declare @a dbo.tt, @b dbo.tt; insert @a values (1, 1); insert @b values (1, 1); select (select count(*) from @a) + (select count(*) from @b)"));
+        _ = sim.AssertSqlError("declare @a dbo.tt; insert @a values (1, 1), (2, 1)", 2601);
+    }
 }
