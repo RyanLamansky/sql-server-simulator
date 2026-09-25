@@ -1250,4 +1250,26 @@ public sealed class CatalogViewTests
         IsFalse((bool)sim.ExecuteScalar("select is_query_store_on from sys.databases where name = 'simulated'")!);
         AreEqual("OFF", sim.ExecuteScalar("select actual_state_desc from sys.database_query_store_options"));
     }
+
+    // ---- system objects (probed 2026-09-24 against SQL Server 2025) ----
+
+    [TestMethod]
+    public void AllObjects_IncludesTheSystemObjects()
+        => AreEqual(1, new Simulation().ExecuteScalar("""
+            select case when (select count(*) from sys.all_objects) = (select count(*) from sys.objects) + (select count(*) from sys.system_objects)
+                and exists (select 1 from sys.all_objects where name = 'sp_help' and type = 'P') then 1 else 0 end
+            """));
+
+    [TestMethod]
+    public void SystemObjectIds_ResolveToTheirNames()
+        => AreEqual("tables|sys|sp_help|-784136858|1|1|0", new Simulation().ExecuteScalar("""
+            select concat(object_name(object_id('sys.tables')), '|', object_schema_name(object_id('sys.tables')), '|',
+                object_name(object_id('dbo.sp_help')), '|', object_id('sp_help'), '|',
+                objectproperty(object_id('sys.tables'), 'IsView'), '|', objectproperty(object_id('sys.sp_help'), 'IsProcedure'), '|',
+                objectproperty(object_id('sys.tables'), 'IsUserTable'))
+            """));
+
+    [TestMethod]
+    public void ExtendedSystemProcedures_AreTypedX()
+        => AreEqual(2, new Simulation().ExecuteScalar("select count(*) from sys.system_objects where name in ('sp_executesql', 'xp_msver', 'sp_help') and type = 'X'"));
 }

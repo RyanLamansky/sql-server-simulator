@@ -207,6 +207,11 @@ internal sealed class ObjectId : Expression
         {
             if (runtime.Batch.TryResolveProcedure(parsed, out var procedure))
                 return Gate(procedure);
+            // A system procedure resolves under any schema qualifier, as it
+            // does on real (probed 2026-09-24: sp_help, sys.sp_help and
+            // dbo.sp_help share one id).
+            if (parsed.Count <= 2 && SystemProcedureId(parsed.Leaf) is { } systemProcedureId)
+                return SqlValue.FromInt32(systemProcedureId);
             if (filter != ObjectTypeFilter.Any)
                 return SqlValue.Null(SqlType.Int32);
         }
@@ -245,6 +250,16 @@ internal sealed class ObjectId : Expression
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
+
+    private static int? SystemProcedureId(string name)
+    {
+        foreach (var system in BuiltInResources.SystemObjects.Value)
+        {
+            if (system.Type is "P " or "X " && string.Equals(system.Name, name, StringComparison.OrdinalIgnoreCase))
+                return system.ObjectId;
+        }
+        return null;
+    }
 
     /// <summary>
     /// The <c>OBJECT_ID(…, '&lt;code&gt;')</c> type filters the resolver

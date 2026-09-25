@@ -551,63 +551,97 @@ internal static partial class BuiltInResources
 
     /// <summary>
     /// Honest projection of the simulator's system surface for
-    /// <c>sys.system_objects</c>: every distinct modeled catalog view (as a
-    /// <c>V</c> row keyed by <see cref="CatalogView.ObjectId"/>, schema_id 4 for
-    /// <c>sys.*</c> and 3 for <c>INFORMATION_SCHEMA.*</c>) plus the modeled
-    /// system procedures (<see cref="SystemProcedureNames"/>, <c>P</c> for
-    /// <c>sp_*</c> / <c>X</c> for <c>xp_*</c>). Deliberately omits
-    /// <c>sp_db_vardecimal_storage_format</c> so SSMS reads vardecimal as OFF.
+    /// <c>sys.system_objects</c>: the <see cref="SystemObjects"/> rows.
     /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateSystemObjects(Parser.BatchContext batch, Database database)
     {
         _ = database;
-        var viewType = SqlValue.FromChar(charTwo, "V ");
-        var viewTypeDesc = SqlValue.FromString(nvarchar60Catalog, "VIEW");
-        var procType = SqlValue.FromChar(charTwo, "P ");
-        var procTypeDesc = SqlValue.FromString(nvarchar60Catalog, "SQL_STORED_PROCEDURE");
-        var xpType = SqlValue.FromChar(charTwo, "X ");
-        var xpTypeDesc = SqlValue.FromString(nvarchar60Catalog, "EXTENDED_STORED_PROCEDURE");
-        var sysSchema = SqlValue.FromInt32(Database.SysSchemaId);
-        var infoSchema = SqlValue.FromInt32(Database.InformationSchemaId);
+        _ = batch;
         var nullInt = SqlValue.Null(SqlType.Int32);
         var isMsShipped = SqlValue.FromBoolean(true);
         var createDate = SqlValue.FromDateTime(SystemObjectDate);
+        foreach (var system in SystemObjects.Value)
+        {
+            yield return
+            [
+                SqlValue.FromInt32(system.ObjectId),
+                SqlValue.FromSystemName(system.Name),
+                SqlValue.FromInt32(system.SchemaId),
+                nullInt,
+                nullInt,
+                SqlValue.FromChar(charTwo, system.Type),
+                SqlValue.FromString(nvarchar60Catalog, system.TypeDesc),
+                createDate,
+                createDate,
+                isMsShipped,
+            ];
+        }
+    }
 
-        SqlValue[] Row(int objectId, string name, SqlValue schemaId, SqlValue type, SqlValue typeDesc) =>
-        [
-            SqlValue.FromInt32(objectId),
-            SqlValue.FromSystemName(name),
-            schemaId,
-            nullInt,
-            nullInt,
-            type,
-            typeDesc,
-            createDate,
-            createDate,
-            isMsShipped,
-        ];
+    /// <summary>
+    /// One system object: a catalog view (type <c>V</c>, schema <c>sys</c> or
+    /// <c>INFORMATION_SCHEMA</c>) or a modeled system procedure (<c>P</c>, or
+    /// <c>X</c> for the extended ones).
+    /// </summary>
+    internal readonly struct SystemObject(int objectId, string name, int schemaId, string type, string typeDesc)
+    {
+        public readonly int ObjectId = objectId;
+        public readonly string Name = name;
+        public readonly int SchemaId = schemaId;
+        public readonly string Type = type;
+        public readonly string TypeDesc = typeDesc;
+    }
 
+    /// <summary>
+    /// Every system object in object-id listing order, built once: the
+    /// <c>sys.system_objects</c> rows, the system half of <c>sys.all_objects</c>,
+    /// and what <c>OBJECT_NAME</c> / <c>OBJECT_SCHEMA_NAME</c> read a negative
+    /// id against. Deliberately omits <c>sp_db_vardecimal_storage_format</c> so
+    /// SSMS reads vardecimal as OFF.
+    /// </summary>
+    internal static readonly Lazy<SystemObject[]> SystemObjects = new(() =>
+    {
+        var objects = new List<SystemObject>();
         var seen = new HashSet<int>();
         foreach (var (key, view) in Simulation.CatalogViews)
         {
-            if (!seen.Add(view.ObjectId)) continue;
+            if (!seen.Add(view.ObjectId))
+                continue;
             var dot = key.IndexOf('.', StringComparison.Ordinal);
             var schemaId = dot >= 0 && key.AsSpan(0, dot).Equals("INFORMATION_SCHEMA", StringComparison.OrdinalIgnoreCase)
-                ? infoSchema
-                : sysSchema;
-            yield return Row(view.ObjectId, view.Name, schemaId, viewType, viewTypeDesc);
+                ? Database.InformationSchemaId
+                : Database.SysSchemaId;
+            objects.Add(new SystemObject(view.ObjectId, view.Name, schemaId, "V ", "VIEW"));
         }
-
         foreach (var proc in SystemProcedureNames)
         {
-            var isExtended = proc.StartsWith("xp_", StringComparison.OrdinalIgnoreCase);
-            yield return Row(
-                SystemObjectId(proc),
-                proc,
-                sysSchema,
-                isExtended ? xpType : procType,
-                isExtended ? xpTypeDesc : procTypeDesc);
+            // Real types these as extended procedures although they're named
+            // sp_ (probed 2026-09-24).
+            var isExtended = proc.StartsWith("xp_", StringComparison.OrdinalIgnoreCase)
+                || proc is "sp_describe_first_result_set" or "sp_executesql" or "sp_set_session_context" or "sp_xml_preparedocument" or "sp_xml_removedocument";
+            objects.Add(new SystemObject(
+                Schemas.CatalogViewObjectIds.ByProcedureName.TryGetValue(proc, out var realId) ? realId : SystemObjectId(proc), proc, Database.SysSchemaId,
+                isExtended ? "X " : "P ", isExtended ? "EXTENDED_STORED_PROCEDURE" : "SQL_STORED_PROCEDURE"));
         }
+        return [.. objects];
+    });
+
+    /// <summary>The system object with <paramref name="objectId"/>, if any.</summary>
+    internal static bool TryResolveSystemObject(int objectId, out SystemObject system)
+    {
+        if (objectId < 0)
+        {
+            foreach (var candidate in SystemObjects.Value)
+            {
+                if (candidate.ObjectId == objectId)
+                {
+                    system = candidate;
+                    return true;
+                }
+            }
+        }
+        system = default;
+        return false;
     }
 
     /// <summary>

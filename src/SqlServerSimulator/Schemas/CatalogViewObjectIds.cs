@@ -198,4 +198,61 @@ internal static class CatalogViewObjectIds
         ["sysobjects"] = -105,
         ["sysusers"] = -140,
     }.ToFrozenDictionary(BuiltInToken.Comparer);
+
+    /// <summary>
+    /// Real's fixed <c>object_id</c> for each system procedure the simulator
+    /// models, read from SQL Server 2025's <c>sys.system_objects</c>
+    /// (2026-09-24).
+    /// </summary>
+    public static readonly FrozenDictionary<string, int> ByProcedureName = new Dictionary<string, int>(BuiltInToken.Comparer)
+    {
+        ["sp_addextendedproperty"] = -806860202,
+        ["sp_addlinkedserver"] = -414504921,
+        ["sp_addlinkedsrvlogin"] = -946112541,
+        ["sp_columns_100"] = -513496712,
+        ["sp_configure"] = -523220828,
+        ["sp_datatype_info_100"] = -255882266,
+        ["sp_depends"] = -61771628,
+        ["sp_describe_first_result_set"] = -276286976,
+        ["sp_dropextendedproperty"] = -292408992,
+        ["sp_droplinkedsrvlogin"] = -158885234,
+        ["sp_dropserver"] = -729459578,
+        ["sp_executesql"] = -644251838,
+        ["sp_getapplock"] = -155622469,
+        ["sp_help"] = -784136858,
+        ["sp_helpconstraint"] = -860295481,
+        ["sp_helpdb"] = -82181699,
+        ["sp_helpfile"] = -669885142,
+        ["sp_helpindex"] = -484505828,
+        ["sp_helprotect"] = -655964121,
+        ["sp_helpstats"] = -892891760,
+        ["sp_helptext"] = -903712576,
+        ["sp_helptrigger"] = -469610141,
+        ["sp_helpuser"] = -489277227,
+        ["sp_MSforeachdb"] = -835749359,
+        ["sp_MSforeachtable"] = -776307597,
+        ["sp_pkeys"] = -578325919,
+        ["sp_refreshsqlmodule"] = -419385653,
+        ["sp_refreshview"] = -745630534,
+        ["sp_releaseapplock"] = -395959103,
+        ["sp_rename"] = -1058549068,
+        ["sp_serveroption"] = -60611724,
+        ["sp_set_session_context"] = -715290006,
+        ["sp_setapprole"] = -307614281,
+        ["sp_settriggerorder"] = -394757827,
+        ["sp_spaceused"] = -48860199,
+        ["sp_statistics_100"] = -563591455,
+        ["sp_stored_procedures"] = -482685215,
+        ["sp_tablecollations_100"] = -123771224,
+        ["sp_tables"] = -236249160,
+        ["sp_unsetapprole"] = -819254104,
+        ["sp_updateextendedproperty"] = -559012070,
+        ["sp_who"] = -781310293,
+        ["sp_who2"] = -107590799,
+        ["sp_xml_preparedocument"] = -889216150,
+        ["sp_xml_removedocument"] = -484404746,
+        ["xp_instance_regread"] = -1057316729,
+        ["xp_msver"] = -524454186,
+        ["xp_qv"] = -873056684,
+    }.ToFrozenDictionary(BuiltInToken.Comparer);
 }

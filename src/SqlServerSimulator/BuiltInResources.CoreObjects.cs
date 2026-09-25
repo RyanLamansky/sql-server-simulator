@@ -285,10 +285,8 @@ internal static partial class BuiltInResources
         ], (batch, database) =>
             EnumerateObjects(batch, database, charTwo, pkType, pkTypeDesc, uqType, uqTypeDesc, checkType, checkTypeDesc, zeroParent, notMsShipped));
 
-        // sys.all_objects: real SQL Server's superset of sys.objects that also
-        // surfaces system objects. SMO correlates only on user-object ids, so
-        // the identical user-object row set suffices (same parity contract as
-        // sys.all_columns vs sys.columns).
+        // sys.all_objects: sys.objects plus sys.system_objects, as real
+        // lists it (probed 2026-09-24).
         Sys("all_objects",
         [
             new("object_id", SqlType.Int32, null, false),
@@ -304,7 +302,8 @@ internal static partial class BuiltInResources
             new("is_published", SqlType.Bit, null, false),
             new("is_schema_published", SqlType.Bit, null, false),
         ], (batch, database) =>
-            EnumerateObjects(batch, database, charTwo, pkType, pkTypeDesc, uqType, uqTypeDesc, checkType, checkTypeDesc, zeroParent, notMsShipped));
+            EnumerateObjects(batch, database, charTwo, pkType, pkTypeDesc, uqType, uqTypeDesc, checkType, checkTypeDesc, zeroParent, notMsShipped)
+                .Concat(EnumerateSystemObjectsAsObjects(zeroParent)));
 
         // sys.synonyms: schema-scoped synonym catalog, one row per CREATE
         // SYNONYM. SSMS's "Edit Top 200 Rows" commit probes whether the edit
@@ -873,6 +872,32 @@ internal static partial class BuiltInResources
                     SqlValue.FromNVarchar(synonym.BaseObjectName),
                 ];
             }
+        }
+    }
+
+    /// <summary>The system objects in <c>sys.objects</c>' column shape, for <c>sys.all_objects</c>.</summary>
+    private static IEnumerable<SqlValue[]> EnumerateSystemObjectsAsObjects(SqlValue zeroParent)
+    {
+        var nullPrincipal = SqlValue.Null(SqlType.Int32);
+        var notPublished = SqlValue.FromBoolean(false);
+        var msShipped = SqlValue.FromBoolean(true);
+        var createDate = SqlValue.FromDateTime(SystemObjectDate);
+        foreach (var system in SystemObjects.Value)
+        {
+            yield return [
+                SqlValue.FromInt32(system.ObjectId),
+                SqlValue.FromSystemName(system.Name),
+                SqlValue.FromInt32(system.SchemaId),
+                zeroParent,
+                nullPrincipal,
+                SqlValue.FromChar(charTwo, system.Type),
+                SqlValue.FromNVarchar(system.TypeDesc),
+                createDate,
+                createDate,
+                msShipped,
+                notPublished,
+                notPublished,
+            ];
         }
     }
 

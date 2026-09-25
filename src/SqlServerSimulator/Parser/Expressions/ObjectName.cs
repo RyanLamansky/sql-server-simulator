@@ -98,6 +98,9 @@ internal sealed class ObjectName : Expression
                     return SqlValue.FromString(SqlType.SystemName, table.Name);
             }
         }
+        // A system object's negative id names it in every database.
+        if (BuiltInResources.TryResolveSystemObject(id, out var system))
+            return SqlValue.FromString(SqlType.SystemName, system.Name);
         // A constraint id reads back its own name, visibility following the
         // table it hangs off (constraints aren't SchemaObjects, so the walk
         // above can't reach one).

@@ -90,6 +90,9 @@ internal sealed class ObjectSchemaName : Expression
                     return SqlValue.FromString(SqlType.SystemName, Database.DefaultSchemaName);
             }
         }
+        // A system object's negative id answers its sys / INFORMATION_SCHEMA schema.
+        if (BuiltInResources.TryResolveSystemObject(id, out var system))
+            return SqlValue.FromString(SqlType.SystemName, system.SchemaId == Database.InformationSchemaId ? "INFORMATION_SCHEMA" : "sys");
         // A constraint id answers the schema of the table that owns it, whose
         // visibility it also follows.
         return ConstraintLookup.TryResolveById(database, id, out var constraint)

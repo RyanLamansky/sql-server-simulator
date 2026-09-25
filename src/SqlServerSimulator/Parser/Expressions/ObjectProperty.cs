@@ -40,8 +40,30 @@ internal sealed class ObjectProperty : Expression
             ? EvaluateProperty(database, obj, prop)
             : TryFindConstraint(database, id, out var parsesAnExpression)
                 ? EvaluateConstraintProperty(parsesAnExpression, prop)
-                : null;
+                : BuiltInResources.TryResolveSystemObject(id, out var system)
+                    ? EvaluateSystemObjectProperty(system, prop)
+                    : null;
         return result is int value ? SqlValue.FromInt32(value) : SqlValue.Null(SqlType.Int32);
+    }
+
+    /// <summary>
+    /// The properties a system object answers: shipped, and a view or a
+    /// (possibly extended) procedure, never a table; anything else is NULL
+    /// (probed 2026-09-24 for sys.tables and sys.sp_help).
+    /// </summary>
+    private static int? EvaluateSystemObjectProperty(BuiltInResources.SystemObject system, string property)
+    {
+        Span<char> upper = stackalloc char[Math.Min(property.Length, 32)];
+        _ = property.AsSpan(0, upper.Length).ToUpperInvariant(upper);
+        return upper switch
+        {
+            "ISEXTENDEDPROC" => system.Type == "X " ? 1 : 0,
+            "ISMSSHIPPED" => 1,
+            "ISPROCEDURE" => system.Type == "P " ? 1 : 0,
+            "ISSYSTEMTABLE" or "ISTABLE" or "ISUSERTABLE" => 0,
+            "ISVIEW" => system.Type == "V " ? 1 : 0,
+            _ => null,
+        };
     }
 
     internal static SchemaObject? FindObject(Database database, int id)
