@@ -454,12 +454,16 @@ public sealed class WindowFunctionTests
             $"select lag(a, 1, {defaultValue}) over (order by a) from (values(1),(2)) v(a)", errorNumber);
 
     [TestMethod]
-    public void Lag_OverNoRows_NeitherReadsTheOffsetNorConvertsTheDefault()
+    public void Lag_OverNoRows_StillConvertsALiteralDefault()
+        => _ = new Simulation().AssertSqlError("declare @t table (a int); select lag(a, 2, 'x') over (order by a) from @t", 245);
+
+    [TestMethod]
+    public void Lag_OverNoRows_DoesNotReadTheOffset()
     {
-        // Nothing reaches the default, so real raises nothing for it; the
-        // explicit offset has no row to be read against either.
+        // The offset has no row to be read against, so a NULL-yielding one
+        // raises nothing.
         using var reader = new Simulation().ExecuteBatchesReader(
-            "select lag(a, 2, 'x') over (order by a) from (values(1)) v(a) where 1 = 0");
+            "declare @t table (a int); select lag(a, (select max(a) from @t), 0) over (order by a) from @t");
         IsFalse(reader.Read());
     }
 
@@ -881,4 +885,49 @@ public sealed class WindowFunctionTests
     [DataRow("select row_number() over (w order by 'x') from nw window w as (partition by g)", 5309)]
     public void NamedWindow_ConstantOrderByTerm_RaisesConstantGate(string commandText, int errorNumber)
         => _ = new Simulation().AssertSqlError(NamedWindowFixture + commandText, errorNumber);
+
+    // ---- argument rules, probed 2026-09-25 against SQL Server 2025 ----
+
+    private const string EmptyTable = "create table w (id int, v int, s varchar(5), d date, x xml, g geography, t text); ";
+
+    [TestMethod]
+    [DataRow("rank() over (order by x)", 305)]
+    [DataRow("rank() over (partition by x order by id)", 305)]
+    [DataRow("rank() over (order by t)", 306)]
+    [DataRow("sum(id) over (partition by t)", 306)]
+    [DataRow("rank() over (order by g)", 249)]
+    [DataRow("ntile(null) over (order by id)", 4116)]
+    [DataRow("ntile(2.5) over (order by id)", 4116)]
+    [DataRow("ntile(cast(2 as bit)) over (order by id)", 4116)]
+    [DataRow("ntile(v + 1) over (order by id)", 4195)]
+    [DataRow("lag(d, 1, 0) over (order by id)", 206)]
+    [DataRow("lag(v, 1, getdate()) over (order by id)", 257)]
+    [DataRow("lag(v, 1, 'x') over (order by id)", 245)]
+    [DataRow("percentile_cont(0.5) within group (order by s) over ()", 402)]
+    public void WindowArgument_RefusedWhileCompiling(string window, int error)
+        => _ = new Simulation().AssertSqlError($"{EmptyTable}select {window} from w", error);
+
+    [TestMethod]
+    public void PartitionBySpatial_NamesItsClause()
+        => new Simulation().AssertSqlError($"{EmptyTable}select rank() over (partition by g order by id) from w", 249, "The type \"geography\" is not comparable. It cannot be used in the PARTITION BY clause.");
+
+    [TestMethod]
+    public void PercentileContOverAString_NamesBothTypes()
+        => new Simulation().AssertSqlError($"{EmptyTable}select percentile_cont(0.5) within group (order by s) over () from w", 402, "The data types numeric and varchar are incompatible in the percentile_cont operator.");
+
+    [TestMethod]
+    public void NTileOverNoRows_AnswersNothing()
+        => AreEqual(0, new Simulation().ExecuteScalar($"{EmptyTable}select count(*) from (select ntile(2) over (order by id) n from w) q"));
+
+    [TestMethod]
+    public void NTileReadingAnOuterColumn_IsAllowed()
+        => AreEqual(1L, new Simulation().ExecuteScalar("select (select ntile(o.v) over (order by id) from (values (1)) i(id)) from (values (2)) o(v)"));
+
+    [TestMethod]
+    [DataRow("lag(v, null) over (order by id)", "||")]
+    [DataRow("lag(v, 3000000000) over (order by id)", "||")]
+    [DataRow("lag(v, 3000000000, 7) over (order by id)", "7|7|7")]
+    public void LagOffset_NullOrPastThePartition(string window, string expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar($"select string_agg(coalesce(cast(r as varchar(5)), ''), '|') within group (order by id) from (select id, {window} r from (values (1, 10), (2, 20), (3, 30)) t(id, v)) q"));
 }
+

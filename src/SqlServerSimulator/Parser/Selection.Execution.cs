@@ -867,7 +867,7 @@ internal sealed partial class Selection
     /// types. DISTINCT and the deduping set operators make no such split; they
     /// report one message across all three families.
     /// </summary>
-    private static SimulatedSqlException NotComparableInClause(SqlType type, string clause) =>
+    internal static SimulatedSqlException NotComparableInClause(SqlType type, string clause) =>
         type.IsLegacyLob ? SimulatedSqlException.LobTypesCannotBeComparedOrSorted()
         : type is XmlSqlType ? SimulatedSqlException.XmlCannotBeComparedOrSorted()
         : SimulatedSqlException.TypeNotComparableInClause(type, clause);

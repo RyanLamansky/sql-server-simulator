@@ -337,7 +337,60 @@ internal sealed class WindowExpression : Expression
             ? result
             : throw new InvalidOperationException("WindowExpression.Run was called before its result was bound; this indicates the Selection executor didn't recognize it as a window function.");
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => this.Kind switch
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        this.BindArguments(batch, resolveColumnType);
+        return this.ResultType(batch, resolveColumnType);
+    }
+
+    /// <summary>
+    /// The window's compile-time argument rules, probed 2026-09-25 against SQL
+    /// Server 2025: a PARTITION BY / ORDER BY key must be comparable (Msg 306 /
+    /// 305 / 249, as a query's own clauses report); NTILE's bucket count is an
+    /// integer other than <c>bit</c> (Msg 4116); PERCENTILE_CONT interpolates,
+    /// so its ordering key must be a number (Msg 402 naming the fraction's
+    /// type and the key's); and a LAG / LEAD default converts to the operand's
+    /// type as an assignment does — a literal default immediately, so
+    /// <c>LAG(v, 1, 'x')</c> over an int is Msg 245 even over no rows.
+    /// </summary>
+    private void BindArguments(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        foreach (var key in this.PartitionBy)
+        {
+            if (key.GetSqlType(batch, resolveColumnType) is { IsLob: true } keyType)
+                throw Selection.NotComparableInClause(keyType, "PARTITION BY");
+        }
+        foreach (var item in this.OrderBy)
+        {
+            if (item.Expr is null)
+                continue;
+            var keyType = item.Expr.GetSqlType(batch, resolveColumnType);
+            if (this.Kind == WindowKind.PercentileCont && this.PercentileArg is { } fraction
+                && keyType.Category is not (SqlTypeCategory.Integer or SqlTypeCategory.Decimal or SqlTypeCategory.Money or SqlTypeCategory.Approximate))
+            {
+                throw SimulatedSqlException.IncompatibleDataTypesInOperator(
+                    SqlType.OperandName(fraction.GetSqlType(batch, resolveColumnType), fraction),
+                    SqlType.OperandName(keyType, item.Expr),
+                    "percentile_cont");
+            }
+            if (keyType.IsLob)
+                throw Selection.NotComparableInClause(keyType, "ORDER BY");
+        }
+        if (this.Kind == WindowKind.NTile && this.BucketCount is { } bucketCount
+            && (IsUntypedNullLiteral(bucketCount) || bucketCount.GetSqlType(batch, resolveColumnType) is not { Category: SqlTypeCategory.Integer } countType || countType == SqlType.Bit))
+        {
+            throw SimulatedSqlException.NTileBucketCountMustBePositive();
+        }
+        if (this.Kind is WindowKind.Lag or WindowKind.Lead && this.DefaultArg is { } defaultArg && !IsUntypedNullLiteral(this.Operand!))
+        {
+            var operandType = this.Operand!.GetSqlType(batch, resolveColumnType);
+            AssignmentRules.RequireAssignable(defaultArg, defaultArg.GetSqlType(batch, resolveColumnType), operandType);
+            if (defaultArg is Value { IsLiteral: true, IsUntypedNull: false } literal)
+                _ = Cast.CoerceToDeclared(literal.Constant, operandType);
+        }
+    }
+
+    private SqlType ResultType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => this.Kind switch
     {
         WindowKind.RowNumber or WindowKind.Rank or WindowKind.DenseRank or WindowKind.NTile => SqlType.BigInt,
         WindowKind.CumeDist or WindowKind.PercentRank or WindowKind.PercentileCont => SqlType.Float,
@@ -441,6 +494,17 @@ internal sealed class WindowExpression : Expression
     public static WindowExpression ParseNTile(ParserContext context)
     {
         var bucketCount = Expression.Parse(context);
+        // The bucket count may read an outer query's columns but none of its
+        // own level's (Msg 4195, probed 2026-09-25 against SQL Server 2025).
+        if (context.ScopeSources is { } sources)
+        {
+            bucketCount.Walk((node, _) =>
+            {
+                if (node is Reference reference && Selection.FindSourceColumn(sources, reference.ReferencedName).SourceIndex >= 0)
+                    throw SimulatedSqlException.NTileColumnReferenceNotAllowed(reference.ReferencedName.Leaf);
+                return true;
+            });
+        }
         if (context.Token is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextRequired();

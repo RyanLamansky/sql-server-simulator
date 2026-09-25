@@ -487,7 +487,10 @@ internal sealed partial class Selection
                         // Server's constant-only restriction for the common
                         // case while letting non-constant expressions surface
                         // naturally if a value can't be produced).
-                        var bucketCount = (int)EvaluateScalarArg(win.BucketCount!, rowCount, runtimeAt).CoerceTo(SqlType.BigInt).AsInt64;
+                        if (rowCount == 0)
+                            break;
+                        var bucketValue = EvaluateScalarArg(win.BucketCount!, rowCount, runtimeAt);
+                        var bucketCount = bucketValue.IsNull ? 0 : bucketValue.CoerceTo(SqlType.BigInt).AsInt64;
                         if (bucketCount <= 0)
                             throw SimulatedSqlException.NTileBucketCountMustBePositive();
                         foreach (var (_, indices) in partitions)
@@ -644,20 +647,33 @@ internal sealed partial class Selection
                         if (rowCount == 0)
                             break;
                         var sign = win.Kind == WindowKind.Lag ? -1 : 1;
-                        var lagOffset = win.OffsetArg is null
-                            ? 1
-                            : (int)EvaluateScalarArg(win.OffsetArg, rowCount, runtimeAt).CoerceTo(SqlType.BigInt).AsInt64;
+                        var offsetValue = win.OffsetArg is null ? SqlValue.FromInt64(1) : EvaluateScalarArg(win.OffsetArg, rowCount, runtimeAt);
+                        var operandType = win.Operand!.GetSqlType(batch, resolveColumnType);
+                        // A NULL offset reaches no row, so every row reads NULL
+                        // — the default included (probed 2026-09-25 against SQL
+                        // Server 2025).
+                        if (offsetValue.IsNull)
+                        {
+                            foreach (var (_, indices) in partitions)
+                            {
+                                foreach (var index in indices)
+                                    results[index] = SqlValue.Null(operandType);
+                            }
+                            break;
+                        }
+                        var lagOffset = offsetValue.CoerceTo(SqlType.BigInt).AsInt64;
                         if (lagOffset < 0)
                             throw SimulatedSqlException.NegativeLagLeadOffset(win.OffsetArg!.IsWrittenConstant ? (byte)1 : (byte)2);
-                        var operandType = win.Operand!.GetSqlType(batch, resolveColumnType);
                         foreach (var (_, indices) in partitions)
                         {
                             indices.Sort((a, b) =>
                                 CompareOrderKeys(perWindowKeys[a][w].OrderKeys, perWindowKeys[b][w].OrderKeys, orderByList));
                             for (var i = 0; i < indices.Count; i++)
                             {
-                                var targetIdx = i + (sign * lagOffset);
-                                if (targetIdx < 0 || targetIdx >= indices.Count)
+                                // An offset past the partition — however far, a
+                                // bigint one included — takes the default.
+                                var target = i + (sign * lagOffset);
+                                if (target < 0 || target >= indices.Count)
                                 {
                                     // Out of partition bounds → DEFAULT expression
                                     // (or typed NULL). Default is evaluated in the
@@ -679,6 +695,7 @@ internal sealed partial class Selection
                                 }
                                 else
                                 {
+                                    var targetIdx = (int)target;
                                     var value = win.Operand.Run(runtimeAt(indices[targetIdx]));
                                     // IGNORE NULLS steps on past a null target in
                                     // the same direction; running out of partition

@@ -697,7 +697,7 @@ Cross-aggregate Msg 8711 isn't modeled (EF doesn't emit).
     NULLs **participate** in the ordering (NULL sorts first under ASC and forms its own peer group), so they count toward `N`.
   - `PERCENT_RANK()` — float; `(RANK − 1) / (N − 1)` (reuses RANK's tie-with-gaps semantics).
     A single-row partition is defined as 0 (no divide-by-zero).
-  - `NTILE(N) OVER ([PARTITION BY ...] ORDER BY ...)` — int.
+  - `NTILE(N) OVER ([PARTITION BY ...] ORDER BY ...)` — bigint.
     Distributes the partition into `N` buckets; the first `count % N` buckets carry one extra row each.
     `N <= 0` at runtime → Msg 9819.
     The bucket-count expression is evaluated once per query against the first buffered row's resolver (constants and parameters work; column references would surface as resolver errors — real SQL Server rejects non-constant bucket counts at compile time, the simulator surfaces it as a runtime issue).
@@ -814,6 +814,12 @@ Measured on WWI `Sales.Orders` (73k rows, 663 partitions), against the same quer
 | `rn BETWEEN 50001 AND 50050` (no partition, past the heap ceiling) | 64.9 ms | **38.0 ms** | 1.7× |
 
 A bare `SELECT COUNT(*), MAX(OrderDate)` over the same table costs ~21 ms here, so the `rn = 1` shape sits about 5 ms above the scan it has to do anyway — and below the reference server's own time for it.
+
+### Argument rules
+
+Probed 2026-09-25 against SQL Server 2025, all while compiling (`WindowExpression.BindArguments`): a PARTITION BY or ORDER BY key must be comparable, reporting a query clause's own Msg 306 / 305 / 249 (the last naming `PARTITION BY` or `ORDER BY`); NTILE's bucket count must be an integer type other than `bit` (Msg 4116) and may read an outer query's columns but not its own level's (Msg 4195, checked at parse); PERCENTILE_CONT interpolates, so a non-numeric ordering key is Msg 402 naming the fraction's type and the key's; a LAG / LEAD default converts to the operand's type as an assignment does, and a literal default converts at once, so `LAG(v, 1, 'x')` over an int is Msg 245 even over no rows.
+At run time a NULL offset makes every row NULL, default included, and an offset past the partition — a bigint one too — takes the default.
+**Divergence**: real drops the whole plan of a contradiction like `WHERE 1 = 0` before the window runs, so a literal default that can't convert raises nothing there; the simulator doesn't model contradiction elimination and raises.
 
 ### Windows over a grouped query
 

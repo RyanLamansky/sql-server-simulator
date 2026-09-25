@@ -732,6 +732,14 @@ partial class SimulatedSqlException
         new("The function 'ntile' takes only a positive int or bigint expression as its input.", 4116, 15, 1);
 
     /// <summary>
+    /// Mimics SQL Server's Msg 4195 — <c>NTILE</c>'s bucket count reads a
+    /// column of its own query level (an outer one is allowed). Probed
+    /// 2026-09-25 against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException NTileColumnReferenceNotAllowed(string column) =>
+        new($"The reference to column \"{column}\" is not allowed in an argument to the NTILE function. Only references to columns at an outer scope or standalone expressions and subqueries are allowed here.", 4195, 15, 1);
+
+    /// <summary>
     /// Mimics SQL Server's Msg 10752 — an explicit <c>ROWS</c> / <c>RANGE</c>
     /// frame specification was supplied for a function that doesn't accept
     /// one (ranking functions: <c>row_number</c> / <c>rank</c> /
