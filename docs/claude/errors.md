@@ -51,6 +51,8 @@ Probed through SqlClient 7 against SQL Server 2025 (2026-09-23):
   An identity overflow takes **Msg 3606** (`Arithmetic overflow occurred.`, class 0, state 0) in its place (probed 2026-09-25 against SQL Server 2025).
 - **Msg 8153** (`Warning: Null value is eliminated by an aggregate or other SET operation.`) goes out once per statement whose aggregate skipped a NULL with `ANSI_WARNINGS` on, after the rows and before the statement's DONE — ahead of the body for an `IF` / `WHILE` condition.
   Every aggregate warns but `COUNT(*)`, `STRING_AGG` and the JSON aggregates, window aggregates and a scalar subquery's included; an `EXISTS` body's and a `PIVOT`'s don't.
+- **Msg 3607** (`Division by zero occurred.`) and **Msg 3606** (`Arithmetic overflow occurred.`), class 0 state 0, go out once each after the rows of a statement whose divide by zero or overflow answered NULL under `ARITHABORT OFF` with `ANSI_WARNINGS OFF` — a fresh session's `ARITHABORT` is off, so `SET ANSI_WARNINGS OFF` alone does it (probed 2026-09-25 against SQL Server 2025).
+  The operators, `CAST` / `CONVERT` (a `real` target reads 0 rather than NULL) and the value an `INSERT` / `UPDATE` / `MERGE` writes take part; a conversion failure and an identity overflow still raise.
 - **Msg 5701** follows every `USE`, even of the current database, and **Msg 5703** every `SET LANGUAGE`.
 
 ### Not modeled yet

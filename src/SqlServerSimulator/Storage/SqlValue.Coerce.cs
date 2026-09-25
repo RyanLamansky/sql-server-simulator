@@ -1335,7 +1335,19 @@ internal readonly partial struct SqlValue
             DateTimeSqlType or SmallDateTimeSqlType => this.LegacyDayCountAsDouble(),
             _ => throw SimulatedSqlException.ExplicitConversionNotAllowed(this.Type, target),
         };
-        return target == SqlType.Float ? FromDouble(d) : FromSingle((float)d);
+        if (target == SqlType.Float)
+            return FromDouble(d);
+        // A value past real's range is Msg 232 naming it at seventeen digits —
+        // the generic Msg 8115 from a string — not an infinity (probed
+        // 2026-09-25 against SQL Server 2025).
+        var narrowed = (float)d;
+        if (float.IsInfinity(narrowed) && double.IsFinite(d))
+        {
+            throw SqlType.IsStringCategory(this.Type)
+                ? SimulatedSqlException.ArithmeticOverflow("real")
+                : SimulatedSqlException.ArithmeticOverflowForType("real", d, state: 2);
+        }
+        return FromSingle(narrowed);
     }
 
     private SqlValue CoerceFromApproximate(SqlType target)

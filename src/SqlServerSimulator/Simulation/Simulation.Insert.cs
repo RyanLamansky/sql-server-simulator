@@ -519,7 +519,7 @@ partial class Simulation
 
                 var source = sourceRow[i];
                 source = EnforceMaxLength(source, targetColumn, destinationTable, context.Connection);
-                var coerced = CoerceForInsert(source, targetColumn);
+                var coerced = CoerceForWrite(source, targetColumn, context.Batch);
                 rowValues[ordinal] = coerced;
 
                 if (ReferenceEquals(targetColumn, identityColumn))

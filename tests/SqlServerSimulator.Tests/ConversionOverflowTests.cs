@@ -61,7 +61,7 @@ public sealed class ConversionOverflowTests
     {
         var ex = new Simulation().AssertSqlError(
             "create table t (c smallint); declare @f float = 70000; insert t values (@f)", 232);
-        AreEqual("Arithmetic overflow error for type smallint, value = 70000.000000.", ex.Message);
+        AreEqual("Arithmetic overflow error for type smallint, value = 70000.000000.", ex.Errors[0].Message);
         AreEqual((byte)2, ex.State);
     }
 

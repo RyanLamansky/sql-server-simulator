@@ -1074,5 +1074,11 @@ public sealed class CastTests
     [TestMethod]
     public void TryCastOfScalePrefixedTemporalIntoTooNarrowBinary_IsNull()
         => IsInstanceOfType<DBNull>(new Simulation().ExecuteScalar("select try_cast(sysdatetime() as binary(4))"));
+
+    [TestMethod]
+    [DataRow("cast(1e300 as real)", 232, "Arithmetic overflow error for type real, value = 1000000000000000100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000.000000.")]
+    [DataRow("cast('1e300' as real)", 8115, "Arithmetic overflow error converting expression to data type real.")]
+    public void FloatPastRealsRange_Overflows(string expression, int number, string message)
+        => new Simulation().AssertSqlError($"select {expression}", number, message);
 }
 

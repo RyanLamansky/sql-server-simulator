@@ -1345,6 +1345,7 @@ public sealed partial class Simulation
                 batch.CurrentStatement.CatalogViewRows = null;
                 batch.CurrentStatement.ComputedUniqueKeys = null;
                 batch.CurrentStatement.NullEliminated = false;
+                batch.CurrentStatement.FirstArithmeticNotice = batch.CurrentStatement.SecondArithmeticNotice = 0;
                 batch.RcsiStatementSnapshotXid = null;
                 batch.BumpRowStamp();
                 // The cached plan is shared across principals; re-run the
@@ -1365,6 +1366,8 @@ public sealed partial class Simulation
                 yield return replayed;
                 if (batch.CurrentStatement.NullEliminated && connection.AnsiWarnings)
                     yield return NullEliminatedWarning(batch);
+                foreach (var notice in ArithmeticNotices(batch))
+                    yield return notice;
             }
 
             WriteBackOutputParameters(batch);
@@ -1768,6 +1771,7 @@ public sealed partial class Simulation
         batch.CurrentStatement.ReportedIgnoredDuplicate = false;
         batch.CurrentStatement.ReportedNoiseWords = false;
         batch.CurrentStatement.NullEliminated = false;
+        batch.CurrentStatement.FirstArithmeticNotice = batch.CurrentStatement.SecondArithmeticNotice = 0;
         batch.CurrentStatement.WritesRows = false;
         batch.CurrentStatement.BindsDeferredSource = false;
         batch.CurrentStatement.PendingDdlEvents = null;
@@ -2170,7 +2174,31 @@ public sealed partial class Simulation
             if (connection.AnsiWarnings)
                 yield return NullEliminatedWarning(batch);
         }
+        foreach (var notice in ArithmeticNotices(batch))
+            yield return notice;
     }
+
+    /// <summary>
+    /// The Msg 3606 / 3607 an absorbed arithmetic fault owes the statement
+    /// (<see cref="BatchContext.AbsorbsArithmeticFault"/>), in the order they
+    /// occurred, after its rows. Cleared once sent, as Msg 8153 is.
+    /// </summary>
+    private static IEnumerable<SimulatedInfoOutcome> ArithmeticNotices(BatchContext batch)
+    {
+        var statement = batch.CurrentStatement;
+        var first = statement.FirstArithmeticNotice;
+        var second = statement.SecondArithmeticNotice;
+        statement.FirstArithmeticNotice = statement.SecondArithmeticNotice = 0;
+        if (first != 0)
+            yield return ArithmeticNotice(batch, first);
+        if (second != 0)
+            yield return ArithmeticNotice(batch, second);
+    }
+
+    private static SimulatedInfoOutcome ArithmeticNotice(BatchContext batch, int number) =>
+        new(number == 3607
+            ? SimulatedSqlException.DivisionByZeroOccurredMessage(batch)
+            : SimulatedSqlException.ArithmeticOverflowOccurredMessage(batch), followsRows: true);
 
     /// <summary>
     /// What a statement produced, in the order real sends it: the messages it
@@ -2232,7 +2260,7 @@ public sealed partial class Simulation
         error.Number == 1505
         || ((!batch.BatchAborted || error.EndedTriggerBody)
             && batch.CurrentStatement.WritesRows
-            && error.Number is 127 or 220 or 515 or 547 or 550 or 2601 or 2627 or 2628 or 8115 or 8134 or 8152 or 16947);
+            && error.Number is 127 or 220 or 232 or 515 or 547 or 550 or 2601 or 2627 or 2628 or 8115 or 8134 or 8152 or 16947);
 
     /// <summary>
     /// True for the parse-time error real SQL Server defers to bind time —

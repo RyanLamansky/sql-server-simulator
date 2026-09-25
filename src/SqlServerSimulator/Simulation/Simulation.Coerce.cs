@@ -148,6 +148,24 @@ partial class Simulation
     /// before this method runs.
     /// </summary>
     /// <summary>
+    /// <see cref="CoerceForInsert(SqlValue, HeapColumn)"/> for a value an
+    /// INSERT, UPDATE or MERGE writes, where a conversion the session lets
+    /// overflow (<see cref="BatchContext.AbsorbsArithmeticFault"/>) stores
+    /// what a CAST would answer.
+    /// </summary>
+    private static SqlValue CoerceForWrite(SqlValue source, HeapColumn column, BatchContext batch)
+    {
+        try
+        {
+            return CoerceForInsert(source, column);
+        }
+        catch (SimulatedSqlException error) when (batch.AbsorbsArithmeticFault(error))
+        {
+            return Parser.Expressions.Cast.AbsorbedOverflow(column.Type);
+        }
+    }
+
+    /// <summary>
     /// <see cref="CoerceForInsert(SqlValue, SqlType)"/> plus the typed-xml
     /// contract: a value landing in an <c>xml(&lt;collection&gt;)</c> column is
     /// validated against that collection and stored in <b>canonical form</b>,

@@ -192,8 +192,11 @@ public sealed class SimulatedDbConnection : DbConnection
 
     /// <summary>
     /// Session-scoped <c>ANSI_WARNINGS</c> setting (default <see langword="true"/>),
-    /// surfaced by <c>SESSIONPROPERTY('ANSI_WARNINGS')</c>. Recorded only.
-    /// Scoping mirrors <see cref="AnsiNulls"/>.
+    /// surfaced by <c>SESSIONPROPERTY('ANSI_WARNINGS')</c>. Off, a write
+    /// truncates an over-long string silently, no Msg 8153 is sent, and — with
+    /// <see cref="Arithabort"/> also off — a divide by zero or an overflow
+    /// answers NULL (<c>BatchContext.AbsorbsArithmeticFault</c>). Scoping
+    /// mirrors <see cref="AnsiNulls"/>.
     /// </summary>
     internal bool AnsiWarnings = true;
 
@@ -201,8 +204,9 @@ public sealed class SimulatedDbConnection : DbConnection
     /// Session-scoped <c>ARITHABORT</c> setting. Defaults to
     /// <see langword="false"/> — a fresh SqlClient session reports 0
     /// (probe-confirmed), the one option of this family that defaults off.
-    /// Surfaced by <c>SESSIONPROPERTY('ARITHABORT')</c>; recorded only.
-    /// Scoping mirrors <see cref="AnsiNulls"/>.
+    /// Surfaced by <c>SESSIONPROPERTY('ARITHABORT')</c>; on, it keeps a divide
+    /// by zero or an overflow an error whatever <see cref="AnsiWarnings"/>
+    /// says. Scoping mirrors <see cref="AnsiNulls"/>.
     /// </summary>
     internal bool Arithabort;
 

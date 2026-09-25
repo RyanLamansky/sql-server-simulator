@@ -59,7 +59,7 @@ internal abstract class TwoSidedExpression : Expression
         if (this.left is not TwoSidedExpression)
         {
             var (fastLeft, fastRight) = AdjustLiteralOperands(this.left, this.right, this.left.Run(runtime), this.right.Run(runtime));
-            return Run(fastLeft, fastRight);
+            return this.RunAbsorbing(fastLeft, fastRight, runtime.Batch);
         }
 
         // Deeper left-leaning chain (a op b op c op …, the shape
@@ -85,9 +85,25 @@ internal abstract class TwoSidedExpression : Expression
             // later steps pass a null left expression to the literal adjuster.
             var leftExpr = i == spine.Count - 1 ? node : null;
             var (adjustedLeft, adjustedRight) = AdjustLiteralOperands(leftExpr, current.right, accumulated, current.right.Run(runtime));
-            accumulated = current.Run(adjustedLeft, adjustedRight);
+            accumulated = current.RunAbsorbing(adjustedLeft, adjustedRight, runtime.Batch);
         }
         return accumulated;
+    }
+
+    /// <summary>
+    /// Applies the operator, answering a divide by zero or an overflow with
+    /// NULL where the session says so (<see cref="BatchContext.AbsorbsArithmeticFault"/>).
+    /// </summary>
+    private SqlValue RunAbsorbing(SqlValue left, SqlValue right, BatchContext batch)
+    {
+        try
+        {
+            return Run(left, right);
+        }
+        catch (SimulatedSqlException error) when (batch.AbsorbsArithmeticFault(error))
+        {
+            return SqlValue.Null(SqlType.PromoteForArithmetic(left.Type, right.Type, this.Operator));
+        }
     }
 
     protected abstract SqlValue Run(SqlValue left, SqlValue right);

@@ -177,6 +177,38 @@ internal sealed class BatchContext
             state: state);
 
     /// <summary>
+    /// Whether <paramref name="error"/> is a divide by zero or an arithmetic
+    /// overflow the session answers with NULL instead: under <c>SET ARITHABORT
+    /// OFF</c> with <c>ANSI_WARNINGS OFF</c> real yields NULL for the failing
+    /// operation and follows the statement with the class-0 Msg 3607
+    /// (<c>Division by zero occurred.</c>) or 3606 (<c>Arithmetic overflow
+    /// occurred.</c>), each once, where either option on raises the error — and
+    /// a fresh session's ARITHABORT is off, so <c>SET ANSI_WARNINGS OFF</c>
+    /// alone gets there (probed 2026-09-25 against SQL Server 2025). An
+    /// identity overflow and a failed conversion still raise. When true the
+    /// notice has been noted.
+    /// </summary>
+    internal bool AbsorbsArithmeticFault(SimulatedSqlException error)
+    {
+        if (this.Connection.Arithabort || this.Connection.AnsiWarnings || error.IsIdentityOverflow)
+            return false;
+        var notice = error.Number switch
+        {
+            8134 => 3607,
+            220 or 232 or 8115 => 3606,
+            _ => 0,
+        };
+        if (notice == 0)
+            return false;
+        var statement = this.CurrentStatement;
+        if (statement.FirstArithmeticNotice == 0)
+            statement.FirstArithmeticNotice = notice;
+        else if (statement.FirstArithmeticNotice != notice)
+            statement.SecondArithmeticNotice = notice;
+        return true;
+    }
+
+    /// <summary>
     /// Queues Msg 8153 now if an aggregate the statement ran so far skipped a
     /// NULL — for an <c>IF</c> / <c>WHILE</c> condition, whose warning real
     /// sends before the body's first message (probed 2026-09-23) rather than

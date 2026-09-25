@@ -79,9 +79,21 @@ internal sealed class Cast : Expression
         {
             coerced = SqlValue.Null(this.targetType);
         }
+        catch (SimulatedSqlException ex) when (runtime.Batch.AbsorbsArithmeticFault(ex))
+        {
+            coerced = AbsorbedOverflow(this.targetType);
+        }
 
         return RecollateStringResult(coerced, this.targetType, sourceValue.Type, dbCollation);
     }
+
+    /// <summary>
+    /// What a conversion the session lets overflow answers
+    /// (<see cref="BatchContext.AbsorbsArithmeticFault"/>): NULL, except that a
+    /// <c>real</c> target reads 0 (probed 2026-09-25 against SQL Server 2025).
+    /// </summary>
+    internal static SqlValue AbsorbedOverflow(SqlType targetType) =>
+        targetType == SqlType.Real ? SqlValue.FromSingle(0) : SqlValue.Null(targetType);
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
         RejectIllegalConversion(this.source, this.source.GetSqlType(batch, resolveColumnType), this.targetType, this.targetReportsNumeric, batch);

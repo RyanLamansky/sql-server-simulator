@@ -151,6 +151,14 @@ internal sealed class StatementContext
     public bool NullEliminated;
 
     /// <summary>
+    /// The class-0 notices an absorbed arithmetic fault owes this statement
+    /// (<see cref="BatchContext.AbsorbsArithmeticFault"/>) — Msg 3606 and / or
+    /// 3607, each once, in the order they first occurred; zero when unused.
+    /// Real sends them after the statement's rows, as it does Msg 8153.
+    /// </summary>
+    public int FirstArithmeticNotice, SecondArithmeticNotice;
+
+    /// <summary>
     /// Set by a statement that writes rows — <c>INSERT</c>, <c>UPDATE</c>,
     /// <c>DELETE</c>, <c>MERGE</c>, <c>SELECT … INTO</c>, and the rewrite
     /// <c>ALTER TABLE … ALTER COLUMN</c> runs — once it begins executing.

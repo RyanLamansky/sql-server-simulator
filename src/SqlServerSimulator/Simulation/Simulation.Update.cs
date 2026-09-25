@@ -1397,7 +1397,7 @@ partial class Simulation
                 continue;
             var raw = expr is AssignmentExpression { Slot: var assigned } ? assigned.Value : expr.Run(runtime);
             raw = EnforceMaxLength(raw, table.Columns[ordinal], table, context.Connection);
-            newValues[ordinal] = CoerceForInsert(raw, table.Columns[ordinal]);
+            newValues[ordinal] = CoerceForWrite(raw, table.Columns[ordinal], context.Batch);
         }
 
         for (var ci = 0; ci < table.Columns.Length; ci++)

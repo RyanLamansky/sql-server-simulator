@@ -265,4 +265,55 @@ public sealed class MessageStreamTests
         _ = command.ExecuteNonQuery();
         AreEqual(warns ? 1 : 0, log.Count(entry => entry.StartsWith("event 8153", StringComparison.Ordinal)));
     }
+
+    /// <summary>
+    /// Under <c>ARITHABORT OFF</c> with <c>ANSI_WARNINGS OFF</c> — a fresh
+    /// session's ARITHABORT is off, so the second alone does it — a divide by
+    /// zero or an overflow answers NULL, and the statement is followed once by
+    /// Msg 3607 or 3606 after its rows (probed 2026-09-25 against SQL Server
+    /// 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select 1/0", "NULL", 3607)]
+    [DataRow("select 1 % 0, 2/0", "NULL|NULL", 3607)]
+    [DataRow("select 1.0/0", "NULL", 3607)]
+    [DataRow("select isnull(1/0, 5)", "5", 3607)]
+    [DataRow("select 2147483647 + 1", "NULL", 3606)]
+    [DataRow("select cast(300 as tinyint)", "NULL", 3606)]
+    [DataRow("select convert(smallint, 70000)", "NULL", 3606)]
+    [DataRow("select cast(1e300 as real)", "0", 3606)]
+    public void ArithmeticFault_UnderAnsiWarningsOff_AnswersNull(string sql, string expected, int notice)
+    {
+        var (connection, log) = Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "set ansi_warnings off; " + sql;
+        using (var reader = command.ExecuteReader())
+        {
+            IsTrue(reader.Read());
+            AreEqual(expected, string.Join('|', Enumerable.Range(0, reader.FieldCount).Select(i => reader.IsDBNull(i) ? "NULL" : Convert.ToString(reader.GetValue(i), System.Globalization.CultureInfo.InvariantCulture))));
+            log.Add("row");
+            IsFalse(reader.Read());
+        }
+        CollectionAssert.AreEqual(new[] { "row", $"event {notice}: " + (notice == 3607 ? "Division by zero occurred." : "Arithmetic overflow occurred.") }, log);
+    }
+
+    [TestMethod]
+    public void ArithmeticFaultsWhileWriting_StoreNullAndNoticeEachOnce()
+    {
+        var (connection, log) = Open("create table w (c varchar(3), t tinyint)");
+        using var command = connection.CreateCommand();
+        command.CommandText = "set ansi_warnings off; insert w values ('a', 300), ('b', 1/0), ('c', 256), ('d', 2/0); select count(*) from w where t is null";
+        AreEqual(4, command.ExecuteScalar());
+        // Real sends them in the order the rows met them, 3606 first; a
+        // multi-row VALUES evaluates every cell before converting any here.
+        CollectionAssert.AreEquivalent(new[] { "event 3606: Arithmetic overflow occurred.", "event 3607: Division by zero occurred." }, log);
+    }
+
+    [TestMethod]
+    [DataRow("set arithabort on; set ansi_warnings off; select 1/0", 8134)]
+    [DataRow("set ansi_warnings on; select 1/0", 8134)]
+    [DataRow("set ansi_warnings off; select cast('abc' as int)", 245)]
+    [DataRow("set ansi_warnings off; create table i (v tinyint identity(255, 1), x int); insert i (x) values (1), (2)", 8115)]
+    public void ArithmeticFault_OtherwiseRaises(string sql, int number)
+        => AreEqual(number, NonQueryError(Open().Connection, sql).Number);
 }

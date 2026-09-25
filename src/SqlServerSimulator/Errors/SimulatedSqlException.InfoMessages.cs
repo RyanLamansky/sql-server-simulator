@@ -21,9 +21,16 @@ partial class SimulatedSqlException
     internal static SimulatedError StatementTerminatedMessage(BatchContext batch) =>
         batch.InfoMessage(@class: 0, state: 0, number: 3621, "The statement has been terminated.");
 
-    /// <summary>Msg 3606, in place of Msg 3621 after an identity overflow ends a write.</summary>
+    /// <summary>
+    /// Msg 3606, in place of Msg 3621 after an identity overflow ends a write,
+    /// and after a statement whose overflow the session answered with NULL.
+    /// </summary>
     internal static SimulatedError ArithmeticOverflowOccurredMessage(BatchContext batch) =>
         batch.InfoMessage(@class: 0, state: 0, number: 3606, "Arithmetic overflow occurred.");
+
+    /// <summary>Msg 3607, after a statement whose divide by zero the session answered with NULL.</summary>
+    internal static SimulatedError DivisionByZeroOccurredMessage(BatchContext batch) =>
+        batch.InfoMessage(@class: 0, state: 0, number: 3607, "Division by zero occurred.");
 
     /// <summary>Msg 5701, after every <c>USE</c>.</summary>
     internal static SimulatedError DatabaseContextChangedMessage(BatchContext batch, string databaseName) =>

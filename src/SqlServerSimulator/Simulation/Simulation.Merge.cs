@@ -1459,7 +1459,7 @@ partial class Simulation
         {
             var raw = expr.Run(new RuntimeContext(name => resolveCombined(targetValues, sourceValues, name), context.Batch));
             raw = EnforceMaxLength(raw, destinationTable.Columns[ord], destinationTable, context.Connection);
-            newValues[ord] = CoerceForInsert(raw, destinationTable.Columns[ord]);
+            newValues[ord] = CoerceForWrite(raw, destinationTable.Columns[ord], context.Batch);
         }
 
         for (var ci = 0; ci < destinationTable.Columns.Length; ci++)
@@ -1552,7 +1552,7 @@ partial class Simulation
             }
             var source = clause.InsertValues![i].Run(new RuntimeContext(name => resolveCombined(null, sourceValues, name), context.Batch));
             source = EnforceMaxLength(source, targetColumn, destinationTable, context.Connection);
-            var coerced = CoerceForInsert(source, targetColumn);
+            var coerced = CoerceForWrite(source, targetColumn, context.Batch);
             rowValues[ordinal] = coerced;
 
             if (ReferenceEquals(targetColumn, identityColumn))

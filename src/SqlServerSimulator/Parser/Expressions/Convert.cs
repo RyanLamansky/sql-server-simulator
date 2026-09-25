@@ -148,6 +148,10 @@ internal sealed class ConvertExpression : Expression
         {
             coerced = SqlValue.Null(this.targetType);
         }
+        catch (SimulatedSqlException ex) when (runtime.Batch.AbsorbsArithmeticFault(ex))
+        {
+            coerced = Cast.AbsorbedOverflow(this.targetType);
+        }
 
         return Cast.RecollateStringResult(coerced, this.targetType, sourceValue.Type, dbCollation);
     }
