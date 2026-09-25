@@ -898,6 +898,22 @@ partial class SimulatedSqlException
         new($"The column prefix '{qualifier}' does not match with a table name or alias name used in the query.", 107, 15, 1);
 
     /// <summary>
+    /// Mimics SQL Server's Msg 11529 — <c>sp_describe_first_result_set</c>'s
+    /// batch fails on every path, as a missing object makes it. Probe-confirmed
+    /// against SQL Server 2025 (2026-09-24).
+    /// </summary>
+    internal static SimulatedSqlException MetadataCouldNotBeDetermined() =>
+        new("The metadata could not be determined because every code path results in an error; see previous errors for some of these.", 11529, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 11501 — <c>sp_describe_first_result_set</c>'s
+    /// batch doesn't compile, reported after the batch's own errors.
+    /// Probe-confirmed against SQL Server 2025 (2026-09-24).
+    /// </summary>
+    internal static SimulatedSqlException BatchCouldNotBeAnalyzed() =>
+        new("The batch could not be analyzed because of compile errors.", 11501, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server's Msg 4127 — every argument of a <c>COALESCE</c> is a
     /// bare <c>NULL</c> literal (parentheses see through), raised while
     /// compiling. Probe-confirmed against SQL Server 2025 (2026-09-24).

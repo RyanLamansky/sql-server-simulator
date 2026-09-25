@@ -780,7 +780,7 @@ internal static partial class BuiltInResources
     /// (<c>datetime2(3)</c> → 23, <c>datetime2(7)</c> → 27).</item>
     /// </list>
     /// </summary>
-    private static (short MaxLength, byte Precision, byte Scale) GetSysColumnMetadata(HeapColumn col)
+    internal static (short MaxLength, byte Precision, byte Scale) GetSysColumnMetadata(HeapColumn col)
     {
         var t = col.Type;
         return t switch

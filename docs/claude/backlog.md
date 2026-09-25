@@ -223,7 +223,6 @@ Already listed elsewhere here and not repeated: parenthesized set-op branches.
 - The subquery side of `IN (SELECT …)` / `= ANY (…)` reports Msg 257 where real reports Msg 260 naming the inner column.
 - A reference to a `numeric` column *inside* an expression reads `decimal` — in `n + d` / `n * 2` result metadata, a computed column over `n`, and a type-pair message's operand name — as do a `VALUES` column, numeric parameters and return types, and an alias type over numeric; the stored column, a bare reference and the catalog carry the name (see [`arithmetic.md`](arithmetic.md#numeric-vs-decimal-reported-type-name)).
   `Expression.ResultReportsNumeric` is a parameterless property, so a reference can't reach its column's spelling without threading a resolver through its ~25 overrides.
-- `sp_describe_first_result_set` isn't built (Msg 2812); tools and ORMs read result metadata through it, and it is the easiest oracle for the projection typing rules.
 - Under a SQL collation, a `varchar` containing `CHAR(0)` compares unequal to the same string without it.
 - A constant-folded `CASE WHEN 1 = 0 …` takes the ELSE arm's type on real.
 - Binary or padded `char` converted to `xml` isn't validated or whitespace-stripped, and a `hierarchyid` parse failure's Msg 6522 wording differs.

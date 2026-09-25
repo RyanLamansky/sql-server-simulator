@@ -818,6 +818,17 @@ It has **no runtime effect** — the simulator stores rows unordered either way 
 Probe-confirmed shapes: the table-level `PRIMARY KEY (a DESC, b ASC)` and `UNIQUE (a DESC, b)` forms both record it, as does `ALTER TABLE … ADD CONSTRAINT … PRIMARY KEY (b DESC, a DESC)`.
 The **inline column-level** form takes no direction at all: real raises **Msg 156** near the keyword for `a int PRIMARY KEY DESC`, so the simulator rejects it there rather than silently accepting.
 
+## `sp_describe_first_result_set`
+
+`Simulation.DescribeFirstResultSet.cs` runs `@tsql` as a dynamic batch under `SET FMTONLY ON` — a SELECT yields its metadata and no rows, a data-modifying statement is suppressed — and describes the first result set that comes back, one row per column in real's 39-column shape (probed 2026-09-24).
+Everything a result set already carries (type, numeric spelling, nullability) feeds it directly; the three FMTONLY-only additions on `SimulatedQueryResult` are the base column each projection reads (through a view to the column behind it), whether a projection is a scalar expression, and whether the query grouped.
+Those give real's `is_identity_column` / `is_updateable` / `is_computed_column`: a grouped query's columns are never updateable, and an aggregate or window function is not "computed" where any other expression is.
+`tds_type_id` follows COLMETADATA's token choice (the fixed-length token for a NOT NULL fixed-width type), with real's own lengths — 17 for decimal, 65535 for a MAX type, 8100 for xml.
+A compile error is followed by **Msg 11501**, a missing object by **Msg 11529**.
+
+**Not modeled yet**: the browse-information modes (every mode answers as 0 does, so the `source_*` columns and `is_part_of_unique_key` stay NULL), and a set operation's NOT NULL columns, which report nullable because a combined result carries no nullability.
+Because FMTONLY runs the batch rather than binding it, DDL and control flow in `@tsql` execute, where real's analysis doesn't run anything.
+
 ## Metadata scalars
 
 Function-form metadata queries that read from the same underlying state as the catalog-view rows.

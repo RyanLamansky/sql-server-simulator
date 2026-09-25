@@ -1344,6 +1344,7 @@ internal sealed partial class Selection
         selection.BranchFromSources = sources;
         selection.AutoSourceNames = AutoSourceNamesOf(sources);
         (selection.AutoColumnSource, selection.AutoColumnOrdinal) = AutoColumnBindingOf(expressions, sources);
+        selection.IsGrouped = aggregates.Count > 0 || fromClause.GroupingSets.Count > 0 || fromClause.Having is not null;
         // A plain SELECT-project-filter body can carry an enclosing statement's
         // WHERE conjunct: it applies its projection and its own WHERE to every
         // row and nothing else, so an extra filter there is the same filter one
@@ -1588,6 +1589,51 @@ internal sealed partial class Selection
             }
         }
         return (source, ordinal);
+    }
+
+    /// <summary>
+    /// Per projection column, whether it is a scalar expression — neither a
+    /// column reference nor an aggregate or window function, which real
+    /// doesn't count as computed (probed 2026-09-24).
+    /// </summary>
+    internal static bool[]? ComputedColumnsOf(Selection selection)
+    {
+        if (selection.ProjectionExpressions is not { } expressions)
+            return null;
+        var computed = new bool[expressions.Length];
+        for (var i = 0; i < expressions.Length; i++)
+        {
+            var expression = expressions[i];
+            while (expression is Expressions.NamedExpression named)
+                expression = named.Inner;
+            computed[i] = expression is not (Expressions.Reference or Expressions.AggregateExpression or Expressions.WindowExpression);
+        }
+        return computed;
+    }
+
+    /// <summary>
+    /// Per projection column, the base-table column it reads directly, or null
+    /// for an expression or a column of any other source; null when no column
+    /// reads a base table.
+    /// </summary>
+    internal static HeapColumn?[]? BaseColumnOrigins(Selection selection)
+    {
+        if (selection.AutoColumnSource is not { } source || selection.AutoColumnOrdinal is not { } ordinal || selection.BranchFromSources is not { } sources)
+            return null;
+        HeapColumn?[]? origins = null;
+        for (var i = 0; i < source.Length; i++)
+        {
+            if (source[i] < 0)
+                continue;
+            var from = sources[source[i]];
+            // A view column traces through to the base column behind it.
+            var column = from.BackingTable is not null ? from.Columns[ordinal[i]]
+                : from.BackingView is { BaseTable: { } baseTable } view && view.BaseColumnOrdinals[ordinal[i]] is >= 0 and var baseOrdinal ? baseTable.Columns[baseOrdinal]
+                : null;
+            if (column is not null)
+                (origins ??= new HeapColumn?[source.Length])[i] = column;
+        }
+        return origins;
     }
 
     /// <summary>

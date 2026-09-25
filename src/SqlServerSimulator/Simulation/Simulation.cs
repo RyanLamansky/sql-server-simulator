@@ -2449,6 +2449,9 @@ public sealed partial class Simulation
                     {
                         ColumnNullability = metadataSelection.ColumnNullability,
                         ColumnReportsNumeric = metadataSelection.ColumnReportsNumeric,
+                        ColumnOrigins = Selection.BaseColumnOrigins(metadataSelection),
+                        ColumnIsComputed = Selection.ComputedColumnsOf(metadataSelection),
+                        IsGrouped = metadataSelection.IsGrouped,
                     };
                 }
 

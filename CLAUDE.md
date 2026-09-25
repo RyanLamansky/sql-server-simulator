@@ -290,7 +290,7 @@ Where an entry carries a second clause it is because that fact changes what you'
   Every one of them reads the document left to right and stops as soon as the path is settled, so the same document can raise for one path and answer for another → [`json.md`](docs/claude/json.md).
 - **Name resolution, schemas, CREATE / DROP DATABASE, the `OBJECT_*` / `SCHEMA_*` / `DB_*` scalars, cross-database reads and writes, synonyms** — with the reserved-schema pin.
   An unresolved column splits by *what* failed: a bad qualifier is Msg 4104 on the whole name, everything else Msg 207 on the leaf → [`schemas.md`](docs/claude/schemas.md).
-- **System metadata surfaces** — the `sys.*` / `INFORMATION_SCHEMA.*` views, `OBJECTPROPERTY`, the `sp_help` family, `sp_who`, `sp_configure`, and the expression-dependency surfaces.
+- **System metadata surfaces** — the `sys.*` / `INFORMATION_SCHEMA.*` views, `OBJECTPROPERTY`, the `sp_help` family, `sp_describe_first_result_set`, `sp_who`, `sp_configure`, and the expression-dependency surfaces.
   All six dependency surfaces project from one walk of stored definition **text**, which is what reproduces real's name-based refresh rules → [`catalog-views.md`](docs/claude/catalog-views.md).
 - **Scalar UDFs / TVFs / views / stored procs / dynamic SQL, the `ALTER` / `CREATE OR ALTER` path, `WITH RESULT SETS`, `WITH SCHEMABINDING`, DML through views**.
   A module body **binds at CREATE** — every binder error at once, in source order — while a missing object still defers → [`programmable.md`](docs/claude/programmable.md).

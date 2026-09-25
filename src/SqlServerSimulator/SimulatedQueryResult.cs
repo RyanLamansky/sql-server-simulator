@@ -59,6 +59,23 @@ internal abstract class SimulatedQueryResult : SimulatedStatementOutcome
     public bool[]? ColumnReportsNumeric;
 
     /// <summary>
+    /// Per column, the base-table column it reads directly, or null for an
+    /// expression — set only by the <c>SET FMTONLY</c> metadata path, which
+    /// is what <c>sp_describe_first_result_set</c> describes through.
+    /// </summary>
+    internal HeapColumn?[]? ColumnOrigins;
+
+    /// <summary>
+    /// Per column, whether it is a scalar expression rather than a column, an
+    /// aggregate or a window function — <c>sp_describe_first_result_set</c>'s
+    /// <c>is_computed_column</c>. Set alongside <see cref="ColumnOrigins"/>.
+    /// </summary>
+    internal bool[]? ColumnIsComputed;
+
+    /// <summary>Whether the query grouped its rows, so no column is updatable through it.</summary>
+    internal bool IsGrouped;
+
+    /// <summary>
     /// The session's <c>SET TEXTSIZE</c> byte cap in effect when this result
     /// was produced; <c>-1</c> = unlimited. Stamped by the dispatch loop at
     /// statement materialization so a later-read result truncates under the

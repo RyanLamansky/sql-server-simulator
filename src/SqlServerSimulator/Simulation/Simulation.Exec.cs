@@ -170,6 +170,7 @@ partial class Simulation
             "sp_configure" => InvokeSpConfigure(batch),
             "sp_datatype_info_100" => InvokeSpDatatypeInfo100(batch),
             "sp_depends" => InvokeSpDepends(batch),
+            "sp_describe_first_result_set" => this.InvokeSpDescribeFirstResultSet(batch),
             "sp_dropextendedproperty" => InvokeSpExtendedProperty(batch, ExtendedPropertyOp.Drop),
             "sp_dropserver" => InvokeSpDropServer(batch),
             "sp_executesql" => ParseSpExecuteSql(batch, returnCodeVar, insertExecSource),

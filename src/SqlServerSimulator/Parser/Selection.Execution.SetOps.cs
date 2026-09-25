@@ -19,6 +19,9 @@ internal sealed partial class Selection
     /// </summary>
     internal bool IsSetOperationResult;
 
+    /// <summary>Whether the query aggregates or groups, so its columns name no base row.</summary>
+    internal bool IsGrouped;
+
     /// <summary>
     /// The FROM sources of the branch whose projections this plan's output
     /// columns come from — the leftmost branch of a set-op chain, since that's
