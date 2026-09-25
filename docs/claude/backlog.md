@@ -200,7 +200,6 @@ Roots **filed** (still open):
   Real answers **Msg 8728** and rolls the whole transaction back, so Django's next `ROLLBACK TRANSACTION <savepoint>` fails (Msg 6401) and `needs_rollback` sticks for the rest of the class; the simulator ran the query.
   Msg 8728 and its transaction-aborting semantics now ship ([`query.md`](query.md#range-frame-order-by-msg-8728), [`transactions.md`](transactions.md#the-transaction-aborting-error-class)), along with the Msg 6401 that used to be Msg 102 and the TDS transaction-state repairs behind it.
   Re-measured over the wire: `expressions_window` is **0 sim-only and 0 real-only**, 27 failing identically on both.
-- Smaller reverse-delta entry: `indexes.tests.PartialIndexTests.test_multiple_conditions` errors on real and passes here.
 
 Getting there took eleven roots, and the pattern worth keeping is that failures cluster by *cause*, not by test — grouping them that way found each one:
 
@@ -353,9 +352,6 @@ Entries are verified against the simulator, so one that no longer reproduces is 
 - **MERGE into a join view is Msg 4405** where real accepts a `WHEN NOT MATCHED THEN INSERT` whose column list names a single base table's columns and writes that table (probe-confirmed).
   MERGE reads `View.RejectionReason` up front; routing it wants the per-action column lists to pick the target the way INSERT's does.
   → [`programmable.md`](programmable.md#dml-through-a-join-view).
-- **A filtered index's WHERE takes predicate shapes real's grammar refuses** — `CREATE INDEX ix ON t(s) WHERE s LIKE 'a%'` and `... WHERE v = 1 OR v = 2` are both **Msg 156** on real (`Incorrect syntax near the keyword 'like'` / `'or'`, probed 2026-08-06), and the simulator creates the index with a NULL `filter_definition`.
-  Real's `<filter_predicate>` grammar is a restricted one — a comparison of a column against a literal, `IN`, `IS [NOT] NULL`, joined by `AND` only — so closing it means gating the predicate parse rather than the rendering, which is where the null comes from today.
-  → [`indexes.md`](indexes.md).
 - **`clr strict security` is a `sp_configure` option nothing reads** — real refuses `CREATE ASSEMBLY` of an unsigned SAFE / EXTERNAL_ACCESS assembly with **Msg 10343** while the option is 1; the simulator registers and validates the option but never consults it, and the Msg 10343 factory was removed as dead code rather than left as an unreferenced promise.
 - **A GROUP BY view's aggregate column is Msg 4403** where real reports **Msg 4406** — real splits by which column the write names, `SET <group-by column>` being 4403 and `SET <aggregate column>` 4406 since the aggregate is a derived field (probe-confirmed, through a chained view too).
   `RejectionReason` settles the whole view before any column is looked at, so the per-column gate never runs on a shape that already failed; letting the 4406 walk run first on an aggregate / DISTINCT body is the work.

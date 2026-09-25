@@ -26,6 +26,10 @@ A missing index still raises **Msg 3701** through the same path as the `name ON 
 **No INCLUDE on a clustered index**: a clustered index's leaf *is* the table row, so real refuses the list with **Msg 10601** class 16 state 1, `Cannot specify included columns for a clustered index.` — naming neither the index nor the table, because it is a statement-shape check.
 It fires ahead of every name-resolution error (a missing table and a missing INCLUDE column alike) and ahead of Msg 1916, all probe-confirmed, so it sits beside the `IGNORE_DUP_KEY` shape check in `TryParseCreateIndex` and covers the indexed-view path with it.
 
+**The filter's grammar is a restricted one**: an `AND` of `column <op> constant`, `column IN (constants)` and `column IS [NOT] NULL`, the column on the left and each constant a literal, a negated one or a CAST of one.
+Real refuses the other connectives where its parser meets them — **Msg 156** at `OR`, `LIKE`, `BETWEEN`, `EXISTS` or a leading `NOT`, **Msg 102** near `'NOT'` for `NOT IN` — and any other comparison (`a = b`, `1 = a`, `a + 1 = 2`, `a = ABS(1)`, `a = @@SPID`) is **Msg 10735** (probed 2026-09-24).
+One rendering divergence remains: real stores a CAST constant as `CONVERT([int],(1))` in `filter_definition`, where the simulator stores the folded `(1)`.
+
 The simulator has no B-tree storage, so an index never constrains inserts (UNIQUE aside) and isn't a stored ordered structure.
 UNIQUE indexes participate in INSERT / UPDATE / MERGE enforcement alongside `KeyConstraint`.
 The `WITH (...)` clause is scanned for `IGNORE_DUP_KEY` — the one option with a semantic, see [`constraints.md`](constraints.md#ignore_dup_key) — and otherwise parsed parens-balanced and discarded: none of `FILLFACTOR` / `PAD_INDEX` / `ONLINE` / `SORT_IN_TEMPDB` / etc. alter behavior.

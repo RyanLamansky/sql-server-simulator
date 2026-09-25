@@ -60,6 +60,31 @@ internal abstract class BooleanExpression : ExpressionNode
     // not renderable (OR / NOT / DISTINCT FROM / EXISTS / BETWEEN / quantified).
     private protected virtual bool TryAppendFilterDefinition(StringBuilder sb, BatchContext batch) => false;
 
+    /// <summary>
+    /// Whether this predicate is what a filtered index's WHERE accepts: an
+    /// AND of <c>column &lt;op&gt; constant</c>, <c>column IN (constants)</c>
+    /// and <c>column IS [NOT] NULL</c>, the column on the left and each
+    /// constant a literal, a negated one or a CAST of one — real answers
+    /// Msg 10735 for <c>a = b</c>, <c>1 = a</c>, <c>a + 1 = 2</c>,
+    /// <c>a = ABS(1)</c> and <c>a = @@SPID</c> (probed 2026-09-24).
+    /// </summary>
+    internal virtual bool IsFilteredIndexShape => false;
+
+    private static bool IsFilterColumn(Expression operand)
+    {
+        while (operand is Parenthesized paren)
+            operand = paren.Wrapped;
+        return operand is Reference { ReferencedName.Count: 1 };
+    }
+
+    private static bool IsFilterConstant(Expression operand) => operand switch
+    {
+        Parenthesized paren => IsFilterConstant(paren.Wrapped),
+        Value { IsLiteral: true } => true,
+        Negate negate => IsFilterConstant(negate.Operand),
+        _ => operand.PureConversionOperand is { } converted && IsFilterConstant(converted),
+    };
+
     // Renders one comparison / IN operand: a single-part column reference as
     // [name], or an otherwise constant-foldable side as its literal. Returns
     // false for anything that isn't a bare column or a constant.
@@ -1525,6 +1550,8 @@ internal abstract class BooleanExpression : ExpressionNode
                 operand.CollectConjuncts(sink);
         }
 
+        internal override bool IsFilteredIndexShape => Array.TrueForAll(operands, operand => operand.IsFilteredIndexShape);
+
         private protected override bool TryAppendFilterDefinition(StringBuilder sb, BatchContext batch)
         {
             for (var i = 0; i < operands.Length; i++)
@@ -1685,6 +1712,8 @@ internal abstract class BooleanExpression : ExpressionNode
             _ = sb.Append(negated ? " IS NOT NULL" : " IS NULL");
             return true;
         }
+
+        internal override bool IsFilteredIndexShape => IsFilterColumn(source);
     }
 
     /// <summary>
@@ -1822,6 +1851,8 @@ internal abstract class BooleanExpression : ExpressionNode
             foreach (var candidate in candidates)
                 visitor(candidate);
         }
+
+        internal override bool IsFilteredIndexShape => !negated && IsFilterColumn(source) && Array.TrueForAll(candidates, IsFilterConstant);
 
         private protected override bool TryAppendFilterDefinition(StringBuilder sb, BatchContext batch)
         {
@@ -2559,6 +2590,8 @@ internal abstract class BooleanExpression : ExpressionNode
         // index definition (=, <>, >, >=, <, <=), or null for shapes with no
         // canonical filter rendering (LIKE) — those bail the whole render.
         protected virtual string? FilterOperator => null;
+
+        internal override bool IsFilteredIndexShape => this.FilterOperator is not null && IsFilterColumn(this.left) && IsFilterConstant(this.right);
 
         private protected override bool TryAppendFilterDefinition(StringBuilder sb, BatchContext batch)
         {

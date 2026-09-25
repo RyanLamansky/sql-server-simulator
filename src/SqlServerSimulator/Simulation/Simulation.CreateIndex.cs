@@ -125,7 +125,10 @@ partial class Simulation
         if (context.Token is ReservedKeyword { Keyword: Keyword.Where })
         {
             context.MoveNextRequired();
+            RejectFilterPredicateKeywords(context);
             filter = BooleanExpression.Parse(context);
+            if (!filter.IsFilteredIndexShape)
+                throw SimulatedSqlException.IncorrectFilteredIndexWhereClause(indexName, targetTableName.Leaf);
             // Render the parsed predicate into SQL Server's normalized
             // filter_definition form ([col]=(1) AND …) for sys.indexes. Null
             // when the predicate falls outside the renderable filtered grammar
@@ -446,5 +449,46 @@ partial class Simulation
             _ = sb.Append(FormatKeyValue(keyValues[i]));
         }
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// A filtered index's WHERE takes only an AND of comparisons, so real
+    /// refuses the other connectives as the parser meets them — Msg 156 at
+    /// <c>OR</c>, <c>LIKE</c>, <c>BETWEEN</c>, <c>EXISTS</c> or a leading
+    /// <c>NOT</c>, and Msg 102 near <c>NOT</c> for <c>NOT IN</c> (probed
+    /// 2026-09-24 against SQL Server 2025). Scans ahead and restores the
+    /// cursor, leaving the ordinary parse to build the predicate.
+    /// </summary>
+    private static void RejectFilterPredicateKeywords(ParserContext context)
+    {
+        var checkpoint = context.SaveCheckpoint();
+        var depth = 0;
+        var expectTerm = true;
+        Token? previous = null;
+        while (context.Token is { } token)
+        {
+            switch (token)
+            {
+                case ReservedKeyword { Keyword: Keyword.With or Keyword.On } when depth == 0:
+                case Operator { Character: ';' }:
+                    context.RestoreCheckpoint(checkpoint);
+                    return;
+                case ReservedKeyword { Keyword: Keyword.Or or Keyword.Like or Keyword.Between or Keyword.Exists } keyword:
+                    throw SimulatedSqlException.SyntaxErrorNearKeyword(keyword);
+                case ReservedKeyword { Keyword: Keyword.Not } keyword when previous is not ReservedKeyword { Keyword: Keyword.Is }:
+                    throw expectTerm ? SimulatedSqlException.SyntaxErrorNearKeyword(keyword) : SimulatedSqlException.SyntaxErrorNearText("NOT");
+                case Operator { Character: '(' }:
+                    depth++;
+                    break;
+                case Operator { Character: ')' }:
+                    depth--;
+                    break;
+            }
+            expectTerm = token is Operator { Character: '(' } or ReservedKeyword { Keyword: Keyword.And };
+            previous = token;
+            if (!context.MoveNext())
+                break;
+        }
+        context.RestoreCheckpoint(checkpoint);
     }
 }

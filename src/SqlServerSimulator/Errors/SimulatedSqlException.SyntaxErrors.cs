@@ -149,6 +149,13 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException SyntaxErrorNear(char c) => new($"Incorrect syntax near '{c}'.", 102, 15, 1);
 
     /// <summary>
+    /// Msg 102 near text real spells its own way rather than as written —
+    /// a filtered index's <c>NOT IN</c> is reported near <c>'NOT'</c> in
+    /// capitals whatever the source's case (probed 2026-09-24).
+    /// </summary>
+    internal static SimulatedSqlException SyntaxErrorNearText(string text) => new($"Incorrect syntax near '{text}'.", 102, 15, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 1038: a select-list column alias resolved to
     /// the empty string — <c>AS ''</c>, <c>AS []</c>, <c>AS ""</c>, bare
     /// <c>''</c>, or the alias-on-left <c>'' = expr</c>. Shares SQL Server's

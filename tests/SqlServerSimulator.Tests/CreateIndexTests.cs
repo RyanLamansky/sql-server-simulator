@@ -139,22 +139,6 @@ public sealed class CreateIndexTests
             select filter_definition from sys.indexes where name = 'ix'
             """));
 
-    // A predicate outside the renderable filtered grammar (OR — which a real
-    // server rejects at CREATE, but the simulator's looser parser accepts):
-    // has_filter stays set, filter_definition degrades to NULL rather than
-    // emitting a non-canonical rendering.
-    [TestMethod]
-    public void CreateIndex_FilterDefinition_UnrenderablePredicate_IsNull()
-    {
-        var sim = new Simulation();
-        _ = sim.ExecuteNonQuery("""
-            create table t (id int not null primary key, status int);
-            create unique index ix on t(id) where status = 1 or status = 2
-            """);
-        IsTrue((bool)sim.ExecuteScalar("select has_filter from sys.indexes where name = 'ix'")!);
-        AreEqual(0, sim.ExecuteScalar("select count(filter_definition) from sys.indexes where name = 'ix'"));
-    }
-
     [TestMethod]
     public void CreateIndex_WithOptionsClause_Accepted()
         // IGNORE_DUP_KEY is deliberately absent: it's the one option here with a
@@ -881,4 +865,41 @@ public sealed class CreateIndexTests
         var ex = sim.AssertSqlError("create unique index ix_t on sx.t (a) where a > 5 with (ignore_dup_key = on)", 10618);
         Assert.Contains("on table 'sx.t'", ex.Message);
     }
+
+    // ---- the filtered-index predicate grammar (probed 2026-09-24 against SQL Server 2025) ----
+
+    private const string FilterTable = "create table fx (a int, s varchar(10), b int, d date);";
+
+    [TestMethod]
+    [DataRow("s like 'a%'", "like")]
+    [DataRow("a = 1 or a = 2", "or")]
+    [DataRow("not a = 1", "not")]
+    [DataRow("a between 1 and 5", "between")]
+    [DataRow("exists (select 1)", "exists")]
+    public void FilteredIndex_RefusedConnective_RaisesMsg156(string predicate, string keyword)
+        => new Simulation().AssertSqlError($"{FilterTable} create index ix on fx(a) where {predicate}", 156, $"Incorrect syntax near the keyword '{keyword}'.");
+
+    [TestMethod]
+    public void FilteredIndex_NotIn_RaisesMsg102NearNot()
+        => new Simulation().AssertSqlError($"{FilterTable} create index ix on fx(a) where a not in (1, 2)", 102, "Incorrect syntax near 'NOT'.");
+
+    [TestMethod]
+    [DataRow("a = b")]
+    [DataRow("1 = a")]
+    [DataRow("a + 1 = 2")]
+    [DataRow("a = abs(1)")]
+    [DataRow("a = @@spid")]
+    public void FilteredIndex_NonConstantComparison_RaisesMsg10735(string predicate)
+        => new Simulation().AssertSqlError($"{FilterTable} create index ix on fx(a) where {predicate}", 10735, "Incorrect WHERE clause for filtered index 'ix' on table 'fx'.");
+
+    [TestMethod]
+    [DataRow("a = 1 and b > 2", "([a]=(1) AND [b]>(2))")]
+    [DataRow("a in (1, 2)", "([a] IN ((1), (2)))")]
+    [DataRow("a is null and s = 'x'", "([a] IS NULL AND [s]='x')")]
+    [DataRow("a > 1 and (b = 2)", "([a]>(1) AND [b]=(2))")]
+    [DataRow("a <> 1", "([a]<>(1))")]
+    [DataRow("a = -1", "([a]=(-1))")]
+    [DataRow("d > '2020-01-01'", "([d]>'2020-01-01')")]
+    public void FilteredIndex_AcceptedShape_StoresItsDefinition(string predicate, string definition)
+        => AreEqual(definition, new Simulation().ExecuteScalar($"{FilterTable} create index ix on fx(a) where {predicate}; select filter_definition from sys.indexes where name = 'ix'"));
 }

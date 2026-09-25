@@ -343,6 +343,14 @@ partial class SimulatedSqlException
         new($"Parameter {parameterNumber} is incorrect for this DBCC statement.", 2560, 16, state);
 
     /// <summary>
+    /// Mimics SQL Server error 10735: a filtered index's WHERE clause isn't an
+    /// AND of column-against-constant comparisons (probed 2026-09-24 against
+    /// SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException IncorrectFilteredIndexWhereClause(string indexName, string tableName) =>
+        new($"Incorrect WHERE clause for filtered index '{indexName}' on table '{tableName}'.", 10735, 15, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 7997: <c>DBCC CHECKIDENT</c> named a table with
     /// no identity column (probed 2026-09-24 against SQL Server 2025).
     /// </summary>
