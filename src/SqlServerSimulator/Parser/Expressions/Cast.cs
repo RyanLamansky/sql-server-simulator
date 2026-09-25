@@ -314,6 +314,11 @@ internal sealed class Cast : Expression
         if (source == SqlType.Text || source == SqlType.NText || source == SqlType.Image)
             return IsRejectedLegacyLobConversion(source, target);
 
+        // A MAX string or binary can't be held by a sql_variant, even
+        // explicitly (probed 2026-09-25 against SQL Server 2025).
+        if (target is SqlVariantSqlType && source is VarcharSqlType { length: SqlType.MaxLengthSentinel } or NVarcharSqlType { length: SqlType.MaxLengthSentinel } or VarbinarySqlType { length: SqlType.MaxLengthSentinel })
+            return true;
+
         // A CLR type converts to and from a character string or a binary and
         // nothing else, another CLR type included (probed 2026-09-25 against
         // SQL Server 2025).

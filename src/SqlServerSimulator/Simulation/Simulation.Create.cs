@@ -1282,7 +1282,10 @@ partial class Simulation
                     identitySpec = ParseIdentitySpec(context);
                     continue;
                 case UnquotedString { ContextualKeyword: ContextualKeyword.Generated } when generatedAs == GeneratedAlwaysAsRow.None:
-                    if (isTableVariable || isTableType)
+                    // The period clause comes ahead of any NULL / NOT NULL:
+                    // `datetime2 NOT NULL GENERATED …` is Msg 102 at GENERATED
+                    // (probed 2026-09-25 against SQL Server 2025).
+                    if (isTableVariable || isTableType || nullable.HasValue)
                         throw SimulatedSqlException.SyntaxErrorNear(context);
                     if (context.GetNextRequired() is not UnquotedString { ContextualKeyword: ContextualKeyword.Always })
                         throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -1467,7 +1470,11 @@ partial class Simulation
             context.Batch, qualifiedTypeName, typeName, declaredMaxLength, declaredScale,
             index: ordinalOffset + heapColumns.Count + 1, TypeSpecSite.Column, columnName: columnName.Value);
         // Alias-type-declared nullability propagates as the column default
-        // when the column declaration omits an explicit NULL / NOT NULL.
+        // when the column declaration omits an explicit NULL / NOT NULL. A
+        // period column defaults to NOT NULL instead (probed 2026-09-25 against
+        // SQL Server 2025); only a NULL written after it is Msg 13587.
+        if (generatedAs != GeneratedAlwaysAsRow.None)
+            nullable ??= false;
         nullable ??= aliasIsNullable;
         var actualNullable = nullable ?? (identitySpec is null);
 

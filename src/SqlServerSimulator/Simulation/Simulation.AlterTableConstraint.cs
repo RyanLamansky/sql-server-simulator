@@ -1069,7 +1069,7 @@ partial class Simulation
             if (column.Type is not DateTime2SqlType)
                 throw SimulatedSqlException.TemporalGeneratedColumnInvalidType(column.Name);
             return column.Nullable
-                ? throw SimulatedSqlException.TemporalPeriodColumnNullable(column.Name)
+                ? throw SimulatedSqlException.TemporalPeriodColumnNullable(column.Name, state: 3)
                 : i;
         }
 

@@ -364,8 +364,6 @@ Real bugs / limitations against shipped behavior — fixes are concrete work, no
 - **A typed write through `CAST(… AS xml(<collection>))` isn't validated** — the CAST grammar doesn't parse a collection argument, so that third typed target neither validates nor canonicalizes where the column and variable forms do.
 - **The bacpac loader writes typed `xml` unvalidated** — it copies decoded wire values straight into the row rather than through the per-column coercion the DML paths take, so an import neither checks nor canonicalizes.
   Harmless for an exported bacpac, whose text is already real's canonical form, but it means an import is not the oracle a write is.
-- **Msg 13525 renders a MAX length uppercase** — real's temporal shape-mismatch message writes `nvarchar(max)` where the simulator writes `nvarchar(MAX)`, off `SqlType.SqlServerName`'s own casing.
-  Worth checking which other messages inherit it before changing the shared renderer.
 
 - **A text pointer's row half is a hash of the cell's value, not of the row** — the pointer `TEXTPTR` hands out is derived from (column name, cell value), with a per-table cache binding the pair to the row address the statements settled on, which is what carries one pointer through the chunked `WRITETEXT`-then-`UPDATETEXT` idiom (see [`legacy-lob.md`](legacy-lob.md#the-pointer-encoding)).
   Three consequences follow, each probed against real and each wanting the row address at `TEXTPTR` evaluation time — which the expression layer doesn't see, since a FROM source yields row bytes and drops the RID:

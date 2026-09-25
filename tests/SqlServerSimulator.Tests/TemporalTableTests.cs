@@ -1347,4 +1347,46 @@ public sealed class TemporalTableTests
             """);
         AreEqual("SYSTEM_TIME", sim.ExecuteScalar("select name from sys.periods where object_id = object_id('q')"));
     }
+
+    /// <summary>
+    /// A period column is NOT NULL without saying so, and its GENERATED clause
+    /// comes ahead of any NULL / NOT NULL — written after one, it is Msg 102
+    /// (probed 2026-09-25 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void Ddl_PeriodColumnWithoutNullability_IsNotNull()
+        => AreEqual("0|0", new Simulation().ExecuteScalar("""
+            create table t (id int primary key, s datetime2 generated always as row start, e datetime2 generated always as row end, period for system_time (s, e));
+            select concat_ws('|', columnproperty(object_id('t'), 's', 'AllowsNull'), columnproperty(object_id('t'), 'e', 'AllowsNull'))
+            """));
+
+    [TestMethod]
+    [DataRow("s datetime2 not null generated always as row start", "generated")]
+    [DataRow("s datetime2 null generated always as row start", "generated")]
+    [DataRow("s datetime2 generated always as row start not null hidden", "hidden")]
+    public void Ddl_NullabilityAheadOfThePeriodClause_IsASyntaxError(string startColumn, string near)
+        => new Simulation().AssertSqlError(
+            $"create table t (id int primary key, {startColumn}, e datetime2 generated always as row end, period for system_time (s, e))",
+            102,
+            $"Incorrect syntax near '{near}'.");
+
+    [TestMethod]
+    public void AddPeriod_NullableColumn_RaisesMsg13587AtState3()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table q (id int, s datetime2 null, e datetime2 not null)");
+        AreEqual((byte)3, sim.AssertSqlError("alter table q add period for system_time (s, e)", 13587).State);
+    }
+
+    [TestMethod]
+    public void HistoryTypeMismatch_WritesMaxInLowerCase()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table h (id int not null, v nvarchar(10), s datetime2 not null, e datetime2 not null);
+            create table t (id int primary key, v nvarchar(max), s datetime2 generated always as row start, e datetime2 generated always as row end, period for system_time (s, e))
+            """);
+        sim.AssertSqlError("alter table t set (system_versioning = on (history_table = dbo.h))", 13525,
+            "Setting SYSTEM_VERSIONING to ON failed because column 'v' has data type nvarchar(10) in history table 'simulated.dbo.h' which is different from corresponding column type nvarchar(max) in table 'simulated.dbo.t'.");
+    }
 }

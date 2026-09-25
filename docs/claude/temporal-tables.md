@@ -6,6 +6,7 @@ Read this when working on `PERIOD FOR SYSTEM_TIME`, `GENERATED ALWAYS AS ROW STA
 
 - **CREATE TABLE** with `PERIOD FOR SYSTEM_TIME (startCol, endCol)` table-level declaration + per-column `GENERATED ALWAYS AS ROW START | END [HIDDEN] NOT NULL`.
   The two period columns must be `datetime2(N)` NOT NULL; nullable or non-datetime2 raises Msg 13501 / 13587.
+  A period column is NOT NULL without saying so, and the `GENERATED` clause comes ahead of any `NULL` / `NOT NULL` — written after one it is Msg 102 at `generated`, and `HIDDEN` likewise precedes the nullability; `ALTER TABLE … ADD PERIOD` over a nullable column reports its Msg 13587 at state 3 (probed 2026-09-25).
   Asymmetric definitions raise Msg 13504 / 13505; period names not matching the GENERATED columns raise Msg 13506 / 13507; orphan GENERATED-AS-ROW columns without a `PERIOD` declaration raise Msg 13509.
   Probe-confirmed verbatim wording against SQL Server 2025.
 - **`WITH (SYSTEM_VERSIONING = ON (HISTORY_TABLE = schema.table))`** trailing clause auto-creates the sibling history `HeapTable` at parent-creation time.

@@ -1509,9 +1509,11 @@ partial class SimulatedSqlException
     /// Mimics SQL Server error 13587: a period column on a system-versioned
     /// temporal table was declared with explicit <c>NULL</c>. Probe-confirmed
     /// wording (the implicit <c>NOT NULL</c> form is required).
+    /// State 1 from a CREATE TABLE's own period, 3 from ALTER TABLE ADD PERIOD
+    /// (probed 2026-09-25).
     /// </summary>
-    internal static SimulatedSqlException TemporalPeriodColumnNullable(string columnName) =>
-        new($"Period column '{columnName}' in a system-versioned temporal table cannot be nullable.", 13587, 16, 1);
+    internal static SimulatedSqlException TemporalPeriodColumnNullable(string columnName, byte state = 1) =>
+        new($"Period column '{columnName}' in a system-versioned temporal table cannot be nullable.", 13587, 16, state);
 
     /// <summary>
     /// Mimics SQL Server error 13513: <c>PERIOD FOR SYSTEM_TIME</c> named two
@@ -1688,10 +1690,11 @@ partial class SimulatedSqlException
     /// <summary>
     /// Mimics SQL Server error 13525: matching columns have different declared
     /// types, rendered in their full declaration form (<c>nvarchar(60)</c>,
-    /// <c>datetime2(3)</c>). Probe-confirmed wording.
+    /// <c>datetime2(3)</c>, <c>nvarchar(max)</c> in lower case). Probe-confirmed
+    /// wording.
     /// </summary>
     internal static SimulatedSqlException HistoryTableColumnTypeMismatch(string columnName, string historyType, string qualifiedHistoryName, string baseType, string qualifiedTableName) =>
-        new($"Setting SYSTEM_VERSIONING to ON failed because column '{columnName}' has data type {historyType} in history table '{qualifiedHistoryName}' which is different from corresponding column type {baseType} in table '{qualifiedTableName}'.", 13525, 16, 1);
+        new($"Setting SYSTEM_VERSIONING to ON failed because column '{columnName}' has data type {historyType.Replace("(MAX)", "(max)", StringComparison.Ordinal)} in history table '{qualifiedHistoryName}' which is different from corresponding column type {baseType.Replace("(MAX)", "(max)", StringComparison.Ordinal)} in table '{qualifiedTableName}'.", 13525, 16, 1);
 
     /// <summary>
     /// Mimics SQL Server error 13526: matching columns resolve to different

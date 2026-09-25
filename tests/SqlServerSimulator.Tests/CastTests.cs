@@ -1080,5 +1080,19 @@ public sealed class CastTests
     [DataRow("cast('1e300' as real)", 8115, "Arithmetic overflow error converting expression to data type real.")]
     public void FloatPastRealsRange_Overflows(string expression, int number, string message)
         => new Simulation().AssertSqlError($"select {expression}", number, message);
+
+    [TestMethod]
+    [DataRow("varchar(max)", "'a'")]
+    [DataRow("nvarchar(max)", "N'a'")]
+    [DataRow("varbinary(max)", "0x01")]
+    public void MaxFormToSqlVariant_RaisesMsg529(string type, string value)
+        => new Simulation().AssertSqlError($"declare @v {type} = {value}; select cast(@v as sql_variant)", 529, $"Explicit conversion from data type {type} to sql_variant is not allowed.");
+
+    [TestMethod]
+    [DataRow("declare @v varchar(max) = 'a'; select @v + 1", 245, "Conversion failed when converting the varchar value 'a' to data type int.")]
+    [DataRow("declare @v nvarchar(max) = 'a'; select cast(@v as int)", 245, "Conversion failed when converting the nvarchar value 'a' to data type int.")]
+    [DataRow("declare @v varchar(max) = 'a'; select cast(@v as decimal(5,2))", 8114, "Error converting data type varchar to numeric.")]
+    public void MaxFormConversionFailure_NamesTheFamily(string sql, int number, string message)
+        => new Simulation().AssertSqlError(sql, number, message);
 }
 

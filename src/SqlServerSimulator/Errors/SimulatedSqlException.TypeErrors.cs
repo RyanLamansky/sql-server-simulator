@@ -301,13 +301,14 @@ partial class SimulatedSqlException
     /// <summary>
     /// A string source as real's conversion failures name it: a fixed-length
     /// <c>char</c> / <c>nchar</c> reads as <c>varchar</c> / <c>nvarchar</c>,
-    /// and a <c>sysname</c> as the <c>nvarchar</c> it aliases (probed
-    /// 2026-09-25 against SQL Server 2025, columns and CASTs alike).
+    /// a <c>sysname</c> as the <c>nvarchar</c> it aliases, and a MAX form
+    /// without its <c>(max)</c> (probed 2026-09-25 against SQL Server 2025,
+    /// columns and CASTs alike).
     /// </summary>
     private static string ConversionSourceName(SqlType source) => source switch
     {
-        CharSqlType => "varchar",
-        NCharSqlType or SystemNameSqlType => "nvarchar",
+        CharSqlType or VarcharSqlType => "varchar",
+        NCharSqlType or NVarcharSqlType or SystemNameSqlType => "nvarchar",
         _ => FamilyRootName(source),
     };
 

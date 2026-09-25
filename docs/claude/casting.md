@@ -244,6 +244,7 @@ The table is the probed one — SQL Server 2025, 2026-08-05, every ordered pair 
 | `uniqueidentifier` | every number, the whole date/time family, `xml` |
 | `xml` | every number, the whole date/time family, `uniqueidentifier`, `sql_variant` |
 | `sql_variant` | `xml` |
+| `varchar(max)` / `nvarchar(max)` / `varbinary(max)` | `sql_variant` — named with its `(max)` (probed 2026-09-25) |
 | `binary` / `varbinary` | `float`, `real` |
 | anything but a character string | `text` / `ntext` |
 | anything but an ANSI character string or a binary | `image` |
