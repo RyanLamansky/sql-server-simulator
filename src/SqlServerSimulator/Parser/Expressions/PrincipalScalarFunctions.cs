@@ -21,7 +21,7 @@ internal static class PrincipalPlaceholders
 /// <see cref="Database.Principals"/> (seeded with <c>public</c>=0,
 /// <c>dbo</c>=1, <c>guest</c>=2, <c>INFORMATION_SCHEMA</c>=3, <c>sys</c>=4);
 /// unknown id returns NULL, NULL argument returns NULL. Result type is
-/// <see cref="SqlType.SystemName"/> (sysname).
+/// <see cref="Expression.MetadataNameType"/>.
 /// </summary>
 internal sealed class UserName : Expression
 {
@@ -39,24 +39,24 @@ internal sealed class UserName : Expression
     public override SqlValue Run(RuntimeContext runtime)
     {
         if (this.idArg is null)
-            return SqlValue.FromString(SqlType.SystemName, runtime.Batch.Connection.Security.Effective.DatabasePrincipalName);
+            return SqlValue.FromNVarchar(MetadataNameType(runtime.Batch), runtime.Batch.Connection.Security.Effective.DatabasePrincipalName);
         var idValue = this.idArg.Run(runtime);
         if (idValue.IsNull)
-            return SqlValue.Null(SqlType.SystemName);
+            return SqlValue.Null(MetadataNameType(runtime.Batch));
         var id = ScalarArguments.CoerceToInt(idValue);
         foreach (var principal in runtime.Batch.CurrentDatabase.Principals.Values)
         {
             if (principal.PrincipalId == id)
-                return SqlValue.FromString(SqlType.SystemName, principal.Name);
+                return SqlValue.FromNVarchar(MetadataNameType(runtime.Batch), principal.Name);
         }
-        return SqlValue.Null(SqlType.SystemName);
+        return SqlValue.Null(MetadataNameType(runtime.Batch));
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
         if (this.idArg is not null)
             _ = AssignmentRules.ArgumentType(this.idArg, SqlType.Int32, batch, resolveColumnType);
-        return SqlType.SystemName;
+        return MetadataNameType(batch);
     }
 
     internal override string DebugDisplay() => this.idArg is null ? "USER_NAME()" : $"USER_NAME({this.idArg.DebugDisplay()})";
@@ -72,7 +72,7 @@ internal sealed class UserName : Expression
 /// an assignment would (probed 2026-09-25 against SQL Server 2025:
 /// <c>SUSER_NAME(1)</c> and <c>SUSER_SNAME(0x01)</c> are <c>sa</c>,
 /// <c>SUSER_NAME(2)</c> is <c>public</c>). Result type is
-/// <see cref="SqlType.SystemName"/> (sysname).
+/// <see cref="Expression.MetadataNameType"/>.
 /// </summary>
 internal sealed class SUserName : Expression
 {
@@ -92,10 +92,10 @@ internal sealed class SUserName : Expression
     public override SqlValue Run(RuntimeContext runtime)
     {
         if (this.arg is null)
-            return SqlValue.FromString(SqlType.SystemName, runtime.Batch.Connection.Security.Effective.LoginName);
+            return SqlValue.FromNVarchar(MetadataNameType(runtime.Batch), runtime.Batch.Connection.Security.Effective.LoginName);
         var argValue = this.arg.Run(runtime);
         if (argValue.IsNull)
-            return SqlValue.Null(SqlType.SystemName);
+            return SqlValue.Null(MetadataNameType(runtime.Batch));
         var sid = this.isSidVariant ? argValue.CoerceTo(SqlType.Varbinary).AsBytes : null;
         var id = this.isSidVariant ? 0 : StringScalars.CoerceLengthArgument(argValue);
         foreach (var row in BuiltInResources.EnumerateSysServerPrincipals(runtime.Batch, runtime.Batch.CurrentDatabase))
@@ -103,14 +103,14 @@ internal sealed class SUserName : Expression
             if (sid is not null ? !row[2].IsNull && row[2].AsBytes.AsSpan().SequenceEqual(sid) : row[1].AsInt32 == id)
                 return row[0];
         }
-        return SqlValue.Null(SqlType.SystemName);
+        return SqlValue.Null(MetadataNameType(runtime.Batch));
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
         if (this.arg is not null)
             _ = AssignmentRules.ArgumentType(this.arg, this.isSidVariant ? SqlType.Varbinary : SqlType.Int32, batch, resolveColumnType);
-        return SqlType.SystemName;
+        return MetadataNameType(batch);
     }
 
     internal override string DebugDisplay() => this.arg is null
@@ -211,10 +211,11 @@ internal sealed class SidBinary : Expression
 }
 
 /// <summary>
-/// SQL <c>ORIGINAL_LOGIN()</c>: returns the original login of the session
-/// before any <c>EXECUTE AS</c> impersonation. The simulator doesn't model
-/// impersonation, so this always returns the placeholder login
-/// (<c>dbo</c>). Result type is <see cref="SqlType.SystemName"/> (sysname).
+/// SQL <c>ORIGINAL_LOGIN()</c>: returns the login the session connected as,
+/// unchanged by any <c>EXECUTE AS</c> impersonation. Unlike the other
+/// principal-name scalars its result is <c>nvarchar(4000)</c> (probed
+/// 2026-09-25 against SQL Server 2025), in the database's collation at
+/// coercible-default.
 /// </summary>
 internal sealed class OriginalLogin : Expression
 {
@@ -225,9 +226,12 @@ internal sealed class OriginalLogin : Expression
     }
 
     public override SqlValue Run(RuntimeContext runtime) =>
-        SqlValue.FromString(SqlType.SystemName, runtime.Batch.Connection.Security.OriginalLoginName);
+        SqlValue.FromNVarchar(ResultType(runtime.Batch), runtime.Batch.Connection.Security.OriginalLoginName);
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SystemName;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => ResultType(batch);
+
+    private static NVarcharSqlType ResultType(BatchContext batch) =>
+        NVarcharSqlType.Get(4000, batch.CurrentDatabase.Collation, Coercibility.CoercibleDefault);
 
     internal override string DebugDisplay() => "ORIGINAL_LOGIN()";
 
@@ -288,7 +292,7 @@ internal sealed class AppName : Expression
 /// <c>SESSION_USER</c>, bare <c>USER</c> (the effective database user), and
 /// <c>SYSTEM_USER</c> (the effective login, <c>isLogin</c>). All read the
 /// session's effective security frame; an unimpersonated in-process session
-/// reports <c>dbo</c>. Result type is <see cref="SqlType.SystemName"/> (sysname).
+/// reports <c>dbo</c>. Result type is <see cref="Expression.MetadataNameType"/>.
 /// Wired through <see cref="Expression.Parse"/>'s reserved-keyword switch rather
 /// than <c>ResolveBuiltIn</c> because the SQL grammar permits no parens.
 /// </summary>
@@ -303,10 +307,10 @@ internal sealed class CurrentPrincipalKeyword(string keywordText, bool isLogin =
     public override SqlValue Run(RuntimeContext runtime)
     {
         var effective = runtime.Batch.Connection.Security.Effective;
-        return SqlValue.FromString(SqlType.SystemName, this.isLogin ? effective.LoginName : effective.DatabasePrincipalName);
+        return SqlValue.FromNVarchar(MetadataNameType(runtime.Batch), this.isLogin ? effective.LoginName : effective.DatabasePrincipalName);
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SystemName;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => MetadataNameType(batch);
 
     internal override string DebugDisplay() => this.keywordText;
 

@@ -9,7 +9,7 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// against SQL Server 2025 (2026-05-22): <c>TYPE_NAME(56)</c> →
 /// <c>'int'</c>; <c>TYPE_NAME(0)</c> → <c>'void type'</c> (the placeholder
 /// SQL Server uses for "no type"). Result type is
-/// <see cref="SqlType.SystemName"/> (sysname).
+/// <see cref="Expression.MetadataNameType"/>.
 /// </summary>
 internal sealed class TypeName : Expression
 {
@@ -26,22 +26,22 @@ internal sealed class TypeName : Expression
     {
         var v = this.idArg.Run(runtime);
         if (v.IsNull)
-            return SqlValue.Null(SqlType.SystemName);
+            return SqlValue.Null(MetadataNameType(runtime.Batch));
         var id = ScalarArguments.CoerceToInt(v);
         // Three ids name no sys.types row but answer all the same (probed
         // 2026-09-25 against SQL Server 2025).
         switch (id)
         {
-            case 0: return SqlValue.FromString(SqlType.SystemName, "void type");
-            case 1: return SqlValue.FromString(SqlType.SystemName, "table");
-            case 243: return SqlValue.FromString(SqlType.SystemName, "table type");
+            case 0: return SqlValue.FromNVarchar(MetadataNameType(runtime.Batch), "void type");
+            case 1: return SqlValue.FromNVarchar(MetadataNameType(runtime.Batch), "table");
+            case 243: return SqlValue.FromNVarchar(MetadataNameType(runtime.Batch), "table type");
         }
         // System types resolve through the same row data the sys.types
         // catalog view uses (column 3 = user_type_id, column 0 = name).
         foreach (var row in BuiltInResources.SystypesRowData)
         {
             if (Convert.ToInt32(row[3]!, System.Globalization.CultureInfo.InvariantCulture) == id)
-                return SqlValue.FromString(SqlType.SystemName, (string)row[0]!);
+                return SqlValue.FromNVarchar(MetadataNameType(runtime.Batch), (string)row[0]!);
         }
         // User-defined table types and scalar alias types — only the
         // current database's schemas are searched (matching real
@@ -51,21 +51,21 @@ internal sealed class TypeName : Expression
             foreach (var tt in schema.TableTypes.Values)
             {
                 if (tt.UserTypeId == id)
-                    return SqlValue.FromString(SqlType.SystemName, tt.Name);
+                    return SqlValue.FromNVarchar(MetadataNameType(runtime.Batch), tt.Name);
             }
             foreach (var alias in schema.AliasTypes.Values)
             {
                 if (alias.UserTypeId == id)
-                    return SqlValue.FromString(SqlType.SystemName, alias.Name);
+                    return SqlValue.FromNVarchar(MetadataNameType(runtime.Batch), alias.Name);
             }
         }
-        return SqlValue.Null(SqlType.SystemName);
+        return SqlValue.Null(MetadataNameType(runtime.Batch));
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
         _ = AssignmentRules.ArgumentType(this.idArg, SqlType.Int32, batch, resolveColumnType);
-        return SqlType.SystemName;
+        return MetadataNameType(batch);
     }
 
     internal override string DebugDisplay() => $"TYPE_NAME({this.idArg.DebugDisplay()})";
@@ -102,17 +102,17 @@ internal sealed class ParseName : Expression
         var name = this.nameArg.Run(runtime);
         var index = this.indexArg.Run(runtime);
         if (name.IsNull || index.IsNull)
-            return SqlValue.Null(SqlType.SystemName);
+            return SqlValue.Null(MetadataNameType(runtime.Batch));
         var n = StringScalars.CoerceLengthArgument(index);
         if (n is < 1 or > 4)
-            return SqlValue.Null(SqlType.SystemName);
+            return SqlValue.Null(MetadataNameType(runtime.Batch));
         var parts = name.CoerceTo(SqlType.NVarchar).AsString.Split('.');
         if (parts.Length < n)
-            return SqlValue.Null(SqlType.SystemName);
+            return SqlValue.Null(MetadataNameType(runtime.Batch));
         var segment = parts[^n];
         if (segment.Length >= 2 && segment[0] == '[' && segment[^1] == ']')
             segment = segment[1..^1];
-        return SqlValue.FromString(SqlType.SystemName, segment);
+        return SqlValue.FromNVarchar(MetadataNameType(runtime.Batch), segment);
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
@@ -122,7 +122,7 @@ internal sealed class ParseName : Expression
         if (this.nameArg.GetSqlType(batch, resolveColumnType) is (XmlSqlType or SqlVariantSqlType) and var nameType)
             throw SimulatedSqlException.InvalidArgumentDataType(nameType.SqlServerName, 1, "parsename");
         _ = AssignmentRules.ArgumentType(this.indexArg, SqlType.Int32, batch, resolveColumnType);
-        return SqlType.SystemName;
+        return MetadataNameType(batch);
     }
 
     internal override string DebugDisplay() => $"PARSENAME({this.nameArg.DebugDisplay()}, {this.indexArg.DebugDisplay()})";
@@ -135,7 +135,7 @@ internal sealed class ParseName : Expression
 /// connection time. The simulator captures the connection's initial
 /// database name when the session opens and exposes it here; real
 /// SQL Server returns the connection-string Initial Catalog. Result is
-/// <see cref="SqlType.SystemName"/> (sysname).
+/// <see cref="Expression.MetadataNameType"/>.
 /// </summary>
 internal sealed class OriginalDbName : Expression
 {
@@ -146,9 +146,9 @@ internal sealed class OriginalDbName : Expression
     }
 
     public override SqlValue Run(RuntimeContext runtime) =>
-        SqlValue.FromString(SqlType.SystemName, Simulation.DefaultDatabaseName);
+        SqlValue.FromNVarchar(MetadataNameType(runtime.Batch), Simulation.DefaultDatabaseName);
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SystemName;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => MetadataNameType(batch);
 
     internal override string DebugDisplay() => "ORIGINAL_DB_NAME()";
 

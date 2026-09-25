@@ -43,32 +43,32 @@ internal sealed class IndexCol : Expression
         var indexIdValue = this.indexIdArg.Run(runtime);
         var keyIdValue = this.keyIdArg.Run(runtime);
         if (tableValue.IsNull || indexIdValue.IsNull || keyIdValue.IsNull)
-            return SqlValue.Null(SqlType.SystemName);
+            return SqlValue.Null(MetadataNameType(runtime.Batch));
 
         var tableName = tableValue.CoerceTo(SqlType.NVarchar).AsString;
         if (!ObjectId.TryParseObjectName(tableName, out var parsed)
             || !runtime.Batch.TryResolveTable(parsed, out var table))
         {
-            return SqlValue.Null(SqlType.SystemName);
+            return SqlValue.Null(MetadataNameType(runtime.Batch));
         }
 
         var indexId = ScalarArguments.CoerceToInt(indexIdValue);
         if (IndexLookup.ResolveByIndexId(table, indexId) is not { } resolved)
-            return SqlValue.Null(SqlType.SystemName);
+            return SqlValue.Null(MetadataNameType(runtime.Batch));
 
         var keyId = ScalarArguments.CoerceToInt(keyIdValue);
         if (IndexLookup.GetKeyColumn(resolved.Constraint, resolved.Index, keyId) is not { } keyCol)
-            return SqlValue.Null(SqlType.SystemName);
+            return SqlValue.Null(MetadataNameType(runtime.Batch));
 
         // INDEX_COL reports the column's *name*, so this indexes back into
         // Columns and wants the ordinal rather than the stable column_id.
         var fullOrdinal = IndexLookup.StorageOrdinalToFullOrdinal(table, keyCol.StorageOrdinal);
         return (uint)fullOrdinal >= (uint)table.Columns.Length
-            ? SqlValue.Null(SqlType.SystemName)
-            : SqlValue.FromSystemName(table.Columns[fullOrdinal].Name);
+            ? SqlValue.Null(MetadataNameType(runtime.Batch))
+            : SqlValue.FromNVarchar(MetadataNameType(runtime.Batch), table.Columns[fullOrdinal].Name);
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SystemName;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => MetadataNameType(batch);
 
     internal override string DebugDisplay() =>
         $"INDEX_COL({this.tableArg.DebugDisplay()}, {this.indexIdArg.DebugDisplay()}, {this.keyIdArg.DebugDisplay()})";

@@ -16,7 +16,7 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// scoped to the connection's current database; with it the lookup is
 /// scoped to the named database (NULL / unknown / out-of-range id →
 /// NULL). NULL <c>object_id</c> returns NULL; missing / negative id
-/// returns NULL; result type is <see cref="SqlType.SystemName"/>.
+/// returns NULL; result type is <see cref="Expression.MetadataNameType"/>.
 /// Database-id allocation matches <see cref="DbId"/>'s
 /// alphabetical-position scheme.
 /// </summary>
@@ -42,7 +42,7 @@ internal sealed class ObjectName : Expression
     {
         var idValue = this.idArg.Run(runtime);
         if (idValue.IsNull)
-            return SqlValue.Null(SqlType.SystemName);
+            return SqlValue.Null(MetadataNameType(runtime.Batch));
         var id = ScalarArguments.CoerceToInt(idValue);
 
         Database? targetDb;
@@ -54,11 +54,11 @@ internal sealed class ObjectName : Expression
         {
             var dbIdValue = this.dbIdArg.Run(runtime);
             if (dbIdValue.IsNull)
-                return SqlValue.Null(SqlType.SystemName);
+                return SqlValue.Null(MetadataNameType(runtime.Batch));
             var dbIdInt = ScalarArguments.CoerceToInt(dbIdValue);
             targetDb = DbId.DatabaseWithId(runtime.Batch.Connection.Simulation, dbIdInt);
             if (targetDb is null)
-                return SqlValue.Null(SqlType.SystemName);
+                return SqlValue.Null(MetadataNameType(runtime.Batch));
         }
 
         // A restricted principal gets NULL for an id it can't view metadata for
@@ -69,7 +69,7 @@ internal sealed class ObjectName : Expression
         // the id form never raises: a database the login has no user in simply
         // reveals nothing and the answer is NULL (probe-confirmed).
         if (!PermissionEnforcement.TryMetadataVisibilityPrincipal(runtime.Batch, targetDb, out var principalId))
-            return SqlValue.Null(SqlType.SystemName);
+            return SqlValue.Null(MetadataNameType(runtime.Batch));
         foreach (var schema in targetDb.Schemas.Values)
         {
             foreach (var obj in schema.SchemaObjects())
@@ -80,13 +80,13 @@ internal sealed class ObjectName : Expression
                     ? (trigger.Parent.ObjectId, trigger.Parent.SchemaId)
                     : (obj.ObjectId, obj.SchemaId);
                 return principalId is { } filter && !PermissionChecker.CanViewMetadata(targetDb, filter, governObjectId, governSchemaId)
-                    ? SqlValue.Null(SqlType.SystemName)
-                    : SqlValue.FromString(SqlType.SystemName, obj.Name);
+                    ? SqlValue.Null(MetadataNameType(runtime.Batch))
+                    : SqlValue.FromNVarchar(MetadataNameType(runtime.Batch), obj.Name);
             }
             foreach (var tableType in schema.TableTypes.Values)
             {
                 if (tableType.ObjectId == id)
-                    return SqlValue.FromString(SqlType.SystemName, tableType.Name);
+                    return SqlValue.FromNVarchar(MetadataNameType(runtime.Batch), tableType.Name);
             }
         }
         // A temp table lives in tempdb's catalog, so an id there names it.
@@ -95,20 +95,20 @@ internal sealed class ObjectName : Expression
             foreach (var table in BuiltInResources.CatalogTables(targetDb.Schemas[Database.DefaultSchemaName], runtime.Batch))
             {
                 if (table.ObjectId == id)
-                    return SqlValue.FromString(SqlType.SystemName, table.Name);
+                    return SqlValue.FromNVarchar(MetadataNameType(runtime.Batch), table.Name);
             }
         }
         // A system object's negative id names it in every database.
         if (BuiltInResources.TryResolveSystemObject(id, out var system))
-            return SqlValue.FromString(SqlType.SystemName, system.Name);
+            return SqlValue.FromNVarchar(MetadataNameType(runtime.Batch), system.Name);
         // A constraint id reads back its own name, visibility following the
         // table it hangs off (constraints aren't SchemaObjects, so the walk
         // above can't reach one).
         return ConstraintLookup.TryResolveById(targetDb, id, out var constraint)
             && (principalId is not { } constraintFilter
                 || PermissionChecker.CanViewMetadata(targetDb, constraintFilter, constraint.Table.ObjectId, constraint.Table.SchemaId))
-            ? SqlValue.FromString(SqlType.SystemName, constraint.Name)
-            : SqlValue.Null(SqlType.SystemName);
+            ? SqlValue.FromNVarchar(MetadataNameType(runtime.Batch), constraint.Name)
+            : SqlValue.Null(MetadataNameType(runtime.Batch));
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
@@ -116,7 +116,7 @@ internal sealed class ObjectName : Expression
         _ = AssignmentRules.ArgumentType(this.idArg, SqlType.Int32, batch, resolveColumnType);
         if (this.dbIdArg is not null)
             _ = AssignmentRules.ArgumentType(this.dbIdArg, SqlType.Int32, batch, resolveColumnType);
-        return SqlType.SystemName;
+        return MetadataNameType(batch);
     }
 
     internal override string DebugDisplay() =>

@@ -8,7 +8,7 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// when called with no argument. Probe-confirmed against SQL Server 2025
 /// (2026-05-13): no-arg returns <c>dbo</c> for the user the simulator
 /// emulates; a non-existent or negative id returns NULL; a NULL argument
-/// returns NULL. Result type is <see cref="SqlType.SystemName"/> (sysname /
+/// returns NULL. Result type is <see cref="Expression.MetadataNameType"/> (<c>nvarchar(128)</c> /
 /// nvarchar(128)) — mirrors <see cref="SchemaId"/>'s int-result inverse.
 /// </summary>
 internal sealed class SchemaName : Expression
@@ -27,24 +27,24 @@ internal sealed class SchemaName : Expression
     public override SqlValue Run(RuntimeContext runtime)
     {
         if (this.idArg is null)
-            return SqlValue.FromString(SqlType.SystemName, Database.DefaultSchemaName);
+            return SqlValue.FromNVarchar(MetadataNameType(runtime.Batch), Database.DefaultSchemaName);
         var idValue = this.idArg.Run(runtime);
         if (idValue.IsNull)
-            return SqlValue.Null(SqlType.SystemName);
+            return SqlValue.Null(MetadataNameType(runtime.Batch));
         var id = ScalarArguments.CoerceToInt(idValue);
         foreach (var schema in runtime.Batch.CurrentDatabase.Schemas.Values)
         {
             if (schema.SchemaId == id)
-                return SqlValue.FromString(SqlType.SystemName, schema.Name);
+                return SqlValue.FromNVarchar(MetadataNameType(runtime.Batch), schema.Name);
         }
-        return SqlValue.Null(SqlType.SystemName);
+        return SqlValue.Null(MetadataNameType(runtime.Batch));
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
         if (this.idArg is not null)
             _ = AssignmentRules.ArgumentType(this.idArg, SqlType.Int32, batch, resolveColumnType);
-        return SqlType.SystemName;
+        return MetadataNameType(batch);
     }
 
     internal override string DebugDisplay() =>

@@ -28,7 +28,7 @@ internal sealed class ColName : Expression
         var tableIdValue = this.tableIdArg.Run(runtime);
         var colIdValue = this.colIdArg.Run(runtime);
         if (tableIdValue.IsNull || colIdValue.IsNull)
-            return SqlValue.Null(SqlType.SystemName);
+            return SqlValue.Null(MetadataNameType(runtime.Batch));
         var tableId = ScalarArguments.CoerceToInt(tableIdValue);
         var colId = ScalarArguments.CoerceToInt(colIdValue);
         foreach (var schema in runtime.Batch.CurrentDatabase.Schemas.Values)
@@ -38,19 +38,19 @@ internal sealed class ColName : Expression
                 if (table.ObjectId == tableId)
                 {
                     return colId >= 1 && colId <= table.Columns.Length
-                        ? SqlValue.FromString(SqlType.SystemName, table.Columns[colId - 1].Name)
-                        : SqlValue.Null(SqlType.SystemName);
+                        ? SqlValue.FromNVarchar(MetadataNameType(runtime.Batch), table.Columns[colId - 1].Name)
+                        : SqlValue.Null(MetadataNameType(runtime.Batch));
                 }
             }
         }
-        return SqlValue.Null(SqlType.SystemName);
+        return SqlValue.Null(MetadataNameType(runtime.Batch));
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
         _ = AssignmentRules.ArgumentType(this.tableIdArg, SqlType.Int32, batch, resolveColumnType);
         _ = AssignmentRules.ArgumentType(this.colIdArg, SqlType.Int32, batch, resolveColumnType);
-        return SqlType.SystemName;
+        return MetadataNameType(batch);
     }
 
     internal override string DebugDisplay() => $"COL_NAME({this.tableIdArg.DebugDisplay()}, {this.colIdArg.DebugDisplay()})";

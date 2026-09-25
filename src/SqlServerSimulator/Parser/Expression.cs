@@ -13,6 +13,17 @@ namespace SqlServerSimulator.Parser;
 [DebuggerDisplay("{DebugDisplay(),nq}")]
 internal abstract class Expression : ExpressionNode
 {
+    /// <summary>
+    /// The type of a metadata-name scalar's result — <c>SCHEMA_NAME</c>,
+    /// <c>OBJECT_NAME</c>, <c>DB_NAME</c>, <c>USER_NAME</c>, <c>TYPE_NAME</c>
+    /// and the rest: <c>nvarchar(128)</c> in the database's collation at
+    /// coercible-default, never <c>sysname</c> (probed 2026-09-25 against
+    /// SQL Server 2025 through <c>SELECT … INTO</c>), so it yields to a
+    /// catalog column's collation instead of conflicting with it.
+    /// </summary>
+    internal static NVarcharSqlType MetadataNameType(BatchContext batch) =>
+        NVarcharSqlType.Get(128, batch.CurrentDatabase.Collation, Coercibility.CoercibleDefault);
+
     private protected Expression()
     {
     }

@@ -95,7 +95,7 @@ internal sealed class DbId : Expression
 /// SQL <c>DB_NAME([id])</c>: returns the database name for the given
 /// <c>database_id</c>, or the current database's name when called with
 /// no argument. NULL argument or unknown id returns NULL. Result type
-/// is <see cref="SqlType.SystemName"/> (sysname).
+/// is <see cref="Expression.MetadataNameType"/>.
 /// </summary>
 internal sealed class DbName : Expression
 {
@@ -113,24 +113,24 @@ internal sealed class DbName : Expression
     public override SqlValue Run(RuntimeContext runtime)
     {
         if (this.idArg is null)
-            return SqlValue.FromString(SqlType.SystemName, runtime.Batch.CurrentDatabase.Name);
+            return SqlValue.FromNVarchar(MetadataNameType(runtime.Batch), runtime.Batch.CurrentDatabase.Name);
         var v = this.idArg.Run(runtime);
         if (v.IsNull)
-            return SqlValue.Null(SqlType.SystemName);
+            return SqlValue.Null(MetadataNameType(runtime.Batch));
         var requested = ScalarArguments.CoerceToInt(v);
         foreach (var (db, id) in DbId.DatabasesWithIds(runtime.Batch.Connection.Simulation))
         {
             if (id == requested)
-                return SqlValue.FromString(SqlType.SystemName, db.Name);
+                return SqlValue.FromNVarchar(MetadataNameType(runtime.Batch), db.Name);
         }
-        return SqlValue.Null(SqlType.SystemName);
+        return SqlValue.Null(MetadataNameType(runtime.Batch));
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
         if (this.idArg is not null)
             _ = AssignmentRules.ArgumentType(this.idArg, SqlType.Int32, batch, resolveColumnType);
-        return SqlType.SystemName;
+        return MetadataNameType(batch);
     }
 
     internal override string DebugDisplay() => this.idArg is null ? "DB_NAME()" : $"DB_NAME({this.idArg.DebugDisplay()})";
@@ -256,7 +256,7 @@ internal sealed class FileId : Expression
 /// file_id 2 (the two-file model shared with <c>sys.database_files</c> /
 /// <see cref="FileId"/> / <see cref="FileProperty"/>). Any other id (0,
 /// negative, &gt; 2) or a NULL argument returns NULL. Result type is
-/// <see cref="SqlType.SystemName"/> (sysname).
+/// <see cref="Expression.MetadataNameType"/>.
 /// </summary>
 internal sealed class FileNameLookup : Expression
 {
@@ -273,20 +273,20 @@ internal sealed class FileNameLookup : Expression
     {
         var value = this.idArg.Run(runtime);
         if (value.IsNull)
-            return SqlValue.Null(SqlType.SystemName);
+            return SqlValue.Null(MetadataNameType(runtime.Batch));
         var database = runtime.Batch.CurrentDatabase;
         return ScalarArguments.CoerceToInt(value) switch
         {
-            1 => SqlValue.FromString(SqlType.SystemName, BuiltInResources.LogicalFileName(database.Name, isLog: false)),
-            2 => SqlValue.FromString(SqlType.SystemName, BuiltInResources.LogicalFileName(database.Name, isLog: true)),
-            _ => SqlValue.Null(SqlType.SystemName),
+            1 => SqlValue.FromNVarchar(MetadataNameType(runtime.Batch), BuiltInResources.LogicalFileName(database.Name, isLog: false)),
+            2 => SqlValue.FromNVarchar(MetadataNameType(runtime.Batch), BuiltInResources.LogicalFileName(database.Name, isLog: true)),
+            _ => SqlValue.Null(MetadataNameType(runtime.Batch)),
         };
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
         _ = AssignmentRules.ArgumentType(this.idArg, SqlType.Int32, batch, resolveColumnType);
-        return SqlType.SystemName;
+        return MetadataNameType(batch);
     }
 
     internal override string DebugDisplay() => $"FILE_NAME({this.idArg.DebugDisplay()})";
@@ -337,7 +337,7 @@ internal sealed class FilegroupId : Expression
 /// SQL <c>FILEGROUP_NAME(filegroup_id)</c>: the name of a filegroup in the
 /// current database, reverse-looked-up in <see cref="Database.Filegroups"/>.
 /// An unknown id (0, negative, or unregistered) or a NULL argument returns
-/// NULL. Result type is <see cref="SqlType.SystemName"/> (sysname).
+/// NULL. Result type is <see cref="Expression.MetadataNameType"/>.
 /// </summary>
 internal sealed class FilegroupName : Expression
 {
@@ -354,7 +354,7 @@ internal sealed class FilegroupName : Expression
     {
         var value = this.idArg.Run(runtime);
         if (value.IsNull)
-            return SqlValue.Null(SqlType.SystemName);
+            return SqlValue.Null(MetadataNameType(runtime.Batch));
         // The parameter is declared smallint, so an id past smallint range
         // reports the narrowing to *that* type — Msg 8115 "converting
         // expression to data type smallint" for a bigint id, and the
@@ -363,15 +363,15 @@ internal sealed class FilegroupName : Expression
         foreach (var (name, id) in runtime.Batch.CurrentDatabase.Filegroups)
         {
             if (id == requested)
-                return SqlValue.FromString(SqlType.SystemName, name);
+                return SqlValue.FromNVarchar(MetadataNameType(runtime.Batch), name);
         }
-        return SqlValue.Null(SqlType.SystemName);
+        return SqlValue.Null(MetadataNameType(runtime.Batch));
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
         _ = AssignmentRules.ArgumentType(this.idArg, SqlType.SmallInt, batch, resolveColumnType);
-        return SqlType.SystemName;
+        return MetadataNameType(batch);
     }
 
     internal override string DebugDisplay() => $"FILEGROUP_NAME({this.idArg.DebugDisplay()})";
