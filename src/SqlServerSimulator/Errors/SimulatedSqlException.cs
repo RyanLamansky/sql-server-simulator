@@ -173,6 +173,14 @@ public sealed partial class SimulatedSqlException : DbException
     internal bool AbortsAsUnderXactAbort { get; private init; }
 
     /// <summary>
+    /// An identity value past its column's type, which real follows with the
+    /// class-0 Msg 3606 (<c>Arithmetic overflow occurred.</c>) where another
+    /// error ending a write is followed by Msg 3621 (probed 2026-09-25 against
+    /// SQL Server 2025).
+    /// </summary>
+    internal bool IsIdentityOverflow { get; private init; }
+
+    /// <summary>
     /// When <see langword="true"/>, this error came from a <c>RAISERROR</c>
     /// statement, the one raising construct <c>SET XACT_ABORT ON</c> does not
     /// promote: probed against SQL Server 2025, a severity-16 or severity-19

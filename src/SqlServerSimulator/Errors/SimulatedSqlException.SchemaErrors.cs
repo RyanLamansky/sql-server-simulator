@@ -1173,7 +1173,7 @@ partial class SimulatedSqlException
     /// IDENTITY variant for this code path.
     /// </summary>
     internal static SimulatedSqlException IdentityOverflow(string targetTypeName) =>
-        new($"Arithmetic overflow error converting IDENTITY to data type {targetTypeName}.", 8115, 16, 1);
+        new($"Arithmetic overflow error converting IDENTITY to data type {targetTypeName}.", 8115, 16, 1) { IsIdentityOverflow = true };
 
     /// <summary>
     /// Mimics SQL Server error 8110: more than one column or table-level

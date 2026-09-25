@@ -247,6 +247,23 @@ public sealed class IdentityTests
             """, 8115,
             "Arithmetic overflow error converting IDENTITY to data type tinyint.");
 
+    /// <summary>
+    /// Real follows an identity overflow with the class-0 Msg 3606 where
+    /// another error ending a write takes Msg 3621 (probed 2026-09-25 against
+    /// SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void IdentityOverflow_IsFollowedByMsg3606()
+    {
+        var ex = new Simulation().AssertSqlError("""
+            create table t (id tinyint identity(255,1), x int);
+            insert t (x) values (1);
+            insert t (x) values (2)
+            """, 8115);
+        CollectionAssert.AreEqual(new[] { 8115, 3606 }, ex.Errors.Cast<SimulatedError>().Select(error => error.Number).ToArray());
+        AreEqual("Arithmetic overflow occurred.", ex.Errors[1].Message);
+    }
+
     [TestMethod]
     public void Identity_OnTinyIntSmallIntBigInt_AllRoundTrip()
     {

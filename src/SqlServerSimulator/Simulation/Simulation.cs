@@ -2062,7 +2062,11 @@ public sealed partial class Simulation
                 yield return outcome;
             yield return new SimulatedErrorOutcome(continuedError, batch.CurrentStatement.LeadingKeywordReturnsRows);
             if (IsStatementTerminationNoticed(batch, continuedError))
-                yield return new SimulatedInfoOutcome(SimulatedSqlException.StatementTerminatedMessage(batch));
+            {
+                yield return new SimulatedInfoOutcome(continuedError.IsIdentityOverflow
+                    ? SimulatedSqlException.ArithmeticOverflowOccurredMessage(batch)
+                    : SimulatedSqlException.StatementTerminatedMessage(batch));
+            }
             yield break;
         }
 
