@@ -181,6 +181,33 @@ partial class SqlType
         + "UUUUUUUUUUUUUUUUUUU"u8 // hierarchyid
         + "UUUUUUUUUUUUUUUUUUU"u8; // spatial
 
+    // The bitwise operators, probed 2026-09-25 against SQL Server 2025 over
+    // every ordered pair of empty-table columns of the 19 classes with `&`,
+    // `|` and `^` spot-checked to match: an integer takes an integer, a
+    // string, a binary or a timestamp; the refusals name the operator
+    // quoted ('&'). An untyped NULL is handled ahead of the grid, pairing only
+    // with an integer.
+    private static ReadOnlySpan<byte> BitwiseGrid =>
+        "..II...II.IIIIIIIuu"u8 // bit
+        + "..II...II.IIIIIIIuu"u8 // integer
+        + "IIOOIIIOOIOOOOOOOuu"u8 // exact numeric
+        + "IIOOIIIOOIOOOOOOOuu"u8 // approximate
+        + "..IIIIIIIIIIIIIIIuu"u8 // ansi string
+        + "..IIIIIIIIIIIIIIIuu"u8 // unicode string
+        + "..IIIIIIIIIIIIIIIuu"u8 // binary
+        + "IIOOIIIOOIOOOOOOOuu"u8 // text
+        + "IIOOIIIOOIOOOOOOOuu"u8 // image
+        + "..IIIIIIIIIIIIIIIuu"u8 // timestamp
+        + "IIOOIIIOOIOOOOOOOuu"u8 // uniqueidentifier
+        + "IIOOIIIOOIOOOOOOOuu"u8 // datetime / smalldatetime
+        + "IIOOIIIOOIOOOOOOOuu"u8 // date
+        + "IIOOIIIOOIOOOOOOOuu"u8 // time
+        + "IIOOIIIOOIOOOOOOOuu"u8 // datetime2 / datetimeoffset
+        + "IIOOIIIOOIOOOOOOOuu"u8 // xml
+        + "IIOOIIIOOIOOOOOOOuu"u8 // sql_variant
+        + "UUUUUUUUUUUUUUUUUUU"u8 // hierarchyid
+        + "UUUUUUUUUUUUUUUUUUU"u8; // spatial
+
     /// <summary>
     /// Whether <paramref name="left"/> and <paramref name="right"/> may meet in
     /// <paramref name="operation"/>: <see langword="null"/> when real accepts
@@ -201,6 +228,8 @@ partial class SqlType
             left = NarrowedIntegerLiteral(left);
             right = NarrowedIntegerLiteral(right);
         }
+        if (operation == TypePairOperation.Bitwise && BitwiseNullError(left, right, operatorName) is { } nullError)
+            return nullError;
         var leftType = left.Type;
         var rightType = right.Type;
         if (operation == TypePairOperation.Unify && leftType == rightType)
@@ -223,6 +252,7 @@ partial class SqlType
             TypePairOperation.Subtract => SubtractGrid,
             TypePairOperation.Modulo => ModuloGrid,
             TypePairOperation.Assign => AssignGrid,
+            TypePairOperation.Bitwise => BitwiseGrid,
             _ => MultiplyDivideGrid,
         };
         System.Diagnostics.Debug.Assert(grid.Length == PairClassCount * PairClassCount, "A type-pair grid row has the wrong length.");
@@ -247,6 +277,31 @@ partial class SqlType
     /// </summary>
     public static SimulatedSqlException? PairError(TypePairOperation operation, SqlType left, SqlType right, string operatorName) =>
         OperandPairError(operation, new TypePairOperand(left), new TypePairOperand(right), operatorName);
+
+    /// <summary>
+    /// A bitwise operator's refusal for an untyped <c>NULL</c> operand, which
+    /// pairs only with an integer or <c>bit</c>: beside a hierarchyid or a
+    /// spatial type it is Msg 403 naming that type, and beside anything else —
+    /// another NULL included — Msg 402 naming it <c>NULL</c> (probed
+    /// 2026-09-25 against SQL Server 2025). Null when neither operand is one,
+    /// or the pairing is legal.
+    /// </summary>
+    private static SimulatedSqlException? BitwiseNullError(TypePairOperand left, TypePairOperand right, string operatorName)
+    {
+        var leftNull = left.Source is Parser.Expressions.Value { IsUntypedNull: true };
+        var rightNull = right.Source is Parser.Expressions.Value { IsUntypedNull: true };
+        if (!leftNull && !rightNull)
+            return null;
+        if (leftNull && rightNull)
+            return SimulatedSqlException.IncompatibleDataTypesInOperator("NULL", "NULL", operatorName);
+        var other = leftNull ? right : left;
+        return other.Type.PairClass switch
+        {
+            TypePairClass.Bit or TypePairClass.Integer => null,
+            TypePairClass.HierarchyId or TypePairClass.Spatial => SimulatedSqlException.InvalidOperatorForDataType(operatorName, OperandName(other)),
+            _ => SimulatedSqlException.IncompatibleDataTypesInOperator(leftNull ? "NULL" : OperandName(left), rightNull ? "NULL" : OperandName(right), operatorName),
+        };
+    }
 
     /// <summary>
     /// A comparison types an integer literal by its value, which is the type

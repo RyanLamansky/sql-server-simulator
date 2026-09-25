@@ -17,6 +17,9 @@ internal enum TypePairOperation : byte
     Divide,
     Modulo,
 
+    /// <summary>The bitwise <c>&amp;</c> / <c>|</c> / <c>^</c> operators, which share one grid.</summary>
+    Bitwise,
+
     /// <summary>
     /// A value assigned to a typed target — a column, a variable, a parameter,
     /// a function's result, <c>ISNULL</c>'s replacement — the left operand the

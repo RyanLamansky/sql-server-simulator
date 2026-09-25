@@ -232,9 +232,12 @@ internal abstract class TwoSidedExpression : Expression
             if (this.right is Value { IsUntypedNull: true } && Add.OneCharacterPartner(leftType) is { } rightPartner)
                 rightType = rightPartner;
         }
+        // The literal sizing is arithmetic's alone: a bitwise operator reads
+        // an integer literal as the int it is, which is what its grid judges.
+        var bitwise = this.Operator is '&' or '|' or '^';
         var result = SqlType.PromoteOperandsForArithmetic(
-            PairOperand(this.left, ArithmeticOperandType(this.left, leftType, rightType), batch),
-            PairOperand(this.right, ArithmeticOperandType(this.right, rightType, leftType), batch),
+            PairOperand(this.left, bitwise ? leftType : ArithmeticOperandType(this.left, leftType, rightType), batch),
+            PairOperand(this.right, bitwise ? rightType : ArithmeticOperandType(this.right, rightType, leftType), batch),
             this.Operator);
         if (result.Category == SqlTypeCategory.String
             && leftType.Category == SqlTypeCategory.String
@@ -324,9 +327,12 @@ internal abstract class TwoSidedExpression : Expression
         {
             _ = SqlType.PromoteForArithmetic(left.Type, right.Type, op);
             var bitwise = op is '&' or '|' or '^';
-            if (leftConverts && !rightConverts && (!bitwise || (left.Type.PairClass == TypePairClass.Binary && SqlType.IsIntegerCategory(right.Type))))
+            // A bitwise operator's string, binary or timestamp operand converts
+            // to its integer partner, which is the only partner the grid lets
+            // it meet (probed 2026-09-25 against SQL Server 2025).
+            if (leftConverts && !rightConverts && (!bitwise || SqlType.IsIntegerCategory(right.Type)))
                 left = left.IsNull ? SqlValue.Null(right.Type) : left.CoerceTo(right.Type);
-            else if (rightConverts && !leftConverts && (!bitwise || (right.Type.PairClass == TypePairClass.Binary && SqlType.IsIntegerCategory(left.Type))))
+            else if (rightConverts && !leftConverts && (!bitwise || SqlType.IsIntegerCategory(left.Type)))
                 right = right.IsNull ? SqlValue.Null(left.Type) : right.CoerceTo(left.Type);
         }
 

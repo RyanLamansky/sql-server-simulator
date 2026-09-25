@@ -303,7 +303,7 @@ internal abstract partial class SqlType
         var a = left.Type;
         var b = right.Type;
         if (op is '&' or '|' or '^')
-            return PromoteForBitwise(a, b, op);
+            return PromoteForBitwise(left, right, op);
 
         if (OperandPairError(ArithmeticOperation(op), left, right, ArithmeticOperatorWord(op)) is { } error)
             throw error;
@@ -403,25 +403,17 @@ internal abstract partial class SqlType
     };
 
     /// <summary>
-    /// The bitwise operators, which the pair grids don't cover. sql_variant
-    /// has no bitwise behavior: variant with variant or a string raises
-    /// Msg 402, with anything else Msg 257. Binary with binary is Msg 402;
-    /// binary with an integer converts the binary to the integer's type
-    /// (probe-confirmed against SQL Server 2025).
+    /// The bitwise operators' result type once the <see cref="TypePairOperation.Bitwise"/>
+    /// grid has cleared the pair: an integer beside a string, a binary or a
+    /// timestamp converts that partner to itself, and two integers promote.
     /// </summary>
-    private static SqlType PromoteForBitwise(SqlType a, SqlType b, char op)
+    private static SqlType PromoteForBitwise(TypePairOperand left, TypePairOperand right, char op)
     {
-        if (a is SqlVariantSqlType || b is SqlVariantSqlType)
-        {
-            var other = a is SqlVariantSqlType ? b : a;
-            throw (a is SqlVariantSqlType && b is SqlVariantSqlType) || other.Category == SqlTypeCategory.String
-                ? SimulatedSqlException.IncompatibleDataTypesInOperator(a, b, ArithmeticOperatorWord(op))
-                : SimulatedSqlException.ImplicitConversionFromSqlVariantNotAllowed(other);
-        }
-
-        return a is VarbinarySqlType or BinarySqlType && b is VarbinarySqlType or BinarySqlType
-            ? throw SimulatedSqlException.IncompatibleDataTypesInOperator(a, b, ArithmeticOperatorWord(op))
-            : Promote(a, b);
+        if (OperandPairError(TypePairOperation.Bitwise, left, right, ArithmeticOperatorWord(op)) is { } error)
+            throw error;
+        return left.Source is Parser.Expressions.Value { IsUntypedNull: true } ? right.Type
+            : right.Source is Parser.Expressions.Value { IsUntypedNull: true } ? left.Type
+            : Promote(left.Type, right.Type);
     }
 
     /// <summary>
