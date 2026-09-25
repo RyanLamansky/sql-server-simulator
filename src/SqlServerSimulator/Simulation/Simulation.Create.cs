@@ -776,12 +776,6 @@ partial class Simulation
             state: clusteredLeadingOrdinal < 0 ? (byte)1 : (byte)2);
     }
 
-    private static void ExpectCloseParen(ParserContext context)
-    {
-        if (context.GetNextRequired() is not Operator { Character: ')' })
-            throw SimulatedSqlException.SyntaxErrorNear(context);
-    }
-
     /// <summary>
     /// The parsed content of a <c>SYSTEM_VERSIONING = ON […]</c> clause.
     /// <see cref="HistoryTable"/> is null for the auto-named form; the

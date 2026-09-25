@@ -1098,4 +1098,14 @@ public sealed class CastTests
     [TestMethod]
     public void MoneyPastIntsRange_ToInt_IsMsg237()
         => new Simulation().AssertSqlError("select cast(cast(922337203685477.5807 as money) as int)", 237, "There is insufficient result space to convert a money value to int.");
+
+    // A styled hex string into binary(n) pads short input with zeros and cuts
+    // long input to n (probed 2026-09-25 against SQL Server 2025).
+    [TestMethod]
+    public void StyledHexToFixedBinary_PadsAndTruncates()
+    {
+        using var reader = new Simulation().ExecuteReader("select convert(binary(4), '0x0102', 1), convert(binary(4), '0102', 2), convert(binary(2), '0x010203', 1), convert(binary(4), N'0x0A', 1)");
+        IsTrue(reader.Read());
+        AreEqual("01020000|01020000|0102|0A000000", string.Join("|", Enumerable.Range(0, 4).Select(i => Convert.ToHexString((byte[])reader.GetValue(i)))));
+    }
 }

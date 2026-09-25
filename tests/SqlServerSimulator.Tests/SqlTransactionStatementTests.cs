@@ -360,4 +360,23 @@ public sealed class SqlTransactionStatementTests
         AreEqual(3901, Throws<SimulatedSqlException>(
             () => conn.CreateCommand("begin distributed transaction with mark 'x'").ExecuteNonQuery()).Number);
     }
+
+    // A row that grows past its page is forwarded, and growing again moves the
+    // forward; rolling the transaction back restores the original row through
+    // both moves (probed 2026-09-25 against SQL Server 2025).
+    [TestMethod]
+    public void Rollback_RestoresARowForwardedTwice()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table fw (id int, v varchar(8000)); insert fw select value, replicate('a', 190) from generate_series(1, 40)");
+        AreEqual("7500d", simulation.ExecuteScalar("""
+            begin tran
+            update fw set v = replicate('b', 3000) where id = 5
+            update fw set v = replicate('c', 6000) where id = 5
+            update fw set v = replicate('d', 7500) where id = 5
+            select concat(len(v), left(v, 1)) from fw where id = 5
+            rollback
+            """));
+        AreEqual("190a|40|7600", simulation.ExecuteScalar("select concat((select concat(len(v), left(v, 1)) from fw where id = 5), '|', count(*), '|', sum(len(v))) from fw"));
+    }
 }
