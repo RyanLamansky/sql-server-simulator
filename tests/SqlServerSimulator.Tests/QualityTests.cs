@@ -461,6 +461,36 @@ public partial class QualityTests
     /// shorthand name that omits the type's own prefix, a renamed member, and a
     /// heading whose slug nobody could have predicted.
     /// </remarks>
+    /// <summary>
+    /// Source text carries no raw control character other than tab and the
+    /// line breaks: a separator or sentinel is written as an escape
+    /// (<c>'\0'</c>, <c>'\u0001'</c>). A raw one is invisible in review, and
+    /// text tools classify the whole file as binary — grep skips it, diff
+    /// won't show it — so a search for a member silently misses its definition.
+    /// </summary>
+    [TestMethod]
+    [Description("Keeps raw control characters out of C# sources, where they hide the file from text tools.")]
+    public void SourcesCarryNoRawControlCharacters()
+    {
+        var repoRoot = FindRepoRoot();
+        List<string> offenders = [];
+        foreach (var directory in new[] { "src", "tests", "tools" })
+        {
+            foreach (var path in Directory.EnumerateFiles(Path.Combine(repoRoot, directory), "*.cs", SearchOption.AllDirectories))
+            {
+                if (path.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal)
+                    || path.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+                if (File.ReadAllText(path).Any(c => char.IsControl(c) && c is not ('\t' or '\n' or '\r')))
+                    offenders.Add(Path.GetRelativePath(repoRoot, path));
+            }
+        }
+
+        Assert.IsEmpty(offenders, "Raw control characters in: " + string.Join(", ", offenders));
+    }
+
     [TestMethod]
     [Description("Pins every file reference and cross-document link in Markdown to something that exists.")]
     public void DocumentedReferencesResolve()

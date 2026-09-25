@@ -231,5 +231,5 @@ internal static partial class BuiltInResources
 
     // NUL joins the segments — it can't occur in a SQL identifier, so the pair
     // "s" / "chema.name" can never collide with "s.chema" / "name".
-    private static string QualifiedName(string schema, string name) => schema + " " + name;
+    private static string QualifiedName(string schema, string name) => schema + "\0" + name;
 }

@@ -120,7 +120,7 @@ public sealed class ParallelAggregateTests
                     {
                         _ = rendered
                             .Append(reader.IsDBNull(i) ? "<null>" : Convert.ToString(reader.GetValue(i), CultureInfo.InvariantCulture))
-                            .Append('');
+                            .Append('\u001f');
                     }
                     _ = rendered.Append('\n');
                 }

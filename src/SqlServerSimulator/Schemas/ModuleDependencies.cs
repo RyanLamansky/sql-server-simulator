@@ -66,7 +66,7 @@ internal static class ModuleDependencies
     internal const byte DatabaseDdlTriggerClass = 12;
 
     /// <summary>The separator that keeps a reference's name parts from colliding in the dedupe key.</summary>
-    private const char KeySeparator = '';
+    private const char KeySeparator = '\u0001';
 
     /// <summary>How one column of a referenced object is touched by the referencing definition.</summary>
     internal sealed class ColumnUse(string name)
