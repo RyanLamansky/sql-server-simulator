@@ -35,7 +35,7 @@ internal sealed class BitwiseNot(Expression operand) : Expression
         var type = operand.GetSqlType(batch, resolveColumnType);
         return type.Category == SqlTypeCategory.Integer
             ? type
-            : throw SimulatedSqlException.OperandDataTypeInvalid(type, "'~'");
+            : throw SimulatedSqlException.OperandDataTypeInvalid(SqlType.OperandName(type, operand), "'~'");
     }
 
     internal override bool ResultIsNullable(NullabilityContext context) =>

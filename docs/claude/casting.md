@@ -33,6 +33,8 @@ A numeric value overflowing an integer conversion target picks its error by **so
 
 A `float` / `real` source's value slot carries **seventeen significant digits** before its six fractional ones, so a magnitude past that shows trailing zeros rather than the double's own binary tail: `CAST(CAST(1e30 AS float) AS int)` names `1000000000000000000000000000000.000000`, not `…19884624838656`.
 
+A `money` / `smallmoney` value **rounds** to an integer, half away from zero (`$1.5` is 2, `-$0.5` is -1), where `decimal` and `float` truncate; a `money` value past `int`'s range is Msg 237 to every narrower target, its state naming it (int 1, smallint 2, tinyint 3) — judged on the rounded value for `int` and the unrounded one for the other two — and a `smallmoney` source reports Msg 8115 for `tinyint` and Msg 220 state 5 naming its whole part for `smallint` (probed 2026-09-25 against SQL Server 2025).
+
 TRY_CAST/TRY_CONVERT swallow all of these (232 and 237 are in the swallow set).
 
 ### The `money` / `smallmoney` target

@@ -54,6 +54,8 @@ A comparison's refusal names an integer literal by its value — `tinyint` for 0
 **The bitwise operators share an eighth grid** (probed 2026-09-25 against SQL Server 2025, `&` / `|` / `^` alike): an integer or `bit` takes an integer, a string, a binary or a timestamp, which converts to it; two non-integers are Msg 8117 naming the left, a non-integer beside an integer or a string Msg 402, `hierarchyid` / spatial Msg 403, and an untyped `NULL` pairs only with an integer (Msg 402 naming `NULL` otherwise).
 An integer literal meets these operators as the `int` it is — the decimal-partner literal sizing is arithmetic's alone.
 
+**An untyped `NULL` is a class of its own** to the arithmetic operators (probed 2026-09-25 against SQL Server 2025): it combines with a number, with a string or a binary under `+`, with a legacy `datetime` under `+` / `-`, and with another NULL, and anything else — a `bit` included, though `bit + int` is legal — is Msg 402 naming it `NULL` (Msg 403 beside a CLR type); `SqlType.ArithmeticNullRow` holds the per-operator rows, `+` asymmetric for a timestamp.
+
 **Assignment is a seventh grid, and one-way.**
 A value entering a typed target — a variable (`DECLARE … =`, `SET`, `SELECT @v =`), a column an `INSERT … VALUES` / `INSERT … SELECT`, `UPDATE` or `MERGE` writes, a column's `DEFAULT`, a scalar function's `RETURN` or argument, `ISNULL`'s replacement — takes the `Assign` grid, source down the rows and target across (`Parser/AssignmentRules.cs`).
 It is not the unification grid: `decimal` and `datetime` unify (so `COALESCE` answers) while `datetime` → `decimal` is Msg 257, which is also what `ISNULL(<decimal>, <datetime>)` reports.

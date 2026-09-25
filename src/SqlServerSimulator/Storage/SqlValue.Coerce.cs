@@ -1148,23 +1148,42 @@ internal readonly partial struct SqlValue
         if (target == SqlType.Bit)
             return FromBoolean(m != 0);
 
-        // Money → integer truncates toward zero (consistent with decimal/float).
-        var truncated = decimal.Truncate(m);
-        try
+        // Money → integer rounds half away from zero, unlike decimal and
+        // float, which truncate (probed 2026-09-25 against SQL Server 2025:
+        // $1.5 is 2, -$0.5 is -1).
+        var rounded = decimal.Round(m, 0, MidpointRounding.AwayFromZero);
+        if (target == SqlType.BigInt)
+            return FromInt64((long)rounded);
+        if (this.Type == SqlType.Money)
         {
-            return target == SqlType.Bit ? FromBoolean(truncated != 0)
-                : target == SqlType.TinyInt ? FromByte(checked((byte)truncated))
-                : target == SqlType.SmallInt ? FromInt16(checked((short)truncated))
-                : target == SqlType.Int32 ? FromInt32(checked((int)truncated))
-                : FromInt64(checked((long)truncated));
+            // Past int's range the target picks only the state — judged on the
+            // rounded value for int but the unrounded one for tinyint and
+            // smallint ($2147483647.49 is Msg 237 to both, and 2147483647 to
+            // int); within it, the narrower two keep their own messages.
+            if ((target == SqlType.Int32 ? rounded : m) is < int.MinValue or > int.MaxValue)
+            {
+                throw target == SqlType.TinyInt ? SimulatedSqlException.InsufficientResultSpaceForMoney("tinyint", 3)
+                    : target == SqlType.SmallInt ? SimulatedSqlException.InsufficientResultSpaceForMoney("smallint", 2)
+                    : SimulatedSqlException.InsufficientResultSpaceForMoney("int", 1);
+            }
+            if (target == SqlType.TinyInt && rounded is < 0 or > byte.MaxValue)
+                throw SimulatedSqlException.ArithmeticOverflowForType("tinyint", m.ToString("F6", System.Globalization.CultureInfo.InvariantCulture), state: 11);
+            if (target == SqlType.SmallInt && rounded is < short.MinValue or > short.MaxValue)
+                throw SimulatedSqlException.ArithmeticOverflowForDataType("smallint", (m * 10000m).ToString("F0", System.Globalization.CultureInfo.InvariantCulture), state: 7);
         }
-        catch (OverflowException)
+        else
         {
-            // money picks a different error per target (Msg 232 / 220 / 237
-            // for tinyint / smallint / int); smallmoney stays Msg 8115.
-            throw SimulatedSqlException.TryConversionOverflow(this, target)
-                ?? SimulatedSqlException.ArithmeticOverflow(target.ToString()!);
+            // smallmoney never passes int; its narrower overflows report the
+            // generic Msg 8115 for tinyint and Msg 220 naming the whole part
+            // for smallint.
+            if (target == SqlType.TinyInt && rounded is < 0 or > byte.MaxValue)
+                throw SimulatedSqlException.ArithmeticOverflow("tinyint");
+            if (target == SqlType.SmallInt && rounded is < short.MinValue or > short.MaxValue)
+                throw SimulatedSqlException.ArithmeticOverflowForDataType("smallint", decimal.Truncate(m).ToString("F0", System.Globalization.CultureInfo.InvariantCulture), state: 5);
         }
+        return target == SqlType.TinyInt ? FromByte((byte)rounded)
+            : target == SqlType.SmallInt ? FromInt16((short)rounded)
+            : FromInt32((int)rounded);
     }
 
     /// <summary>

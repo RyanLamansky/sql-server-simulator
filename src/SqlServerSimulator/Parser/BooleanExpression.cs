@@ -2692,19 +2692,22 @@ internal abstract class BooleanExpression : ExpressionNode
 
     /// <summary>
     /// The type two differently-typed operands compare in: the unification's,
-    /// save that a string beside a <c>tinyint</c> or <c>smallint</c> compares
-    /// as <c>int</c> — `'300' = CAST(1 AS tinyint)` is false rather than the
-    /// overflow arithmetic and unification report (probed 2026-09-25 against
-    /// SQL Server 2025).
+    /// save that a string or a binary beside a <c>tinyint</c> or
+    /// <c>smallint</c> compares as <c>int</c> — `'300' = CAST(1 AS tinyint)`
+    /// is false rather than the overflow arithmetic and unification report,
+    /// and `0xFF00 > CAST(-3 AS smallint)` reads the binary as 65280 (probed
+    /// 2026-09-25 against SQL Server 2025).
     /// </summary>
     internal static SqlType ComparisonType(SqlType left, SqlType right)
     {
         var common = SqlType.Promote(left, right);
-        return (common == SqlType.TinyInt || common == SqlType.SmallInt)
-            && (left.PairClass is TypePairClass.AnsiString or TypePairClass.UnicodeString || right.PairClass is TypePairClass.AnsiString or TypePairClass.UnicodeString)
-                ? SqlType.Int32
-                : common;
+        return (common == SqlType.TinyInt || common == SqlType.SmallInt) && (WidensSmallInteger(left) || WidensSmallInteger(right))
+            ? SqlType.Int32
+            : common;
     }
+
+    private static bool WidensSmallInteger(SqlType type) =>
+        type.PairClass is TypePairClass.AnsiString or TypePairClass.UnicodeString or TypePairClass.Binary;
 
     private sealed class EqualityExpression(Expression left, Expression right) : CompareExpression(left, right)
     {

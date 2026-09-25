@@ -144,4 +144,18 @@ public sealed class ImplicitConversionArithmeticTests
     [TestMethod]
     public void DateAdd_HugeSecondInterval_RaisesMsg517()
         => new Simulation().AssertSqlError("SELECT DATEADD(second, 9999999999999, CAST('2024-01-01' AS datetime2))", 517);
+
+    [TestMethod]
+    [DataRow("cast(1 as bit) + null", "bit", "NULL", "add")]
+    [DataRow("null - 'a'", "NULL", "varchar", "subtract")]
+    [DataRow("cast('2020-01-01' as date) * null", "date", "NULL", "multiply")]
+    [DataRow("0x01 / null", "varbinary", "NULL", "divide")]
+    [DataRow("1e0 % null", "float", "NULL", "modulo")]
+    public void UntypedNull_IsItsOwnArithmeticClass(string expression, string left, string right, string op)
+        => new Simulation().AssertSqlError($"select {expression}", 402, $"The data types {left} and {right} are incompatible in the {op} operator.");
+
+    [TestMethod]
+    public void UntypedNull_BesideANumberOrAString_StillCombines()
+        => AreEqual(DBNull.Value, new Simulation().ExecuteScalar("select coalesce(1 + null, 1.5 * null, 'a' + null, getdate() + null, null % 2)"));
 }
+

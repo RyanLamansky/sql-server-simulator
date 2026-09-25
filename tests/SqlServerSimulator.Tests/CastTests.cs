@@ -828,5 +828,37 @@ public sealed class CastTests
     [TestMethod]
     public void StringAddedToATinyint_StillOverflows()
         => _ = new Simulation().AssertSqlError("select '300' + cast(1 as tinyint)", 244);
+
+    // ---- money to an integer, probed 2026-09-25 ----
+
+    [TestMethod]
+    [DataRow("1.5", "int", 2L)]
+    [DataRow("2.5", "bigint", 3L)]
+    [DataRow("-1.5", "smallint", -2L)]
+    [DataRow("-0.5", "int", -1L)]
+    [DataRow("-0.4", "int", 0L)]
+    [DataRow("255.4", "tinyint", 255L)]
+    [DataRow("2147483647.5", "bigint", 2147483648L)]
+    public void MoneyToInteger_RoundsHalfAwayFromZero(string value, string target, long expected)
+        => AreEqual(expected, Convert.ToInt64(new Simulation().ExecuteScalar($"select cast(cast({value} as money) as {target})"), CultureInfo.InvariantCulture));
+
+    [TestMethod]
+    [DataRow("cast(cast(-0.5 as money) as tinyint)", 232, "Arithmetic overflow error for type tinyint, value = -0.500000.")]
+    [DataRow("cast(cast(40000 as money) as smallint)", 220, "Arithmetic overflow error for data type smallint, value = 400000000.")]
+    [DataRow("cast(cast(2147483647.5 as money) as int)", 237, "There is insufficient result space to convert a money value to int.")]
+    [DataRow("cast(cast(2147483647.49 as money) as smallint)", 237, "There is insufficient result space to convert a money value to smallint.")]
+    [DataRow("cast(cast(3000000000 as money) as tinyint)", 237, "There is insufficient result space to convert a money value to tinyint.")]
+    [DataRow("cast(cast(255.5 as smallmoney) as tinyint)", 8115, "Arithmetic overflow error converting expression to data type tinyint.")]
+    [DataRow("cast(cast(32767.5 as smallmoney) as smallint)", 220, "Arithmetic overflow error for data type smallint, value = 32767.")]
+    public void MoneyToInteger_OverflowReportsByTarget(string expression, int error, string message)
+        => new Simulation().AssertSqlError($"select {expression}", error, message);
+
+    [TestMethod]
+    public void BinaryComparedWithASmallint_ComparesAsInt()
+        => AreEqual(1, new Simulation().ExecuteScalar("select case when 0xFF00 > cast(-3 as smallint) then 1 else 0 end"));
+
+    [TestMethod]
+    public void SysnameSource_IsNamedNvarchar()
+        => new Simulation().AssertSqlError("select cast(sql_variant_property(1, 'BaseType') as float)", 8114, "Error converting data type nvarchar to float.");
 }
 

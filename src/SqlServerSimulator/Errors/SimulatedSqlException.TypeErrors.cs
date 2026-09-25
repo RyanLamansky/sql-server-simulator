@@ -300,13 +300,14 @@ partial class SimulatedSqlException
 
     /// <summary>
     /// A string source as real's conversion failures name it: a fixed-length
-    /// <c>char</c> / <c>nchar</c> reads as <c>varchar</c> / <c>nvarchar</c>
-    /// (probed 2026-09-25 against SQL Server 2025, columns and CASTs alike).
+    /// <c>char</c> / <c>nchar</c> reads as <c>varchar</c> / <c>nvarchar</c>,
+    /// and a <c>sysname</c> as the <c>nvarchar</c> it aliases (probed
+    /// 2026-09-25 against SQL Server 2025, columns and CASTs alike).
     /// </summary>
     private static string ConversionSourceName(SqlType source) => source switch
     {
         CharSqlType => "varchar",
-        NCharSqlType => "nvarchar",
+        NCharSqlType or SystemNameSqlType => "nvarchar",
         _ => FamilyRootName(source),
     };
 
@@ -463,8 +464,16 @@ partial class SimulatedSqlException
     /// and this is the int cell. Same text as Msg 234's string-target
     /// variant, different error number (probe-confirmed 2026-07-31).
     /// </summary>
-    internal static SimulatedSqlException InsufficientResultSpaceForMoneyToInt() =>
-        new("There is insufficient result space to convert a money value to int.", 237, 16, 1);
+    internal static SimulatedSqlException InsufficientResultSpaceForMoneyToInt() => InsufficientResultSpaceForMoney("int", 1);
+
+    /// <summary>
+    /// Msg 237 for any integer target, whose state names it: 1 <c>int</c>, 2
+    /// <c>smallint</c>, 3 <c>tinyint</c> — what a <c>money</c> value past
+    /// <c>int</c>'s range reports whichever of them it meets (probed
+    /// 2026-09-25 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException InsufficientResultSpaceForMoney(string target, byte state) =>
+        new($"There is insufficient result space to convert a money value to {target}.", 237, 16, state);
 
     /// <summary>
     /// Mimics SQL Server error 237's <c>smallmoney</c> cell: a <c>money</c>

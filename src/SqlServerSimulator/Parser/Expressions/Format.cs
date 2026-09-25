@@ -71,7 +71,14 @@ internal sealed class Format : Expression
         }
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.NVarchar;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        // The value's type is settled while compiling, so a refused one raises
+        // even where the call is never evaluated (probed 2026-09-25 against
+        // SQL Server 2025: COALESCE(1, FORMAT('x', 'N2')) is Msg 8116).
+        RejectUnsupportedValueType(this.value.GetSqlType(batch, resolveColumnType));
+        return SqlType.NVarchar;
+    }
 
     /// <summary>
     /// SQL Server formats through Windows' culture data, which differs from

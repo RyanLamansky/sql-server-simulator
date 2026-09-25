@@ -230,6 +230,11 @@ partial class SqlType
         }
         if (operation == TypePairOperation.Bitwise && BitwiseNullError(left, right, operatorName) is { } nullError)
             return nullError;
+        if (operation is TypePairOperation.Add or TypePairOperation.Subtract or TypePairOperation.Multiply or TypePairOperation.Divide or TypePairOperation.Modulo
+            && ArithmeticNullRow(operation, left, right) is { } nullRow)
+        {
+            return ArithmeticNullError(nullRow, left, right, operatorName);
+        }
         var leftType = left.Type;
         var rightType = right.Type;
         if (operation == TypePairOperation.Unify && leftType == rightType)
@@ -277,6 +282,50 @@ partial class SqlType
     /// </summary>
     public static SimulatedSqlException? PairError(TypePairOperation operation, SqlType left, SqlType right, string operatorName) =>
         OperandPairError(operation, new TypePairOperand(left), new TypePairOperand(right), operatorName);
+
+    // An untyped NULL is a class of its own to the arithmetic operators, one
+    // row per operator and side read across the other operand's class
+    // (probed 2026-09-25 against SQL Server 2025 over empty-table columns):
+    // `.` legal, `I` Msg 402 naming NULL in its position, `U` Msg 403 naming
+    // the other operand. Two NULLs always combine. `+` alone is asymmetric —
+    // a timestamp takes a NULL on its left but not on its right.
+    private static ReadOnlySpan<byte> NullAfterAdd => "I......IIII.IIIIIUU"u8;
+    private static ReadOnlySpan<byte> NullBeforeAdd => "I......II.I.IIIIIUU"u8;
+    private static ReadOnlySpan<byte> NullSubtract => "I...IIIIIII.IIIIIUU"u8;
+    private static ReadOnlySpan<byte> NullMultiplyDivide => "I...IIIIIIIIIIIIIUU"u8;
+    private static ReadOnlySpan<byte> NullModulo => "I..IIIIIIIIIIIIIIUU"u8;
+
+    /// <summary>
+    /// The NULL row cell for an arithmetic pair holding exactly one untyped
+    /// <c>NULL</c>, or <see langword="null"/> when neither or both operands
+    /// are one (two NULLs combine; no NULL reads the ordinary grid).
+    /// </summary>
+    private static char? ArithmeticNullRow(TypePairOperation operation, TypePairOperand left, TypePairOperand right)
+    {
+        var leftNull = left.Source is Parser.Expressions.Value { IsUntypedNull: true };
+        var rightNull = right.Source is Parser.Expressions.Value { IsUntypedNull: true };
+        if (leftNull == rightNull)
+            return leftNull ? '.' : null;
+        var row = operation switch
+        {
+            TypePairOperation.Add => rightNull ? NullAfterAdd : NullBeforeAdd,
+            TypePairOperation.Subtract => NullSubtract,
+            TypePairOperation.Modulo => NullModulo,
+            _ => NullMultiplyDivide,
+        };
+        return (char)row[(int)(leftNull ? right : left).Type.PairClass];
+    }
+
+    private static SimulatedSqlException? ArithmeticNullError(char cell, TypePairOperand left, TypePairOperand right, string operatorName)
+    {
+        var leftNull = left.Source is Parser.Expressions.Value { IsUntypedNull: true };
+        return cell switch
+        {
+            '.' => null,
+            'U' => SimulatedSqlException.InvalidOperatorForDataType(operatorName, OperandName(leftNull ? right : left)),
+            _ => SimulatedSqlException.IncompatibleDataTypesInOperator(leftNull ? "NULL" : OperandName(left), leftNull ? OperandName(right) : "NULL", operatorName),
+        };
+    }
 
     /// <summary>
     /// A bitwise operator's refusal for an untyped <c>NULL</c> operand, which
