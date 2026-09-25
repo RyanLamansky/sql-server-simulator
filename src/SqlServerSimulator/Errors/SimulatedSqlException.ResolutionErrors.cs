@@ -166,6 +166,14 @@ partial class SimulatedSqlException
             + $"'{parameterName}', which was not supplied.", 8178, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server's Msg 4124 — an <c>sp_executesql</c> declaration
+    /// string with text after the parenthesized list it is parsed as, such as
+    /// <c>N'@p int) select (1'</c>. Probed 2026-09-25 against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException BatchParametersNotValid() =>
+        new("The parameters supplied for the batch are not valid.", 4124, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server's Msg 217 — fired when scalar UDF / proc / trigger /
     /// view recursion exceeds the 32-level cap (probe-confirmed verbatim).
     /// Backed by <see cref="SimulatedDbConnection.NestingLevel"/>; the call

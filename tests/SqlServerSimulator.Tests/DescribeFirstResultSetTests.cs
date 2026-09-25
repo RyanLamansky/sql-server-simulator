@@ -112,4 +112,65 @@ public sealed class DescribeFirstResultSetTests
     [DataRow("select id, n from da except select n, id from da", "notnull null")]
     public void SetOperation_CombinesItsBranchesNullability(string tsql, string expected)
         => AreEqual(expected, string.Join(" ", Describe(Seeded(), tsql).Split(" | ").Select(column => column.Split(' ')[1])));
+
+    [TestMethod]
+    public void ConstantThatFailsToConvert_IsDescribedNotRun()
+        => AreEqual("x null int 4 - - computed 38 4", Describe(Seeded(), "select cast('a' as int) as x"));
+
+    [TestMethod]
+    public void MalformedParameterList_IsFollowedByMsg11501()
+    {
+        var ex = Seeded().AssertSqlError("exec sp_describe_first_result_set N'select 1', N'@p'", 102);
+        AreEqual(11501, ex.Errors[1].Number);
+    }
+
+    // ---- sys.dm_exec_describe_first_result_set ----
+
+    [TestMethod]
+    public void Dmv_DescribesAsTheProcedureDoes()
+    {
+        using var reader = Seeded().ExecuteReader(
+            "select column_ordinal, name, is_nullable, system_type_name, max_length, is_identity_column, error_number from sys.dm_exec_describe_first_result_set(N'select id, v from da', null, 0)");
+        AreEqual(7, reader.FieldCount);
+        AreEqual(
+            "1 id False int 4 True - | 2 v False varchar(10) 10 False -",
+            string.Join(" | ", reader.EnumerateRecords().Select(r => $"{r.GetInt32(0)} {r.GetString(1)} {r.GetBoolean(2)} {r.GetString(3)} {r.GetInt16(4)} {r.GetBoolean(5)} {(r.IsDBNull(6) ? "-" : r.GetInt32(6))}")));
+    }
+
+    [TestMethod]
+    [DataRow("select nosuch from da", "0 207 16 1 SYNTAX Invalid column name 'nosuch'. | 1 11501 16 1 SYNTAX The batch could not be analyzed because of compile errors.")]
+    [DataRow("select * from nosuch", "0 208 16 1 SYNTAX Invalid object name 'nosuch'. | 1 11529 16 1 MISC The metadata could not be determined because every code path results in an error; see previous errors for some of these.")]
+    [DataRow("select from", "0 156 15 1 SYNTAX Incorrect syntax near the keyword 'from'. | 1 11501 16 1 SYNTAX The batch could not be analyzed because of compile errors.")]
+    public void Dmv_AnswersErrorsAsRows(string tsql, string expected)
+    {
+        using var connection = Seeded().CreateOpenConnection();
+        using var command = connection.CreateCommand(
+            "select column_ordinal, error_number, error_severity, error_state, error_type_desc, error_message, name from sys.dm_exec_describe_first_result_set(@t, null, 0)",
+            ("@t", tsql));
+        using var reader = command.ExecuteReader();
+        AreEqual(expected, string.Join(" | ", reader.EnumerateRecords().Select(r =>
+        {
+            IsTrue(r.IsDBNull(6));
+            return $"{r.GetInt32(0)} {r.GetInt32(1)} {r.GetInt32(2)} {r.GetInt32(3)} {r.GetString(4)} {r.GetString(5)}";
+        })));
+    }
+
+    [TestMethod]
+    public void Dmv_TakesParametersAndDescribesNothingForNullOrNoResult()
+    {
+        var sim = Seeded();
+        AreEqual("int", sim.ExecuteScalar("select system_type_name from sys.dm_exec_describe_first_result_set(N'select @p + 1 as x', N'@p int', 0)"));
+        AreEqual(0, sim.ExecuteScalar("select count(*) from sys.dm_exec_describe_first_result_set(null, null, 0)"));
+        AreEqual(0, sim.ExecuteScalar("select count(*) from sys.dm_exec_describe_first_result_set(N'print 1', null, null)"));
+    }
+
+    [TestMethod]
+    public void Dmv_RequiresExactlyThreeArguments()
+    {
+        var sim = Seeded();
+        sim.AssertSqlError("select * from sys.dm_exec_describe_first_result_set(N'select 1', null)", 313,
+            "An insufficient number of arguments were supplied for the procedure or function sys.dm_exec_describe_first_result_set.");
+        sim.AssertSqlError("select * from sys.dm_exec_describe_first_result_set(N'select 1', null, 0, 1)", 8144,
+            "Procedure or function sys.dm_exec_describe_first_result_set has too many arguments specified.");
+    }
 }

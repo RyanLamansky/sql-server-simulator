@@ -508,6 +508,25 @@ public sealed class StoredProcedureTests
         StringContains(ex.Message, "'(@x int)select 5 as v'");
     }
 
+    // The declarations parse as the parenthesized list Msg 8178 prints, so a
+    // list that ends early is a syntax error near that closing parenthesis
+    // (probed 2026-09-25 against SQL Server 2025).
+    [TestMethod]
+    [DataRow("@p int,", ")")]
+    [DataRow("@p", ")")]
+    [DataRow("@p int, @q", ")")]
+    [DataRow("@p int x", "x")]
+    public void SpExecuteSql_MalformedDeclarations_AreASyntaxError(string declarations, string near)
+        => new Simulation().ValidateSyntaxError($"exec sp_executesql N'select 1', N'{declarations}'", near);
+
+    [TestMethod]
+    public void SpExecuteSql_TextAfterTheDeclarationList_Raises4124()
+        => new Simulation().AssertSqlError("exec sp_executesql N'select 1', N'@p int) select (1'", 4124, "The parameters supplied for the batch are not valid.");
+
+    [TestMethod]
+    public void SpExecuteSql_BlankDeclarations_DeclareNothing()
+        => AreEqual(1, new Simulation().ExecuteScalar("exec sp_executesql N'select 1', N' '"));
+
     // === Every declared parameter has to be supplied ===
 
     [TestMethod]

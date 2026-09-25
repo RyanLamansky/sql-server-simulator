@@ -2680,14 +2680,17 @@ internal sealed partial class Selection
                     return BuiltInRowsetSource(context, ParseVirtualFileStats(context, objectName.ToString()));
                 }
 
-                // The two dependency DMVs are 2-arg system TVFs, `sys.`-qualified
-                // like fn_virtualfilestats and dispatched on the same terms.
+                // The two dependency DMVs (2-arg) and the describe DMV (3-arg) are
+                // system TVFs, `sys.`-qualified like fn_virtualfilestats and
+                // dispatched on the same terms.
                 if (objectName.Count == 2 && BuiltInToken.Equals(objectName.ImmediateQualifier, "sys"))
                 {
                     if (BuiltInToken.Equals(objectName.Leaf, "dm_sql_referencing_entities"))
                         return BuiltInRowsetSource(context, ParseSqlReferencingEntities(context, objectName.ToString()));
                     if (BuiltInToken.Equals(objectName.Leaf, "dm_sql_referenced_entities"))
                         return BuiltInRowsetSource(context, ParseSqlReferencedEntities(context, objectName.ToString()));
+                    if (BuiltInToken.Equals(objectName.Leaf, "dm_exec_describe_first_result_set"))
+                        return BuiltInRowsetSource(context, ParseDescribeFirstResultSet(context, objectName.ToString()));
                 }
 
                 // Linked-server fork: four-part `server.db.schema.t` routes
@@ -4414,8 +4417,9 @@ internal sealed partial class Selection
         // NEXT VALUE FOR s` drew a value here where real leaves the sequence
         // untouched (probe-confirmed 2026-08-05 — `last_used_value` stays NULL
         // there). Deferring costs nothing, since a skipped statement yields no
-        // rows for anyone to read.
-        var referencesOuterColumns = containsSubquery || parseBatch.IsSkipping;
+        // rows for anyone to read. SET FMTONLY ON is the same — it describes
+        // `SELECT CAST('a' AS int)` where running it raises Msg 245.
+        var referencesOuterColumns = containsSubquery || parseBatch.IsSkipping || parseBatch.Connection.FmtOnly;
         foreach (var expression in expressions)
             expression.VisitColumnReferences(_ => referencesOuterColumns = true);
 

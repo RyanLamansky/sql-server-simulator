@@ -828,9 +828,14 @@ The **inline column-level** form takes no direction at all: real raises **Msg 15
 Everything a result set already carries (type, numeric spelling, nullability) feeds it directly; the three FMTONLY-only additions on `SimulatedQueryResult` are the base column each projection reads (through a view to the column behind it), whether a projection is a scalar expression, and whether the query grouped.
 Those give real's `is_identity_column` / `is_updateable` / `is_computed_column`: a grouped query's columns are never updateable, and an aggregate or window function is not "computed" where any other expression is.
 `tds_type_id` follows COLMETADATA's token choice (the fixed-length token for a NOT NULL fixed-width type), with real's own lengths — 17 for decimal, 65535 for a MAX type, 8100 for xml.
-A compile error is followed by **Msg 11501**, a missing object by **Msg 11529**.
+A compile error — the `@params` declaration list's included — is followed by **Msg 11501**, a missing object by **Msg 11529**.
+FMTONLY also stops a FROM-less SELECT from baking its values at parse, so `CAST('a' AS int)` is described rather than raising Msg 245, as real describes it.
+
+`sys.dm_exec_describe_first_result_set(@tsql, @params, @browse_information_mode)` is the same engine as a system TVF (probed 2026-09-25): the first 35 columns match the procedure's (`system_type_name` declared `nvarchar(128)` rather than 256), and six `error_*` columns replace the four TDS ones.
+It never raises for what it describes: each error becomes a row of its own, numbered from 0 in `column_ordinal`, with `error_type_desc` `MISC` for Msg 11529 and `SYNTAX` for every compile error, and a NULL `@tsql` answers no rows.
 
 **Not modeled yet**: the browse-information modes (every mode answers as 0 does, so the `source_*` columns and `is_part_of_unique_key` stay NULL).
+Neither do real's describe-specific refusals — Msg 11509 `CONFLICTING_RESULTS` (an IF whose branches return different shapes), Msg 11521 `UNDECLARED_PARAMETER` (`select @p`, where the simulator reports Msg 137) and Msg 11525 `TEMPORARY_TABLE` (a `#t` the batch creates); the DMV already files each under real's `error_type`.
 Because FMTONLY runs the batch rather than binding it, DDL and control flow in `@tsql` execute, where real's analysis doesn't run anything.
 
 ## Metadata scalars

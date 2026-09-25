@@ -5,7 +5,7 @@ namespace SqlServerSimulator;
 
 partial class Simulation
 {
-    private static readonly SqlType[] DescribeSchema =
+    internal static readonly SqlType[] DescribeSchema =
     [
         SqlType.Bit, SqlType.Int32, SqlType.SystemName, SqlType.Bit, SqlType.Int32, NVarcharSqlType.Get(256, Collation.Baseline, Coercibility.Implicit),
         SqlType.SmallInt, SqlType.TinyInt, SqlType.TinyInt, SqlType.SystemName, SqlType.Int32, SqlType.SystemName,
@@ -16,7 +16,7 @@ partial class Simulation
         SqlType.Int32, SqlType.Int32, SqlType.TinyInt,
     ];
 
-    private static readonly string[] DescribeColumnNames =
+    internal static readonly string[] DescribeColumnNames =
     [
         "is_hidden", "column_ordinal", "name", "is_nullable", "system_type_id", "system_type_name",
         "max_length", "precision", "scale", "collation_name", "user_type_id", "user_type_database",
@@ -65,20 +65,35 @@ partial class Simulation
         if (tsql is not { IsNull: false } text)
             throw SimulatedSqlException.ProcedureExpectsParameter("sp_describe_first_result_set", "tsql");
 
-        var declared = new Dictionary<string, VariableSlot>(BatchContext.VariableNameComparer);
-        if (parameters is { IsNull: false } parameterText)
-        {
-            foreach (var parameter in ParseSpExecuteSqlParamDefinitions(parameterText.AsString, batch.Connection))
-                declared[parameter.Name] = new VariableSlot(parameter.Type, declaredMaxLength: null, SqlValue.Null(parameter.Type), parameter: null);
-        }
+        var rows = this.DescribeFirstResult(batch, text.AsString, parameters);
+        yield return new SimulatedSqlResultSet(DescribeSchema, DescribeColumnNames, rows.ConvertAll(row => RowEncoder.EncodeRow(DescribeSchema, row)));
+    }
 
+    /// <summary>
+    /// The engine <c>sp_describe_first_result_set</c> and
+    /// <c>sys.dm_exec_describe_first_result_set</c> share: one row per column
+    /// of the first result set <paramref name="tsql"/> would return, found by
+    /// running it under <c>SET FMTONLY ON</c> (a SELECT yields its metadata
+    /// and no rows, and a data-modifying statement is suppressed), and none
+    /// when it has no result set. A batch — or a parameter declaration list —
+    /// that doesn't compile raises its errors followed by Msg 11501.
+    /// </summary>
+    internal List<SqlValue[]> DescribeFirstResult(BatchContext batch, string tsql, SqlValue? parameters)
+    {
         var connection = batch.Connection;
         var savedFmtOnly = connection.FmtOnly;
         connection.FmtOnly = true;
         SimulatedQueryResult? first = null;
         try
         {
-            foreach (var outcome in this.ExecuteDynamicBatch(batch, text.AsString, declared))
+            var declared = new Dictionary<string, VariableSlot>(BatchContext.VariableNameComparer);
+            if (parameters is { IsNull: false } parameterText)
+            {
+                foreach (var parameter in ParseSpExecuteSqlParamDefinitions(parameterText.AsString, connection))
+                    declared[parameter.Name] = new VariableSlot(parameter.Type, declaredMaxLength: null, SqlValue.Null(parameter.Type), parameter: null);
+            }
+
+            foreach (var outcome in this.ExecuteDynamicBatch(batch, tsql, declared))
             {
                 if (outcome is SimulatedQueryResult result)
                 {
@@ -104,7 +119,7 @@ partial class Simulation
             for (var i = 0; i < first.Schema.Length; i++)
                 rows.Add(DescribeColumn(first, i));
         }
-        yield return new SimulatedSqlResultSet(DescribeSchema, DescribeColumnNames, rows.ConvertAll(row => RowEncoder.EncodeRow(DescribeSchema, row)));
+        return rows;
     }
 
     private static SqlValue[] DescribeColumn(SimulatedQueryResult result, int index)

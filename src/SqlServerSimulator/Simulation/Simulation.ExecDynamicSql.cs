@@ -352,23 +352,24 @@ partial class Simulation
     /// </summary>
     private static List<SpExecuteSqlParam> ParseSpExecuteSqlParamDefinitions(string source, SimulatedDbConnection connection)
     {
-        if (source.Length == 0)
+        if (string.IsNullOrWhiteSpace(source))
             return [];
 
-        // Wrap the param-def string in a synthetic SimulatedDbCommand so the
-        // tokenizer can walk it through ParserContext. Reuse the outer
-        // connection's Simulation reference — we don't dispatch through this
-        // batch, only walk tokens.
+        // Real parses the definitions as the parenthesized list it prints in
+        // Msg 8178 — `(@p int)` — so a list that ends early is a syntax error
+        // near that closing `)`, and text after it is Msg 4124. A synthetic
+        // SimulatedDbCommand lets the tokenizer walk it; nothing dispatches.
         using var defCommand = new SimulatedDbCommand(connection.Simulation, connection);
 #pragma warning disable CA2100
-        defCommand.CommandText = source;
+        defCommand.CommandText = "(" + source + ")";
 #pragma warning restore CA2100
         var defBatch = new BatchContext(defCommand);
         var defContext = defBatch.Parser;
         defContext.MoveNextOptional();
+        defContext.MoveNextRequired();
 
         var parameters = new List<SpExecuteSqlParam>();
-        while (defContext.Token is not null)
+        while (true)
         {
             if (defContext.Token is not AtPrefixedString name)
                 throw SimulatedSqlException.SyntaxErrorNear(defContext);
@@ -391,9 +392,12 @@ partial class Simulation
                 defContext.MoveNextRequired();
                 continue;
             }
-            break;
+            if (defContext.Token is not Operator { Character: ')' })
+                throw SimulatedSqlException.SyntaxErrorNear(defContext);
+            if (defContext.GetNextOptional() is not null)
+                throw SimulatedSqlException.BatchParametersNotValid();
+            return parameters;
         }
-        return parameters;
     }
 
     /// <summary>
