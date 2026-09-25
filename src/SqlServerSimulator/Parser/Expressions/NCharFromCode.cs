@@ -35,7 +35,11 @@ internal sealed class NCharFromCode(ParserContext context) : Expression
             : SqlValue.FromNChar(nchar1, ((char)n).ToString());
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => NChar1For(batch);
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        _ = AssignmentRules.ArgumentType(this.code, SqlType.Int32, batch, resolveColumnType);
+        return NChar1For(batch);
+    }
 
     internal override string DebugDisplay() => $"NCHAR({this.code.DebugDisplay()})";
 

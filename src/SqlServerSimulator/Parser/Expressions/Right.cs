@@ -43,8 +43,11 @@ internal sealed class Right : Expression
         return SqlValue.FromString(resultType, result);
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
-        ResolveResultType(StringScalars.BindArgument(source, batch, resolveColumnType, "right"), batch);
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        _ = AssignmentRules.ArgumentType(this.count, SqlType.Int32, batch, resolveColumnType);
+        return ResolveResultType(StringScalars.BindArgument(source, batch, resolveColumnType, "right"), batch);
+    }
 
     /// <summary>
     /// RIGHT preserves the input's string family; a constant count tightens the

@@ -27,7 +27,7 @@ internal sealed class Ceiling(ParserContext context) : Expression
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
-        => MathScalars.FloorCeilingResult(this.source.GetSqlType(batch, resolveColumnType));
+        => MathScalars.FloorCeilingResult(AssignmentRules.ArgumentType(this.source, SqlType.Float, batch, resolveColumnType));
 
     internal override bool ResultReportsNumeric => this.source.ResultReportsNumeric;
 

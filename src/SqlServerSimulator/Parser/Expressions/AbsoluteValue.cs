@@ -44,7 +44,7 @@ internal sealed class AbsoluteValue(ParserContext context) : Expression
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
-        => MathScalars.WidenForResult(this.source.GetSqlType(batch, resolveColumnType));
+        => MathScalars.WidenForResult(AssignmentRules.ArgumentType(this.source, SqlType.Float, batch, resolveColumnType));
 
     internal override bool ResultReportsNumeric => this.source.ResultReportsNumeric;
 

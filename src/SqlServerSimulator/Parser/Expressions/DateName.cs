@@ -79,7 +79,11 @@ internal sealed class DateName : Expression
     private static string FormatOffset(int minutes) =>
         $"{(minutes < 0 ? '-' : '+')}{Math.Abs(minutes) / 60:00}:{Math.Abs(minutes) % 60:00}";
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => ResultType;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        _ = AssignmentRules.ArgumentType(this.source, SqlType.DateTime, batch, resolveColumnType);
+        return ResultType;
+    }
 
     internal override string DebugDisplay() => $"DATENAME({this.keywordText}, {this.source.DebugDisplay()})";
 

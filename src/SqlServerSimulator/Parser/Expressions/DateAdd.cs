@@ -51,7 +51,7 @@ internal sealed class DateAdd : Expression
     /// and a seven-digit fraction is Msg 241.
     /// </summary>
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
-        source.GetSqlType(batch, resolveColumnType) is var sourceType && SqlType.IsStringCategory(sourceType)
+        AssignmentRules.ArgumentType(this.source, SqlType.DateTime, batch, resolveColumnType) is var sourceType && SqlType.IsStringCategory(sourceType)
             ? SqlType.DateTime
             : DatePartKinds.ResolveImplicitDateType(sourceType);
 

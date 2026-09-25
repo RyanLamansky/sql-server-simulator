@@ -29,11 +29,18 @@ internal sealed class EOMonth : Expression
         }
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Date;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        _ = DatePartKinds.RequireDateArgument(this.startDate, this.startDate.GetSqlType(batch, resolveColumnType), 1, "eomonth", acceptsString: true, acceptsTime: false);
+        if (this.monthOffset is not null)
+            _ = AssignmentRules.ArgumentType(this.monthOffset, SqlType.Int32, batch, resolveColumnType);
+        return SqlType.Date;
+    }
 
     public override SqlValue Run(RuntimeContext runtime)
     {
         var input = this.startDate.Run(runtime);
+        _ = DatePartKinds.RequireDateArgument(this.startDate, input.Type, 1, "eomonth", acceptsString: true, acceptsTime: false);
         if (input.IsNull)
             return SqlValue.Null(SqlType.Date);
 

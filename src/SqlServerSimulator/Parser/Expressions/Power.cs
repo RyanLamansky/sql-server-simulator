@@ -79,7 +79,10 @@ internal sealed class Power : Expression
             : SqlValue.FromInt32((int)raw);
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
-        => MathScalars.PowerResult(this.baseExpr.GetSqlType(batch, resolveColumnType));
+    {
+        _ = AssignmentRules.ArgumentType(this.exponent, SqlType.Float, batch, resolveColumnType);
+        return MathScalars.PowerResult(AssignmentRules.ArgumentType(this.baseExpr, SqlType.Float, batch, resolveColumnType));
+    }
 
     // POWER's result takes the base's type, so it carries the base's name
     // (the exponent doesn't contribute): POWER(2.0, 10) → numeric.

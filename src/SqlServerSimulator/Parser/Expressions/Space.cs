@@ -31,7 +31,11 @@ internal sealed class Space(ParserContext context) : Expression
         return SqlValue.FromVarchar((VarcharSqlType)resultType, new string(' ', times));
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => ResolveResultType(batch);
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        _ = AssignmentRules.ArgumentType(this.count, SqlType.Int32, batch, resolveColumnType);
+        return ResolveResultType(batch);
+    }
 
     /// <summary>
     /// SPACE is always <c>varchar</c> in the active database collation. A

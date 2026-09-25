@@ -67,7 +67,7 @@ internal sealed class Round : Expression
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
-        => MathScalars.WidenForResult(this.value.GetSqlType(batch, resolveColumnType));
+        => MathScalars.WidenForResult(AssignmentRules.ArgumentType(this.value, SqlType.Float, batch, resolveColumnType));
 
     internal override bool ResultReportsNumeric => this.value.ResultReportsNumeric;
 

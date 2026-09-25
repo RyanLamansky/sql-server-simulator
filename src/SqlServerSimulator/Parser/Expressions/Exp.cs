@@ -19,7 +19,11 @@ internal sealed class Exp(ParserContext context) : Expression
         return double.IsInfinity(result) ? throw SimulatedSqlException.ArithmeticOverflow("float") : SqlValue.FromDouble(result);
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Float;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        _ = AssignmentRules.ArgumentType(this.source, SqlType.Float, batch, resolveColumnType);
+        return SqlType.Float;
+    }
 
     internal override string DebugDisplay() => $"EXP({this.source.DebugDisplay()})";
 

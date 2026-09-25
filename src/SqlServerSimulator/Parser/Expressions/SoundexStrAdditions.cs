@@ -324,8 +324,11 @@ internal sealed class Str : Expression
         }
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
-        StringScalars.SizedResultType(SqlType.Varchar, this.projectedLength, batch);
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        _ = AssignmentRules.ArgumentType(this.numArg, SqlType.Float, batch, resolveColumnType);
+        return StringScalars.SizedResultType(SqlType.Varchar, this.projectedLength, batch);
+    }
 
     private static int ProjectedLength(Expression? lengthArg, ParserContext context)
     {

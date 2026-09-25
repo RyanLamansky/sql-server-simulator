@@ -52,7 +52,7 @@ internal sealed class DateBucket : Expression
     public override SqlValue Run(RuntimeContext runtime)
     {
         var dateValue = this.date.Run(runtime);
-        _ = RejectStringDate(dateValue.Type);
+        _ = DatePartKinds.RequireDateArgument(this.date, dateValue.Type, 3, "Date_Bucket", acceptsString: false, acceptsTime: true);
         if (dateValue.IsNull)
             return SqlValue.Null(dateValue.Type);
         // Real spells the function Date_Bucket in this one message.
@@ -114,17 +114,10 @@ internal sealed class DateBucket : Expression
         : SqlValue.FromDateTime(DefaultOriginDateTime);
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
-        DatePartKinds.ResolveImplicitDateType(RejectStringDate(this.date.GetSqlType(batch, resolveColumnType)));
-
-    /// <summary>
-    /// Unlike the other date functions, DATE_BUCKET takes no string for its
-    /// date — Msg 8116, spelling the function <c>Date_Bucket</c>
-    /// (probe-confirmed 2026-09-23 against SQL Server 2025).
-    /// </summary>
-    private static SqlType RejectStringDate(SqlType dateType) =>
-        SqlType.IsStringCategory(dateType)
-            ? throw SimulatedSqlException.InvalidArgumentDataType(SimulatedSqlException.FamilyRootName(dateType), 3, "Date_Bucket")
-            : dateType;
+        // Unlike the other date functions, DATE_BUCKET takes no string for
+        // its date, and real spells the function Date_Bucket (probe-confirmed
+        // 2026-09-23 against SQL Server 2025).
+        DatePartKinds.RequireDateArgument(this.date, this.date.GetSqlType(batch, resolveColumnType), 3, "Date_Bucket", acceptsString: false, acceptsTime: true);
 
     internal override string DebugDisplay() => $"DATE_BUCKET({this.keywordText}, {this.bucketWidth.DebugDisplay()}, {this.date.DebugDisplay()})";
 

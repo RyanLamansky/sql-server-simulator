@@ -30,6 +30,28 @@ internal static class AssignmentRules
     }
 
     /// <summary>
+    /// The type of <paramref name="argument"/>, after raising real's error
+    /// when it can't reach <paramref name="parameter"/>, the type a built-in
+    /// declares that argument as: a built-in's argument converts the way an
+    /// assignment does (probed 2026-09-25 against SQL Server 2025 — the math
+    /// family over a date, a varbinary, xml or a uniqueidentifier is Msg 206
+    /// naming <c>float</c> and over a <c>sql_variant</c> Msg 257, or Msg 260
+    /// naming a column of the query being compiled; <c>CHAR</c> /
+    /// <c>SPACE</c> / <c>LEFT</c>'s count names <c>int</c>, <c>YEAR</c> /
+    /// <c>DATEPART</c> / <c>DATEADD</c>'s date <c>datetime</c>).
+    /// </summary>
+    public static SqlType ArgumentType(Expression argument, SqlType parameter, BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        var type = argument.GetSqlType(batch, resolveColumnType);
+        if (argument is not Value { IsUntypedNull: true }
+            && SqlType.OperandPairError(TypePairOperation.Assign, Expression.PairOperand(argument, type, batch), new TypePairOperand(parameter), "assign") is { } error)
+        {
+            throw error;
+        }
+        return type;
+    }
+
+    /// <summary>
     /// The same rule for a source known only by its type — a query's column,
     /// a procedure argument's value — which the caller has already cleared of
     /// the untyped-<c>NULL</c> exemption.

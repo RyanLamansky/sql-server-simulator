@@ -159,20 +159,24 @@ internal static class DatePartKinds
     /// (days-since-1900-01-01). Both behaviors probe-confirmed against
     /// SQL Server 2025 (2026-05-22): <c>DATEPART(year, '2024-01-15')</c>,
     /// <c>DATEPART(year, 0)</c> → 1900, <c>DATEADD(day, 1, 0)</c> →
-    /// <c>1900-01-02</c>. Non-date / non-string / non-integer operands
-    /// pass through unchanged so the downstream
-    /// <see cref="RequireCompatible"/> check raises the same Msg 9810 the
-    /// real server would.
+    /// <c>1900-01-02</c>. Every other number and a binary read as
+    /// <c>datetime</c> too (probed 2026-09-25: <c>DAY(1.5)</c> is 2,
+    /// <c>DATEADD(day, 1, 0x01)</c> 1900-01-02); the types that can't reach
+    /// <c>datetime</c> at all were refused while compiling.
     /// </summary>
     public static SqlValue CoerceDateArgumentImplicit(SqlValue value) =>
         SqlType.IsStringCategory(value.Type) ? value.CoerceTo(SqlType.GetDateTime2(7))
-        : SqlType.IsIntegerCategory(value.Type) ? value.CoerceTo(SqlType.DateTime)
+        : ReadsAsDateTime(value.Type) ? value.CoerceTo(SqlType.DateTime)
         : value;
+
+    private static bool ReadsAsDateTime(SqlType type) =>
+        type.Category is SqlTypeCategory.Integer or SqlTypeCategory.Decimal or SqlTypeCategory.Money or SqlTypeCategory.Approximate
+        || type is BinarySqlType or VarbinarySqlType;
 
     /// <summary>
     /// Parallel of <see cref="CoerceDateArgumentImplicit"/> for the static
     /// projection path: maps string types to <c>datetime2(7)</c> and
-    /// integer types to legacy <c>datetime</c>; everything else passes
+    /// numeric and binary types to legacy <c>datetime</c>; everything else passes
     /// through. Used so a date function's schema matches the runtime type
     /// for the implicit-cast cases (a string-typed source projects as
     /// datetime2, not the input's varchar — <c>DATEADD</c> is the exception,
@@ -180,8 +184,27 @@ internal static class DatePartKinds
     /// </summary>
     public static SqlType ResolveImplicitDateType(SqlType source) =>
         SqlType.IsStringCategory(source) ? SqlType.GetDateTime2(7)
-        : SqlType.IsIntegerCategory(source) ? SqlType.DateTime
+        : ReadsAsDateTime(source) ? SqlType.DateTime
         : source;
+
+    /// <summary>
+    /// <c>DATETRUNC</c>, <c>DATE_BUCKET</c> and <c>EOMONTH</c> take a date
+    /// and nothing a number or a binary would convert to: any other type —
+    /// a typed <c>NULL</c> or an empty rowset's column included — is Msg 8116
+    /// while compiling (probed 2026-09-25 against SQL Server 2025). A string
+    /// passes where <paramref name="acceptsString"/> says so, and a
+    /// <c>time</c> where <paramref name="acceptsTime"/> does.
+    /// </summary>
+    public static SqlType RequireDateArgument(Expression argument, SqlType type, int argumentIndex, string functionName, bool acceptsString, bool acceptsTime)
+    {
+        if (Expression.IsUntypedNullLiteral(argument)
+            || (SqlType.IsDateTimeCategory(type) && (acceptsTime || type is not TimeSqlType))
+            || (acceptsString && SqlType.IsStringCategory(type) && type is not XmlSqlType))
+        {
+            return type;
+        }
+        throw SimulatedSqlException.InvalidArgumentDataType(SqlType.OperandName(type, argument), argumentIndex, functionName);
+    }
 
     /// <summary>
     /// Enforces SQL Server's per-type compatibility rules and raises Msg 9810

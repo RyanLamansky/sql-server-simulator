@@ -261,10 +261,13 @@ partial class SqlType
     /// The type name real's pair diagnostics print: the bare family root, a
     /// MAX form keeping its <c>(max)</c>, <c>sysname</c> as the
     /// <c>nvarchar</c> it aliases, and a <c>decimal</c> written as
-    /// <c>numeric</c> keeping that spelling.
+    /// <c>numeric</c> keeping that spelling. Real's Msg 8116 names an
+    /// argument's type the same way.
     /// </summary>
-    private static string OperandName(TypePairOperand operand) =>
-        operand.Type is SystemNameSqlType ? "nvarchar"
-        : operand.Type is DecimalSqlType && operand.Source is { ResultReportsNumeric: true } ? "numeric"
-        : SimulatedSqlException.FamilyRootName(operand.Type);
+    public static string OperandName(SqlType type, Parser.Expression? source) =>
+        type is SystemNameSqlType ? "nvarchar"
+        : type is DecimalSqlType && source is { ResultReportsNumeric: true } ? "numeric"
+        : SimulatedSqlException.FamilyRootName(type);
+
+    private static string OperandName(TypePairOperand operand) => OperandName(operand.Type, operand.Source);
 }

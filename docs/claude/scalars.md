@@ -294,6 +294,14 @@ A scalar UDF that patindexes its own `varchar` parameter is the shape that meets
   SQL Server's FORMAT runs on Windows' NLS culture data where the simulator runs on .NET's ICU data; `Format.WithWindowsDecimalDigits` patches the number-format cells known to differ (default digits, the no-break group separator, the yen sign, en-US's parenthesized negative currency), which both paths read.
   **Divergence**: `FORMAT(CAST(0 AS decimal(5, 0)), 'P')` is `0.00%` against real's `000.00%` (probed 2026-09-24).
 
+## An argument's type against the parameter's
+
+A built-in's argument converts to the type its parameter is declared as the way an assignment does, so which types may reach it is the Assign grid's (`SqlType.PairRules.cs`), checked while compiling through `AssignmentRules.ArgumentType` — a typed `NULL` and an empty table's column raise too (probed 2026-09-25 against SQL Server 2025).
+The math family's value is declared `float` (whatever type the result keeps), a count or code point `int` (`CHAR`, `NCHAR`, `SPACE`, `REPLICATE`, `LEFT`, `RIGHT`, `EOMONTH`'s offset), and the date of `YEAR` / `MONTH` / `DAY` / `DATEPART` / `DATENAME` / `DATEADD` / `DATEDIFF` `datetime`.
+A date, a binary, xml or a `uniqueidentifier` meeting `float` is Msg 206; a `sql_variant` is Msg 257, or Msg 260 when it is a column of the query.
+The date functions then read every accepted number and a binary as `datetime`, not only an integer: `DAY(1.5)` is 2 and `DATEADD(day, 1, 0x01)` is 1900-01-02.
+`DATETRUNC`, `DATE_BUCKET` and `EOMONTH` are the exception: they take a date (a string too, save `DATE_BUCKET`; not a `time` for `EOMONTH`) and nothing else, so a number is Msg 8116 rather than a conversion.
+
 ## Integer arguments outside the parameter's range
 
 An integer argument — a length, position, count, index, code point, object / database / index id, month offset, SRID — is narrowed to the type its parameter is declared as, and one that doesn't fit raises SQL Server's own conversion error rather than leaking .NET's narrowing exception.

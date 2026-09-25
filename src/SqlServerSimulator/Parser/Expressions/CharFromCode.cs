@@ -36,7 +36,11 @@ internal sealed class CharFromCode(ParserContext context) : Expression
         return SqlValue.FromChar(char1, CharSqlType.Cp1252Encoder.GetString(oneByte));
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => Char1For(batch);
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        _ = AssignmentRules.ArgumentType(this.code, SqlType.Int32, batch, resolveColumnType);
+        return Char1For(batch);
+    }
 
     internal override string DebugDisplay() => $"CHAR({this.code.DebugDisplay()})";
 

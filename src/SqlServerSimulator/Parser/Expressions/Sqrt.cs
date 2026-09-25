@@ -21,7 +21,11 @@ internal sealed class Sqrt(ParserContext context) : Expression
         return d < 0 ? throw SimulatedSqlException.InvalidFloatingPointOperation() : SqlValue.FromDouble(Math.Sqrt(d));
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Float;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        _ = AssignmentRules.ArgumentType(this.source, SqlType.Float, batch, resolveColumnType);
+        return SqlType.Float;
+    }
 
     internal override string DebugDisplay() => $"SQRT({this.source.DebugDisplay()})";
 

@@ -36,7 +36,7 @@ internal sealed class Degrees(ParserContext context) : Expression
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
-        => ResolveResultType(this.source.GetSqlType(batch, resolveColumnType));
+        => ResolveResultType(AssignmentRules.ArgumentType(this.source, SqlType.Float, batch, resolveColumnType));
 
     internal override bool ResultReportsNumeric => this.source.ResultReportsNumeric;
 

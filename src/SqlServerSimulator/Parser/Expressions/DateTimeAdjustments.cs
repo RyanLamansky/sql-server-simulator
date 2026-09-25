@@ -33,6 +33,7 @@ internal sealed class DateTrunc : Expression
     public override SqlValue Run(RuntimeContext runtime)
     {
         var raw = this.source.Run(runtime);
+        _ = DatePartKinds.RequireDateArgument(this.source, raw.Type, 2, "datetrunc", acceptsString: true, acceptsTime: true);
         if (raw.IsNull)
             return SqlValue.Null(raw.Type);
         var value = DatePartKinds.CoerceDateArgumentImplicit(raw);
@@ -59,7 +60,7 @@ internal sealed class DateTrunc : Expression
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
-        DatePartKinds.ResolveImplicitDateType(this.source.GetSqlType(batch, resolveColumnType));
+        DatePartKinds.ResolveImplicitDateType(DatePartKinds.RequireDateArgument(this.source, this.source.GetSqlType(batch, resolveColumnType), 2, "datetrunc", acceptsString: true, acceptsTime: true));
 
     internal override string DebugDisplay() => $"DATETRUNC({this.keywordText}, {this.source.DebugDisplay()})";
 
