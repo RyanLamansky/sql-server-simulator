@@ -54,7 +54,8 @@ public sealed class LiteralTypePromotionTests
     private static void AssertDecimal(string expr, int precision, int scale)
     {
         var (typeName, actualPrecision, actualScale) = TypeOf(expr);
-        AreEqual("decimal", typeName, $"{expr} type name");
+        // Which of the two names applies is DecimalTypeNameTests' subject.
+        IsTrue(typeName is "decimal" or "numeric", $"{expr} type name {typeName}");
         AreEqual(precision, actualPrecision, $"{expr} precision");
         AreEqual(scale, actualScale, $"{expr} scale");
     }
@@ -116,9 +117,9 @@ public sealed class LiteralTypePromotionTests
     [TestMethod]
     public void IntegerLiteral_InSetOp_SizedByDigitCount()
     {
-        AreEqual(("decimal", 2, 1), ColumnType("select 1 as v into t union select 2.5"));
+        AreEqual(("numeric", 2, 1), ColumnType("select 1 as v into t union select 2.5"));
         // Nested set-op: the folded 1/2 literals still size against 2.5.
-        AreEqual(("decimal", 2, 1), ColumnType("select 1 as v into t union select 2 union select 2.5"));
+        AreEqual(("numeric", 2, 1), ColumnType("select 1 as v into t union select 2 union select 2.5"));
         // All-integer union stays int.
         AreEqual(("int", 10, 0), ColumnType("select 1 as v into t union select 2 union select 250"));
     }
@@ -289,7 +290,7 @@ public sealed class LiteralTypePromotionTests
     {
         var sim = new Simulation();
         _ = sim.ExecuteNonQuery("declare @d numeric(10, 0) = 2147483648; select -@d as v into t");
-        AreEqual("decimal", (string)sim.ExecuteScalar("select data_type from information_schema.columns where table_name = 't'")!);
+        AreEqual("numeric", (string)sim.ExecuteScalar("select data_type from information_schema.columns where table_name = 't'")!);
     }
 
     /// <summary>

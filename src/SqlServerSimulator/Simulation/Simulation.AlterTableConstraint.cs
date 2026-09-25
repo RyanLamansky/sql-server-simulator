@@ -1109,7 +1109,8 @@ partial class Simulation
             defaultExpression: column.Default,
             generatedAs: generatedAs,
             collation: column.Collation,
-            isRowGuidCol: column.IsRowGuidCol)
+            isRowGuidCol: column.IsRowGuidCol,
+            spelledNumeric: column.SpelledNumeric)
         {
             DefaultConstraint = column.DefaultConstraint,
             ColumnId = column.ColumnId,
@@ -1174,7 +1175,8 @@ partial class Simulation
             identity: column.Identity,
             defaultExpression: column.Default,
             collation: column.Collation,
-            isRowGuidCol: column.IsRowGuidCol)
+            isRowGuidCol: column.IsRowGuidCol,
+            spelledNumeric: column.SpelledNumeric)
         {
             DefaultConstraint = column.DefaultConstraint,
             ColumnId = column.ColumnId,

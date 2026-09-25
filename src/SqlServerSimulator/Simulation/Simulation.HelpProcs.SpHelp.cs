@@ -263,7 +263,7 @@ partial class Simulation
                 or BinarySqlType or VarbinarySqlType;
             rows.Add([
                 SqlValue.FromSystemName(column.Name),
-                SqlValue.FromSystemName(HelpTypeName(type)),
+                SqlValue.FromSystemName(column.SpelledNumeric ? column.TypeName : HelpTypeName(type)),
                 HelpFlag(column.Computed is not null),
                 SqlValue.FromInt32(maxLength),
                 showsPrecScale ? HelpPrecScaleCell(precision) : blank,

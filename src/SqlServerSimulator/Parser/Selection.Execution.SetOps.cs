@@ -202,7 +202,8 @@ internal sealed partial class Selection
                     combinedSchema[i],
                     maxLength: null,
                     nullable: leftDest[i].Nullable,
-                    identity: null);
+                    identity: null,
+                    spelledNumeric: combinedReportsNumeric is { } numeric && numeric[i]);
             }
         }
 

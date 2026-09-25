@@ -38,6 +38,12 @@ internal sealed class VariableSlot(SqlType declaredType, int? declaredMaxLength,
     public Schemas.XmlSchemaCollection? XmlSchemaCollection;
 
     /// <summary>
+    /// The variable was declared <c>numeric</c> rather than <c>decimal</c>,
+    /// which a reference reports as its type's name (probed 2026-09-24).
+    /// </summary>
+    public bool SpelledNumeric;
+
+    /// <summary>
     /// Stores <paramref name="value"/>, validating and canonicalizing it first
     /// when this slot carries an <c>xml(&lt;collection&gt;)</c> binding — real
     /// does that on an assignment to a typed variable exactly as it does on a

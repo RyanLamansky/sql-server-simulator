@@ -86,7 +86,7 @@ partial class Simulation
                 continue;
             rebound ??= [.. recorded];
             var nullable = nullability is null || i >= nullability.Length || nullability[i];
-            rebound[i] = new HeapColumn(recorded[i].Name, bound[i], maxLength: null, nullable: nullable);
+            rebound[i] = new HeapColumn(recorded[i].Name, bound[i], maxLength: null, nullable: nullable, spelledNumeric: recorded[i].SpelledNumeric);
         }
         return rebound ?? recorded;
     }

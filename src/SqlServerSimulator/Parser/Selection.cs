@@ -2746,7 +2746,7 @@ internal sealed partial class Selection
 
                     var cteColumns = new HeapColumn[cteBinding.Plan.Schema.Length];
                     for (var ci = 0; ci < cteColumns.Length; ci++)
-                        cteColumns[ci] = new HeapColumn(string.Empty, cteBinding.Plan.Schema[ci], maxLength: null, nullable: true);
+                        cteColumns[ci] = new HeapColumn(string.Empty, cteBinding.Plan.Schema[ci], maxLength: null, nullable: true, spelledNumeric: cteBinding.Plan.ColumnReportsNumeric is { } cteNumeric && cteNumeric[ci]);
 
                     var cteAlias = ConsumeOptionalAlias(context);
 
@@ -3067,7 +3067,7 @@ internal sealed partial class Selection
                 // columns; lobStore is null because no chain to follow.
                 var derivedColumns = new HeapColumn[derivedSelection.Schema.Length];
                 for (var ci = 0; ci < derivedColumns.Length; ci++)
-                    derivedColumns[ci] = new HeapColumn(string.Empty, derivedSelection.Schema[ci], maxLength: null, nullable: true);
+                    derivedColumns[ci] = new HeapColumn(string.Empty, derivedSelection.Schema[ci], maxLength: null, nullable: true, spelledNumeric: derivedSelection.ColumnReportsNumeric is { } derivedNumeric && derivedNumeric[ci]);
 
                 // A body that never closed its paren is Msg 102 naming what the
                 // parse stopped on — the last token of the batch when the input

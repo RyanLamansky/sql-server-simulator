@@ -35,8 +35,14 @@ internal sealed class VariableReference : Expression
         this.VariableName = raw.StartsWith('@') ? raw[1..] : raw;
         // Parse-time validation (and capture of the declared type for
         // GetSqlType) — this is what raises Msg 137 if @v was never declared.
-        this.DeclaredType = context.Batch.GetVariableSlot(raw).DeclaredType;
+        var slot = context.Batch.GetVariableSlot(raw);
+        this.DeclaredType = slot.DeclaredType;
+        this.spelledNumeric = slot.SpelledNumeric;
     }
+
+    private readonly bool spelledNumeric;
+
+    internal override bool ResultReportsNumeric => this.spelledNumeric;
 
     internal override bool ParallelSafe => true;
 

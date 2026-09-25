@@ -103,7 +103,8 @@ partial class Selection
                 outputSchema[i],
                 maxLength: null,
                 nullable: nullable,
-                identity: identity);
+                identity: identity,
+                spelledNumeric: projections[i].ResultReportsNumeric || ReadsNumericSpelledColumn(projections[i], sources));
         }
 
         return identityFunctions > 0 && inheritedIdentity is not null

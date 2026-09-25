@@ -1166,7 +1166,7 @@ internal static partial class BuiltInResources
                 SqlValue.FromInt32(position),
                 col.DefaultConstraint?.Definition is { } defaultText ? SqlValue.FromNVarchar(defaultText) : nullString,
                 col.Nullable ? yesNullable : noNullable,
-                IsoDataTypeName(col.Type),
+                col.TypeName == "numeric" ? SqlValue.FromSystemName("numeric") : IsoDataTypeName(col.Type),
                 charLength is int cl ? SqlValue.FromInt32(cl) : nullInt32,
                 octetLength is int ol ? SqlValue.FromInt32(ol) : nullInt32,
                 numericPrecision is byte np ? SqlValue.FromByte(np) : nullByte,

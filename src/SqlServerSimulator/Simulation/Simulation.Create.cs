@@ -861,7 +861,8 @@ partial class Simulation
                 generatedAs: GeneratedAlwaysAsRow.None,
                 isHidden: pc.IsHidden,
                 collation: pc.Collation,
-                computedDefinition: pc.ComputedDefinition);
+                computedDefinition: pc.ComputedDefinition,
+                spelledNumeric: pc.SpelledNumeric);
         }
         var history = new HeapTable(
             historyLeaf,
@@ -1062,7 +1063,8 @@ partial class Simulation
                         isPersisted: column.IsPersisted,
                         generatedAs: column.GeneratedAs,
                         isHidden: column.IsHidden,
-                        computedDefinition: column.ComputedDefinition);
+                        computedDefinition: column.ComputedDefinition,
+                        spelledNumeric: column.SpelledNumeric);
                 }
             }
         }
@@ -1532,7 +1534,8 @@ partial class Simulation
         // 2026-09-24: a datetime DEFAULT on a decimal column is Msg 257).
         if (defaultExpression is not null)
             AssignmentRules.RequireAssignable(defaultExpression, defaultExpression.GetSqlType(context.Batch, NoColumnTypeResolver), resolvedType);
-        var newColumn = new HeapColumn(columnName.Value, resolvedType, maxLength, actualNullable, identity, defaultExpression, generatedAs: generatedAs, isHidden: isHidden, collation: columnCollation, isRowGuidCol: isRowGuidCol);
+        var newColumn = new HeapColumn(columnName.Value, resolvedType, maxLength, actualNullable, identity, defaultExpression, generatedAs: generatedAs, isHidden: isHidden, collation: columnCollation, isRowGuidCol: isRowGuidCol,
+            spelledNumeric: SqlType.IsNumericSpelling(qualifiedTypeName, alias: context.Batch.TryResolveAliasType(qualifiedTypeName, out _)));
         if (xmlSchemaCollection is not null)
             newColumn.XmlSchemaCollection = xmlSchemaCollection;
         if (defaultExpression is not null)

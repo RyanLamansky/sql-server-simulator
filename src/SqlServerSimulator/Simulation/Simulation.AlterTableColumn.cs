@@ -870,7 +870,8 @@ partial class Simulation
             defaultExpression: existingCol.Default,
             generatedAs: existingCol.GeneratedAs,
             isHidden: existingCol.IsHidden,
-            collation: newCollationStored)
+            collation: newCollationStored,
+            spelledNumeric: SqlType.IsNumericSpelling(qualifiedTypeName, alias: context.Batch.TryResolveAliasType(qualifiedTypeName, out _)))
         {
             DefaultConstraint = existingCol.DefaultConstraint,
             // ALTER COLUMN replaces the HeapColumn instance but not the

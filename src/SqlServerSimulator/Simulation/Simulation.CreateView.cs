@@ -320,7 +320,7 @@ partial class Simulation
             if (!seen.Add(name))
                 throw SimulatedSqlException.DuplicateColumnInViewOrFunction(name, viewName);
             var nullable = nullability is null || i >= nullability.Length || nullability[i];
-            output[i] = new HeapColumn(name, bodySelection.Schema[i], maxLength: null, nullable: nullable);
+            output[i] = new HeapColumn(name, bodySelection.Schema[i], maxLength: null, nullable: nullable, spelledNumeric: bodySelection.ColumnReportsNumeric is { } numeric && numeric[i]);
         }
         return output;
     }

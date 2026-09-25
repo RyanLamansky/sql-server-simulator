@@ -17,7 +17,7 @@ namespace SqlServerSimulator.Storage;
 /// </para>
 /// </remarks>
 [DebuggerDisplay("{DebugDisplay(),nq}")]
-internal sealed class HeapColumn(string name, SqlType type, int? maxLength, bool nullable, IdentityState? identity = null, Expression? defaultExpression = null, Expression? computedExpression = null, bool isPersisted = false, GeneratedAlwaysAsRow generatedAs = GeneratedAlwaysAsRow.None, bool isHidden = false, string? collation = null, string? computedDefinition = null, bool isRowGuidCol = false)
+internal sealed class HeapColumn(string name, SqlType type, int? maxLength, bool nullable, IdentityState? identity = null, Expression? defaultExpression = null, Expression? computedExpression = null, bool isPersisted = false, GeneratedAlwaysAsRow generatedAs = GeneratedAlwaysAsRow.None, bool isHidden = false, string? collation = null, string? computedDefinition = null, bool isRowGuidCol = false, bool spelledNumeric = false)
 {
     // Mutable: EXEC sp_rename (COLUMN rename) reassigns the name in place. Storage
     // is by ordinal, so no row re-encode is needed — but the rename path bumps the
@@ -94,6 +94,27 @@ internal sealed class HeapColumn(string name, SqlType type, int? maxLength, bool
     /// ROWGUIDCOL</c> moves the marker without touching storage.
     /// </remarks>
     public bool IsRowGuidCol = isRowGuidCol;
+
+    /// <summary>
+    /// The column was declared <c>numeric</c> rather than <c>decimal</c> — or
+    /// took a numeric-named value through <c>SELECT … INTO</c> or a view's
+    /// projection. The two names share one <see cref="SqlType"/>, so this is
+    /// catalog truth only: <c>sys.columns</c> reports type 108 and the name
+    /// <c>numeric</c> for it where a decimal column reports 106 (probed
+    /// 2026-09-24 against SQL Server 2025).
+    /// </summary>
+    public readonly bool SpelledNumeric = spelledNumeric;
+
+    /// <summary><c>sys.columns.system_type_id</c>: the type's, or 108 for a numeric-spelled column.</summary>
+    public byte SystemTypeId => this.SpelledNumeric && this.Type is DecimalSqlType ? NumericTypeId : this.Type.SystemTypeId;
+
+    /// <summary><c>sys.columns.user_type_id</c>: the type's, or 108 for a numeric-spelled column.</summary>
+    public int UserTypeId => this.SpelledNumeric && this.Type is DecimalSqlType ? NumericTypeId : this.Type.UserTypeId;
+
+    /// <summary>The column's type name as the catalog spells it.</summary>
+    public string TypeName => this.SpelledNumeric && this.Type is DecimalSqlType ? "numeric" : this.Type.SqlServerName;
+
+    private const byte NumericTypeId = 108;
 
     /// <summary>
     /// True when the column was declared or altered <c>SPARSE</c>. Real trades

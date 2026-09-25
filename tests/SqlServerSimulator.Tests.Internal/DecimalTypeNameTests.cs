@@ -131,13 +131,12 @@ public sealed class DecimalTypeNameTests
     [TestMethod]
     public void ColumnSourceName_StaysDecimal_Deferred()
     {
-        // Deferred boundary: a decimal value read from a declared column, or
-        // from a derived-table / VALUES / set-op subquery column, keeps
-        // `decimal` because the column source doesn't remember its name.
-        // Real reports `numeric` for these; documented as a known deferral.
+        // Deferred boundary: a VALUES constructor's column doesn't remember
+        // its cells' spelling, so it keeps `decimal` where real reports
+        // `numeric`; a derived table's column does.
         AreEqual("decimal", ColumnTypeName("select v from (values(1.0),(2.0)) t(v)", 0));
         AreEqual("decimal", ColumnTypeName("select avg(v) from (values(1.0),(2.0)) t(v)", 0));
-        AreEqual("decimal", ColumnTypeName("select v from (select 1 as v union select 2.5) t", 0));
+        AreEqual("numeric", ColumnTypeName("select v from (select 1 as v union select 2.5) t", 0));
     }
 
     [TestMethod]

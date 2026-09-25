@@ -107,6 +107,7 @@ partial class Simulation
             SqlType declaredType;
             int? declaredMaxLength;
             XmlSchemaCollection? xmlSchemaCollection;
+            var spelledNumeric = false;
             try
             {
                 if (context.Token is Name firstNameToken && TryParseDeclareTableTypeVariable(context, firstNameToken, variableName, variableIndex, reExecution))
@@ -115,6 +116,7 @@ partial class Simulation
                     continue;
                 }
 
+                spelledNumeric = context.Token is Name { Value: var typeWord } && string.Equals(typeWord, "numeric", StringComparison.OrdinalIgnoreCase);
                 (declaredType, declaredMaxLength, xmlSchemaCollection) = ParseDeclareTypeSpec(context, variableName);
             }
             catch (SimulatedSqlException missingType) when (missingType.Number is 2715 or 2717 or 2750 && context.Batch.CreateTimeBindErrors is { } bindErrors)
@@ -167,6 +169,7 @@ partial class Simulation
                 var slot = new VariableSlot(declaredType, declaredMaxLength, SqlValue.Null(declaredType), parameter: null)
                 {
                     XmlSchemaCollection = xmlSchemaCollection,
+                    SpelledNumeric = spelledNumeric,
                 };
                 // Through Assign rather than the constructor so an initializer
                 // against an xml(<collection>) declaration is validated and

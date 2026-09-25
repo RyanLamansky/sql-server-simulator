@@ -1340,7 +1340,7 @@ internal sealed partial class Selection
         selection.ProjectionExpressions = [.. expressions];
         selection.ColumnIntegerLiteralDigits = LiteralDigitsOf(expressions);
         selection.ColumnIsUntypedNull = UntypedNullsOf(expressions);
-        selection.ColumnReportsNumeric = ColumnReportsNumericOf(expressions, outputSchema);
+        selection.ColumnReportsNumeric = ColumnReportsNumericOf(expressions, outputSchema, sources);
         selection.BranchFromSources = sources;
         selection.AutoSourceNames = AutoSourceNamesOf(sources);
         (selection.AutoColumnSource, selection.AutoColumnOrdinal) = AutoColumnBindingOf(expressions, sources);
@@ -1610,15 +1610,30 @@ internal sealed partial class Selection
     /// carry no extra array. The two names share one <see cref="SqlType"/>, so
     /// this stays projection-time metadata and never influences storage.
     /// </summary>
-    private static bool[]? ColumnReportsNumericOf(List<Expression> expressions, SqlType[] schema)
+    private static bool[]? ColumnReportsNumericOf(List<Expression> expressions, SqlType[] schema, FromSource[]? sources = null)
     {
         bool[]? reportsNumeric = null;
         for (var i = 0; i < expressions.Count; i++)
         {
-            if (schema[i] is DecimalSqlType && expressions[i].ResultReportsNumeric)
+            if (schema[i] is DecimalSqlType && (expressions[i].ResultReportsNumeric || ReadsNumericSpelledColumn(expressions[i], sources)))
                 (reportsNumeric ??= new bool[expressions.Count])[i] = true;
         }
         return reportsNumeric;
+    }
+
+    /// <summary>
+    /// Whether a projection is a bare reference to a column declared (or
+    /// derived as) <c>numeric</c> — real carries the spelling through a
+    /// reference, a derived table and a view (probed 2026-09-24).
+    /// </summary>
+    internal static bool ReadsNumericSpelledColumn(Expression expression, FromSource[]? sources)
+    {
+        while (expression is Expressions.NamedExpression named)
+            expression = named.Inner;
+        if (sources is null || expression is not Expressions.Reference reference)
+            return false;
+        var (s, c) = FindSourceColumn(sources, reference.ReferencedName);
+        return s >= 0 && sources[s].Columns[c].SpelledNumeric;
     }
 
     /// <summary>
