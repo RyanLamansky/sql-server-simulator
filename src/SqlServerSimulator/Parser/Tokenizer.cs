@@ -241,6 +241,21 @@ static class Tokenizer
     }
 
     /// <summary>
+    /// A literal without <c>N</c> is <c>varchar</c> in the active database's
+    /// code page, so a character the page lacks becomes its best fit or
+    /// <c>?</c> as it is read: <c>UNICODE('水')</c> is 63 under a Latin1
+    /// collation, and the literal stores <c>?</c> even into an <c>nvarchar</c>
+    /// column (probed 2026-09-25 against SQL Server 2025).
+    /// </summary>
+    private static string InCodePage(string body, Collation activeCollation)
+    {
+        if (System.Text.Ascii.IsValid(body))
+            return body;
+        var encoding = activeCollation.StorageEncoding;
+        return encoding.GetString(encoding.GetBytes(body));
+    }
+
+    /// <summary>
     /// Parses a SQL string literal: <c>'foo'</c>, with <c>''</c> as the
     /// embedded-apostrophe escape. The opening quote is at <paramref name="index"/>;
     /// returns a <see cref="Literal"/> typed as <see cref="SqlType.Varchar"/>
@@ -252,7 +267,7 @@ static class Tokenizer
         var start = index;
         var body = ParseQuotedBody(command, ref index, '\'');
         var literalType = VarcharSqlType.Get(VarcharLiteralLength(body.Length), activeCollation, Coercibility.CoercibleDefault);
-        return new Literal(SqlValue.FromVarchar(literalType, body), command, start, index - start);
+        return new Literal(SqlValue.FromVarchar(literalType, InCodePage(body, activeCollation)), command, start, index - start);
     }
 
     /// <summary>
@@ -270,7 +285,7 @@ static class Tokenizer
         var start = index;
         var body = ParseQuotedBody(command, ref index, '"');
         var literalType = VarcharSqlType.Get(VarcharLiteralLength(body.Length), activeCollation, Coercibility.CoercibleDefault);
-        return new Literal(SqlValue.FromVarchar(literalType, body), command, start, index - start);
+        return new Literal(SqlValue.FromVarchar(literalType, InCodePage(body, activeCollation)), command, start, index - start);
     }
 
     /// <summary>

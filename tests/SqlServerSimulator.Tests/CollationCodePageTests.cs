@@ -325,4 +325,30 @@ public sealed class CollationCodePageTests
         AreEqual(8, sim.ExecuteScalar<int>("select charindex('r. r.', 'George R. R. Martin')"));
         AreEqual(0, sim.ExecuteScalar<int>("select charindex('r. r.' collate SQL_Latin1_General_CP1_CS_AS, 'George R. R. Martin')"));
     }
+
+    /// <summary>
+    /// A character literal without <c>N</c> is read in the database's code
+    /// page, so a character the page lacks is gone before the literal reaches
+    /// anything — an <c>nvarchar</c> column included (probed 2026-09-25 against
+    /// SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void AnsiLiteral_IsReadInTheDatabaseCodePage()
+    {
+        var sim = new Simulation();
+        AreEqual("63|65|63", sim.ExecuteScalar("select concat_ws('|', unicode('水'), unicode('Ā'), unicode(right(N'水' + '水', 1)))"));
+        AreEqual("63|1|0", sim.ExecuteScalar("""
+            create table t (n nvarchar(10));
+            insert t values ('水');
+            select concat_ws('|', (select unicode(n) from t), (select count(*) from t where n = '水'), (select count(*) from t where n = N'水'))
+            """));
+    }
+
+    [TestMethod]
+    [DataRow("Japanese_CI_AS", "27700|63|2")]
+    [DataRow("Latin1_General_100_CI_AS_SC_UTF8", "27700|256|3")]
+    public void AnsiLiteral_FollowsTheDatabasesCodePage(string collation, string expected)
+        => AreEqual(expected, new Simulation().ExecuteBatchesScalar(
+            $"create database d collate {collation}",
+            "use d; select concat_ws('|', unicode('水'), unicode('Ā'), datalength('水'))"));
 }

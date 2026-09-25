@@ -283,6 +283,7 @@ Sites that pin to catalog:
 `Tokenizer.NextToken` takes a `Collation activeCollation` parameter; `ParserContext.MoveNext` threads `context.CurrentDatabase.Collation` in.
 The two string-literal entry points (`ParseStringLiteral` for `'foo'`, `ParseNPrefixedStringLiteral` for `N'foo'`) construct `VarcharSqlType.Get(0, activeCollation, Coercibility.CoercibleDefault)` / `NVarcharSqlType` and tag the resulting `SqlValue` with it.
 Other literal kinds (varbinary `0xHEX`, currency `$1.23`) don't carry collation and ignore the parameter.
+A `'foo'` body is also read in that collation's code page (`Tokenizer.InCodePage`), so a character the page lacks is its best fit or `?` before the literal reaches anything: `UNICODE('水')` is 63 under Latin1 and 27700 under `Japanese_CI_AS`, and `'水'` stores `?` even into an `nvarchar` column — real's missing-`N` data loss (probed 2026-09-25).
 
 Effect: `SELECT IIF('A' = 'a', 'eq', 'neq')` on a CS database returns `'neq'` (case-sensitive), matching real SQL Server.
 The `CsDatabase_TwoVarcharLiteralsCompareCaseSensitively` / `CsDatabase_TwoNVarcharLiteralsCompareCaseSensitively` tests in `NameComparisonRegimeTests.cs` lock the behavior in.
