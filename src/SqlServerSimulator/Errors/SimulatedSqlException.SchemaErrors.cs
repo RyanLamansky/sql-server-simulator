@@ -2118,6 +2118,14 @@ partial class SimulatedSqlException
         new($"'{optionName}' is not a recognized ALTER INDEX option.", 155, 15, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 4920: <c>ALTER TABLE … { ENABLE | DISABLE }
+    /// TRIGGER</c> named a trigger the table doesn't have (probed 2026-09-25
+    /// against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException AlterTableTriggerMissing(string triggerName, string tableName) =>
+        new($"ALTER TABLE failed because trigger '{triggerName}' on table '{tableName}' does not exist.", 4920, 16, 0);
+
+    /// <summary>
     /// Mimics SQL Server error 155 for <c>ALTER TABLE … SET (LOCK_ESCALATION = x)</c>
     /// naming an escalation it doesn't know (probed 2026-09-25 against SQL
     /// Server 2025).
@@ -2364,27 +2372,6 @@ partial class SimulatedSqlException
         new($"ALTER TABLE DROP COLUMN failed because column '{columnName}' does not exist in table '{tableName}'.", 4924, 16, 1);
 
     /// <summary>
-    /// Mimics SQL Server error 5074: <c>ALTER TABLE DROP COLUMN</c>
-    /// targeted a column referenced by at least one constraint, index, or
-    /// other dependent object. The message body lists every blocker on
-    /// its own line, in the form <c>"The object 'X' is dependent on
-    /// column 'col'.\n[…]
-    /// ALTER TABLE DROP COLUMN col failed because one or more objects
-    /// access this column."</c>. Constraints surface as <c>The object</c>;
-    /// indexes surface as <c>The index</c>. Probe-confirmed verbatim
-    /// against SQL Server 2025; blocker enumeration order matches PK /
-    /// UQ → FK → CHECK → DEFAULT → index in the simulator.
-    /// </summary>
-    internal static SimulatedSqlException DropColumnHasDependenciesMixed(string columnName, List<(string Name, bool IsIndex)> blockers)
-    {
-        var sb = new System.Text.StringBuilder();
-        for (var i = 0; i < blockers.Count; i++)
-            _ = sb.Append(blockers[i].IsIndex ? "The index '" : "The object '").Append(blockers[i].Name).Append("' is dependent on column '").Append(columnName).Append("'.\r\n");
-        _ = sb.Append("ALTER TABLE DROP COLUMN ").Append(columnName).Append(" failed because one or more objects access this column.");
-        return new(sb.ToString(), 5074, 16, 1);
-    }
-
-    /// <summary>
     /// Mimics SQL Server's Msg 264 — an UPDATE's SET list or an INSERT's column
     /// list names one column twice, raised while compiling and naming the
     /// column as declared. Probe-confirmed against SQL Server 2025 (2026-09-24).
@@ -2425,8 +2412,8 @@ partial class SimulatedSqlException
         new($"Cannot alter column '{columnName}' because it is '{kindWord}'.", 4928, 16, 1);
 
     /// <summary>
-    /// Distinguishes blocker kinds for <see cref="AlterColumnHasDependencies"/>'s
-    /// per-line prefix: <c>Object</c> renders as <c>"The object 'X'"</c>,
+    /// Distinguishes blocker kinds for <see cref="ColumnHasDependencies"/>'s
+    /// per-error noun: <c>Object</c> renders as <c>"The object 'X'"</c>,
     /// <c>Index</c> as <c>"The index 'X'"</c>, <c>Column</c> as <c>"The column 'X'"</c>.
     /// </summary>
     internal enum AlterColumnBlockerKind
@@ -2437,28 +2424,28 @@ partial class SimulatedSqlException
     }
 
     /// <summary>
-    /// Mimics SQL Server error 5074: <c>ALTER TABLE ALTER COLUMN</c>
-    /// targeted a column referenced by at least one constraint, index, or
-    /// computed-column expression. Per-line prefix varies by blocker kind:
-    /// <c>The object</c> for PK / UQ / FK / CHECK, <c>The index</c> for
-    /// indexes, <c>The column</c> for computed-column dependencies.
-    /// Probe-confirmed verbatim against SQL Server 2025.
+    /// Mimics SQL Server error 5074, once per object that keeps
+    /// <c>ALTER TABLE { DROP | ALTER } COLUMN</c> from touching a column —
+    /// <c>The object</c> for a constraint or schema-bound module, <c>The
+    /// index</c>, <c>The column</c> for a computed column — then Msg 4922
+    /// state 9 naming the verb, each its own error (probed 2026-09-25 against
+    /// SQL Server 2025).
     /// </summary>
-    internal static SimulatedSqlException AlterColumnHasDependencies(string columnName, List<(string Name, AlterColumnBlockerKind Kind)> blockers)
+    internal static SimulatedSqlException ColumnHasDependencies(string verb, string columnName, List<(string Name, AlterColumnBlockerKind Kind)> blockers)
     {
-        var sb = new System.Text.StringBuilder();
-        for (var i = 0; i < blockers.Count; i++)
+        var errors = new List<SimulatedSqlException>(blockers.Count + 1);
+        foreach (var (name, kind) in blockers)
         {
-            var prefix = blockers[i].Kind switch
+            var noun = kind switch
             {
-                AlterColumnBlockerKind.Index => "The index '",
-                AlterColumnBlockerKind.Column => "The column '",
-                _ => "The object '",
+                AlterColumnBlockerKind.Index => "index",
+                AlterColumnBlockerKind.Column => "column",
+                _ => "object",
             };
-            _ = sb.Append(prefix).Append(blockers[i].Name).Append("' is dependent on column '").Append(columnName).Append("'.\r\n");
+            errors.Add(new($"The {noun} '{name}' is dependent on column '{columnName}'.", 5074, 16, 1));
         }
-        _ = sb.Append("ALTER TABLE ALTER COLUMN ").Append(columnName).Append(" failed because one or more objects access this column.");
-        return new(sb.ToString(), 5074, 16, 1);
+        errors.Add(new($"ALTER TABLE {verb} {columnName} failed because one or more objects access this column.", 4922, 16, 9));
+        return Aggregate(errors);
     }
 
     /// <summary>

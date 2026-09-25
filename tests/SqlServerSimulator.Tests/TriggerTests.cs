@@ -1106,4 +1106,25 @@ public sealed class TriggerTests
         AreEqual((11, "au"), log[4]);
         AreEqual((11, "au"), log[5]);
     }
+
+    /// <summary>
+    /// <c>ALTER TABLE … { ENABLE | DISABLE } TRIGGER</c> toggles the table's
+    /// triggers by name or all at once; a name the table lacks is Msg 4920 and
+    /// toggles none (probed 2026-09-25 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void AlterTable_DisableAndEnableTrigger()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table t (id int); create table log (n int)",
+            "create trigger tr on t after insert as insert log values (1)");
+        _ = sim.ExecuteNonQuery("alter table t disable trigger tr; insert t values (1)");
+        AreEqual(0, sim.ExecuteScalar("select count(*) from log"));
+        _ = sim.ExecuteNonQuery("alter table t enable trigger all; insert t values (2)");
+        AreEqual(1, sim.ExecuteScalar("select count(*) from log"));
+        sim.AssertSqlError("alter table t disable trigger tr, nosuch", 4920, "ALTER TABLE failed because trigger 'nosuch' on table 't' does not exist.");
+        IsFalse((bool)sim.ExecuteScalar("select is_disabled from sys.triggers where name = 'tr'")!);
+    }
 }
+

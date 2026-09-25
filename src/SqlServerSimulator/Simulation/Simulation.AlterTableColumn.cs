@@ -470,15 +470,13 @@ partial class Simulation
         if (toDropOrdinals.Count == 0)
             return true;
 
-        // Per-column dependency check. Msg 5074 lists every blocker; the
-        // probe-confirmed format uses one line per blocker with the
-        // "The object 'X'" / "The index 'X'" prefix per kind.
+        // Per-column dependency check: one Msg 5074 per blocker, then Msg 4922.
         foreach (var ordinal in toDropOrdinals)
         {
             var col = table.Columns[ordinal];
-            var blockers = CollectColumnDependencies(context.Batch.CurrentDatabase, table, ordinal, col);
+            var blockers = CollectColumnBlockers(context.Batch.CurrentDatabase, table, ordinal, col, includeCheckAndDefault: true, includeIndexes: true);
             if (blockers.Count > 0)
-                throw SimulatedSqlException.DropColumnHasDependenciesMixed(col.Name, blockers);
+                throw SimulatedSqlException.ColumnHasDependencies("DROP COLUMN", col.Name, blockers);
         }
 
         // Apply phase. Build full-ordinal and storage-ordinal mappings
@@ -559,103 +557,6 @@ partial class Simulation
         table.RecomputeStorageProjections();
 
         return true;
-    }
-
-    /// <summary>
-    /// Walks every constraint / index / FK on the table and reports the
-    /// names of any that reference the column at <paramref name="ordinal"/>.
-    /// Returns an ordered list of (name, isIndex) entries the Msg 5074
-    /// factory consumes to render the probed message shape. Walker order:
-    /// PK / UQ → outgoing FK → incoming FK (parent-side references to
-    /// this column) → CHECK (inline by name, table-level by predicate
-    /// walk) → DEFAULT → schema-bound module → index (probe-confirmed that
-    /// a schema-bound view precedes an index on the same column).
-    /// </summary>
-    private static List<(string Name, bool IsIndex)> CollectColumnDependencies(Database database, HeapTable table, int ordinal, HeapColumn col)
-    {
-        var collation = database.Collation;
-        var blockers = new List<(string, bool)>();
-        var storageOrdinal = table.StorageOrdinals[ordinal];
-
-        foreach (var kc in table.KeyConstraints)
-        {
-            if (storageOrdinal >= 0)
-            {
-                foreach (var so in kc.StorageOrdinals)
-                {
-                    if (so == storageOrdinal)
-                    {
-                        blockers.Add((kc.Name, false));
-                        break;
-                    }
-                }
-            }
-        }
-        foreach (var fk in table.OutgoingForeignKeys)
-        {
-            foreach (var co in fk.ChildColumnOrdinals)
-            {
-                if (co == ordinal)
-                {
-                    blockers.Add((fk.Name, false));
-                    break;
-                }
-            }
-        }
-        foreach (var fk in table.IncomingForeignKeys)
-        {
-            foreach (var ro in fk.ReferencedColumnOrdinals)
-            {
-                if (ro == ordinal)
-                {
-                    blockers.Add((fk.Name, false));
-                    break;
-                }
-            }
-        }
-        foreach (var ck in table.CheckConstraints)
-        {
-            if (ck.InlineColumn is not null && collation.Equals(ck.InlineColumn, col.Name))
-            {
-                blockers.Add((ck.Name, false));
-                continue;
-            }
-            if (CheckPredicateReferencesColumn(collation, ck.Predicate, col.Name))
-                blockers.Add((ck.Name, false));
-        }
-        if (col.DefaultConstraint is { } df)
-            blockers.Add((df.Name, false));
-        foreach (var module in SchemaBinding.ColumnReferencingModuleNames(database, table, col.Name))
-            blockers.Add((module, false));
-        foreach (var ix in table.Indexes)
-        {
-            if (storageOrdinal < 0)
-                continue;
-            var referenced = false;
-            foreach (var keyCol in ix.KeyColumns)
-            {
-                if (keyCol.StorageOrdinal == storageOrdinal)
-                {
-                    referenced = true;
-                    break;
-                }
-            }
-            if (!referenced)
-            {
-                foreach (var inc in ix.IncludedColumns)
-                {
-                    if (inc == storageOrdinal)
-                    {
-                        referenced = true;
-                        break;
-                    }
-                }
-            }
-            if (referenced)
-                blockers.Add((ix.Name, true));
-        }
-
-        return blockers;
     }
 
     /// <summary>
@@ -856,14 +757,23 @@ partial class Simulation
         if (existingCol.Identity is not null && !SqlType.IsIntegerCategory(newType))
             throw SimulatedSqlException.IdentityColumnMustBeIntegerType(columnName);
 
-        // Blocker detection. PK/UQ, FK (both directions), and computed-column
-        // dependencies block unconditionally; indexes block only on actual
-        // SqlType-subclass change (varchar(50)→varchar(100) widening passes
-        // under an index, varchar→nvarchar doesn't).
-        var isSubclassChange = existingCol.Type.GetType() != newType.GetType();
-        var blockers = CollectAlterColumnBlockers(context.Batch.CurrentDatabase, table, ordinal, existingCol, isSubclassChange);
+        // Blocker detection. PK/UQ, FK (both directions), computed-column and
+        // schema-bound module dependencies block unconditionally. A CHECK or
+        // DEFAULT blocks a change of type — the family, the collation, or a
+        // move to or from MAX — but not of length, precision, scale or
+        // nullability; an index blocks those and a nullability change too
+        // (probed 2026-09-25 against SQL Server 2025: varchar(10)→varchar(5)
+        // passes a CHECK, int→bigint and varchar→nvarchar don't).
+        var isTypeChange = existingCol.Type.GetType() != newType.GetType()
+            || !Equals(existingCol.Type.Collation, newType.Collation)
+            || Parser.Expressions.StringScalars.IsMaxForm(existingCol.Type) != Parser.Expressions.StringScalars.IsMaxForm(newType)
+            || (existingCol.Type is VarbinarySqlType { length: SqlType.MaxLengthSentinel }) != (newType is VarbinarySqlType { length: SqlType.MaxLengthSentinel });
+        var blockers = CollectColumnBlockers(
+            context.Batch.CurrentDatabase, table, ordinal, existingCol,
+            includeCheckAndDefault: isTypeChange,
+            includeIndexes: isTypeChange || newNullable != existingCol.Nullable);
         if (blockers.Count > 0)
-            throw SimulatedSqlException.AlterColumnHasDependencies(columnName, blockers);
+            throw SimulatedSqlException.ColumnHasDependencies("ALTER COLUMN", columnName, blockers);
 
         var newColumn = new HeapColumn(
             existingCol.Name,
@@ -914,103 +824,64 @@ partial class Simulation
     }
 
     /// <summary>
-    /// Returns the list of constraints / indexes / computed-column references
-    /// that block <c>ALTER COLUMN</c> on the column at
-    /// <paramref name="ordinal"/>. PK / UQ / outgoing FK / incoming FK /
-    /// computed-column references block unconditionally;
-    /// <paramref name="includeIndexes"/> selects whether indexes block (true
-    /// when the alteration changes the column's <see cref="SqlType"/>
-    /// subclass — probe-confirmed that pure length widening within the same
-    /// SqlType family passes under an index). A schema-bound module
-    /// referencing the column blocks unconditionally too: probe-confirmed that
-    /// a widening real waves past an index still fails under a schema-bound
-    /// view.
+    /// The objects that keep <c>ALTER TABLE { DROP | ALTER } COLUMN</c> from
+    /// touching the column at <paramref name="ordinal"/>, in the order real
+    /// reports them — by kind (the DEFAULT, computed columns, CHECKs,
+    /// schema-bound modules, key constraints, indexes, outgoing then incoming
+    /// foreign keys), creation order within a kind (probed 2026-09-25 against
+    /// SQL Server 2025). The flags say whether CHECK / DEFAULT constraints and
+    /// indexes count; everything else always does.
     /// </summary>
-    private static List<(string Name, SimulatedSqlException.AlterColumnBlockerKind Kind)> CollectAlterColumnBlockers(Database database, HeapTable table, int ordinal, HeapColumn col, bool includeIndexes)
+    private static List<(string Name, SimulatedSqlException.AlterColumnBlockerKind Kind)> CollectColumnBlockers(
+        Database database, HeapTable table, int ordinal, HeapColumn col, bool includeCheckAndDefault, bool includeIndexes)
     {
         var collation = database.Collation;
-        var blockers = new List<(string, SimulatedSqlException.AlterColumnBlockerKind)>();
+        var blockers = new List<(string Name, SimulatedSqlException.AlterColumnBlockerKind Kind, int Rank, int ObjectId)>();
         var storageOrdinal = table.StorageOrdinals[ordinal];
+        const SimulatedSqlException.AlterColumnBlockerKind objectKind = SimulatedSqlException.AlterColumnBlockerKind.Object;
 
+        if (includeCheckAndDefault && col.DefaultConstraint is { } df)
+            blockers.Add((df.Name, objectKind, 0, df.ObjectId));
+        for (var i = 0; i < table.Columns.Length; i++)
+        {
+            if (table.Columns[i].Computed is { } expr && ComputedReferencesColumn(collation, expr, col.Name))
+                blockers.Add((table.Columns[i].Name, SimulatedSqlException.AlterColumnBlockerKind.Column, 1, i));
+        }
+        if (includeCheckAndDefault)
+        {
+            foreach (var ck in table.CheckConstraints)
+            {
+                if ((ck.InlineColumn is not null && collation.Equals(ck.InlineColumn, col.Name)) || CheckPredicateReferencesColumn(collation, ck.Predicate, col.Name))
+                    blockers.Add((ck.Name, objectKind, 2, ck.ObjectId));
+            }
+        }
+        foreach (var (module, moduleId) in SchemaBinding.ColumnReferencingModules(database, table, col.Name))
+            blockers.Add((module, objectKind, 3, moduleId));
         foreach (var kc in table.KeyConstraints)
         {
-            if (storageOrdinal < 0)
-                continue;
-            foreach (var so in kc.StorageOrdinals)
-            {
-                if (so == storageOrdinal)
-                {
-                    blockers.Add((kc.Name, SimulatedSqlException.AlterColumnBlockerKind.Object));
-                    break;
-                }
-            }
+            if (storageOrdinal >= 0 && Array.IndexOf(kc.StorageOrdinals, storageOrdinal) >= 0)
+                blockers.Add((kc.Name, objectKind, 4, kc.ObjectId));
         }
-
-        foreach (var fk in table.OutgoingForeignKeys)
-        {
-            foreach (var co in fk.ChildColumnOrdinals)
-            {
-                if (co == ordinal)
-                {
-                    blockers.Add((fk.Name, SimulatedSqlException.AlterColumnBlockerKind.Object));
-                    break;
-                }
-            }
-        }
-
-        foreach (var fk in table.IncomingForeignKeys)
-        {
-            foreach (var ro in fk.ReferencedColumnOrdinals)
-            {
-                if (ro == ordinal)
-                {
-                    blockers.Add((fk.Name, SimulatedSqlException.AlterColumnBlockerKind.Object));
-                    break;
-                }
-            }
-        }
-
-        foreach (var c in table.Columns)
-        {
-            if (c.Computed is { } expr && ComputedReferencesColumn(collation, expr, col.Name))
-                blockers.Add((c.Name, SimulatedSqlException.AlterColumnBlockerKind.Column));
-        }
-
-        foreach (var module in SchemaBinding.ColumnReferencingModuleNames(database, table, col.Name))
-            blockers.Add((module, SimulatedSqlException.AlterColumnBlockerKind.Object));
-
-        if (includeIndexes)
+        if (includeIndexes && storageOrdinal >= 0)
         {
             foreach (var ix in table.Indexes)
             {
-                if (storageOrdinal < 0)
-                    continue;
-                var referenced = false;
-                foreach (var keyCol in ix.KeyColumns)
-                {
-                    if (keyCol.StorageOrdinal == storageOrdinal)
-                    {
-                        referenced = true;
-                        break;
-                    }
-                }
-                if (!referenced)
-                {
-                    foreach (var inc in ix.IncludedColumns)
-                    {
-                        if (inc == storageOrdinal)
-                        {
-                            referenced = true;
-                            break;
-                        }
-                    }
-                }
-                if (referenced)
-                    blockers.Add((ix.Name, SimulatedSqlException.AlterColumnBlockerKind.Index));
+                if (ix.KeyColumns.Any(k => k.StorageOrdinal == storageOrdinal) || Array.IndexOf(ix.IncludedColumns, storageOrdinal) >= 0)
+                    blockers.Add((ix.Name, SimulatedSqlException.AlterColumnBlockerKind.Index, 5, ix.ObjectId));
             }
         }
+        foreach (var fk in table.OutgoingForeignKeys)
+        {
+            if (Array.IndexOf(fk.ChildColumnOrdinals, ordinal) >= 0)
+                blockers.Add((fk.Name, objectKind, 6, fk.ObjectId));
+        }
+        foreach (var fk in table.IncomingForeignKeys)
+        {
+            if (Array.IndexOf(fk.ReferencedColumnOrdinals, ordinal) >= 0)
+                blockers.Add((fk.Name, objectKind, 7, fk.ObjectId));
+        }
 
-        return blockers;
+        return [.. blockers.OrderBy(static b => b.Rank).ThenBy(static b => b.ObjectId).Select(static b => (b.Name, b.Kind))];
     }
 
     /// <summary>

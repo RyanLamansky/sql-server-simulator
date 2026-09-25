@@ -341,7 +341,7 @@ Two-pass apply: every name is resolved + dependency-checked before any mutation,
 
 ### Dependency rejection — DROP COLUMN
 
-Probe-confirmed: dropping a column referenced by ANY of the following raises **Msg 5074** with one line per blocker:
+Probe-confirmed: dropping a column referenced by ANY of the following raises one **Msg 5074** per blocker, then **Msg 4922** state 9 (`ALTER TABLE DROP COLUMN col failed because one or more objects access this column.`), each its own error:
 
 - `PRIMARY KEY` / `UNIQUE` constraint (`KeyConstraint` storage ordinals)
 - Outgoing `FOREIGN KEY` (child side — the FK's child column references the to-be-dropped column)
@@ -350,10 +350,10 @@ Probe-confirmed: dropping a column referenced by ANY of the following raises **M
 - `DEFAULT` constraint attached to the column
 - A `WITH SCHEMABINDING` view or function whose body names the column (see [`programmable.md`](programmable.md#schema-binding-with-schemabinding))
 - `INDEX` (`CREATE INDEX`-declared — either KEY column or INCLUDE column)
+- A computed column whose expression names it (`The column 'X' …`)
 
 Each blocker emits its line with the appropriate prefix: `The object 'X' is dependent on column 'col'.` for constraints and schema-bound modules, `The index 'X' is dependent on column 'col'.` for indexes.
-Multiple blockers on one column emit one line each.
-The schema-bound module sits between DEFAULT and index in the walk, which reproduces real's probed view-before-index ordering.
+Real orders them by kind — the DEFAULT, computed columns, CHECKs, schema-bound modules, key constraints, indexes, outgoing then incoming foreign keys — and by creation within a kind, not by creation overall (probed 2026-09-25); `CollectColumnBlockers` walks in that order.
 
 `IF EXISTS` suppresses Msg 4924 (column doesn't exist) but does NOT suppress Msg 5074 (dependencies block) — matches real SQL Server.
 
@@ -380,7 +380,6 @@ The old `Heap` is replaced wholesale (via the mutable `HeapTable.Heap` field).
   The simulator's regular-DDL non-logging pattern (see existing CREATE/DROP TABLE quirk) extends here: ALTER TABLE ADD / DROP COLUMN doesn't participate in the undo log, so a `BEGIN TRAN` / `ROLLBACK` won't undo a column mutation.
   Matches the existing CREATE/DROP TABLE asymmetry.
 - **Table variable column ops**: `DECLARE @t TABLE` then `ALTER TABLE @t ADD …` raises Msg 102 at parse — real SQL Server's grammar also doesn't allow ALTER on table variables.
-- **Single primary error**: Real SQL Server's Msg 5074 path may pair with a trailing Msg 4922 informational; the simulator emits only the primary Msg 5074.
 
 ## ALTER COLUMN
 
@@ -412,11 +411,12 @@ Real SQL Server's error codes surface verbatim:
 | Bounded-string narrow | `varchar(50) → varchar(10)` with 30-char value | Msg 2628 (`String or binary data would be truncated…`) |
 | `NULL → NOT NULL` with existing NULL | `varchar(10) null → varchar(10) not null` on a row with NULL | Msg 515 (`Cannot insert the value NULL into column 'X', table 'Y'; column does not allow nulls.`) |
 
-Widening within the same family (`varchar(50) → varchar(100)`, `int → bigint`, `tinyint → smallint`) always succeeds; bounded-string narrowings succeed when every existing value fits the new length.
+Widening within the same family (`varchar(50) → varchar(100)`, `int → bigint`, `tinyint → smallint`) succeeds when nothing below blocks it; bounded-string narrowings succeed when every existing value fits the new length.
 
 ### Blockers (Msg 5074)
 
-`CollectAlterColumnBlockers` walks the same constraint surface as DROP COLUMN, except CHECK and DEFAULT don't block (probe-confirmed: ALTER COLUMN under a CHECK constraint succeeds and the constraint stays in force against future inserts):
+`CollectColumnBlockers` walks the same surface as DROP COLUMN, with CHECK, DEFAULT and index blocking only some changes (probed 2026-09-25).
+A **type change** is a different type family (`int → bigint`, `varchar → nvarchar`), a different collation, or a move to or from MAX; length, precision, scale and nullability changes are not:
 
 | Source | Blocks ALTER COLUMN? | Prefix in Msg 5074 |
 |--------|----------------------|--------------------|
@@ -426,12 +426,11 @@ Widening within the same family (`varchar(50) → varchar(100)`, `int → bigint
 | Incoming FOREIGN KEY referencing this column as a parent column | Always | `The object 'X' is dependent…` |
 | Computed column that references this column in its expression | Always | `The column 'X' is dependent…` |
 | `WITH SCHEMABINDING` view or function whose body names this column | Always — probe-confirmed that a widening an index waves past still fails here | `The object 'X' is dependent…` |
-| Index whose key or include columns reference this column | Only when the `SqlType` subclass changes — length widening within the same family (`varchar(50) → varchar(100)`) passes | `The index 'X' is dependent…` |
-| CHECK constraint that references this column | Never (constraint survives the type change and continues to enforce against future inserts) | — |
-| DEFAULT constraint on this column | Never (default expression + constraint name survive the type change) | — |
+| Index whose key or include columns reference this column | On a type change or a nullability change — length widening within the same family (`varchar(50) → varchar(100)`) passes | `The index 'X' is dependent…` |
+| CHECK constraint that references this column | On a type change (a length change passes and the constraint keeps enforcing) | `The object 'X' is dependent…` |
+| DEFAULT constraint on this column | On a type change | `The object 'X' is dependent…` |
 
-Multi-blocker enumeration follows the existing `DropColumnHasDependenciesMixed` pattern: one line per blocker, all surfaced in one Msg 5074 raise.
-Blocker order: PK / UQ → outgoing FK → incoming FK → computed-column refs → schema-bound modules → indexes (when applicable).
+One Msg 5074 per blocker then Msg 4922 naming `ALTER COLUMN`, in DROP COLUMN's order.
 
 ### Rejection paths (other than Msg 5074)
 

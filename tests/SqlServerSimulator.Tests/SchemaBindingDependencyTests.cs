@@ -315,11 +315,14 @@ public sealed class SchemaBindingDependencyTests
             "create view dbo.first_v with schemabinding as select a from dbo.t",
             "create view dbo.second_v with schemabinding as select a from dbo.t");
         var ex = sim.AssertSqlError("alter table dbo.t drop column a", 5074);
-        AreEqual("""
-            The object 'first_v' is dependent on column 'a'.
-            The object 'second_v' is dependent on column 'a'.
-            ALTER TABLE DROP COLUMN a failed because one or more objects access this column.
-            """.ReplaceLineEndings("\r\n"), ex.Message);
+        CollectionAssert.AreEqual(
+            new[]
+            {
+                "5074: The object 'first_v' is dependent on column 'a'.",
+                "5074: The object 'second_v' is dependent on column 'a'.",
+                "4922: ALTER TABLE DROP COLUMN a failed because one or more objects access this column.",
+            },
+            ex.Errors.Cast<SimulatedError>().Select(e => $"{e.Number}: {e.Message}").ToArray());
     }
 
     /// <summary>A schema-bound view precedes an index on the same column in the blocker list.</summary>

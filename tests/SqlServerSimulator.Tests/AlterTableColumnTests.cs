@@ -996,4 +996,59 @@ public sealed class AlterTableColumnTests
     [DataRow("declare @t table (id int default 1 with values)")]
     public void WithValues_OutsideAnAddedDefault_RaisesMsg156(string sql)
         => new Simulation().AssertSqlError(sql, 156, "Incorrect syntax near the keyword 'values'.");
+
+    /// <summary>
+    /// A CHECK or DEFAULT keeps a column's type — family, collation, MAX-ness —
+    /// but not its length or nullability; an index keeps its nullability too.
+    /// Each blocker is its own Msg 5074, then Msg 4922 (probed 2026-09-25
+    /// against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("v int check (v > 0)", "v bigint", "The object 'ck' is dependent on column 'v'.")]
+    [DataRow("v varchar(10) check (v <> '')", "v nvarchar(10)", "The object 'ck' is dependent on column 'v'.")]
+    [DataRow("v varchar(10) check (v <> '')", "v varchar(max)", "The object 'ck' is dependent on column 'v'.")]
+    [DataRow("v varchar(10) check (v <> '')", "v varchar(10) collate Latin1_General_BIN2", "The object 'ck' is dependent on column 'v'.")]
+    [DataRow("v int default 0", "v bigint", "The object 'df' is dependent on column 'v'.")]
+    public void AlterColumn_TypeChangeUnderCheckOrDefault_IsBlocked(string column, string alter, string blocker)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery($"create table t (id int, {column.Replace(" check", " constraint ck check").Replace(" default", " constraint df default")})");
+        var error = sim.AssertSqlError($"alter table t alter column {alter}", 5074);
+        CollectionAssert.AreEqual(
+            new[] { $"5074: {blocker}", "4922: ALTER TABLE ALTER COLUMN v failed because one or more objects access this column." },
+            error.Errors.Cast<SimulatedError>().Select(e => $"{e.Number}: {e.Message}").ToArray());
+    }
+
+    [TestMethod]
+    [DataRow("v varchar(10) check (v <> '')", "v varchar(5)")]
+    [DataRow("v decimal(5,2) check (v > 0)", "v decimal(10,3)")]
+    [DataRow("v int check (v > 0)", "v int not null")]
+    public void AlterColumn_LengthOrNullabilityUnderCheck_Passes(string column, string alter)
+        => AreEqual(0, new Simulation().ExecuteScalar($"create table t (id int, {column}); alter table t alter column {alter}; select count(*) from t"));
+
+    [TestMethod]
+    public void AlterColumn_NullabilityUnderAnIndex_IsBlocked()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (id int, v int); create index ix on t (v)");
+        AreEqual("The index 'ix' is dependent on column 'v'.", sim.AssertSqlError("alter table t alter column v int not null", 5074).Errors[0].Message);
+    }
+
+    [TestMethod]
+    public void DropColumn_Blockers_ComeInRealsKindOrder()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table p (v int primary key)",
+            "create table t (id int, v int, constraint uq unique (v), constraint fk foreign key (v) references p(v))",
+            "create index ix on t (v)",
+            "alter table t add constraint ck check (v > 0)",
+            "alter table t add constraint df default 0 for v",
+            "alter table t add c as v + 1");
+        var error = sim.AssertSqlError("alter table t drop column v", 5074);
+        CollectionAssert.AreEqual(
+            new[] { "df", "c", "ck", "uq", "ix", "fk" },
+            error.Errors.Cast<SimulatedError>().Where(e => e.Number == 5074).Select(e => e.Message.Split('\'')[1]).ToArray());
+    }
 }
+

@@ -207,7 +207,7 @@ partial class Simulation
         // Column-granular schema binding: renaming a column no schema-bound
         // module reads is allowed, renaming one that is read is Msg 15336
         // (both probe-confirmed).
-        if (SchemaBinding.ColumnReferencingModuleNames(batch.CurrentDatabase, table, columnName).Count > 0)
+        if (SchemaBinding.ColumnReferencingModules(batch.CurrentDatabase, table, columnName).Count > 0)
             throw SimulatedSqlException.RenameParticipatesInEnforcedDependencies(objName);
 
         // Storage is by ordinal, so the name change needs no row re-encode — but

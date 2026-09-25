@@ -89,19 +89,19 @@ internal static class SchemaBinding
     }
 
     /// <summary>
-    /// Leaf names of every schema-bound module that references
+    /// Leaf names and object ids of every schema-bound module that references
     /// <paramref name="table"/> and mentions <paramref name="columnName"/>,
-    /// ordered by object id — the Msg 5074 blocker lines <c>ALTER TABLE DROP
+    /// ordered by object id — the Msg 5074 blockers <c>ALTER TABLE DROP
     /// COLUMN</c> / <c>ALTER COLUMN</c> add to their own constraint and index
     /// blockers.
     /// </summary>
-    internal static List<string> ColumnReferencingModuleNames(Database database, HeapTable table, string columnName)
+    internal static List<(string Name, int ObjectId)> ColumnReferencingModules(Database database, HeapTable table, string columnName)
     {
         var matches = ReferencingModules(database, table, columnName);
-        var names = new List<string>(matches.Count);
+        var modules = new List<(string, int)>(matches.Count);
         foreach (var match in matches)
-            names.Add(match.Name);
-        return names;
+            modules.Add((match.Name, match.ObjectId));
+        return modules;
     }
 
     /// <summary>

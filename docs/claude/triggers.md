@@ -15,6 +15,7 @@ Database-scope DDL triggers (`CREATE TRIGGER … ON DATABASE`) fire on the DDL t
 - **DROP TRIGGER [IF EXISTS] name [, ...]** — comma-list form supported via the shared DROP parser.
 - **DISABLE / ENABLE TRIGGER { name | ALL } ON parent** — toggles `Trigger.IsDisabled`.
   Disabled triggers stay in the schema and surface in `sys.triggers.is_disabled` but don't fire.
+  `ALTER TABLE t { DISABLE | ENABLE } TRIGGER { ALL | name [, …] }` is the table-scoped form; a name the table lacks is Msg 4920 and toggles none of the list (probed 2026-09-25).
   Works on both table and view parents.
 - **AFTER INSERT / UPDATE / DELETE** plus the **FOR-synonym-for-AFTER** spelling — table parents only.
   AFTER on a view raises Msg 8197 (probe-confirmed).

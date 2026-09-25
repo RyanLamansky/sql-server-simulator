@@ -1432,9 +1432,77 @@ partial class Simulation
                 if (withCheckExplicit.HasValue)
                     throw SimulatedSqlException.SyntaxErrorNear(context);
                 return TryParseAlterTableRebuild(context, tableName);
+            case UnquotedString { ContextualKeyword: ContextualKeyword.Enable or ContextualKeyword.Disable } toggle:
+                if (withCheckExplicit.HasValue)
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                return TryParseAlterTableTriggerToggle(context, tableName, disable: toggle.ContextualKeyword == ContextualKeyword.Disable);
             default:
-                throw new NotSupportedException("ALTER TABLE supports only SET (SYSTEM_VERSIONING = OFF), ADD / DROP / ALTER COLUMN, ADD / DROP CONSTRAINT, CHECK / NOCHECK CONSTRAINT and REBUILD shapes.");
+                throw new NotSupportedException("ALTER TABLE supports only SET, ADD / DROP / ALTER COLUMN, ADD / DROP CONSTRAINT, CHECK / NOCHECK CONSTRAINT, ENABLE / DISABLE TRIGGER and REBUILD shapes.");
         }
+    }
+
+    /// <summary>
+    /// Parses <c>ALTER TABLE … { ENABLE | DISABLE } TRIGGER { ALL | name [, …] }</c>,
+    /// the table-scoped sibling of the standalone <c>ENABLE / DISABLE TRIGGER</c>
+    /// statement. A name that isn't one of the table's triggers is Msg 4920 and
+    /// toggles none of them (probed 2026-09-25 against SQL Server 2025). Cursor
+    /// on entry: <c>ENABLE</c> / <c>DISABLE</c>.
+    /// </summary>
+    private static bool TryParseAlterTableTriggerToggle(ParserContext context, MultiPartName tableName, bool disable)
+    {
+        if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Trigger })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        var allTriggers = false;
+        var triggerNames = new List<string>();
+        if (context.GetNextRequired() is ReservedKeyword { Keyword: Keyword.All })
+        {
+            allTriggers = true;
+            context.MoveNextOptional();
+        }
+        else
+        {
+            while (true)
+            {
+                if (context.Token is not Name triggerName)
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                triggerNames.Add(triggerName.Value);
+                if (context.GetNextOptional() is not Operator { Character: ',' })
+                    break;
+                context.MoveNextRequired();
+            }
+        }
+
+        if (context.Batch.IsSkipping)
+            return true;
+        if (!context.Batch.TryResolveTable(tableName, out var table))
+            throw SimulatedSqlException.CannotFindObjectForAlterTable(tableName.ToString());
+
+        var tableTriggers = new List<Trigger>();
+        foreach (var schema in context.CurrentDatabase.Schemas.Values)
+        {
+            foreach (var trigger in schema.Triggers.Values)
+            {
+                if (ReferenceEquals(trigger.Parent, table))
+                    tableTriggers.Add(trigger);
+            }
+        }
+        if (allTriggers)
+        {
+            foreach (var trigger in tableTriggers)
+                trigger.IsDisabled = disable;
+            return true;
+        }
+
+        var collation = context.CurrentDatabase.Collation;
+        var named = new List<Trigger>(triggerNames.Count);
+        foreach (var name in triggerNames)
+        {
+            named.Add(tableTriggers.Find(trigger => collation.Equals(trigger.Name, name))
+                ?? throw SimulatedSqlException.AlterTableTriggerMissing(name, tableName.Leaf));
+        }
+        foreach (var trigger in named)
+            trigger.IsDisabled = disable;
+        return true;
     }
 
     /// <summary>
