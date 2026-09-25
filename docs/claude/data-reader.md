@@ -44,6 +44,11 @@ Two of the simulator's own type names never reach a SqlClient consumer as writte
 
 Everything else in the type matrix already matched: the whole numeric / character / binary / date-time family, `xml`, `sql_variant`, `hierarchyid`, `rowversion` (reported `timestamp`), and an alias type, which reports its base type's name on both.
 
+## An `xml` value reads through `SqlXml`
+
+SqlClient hands an `xml` column over as the text `SqlXml.Value` writes — its reader-to-writer round trip spells an empty element `<a />` and single-spaces attributes — from `GetValue`, `GetString`, `GetChars`, `GetFieldValue<string>` and `ExecuteScalar` alike (confirmed 2026-09-25 against SqlClient 6.1 over SQL Server 2025), so the reader and `SimulatedDbCommand.ExecuteScalar` pass an `xml` value through the same round trip; the stored text, which `CAST(x AS nvarchar(max))` reads, keeps the server's own `<a/>`.
+The TDS endpoint sends the stored text and lets the connecting client do its own round trip.
+
 ## `RecordsAffected`
 
 Rows the batch's statements **changed**, summed — never rows a SELECT returned.

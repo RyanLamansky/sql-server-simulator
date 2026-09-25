@@ -16,7 +16,7 @@ public sealed class XmlModifyTests
 {
     /// <summary>Runs <paramref name="dml"/> against <paramref name="instance"/> through an xml variable.</summary>
     private static object? ModifyVariable(string instance, string dml) =>
-        new Simulation().ExecuteScalar($"declare @x xml = '{instance}'; set @x.modify('{dml}'); select @x");
+        new Simulation().ExecuteScalar($"declare @x xml = '{instance}'; set @x.modify('{dml}'); select cast(@x as nvarchar(max))");
 
     /// <summary>A simulation holding <c>dbo.doc(id int, body xml, tag nvarchar(20))</c> with one row.</summary>
     private static Simulation Seeded()
@@ -119,7 +119,7 @@ public sealed class XmlModifyTests
     [TestMethod]
     public void Insert_EnclosedExpressionInAttributeValue() =>
         AreEqual(
-            "<r><n a=\"7\"/></r>",
+            "<r><n a=\"7\" /></r>",
             new Simulation().ExecuteScalar("declare @x xml = '<r/>'; declare @v int = 7; set @x.modify('insert <n a=''{sql:variable(\"@v\")}''/> into (/r)[1]'); select @x"));
 
     [TestMethod]
@@ -297,7 +297,7 @@ public sealed class XmlModifyTests
     {
         var sim = Seeded();
         _ = sim.ExecuteNonQuery($"update dbo.doc set {setList} where id = 1");
-        AreEqual("<r><a>1</a><b/></r>", sim.ExecuteScalar("select body from dbo.doc"));
+        AreEqual("<r><a>1</a><b /></r>", sim.ExecuteScalar("select body from dbo.doc"));
         AreEqual("z", sim.ExecuteScalar("select tag from dbo.doc"));
     }
 
@@ -326,7 +326,7 @@ public sealed class XmlModifyTests
         command.CommandText = "update dbo.doc set body.modify('insert <b/> into (/r)[1]') output inserted.body as ins, deleted.body as del";
         using var reader = command.ExecuteReader();
         IsTrue(reader.Read());
-        AreEqual("<r><a>1</a><b/></r>", reader.GetString(0));
+        AreEqual("<r><a>1</a><b /></r>", reader.GetString(0));
         AreEqual("<r><a>1</a></r>", reader.GetString(1));
     }
 
@@ -336,7 +336,7 @@ public sealed class XmlModifyTests
         var sim = Seeded();
         _ = sim.ExecuteNonQuery("create trigger dbo.tr_doc on dbo.doc after update as insert dbo.doc values (9, (select top 1 body from inserted), N'trig')");
         _ = sim.ExecuteNonQuery("update dbo.doc set body.modify('insert <b/> into (/r)[1]') where id = 1");
-        AreEqual("<r><a>1</a><b/></r>", sim.ExecuteScalar("select body from dbo.doc where id = 9"));
+        AreEqual("<r><a>1</a><b /></r>", sim.ExecuteScalar("select body from dbo.doc where id = 9"));
     }
 
     [TestMethod]
@@ -353,7 +353,7 @@ public sealed class XmlModifyTests
         var sim = Seeded();
         _ = sim.ExecuteNonQuery("create procedure dbo.p_touch as update dbo.doc set body.modify('insert <b/> into (/r)[1]')");
         _ = sim.ExecuteNonQuery("exec dbo.p_touch");
-        AreEqual("<r><a>1</a><b/></r>", sim.ExecuteScalar("select body from dbo.doc"));
+        AreEqual("<r><a>1</a><b /></r>", sim.ExecuteScalar("select body from dbo.doc"));
     }
 
     [TestMethod]
@@ -362,7 +362,7 @@ public sealed class XmlModifyTests
         var sim = Seeded();
         _ = sim.ExecuteNonQuery("create view dbo.v_doc as select id, body from dbo.doc");
         _ = sim.ExecuteNonQuery("update dbo.v_doc set body.modify('insert <b/> into (/r)[1]')");
-        AreEqual("<r><a>1</a><b/></r>", sim.ExecuteScalar("select body from dbo.doc"));
+        AreEqual("<r><a>1</a><b /></r>", sim.ExecuteScalar("select body from dbo.doc"));
     }
 
     [TestMethod]
@@ -370,10 +370,10 @@ public sealed class XmlModifyTests
     {
         var sim = new Simulation();
         AreEqual(
-            "<r><b/></r>",
+            "<r><b /></r>",
             sim.ExecuteScalar("create table #t (x xml); insert #t values (N'<r/>'); update #t set x.modify('insert <b/> into (/r)[1]'); select x from #t"));
         AreEqual(
-            "<r><b/></r>",
+            "<r><b /></r>",
             sim.ExecuteScalar("declare @t table (x xml); insert @t values (N'<r/>'); update @t set x.modify('insert <b/> into (/r)[1]'); select x from @t"));
     }
 
@@ -390,25 +390,25 @@ public sealed class XmlModifyTests
     [TestMethod]
     public void Insert_ConstructorTakesThePrologDefaultNamespace() =>
         AreEqual(
-            "<r xmlns=\"urn:d\"><a/><b/></r>",
+            "<r xmlns=\"urn:d\"><a /><b /></r>",
             new Simulation().ExecuteScalar("declare @x xml = '<r xmlns=\"urn:d\"><a/></r>'; set @x.modify('declare default element namespace \"urn:d\"; insert <b/> into (/r)[1]'); select @x"));
 
     [TestMethod]
     public void Insert_UnqualifiedConstructorUnderNamespacedParent_DeclaresEmptyDefault() =>
         AreEqual(
-            "<r xmlns=\"urn:d\"><a/><b xmlns=\"\"/></r>",
+            "<r xmlns=\"urn:d\"><a /><b xmlns=\"\" /></r>",
             new Simulation().ExecuteScalar("declare @x xml = '<r xmlns=\"urn:d\"><a/></r>'; set @x.modify('declare namespace d=\"urn:d\"; insert <b/> into (/d:r)[1]'); select @x"));
 
     [TestMethod]
     public void Insert_ConstructorTakesAPrologPrefix() =>
         AreEqual(
-            "<r><p:b xmlns:p=\"urn:x\"/></r>",
+            "<r><p:b xmlns:p=\"urn:x\" /></r>",
             new Simulation().ExecuteScalar("declare @x xml = '<r/>'; set @x.modify('declare namespace p=\"urn:x\"; insert <p:b/> into (/r)[1]'); select @x"));
 
     [TestMethod]
     public void Modify_PrefixedNamespace_RoundTrips() =>
         AreEqual(
-            "<r xmlns:p=\"urn:x\"><p:a>1</p:a><p:b xmlns:p=\"urn:x\"/></r>",
+            "<r xmlns:p=\"urn:x\"><p:a>1</p:a><p:b xmlns:p=\"urn:x\" /></r>",
             new Simulation().ExecuteScalar("declare @x xml = '<r xmlns:p=\"urn:x\"><p:a>1</p:a></r>'; set @x.modify('declare namespace p=\"urn:x\"; insert <p:b xmlns:p=\"urn:x\"/> into (/r)[1]'); select @x"));
 
     [TestMethod]
@@ -439,7 +439,7 @@ public sealed class XmlModifyTests
         var sim = new Simulation();
         _ = sim.ExecuteNonQuery("create table dbo.doc (body xml); insert dbo.doc values (N'<r/>')");
         _ = sim.ExecuteNonQuery("update dbo.doc set body.modify('insert <b/> after (/r)[1]')");
-        AreEqual("<r/><b/>", sim.ExecuteScalar("select body from dbo.doc"));
+        AreEqual("<r /><b />", sim.ExecuteScalar("select body from dbo.doc"));
     }
 
     [TestMethod]
@@ -469,7 +469,7 @@ public sealed class XmlModifyTests
     [TestMethod]
     public void Insert_AttributeAcrossStatements_KeepsThreading() =>
         AreEqual(
-            "<a m=\"1\" w=\"7\" y=\"8\" z=\"9\" n=\"2\" o=\"3\" p=\"4\"/>",
+            "<a m=\"1\" w=\"7\" y=\"8\" z=\"9\" n=\"2\" o=\"3\" p=\"4\" />",
             new Simulation().ExecuteScalar("""
                 declare @x xml = '<a m="1" n="2" o="3" p="4"/>';
                 set @x.modify('insert attribute z {9} into (/a)[1]');
@@ -660,7 +660,7 @@ public sealed class XmlModifyTests
         _ = sim.ExecuteNonQuery("insert dbo.m1 values (1, N'<r a=\"x\"/>')");
         _ = sim.ExecuteNonQuery("insert dbo.m3 values (1, N'<r a=\"other\"/>')");
         _ = sim.ExecuteNonQuery("update dbo.m1 set d.modify('replace value of (/r/@a)[1] with \"q\"') from dbo.m3 where dbo.m1.id = dbo.m3.id");
-        AreEqual("<r a=\"q\"/>", sim.ExecuteScalar("select d from dbo.m1"));
+        AreEqual("<r a=\"q\" />", sim.ExecuteScalar("select d from dbo.m1"));
     }
 
     /// <summary>
@@ -688,6 +688,6 @@ public sealed class XmlModifyTests
         _ = sim.ExecuteNonQuery("create table dbo.typed (body xml(xsc))");
         _ = sim.ExecuteNonQuery("insert dbo.typed values (N'<r><a>1</a></r>')");
         _ = sim.ExecuteNonQuery("update dbo.typed set body.modify('insert <undeclared/> into (/r)[1]')");
-        AreEqual("<r><a>1</a><undeclared/></r>", sim.ExecuteScalar("select body from dbo.typed"));
+        AreEqual("<r><a>1</a><undeclared /></r>", sim.ExecuteScalar("select body from dbo.typed"));
     }
 }

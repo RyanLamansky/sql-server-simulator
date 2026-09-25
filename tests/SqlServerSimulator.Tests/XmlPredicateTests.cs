@@ -374,7 +374,7 @@ public sealed class XmlPredicateTests
             $"declare @x xml = '{TwoAttributes}'; set @x.modify('replace value of (/r/a[@x=\"2\"]/text())[1] with \"Z\"'); select @x"));
         AreEqual("<r><a x=\"2\">v2</a></r>", simulation.ExecuteScalar(
             $"declare @x xml = '{TwoAttributes}'; set @x.modify('delete /r/a[@x=\"1\"]'); select @x"));
-        AreEqual("<r><a x=\"1\">v1</a><a x=\"2\">v2<c/></a></r>", simulation.ExecuteScalar(
+        AreEqual("<r><a x=\"1\">v1</a><a x=\"2\">v2<c /></a></r>", simulation.ExecuteScalar(
             $"declare @x xml = '{TwoAttributes}'; set @x.modify('insert <c/> into (/r/a[@x=\"2\"])[1]'); select @x"));
     }
 

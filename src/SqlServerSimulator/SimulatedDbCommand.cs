@@ -216,7 +216,7 @@ public sealed class SimulatedDbCommand : DbCommand
                             // DBNull.Value (matching SqlClient and the reader's
                             // GetValue); only an empty first result set leaves
                             // the C# null that signals "no value".
-                            scalar = value.IsNull ? DBNull.Value : value.ToObject();
+                            scalar = value.IsNull ? DBNull.Value : value.Type is Storage.XmlSqlType ? SimulatedDbDataReader.ClientString(value) : value.ToObject();
                         }
                     }
 

@@ -272,7 +272,7 @@ public sealed class XmlFlworTests
     [TestMethod]
     public void AFlworReachesAModifyTarget() =>
         AreEqual(
-            "<r><a>1<b/></a></r>",
+            "<r><a>1<b /></a></r>",
             new Simulation().ExecuteScalar(
                 "declare @x xml = '<r><a>1</a></r>'; set @x.modify('insert <b/> into (for $i in /r/a return $i)[1]'); select @x"));
 

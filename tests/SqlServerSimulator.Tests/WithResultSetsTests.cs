@@ -148,7 +148,7 @@ public sealed class WithResultSetsTests
     {
         // The counterpart of the rejection above: varchar → xml, varbinary →
         // uniqueidentifier and int → datetime are implicit and convert.
-        AreEqual("<a/>", WithProcedure("select '<a/>' as a").ExecuteScalar(
+        AreEqual("<a />", WithProcedure("select '<a/>' as a").ExecuteScalar(
             "exec dbo.p with result sets ((x xml))"));
         AreEqual(new Guid("04030201-0605-0807-090a-0b0c0d0e0f10"),
             WithProcedure("select cast(0x0102030405060708090a0b0c0d0e0f10 as varbinary(16)) as a").ExecuteScalar(

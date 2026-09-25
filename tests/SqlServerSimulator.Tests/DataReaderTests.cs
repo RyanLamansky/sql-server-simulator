@@ -560,4 +560,20 @@ public sealed class DataReaderTests
         IsFalse(reader.HasRows);
         IsFalse(reader.Read());
     }
+
+    [TestMethod]
+    public void XmlColumn_ReadsAsSqlClientsSqlXmlText()
+    {
+        var simulation = new Simulation();
+        using var connection = simulation.CreateOpenConnection();
+        using var command = connection.CreateCommand();
+        command.CommandText = """select cast('<a  b="1"/><!-- c -->' as xml), cast(cast('<a/>' as xml) as nvarchar(max))""";
+        using var reader = command.ExecuteReader();
+        IsTrue(reader.Read());
+        AreEqual("<a b=\"1\" /><!-- c -->", reader.GetString(0));
+        AreEqual("<a b=\"1\" /><!-- c -->", reader.GetValue(0));
+        AreEqual("<a/>", reader.GetString(1));
+        AreEqual("<a />", simulation.ExecuteScalar("select cast('<a/>' as xml)"));
+    }
 }
+

@@ -221,7 +221,7 @@ public sealed class SimulatedDbDataReader : DbDataReader
         var v = cursor[ordinal];
         if (v.IsNull)
             throw new SqlNullValueException();
-        var s = v.AsString;
+        var s = ClientString(v);
         if (buffer is null)
             return s.Length;
         if (dataOffset is < 0 or > int.MaxValue)
@@ -401,14 +401,29 @@ public sealed class SimulatedDbDataReader : DbDataReader
     public override string GetString(int ordinal)
     {
         var v = cursor[ordinal];
-        return v.IsNull ? throw new SqlNullValueException() : v.AsString;
+        return v.IsNull ? throw new SqlNullValueException() : ClientString(v);
     }
 
     /// <inheritdoc/>
     public override object GetValue(int ordinal)
     {
         var v = cursor[ordinal];
-        return v.IsNull ? DBNull.Value : v.ToObject()!;
+        return v.IsNull ? DBNull.Value : v.Type is XmlSqlType ? ClientString(v) : v.ToObject()!;
+    }
+
+    /// <summary>
+    /// A column's text as SqlClient hands it over: an <c>xml</c> value passes
+    /// through <see cref="SqlXml.Value"/>'s reader-to-writer round trip, the
+    /// way SqlClient's own accessors read it, so an empty element comes back
+    /// as <c>&lt;a /&gt;</c> and attributes are single-spaced (confirmed
+    /// 2026-09-25 against SqlClient 6.1 over SQL Server 2025).
+    /// </summary>
+    internal static string ClientString(SqlValue value)
+    {
+        if (value.Type is not XmlSqlType)
+            return value.AsString;
+        using var reader = System.Xml.XmlReader.Create(new StringReader(value.AsString), new System.Xml.XmlReaderSettings { ConformanceLevel = System.Xml.ConformanceLevel.Fragment });
+        return new SqlXml(reader).Value;
     }
 
     /// <summary>
@@ -432,7 +447,7 @@ public sealed class SimulatedDbDataReader : DbDataReader
             if (typeof(T) == typeof(TimeOnly) && v.Type is TimeSqlType)
                 return (T)(object)TimeOnly.FromTimeSpan(v.AsTime);
         }
-        return (T)(v.IsNull ? DBNull.Value : v.ToObject()!);
+        return (T)(v.IsNull ? DBNull.Value : v.Type is XmlSqlType ? ClientString(v) : v.ToObject()!);
     }
 
     /// <inheritdoc/>

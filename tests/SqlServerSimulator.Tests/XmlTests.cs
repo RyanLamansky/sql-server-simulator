@@ -80,7 +80,7 @@ public sealed class XmlTests
         // The binding round-trips through INSERT/SELECT — payload still stores
         // as raw text since no XSD validation runs.
         _ = sim.ExecuteNonQuery("insert into dbo.doc values (1, N'<hi/>')");
-        AreEqual("<hi/>", sim.ExecuteScalar("select body from dbo.doc"));
+        AreEqual("<hi />", sim.ExecuteScalar("select body from dbo.doc"));
     }
 
     [TestMethod]

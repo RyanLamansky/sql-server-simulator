@@ -695,7 +695,7 @@ public sealed class ForXmlTests
 
     [TestMethod]
     public void Type_WithRoot()
-        => AreEqual("""<r><row id="1"/><row id="2"/><row id="3"/></r>""",
+        => AreEqual("""<r><row id="1" /><row id="2" /><row id="3" /></r>""",
             Xml("select id from t for xml raw, type, root('r')"));
 
     [TestMethod]
