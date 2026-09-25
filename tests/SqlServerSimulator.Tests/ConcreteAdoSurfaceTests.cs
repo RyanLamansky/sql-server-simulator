@@ -206,4 +206,21 @@ public sealed class ConcreteAdoSurfaceTests
             AreEqual(8134, ThrowsExactly<SimulatedSqlException>(() => reader.Read()).Number);
         }
     }
+
+    /// <summary>
+    /// A SELECT refused before its first row sends no metadata, so its error
+    /// throws on the advance onto it — ExecuteReader or NextResult — rather
+    /// than a later Read, as SqlClient reports it (probed 2026-09-25 against
+    /// SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void Reader_ASelectRefusedBeforeItsFirstRow_ThrowsOnTheAdvance()
+    {
+        using var connection = OpenConcrete();
+        AreEqual(208, ThrowsExactly<SimulatedSqlException>(() => connection.CreateCommand("select * from missing").ExecuteReader()).Number);
+        using var reader = connection.CreateCommand("select 1 as a; select * from missing").ExecuteReader();
+        IsTrue(reader.Read());
+        IsFalse(reader.Read());
+        AreEqual(208, ThrowsExactly<SimulatedSqlException>(() => reader.NextResult()).Number);
+    }
 }

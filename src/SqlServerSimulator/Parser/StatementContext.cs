@@ -232,31 +232,13 @@ internal sealed class StatementContext
     public int? DdlTriggerCreatedThisStatement;
 
     /// <summary>
-    /// Whether this statement's leading keyword makes it row-returning — a
-    /// <c>SELECT</c> (bare, CTE-prefixed, or parenthesized) or <c>VALUES</c>.
-    /// Set at dispatch entry from the leading token. When such a statement
-    /// fails under continue-on-error, real SQL Server has already sent the
-    /// result-set metadata (COLMETADATA) before the error, so the in-process
-    /// reader surfaces it positionally (the first <c>Read</c> throws, the
-    /// reader survives to the next result set). A non-row-returning statement
-    /// (INSERT / UPDATE / DELETE / DDL) has no such envelope, so its error
-    /// surfaces eagerly when the reader advances onto it (at
-    /// <c>ExecuteReader</c> or <c>NextResult</c>) — matching SqlClient and the
-    /// way EF Core's no-OUTPUT modification batches, which never call
-    /// <c>Read</c>, still observe the failure. Carried onto the emitted
-    /// <c>SimulatedErrorOutcome</c>.
-    /// </summary>
-    public bool LeadingKeywordReturnsRows;
-
-    /// <summary>
     /// The statement name Msg 1934 echoes when a SET-option gate rejects an
     /// expression buried inside the statement rather than the statement's own
     /// target — an XML data-type method is the case that needs it. Real names
     /// the enclosing DML verb (<c>INSERT … SELECT @x.value(…)</c> reports
     /// <c>INSERT</c>) and falls back to <c>SELECT</c> everywhere else,
     /// including a bare <c>SET @i = @x.value(…)</c> (probe-confirmed). Set at
-    /// dispatch entry from the leading token, alongside
-    /// <see cref="LeadingKeywordReturnsRows"/>; the gates whose statement is
+    /// dispatch entry from the leading token; the gates whose statement is
     /// unambiguous (DML targets, CREATE TABLE / INDEX) pass their own verb
     /// instead of reading this.
     /// </summary>

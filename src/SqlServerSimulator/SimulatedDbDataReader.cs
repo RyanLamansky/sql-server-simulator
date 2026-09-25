@@ -89,25 +89,20 @@ public sealed class SimulatedDbDataReader : DbDataReader
                     this.currentResult = query;
                     this.cursor = query.CreateClientCursor();
                     return true;
-                case SimulatedErrorOutcome { RowReturning: true } error:
-                    // A row-returning statement (SELECT / VALUES) that failed
-                    // after real SQL Server would have sent its COLMETADATA:
-                    // surface positionally. The reader advances onto the failed
-                    // statement (this advance returns true) and the first Read
-                    // throws — the ErrorCursor carries the throw, and the reader
-                    // survives to the next result set.
-                    this.currentResult = null;
-                    this.cursor = new ErrorCursor(error.Exception);
-                    return true;
                 case SimulatedErrorOutcome error:
-                    // A non-row-returning statement (INSERT / UPDATE / DELETE /
-                    // DDL) that failed: real SQL Server sent no result-set
-                    // envelope, so SqlClient surfaces the error on the advance
-                    // itself — ExecuteReader (the constructor's advance) or
-                    // NextResult throws, not a later Read. This is what lets EF
-                    // Core's no-OUTPUT modification batches, which never call
-                    // Read, still observe the failure. Park at end first so a
-                    // caller that catches and probes the reader sees it closed.
+                    // A statement that failed before sending a result-set
+                    // envelope — any DML or DDL, and a SELECT refused before
+                    // its first row (a missing table, a permission) — surfaces
+                    // on the advance itself: ExecuteReader (the constructor's
+                    // advance) or NextResult throws, not a later Read, as
+                    // SqlClient does (probed 2026-09-25 against SQL Server
+                    // 2025). A SELECT that failed on a row has already sent its
+                    // metadata and arrives as a result set ending in the error
+                    // instead (see SimulatedSqlResultSet.EndedByError). This is
+                    // what lets EF Core's no-OUTPUT modification batches, which
+                    // never call Read, still observe the failure. Park at end
+                    // first so a caller that catches and probes the reader sees
+                    // it closed.
                     this.currentResult = null;
                     this.cursor = EmptyCursor.Instance;
                     throw initial ? this.GatherUpToNextResult(error.Exception) : error.Exception;
@@ -587,10 +582,10 @@ public sealed class SimulatedDbDataReader : DbDataReader
                 case SimulatedInfoOutcome info:
                     messages.Add(info.Message);
                     continue;
-                case SimulatedErrorOutcome { RowReturning: false } error:
+                case SimulatedErrorOutcome error:
                     errors.Add(error.Exception);
                     continue;
-                case SimulatedQueryResult or SimulatedErrorOutcome:
+                case SimulatedQueryResult:
                     this.pendingOutcome = outcome;
                     break;
                 default:
@@ -623,32 +618,6 @@ public sealed class SimulatedDbDataReader : DbDataReader
         public override bool HasRows => false;
 
         public override bool MoveNext() => false;
-
-        public override SqlValue this[int ordinal] => throw new InvalidOperationException("No current row.");
-    }
-
-    /// <summary>
-    /// Cursor for a <see cref="SimulatedErrorOutcome"/> position: the reader
-    /// advanced onto a statement that failed, so the first <see cref="Read"/>
-    /// (its first <see cref="MoveNext"/>) throws the carried error — real
-    /// SqlClient's positional error surfacing. After the throw it reports no
-    /// rows, matching "the failed statement yields no further rows."
-    /// </summary>
-    private sealed class ErrorCursor(SimulatedSqlException exception) : RowCursor
-    {
-        private bool thrown;
-
-        public override int FieldCount => 0;
-
-        public override bool HasRows => false;
-
-        public override bool MoveNext()
-        {
-            if (this.thrown)
-                return false;
-            this.thrown = true;
-            throw exception;
-        }
 
         public override SqlValue this[int ordinal] => throw new InvalidOperationException("No current row.");
     }

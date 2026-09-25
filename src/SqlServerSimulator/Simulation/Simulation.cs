@@ -1170,7 +1170,7 @@ public sealed partial class Simulation
             if (this.CompileBatch(CompileContextFor(batch, command), cacheKey) is { } compileError)
             {
                 batch.Connection.LastErrorNumber = compileError.Number;
-                yield return new SimulatedErrorOutcome(compileError, rowReturning: false);
+                yield return new SimulatedErrorOutcome(compileError);
                 yield break;
             }
 
@@ -1189,7 +1189,7 @@ public sealed partial class Simulation
                 doomed.Rollback();
                 var endOfBatch = SimulatedSqlException.UncommittableTransactionAtEndOfBatch();
                 endOfBatch.ResolveDiagnostics(1, batch.LineOffset, batch.ErrorProcedureName);
-                yield return new SimulatedErrorOutcome(endOfBatch, rowReturning: false);
+                yield return new SimulatedErrorOutcome(endOfBatch);
             }
             WriteBackOutputParameters(batch);
         }
@@ -1828,19 +1828,6 @@ public sealed partial class Simulation
         batch.CurrentStatement.BindsDeferredSource = false;
         batch.CurrentStatement.PendingDdlEvents = null;
         batch.CurrentStatement.DdlTriggerCreatedThisStatement = null;
-        // Classify the statement as row-returning from its leading token so a
-        // failure under continue-on-error surfaces the way real SQL Server
-        // frames it: a SELECT (bare / CTE-prefixed / parenthesized) or VALUES
-        // has already sent COLMETADATA before erroring, so the in-process
-        // reader surfaces it positionally (Read throws); anything else (DML /
-        // DDL) has no result-set envelope, so the reader throws eagerly on the
-        // advance onto it. See StatementContext.LeadingKeywordReturnsRows.
-        batch.CurrentStatement.LeadingKeywordReturnsRows = batch.Parser.Token switch
-        {
-            ReservedKeyword { Keyword: Keyword.Select or Keyword.With or Keyword.Values } => true,
-            Operator { Character: '(' } => true,
-            _ => false,
-        };
         batch.CurrentStatement.StatementVerb = batch.Parser.Token switch
         {
             ReservedKeyword { Keyword: Keyword.Insert } => "INSERT",
@@ -2135,7 +2122,7 @@ public sealed partial class Simulation
             }
             foreach (var outcome in ProducedOutcomes(batch, outcomes))
                 yield return outcome;
-            yield return new SimulatedErrorOutcome(continuedError, batch.CurrentStatement.LeadingKeywordReturnsRows);
+            yield return new SimulatedErrorOutcome(continuedError);
             if (IsStatementTerminationNoticed(batch, continuedError))
             {
                 yield return new SimulatedInfoOutcome(continuedError.IsIdentityOverflow

@@ -105,10 +105,8 @@ The reader consumes the unified continue-on-error outcome stream (see [`control-
   Inside a `TRY` the partial result set still goes out ahead of the `CATCH` output, as real sends it, so `ExecuteScalar` over `BEGIN TRY SELECT CAST('x' AS int) END TRY BEGIN CATCH SELECT 2 END CATCH` is NULL on both.
   A FROM-less SELECT, whose values are computed while it parses, keeps a value's error for the plan to raise when it runs, past its row limit and WHERE.
   Rows buffered for an ORDER BY are projected before sorting, so none precede the error there where real may deliver the rows it sorted ahead of the failing one.
-- **Row-returning error** otherwise (`SimulatedErrorOutcome.RowReturning` — a SELECT / VALUES that failed before producing a plan): the reader advances *onto* the failed statement (the advance returns `true`) and the first `Read` throws, via an internal `ErrorCursor` whose first `MoveNext` throws and then reports no rows.
-  The reader **survives** — a following `NextResult` reaches the next result set and reads clean.
-- **Non-row-returning error** (INSERT / UPDATE / DELETE / DDL — no result-set envelope): the error throws *eagerly* on the advance itself, so `ExecuteReader` (the constructor's advance) or `NextResult` throws rather than a later `Read`.
-  This matches SqlClient surfacing an error token that no COLMETADATA precedes, and is what lets EF Core's no-OUTPUT modification batches — which never call `Read` — observe a failed write.
+- **Any other failed statement** — DML, DDL, and a SELECT refused before its first row (a missing table, a permission) — sent no result-set envelope, so the error throws *eagerly* on the advance onto it: `ExecuteReader` (the constructor's advance) or `NextResult` throws rather than a later `Read`, as SqlClient does against real (probed 2026-09-25: `SELECT 1; SELECT * FROM missing` reads the 1 and `NextResult` throws Msg 208).
+  This is what lets EF Core's no-OUTPUT modification batches — which never call `Read` — observe a failed write.
 
 `ExecuteNonQuery` / `ExecuteScalar` bypass this positional model: they drain the whole outcome stream and aggregate every error into one `SimulatedSqlException` thrown at completion (`ExecuteScalar` returns the first result set's first value only when the batch had no error).
 Which informational messages ride along in an exception rather than firing as events is in [`errors.md`](errors.md#the-message-stream).
