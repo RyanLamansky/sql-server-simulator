@@ -547,4 +547,66 @@ public sealed class CatalogProcTests
         AreEqual(sim.ExecuteScalar("select sum(size) * 8 from sys.master_files where database_id = db_id()"), simulated["DATABASE_SIZE"]);
         IsNull(simulated["REMARKS"]);
     }
+
+    private static Simulation NewClrAndMaxFixture()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table clrs (g geography, h hierarchyid not null, v sql_variant not null, c char(2) not null,
+                b binary(8) not null, n sysname, d datetime2(3), x xml, vm varchar(max), nm nvarchar(max), bm varbinary(max))
+            """);
+        return sim;
+    }
+
+    [TestMethod]
+    public void SpColumns100_ReportsClrTypesAsUdts()
+    {
+        var sim = NewClrAndMaxFixture();
+        var g = Column(sim, "clrs", "g");
+        AreEqual((short)-151, g["DATA_TYPE"]);
+        AreEqual("geography", g["TYPE_NAME"]);
+        AreEqual(0, g["PRECISION"]);
+        AreEqual("sys", g["SS_UDT_SCHEMA_NAME"]);
+        StartsWith("Microsoft.SqlServer.Types.SqlGeography, Microsoft.SqlServer.Types, Version=11.0.0.0", (string)g["SS_UDT_ASSEMBLY_TYPE_NAME"]!);
+        AreEqual((byte)23, g["SS_DATA_TYPE"]);
+        var h = Column(sim, "clrs", "h");
+        AreEqual(892, h["LENGTH"]);
+        AreEqual(892, h["CHAR_OCTET_LENGTH"]);
+    }
+
+    [TestMethod]
+    public void SpColumns100_ReportsRealsLegacyStorageTokens()
+    {
+        // Fixed-length char / binary read 47 / 45 NOT NULL, sql_variant 39;
+        // a bare sysname column is NOT NULL and keeps its own type name.
+        var sim = NewClrAndMaxFixture();
+        AreEqual((byte)39, Column(sim, "clrs", "v")["SS_DATA_TYPE"]);
+        AreEqual(0, Column(sim, "clrs", "v")["PRECISION"]);
+        AreEqual((byte)47, Column(sim, "clrs", "c")["SS_DATA_TYPE"]);
+        AreEqual((byte)45, Column(sim, "clrs", "b")["SS_DATA_TYPE"]);
+        var n = Column(sim, "clrs", "n");
+        AreEqual("sysname", n["TYPE_NAME"]);
+        AreEqual("NO", n["IS_NULLABLE"]);
+    }
+
+    [TestMethod]
+    public void SpColumns_ReportsTheNewerTypesDownlevel()
+    {
+        var sim = NewClrAndMaxFixture();
+        var rows = Run(sim, "exec sp_columns 'clrs'");
+        HasCount(19, rows[0]);
+        string Summary(string column)
+        {
+            var r = rows.Single(row => (string)row["COLUMN_NAME"]! == column);
+            return $"{r["DATA_TYPE"]}:{r["TYPE_NAME"]}:{r["PRECISION"]}:{r["LENGTH"]}:{r["SCALE"] ?? "-"}:{r["CHAR_OCTET_LENGTH"] ?? "-"}";
+        }
+
+        AreEqual("-9:datetime2:23:46:-:-", Summary("d"));
+        AreEqual("-10:xml:1073741823:2147483646:-:2147483646", Summary("x"));
+        AreEqual("-1:text:2147483647:2147483647:-:2147483647", Summary("vm"));
+        AreEqual("-10:ntext:1073741823:2147483646:-:2147483646", Summary("nm"));
+        AreEqual("-4:image:2147483647:2147483647:-:2147483647", Summary("bm"));
+        AreEqual("-4:geography:2147483647:2147483647:-:2147483647", Summary("g"));
+        AreEqual("-4:hierarchyid:892:892:-:892", Summary("h"));
+    }
 }

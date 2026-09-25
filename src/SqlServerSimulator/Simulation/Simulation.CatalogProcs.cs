@@ -301,13 +301,13 @@ partial class Simulation
     /// patterns; <c>@ODBCVer</c> (&lt; 3 → 2) selects the temporal DATA_TYPE
     /// codes / float-real precision the same way sp_datatype_info_100 does.
     /// </summary>
-    private static IEnumerable<SimulatedStatementOutcome> InvokeSpColumns100(BatchContext batch)
+    private static IEnumerable<SimulatedStatementOutcome> InvokeSpColumns(BatchContext batch, bool classic)
     {
         var arguments = ParseExecArguments(batch.Parser, batch);
         if (batch.IsSkipping)
             yield break;
 
-        var (tableName, tableOwner, tableQualifier, columnName, odbcVer) = ParseSpColumnsArgs(arguments);
+        var (tableName, tableOwner, tableQualifier, columnName, odbcVer) = ParseSpColumnsArgs(arguments, classic ? "sp_columns" : "sp_columns_100");
         var database = batch.CurrentDatabase;
         var qualifier = SqlValue.FromSystemName(database.Name);
         var byName = (odbcVer >= 3 ? SpDatatypeInfoByNameV3 : SpDatatypeInfoByNameV2).Value;
@@ -326,23 +326,25 @@ partial class Simulation
                 foreach (var table in schema.HeapTables.Values.OrderBy(t => t.Name, StringComparer.OrdinalIgnoreCase))
                 {
                     if (Matches(namePattern, table.Name))
-                        AppendColumnRows(rows, qualifier, owner, table.Name, table.Columns, byName, columnPattern);
+                        AppendColumnRows(rows, qualifier, owner, table.Name, table.Columns, byName, columnPattern, classic);
                 }
 
                 foreach (var view in schema.Views.Values.OrderBy(v => v.Name, StringComparer.OrdinalIgnoreCase))
                 {
                     if (Matches(namePattern, view.Name))
-                        AppendColumnRows(rows, qualifier, owner, view.Name, view.OutputColumns, byName, columnPattern);
+                        AppendColumnRows(rows, qualifier, owner, view.Name, view.OutputColumns, byName, columnPattern, classic);
                 }
             }
         }
 
-        yield return new SimulatedSqlResultSet(SpColumnsSchema, SpColumnsColumnNames, rows);
+        yield return classic
+            ? new SimulatedSqlResultSet(ClassicSpColumnsSchema, ClassicSpColumnsColumnNames, rows)
+            : new SimulatedSqlResultSet(SpColumnsSchema, SpColumnsColumnNames, rows);
     }
 
     private static void AppendColumnRows(
         List<SqlValue[]> rows, SqlValue qualifier, SqlValue owner, string tableName,
-        HeapColumn[] columns, FrozenDictionary<string, object?[]> byName, LikeMatcher? columnPattern)
+        HeapColumn[] columns, FrozenDictionary<string, object?[]> byName, LikeMatcher? columnPattern, bool classic)
     {
         var tableNameValue = SqlValue.FromSystemName(tableName);
         for (var i = 0; i < columns.Length; i++)
@@ -350,8 +352,64 @@ partial class Simulation
             var col = columns[i];
             if (!Matches(columnPattern, col.Name))
                 continue;
-            rows.Add(BuildSpColumnsRow(qualifier, owner, tableNameValue, col, i + 1, byName));
+            var row = BuildSpColumnsRow(qualifier, owner, tableNameValue, col, i + 1, byName);
+            rows.Add(classic ? ClassicSpColumnsRow(row, col) : row);
         }
+    }
+
+    // The older sp_columns' 19 columns: sp_columns_100's first 18 plus its
+    // closing SS_DATA_TYPE.
+    private static readonly SqlType[] ClassicSpColumnsSchema = [.. SpColumnsSchema[..18], SpColumnsSchema[28]];
+
+    private static readonly string[] ClassicSpColumnsColumnNames = [.. SpColumnsColumnNames[..18], SpColumnsColumnNames[28]];
+
+    /// <summary>
+    /// An <c>sp_columns_100</c> row as the older <c>sp_columns</c> reports it,
+    /// for drivers that predate the newer types (probed 2026-09-25 against SQL
+    /// Server 2025): <c>date</c> / <c>time</c> / <c>datetime2</c> /
+    /// <c>datetimeoffset</c> read as <c>nvarchar</c> (-9) of their literal's
+    /// length, <c>xml</c> and <c>nvarchar(max)</c> as <c>ntext</c> (-10),
+    /// <c>varchar(max)</c> as <c>text</c> (-1), <c>varbinary(max)</c> as
+    /// <c>image</c> (-4), and the CLR types as <c>image</c>-coded (-4) under
+    /// their own names; every other column keeps its <c>_100</c> values.
+    /// </summary>
+    private static SqlValue[] ClassicSpColumnsRow(SqlValue[] row, HeapColumn col)
+    {
+        var classic = new SqlValue[19];
+        Array.Copy(row, classic, 18);
+        classic[18] = row[28];
+
+        var isMax = col.MaxLength == SqlType.MaxLengthSentinel;
+        (short DataType, string? TypeName, int Precision, int Length, int? OctetLength)? downlevel = col.Type switch
+        {
+            DateSqlType or TimeSqlType or DateTime2SqlType or DateTimeOffsetSqlType =>
+                (-9, null, row[6].AsInt32, row[6].AsInt32 * 2, null),
+            XmlSqlType => (-10, null, 1073741823, 2147483646, 2147483646),
+            NVarcharSqlType when isMax || col.Type is NVarcharSqlType { length: SqlType.MaxLengthSentinel } =>
+                (-10, "ntext", 1073741823, 2147483646, 2147483646),
+            VarcharSqlType when isMax || col.Type is VarcharSqlType { length: SqlType.MaxLengthSentinel } =>
+                (-1, "text", 2147483647, 2147483647, 2147483647),
+            VarbinarySqlType when isMax || col.Type is VarbinarySqlType { length: SqlType.MaxLengthSentinel } =>
+                (-4, "image", 2147483647, 2147483647, 2147483647),
+            SpatialSqlType => (-4, null, 2147483647, 2147483647, 2147483647),
+            HierarchyIdSqlType => (-4, null, 892, 892, 892),
+            _ => null,
+        };
+        if (downlevel is { } mapped)
+        {
+            classic[4] = SqlValue.FromInt16(mapped.DataType);
+            if (mapped.TypeName is { } typeName)
+                classic[5] = SqlValue.FromSystemName(typeName);
+            classic[6] = SqlValue.FromInt32(mapped.Precision);
+            classic[7] = SqlValue.FromInt32(mapped.Length);
+            classic[8] = SqlValue.Null(SqlType.SmallInt);
+            classic[9] = SqlValue.Null(SqlType.SmallInt);
+            classic[13] = SqlValue.FromInt16(mapped.DataType);
+            classic[14] = SqlValue.Null(SqlType.SmallInt);
+            classic[15] = mapped.OctetLength is { } octets ? SqlValue.FromInt32(octets) : SqlValue.Null(SqlType.Int32);
+        }
+
+        return classic;
     }
 
     private static SqlValue[] BuildSpColumnsRow(
@@ -359,7 +417,13 @@ partial class Simulation
         HeapColumn col, int ordinal, FrozenDictionary<string, object?[]> byName)
     {
         var baseName = SpColumnsTypeName(col.Type);
-        var row = byName[baseName];
+        // A CLR type has no sp_datatype_info row: real reports it as
+        // SQL_SS_UDT (-151) with no radix or datetime subcode.
+        var clrAssemblyName = SpColumnsClrAssemblyName(col.Type);
+        // sysname reads nvarchar's type facts under its own name.
+        var row = clrAssemblyName is null
+            ? byName[baseName == "sysname" ? "nvarchar" : baseName]
+            : [baseName, -151, null, null, null, null, null, null, null, null, null, null, null, null, null, -151, null, null, null, null];
         var (typePrecision, length, scale, charOctetLength) = SpColumnGeometry(col);
         var precision = typePrecision ?? (int)row[2]!;
         var isIdentity = col.Identity is not null;
@@ -395,9 +459,11 @@ partial class Simulation
             Flag(false),                                                         // SS_IS_COLUMN_SET
             Flag(isComputed),                                                    // SS_IS_COMPUTED
             Flag(isIdentity),                                                    // SS_IS_IDENTITY
-            SqlValue.Null(SqlType.SystemName),                                   // SS_UDT_CATALOG_NAME
-            SqlValue.Null(SqlType.SystemName),                                   // SS_UDT_SCHEMA_NAME
-            SqlValue.Null(CatalogNVarchar4000),                                  // SS_UDT_ASSEMBLY_TYPE_NAME
+            clrAssemblyName is null ? SqlValue.Null(SqlType.SystemName) : qualifier,              // SS_UDT_CATALOG_NAME
+            clrAssemblyName is null ? SqlValue.Null(SqlType.SystemName) : SqlValue.FromSystemName("sys"), // SS_UDT_SCHEMA_NAME
+            clrAssemblyName is null                                              // SS_UDT_ASSEMBLY_TYPE_NAME
+                ? SqlValue.Null(CatalogNVarchar4000)
+                : SqlValue.FromString(CatalogNVarchar4000, clrAssemblyName),
             SqlValue.Null(SqlType.SystemName),                                   // SS_XML_SCHEMACOLLECTION_CATALOG_NAME
             SqlValue.Null(SqlType.SystemName),                                   // SS_XML_SCHEMACOLLECTION_SCHEMA_NAME
             SqlValue.Null(SqlType.SystemName),                                   // SS_XML_SCHEMACOLLECTION_NAME
@@ -436,7 +502,7 @@ partial class Simulation
         _ when type == SqlType.Text => "text",
         _ when type == SqlType.NText => "ntext",
         _ when type == SqlType.Image => "image",
-        _ when type == SqlType.SystemName => "nvarchar",
+        _ when type == SqlType.SystemName => "sysname",
         CharSqlType => "char",
         NCharSqlType => "nchar",
         VarcharSqlType => "varchar",
@@ -445,8 +511,25 @@ partial class Simulation
         VarbinarySqlType => "varbinary",
         XmlSqlType => "xml",
         SqlVariantSqlType => "sql_variant",
+        GeographySqlType => "geography",
+        GeometrySqlType => "geometry",
+        HierarchyIdSqlType => "hierarchyid",
         _ => throw new NotSupportedException($"sp_columns_100 does not model {type} columns."),
     };
+
+    // The assembly-qualified CLR type sp_columns_100 names for a CLR-typed
+    // column's SS_UDT_ASSEMBLY_TYPE_NAME (probed 2026-09-25), or null for
+    // every other type.
+    private static string? SpColumnsClrAssemblyName(SqlType type) => type switch
+    {
+        GeographySqlType => "Microsoft.SqlServer.Types.SqlGeography, " + SqlServerTypesAssembly,
+        GeometrySqlType => "Microsoft.SqlServer.Types.SqlGeometry, " + SqlServerTypesAssembly,
+        HierarchyIdSqlType => "Microsoft.SqlServer.Types.SqlHierarchyId, " + SqlServerTypesAssembly,
+        _ => null,
+    };
+
+    private const string SqlServerTypesAssembly =
+        "Microsoft.SqlServer.Types, Version=11.0.0.0, Culture=neutral, PublicKeyToken=89845dcd8080cc91";
 
     // Per-column geometry: PRECISION (null → take the parameterless value from
     // the sp_datatype_info row), LENGTH, SCALE, CHAR_OCTET_LENGTH. All
@@ -487,7 +570,9 @@ partial class Simulation
             NVarcharSqlType nv => nv.length < 1 ? (0, 0, null, 0) : (nv.length, nv.length * 2, null, nv.length * 2),
             BinarySqlType bn => (bn.length, bn.length, null, bn.length),
             VarbinarySqlType vb => vb.length < 1 ? (0, 0, null, 0) : (vb.length, vb.length, null, vb.length),
-            SqlVariantSqlType => (null, 8000, null, null),
+            SqlVariantSqlType => (0, 8000, null, 8000),
+            SpatialSqlType => (0, 0, null, 0),
+            HierarchyIdSqlType => (892, 892, null, 892),
             _ => throw new NotSupportedException($"sp_columns_100 does not model {col.Type} columns."),
         };
 
@@ -502,9 +587,11 @@ partial class Simulation
 
     // SS_DATA_TYPE: the legacy tabular-storage token (old syscolumns.type).
     // Integer / exact-numeric / approximate / money / datetime types switch to
-    // their nullable ("N") variant when the column allows NULL; string /
-    // binary / uniqueidentifier / bit / the fraction-second temporal types and
-    // xml carry one token regardless. Probe-confirmed against SQL Server 2025;
+    // their nullable ("N") variant when the column allows NULL, and the
+    // fixed-length char / binary families (timestamp included) to their
+    // variable-length token; variable strings / binaries, uniqueidentifier,
+    // bit, sql_variant, the fraction-second temporal types and xml carry one
+    // token regardless. Probe-confirmed against SQL Server 2025 (2026-09-25);
     // bigint's 63 / 108 pairing is a documented sp_columns quirk.
     private static byte SpColumnsSsDataType(SqlType type, bool nullable)
     {
@@ -527,24 +614,30 @@ partial class Simulation
             DateTime2SqlType => (0, 0),
             DateTimeOffsetSqlType => (0, 0),
             _ when type == SqlType.UniqueIdentifier => (37, 37),
-            _ when type == SqlType.RowVersion => (37, 37),
+            _ when type == SqlType.RowVersion => (45, 37),
             _ when type == SqlType.Text => (35, 35),
             _ when type == SqlType.NText => (35, 35),
             _ when type == SqlType.Image => (34, 34),
             XmlSqlType => (0, 0),
-            SqlVariantSqlType => (98, 98),
-            CharSqlType or NCharSqlType or VarcharSqlType or NVarcharSqlType => (39, 39),
+            SqlVariantSqlType => (39, 39),
+            SpatialSqlType or HierarchyIdSqlType => (23, 23),
+            CharSqlType or NCharSqlType => (47, 39),
+            VarcharSqlType or NVarcharSqlType => (39, 39),
             _ when type == SqlType.SystemName => (39, 39),
-            BinarySqlType or VarbinarySqlType => (37, 37),
+            BinarySqlType => (45, 37),
+            VarbinarySqlType => (37, 37),
             _ => (0, 0),
         };
 
         return (byte)(nullable ? orNull : notNull);
     }
 
+    // The older sp_columns takes no @fUsePattern, and reads any @ODBCVer but 3
+    // as 2 where sp_columns_100 reads any value from 3 up as 3.
     private static (string? Name, string? Owner, string? Qualifier, string? Column, int OdbcVer) ParseSpColumnsArgs(
-        List<ProcArgument> arguments)
+        List<ProcArgument> arguments, string procedureName)
     {
+        var classic = procedureName == "sp_columns";
         string? name = null, owner = null, qualifier = null, column = null;
         var odbcVer = 2;
         var positional = 0;
@@ -559,8 +652,8 @@ partial class Simulation
                     case 2: qualifier = CatalogStringArg(arg); break;
                     case 3: column = CatalogStringArg(arg); break;
                     case 4: odbcVer = CatalogOdbcVer(arg); break;
-                    case 5: break; // @fUsePattern — pattern mode is always on
-                    default: throw SimulatedSqlException.InvalidProcedureParameters("sp_columns_100");
+                    case 5 when !classic: break; // @fUsePattern — pattern mode is always on
+                    default: throw SimulatedSqlException.InvalidProcedureParameters(procedureName);
                 }
 
                 continue;
@@ -573,12 +666,12 @@ partial class Simulation
                 case var n when BuiltInToken.Equals(n, "table_qualifier"): qualifier = CatalogStringArg(arg); break;
                 case var n when BuiltInToken.Equals(n, "column_name"): column = CatalogStringArg(arg); break;
                 case var n when BuiltInToken.Equals(n, "ODBCVer"): odbcVer = CatalogOdbcVer(arg); break;
-                case var n when BuiltInToken.Equals(n, "fUsePattern"): break;
-                default: throw SimulatedSqlException.InvalidProcedureParameters("sp_columns_100");
+                case var n when !classic && BuiltInToken.Equals(n, "fUsePattern"): break;
+                default: throw SimulatedSqlException.InvalidProcedureParameters(procedureName);
             }
         }
 
-        return (name, owner, qualifier, column, odbcVer < 3 ? 2 : 3);
+        return (name, owner, qualifier, column, classic ? (odbcVer == 3 ? 3 : 2) : odbcVer < 3 ? 2 : 3);
     }
 
     /// <summary>

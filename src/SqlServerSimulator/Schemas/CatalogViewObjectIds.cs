@@ -215,6 +215,7 @@ internal static class CatalogViewObjectIds
         ["sp_addextendedproperty"] = -806860202,
         ["sp_addlinkedserver"] = -414504921,
         ["sp_addlinkedsrvlogin"] = -946112541,
+        ["sp_columns"] = -10461767,
         ["sp_columns_100"] = -513496712,
         ["sp_configure"] = -523220828,
         ["sp_databases"] = -938910433,
