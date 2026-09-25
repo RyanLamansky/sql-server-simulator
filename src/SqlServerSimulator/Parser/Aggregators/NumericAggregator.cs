@@ -19,6 +19,21 @@ internal abstract class NumericAggregatorBase : Aggregator
     protected readonly SqlType ResultType;
     protected long Count;
 
+    /// <summary>
+    /// The batch the aggregate runs in, whose session decides whether a total
+    /// that overflows answers NULL (<see cref="BatchContext.AbsorbsArithmeticFault"/>);
+    /// null leaves every overflow an error.
+    /// </summary>
+    public BatchContext? Batch;
+
+    /// <summary>
+    /// A total overflowed under a session that answers NULL for it: the group
+    /// reads NULL and takes no further rows, where the other groups and a
+    /// <c>COUNT(*)</c> beside it are unaffected (probed 2026-09-25 against SQL
+    /// Server 2025).
+    /// </summary>
+    public bool Overflowed;
+
     protected NumericAggregatorBase(SqlType resultType, bool distinct)
     {
         this.ResultType = resultType;
@@ -29,13 +44,40 @@ internal abstract class NumericAggregatorBase : Aggregator
 
     public sealed override void Add(SqlValue value)
     {
-        if (value.IsNull)
+        if (value.IsNull || this.Overflowed)
             return;
         if (this.distinct && !this.seen!.Add(value))
             return;
-        Accumulate(value);
+        try
+        {
+            Accumulate(value);
+        }
+        catch (SimulatedSqlException error) when (this.Absorbs(error))
+        {
+            return;
+        }
         this.Count++;
     }
+
+    public sealed override SqlValue Result()
+    {
+        if (this.Overflowed)
+            return SqlValue.Null(this.ResultType);
+        try
+        {
+            return Finish();
+        }
+        catch (SimulatedSqlException error) when (this.Absorbs(error))
+        {
+            return SqlValue.Null(this.ResultType);
+        }
+    }
+
+    /// <summary>The group's answer from its accumulated total, NULL for no rows.</summary>
+    protected abstract SqlValue Finish();
+
+    private bool Absorbs(SimulatedSqlException error) =>
+        this.Overflowed = this.Batch?.AbsorbsArithmeticFault(error) == true;
 
     // A running sum subtracts cleanly, so SUM / AVG slide incrementally — but
     // only without DISTINCT, whose dedup set can't tell whether a removed value
@@ -45,7 +87,7 @@ internal abstract class NumericAggregatorBase : Aggregator
 
     public sealed override void Remove(SqlValue value)
     {
-        if (value.IsNull)
+        if (value.IsNull || this.Overflowed)
             return;
         Deduct(value);
         this.Count--;
@@ -69,6 +111,8 @@ internal abstract class NumericAggregatorBase : Aggregator
     public sealed override bool TryMergeFrom(Aggregator other)
     {
         var source = (NumericAggregatorBase)other;
+        if (this.Overflowed || source.Overflowed)
+            return false;
         if (this.distinct)
         {
             foreach (var value in source.seen!)
@@ -152,7 +196,7 @@ internal abstract class NumericAggregator<TAccumulator>(SqlType resultType, bool
     /// </summary>
     protected virtual TAccumulator ExtractCoerced(SqlValue value) => Extract(value.CoerceTo(this.ResultType));
 
-    public sealed override SqlValue Result()
+    protected sealed override SqlValue Finish()
     {
         if (this.Count == 0)
             return SqlValue.Null(this.ResultType);
@@ -228,7 +272,7 @@ internal abstract class Decimal38Aggregator : NumericAggregatorBase
         return true;
     }
 
-    public sealed override SqlValue Result()
+    protected sealed override SqlValue Finish()
     {
         if (this.Count == 0)
             return SqlValue.Null(this.ResultType);

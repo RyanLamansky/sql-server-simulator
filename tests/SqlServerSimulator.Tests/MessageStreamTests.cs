@@ -281,6 +281,9 @@ public sealed class MessageStreamTests
     [DataRow("select 2147483647 + 1", "NULL", 3606)]
     [DataRow("select cast(300 as tinyint)", "NULL", 3606)]
     [DataRow("set numeric_roundabort on; select cast(1.25 as decimal(2,1))", "NULL", 3606)]
+    [DataRow("select sum(x), count(*) from (values (2147483647), (1)) v(x)", "NULL|2", 3606)]
+    [DataRow("select avg(x) from (values (2147483647), (1)) v(x)", "NULL", 3606)]
+    [DataRow("select sum(x) from (values (cast(9e37 as decimal(38,0))), (cast(9e37 as decimal(38,0)))) v(x)", "NULL", 3606)]
     [DataRow("select convert(smallint, 70000)", "NULL", 3606)]
     [DataRow("select cast(1e300 as real)", "0", 3606)]
     public void ArithmeticFault_UnderAnsiWarningsOff_AnswersNull(string sql, string expected, int notice)
@@ -310,9 +313,23 @@ public sealed class MessageStreamTests
         CollectionAssert.AreEquivalent(new[] { "event 3606: Arithmetic overflow occurred.", "event 3607: Division by zero occurred." }, log);
     }
 
+    /// <summary>
+    /// An overflowing SUM leaves only its own group NULL, and a sliding window
+    /// frame answers again once the overflowing row has left it, where a
+    /// frame pinned at the partition start stays NULL.
+    /// </summary>
+    [TestMethod]
+    [DataRow("select g, sum(x) s from (values (1, 2147483647), (1, 1), (2, 5)) v(g, x) group by g", "1:N,2:5")]
+    [DataRow("select g, sum(x) over (order by g rows between 1 preceding and current row) s from (values (1, 5), (2, 2147483647), (3, 1), (4, 7), (5, 8)) v(g, x)", "1:5,2:N,3:N,4:8,5:15")]
+    [DataRow("select g, sum(x) over (order by g) s from (values (1, 5), (2, 2147483647), (3, -10), (4, 7)) v(g, x)", "1:5,2:N,3:N,4:N")]
+    public void OverflowingSum_NullsOnlyItsOwnTotal(string query, string expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar(
+            $"set ansi_warnings off; select string_agg(concat(g, ':', isnull(cast(s as varchar(20)), 'N')), ',') within group (order by g) from ({query}) d"));
+
     [TestMethod]
     [DataRow("set arithabort on; set ansi_warnings off; select 1/0", 8134)]
     [DataRow("set ansi_warnings on; select 1/0", 8134)]
+    [DataRow("select sum(x) from (values (2147483647), (1)) v(x)", 8115)]
     [DataRow("set ansi_warnings off; select cast('abc' as int)", 245)]
     [DataRow("set ansi_warnings off; create table i (v tinyint identity(255, 1), x int); insert i (x) values (1), (2)", 8115)]
     public void ArithmeticFault_OtherwiseRaises(string sql, int number)

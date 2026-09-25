@@ -80,8 +80,21 @@ internal abstract class Aggregator
     /// multiset. Aggregators that are intrinsically removable (or never) ignore
     /// it.
     /// </para>
+    /// <para>
+    /// <paramref name="batch"/> hands SUM and AVG the session settings a total
+    /// answers to — an overflow NULL under <c>ANSI_WARNINGS OFF</c>, a decimal
+    /// AVG refused under <c>NUMERIC_ROUNDABORT</c>; without one, both raise.
+    /// </para>
     /// </summary>
-    public static Aggregator Create(AggregateExpression aggregate, SqlType operandType, SqlType resultType, bool removable = false, bool numericRoundabort = false) => aggregate.Kind switch
+    public static Aggregator Create(AggregateExpression aggregate, SqlType operandType, SqlType resultType, bool removable = false, BatchContext? batch = null)
+    {
+        var aggregator = CreateFor(aggregate, operandType, resultType, removable);
+        if (aggregator is Aggregators.NumericAggregatorBase numeric)
+            numeric.Batch = batch;
+        return aggregator;
+    }
+
+    private static Aggregator CreateFor(AggregateExpression aggregate, SqlType operandType, SqlType resultType, bool removable) => aggregate.Kind switch
     {
         AggregateKind.Count => CountsUncountable(aggregate, operandType)
             ? throw SimulatedSqlException.OperandDataTypeInvalid(operandType, "count", CountState(aggregate))
@@ -97,7 +110,7 @@ internal abstract class Aggregator
             ? throw MinMaxRejection(operandType, "min")
             : new MinMaxAggregator(resultType, isMax: false, removable),
         AggregateKind.Sum => SumAggregator.Create(resultType, aggregate.Distinct),
-        AggregateKind.Avg => AverageAggregator.Create(resultType, aggregate.Distinct, numericRoundabort),
+        AggregateKind.Avg => AverageAggregator.Create(resultType, aggregate.Distinct),
         AggregateKind.Stdev or AggregateKind.StdevP or AggregateKind.Var or AggregateKind.VarP => new StatisticalAggregator(aggregate.Kind),
         AggregateKind.StringAgg => new StringAggAggregator(resultType, aggregate.OrderBy),
         AggregateKind.JsonArrayAgg => new JsonArrayAggAggregator(resultType, aggregate.JsonNulls, JsonValueRender.ProducesJson(aggregate.Operand!), aggregate.OrderBy),

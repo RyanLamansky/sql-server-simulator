@@ -237,7 +237,7 @@ Already listed elsewhere here and not repeated: parenthesized set-op branches.
 
 **Session options with no effect**:
 
-- `SET ANSI_WARNINGS OFF` (with `ARITHABORT OFF`, a fresh session's default) answers a divide by zero or an overflow with NULL and Msg 3607 / 3606 ([`errors.md`](errors.md)), but an overflowing `SUM` / `AVG` still raises here where real answers NULL, and a multi-row `VALUES` sends the two notices in evaluation order rather than row order (probed 2026-09-25).
+- `SET ANSI_WARNINGS OFF` (with `ARITHABORT OFF`, a fresh session's default) answers a divide by zero or an overflow with NULL and Msg 3607 / 3606 ([`errors.md`](errors.md)), but a multi-row `VALUES` sends the two notices in evaluation order rather than row order (probed 2026-09-25).
 
 **Wrong results**:
 

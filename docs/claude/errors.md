@@ -53,6 +53,7 @@ Probed through SqlClient 7 against SQL Server 2025 (2026-09-23):
   Every aggregate warns but `COUNT(*)`, `STRING_AGG` and the JSON aggregates, window aggregates and a scalar subquery's included; an `EXISTS` body's and a `PIVOT`'s don't.
 - **Msg 3607** (`Division by zero occurred.`) and **Msg 3606** (`Arithmetic overflow occurred.`), class 0 state 0, go out once each after the rows of a statement whose divide by zero or overflow answered NULL under `ARITHABORT OFF` with `ANSI_WARNINGS OFF` — a fresh session's `ARITHABORT` is off, so `SET ANSI_WARNINGS OFF` alone does it (probed 2026-09-25 against SQL Server 2025).
   The operators, `CAST` / `CONVERT` (a `real` target reads 0 rather than NULL) and the value an `INSERT` / `UPDATE` / `MERGE` writes take part; a conversion failure and an identity overflow still raise.
+  So do `SUM` and `AVG`: an overflowing total NULLs only its own group, and a sliding window frame answers again once the overflowing row has left it.
 - **Msg 5701** follows every `USE`, even of the current database, and **Msg 5703** every `SET LANGUAGE`.
 
 ### Not modeled yet
