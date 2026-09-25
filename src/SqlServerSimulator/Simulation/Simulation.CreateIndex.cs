@@ -103,44 +103,7 @@ partial class Simulation
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextOptional();
 
-        var includeColumnNames = new List<string>();
-        if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Include })
-        {
-            if (context.GetNextRequired() is not Operator { Character: '(' })
-                throw SimulatedSqlException.SyntaxErrorNear(context);
-            do
-            {
-                if (context.GetNextRequired() is not Name incCol)
-                    throw SimulatedSqlException.SyntaxErrorNear(context);
-                includeColumnNames.Add(incCol.Value);
-                context.MoveNextRequired();
-            } while (context.Token is Operator { Character: ',' });
-            if (context.Token is not Operator { Character: ')' })
-                throw SimulatedSqlException.SyntaxErrorNear(context);
-            context.MoveNextOptional();
-        }
-
-        BooleanExpression? filter = null;
-        string? filterDefinition = null;
-        if (context.Token is ReservedKeyword { Keyword: Keyword.Where })
-        {
-            context.MoveNextRequired();
-            RejectFilterPredicateKeywords(context);
-            filter = BooleanExpression.Parse(context);
-            if (!filter.IsFilteredIndexShape)
-                throw SimulatedSqlException.IncorrectFilteredIndexWhereClause(indexName, targetTableName.Leaf);
-            // Render the parsed predicate into SQL Server's normalized
-            // filter_definition form ([col]=(1) AND …) for sys.indexes. Null
-            // when the predicate falls outside the renderable filtered grammar
-            // — exactly the shapes a real server rejects in a filtered index.
-            filterDefinition = filter.RenderFilterDefinition(context.Batch);
-        }
-
-        // WITH (option = value, …) followed by an optional ON <filegroup>.
-        // The filegroup clause is discarded (no filegroup model) and so is every
-        // index option except IGNORE_DUP_KEY, the one with a semantic here.
-        var ignoreDupKey = ParseOptionalIndexWithClause(context);
-        SkipOptionalFilegroupClause(context);
+        var (includeColumnNames, filter, filterDefinition, ignoreDupKey) = ParseIndexTail(context, indexName, targetTableName.Leaf, acceptsInclude: true);
 
         // Both statement-shape checks precede every name-resolution error,
         // including a missing table, so they fire here rather than after the
@@ -215,6 +178,7 @@ partial class Simulation
                 throw SimulatedSqlException.MoreThanOneClusteredIndex(table.Name, existingClustered);
         }
 
+        RejectDuplicateIndexColumns(context.Batch.CurrentDatabase.Collation, [.. keyColumns.Select(static k => k.Name)], includeColumnNames, inline: false);
         var resolvedKeyColumns = new IndexKeyColumn[keyColumns.Count];
         for (var i = 0; i < keyColumns.Count; i++)
         {
@@ -297,8 +261,9 @@ partial class Simulation
     /// <c>INDEX ix (cols)</c> and column-level <c>col type INDEX ix</c> forms)
     /// against the freshly-created <paramref name="table"/>. Each maps to the
     /// same <see cref="StoredIndex"/> the standalone CREATE INDEX builds
-    /// (catalog metadata + seek acceleration); the inline grammar exposes no
-    /// UNIQUE / INCLUDE / filter forms, so those stay defaulted.
+    /// (catalog metadata + seek acceleration), <c>UNIQUE</c>, <c>INCLUDE</c>, a
+    /// filter and <c>IGNORE_DUP_KEY</c> included; the table is empty, so there
+    /// are no existing rows for a unique one to check.
     /// </summary>
     private static void AddInlineIndexes(ParserContext context, HeapTable table, string writtenTableName, List<PendingInlineIndex> pendingIndexes)
     {
@@ -323,6 +288,10 @@ partial class Simulation
                 if (existingClustered is not null)
                     throw SimulatedSqlException.MoreThanOneClusteredIndex(table.Name, existingClustered);
             }
+            if (pending.Filter is not null)
+                RejectComputedColumnInIndexFilter(context.Batch, table, pending.Name, writtenTableName, pending.Filter);
+
+            RejectDuplicateIndexColumns(collation, [.. pending.Columns.Select(static c => c.ColumnName)], pending.IncludeColumnNames, inline: true);
 
             var keyColumns = new IndexKeyColumn[pending.Columns.Length];
             for (var i = 0; i < pending.Columns.Length; i++)
@@ -330,18 +299,45 @@ partial class Simulation
                 var fullOrdinal = ResolveColumnOrdinal(collation, table, pending.Columns[i].ColumnName);
                 keyColumns[i] = new IndexKeyColumn(table.StorageOrdinals[fullOrdinal], fullOrdinal, pending.Columns[i].IsDescending);
             }
+            var includeColumns = new int[pending.IncludeColumnNames.Count];
+            var includeOrdinals = new int[pending.IncludeColumnNames.Count];
+            for (var i = 0; i < includeColumns.Length; i++)
+            {
+                var fullOrdinal = ResolveColumnOrdinal(collation, table, pending.IncludeColumnNames[i]);
+                includeColumns[i] = table.StorageOrdinals[fullOrdinal];
+                includeOrdinals[i] = fullOrdinal;
+            }
             table.Indexes.Add(new StoredIndex(
                 pending.Name,
                 context.CurrentDatabase.AllocateObjectId(),
-                isUnique: false,
+                pending.IsUnique,
                 pending.IsClustered,
                 keyColumns,
-                [],
-                [],
-                filter: null,
-                filterDefinition: null,
-                // The inline CREATE TABLE index grammar exposes no WITH clause.
-                ignoreDupKey: false));
+                includeColumns,
+                includeOrdinals,
+                pending.Filter,
+                pending.FilterDefinition,
+                pending.IgnoreDupKey));
+        }
+    }
+
+    /// <summary>
+    /// Refuses an index naming a column twice (Msg 1909), in its key list or
+    /// between that and its <c>INCLUDE</c> list; an index declared inline in
+    /// <c>CREATE TABLE</c> follows it with Msg 1750 state 0.
+    /// </summary>
+    private static void RejectDuplicateIndexColumns(Collation collation, string[] keyColumnNames, List<string> includeColumnNames, bool inline)
+    {
+        string[] all = [.. keyColumnNames, .. includeColumnNames];
+        for (var i = 1; i < all.Length; i++)
+        {
+            for (var j = 0; j < i; j++)
+            {
+                if (!collation.Equals(all[i], all[j]))
+                    continue;
+                var duplicate = SimulatedSqlException.DuplicateIndexColumn(all[i], state: i < keyColumnNames.Length ? (byte)1 : (byte)2);
+                throw inline ? SimulatedSqlException.FollowedByConstraintNotCreated(duplicate, state: 0) : duplicate;
+            }
         }
     }
 
@@ -449,6 +445,56 @@ partial class Simulation
             _ = sb.Append(FormatKeyValue(keyValues[i]));
         }
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// The clauses an index takes after its key list, standalone or declared
+    /// inline in a <c>CREATE TABLE</c>: <c>INCLUDE (…)</c> where
+    /// <paramref name="acceptsInclude"/> says (a column-level inline index
+    /// takes none), a <c>WHERE</c> filter, <c>WITH (option = value, …)</c> and
+    /// <c>ON &lt;filegroup&gt;</c>. The filegroup clause is discarded (no
+    /// filegroup model) and so is every index option except
+    /// <c>IGNORE_DUP_KEY</c>, the one with a semantic here.
+    /// </summary>
+    private static (List<string> IncludeColumnNames, BooleanExpression? Filter, string? FilterDefinition, bool IgnoreDupKey) ParseIndexTail(
+        ParserContext context, string indexName, string tableLeaf, bool acceptsInclude)
+    {
+        var includeColumnNames = new List<string>();
+        if (acceptsInclude && context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Include })
+        {
+            if (context.GetNextRequired() is not Operator { Character: '(' })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            do
+            {
+                if (context.GetNextRequired() is not Name incCol)
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                includeColumnNames.Add(incCol.Value);
+                context.MoveNextRequired();
+            } while (context.Token is Operator { Character: ',' });
+            if (context.Token is not Operator { Character: ')' })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            context.MoveNextOptional();
+        }
+
+        BooleanExpression? filter = null;
+        string? filterDefinition = null;
+        if (context.Token is ReservedKeyword { Keyword: Keyword.Where })
+        {
+            context.MoveNextRequired();
+            RejectFilterPredicateKeywords(context);
+            filter = BooleanExpression.Parse(context);
+            if (!filter.IsFilteredIndexShape)
+                throw SimulatedSqlException.IncorrectFilteredIndexWhereClause(indexName, tableLeaf);
+            // Render the parsed predicate into SQL Server's normalized
+            // filter_definition form ([col]=(1) AND …) for sys.indexes. Null
+            // when the predicate falls outside the renderable filtered grammar
+            // — exactly the shapes a real server rejects in a filtered index.
+            filterDefinition = filter.RenderFilterDefinition(context.Batch);
+        }
+
+        var ignoreDupKey = ParseOptionalIndexWithClause(context);
+        SkipOptionalFilegroupClause(context);
+        return (includeColumnNames, filter, filterDefinition, ignoreDupKey);
     }
 
     /// <summary>

@@ -902,4 +902,60 @@ public sealed class CreateIndexTests
     [DataRow("d > '2020-01-01'", "([d]>'2020-01-01')")]
     public void FilteredIndex_AcceptedShape_StoresItsDefinition(string predicate, string definition)
         => AreEqual(definition, new Simulation().ExecuteScalar($"{FilterTable} create index ix on fx(a) where {predicate}; select filter_definition from sys.indexes where name = 'ix'"));
+
+    /// <summary>
+    /// An index declared inline in <c>CREATE TABLE</c> takes the standalone
+    /// grammar — <c>UNIQUE</c>, clustering, <c>INCLUDE</c> (table level only),
+    /// a filter, <c>WITH</c> and <c>ON</c> — and enforces what it declares
+    /// (probed 2026-09-25 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void InlineIndex_TakesTheStandaloneGrammar()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (id int, v int, w int, index ix unique nonclustered (v) include (w) where v > 0 with (fillfactor = 90) on [primary])");
+        AreEqual("ix|1|1|([v]>(0))|1", sim.ExecuteScalar("""
+            select concat_ws('|', i.name, i.is_unique, i.has_filter, i.filter_definition,
+                (select count(*) from sys.index_columns ic where ic.object_id = i.object_id and ic.index_id = i.index_id and ic.is_included_column = 1))
+            from sys.indexes i where i.object_id = object_id('t') and i.name = 'ix'
+            """));
+        _ = sim.ExecuteNonQuery("insert t values (1, -1, 1), (2, -1, 2)");
+        _ = sim.AssertSqlError("insert t values (3, 1, 1), (4, 1, 2)", 2601);
+    }
+
+    [TestMethod]
+    public void ColumnLevelInlineIndex_TakesUnique()
+        => AreEqual("ix|1|0", new Simulation().ExecuteScalar("""
+            create table t (id int, v int index ix unique clustered with (fillfactor = 80) on [primary]);
+            select concat_ws('|', name, is_unique, (select count(*) from sys.key_constraints where parent_object_id = object_id('t'))) from sys.indexes where object_id = object_id('t') and name is not null
+            """));
+
+    [TestMethod]
+    [DataRow("create table t (id int, v int, index ix clustered (v) include (id))", 10601, "Cannot specify included columns for a clustered index.")]
+    [DataRow("create table t (id int, v int, index ix (v) with (ignore_dup_key = on))", 1916, "CREATE INDEX options nonunique and ignore_dup_key are mutually exclusive.")]
+    [DataRow("create table t (id int, v int, index ix (v, V))", 1909, "Cannot use duplicate column names in index. Column name 'V' listed more than once.")]
+    [DataRow("create table t (id int, w int, v int index ix include (w))", 102, "Incorrect syntax near 'include'.")]
+    [DataRow("create table t (id int primary key) with (data_compression = page on partitions (1))", 7729, "Cannot specify partition number in the create index statement as the index '' is not partitioned.")]
+    public void InlineIndex_Refusals(string sql, int number, string message)
+        => new Simulation().AssertSqlError(sql, number, message);
+
+    [TestMethod]
+    [DataRow("create index ix on t (id) include (id)", "id", 2)]
+    [DataRow("create index ix on t (id, ID)", "ID", 1)]
+    [DataRow("create index ix on t (id) include (v, v)", "v", 2)]
+    public void DuplicateIndexColumn_RaisesMsg1909(string create, string column, int state)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (id int, v int)");
+        var error = sim.AssertSqlError(create, 1909);
+        AreEqual($"Cannot use duplicate column names in index. Column name '{column}' listed more than once.", error.Errors[0].Message);
+        AreEqual((byte)state, error.Errors[0].State);
+    }
+
+    [TestMethod]
+    [DataRow("with (data_compression = page)")]
+    [DataRow("on [primary] with (data_compression = row)")]
+    [DataRow("with (data_compression = none, xml_compression = off)")]
+    public void TableStorageOptions_AreAccepted(string options)
+        => AreEqual(1, new Simulation().ExecuteScalar($"create table t (id int primary key, x xml) {options}; insert t values (1, null); select count(*) from t"));
 }

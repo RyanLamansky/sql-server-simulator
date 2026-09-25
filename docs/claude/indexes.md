@@ -46,8 +46,10 @@ CREATE TABLE t (id int, name varchar(10) INDEX ix NONCLUSTERED);    -- column-le
 CREATE TABLE t (id int PRIMARY KEY NONCLUSTERED, a int INDEX ixa);  -- alongside a PK
 ```
 
-The parser collects each into a `PendingInlineIndex` (name, `CLUSTERED`/`NONCLUSTERED`, key columns) — the table-level form in `ParseColumnList` (`ParseTableLevelInlineIndex`), the column-level form as an `INDEX` case in the per-column constraint loop.
-After the `HeapTable` is built, `AddInlineIndexes` (`Simulation.CreateIndex.cs`) resolves the columns and appends the same `Index` a standalone CREATE INDEX would (catalog metadata + seek acceleration; no UNIQUE / INCLUDE / filter — the inline grammar exposes none).
+Both take the standalone grammar after the name — `UNIQUE`, `CLUSTERED` / `NONCLUSTERED`, a `WHERE` filter, `WITH (…)` and `ON <filegroup>` — and the table-level form an `INCLUDE` list too; the column-level form refuses `INCLUDE` as Msg 102 (probed 2026-09-25).
+The parser collects each into a `PendingInlineIndex` through `ParseInlineIndexBody`, which shares the standalone statement's tail (`ParseIndexTail`) and its shape checks: Msg 10601 (class 15 state 2 inline), Msg 1916 and a filtered `IGNORE_DUP_KEY`'s Msg 10618, the last two followed by Msg 1750 state 0.
+After the `HeapTable` is built, `AddInlineIndexes` (`Simulation.CreateIndex.cs`) resolves the columns and appends the same `Index` a standalone CREATE INDEX would (catalog metadata + seek acceleration, uniqueness and the filter enforced).
+An index naming one column twice is **Msg 1909** — state 1 within the key list, state 2 when the `INCLUDE` list repeats a key or itself, naming the repeat as written — standalone or inline (inline adds Msg 1750).
 Column resolution, name-collision (Msg 1913 via `IndexAlreadyExists`, naming the table as the statement wrote it) and a missing column (Msg 1911 via `IndexColumnMissing`), and one-clustered-per-table (Msg 1902) run inside the CREATE TABLE atomic block, so a bad inline index rolls the table back.
 Inline indexes are **CREATE TABLE only** — table variables / table types leave the `INDEX` keyword to the column path, which rejects it.
 

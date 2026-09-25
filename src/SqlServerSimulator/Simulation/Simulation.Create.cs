@@ -119,7 +119,7 @@ partial class Simulation
         SkipOptionalFilegroupClause(context);
         SystemVersioningOptions? systemVersioning = null;
         if (context.Token is ReservedKeyword { Keyword: Keyword.With })
-            systemVersioning = ParseSystemVersioningOption(context);
+            systemVersioning = ParseTableOptions(context);
 
         // Pass 2: resolve computed columns now that every column's name has
         // been seen. The resolver throws Msg 1759 for any reference to another
@@ -472,23 +472,72 @@ partial class Simulation
     }
 
     /// <summary>
-    /// Parses the trailing <c>WITH (SYSTEM_VERSIONING = ON […])</c> option
-    /// after a CREATE TABLE column list. Cursor on entry: the <c>WITH</c>
-    /// keyword. Cursor on exit: the option's closing <c>)</c>.
+    /// Parses the trailing <c>WITH (option, …)</c> list after a CREATE TABLE
+    /// column list: <c>SYSTEM_VERSIONING = ON […]</c>, which is load-bearing,
+    /// and the storage options SSMS scripts carry — <c>DATA_COMPRESSION =
+    /// {NONE | ROW | PAGE}</c> and <c>XML_COMPRESSION = {ON | OFF}</c> — which
+    /// are parsed and discarded, the simulator storing no compressed pages. Cursor on entry:
+    /// the <c>WITH</c> keyword. Cursor on exit: the list's closing <c>)</c>.
+    /// Returns the system-versioning options, or null when none were given.
     /// </summary>
-    private static SystemVersioningOptions ParseSystemVersioningOption(ParserContext context)
+    private static SystemVersioningOptions? ParseTableOptions(ParserContext context)
     {
         if (context.GetNextRequired() is not Operator { Character: '(' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
-        if (context.GetNextRequired() is not UnquotedString { ContextualKeyword: ContextualKeyword.System_Versioning })
-            throw new NotSupportedException("Only SYSTEM_VERSIONING is supported in the CREATE TABLE WITH clause.");
-        if (context.GetNextRequired() is not Operator { Character: '=' })
-            throw SimulatedSqlException.SyntaxErrorNear(context);
-        if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.On })
-            throw new NotSupportedException("SYSTEM_VERSIONING must be set to ON in CREATE TABLE.");
-        var options = ParseSystemVersioningOnOptions(context);
-        ExpectCloseParen(context);
-        return options;
+        SystemVersioningOptions? systemVersioning = null;
+        while (true)
+        {
+            var option = context.GetNextRequired();
+            if (context.GetNextRequired() is not Operator { Character: '=' })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            switch (option)
+            {
+                case UnquotedString { ContextualKeyword: ContextualKeyword.System_Versioning }:
+                    if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.On })
+                        throw new NotSupportedException("SYSTEM_VERSIONING must be set to ON in CREATE TABLE.");
+                    systemVersioning = ParseSystemVersioningOnOptions(context);
+                    break;
+                case StringToken name when name.Span.Equals("DATA_COMPRESSION", StringComparison.OrdinalIgnoreCase):
+                    if (context.GetNextRequired() is not StringToken level
+                        || !(level.Span.Equals("NONE", StringComparison.OrdinalIgnoreCase)
+                            || level.Span.Equals("ROW", StringComparison.OrdinalIgnoreCase)
+                            || level.Span.Equals("PAGE", StringComparison.OrdinalIgnoreCase)))
+                    {
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                    }
+                    RejectOnPartitions(context);
+                    break;
+                case StringToken name when name.Span.Equals("XML_COMPRESSION", StringComparison.OrdinalIgnoreCase):
+                    if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.On or Keyword.Off })
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                    RejectOnPartitions(context);
+                    break;
+                case StringToken name:
+                    throw new NotSupportedException($"The CREATE TABLE option {name.Span.ToString().ToUpperInvariant()} isn't modeled.");
+                default:
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+            }
+            if (context.GetNextRequired() is not Operator { Character: ',' })
+                break;
+        }
+        return context.Token is Operator { Character: ')' }
+            ? systemVersioning
+            : throw SimulatedSqlException.SyntaxErrorNear(context);
+    }
+
+    /// <summary>
+    /// Refuses a storage option's <c>ON PARTITIONS (…)</c> suffix: no table
+    /// here is partitioned, so it is Msg 7729 then Msg 1750 (probed 2026-09-25
+    /// against SQL Server 2025). Cursor on entry: the option's value; on exit,
+    /// when there is no suffix, unchanged.
+    /// </summary>
+    private static void RejectOnPartitions(ParserContext context)
+    {
+        var checkpoint = context.SaveCheckpoint();
+        var followsOn = context.GetNextOptional() is ReservedKeyword { Keyword: Keyword.On };
+        context.RestoreCheckpoint(checkpoint);
+        if (followsOn)
+            throw SimulatedSqlException.FollowedByConstraintNotCreated(SimulatedSqlException.PartitionNumberOnUnpartitionedCreate());
     }
 
     /// <summary>
@@ -998,13 +1047,13 @@ partial class Simulation
                 continue;
             }
 
-            // Table-level inline index: `INDEX name [CLUSTERED | NONCLUSTERED]
+            // Table-level inline index: `INDEX name [UNIQUE] [CLUSTERED | NONCLUSTERED]
             // (col [ASC | DESC], …)`. Only accepted in CREATE TABLE (where
             // pendingIndexes is supplied); table variables / table types leave
             // it to the column path, which rejects the INDEX keyword.
             if (context.Token is ReservedKeyword { Keyword: Keyword.Index } && pendingIndexes is not null)
             {
-                pendingIndexes.Add(ParseTableLevelInlineIndex(context));
+                pendingIndexes.Add(ParseTableLevelInlineIndex(context, tableName));
                 continue;
             }
 
@@ -1413,13 +1462,13 @@ partial class Simulation
                             throw SimulatedSqlException.SyntaxErrorNear(context);
                     }
                 case ReservedKeyword { Keyword: Keyword.Index } when pendingIndexes is not null:
-                    // Column-level inline index: `INDEX name [CLUSTERED |
-                    // NONCLUSTERED]` — a single-column index on this column.
+                    // Column-level inline index: `INDEX name [UNIQUE] [CLUSTERED
+                    // | NONCLUSTERED]` and the tail bar INCLUDE — a single-column
+                    // index on this column.
                     if (context.GetNextRequired() is not Name indexNameToken)
                         throw SimulatedSqlException.SyntaxErrorNear(context);
                     context.MoveNextOptional();
-                    var columnIndexClustered = ParseOptionalIndexClustering(context);
-                    pendingIndexes.Add(new PendingInlineIndex(indexNameToken.Value, columnIndexClustered, [(columnName.Value, false)]));
+                    pendingIndexes.Add(ParseInlineIndexBody(context, indexNameToken.Value, tableName, columnLevelKey: columnName.Value));
                     continue;
                 case ReservedKeyword { Keyword: Keyword.Primary or Keyword.Unique } when inlineKeyKind is null:
                     (inlineKeyKind, inlineKeyClustered, inlineKeyIgnoreDupKey) = ParseInlineKeyKindAndModifiers(context);
@@ -2600,12 +2649,79 @@ partial class Simulation
     /// </summary>
     internal sealed class PendingInlineIndex(
         string name,
+        bool isUnique,
         bool isClustered,
-        (string ColumnName, bool IsDescending)[] columns)
+        (string ColumnName, bool IsDescending)[] columns,
+        List<string> includeColumnNames,
+        BooleanExpression? filter,
+        string? filterDefinition,
+        bool ignoreDupKey)
     {
         public readonly string Name = name;
+        public readonly bool IsUnique = isUnique;
         public readonly bool IsClustered = isClustered;
         public readonly (string ColumnName, bool IsDescending)[] Columns = columns;
+        public readonly List<string> IncludeColumnNames = includeColumnNames;
+        public readonly BooleanExpression? Filter = filter;
+        public readonly string? FilterDefinition = filterDefinition;
+        public readonly bool IgnoreDupKey = ignoreDupKey;
+    }
+
+    /// <summary>
+    /// Parses what follows an inline index's name — <c>[UNIQUE] [CLUSTERED |
+    /// NONCLUSTERED]</c>, the key list where <paramref name="columnLevelKey"/>
+    /// doesn't already supply it, then the standalone index's tail (no
+    /// <c>INCLUDE</c> at column level) — and settles the shape checks real
+    /// runs on the statement: an inline Msg 10601, then Msg 1916 and a
+    /// filtered <c>IGNORE_DUP_KEY</c>'s Msg 10618, each followed by Msg 1750
+    /// state 0 (probed 2026-09-25 against SQL Server 2025).
+    /// </summary>
+    private static PendingInlineIndex ParseInlineIndexBody(ParserContext context, string indexName, string tableName, string? columnLevelKey)
+    {
+        var isUnique = false;
+        if (context.Token is ReservedKeyword { Keyword: Keyword.Unique })
+        {
+            isUnique = true;
+            context.MoveNextRequired();
+        }
+        var isClustered = ParseOptionalIndexClustering(context);
+        (string, bool)[] columns;
+        if (columnLevelKey is not null)
+        {
+            columns = [(columnLevelKey, false)];
+        }
+        else
+        {
+            if (context.Token is not Operator { Character: '(' })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            var keyList = new List<(string, bool)>();
+            do
+            {
+                if (context.GetNextRequired() is not Name keyColumn)
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                var isDescending = false;
+                context.MoveNextRequired();
+                if (context.Token is ReservedKeyword { Keyword: Keyword.Asc or Keyword.Desc } order)
+                {
+                    isDescending = order.Keyword == Keyword.Desc;
+                    context.MoveNextRequired();
+                }
+                keyList.Add((keyColumn.Value, isDescending));
+            } while (context.Token is Operator { Character: ',' });
+            if (context.Token is not Operator { Character: ')' })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            context.MoveNextRequired();
+            columns = [.. keyList];
+        }
+
+        var (includeColumnNames, filter, filterDefinition, ignoreDupKey) = ParseIndexTail(context, indexName, tableName, acceptsInclude: columnLevelKey is null);
+        if (isClustered && includeColumnNames.Count > 0)
+            throw SimulatedSqlException.IncludedColumnsOnClusteredIndex(inline: true);
+        if (ignoreDupKey && !isUnique)
+            throw SimulatedSqlException.FollowedByConstraintNotCreated(SimulatedSqlException.IgnoreDupKeyOnNonUniqueIndex(), state: 0);
+        if (ignoreDupKey && filter is not null)
+            throw SimulatedSqlException.FollowedByConstraintNotCreated(SimulatedSqlException.IgnoreDupKeyOnFilteredIndex("create", indexName, tableName), state: 0);
+        return new PendingInlineIndex(indexName, isUnique, isClustered, columns, includeColumnNames, filter, filterDefinition, ignoreDupKey);
     }
 
     /// <summary>
@@ -2614,32 +2730,12 @@ partial class Simulation
     /// <c>INDEX</c> keyword; on exit: the trailing comma / closing paren of
     /// the table's column-element list.
     /// </summary>
-    private static PendingInlineIndex ParseTableLevelInlineIndex(ParserContext context)
+    private static PendingInlineIndex ParseTableLevelInlineIndex(ParserContext context, string tableName)
     {
         if (context.GetNextRequired() is not Name indexName)
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextRequired();
-        var isClustered = ParseOptionalIndexClustering(context);
-        if (context.Token is not Operator { Character: '(' })
-            throw SimulatedSqlException.SyntaxErrorNear(context);
-        var columns = new List<(string, bool)>();
-        do
-        {
-            if (context.GetNextRequired() is not Name keyColumn)
-                throw SimulatedSqlException.SyntaxErrorNear(context);
-            var isDescending = false;
-            context.MoveNextRequired();
-            if (context.Token is ReservedKeyword { Keyword: Keyword.Asc or Keyword.Desc } order)
-            {
-                isDescending = order.Keyword == Keyword.Desc;
-                context.MoveNextRequired();
-            }
-            columns.Add((keyColumn.Value, isDescending));
-        } while (context.Token is Operator { Character: ',' });
-        if (context.Token is not Operator { Character: ')' })
-            throw SimulatedSqlException.SyntaxErrorNear(context);
-        context.MoveNextRequired();
-        return new PendingInlineIndex(indexName.Value, isClustered, [.. columns]);
+        return ParseInlineIndexBody(context, indexName.Value, tableName, columnLevelKey: null);
     }
 
     /// <summary>

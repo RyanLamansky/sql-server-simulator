@@ -2028,6 +2028,15 @@ partial class SimulatedSqlException
         new($"A full-text index for table or indexed view '{writtenTableName}' has already been created.", 7652, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 1909: an index names one column twice — state 1
+    /// within its key list, state 2 when the <c>INCLUDE</c> list repeats a key
+    /// or itself — naming the repeat as written (probed 2026-09-25 against
+    /// SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException DuplicateIndexColumn(string columnName, byte state) =>
+        new($"Cannot use duplicate column names in index. Column name '{columnName}' listed more than once.", 1909, 16, state);
+
+    /// <summary>
     /// Mimics SQL Server error 1916: <c>IGNORE_DUP_KEY</c> was set on a
     /// <c>CREATE INDEX</c> that isn't UNIQUE. Probe-confirmed verbatim, including
     /// the lowercase option name and State 4, and probe-confirmed to fire ahead of
@@ -2078,9 +2087,13 @@ partial class SimulatedSqlException
     /// Probe-confirmed verbatim and probe-confirmed to fire ahead of table /
     /// view / column resolution and ahead of Msg 1916 — it is a
     /// statement-shape check, so the message names neither index nor table.
+    /// An index declared inline in <c>CREATE TABLE</c> reports it as a
+    /// class-15 syntax error at state 2 (probed 2026-09-25).
     /// </summary>
-    internal static SimulatedSqlException IncludedColumnsOnClusteredIndex() =>
-        new("Cannot specify included columns for a clustered index.", 10601, 16, 1);
+    internal static SimulatedSqlException IncludedColumnsOnClusteredIndex(bool inline = false) =>
+        inline
+            ? new("Cannot specify included columns for a clustered index.", 10601, 15, 2)
+            : new("Cannot specify included columns for a clustered index.", 10601, 16, 1);
 
     /// <summary>
     /// Mimics SQL Server error 2727: <c>ALTER INDEX</c> named an index the table
@@ -2146,6 +2159,14 @@ partial class SimulatedSqlException
     /// <inheritdoc cref="PartitionNumberOnUnpartitionedIndex"/>
     internal static SimulatedSqlException PartitionNumberOnUnpartitionedTable(string tableName) =>
         new($"Cannot specify partition number in the alter table statement as the table '{tableName}' is not partitioned.", 7729, 16, 3);
+
+    /// <summary>
+    /// The <c>CREATE TABLE</c> form of <see cref="PartitionNumberOnUnpartitionedIndex"/>:
+    /// a storage option's <c>ON PARTITIONS</c> names the create index statement
+    /// and an empty index (probed 2026-09-25 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException PartitionNumberOnUnpartitionedCreate() =>
+        new("Cannot specify partition number in the create index statement as the index '' is not partitioned.", 7729, 16, 3);
 
     /// <summary>
     /// Mimics SQL Server error 7735: the rebuild / reorganize flavour of the
