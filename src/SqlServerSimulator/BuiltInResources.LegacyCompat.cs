@@ -217,7 +217,7 @@ internal static partial class BuiltInResources
         [
             new("value", SqlType.Int32, null, true),
             new("config", SqlType.Int32, null, false),
-            new("comment", SqlType.NVarchar, 255, true),
+            new("comment", SqlType.NVarchar, 255, false),
             new("status", SqlType.SmallInt, null, true),
         ];
         // The stock rows are built here rather than in a static field because

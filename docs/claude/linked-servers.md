@@ -85,8 +85,8 @@ Divergences:
 | `server_id` | int | 0 = local, 1+ = monotonic over linked servers in name-sort order |
 | `name` | sysname | `"SIMULATED"` for local; the registered name for linked |
 | `product` | nvarchar(128) | `"SQL Server"` for local; `@srvproduct` arg from sp_addlinkedserver for linked |
-| `provider` | nvarchar(128) | NULL for local; `@provider` arg (defaults to `"SQLNCLI"`) for linked |
-| `data_source` | nvarchar(4000) | NULL for local; `@datasrc` arg or NULL if unspecified |
+| `provider` | nvarchar(128) | `"SQLNCLI"` for local (probed 2026-09-25); `@provider` arg (defaults to `"SQLNCLI"`) for linked |
+| `data_source` | nvarchar(4000) | the server name for local (probed 2026-09-25); `@datasrc` arg or NULL if unspecified |
 | `is_linked` | bit | 0 / 1 |
 
 Stable ordering across runs (name-sorted with the local row first).

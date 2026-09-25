@@ -97,7 +97,7 @@ internal static partial class BuiltInResources
             // Server for tables without an AUTHORIZATION override. SMO's
             // CREATE-scripting table query reads it.
             new("principal_id", SqlType.Int32, null, true),
-            new("type", charTwo, 2, false),
+            new("type", charTwo, 2, true),
             new("type_desc", nvarchar60Catalog, 60, true),
             new("create_date", SqlType.DateTime, null, false),
             new("modify_date", SqlType.DateTime, null, false),
@@ -110,17 +110,17 @@ internal static partial class BuiltInResources
             // filetable, external/PolyBase, graph node/edge, ledger), so each
             // ships as a constant 0. ledger_type is tinyint (0 = NON_LEDGER_TABLE,
             // probe-confirmed non-null on SQL Server 2025). See docs/claude/catalog-views.md.
-            new("is_memory_optimized", SqlType.Bit, null, false),
-            new("is_filetable", SqlType.Bit, null, false),
+            new("is_memory_optimized", SqlType.Bit, null, true),
+            new("is_filetable", SqlType.Bit, null, true),
             new("is_external", SqlType.Bit, null, false),
-            new("is_node", SqlType.Bit, null, false),
-            new("is_edge", SqlType.Bit, null, false),
+            new("is_node", SqlType.Bit, null, true),
+            new("is_edge", SqlType.Bit, null, true),
             // Only memory-optimized tables have a non-default durability; every
             // simulator table is disk-based, so durability is a constant 0 /
             // SCHEMA_AND_DATA. SMO's CREATE-scripting table query reads it.
             new("durability", SqlType.TinyInt, null, true),
             new("durability_desc", nvarchar60Catalog, 60, true),
-            new("ledger_type", SqlType.TinyInt, null, false),
+            new("ledger_type", SqlType.TinyInt, null, true),
             // Ledger isn't modeled, so ledger_view_id (the object_id of the
             // ledger view over an append-only / updatable ledger table) is
             // always NULL — SMO's CREATE-scripting table query selects
@@ -154,7 +154,7 @@ internal static partial class BuiltInResources
             // Equals the column count until a DROP COLUMN, after which it
             // stays put while the count falls — and the next added column
             // takes watermark + 1 rather than reusing the hole.
-            new("max_column_id_used", SqlType.Int32, null, true),
+            new("max_column_id_used", SqlType.Int32, null, false),
             // Transactional / merge replication isn't modeled, so no table is an
             // article — is_replicated is a constant 0 (nullable in real SQL
             // Server). SMO's Table property-bag query projects tbl.is_replicated
@@ -170,7 +170,7 @@ internal static partial class BuiltInResources
             // Replication isn't modeled, so the remaining publication flags
             // are constant 0 alongside is_replicated. DacFx's table
             // reverse-engineering reads all four in one ReplInfo CASE.
-            new("is_merge_published", SqlType.Bit, null, false),
+            new("is_merge_published", SqlType.Bit, null, true),
             new("is_schema_published", SqlType.Bit, null, false),
             new("is_published", SqlType.Bit, null, false),
             // Remaining columns DacFx's SqlTable reverse-engineering reads.
@@ -180,10 +180,10 @@ internal static partial class BuiltInResources
             // a versioned table — -1 / -1 / INFINITE until one is set — and is
             // NULL on history and non-temporal tables (all probe-confirmed
             // against SQL Server 2025).
-            new("text_in_row_limit", SqlType.Int32, null, false),
-            new("large_value_types_out_of_row", SqlType.Bit, null, false),
-            new("is_tracked_by_cdc", SqlType.Bit, null, false),
-            new("is_remote_data_archive_enabled", SqlType.Bit, null, false),
+            new("text_in_row_limit", SqlType.Int32, null, true),
+            new("large_value_types_out_of_row", SqlType.Bit, null, true),
+            new("is_tracked_by_cdc", SqlType.Bit, null, true),
+            new("is_remote_data_archive_enabled", SqlType.Bit, null, true),
             new("history_retention_period", SqlType.Int32, null, true),
             new("history_retention_period_unit", SqlType.Int32, null, true),
             new("history_retention_period_unit_desc", nvarchar60Catalog, 60, true),
@@ -271,7 +271,7 @@ internal static partial class BuiltInResources
         Sys("objects",
         [
             new("object_id", SqlType.Int32, null, false),
-            new("name", SqlType.SystemName, 128, true),
+            new("name", SqlType.SystemName, 128, false),
             new("schema_id", SqlType.Int32, null, false),
             new("parent_object_id", SqlType.Int32, null, false),
             // No explicit object owner is modeled (ownership follows the
@@ -284,7 +284,7 @@ internal static partial class BuiltInResources
             new("type_desc", nvarchar60Catalog, 60, true),
             new("create_date", SqlType.DateTime, null, false),
             new("modify_date", SqlType.DateTime, null, false),
-            new("is_ms_shipped", SqlType.Bit, null, true),
+            new("is_ms_shipped", SqlType.Bit, null, false),
             new("is_published", SqlType.Bit, null, false),
             new("is_schema_published", SqlType.Bit, null, false),
         ], (batch, database) =>
@@ -295,7 +295,7 @@ internal static partial class BuiltInResources
         Sys("all_objects",
         [
             new("object_id", SqlType.Int32, null, false),
-            new("name", SqlType.SystemName, 128, true),
+            new("name", SqlType.SystemName, 128, false),
             new("schema_id", SqlType.Int32, null, false),
             new("parent_object_id", SqlType.Int32, null, false),
             new("principal_id", SqlType.Int32, null, true),
@@ -304,8 +304,8 @@ internal static partial class BuiltInResources
             new("create_date", SqlType.DateTime, null, false),
             new("modify_date", SqlType.DateTime, null, false),
             new("is_ms_shipped", SqlType.Bit, null, true),
-            new("is_published", SqlType.Bit, null, false),
-            new("is_schema_published", SqlType.Bit, null, false),
+            new("is_published", SqlType.Bit, null, true),
+            new("is_schema_published", SqlType.Bit, null, true),
         ], (batch, database) =>
             EnumerateObjects(batch, database, charTwo, pkType, pkTypeDesc, uqType, uqTypeDesc, checkType, checkTypeDesc, zeroParent, notMsShipped)
                 .Concat(EnumerateSystemObjectsAsObjects(zeroParent)));
@@ -356,7 +356,7 @@ internal static partial class BuiltInResources
         HeapColumn[] ColumnsShape() =>
         [
             new("object_id", SqlType.Int32, null, false),
-            new("name", SqlType.SystemName, 128, false),
+            new("name", SqlType.SystemName, 128, true),
             new("column_id", SqlType.Int32, null, false),
             new("system_type_id", systemTypeId, null, false),
             new("user_type_id", SqlType.Int32, null, false),
@@ -365,7 +365,7 @@ internal static partial class BuiltInResources
             new("scale", systemTypeId, null, false),
             new("is_nullable", SqlType.Bit, null, true),
             new("is_identity", SqlType.Bit, null, false),
-            new("is_computed", SqlType.Bit, null, false),
+            new("is_computed", SqlType.Bit, null, true),
             new("collation_name", SqlType.SystemName, 128, true),
             new("is_sparse", SqlType.Bit, null, true),
             // Probe-confirmed constants (SQL Server 2025, 2026-07-15) that SMO's

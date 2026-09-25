@@ -145,8 +145,8 @@ internal static partial class BuiltInResources
         [
             new("server_id", SqlType.Int32, null, false),
             new("name", SqlType.SystemName, 128, false),
-            new("product", SqlType.NVarchar, 128, true),
-            new("provider", SqlType.NVarchar, 128, true),
+            new("product", SqlType.NVarchar, 128, false),
+            new("provider", SqlType.NVarchar, 128, false),
             new("data_source", SqlType.NVarchar, 4000, true),
             new("is_linked", SqlType.Bit, null, false),
         ], EnumerateSysServers);
@@ -491,8 +491,8 @@ internal static partial class BuiltInResources
         // independent of the database.
         Sys("database_scoped_configurations",
         [
-            new("configuration_id", SqlType.Int32, null, false),
-            new("name", SqlType.SystemName, 128, false),
+            new("configuration_id", SqlType.Int32, null, true),
+            new("name", SqlType.SystemName, 128, true),
             new("value", SqlType.SqlVariant, null, true),
             new("value_for_secondary", SqlType.SqlVariant, null, true),
             new("is_value_default", SqlType.Bit, null, true),
@@ -547,7 +547,7 @@ internal static partial class BuiltInResources
             new("protocol_desc", nvarchar60Catalog, 60, true),
             new("type", SqlType.TinyInt, null, false),
             new("type_desc", nvarchar60Catalog, 60, true),
-            new("state", SqlType.TinyInt, null, false),
+            new("state", SqlType.TinyInt, null, true),
             new("state_desc", nvarchar60Catalog, 60, true),
             new("is_admin_endpoint", SqlType.Bit, null, false),
         ], static (_, _) => EmptyCatalogRows);
@@ -738,7 +738,7 @@ internal static partial class BuiltInResources
             new("type_desc", nvarchar60Catalog, 60, true),
             new("data_space_id", SqlType.Int32, null, false),
             new("name", SqlType.NVarchar, 128, true),
-            new("physical_name", SqlType.NVarchar, 260, false),
+            new("physical_name", SqlType.NVarchar, 260, true),
             new("state", SqlType.TinyInt, null, true),
             new("state_desc", nvarchar60Catalog, 60, true),
             new("size", SqlType.Int32, null, false),
@@ -1778,8 +1778,9 @@ internal static partial class BuiltInResources
 
     /// <summary>
     /// Rows for <c>sys.servers</c>. Row 0 is the local instance
-    /// (<c>is_linked = 0</c>, name <c>"SIMULATED"</c>, product
-    /// <c>"SQL Server"</c>); each subsequent row is one entry from
+    /// (<c>is_linked = 0</c>, name and data source <c>"SIMULATED"</c>,
+    /// product <c>"SQL Server"</c>, provider <c>"SQLNCLI"</c>, as real
+    /// reports its own row, probed 2026-09-25); each subsequent row is one entry from
     /// <see cref="Simulation.ActiveLinkedServers"/> in name-sort order
     /// (stable across runs, distinct from real SQL Server's
     /// <c>object_id</c>-derived ordering — see the quirks list).
@@ -1790,14 +1791,13 @@ internal static partial class BuiltInResources
         var notLinked = SqlValue.FromBoolean(false);
         var isLinked = SqlValue.FromBoolean(true);
         var localProduct = SqlValue.FromNVarchar("SQL Server");
-        var nullProvider = SqlValue.Null(SqlType.NVarchar);
         var nullDataSource = SqlValue.Null(SqlType.NVarchar);
         yield return [
             SqlValue.FromInt32(0),
             SqlValue.FromSystemName("SIMULATED"),
             localProduct,
-            nullProvider,
-            nullDataSource,
+            SqlValue.FromNVarchar("SQLNCLI"),
+            SqlValue.FromNVarchar("SIMULATED"),
             notLinked,
         ];
 

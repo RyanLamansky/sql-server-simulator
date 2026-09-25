@@ -1333,4 +1333,16 @@ public sealed class CatalogViewTests
             insert #d exec sp_describe_first_result_set N'select value from sys.configurations';
             select system_type_name from #d
             """));
+
+    [TestMethod]
+    public void CatalogColumnNullability_FollowsReal()
+        => AreEqual("0|1|0", ExecuteScalar("""
+            select concat(columnproperty(object_id('sys.objects'), 'name', 'AllowsNull'), '|',
+                columnproperty(object_id('sys.columns'), 'name', 'AllowsNull'), '|',
+                columnproperty(object_id('sys.servers'), 'provider', 'AllowsNull'))
+            """));
+
+    [TestMethod]
+    public void LocalServerRow_NamesItsProviderAndDataSource()
+        => AreEqual("SQLNCLI|SIMULATED", ExecuteScalar("select provider + '|' + data_source from sys.servers where server_id = 0"));
 }

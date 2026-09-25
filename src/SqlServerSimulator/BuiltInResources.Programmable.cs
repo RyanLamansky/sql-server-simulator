@@ -97,7 +97,7 @@ internal static partial class BuiltInResources
         HeapColumn[] parameterColumns =
         [
             new("object_id", SqlType.Int32, null, false),
-            new("name", SqlType.SystemName, 128, false),
+            new("name", SqlType.SystemName, 128, true),
             new("parameter_id", SqlType.Int32, null, false),
             new("system_type_id", SqlType.TinyInt, null, false),
             new("user_type_id", SqlType.Int32, null, false),
@@ -114,7 +114,7 @@ internal static partial class BuiltInResources
             new("default_value", SqlType.SqlVariant, null, true),
             new("xml_collection_id", SqlType.Int32, null, false),
             new("is_readonly", SqlType.Bit, null, false),
-            new("is_nullable", SqlType.Bit, null, false),
+            new("is_nullable", SqlType.Bit, null, true),
             // Vector-typed parameters aren't modeled, so the pair is always
             // NULL (mirroring sys.columns' vector pair). DacFx's parameter
             // reverse-engineering reads both.
@@ -147,18 +147,18 @@ internal static partial class BuiltInResources
             // 0 (ledger unmodeled). SMO's Object-Explorer Views enumeration
             // reads create_date, principal_id, is_ms_shipped, ledger_view_type.
             new("principal_id", SqlType.Int32, null, true),
-            new("type", charTwo, 2, false),
+            new("type", charTwo, 2, true),
             new("type_desc", nvarchar60Catalog, 60, true),
             new("create_date", SqlType.DateTime, null, false),
             new("modify_date", SqlType.DateTime, null, false),
             new("is_ms_shipped", SqlType.Bit, null, false),
             new("with_check_option", SqlType.Bit, null, false),
             new("is_date_correlation_view", SqlType.Bit, null, false),
-            new("ledger_view_type", SqlType.TinyInt, null, false),
+            new("ledger_view_type", SqlType.TinyInt, null, true),
             // has_opaque_metadata / is_dropped_ledger_view: both nullable bit
             // on real, 0 for every ordinary view (probe-confirmed against
             // SQL Server 2025) — SMO's Script-As view query reads both.
-            new("has_opaque_metadata", SqlType.Bit, null, true),
+            new("has_opaque_metadata", SqlType.Bit, null, false),
             new("is_dropped_ledger_view", SqlType.Bit, null, true),
         ], EnumerateViews);
 
@@ -177,10 +177,10 @@ internal static partial class BuiltInResources
             new("type_desc", nvarchar60Catalog, 60, true),
             new("create_date", SqlType.DateTime, null, false),
             new("modify_date", SqlType.DateTime, null, false),
-            new("is_ms_shipped", SqlType.Bit, null, false),
-            new("with_check_option", SqlType.Bit, null, false),
-            new("is_date_correlation_view", SqlType.Bit, null, false),
-            new("ledger_view_type", SqlType.TinyInt, null, false),
+            new("is_ms_shipped", SqlType.Bit, null, true),
+            new("with_check_option", SqlType.Bit, null, true),
+            new("is_date_correlation_view", SqlType.Bit, null, true),
+            new("ledger_view_type", SqlType.TinyInt, null, true),
             new("has_opaque_metadata", SqlType.Bit, null, true),
             new("is_dropped_ledger_view", SqlType.Bit, null, true),
         ], EnumerateViews);
@@ -199,7 +199,7 @@ internal static partial class BuiltInResources
             new("object_id", SqlType.Int32, null, false),
             new("name", SqlType.SystemName, 128, false),
             new("schema_id", SqlType.Int32, null, false),
-            new("type", charTwo, 2, false),
+            new("type", charTwo, 2, true),
             new("type_desc", nvarchar60Catalog, 60, true),
             new("create_date", SqlType.DateTime, null, false),
             new("modify_date", SqlType.DateTime, null, false),
@@ -251,10 +251,10 @@ internal static partial class BuiltInResources
             new("SPECIFIC_CATALOG", SqlType.SystemName, 128, true),
             new("SPECIFIC_SCHEMA", SqlType.SystemName, 128, true),
             new("SPECIFIC_NAME", SqlType.SystemName, 128, false),
-            new("ORDINAL_POSITION", SqlType.Int32, null, true),
+            new("ORDINAL_POSITION", SqlType.Int32, null, false),
             new("PARAMETER_MODE", SqlType.Varchar, 10, true),
             new("PARAMETER_NAME", SqlType.SystemName, 128, true),
-            new("DATA_TYPE", SqlType.SystemName, 128, true),
+            new("DATA_TYPE", SqlType.SystemName, 128, false),
             new("CHARACTER_MAXIMUM_LENGTH", SqlType.Int32, null, true),
         ], (batch, database) =>
             EnumerateInformationSchemaParameters(batch, database, modeIn, modeInOut, modeOut));
@@ -275,7 +275,7 @@ internal static partial class BuiltInResources
             new("TABLE_NAME", SqlType.SystemName, 128, false),
             new("VIEW_DEFINITION", SqlType.NVarchar, 4000, true),
             new("CHECK_OPTION", SqlType.Varchar, 7, true),
-            new("IS_UPDATABLE", SqlType.Varchar, 2, true),
+            new("IS_UPDATABLE", SqlType.Varchar, 2, false),
         ], (batch, database) =>
             EnumerateInformationSchemaViews(batch, database, checkOptionNone, checkOptionCascade, isUpdatableNo));
 
@@ -293,7 +293,7 @@ internal static partial class BuiltInResources
             new("schema_id", SqlType.Int32, null, false),
             new("is_user_defined", SqlType.Bit, null, false),
             new("is_table_type", SqlType.Bit, null, false),
-            new("is_nullable", SqlType.Bit, null, false),
+            new("is_nullable", SqlType.Bit, null, true),
             // is_assembly_type: 1 only for the CLR-backed system types
             // (hierarchyid / geometry / geography); 0 for every other built-in,
             // table type, and scalar alias. SMO's SSMS column-node query reads
@@ -347,7 +347,7 @@ internal static partial class BuiltInResources
             new("is_user_defined", SqlType.Bit, null, false),
             new("schema_id", SqlType.Int32, null, false),
             new("user_type_id", SqlType.Int32, null, false),
-            new("is_memory_optimized", SqlType.Bit, null, false),
+            new("is_memory_optimized", SqlType.Bit, null, true),
             new("system_type_id", SqlType.TinyInt, null, false),
             new("principal_id", SqlType.Int32, null, true),
             new("max_length", SqlType.SmallInt, null, false),
@@ -387,8 +387,8 @@ internal static partial class BuiltInResources
             new("increment", SqlType.SqlVariant, null, false),
             new("minimum_value", SqlType.SqlVariant, null, false),
             new("maximum_value", SqlType.SqlVariant, null, false),
-            new("is_cycling", SqlType.Bit, null, false),
-            new("is_cached", SqlType.Bit, null, false),
+            new("is_cycling", SqlType.Bit, null, true),
+            new("is_cached", SqlType.Bit, null, true),
             new("cache_size", SqlType.Int32, null, true),
             new("current_value", SqlType.SqlVariant, null, false),
             // last_used_value: sql_variant carrying the last emitted value in
@@ -438,7 +438,7 @@ internal static partial class BuiltInResources
         Sys("numbered_procedures",
         [
             new("object_id", SqlType.Int32, null, false),
-            new("procedure_number", SqlType.SmallInt, null, false),
+            new("procedure_number", SqlType.SmallInt, null, true),
             new("definition", SqlType.NVarchar, 4000, true),
         ], static (_, _) => EmptyCatalogRows);
 

@@ -47,7 +47,7 @@ internal static partial class BuiltInResources
             new("is_accent_sensitivity_on", SqlType.Bit, null, false),
             new("data_space_id", SqlType.Int32, null, true),
             new("file_id", SqlType.Int32, null, true),
-            new("principal_id", SqlType.Int32, null, false),
+            new("principal_id", SqlType.Int32, null, true),
             new("is_importing", SqlType.Bit, null, false),
         ], EnumerateSysFullTextCatalogs);
 
@@ -57,9 +57,9 @@ internal static partial class BuiltInResources
         [
             new("object_id", SqlType.Int32, null, false),
             new("unique_index_id", SqlType.Int32, null, false),
-            new("fulltext_catalog_id", SqlType.Int32, null, false),
+            new("fulltext_catalog_id", SqlType.Int32, null, true),
             new("is_enabled", SqlType.Bit, null, false),
-            new("change_tracking_state", charOne, 1, false),
+            new("change_tracking_state", charOne, 1, true),
             new("change_tracking_state_desc", nvarchar60Catalog, 60, true),
             new("has_crawl_completed", SqlType.Bit, null, false),
             new("crawl_type", charOne, 1, false),
@@ -67,7 +67,7 @@ internal static partial class BuiltInResources
             new("crawl_start_date", SqlType.DateTime, null, true),
             new("crawl_end_date", SqlType.DateTime, null, true),
             new("stoplist_id", SqlType.Int32, null, true),
-            new("data_space_id", SqlType.Int32, null, true),
+            new("data_space_id", SqlType.Int32, null, false),
             new("property_list_id", SqlType.Int32, null, true),
         ], EnumerateSysFullTextIndexes);
 
@@ -233,7 +233,7 @@ internal static partial class BuiltInResources
             new("is_ignored_in_optimization", SqlType.Bit, null, true),
             new("allow_row_locks", SqlType.Bit, null, true),
             new("allow_page_locks", SqlType.Bit, null, true),
-            new("has_filter", SqlType.Bit, null, true),
+            new("has_filter", SqlType.Bit, null, false),
             new("filter_definition", NVarcharSqlType.Get(-1, Collation.Baseline, Coercibility.CoercibleDefault), SqlType.MaxLengthSentinel, true),
             new("xml_index_type", SqlType.TinyInt, null, true),
             new("xml_index_type_description", nvarchar60Catalog, 60, true),

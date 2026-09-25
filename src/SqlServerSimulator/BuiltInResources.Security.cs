@@ -26,7 +26,7 @@ internal static partial class BuiltInResources
         [
             new("resource_type", SqlType.NVarchar, 60, false),
             new("resource_database_id", SqlType.Int32, null, false),
-            new("resource_description", SqlType.NVarchar, 256, true),
+            new("resource_description", SqlType.NVarchar, 256, false),
             new("resource_associated_entity_id", SqlType.BigInt, null, true),
             new("request_mode", SqlType.NVarchar, 60, false),
             new("request_status", SqlType.NVarchar, 60, false),
@@ -51,13 +51,13 @@ internal static partial class BuiltInResources
         // so existing diagnostic queries port unchanged.
         Sys("dm_tran_version_store",
         [
-            new("transaction_sequence_num", SqlType.BigInt, null, false),
-            new("version_sequence_num", SqlType.BigInt, null, false),
-            new("database_id", SqlType.SmallInt, null, false),
-            new("rowset_id", SqlType.BigInt, null, false),
-            new("status", SqlType.TinyInt, null, false),
-            new("min_length_in_bytes", SqlType.SmallInt, null, false),
-            new("record_length_first_part_in_bytes", SqlType.SmallInt, null, false),
+            new("transaction_sequence_num", SqlType.BigInt, null, true),
+            new("version_sequence_num", SqlType.BigInt, null, true),
+            new("database_id", SqlType.SmallInt, null, true),
+            new("rowset_id", SqlType.BigInt, null, true),
+            new("status", SqlType.TinyInt, null, true),
+            new("min_length_in_bytes", SqlType.SmallInt, null, true),
+            new("record_length_first_part_in_bytes", SqlType.SmallInt, null, true),
             new("record_image_first_part", VarbinarySqlType.MaxForm, null, true),
             new("record_length_second_part_in_bytes", SqlType.SmallInt, null, true),
             new("record_image_second_part", VarbinarySqlType.MaxForm, null, true),
@@ -68,9 +68,9 @@ internal static partial class BuiltInResources
         // since HV payloads aren't backed by real pages.
         Sys("dm_tran_version_store_space_usage",
         [
-            new("database_id", SqlType.Int32, null, false),
-            new("reserved_page_count", SqlType.BigInt, null, false),
-            new("reserved_space_kb", SqlType.BigInt, null, false),
+            new("database_id", SqlType.Int32, null, true),
+            new("reserved_page_count", SqlType.BigInt, null, true),
+            new("reserved_space_kb", SqlType.BigInt, null, true),
         ], VersionStoreDmvs.EnumerateDmTranVersionStoreSpaceUsage);
 
         // sys.dm_tran_active_snapshot_database_transactions: one row per
@@ -78,15 +78,15 @@ internal static partial class BuiltInResources
         // snapshots are not tracked here (matching real SQL Server).
         Sys("dm_tran_active_snapshot_database_transactions",
         [
-            new("transaction_id", SqlType.BigInt, null, false),
-            new("transaction_sequence_num", SqlType.BigInt, null, false),
+            new("transaction_id", SqlType.BigInt, null, true),
+            new("transaction_sequence_num", SqlType.BigInt, null, true),
             new("commit_sequence_num", SqlType.BigInt, null, true),
-            new("session_id", SqlType.Int32, null, false),
-            new("is_snapshot", SqlType.Bit, null, false),
+            new("session_id", SqlType.Int32, null, true),
+            new("is_snapshot", SqlType.Bit, null, true),
             new("first_snapshot_sequence_num", SqlType.BigInt, null, true),
-            new("max_version_chain_traversed", SqlType.Int32, null, false),
-            new("average_version_chain_traversed", SqlType.Float, null, false),
-            new("elapsed_time_seconds", SqlType.BigInt, null, false),
+            new("max_version_chain_traversed", SqlType.Int32, null, true),
+            new("average_version_chain_traversed", SqlType.Float, null, true),
+            new("elapsed_time_seconds", SqlType.BigInt, null, true),
         ], VersionStoreDmvs.EnumerateDmTranActiveSnapshotDatabaseTransactions);
 
         // sys.extended_properties: per-database user-defined annotations
@@ -131,7 +131,7 @@ internal static partial class BuiltInResources
             new("owning_principal_id", SqlType.Int32, null, true),
             new("sid", SqlType.Varbinary, 85, true),
             new("is_fixed_role", SqlType.Bit, null, false),
-            new("authentication_type", SqlType.TinyInt, null, true),
+            new("authentication_type", SqlType.TinyInt, null, false),
             new("authentication_type_desc", nvarchar60Catalog, 60, true),
             // default_language_name / default_language_lcid aren't tracked
             // (always NULL). SMO's User property-bag reads both via
@@ -179,7 +179,7 @@ internal static partial class BuiltInResources
             new("sid", SqlType.Varbinary, 85, true),
             new("type", charOne, 1, false),
             new("type_desc", nvarchar60Catalog, 60, true),
-            new("is_disabled", SqlType.Bit, null, false),
+            new("is_disabled", SqlType.Bit, null, true),
             new("create_date", SqlType.DateTime, null, false),
             new("modify_date", SqlType.DateTime, null, false),
             new("default_database_name", SqlType.SystemName, 128, true),
@@ -203,7 +203,7 @@ internal static partial class BuiltInResources
             new("sid", SqlType.Varbinary, 85, true),
             new("type", charOne, 1, false),
             new("type_desc", nvarchar60Catalog, 60, true),
-            new("is_disabled", SqlType.Bit, null, false),
+            new("is_disabled", SqlType.Bit, null, true),
             new("create_date", SqlType.DateTime, null, false),
             new("modify_date", SqlType.DateTime, null, false),
             new("default_database_name", SqlType.SystemName, 128, true),
@@ -264,13 +264,13 @@ internal static partial class BuiltInResources
             new("asymmetric_key_id", SqlType.Int32, null, false),
             new("pvt_key_encryption_type", charTwo, 2, false),
             new("pvt_key_encryption_type_desc", nvarchar60Catalog, 60, true),
-            new("thumbprint", SqlType.Varbinary, 32, true),
+            new("thumbprint", SqlType.Varbinary, 32, false),
             new("algorithm", charTwo, 2, false),
             new("algorithm_desc", nvarchar60Catalog, 60, true),
             new("key_length", SqlType.Int32, null, false),
             new("sid", SqlType.Varbinary, 85, true),
             new("string_sid", SqlType.NVarchar, 128, true),
-            new("public_key", VarbinarySqlType.MaxForm, null, true),
+            new("public_key", VarbinarySqlType.MaxForm, null, false),
             new("attested_by", SqlType.NVarchar, 260, true),
             new("provider_type", SqlType.NVarchar, 120, true),
             new("cryptographic_provider_guid", SqlType.UniqueIdentifier, null, true),
@@ -284,18 +284,18 @@ internal static partial class BuiltInResources
             new("principal_id", SqlType.Int32, null, true),
             new("pvt_key_encryption_type", charTwo, 2, false),
             new("pvt_key_encryption_type_desc", nvarchar60Catalog, 60, true),
-            new("is_active_for_begin_dialog", SqlType.Bit, null, false),
+            new("is_active_for_begin_dialog", SqlType.Bit, null, true),
             new("issuer_name", SqlType.NVarchar, 442, true),
             new("cert_serial_number", SqlType.NVarchar, 64, true),
             new("sid", SqlType.Varbinary, 85, true),
             new("string_sid", SqlType.NVarchar, 128, true),
             new("subject", SqlType.NVarchar, 4000, true),
-            new("expiry_date", SqlType.DateTime, null, false),
-            new("start_date", SqlType.DateTime, null, false),
-            new("thumbprint", SqlType.Varbinary, 32, true),
+            new("expiry_date", SqlType.DateTime, null, true),
+            new("start_date", SqlType.DateTime, null, true),
+            new("thumbprint", SqlType.Varbinary, 32, false),
             new("attested_by", SqlType.NVarchar, 260, true),
             new("pvt_key_last_backup_date", SqlType.DateTime, null, true),
-            new("key_length", SqlType.Int32, null, false),
+            new("key_length", SqlType.Int32, null, true),
         ], static (_, _) => EmptyCatalogRows);
 
         Sys("credentials",

@@ -895,7 +895,7 @@ NULL `object_id` / NULL property / non-table object on a `TableHas*` query → N
 **`COLUMNPROPERTY(table_id, column_name, property)`** (`Parser/Expressions/ColumnProperty.cs`): per-column metadata returning `int`.
 Properties (probe-confirmed): `AllowsNull` / `IsIdentity` / `IsComputed` (1/0 from `HeapColumn.Nullable` / `Identity` / `Computed`), `IsRowGuidCol` (1/0 from `HeapColumn.IsRowGuidCol`), `IsIdNotForRepl` (1 for an `IDENTITY … NOT FOR REPLICATION` column, else 0 — 0 on non-identity columns, probe-confirmed), `Precision` (decimal-equivalent for integer family, declared `N` for `varchar(N)` / `nvarchar(N)`, 19/10 for money/smallmoney), `Scale` (4 for money, declared scale for decimal, 0 otherwise), `CharMaxLen` (`N` for character types, NULL otherwise), `ColumnId` (the [stable column id](#stable-column-ids), agreeing with `sys.columns.column_id` after a DROP COLUMN — probe-confirmed that real reports the same value from both surfaces), `UsesAnsiTrim` (1 for character types, 0 otherwise).
 Column lookup matches by name through `Collation.Baseline` (case-insensitive), over a table's, a view's, a catalog view's or a table-valued function's columns, or — named with its `@` — a procedure's or function's parameters, which always allow NULL and whose `ColumnId` is their position (probed 2026-09-25).
-A catalog view's answers follow the simulator's declaration of it, so its nullability divergences show through (`COLUMNPROPERTY(OBJECT_ID('sys.objects'), 'name', 'AllowsNull')` is 1 where real says 0).
+A catalog view's answers follow the simulator's declaration of it.
 NULL on any arg / unknown column / unknown property / unknown object → NULL.
 
 **`INDEXPROPERTY(object_id, index_name, property)`** (`Parser/Expressions/IndexProperty.cs`): per-index metadata returning `int`.
@@ -972,6 +972,7 @@ Every surface takes the names from `BuiltInResources.LogicalFileName`: a created
 
 Cross-cutting notes:
 - **Column subset**: several views ship the load-bearing subset of real's columns that EF / migration tooling, DacFx, SMO and the probes queried — among them `sys.tables`, `sys.views`, `sys.procedures`, `sys.sequences`, `sys.computed_columns`, `sys.identity_columns`, `sys.servers`, and `INFORMATION_SCHEMA.ROUTINES` / `.PARAMETERS` / `.DOMAINS` — so `SELECT *` returns fewer columns than real.
+  Each column shipped declares the nullability real's `sp_describe_first_result_set` reports for it (a sweep of every catalog view, 2026-09-25), and a declared NOT NULL column never yields NULL across the AdventureWorks, WideWorldImporters and Insite bacpacs.
   The columns shipped appear in real's order: `BuiltInResources.RealColumnOrder` presents each view whose declaration was written in another order in the one real lists (a sweep of every catalog view's `SELECT *` against SQL Server 2025, 2026-09-25), which is what `SELECT *`, `sys.all_columns.column_id` and `COLUMNPROPERTY(…, 'ColumnId')` show.
 - **Temp tables not in `sys.tables` / `INFORMATION_SCHEMA.TABLES`**: the per-connection `TempTables` dict isn't walked by the row generators (real SQL Server lists temp tables in `tempdb.sys.tables`, which the simulator's single-database model doesn't separate).
   Catalog views show user tables in `dbo` + any user schema only.

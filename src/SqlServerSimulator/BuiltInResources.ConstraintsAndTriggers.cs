@@ -97,12 +97,12 @@ internal static partial class BuiltInResources
             new("principal_id", SqlType.Int32, null, true),
             new("assembly_id", SqlType.Int32, null, false),
             new("clr_name", SqlType.NVarchar, 4000, true),
-            new("permission_set", SqlType.TinyInt, null, false),
+            new("permission_set", SqlType.TinyInt, null, true),
             new("permission_set_desc", nvarchar60Catalog, 60, true),
-            new("is_visible", SqlType.Bit, null, true),
+            new("is_visible", SqlType.Bit, null, false),
             new("create_date", SqlType.DateTime, null, false),
             new("modify_date", SqlType.DateTime, null, false),
-            new("is_user_defined", SqlType.Bit, null, false),
+            new("is_user_defined", SqlType.Bit, null, true),
         ], static (batch, database) => EnumerateAssemblies(database));
 
         // sys.foreign_keys: probe-confirmed 21-column shape against SQL
@@ -112,7 +112,7 @@ internal static partial class BuiltInResources
         // catalog-introspection tooling sees an authentic shape.
         Sys("foreign_keys",
         [
-            new("name", SqlType.SystemName, 128, true),
+            new("name", SqlType.SystemName, 128, false),
             new("object_id", SqlType.Int32, null, false),
             new("principal_id", SqlType.Int32, null, true),
             new("schema_id", SqlType.Int32, null, false),
@@ -121,17 +121,17 @@ internal static partial class BuiltInResources
             new("type_desc", nvarchar60Catalog, 60, true),
             new("create_date", SqlType.DateTime, null, false),
             new("modify_date", SqlType.DateTime, null, false),
-            new("is_ms_shipped", SqlType.Bit, null, true),
-            new("is_published", SqlType.Bit, null, true),
-            new("is_schema_published", SqlType.Bit, null, true),
-            new("referenced_object_id", SqlType.Int32, null, false),
-            new("key_index_id", SqlType.Int32, null, false),
+            new("is_ms_shipped", SqlType.Bit, null, false),
+            new("is_published", SqlType.Bit, null, false),
+            new("is_schema_published", SqlType.Bit, null, false),
+            new("referenced_object_id", SqlType.Int32, null, true),
+            new("key_index_id", SqlType.Int32, null, true),
             new("is_disabled", SqlType.Bit, null, false),
             new("is_not_for_replication", SqlType.Bit, null, false),
             new("is_not_trusted", SqlType.Bit, null, false),
-            new("delete_referential_action", SqlType.TinyInt, null, false),
+            new("delete_referential_action", SqlType.TinyInt, null, true),
             new("delete_referential_action_desc", nvarchar60Catalog, 60, true),
-            new("update_referential_action", SqlType.TinyInt, null, false),
+            new("update_referential_action", SqlType.TinyInt, null, true),
             new("update_referential_action_desc", nvarchar60Catalog, 60, true),
             new("is_system_named", SqlType.Bit, null, false),
         ], EnumerateSysForeignKeys);
@@ -234,11 +234,11 @@ internal static partial class BuiltInResources
         [
             new("TABLE_CATALOG", SqlType.SystemName, 128, true),
             new("TABLE_SCHEMA", SqlType.SystemName, 128, true),
-            new("TABLE_NAME", SqlType.SystemName, 128, true),
+            new("TABLE_NAME", SqlType.SystemName, 128, false),
             new("COLUMN_NAME", SqlType.SystemName, 128, true),
             new("CONSTRAINT_CATALOG", SqlType.SystemName, 128, true),
             new("CONSTRAINT_SCHEMA", SqlType.SystemName, 128, true),
-            new("CONSTRAINT_NAME", SqlType.SystemName, 128, true),
+            new("CONSTRAINT_NAME", SqlType.SystemName, 128, false),
         ], EnumerateInformationSchemaConstraintColumnUsage);
 
         // INFORMATION_SCHEMA.CONSTRAINT_TABLE_USAGE: one row per constraint,
@@ -248,10 +248,10 @@ internal static partial class BuiltInResources
         [
             new("TABLE_CATALOG", SqlType.SystemName, 128, true),
             new("TABLE_SCHEMA", SqlType.SystemName, 128, true),
-            new("TABLE_NAME", SqlType.SystemName, 128, true),
+            new("TABLE_NAME", SqlType.SystemName, 128, false),
             new("CONSTRAINT_CATALOG", SqlType.SystemName, 128, true),
             new("CONSTRAINT_SCHEMA", SqlType.SystemName, 128, true),
-            new("CONSTRAINT_NAME", SqlType.SystemName, 128, true),
+            new("CONSTRAINT_NAME", SqlType.SystemName, 128, false),
         ], EnumerateInformationSchemaConstraintTableUsage);
 
         // sys.check_constraints: probe-confirmed 13-column shape (a subset
@@ -259,7 +259,7 @@ internal static partial class BuiltInResources
         // model snapshot and tooling that introspects existing CHECK rules.
         Sys("check_constraints",
         [
-            new("name", SqlType.SystemName, 128, true),
+            new("name", SqlType.SystemName, 128, false),
             new("object_id", SqlType.Int32, null, false),
             new("principal_id", SqlType.Int32, null, true),
             new("schema_id", SqlType.Int32, null, false),
@@ -276,7 +276,7 @@ internal static partial class BuiltInResources
             new("is_not_trusted", SqlType.Bit, null, false),
             new("parent_column_id", SqlType.Int32, null, false),
             new("definition", SqlType.NVarchar, SqlType.MaxLengthSentinel, true),
-            new("uses_database_collation", SqlType.Bit, null, false),
+            new("uses_database_collation", SqlType.Bit, null, true),
             new("is_system_named", SqlType.Bit, null, false),
         ], EnumerateSysCheckConstraints);
 
@@ -284,7 +284,7 @@ internal static partial class BuiltInResources
         // sys.foreign_keys. Probe-confirmed column set.
         Sys("key_constraints",
         [
-            new("name", SqlType.SystemName, 128, true),
+            new("name", SqlType.SystemName, 128, false),
             new("object_id", SqlType.Int32, null, false),
             new("principal_id", SqlType.Int32, null, true),
             new("schema_id", SqlType.Int32, null, false),
@@ -296,16 +296,16 @@ internal static partial class BuiltInResources
             new("is_ms_shipped", SqlType.Bit, null, false),
             new("is_published", SqlType.Bit, null, false),
             new("is_schema_published", SqlType.Bit, null, false),
-            new("unique_index_id", SqlType.Int32, null, false),
+            new("unique_index_id", SqlType.Int32, null, true),
             new("is_system_named", SqlType.Bit, null, false),
-            new("is_enforced", SqlType.Bit, null, false),
+            new("is_enforced", SqlType.Bit, null, true),
         ], EnumerateSysKeyConstraints);
 
         // sys.default_constraints: per-column named DEFAULT bindings. Real
         // SQL Server emits one row per default (inline or named via ALTER).
         Sys("default_constraints",
         [
-            new("name", SqlType.SystemName, 128, true),
+            new("name", SqlType.SystemName, 128, false),
             new("object_id", SqlType.Int32, null, false),
             new("principal_id", SqlType.Int32, null, true),
             new("schema_id", SqlType.Int32, null, false),
