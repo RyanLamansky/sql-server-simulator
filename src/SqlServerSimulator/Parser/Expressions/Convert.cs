@@ -146,7 +146,7 @@ internal sealed class ConvertExpression : Expression
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
-        Cast.RejectIllegalConversion(this.source, this.source.GetSqlType(batch, resolveColumnType), this.targetType, batch.CurrentDatabase.Collation);
+        Cast.RejectIllegalConversion(this.source, this.source.GetSqlType(batch, resolveColumnType), this.targetType, batch);
 
     internal override bool ResultReportsNumeric => this.targetReportsNumeric;
 

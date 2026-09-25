@@ -40,10 +40,10 @@ public sealed class ErrorFidelityTests
     [TestMethod]
     public void CastPrecisionAlone_ClampsToTheMaximum()
         => AreEqual("numeric|38|0|float", new Simulation().ExecuteScalar("""
-            select concat(sql_variant_property(cast(1.5 as numeric(39)), 'BaseType'), '|',
-                          sql_variant_property(cast(1.5 as numeric(39)), 'Precision'), '|',
-                          sql_variant_property(cast(1.5 as numeric(39)), 'Scale'), '|',
-                          sql_variant_property(cast(1 as float(54)), 'BaseType'))
+            select concat(cast(sql_variant_property(cast(1.5 as numeric(39)), 'BaseType') as varchar(20)), '|',
+                          cast(sql_variant_property(cast(1.5 as numeric(39)), 'Precision') as varchar(20)), '|',
+                          cast(sql_variant_property(cast(1.5 as numeric(39)), 'Scale') as varchar(20)), '|',
+                          cast(sql_variant_property(cast(1 as float(54)), 'BaseType') as varchar(20)))
             """));
 
     [TestMethod]

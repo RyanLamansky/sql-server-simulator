@@ -426,7 +426,7 @@ public sealed class RefusalFidelityTests
     [DataRow("000000000001", "numeric", 1)]
     [DataRow("0000000002147483647", "numeric", 10)]
     public void IntegerLiteral_WrittenPastElevenCharacters_IsNumeric(string literal, string type, int precision)
-        => AreEqual($"{type}|{precision}", new Simulation().ExecuteScalar($"select concat(sql_variant_property({literal}, 'BaseType'), '|', sql_variant_property({literal}, 'Precision'))"));
+        => AreEqual($"{type}|{precision}", new Simulation().ExecuteScalar($"select concat(cast(sql_variant_property({literal}, 'BaseType') as varchar(20)), '|', cast(sql_variant_property({literal}, 'Precision') as varchar(20)))"));
 
     // ---- an erroring non-persisted computed column (probed 2026-09-24 against SQL Server 2025) ----
 

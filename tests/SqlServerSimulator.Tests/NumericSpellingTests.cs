@@ -101,8 +101,8 @@ public sealed class NumericSpellingTests
     public void SqlVariantBaseType_ReportsTheArgumentsSpelling()
         => AreEqual("decimal|numeric|decimal|numeric|decimal|numeric", new Simulation().ExecuteScalar($"""
             {Table} insert nm values (1, 1);
-            select concat(sql_variant_property(d, 'BaseType'), '|', sql_variant_property(n, 'BaseType'), '|',
-                sql_variant_property(cast(1 as decimal(5, 1)), 'BaseType'), '|', sql_variant_property(1.5, 'BaseType'), '|',
-                sql_variant_property(d + 1, 'BaseType'), '|', sql_variant_property(n + d, 'BaseType')) from nm
+            select concat(cast(sql_variant_property(d, 'BaseType') as varchar(20)), '|', cast(sql_variant_property(n, 'BaseType') as varchar(20)), '|',
+                cast(sql_variant_property(cast(1 as decimal(5, 1)), 'BaseType') as varchar(20)), '|', cast(sql_variant_property(1.5, 'BaseType') as varchar(20)), '|',
+                cast(sql_variant_property(d + 1, 'BaseType') as varchar(20)), '|', cast(sql_variant_property(n + d, 'BaseType') as varchar(20))) from nm
             """));
 }

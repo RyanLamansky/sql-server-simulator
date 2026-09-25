@@ -370,7 +370,7 @@ public sealed class SelectIntoTests
             select identity(int, 3, 1) 'q' into t from (values (1), (2)) v(x);
             insert t default values;
             select concat(c.name, '|', c.is_nullable, '|', c.is_identity, '|', type_name(c.system_type_id), '|', c.precision, '|',
-                          ic.seed_value, '|', ident_current('t'))
+                          cast(ic.seed_value as int), '|', ident_current('t'))
             from sys.columns c join sys.identity_columns ic on ic.object_id = c.object_id and ic.column_id = c.column_id
             where c.object_id = object_id('t')
             """));

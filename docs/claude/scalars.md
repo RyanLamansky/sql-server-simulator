@@ -138,6 +138,7 @@ An argument with **no declared width** contributes none, so there is no sum to t
 `CONCAT(REPLACE('aaa','a','XY'), 'x')` → `varchar(8000)` and its national counterpart → `nvarchar(4000)`, matching real, whose `REPLACE` result is a container too.
 The width-less form also reaches CONCAT from a **bound parameter** (a `varchar` / `nvarchar` value carries the simulator's length-0 "size from the value" form where real binds the width the RPC declared), which is the shape that made this load-bearing: summing it as zero projected `nvarchar(1)` while the concatenation still produced the whole value, and a ROW length prefix past the COLMETADATA maximum is a protocol error rather than a metadata mismatch — real's own width there is the declared parameter's (`@a nvarchar(2), @b nvarchar(2)` → `nvarchar(4)`), so the container is wider than real's and the value always fits it.
 Arg-count rules → Msg 189: `CONCAT` requires 2-254 args; `CONCAT_WS` requires 3-254 (separator + ≥2 values).
+An `xml` or `sql_variant` argument — `SQL_VARIANT_PROPERTY` and `SERVERPROPERTY` results included — can't become the result's string family, which is Msg 257 naming `varchar` or `nvarchar` while compiling, and an `image` is Msg 206; `QUOTENAME` refuses the first two the same way against `nvarchar` (probed 2026-09-25 against SQL Server 2025).
 
 `CONCAT_WS` quirks: NULL separator silently degrades to empty string (NOT NULL propagation despite docs); NULL values skipped entirely (no double separators); `concat_ws(sep, single_value)` → Msg 189 (refuses no-op stringify).
 
@@ -398,7 +399,6 @@ This is the *argument* rule; the slots these types can't reach at all — sortin
 ### Divergences
 
 - **`TRIM` of a binary** answers its `varchar` rendering on real (`TRIM(0x41)` is `A`) and raises Msg 8116 here.
-- **`QUOTENAME` / `CONCAT` / `CONCAT_WS` over `xml` or `sql_variant`** answer where real raises Msg 257 converting to `nvarchar` / `varchar`.
 - **`CHARINDEX(<needle>, <image>)`** reports Msg 8116 for argument 2 where real reports Msg 206 (`image is incompatible with varchar`); real accepts the pair when the needle is binary too, which needs the unbuilt binary CHARINDEX.
 
 ## EF.Functions-driven type-check / random scalars: `ISNUMERIC` / `ISDATE` / `RAND`

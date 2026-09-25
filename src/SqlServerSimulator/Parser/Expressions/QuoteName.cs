@@ -94,8 +94,15 @@ internal sealed class QuoteName : Expression
         return SqlValue.FromNVarchar(resultType, $"{open}{doubled}{close}");
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
-        ResultType(this.name.GetSqlType(batch, resolveColumnType));
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        var type = this.name.GetSqlType(batch, resolveColumnType);
+        // The name converts to nvarchar, which an xml or sql_variant can't do
+        // implicitly (Msg 257, probed 2026-09-25 against SQL Server 2025).
+        return type is XmlSqlType or SqlVariantSqlType
+            ? throw SimulatedSqlException.ImplicitConversionNotAllowed(type.SqlServerName, "nvarchar")
+            : ResultType(type);
+    }
 
     /// <summary>
     /// <c>nvarchar(258)</c> carrying the input argument's collation and

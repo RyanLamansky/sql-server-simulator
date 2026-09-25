@@ -157,4 +157,32 @@ public sealed class BuiltInArgumentTypeTests
     [TestMethod]
     public void TrimCharacters_OfANonString_ReadAsVarchar()
         => AreEqual("a|", new Simulation().ExecuteScalar("select concat(ltrim('a', 1.5), '|', ltrim('a', 0x41))"));
+
+    [TestMethod]
+    [DataRow("concat(cast('<a/>' as xml), 'a')", "xml", "varchar")]
+    [DataRow("concat(N'a', cast(1 as sql_variant))", "sql_variant", "nvarchar")]
+    [DataRow("concat_ws(',', cast('<a/>' as xml), 'b')", "xml", "varchar")]
+    [DataRow("quotename(cast(1 as sql_variant))", "sql_variant", "nvarchar")]
+    public void ConcatenatedArgument_ThatCantBecomeAString_RaisesMsg257(string call, string type, string target)
+        => new Simulation().AssertSqlError($"select {call}", 257, $"Implicit conversion from data type {type} to {target} is not allowed. Use the CONVERT function to run this query.");
+
+    [TestMethod]
+    public void Concat_OfAnImage_RaisesMsg206()
+        => new Simulation().AssertSqlError("select concat(cast(0x41 as image), 'a')", 206, "Operand type clash: image is incompatible with varchar");
+
+    // ---- CAST to and from the CLR types ----
+
+    [TestMethod]
+    [DataRow("cast(1 as hierarchyid)", "int", "simulated.sys.hierarchyid")]
+    [DataRow("cast(1.5 as geography)", "numeric", "simulated.sys.geography")]
+    [DataRow("convert(geometry, cast('<a/>' as xml))", "xml", "simulated.sys.geometry")]
+    [DataRow("cast(hierarchyid::GetRoot() as sql_variant)", "simulated.sys.hierarchyid", "sql_variant")]
+    [DataRow("cast(geography::Point(1, 2, 4326) as float)", "simulated.sys.geography", "float")]
+    public void ClrTypeConversion_WithANonStringNonBinary_RaisesMsg529(string call, string source, string target)
+        => new Simulation().AssertSqlError($"select {call}", 529, $"Explicit conversion from data type {source} to {target} is not allowed.");
+
+    [TestMethod]
+    public void ClrTypeConversion_WithAStringOrBinary_StillAnswers()
+        => AreEqual("/1/|POINT (2 1)", new Simulation().ExecuteScalar("select concat(cast(cast('/1/' as hierarchyid) as varchar(10)), '|', cast(geography::Point(1, 2, 4326) as nvarchar(30)))"));
 }
+

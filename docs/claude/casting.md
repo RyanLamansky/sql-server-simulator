@@ -231,7 +231,11 @@ The table is the probed one — SQL Server 2025, 2026-08-05, every ordered pair 
 | anything but a character string | `text` / `ntext` |
 | anything but an ANSI character string or a binary | `image` |
 
-Types outside that grid (`rowversion`, `hierarchyid`, the spatial pair, alias types) are not in the table and keep whatever the value path decides.
+| `hierarchyid` / `geography` / `geometry` | everything but a character string or a binary — another CLR type included |
+| anything but a character string or a binary | `hierarchyid` / `geography` / `geometry` |
+
+The CLR rows were probed 2026-09-25 against SQL Server 2025, and real names a CLR type in the message by its three-part name in the current database (`simulated.sys.hierarchyid`) and a literal decimal `numeric`.
+Types outside that grid (`rowversion`, alias types) are not in the table and keep whatever the value path decides.
 A module body's Msg 529 **ends the bind report where it is**: real gathers name-resolution errors across a whole body but stops at this one, so a body whose first statement carries a conversion error reports it alone even when a later statement names a missing column, while a name error found first reports with the conversion behind it (probed 2026-08-05).
 Oracle: `ConversionLegalityTests`.
 

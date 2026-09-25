@@ -595,7 +595,14 @@ partial class SimulatedSqlException
     /// pair surface as Msg 206 from the comparison/arithmetic path.
     /// </summary>
     internal static SimulatedSqlException ExplicitConversionNotAllowed(SqlType source, SqlType target) =>
-        new($"Explicit conversion from data type {FamilyRootName(source)} to {FamilyRootName(target)} is not allowed.", 529, 16, 1);
+        ExplicitConversionNotAllowed(FamilyRootName(source), FamilyRootName(target));
+
+    /// <summary>
+    /// <see cref="ExplicitConversionNotAllowed(SqlType, SqlType)"/> over
+    /// already-rendered type names.
+    /// </summary>
+    internal static SimulatedSqlException ExplicitConversionNotAllowed(string source, string target) =>
+        new($"Explicit conversion from data type {source} to {target} is not allowed.", 529, 16, 1);
 
     /// <summary>
     /// Mimics SQL Server error 245: a CAST from a string to a non-string

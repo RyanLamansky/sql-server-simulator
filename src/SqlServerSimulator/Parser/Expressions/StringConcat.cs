@@ -80,9 +80,12 @@ internal sealed class StringConcat : Expression
         var width = 0;
         var separatorWidth = 0;
         var collation = new CollationAccumulator();
+        SqlType? unconvertible = null;
         for (var i = 0; i < this.arguments.Length; i++)
         {
             var type = this.arguments[i].GetSqlType(batch, resolveColumnType);
+            if (type is XmlSqlType or SqlVariantSqlType or ImageSqlType)
+                unconvertible ??= type;
             anyNational |= IsNationalString(type);
             anyMax |= IsMaxForm(type);
             collation.Fold(type, this.kind);
@@ -92,6 +95,16 @@ internal sealed class StringConcat : Expression
                 separatorWidth = Math.Max(0, argumentWidth);
             else
                 width += Math.Max(0, argumentWidth);
+        }
+        // Every argument converts to the result's string family, and an xml,
+        // sql_variant or image one can't (probed 2026-09-25 against SQL Server
+        // 2025: Msg 257 naming varchar or nvarchar, Msg 206 for image).
+        if (unconvertible is not null)
+        {
+            var target = anyNational ? "nvarchar" : "varchar";
+            throw unconvertible is ImageSqlType
+                ? SimulatedSqlException.OperandTypeClash("image", target)
+                : SimulatedSqlException.ImplicitConversionNotAllowed(unconvertible.SqlServerName, target);
         }
         return ResolveResultType(anyNational, anyMax, anyUnspecified, width + SeparatorTotal(separatorWidth), batch, collation);
     }

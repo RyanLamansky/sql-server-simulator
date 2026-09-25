@@ -84,18 +84,26 @@ internal sealed class Cast : Expression
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
-        RejectIllegalConversion(this.source, this.source.GetSqlType(batch, resolveColumnType), this.targetType, batch.CurrentDatabase.Collation);
+        RejectIllegalConversion(this.source, this.source.GetSqlType(batch, resolveColumnType), this.targetType, batch);
 
     /// <summary>
     /// The compile-time half of Msg 529, shared by CAST and CONVERT: real
     /// settles conversion legality from the two types while it compiles, so
     /// the diagnostic is due here rather than at the first row. Returns the
-    /// result type so the two callers stay one expression each.
+    /// result type so the two callers stay one expression each. Real names a
+    /// literal decimal <c>numeric</c> and a CLR type by its three-part name in
+    /// the current database (<c>probe.sys.hierarchyid</c>, probed 2026-09-25
+    /// against SQL Server 2025).
     /// </summary>
-    internal static SqlType RejectIllegalConversion(Expression source, SqlType sourceType, SqlType targetType, Collation dbCollation) =>
+    internal static SqlType RejectIllegalConversion(Expression source, SqlType sourceType, SqlType targetType, BatchContext batch) =>
         source is not Value { IsUntypedNull: true } && IsIllegalExplicitConversion(sourceType, targetType)
-            ? throw SimulatedSqlException.ExplicitConversionNotAllowed(sourceType, targetType)
-            : ResultStringType(targetType, sourceType, dbCollation) ?? targetType;
+            ? throw SimulatedSqlException.ExplicitConversionNotAllowed(ConversionName(sourceType, source, batch), ConversionName(targetType, null, batch))
+            : ResultStringType(targetType, sourceType, batch.CurrentDatabase.Collation) ?? targetType;
+
+    private static string ConversionName(SqlType type, Expression? source, BatchContext batch) =>
+        type is HierarchyIdSqlType or SpatialSqlType ? $"{batch.CurrentDatabase.Name}.sys.{type.SqlServerName}"
+        : type is DecimalSqlType ? SqlType.OperandName(type, source)
+        : SimulatedSqlException.FamilyRootName(type);
 
     internal override bool ResultReportsNumeric => this.targetReportsNumeric;
 
@@ -291,6 +299,14 @@ internal sealed class Cast : Expression
         if (source == SqlType.Text || source == SqlType.NText || source == SqlType.Image)
             return IsRejectedLegacyLobConversion(source, target);
 
+        // A CLR type converts to and from a character string or a binary and
+        // nothing else, another CLR type included (probed 2026-09-25 against
+        // SQL Server 2025).
+        if (source is HierarchyIdSqlType or SpatialSqlType)
+            return !IsCharacterOrBinary(target);
+        if (target is HierarchyIdSqlType or SpatialSqlType)
+            return !IsCharacterOrBinary(source);
+
         // The legacy LOB targets take the mirror of those allow-lists: only a
         // character source reaches text / ntext (xml, which converts to every
         // other string type, does not), and only an ANSI-character or binary
@@ -321,6 +337,9 @@ internal sealed class Cast : Expression
             return target is XmlSqlType;
         return source is BinarySqlType or VarbinarySqlType && (target == SqlType.Float || target == SqlType.Real);
     }
+
+    private static bool IsCharacterOrBinary(SqlType type) =>
+        type is VarcharSqlType or NVarcharSqlType or CharSqlType or NCharSqlType or SystemNameSqlType or VarbinarySqlType or BinarySqlType;
 
     /// <summary>The two date/time parts that share nothing: a whole-day value
     /// and a within-day one convert to every other member of the family but
