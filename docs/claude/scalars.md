@@ -758,7 +758,8 @@ When `expression` is a **true `sql_variant`** (the primary use — reading the D
 For a non-variant argument it describes the value directly.
 Like real SQL Server the *result* is **`sql_variant`** carrying a per-property inner base type: `BaseType` / `Collation` as `sysname` (an `nvarchar` inner), the four numeric facets as `int` (probe-confirmed against SQL Server 2025).
 Property names are case-insensitive.
-A NULL expression, a NULL property, an unknown property, or a value whose type can't live in a sql_variant (MAX strings, LOB, xml, spatial, hierarchyid) all return a NULL `sql_variant`.
+A NULL expression, a NULL property or an unknown property returns a NULL `sql_variant`.
+An expression whose type a `sql_variant` can't hold — a MAX string or binary, a legacy LOB, `xml`, `rowversion`, the spatial types, `hierarchyid` — is **Msg 206** (`Operand type clash: varchar(max) is incompatible with sql_variant`, `timestamp` for rowversion) while compiling, since the argument converts implicitly (probed 2026-09-25).
 Probe-confirmed against SQL Server 2025:
 
 - **BaseType** — the bare type name (`1` → `int`, `'abc'` → `varchar`, `N'abc'` → `nvarchar`, `CAST(1 AS bit)` → `bit`, `GETDATE()` → `datetime`).

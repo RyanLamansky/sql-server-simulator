@@ -91,7 +91,16 @@ internal sealed class SqlVariantProperty : Expression
         // The argument's own type is what the properties describe, so it has
         // to be settled here — a CASE / COALESCE argument converts the arm it
         // picks to its unified type only once that type is known.
-        _ = this.valueArg.GetSqlType(batch, resolveColumnType);
+        var argumentType = this.valueArg.GetSqlType(batch, resolveColumnType);
+        // The argument converts implicitly to sql_variant, which can't hold a
+        // MAX string or binary, xml, a legacy LOB, rowversion or a CLR type:
+        // Msg 206 while compiling (probed 2026-09-25 against SQL Server 2025).
+        if (argumentType is VarcharSqlType { length: SqlType.MaxLengthSentinel } or NVarcharSqlType { length: SqlType.MaxLengthSentinel }
+                or VarbinarySqlType { length: SqlType.MaxLengthSentinel } or XmlSqlType or TextSqlType or NTextSqlType or ImageSqlType
+                or RowVersionSqlType or HierarchyIdSqlType or GeographySqlType or GeometrySqlType)
+        {
+            throw SimulatedSqlException.OperandTypeClash(argumentType == SqlType.RowVersion ? "timestamp" : SimulatedSqlException.FamilyRootName(argumentType), "sql_variant");
+        }
         return SqlType.SqlVariant;
     }
 

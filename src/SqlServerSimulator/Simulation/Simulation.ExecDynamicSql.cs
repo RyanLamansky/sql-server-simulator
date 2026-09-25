@@ -231,8 +231,8 @@ partial class Simulation
                 }
                 if (!boundIsUntypedNull[i])
                     AssignmentRules.RequireAssignable(bound[i]!.Value.Type, param.Type);
-                var initialValue = BindParameterValue(bound[i]!.Value, param.Type, procedure: "");
-                var slot = new VariableSlot(param.Type, declaredMaxLength: null, initialValue, parameter: null);
+                var initialValue = BindParameterValue(bound[i]!.Value, param.Type, param.DeclaredMaxLength, procedure: "");
+                var slot = new VariableSlot(param.Type, param.DeclaredMaxLength, initialValue, parameter: null);
                 preDeclared[param.Name] = slot;
                 if (param.IsOutput && boundOutputSlots[i] is { } caller)
                     outputBindings.Add((param, caller));
@@ -379,7 +379,7 @@ partial class Simulation
             defContext.MoveNextRequired();
 
             // Type parsing reuses the procedure-parameter type grammar.
-            var (type, _) = ParseSpExecuteSqlParamType(defContext, parameters.Count + 1);
+            var (type, declaredMaxLength) = ParseSpExecuteSqlParamType(defContext, parameters.Count + 1);
 
             // A default comes before OUTPUT and is a constant, as a procedure
             // parameter's is: `@p int = 5 OUTPUT` (probed 2026-09-25 against
@@ -398,7 +398,7 @@ partial class Simulation
                 defContext.MoveNextOptional();
             }
 
-            parameters.Add(new SpExecuteSqlParam(name.Value, type, isOutput, defaultValue));
+            parameters.Add(new SpExecuteSqlParam(name.Value, type, declaredMaxLength, isOutput, defaultValue));
 
             if (defContext.Token is Operator { Character: ',' })
             {
@@ -592,10 +592,13 @@ partial class Simulation
     /// sp_executesql params have no defaults — every declared param must be
     /// bound by a positional/named arg.
     /// </summary>
-    private readonly struct SpExecuteSqlParam(string name, SqlType type, bool isOutput, SqlValue? defaultValue)
+    private readonly struct SpExecuteSqlParam(string name, SqlType type, int? declaredMaxLength, bool isOutput, SqlValue? defaultValue)
     {
         public readonly string Name = name;
         public readonly SqlType Type = type;
+
+        /// <summary>The declared width a bound value is cut to, as a procedure parameter's is.</summary>
+        public readonly int? DeclaredMaxLength = declaredMaxLength;
         public readonly bool IsOutput = isOutput;
 
         /// <summary>The declaration's constant default, which an unsupplied parameter takes in place of Msg 8178.</summary>

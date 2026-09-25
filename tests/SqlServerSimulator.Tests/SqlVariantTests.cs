@@ -172,4 +172,16 @@ public sealed class SqlVariantTests
             new byte[] { 0x01, 0x02, 0x03, 0x04 },
             (byte[])sim.ExecuteScalar("select cast(cast(0x01020304 as nvarchar(60)) as varbinary(60))")!);
     }
+
+    // SQL_VARIANT_PROPERTY's argument converts implicitly to sql_variant, so a
+    // type a variant can't hold is Msg 206 while compiling (probed 2026-09-25
+    // against SQL Server 2025).
+    [TestMethod]
+    [DataRow("cast('x' as varchar(max))", "varchar(max)")]
+    [DataRow("cast(0x01 as varbinary(max))", "varbinary(max)")]
+    [DataRow("cast('<a/>' as xml)", "xml")]
+    [DataRow("cast(1 as rowversion)", "timestamp")]
+    [DataRow("hierarchyid::GetRoot()", "hierarchyid")]
+    public void SqlVariantProperty_OfATypeAVariantCannotHold_IsMsg206(string argument, string typeName)
+        => new Simulation().AssertSqlError($"select 1; select sql_variant_property({argument}, 'BaseType')", 206, $"Operand type clash: {typeName} is incompatible with sql_variant");
 }

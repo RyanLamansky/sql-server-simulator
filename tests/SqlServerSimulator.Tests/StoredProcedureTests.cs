@@ -901,4 +901,16 @@ public sealed class StoredProcedureTests
 
     private static void StringEnding(string actual, string suffix)
         => IsTrue(actual.EndsWith(suffix, StringComparison.Ordinal), $"expected '{actual}' to end with '{suffix}'");
+
+    // An argument is assigned to its parameter as SET assigns a variable, so a
+    // value past the declared width is cut to it — for a procedure and for an
+    // sp_executesql declaration alike (probed 2026-09-25 against SQL Server 2025).
+    [TestMethod]
+    public void Parameters_TruncateToTheirDeclaredWidth()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create proc p @a varbinary(2), @b char(3), @c decimal(5, 1), @d nvarchar(2) as select concat(convert(varchar(10), @a, 1), '|', @b, '|', @c, '|', @d)");
+        AreEqual("0x0102|abc|1.3|xy", simulation.ExecuteScalar("exec p 0x010203, 'abcdef', 1.26, N'xyz'"));
+        AreEqual("ab|4", simulation.ExecuteScalar("exec sp_executesql N'select concat(@a, ''|'', datalength(@a))', N'@a nvarchar(2)', N'abcd'"));
+    }
 }

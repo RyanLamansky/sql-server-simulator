@@ -205,7 +205,7 @@ partial class Simulation
             // as the call runs (probe-confirmed against SQL Server 2025).
             if (!boundIsDefault[i] && !boundIsUntypedNull[i])
                 AssignmentRules.RequireAssignable(boundValues[i]!.Value.Type, param.Type);
-            var coerced = BindParameterValue(boundValues[i]!.Value, param.Type, attributionName);
+            var coerced = BindParameterValue(boundValues[i]!.Value, param.Type, param.DeclaredMaxLength, attributionName);
             variables[param.Name] = new VariableSlot(param.Type, declaredMaxLength: param.DeclaredMaxLength, coerced, parameter: null) { SpelledNumeric = param.SpelledNumeric };
         }
 
@@ -398,11 +398,15 @@ partial class Simulation
     /// both reported at line 0 and attributed to <paramref name="procedure"/>
     /// (empty for <c>sp_executesql</c>).
     /// </summary>
-    internal static SqlValue BindParameterValue(SqlValue value, SqlType target, string procedure)
+    internal static SqlValue BindParameterValue(SqlValue value, SqlType target, int? declaredMaxLength, string procedure)
     {
         try
         {
-            return value.CoerceTo(target);
+            // An argument is assigned to its parameter as SET assigns a
+            // variable, so a string past the declared width is cut to it
+            // (probed 2026-09-25 against SQL Server 2025: `@a nvarchar(2)`
+            // bound `N'abcd'` reads `ab`).
+            return Parser.Expressions.Cast.ApplyCoercion(value, target, declaredMaxLength);
         }
         catch (SimulatedSqlException ex) when (ex.Number is 6359 or (>= 9400 and <= 9465))
         {
