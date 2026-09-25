@@ -34,9 +34,11 @@ internal sealed class DateAdd : Expression
 
     public override SqlValue Run(RuntimeContext runtime)
     {
+        // The number evaluates first, so an error in it outranks one in the
+        // date (probed 2026-09-25 against SQL Server 2025).
+        var n = number.Run(runtime);
         var raw = source.Run(runtime);
         var value = DatePartKinds.CoerceDateArgumentImplicit(SqlType.IsStringCategory(raw.Type) ? raw.CoerceTo(SqlType.DateTime) : raw);
-        var n = number.Run(runtime);
         if (value.IsNull || n.IsNull)
             return SqlValue.Null(value.Type);
         DatePartKinds.RequireCompatible(this.kind, this.keywordText, value.Type, "dateadd");
@@ -52,10 +54,13 @@ internal sealed class DateAdd : Expression
     /// </summary>
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
+        // Every argument binds before the number's slot rule applies, so an
+        // error inside the date argument is the one reported (probed
+        // 2026-09-25 against SQL Server 2025).
+        _ = this.number.GetSqlType(batch, resolveColumnType);
+        var sourceType = AssignmentRules.ArgumentType(this.source, SqlType.DateTime, batch, resolveColumnType);
         ScalarArguments.RequireNumericSlot(this.number, batch, resolveColumnType, "dateadd", 2, NumericSlot.AnyNumber);
-        return AssignmentRules.ArgumentType(this.source, SqlType.DateTime, batch, resolveColumnType) is var sourceType && SqlType.IsStringCategory(sourceType)
-            ? SqlType.DateTime
-            : DatePartKinds.ResolveImplicitDateType(sourceType);
+        return SqlType.IsStringCategory(sourceType) ? SqlType.DateTime : DatePartKinds.ResolveImplicitDateType(sourceType);
     }
 
     internal override string DebugDisplay() => $"DATEADD({this.keywordText}, {number.DebugDisplay()}, {source.DebugDisplay()})";

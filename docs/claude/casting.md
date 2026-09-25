@@ -172,6 +172,7 @@ The encoder accepts any same-family pair regardless of length (write-time trunca
 
 Both directions live in `SqlValue.CoerceTo` (probe-confirmed against SQL Server 2025).
 This is what makes SSMS's connect queries (`CAST(0x0001 AS int)`, `(@@microsoftversion / 0x1000000) & 0xff`) and hex `nchar(0x41)` resolve.
+A `float` / `real` converts to binary as its big-endian IEEE bits and a `money` / `smallmoney` as its scaled units, each at its own width and fitted to the target as an integer is — `CAST(1e0 AS varbinary(4))` keeps the rightmost four bytes, `0x00000000` (probed 2026-09-25 against SQL Server 2025); the reverse, binary to `float` / `real`, is Msg 529.
 
 | Source → target | Rule |
 | --- | --- |

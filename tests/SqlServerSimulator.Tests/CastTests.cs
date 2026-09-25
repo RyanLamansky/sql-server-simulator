@@ -889,5 +889,14 @@ public sealed class CastTests
     [TestMethod]
     public void IntegerComparedWithSmallMoney_ComparesAsMoney()
         => AreEqual(1, new Simulation().ExecuteScalar("select case when 2147483647 > cast(2.25 as smallmoney) then 1 else 0 end"));
+
+    [TestMethod]
+    [DataRow("cast(1e0 as varbinary(8))", "0x3FF0000000000000")]
+    [DataRow("cast(1e0 as varbinary(4))", "0x00000000")]
+    [DataRow("cast(1e0 as binary(10))", "0x00003FF0000000000000")]
+    [DataRow("cast(cast(1.5 as real) as varbinary(8))", "0x3FC00000")]
+    [DataRow("cast(cast(1.5 as money) as varbinary(8))", "0x0000000000003A98")]
+    public void ApproximateOrMoneyToBinary_LaysOutItsBigEndianBytes(string expression, string expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar($"select convert(varchar(40), {expression}, 1)"));
 }
 

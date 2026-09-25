@@ -80,12 +80,12 @@ internal sealed class Stuff : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
         var inputType = StringScalars.ResolveResultType(StringScalars.BindCoercedArgument(this.input, batch, resolveColumnType, "stuff"), batch);
+        _ = this.start.GetSqlType(batch, resolveColumnType);
+        _ = this.length.GetSqlType(batch, resolveColumnType);
+        var replacementType = StringScalars.ResolveResultType(StringScalars.BindCoercedArgument(this.replacement, batch, resolveColumnType, "stuff", argumentIndex: 4), batch);
         ScalarArguments.RequireNumericSlot(this.start, batch, resolveColumnType, "stuff", 2, NumericSlot.IntegerOrDecimal);
         ScalarArguments.RequireNumericSlot(this.length, batch, resolveColumnType, "stuff", 3, NumericSlot.IntegerOrDecimal);
-        return ResolveResultType(
-            inputType,
-            StringScalars.ResolveResultType(StringScalars.BindCoercedArgument(this.replacement, batch, resolveColumnType, "stuff", argumentIndex: 4), batch),
-            batch);
+        return ResolveResultType(inputType, replacementType, batch);
     }
 
     /// <summary>

@@ -45,8 +45,9 @@ internal sealed class Left : Expression
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
+        var sourceType = StringScalars.BindArgument(source, batch, resolveColumnType, "left");
         _ = AssignmentRules.ArgumentType(this.count, SqlType.Int32, batch, resolveColumnType);
-        return ResolveResultType(StringScalars.BindArgument(source, batch, resolveColumnType, "left"), batch);
+        return ResolveResultType(sourceType, batch);
     }
 
     /// <summary>

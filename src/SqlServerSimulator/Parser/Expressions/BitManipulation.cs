@@ -243,8 +243,9 @@ internal sealed class SetBit : Expression
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
+        var type = BitOperandHelpers.RequireOperand(this.numArg, batch, resolveColumnType, "set_bit", acceptsBinary: false);
         ScalarArguments.RequireNumericSlot(this.positionArg, batch, resolveColumnType, "set_bit", 2, NumericSlot.Integer);
-        return BitOperandHelpers.RequireOperand(this.numArg, batch, resolveColumnType, "set_bit", acceptsBinary: false);
+        return type;
     }
 
     internal override string DebugDisplay() => $"SET_BIT({this.numArg.DebugDisplay()}, {this.positionArg.DebugDisplay()})";
@@ -338,8 +339,9 @@ internal sealed class BitShift : Expression
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
+        var type = BitOperandHelpers.RequireOperand(this.numArg, batch, resolveColumnType, this.functionName, acceptsBinary: false);
         ScalarArguments.RequireNumericSlot(this.shiftArg, batch, resolveColumnType, this.functionName, 2, NumericSlot.Integer);
-        return BitOperandHelpers.RequireOperand(this.numArg, batch, resolveColumnType, this.functionName, acceptsBinary: false);
+        return type;
     }
 
     internal override string DebugDisplay() => $"{(this.isLeftShift ? "LEFT_SHIFT" : "RIGHT_SHIFT")}({this.numArg.DebugDisplay()}, {this.shiftArg.DebugDisplay()})";

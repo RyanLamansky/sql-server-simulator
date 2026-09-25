@@ -71,10 +71,11 @@ internal sealed class Replicate : Expression
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
-        _ = AssignmentRules.ArgumentType(this.count, SqlType.Int32, batch, resolveColumnType);
         // REPLICATE copies its input without comparing it, so an unresolved
         // collation propagates into the result (probe-confirmed).
-        return ResolveResultType(StringScalars.BindCoercedArgument(this.input, batch, resolveColumnType, "replicate", propagatesUnresolvedCollation: true), batch);
+        var inputType = StringScalars.BindCoercedArgument(this.input, batch, resolveColumnType, "replicate", propagatesUnresolvedCollation: true);
+        _ = AssignmentRules.ArgumentType(this.count, SqlType.Int32, batch, resolveColumnType);
+        return ResolveResultType(inputType, batch);
     }
 
     /// <summary>

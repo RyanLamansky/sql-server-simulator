@@ -66,10 +66,11 @@ internal sealed class Round : Expression
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
+        var valueType = AssignmentRules.ArgumentType(this.value, SqlType.Float, batch, resolveColumnType);
         ScalarArguments.RequireNumericSlot(this.length, batch, resolveColumnType, "round", 2, NumericSlot.AnyNumber);
         if (this.function is not null)
             ScalarArguments.RequireNumericSlot(this.function, batch, resolveColumnType, "round", 3, NumericSlot.AnyNumber);
-        return MathScalars.WidenForResult(AssignmentRules.ArgumentType(this.value, SqlType.Float, batch, resolveColumnType));
+        return MathScalars.WidenForResult(valueType);
     }
 
     internal override bool ResultReportsNumeric => this.value.ResultReportsNumeric;

@@ -50,7 +50,7 @@ internal sealed class HashBytes : Expression
         // with Msg 8116 regardless of value, but a typed-NULL string / binary
         // yields a NULL hash.
         if (!TryExtractBytes(input, out var inputBytes))
-            throw SimulatedSqlException.InvalidArgumentDataType(input.Type.ToString()!, 2, "hashbytes");
+            throw SimulatedSqlException.InvalidArgumentDataType(SimulatedSqlException.FamilyRootName(input.Type), 2, "hashbytes");
 
         var algorithm = this.algorithmArg.Run(runtime);
         if (algorithm.IsNull || input.IsNull)
@@ -62,7 +62,18 @@ internal sealed class HashBytes : Expression
             : SqlValue.FromVarbinary(ResultType, hash);
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => ResultType;
+    /// <summary>
+    /// The input's type is settled while compiling, named as real names it —
+    /// <c>time</c>, <c>decimal</c>, a literal decimal <c>numeric</c> — rather
+    /// than with its length (probed 2026-09-25 against SQL Server 2025).
+    /// </summary>
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        var inputType = this.inputArg.GetSqlType(batch, resolveColumnType);
+        if (inputType is not (VarbinarySqlType or BinarySqlType or ImageSqlType or NVarcharSqlType or NCharSqlType or NTextSqlType or SystemNameSqlType or VarcharSqlType or CharSqlType or TextSqlType))
+            throw SimulatedSqlException.InvalidArgumentDataType(SqlType.OperandName(inputType, this.inputArg), 2, "hashbytes");
+        return ResultType;
+    }
 
     internal override string DebugDisplay() => $"HASHBYTES({this.algorithmArg.DebugDisplay()}, {this.inputArg.DebugDisplay()})";
 

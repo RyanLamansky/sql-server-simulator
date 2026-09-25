@@ -207,6 +207,22 @@ internal readonly partial struct SqlValue
         if (SqlType.IsIntegerCategory(this.Type) && target is VarbinarySqlType intToVarbinary)
             return FromVarbinary(EncodeIntegerToBinary(this, intToVarbinary.length, fixedWidth: false));
 
+        // A float / real lays out its IEEE bits and a money / smallmoney its
+        // scaled units, big-endian at their own width, and fits the target as
+        // an integer does (probed 2026-09-25 against SQL Server 2025:
+        // CAST(1e0 AS varbinary(4)) is 0x00000000, CAST($1.5 AS varbinary(8))
+        // 0x0000000000003A98).
+        if (this.Type.Category is SqlTypeCategory.Approximate or SqlTypeCategory.Money && target is BinarySqlType or VarbinarySqlType)
+        {
+            var native = this.Type == SqlType.Float ? BitConverter.DoubleToInt64Bits(this.AsDouble)
+                : this.Type == SqlType.Real ? BitConverter.SingleToInt32Bits(this.AsSingle)
+                : this.AsMoneyScaledUnits;
+            var nativeWidth = this.Type == SqlType.Float || this.Type == SqlType.Money ? 8 : 4;
+            return target is BinarySqlType fixedTarget
+                ? FromBinary(fixedTarget, FitToBinaryWidth(native, nativeWidth, fixedTarget.length, fixedWidth: true))
+                : FromVarbinary(FitToBinaryWidth(native, nativeWidth, ((VarbinarySqlType)target).length, fixedWidth: false));
+        }
+
         // rowversion converts out as the binary(8) it is: bigint reads the 8
         // bytes big-endian (the database-scoped @@DBTS counter is exposed as a
         // signed bigint), varbinary / binary copy them, and every other target
@@ -2022,8 +2038,20 @@ internal readonly partial struct SqlValue
             : value.Type == SqlType.Int32 ? 4
             : value.Type == SqlType.BigInt ? 8
             : 1;
+        return FitToBinaryWidth(AsInt64Widened(value), native, declaredLength, fixedWidth);
+    }
+
+    /// <summary>
+    /// The low <paramref name="native"/> bytes of <paramref name="value"/>,
+    /// big-endian, fitted to a binary target the way every number converts:
+    /// fixed-width <c>binary(N)</c> left-zero-pads or left-truncates to exactly
+    /// N bytes; <c>varbinary(N)</c> keeps the native width and only
+    /// left-truncates when N is narrower. Length ≤ 0 keeps the native width.
+    /// </summary>
+    private static byte[] FitToBinaryWidth(long value, int native, int declaredLength, bool fixedWidth)
+    {
         Span<byte> wide = stackalloc byte[8];
-        System.Buffers.Binary.BinaryPrimitives.WriteInt64BigEndian(wide, AsInt64Widened(value));
+        System.Buffers.Binary.BinaryPrimitives.WriteInt64BigEndian(wide, value);
         var nativeBytes = wide[(8 - native)..];
 
         var width = fixedWidth ? declaredLength

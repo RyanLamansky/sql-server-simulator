@@ -45,8 +45,9 @@ internal sealed class Right : Expression
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
+        var sourceType = StringScalars.BindArgument(source, batch, resolveColumnType, "right");
         _ = AssignmentRules.ArgumentType(this.count, SqlType.Int32, batch, resolveColumnType);
-        return ResolveResultType(StringScalars.BindArgument(source, batch, resolveColumnType, "right"), batch);
+        return ResolveResultType(sourceType, batch);
     }
 
     /// <summary>

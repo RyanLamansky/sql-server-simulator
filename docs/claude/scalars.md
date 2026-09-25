@@ -303,6 +303,7 @@ The metadata functions follow the same rule: an object / schema / database / use
 A date, a binary, xml or a `uniqueidentifier` meeting `float` is Msg 206; a `sql_variant` is Msg 257, or Msg 260 when it is a column of the query.
 The date functions then read every accepted number and a binary as `datetime`, not only an integer: `DAY(1.5)` is 2 and `DATEADD(day, 1, 0x01)` is 1900-01-02.
 A position / length / count slot is narrower than an `int` conversion (`ScalarArguments.RequireNumericSlot`): SUBSTRING / STUFF / CHARINDEX positions take an integer or a decimal, STR's length and decimals and the bit functions' positions an integer only, and ROUND's length and function and DATEADD's number any number, while a `bit`, a string, a binary or a date is Msg 8116 in every one of them.
+Every argument binds before a function applies its own slot rules, so an error inside a later argument outranks a slot refusal of an earlier one — `DATEADD(day, CAST(1e0 AS bit), CAST(1.5 AS uniqueidentifier))` is the CAST's Msg 529 — and DATEADD evaluates its number before its date.
 `DATETRUNC`, `DATE_BUCKET` and `EOMONTH` are the exception: they take a date (a string too, save `DATE_BUCKET`; not a `time` for `EOMONTH`) and nothing else, so a number is Msg 8116 rather than a conversion.
 
 ## Integer arguments outside the parameter's range

@@ -247,5 +247,26 @@ public sealed class BuiltInArgumentTypeTests
     [DataRow("choose(getdate(), 'a', 'b')", "datetime")]
     public void IntPart_FromADatetime_RaisesMsg257(string call, string type)
         => new Simulation().AssertSqlError($"select {call}", 257, $"Implicit conversion from data type {type} to int is not allowed. Use the CONVERT function to run this query.");
+
+    // ---- which error wins ----
+
+    [TestMethod]
+    public void DateAdd_BindsItsDateBeforeCheckingItsNumber()
+        => _ = new Simulation().AssertSqlError("select dateadd(day, cast(1e0 as bit), cast(1.5 as uniqueidentifier))", 529);
+
+    [TestMethod]
+    public void DateAdd_EvaluatesItsNumberFirst()
+        => new Simulation().AssertSqlError("select dateadd(day, round(N'x', 1), 'abc')", 8114, "Error converting data type nvarchar to float.");
+
+    [TestMethod]
+    public void Left_BindsItsSourceBeforeItsCount()
+        => new Simulation().AssertSqlError("select left(compress(getdate()), null & null)", 8116, "Argument data type datetime is invalid for argument 1 of Compress function.");
+
+    [TestMethod]
+    [DataRow("hashbytes('MD5', cast('10:00' as time))", "time")]
+    [DataRow("hashbytes('MD5', cast(1.5 as decimal(10,4)))", "decimal")]
+    [DataRow("hashbytes('MD5', 1.5)", "numeric")]
+    public void HashBytes_NamesTheInputTypeWithoutItsLength(string call, string type)
+        => new Simulation().AssertSqlError($"select {call}", 8116, $"Argument data type {type} is invalid for argument 2 of hashbytes function.");
 }
 
