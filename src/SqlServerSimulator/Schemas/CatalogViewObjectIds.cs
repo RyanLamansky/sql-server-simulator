@@ -218,6 +218,7 @@ internal static class CatalogViewObjectIds
         ["sp_columns_100"] = -513496712,
         ["sp_configure"] = -523220828,
         ["sp_databases"] = -938910433,
+        ["sp_datatype_info"] = -520841490,
         ["sp_datatype_info_100"] = -255882266,
         ["sp_depends"] = -61771628,
         ["sp_describe_first_result_set"] = -276286976,

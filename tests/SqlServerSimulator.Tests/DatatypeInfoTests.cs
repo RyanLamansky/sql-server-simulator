@@ -155,4 +155,27 @@ public sealed class DatatypeInfoTests
     [TestMethod]
     public void DatatypeInfo_CallableThroughBareLeaf()
         => HasCount(37, ReadRows("exec sp_datatype_info_100"));
+
+    [TestMethod]
+    public void DatatypeInfo_ExplicitNullDataType_ReturnsNoRows()
+    {
+        // The proc's range test compares against the NULL, so no type
+        // matches — unlike an omitted @data_type, which is the declared 0.
+        IsEmpty(ReadRows("exec sp_datatype_info_100 null"));
+        IsEmpty(ReadRows("exec sp_datatype_info null"));
+    }
+
+    [TestMethod]
+    public void ClassicDatatypeInfo_ReportsTheNewerTypesDownlevel()
+    {
+        // The pre-2008 proc reports date / time / datetime2 / datetimeoffset
+        // as nvarchar and xml as ntext, for drivers that predate them.
+        var nvarcharFamily = ReadRows("exec sp_datatype_info -9").ConvertAll(r => r.TypeName);
+        CollectionAssert.AreEqual(
+            new[] { "nvarchar", "sysname", "date", "time", "datetime2", "datetimeoffset" },
+            nvarcharFamily);
+        CollectionAssert.AreEqual(new[] { "ntext", "xml" }, ReadRows("exec sp_datatype_info -10").ConvertAll(r => r.TypeName));
+        HasCount(37, ReadRows("exec sp_datatype_info @ODBCVer = 3"));
+        IsEmpty(ReadRows("exec sp_datatype_info 93, 3").FindAll(r => r.TypeName == "datetime2"));
+    }
 }

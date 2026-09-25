@@ -88,6 +88,7 @@ internal static partial class BuiltInResources
         // sp_datatype_info_100: the ODBC SQLGetTypeInfo backing proc — ODBC
         // Driver 18 / JDBC call it on connect to learn each type's
         // precision/scale, so temporal parameters bind at the right scale.
+        "sp_datatype_info",
         "sp_datatype_info_100",
         // sp_tables / sp_columns_100: the ODBC SQLTables / SQLColumns backing
         // procs — JDBC's DatabaseMetaData.getTables / getColumns (Hibernate

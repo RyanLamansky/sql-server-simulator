@@ -147,6 +147,98 @@ partial class Simulation
 
     private static readonly SqlValue[][] DatatypeInfoV3Rows = BuildDatatypeInfoRows(DatatypeInfoV3Raw);
 
+    // The older sp_datatype_info's rows, captured verbatim from SQL Server
+    // 2025 (2026-09-25) in the order it returns them: its backward-compatible
+    // columns report date / time / datetime2 / datetimeoffset as nvarchar (-9)
+    // and xml as ntext (-10), for drivers that predate those types, and its
+    // ORDER BY adds a hidden mapped-type key, so the rows keep this order
+    // rather than being re-sorted.
+    private static readonly object?[][] ClassicDatatypeInfoV2Raw =
+    [
+        ["sql_variant", -150, 8000, null, null, null, 1, 0, 2, null, 0, null, "sql_variant", 0, 0, -150, null, 10, null, 0],
+        ["uniqueidentifier", -11, 36, "'", "'", null, 1, 0, 2, null, 0, null, "uniqueidentifier", null, null, -11, null, null, null, 0],
+        ["ntext", -10, 1073741823, "N'", "'", null, 1, 0, 1, null, 0, null, "ntext", null, null, -10, null, null, null, 0],
+        ["xml", -10, 1073741823, "N'", "'", null, 1, 1, 0, null, 0, null, "xml", null, null, -10, null, null, null, 0],
+        ["nvarchar", -9, 4000, "N'", "'", "max length", 1, 0, 3, null, 0, null, "nvarchar", null, null, -9, null, null, null, 0],
+        ["sysname", -9, 128, "N'", "'", null, 0, 0, 3, null, 0, null, "sysname", null, null, -9, null, null, null, 18],
+        ["date", -9, 10, "'", "'", null, 1, 0, 3, null, 0, null, "date", null, null, -9, null, null, null, 0],
+        ["time", -9, 16, "'", "'", null, 1, 0, 3, null, 0, null, "time", null, null, -9, null, null, null, 0],
+        ["datetime2", -9, 27, "'", "'", null, 1, 0, 3, null, 0, null, "datetime2", null, null, -9, null, null, null, 0],
+        ["datetimeoffset", -9, 34, "'", "'", null, 1, 0, 3, null, 0, null, "datetimeoffset", null, null, -9, null, null, null, 0],
+        ["nchar", -8, 4000, "N'", "'", "length", 1, 0, 3, null, 0, null, "nchar", null, null, -8, null, null, null, 0],
+        ["bit", -7, 1, null, null, null, 1, 0, 2, null, 0, null, "bit", 0, 0, -7, null, null, null, 16],
+        ["tinyint", -6, 3, null, null, null, 1, 0, 2, 1, 0, 0, "tinyint", 0, 0, -6, null, 10, null, 5],
+        ["tinyint identity", -6, 3, null, null, null, 0, 0, 2, 1, 0, 1, "tinyint identity", 0, 0, -6, null, 10, null, 5],
+        ["bigint", -5, 19, null, null, null, 1, 0, 2, 0, 0, 0, "bigint", 0, 0, -5, null, 10, null, 0],
+        ["bigint identity", -5, 19, null, null, null, 0, 0, 2, 0, 0, 1, "bigint identity", 0, 0, -5, null, 10, null, 0],
+        ["image", -4, 2147483647, "0x", null, null, 1, 0, 0, null, 0, null, "image", null, null, -4, null, null, null, 20],
+        ["varbinary", -3, 8000, "0x", null, "max length", 1, 0, 2, null, 0, null, "varbinary", null, null, -3, null, null, null, 4],
+        ["binary", -2, 8000, "0x", null, "length", 1, 0, 2, null, 0, null, "binary", null, null, -2, null, null, null, 3],
+        ["timestamp", -2, 8, "0x", null, null, 0, 0, 2, null, 0, null, "timestamp", null, null, -2, null, null, null, 80],
+        ["text", -1, 2147483647, "'", "'", null, 1, 0, 1, null, 0, null, "text", null, null, -1, null, null, null, 19],
+        ["char", 1, 8000, "'", "'", "length", 1, 0, 3, null, 0, null, "char", null, null, 1, null, null, null, 1],
+        ["numeric", 2, 38, null, null, "precision,scale", 1, 0, 2, 0, 0, 0, "numeric", 0, 38, 2, null, 10, null, 10],
+        ["numeric() identity", 2, 38, null, null, "precision", 0, 0, 2, 0, 0, 1, "numeric() identity", 0, 0, 2, null, 10, null, 10],
+        ["decimal", 3, 38, null, null, "precision,scale", 1, 0, 2, 0, 0, 0, "decimal", 0, 38, 3, null, 10, null, 24],
+        ["money", 3, 19, "$", null, null, 1, 0, 2, 0, 1, 0, "money", 4, 4, 3, null, 10, null, 11],
+        ["smallmoney", 3, 10, "$", null, null, 1, 0, 2, 0, 1, 0, "smallmoney", 4, 4, 3, null, 10, null, 21],
+        ["decimal() identity", 3, 38, null, null, "precision", 0, 0, 2, 0, 0, 1, "decimal() identity", 0, 0, 3, null, 10, null, 24],
+        ["int", 4, 10, null, null, null, 1, 0, 2, 0, 0, 0, "int", 0, 0, 4, null, 10, null, 7],
+        ["int identity", 4, 10, null, null, null, 0, 0, 2, 0, 0, 1, "int identity", 0, 0, 4, null, 10, null, 7],
+        ["smallint", 5, 5, null, null, null, 1, 0, 2, 0, 0, 0, "smallint", 0, 0, 5, null, 10, null, 6],
+        ["smallint identity", 5, 5, null, null, null, 0, 0, 2, 0, 0, 1, "smallint identity", 0, 0, 5, null, 10, null, 6],
+        ["float", 6, 15, null, null, null, 1, 0, 2, 0, 0, 0, "float", null, null, 6, null, 10, null, 8],
+        ["real", 7, 7, null, null, null, 1, 0, 2, 0, 0, 0, "real", null, null, 7, null, 10, null, 23],
+        ["datetime", 11, 23, "'", "'", null, 1, 0, 3, null, 0, null, "datetime", 3, 3, 9, 3, null, null, 12],
+        ["smalldatetime", 11, 16, "'", "'", null, 1, 0, 3, null, 0, null, "smalldatetime", 0, 0, 9, 3, null, null, 22],
+        ["varchar", 12, 8000, "'", "'", "max length", 1, 0, 3, null, 0, null, "varchar", null, null, 12, null, null, null, 2],
+    ];
+
+    private static readonly object?[][] ClassicDatatypeInfoV3Raw =
+    [
+        ["sql_variant", -150, 8000, null, null, null, 1, 0, 2, null, 0, null, "sql_variant", 0, 0, -150, null, 10, null, 0],
+        ["uniqueidentifier", -11, 36, "'", "'", null, 1, 0, 2, null, 0, null, "uniqueidentifier", null, null, -11, null, null, null, 0],
+        ["ntext", -10, 1073741823, "N'", "'", null, 1, 0, 1, null, 0, null, "ntext", null, null, -10, null, null, null, 0],
+        ["xml", -10, 1073741823, "N'", "'", null, 1, 1, 0, null, 0, null, "xml", null, null, -10, null, null, null, 0],
+        ["nvarchar", -9, 4000, "N'", "'", "max length", 1, 0, 3, null, 0, null, "nvarchar", null, null, -9, null, null, null, 0],
+        ["sysname", -9, 128, "N'", "'", null, 0, 0, 3, null, 0, null, "sysname", null, null, -9, null, null, null, 18],
+        ["date", -9, 10, "'", "'", null, 1, 0, 3, null, 0, null, "date", null, null, -9, null, null, null, 0],
+        ["time", -9, 16, "'", "'", null, 1, 0, 3, null, 0, null, "time", null, null, -9, null, null, null, 0],
+        ["datetime2", -9, 27, "'", "'", null, 1, 0, 3, null, 0, null, "datetime2", null, null, -9, null, null, null, 0],
+        ["datetimeoffset", -9, 34, "'", "'", null, 1, 0, 3, null, 0, null, "datetimeoffset", null, null, -9, null, null, null, 0],
+        ["nchar", -8, 4000, "N'", "'", "length", 1, 0, 3, null, 0, null, "nchar", null, null, -8, null, null, null, 0],
+        ["bit", -7, 1, null, null, null, 1, 0, 2, null, 0, null, "bit", 0, 0, -7, null, null, null, 16],
+        ["tinyint", -6, 3, null, null, null, 1, 0, 2, 1, 0, 0, "tinyint", 0, 0, -6, null, 10, null, 5],
+        ["tinyint identity", -6, 3, null, null, null, 0, 0, 2, 1, 0, 1, "tinyint identity", 0, 0, -6, null, 10, null, 5],
+        ["bigint", -5, 19, null, null, null, 1, 0, 2, 0, 0, 0, "bigint", 0, 0, -5, null, 10, null, 0],
+        ["bigint identity", -5, 19, null, null, null, 0, 0, 2, 0, 0, 1, "bigint identity", 0, 0, -5, null, 10, null, 0],
+        ["image", -4, 2147483647, "0x", null, null, 1, 0, 0, null, 0, null, "image", null, null, -4, null, null, null, 20],
+        ["varbinary", -3, 8000, "0x", null, "max length", 1, 0, 2, null, 0, null, "varbinary", null, null, -3, null, null, null, 4],
+        ["binary", -2, 8000, "0x", null, "length", 1, 0, 2, null, 0, null, "binary", null, null, -2, null, null, null, 3],
+        ["timestamp", -2, 8, "0x", null, null, 0, 0, 2, null, 0, null, "timestamp", null, null, -2, null, null, null, 80],
+        ["text", -1, 2147483647, "'", "'", null, 1, 0, 1, null, 0, null, "text", null, null, -1, null, null, null, 19],
+        ["char", 1, 8000, "'", "'", "length", 1, 0, 3, null, 0, null, "char", null, null, 1, null, null, null, 1],
+        ["numeric", 2, 38, null, null, "precision,scale", 1, 0, 2, 0, 0, 0, "numeric", 0, 38, 2, null, 10, null, 10],
+        ["numeric() identity", 2, 38, null, null, "precision", 0, 0, 2, 0, 0, 1, "numeric() identity", 0, 0, 2, null, 10, null, 10],
+        ["decimal", 3, 38, null, null, "precision,scale", 1, 0, 2, 0, 0, 0, "decimal", 0, 38, 3, null, 10, null, 24],
+        ["money", 3, 19, "$", null, null, 1, 0, 2, 0, 1, 0, "money", 4, 4, 3, null, 10, null, 11],
+        ["smallmoney", 3, 10, "$", null, null, 1, 0, 2, 0, 1, 0, "smallmoney", 4, 4, 3, null, 10, null, 21],
+        ["decimal() identity", 3, 38, null, null, "precision", 0, 0, 2, 0, 0, 1, "decimal() identity", 0, 0, 3, null, 10, null, 24],
+        ["int", 4, 10, null, null, null, 1, 0, 2, 0, 0, 0, "int", 0, 0, 4, null, 10, null, 7],
+        ["int identity", 4, 10, null, null, null, 0, 0, 2, 0, 0, 1, "int identity", 0, 0, 4, null, 10, null, 7],
+        ["smallint", 5, 5, null, null, null, 1, 0, 2, 0, 0, 0, "smallint", 0, 0, 5, null, 10, null, 6],
+        ["smallint identity", 5, 5, null, null, null, 0, 0, 2, 0, 0, 1, "smallint identity", 0, 0, 5, null, 10, null, 6],
+        ["float", 6, 53, null, null, null, 1, 0, 2, 0, 0, 0, "float", null, null, 6, null, 2, null, 8],
+        ["real", 7, 24, null, null, null, 1, 0, 2, 0, 0, 0, "real", null, null, 7, null, 2, null, 23],
+        ["varchar", 12, 8000, "'", "'", "max length", 1, 0, 3, null, 0, null, "varchar", null, null, 12, null, null, null, 2],
+        ["datetime", 93, 23, "'", "'", null, 1, 0, 3, null, 0, null, "datetime", 3, 3, 9, 3, null, null, 12],
+        ["smalldatetime", 93, 16, "'", "'", null, 1, 0, 3, null, 0, null, "smalldatetime", 0, 0, 9, 3, null, null, 22],
+    ];
+
+    private static readonly SqlValue[][] ClassicDatatypeInfoV2Rows = BuildDatatypeInfoRows(ClassicDatatypeInfoV2Raw);
+
+    private static readonly SqlValue[][] ClassicDatatypeInfoV3Rows = BuildDatatypeInfoRows(ClassicDatatypeInfoV3Raw);
+
     private static SqlValue[][] BuildDatatypeInfoRows(object?[][] raw)
     {
         var rows = new SqlValue[raw.Length][];
@@ -177,9 +269,12 @@ partial class Simulation
     /// Handles <c>EXEC sp_datatype_info_100 [@data_type] [, @ODBCVer]</c> — the
     /// proc ODBC's <c>SQLGetTypeInfo</c> calls on connect to learn each type's
     /// precision/scale (also reached via the <c>sys.sp_datatype_info_100</c>
-    /// name-form RPC through a synthesized EXEC). Mirrors the real proc's
-    /// semantics: <c>@data_type</c> (positional or named, NULL/absent → 0)
-    /// selects a single <c>DATA_TYPE</c> when non-zero or every type when 0;
+    /// name-form RPC through a synthesized EXEC) — and, with
+    /// <paramref name="classic"/>, the older <c>sp_datatype_info</c> pre-2008
+    /// drivers call, which reads the downlevel row set. Mirrors the real proc's
+    /// semantics: <c>@data_type</c> (positional or named, absent → 0, an
+    /// explicit NULL → no rows) selects a single <c>DATA_TYPE</c> when non-zero
+    /// or every type when 0;
     /// <c>@ODBCVer</c> (positional or named, absent → 2) collapses to 2 (values
     /// &lt; 3) or 3, choosing the version-tagged row set — the split drives the
     /// temporal <c>DATA_TYPE</c> codes (e.g. <c>datetime2</c> = 11 in v2, 93 in
@@ -187,23 +282,37 @@ partial class Simulation
     /// in range and sorted by (<c>DATA_TYPE</c>, <c>AUTO_INCREMENT</c>,
     /// <c>MONEY</c>, <c>USERTYPE</c>) with NULL <c>AUTO_INCREMENT</c> first.
     /// </summary>
-    private static IEnumerable<SimulatedStatementOutcome> InvokeSpDatatypeInfo100(BatchContext batch)
+    private static IEnumerable<SimulatedStatementOutcome> InvokeSpDatatypeInfo(BatchContext batch, bool classic)
     {
         var arguments = ParseExecArguments(batch.Parser, batch);
         if (batch.IsSkipping)
             yield break;
 
-        var (dataType, odbcVer) = ParseDatatypeInfoArgs(arguments);
-        var source = odbcVer >= 3 ? DatatypeInfoV3Rows : DatatypeInfoV2Rows;
-        var (low, high) = dataType == 0 ? (-32768, 32767) : (dataType, dataType);
+        var (dataType, odbcVer) = ParseDatatypeInfoArgs(arguments, classic ? "sp_datatype_info" : "sp_datatype_info_100");
+        var source = (classic, odbcVer >= 3) switch
+        {
+            (true, true) => ClassicDatatypeInfoV3Rows,
+            (true, false) => ClassicDatatypeInfoV2Rows,
+            (false, true) => DatatypeInfoV3Rows,
+            (false, false) => DatatypeInfoV2Rows,
+        };
 
-        var rows = source
-            .Where(row => row[1].AsInt16 >= low && row[1].AsInt16 <= high)
-            .OrderBy(row => (int)row[1].AsInt16)
-            .ThenBy(DatatypeInfoOrderKey12)
-            .ThenBy(row => (int)row[10].AsInt16)
-            .ThenBy(row => (int)row[19].AsInt16)
-            .ToList();
+        // An explicit NULL @data_type matches no type — the proc's range test
+        // compares against NULL (probed 2026-09-25) — where an omitted one is
+        // the declared 0, every type.
+        List<SqlValue[]> rows = [];
+        if (dataType is { } wanted)
+        {
+            var (low, high) = wanted == 0 ? (-32768, 32767) : (wanted, wanted);
+            var matching = source.Where(row => row[1].AsInt16 >= low && row[1].AsInt16 <= high);
+            rows = classic
+                ? [.. matching]
+                : [.. matching
+                    .OrderBy(row => (int)row[1].AsInt16)
+                    .ThenBy(DatatypeInfoOrderKey12)
+                    .ThenBy(row => (int)row[10].AsInt16)
+                    .ThenBy(row => (int)row[19].AsInt16)];
+        }
 
         yield return new SimulatedSqlResultSet(DatatypeInfoSchema, DatatypeInfoColumnNames, rows);
     }
@@ -212,9 +321,9 @@ partial class Simulation
     // ORDER BY ascending, so a NULL cell maps to int.MinValue.
     private static int DatatypeInfoOrderKey12(SqlValue[] row) => row[11].IsNull ? int.MinValue : row[11].AsInt16;
 
-    private static (int DataType, int OdbcVer) ParseDatatypeInfoArgs(List<ProcArgument> arguments)
+    private static (int? DataType, int OdbcVer) ParseDatatypeInfoArgs(List<ProcArgument> arguments, string procedureName)
     {
-        var dataType = 0;
+        int? dataType = 0;
         var odbcVer = 2;
         var positional = 0;
         foreach (var arg in arguments)
@@ -223,9 +332,9 @@ partial class Simulation
             {
                 switch (positional++)
                 {
-                    case 0: dataType = DatatypeInfoArgValue(arg, 0, SqlType.Int32); break;
+                    case 0: dataType = DatatypeInfoDataTypeArg(arg); break;
                     case 1: odbcVer = DatatypeInfoArgValue(arg, 2, SqlType.TinyInt); break;
-                    default: throw SimulatedSqlException.InvalidProcedureParameters("sp_datatype_info_100");
+                    default: throw SimulatedSqlException.InvalidProcedureParameters(procedureName);
                 }
 
                 continue;
@@ -233,14 +342,17 @@ partial class Simulation
 
             switch (arg.Name)
             {
-                case var n when BuiltInToken.Equals(n, "data_type"): dataType = DatatypeInfoArgValue(arg, 0, SqlType.Int32); break;
+                case var n when BuiltInToken.Equals(n, "data_type"): dataType = DatatypeInfoDataTypeArg(arg); break;
                 case var n when BuiltInToken.Equals(n, "ODBCVer"): odbcVer = DatatypeInfoArgValue(arg, 2, SqlType.TinyInt); break;
-                default: throw SimulatedSqlException.InvalidProcedureParameters("sp_datatype_info_100");
+                default: throw SimulatedSqlException.InvalidProcedureParameters(procedureName);
             }
         }
 
         return (dataType, odbcVer < 3 ? 2 : 3);
     }
+
+    private static int? DatatypeInfoDataTypeArg(ProcArgument arg) =>
+        arg.IsDefault ? 0 : arg.Value.IsNull ? null : ScalarArguments.CoerceProcedureParameter(arg.Value, SqlType.Int32);
 
     private static int DatatypeInfoArgValue(ProcArgument arg, int fallback, SqlType target) =>
         arg.IsDefault || arg.Value.IsNull ? fallback : ScalarArguments.CoerceProcedureParameter(arg.Value, target);
