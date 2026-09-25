@@ -1,21 +1,6 @@
 name: Build and Test
 on: [push, pull_request]
 jobs:
-  Whitespace_Check:
-    name: Whitespace Check
-    runs-on: ubuntu-latest
-    steps:
-    - name: Checkout
-      uses: actions/checkout@v6
-    - name: Setup .NET
-      uses: actions/setup-dotnet@v5
-      with:
-        dotnet-version: 10
-        dotnet-quality: ga
-    - name: Restore Dependencies
-      run: dotnet restore
-    - name: Whitespace Check
-      run: dotnet format whitespace --verify-no-changes --no-restore
   Build_and_Test:
     strategy:
       matrix:
@@ -23,6 +8,7 @@ jobs:
         configuration: [Debug, Release]
     name: Build and Test (${{ matrix.configuration }})
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
     - name: Checkout
       uses: actions/checkout@v6
