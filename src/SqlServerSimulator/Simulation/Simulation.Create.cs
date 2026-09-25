@@ -192,6 +192,9 @@ partial class Simulation
             // fresh evaluation.
             if (pending.Persisted)
                 RejectNondeterministicPersisted(context, heapColumns, pending.Name, tableName.Leaf, pending.Definition);
+            // A numeric-spelled peer names the expression that reads it.
+            Parser.Expressions.Reference.MarkNumericSpelled(pending.Expression, name => heapColumns.Exists(
+                peer => peer is { SpelledNumeric: true } && context.Batch.CurrentDatabase.Collation.Equals(peer.Name, name.Leaf)));
             heapColumns[pending.Index] = new HeapColumn(
                 pending.Name,
                 resolvedType,
@@ -199,7 +202,8 @@ partial class Simulation
                 nullable: pending.Nullable && inferredNullable && !IsPendingPrimaryKeyOrdinal(pendingKeys, pending.Index),
                 computedExpression: pending.Expression,
                 isPersisted: pending.Persisted,
-                computedDefinition: pending.Definition);
+                computedDefinition: pending.Definition,
+                spelledNumeric: resolvedType is DecimalSqlType && pending.Expression.ResultReportsNumeric);
         }
 
         // Schemas whose fixed-width stored columns alone exceed SQL Server's

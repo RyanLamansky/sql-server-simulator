@@ -104,7 +104,7 @@ partial class Selection
                 maxLength: null,
                 nullable: nullable,
                 identity: identity,
-                spelledNumeric: projections[i].ResultReportsNumeric || ReadsNumericSpelledColumn(projections[i], sources));
+                spelledNumeric: projections[i].ResultReportsNumeric);
         }
 
         return identityFunctions > 0 && inheritedIdentity is not null

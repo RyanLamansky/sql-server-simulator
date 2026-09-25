@@ -1028,6 +1028,17 @@ internal sealed partial class Selection
             outputColumnNames[i] = expressions[i].Name;
         }
 
+        // A reference to a numeric-spelled column names what reads it
+        // numeric, so each is marked against the column it binds to.
+        foreach (var expression in expressions)
+        {
+            Reference.MarkNumericSpelled(expression, name =>
+            {
+                var (s, c) = FindSourceColumn(sources, name);
+                return s >= 0 && sources[s].Columns[c].SpelledNumeric;
+            });
+        }
+
         // An EXISTS body only counts rows, so real never evaluates its select
         // list — `EXISTS (SELECT 1/0 FROM t)` is true over a non-empty t
         // (probe-confirmed 2026-09-23). Once the list is bound, each term
@@ -1340,7 +1351,7 @@ internal sealed partial class Selection
         selection.ProjectionExpressions = [.. expressions];
         selection.ColumnIntegerLiteralDigits = LiteralDigitsOf(expressions);
         selection.ColumnIsUntypedNull = UntypedNullsOf(expressions);
-        selection.ColumnReportsNumeric = ColumnReportsNumericOf(expressions, outputSchema, sources);
+        selection.ColumnReportsNumeric = ColumnReportsNumericOf(expressions, outputSchema);
         selection.BranchFromSources = sources;
         selection.AutoSourceNames = AutoSourceNamesOf(sources);
         (selection.AutoColumnSource, selection.AutoColumnOrdinal) = AutoColumnBindingOf(expressions, sources);
@@ -1656,32 +1667,15 @@ internal sealed partial class Selection
     /// carry no extra array. The two names share one <see cref="SqlType"/>, so
     /// this stays projection-time metadata and never influences storage.
     /// </summary>
-    private static bool[]? ColumnReportsNumericOf(List<Expression> expressions, SqlType[] schema, FromSource[]? sources = null)
+    private static bool[]? ColumnReportsNumericOf(List<Expression> expressions, SqlType[] schema)
     {
         bool[]? reportsNumeric = null;
         for (var i = 0; i < expressions.Count; i++)
         {
-            if (schema[i] is DecimalSqlType && (expressions[i].ResultReportsNumeric || ReadsNumericSpelledColumn(expressions[i], sources)))
+            if (schema[i] is DecimalSqlType && expressions[i].ResultReportsNumeric)
                 (reportsNumeric ??= new bool[expressions.Count])[i] = true;
         }
         return reportsNumeric;
-    }
-
-    /// <summary>
-    /// Whether a projection is a bare reference to a column declared (or
-    /// derived as) <c>numeric</c>, or an aggregate over one — real carries
-    /// the spelling through a reference, a derived table and a view (probed
-    /// 2026-09-24).
-    /// </summary>
-    internal static bool ReadsNumericSpelledColumn(Expression expression, FromSource[]? sources)
-    {
-        // An aggregate keeps its operand's name, as it does for any source.
-        while (expression is Expressions.NamedExpression or Expressions.AggregateExpression { Operand: not null })
-            expression = expression is Expressions.NamedExpression named ? named.Inner : ((Expressions.AggregateExpression)expression).Operand!;
-        if (sources is null || expression is not Expressions.Reference reference)
-            return false;
-        var (s, c) = FindSourceColumn(sources, reference.ReferencedName);
-        return s >= 0 && sources[s].Columns[c].SpelledNumeric;
     }
 
     /// <summary>

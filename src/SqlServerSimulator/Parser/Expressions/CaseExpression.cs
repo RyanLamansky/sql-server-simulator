@@ -162,6 +162,7 @@ internal sealed class CaseExpression : Expression
 
         var arms = this.elseBranch is null ? this.thens : [.. this.thens, this.elseBranch];
         this.cachedResultType = PromoteValueArms(arms, batch, resolveColumnType);
+        this.namingArm = FirstDecimalArm(arms, batch, resolveColumnType);
         return this.cachedResultType;
     }
 
@@ -281,21 +282,11 @@ internal sealed class CaseExpression : Expression
         }
     }
 
-    // Numeric-named if any value arm (a THEN or the ELSE) is — the same arm
-    // set the result-type promotion walks; the WHEN conditions don't produce
-    // the result value.
-    internal override bool ResultReportsNumeric
-    {
-        get
-        {
-            foreach (var then in this.thens)
-            {
-                if (then.ResultReportsNumeric)
-                    return true;
-            }
-            return this.elseBranch is not null && this.elseBranch.ResultReportsNumeric;
-        }
-    }
+    // Named by the first decimal-family value arm (a THEN or the ELSE), which
+    // binding settles; the WHEN conditions don't produce the result value.
+    private Expression? namingArm;
+
+    internal override bool ResultReportsNumeric => this.namingArm?.ResultReportsNumeric ?? false;
 
     /// <summary>
     /// Parses a CASE expression. Entered with

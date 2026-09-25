@@ -63,4 +63,21 @@ public sealed class NumericSpellingTests
     [DataRow("select avg(v) as v into t from (values (1.0), (2.0)) x(v)", "numeric")]
     public void FirstDecimalBranch_NamesTheColumn(string sql, string expected)
         => AreEqual(expected, new Simulation().ExecuteScalar($"{sql}; select type_name(system_type_id) from sys.columns where object_id = object_id('t')"));
+
+    [TestMethod]
+    [DataRow("n + d", "numeric")]
+    [DataRow("d + d", "decimal")]
+    [DataRow("n * 2", "numeric")]
+    [DataRow("d * 1", "decimal")]
+    [DataRow("coalesce(d, n)", "decimal")]
+    [DataRow("coalesce(n, d)", "numeric")]
+    [DataRow("isnull(n, 0)", "numeric")]
+    [DataRow("sum(n) over ()", "numeric")]
+    [DataRow("(select max(n) from nm)", "numeric")]
+    public void ReferenceInsideAnExpression_CarriesTheName(string expression, string expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar($"{Table} select {expression} as v into t from nm; select type_name(system_type_id) from sys.columns where object_id = object_id('t')"));
+
+    [TestMethod]
+    public void ComputedColumn_OverANumericColumn_IsNumeric()
+        => AreEqual("numeric", new Simulation().ExecuteScalar("create table cn (n numeric(5, 2), c as n * 2); select type_name(system_type_id) from sys.columns where name = 'c'"));
 }

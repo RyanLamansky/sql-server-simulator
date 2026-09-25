@@ -67,6 +67,7 @@ internal sealed class IsNullExpression : Expression
         // than the unification CASE and COALESCE apply (probed 2026-09-24:
         // ISNULL(<decimal>, <datetime>) is Msg 257 where COALESCE answers).
         AssignmentRules.RequireAssignable(this.replacement, this.replacement.GetSqlType(batch, resolveColumnType), t);
+        this.namingArm = FirstDecimalArm([this.check, this.replacement], batch, resolveColumnType);
         return this.cachedResultType = t;
     }
 
@@ -80,6 +81,8 @@ internal sealed class IsNullExpression : Expression
         this.check.ResultIsNullable(context)
         && this.replacement.ResultIsNullable(context);
 
-    internal override bool ResultReportsNumeric =>
-        this.check.ResultReportsNumeric || this.replacement.ResultReportsNumeric;
+    private Expression? namingArm;
+
+    // Named by the check when it is decimal-family, as the result type is.
+    internal override bool ResultReportsNumeric => this.namingArm?.ResultReportsNumeric ?? this.replacement.ResultReportsNumeric;
 }

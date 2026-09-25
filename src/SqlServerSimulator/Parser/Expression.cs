@@ -865,6 +865,24 @@ internal abstract class Expression : ExpressionNode
     internal virtual bool ResultReportsNumeric => false;
 
     /// <summary>
+    /// The arm a value-selecting form (<c>CASE</c>, <c>COALESCE</c>, <c>IIF</c>,
+    /// <c>ISNULL</c>, <c>CHOOSE</c>, <c>GREATEST</c> / <c>LEAST</c>) takes its
+    /// numeric-or-decimal name from: the first one of decimal family, so
+    /// <c>COALESCE(CAST(1 AS decimal(5, 1)), 2.0)</c> is decimal and the reverse
+    /// numeric (probed 2026-09-24). Arithmetic differs — any numeric operand
+    /// names its result. Null when no arm is decimal-family.
+    /// </summary>
+    private protected static Expression? FirstDecimalArm(IEnumerable<Expression> arms, BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        foreach (var arm in arms)
+        {
+            if (!IsUntypedNullLiteral(arm) && arm.GetSqlType(batch, resolveColumnType) is DecimalSqlType)
+                return arm;
+        }
+        return null;
+    }
+
+    /// <summary>
     /// Records a freshly-built <see cref="Reference"/> against
     /// <see cref="ParserContext.ColumnReferencesParsed"/> — and against
     /// <see cref="ParserContext.FromSourceColumnSink"/> when a FROM source's

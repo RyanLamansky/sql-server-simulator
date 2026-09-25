@@ -58,21 +58,13 @@ internal sealed class GreatestLeast : Expression
             branches[i] = (type, IntegerLiteralDigits(this.arguments[i]));
         }
         this.cachedResultType = SqlType.PromoteBranches(branches);
+        this.namingArm = FirstDecimalArm(this.arguments, batch, resolveColumnType);
         return this.cachedResultType;
     }
 
-    internal override bool ResultReportsNumeric
-    {
-        get
-        {
-            foreach (var argument in this.arguments)
-            {
-                if (argument.ResultReportsNumeric)
-                    return true;
-            }
-            return false;
-        }
-    }
+    private Expression? namingArm;
+
+    internal override bool ResultReportsNumeric => this.namingArm?.ResultReportsNumeric ?? false;
 
     internal override bool ParallelSafe => AllParallelSafe(this.arguments);
 

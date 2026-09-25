@@ -64,6 +64,9 @@ internal sealed class ScalarSubqueryExpression(Selection inner) : Expression
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => this.Inner.Schema[0];
 
+    // The inner query's one column names the value, numeric spelling included.
+    internal override bool ResultReportsNumeric => this.Inner.ColumnReportsNumeric is { } numeric && numeric[0];
+
     internal override string DebugDisplay() => "(SELECT ...)";
 
     internal override void Describe(NodeShape shape) => shape.Local(this.Inner);

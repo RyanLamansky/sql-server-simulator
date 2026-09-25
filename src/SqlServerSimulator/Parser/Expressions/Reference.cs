@@ -15,6 +15,30 @@ internal sealed class Reference : Expression
     /// </summary>
     internal MultiPartName ReferencedName;
 
+    /// <summary>
+    /// The column this reference binds to was declared (or derived as)
+    /// <c>numeric</c>, which names whatever reads it numeric the way a
+    /// numeric literal does. Set by <see cref="MarkNumericSpelled"/> once the
+    /// sources are known.
+    /// </summary>
+    private bool readsNumericColumn;
+
+    internal override bool ResultReportsNumeric => this.readsNumericColumn;
+
+    /// <summary>
+    /// Marks every reference in <paramref name="root"/> whose column
+    /// <paramref name="isNumericColumn"/> says is numeric-spelled (probed
+    /// 2026-09-24: <c>n + d</c>, <c>n * 2</c> and <c>AVG(n)</c> over a numeric
+    /// <c>n</c> are numeric). A subquery binds in its own scope and isn't entered.
+    /// </summary>
+    internal static void MarkNumericSpelled(ExpressionNode root, Func<MultiPartName, bool> isNumericColumn) =>
+        root.Walk((node, _) =>
+        {
+            if (node is Reference reference && isNumericColumn(reference.ReferencedName))
+                reference.readsNumericColumn = true;
+            return true;
+        });
+
     public Reference(Name name)
     {
         this.ReferencedName = new MultiPartName(name.Value);

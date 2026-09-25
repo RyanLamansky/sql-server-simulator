@@ -288,7 +288,11 @@ partial class Simulation
             }
             var computedType = pc.Expression.GetSqlType(batch, ResolveReference);
             var inferredNullable = pc.Expression.ResultIsNullable(new NullabilityContext(batch, ResolveReferenceNullable, ResolveReference));
-            heapColumns[pc.Index] = new HeapColumn(pc.Name, computedType, maxLength: null, nullable: pc.Nullable && inferredNullable, computedExpression: pc.Expression, isPersisted: pc.Persisted, computedDefinition: pc.Definition);
+            Parser.Expressions.Reference.MarkNumericSpelled(pc.Expression, name =>
+                Array.Exists(table.Columns, peer => peer.SpelledNumeric && collation.Equals(peer.Name, name.Leaf))
+                || heapColumns.Exists(peer => peer is { SpelledNumeric: true } && collation.Equals(peer.Name, name.Leaf)));
+            heapColumns[pc.Index] = new HeapColumn(pc.Name, computedType, maxLength: null, nullable: pc.Nullable && inferredNullable, computedExpression: pc.Expression, isPersisted: pc.Persisted, computedDefinition: pc.Definition,
+                spelledNumeric: computedType is DecimalSqlType && pc.Expression.ResultReportsNumeric);
         }
     }
 

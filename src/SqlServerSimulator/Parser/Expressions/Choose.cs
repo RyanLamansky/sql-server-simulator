@@ -51,21 +51,13 @@ internal sealed class Choose : Expression
         for (var i = 1; i < this.values.Length; i++)
             t = SqlType.Promote(t, this.values[i].GetSqlType(batch, resolveColumnType));
         this.cachedResultType = t;
+        this.namingArm = FirstDecimalArm(this.values, batch, resolveColumnType);
         return t;
     }
 
-    internal override bool ResultReportsNumeric
-    {
-        get
-        {
-            foreach (var value in this.values)
-            {
-                if (value.ResultReportsNumeric)
-                    return true;
-            }
-            return false;
-        }
-    }
+    private Expression? namingArm;
+
+    internal override bool ResultReportsNumeric => this.namingArm?.ResultReportsNumeric ?? false;
 
     internal override string DebugDisplay() => $"CHOOSE({this.indexExpr.DebugDisplay()}, ...{this.values.Length} values)";
 

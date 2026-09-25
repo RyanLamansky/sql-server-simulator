@@ -91,21 +91,13 @@ internal sealed class Coalesce : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
         this.cachedResultType = PromoteValueArms(this.arguments, batch, resolveColumnType);
+        this.namingArm = FirstDecimalArm(this.arguments, batch, resolveColumnType);
         return this.cachedResultType;
     }
 
-    internal override bool ResultReportsNumeric
-    {
-        get
-        {
-            foreach (var argument in this.arguments)
-            {
-                if (argument.ResultReportsNumeric)
-                    return true;
-            }
-            return false;
-        }
-    }
+    private Expression? namingArm;
+
+    internal override bool ResultReportsNumeric => this.namingArm?.ResultReportsNumeric ?? false;
 
     /// <summary>
     /// COALESCE takes its nullability from the CASE it desugars to —

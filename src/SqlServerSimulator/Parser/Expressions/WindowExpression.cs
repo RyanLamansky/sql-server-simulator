@@ -1121,6 +1121,15 @@ internal sealed class WindowExpression : Expression
         return [.. items];
     }
 
+    // A windowed aggregate keeps its operand's name as the plain aggregate
+    // does; the offset and value functions keep their operand's.
+    internal override bool ResultReportsNumeric => this.Kind switch
+    {
+        WindowKind.Aggregate => this.AggregateInfo!.ResultReportsNumeric,
+        WindowKind.Lag or WindowKind.Lead or WindowKind.FirstValue or WindowKind.LastValue => this.Operand!.ResultReportsNumeric,
+        _ => false,
+    };
+
     internal override string DebugDisplay()
     {
         var name = this.Kind switch

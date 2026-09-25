@@ -74,6 +74,7 @@ internal sealed class Iif : Expression
     {
         this.condition.Bind(batch, resolveColumnType);
         this.cachedResultType = PromoteValueArms([this.trueValue, this.falseValue], batch, resolveColumnType);
+        this.namingArm = FirstDecimalArm([this.trueValue, this.falseValue], batch, resolveColumnType);
         return this.cachedResultType;
     }
 
@@ -106,8 +107,9 @@ internal sealed class Iif : Expression
             _ = foldedAway.Add(branchTaken ? this.falseValue : this.trueValue);
     }
 
-    internal override bool ResultReportsNumeric =>
-        this.trueValue.ResultReportsNumeric || this.falseValue.ResultReportsNumeric;
+    private Expression? namingArm;
+
+    internal override bool ResultReportsNumeric => this.namingArm?.ResultReportsNumeric ?? false;
 
     internal override string DebugDisplay() => $"IIF(..., {this.trueValue.DebugDisplay()}, {this.falseValue.DebugDisplay()})";
 
