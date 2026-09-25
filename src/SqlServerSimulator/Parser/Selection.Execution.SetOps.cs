@@ -242,7 +242,33 @@ internal sealed partial class Selection
             ColumnIntegerLiteralDigits = combinedDigits,
             ColumnIsUntypedNull = combinedUntypedNulls,
             ColumnReportsNumeric = combinedReportsNumeric,
+            ColumnNullability = CombinedNullability(left.ColumnNullability, right.ColumnNullability, kind, combinedSchema.Length),
         };
+    }
+
+    /// <summary>
+    /// A set operation's column nullability, as real infers it (probed
+    /// 2026-09-24): UNION's column is nullable when either branch's is,
+    /// INTERSECT's only when both are, and EXCEPT's takes the left branch's.
+    /// A branch whose nullability isn't known counts as nullable.
+    /// </summary>
+    private static bool[]? CombinedNullability(bool[]? left, bool[]? right, SetOpKind kind, int width)
+    {
+        if (left is null && (right is null || kind != SetOpKind.Intersect))
+            return null;
+        var combined = new bool[width];
+        for (var i = 0; i < width; i++)
+        {
+            var leftNullable = left is null || left[i];
+            var rightNullable = right is null || right[i];
+            combined[i] = kind switch
+            {
+                SetOpKind.Intersect => leftNullable && rightNullable,
+                SetOpKind.Except => leftNullable,
+                _ => leftNullable || rightNullable,
+            };
+        }
+        return combined;
     }
 
     /// <summary>

@@ -104,4 +104,12 @@ public sealed class DescribeFirstResultSetTests
         var ex = Seeded().AssertSqlError("exec sp_describe_first_result_set N'select * from nosuch'", 208);
         AreEqual(11529, ex.Errors[1].Number);
     }
+
+    [TestMethod]
+    [DataRow("select id, n from da union all select 1, 2", "notnull null")]
+    [DataRow("select id, id from da union select n, 2 from da", "null notnull")]
+    [DataRow("select id, n from da intersect select n, id from da", "notnull notnull")]
+    [DataRow("select id, n from da except select n, id from da", "notnull null")]
+    public void SetOperation_CombinesItsBranchesNullability(string tsql, string expected)
+        => AreEqual(expected, string.Join(" ", Describe(Seeded(), tsql).Split(" | ").Select(column => column.Split(' ')[1])));
 }

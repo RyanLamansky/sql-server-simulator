@@ -826,7 +826,7 @@ Those give real's `is_identity_column` / `is_updateable` / `is_computed_column`:
 `tds_type_id` follows COLMETADATA's token choice (the fixed-length token for a NOT NULL fixed-width type), with real's own lengths — 17 for decimal, 65535 for a MAX type, 8100 for xml.
 A compile error is followed by **Msg 11501**, a missing object by **Msg 11529**.
 
-**Not modeled yet**: the browse-information modes (every mode answers as 0 does, so the `source_*` columns and `is_part_of_unique_key` stay NULL), and a set operation's NOT NULL columns, which report nullable because a combined result carries no nullability.
+**Not modeled yet**: the browse-information modes (every mode answers as 0 does, so the `source_*` columns and `is_part_of_unique_key` stay NULL).
 Because FMTONLY runs the batch rather than binding it, DDL and control flow in `@tsql` execute, where real's analysis doesn't run anything.
 
 ## Metadata scalars
