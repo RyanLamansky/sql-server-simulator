@@ -553,12 +553,14 @@ partial class SimulatedSqlException
     /// was cast to a <c>varchar</c> / <c>nvarchar</c> destination too narrow
     /// to hold the formatted value. Distinct from the generic Msg 8115 path —
     /// money picks its own dedicated message rather than reusing the
-    /// arithmetic-overflow surface. Probe-confirmed against SQL Server 2025
-    /// (2026-05-09); the message says "money" regardless of whether the
-    /// source was money or smallmoney.
+    /// arithmetic-overflow surface. A <c>smallmoney</c> source takes its own
+    /// number, Msg 292, naming itself (probed 2026-09-25 against SQL Server
+    /// 2025).
     /// </summary>
-    internal static SimulatedSqlException InsufficientResultSpaceForMoney(string targetType) =>
-        new($"There is insufficient result space to convert a money value to {targetType}.", 234, 16, 2);
+    internal static SimulatedSqlException InsufficientResultSpaceForMoney(SqlType sourceType, string targetType) =>
+        sourceType == SqlType.SmallMoney
+            ? new($"There is insufficient result space to convert a smallmoney value to {targetType}.", 292, 16, 2)
+            : new($"There is insufficient result space to convert a money value to {targetType}.", 234, 16, 2);
 
     /// <summary>
     /// Mimics SQL Server error 9809: <c>CONVERT</c> of a binary to a string

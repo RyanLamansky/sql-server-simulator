@@ -52,8 +52,10 @@ internal abstract class DateDiff : Expression
 
     public override SqlValue Run(RuntimeContext runtime)
     {
-        var startVal = DatePartKinds.CoerceDateArgumentImplicit(this.start.Run(runtime));
-        var endVal = DatePartKinds.CoerceDateArgumentImplicit(this.end.Run(runtime));
+        var rawStart = this.start.Run(runtime);
+        var rawEnd = this.end.Run(runtime);
+        var startVal = DatePartKinds.CoerceDiffArgument(rawStart, rawEnd);
+        var endVal = DatePartKinds.CoerceDiffArgument(rawEnd, rawStart);
         if (startVal.IsNull || endVal.IsNull)
             return SqlValue.Null(this.resultType);
         DatePartKinds.RequireCompatibleForDiff(this.kind, this.keywordText, this.functionLowerName);

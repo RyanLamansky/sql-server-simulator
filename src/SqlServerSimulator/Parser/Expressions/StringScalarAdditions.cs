@@ -78,8 +78,8 @@ internal sealed class StringEscape : Expression
 /// <c>input</c> with each character in <c>characters</c> replaced by
 /// the character at the same position in <c>translations</c>. The
 /// second and third arguments must have the same length — Msg 9819
-/// otherwise. NULL on any argument returns NULL. Result type is the
-/// input string type.
+/// otherwise. NULL on any argument returns NULL. The input converts from any
+/// type, where the other two must be strings.
 /// <para>The per-character lookup runs under the collation the arguments
 /// resolve to, so <c>TRANSLATE(N'café', N'e', N'Z')</c> is <c>cafZ</c> under an
 /// <c>_AI</c> collation and unchanged under an <c>_AS</c> one. The input is
@@ -114,7 +114,7 @@ internal sealed class Translate : Expression
         StringScalars.RejectLegacyLob(input, "translate", argumentIndex: 1);
         StringScalars.RejectLegacyLob(chars, "translate", argumentIndex: 2);
         StringScalars.RejectLegacyLob(translations, "translate", argumentIndex: 3);
-        var resultType = ResolveResultType(input.Type);
+        var resultType = this.boundResultType ?? ResolveResultType(input.Type, chars.Type, translations.Type, runtime.Batch);
         if (input.IsNull || chars.IsNull || translations.IsNull)
             return SqlValue.Null(resultType);
         var charsStr = chars.CoerceTo(SqlType.NVarchar).AsString;
@@ -140,38 +140,38 @@ internal sealed class Translate : Expression
         return SqlValue.FromString(resultType, sb.ToString());
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
-        ResolveResultType(BindArguments(batch, resolveColumnType));
+    // The bound result type, which a MAX input's value doesn't carry at runtime.
+    private SqlType? boundResultType;
 
     /// <summary>
     /// Compile-time mirror of the three <c>RejectLegacyLob</c> calls in
-    /// <see cref="Run"/>, keeping the same argument numbering. Returns the
-    /// input's type, which the result type derives from.
+    /// <see cref="Run"/>, keeping the same argument numbering, plus the
+    /// string-only rule for the character lists (Msg 8116, probed 2026-09-25
+    /// against SQL Server 2025).
     /// </summary>
-    private SqlType BindArguments(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
         var inputType = StringScalars.BindArgument(this.inputArg, batch, resolveColumnType, "translate");
-        _ = StringScalars.BindArgument(this.charsArg, batch, resolveColumnType, "translate", argumentIndex: 2);
-        _ = StringScalars.BindArgument(this.translationsArg, batch, resolveColumnType, "translate", argumentIndex: 3);
-        return inputType;
+        var charsType = StringScalars.RequireStringArgument(this.charsArg, StringScalars.BindArgument(this.charsArg, batch, resolveColumnType, "translate", argumentIndex: 2), "translate", 2);
+        var translationsType = StringScalars.RequireStringArgument(this.translationsArg, StringScalars.BindArgument(this.translationsArg, batch, resolveColumnType, "translate", argumentIndex: 3), "translate", 3);
+        return this.boundResultType = ResolveResultType(inputType, charsType, translationsType, batch);
     }
 
     /// <summary>
-    /// TRANSLATE returns a value of the same length family as its input. A
-    /// MAX-form input (<c>varchar(max)</c> / <c>nvarchar(max)</c>) carries
-    /// unbounded length through to the result, so it must project as
-    /// <see cref="SqlType.NVarcharMax"/> to
-    /// stream over the wire as PLP; a bounded input keeps the existing
-    /// length-0 <c>nvarchar</c> shape (the simulator coerces every input to
-    /// nvarchar before processing — a minor pre-existing family divergence
-    /// from real, which preserves the varchar family for varchar input).
+    /// TRANSLATE's result is a container-width <c>varchar</c> — <c>nvarchar</c>
+    /// when any argument is Unicode — and MAX only when the input is:
+    /// <c>TRANSLATE(&lt;varchar(10)&gt;, 'a', 'b')</c> is <c>varchar(8000)</c>
+    /// and a MAX character list leaves it bounded (probed 2026-09-25 against
+    /// SQL Server 2025).
     /// </summary>
-    private static NVarcharSqlType ResolveResultType(SqlType inputType) =>
-        inputType.IsLob
-            || inputType is NVarcharSqlType { length: SqlType.MaxLengthSentinel }
-            || inputType is VarcharSqlType { length: SqlType.MaxLengthSentinel }
-            ? SqlType.NVarcharMax
-            : SqlType.NVarchar;
+    private static SqlType ResolveResultType(SqlType inputType, SqlType charsType, SqlType translationsType, BatchContext batch)
+    {
+        var collation = StringScalars.CollationFor(batch, inputType, charsType, translationsType);
+        var isMax = inputType is VarcharSqlType { length: SqlType.MaxLengthSentinel } or NVarcharSqlType { length: SqlType.MaxLengthSentinel };
+        return SqlType.IsNationalStringCategory(inputType) || SqlType.IsNationalStringCategory(charsType) || SqlType.IsNationalStringCategory(translationsType)
+            ? NVarcharSqlType.Get(isMax ? SqlType.MaxLengthSentinel : 4000, collation, inputType.Coercibility)
+            : VarcharSqlType.Get(isMax ? SqlType.MaxLengthSentinel : 8000, collation, inputType.Coercibility);
+    }
 
     internal override string DebugDisplay() => $"TRANSLATE({this.inputArg.DebugDisplay()}, {this.charsArg.DebugDisplay()}, {this.translationsArg.DebugDisplay()})";
 

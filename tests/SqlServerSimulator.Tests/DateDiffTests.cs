@@ -200,4 +200,25 @@ public sealed class DateDiffTests
             select datediff(day, a, b) from t
             """));
     }
+
+    /// <summary>
+    /// A string beside a number, a binary or a bare NULL reads as datetime,
+    /// rounding to 1/300 s and raising its Msg 242, where beside a date it reads
+    /// as datetime2 (probed 2026-09-25 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("datediff(ms, 0, '1900-01-01 00:00:00.001')", 0)]
+    [DataRow("datediff(ms, 0x00, '1900-01-01 00:00:00.002')", 3)]
+    [DataRow("datediff(ms, '1900-01-01', '1900-01-01 00:00:00.001')", 1)]
+    public void StringBesideANumber_ReadsAsDateTime(string expression, int expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar($"select {expression}"));
+
+    [TestMethod]
+    [DataRow("datediff(day, 0, 'Z')", 242)]
+    [DataRow("datediff(day, null, '0001-01-01')", 242)]
+    [DataRow("datediff(day, getdate(), 'Z')", 241)]
+    [DataRow("datediff(day, 'Z', 'Z')", 241)]
+    public void StringBesideANumber_TakesTheDateTimeError(string expression, int number)
+        => new Simulation().AssertSqlError($"select {expression}", number);
 }
+

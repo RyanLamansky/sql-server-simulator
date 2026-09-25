@@ -90,6 +90,12 @@ internal sealed class ConvertExpression : Expression
             return Cast.RecollateStringResult(SqlValue.Null(this.targetType), this.targetType, sourceValue.Type, dbCollation);
 
         var budgetCollation = Cast.ResultCollation(this.targetType, sourceValue.Type, dbCollation);
+        // A styled string rendering goes into a char / nchar through its var
+        // form, so it meets the length the way CAST's does rather than being
+        // padded and cut first.
+        var (renderTarget, renderLength) = styleCode is not null && Cast.VarFormOfFixedString(this.targetType) is var (varTarget, length)
+            ? (varTarget, length)
+            : (this.targetType, this.targetMaxLength);
         SqlValue coerced;
         try
         {
@@ -101,21 +107,42 @@ internal sealed class ConvertExpression : Expression
                 ? (sourceValue.Type, this.targetType) switch
                 {
                     ({ Category: SqlTypeCategory.DateTime }, { Category: SqlTypeCategory.String })
-                        => sourceValue.CoerceDateTimeToStringWithStyle(this.targetType, sc),
+                        => sourceValue.CoerceDateTimeToStringWithStyle(renderTarget, sc),
                     ({ Category: SqlTypeCategory.String }, { Category: SqlTypeCategory.DateTime })
                         => sourceValue.CoerceStringToDateLikeWithStyle(this.targetType, sc),
                     ({ Category: SqlTypeCategory.Money }, { Category: SqlTypeCategory.String })
-                        => sourceValue.CoerceMoneyToStringWithStyle(this.targetType, sc),
+                        => sourceValue.CoerceMoneyToStringWithStyle(renderTarget, sc),
                     ({ Category: SqlTypeCategory.Approximate }, { Category: SqlTypeCategory.String })
-                        => sourceValue.CoerceFloatToStringWithStyle(this.targetType, sc),
+                        => sourceValue.CoerceFloatToStringWithStyle(renderTarget, sc),
                     (_, XmlSqlType) => CoerceToXmlWithStyle(sourceValue, sc),
                     (VarbinarySqlType or BinarySqlType or ImageSqlType, { Category: SqlTypeCategory.String })
-                        => sourceValue.CoerceBinaryToStringWithStyle(this.targetType, sc),
+                        => sourceValue.CoerceBinaryToStringWithStyle(renderTarget, sc),
                     ({ Category: SqlTypeCategory.String }, VarbinarySqlType or BinarySqlType)
                         => sourceValue.CoerceStringToBinaryWithStyle(this.targetType, sc),
                     _ => Cast.ApplyCoercion(sourceValue, this.targetType, this.targetMaxLength, budgetCollation),
                 }
                 : Cast.ApplyCoercion(sourceValue, this.targetType, this.targetMaxLength, budgetCollation);
+            // A styled rendering meets the declared length as CAST's does —
+            // truncated from a date, Msg 234 from money, into a char / nchar
+            // as into the var form (probed 2026-09-25).
+            if (styleCode is int style)
+            {
+                // Hex text is cut at a whole byte, the 0x prefix included:
+                // CONVERT(varchar(3), 0x4142, 1) is 0x and varchar(1) empty.
+                if (style is 1 or 2
+                    && sourceValue.Type is VarbinarySqlType or BinarySqlType or ImageSqlType
+                    && renderLength is int max and > 0
+                    && !coerced.IsNull
+                    && SqlType.IsStringCategory(renderTarget)
+                    && coerced.AsString.Length > max)
+                {
+                    var prefix = style == 1 ? 2 : 0;
+                    coerced = SqlValue.FromString(renderTarget, coerced.AsString[..(max < prefix ? 0 : prefix + ((max - prefix) / 2 * 2))]);
+                }
+                coerced = Cast.EnforceTargetMaxLength(coerced, renderTarget, renderLength, sourceValue.Type, budgetCollation);
+                if (renderTarget != this.targetType)
+                    coerced = coerced.CoerceTo(this.targetType);
+            }
         }
         catch (SimulatedSqlException ex) when (this.tryMode && Cast.IsConversionFailure(ex.Number))
         {
@@ -146,7 +173,7 @@ internal sealed class ConvertExpression : Expression
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
-        Cast.RejectIllegalConversion(this.source, this.source.GetSqlType(batch, resolveColumnType), this.targetType, batch);
+        Cast.RejectIllegalConversion(this.source, this.source.GetSqlType(batch, resolveColumnType), this.targetType, this.targetReportsNumeric, batch);
 
     internal override bool ResultReportsNumeric => this.targetReportsNumeric;
 

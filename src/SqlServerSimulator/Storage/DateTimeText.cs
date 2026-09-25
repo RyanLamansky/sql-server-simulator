@@ -43,12 +43,17 @@ internal readonly struct DateTimeText(DateOnly? date, long timeTicks, TimeSpan? 
     /// <item>Only the legacy pair takes a time before the date
     /// (<c>'10:00 2024-01-01'</c>), mixed date separators
     /// (<c>'2024-12/31'</c>), a fraction written after the minutes
-    /// (<c>'10:00.5'</c>), or a <c>Z</c> after an ISO <c>T</c> time.</item>
+    /// (<c>'10:00.5'</c>), or a <c>Z</c> spaced from an ISO date, a bare year
+    /// or an ISO <c>T</c> time; and it reads a string holding nothing but a
+    /// marker (<c>'Z'</c>, <c>'T'</c>, <c>'-'</c>, <c>'.'</c>, <c>'am'</c>) as out
+    /// of range.</item>
     /// <item>Only the newer types take more than three fractional digits (a
     /// digit past the seventh rounds), an offset (<c>±h:mm</c>, at most
-    /// fourteen hours), a <c>Z</c> after any time, or a space before the ISO
-    /// <c>T</c>.</item>
+    /// fourteen hours), a <c>Z</c> after a time that follows a date, or a space
+    /// before the ISO <c>T</c>.</item>
     /// </list>
+    /// Both take a <c>Z</c> attached to an ISO date and after a time standing
+    /// alone, and neither takes a lower-case <c>z</c> (probed 2026-09-25).
     /// Everything else is shared: numeric dates in the session's
     /// <c>SET DATEFORMAT</c> order (see <c>OrderNumericDate</c>), with a
     /// one- or two-digit year pivoting at 50; year-first ISO forms; the six-
@@ -69,6 +74,8 @@ internal readonly struct DateTimeText(DateOnly? date, long timeTicks, TimeSpan? 
             value = new DateTimeText(null, 0, null);
             return DateTimeTextError.None;
         }
+        if (legacy && scanner.IsLoneMarker())
+            return DateTimeTextError.Range;
 
         DateOnly? date = null;
         var time = default(TimeValue);
@@ -102,10 +109,12 @@ internal readonly struct DateTimeText(DateOnly? date, long timeTicks, TimeSpan? 
         }
         else
         {
+            var dateStart = scanner.Position;
             var dateError = scanner.ParseDate(legacy, out var parsed, out var isoDashes);
             if (dateError != DateTimeTextError.None)
                 return dateError;
             date = parsed;
+            var takesLegacyZ = legacy && (isoDashes || scanner.IsBareYearFrom(dateStart));
 
             var beforeSeparator = scanner.Position;
             var spaced = scanner.SkipSpaces();
@@ -128,9 +137,9 @@ internal readonly struct DateTimeText(DateOnly? date, long timeTicks, TimeSpan? 
                     offset = TimeSpan.Zero;
                 }
             }
-            else if (scanner.PeekZ() && !spaced)
+            else if (scanner.PeekZ())
             {
-                if (!isoDashes)
+                if (!(spaced ? takesLegacyZ : isoDashes || takesLegacyZ))
                     return DateTimeTextError.Syntax;
                 scanner.Advance();
                 offset = TimeSpan.Zero;
@@ -154,18 +163,21 @@ internal readonly struct DateTimeText(DateOnly? date, long timeTicks, TimeSpan? 
 
         if (hasTime && offset is null)
         {
-            // An ISO T time takes its Z or offset attached.
-            if (scanner.SkipSpaces() && isoT && (scanner.PeekZ() || scanner.Peek is '+' or '-'))
-                return DateTimeTextError.Syntax;
+            // The newer types take an ISO T time's Z or offset attached; the
+            // legacy pair takes a Z after a T time either way, and after a time
+            // standing alone, but not after a date and a spaced time.
+            var spaced = scanner.SkipSpaces();
             if (scanner.PeekZ())
             {
-                if (legacy)
+                if (legacy ? date is not null && !isoT : spaced && isoT)
                     return DateTimeTextError.Syntax;
                 scanner.Advance();
                 offset = TimeSpan.Zero;
             }
             else if (scanner.Peek is '+' or '-')
             {
+                if (spaced && isoT)
+                    return DateTimeTextError.Syntax;
                 // The legacy pair reads a minus as a range it can't place and a
                 // plus as nothing at all.
                 if (legacy)
@@ -179,7 +191,7 @@ internal readonly struct DateTimeText(DateOnly? date, long timeTicks, TimeSpan? 
 
         _ = scanner.SkipSpaces();
         if (!scanner.AtEnd)
-            return legacy && scanner.IsLegacyRangeTail() ? DateTimeTextError.Range : DateTimeTextError.Syntax;
+            return legacy && offset is null && scanner.IsLegacyRangeTail() ? DateTimeTextError.Range : DateTimeTextError.Syntax;
 
         value = new DateTimeText(date, hasTime ? time.Ticks : 0, offset);
         return DateTimeTextError.None;
@@ -202,7 +214,22 @@ internal readonly struct DateTimeText(DateOnly? date, long timeTicks, TimeSpan? 
 
         public void Advance() => this.Position++;
 
-        public readonly bool PeekZ() => this.Peek is 'Z' or 'z' && !IsLetterAt(this.text, this.Position + 1);
+        public readonly bool PeekZ() => this.Peek == 'Z' && !IsLetterAt(this.text, this.Position + 1);
+
+        /// <summary>Whether the text from <paramref name="start"/> to here is a year written alone.</summary>
+        public readonly bool IsBareYearFrom(int start) =>
+            this.Position - start == 4 && char.IsAsciiDigit(this.text[start]) && char.IsAsciiDigit(this.text[start + 3]);
+
+        /// <summary>
+        /// Whether the whole text is one marker the legacy pair reads as an
+        /// out-of-range value — a <c>Z</c>, <c>T</c>, <c>-</c> or <c>.</c>
+        /// alone, <c>AM</c> / <c>PM</c> alone, or a <c>Z</c> before a time.
+        /// </summary>
+        public readonly bool IsLoneMarker() =>
+            this.text is "Z" or "T" or "-" or "."
+            || this.text.Equals("AM", StringComparison.OrdinalIgnoreCase)
+            || this.text.Equals("PM", StringComparison.OrdinalIgnoreCase)
+            || (this.text.Length > 1 && this.text[0] == 'Z' && new Scanner(this.text[1..], this.tabsAreSpaces).StartsTime());
 
         /// <summary>Skips spaces, reporting whether there were any.</summary>
         public bool SkipSpaces()

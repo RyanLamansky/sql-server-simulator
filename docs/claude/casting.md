@@ -13,10 +13,11 @@ Per-source-category rule applied after `SqlValue.CoerceTo`:
   Quirk specific to `varchar`; `nvarchar` raises Msg 8115.
   `bigint` doesn't get fallback either.
 - `decimal`/`numeric` source → an ANSI target is Msg 8115 **state 5** with "numeric to data type varchar" wording (the family root whatever the target's declared length), while a Unicode target is Msg 8115 **state 2** with the generic "expression to data type nvarchar" wording — probed both ways.
-- `money`/`smallmoney` → Msg 234 (`"There is insufficient result space to convert a money value to <target>."` — "money" regardless of source variant).
+- `money` → Msg 234 (`"There is insufficient result space to convert a money value to <target>."`); `smallmoney` → Msg 292, the same wording naming `smallmoney` (probed 2026-09-25 against SQL Server 2025).
 - `float`/`real` → Msg 232 with formatted source value (F6).
 - `uniqueidentifier`: pre-CoerceTo branch (Msg 8170 char/varchar, Msg 8115 nchar/nvarchar) — fires only for a *bounded* target under 36 chars; a MAX target (length sentinel -1) has unbounded width and holds the 36-char dashed form, so the check guards `max is >= 0 and < 36` (a plain `< 36` treated the sentinel as too-narrow and wrongly raised Msg 8115 on `CAST(newid() AS nvarchar(max))` — tiberius-surfaced).
-- `datetimeoffset → varchar` too narrow: real SQL Server raises Msg 241; simulator silently truncates (niche).
+- A styled `CONVERT` meets the declared length the same way — a date's text is cut, money overflows, a fixed `char` / `nchar` target is judged as its var form — and a binary's hex (styles 1 and 2) is cut at a whole byte, the `0x` prefix included, so `CONVERT(varchar(3), 0x4142, 1)` is `0x` (probed 2026-09-25 against SQL Server 2025).
+  `TRY_CAST` / `TRY_CONVERT` answer NULL for every one of these overflows.
 
 **CAST/CONVERT context defaults missing length to 30** for `varchar`/`nvarchar`/`varbinary` (column-context default is 1).
 

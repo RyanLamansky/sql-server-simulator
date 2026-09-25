@@ -946,5 +946,80 @@ public sealed class CastTests
         AreEqual("Arithmetic overflow error converting varchar to data type numeric.", error.Errors[0].Message);
         AreEqual((byte)6, error.Errors[0].State);
     }
+
+    /// <summary>
+    /// A <c>Z</c> is upper case only, and the legacy pair takes it after a
+    /// time standing alone, an ISO date or a bare year, spaced or not, where
+    /// the newer types take it after any time (probed 2026-09-25 against
+    /// SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("'12:00Z' as datetime", "1900-01-01 12:00:00.000")]
+    [DataRow("'12:00 PM Z' as datetime", "1900-01-01 12:00:00.000")]
+    [DataRow("'2020-01-01 Z' as datetime", "2020-01-01 00:00:00.000")]
+    [DataRow("'2020 Z' as smalldatetime", "2020-01-01 00:00:00.000")]
+    [DataRow("'2020-01-01T12:00:00 Z' as datetime", "2020-01-01 12:00:00.000")]
+    [DataRow("'2020-01-01 12:00Z' as datetime2", "2020-01-01 12:00:00.0000000")]
+    public void ZoneSuffix_Reads(string cast, string expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar($"select convert(varchar(30), cast({cast}), 121)"));
+
+    [TestMethod]
+    [DataRow("'12:00z' as datetime2")]
+    [DataRow("'2020-01-01z' as date")]
+    [DataRow("'2020-01-01 12:00Z' as datetime")]
+    [DataRow("'2020-01-01 Z' as datetime2")]
+    [DataRow("'2020Z' as datetime2")]
+    [DataRow("'Z1' as datetime")]
+    public void ZoneSuffix_Refused(string cast)
+        => new Simulation().AssertSqlError($"select cast({cast})", 241);
+
+    [TestMethod]
+    [DataRow("'Z'", "datetime", "varchar")]
+    [DataRow("' T '", "smalldatetime", "varchar")]
+    [DataRow("'-'", "datetime", "varchar")]
+    [DataRow("'pm'", "datetime", "varchar")]
+    [DataRow("'Z12:00'", "datetime", "varchar")]
+    [DataRow("N'Z'", "datetime", "nvarchar")]
+    public void LoneMarker_IsOutOfRangeToTheLegacyPair(string literal, string target, string source)
+        => new Simulation().AssertSqlError($"select cast({literal} as {target})", 242, $"The conversion of a {source} data type to a {target} data type resulted in an out-of-range value.");
+
+    [TestMethod]
+    public void SmallMoneyIntoTooShortString_RaisesMsg292()
+        => new Simulation().AssertSqlError("select cast(cast(12.5 as smallmoney) as nvarchar(3))", 292, "There is insufficient result space to convert a smallmoney value to nvarchar.");
+
+    [TestMethod]
+    [DataRow("try_cast(cast(1234.5 as money) as varchar(3))")]
+    [DataRow("try_convert(char(3), cast(1234.5 as money), 1)")]
+    [DataRow("try_convert(varchar(3), cast(12.5 as smallmoney))")]
+    public void TryConversionIntoTooShortString_IsNull(string expression)
+        => IsInstanceOfType<DBNull>(new Simulation().ExecuteScalar($"select {expression}"));
+
+    /// <summary>
+    /// A styled CONVERT meets the declared length as CAST does: a date's text
+    /// is cut, money's overflows (a char target included), and hex is cut at a
+    /// whole byte (probed 2026-09-25 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("convert(varchar(5), cast('2020-01-02 03:04:05' as datetime), 121)", "2020-")]
+    [DataRow("convert(nvarchar(5), cast('2020-01-02' as date), 101)", "01/02")]
+    [DataRow("convert(varchar(3), 0x414243, 1)", "0x")]
+    [DataRow("convert(varchar(1), 0x4142, 1)", "")]
+    [DataRow("convert(nvarchar(3), 0x4142, 2)", "41")]
+    [DataRow("convert(char(5), 0x414243, 1)", "0x41 ")]
+    public void StyledConversion_MeetsTheDeclaredLength(string expression, string expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar($"select {expression}"));
+
+    [TestMethod]
+    [DataRow("convert(varchar(3), cast(1234.5 as money), 1)", "varchar")]
+    [DataRow("convert(char(3), cast(1234.5 as money), 1)", "varchar")]
+    [DataRow("convert(nvarchar(3), cast(1234.5 as money), 2)", "nvarchar")]
+    public void StyledMoneyIntoTooShortString_RaisesMsg234(string expression, string target)
+        => new Simulation().AssertSqlError($"select {expression}", 234, $"There is insufficient result space to convert a money value to {target}.");
+
+    [TestMethod]
+    [DataRow("cast(cast('2020-01-02' as date) as numeric(5,1))", "numeric")]
+    [DataRow("convert(decimal(5,1), cast('2020-01-02' as date))", "decimal")]
+    public void IllegalConversion_NamesTheTargetAsWritten(string expression, string target)
+        => new Simulation().AssertSqlError($"select {expression}", 529, $"Explicit conversion from data type date to {target} is not allowed.");
 }
 

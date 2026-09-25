@@ -84,20 +84,23 @@ internal sealed class Cast : Expression
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
-        RejectIllegalConversion(this.source, this.source.GetSqlType(batch, resolveColumnType), this.targetType, batch);
+        RejectIllegalConversion(this.source, this.source.GetSqlType(batch, resolveColumnType), this.targetType, this.targetReportsNumeric, batch);
 
     /// <summary>
     /// The compile-time half of Msg 529, shared by CAST and CONVERT: real
     /// settles conversion legality from the two types while it compiles, so
     /// the diagnostic is due here rather than at the first row. Returns the
     /// result type so the two callers stay one expression each. Real names a
-    /// literal decimal <c>numeric</c> and a CLR type by its three-part name in
+    /// literal decimal <c>numeric</c>, as it does a target written
+    /// <c>numeric</c>, and a CLR type by its three-part name in
     /// the current database (<c>probe.sys.hierarchyid</c>, probed 2026-09-25
     /// against SQL Server 2025).
     /// </summary>
-    internal static SqlType RejectIllegalConversion(Expression source, SqlType sourceType, SqlType targetType, BatchContext batch) =>
+    internal static SqlType RejectIllegalConversion(Expression source, SqlType sourceType, SqlType targetType, bool targetReportsNumeric, BatchContext batch) =>
         source is not Value { IsUntypedNull: true } && IsIllegalExplicitConversion(sourceType, targetType)
-            ? throw SimulatedSqlException.ExplicitConversionNotAllowed(ConversionName(sourceType, source, batch), ConversionName(targetType, null, batch))
+            ? throw SimulatedSqlException.ExplicitConversionNotAllowed(
+                ConversionName(sourceType, source, batch),
+                targetReportsNumeric && targetType is DecimalSqlType ? "numeric" : ConversionName(targetType, null, batch))
             : ResultStringType(targetType, sourceType, batch.CurrentDatabase.Collation) ?? targetType;
 
     private static string ConversionName(SqlType type, Expression? source, BatchContext batch) =>
@@ -420,13 +423,8 @@ internal sealed class Cast : Expression
         // SQL Server 2025).
         if (!value.IsNull
             && value.Type.Category is SqlTypeCategory.Integer or SqlTypeCategory.Decimal or SqlTypeCategory.Money or SqlTypeCategory.Approximate
-            && targetType is CharSqlType { length: > 0 } or NCharSqlType { length: > 0 })
+            && VarFormOfFixedString(targetType) is var (varTarget, length))
         {
-            var length = targetType is CharSqlType fixedChar ? fixedChar.length : ((NCharSqlType)targetType).length;
-            var collation = targetType.Collation ?? Collation.Baseline;
-            SqlType varTarget = targetType is CharSqlType
-                ? VarcharSqlType.Get(length, collation, targetType.Coercibility)
-                : NVarcharSqlType.Get(length, collation, targetType.Coercibility);
             return ApplyCoercion(value, varTarget, length, budgetCollation).CoerceTo(targetType);
         }
 
@@ -448,6 +446,28 @@ internal sealed class Cast : Expression
 
         coerced = NarrowToCodePage(coerced, sourceType, budgetCollation);
         return EnforceTargetMaxLength(coerced, targetType, targetMaxLength, sourceType, budgetCollation);
+    }
+
+    /// <summary>
+    /// The var form of a sized <c>char</c> / <c>nchar</c> target and its
+    /// length, through which a number converts so it overflows as into the
+    /// var form rather than being padded and truncated; null for any other
+    /// target.
+    /// </summary>
+    internal static (SqlType VarTarget, int Length)? VarFormOfFixedString(SqlType targetType)
+    {
+        var length = targetType switch
+        {
+            CharSqlType fixedChar => fixedChar.length,
+            NCharSqlType fixedNChar => fixedNChar.length,
+            _ => 0,
+        };
+        if (length <= 0)
+            return null;
+        var collation = targetType.Collation ?? Collation.Baseline;
+        return targetType is CharSqlType
+            ? (VarcharSqlType.Get(length, collation, targetType.Coercibility), length)
+            : (NVarcharSqlType.Get(length, collation, targetType.Coercibility), length);
     }
 
     /// <summary>
@@ -500,7 +520,7 @@ internal sealed class Cast : Expression
     /// arrives as <c>null</c> from <see cref="SqlType.GetByName"/> and they
     /// short-circuit this method.
     /// </summary>
-    private static SqlValue EnforceTargetMaxLength(SqlValue coerced, SqlType targetType, int? targetMaxLength, SqlType sourceType, Collation? budgetCollation)
+    internal static SqlValue EnforceTargetMaxLength(SqlValue coerced, SqlType targetType, int? targetMaxLength, SqlType sourceType, Collation? budgetCollation)
     {
         if (coerced.IsNull || targetMaxLength is not int max || max <= 0)
             return coerced;
@@ -547,7 +567,7 @@ internal sealed class Cast : Expression
                 SqlTypeCategory.Decimal
                     => throw SimulatedSqlException.ArithmeticOverflowToTarget(familyName, state: 5),
                 SqlTypeCategory.Money
-                    => throw SimulatedSqlException.InsufficientResultSpaceForMoney(familyName),
+                    => throw SimulatedSqlException.InsufficientResultSpaceForMoney(sourceType, familyName),
                 // float / real names its value into a varchar and takes the
                 // generic form into an nvarchar (probed 2026-09-25).
                 SqlTypeCategory.Approximate when targetType is NVarcharSqlType
@@ -586,6 +606,7 @@ internal sealed class Cast : Expression
     internal static bool IsConversionFailure(int number) => number is
         220    // ArithmeticOverflowForDataType (integer → tinyint/smallint)
         or 232 // ArithmeticOverflowForType (float/real/money → integer)
+        or 234 // InsufficientResultSpaceForMoney
         or 235 // money string syntax
         or 237 // InsufficientResultSpaceForMoneyToInt
         or 241 // ConversionFailedDateTimeFromString
@@ -593,6 +614,7 @@ internal sealed class Cast : Expression
         or 244 // OverflowConvertingNarrowInt (INT1/INT2)
         or 245 // ConversionFailedFromString
         or 248 // OverflowConvertingToInt
+        or 292 // InsufficientResultSpaceForMoney (smallmoney)
         or 293 // smallmoney string syntax
         or 295 // ConversionFailedSmallDateTimeFromString
         or 8114 // ConvertingDataTypeError

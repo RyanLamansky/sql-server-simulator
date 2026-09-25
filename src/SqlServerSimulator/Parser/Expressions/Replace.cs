@@ -38,7 +38,7 @@ internal sealed class Replace : Expression
         StringScalars.RejectLegacyLob(rawOld, "replace", argumentIndex: 2);
         StringScalars.RejectLegacyLob(rawNew, "replace", argumentIndex: 3);
         if (rawInput.IsNull || rawOld.IsNull || rawNew.IsNull)
-            return SqlValue.Null(StringScalars.ContainerResultType(rawInput.Type, runtime.Batch));
+            return SqlValue.Null(ResultType(rawInput.Type, rawOld.Type, rawNew.Type, runtime.Batch));
         var i = StringScalars.CoerceToVarchar(rawInput, runtime.Batch, "replace", argumentIndex: 1);
         var o = StringScalars.CoerceToVarchar(rawOld, runtime.Batch, "replace", argumentIndex: 2);
         var n = StringScalars.CoerceToVarchar(rawNew, runtime.Batch, "replace", argumentIndex: 3);
@@ -55,7 +55,21 @@ internal sealed class Replace : Expression
         // result type is the family container (varchar(8000) / nvarchar(4000))
         // regardless of the input's declared width — probe-confirmed against
         // SQL Server 2025 (REPLACE(varchar(3), 'a', 'XY') → varchar(8000)).
-        return SqlValue.FromString(StringScalars.ContainerResultType(i.Type, runtime.Batch), replaced);
+        return SqlValue.FromString(ResultType(i.Type, rawOld.Type, rawNew.Type, runtime.Batch), replaced);
+    }
+
+    /// <summary>
+    /// The input's container type, made <c>nvarchar</c> when the pattern or the
+    /// replacement is Unicode though the input isn't (probed 2026-09-25 against
+    /// SQL Server 2025: <c>REPLACE(&lt;varchar(10)&gt;, 'a', N'b')</c> is
+    /// <c>nvarchar(4000)</c>).
+    /// </summary>
+    private static SqlType ResultType(SqlType inputType, SqlType oldType, SqlType newType, BatchContext batch)
+    {
+        var container = StringScalars.ContainerResultType(inputType, batch);
+        return container is VarcharSqlType varchar && (SqlType.IsNationalStringCategory(oldType) || SqlType.IsNationalStringCategory(newType))
+            ? NVarcharSqlType.Get(varchar.length == SqlType.MaxLengthSentinel ? SqlType.MaxLengthSentinel : 4000, varchar.Collation, varchar.Coercibility)
+            : container;
     }
 
     /// <summary>
@@ -85,20 +99,16 @@ internal sealed class Replace : Expression
         return builder.Append(input, position, input.Length - position).ToString();
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
-        StringScalars.ContainerResultType(BindArguments(batch, resolveColumnType), batch);
-
     /// <summary>
     /// Compile-time mirror of the three <c>RejectLegacyLob</c> calls in
-    /// <see cref="Run"/>, keeping the same argument numbering. Returns the
-    /// input's type, which is what the result width derives from.
+    /// <see cref="Run"/>, keeping the same argument numbering.
     /// </summary>
-    private SqlType BindArguments(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
         var inputType = StringScalars.BindArgument(input, batch, resolveColumnType, "replace");
-        _ = StringScalars.BindArgument(oldValue, batch, resolveColumnType, "replace", argumentIndex: 2);
-        _ = StringScalars.BindArgument(newValue, batch, resolveColumnType, "replace", argumentIndex: 3);
-        return inputType;
+        var oldType = StringScalars.BindArgument(oldValue, batch, resolveColumnType, "replace", argumentIndex: 2);
+        var newType = StringScalars.BindArgument(newValue, batch, resolveColumnType, "replace", argumentIndex: 3);
+        return ResultType(inputType, oldType, newType, batch);
     }
 
     internal override string DebugDisplay() => $"REPLACE({input.DebugDisplay()}, {oldValue.DebugDisplay()}, {newValue.DebugDisplay()})";

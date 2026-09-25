@@ -97,7 +97,7 @@ Inside a `BEGIN TRY` block real swallows the failure outright — nothing raised
 
 **Not modeled**: the message language itself (every diagnostic stays English), and month and weekday names in any language but English — so `sys.syslanguages`'s three name-list columns (`months` / `shortmonths` / `days`), nullable on real, are left NULL here.
 
-**Implicit operand coercion** (date argument, all three functions): string operands route through `DatePartKinds.CoerceDateArgumentImplicit` → `CoerceTo(datetime2(7))`, except that `DATEADD` reads a string as `datetime` (its result type, and the type its Msg 517 names; probed 2026-09-23); integer operands → `CoerceTo(datetime)` (days-since-1900-01-01).
+**Implicit operand coercion** (date argument, all three functions): string operands route through `DatePartKinds.CoerceDateArgumentImplicit` → `CoerceTo(datetime2(7))`, except that `DATEADD` reads a string as `datetime` (its result type, and the type its Msg 517 names; probed 2026-09-23), and so does `DATEDIFF` beside a number, a binary or a bare `NULL` — `DATEDIFF(ms, 0, '1900-01-01 00:00:00.001')` is 0, rounded to 1/300 s, and a string the legacy grammar reads as out of range is Msg 242 there (probed 2026-09-25); integer operands → `CoerceTo(datetime)` (days-since-1900-01-01).
 `ParseDateTime2` also accepts a **bare time-of-day string** (`HH:mm[:ss[.fffffff]]`, anchored to 1900-01-01), so `DATEDIFF(second, '11:15:00', <time>)` / `DATEPART(microsecond, '11:15:00')` coerce like real (a Django DurationField/TimeField pattern) rather than raising Msg 241.
 Probe-confirmed against SQL Server 2025: `DATEPART(year, 0) = 1900`, `DATEADD(day, 1, 0) = 1900-01-02`, `DATEDIFF(day, 0, '2024-01-31') = 45320`.
 `DATEADD`'s offset (second) arg stays strict-int — string offsets raise Msg 9810 ("Argument data type varchar is invalid for argument 2 of dateadd function") just like real SQL Server.
@@ -443,6 +443,8 @@ This is the *argument* rule; the slots these types can't reach at all — sortin
 - **`TRANSLATE(input, chars, translations)`** (`Parser/Expressions/StringScalarAdditions.cs`) — character-by-character substitution.
   The input is walked one code unit at a time and each character looked up in `chars` under the collation the three arguments resolve to (`Collation.IndexOfElement`), with the substitution taken from the **position** the lookup reports — so a combining mark is its own character, and `TRANSLATE(N'café', N'e', N'Z')` is `cafZ` under an `_AI` collation and unchanged under an `_AS` one.
   The `chars` and `translations` arguments must have equal length; mismatch raises Msg 9819 via a dedicated `TranslateUnequalChars` factory.
+  The input converts from any type, where the two character lists must be strings (Msg 8116).
+  The result is `varchar(8000)`, or `nvarchar(4000)` when any argument is Unicode, and MAX only when the input is — `REPLACE` follows the same Unicode rule (probed 2026-09-25 against SQL Server 2025).
   NULL on any operand → NULL.
   Result is the length family of `input`: a MAX-form input (`varchar(max)` / `nvarchar(max)` / `text` / `ntext`) projects `SqlType.NVarcharMax` so a large result streams as PLP; a bounded input keeps the length-0 `nvarchar` shape.
   (The simulator coerces every input to nvarchar before processing — a minor family divergence from real, which keeps the varchar family for varchar input.)

@@ -301,5 +301,32 @@ public sealed class BuiltInArgumentTypeTests
     [DataRow("0xFF0A0B0C")]
     public void BinaryToDate_ThatTheLayoutCannotRead_RaisesMsg241(string bytes)
         => _ = new Simulation().AssertSqlError($"select cast({bytes} as date)", 241);
+
+    /// <summary>
+    /// TRANSLATE and REPLACE project the container width, Unicode when any
+    /// argument is and MAX only from the input (probed 2026-09-25 against
+    /// SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("translate(c, 'a', 'b')", "varchar", 8000)]
+    [DataRow("translate(c, N'a', 'b')", "nvarchar", 8000)]
+    [DataRow("translate(ch, 'a', 'b')", "varchar", 8000)]
+    [DataRow("translate(m, N'a', 'b')", "nvarchar", -1)]
+    [DataRow("translate(c, cast('a' as varchar(max)), 'b')", "varchar", 8000)]
+    [DataRow("replace(c, 'a', 'b')", "varchar", 8000)]
+    [DataRow("replace(c, 'a', N'b')", "nvarchar", 8000)]
+    [DataRow("replace(m, 'a', 'b')", "varchar", -1)]
+    public void GrowableStringResult_TakesTheContainerWidth(string expression, string type, int maxLength)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery($"create table t (c varchar(10), ch char(3), m varchar(max)); select {expression} as r into t2 from t");
+        AreEqual($"{type}|{maxLength}", sim.ExecuteScalar("select concat(type_name(system_type_id), '|', max_length) from sys.columns where object_id = object_id('t2')"));
+    }
+
+    [TestMethod]
+    [DataRow("translate('a', 0x61, 'b')", "varbinary", 2)]
+    [DataRow("translate('a', 'a', 1)", "int", 3)]
+    public void TranslateCharacterLists_MustBeStrings(string expression, string type, int argument)
+        => new Simulation().AssertSqlError($"select {expression}", 8116, $"Argument data type {type} is invalid for argument {argument} of translate function.");
 }
 

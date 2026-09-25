@@ -170,6 +170,19 @@ internal static class DatePartKinds
         : ReadsAsDateTime(value.Type) ? value.CoerceTo(SqlType.DateTime)
         : value;
 
+    /// <summary>
+    /// <see cref="CoerceDateArgumentImplicit"/> for one of <c>DATEDIFF</c>'s
+    /// two dates: a string beside a number, a binary or a bare <c>NULL</c> —
+    /// a partner that reads as <c>datetime</c> — reads as <c>datetime</c> too,
+    /// so it rounds to that type's 1/300 s and raises its Msg 242 where the
+    /// <c>datetime2</c> it reads as otherwise would not (probed 2026-09-25
+    /// against SQL Server 2025: <c>DATEDIFF(ms, 0, '1900-01-01 00:00:00.001')</c>
+    /// is 0).
+    /// </summary>
+    public static SqlValue CoerceDiffArgument(SqlValue value, SqlValue partner) =>
+        SqlType.IsStringCategory(value.Type) && ReadsAsDateTime(partner.Type) ? value.CoerceTo(SqlType.DateTime)
+        : CoerceDateArgumentImplicit(value);
+
     private static bool ReadsAsDateTime(SqlType type) =>
         type.Category is SqlTypeCategory.Integer or SqlTypeCategory.Decimal or SqlTypeCategory.Money or SqlTypeCategory.Approximate
         || type is BinarySqlType or VarbinarySqlType;

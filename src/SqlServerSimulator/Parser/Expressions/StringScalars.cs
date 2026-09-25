@@ -425,21 +425,23 @@ internal static class StringScalars
     }
 
     /// <summary>
-    /// The length-0 (unspecified) form of the same variable-length string
-    /// family as <paramref name="sourceType"/>, preserving its collation and
-    /// coercibility. Renders as the family container width (varchar(8000) /
-    /// nvarchar(4000)) over the wire — the result type SQL Server assigns to
-    /// growable scalars (<c>REPLACE</c> / <c>TRANSLATE</c>) that don't compute
-    /// a tighter bound. Fixed-length (char / nchar) sources drop to the
-    /// variable form since the result length varies.
+    /// The container-width form (varchar(8000) / nvarchar(4000)) of the same
+    /// variable-length string family as <paramref name="sourceType"/>,
+    /// preserving its collation and coercibility — the result type SQL Server
+    /// assigns to growable scalars (<c>REPLACE</c> / <c>TRANSLATE</c>) that
+    /// don't compute a tighter bound, which a <c>SELECT … INTO</c> column
+    /// takes (probed 2026-09-25 against SQL Server 2025). A MAX source stays
+    /// MAX; fixed-length (char / nchar) sources drop to the variable form since
+    /// the result length varies.
     /// </summary>
     public static SqlType ContainerResultType(SqlType sourceType, BatchContext batch)
     {
         var collation = sourceType.Collation ?? batch.CurrentDatabase.Collation;
         var coercibility = sourceType.Coercibility;
+        var isMax = sourceType is VarcharSqlType { length: SqlType.MaxLengthSentinel } or NVarcharSqlType { length: SqlType.MaxLengthSentinel };
         return sourceType is NVarcharSqlType or NCharSqlType || sourceType == SqlType.NText
-            ? NVarcharSqlType.Get(0, collation, coercibility)
-            : VarcharSqlType.Get(0, collation, coercibility);
+            ? NVarcharSqlType.Get(isMax ? SqlType.MaxLengthSentinel : 4000, collation, coercibility)
+            : VarcharSqlType.Get(isMax ? SqlType.MaxLengthSentinel : 8000, collation, coercibility);
     }
 
     /// <summary>

@@ -372,7 +372,7 @@ internal readonly partial struct SqlValue
 
     private SqlValue CoerceToDateTime() => this.Type switch
     {
-        _ when SqlType.IsStringCategory(this.Type) => FromDateTime(ParseLegacyDateTime(this.AsString)),
+        _ when SqlType.IsStringCategory(this.Type) => FromDateTime(ParseLegacyDateTime(this.AsString, this.Type)),
         _ when this.Type == SqlType.Date => FromDateTime(this.AsDate.ToDateTime(TimeOnly.MinValue), this.Type),
         _ when this.Type == SqlType.SmallDateTime => FromDateTime(this.AsSmallDateTime),
         DateTime2SqlType => FromDateTime(this.AsDateTime2, this.Type),
@@ -389,7 +389,7 @@ internal readonly partial struct SqlValue
 
     private SqlValue CoerceToSmallDateTime() => this.Type switch
     {
-        _ when SqlType.IsStringCategory(this.Type) => FromSmallDateTime(ParseSmallDateTime(this.AsString)),
+        _ when SqlType.IsStringCategory(this.Type) => FromSmallDateTime(ParseSmallDateTime(this.AsString, this.Type)),
         _ when this.Type == SqlType.Date => FromSmallDateTime(this.AsDate.ToDateTime(TimeOnly.MinValue), this.Type),
         _ when this.Type == SqlType.DateTime => FromSmallDateTime(this.AsDateTime, this.Type),
         DateTime2SqlType => FromSmallDateTime(this.AsDateTime2, this.Type),

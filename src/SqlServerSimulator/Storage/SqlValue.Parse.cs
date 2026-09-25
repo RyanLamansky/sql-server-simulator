@@ -66,14 +66,14 @@ internal readonly partial struct SqlValue
     /// <summary>
     /// Reads <paramref name="value"/> as <c>datetime</c> does: Msg 241 for a
     /// string it can't read, Msg 242 for one naming a value that doesn't
-    /// exist. The 1/300-second rounding and the 1753–9999 range are
-    /// <see cref="FromDateTime(DateTime)"/>'s.
+    /// exist, naming a Unicode source <c>nvarchar</c>. The 1/300-second
+    /// rounding and the 1753–9999 range are <see cref="FromDateTime(DateTime)"/>'s.
     /// </summary>
-    private static DateTime ParseLegacyDateTime(string value) =>
+    private static DateTime ParseLegacyDateTime(string value, SqlType sourceType) =>
         DateTimeText.TryParse(value, legacy: true, out var text) switch
         {
             DateTimeTextError.None => text.DateTime,
-            DateTimeTextError.Range => throw SimulatedSqlException.OutOfRangeDateTimeConversion(SqlType.DateTime),
+            DateTimeTextError.Range => throw SimulatedSqlException.OutOfRangeDateTimeConversion(SqlType.DateTime, RangeErrorSource(sourceType)),
             _ => throw SimulatedSqlException.ConversionFailedDateTimeFromString(),
         };
 
@@ -81,13 +81,16 @@ internal readonly partial struct SqlValue
     /// As <see cref="ParseLegacyDateTime"/>, but a string it can't read is
     /// <c>smalldatetime</c>'s own Msg 295.
     /// </summary>
-    private static DateTime ParseSmallDateTime(string value) =>
+    private static DateTime ParseSmallDateTime(string value, SqlType sourceType) =>
         DateTimeText.TryParse(value, legacy: true, out var text) switch
         {
             DateTimeTextError.None => text.DateTime,
-            DateTimeTextError.Range => throw SimulatedSqlException.OutOfRangeDateTimeConversion(SqlType.SmallDateTime),
+            DateTimeTextError.Range => throw SimulatedSqlException.OutOfRangeDateTimeConversion(SqlType.SmallDateTime, RangeErrorSource(sourceType)),
             _ => throw SimulatedSqlException.ConversionFailedSmallDateTimeFromString(),
         };
+
+    private static NVarcharSqlType? RangeErrorSource(SqlType sourceType) =>
+        SqlType.IsNationalStringCategory(sourceType) ? SqlType.NVarchar : null;
 
     /// <summary>
     /// Whether <paramref name="value"/> reads as a <c>datetime</c> string, for
