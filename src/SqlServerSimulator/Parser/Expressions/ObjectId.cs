@@ -249,7 +249,11 @@ internal sealed class ObjectId : Expression
         return SqlValue.Null(SqlType.Int32);
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        _ = AssignmentRules.ArgumentType(this.nameArg, SqlType.NVarchar, batch, resolveColumnType);
+        return SqlType.Int32;
+    }
 
     private static int? SystemProcedureId(string name)
     {

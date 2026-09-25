@@ -52,7 +52,12 @@ internal sealed class UserName : Expression
         return SqlValue.Null(SqlType.SystemName);
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SystemName;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        if (this.idArg is not null)
+            _ = AssignmentRules.ArgumentType(this.idArg, SqlType.Int32, batch, resolveColumnType);
+        return SqlType.SystemName;
+    }
 
     internal override string DebugDisplay() => this.idArg is null ? "USER_NAME()" : $"USER_NAME({this.idArg.DebugDisplay()})";
 
@@ -61,10 +66,12 @@ internal sealed class UserName : Expression
 
 /// <summary>
 /// SQL <c>SUSER_NAME([id])</c> / <c>SUSER_SNAME([sid])</c>: returns the
-/// server-login name for the given id/sid, or the calling login when
-/// called with no argument. The simulator emulates a single fixed login
-/// (<c>dbo</c>); any id/sid input that isn't NULL produces the same
-/// placeholder name. NULL argument returns NULL. Result type is
+/// server-login name for the given id/sid — the <c>sys.server_principals</c>
+/// row carrying it, else NULL — or the calling login when called with no
+/// argument. The id converts to <c>int</c> and the sid to <c>varbinary</c> as
+/// an assignment would (probed 2026-09-25 against SQL Server 2025:
+/// <c>SUSER_NAME(1)</c> and <c>SUSER_SNAME(0x01)</c> are <c>sa</c>,
+/// <c>SUSER_NAME(2)</c> is <c>public</c>). Result type is
 /// <see cref="SqlType.SystemName"/> (sysname).
 /// </summary>
 internal sealed class SUserName : Expression
@@ -87,12 +94,24 @@ internal sealed class SUserName : Expression
         if (this.arg is null)
             return SqlValue.FromString(SqlType.SystemName, runtime.Batch.Connection.Security.Effective.LoginName);
         var argValue = this.arg.Run(runtime);
-        return argValue.IsNull
-            ? SqlValue.Null(SqlType.SystemName)
-            : SqlValue.FromString(SqlType.SystemName, runtime.Batch.Connection.Security.Effective.LoginName);
+        if (argValue.IsNull)
+            return SqlValue.Null(SqlType.SystemName);
+        var sid = this.isSidVariant ? argValue.CoerceTo(SqlType.Varbinary).AsBytes : null;
+        var id = this.isSidVariant ? 0 : StringScalars.CoerceLengthArgument(argValue);
+        foreach (var row in BuiltInResources.EnumerateSysServerPrincipals(runtime.Batch, runtime.Batch.CurrentDatabase))
+        {
+            if (sid is not null ? !row[2].IsNull && row[2].AsBytes.AsSpan().SequenceEqual(sid) : row[1].AsInt32 == id)
+                return row[0];
+        }
+        return SqlValue.Null(SqlType.SystemName);
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SystemName;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        if (this.arg is not null)
+            _ = AssignmentRules.ArgumentType(this.arg, this.isSidVariant ? SqlType.Varbinary : SqlType.Int32, batch, resolveColumnType);
+        return SqlType.SystemName;
+    }
 
     internal override string DebugDisplay() => this.arg is null
         ? (this.isSidVariant ? "SUSER_SNAME()" : "SUSER_NAME()")

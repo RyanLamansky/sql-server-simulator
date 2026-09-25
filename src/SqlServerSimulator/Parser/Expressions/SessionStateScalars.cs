@@ -114,7 +114,11 @@ internal sealed class ConnectionProperty : Expression
         };
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SqlVariant;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        _ = AssignmentRules.ArgumentType(this.nameArg, SqlType.Varchar, batch, resolveColumnType);
+        return SqlType.SqlVariant;
+    }
 
     internal override string DebugDisplay() => $"CONNECTIONPROPERTY({this.nameArg.DebugDisplay()})";
 

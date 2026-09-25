@@ -46,7 +46,12 @@ internal sealed class ColName : Expression
         return SqlValue.Null(SqlType.SystemName);
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SystemName;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        _ = AssignmentRules.ArgumentType(this.tableIdArg, SqlType.Int32, batch, resolveColumnType);
+        _ = AssignmentRules.ArgumentType(this.colIdArg, SqlType.Int32, batch, resolveColumnType);
+        return SqlType.SystemName;
+    }
 
     internal override string DebugDisplay() => $"COL_NAME({this.tableIdArg.DebugDisplay()}, {this.colIdArg.DebugDisplay()})";
 
@@ -129,7 +134,12 @@ internal sealed class ColLength : Expression
         _ => -1,
     };
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SmallInt;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        _ = AssignmentRules.ArgumentType(this.tableNameArg, SqlType.NVarchar, batch, resolveColumnType);
+        _ = AssignmentRules.ArgumentType(this.colNameArg, SqlType.NVarchar, batch, resolveColumnType);
+        return SqlType.SmallInt;
+    }
 
     internal override string DebugDisplay() => $"COL_LENGTH({this.tableNameArg.DebugDisplay()}, {this.colNameArg.DebugDisplay()})";
 

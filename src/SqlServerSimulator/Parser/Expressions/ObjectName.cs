@@ -111,7 +111,13 @@ internal sealed class ObjectName : Expression
             : SqlValue.Null(SqlType.SystemName);
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SystemName;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        _ = AssignmentRules.ArgumentType(this.idArg, SqlType.Int32, batch, resolveColumnType);
+        if (this.dbIdArg is not null)
+            _ = AssignmentRules.ArgumentType(this.dbIdArg, SqlType.Int32, batch, resolveColumnType);
+        return SqlType.SystemName;
+    }
 
     internal override string DebugDisplay() =>
         this.dbIdArg is null

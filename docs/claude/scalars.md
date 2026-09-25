@@ -299,6 +299,7 @@ A scalar UDF that patindexes its own `varchar` parameter is the shape that meets
 
 A built-in's argument converts to the type its parameter is declared as the way an assignment does, so which types may reach it is the Assign grid's (`SqlType.PairRules.cs`), checked while compiling through `AssignmentRules.ArgumentType` — a typed `NULL` and an empty table's column raise too (probed 2026-09-25 against SQL Server 2025).
 The math family's value is declared `float` (whatever type the result keeps), a count or code point `int` (`CHAR`, `NCHAR`, `SPACE`, `REPLICATE`, `LEFT`, `RIGHT`, `EOMONTH`'s offset), and the date of `YEAR` / `MONTH` / `DAY` / `DATEPART` / `DATENAME` / `DATEADD` / `DATEDIFF` `datetime`.
+The metadata functions follow the same rule: an object / schema / database / user / type / column id is `int` (`FILEGROUP_NAME`'s `smallint`), a name `nvarchar`, an `OBJECTPROPERTY` / `SERVERPROPERTY` / `SESSIONPROPERTY` / `CONNECTIONPROPERTY` property name `varchar`, and `SUSER_SNAME`'s sid `varbinary`.
 A date, a binary, xml or a `uniqueidentifier` meeting `float` is Msg 206; a `sql_variant` is Msg 257, or Msg 260 when it is a column of the query.
 The date functions then read every accepted number and a binary as `datetime`, not only an integer: `DAY(1.5)` is 2 and `DATEADD(day, 1, 0x01)` is 1900-01-02.
 `DATETRUNC`, `DATE_BUCKET` and `EOMONTH` are the exception: they take a date (a string too, save `DATE_BUCKET`; not a `time` for `EOMONTH`) and nothing else, so a number is Msg 8116 rather than a conversion.

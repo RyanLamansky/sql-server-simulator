@@ -184,7 +184,11 @@ internal sealed class TypeProperty : Expression
         };
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        _ = AssignmentRules.ArgumentType(this.typeArg, SqlType.NVarchar, batch, resolveColumnType);
+        return SqlType.Int32;
+    }
 
     internal override string DebugDisplay() =>
         $"TYPEPROPERTY({this.typeArg.DebugDisplay()}, {this.propertyArg.DebugDisplay()})";

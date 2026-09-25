@@ -28,8 +28,14 @@ internal sealed class TypeName : Expression
         if (v.IsNull)
             return SqlValue.Null(SqlType.SystemName);
         var id = ScalarArguments.CoerceToInt(v);
-        if (id == 0)
-            return SqlValue.FromString(SqlType.SystemName, "void type");
+        // Three ids name no sys.types row but answer all the same (probed
+        // 2026-09-25 against SQL Server 2025).
+        switch (id)
+        {
+            case 0: return SqlValue.FromString(SqlType.SystemName, "void type");
+            case 1: return SqlValue.FromString(SqlType.SystemName, "table");
+            case 243: return SqlValue.FromString(SqlType.SystemName, "table type");
+        }
         // System types resolve through the same row data the sys.types
         // catalog view uses (column 3 = user_type_id, column 0 = name).
         foreach (var row in BuiltInResources.SystypesRowData)
@@ -56,7 +62,11 @@ internal sealed class TypeName : Expression
         return SqlValue.Null(SqlType.SystemName);
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SystemName;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        _ = AssignmentRules.ArgumentType(this.idArg, SqlType.Int32, batch, resolveColumnType);
+        return SqlType.SystemName;
+    }
 
     internal override string DebugDisplay() => $"TYPE_NAME({this.idArg.DebugDisplay()})";
 
@@ -105,7 +115,15 @@ internal sealed class ParseName : Expression
         return SqlValue.FromString(SqlType.SystemName, segment);
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SystemName;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        // The name reads as text, which an xml or sql_variant isn't (Msg 8116,
+        // probed 2026-09-25 against SQL Server 2025).
+        if (this.nameArg.GetSqlType(batch, resolveColumnType) is (XmlSqlType or SqlVariantSqlType) and var nameType)
+            throw SimulatedSqlException.InvalidArgumentDataType(nameType.SqlServerName, 1, "parsename");
+        _ = AssignmentRules.ArgumentType(this.indexArg, SqlType.Int32, batch, resolveColumnType);
+        return SqlType.SystemName;
+    }
 
     internal override string DebugDisplay() => $"PARSENAME({this.nameArg.DebugDisplay()}, {this.indexArg.DebugDisplay()})";
 

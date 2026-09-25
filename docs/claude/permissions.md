@@ -55,7 +55,7 @@ It carries the original login name, a base `SecurityPrincipalFrame` (database-pr
 Each frame also records whether its identity is `IsDatabaseScoped`, which is what makes a reference *across* a boundary ask `PermissionEnforcement.Bypasses` instead — see [Cross-database references](#cross-database-references).
 An unauthenticated in-process connection uses `CreateDefault()` — dbo as login, database user, and original login everywhere — so existing consumers see byte-identical identity output.
 
-**Identity scalars read the effective frame**: `CURRENT_USER` / `SESSION_USER` / `USER` / `USER_NAME()` / `USER_ID()` / `DATABASE_PRINCIPAL_ID()` → the effective database user; `SYSTEM_USER` / `SUSER_SNAME()` / `SUSER_NAME()` → the effective login (or the WITHOUT-LOGIN SID string); `ORIGINAL_LOGIN()` → the session's original login.
+**Identity scalars read the effective frame**: `CURRENT_USER` / `SESSION_USER` / `USER` / `USER_NAME()` / `USER_ID()` / `DATABASE_PRINCIPAL_ID()` → the effective database user; `SYSTEM_USER` / `SUSER_SNAME()` / `SUSER_NAME()` → the effective login (or the WITHOUT-LOGIN SID string), and with an argument the `sys.server_principals` row carrying that id or sid; `ORIGINAL_LOGIN()` → the session's original login.
 
 **`EXECUTE AS` / `REVERT`** (`Simulation/Simulation.ExecuteAs.cs`, dispatched by peeking the `AS` after `EXEC`/`EXECUTE`; `REVERT` is its own statement).
 - `EXECUTE AS USER = 'x'` pushes x's database-principal frame; a missing / non-user target raises Msg 15517.

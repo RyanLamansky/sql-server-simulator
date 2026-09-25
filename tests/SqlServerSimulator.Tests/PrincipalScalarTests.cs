@@ -42,8 +42,8 @@ public sealed class PrincipalScalarTests
         => AreEqual("dbo", new Simulation().ExecuteScalar("select suser_name()"));
 
     [TestMethod]
-    public void SuserName_AnyId_ReturnsDbo()
-        => AreEqual("dbo", new Simulation().ExecuteScalar("select suser_name(1)"));
+    public void SuserName_OfAnId_NamesThatServerPrincipal()
+        => AreEqual("sa", new Simulation().ExecuteScalar("select suser_name(1)"));
 
     [TestMethod]
     public void SuserName_NullArg_ReturnsNull()

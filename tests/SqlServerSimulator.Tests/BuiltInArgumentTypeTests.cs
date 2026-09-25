@@ -184,5 +184,38 @@ public sealed class BuiltInArgumentTypeTests
     [TestMethod]
     public void ClrTypeConversion_WithAStringOrBinary_StillAnswers()
         => AreEqual("/1/|POINT (2 1)", new Simulation().ExecuteScalar("select concat(cast(cast('/1/' as hierarchyid) as varchar(10)), '|', cast(geography::Point(1, 2, 4326) as nvarchar(30)))"));
+
+    // ---- the metadata functions ----
+
+    [TestMethod]
+    [DataRow("object_name(cast('<a/>' as xml))", "xml", "int")]
+    [DataRow("db_name(newid())", "uniqueidentifier", "int")]
+    [DataRow("col_name(1, cast('2020-01-01' as date))", "date", "int")]
+    [DataRow("filegroup_name(cast('<a/>' as xml))", "xml", "smallint")]
+    [DataRow("parsename('a.b', cast('<a/>' as xml))", "xml", "int")]
+    public void MetadataIdArgument_WithNoConversion_RaisesMsg206(string call, string type, string target)
+        => new Simulation().AssertSqlError($"select {call}", 206, $"Operand type clash: {type} is incompatible with {target}");
+
+    [TestMethod]
+    [DataRow("object_id(cast('<a/>' as xml))", "xml", "nvarchar")]
+    [DataRow("schema_name(cast(1 as sql_variant))", "sql_variant", "int")]
+    [DataRow("objectproperty(1, cast(1 as sql_variant))", "sql_variant", "varchar")]
+    [DataRow("is_member(cast('<a/>' as xml))", "xml", "nvarchar")]
+    [DataRow("serverproperty(cast(1 as sql_variant))", "sql_variant", "varchar")]
+    [DataRow("suser_sname('x')", "varchar", "varbinary")]
+    public void MetadataArgument_ConvertibleOnlyExplicitly_RaisesMsg257(string call, string type, string target)
+        => new Simulation().AssertSqlError($"select {call}", 257, $"Implicit conversion from data type {type} to {target} is not allowed. Use the CONVERT function to run this query.");
+
+    [TestMethod]
+    public void ParseName_OfAnXmlName_RaisesMsg8116()
+        => new Simulation().AssertSqlError("select parsename(cast('<a/>' as xml), 1)", 8116, "Argument data type xml is invalid for argument 1 of parsename function.");
+
+    [TestMethod]
+    public void SUserName_ResolvesItsArgument()
+        => AreEqual("sa|public|sa|public", new Simulation().ExecuteScalar("select concat_ws('|', suser_name(1), suser_name(2.5), suser_name(0), suser_sname(0x01), suser_sname(0x02))"));
+
+    [TestMethod]
+    public void TypeName_OfTheTableIds_AnswersAsReal()
+        => AreEqual("table|table type|void type", new Simulation().ExecuteScalar("select concat_ws('|', type_name(1), type_name(243), type_name(0))"));
 }
 

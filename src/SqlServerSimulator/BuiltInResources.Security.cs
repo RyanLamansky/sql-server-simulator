@@ -705,7 +705,7 @@ internal static partial class BuiltInResources
     /// per-Simulation login registry and custom server roles. Rows emit in
     /// principal_id order.
     /// </summary>
-    private static IEnumerable<SqlValue[]> EnumerateSysServerPrincipals(Parser.BatchContext batch, Database database)
+    internal static IEnumerable<SqlValue[]> EnumerateSysServerPrincipals(Parser.BatchContext batch, Database database)
     {
         var simulation = batch.Connection.Simulation;
         var charOne = SqlType.GetChar(1);

@@ -62,7 +62,11 @@ internal sealed class DatabasePropertyEx : Expression
         return value.IsNull ? SqlValue.Null(SqlType.SqlVariant) : SqlValue.FromVariant(value);
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SqlVariant;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        _ = AssignmentRules.ArgumentType(this.dbNameArg, SqlType.NVarchar, batch, resolveColumnType);
+        return SqlType.SqlVariant;
+    }
 
     private static SqlValue Produce(string property, Database db)
     {

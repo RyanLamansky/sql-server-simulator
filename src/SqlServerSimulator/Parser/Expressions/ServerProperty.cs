@@ -33,7 +33,11 @@ internal sealed class ServerProperty : Expression
         return value.IsNull ? SqlValue.Null(SqlType.SqlVariant) : SqlValue.FromVariant(value);
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SqlVariant;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        _ = AssignmentRules.ArgumentType(this.nameArg, SqlType.Varchar, batch, resolveColumnType);
+        return SqlType.SqlVariant;
+    }
 
     /// <summary>
     /// Resolves one property to its inner value; a NULL result (a null-valued

@@ -54,7 +54,12 @@ internal sealed class PrincipalIdLookup : Expression
             : SqlValue.Null(SqlType.Int32);
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        if (this.nameArg is not null)
+            _ = AssignmentRules.ArgumentType(this.nameArg, SqlType.NVarchar, batch, resolveColumnType);
+        return SqlType.Int32;
+    }
 
     internal override string DebugDisplay() => this.kind switch
     {
@@ -390,7 +395,13 @@ internal sealed class RoleMemberCheck : Expression
         return SqlValue.Null(SqlType.Int32);
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        _ = AssignmentRules.ArgumentType(this.roleArg, SqlType.NVarchar, batch, resolveColumnType);
+        if (this.principalArg is not null)
+            _ = AssignmentRules.ArgumentType(this.principalArg, SqlType.NVarchar, batch, resolveColumnType);
+        return SqlType.Int32;
+    }
 
     internal override string DebugDisplay() => $"IS_MEMBER({this.roleArg.DebugDisplay()})";
 

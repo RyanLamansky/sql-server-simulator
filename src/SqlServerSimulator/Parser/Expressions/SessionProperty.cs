@@ -63,7 +63,11 @@ internal sealed class SessionProperty : Expression
             : SqlValue.Null(SqlType.SqlVariant);
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SqlVariant;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        _ = AssignmentRules.ArgumentType(this.nameArg, SqlType.Varchar, batch, resolveColumnType);
+        return SqlType.SqlVariant;
+    }
 
     internal override string DebugDisplay() => $"SESSIONPROPERTY({this.nameArg.DebugDisplay()})";
 

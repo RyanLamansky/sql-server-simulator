@@ -321,7 +321,12 @@ internal sealed class ObjectProperty : Expression
     private static bool IsSqlModule(SchemaObject obj) =>
         obj is Procedure or View or Trigger or ScalarFunction or InlineTableValuedFunction or MultiStatementTableValuedFunction;
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        _ = AssignmentRules.ArgumentType(this.idArg, SqlType.Int32, batch, resolveColumnType);
+        _ = AssignmentRules.ArgumentType(this.propertyArg, SqlType.Varchar, batch, resolveColumnType);
+        return SqlType.Int32;
+    }
 
     /// <summary>
     /// Adapts <see cref="ObjectPropertyEx.TableFlagByName"/> to this function's

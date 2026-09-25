@@ -41,7 +41,12 @@ internal sealed class SchemaId : Expression
             : SqlValue.Null(SqlType.Int32);
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        if (this.nameArg is not null)
+            _ = AssignmentRules.ArgumentType(this.nameArg, SqlType.NVarchar, batch, resolveColumnType);
+        return SqlType.Int32;
+    }
 
     internal override string DebugDisplay() =>
         this.nameArg is null ? "SCHEMA_ID()" : $"SCHEMA_ID({this.nameArg.DebugDisplay()})";
