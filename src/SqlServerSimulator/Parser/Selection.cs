@@ -2466,6 +2466,10 @@ internal sealed partial class Selection
             return ParseSingleFromSource(context, scope);
         }
 
+        // `CROSS APPLY @x.nodes('…')` shreds a variable, which needs no left scope.
+        if (next is AtPrefixedString && IsXmlNodesCallAhead(context))
+            return ParseXmlNodesSource(context, []);
+
         if (next is Name nextName)
         {
             // The right-side source's column references can correlate to the
@@ -3078,6 +3082,10 @@ internal sealed partial class Selection
             // Msg 208) since the user's spelling tells us they meant a
             // table variable, not a missing table.
             case AtPrefixedString:
+                // `@x.nodes('…')` shreds an xml variable (or parameter); a
+                // variable needs no APPLY-left scope for its target.
+                if (IsXmlNodesCallAhead(context))
+                    return ParseXmlNodesSource(context, []);
                 var tvName = BatchContext.ParseObjectName(context, acceptTableVariable: true);
                 if (!context.Batch.TryResolveTable(tvName, out var tvTable))
                     throw SimulatedSqlException.MustDeclareTableVariable(tvName.Leaf);

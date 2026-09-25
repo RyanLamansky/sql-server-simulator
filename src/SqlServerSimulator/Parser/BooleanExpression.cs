@@ -1703,7 +1703,7 @@ internal abstract class BooleanExpression : ExpressionNode
     /// <c>IS NOT NULL</c> is just the negation; standard NOT behavior
     /// doesn't apply because there's no UNKNOWN to propagate.
     /// </summary>
-    private sealed class IsNullExpression(Expression source, bool negated) : BooleanExpression
+    internal sealed class IsNullExpression(Expression source, bool negated) : BooleanExpression
     {
         internal override bool ParallelSafe => source.ParallelSafe;
 

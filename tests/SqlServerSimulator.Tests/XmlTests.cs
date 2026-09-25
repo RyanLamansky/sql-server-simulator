@@ -528,6 +528,35 @@ public sealed class XmlTests
             """));
     }
 
+    /// <summary>A variable or parameter shreds through .nodes() as a FROM source or an APPLY's right side.</summary>
+    [TestMethod]
+    [DataRow("declare @x xml = '<r><a i=\"1\"/><a i=\"2\"/></r>'; select string_agg(t.c.value('@i', 'varchar(5)'), ',') from @x.nodes('/r/a') t(c)", "1,2")]
+    [DataRow("declare @x xml = '<r><a i=\"1\"/></r>'; select string_agg(concat(v.n, ':', t.c.value('@i', 'int')), ',') from (values (1), (2)) v(n) cross apply @x.nodes('/r/a') as t(c)", "1:1,2:1")]
+    [DataRow("declare @x xml = '<r/>'; select count(*) from (values (1)) v(n) outer apply @x.nodes('/r/zz') t(c)", "1")]
+    public void XmlNodes_OverAVariable_ShredsRows(string sql, string expected)
+        => AreEqual(expected, Convert.ToString(new Simulation().ExecuteScalar(sql), System.Globalization.CultureInfo.InvariantCulture));
+
+    /// <summary>
+    /// A .nodes() column is readable only by the xml methods and IS [NOT] NULL
+    /// (probed 2026-09-25 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select t.c", 493, "The column 'c' that was returned from the nodes() method cannot be used directly. It can only be used with one of the four XML data type methods, exist(), nodes(), query(), and value(), or in IS NULL and IS NOT NULL checks.")]
+    [DataRow("select *", 493, null)]
+    [DataRow("select t.c + 1", 493, null)]
+    [DataRow("select cast(t.c as nvarchar(max))", 525, "The column that was returned from the nodes() method cannot be converted to the data type nvarchar(max). It can only be used with one of the four XML data type methods, exist(), nodes(), query(), and value(), or in IS NULL and IS NOT NULL checks.")]
+    [DataRow("select convert(decimal(5, 2), t.c)", 525, "The column that was returned from the nodes() method cannot be converted to the data type decimal. It can only be used with one of the four XML data type methods, exist(), nodes(), query(), and value(), or in IS NULL and IS NOT NULL checks.")]
+    public void XmlNodes_ColumnReadDirectly_IsRefused(string select, int number, string? message)
+    {
+        var ex = new Simulation().AssertSqlError($"declare @x xml = '<r><a/></r>'; {select} from @x.nodes('/r/a') t(c)", number);
+        if (message is not null)
+            AreEqual(message, ex.Errors[0].Message);
+    }
+
+    [TestMethod]
+    public void XmlNodes_ColumnInAnIsNullTest_IsAccepted()
+        => AreEqual(1, new Simulation().ExecuteScalar("declare @x xml = '<r><a/></r>'; select case when t.c is null then 0 else 1 end from @x.nodes('/r/a') t(c)"));
+
     [TestMethod]
     public void XmlNodes_OuterApply_NullXmlYieldsNoRows()
     {

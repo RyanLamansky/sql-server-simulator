@@ -7,6 +7,23 @@ namespace SqlServerSimulator;
 partial class SimulatedSqlException
 {
     /// <summary>
+    /// Mimics SQL Server error 493: a <c>.nodes()</c> row column read other
+    /// than by one of the four xml methods or an <c>IS [NOT] NULL</c> test
+    /// (probed 2026-09-25 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException NodesColumnUsedDirectly(string columnName) =>
+        new($"The column '{columnName}' that was returned from the nodes() method cannot be used directly. It can only be used with one of the four XML data type methods, exist(), nodes(), query(), and value(), or in IS NULL and IS NOT NULL checks.", 493, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 525: a <c>CAST</c> / <c>CONVERT</c> of a
+    /// <c>.nodes()</c> row column, naming the target by its base type — kept
+    /// <c>(max)</c>, dropped length or precision otherwise (probed 2026-09-25).
+    /// </summary>
+    internal static SimulatedSqlException NodesColumnCannotConvert(SqlType target) =>
+        new($"The column that was returned from the nodes() method cannot be converted to the data type {target.SqlServerName}{(target is VarcharSqlType { length: SqlType.MaxLengthSentinel } or NVarcharSqlType { length: SqlType.MaxLengthSentinel } or VarbinarySqlType { length: SqlType.MaxLengthSentinel } ? "(max)" : "")}. It can only be used with one of the four XML data type methods, exist(), nodes(), query(), and value(), or in IS NULL and IS NOT NULL checks.", 525, 16, 2);
+
+
+    /// <summary>
     /// The 9400 family: a value converted to <c>xml</c> isn't well-formed.
     /// Probe-confirmed against SQL Server 2025 (2026-09-23): Class 16, State
     /// 1, <c>XML parsing: line L, character C, &lt;detail&gt;</c>, where the

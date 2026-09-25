@@ -1022,6 +1022,11 @@ internal sealed partial class Selection
         // unresolved collation on to whatever reads its column.
         var projectionFeedsAnAssignment = isAssignmentOnly || scope.FeedsInsert;
         var projectionNamesOwnCollation = !projectionFeedsAnAssignment && scope.NamesOutputCollation;
+        // A .nodes() row column holds a node reference, which only the xml
+        // methods and IS [NOT] NULL may read: selecting it is Msg 493, ahead of
+        // any type rule its xml type would break.
+        foreach (var expression in expressions)
+            RejectDirectNodesColumnRead(expression, sources);
         for (var i = 0; i < expressions.Count; i++)
         {
             outputSchema[i] = expressions[i].GetSqlType(parseBatch, readColumnSink is null ? ResolveColumnType : RecordingResolver);
@@ -1692,6 +1697,29 @@ internal sealed partial class Selection
     /// carry no extra array. The two names share one <see cref="SqlType"/>, so
     /// this stays projection-time metadata and never influences storage.
     /// </summary>
+    /// <summary>
+    /// Raises Msg 493 for a <c>.nodes()</c> column <paramref name="expression"/>
+    /// reads outside an xml method's receiver or an <c>IS [NOT] NULL</c> test.
+    /// </summary>
+    private static void RejectDirectNodesColumnRead(Expression expression, FromSource[] sources) =>
+        expression.Walk((node, shape) => node switch
+        {
+            Reference reference when ReadsNodesColumn(sources, reference)
+                => throw SimulatedSqlException.NodesColumnUsedDirectly(reference.ReferencedName.Leaf),
+            // A conversion of the column is Msg 525 naming the target type
+            // (probed 2026-09-25) — its shape reports the type, then the source.
+            Cast or ConvertExpression when shape.ChildNodes[0] is Reference converted && ReadsNodesColumn(sources, converted)
+                => throw SimulatedSqlException.NodesColumnCannotConvert((SqlType)shape.Locals[1]!),
+            XmlMethodCall or BooleanExpression.IsNullExpression or Reference => false,
+            _ => true,
+        });
+
+    private static bool ReadsNodesColumn(FromSource[] sources, Reference reference)
+    {
+        var (s, _) = FindSourceColumn(sources, reference.ReferencedName);
+        return s >= 0 && sources[s].XmlReceiverName is not null;
+    }
+
     /// <summary>Whether <paramref name="operand"/> is a bare reference to a source column with no type.</summary>
     private static bool ReadsUntypedNullColumn(FromSource[] sources, Expression? operand)
     {

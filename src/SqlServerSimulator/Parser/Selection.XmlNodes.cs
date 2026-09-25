@@ -37,6 +37,23 @@ internal sealed partial class Selection
     /// expression; on return it sits just past the closing <c>)</c> of the
     /// column-alias list.
     /// </summary>
+    /// <summary>
+    /// Whether the token under the cursor opens <c>&lt;target&gt;.nodes(</c>,
+    /// read ahead without consuming.
+    /// </summary>
+    private static bool IsXmlNodesCallAhead(ParserContext context)
+    {
+        var checkpoint = context.SaveCheckpoint();
+        var isNodes = false;
+        if (context.GetNextOptional() is Operator { Character: '.' })
+        {
+            if (context.GetNextOptional() is Name { Value: "nodes" })
+                isNodes = context.GetNextOptional() is Operator { Character: '(' };
+        }
+        context.RestoreCheckpoint(checkpoint);
+        return isNodes;
+    }
+
     private static FromSource ParseXmlNodesSource(ParserContext context, FromSource[] leftSources)
     {
         // The xml target names a column of the APPLY's left side, so install

@@ -76,6 +76,8 @@ CREATE XML INDEX name ON table(col)
   `GetSqlType` returns the resolved target type, so projection / view-output schemas are exact (not the old nvarchar(MAX) stub).
 - **`.nodes(xquery)`** — rowset-producing, valid only in a FROM / APPLY source position.
   `Selection.cs::ParseLateralFromSource` detects the `xmlexpr.nodes(...) [AS] alias(column)` shape (the parsed object name's leaf is `nodes` with a following `(`), re-parses the target as an expression, and builds a correlated single-column (`xml`) lateral plan (`Selection.XmlNodes.cs`).
+  A variable or parameter target — `FROM @x.nodes(…)`, `CROSS APPLY @x.nodes(…)` — takes the same plan through a `.nodes(` lookahead on the `@` token.
+  The row column is a node reference only the four methods and `IS [NOT] NULL` may read: in the select list anything else is **Msg 493**, and a `CAST` / `CONVERT` of it **Msg 525** naming the target's base type, both ahead of the type rules its `xml` type would otherwise break (probed 2026-09-25); a read in another clause isn't checked.
   Each row's value is the serialized outer XML of one matched node, so a downstream relative `.value()` / nested `.nodes()` re-parses the fragment.
   Reaching `XmlMethodCall.Run` for `.nodes()` means it appeared in scalar position — unsupported.
 - **`.exist(xquery)`** — returns `bit`: 1 when the expression's **result sequence is non-empty**, 0 otherwise, NULL when the instance is NULL (`XmlQueryEngine.EvaluateExists`).
