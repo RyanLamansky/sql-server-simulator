@@ -562,7 +562,7 @@ Probe-confirmed; oracle `AggregateBindingRuleTests`.
 - **Msg 8117 Cls 16 St 1** — `"Operand data type NULL is invalid for {aggregate} operator."`
   A bare untyped `NULL` operand, for count / count_big / sum / avg / max / min / stdev / checksum_agg.
   A *typed* NULL is fine (`COUNT_BIG(CAST(NULL AS int))` → 0).
-  `STRING_AGG(NULL, ',')` uses a different message (Msg 8116, the argument form) and isn't covered.
+  `STRING_AGG(NULL, ',')` uses the argument form instead — Msg 8116, `Argument data type NULL is invalid for argument 1 of string_agg function.`
 - **Msg 144 Cls 15 St 1** — `"Cannot use an aggregate or a subquery in an expression used for the group by list of a GROUP BY clause."`
   Takes precedence over Msg 164: a correlated-subquery grouping item reports 144 even though it does reference a local column.
 - **Msg 164 Cls 15 St 1** — `"Each GROUP BY expression must contain at least one column that is not an outer reference."`

@@ -42,6 +42,9 @@ internal sealed class CertificateFunction : Expression
             this.certId = Parse(context);
             if (context.Token is not Tokens.Operator { Character: ')' })
                 throw SimulatedSqlException.FunctionRequiresNArguments("CertEncoded", 1);
+            // A bare NULL has no type to accept (Msg 8116, probed 2026-09-24).
+            if (IsUntypedNullLiteral(this.certId))
+                throw SimulatedSqlException.InvalidArgumentDataType("NULL", 1, "CertEncoded");
         }
     }
 

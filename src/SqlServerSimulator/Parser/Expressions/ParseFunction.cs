@@ -29,6 +29,9 @@ internal sealed class ParseFunction : Expression
     {
         this.tryMode = tryMode;
         this.source = Parse(context);
+        // A bare NULL has no type to accept (Msg 8116, probed 2026-09-24).
+        if (IsUntypedNullLiteral(this.source))
+            throw SimulatedSqlException.InvalidArgumentDataType("NULL", 1, "parse");
         if (context.Token is not Tokens.ReservedKeyword { Keyword: Keyword.As })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         var typeName = context.GetNextRequired<Tokens.Name>();

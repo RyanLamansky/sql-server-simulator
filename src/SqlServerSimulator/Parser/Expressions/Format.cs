@@ -30,6 +30,9 @@ internal sealed class Format : Expression
     public Format(ParserContext context)
     {
         this.value = Parse(context);
+        // A bare NULL value has no type to format (Msg 8116, probed 2026-09-24).
+        if (IsUntypedNullLiteral(this.value))
+            throw SimulatedSqlException.InvalidArgumentDataType("NULL", argumentIndex: 1, "format");
         if (context.Token is not Tokens.Operator { Character: ',' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         this.format = Parse(context.MoveNextRequiredReturnSelf());

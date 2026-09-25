@@ -815,7 +815,7 @@ partial class SimulatedSqlException
     /// <see cref="ConstantNotAllowedInOrderedAggregate"/> instead.
     /// </summary>
     internal static SimulatedSqlException IntegerIndexNotAllowedInOrderedAggregate() =>
-        new("Windowed functions, aggregates and NEXT VALUE FOR functions do not support integer indices as ORDER BY clause expressions.", 5308, 15, 1);
+        new("Windowed functions, aggregates and NEXT VALUE FOR functions do not support integer indices as ORDER BY clause expressions.", 5308, 16, 1);
 
     /// <summary>
     /// Mimics SQL Server's Msg 5309 — an <c>OVER (ORDER BY …)</c> or
@@ -827,7 +827,7 @@ partial class SimulatedSqlException
     /// and <c>NEXT VALUE FOR … OVER</c> forms alike.
     /// </summary>
     internal static SimulatedSqlException ConstantNotAllowedInOrderedAggregate() =>
-        new("Windowed functions, aggregates and NEXT VALUE FOR functions do not support constants as ORDER BY clause expressions.", 5309, 15, 1);
+        new("Windowed functions, aggregates and NEXT VALUE FOR functions do not support constants as ORDER BY clause expressions.", 5309, 16, 1);
 
     /// <summary>
     /// Mimics SQL Server's Msg 8729 — a RANGE window frame's ORDER BY keys

@@ -35,6 +35,9 @@ internal sealed class HashBytes : Expression
         if (context.Token is not Tokens.Operator { Character: ',' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         this.inputArg = Parse(context.MoveNextRequiredReturnSelf());
+        // A bare NULL has no type to accept (Msg 8116, probed 2026-09-24).
+        if (IsUntypedNullLiteral(this.inputArg))
+            throw SimulatedSqlException.InvalidArgumentDataType("NULL", 2, "hashbytes");
         if (context.Token is not Tokens.Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
     }

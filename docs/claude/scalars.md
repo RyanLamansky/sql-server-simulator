@@ -838,7 +838,7 @@ Probe-confirmed against SQL Server 2025.
   (A reference instance with FILESTREAM file-system access disabled at the instance level instead raises Msg 5592; the simulator returns the enabled-but-idle answer.)
   Zero arguments; any argument raises **Msg 174** (`The get_filestream_transaction_context function requires 0 argument(s).` — lowercase function name).
 
-The untyped-NULL-literal argument diagnostic (real raises Msg 8116 for `CERTENCODED(NULL)` because an untyped `NULL` literal has no type) is not modeled — the simulator's untyped `NULL` literal carries `Type=Int32`, so it flows through as a valid int argument and returns NULL.
+A bare `NULL` argument is Msg 8116 naming `NULL` (`Argument data type NULL is invalid for argument 1 of CertEncoded function.`), as it is for `FORMAT`'s value, `PARSE`'s string, `HASHBYTES`' input, `DATE_BUCKET`'s date, `SUBSTRING`'s string and each `CHECKSUM` argument (probed 2026-09-24).
 
 ## ODBC escape sequences: `{d}` / `{t}` / `{ts}` / `{guid}` / `{fn}`
 

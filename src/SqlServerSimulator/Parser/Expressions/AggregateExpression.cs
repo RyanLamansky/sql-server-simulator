@@ -236,8 +236,14 @@ internal sealed class AggregateExpression : Expression
         {
             throw SimulatedSqlException.AggregateOnAggregateOrSubquery();
         }
-        if (kind != AggregateKind.StringAgg && IsUntypedNullLiteral(operand))
-            throw SimulatedSqlException.OperandDataTypeNullInvalid(LowerNameOf(kind));
+        if (IsUntypedNullLiteral(operand))
+        {
+            // STRING_AGG names the argument where the others name the
+            // operator (Msg 8116, probed 2026-09-24).
+            throw kind == AggregateKind.StringAgg
+                ? SimulatedSqlException.InvalidArgumentDataType("NULL", 1, "string_agg")
+                : SimulatedSqlException.OperandDataTypeNullInvalid(LowerNameOf(kind));
+        }
     }
 
     /// <summary>

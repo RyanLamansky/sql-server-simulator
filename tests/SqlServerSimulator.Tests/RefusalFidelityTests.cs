@@ -514,4 +514,20 @@ public sealed class RefusalFidelityTests
         values.Sort();
         CollectionAssert.AreEqual(new long[] { 1, 2, 3 }, values);
     }
+
+    [TestMethod]
+    [DataRow("select format(null, 'N')", 1, "format")]
+    [DataRow("select certencoded(null)", 1, "CertEncoded")]
+    [DataRow("select parse(null as int)", 1, "parse")]
+    [DataRow("select hashbytes('md5', null)", 2, "hashbytes")]
+    [DataRow("select date_bucket(day, 1, null)", 3, "Date_Bucket")]
+    [DataRow("select string_agg(null, ',')", 1, "string_agg")]
+    public void BareNullArgument_RaisesMsg8116NamingNull(string sql, int argument, string function)
+        => new Simulation().AssertSqlError(sql, 8116, $"Argument data type NULL is invalid for argument {argument} of {function} function.");
+
+    [TestMethod]
+    [DataRow("select row_number() over (order by 'a')", 5309)]
+    [DataRow("select row_number() over (order by 1)", 5308)]
+    public void ConstantWindowOrderBy_IsClass16(string sql, int number)
+        => AreEqual((byte)16, new Simulation().AssertSqlError(sql, number).Class);
 }

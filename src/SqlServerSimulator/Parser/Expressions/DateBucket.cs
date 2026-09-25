@@ -40,6 +40,9 @@ internal sealed class DateBucket : Expression
         if (context.Token is not Operator { Character: ',' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         this.date = Parse(context.MoveNextRequiredReturnSelf());
+        // A bare NULL has no type to accept (Msg 8116, probed 2026-09-24).
+        if (IsUntypedNullLiteral(this.date))
+            throw SimulatedSqlException.InvalidArgumentDataType("NULL", 3, "Date_Bucket");
         if (context.Token is Operator { Character: ',' })
             this.origin = Parse(context.MoveNextRequiredReturnSelf());
         if (context.Token is not Operator { Character: ')' })
