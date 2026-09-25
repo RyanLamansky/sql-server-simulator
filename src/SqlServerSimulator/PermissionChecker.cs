@@ -234,7 +234,7 @@ internal static class PermissionEnforcement
     /// reach simply reveals nothing to them (probe-confirmed — the id form never
     /// raises, unlike the name form's three-part lookup).
     /// </summary>
-    private static bool TryResolveCrossDatabasePrincipal(SimulatedDbConnection connection, Database target, out DatabasePrincipal principal)
+    internal static bool TryResolveCrossDatabasePrincipal(SimulatedDbConnection connection, Database target, out DatabasePrincipal principal)
     {
         var effective = connection.Security.Effective;
         if (effective.IsDatabaseScoped && !connection.CurrentDatabase.Trustworthy)

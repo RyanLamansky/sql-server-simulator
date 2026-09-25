@@ -385,13 +385,29 @@ public sealed class SystemInfoProcTests
             ColumnNames(new Simulation(), "exec sp_helpdb"));
 
     [TestMethod]
-    public void HelpDb_NoArgument_ListsAccessibleDatabasesByNameAndSkipsModel()
+    public void HelpDb_NoArgument_ListsAccessibleDatabasesByName()
     {
         var (sets, errors) = Run(new Simulation(), "exec sp_helpdb");
         var names = sets[0].Rows.ConvertAll(r => (string)r[0]!);
-        CollectionAssert.AreEqual(new[] { "master", "msdb", "simulated", "tempdb" }, names);
-        AreEqual(15622, errors[0].Number);
-        AreEqual("No permission to access database 'model'.", errors[0].Message);
+        CollectionAssert.AreEqual(new[] { "master", "model", "msdb", "simulated", "tempdb" }, names);
+        IsEmpty(errors);
+    }
+
+    [TestMethod]
+    public void HelpDb_NoArgument_SkipsWhatARestrictedLoginCannotOpen()
+    {
+        // A login with no user anywhere reaches only the guest-enabled system
+        // databases; the rest are Msg 15622 in the listing's place.
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create login app with password = 'S3cret!Pass'");
+        using var connection = sim.CreateDbConnection();
+        connection.ConnectionString = "User ID=app;Password=S3cret!Pass;Initial Catalog=master";
+        connection.Open();
+        var (sets, errors) = Run(connection, "exec sp_helpdb");
+        CollectionAssert.AreEqual(new[] { "master", "msdb", "tempdb" }, sets[0].Rows.ConvertAll(r => (string)r[0]!));
+        CollectionAssert.AreEqual(
+            new[] { "No permission to access database 'model'.", "No permission to access database 'simulated'." },
+            errors.ConvertAll(e => e.Message));
     }
 
     [TestMethod]
@@ -911,9 +927,10 @@ public sealed class SystemInfoProcTests
 
     // ===== sp_MSforeachdb =====
 
-    // The accessible databases in database_id order — model is left out
-    // because HAS_DBACCESS reports 0 for it, the same filter sp_helpdb applies.
-    private static readonly string[] ForEachDbNames = ["master", "tempdb", "msdb", "simulated"];
+    // The accessible databases in database_id order — every one, model
+    // included, for the sysadmin-equivalent default session (probed
+    // 2026-09-25 as sa); a restricted login loses what HAS_DBACCESS denies it.
+    private static readonly string[] ForEachDbNames = ["master", "tempdb", "model", "msdb", "simulated"];
 
     [TestMethod]
     public void ForEachDb_RunsTheCommandOncePerAccessibleDatabaseInIdOrder()
@@ -927,7 +944,7 @@ public sealed class SystemInfoProcTests
         // command reading DB_NAME() reports the caller's every time.
         var names = Sets(new Simulation(), "exec sp_MSforeachdb 'select db_name() as ctx'")
             .ConvertAll(s => (string)s.Rows[0][0]!);
-        CollectionAssert.AreEqual(new[] { "simulated", "simulated", "simulated", "simulated" }, names);
+        CollectionAssert.AreEqual(new[] { "simulated", "simulated", "simulated", "simulated", "simulated" }, names);
     }
 
     [TestMethod]

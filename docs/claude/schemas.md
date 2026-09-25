@@ -283,8 +283,8 @@ NULL arg → NULL.
 Result types: `DB_ID` → `smallint`; `DB_NAME` → `sysname`.
 
 **`HAS_DBACCESS('name')`** (same file): int — **accessibility-aware, not existence-based**.
-`1` for an accessible hosted database (master / tempdb / msdb and every user database — the simulator has no per-login access model, so hosted ⇒ accessible), `0` for `model` (the restricted template database, inaccessible even to a normal login — probe-confirmed), NULL for unknown / empty / NULL names (case-insensitive lookup; missing argument → Msg 174).
-So `model` is seeded and resolves through `DB_ID` / `sys.databases` yet `has_dbaccess('model')` reports `0` — the "exists but inaccessible" split.
+`1` when the session's login can open the database — the question `USE` asks ([`permissions.md`](permissions.md)): a sysadmin (and the default session) opens every database, an ordinary login one it has a user in or whose `guest` is enabled (master / tempdb / msdb, not `model`) — else `0`, and NULL for unknown / empty / NULL names (case-insensitive lookup; missing argument → Msg 174), probed 2026-09-25 against SQL Server 2025 as `sa` and as an ordinary login.
+So `model` is seeded and resolves through `DB_ID` / `sys.databases` for everyone, yet an ordinary login's `has_dbaccess('model')` reports `0` — the "exists but inaccessible" split.
 SSMS calls `has_dbaccess('msdb')` at connect to gate its Policy Health / Agent features; the seeded msdb answers `1` and the feature renders.
 `DB_ID` resolves all four system databases; `has_dbaccess` reflects accessibility.
 

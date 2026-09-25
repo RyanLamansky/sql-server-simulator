@@ -106,6 +106,10 @@ internal static partial class BuiltInResources
         "sp_fkeys",
         "sp_statistics",
         "sp_statistics_100",
+        // sp_server_info / sp_databases: ODBC's SQLGetInfo attribute list and
+        // its catalog (database) list.
+        "sp_server_info",
+        "sp_databases",
         "sp_stored_procedures",
         // The sp_help family — the formatted-metadata procs interactive
         // sessions and SSMS's scripting fall back on. sp_help delegates to

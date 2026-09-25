@@ -103,11 +103,20 @@ public sealed class SystemDatabaseTests
     // normal login (probe-confirmed 2026-07-14). It exists (sys.databases /
     // DB_ID resolve it) but has_dbaccess reports 0.
     [TestMethod]
-    public void HasDbAccess_Model_Returns0_DespiteBeingSeeded()
+    public void HasDbAccess_Model_FollowsTheLogin()
     {
+        // A sysadmin (and the default session) opens model; an ordinary login
+        // can't, since model has no enabled guest (probed against SQL Server
+        // 2025 both ways).
         var sim = new Simulation();
         AreEqual((short)3, sim.ExecuteScalar("select db_id('model')"));
-        AreEqual(0, sim.ExecuteScalar("select has_dbaccess('model')"));
+        AreEqual(1, sim.ExecuteScalar("select has_dbaccess('model')"));
+        _ = sim.ExecuteNonQuery("create login app with password = 'S3cret!Pass'");
+        using var connection = sim.CreateDbConnection();
+        connection.ConnectionString = "User ID=app;Password=S3cret!Pass;Initial Catalog=master";
+        connection.Open();
+        AreEqual("0|1|0", connection.CreateCommand(
+            "select concat(has_dbaccess('model'), '|', has_dbaccess('msdb'), '|', has_dbaccess('simulated'))").ExecuteScalar());
     }
 
     [TestMethod]

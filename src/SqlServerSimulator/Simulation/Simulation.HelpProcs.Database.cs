@@ -114,7 +114,7 @@ partial class Simulation
         {
             if (single is not null && !ReferenceEquals(database, single))
                 continue;
-            if (!HasDbAccess.IsAccessible(database))
+            if (!HasDbAccess.IsAccessible(batch.Connection, database))
             {
                 batch.AppendInfoError(@class: 10, state: 1, number: 15622,
                     message: $"No permission to access database '{database.Name}'.");
@@ -137,7 +137,7 @@ partial class Simulation
 
         // The single-database form follows the summary with a bare PRINT and
         // the target database's own sp_helpfile output.
-        if (single is null || !HasDbAccess.IsAccessible(single))
+        if (single is null || !HasDbAccess.IsAccessible(batch.Connection, single))
             yield break;
         batch.AppendPrintMessage(" ");
         yield return HelpFileResultSet(single);

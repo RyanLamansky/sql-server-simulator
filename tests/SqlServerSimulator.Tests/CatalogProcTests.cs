@@ -521,4 +521,30 @@ public sealed class CatalogProcTests
     [TestMethod]
     public void SpFkeys_NeedsATableName()
         => TestHelpers.AssertSqlError("exec sp_fkeys", 15252, "The primary or foreign key table name must be given.");
+
+    [TestMethod]
+    public void SpServerInfo_ListsTheAttributesInOrder()
+    {
+        var rows = Run(new Simulation(), "exec sp_server_info");
+        HasCount(29, rows);
+        AreEqual("DBMS_NAME=Microsoft SQL Server", $"{rows[0]["attribute_name"]}={rows[0]["attribute_value"]}");
+        AreEqual("IDENTIFIER_CASE=MIXED", $"{rows[8]["attribute_name"]}={rows[8]["attribute_value"]}");
+        AreEqual(500, rows[^1]["attribute_id"]);
+        var collationSequence = Run(new Simulation(), "exec sp_server_info @attribute_id = 18");
+        HasCount(1, collationSequence);
+        AreEqual("charset=iso_1 sort_order=nocase_iso charset_num=1 sort_order_num=52", collationSequence[0]["attribute_value"]);
+    }
+
+    [TestMethod]
+    public void SpDatabases_ListsEachDatabaseWithItsSizeInKilobytes()
+    {
+        var sim = new Simulation();
+        var rows = Run(sim, "exec sp_databases");
+        CollectionAssert.AreEqual(
+            new[] { "master", "model", "msdb", "simulated", "tempdb" },
+            rows.ConvertAll(r => (string)r["DATABASE_NAME"]!));
+        var simulated = rows.Find(r => (string)r["DATABASE_NAME"]! == "simulated")!;
+        AreEqual(sim.ExecuteScalar("select sum(size) * 8 from sys.master_files where database_id = db_id()"), simulated["DATABASE_SIZE"]);
+        IsNull(simulated["REMARKS"]);
+    }
 }

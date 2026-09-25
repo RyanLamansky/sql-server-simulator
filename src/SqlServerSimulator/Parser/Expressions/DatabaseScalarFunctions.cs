@@ -170,20 +170,23 @@ internal sealed class HasDbAccess : Expression
             return SqlValue.Null(SqlType.Int32);
         var name = arg.CoerceTo(SqlType.NVarchar).AsString;
         return runtime.Batch.Connection.Simulation.Databases.TryGetValue(name, out var database)
-            ? SqlValue.FromInt32(IsAccessible(database) ? 1 : 0)
+            ? SqlValue.FromInt32(IsAccessible(runtime.Batch.Connection, database) ? 1 : 0)
             : SqlValue.Null(SqlType.Int32);
     }
 
     /// <summary>
-    /// Whether <paramref name="database"/> is accessible to a normal login —
-    /// the answer <c>HAS_DBACCESS</c> gives, and the same gate
-    /// <c>sp_helpdb</c> applies before listing a database. <c>model</c> is the
-    /// restricted template and answers <see langword="false"/>
-    /// (probe-confirmed); every other hosted database is accessible, since the
-    /// simulator has no per-login database-access model.
+    /// Whether the session's login can open <paramref name="database"/> — the
+    /// answer <c>HAS_DBACCESS</c> gives, and the gate <c>sp_helpdb</c>,
+    /// <c>sp_databases</c> and <c>sp_MSforeachdb</c> apply before listing a
+    /// database. It is the question a <c>USE</c> asks: a sysadmin reaches every
+    /// database, <c>model</c> included, while any other login needs a user
+    /// there or an enabled <c>guest</c>, which <c>model</c> lacks (probed
+    /// 2026-09-25 against SQL Server 2025 as <c>sa</c>, and earlier as an
+    /// ordinary login).
     /// </summary>
-    internal static bool IsAccessible(Database database) =>
-        !BuiltInToken.Comparer.Equals(database.Name, Simulation.ModelDatabaseName);
+    internal static bool IsAccessible(SimulatedDbConnection connection, Database database) =>
+        PermissionEnforcement.Bypasses(connection, database)
+        || PermissionEnforcement.TryResolveCrossDatabasePrincipal(connection, database, out _);
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {

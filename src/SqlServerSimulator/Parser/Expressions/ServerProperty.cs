@@ -112,7 +112,7 @@ internal sealed class ServerProperty : Expression
 
     // Derive the SQL sort-order id from the collation name; real SQL Server
     // reports 0 for collations with no SQL_* sort order.
-    private static byte SortIdFor(string collationName)
+    internal static byte SortIdFor(string collationName)
         => Collation.SqlServerSortOrders.TryGetValue(collationName, out var so) ? checked((byte)so.OrderNumber) : (byte)0;
 
     internal override string DebugDisplay() => $"SERVERPROPERTY({this.nameArg.DebugDisplay()})";

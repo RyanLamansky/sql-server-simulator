@@ -94,7 +94,7 @@ partial class Simulation
         var names = new List<string>();
         foreach (var (database, _) in DbId.DatabasesWithIds(batch.Connection.Simulation))
         {
-            if (HasDbAccess.IsAccessible(database))
+            if (HasDbAccess.IsAccessible(batch.Connection, database))
                 names.Add(database.Name);
         }
 
