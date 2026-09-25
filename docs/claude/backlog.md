@@ -340,9 +340,6 @@ Entries are verified against the simulator, so one that no longer reproduces is 
 - **A GROUP BY view's aggregate column is Msg 4403** where real reports **Msg 4406** — real splits by which column the write names, `SET <group-by column>` being 4403 and `SET <aggregate column>` 4406 since the aggregate is a derived field (probe-confirmed, through a chained view too).
   `RejectionReason` settles the whole view before any column is looked at, so the per-column gate never runs on a shape that already failed; letting the 4406 walk run first on an aggregate / DISTINCT body is the work.
   → [`programmable.md`](programmable.md#updatable-views-dml-through-views).
-- **A batch that is nothing but `@var <type>` is Msg 102 where real says Msg 137** — real parses `@x int` as a statement far enough to bind `@x` and reports the undeclared variable; the simulator's dispatcher rejects it as a syntax error at the `@x`.
-  Reachable through `EXEC sp_executesql N'@x int'` and, more realistically, through an `sp_executesql` call whose two leading arguments were transposed — real runs the declaration string as the statement and reports 137, which is how the positional-binding rule was probed in the first place.
-  Both engines refuse the batch either way; only the number and wording differ.
 - **An `sp_executesql` declaration string that is itself a query** (`N'select 2'`, the transposed-arguments shape) is Msg 156 at its first keyword here, where real reads `(select 2)` as a complete parenthesized expression and reports the text after it as **Msg 4124** (probed 2026-09-25).
   The declaration parse otherwise follows real's `(<declarations>)` reading: a list that ends early is Msg 102 near its closing `)`, and text after a complete list is Msg 4124.
 

@@ -138,7 +138,7 @@ partial class Simulation
         }
 
         MultiPartName procName;
-        if (!implicitExec && context.Token is AtPrefixedString nameVariable)
+        if (context.Token is AtPrefixedString nameVariable)
         {
             procName = ProcedureNameFromVariable(batch, nameVariable.Value);
         }

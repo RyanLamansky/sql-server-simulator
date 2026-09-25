@@ -51,4 +51,40 @@ public sealed class ImplicitExecTests
     [TestMethod]
     public void BareProcCall_AfterLeadingSemicolon_RaisesMsg102()
         => new Simulation().AssertSqlError("; sp_datatype_info_100 0, 3", 102);
+
+    /// <summary>
+    /// A variable naming the procedure takes the implicit form too, and a
+    /// dynamic-SQL string is a batch of its own whose first statement
+    /// qualifies.
+    /// </summary>
+    [TestMethod]
+    [DataRow("exec sp_executesql N'@p 7', N'@p nvarchar(100)', @p = N'myp'", 8)]
+    [DataRow("exec sp_executesql N'@p', N'@p nvarchar(100)', @p = N'myp'", 6)]
+    [DataRow("exec sp_executesql N'@p @a = 9', N'@p nvarchar(100)', @p = N'myp'", 10)]
+    [DataRow("exec (N'myp 3')", 4)]
+    [DataRow("exec sp_executesql N'myp 3'", 4)]
+    public void DynamicSqlFirstStatement_TakesTheImplicitForm(string sql, int expected)
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create procedure myp @a int = 5 as select @a + 1");
+        AreEqual(expected, sim.ExecuteScalar(sql));
+    }
+
+    [TestMethod]
+    [DataRow("exec sp_executesql N'select 0; @p 1', N'@p nvarchar(100)', @p = N'myp'")]
+    [DataRow("exec sp_executesql N'if 1 = 1 myp 3'")]
+    public void DynamicSqlLaterStatement_RaisesMsg102(string sql)
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create procedure myp @a int = 5 as select @a + 1");
+        _ = sim.AssertSqlError(sql, 102);
+    }
+
+    /// <summary>An undeclared variable opening a batch is bound as the procedure name.</summary>
+    [TestMethod]
+    [DataRow("@x int")]
+    [DataRow("@x = 1")]
+    [DataRow("@x, @y int")]
+    public void UndeclaredVariableOpeningABatch_RaisesMsg137(string sql)
+        => new Simulation().AssertSqlError(sql, 137);
 }

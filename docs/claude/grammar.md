@@ -37,6 +37,7 @@ Anywhere else it is Msg 102: after a prior statement (`SELECT 1; sp_who`), and e
 The dispatch loop carries an `atBatchStart` flag (`DispatchStatementsUntil` → `DispatchOneStatement` → `DispatchOneStatementCore`) that starts true for a top-level batch (`endKeyword is null` — never inside a `BEGIN…END` block) and clears on the first `;` or dispatched statement.
 When it is still set and the leading token is a bare `Name` (not a reserved statement keyword — those match their own switch arms first), the statement routes through `ParseExec(batch, implicitExec: true)`, which skips the EXEC-keyword consume, the `EXECUTE AS` / `@rc =` capture, and the dynamic-SQL `(…)` branches and starts directly at the proc-name parse — so RPC and text execution stay identical.
 Positional args (`a, b`), named args (`@p = v`), and no-arg (`sp_who`) all work; an unknown bare name raises the normal proc-not-found (Msg 2812), not Msg 102.
+A variable naming the procedure takes the same form — a batch opening `@p 1` runs `EXEC @p 1`, and an undeclared one is Msg 137 rather than a syntax error — and a dynamic-SQL string (`EXEC (…)`, `sp_executesql`) is a batch of its own whose first statement qualifies (probed 2026-09-25 against SQL Server 2025).
 
 # Unquoted identifier body characters
 

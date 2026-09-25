@@ -1676,8 +1676,10 @@ public sealed partial class Simulation
         // statement clears it. A module body isn't a batch of its own: its
         // CREATE is the batch's first statement, so a bare name opening the
         // body is Msg 102 too (probed 2026-09-25 for a procedure and a
-        // trigger).
-        var atBatchStart = endKeyword is null && batch.ProcFrame is null && batch.TriggerFrame is null && batch.UdfFrame is null;
+        // trigger). A dynamic-SQL string is a batch of its own, so
+        // `EXEC (N'sp_who')` and `sp_executesql N'sp_who'` qualify (probed
+        // 2026-09-25).
+        var atBatchStart = endKeyword is null && batch.ProcFrame is not { IsDynamicSql: false } && batch.TriggerFrame is null && batch.UdfFrame is null;
         // BEGIN...END block dispatch (endKeyword=End) bumps BlockDepth so the
         // must-be-first-statement check on CREATE/ALTER
         // PROCEDURE / FUNCTION / VIEW / TRIGGER / SCHEMA rejects them inside
@@ -3024,7 +3026,10 @@ public sealed partial class Simulation
             // with no EXEC keyword). Routed through the same EXEC path so RPC
             // and text execution stay identical. Anywhere but the first
             // statement, a leading identifier stays Msg 102 (real's rule).
-            case Name when atBatchStart:
+            // A variable naming the procedure takes the implicit form too, so
+            // a batch opening `@p 1` runs `EXEC @p 1` and an undeclared one is
+            // Msg 137 (probed 2026-09-25 against SQL Server 2025).
+            case Name or AtPrefixedString when atBatchStart:
                 foreach (var o in ParseExec(batch, implicitExec: true))
                     yield return o;
                 break;

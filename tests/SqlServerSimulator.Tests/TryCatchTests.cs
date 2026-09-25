@@ -481,5 +481,5 @@ public sealed class TryCatchTests
 
     [TestMethod]
     public void SyntaxErrorInDynamicSql_IsCaughtByTheCallersTry()
-        => AreEqual(102, new Simulation().ExecuteScalar("begin try exec('selec 1') end try begin catch select error_number() end catch"));
+        => AreEqual(156, new Simulation().ExecuteScalar("begin try exec('selec from t') end try begin catch select error_number() end catch"));
 }
