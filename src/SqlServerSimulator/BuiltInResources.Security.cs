@@ -41,7 +41,7 @@ internal static partial class BuiltInResources
         [
             new("session_id", SqlType.SmallInt, null, true),
             new("wait_type", SqlType.NVarchar, 60, true),
-            new("resource_description", SqlType.NVarchar, 2000, true),
+            new("resource_description", SqlType.NVarchar, 3072, true),
             new("blocking_session_id", SqlType.SmallInt, null, true),
         ], LockDmvs.EnumerateDmOsWaitingTasks);
 
@@ -58,9 +58,9 @@ internal static partial class BuiltInResources
             new("status", SqlType.TinyInt, null, true),
             new("min_length_in_bytes", SqlType.SmallInt, null, true),
             new("record_length_first_part_in_bytes", SqlType.SmallInt, null, true),
-            new("record_image_first_part", VarbinarySqlType.MaxForm, null, true),
+            new("record_image_first_part", SqlType.Varbinary, 8000, true),
             new("record_length_second_part_in_bytes", SqlType.SmallInt, null, true),
-            new("record_image_second_part", VarbinarySqlType.MaxForm, null, true),
+            new("record_image_second_part", SqlType.Varbinary, 8000, true),
         ], VersionStoreDmvs.EnumerateDmTranVersionStore);
 
         // sys.dm_tran_version_store_space_usage: aggregate sizing per
@@ -101,7 +101,7 @@ internal static partial class BuiltInResources
         SysP("extended_properties",
         [
             new("class", SqlType.TinyInt, null, false),
-            new("class_desc", SqlType.SystemName, 60, true),
+            new("class_desc", nvarchar60Catalog, 60, true),
             new("major_id", SqlType.Int32, null, false),
             new("minor_id", SqlType.Int32, null, false),
             new("name", SqlType.SystemName, 128, false),
@@ -131,7 +131,7 @@ internal static partial class BuiltInResources
             new("owning_principal_id", SqlType.Int32, null, true),
             new("sid", SqlType.Varbinary, 85, true),
             new("is_fixed_role", SqlType.Bit, null, false),
-            new("authentication_type", SqlType.TinyInt, null, false),
+            new("authentication_type", SqlType.Int32, null, false),
             new("authentication_type_desc", nvarchar60Catalog, 60, true),
             // default_language_name / default_language_lcid aren't tracked
             // (always NULL). SMO's User property-bag reads both via
@@ -264,7 +264,7 @@ internal static partial class BuiltInResources
             new("asymmetric_key_id", SqlType.Int32, null, false),
             new("pvt_key_encryption_type", charTwo, 2, false),
             new("pvt_key_encryption_type_desc", nvarchar60Catalog, 60, true),
-            new("thumbprint", SqlType.Varbinary, 32, false),
+            new("thumbprint", SqlType.Varbinary, 64, false),
             new("algorithm", charTwo, 2, false),
             new("algorithm_desc", nvarchar60Catalog, 60, true),
             new("key_length", SqlType.Int32, null, false),
@@ -272,7 +272,7 @@ internal static partial class BuiltInResources
             new("string_sid", SqlType.NVarchar, 128, true),
             new("public_key", VarbinarySqlType.MaxForm, null, false),
             new("attested_by", SqlType.NVarchar, 260, true),
-            new("provider_type", SqlType.NVarchar, 120, true),
+            new("provider_type", nvarchar60Catalog, 60, true),
             new("cryptographic_provider_guid", SqlType.UniqueIdentifier, null, true),
             new("cryptographic_provider_algid", SqlType.SqlVariant, null, true),
         ], static (_, _) => EmptyCatalogRows);
@@ -292,7 +292,7 @@ internal static partial class BuiltInResources
             new("subject", SqlType.NVarchar, 4000, true),
             new("expiry_date", SqlType.DateTime, null, true),
             new("start_date", SqlType.DateTime, null, true),
-            new("thumbprint", SqlType.Varbinary, 32, false),
+            new("thumbprint", SqlType.Varbinary, 64, false),
             new("attested_by", SqlType.NVarchar, 260, true),
             new("pvt_key_last_backup_date", SqlType.DateTime, null, true),
             new("key_length", SqlType.Int32, null, true),
@@ -305,7 +305,7 @@ internal static partial class BuiltInResources
             new("credential_identity", SqlType.NVarchar, 4000, true),
             new("create_date", SqlType.DateTime, null, false),
             new("modify_date", SqlType.DateTime, null, false),
-            new("target_type", SqlType.NVarchar, 100, true),
+            new("target_type", nvarchar60Catalog, 60, true),
             new("target_id", SqlType.Int32, null, true),
         ], static (_, _) => EmptyCatalogRows);
 
@@ -393,7 +393,7 @@ internal static partial class BuiltInResources
             new("credential_identity", SqlType.NVarchar, 4000, true),
             new("create_date", SqlType.DateTime, null, false),
             new("modify_date", SqlType.DateTime, null, false),
-            new("target_type", SqlType.NVarchar, 60, true),
+            new("target_type", nvarchar60Catalog, 60, true),
             new("target_id", SqlType.Int32, null, true),
         ], static (_, _) => EmptyCatalogRows);
         Sys("database_scoped_credentials",
@@ -510,7 +510,7 @@ internal static partial class BuiltInResources
             };
             yield return [
                 SqlValue.FromByte(key.Class),
-                SqlValue.FromSystemName(classDesc),
+                SqlValue.FromNVarchar(classDesc),
                 SqlValue.FromInt32(key.MajorId),
                 SqlValue.FromInt32(key.MinorId),
                 SqlValue.FromSystemName(key.Name),
@@ -545,9 +545,9 @@ internal static partial class BuiltInResources
         var nullSchemaName = SqlValue.Null(SqlType.SystemName);
         var nullOwningId = SqlValue.Null(SqlType.Int32);
         var dboSchemaName = SqlValue.FromSystemName(Database.DefaultSchemaName);
-        var authNone = SqlValue.FromByte(0);
+        var authNone = SqlValue.FromInt32(0);
         var authNoneDesc = SqlValue.FromNVarchar("NONE");
-        var authInstance = SqlValue.FromByte(1);
+        var authInstance = SqlValue.FromInt32(1);
         var authInstanceDesc = SqlValue.FromNVarchar("INSTANCE");
         // Database roles are owned by dbo (principal_id 1) — probe-confirmed on
         // the reference (every WWI custom role: owning_principal_id = 1). This

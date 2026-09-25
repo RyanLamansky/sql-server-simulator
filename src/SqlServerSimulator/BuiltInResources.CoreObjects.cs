@@ -186,7 +186,7 @@ internal static partial class BuiltInResources
             new("is_remote_data_archive_enabled", SqlType.Bit, null, true),
             new("history_retention_period", SqlType.Int32, null, true),
             new("history_retention_period_unit", SqlType.Int32, null, true),
-            new("history_retention_period_unit_desc", nvarchar60Catalog, 60, true),
+            new("history_retention_period_unit_desc", NVarcharSqlType.Get(10, Collation.Catalog, Coercibility.Implicit), 10, true),
         ], (batch, database) =>
             database.Schemas.Values
                 .SelectMany(s => CatalogTables(s, batch))
@@ -380,7 +380,7 @@ internal static partial class BuiltInResources
             new("is_column_set", SqlType.Bit, null, true),
             new("is_dropped_ledger_column", SqlType.Bit, null, true),
             new("vector_dimensions", SqlType.Int32, null, true),
-            new("vector_base_type_desc", SqlType.NVarchar, 20, true),
+            new("vector_base_type_desc", NVarcharSqlType.Get(10, Collation.Catalog, Coercibility.Implicit), 10, true),
             // Ledger isn't modeled, so the ledger-view column-mapping pair is
             // always NULL — SMO's CREATE-scripting column query selects
             // ledger_view_column_type to detect a ledger-view column.

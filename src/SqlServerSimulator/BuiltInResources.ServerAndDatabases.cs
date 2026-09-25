@@ -263,7 +263,7 @@ internal static partial class BuiltInResources
             new("login_name", SqlType.NVarchar, 128, false),
             new("nt_domain", SqlType.NVarchar, 128, true),
             new("nt_user_name", SqlType.NVarchar, 128, true),
-            new("status", nvarchar60Catalog, 30, false),
+            new("status", SqlType.NVarchar, 30, false),
             new("context_info", SqlType.Varbinary, 128, true),
             new("cpu_time", SqlType.Int32, null, false),
             new("memory_usage", SqlType.Int32, null, false),
@@ -492,7 +492,7 @@ internal static partial class BuiltInResources
         Sys("database_scoped_configurations",
         [
             new("configuration_id", SqlType.Int32, null, true),
-            new("name", SqlType.SystemName, 128, true),
+            new("name", SqlType.NVarchar, 60, true),
             new("value", SqlType.SqlVariant, null, true),
             new("value_for_secondary", SqlType.SqlVariant, null, true),
             new("is_value_default", SqlType.Bit, null, true),
@@ -1095,7 +1095,7 @@ internal static partial class BuiltInResources
             rows[i] =
             [
                 SqlValue.FromInt32(data[i].Id),
-                SqlValue.FromSystemName(data[i].Name),
+                SqlValue.FromNVarchar(data[i].Name),
                 data[i].Value,
                 nullValue,
                 isDefault,

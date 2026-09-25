@@ -65,7 +65,7 @@ internal sealed class CatalogView(
         return (int)(hash.Value | 0x8000_0000);
     }
 
-    public readonly HeapColumn[] Columns = columns;
+    public readonly HeapColumn[] Columns = Array.ConvertAll(columns, SizedColumn);
 
     /// <summary>
     /// Row generator. The <see cref="Database"/> parameter is the database
@@ -175,6 +175,29 @@ internal sealed class CatalogView(
             this.MasterScoped,
             filtered is null ? null : (batch, database, filter) => filtered(batch, database, filter).Select(row => Permute(row, positions)),
             this.PushdownColumns);
+    }
+
+    /// <summary>
+    /// A column declared with an unsized string or binary type and a separate
+    /// length, retyped to that length — the type every metadata surface
+    /// (<c>sp_describe_first_result_set</c>, TDS COLMETADATA, the result type
+    /// of an expression over the column) reads, as real types
+    /// <c>INFORMATION_SCHEMA.COLUMNS.COLUMN_DEFAULT</c> <c>nvarchar(4000)</c>.
+    /// </summary>
+    private static HeapColumn SizedColumn(HeapColumn column)
+    {
+        if (column.MaxLength is not (> 0 or SqlType.MaxLengthSentinel) || column.Computed is not null)
+            return column;
+        var sized = column.Type switch
+        {
+            VarcharSqlType { length: 0 } varchar => (SqlType)VarcharSqlType.Get(column.MaxLength.Value, varchar.Collation, varchar.Coercibility),
+            NVarcharSqlType { length: 0 } nvarchar => NVarcharSqlType.Get(column.MaxLength.Value, nvarchar.Collation, nvarchar.Coercibility),
+            VarbinarySqlType { length: 0 } => VarbinarySqlType.Get(column.MaxLength.Value),
+            _ => null,
+        };
+        return sized is null
+            ? column
+            : new HeapColumn(column.Name, sized, column.MaxLength, column.Nullable, isHidden: column.IsHidden, collation: column.Collation);
     }
 
     private static SqlValue[] Permute(SqlValue[] row, int[] positions)

@@ -119,7 +119,7 @@ internal static partial class BuiltInResources
             // NULL (mirroring sys.columns' vector pair). DacFx's parameter
             // reverse-engineering reads both.
             new("vector_dimensions", SqlType.Int32, null, true),
-            new("vector_base_type_desc", SqlType.NVarchar, 20, true),
+            new("vector_base_type_desc", NVarcharSqlType.Get(10, Collation.Catalog, Coercibility.Implicit), 10, true),
         ];
         SysP("parameters", parameterColumns, ["object_id"], EnumerateParameters);
 
@@ -216,8 +216,8 @@ internal static partial class BuiltInResources
         // is 'TABLE'. ROUTINE_DEFINITION carries the module source text
         // (nvarchar(4000), truncated like SQL Server). Real SQL Server ships
         // dozens of further columns (CREATED, LAST_ALTERED, etc.) not modeled.
-        var procedureRoutineType = SqlValue.FromVarchar("PROCEDURE");
-        var functionRoutineType = SqlValue.FromVarchar("FUNCTION");
+        var procedureRoutineType = SqlValue.FromNVarchar("PROCEDURE");
+        var functionRoutineType = SqlValue.FromNVarchar("FUNCTION");
         var tableDataType = SqlValue.FromSystemName("TABLE");
         Iso("ROUTINES",
         [
@@ -231,7 +231,7 @@ internal static partial class BuiltInResources
             new("ROUTINE_CATALOG", SqlType.SystemName, 128, true),
             new("ROUTINE_SCHEMA", SqlType.SystemName, 128, true),
             new("ROUTINE_NAME", SqlType.SystemName, 128, false),
-            new("ROUTINE_TYPE", SqlType.Varchar, 9, true),
+            new("ROUTINE_TYPE", SqlType.NVarchar, 20, true),
             new("DATA_TYPE", SqlType.SystemName, 128, true),
             new("ROUTINE_DEFINITION", SqlType.NVarchar, 4000, true),
         ], (batch, database) =>
@@ -243,16 +243,16 @@ internal static partial class BuiltInResources
         // for OUTPUT-declared params (probe-confirmed: real SQL Server uses
         // INOUT for OUTPUT in procedures). CHARACTER_MAXIMUM_LENGTH is set
         // only for string types.
-        var modeIn = SqlValue.FromVarchar("IN");
-        var modeInOut = SqlValue.FromVarchar("INOUT");
-        var modeOut = SqlValue.FromVarchar("OUT");
+        var modeIn = SqlValue.FromNVarchar("IN");
+        var modeInOut = SqlValue.FromNVarchar("INOUT");
+        var modeOut = SqlValue.FromNVarchar("OUT");
         Iso("PARAMETERS",
         [
             new("SPECIFIC_CATALOG", SqlType.SystemName, 128, true),
             new("SPECIFIC_SCHEMA", SqlType.SystemName, 128, true),
             new("SPECIFIC_NAME", SqlType.SystemName, 128, false),
             new("ORDINAL_POSITION", SqlType.Int32, null, false),
-            new("PARAMETER_MODE", SqlType.Varchar, 10, true),
+            new("PARAMETER_MODE", SqlType.NVarchar, 10, true),
             new("PARAMETER_NAME", SqlType.SystemName, 128, true),
             new("DATA_TYPE", SqlType.SystemName, 128, false),
             new("CHARACTER_MAXIMUM_LENGTH", SqlType.Int32, null, true),
@@ -420,13 +420,13 @@ internal static partial class BuiltInResources
             new("create_date", SqlType.DateTime, null, false),
             new("modify_date", SqlType.DateTime, null, false),
             new("is_disabled", SqlType.Bit, null, false),
-            new("query_text", SqlType.NVarchar, 4000, true),
+            new("query_text", SqlType.NVarcharMax, null, true),
             new("scope_type", SqlType.TinyInt, null, false),
             new("scope_type_desc", nvarchar60Catalog, 60, true),
             new("scope_object_id", SqlType.Int32, null, true),
-            new("scope_batch", SqlType.NVarchar, 4000, true),
-            new("parameters", SqlType.NVarchar, 4000, true),
-            new("hints", SqlType.NVarchar, 4000, true),
+            new("scope_batch", SqlType.NVarcharMax, null, true),
+            new("parameters", SqlType.NVarcharMax, null, true),
+            new("hints", SqlType.NVarcharMax, null, true),
         ], static (_, _) => EmptyCatalogRows);
 
         // sys.numbered_procedures: numbered stored procedures are a removed
@@ -439,7 +439,7 @@ internal static partial class BuiltInResources
         [
             new("object_id", SqlType.Int32, null, false),
             new("procedure_number", SqlType.SmallInt, null, true),
-            new("definition", SqlType.NVarchar, 4000, true),
+            new("definition", SqlType.NVarcharMax, null, true),
         ], static (_, _) => EmptyCatalogRows);
 
         // sys.assembly_types: the three CLR-backed system types shipped by

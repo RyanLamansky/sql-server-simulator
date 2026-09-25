@@ -81,7 +81,7 @@ internal static partial class BuiltInResources
             new("column_id", SqlType.Int32, null, false),
             new("type_column_id", SqlType.Int32, null, true),
             new("language_id", SqlType.Int32, null, false),
-            new("statistical_semantics", SqlType.Bit, null, false),
+            new("statistical_semantics", SqlType.Int32, null, false),
         ], EnumerateSysFullTextIndexColumns);
 
         // sys.fulltext_stoplists / sys.registered_search_property_lists:
@@ -308,10 +308,10 @@ internal static partial class BuiltInResources
         Sys("spatial_reference_systems",
         [
             new("spatial_reference_id", SqlType.Int32, null, true),
-            new("authority_name", SqlType.NVarchar, 256, true),
+            new("authority_name", SqlType.NVarchar, 128, true),
             new("authorized_spatial_reference_id", SqlType.Int32, null, true),
-            new("well_known_text", SqlType.NVarchar, 8000, true),
-            new("unit_of_measure", SqlType.NVarchar, 256, true),
+            new("well_known_text", SqlType.NVarchar, 4000, true),
+            new("unit_of_measure", SqlType.NVarchar, 128, true),
             new("unit_conversion_factor", SqlType.Float, null, true),
         ], EnumerateSysSpatialReferenceSystems);
     }
@@ -407,13 +407,13 @@ internal static partial class BuiltInResources
     /// <summary>
     /// Rows for <c>sys.fulltext_index_columns</c>. One row per
     /// <see cref="FullTextIndexColumn"/> across every indexed table.
-    /// <c>statistical_semantics</c> always false (the simulator doesn't
+    /// <c>statistical_semantics</c> always 0 (the simulator doesn't
     /// expose the WITH STATISTICAL_SEMANTICS option at the column level
     /// since the index parser parse-and-discards it).
     /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateSysFullTextIndexColumns(Parser.BatchContext batch, Database database)
     {
-        var falseBit = SqlValue.FromBoolean(false);
+        var noSemantics = SqlValue.FromInt32(0);
         foreach (var schema in database.Schemas.Values)
         {
             foreach (var table in CatalogTables(schema, batch))
@@ -427,7 +427,7 @@ internal static partial class BuiltInResources
                         SqlValue.FromInt32(col.ColumnId),
                         col.TypeColumnId is int tcid ? SqlValue.FromInt32(tcid) : SqlValue.Null(SqlType.Int32),
                         SqlValue.FromInt32(col.LanguageId),
-                        falseBit,
+                        noSemantics,
                     ];
                 }
             }

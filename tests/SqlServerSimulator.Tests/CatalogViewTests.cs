@@ -1345,4 +1345,12 @@ public sealed class CatalogViewTests
     [TestMethod]
     public void LocalServerRow_NamesItsProviderAndDataSource()
         => AreEqual("SQLNCLI|SIMULATED", ExecuteScalar("select provider + '|' + data_source from sys.servers where server_id = 0"));
+
+    [TestMethod]
+    public void CatalogColumnTypes_CarryRealsLengths()
+        => AreEqual("nvarchar|8000;nvarchar|40", ExecuteScalar("""
+            select top 0 c.COLUMN_DEFAULT, r.ROUTINE_TYPE into #x from INFORMATION_SCHEMA.COLUMNS c cross join INFORMATION_SCHEMA.ROUTINES r;
+            select string_agg(concat(type_name(system_type_id), '|', max_length), ';') within group (order by column_id)
+            from tempdb.sys.columns where object_id = object_id('tempdb..#x')
+            """));
 }
