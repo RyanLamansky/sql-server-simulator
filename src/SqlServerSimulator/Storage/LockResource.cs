@@ -340,6 +340,8 @@ internal sealed class LockManager
                     // descheduled mid-check. Cleared once on the way out, so
                     // an exception path (Msg 1222 / 1205) leaves no stale
                     // wait state either.
+                    if (!waited)
+                        owner.WaitStartedTicks = Environment.TickCount64;
                     owner.WaitingOnResource = resource;
                     owner.WaitingForMode = mode;
                     waited = true;

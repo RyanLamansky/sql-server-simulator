@@ -117,10 +117,20 @@ partial class Simulation
     private static void WaitInterruptibly(BatchContext batch, TimeSpan delay)
     {
         var token = batch.Connection.ExecutionCancellationToken;
-        if (token.CanBeCanceled)
-            _ = token.WaitHandle.WaitOne(delay);
-        else
-            Thread.Sleep(delay);
+        var session = batch.Connection.Session;
+        session.WaitStartedTicks = Environment.TickCount64;
+        session.InWaitFor = true;
+        try
+        {
+            if (token.CanBeCanceled)
+                _ = token.WaitHandle.WaitOne(delay);
+            else
+                Thread.Sleep(delay);
+        }
+        finally
+        {
+            session.InWaitFor = false;
+        }
     }
 
     private static readonly string[] waitForTimeFormats =

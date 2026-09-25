@@ -82,6 +82,26 @@ internal sealed class SessionToken(int spid)
     public LockMode? WaitingForMode;
 
     /// <summary>
+    /// <c>Environment.TickCount64</c> when the session's current wait began —
+    /// a blocked lock acquisition or a <c>WAITFOR</c> — read as
+    /// <c>sys.dm_exec_requests.wait_time</c>. Meaningful only while waiting.
+    /// </summary>
+    public long WaitStartedTicks;
+
+    /// <summary>Set while the session sleeps in a <c>WAITFOR</c>, which <c>sys.dm_exec_requests</c> reports as its wait.</summary>
+    public bool InWaitFor;
+
+    /// <summary>
+    /// The kind of the statement the session is running, as
+    /// <c>sys.dm_exec_requests.command</c> reports it; written as each
+    /// statement dispatches, so a nested body's statement names itself.
+    /// </summary>
+    public string CurrentCommand = "SELECT";
+
+    /// <summary>When the session's in-flight command began, which <c>sys.dm_exec_requests.start_time</c> reports.</summary>
+    public DateTime RequestStartUtc;
+
+    /// <summary>
     /// Set once the abandoned-session sweep has torn this session down, so a
     /// second pass (or a late <see cref="SimulatedDbConnection.Dispose(bool)"/>
     /// on a resurrected connection) doesn't repeat the work.

@@ -748,6 +748,51 @@ public sealed class LockingTests
     }
 
     [TestMethod]
+    public async Task DmExecRequests_DuringContention_ShowsTheSuspendedRequest()
+    {
+        // The blocked UPDATE is a request of its own: suspended on a lock wait,
+        // naming its blocker and the resource, while the idle holder has no
+        // request at all.
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (id int); insert t values (1)");
+        using var holder = sim.CreateOpenConnection();
+        using var waiter = sim.CreateOpenConnection();
+        using var observer = sim.CreateOpenConnection();
+        var holderSpid = (short)holder.CreateCommand("select @@spid").ExecuteScalar()!;
+        var waiterSpid = (short)waiter.CreateCommand("select @@spid").ExecuteScalar()!;
+        _ = holder.CreateCommand("begin tran; update t set id = 2").ExecuteNonQuery();
+
+        var waitTask = Task.Run(() => waiter.CreateCommand("update t set id = 3").ExecuteNonQuery(), TestContext.CancellationToken);
+        var row = await PollUntil(
+            () => observer.CreateCommand(
+                $"select concat(status, '|', command, '|', iif(wait_type like 'LCK[_]M[_]%', 'lock', wait_type), '|', blocking_session_id, '|', iif(wait_resource like 'RID: %', 'rid', wait_resource), '|', iif(wait_time >= 0, 'timed', 'x'))"
+                + $" from sys.dm_exec_requests where session_id = {waiterSpid}").ExecuteScalar() as string,
+            value => value is not null && value.StartsWith("suspended", StringComparison.Ordinal),
+            TestContext.CancellationToken);
+        AreEqual($"suspended|UPDATE|lock|{holderSpid}|rid|timed", row);
+        AreEqual(0, observer.CreateCommand($"select count(*) from sys.dm_exec_requests where session_id = {holderSpid}").ExecuteScalar());
+
+        _ = holder.CreateCommand("commit tran").ExecuteNonQuery();
+        _ = await waitTask;
+    }
+
+    [TestMethod]
+    public async Task DmExecRequests_DuringWaitFor_ReportsTheWaitFor()
+    {
+        var sim = new Simulation();
+        using var sleeper = sim.CreateOpenConnection();
+        using var observer = sim.CreateOpenConnection();
+        var sleeperSpid = (short)sleeper.CreateCommand("select @@spid").ExecuteScalar()!;
+        var sleepTask = Task.Run(() => sleeper.CreateCommand("waitfor delay '00:00:01'").ExecuteNonQuery(), TestContext.CancellationToken);
+        var row = await PollUntil(
+            () => observer.CreateCommand($"select concat(status, '|', command, '|', wait_type, '|', blocking_session_id) from sys.dm_exec_requests where session_id = {sleeperSpid}").ExecuteScalar() as string,
+            value => value is not null,
+            TestContext.CancellationToken);
+        AreEqual("suspended|WAITFOR|WAITFOR|0", row);
+        _ = await sleepTask;
+    }
+
+    [TestMethod]
     public async Task DmTranLocks_DuringContention_ShowsWaitRow()
     {
         // WAIT-row emission for sys.dm_tran_locks is only reached when a

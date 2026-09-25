@@ -1,4 +1,5 @@
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
+using static SqlServerSimulator.Extensions;
 
 namespace SqlServerSimulator;
 
@@ -19,6 +20,8 @@ namespace SqlServerSimulator;
 [TestClass]
 public sealed class DmvServerStateGatingTests
 {
+    public TestContext TestContext { get; set; } = null!;
+
     // srvl: a login granted VIEW SERVER STATE (server scope, in master).
     // srvl2: a login with no server-state grant. u_dbstate: a database user
     // granted VIEW DATABASE STATE. u_none: a database user with no grant.
@@ -135,6 +138,23 @@ public sealed class DmvServerStateGatingTests
         using var idle = sim.CreateOpenConnection();
         IsGreaterThanOrEqualTo(2, Convert.ToInt32(sim.ExecuteScalar(
             "use master; execute as login = 'srvl'; select count(*) from sys.dm_exec_sessions")));
+    }
+
+    // sys.dm_exec_requests filters the same way (probed 2026-09-25): a
+    // sleeping session's request is visible only with the permission.
+    [TestMethod]
+    public async Task ExecRequests_SelfFilterLikeExecSessions()
+    {
+        var sim = Seeded();
+        using var sleeper = sim.CreateOpenConnection();
+        var sleepTask = Task.Run(() => sleeper.CreateCommand("waitfor delay '00:00:01'").ExecuteNonQuery(), TestContext.CancellationToken);
+        _ = await PollUntil(
+            () => (int)sim.ExecuteScalar("select count(*) from sys.dm_exec_requests where command = 'WAITFOR'")!,
+            count => count == 1,
+            TestContext.CancellationToken);
+        AreEqual(1, sim.ExecuteScalar("execute as user = 'u_none'; select count(*) from sys.dm_exec_requests"));
+        AreEqual(2, sim.ExecuteScalar("use master; execute as login = 'srvl'; select count(*) from sys.dm_exec_requests"));
+        _ = await sleepTask;
     }
 
     // ---- dbo / sysadmin bypass + ungated views ----

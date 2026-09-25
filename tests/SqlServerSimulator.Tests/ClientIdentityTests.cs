@@ -109,4 +109,18 @@ public sealed class ClientIdentityTests
         IsTrue(reader.Read());
         AreEqual("Shared memory|FALSE|<local machine>|-1|-1|-1|2|2|2", string.Join("|", Enumerable.Range(0, reader.FieldCount).Select(reader.GetValue)));
     }
+
+    // The querying session's own request is always listed, running the
+    // SELECT that reads it; an idle session has none.
+    [TestMethod]
+    public void Requests_ListTheRunningQueryOnly()
+    {
+        var simulation = new Simulation();
+        using var connection = simulation.CreateOpenConnection();
+        using var idle = simulation.CreateOpenConnection();
+        using var command = connection.CreateCommand(
+            "set datefirst 3; select concat(count(*), '|', max(status), '|', max(command), '|', max(blocking_session_id), '|', isnull(max(wait_type), '-'), '|', max(date_first), '|', max(nest_level), '|', max(user_id))"
+            + " from sys.dm_exec_requests where session_id > 50");
+        AreEqual("1|running|SELECT|0|-|3|0|1", command.ExecuteScalar());
+    }
 }

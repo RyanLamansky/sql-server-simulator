@@ -257,7 +257,7 @@ internal static class LockDmvs
     /// <c>null</c> when nothing blocks (a race against grant — the
     /// waiter's about to unblock).
     /// </summary>
-    private static int? FindFirstBlocker(LockResource resource, SimulatedDbConnection waiter)
+    internal static int? FindFirstBlocker(LockResource resource, SimulatedDbConnection waiter)
     {
         if (waiter.WaitingForMode is not { } mode)
             return null;
@@ -278,7 +278,7 @@ internal static class LockDmvs
     /// description when no association matches (rare — the resource is
     /// usually a SchemaLock or a HeapTable's row-lock dict entry).
     /// </summary>
-    private static string DescribeResource(Simulation sim, LockResource resource)
+    internal static string DescribeResource(Simulation sim, LockResource resource)
     {
         foreach (var db in sim.Databases.Values)
         {

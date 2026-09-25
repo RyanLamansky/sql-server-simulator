@@ -290,6 +290,79 @@ internal static partial class BuiltInResources
             new("most_recent_sql_handle", SqlType.Varbinary, 64, true),
         ], EnumerateSysDmExecConnections);
 
+        // sys.dm_exec_requests: one row per session with a command in flight —
+        // the querying session always, and any other mid-statement or blocked
+        // (probed 2026-09-25 against SQL Server 2025). A lock wait reports its
+        // LCK_M_<mode>, blocker and resource, a WAITFOR reports WAITFOR, and
+        // the session-option columns read as sys.dm_exec_sessions reads them.
+        // No sql or plan handles are modeled, so those columns are NULL.
+        Sys("dm_exec_requests",
+        [
+            new("session_id", SqlType.SmallInt, null, false),
+            new("request_id", SqlType.Int32, null, false),
+            new("start_time", SqlType.DateTime, null, false),
+            new("status", SqlType.NVarchar, 30, false),
+            new("command", SqlType.NVarchar, 32, false),
+            new("sql_handle", SqlType.Varbinary, 64, true),
+            new("statement_start_offset", SqlType.Int32, null, true),
+            new("statement_end_offset", SqlType.Int32, null, true),
+            new("plan_handle", SqlType.Varbinary, 64, true),
+            new("database_id", SqlType.SmallInt, null, false),
+            new("user_id", SqlType.Int32, null, false),
+            new("connection_id", SqlType.UniqueIdentifier, null, true),
+            new("blocking_session_id", SqlType.SmallInt, null, true),
+            new("wait_type", SqlType.NVarchar, 60, true),
+            new("wait_time", SqlType.Int32, null, false),
+            new("last_wait_type", SqlType.NVarchar, 60, false),
+            new("wait_resource", SqlType.NVarchar, 256, false),
+            new("open_transaction_count", SqlType.Int32, null, false),
+            new("open_resultset_count", SqlType.Int32, null, false),
+            new("transaction_id", SqlType.BigInt, null, false),
+            new("context_info", SqlType.Varbinary, 128, true),
+            new("percent_complete", SqlType.Real, null, false),
+            new("estimated_completion_time", SqlType.BigInt, null, false),
+            new("cpu_time", SqlType.Int32, null, false),
+            new("total_elapsed_time", SqlType.Int32, null, false),
+            new("scheduler_id", SqlType.Int32, null, true),
+            new("task_address", SqlType.Varbinary, 8, true),
+            new("reads", SqlType.BigInt, null, false),
+            new("writes", SqlType.BigInt, null, false),
+            new("logical_reads", SqlType.BigInt, null, false),
+            new("text_size", SqlType.Int32, null, false),
+            new("language", SqlType.NVarchar, 128, true),
+            new("date_format", SqlType.NVarchar, 3, true),
+            new("date_first", SqlType.SmallInt, null, false),
+            new("quoted_identifier", SqlType.Bit, null, false),
+            new("arithabort", SqlType.Bit, null, false),
+            new("ansi_null_dflt_on", SqlType.Bit, null, false),
+            new("ansi_defaults", SqlType.Bit, null, false),
+            new("ansi_warnings", SqlType.Bit, null, false),
+            new("ansi_padding", SqlType.Bit, null, false),
+            new("ansi_nulls", SqlType.Bit, null, false),
+            new("concat_null_yields_null", SqlType.Bit, null, false),
+            new("transaction_isolation_level", SqlType.SmallInt, null, false),
+            new("lock_timeout", SqlType.Int32, null, false),
+            new("deadlock_priority", SqlType.Int32, null, false),
+            new("row_count", SqlType.BigInt, null, false),
+            new("prev_error", SqlType.Int32, null, false),
+            new("nest_level", SqlType.Int32, null, false),
+            new("granted_query_memory", SqlType.Int32, null, false),
+            new("executing_managed_code", SqlType.Bit, null, false),
+            new("group_id", SqlType.Int32, null, false),
+            new("query_hash", SqlType.GetBinary(8), null, true),
+            new("query_plan_hash", SqlType.GetBinary(8), null, true),
+            new("statement_sql_handle", SqlType.Varbinary, 64, true),
+            new("statement_context_id", SqlType.BigInt, null, true),
+            new("dop", SqlType.Int32, null, false),
+            new("parallel_worker_count", SqlType.Int32, null, true),
+            new("external_script_request_id", SqlType.UniqueIdentifier, null, true),
+            new("is_resumable", SqlType.Bit, null, false),
+            new("page_resource", SqlType.Varbinary, 8, true),
+            new("page_server_reads", SqlType.BigInt, null, false),
+            new("dist_statement_id", SqlType.UniqueIdentifier, null, true),
+            new("label", SqlType.NVarchar, 255, true),
+        ], EnumerateSysDmExecRequests);
+
         // sys.configurations: server-scoped static server-configuration
         // catalog. value / minimum / maximum / value_in_use are sql_variant,
         // matching real SQL Server — every option carries an inner base type of
@@ -1173,6 +1246,121 @@ internal static partial class BuiltInResources
     }
 
     /// <summary>
+    /// Rows for <c>sys.dm_exec_requests</c> — the querying session's, then each
+    /// other session mid-statement or blocked, in session order.
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateSysDmExecRequests(Parser.BatchContext batch, Database database)
+    {
+        _ = database;
+        var simulation = batch.Connection.Simulation;
+        var connections = simulation.SnapshotConnections();
+        Array.Sort(connections, static (a, b) => a.Spid.CompareTo(b.Spid));
+        var now = DateTime.UtcNow;
+        var zero = SqlValue.FromInt32(0);
+        var zeroBig = SqlValue.FromInt64(0);
+        var bitOn = SqlValue.FromBoolean(true);
+        var bitOff = SqlValue.FromBoolean(false);
+        var nullBinary = SqlValue.Null(SqlType.Varbinary);
+        var nullInt = SqlValue.Null(SqlType.Int32);
+        var nullGuid = SqlValue.Null(SqlType.UniqueIdentifier);
+        var emptyName = SqlValue.FromNVarchar(string.Empty);
+        foreach (var connection in connections)
+        {
+            var session = connection.Session;
+            var isSelf = ReferenceEquals(connection, batch.Connection);
+            var lockWait = connection.WaitingOnResource is { } resource && connection.WaitingForMode is { } mode ? (resource, mode) : ((LockResource, LockMode)?)null;
+            var inWaitFor = session.InWaitFor;
+            if (!isSelf && session.CurrentExecutingThreadId is null && lockWait is null)
+                continue;
+
+            var waitType = lockWait is var (_, waitMode) ? $"LCK_M_{LockDmvs.ModeAbbreviation(waitMode).Replace("-", "_", StringComparison.Ordinal)}"
+                : inWaitFor ? "WAITFOR"
+                : null;
+            var blocker = lockWait is var (waitResource, _) ? LockDmvs.FindFirstBlocker(waitResource, connection) ?? 0 : 0;
+            var waitMillis = waitType is null ? 0 : (int)Math.Min(int.MaxValue, Math.Max(0, Environment.TickCount64 - session.WaitStartedTicks));
+            var start = session.RequestStartUtc == default ? connection.LoginTimeUtc : session.RequestStartUtc;
+            yield return [
+                SqlValue.FromInt16((short)connection.Spid),
+                zero,
+                SqlValue.FromDateTime(start),
+                SqlValue.FromNVarchar(isSelf ? "running" : waitType is not null ? "suspended" : "runnable"),
+                SqlValue.FromNVarchar(session.CurrentCommand),
+                nullBinary, nullInt, nullInt, nullBinary,
+                SqlValue.FromInt16(SessionDatabaseId(simulation, connection)),
+                SqlValue.FromInt32(connection.Security.Effective.DatabasePrincipalId),
+                SqlValue.FromGuid(connection.Transport.ConnectionId),
+                SqlValue.FromInt16((short)blocker),
+                waitType is null ? SqlValue.Null(SqlType.NVarchar) : SqlValue.FromNVarchar(waitType),
+                SqlValue.FromInt32(waitMillis),
+                waitType is null ? emptyName : SqlValue.FromNVarchar(waitType),
+                lockWait is var (describedResource, _) ? SqlValue.FromNVarchar(LockDmvs.DescribeResource(simulation, describedResource)) : emptyName,
+                SqlValue.FromInt32(connection.CurrentTransaction?.TranCount ?? 0),
+                SqlValue.FromInt32(1),
+                zeroBig,
+                SqlValue.FromVarbinary(connection.ContextInfo ?? []),
+                SqlValue.FromSingle(0),
+                zeroBig,
+                zero,
+                SqlValue.FromInt32((int)Math.Min(int.MaxValue, Math.Max(0, (now - start).TotalMilliseconds))),
+                SqlValue.FromInt32(1),
+                nullBinary,
+                zeroBig, zeroBig, zeroBig,
+                SqlValue.FromInt32(connection.TextSize),
+                SqlValue.FromNVarchar(connection.Language.Name),
+                SqlValue.FromNVarchar(connection.DateFormat.Name),
+                SqlValue.FromInt16(connection.DateFirst),
+                connection.QuotedIdentifiers ? bitOn : bitOff,
+                connection.Arithabort ? bitOn : bitOff,
+                bitOn,
+                bitOff,
+                connection.AnsiWarnings ? bitOn : bitOff,
+                connection.AnsiPadding ? bitOn : bitOff,
+                connection.AnsiNulls ? bitOn : bitOff,
+                connection.ConcatNullYieldsNull ? bitOn : bitOff,
+                SqlValue.FromInt16(SessionIsolationLevelId(connection)),
+                SqlValue.FromInt32(connection.LockTimeoutMillis),
+                zero,
+                SqlValue.FromInt64(connection.LastStatementRowCount),
+                SqlValue.FromInt32(connection.LastErrorNumber),
+                SqlValue.FromInt32(connection.NestingLevel),
+                zero,
+                bitOff,
+                SqlValue.FromInt32(2),
+                SqlValue.Null(SqlType.GetBinary(8)), SqlValue.Null(SqlType.GetBinary(8)), nullBinary, SqlValue.Null(SqlType.BigInt),
+                SqlValue.FromInt32(1),
+                nullInt,
+                nullGuid,
+                bitOff,
+                nullBinary,
+                zeroBig,
+                SqlValue.FromGuid(Guid.Empty),
+                SqlValue.Null(SqlType.NVarchar),
+            ];
+        }
+    }
+
+    /// <summary>The <c>database_id</c> of the database a session is pointed at.</summary>
+    private static short SessionDatabaseId(Simulation simulation, SimulatedDbConnection connection)
+    {
+        foreach (var (db, id) in Parser.Expressions.DbId.DatabasesWithIds(simulation))
+        {
+            if (ReferenceEquals(db, connection.CurrentDatabase))
+                return id;
+        }
+        return 1;
+    }
+
+    /// <summary>A session's isolation level as the DMVs number it: 1–5 for read uncommitted through snapshot.</summary>
+    private static short SessionIsolationLevelId(SimulatedDbConnection connection) => connection.SessionIsolationLevel switch
+    {
+        System.Data.IsolationLevel.ReadUncommitted => 1,
+        System.Data.IsolationLevel.RepeatableRead => 3,
+        System.Data.IsolationLevel.Serializable => 4,
+        System.Data.IsolationLevel.Snapshot => 5,
+        _ => 2,
+    };
+
+    /// <summary>
     /// Rows for <c>sys.dm_exec_sessions</c> — one per live connection on the
     /// simulation, snapshotted under the registry lock. Session-backed
     /// columns read the connection's real state; the rest are the
@@ -1196,23 +1384,8 @@ internal static partial class BuiltInResources
         foreach (var connection in connections)
         {
             var loginTime = SqlValue.FromDateTime(connection.LoginTimeUtc);
-            short databaseId = 1;
-            foreach (var (db, id) in Parser.Expressions.DbId.DatabasesWithIds(simulation))
-            {
-                if (ReferenceEquals(db, connection.CurrentDatabase))
-                {
-                    databaseId = id;
-                    break;
-                }
-            }
-            var isolation = connection.SessionIsolationLevel switch
-            {
-                System.Data.IsolationLevel.ReadUncommitted => (short)1,
-                System.Data.IsolationLevel.RepeatableRead => (short)3,
-                System.Data.IsolationLevel.Serializable => (short)4,
-                System.Data.IsolationLevel.Snapshot => (short)5,
-                _ => (short)2,
-            };
+            var databaseId = SessionDatabaseId(simulation, connection);
+            var isolation = SessionIsolationLevelId(connection);
             var effectiveLogin = connection.Security.Effective.LoginName;
             var originalLogin = connection.Security.OriginalLoginName;
             yield return [

@@ -1038,6 +1038,8 @@ public sealed partial class Simulation
         // still in flight. Child batches (proc / UDF / dynamic-SQL bodies)
         // don't re-enter here, so one execution counts once.
         _ = Interlocked.Increment(ref this.statementsInFlight);
+        if (command.Connection is { } requester)
+            requester.Session.RequestStartUtc = DateTime.UtcNow;
         try
         {
             foreach (var outcome in this.CreateResultSetsForCommandCore(command, continueOnError))
@@ -1800,6 +1802,9 @@ public sealed partial class Simulation
             ReservedKeyword { Keyword: Keyword.Merge } => "MERGE",
             _ => "SELECT",
         };
+        batch.Connection.Session.CurrentCommand = batch.Parser.Token is ReservedKeyword { Keyword: Keyword.WaitFor }
+            ? "WAITFOR"
+            : batch.CurrentStatement.StatementVerb;
         // READ_COMMITTED_SNAPSHOT readers take a fresh snapshot per statement;
         // clearing here ensures the next statement allocates a new Xid on its
         // first user-table read.

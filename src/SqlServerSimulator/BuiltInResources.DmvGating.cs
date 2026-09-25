@@ -20,6 +20,7 @@ internal static partial class BuiltInResources
     [
         ("sys.dm_db_partition_stats", DmvGateKind.DatabaseState),
         ("sys.dm_exec_connections", DmvGateKind.ServerStatePolicy),
+        ("sys.dm_exec_requests", DmvGateKind.SessionSelfFilter),
         ("sys.dm_exec_sessions", DmvGateKind.SessionSelfFilter),
         ("sys.dm_hadr_cluster", DmvGateKind.ServerState),
         ("sys.dm_hadr_database_replica_states", DmvGateKind.DatabaseState),
@@ -91,8 +92,9 @@ internal static partial class BuiltInResources
             Permission.ViewDatabasePerformanceState, PermissionChecker.ClassDatabase, 0, 0)
         || simulation.HoldsServerPermission(login, Permission.ViewServerPerformanceState);
 
-    // sys.dm_exec_sessions column 0 is session_id (smallint); a restricted
-    // session without VIEW SERVER STATE sees only its own SPID's row.
+    // sys.dm_exec_sessions' and sys.dm_exec_requests' column 0 is session_id
+    // (smallint); a restricted session without VIEW SERVER STATE sees only
+    // its own SPID's row.
     private static IEnumerable<SqlValue[]> FilterToOwnSession(BatchContext batch, IEnumerable<SqlValue[]> rows)
     {
         var spid = (short)batch.Connection.Spid;

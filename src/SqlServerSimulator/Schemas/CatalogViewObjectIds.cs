@@ -71,6 +71,7 @@ internal static class CatalogViewObjectIds
         ["sys.dm_db_partition_stats"] = -495130372,
         ["sys.dm_db_xtp_table_memory_stats"] = -667123516,
         ["sys.dm_exec_connections"] = -589966475,
+        ["sys.dm_exec_requests"] = -979629760,
         ["sys.dm_exec_sessions"] = -651118071,
         ["sys.dm_hadr_cluster"] = -951091328,
         ["sys.dm_hadr_database_replica_states"] = -233577667,
