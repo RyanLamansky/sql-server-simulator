@@ -121,7 +121,7 @@ Rejections, all real's own:
 
 `ALTER DATABASE <name> SET { READ_ONLY | READ_WRITE }` moves `Database.IsReadOnly`, projected by `sys.databases.is_read_only` and by `DATABASEPROPERTYEX(name, 'Updateability')` (`READ_ONLY` / `READ_WRITE`).
 Every write to a read-only database is **Msg 3906** class 16 — `Failed to update database "<n>" because the database is read-only.` — the identical wording for DML and DDL, probe-confirmed against SQL Server 2025 (2026-08-04, the states and the catalog-writing statements re-probed 2026-08-08).
-The state is **1** everywhere but `ALTER TABLE`, whose every sub-action (ADD / DROP / ALTER COLUMN, ADD / DROP CONSTRAINT, CHECK / NOCHECK, REBUILD) reports **12**.
+The state is **1** everywhere but `ALTER TABLE`, whose every sub-action (ADD / DROP / ALTER COLUMN, ADD / DROP CONSTRAINT, CHECK / NOCHECK, REBUILD) reports **12**, and `UPDATE STATISTICS`, which reports **13** (probed 2026-09-25).
 The error names the database that *would have been written*, so a three-part write out of another session database reports the target's name, the same rule the rowversion counter and trigger dispatch follow.
 
 **The check happens where the write happens**, which is what reproduces real's laziness.
@@ -130,7 +130,8 @@ Writes to a table belonging to no database — a `#temp` table, a `##global` tab
 
 Enforced at two kinds of seam: the per-row DML writes (INSERT / UPDATE / DELETE / MERGE / bulk load, keyed on `HeapTable.OwningDatabase`), and the DDL statements' own target resolution — the module `CREATE` / `ALTER` family through `ResolveModuleSchema`, plus `CREATE TABLE`, `SELECT … INTO`, `TRUNCATE`, `ALTER TABLE`, `CREATE INDEX`, `ALTER SEQUENCE`, the `CREATE` / `DROP` pairs for sequences, types and synonyms, and every `DROP` of a table, view, procedure, function, sequence, type or trigger.
 
-The catalog-writing statements carry it too: `GRANT` / `REVOKE` / `DENY`, `sp_rename` (object, column and index forms), `sp_addextendedproperty` and its update / drop siblings, `ALTER SCHEMA … TRANSFER`, `CREATE SCHEMA`, `CREATE` / `ALTER` / `DROP INDEX`, `CREATE STATISTICS`, `CREATE` / `DROP ASSEMBLY`, and the database-scoped principal DDL (`CREATE` / `DROP USER`, `CREATE` / `DROP ROLE`, `ALTER ROLE … ADD | DROP MEMBER`, the application-role trio).
+The catalog-writing statements carry it too: `GRANT` / `REVOKE` / `DENY`, `sp_rename` (object, column and index forms), `sp_addextendedproperty` and its update / drop siblings, `ALTER SCHEMA … TRANSFER`, `CREATE SCHEMA`, `CREATE` / `ALTER` / `DROP INDEX`, `CREATE STATISTICS`, `CREATE` / `DROP ASSEMBLY`, `DROP SCHEMA`, `UPDATE STATISTICS`, and the database-scoped principal DDL (`CREATE` / `DROP USER`, `CREATE` / `DROP ROLE`, `ALTER ROLE … ADD | DROP MEMBER` and its `sp_addrolemember` / `sp_droprolemember` spelling, the application-role trio).
+Drawing a sequence value is a write too: `NEXT VALUE FOR` refuses when it actually draws, so a query whose `WHERE` admits no row completes (probed 2026-09-25).
 Login and server-role DDL don't: those write `master`, which can never be read-only.
 
 **Where the refusal sits relative to name resolution differs per statement**, and real's order is what each gate follows (all probe-confirmed):
@@ -141,9 +142,11 @@ Login and server-role DDL don't: those write `master`, which can never be read-o
 | `ALTER SCHEMA … TRANSFER` | before — a missing object still reports Msg 3906 |
 | `CREATE USER` / `CREATE ROLE` | before — an existing name still reports Msg 3906 |
 | `DROP ASSEMBLY` | before — a name no assembly holds still reports Msg 3906 |
+| `DROP SCHEMA` | before everything — a missing, protected or `IF EXISTS` schema still reports Msg 3906 |
+| `UPDATE STATISTICS` | after the *table* (a missing one is Msg 2706), before the statistic names |
 | `ALTER INDEX` | after the *table* (a missing one is Msg 1088), before the index |
 | `DROP INDEX` | after both — a missing table or index reports its own Msg 3701 |
-| `sp_rename` | after the target resolves (Msg 15225 / 15248 otherwise) |
+| `sp_rename` | after the target resolves (Msg 15225 / 15248 otherwise), and after its Msg 15477 caution |
 | `sp_addextendedproperty` | after the target resolves (Msg 15135 otherwise) |
 | `ALTER TABLE` | after the table resolves (Msg 4902 otherwise) |
 | every `DROP` of an object | after — real checks existence before the access mode |

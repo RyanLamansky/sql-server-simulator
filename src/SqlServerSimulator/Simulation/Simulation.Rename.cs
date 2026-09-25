@@ -70,25 +70,35 @@ partial class Simulation
         if (string.IsNullOrEmpty(objName) || string.IsNullOrEmpty(newName))
             throw SimulatedSqlException.InvalidProcedureParameters("sp_rename");
 
-        if (objType is null || BuiltInToken.Equals(objType, "OBJECT"))
+        try
         {
-            var renamedKind = RenameObject(batch, objName, newName, objType);
-            RecordRenameEvent(batch, objName, renamedKind);
+            if (objType is null || BuiltInToken.Equals(objType, "OBJECT"))
+            {
+                var renamedKind = RenameObject(batch, objName, newName, objType);
+                RecordRenameEvent(batch, objName, renamedKind);
+            }
+            else if (BuiltInToken.Equals(objType, "COLUMN"))
+            {
+                RenameColumn(batch, objName, newName);
+                RecordRenameEvent(batch, objName, "COLUMN");
+            }
+            else if (BuiltInToken.Equals(objType, "INDEX"))
+            {
+                RenameIndex(batch, objName, newName);
+                RecordRenameEvent(batch, objName, "INDEX");
+            }
+            else
+            {
+                throw new NotSupportedException(
+                    $"sp_rename with @objtype '{objType}' is not modeled; supported @objtype values are COLUMN, INDEX, and a table / object rename (NULL @objtype).");
+            }
         }
-        else if (BuiltInToken.Equals(objType, "COLUMN"))
+        catch (SimulatedSqlException readOnly) when (readOnly.Number == 3906)
         {
-            RenameColumn(batch, objName, newName);
-            RecordRenameEvent(batch, objName, "COLUMN");
-        }
-        else if (BuiltInToken.Equals(objType, "INDEX"))
-        {
-            RenameIndex(batch, objName, newName);
-            RecordRenameEvent(batch, objName, "INDEX");
-        }
-        else
-        {
-            throw new NotSupportedException(
-                $"sp_rename with @objtype '{objType}' is not modeled; supported @objtype values are COLUMN, INDEX, and a table / object rename (NULL @objtype).");
+            // Real cautions before it finds the database read-only, so the
+            // caution precedes the Msg 3906 (probed 2026-09-25).
+            batch.AppendInfoError(@class: 10, state: 1, number: 15477, message: RenameCautionMessage);
+            throw;
         }
 
         batch.AppendInfoError(@class: 10, state: 1, number: 15477, message: RenameCautionMessage);

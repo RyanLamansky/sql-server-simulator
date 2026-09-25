@@ -166,12 +166,14 @@ partial class Simulation
             "sp_addextendedproperty" => InvokeSpExtendedProperty(batch, ExtendedPropertyOp.Add),
             "sp_addlinkedserver" => InvokeSpAddLinkedServer(batch),
             "sp_addlinkedsrvlogin" or "sp_droplinkedsrvlogin" or "sp_serveroption" => InvokeSpLinkedServerNoOp(batch),
+            "sp_addrolemember" => InvokeSpRoleMember(batch, isAdd: true),
             "sp_columns_100" => InvokeSpColumns100(batch),
             "sp_configure" => InvokeSpConfigure(batch),
             "sp_datatype_info_100" => InvokeSpDatatypeInfo100(batch),
             "sp_depends" => InvokeSpDepends(batch),
             "sp_describe_first_result_set" => this.InvokeSpDescribeFirstResultSet(batch),
             "sp_dropextendedproperty" => InvokeSpExtendedProperty(batch, ExtendedPropertyOp.Drop),
+            "sp_droprolemember" => InvokeSpRoleMember(batch, isAdd: false),
             "sp_dropserver" => InvokeSpDropServer(batch),
             "sp_executesql" => ParseSpExecuteSql(batch, returnCodeVar, insertExecSource),
             "sp_getapplock" => InvokeSpGetAppLock(batch, returnCodeVar),
@@ -216,6 +218,16 @@ partial class Simulation
         {
             foreach (var outcome in systemProc)
                 yield return outcome;
+            // A system procedure that finishes answers 0 to `EXEC @rc = …`
+            // (probed 2026-09-25 across sp_help, sp_who, sp_rename and the
+            // extended-property procedures); the few with codes of their own
+            // write them themselves.
+            if (returnCodeVar is not null && !batch.IsSkipping
+                && systemProcName is not ("sp_executesql" or "sp_getapplock" or "sp_releaseapplock" or "sp_xml_preparedocument" or "sp_xml_removedocument" or "xp_qv"))
+            {
+                var slot = batch.GetVariableSlot(returnCodeVar);
+                slot.Value = SqlValue.FromInt32(0).CoerceTo(slot.DeclaredType);
+            }
             yield break;
         }
 

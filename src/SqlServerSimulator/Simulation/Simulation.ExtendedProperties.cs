@@ -49,7 +49,6 @@ partial class Simulation
 
         string? name = null;
         var value = SqlValue.Null(NVarcharSqlType.Get(-1, Collation.Baseline, Coercibility.CoercibleDefault));
-        var hasValueArg = false;
         string? level0Type = null;
         string? level0Name = null;
         string? level1Type = null;
@@ -64,18 +63,26 @@ partial class Simulation
             _ => throw new InvalidOperationException(),
         };
 
-        foreach (var arg in arguments)
+        // Real's own signatures, positional or named (probed 2026-09-25
+        // against SQL Server 2025): the drop takes no @value, an argument past
+        // the list is Msg 8144, a missing @name Msg 201 ahead of an unknown
+        // name's Msg 8145, and the value defaults to NULL.
+        string[] parameters = op == ExtendedPropertyOp.Drop
+            ? ["name", "level0type", "level0name", "level1type", "level1name", "level2type", "level2name"]
+            : ["name", "value", "level0type", "level0name", "level1type", "level1name", "level2type", "level2name"];
+        string? unknownParameter = null;
+        for (var i = 0; i < arguments.Count; i++)
         {
-            if (arg.Name is null)
-                throw SimulatedSqlException.InvalidExtendedPropertyParameter(procLabel);
-            switch (arg.Name)
+            var arg = arguments[i];
+            if (arg.Name is null && i >= parameters.Length)
+                throw SimulatedSqlException.TooManyArgumentsToFunction(procLabel);
+            switch (arg.Name ?? parameters[i])
             {
                 case var n when BuiltInToken.Equals(n, "name"):
                     name = ExpectStringArg(arg.Value);
                     break;
-                case var n when BuiltInToken.Equals(n, "value"):
+                case var n when op != ExtendedPropertyOp.Drop && BuiltInToken.Equals(n, "value"):
                     value = arg.Value;
-                    hasValueArg = true;
                     break;
                 case var n when BuiltInToken.Equals(n, "level0type"):
                     level0Type = ExpectStringArgOrNull(arg.Value);
@@ -96,14 +103,15 @@ partial class Simulation
                     level2Name = ExpectStringArgOrNull(arg.Value);
                     break;
                 default:
-                    throw SimulatedSqlException.InvalidExtendedPropertyParameter(procLabel);
+                    unknownParameter ??= arg.Name;
+                    break;
             }
         }
 
         if (name is null)
-            throw SimulatedSqlException.InvalidExtendedPropertyParameter(procLabel);
-        if (op == ExtendedPropertyOp.Add && !hasValueArg)
-            throw SimulatedSqlException.InvalidExtendedPropertyParameter(procLabel);
+            throw SimulatedSqlException.ProcedureExpectsParameter(procLabel, "name");
+        if (unknownParameter is not null)
+            throw SimulatedSqlException.NotAParameterForProcedure(unknownParameter, procLabel);
 
         var (key, targetLabel) = ResolveExtendedPropertyTarget(
             batch, procLabel,

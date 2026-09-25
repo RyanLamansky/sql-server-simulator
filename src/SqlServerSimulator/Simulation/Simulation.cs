@@ -1655,6 +1655,19 @@ public sealed partial class Simulation
     }
 
     /// <summary>
+    /// Whether the <c>UPDATE</c> under the cursor opens <c>UPDATE STATISTICS</c>;
+    /// on true the cursor has moved onto <c>STATISTICS</c>, otherwise it stays.
+    /// </summary>
+    private static bool IsUpdateStatistics(ParserContext context)
+    {
+        var checkpoint = context.SaveCheckpoint();
+        if (context.GetNextOptional() is ReservedKeyword { Keyword: Keyword.Statistics })
+            return true;
+        context.RestoreCheckpoint(checkpoint);
+        return false;
+    }
+
+    /// <summary>
     /// Drives the per-statement dispatch loop until either end-of-batch
     /// (when <paramref name="endKeyword"/> is null — top-level call from
     /// <see cref="CreateResultSetsForCommand"/>) or the matching keyword
@@ -2730,6 +2743,13 @@ public sealed partial class Simulation
                 // requirement is independent of execution.
                 if (context.Token is not Operator { Character: ';' })
                     throw SimulatedSqlException.MergeMustBeTerminated();
+                break;
+
+            case ReservedKeyword { Keyword: Keyword.Update } when IsUpdateStatistics(context):
+                _ = TryParseUpdateStatistics(context);
+                context.RejectTrailingToken();
+                if (!batch.IsSkipping)
+                    connection.LastStatementRowCount = 0;
                 break;
 
             case ReservedKeyword { Keyword: Keyword.Update }:

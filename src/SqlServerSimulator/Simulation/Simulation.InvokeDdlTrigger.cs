@@ -25,13 +25,14 @@ partial class Simulation
         string objectName,
         string objectType,
         string? targetObjectName = null,
-        string? targetObjectType = null)
+        string? targetObjectType = null,
+        string? roleName = null)
     {
         if (context.Batch.IsSkipping || context.Connection.SuppressDdlTriggers || context.CurrentDatabase.DdlTriggers.IsEmpty)
             return;
         var statement = context.Batch.CurrentStatement;
         (statement.PendingDdlEvents ??= []).Add(
-            new DdlEventInfo(eventType, schemaName, objectName, objectType, targetObjectName, targetObjectType));
+            new DdlEventInfo(eventType, schemaName, objectName, objectType, targetObjectName, targetObjectType, roleName));
     }
 
     /// <summary>
@@ -186,6 +187,8 @@ partial class Simulation
             AppendElement(builder, "TargetObjectName", targetName);
         if (info.TargetObjectType is { } targetType)
             AppendElement(builder, "TargetObjectType", targetType);
+        if (info.RoleName is { } roleName)
+            AppendElement(builder, "RoleName", roleName);
         _ = builder
             .Append("<TSQLCommand><SetOptions ANSI_NULLS=\"ON\" ANSI_NULL_DEFAULT=\"ON\" ANSI_PADDING=\"ON\" QUOTED_IDENTIFIER=\"")
             .Append(connection.QuotedIdentifiers ? "ON" : "OFF")

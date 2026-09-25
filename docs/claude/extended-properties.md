@@ -18,7 +18,7 @@ Per-DB flat dict mirrors `sys.extended_properties`'s catalog shape — not per-s
 - `sp_updateextendedproperty` — update (Msg 15217 on missing)
 - `sp_dropextendedproperty` — drop (Msg 15217 on missing)
 
-Named-arg parsing handles 8 args: `@name`, `@value`, `@level0type` / `@level0name` / `@level1type` / `@level1name` / `@level2type` / `@level2name`.
+The arguments bind positionally or by name to each procedure's own signature: `@name`, `@value` (absent from the drop), then the three `@levelNtype` / `@levelNname` pairs, with `@value` defaulting to NULL (probed 2026-09-25 against SQL Server 2025).
 Argument-name comparison drops the `@` prefix (the `AtPrefixedString` token's `Value` is already `@`-stripped).
 Target resolution routes through `ResolveExtendedPropertyTarget`.
 
@@ -42,7 +42,10 @@ Probe-confirmed against SQL Server 2025.
 | 15233 | Duplicate add: `"Property cannot be added. Property 'X' already exists for 'Y'."` |
 | 15217 | Update / drop on missing property, same target-label convention as 15233. |
 | 15135 | Missing target object: `"Object is invalid. Extended properties are not permitted on '<target>', or the object does not exist."` |
-| 15600 | Invalid parameters (positional arg, unknown @-name, missing required arg, unknown level type). |
+| 201 | No `@name`, reported ahead of an unknown name. |
+| 8144 | An argument past the signature. |
+| 8145 | An unknown `@`-name — including `@value` on the drop. |
+| 15600 | An unknown level type. |
 
 **Target-label convention** for Msg 15233 / 15217:
 - DB-level → `'object specified'`

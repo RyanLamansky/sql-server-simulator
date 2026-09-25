@@ -157,8 +157,9 @@ partial class SimulatedSqlException
         new("A TOP N or FETCH rowcount value may not be negative.", 127, 15, 1);
 
     /// <summary>
-    /// Mimics SQL Server's Msg 1031 — a <c>TOP (n) PERCENT</c> value fell
-    /// outside the 0–100 range. Wording verbatim.
+    /// Mimics SQL Server's Msg 1031 — a <c>TOP (n) PERCENT</c> or an
+    /// <c>UPDATE STATISTICS … SAMPLE n PERCENT</c> value fell outside the 0–100
+    /// range. Wording verbatim.
     /// </summary>
     internal static SimulatedSqlException TopPercentOutOfRange() =>
         new("Percent values must be between 0 and 100.", 1031, 15, 1);

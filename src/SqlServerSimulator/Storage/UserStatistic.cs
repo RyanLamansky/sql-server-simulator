@@ -34,8 +34,11 @@ internal sealed class UserStatistic(string name, int statsId, int[] columnFullOr
     /// </summary>
     public readonly int[] ColumnFullOrdinals = columnFullOrdinals;
 
-    /// <summary>Whether <c>WITH NORECOMPUTE</c> was declared.</summary>
-    public readonly bool NoRecompute = noRecompute;
+    /// <summary>
+    /// Whether <c>WITH NORECOMPUTE</c> was declared, by the <c>CREATE</c> or
+    /// by the latest <c>UPDATE STATISTICS</c> that reached this statistic.
+    /// </summary>
+    public bool NoRecompute = noRecompute;
 
     public readonly DateTime CreateDate = createDate;
 }

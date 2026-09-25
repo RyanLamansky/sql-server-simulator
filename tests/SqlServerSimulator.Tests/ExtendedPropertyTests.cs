@@ -429,4 +429,31 @@ public class ExtendedPropertyTests
                 @level2type=N'INDEX', @level2name=N'no_such_index';
             """, 15135);
     }
+
+    /// <summary>
+    /// The three procedures bind positionally in their own signatures — the
+    /// drop takes no @value — with real's argument errors (probed 2026-09-25).
+    /// </summary>
+    [TestMethod]
+    public void PositionalArguments_Bind()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table t (id int)");
+        _ = simulation.ExecuteNonQuery("exec sp_addextendedproperty N'd1', N'v1', N'SCHEMA', N'dbo', N'TABLE', N't'");
+        _ = simulation.ExecuteNonQuery("exec sp_updateextendedproperty N'd1', N'v2', N'SCHEMA', N'dbo', N'TABLE', N't'");
+        AreEqual("v2", simulation.ExecuteScalar("select cast(value as nvarchar(10)) from sys.extended_properties where name = 'd1'"));
+        _ = simulation.ExecuteNonQuery("exec sp_dropextendedproperty N'd1', N'SCHEMA', N'dbo', N'TABLE', N't'");
+        AreEqual(0, simulation.ExecuteScalar("select count(*) from sys.extended_properties where name = 'd1'"));
+        _ = simulation.ExecuteNonQuery("exec sp_addextendedproperty N'd4'");
+        IsTrue(simulation.ExecuteScalar("select value from sys.extended_properties where name = 'd4'") is DBNull);
+    }
+
+    [TestMethod]
+    [DataRow("exec sp_addextendedproperty N'd', N'v', N'SCHEMA', N'dbo', N'TABLE', N't', N'COLUMN', N'id', N'extra'", 8144, "Procedure or function sp_addextendedproperty has too many arguments specified.")]
+    [DataRow("exec sp_dropextendedproperty", 201, "Procedure or function 'sp_dropextendedproperty' expects parameter '@name', which was not supplied.")]
+    [DataRow("exec sp_addextendedproperty @bogus = 1", 201, "Procedure or function 'sp_addextendedproperty' expects parameter '@name', which was not supplied.")]
+    [DataRow("exec sp_addextendedproperty @name = N'd', @bogus = 1", 8145, "@bogus is not a parameter for procedure sp_addextendedproperty.")]
+    [DataRow("exec sp_dropextendedproperty @name = N'd', @value = 1", 8145, "@value is not a parameter for procedure sp_dropextendedproperty.")]
+    public void ArgumentErrors_MatchReal(string statement, int number, string message)
+        => new Simulation().AssertSqlError($"create table t (id int); {statement}", number, message);
 }

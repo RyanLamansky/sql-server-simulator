@@ -555,6 +555,10 @@ Diagnostics, probe-confirmed against SQL Server 2025:
 
 Auto-created column statistics (the `_WA_Sys_*` rows real materializes on first predicate use) still aren't modeled — see [`catalog-views.md`](catalog-views.md).
 
+`UPDATE STATISTICS <table> [<name> | (<name> [, …])] [WITH <option> [, …]]` has no histogram to rebuild, so it is its validation plus one catalog effect: each user-created statistic it reaches takes `no_recompute` from whether this update wrote `NORECOMPUTE`, clearing an earlier one as real does (probed 2026-09-25 against SQL Server 2025).
+Real flips an index-backed statistic's flag the same way, where the simulator's index statistics always report 0.
+Its option list is strict where `CREATE STATISTICS`' isn't, since real's option errors are the observable part; the numbers and their order live on `TryParseUpdateStatistics`.
+
 ## `DBCC SHOW_STATISTICS(<table>, <stat>) WITH HISTOGRAM`
 
 DacFx's `sqlpackage /Action:Export` runs one `dbcc show_statistics(N'[schema].[table]', N'<index-or-stat-name>') with histogram` per table (using the PK / clustered-index statistic name) before bulk-reading it, to chunk the table into extraction ranges — so the DATA phase of a bacpac export needs this parsed.

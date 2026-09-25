@@ -35,13 +35,18 @@ namespace SqlServerSimulator.Parser;
 /// <paramref name="targetObjectName"/>. Null where real emits the name without
 /// a type — a synonym's base object.
 /// </param>
+/// <param name="roleName">
+/// The role an <c>ADD_ROLE_MEMBER</c> / <c>DROP_ROLE_MEMBER</c> event changed,
+/// whose member is the object.
+/// </param>
 internal sealed class DdlEventInfo(
     string eventType,
     string? schemaName,
     string objectName,
     string objectType,
     string? targetObjectName = null,
-    string? targetObjectType = null)
+    string? targetObjectType = null,
+    string? roleName = null)
 {
     public readonly string EventType = eventType;
     public readonly string? SchemaName = schemaName;
@@ -49,4 +54,5 @@ internal sealed class DdlEventInfo(
     public readonly string ObjectType = objectType;
     public readonly string? TargetObjectName = targetObjectName;
     public readonly string? TargetObjectType = targetObjectType;
+    public readonly string? RoleName = roleName;
 }

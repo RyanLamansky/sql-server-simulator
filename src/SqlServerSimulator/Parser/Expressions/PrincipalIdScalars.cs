@@ -349,9 +349,12 @@ internal sealed class RoleMemberCheck : Expression
         var role = this.roleArg.Run(runtime);
         if (role.IsNull)
             return SqlValue.Null(SqlType.Int32);
-        if (this.principalArg?.Run(runtime).IsNull == true)
+        var principalValue = this.principalArg?.Run(runtime);
+        if (principalValue?.IsNull == true)
             return SqlValue.Null(SqlType.Int32);
         var roleName = role.CoerceTo(SqlType.NVarchar).AsString;
+        if (!this.serverScope && principalValue is { } named)
+            return DatabaseMemberOf(runtime.Batch.CurrentDatabase, roleName, named.CoerceTo(SqlType.NVarchar).AsString);
         if (BuiltInToken.Comparer.Equals(roleName, "public"))
             return SqlValue.FromInt32(1);
         if (this.serverScope)
@@ -393,6 +396,30 @@ internal sealed class RoleMemberCheck : Expression
             return SqlValue.FromInt32(PermissionChecker.IsRoleMember(database, effectiveId, principal) ? 1 : 0);
         }
         return SqlValue.Null(SqlType.Int32);
+    }
+
+    /// <summary>
+    /// <c>IS_ROLEMEMBER(role, principal)</c>: the named principal is resolved
+    /// first, so a missing one is NULL even for <c>public</c>; a principal is a
+    /// member of itself whatever it is, and otherwise of the roles it reaches
+    /// through nesting (probed 2026-09-25 against SQL Server 2025).
+    /// </summary>
+    private static SqlValue DatabaseMemberOf(Database database, string roleName, string principalName)
+    {
+        if (!database.Principals.TryGetValue(principalName, out var member))
+            return SqlValue.Null(SqlType.Int32);
+        if (BuiltInToken.Comparer.Equals(roleName, "public"))
+            return SqlValue.FromInt32(1);
+        if (!database.Principals.TryGetValue(roleName, out var roleP))
+            return SqlValue.Null(SqlType.Int32);
+        if (roleP.PrincipalId == member.PrincipalId
+            || (member.PrincipalId == Database.DboPrincipalId && BuiltInToken.Comparer.Equals(roleName, "db_owner")))
+        {
+            return SqlValue.FromInt32(1);
+        }
+        return roleP.TypeCode == "R"
+            ? SqlValue.FromInt32(PermissionChecker.IsRoleMember(database, member.PrincipalId, roleP) ? 1 : 0)
+            : SqlValue.Null(SqlType.Int32);
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)

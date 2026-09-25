@@ -379,7 +379,8 @@ Their bypass is the plain effective-`dbo` one rather than the boundary-aware `By
   The default schema is catalog-only: an unqualified name still resolves through `dbo` for every user (not built yet).
 - `CREATE ROLE name [AUTHORIZATION owner]` — `type_code='R'`.
   AUTHORIZATION clause parse-and-discards.
-- `ALTER ROLE name { ADD MEMBER name | DROP MEMBER name | WITH NAME = newname }` — ADD/DROP MEMBER append/remove `(role_id, member_id)` on `Database.RoleMembers`, refusing `dbo` (**Msg 15405**) and the role itself (**Msg 15413**); `WITH NAME` renames, a taken name being **Msg 15023** state 10.
+- `ALTER ROLE name { ADD MEMBER name | DROP MEMBER name | WITH NAME = newname }` — ADD/DROP MEMBER append/remove `(role_id, member_id)` on `Database.RoleMembers`, refusing `dbo` (**Msg 15405**), the role itself (**Msg 15413**) and `[public]` (**Msg 15081**); a name that isn't a role is `Cannot alter the role` and a missing member `Cannot add` / `Cannot drop the principal` (all Msg 15151 state 1); `WITH NAME` renames, a taken name being **Msg 15023** state 10.
+  `sp_addrolemember` / `sp_droprolemember` run the same change, differing only in a missing member to add (**Msg 15410**, class 11); both spellings raise `ADD_ROLE_MEMBER` / `DROP_ROLE_MEMBER` naming the member (probed 2026-09-25 against SQL Server 2025).
 - `DROP USER [IF EXISTS] name` and `DROP ROLE [IF EXISTS] name` — drop from `Database.Principals`; a user's memberships go with it, while a role that still has members is **Msg 15144**.
   All probed 2026-09-25 against SQL Server 2025.
   Dispatched ahead of the generic DROP-target switch in `Simulation.Drop.cs` because principals don't live in a per-schema dict.
@@ -661,7 +662,7 @@ The current-principal / id scalars read the session's effective principal; `HAS_
 - `HAS_PERMS_BY_NAME(securable, securable_class, permission [, …])` returns NULL for a NULL `permission`, `1` everywhere for a dbo session (preserving the DacFx bacpac-export gate `HAS_PERMS_BY_NAME(NULL, N'DATABASE', N'VIEW DEFINITION')` = 1), and otherwise the real checker result (1/0) for a `DATABASE` / `OBJECT` / `SCHEMA` securable_class.
   A NULL securable_class is the ambiguous "current server or database" request the simulator returns NULL for; an unresolvable OBJECT / SCHEMA securable or an unrecognized class returns NULL.
 - `IS_MEMBER(group_or_role)` — `public` → 1; the effective principal's transitive membership (nested roles + fixed roles via the checker's role closure) → 1/0; dbo → 1 for `db_owner`; any non-role / unknown name → NULL.
-- `IS_ROLEMEMBER(role [, principal])` — same shape as `IS_MEMBER` (the 2-arg named-principal form is not distinguished from the effective principal).
+- `IS_ROLEMEMBER(role [, principal])` — same shape as `IS_MEMBER`; a named principal is resolved first (a missing one is NULL even for `public`), counts as a member of itself, and follows nested roles (probed 2026-09-25).
 - `IS_SRVROLEMEMBER(role [, login])` — `public` → 1; real membership from `Simulation.ServerRoleMembers` (1/0); a sysadmin-member login → 1 for **every fixed** server role; a non-role name → NULL; NULL → NULL. The 1-arg form checks the session's effective login; the 2-arg form looks up the named login (an unknown named login → NULL).
 
 ## Known gaps

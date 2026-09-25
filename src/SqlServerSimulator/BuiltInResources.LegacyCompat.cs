@@ -50,6 +50,10 @@ internal static partial class BuiltInResources
         // See docs/claude/permissions.md.
         "sp_setapprole",
         "sp_unsetapprole",
+        // sp_addrolemember / sp_droprolemember: the legacy spelling of ALTER
+        // ROLE … ADD | DROP MEMBER, which older deployment scripts still use.
+        "sp_addrolemember",
+        "sp_droprolemember",
         // sp_configure: reads / stages server-configuration options, installed
         // by RECONFIGURE. 'nested triggers' is the one option with behavior
         // wired — see docs/claude/triggers.md.

@@ -226,6 +226,9 @@ partial class Simulation
     {
         if (context.Batch.IsSkipping)
             return;
+        // Ahead of every other check, even a missing or protected schema's and
+        // IF EXISTS (probed 2026-09-25 against SQL Server 2025).
+        context.CurrentDatabase.RejectWriteWhenReadOnly();
         var schemaName = name.Leaf;
         if (IsReservedSchemaName(context.CurrentDatabase.Collation, schemaName))
             throw SimulatedSqlException.CannotDropProtectedSchema(schemaName);

@@ -206,8 +206,31 @@ public sealed partial class SimulatedSqlException
     /// <c>ALTER ANY ROLE</c>. Severity 16, <strong>state 2</strong> — probe-confirmed
     /// distinct from the DROP ROLE state 1.
     /// </summary>
-    internal static SimulatedSqlException CannotAlterRole(string name) =>
-        new($"Cannot alter the role '{name}', because it does not exist or you do not have permission.", 15151, 16, 2);
+    internal static SimulatedSqlException CannotAlterRole(string name, byte state = 2) =>
+        new($"Cannot alter the role '{name}', because it does not exist or you do not have permission.", 15151, 16, state);
+
+    /// <summary>
+    /// Mimics SQL Server error 15151 as a membership change words a member
+    /// that doesn't exist, naming the verb (<c>add</c> or <c>drop</c>) —
+    /// probed 2026-09-25 against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException CannotChangeMembershipOfPrincipal(string verb, string name) =>
+        new($"Cannot {verb} the principal '{name}', because it does not exist or you do not have permission.", 15151, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 15081: <c>ALTER ROLE [public]</c> or
+    /// <c>sp_addrolemember 'public'</c> (probed 2026-09-25).
+    /// </summary>
+    internal static SimulatedSqlException PublicRoleMembershipFixed() =>
+        new("Membership of the public role cannot be changed.", 15081, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 15410, class 11: <c>sp_addrolemember</c> naming a
+    /// member that doesn't exist, where <c>ALTER ROLE</c> reports Msg 15151
+    /// (probed 2026-09-25).
+    /// </summary>
+    internal static SimulatedSqlException UserOrRoleDoesNotExist(string name) =>
+        new($"User or role '{name}' does not exist in this database.", 15410, 11, 1);
 
     /// <summary>
     /// Mimics SQL Server error 15151 state 1 for <c>ALTER USER</c> of a user

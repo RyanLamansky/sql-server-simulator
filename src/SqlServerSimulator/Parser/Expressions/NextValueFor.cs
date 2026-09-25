@@ -96,6 +96,9 @@ internal sealed class NextValueFor : Expression
         // value, so an enclosing uncorrelated subquery declines to replay its
         // result for the rest of the statement.
         batch.Connection.VolatileEvaluations++;
+        // Advancing is a write, refused in a read-only database when a value
+        // is actually drawn (probed 2026-09-25 against SQL Server 2025).
+        this.Sequence.Schema.Database.RejectWriteWhenReadOnly();
         if (this.Sequence.AllocatesShortFirstCache())
             batch.Connection.PendingMessages.Enqueue(SimulatedSqlException.SequenceCacheExceedsRangeMessage(batch, this.Sequence.Name));
         var value = this.Sequence.Advance();

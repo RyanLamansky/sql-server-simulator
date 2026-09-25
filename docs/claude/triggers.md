@@ -312,7 +312,7 @@ For a statement whose body runs to end of batch (`CREATE VIEW` / `PROCEDURE` / `
 
 ### Not modeled yet
 
-- **Per-event extra elements**: `AlterTableActionList` (which columns / constraints an `ALTER TABLE` touched), a principal's `SID` / `DefaultSchema` / `DefaultLanguage`, a schema's `OwnerName`, `sp_rename`'s `NewObjectName`, and the empty `TargetServerName` / `TargetDatabaseName` / `TargetSchemaName` trio real puts ahead of a synonym's `TargetObjectName`.
+- **Per-event extra elements**: `AlterTableActionList` (which columns / constraints an `ALTER TABLE` touched), a principal's `SID` / `DefaultSchema` / `DefaultLanguage` (the role-member events carry `RoleName` but not these two, and `sp_addrolemember`'s event reports its own `EXEC` text where real reports the `ALTER ROLE` it runs), a schema's `OwnerName`, `sp_rename`'s `NewObjectName`, and the empty `TargetServerName` / `TargetDatabaseName` / `TargetSchemaName` trio real puts ahead of a synonym's `TargetObjectName`.
   The common header plus `TSQLCommand` is what an audit body reads.
 - **`ALTER SCHEMA … TRANSFER`'s `ObjectType`** reports `OBJECT` / `TYPE` — the transfer's own name class — where real reports the moved object's actual kind (`SYNONYM`, `TABLE`, …).
 - **`GRANT` / `DENY` / `REVOKE`** → `GRANT_DATABASE` / `DENY_DATABASE` / `REVOKE_DATABASE`, whose document carries a distinct `Grantor` / `Permissions` / `Grantees` / `GrantOption` block.

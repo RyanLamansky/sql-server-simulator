@@ -159,7 +159,8 @@ public sealed class ReadOnlyDatabaseTests
             create index ix_t on dbo.t (label);
             create fulltext catalog ftc0;
             create user u1 without login;
-            create role r1
+            create role r1;
+            create sequence dbo.sq as int start with 1
             """,
             "alter database current set read_only");
         return simulation;
@@ -194,13 +195,46 @@ public sealed class ReadOnlyDatabaseTests
     [DataRow("alter role r1 add member u1")]
     [DataRow("create application role ar with password = 'Pa$$w0rd!23'")]
     [DataRow("drop assembly nosuchassembly")]
+    [DataRow("exec sp_addextendedproperty N'X', N'Y'")]
+    [DataRow("exec sp_addrolemember 'r1', 'u1'")]
+    [DataRow("exec sp_droprolemember 'r1', 'u1'")]
+    [DataRow("drop schema s1")]
+    [DataRow("drop schema if exists nosuch")]
+    [DataRow("drop schema dbo")]
+    [DataRow("select next value for dbo.sq")]
     public void CatalogWritingStatements_OnAReadOnlyDatabase_RaiseMsg3906(string statement)
     {
         var ex = WithReadOnlySelf().AssertSqlError(statement, 3906);
-        AreEqual(SelfRefusalMessage, ex.Message);
+        AreEqual(SelfRefusalMessage, ex.Errors[0].Message);
         AreEqual(16, ex.Class);
         AreEqual(1, ex.State);
     }
+
+    /// <summary>
+    /// <c>sp_rename</c> cautions before it finds the database read-only, so its
+    /// Msg 15477 travels with the refusal (probed 2026-09-25).
+    /// </summary>
+    [TestMethod]
+    public void SpRename_CautionsAlongsideTheRefusal()
+    {
+        var ex = WithReadOnlySelf().AssertSqlError("exec sp_rename 'dbo.t', 'tt'", 3906);
+        CollectionAssert.AreEqual(new[] { 3906, 15477 }, ex.Errors.Select(e => e.Number).ToArray());
+    }
+
+    /// <summary>A <c>NEXT VALUE FOR</c> refuses only when a value is actually drawn.</summary>
+    [TestMethod]
+    public void NextValueFor_DrawingNothing_IsAccepted()
+        => IsNull(WithReadOnlySelf().ExecuteScalar("select next value for dbo.sq from dbo.t where 1 = 0"));
+
+    /// <summary>
+    /// <c>UPDATE STATISTICS</c> reports state 13, after resolving its table and
+    /// ahead of resolving its statistic names (probed 2026-09-25).
+    /// </summary>
+    [TestMethod]
+    [DataRow("update statistics dbo.t")]
+    [DataRow("update statistics dbo.t nosuchstat")]
+    public void UpdateStatistics_OnAReadOnlyDatabase_RaisesMsg3906AtState13(string statement)
+        => AreEqual(13, WithReadOnlySelf().AssertSqlError(statement, 3906).State);
 
     /// <summary>
     /// <c>CREATE SCHEMA</c> has to open its own batch, so it can't ride the

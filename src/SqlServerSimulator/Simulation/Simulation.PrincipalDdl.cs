@@ -1,5 +1,6 @@
 using SqlServerSimulator.Parser;
 using SqlServerSimulator.Parser.Tokens;
+using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator;
 
@@ -227,6 +228,99 @@ partial class Simulation
     }
 
     /// <summary>
+    /// Adds <paramref name="memberName"/> to, or drops it from,
+    /// <paramref name="roleName"/> — the whole of <c>ALTER ROLE … ADD | DROP
+    /// MEMBER</c> and of <c>sp_addrolemember</c> / <c>sp_droprolemember</c>,
+    /// which real runs as that statement. The procedure differs only in how it
+    /// words a member it can't find to add (Msg 15410 rather than 15151), and
+    /// both raise <c>ADD_ROLE_MEMBER</c> / <c>DROP_ROLE_MEMBER</c> naming the
+    /// member as the object (probed 2026-09-25 against SQL Server 2025).
+    /// </summary>
+    private static void ChangeRoleMembership(ParserContext context, string roleName, string memberName, bool isAdd, bool viaProcedure)
+    {
+        var database = context.CurrentDatabase;
+        database.RejectWriteWhenReadOnly();
+        // Membership changes need ALTER ANY ROLE (or ALTER / CONTROL on the
+        // role, which the covering walk folds in). db_ddladmin does NOT
+        // carry it — probe-confirmed, which is why ALTER ANY ROLE isn't in
+        // the DDL category. Msg 15151 at state 2 for the denial, state 1 for
+        // a name that isn't a role.
+        if (!PermissionEnforcement.HasDatabasePermission(context.Batch, database, Permission.AlterAnyRole))
+            throw SimulatedSqlException.CannotAlterRole(roleName);
+        if (!database.Principals.TryGetValue(roleName, out var role) || role.TypeCode != "R")
+            throw SimulatedSqlException.CannotAlterRole(roleName, state: 1);
+        if (role.PrincipalId == 0)
+            throw SimulatedSqlException.PublicRoleMembershipFixed();
+        if (!database.Principals.TryGetValue(memberName, out var member))
+        {
+            throw isAdd && viaProcedure
+                ? SimulatedSqlException.UserOrRoleDoesNotExist(memberName)
+                : SimulatedSqlException.CannotChangeMembershipOfPrincipal(isAdd ? "add" : "drop", memberName);
+        }
+        // dbo can't be a member of any role, nor a role of itself (both
+        // probed 2026-09-25 against SQL Server 2025).
+        if (isAdd && member.PrincipalId == Database.DboPrincipalId)
+            throw SimulatedSqlException.CannotUseSpecialPrincipal(member.Name);
+        if (isAdd && member.PrincipalId == role.PrincipalId)
+            throw SimulatedSqlException.RoleMemberOfItself();
+        if (isAdd)
+        {
+            if (!database.RoleMembers.Contains((role.PrincipalId, member.PrincipalId)))
+                database.RoleMembers.Add((role.PrincipalId, member.PrincipalId));
+        }
+        else
+        {
+            _ = database.RoleMembers.Remove((role.PrincipalId, member.PrincipalId));
+        }
+        RecordDdlEvent(context, isAdd ? "ADD_ROLE_MEMBER" : "DROP_ROLE_MEMBER", null, member.Name, member.TypeCode == "R" ? "ROLE" : "SQL USER", roleName: role.Name);
+    }
+
+    /// <summary>
+    /// <c>sp_addrolemember</c> / <c>sp_droprolemember</c>: the legacy spelling of
+    /// <c>ALTER ROLE … ADD | DROP MEMBER</c>, with real's own signature — a
+    /// missing argument is Msg 201, a third Msg 8144, an unknown name Msg 8145
+    /// and a NULL one Msg 15004 (probed 2026-09-25 against SQL Server 2025).
+    /// </summary>
+    private static IEnumerable<SimulatedStatementOutcome> InvokeSpRoleMember(BatchContext batch, bool isAdd)
+    {
+        var procLabel = isAdd ? "sp_addrolemember" : "sp_droprolemember";
+        var arguments = ParseExecArguments(batch.Parser, batch);
+        if (batch.IsSkipping)
+            yield break;
+
+        string[] parameters = ["rolename", "membername"];
+        var values = new SqlValue?[parameters.Length];
+        string? unknownParameter = null;
+        for (var i = 0; i < arguments.Count; i++)
+        {
+            var arg = arguments[i];
+            if (arg.Name is null && i >= parameters.Length)
+                throw SimulatedSqlException.TooManyArgumentsToFunction(procLabel);
+            var slot = Array.FindIndex(parameters, p => BuiltInToken.Equals(arg.Name ?? parameters[i], p));
+            if (slot < 0)
+                unknownParameter ??= arg.Name;
+            else
+                values[slot] = arg.Value;
+        }
+        for (var i = 0; i < parameters.Length; i++)
+        {
+            if (values[i] is null)
+                throw SimulatedSqlException.ProcedureExpectsParameter(procLabel, parameters[i]);
+        }
+        if (unknownParameter is not null)
+            throw SimulatedSqlException.NotAParameterForProcedure(unknownParameter, procLabel);
+        if (values[0]!.Value.IsNull || values[1]!.Value.IsNull)
+            throw SimulatedSqlException.NameCannotBeNull();
+
+        ChangeRoleMembership(
+            batch.Parser,
+            values[0]!.Value.CoerceTo(SqlType.SystemName).AsString,
+            values[1]!.Value.CoerceTo(SqlType.SystemName).AsString,
+            isAdd,
+            viaProcedure: true);
+    }
+
+    /// <summary>
     /// Parses <c>ALTER ROLE name { ADD MEMBER name | DROP MEMBER name |
     /// WITH NAME = newname }</c>. ADD/DROP MEMBER mutates
     /// <see cref="Database.RoleMembers"/>; WITH NAME parse-and-discards
@@ -261,34 +355,7 @@ partial class Simulation
 
             if (context.Batch.IsSkipping)
                 return true;
-            context.CurrentDatabase.RejectWriteWhenReadOnly();
-            // Membership changes need ALTER ANY ROLE (or ALTER / CONTROL on the
-            // role, which the covering walk folds in). db_ddladmin does NOT
-            // carry it — probe-confirmed, which is why ALTER ANY ROLE isn't in
-            // the DDL category. Msg 15151 at state 2, distinct from DROP ROLE's
-            // state 1.
-            if (!PermissionEnforcement.HasDatabasePermission(context.Batch, context.CurrentDatabase, Permission.AlterAnyRole))
-                throw SimulatedSqlException.CannotAlterRole(roleName);
-            if (!context.CurrentDatabase.Principals.TryGetValue(roleName, out var role))
-                throw SimulatedSqlException.CannotFindPrincipal(roleName);
-            if (!context.CurrentDatabase.Principals.TryGetValue(memberName, out var member))
-                throw SimulatedSqlException.CannotFindPrincipal(memberName);
-            // dbo can't be a member of any role, nor a role of itself (both
-            // probed 2026-09-25 against SQL Server 2025).
-            if (isAdd && member.PrincipalId == Database.DboPrincipalId)
-                throw SimulatedSqlException.CannotUseSpecialPrincipal(member.Name);
-            if (isAdd && member.PrincipalId == role.PrincipalId)
-                throw SimulatedSqlException.RoleMemberOfItself();
-            if (isAdd)
-            {
-                if (!context.CurrentDatabase.RoleMembers.Contains((role.PrincipalId, member.PrincipalId)))
-                    context.CurrentDatabase.RoleMembers.Add((role.PrincipalId, member.PrincipalId));
-            }
-            else
-            {
-                _ = context.CurrentDatabase.RoleMembers.Remove((role.PrincipalId, member.PrincipalId));
-            }
-            RecordDdlEvent(context, "ALTER_ROLE", null, roleName, "ROLE");
+            ChangeRoleMembership(context, roleName, memberName, isAdd, viaProcedure: false);
             return true;
         }
 

@@ -2184,6 +2184,50 @@ partial class SimulatedSqlException
         new($"'{optionName}' is not a recognized ALTER INDEX option.", 155, 15, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 155 for an <c>UPDATE STATISTICS</c> option,
+    /// naming it as written (probed 2026-09-25).
+    /// </summary>
+    internal static SimulatedSqlException UnrecognizedUpdateStatisticsOption(string optionName) =>
+        new($"'{optionName}' is not a recognized UPDATE STATISTICS option.", 155, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 1052: two <c>UPDATE STATISTICS</c> options that
+    /// exclude each other, named in real's fixed order (probed 2026-09-25).
+    /// </summary>
+    internal static SimulatedSqlException ConflictingUpdateStatisticsOptions(string first, string second) =>
+        new($"Conflicting UPDATE STATISTICS options \"{first}\" and \"{second}\".", 1052, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 1039: an <c>UPDATE STATISTICS</c> option written
+    /// twice (probed 2026-09-25).
+    /// </summary>
+    internal static SimulatedSqlException OptionSpecifiedMoreThanOnce(string optionName) =>
+        new($"Option '{optionName}' is specified more than once.", 1039, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 9108: <c>UPDATE STATISTICS … INCREMENTAL = ON</c>
+    /// over a statistic on an unpartitioned table (probed 2026-09-25).
+    /// </summary>
+    internal static SimulatedSqlException StatisticsCannotBeIncremental() =>
+        new("This type of statistics is not supported to be incremental.", 9108, 16, 2);
+
+    /// <summary>
+    /// Mimics SQL Server error 9111: <c>UPDATE STATISTICS … RESAMPLE ON
+    /// PARTITIONS</c> over a statistic that isn't incremental (probed
+    /// 2026-09-25).
+    /// </summary>
+    internal static SimulatedSqlException OnPartitionsNeedsIncrementalStatistics() =>
+        new("UPDATE STATISTICS ON PARTITIONS syntax is not supported for non-incremental statistics.", 9111, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 2706: <c>UPDATE STATISTICS</c> named no table —
+    /// state 6 for a missing name, 7 for a view with no index (probed
+    /// 2026-09-25).
+    /// </summary>
+    internal static SimulatedSqlException TableDoesNotExist(string tableName, byte state) =>
+        new($"Table '{tableName}' does not exist.", 2706, 16, state);
+
+    /// <summary>
     /// Mimics SQL Server error 4920: <c>ALTER TABLE … { ENABLE | DISABLE }
     /// TRIGGER</c> named a trigger the table doesn't have (probed 2026-09-25
     /// against SQL Server 2025).
