@@ -2813,7 +2813,12 @@ internal sealed partial class Selection
 
                     var cteColumns = new HeapColumn[cteBinding.Plan.Schema.Length];
                     for (var ci = 0; ci < cteColumns.Length; ci++)
-                        cteColumns[ci] = new HeapColumn(string.Empty, cteBinding.Plan.Schema[ci], maxLength: null, nullable: true, spelledNumeric: cteBinding.Plan.ColumnReportsNumeric is { } cteNumeric && cteNumeric[ci]);
+                    {
+                        cteColumns[ci] = new HeapColumn(string.Empty, cteBinding.Plan.Schema[ci], maxLength: null, nullable: true, spelledNumeric: cteBinding.Plan.ColumnReportsNumeric is { } cteNumeric && cteNumeric[ci])
+                        {
+                            IsUntypedNull = cteBinding.Plan.ColumnIsUntypedNull is { } cteNulls && cteNulls[ci],
+                        };
+                    }
 
                     var cteAlias = ConsumeOptionalAlias(context);
                     // A CTE reference takes no hints, so a WITH after it is the
@@ -3143,7 +3148,12 @@ internal sealed partial class Selection
                 // columns; lobStore is null because no chain to follow.
                 var derivedColumns = new HeapColumn[derivedSelection.Schema.Length];
                 for (var ci = 0; ci < derivedColumns.Length; ci++)
-                    derivedColumns[ci] = new HeapColumn(string.Empty, derivedSelection.Schema[ci], maxLength: null, nullable: true, spelledNumeric: derivedSelection.ColumnReportsNumeric is { } derivedNumeric && derivedNumeric[ci]);
+                {
+                    derivedColumns[ci] = new HeapColumn(string.Empty, derivedSelection.Schema[ci], maxLength: null, nullable: true, spelledNumeric: derivedSelection.ColumnReportsNumeric is { } derivedNumeric && derivedNumeric[ci])
+                    {
+                        IsUntypedNull = derivedSelection.ColumnIsUntypedNull is { } derivedNulls && derivedNulls[ci],
+                    };
+                }
 
                 // A body that never closed its paren is Msg 102 naming what the
                 // parse stopped on — the last token of the batch when the input
@@ -3345,6 +3355,7 @@ internal sealed partial class Selection
         // is varchar, `(VALUES (1), (2.5))` numeric(2, 1)).
         var schema = new SqlType[arity];
         var cells = new (SqlType, int, Expression)[tuples.Count];
+        var untypedNull = new bool[arity];
         for (var c = 0; c < arity; c++)
         {
             var count = 0;
@@ -3355,6 +3366,7 @@ internal sealed partial class Selection
                     cells[count++] = (cell.GetSqlType(context.Batch, TypeResolver), Expression.IntegerLiteralDigits(cell), cell);
             }
             schema[c] = SqlType.PromoteBranches(cells.AsSpan(0, count));
+            untypedNull[c] = count == 0;
         }
 
         // Per-column nullability = OR across every row's cell: a VALUES column
@@ -3385,7 +3397,10 @@ internal sealed partial class Selection
                     }
                 }
             }
-            columns[c] = new HeapColumn(columnNames[c], schema[c], maxLength: null, nullable: nullable, spelledNumeric: spelledNumeric);
+            columns[c] = new HeapColumn(columnNames[c], schema[c], maxLength: null, nullable: nullable, spelledNumeric: spelledNumeric)
+            {
+                IsUntypedNull = untypedNull[c],
+            };
         }
 
         return new FromSource(

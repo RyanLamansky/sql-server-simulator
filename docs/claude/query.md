@@ -561,6 +561,7 @@ Probe-confirmed; oracle `AggregateBindingRuleTests`.
   A **windowed** aggregate over an aggregate is legal on real (`SUM(SUM(b)) OVER ()` returns a value); the simulator doesn't parse that shape at all yet, so it can't reach this check — see [`backlog.md`](backlog.md).
 - **Msg 8117 Cls 16 St 1** — `"Operand data type NULL is invalid for {aggregate} operator."`
   A bare untyped `NULL` operand, for count / count_big / sum / avg / max / min / stdev / checksum_agg.
+  A derived table's or CTE's column its body fills only with bare `NULL`s is untyped too — through `VALUES`, a union and a pass-through level — so an aggregate, an aggregate window or `LAG` / `LEAD` / `FIRST_VALUE` / `LAST_VALUE` over it is refused the same way (`HeapColumn.IsUntypedNull`, probed 2026-09-25).
   A *typed* NULL is fine (`COUNT_BIG(CAST(NULL AS int))` → 0).
   `STRING_AGG(NULL, ',')` uses the argument form instead — Msg 8116, `Argument data type NULL is invalid for argument 1 of string_agg function.`
 - **Msg 144 Cls 15 St 1** — `"Cannot use an aggregate or a subquery in an expression used for the group by list of a GROUP BY clause."`

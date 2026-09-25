@@ -105,6 +105,15 @@ internal sealed class HeapColumn(string name, SqlType type, int? maxLength, bool
     /// </summary>
     public readonly bool SpelledNumeric = spelledNumeric;
 
+    /// <summary>
+    /// A derived table's or CTE's column its body fills with nothing but the
+    /// bare <c>NULL</c> keyword, which carries no type: an aggregate or an
+    /// offset window function over it is refused as over a bare <c>NULL</c>
+    /// (probed 2026-09-25 against SQL Server 2025). The column's
+    /// <see cref="Type"/> is the placeholder <c>int</c>.
+    /// </summary>
+    public bool IsUntypedNull;
+
     /// <summary><c>sys.columns.system_type_id</c>: the type's, or 108 for a numeric-spelled column.</summary>
     public byte SystemTypeId => this.SpelledNumeric && this.Type is DecimalSqlType ? NumericTypeId : this.Type.SystemTypeId;
 

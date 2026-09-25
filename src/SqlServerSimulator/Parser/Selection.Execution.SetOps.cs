@@ -311,15 +311,19 @@ internal sealed partial class Selection
     /// <summary>
     /// Per-column flags marking the projection columns that are the bare
     /// untyped <c>NULL</c>, for <see cref="ColumnIsUntypedNull"/>; null when
-    /// none is.
+    /// none is. Given the <paramref name="sources"/>, a column that passes a
+    /// source's untyped column straight through is one too.
     /// </summary>
-    internal static bool[]? UntypedNullsOf(List<Expression> expressions)
+    internal static bool[]? UntypedNullsOf(List<Expression> expressions, FromSource[]? sources = null)
     {
         bool[]? flags = null;
         for (var i = 0; i < expressions.Count; i++)
         {
-            if (Expression.IsUntypedNullLiteral(expressions[i]))
+            if (Expression.IsUntypedNullLiteral(expressions[i])
+                || (sources is not null && ReadsUntypedNullColumn(sources, expressions[i] is Expressions.NamedExpression named ? named.Inner : expressions[i])))
+            {
                 (flags ??= new bool[expressions.Count])[i] = true;
+            }
         }
         return flags;
     }

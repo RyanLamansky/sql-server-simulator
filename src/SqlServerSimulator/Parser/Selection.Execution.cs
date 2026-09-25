@@ -1039,6 +1039,23 @@ internal sealed partial class Selection
             });
         }
 
+        // A column a derived source filled only with bare NULLs has no type
+        // either, so an aggregate or offset window over it is refused as over
+        // the bare NULL itself (probed 2026-09-25 against SQL Server 2025).
+        foreach (var aggregate in aggregates)
+        {
+            if (ReadsUntypedNullColumn(sources, aggregate.Operand))
+                throw AggregateExpression.UntypedNullOperand(aggregate.Kind);
+        }
+        foreach (var window in windows)
+        {
+            if (ReadsUntypedNullColumn(sources, window.Kind == WindowKind.Aggregate ? window.AggregateInfo!.Operand : window.Operand)
+                && window.UntypedNullOperand() is { } refusal)
+            {
+                throw refusal;
+            }
+        }
+
         // An EXISTS body only counts rows, so real never evaluates its select
         // list — `EXISTS (SELECT 1/0 FROM t)` is true over a non-empty t
         // (probe-confirmed 2026-09-23). Once the list is bound, each term
@@ -1358,7 +1375,7 @@ internal sealed partial class Selection
         selection.ColumnNullability = columnNullability;
         selection.ProjectionExpressions = [.. expressions];
         selection.ColumnIntegerLiteralDigits = LiteralDigitsOf(expressions);
-        selection.ColumnIsUntypedNull = UntypedNullsOf(expressions);
+        selection.ColumnIsUntypedNull = UntypedNullsOf(expressions, sources);
         selection.ColumnReportsNumeric = ColumnReportsNumericOf(expressions, outputSchema);
         selection.BranchFromSources = sources;
         selection.AutoSourceNames = AutoSourceNamesOf(sources);
@@ -1675,6 +1692,15 @@ internal sealed partial class Selection
     /// carry no extra array. The two names share one <see cref="SqlType"/>, so
     /// this stays projection-time metadata and never influences storage.
     /// </summary>
+    /// <summary>Whether <paramref name="operand"/> is a bare reference to a source column with no type.</summary>
+    private static bool ReadsUntypedNullColumn(FromSource[] sources, Expression? operand)
+    {
+        if (operand is not Reference reference)
+            return false;
+        var (s, c) = FindSourceColumn(sources, reference.ReferencedName);
+        return s >= 0 && sources[s].Columns[c].IsUntypedNull;
+    }
+
     private static bool[]? ColumnReportsNumericOf(List<Expression> expressions, SqlType[] schema)
     {
         bool[]? reportsNumeric = null;

@@ -237,14 +237,18 @@ internal sealed class AggregateExpression : Expression
             throw SimulatedSqlException.AggregateOnAggregateOrSubquery();
         }
         if (IsUntypedNullLiteral(operand))
-        {
-            // STRING_AGG names the argument where the others name the
-            // operator (Msg 8116, probed 2026-09-24).
-            throw kind == AggregateKind.StringAgg
-                ? SimulatedSqlException.InvalidArgumentDataType("NULL", 1, "string_agg")
-                : SimulatedSqlException.OperandDataTypeNullInvalid(LowerNameOf(kind));
-        }
+            throw UntypedNullOperand(kind);
     }
+
+    /// <summary>
+    /// The refusal of an operand with no type — the bare <c>NULL</c>, or a
+    /// derived column filled only with it. STRING_AGG names the argument where
+    /// the others name the operator (Msg 8116, probed 2026-09-24).
+    /// </summary>
+    internal static SimulatedSqlException UntypedNullOperand(AggregateKind kind) =>
+        kind == AggregateKind.StringAgg
+            ? SimulatedSqlException.InvalidArgumentDataType("NULL", 1, "string_agg")
+            : SimulatedSqlException.OperandDataTypeNullInvalid(LowerNameOf(kind));
 
     /// <summary>
     /// Non-consuming lookahead for the <c>) OVER</c> pair that turns this

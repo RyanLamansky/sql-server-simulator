@@ -709,6 +709,19 @@ internal sealed class WindowExpression : Expression
     /// <see cref="ParserContext.WindowCollector"/>. Leaves the cursor on
     /// the OVER's closing <c>)</c>.
     /// </summary>
+    /// <summary>
+    /// The refusal of an operand with no type — the bare <c>NULL</c>, or a
+    /// derived column filled only with it: Msg 8117 state 3 for the offset and
+    /// value functions, the aggregate's own for an aggregate window, and null
+    /// for the kinds that take no operand.
+    /// </summary>
+    internal SimulatedSqlException? UntypedNullOperand() => this.Kind switch
+    {
+        WindowKind.Lag or WindowKind.Lead or WindowKind.FirstValue or WindowKind.LastValue => SimulatedSqlException.OperandDataTypeInvalid("NULL", LowerNameFor(this.Kind), 3),
+        WindowKind.Aggregate => AggregateExpression.UntypedNullOperand(this.AggregateInfo!.Kind),
+        _ => null,
+    };
+
     public static WindowExpression WrapAggregate(AggregateExpression aggregate, ParserContext context)
     {
         if (aggregate.Distinct)

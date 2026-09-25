@@ -58,6 +58,32 @@ public sealed class AggregateBindingRuleTests
         // which is what surfaced this.
         Seeded().AssertSqlError(sql, 8117, $"Operand data type NULL is invalid for {aggregate} operator.");
 
+    /// <summary>
+    /// A derived column filled only with the bare NULL keyword has no type
+    /// either, through VALUES, a union, a CTE and a pass-through level, so an
+    /// aggregate or an offset window over it is refused as over the keyword
+    /// itself.
+    /// </summary>
+    [TestMethod]
+    [DataRow("select max(y) from (values (1, null)) v(x, y)", 8117, "Operand data type NULL is invalid for max operator.")]
+    [DataRow("select count(y) from (select y from (select null) a(y)) b", 8117, "Operand data type NULL is invalid for count operator.")]
+    [DataRow("select sum(y) from (select null y union all select null) v", 8117, "Operand data type NULL is invalid for sum operator.")]
+    [DataRow("with c(y) as (select null) select avg(y) from c", 8117, "Operand data type NULL is invalid for avg operator.")]
+    [DataRow("select sum(y) over () from (values (1, null)) v(x, y)", 8117, "Operand data type NULL is invalid for sum operator.")]
+    [DataRow("select lag(y) over (order by x) from (values (1, null)) v(x, y)", 8117, "Operand data type NULL is invalid for lag operator.")]
+    [DataRow("select last_value(y) over (order by x) from (select 1, null) v(x, y)", 8117, "Operand data type NULL is invalid for last_value operator.")]
+    [DataRow("select string_agg(y, ',') from (values (1, null)) v(x, y)", 8116, "Argument data type NULL is invalid for argument 1 of string_agg function.")]
+    public void AggregateOverUntypedNullColumn_IsRefused(string sql, int number, string message) =>
+        new Simulation().AssertSqlError(sql, number, message);
+
+    [TestMethod]
+    [DataRow("select count(*) from (values (1, null)) v(x, y)", 1)]
+    [DataRow("select max(y) from (select null y union all select 1) v", 1)]
+    [DataRow("select count(y) from (values (1, null), (2, 5)) v(x, y)", 1)]
+    [DataRow("select count(z) from (select y + 1 as z from (select null) a(y)) b", 0)]
+    public void AggregateOverTypedDerivedColumn_IsAccepted(string sql, int expected) =>
+        AreEqual(expected, new Simulation().ExecuteScalar(sql));
+
     [TestMethod]
     [DataRow("select count_big(cast(null as int)) from t", 0L)]
     [DataRow("select count(cast(null as int)) from t", 0)]
