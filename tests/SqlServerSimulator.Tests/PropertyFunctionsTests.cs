@@ -496,35 +496,35 @@ public sealed class PropertyFunctionsTests
             "select objectpropertyex(object_id('t'), null)"));
 
     // === FILEPROPERTY ===
-    // The current database's modeled files are <db>_Data (file_id 1, primary
-    // data) and <db>_Log (file_id 2, log); the default simulation database is
+    // The current database's modeled files are <db> (file_id 1, primary
+    // data) and <db>_log (file_id 2, log); the default simulation database is
     // "simulated". Values / NULL cases probed against SQL Server 2025
     // (2026-07-15). Returns int.
 
     [TestMethod]
     public void FileProperty_IsPrimaryFile_DataFile_Returns1()
         => AreEqual(1, new Simulation().ExecuteScalar<int>(
-            "select fileproperty(N'simulated_Data', 'IsPrimaryFile')"));
+            "select fileproperty(N'simulated', 'IsPrimaryFile')"));
 
     [TestMethod]
     public void FileProperty_IsPrimaryFile_LogFile_Returns0()
         => AreEqual(0, new Simulation().ExecuteScalar<int>(
-            "select fileproperty(N'simulated_Log', 'IsPrimaryFile')"));
+            "select fileproperty(N'simulated_log', 'IsPrimaryFile')"));
 
     [TestMethod]
     public void FileProperty_IsLogFile_LogFile_Returns1()
         => AreEqual(1, new Simulation().ExecuteScalar<int>(
-            "select fileproperty(N'simulated_Log', 'IsLogFile')"));
+            "select fileproperty(N'simulated_log', 'IsLogFile')"));
 
     [TestMethod]
     public void FileProperty_IsLogFile_DataFile_Returns0()
         => AreEqual(0, new Simulation().ExecuteScalar<int>(
-            "select fileproperty(N'simulated_Data', 'IsLogFile')"));
+            "select fileproperty(N'simulated', 'IsLogFile')"));
 
     [TestMethod]
     public void FileProperty_IsReadOnly_AlwaysZero()
         => AreEqual(0, new Simulation().ExecuteScalar<int>(
-            "select fileproperty(N'simulated_Data', 'IsReadOnly')"));
+            "select fileproperty(N'simulated', 'IsReadOnly')"));
 
     // SpaceUsed on the data file equals SUM(allocation_units.total_pages),
     // keeping SSMS's SpaceAvailable non-negative.
@@ -538,25 +538,25 @@ public sealed class PropertyFunctionsTests
             select sum(a.total_pages)
             from sys.partitions p join sys.allocation_units a on p.partition_id = a.container_id
             """);
-        AreEqual((int)sumTotal, sim.ExecuteScalar<int>("select fileproperty(N'simulated_Data', 'SpaceUsed')"));
+        AreEqual((int)sumTotal, sim.ExecuteScalar<int>("select fileproperty(N'simulated', 'SpaceUsed')"));
     }
 
     [TestMethod]
     public void FileProperty_SpaceUsed_LogFile_NonNull()
         => IsGreaterThan(0, new Simulation().ExecuteScalar<int>(
-            "select fileproperty(N'simulated_Log', 'SpaceUsed')"));
+            "select fileproperty(N'simulated_log', 'SpaceUsed')"));
 
     // Property name is case-insensitive and trailing-space insensitive (SQL
     // Server's internal = comparison).
     [TestMethod]
     public void FileProperty_Property_CaseAndTrailingSpaceInsensitive()
         => AreEqual(1, new Simulation().ExecuteScalar<int>(
-            "select fileproperty(N'simulated_Data', 'isPRIMARYfile ')"));
+            "select fileproperty(N'simulated', 'isPRIMARYfile ')"));
 
     [TestMethod]
     public void FileProperty_UnknownProperty_ReturnsNull()
         => AreEqual(DBNull.Value, new Simulation().ExecuteScalar(
-            "select fileproperty(N'simulated_Data', 'NotAProperty')"));
+            "select fileproperty(N'simulated', 'NotAProperty')"));
 
     [TestMethod]
     public void FileProperty_UnknownFile_ReturnsNull()
@@ -571,11 +571,11 @@ public sealed class PropertyFunctionsTests
     [TestMethod]
     public void FileProperty_NullProperty_ReturnsNull()
         => AreEqual(DBNull.Value, new Simulation().ExecuteScalar(
-            "select fileproperty(N'simulated_Data', null)"));
+            "select fileproperty(N'simulated', null)"));
 
     // === FILE_ID / FILE_IDEX / FILE_NAME ===
-    // The current database's two modeled files are <db>_Data (file_id 1) and
-    // <db>_Log (file_id 2), consistent with sys.database_files; the default
+    // The current database's two modeled files are <db> (file_id 1) and
+    // <db>_log (file_id 2), consistent with sys.database_files; the default
     // simulation database is "simulated". Return types / NULL cases
     // probe-confirmed against SQL Server 2025 (2026-07-20): FILE_ID → smallint,
     // FILE_IDEX → int, FILE_NAME → nvarchar(128).
@@ -583,17 +583,17 @@ public sealed class PropertyFunctionsTests
     [TestMethod]
     public void FileId_DataFile_Returns1()
         => AreEqual((short)1, new Simulation().ExecuteScalar<short>(
-            "select file_id(N'simulated_Data')"));
+            "select file_id(N'simulated')"));
 
     [TestMethod]
     public void FileId_LogFile_Returns2()
         => AreEqual((short)2, new Simulation().ExecuteScalar<short>(
-            "select file_id(N'simulated_Log')"));
+            "select file_id(N'simulated_log')"));
 
     [TestMethod]
     public void FileId_TrailingSpaceInsensitive()
         => AreEqual((short)1, new Simulation().ExecuteScalar<short>(
-            "select file_id(N'simulated_Data ')"));
+            "select file_id(N'simulated ')"));
 
     [TestMethod]
     public void FileId_UnknownFile_ReturnsNull()
@@ -608,12 +608,12 @@ public sealed class PropertyFunctionsTests
     [TestMethod]
     public void FileId_ResultType_IsSmallInt()
         => AreEqual("smallint", new Simulation().ExecuteScalar(
-            "select sql_variant_property(cast(file_id(N'simulated_Data') as sql_variant), 'BaseType')"));
+            "select sql_variant_property(cast(file_id(N'simulated') as sql_variant), 'BaseType')"));
 
     [TestMethod]
     public void FileIdEx_DataFile_Returns1()
         => AreEqual(1, new Simulation().ExecuteScalar<int>(
-            "select file_idex(N'simulated_Data')"));
+            "select file_idex(N'simulated')"));
 
     [TestMethod]
     public void FileIdEx_UnknownFile_ReturnsNull()
@@ -623,16 +623,16 @@ public sealed class PropertyFunctionsTests
     [TestMethod]
     public void FileIdEx_ResultType_IsInt()
         => AreEqual("int", new Simulation().ExecuteScalar(
-            "select sql_variant_property(cast(file_idex(N'simulated_Log') as sql_variant), 'BaseType')"));
+            "select sql_variant_property(cast(file_idex(N'simulated_log') as sql_variant), 'BaseType')"));
 
     [TestMethod]
     public void FileName_File1_ReturnsDataFile()
-        => AreEqual("simulated_Data", new Simulation().ExecuteScalar(
+        => AreEqual("simulated", new Simulation().ExecuteScalar(
             "select file_name(1)"));
 
     [TestMethod]
     public void FileName_File2_ReturnsLogFile()
-        => AreEqual("simulated_Log", new Simulation().ExecuteScalar(
+        => AreEqual("simulated_log", new Simulation().ExecuteScalar(
             "select file_name(2)"));
 
     [TestMethod]
@@ -658,8 +658,8 @@ public sealed class PropertyFunctionsTests
     // FILE_ID / FILE_NAME are exact inverses over the modeled file pair.
     [TestMethod]
     public void FileName_OfFileId_RoundTrips()
-        => AreEqual("simulated_Data", new Simulation().ExecuteScalar(
-            "select file_name(file_id(N'simulated_Data'))"));
+        => AreEqual("simulated", new Simulation().ExecuteScalar(
+            "select file_name(file_id(N'simulated'))"));
 
     // === FILEGROUP_ID / FILEGROUP_NAME ===
     // Every database carries the PRIMARY filegroup at data_space_id 1; user

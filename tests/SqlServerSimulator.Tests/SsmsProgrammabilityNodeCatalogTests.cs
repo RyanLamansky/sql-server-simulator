@@ -216,16 +216,25 @@ public sealed class SsmsProgrammabilityNodeCatalogTests
         var fromMasterFiles = (string?)sim.ExecuteScalar(
             "select name from sys.master_files where database_id = db_id() and file_id = 1");
         AreEqual(fromMasterFiles, fromDatabaseFiles);
-        IsTrue(fromDatabaseFiles!.EndsWith("_Data", StringComparison.Ordinal));
+        AreEqual("simulated", fromDatabaseFiles);
     }
+
+    [TestMethod]
+    [DataRow("master", "master|/var/opt/mssql/data/master.mdf|mastlog|/var/opt/mssql/data/mastlog.ldf")]
+    [DataRow("tempdb", "tempdev|/var/opt/mssql/data/tempdb.mdf|templog|/var/opt/mssql/data/templog.ldf")]
+    [DataRow("model", "modeldev|/var/opt/mssql/data/model.mdf|modellog|/var/opt/mssql/data/modellog.ldf")]
+    [DataRow("msdb", "MSDBData|/var/opt/mssql/data/MSDBData.mdf|MSDBLog|/var/opt/mssql/data/MSDBLog.ldf")]
+    [DataRow("simulated", "simulated|/var/opt/mssql/data/simulated.mdf|simulated_log|/var/opt/mssql/data/simulated_log.ldf")]
+    public void MasterFiles_NameEachDatabasesFilesAsReal(string database, string expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar($"select string_agg(concat(name, '|', physical_name), '|') within group (order by file_id) from sys.master_files where database_id = db_id('{database}')"));
 
     [TestMethod]
     public void DatabaseFiles_ResolvesCrossDatabaseThroughMaster()
     {
         var sim = new Simulation();
         AreEqual(2, sim.ExecuteScalar<int>("select count(*) from master.sys.database_files"));
-        AreEqual("master_Data", (string?)sim.ExecuteScalar("select name from master.sys.database_files where file_id = 1"));
-        AreEqual("master_Log", (string?)sim.ExecuteScalar("select name from master.sys.database_files where file_id = 2"));
+        AreEqual("master", (string?)sim.ExecuteScalar("select name from master.sys.database_files where file_id = 1"));
+        AreEqual("mastlog", (string?)sim.ExecuteScalar("select name from master.sys.database_files where file_id = 2"));
     }
 
     /// <summary>

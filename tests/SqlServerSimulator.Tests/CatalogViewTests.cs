@@ -745,12 +745,12 @@ public sealed class CatalogViewTests
         AreEqual(1, reader.GetInt32(0));
         AreEqual((byte)0, reader.GetByte(1));
         AreEqual("ROWS", reader.GetString(2));
-        AreEqual("simulated_Data", reader.GetString(3));
+        AreEqual("simulated", reader.GetString(3));
         IsTrue(reader.Read());
         AreEqual(2, reader.GetInt32(0));
         AreEqual((byte)1, reader.GetByte(1));
         AreEqual("LOG", reader.GetString(2));
-        AreEqual("simulated_Log", reader.GetString(3));
+        AreEqual("simulated_log", reader.GetString(3));
         IsFalse(reader.Read());
     }
 

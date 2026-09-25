@@ -186,8 +186,8 @@ partial class Simulation
     /// </summary>
     /// <remarks>
     /// File identity is the synthetic two-file model <c>sys.database_files</c>
-    /// / <c>sys.master_files</c> / <c>FILE_ID</c> share — <c>&lt;db&gt;_Data</c>
-    /// (fileid 1, PRIMARY) and <c>&lt;db&gt;_Log</c> (fileid 2, NULL filegroup)
+    /// / <c>sys.master_files</c> / <c>FILE_ID</c> share — <c>&lt;db&gt;</c>
+    /// (fileid 1, PRIMARY) and <c>&lt;db&gt;_log</c> (fileid 2, NULL filegroup)
     /// — so every surface reports the same sizes. Name matching is
     /// trailing-space insensitive, as <c>FILE_ID</c>'s is.
     /// </remarks>
@@ -215,8 +215,8 @@ partial class Simulation
     private static short? HelpFileIdOf(Database database, string fileName)
     {
         var name = fileName.TrimEnd(' ');
-        return Collation.Baseline.Equals(name, database.Name + "_Data") ? 1
-            : Collation.Baseline.Equals(name, database.Name + "_Log") ? 2
+        return Collation.Baseline.Equals(name, BuiltInResources.LogicalFileName(database.Name, isLog: false)) ? 1
+            : Collation.Baseline.Equals(name, BuiltInResources.LogicalFileName(database.Name, isLog: true)) ? 2
             : null;
     }
 
@@ -231,7 +231,7 @@ partial class Simulation
             BuiltInResources.FileGrowthKilobytes.ToString(CultureInfo.InvariantCulture) + " KB");
         SqlValue[] data =
         [
-            SqlValue.FromSystemName(database.Name + "_Data"),
+            SqlValue.FromSystemName(BuiltInResources.LogicalFileName(database.Name, isLog: false)),
             SqlValue.FromInt16(1),
             SqlValue.FromString(HelpFilePathType, BuiltInResources.DataFilePath(database.Name)),
             primary,
@@ -245,7 +245,7 @@ partial class Simulation
         // sys.database_files.max_size reports in pages.
         SqlValue[] log =
         [
-            SqlValue.FromSystemName(database.Name + "_Log"),
+            SqlValue.FromSystemName(BuiltInResources.LogicalFileName(database.Name, isLog: true)),
             SqlValue.FromInt16(2),
             SqlValue.FromString(HelpFilePathType, BuiltInResources.LogFilePath(database.Name)),
             nullFilegroup,

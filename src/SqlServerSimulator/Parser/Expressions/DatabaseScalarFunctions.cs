@@ -200,8 +200,8 @@ internal sealed class HasDbAccess : Expression
 /// SQL <c>FILE_ID('file_name')</c> (smallint) / <c>FILE_IDEX('file_name')</c>
 /// (int): the <c>file_id</c> of a logical file in the current database.
 /// The simulator models two files per database, mirroring
-/// <c>sys.database_files</c>: <c>&lt;db&gt;_Data</c> (file_id 1, primary ROWS)
-/// and <c>&lt;db&gt;_Log</c> (file_id 2, LOG). An unknown / NULL file name
+/// <c>sys.database_files</c>: <c>&lt;db&gt;</c> (file_id 1, primary ROWS)
+/// and <c>&lt;db&gt;_log</c> (file_id 2, LOG). An unknown / NULL file name
 /// returns NULL. File-name comparison is trailing-space insensitive (SQL
 /// Server's internal <c>=</c>). The two forms differ only in projected result
 /// type — probe-confirmed against SQL Server 2025: FILE_ID → smallint,
@@ -232,9 +232,9 @@ internal sealed class FileId : Expression
         var name = value.CoerceTo(SqlType.NVarchar).AsString.TrimEnd(' ');
         var database = runtime.Batch.CurrentDatabase;
         int fileId;
-        if (Collation.Baseline.Equals(name, database.Name + "_Data"))
+        if (Collation.Baseline.Equals(name, BuiltInResources.LogicalFileName(database.Name, isLog: false)))
             fileId = 1;
-        else if (Collation.Baseline.Equals(name, database.Name + "_Log"))
+        else if (Collation.Baseline.Equals(name, BuiltInResources.LogicalFileName(database.Name, isLog: true)))
             fileId = 2;
         else
             return SqlValue.Null(resultType);
@@ -252,7 +252,7 @@ internal sealed class FileId : Expression
 
 /// <summary>
 /// SQL <c>FILE_NAME(file_id)</c>: the logical name of a file in the current
-/// database — <c>&lt;db&gt;_Data</c> for file_id 1, <c>&lt;db&gt;_Log</c> for
+/// database — <c>&lt;db&gt;</c> for file_id 1, <c>&lt;db&gt;_log</c> for
 /// file_id 2 (the two-file model shared with <c>sys.database_files</c> /
 /// <see cref="FileId"/> / <see cref="FileProperty"/>). Any other id (0,
 /// negative, &gt; 2) or a NULL argument returns NULL. Result type is
@@ -277,8 +277,8 @@ internal sealed class FileNameLookup : Expression
         var database = runtime.Batch.CurrentDatabase;
         return ScalarArguments.CoerceToInt(value) switch
         {
-            1 => SqlValue.FromString(SqlType.SystemName, database.Name + "_Data"),
-            2 => SqlValue.FromString(SqlType.SystemName, database.Name + "_Log"),
+            1 => SqlValue.FromString(SqlType.SystemName, BuiltInResources.LogicalFileName(database.Name, isLog: false)),
+            2 => SqlValue.FromString(SqlType.SystemName, BuiltInResources.LogicalFileName(database.Name, isLog: true)),
             _ => SqlValue.Null(SqlType.SystemName),
         };
     }

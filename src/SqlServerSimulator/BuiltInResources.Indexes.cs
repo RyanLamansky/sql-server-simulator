@@ -931,11 +931,31 @@ internal static partial class BuiltInResources
     /// </summary>
     internal const int LogFileMaxSizePages = 268435456;
 
+    /// <summary>
+    /// The logical name of a database's data file (file_id 1) or log file
+    /// (file_id 2) — the one naming every file surface shares. A created
+    /// database's are <c>&lt;db&gt;</c> and <c>&lt;db&gt;_log</c>, and the
+    /// system databases keep their install-time names (probed 2026-09-25
+    /// against SQL Server 2025).
+    /// </summary>
+    internal static string LogicalFileName(string databaseName, bool isLog) => SystemFileNames(databaseName) is { } names
+        ? (isLog ? names.Log : names.Data)
+        : isLog ? databaseName + "_log" : databaseName;
+
     /// <summary>Synthetic physical path of a database's data file — shared by the file catalog views and <c>sp_helpfile</c>.</summary>
-    internal static string DataFilePath(string databaseName) => "/var/opt/mssql/data/" + databaseName + ".mdf";
+    internal static string DataFilePath(string databaseName) =>
+        "/var/opt/mssql/data/" + (SystemFileNames(databaseName) is { } names ? names.DataPath : databaseName) + ".mdf";
 
     /// <summary>Synthetic physical path of a database's log file — shared by the file catalog views and <c>sp_helpfile</c>.</summary>
-    internal static string LogFilePath(string databaseName) => "/var/opt/mssql/data/" + databaseName + "_log.ldf";
+    internal static string LogFilePath(string databaseName) =>
+        "/var/opt/mssql/data/" + (SystemFileNames(databaseName) is { } names ? names.Log : databaseName + "_log") + ".ldf";
+
+    private static (string Data, string Log, string DataPath)? SystemFileNames(string databaseName) =>
+        databaseName.Equals("master", StringComparison.OrdinalIgnoreCase) ? ("master", "mastlog", "master")
+        : databaseName.Equals("tempdb", StringComparison.OrdinalIgnoreCase) ? ("tempdev", "templog", "tempdb")
+        : databaseName.Equals("model", StringComparison.OrdinalIgnoreCase) ? ("modeldev", "modellog", "model")
+        : databaseName.Equals("msdb", StringComparison.OrdinalIgnoreCase) ? ("MSDBData", "MSDBLog", "MSDBData")
+        : null;
 
     /// <summary>Synthetic log-file <c>SpaceUsed</c> (pages) reported by FILEPROPERTY — a small fraction of <see cref="LogFileSizePages"/>.</summary>
     internal const int LogFileUsedPages = 24;

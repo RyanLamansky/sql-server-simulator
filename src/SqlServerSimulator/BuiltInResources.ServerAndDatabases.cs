@@ -488,7 +488,7 @@ internal static partial class BuiltInResources
         // `... from master.sys.master_files mf ... where mf.[type] = 2`, which
         // must return nothing — the simulator emits no type-2 (FILESTREAM /
         // memory-optimized) files. File contents are synthetic: logical name
-        // `<db>_Data` / `<db>_Log`, a plausible physical path, a small page
+        // `<db>` / `<db>_log`, a plausible physical path, a small page
         // count, unlimited max_size, 64 MB growth. All LSN columns numeric(25, 0),
         // surfaced NULL (no physical log).
         Sys("master_files",
@@ -533,7 +533,7 @@ internal static partial class BuiltInResources
         // `database`), so a three-part `master.sys.database_files` read (SSMS
         // reads it to derive the master data/log directory) returns master's
         // two files. Names / file_ids / types agree with sys.master_files
-        // (`<db>_Data` / `<db>_Log`); real SQL Server has no database_id column
+        // (`<db>` / `<db>_log`); real SQL Server has no database_id column
         // here (implicitly the current database), so it is omitted.
         Sys("database_files",
         [
@@ -1243,7 +1243,7 @@ internal static partial class BuiltInResources
     /// <c>database_id</c>. The simulator emits no <c>type</c>-2
     /// (FILESTREAM / memory-optimized) files, so SSMS's in-memory-OLTP probe
     /// (<c>where mf.[type] = 2</c>) returns nothing. Contents are synthetic:
-    /// logical name <c>&lt;db&gt;_Data</c> / <c>&lt;db&gt;_Log</c>, a plausible
+    /// logical name <c>&lt;db&gt;</c> / <c>&lt;db&gt;_log</c>, a plausible
     /// physical path, a small page count, and the 64 MB default autogrowth.
     /// <c>max_size</c> / <c>growth</c> are both in 8 KB pages here (the unit
     /// real uses whenever <c>is_percent_growth</c> is 0): the data file
@@ -1304,8 +1304,8 @@ internal static partial class BuiltInResources
 
         foreach (var (db, id) in Parser.Expressions.DbId.DatabasesWithIds(batch.Connection.Simulation))
         {
-            yield return BuildFile(id, 1, 0, rowsDesc, 1, db.Name + "_Data", DataFilePath(db.Name), ComputeDataFileSizePages(db));
-            yield return BuildFile(id, 2, 1, logDesc, 0, db.Name + "_Log", LogFilePath(db.Name), LogFileSizePages);
+            yield return BuildFile(id, 1, 0, rowsDesc, 1, LogicalFileName(db.Name, isLog: false), DataFilePath(db.Name), ComputeDataFileSizePages(db));
+            yield return BuildFile(id, 2, 1, logDesc, 0, LogicalFileName(db.Name, isLog: true), LogFilePath(db.Name), LogFileSizePages);
         }
     }
 
@@ -1318,7 +1318,7 @@ internal static partial class BuiltInResources
     /// <c>database_id</c> column (the view is implicitly current-database), so
     /// a three-part <c>master.sys.database_files</c> read returns master's two
     /// files. Synthetic contents mirror master_files: logical name
-    /// <c>&lt;db&gt;_Data</c> / <c>&lt;db&gt;_Log</c>, a plausible physical
+    /// <c>&lt;db&gt;</c> / <c>&lt;db&gt;_log</c>, a plausible physical
     /// path, a small page count, and the page-denominated <c>max_size</c> /
     /// <c>growth</c> pair (-1 unlimited on the data file, the 2 TB ceiling on
     /// the log, 8192 pages of growth on both).
@@ -1359,8 +1359,8 @@ internal static partial class BuiltInResources
             nullLsn,
         ];
 
-        yield return BuildFile(1, 0, rowsDesc, 1, database.Name + "_Data", DataFilePath(database.Name), ComputeDataFileSizePages(database));
-        yield return BuildFile(2, 1, logDesc, 0, database.Name + "_Log", LogFilePath(database.Name), LogFileSizePages);
+        yield return BuildFile(1, 0, rowsDesc, 1, LogicalFileName(database.Name, isLog: false), DataFilePath(database.Name), ComputeDataFileSizePages(database));
+        yield return BuildFile(2, 1, logDesc, 0, LogicalFileName(database.Name, isLog: true), LogFilePath(database.Name), LogFileSizePages);
     }
 
     /// <summary>

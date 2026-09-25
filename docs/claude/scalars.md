@@ -734,7 +734,7 @@ Probe-confirmed against SQL Server 2025: `SQL_Latin1_General_CP1_CI_AS` → Code
 `Parser/Expressions/FileProperty.cs`: per-file metadata for a file of the **current** database.
 SSMS's Database Properties → General page reads it (`CAST(FILEPROPERTY(s.name, 'SpaceUsed') AS float) * 8` over `sys.database_files WHERE type = 1`) to compute the log file's used space, and `Database.SpaceAvailable` in SMO drives it.
 Returns **`int`** (probe-confirmed against SQL Server 2025).
-The simulator models exactly two files per database, mirroring `sys.database_files`: the primary data file `<db>_Data` (file_id 1, ROWS) and the log file `<db>_Log` (file_id 2, LOG).
+The simulator models exactly two files per database, mirroring `sys.database_files`: the primary data file `<db>` (file_id 1, ROWS) and the log file `<db>_log` (file_id 2, LOG), named by `BuiltInResources.LogicalFileName`.
 File names are matched with SQL Server's trailing-space-insensitive `=` semantics; property names are case-insensitive and trailing-space insensitive (the property arg is `TrimEnd(' ')`-ed before the switch, matching the probed reference which accepts `'SpaceUsed '`).
 
 - **SpaceUsed** — for the data file, `BuiltInResources.SumDataFilePages` (the live page total across every modeled allocation unit — the same value `sys.allocation_units` / `sys.database_files.size` derive from, so SSMS's `SpaceAvailable = size − SpaceUsed` stays non-negative); for the log file, a small synthetic constant (`BuiltInResources.LogFileUsedPages` = 24 pages, well under the 128-page log size — a fixed plausible value, since the simulator has no log to measure).

@@ -12,8 +12,8 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// <remarks>
 /// <para>
 /// The simulator models exactly two files per database (mirroring
-/// <c>sys.database_files</c>): the primary data file <c>&lt;db&gt;_Data</c>
-/// (file_id 1, ROWS) and the log file <c>&lt;db&gt;_Log</c> (file_id 2, LOG).
+/// <c>sys.database_files</c>): the primary data file <c>&lt;db&gt;</c>
+/// (file_id 1, ROWS) and the log file <c>&lt;db&gt;_log</c> (file_id 2, LOG).
 /// </para>
 /// <para>
 /// Shipped properties (probe-confirmed against SQL Server 2025):
@@ -58,13 +58,13 @@ internal sealed class FileProperty : Expression
         var prop = propValue.CoerceTo(SqlType.NVarchar).AsString;
         var database = runtime.Batch.CurrentDatabase;
 
-        // file_id 1 = <db>_Data (ROWS, primary); file_id 2 = <db>_Log (LOG).
+        // file_id 1 is the data file (ROWS, primary), file_id 2 the log.
         // Baseline.Equals applies SQL Server's trailing-space-insensitive
         // comparison to the file name.
         bool isLog;
-        if (Collation.Baseline.Equals(name, database.Name + "_Data"))
+        if (Collation.Baseline.Equals(name, BuiltInResources.LogicalFileName(database.Name, isLog: false)))
             isLog = false;
-        else if (Collation.Baseline.Equals(name, database.Name + "_Log"))
+        else if (Collation.Baseline.Equals(name, BuiltInResources.LogicalFileName(database.Name, isLog: true)))
             isLog = true;
         else
             return SqlValue.Null(SqlType.Int32);

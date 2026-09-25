@@ -426,13 +426,13 @@ public sealed class SystemInfoProcTests
         CollectionAssert.AreEqual(
             new[] { "name", "fileid", "filename", "filegroup", "size", "maxsize", "growth", "usage" }, sets[1].Names);
         var files = sets[1].Rows;
-        AreEqual("simulated_Data", files[0][0]);
+        AreEqual("simulated", files[0][0]);
         AreEqual((short)1, files[0][1]);
         AreEqual("PRIMARY", files[0][3]);
         AreEqual("Unlimited", files[0][5]);
         AreEqual("65536 KB", files[0][6]);
         AreEqual("data only", files[0][7]);
-        AreEqual("simulated_Log", files[1][0]);
+        AreEqual("simulated_log", files[1][0]);
         AreEqual((short)2, files[1][1]);
         IsNull(files[1][3]);
         AreEqual("log only", files[1][7]);
@@ -465,7 +465,7 @@ public sealed class SystemInfoProcTests
         CollectionAssert.AreEqual(
             new[] { "name", "fileid", "filename", "filegroup", "size", "maxsize", "growth", "usage" }, sets[0].Names);
         CollectionAssert.AreEqual(
-            new[] { "simulated_Data", "simulated_Log" }, sets[0].Rows.ConvertAll(r => (string)r[0]!));
+            new[] { "simulated", "simulated_log" }, sets[0].Rows.ConvertAll(r => (string)r[0]!));
         AreEqual((short)1, sets[0].Rows[0][1]);
         AreEqual((short)2, sets[0].Rows[1][1]);
     }
@@ -473,11 +473,11 @@ public sealed class SystemInfoProcTests
     [TestMethod]
     public void HelpFile_NamedFile_DropsTheFileIdColumn()
     {
-        var sets = Sets(new Simulation(), "exec sp_helpfile @filename = 'simulated_Log'");
+        var sets = Sets(new Simulation(), "exec sp_helpfile @filename = 'simulated_log'");
         CollectionAssert.AreEqual(
             new[] { "name", "filename", "filegroup", "size", "maxsize", "growth", "usage" }, sets[0].Names);
         var row = sets[0].Rows.Single();
-        AreEqual("simulated_Log", row[0]);
+        AreEqual("simulated_log", row[0]);
         // nvarchar(260), so the path carries no padding.
         AreEqual("/var/opt/mssql/data/simulated_log.ldf", row[1]);
         IsNull(row[2]);
