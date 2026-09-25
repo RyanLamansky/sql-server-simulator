@@ -1,6 +1,6 @@
 # `hierarchyid` data type
 
-AW-minimum-viable surface ships: storage, two static factories, five instance methods, comparison, and `ORDER BY` honoring path order.
+Storage, two static factories, six instance methods, comparison, and `ORDER BY` honoring path order.
 
 ## Surface
 
@@ -13,6 +13,9 @@ AW-minimum-viable surface ships: storage, two static factories, five instance me
 - `.GetAncestor(n)` → ancestor path n levels up; raises Msg 6522 on `n < 0` or `n > level`.
 - `.GetDescendant(child1, child2)` → a fresh descendant path between two siblings; covers all four `(NULL, NULL)` / `(c, NULL)` / `(NULL, c)` / `(c1, c2)` combinations probe-confirmed against AW's `[HumanResources].[Employee]` data.
 - `.IsDescendantOf(other)` → `bit`.
+- `.GetReparentedValue(oldRoot, newRoot)` → the path with its `oldRoot` prefix swapped for `newRoot`; NULL for a NULL argument.
+
+Arguments convert as assignments do: a string reads as a path (`@h.GetDescendant('/1/3/', NULL)`), and a type that can't convert is refused while binding — `IsDescendantOf(1)` is Msg 206, `GetAncestor('x')` Msg 245 (probed 2026-09-25 against SQL Server 2025).
 - `.ToString()` → `nvarchar(4000)` canonical path string.
 
 **Operators**: comparison + `ORDER BY` follow lexicographic path order.
@@ -69,8 +72,8 @@ Outside the domain, `hierarchyid::Parse` is **Msg 6522** like any other malforme
 A **non-final** dotted label encodes as `ordinal + 1`, so one at the very top of the domain has nowhere to go: real refuses `/281479271683151.1/` while accepting both `/281479271683150.1/` and `/1.281479271683151/`.
 A *computed* ordinal past the top — `GetDescendant` above the last child — is real's other 6522 form, state 2 naming `WriteOrd` (`24006: SqlHierarchyId.WriteOrd failed because its result is too big.`).
 
-**Reverse CAST `CAST(varbinary AS hierarchyid)` is strict** — probe-confirmed that SQL Server rejects any non-canonical byte string (wrong pad bits: `0x59` vs canonical `0x58`; all-zero non-empty `0x00`; garbage prefix; trailing bytes) with the .NET-UDR error (Msg 6522).
-`HierarchyIdOrdPath.DecodeCanonical` enforces this by decoding then re-encoding and requiring byte equality, so canonicalization is checked by construction.
+**Reverse CAST `CAST(varbinary AS hierarchyid)` takes any bytes** — real stores a non-canonical string (wrong pad bits: `0x59` vs canonical `0x58`; all-zero non-empty `0x00`; garbage prefix; trailing bytes), hands it back through `CAST … AS varbinary` and compares it bytewise, and refuses it only when a method decodes it (Msg 6522, 24000; probed 2026-09-25 against SQL Server 2025).
+`SqlValue.AsHierarchyId` decodes through `HierarchyIdOrdPath.DecodeCanonical`, which re-encodes and requires byte equality, so the refusal lands wherever real's would.
 `0x` (empty) → root `/`.
 
 Anchored test vectors live in `HierarchyIdOrdPathTests` (Tests.Internal); the byte-identical CAST + reverse-CAST + multi-tier ORDER BY probes live in `HierarchyIdTests`; the wire form in `HierarchyIdWireTests` (Tests.SqlClient).
@@ -83,7 +86,7 @@ Anchored test vectors live in `HierarchyIdOrdPathTests` (Tests.Internal); the by
   Dispatches to `HierarchyIdStaticCall.Parse`.
   The same dispatch path also handles `geography::` / `geometry::` (see [`spatial.md`](spatial.md)).
 
-- **`Operator { Character: '.' }`** extended — when the dotted-name component matches one of the closed accept-list method names (`GetLevel` / `GetAncestor` / `GetDescendant` / `IsDescendantOf` / `ToString`) **and** the very next token is `(`, dispatch to `HierarchyIdMethodCall.Parse` instead of the existing multipart-`Reference` path.
+- **`Operator { Character: '.' }`** extended — when the dotted-name component matches one of the closed accept-list method names (`GetLevel` / `GetAncestor` / `GetDescendant` / `GetReparentedValue` / `IsDescendantOf` / `ToString`) **and** the very next token is `(`, dispatch to `HierarchyIdMethodCall.Parse` instead of the existing multipart-`Reference` path.
   Uses `SaveCheckpoint` / `RestoreCheckpoint` to peek without committing.
 
 Known gap from the closed-list approach: a column literally named `GetLevel` (etc.) followed by `.MethodName(...)` would route through hierarchyid dispatch instead of multipart-reference resolution.
@@ -93,10 +96,7 @@ AW doesn't exercise this collision; documented limitation.
 
 ## Errors
 
-**Msg 6522** verbatim covers:
-- `hierarchyid::Parse` on invalid input (empty, missing slash, double-slash, non-numeric, etc.)
-- `.GetAncestor(-1)`
-- `.GetDescendant(self, x)` where `x` isn't a direct child of self
-- `.GetDescendant(c1, c2)` where `c1 >= c2`
+Every refusal is **Msg 6522 state 2** in the library's own wording — `hierarchyid::Parse` / a string conversion (24001), a non-canonical binary on decode (24000), `GetAncestor(-1)` (an `ArgumentOutOfRangeException` whose 24011 text rides the `Parameter name:` line), `GetDescendant`'s non-child (24008) and out-of-order (24007) arguments, `GetReparentedValue`'s non-ancestor (24009), and the too-big ordinal (24006).
+The text stops at the repeated exception-type line, before the stack frames real appends, as the spatial family's does ([`spatial.md`](spatial.md)).
 
-`.GetReparentedValue` / `.Read` / `.Write` raise `NotSupportedException` if encountered — AW doesn't reference them.
+`.Read` / `.Write` raise `NotSupportedException` if encountered.

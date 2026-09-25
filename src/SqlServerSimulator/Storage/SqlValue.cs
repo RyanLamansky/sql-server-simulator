@@ -533,7 +533,7 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
     /// Non-NULL SQL <c>hierarchyid</c> value from raw OrdPath bytes, stored
     /// verbatim (no validation or re-encoding) — the passthrough path for BACPAC
     /// import, the ADO.NET byte-parameter path, and <c>CAST(varbinary AS
-    /// hierarchyid)</c> (after that path validates canonicality). Lets a value in
+    /// hierarchyid)</c>, which real doesn't validate either. Lets a value in
     /// an unmodeled tier still round-trip through storage even though
     /// <see cref="AsHierarchyId"/> / <c>ToString()</c> can't decode it. The caller
     /// transfers ownership of the array.
@@ -737,12 +737,17 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
             ? throw new InvalidOperationException($"Value is {this.Type}, not sql_variant.")
             : (SqlValue)this.reference!;
 
-    /// <summary>Returns the hierarchyid path decoded to segment-array form. Throws if NULL or not a hierarchyid value; <see cref="NotSupportedException"/> if the stored bytes use an unmodeled OrdPath tier.</summary>
+    /// <summary>
+    /// Returns the hierarchyid path decoded to segment-array form. Throws if
+    /// NULL or not a hierarchyid value, and raises real's Msg 6522 (24000) when
+    /// the stored bytes aren't a canonical OrdPath encoding — a CAST from
+    /// binary stores them unchecked, so decoding is where real notices.
+    /// </summary>
     public long[][] AsHierarchyId => this.IsNull
         ? throw new InvalidOperationException("Value is NULL.")
         : this.Type != SqlType.HierarchyId
             ? throw new InvalidOperationException($"Value is {this.Type}, not hierarchyid.")
-            : HierarchyIdOrdPath.Decode((byte[])this.reference!);
+            : HierarchyIdOrdPath.DecodeCanonical((byte[])this.reference!);
 
     /// <summary>Returns the raw canonical OrdPath bytes backing a hierarchyid value (zero-copy). Throws if NULL or not a hierarchyid value.</summary>
     public byte[] AsHierarchyIdBytes => this.IsNull

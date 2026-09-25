@@ -31,19 +31,31 @@ partial class SimulatedSqlException
         string message,
         string? parameterName = null)
     {
-        var parameter = parameterName is null ? string.Empty : $"Parameter name: {parameterName}\r\n";
         // A failure raised by the hosting layer rather than by the spatial
         // library carries no 24xxx code — a null SRID assignment is the one
         // that reaches here that way.
         var prefix = code == 0 ? string.Empty : $"{code.ToString(CultureInfo.InvariantCulture)}: ";
+        return ClrTypeFailure(isGeography ? "geography" : "geometry", clrExceptionType, prefix + message, parameterName, state: 1);
+    }
+
+    /// <summary>
+    /// Msg 6522 as a system CLR type's library reports it: the routine line,
+    /// the exception type and message, the <c>Parameter name:</c> line an
+    /// argument failure carries, and the repeated exception type — stopping
+    /// before the stack frames real appends, which name internal Microsoft
+    /// methods (see <see cref="SpatialFailure"/>).
+    /// </summary>
+    private static SimulatedSqlException ClrTypeFailure(string routine, string clrExceptionType, string message, string? parameterName, byte state)
+    {
+        var parameter = parameterName is null ? string.Empty : $"Parameter name: {parameterName}\r\n";
         return new(
-            $"A .NET Framework error occurred during execution of user-defined routine or aggregate \"{(isGeography ? "geography" : "geometry")}\": \r\n"
-            + $"{clrExceptionType}: {prefix}{message}\r\n"
+            $"A .NET Framework error occurred during execution of user-defined routine or aggregate \"{routine}\": \r\n"
+            + $"{clrExceptionType}: {message}\r\n"
             + parameter
             + $"{clrExceptionType}: \r\n.",
             6522,
             16,
-            1);
+            state);
     }
 
     private const string SpatialFormat = "System.FormatException";

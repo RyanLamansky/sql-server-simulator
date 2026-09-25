@@ -301,19 +301,16 @@ internal readonly partial struct SqlValue
         // hierarchyid ↔ varbinary/binary: hierarchyid stores its canonical
         // OrdPath bytes, so CAST(node AS varbinary) is a zero-copy byte read
         // (byte-identical to a real server). The reverse — CAST(0x… AS
-        // hierarchyid) — accepts only a canonical OrdPath encoding, matching
-        // real SQL Server's strict rejection (probe-confirmed 2026-07-17: any
-        // non-canonical byte string raises the .NET-UDR error, Msg 6522); the
-        // validation lives in HierarchyIdOrdPath.DecodeCanonical.
+        // hierarchyid) — takes the bytes as they are: real stores, compares
+        // and hands back a non-canonical string without complaint and raises
+        // only when a method decodes it (probed 2026-09-25 against SQL Server
+        // 2025), which AsHierarchyId's canonical decode reproduces.
         if (this.Type is HierarchyIdSqlType && target is VarbinarySqlType)
             return FromVarbinary(this.AsHierarchyIdBytes);
         if (this.Type is HierarchyIdSqlType && target is BinarySqlType hierarchyToBinary)
             return FromBinary(hierarchyToBinary, this.AsHierarchyIdBytes);
         if (this.Type is VarbinarySqlType or BinarySqlType && target is HierarchyIdSqlType)
-        {
-            _ = HierarchyIdOrdPath.DecodeCanonical(this.AsBytes);
             return FromHierarchyIdBytes(this.AsBytes);
-        }
 
         // uniqueidentifier crossings: only string ↔ uid and varbinary ↔ uid
         // are allowed. Every other source/target pair surfaces as Msg 529.

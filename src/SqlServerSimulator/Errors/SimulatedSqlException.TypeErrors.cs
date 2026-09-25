@@ -790,26 +790,60 @@ partial class SimulatedSqlException
         new($"The timezone provided to builtin function {function} is invalid.", 9812, 16, state);
 
     /// <summary>
-    /// Mimics SQL Server error 6522: an input to a hierarchyid method
-    /// (<c>Parse</c>, <c>GetAncestor</c> with out-of-range depth,
-    /// <c>GetDescendant</c> with mismatched children, etc.) violates the
-    /// hierarchyid contract. Real SQL Server wraps these as ".NET Framework
-    /// error … during execution of user-defined routine or aggregate
-    /// 'hierarchyid'"; the simulator surfaces a concise actionable message
-    /// with the same number so apps doing <c>TRY/CATCH</c> on Msg 6522 still
-    /// see the same code.
+    /// A hierarchyid method refused its input for a reason real never reports,
+    /// because its own binder refuses the shape first — an argument count or a
+    /// receiver type no parse can produce. Kept as the 6522 real's library
+    /// would raise were the call to reach it.
     /// </summary>
     internal static SimulatedSqlException InvalidHierarchyIdInput(string detail) =>
-        new($"A .NET Framework error occurred during execution of user-defined routine or aggregate \"hierarchyid\": Microsoft.SqlServer.Types.HierarchyIdException: 24001: SqlHierarchyId operation failed because input '{detail}' was not valid.", 6522, 16, 1);
+        HierarchyIdFailure($"24001: SqlHierarchyId operation failed because input '{detail}' was not valid.");
 
     /// <summary>
-    /// Mimics SQL Server error 6522 state 2 with the <c>24006</c> inner
-    /// wording: a computed <c>hierarchyid</c> ordinal fell outside the OrdPath
+    /// Msg 6522 as real's hierarchyid library words each failure, at state 2
+    /// (all probed 2026-09-25 against SQL Server 2025), stopping before the
+    /// stack frames real appends as the spatial family does.
+    /// </summary>
+    private static SimulatedSqlException HierarchyIdFailure(string message, string exceptionType = "Microsoft.SqlServer.Types.HierarchyIdException", string? parameterName = null) =>
+        ClrTypeFailure("hierarchyid", exceptionType, message, parameterName, state: 2);
+
+    /// <summary>A string <c>hierarchyid::Parse</c> or a conversion can't read.</summary>
+    internal static SimulatedSqlException HierarchyIdParseFailed(string input) =>
+        HierarchyIdFailure($"24001: SqlHierarchyId.Parse failed because the input string '{input}' is not a valid string representation of a SqlHierarchyId node.");
+
+    /// <summary>
+    /// Bytes that aren't a canonical OrdPath encoding, reported when a method
+    /// first decodes them — a CAST or a comparison reads them without complaint.
+    /// Real's message ends in a space.
+    /// </summary>
+    internal static SimulatedSqlException HierarchyIdInvalidBinary() =>
+        HierarchyIdFailure("24000: SqlHierarchyId operation failed because HierarchyId object was constructed from an invalid binary string. ");
+
+    /// <summary><c>GetAncestor</c> with a negative level, reported as the argument failure it is.</summary>
+    internal static SimulatedSqlException HierarchyIdNegativeAncestor() =>
+        HierarchyIdFailure(
+            "Specified argument was out of the range of valid values.",
+            "System.ArgumentOutOfRangeException",
+            "24011: SqlHierarchyId.GetAncestor failed because 'n' was negative.");
+
+    /// <summary><c>GetDescendant</c> with a <paramref name="childName"/> argument that isn't a child of the receiver.</summary>
+    internal static SimulatedSqlException HierarchyIdDescendantNotAChild(string childName, string child, string self) =>
+        HierarchyIdFailure($"24008: SqlHierarchyId.GetDescendant failed because '{childName}' must be a child of 'this'.  '{childName}' was '{child}' and 'this' was '{self}'.");
+
+    /// <summary><c>GetDescendant</c> with <c>child1</c> not below <c>child2</c>.</summary>
+    internal static SimulatedSqlException HierarchyIdDescendantOutOfOrder(string child1, string child2) =>
+        HierarchyIdFailure($"24007: SqlHierarchyId.GetDescendant failed because 'child1' must be less than 'child2'.  'child1' was '{child1}' and 'child2' was '{child2}'.");
+
+    /// <summary><c>GetReparentedValue</c> with an <c>oldRoot</c> the receiver doesn't descend from.</summary>
+    internal static SimulatedSqlException HierarchyIdReparentNotAnAncestor(string oldRoot, string self) =>
+        HierarchyIdFailure($"24009: SqlHierarchyId.GetReparentedValue failed because 'oldRoot' was not an ancestor node of 'this'.  'oldRoot' was '{oldRoot}', and 'this' was '{self}'.");
+
+    /// <summary>
+    /// The <c>24006</c> form: a computed ordinal fell outside the OrdPath
     /// domain, which is what <c>GetDescendant</c> reports past the top of the
     /// widest tier (probe-confirmed against SQL Server 2025, 2026-08-08).
     /// </summary>
     internal static SimulatedSqlException HierarchyIdResultTooBig() =>
-        new("A .NET Framework error occurred during execution of user-defined routine or aggregate \"hierarchyid\": Microsoft.SqlServer.Types.HierarchyIdException: 24006: SqlHierarchyId.WriteOrd failed because its result is too big.", 6522, 16, 2);
+        HierarchyIdFailure("24006: SqlHierarchyId.WriteOrd failed because its result is too big.");
 
     /// <summary>
     /// Mimics SQL Server error 447: an explicit <c>COLLATE</c> clause was

@@ -61,7 +61,7 @@ internal sealed class HierarchyIdSqlType() : SqlType(SqlTypeCategory.Other, Type
     {
         ArgumentNullException.ThrowIfNull(input);
         if (input.Length == 0 || input[0] != '/' || input[^1] != '/')
-            throw SimulatedSqlException.InvalidHierarchyIdInput(input);
+            throw SimulatedSqlException.HierarchyIdParseFailed(input);
         if (input.Length == 1)
             return [];
         var inner = input.AsSpan(1, input.Length - 2);
@@ -72,7 +72,7 @@ internal sealed class HierarchyIdSqlType() : SqlType(SqlTypeCategory.Other, Type
             if (i == inner.Length || inner[i] == '/')
             {
                 if (i == start)
-                    throw SimulatedSqlException.InvalidHierarchyIdInput(input);
+                    throw SimulatedSqlException.HierarchyIdParseFailed(input);
                 segments.Add(ParseSegment(inner[start..i], input));
                 start = i + 1;
             }
@@ -89,7 +89,7 @@ internal sealed class HierarchyIdSqlType() : SqlType(SqlTypeCategory.Other, Type
             if (i == segment.Length || segment[i] == '.')
             {
                 if (i == start)
-                    throw SimulatedSqlException.InvalidHierarchyIdInput(fullInput);
+                    throw SimulatedSqlException.HierarchyIdParseFailed(fullInput);
                 var slice = segment[start..i];
                 // Labels span real's whole ordinal domain, which is wider
                 // than int; one outside it is as malformed as a non-numeric
@@ -98,7 +98,7 @@ internal sealed class HierarchyIdSqlType() : SqlType(SqlTypeCategory.Other, Type
                     || value < HierarchyIdOrdPath.DomainMin
                     || value > HierarchyIdOrdPath.DomainMax)
                 {
-                    throw SimulatedSqlException.InvalidHierarchyIdInput(fullInput);
+                    throw SimulatedSqlException.HierarchyIdParseFailed(fullInput);
                 }
                 labels.Add(value);
                 start = i + 1;
@@ -113,7 +113,7 @@ internal sealed class HierarchyIdSqlType() : SqlType(SqlTypeCategory.Other, Type
         for (var i = 0; i < labels.Count - 1; i++)
         {
             if (labels[i] == HierarchyIdOrdPath.DomainMax)
-                throw SimulatedSqlException.InvalidHierarchyIdInput(fullInput);
+                throw SimulatedSqlException.HierarchyIdParseFailed(fullInput);
         }
 
         return [.. labels];

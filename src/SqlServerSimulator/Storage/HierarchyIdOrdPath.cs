@@ -196,12 +196,13 @@ internal static class HierarchyIdOrdPath
 
     /// <summary>
     /// Strictly decodes a payload that must be the exact canonical OrdPath
-    /// encoding, matching SQL Server's <c>CAST(varbinary AS hierarchyid)</c>,
-    /// which rejects any non-canonical byte string (wrong pad bits, non-minimal
-    /// tier, trailing garbage). Implemented by decoding then re-encoding and
-    /// requiring byte equality, so canonicalization is enforced by construction.
+    /// encoding — what every hierarchyid method reads its receiver through,
+    /// since real refuses any non-canonical byte string (wrong pad bits,
+    /// non-minimal tier, trailing garbage) the moment it decodes one.
+    /// Implemented by decoding then re-encoding and requiring byte equality, so
+    /// canonicalization is enforced by construction.
     /// </summary>
-    /// <exception cref="SimulatedSqlException">The input is not a canonical hierarchyid encoding (Msg 6522).</exception>
+    /// <exception cref="SimulatedSqlException">The input is not a canonical hierarchyid encoding (Msg 6522, 24000).</exception>
     public static long[][] DecodeCanonical(ReadOnlySpan<byte> source)
     {
         long[][] path;
@@ -211,11 +212,11 @@ internal static class HierarchyIdOrdPath
         }
         catch (Exception ex) when (ex is NotSupportedException or InvalidDataException)
         {
-            throw SimulatedSqlException.InvalidHierarchyIdInput(Convert.ToHexString(source));
+            throw SimulatedSqlException.HierarchyIdInvalidBinary();
         }
         return Encode(path).AsSpan().SequenceEqual(source)
             ? path
-            : throw SimulatedSqlException.InvalidHierarchyIdInput(Convert.ToHexString(source));
+            : throw SimulatedSqlException.HierarchyIdInvalidBinary();
     }
 
     private static void WriteLabel(ref BitWriter writer, long ordinal, bool terminator)

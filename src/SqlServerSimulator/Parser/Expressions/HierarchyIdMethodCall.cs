@@ -10,9 +10,9 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// dispatch routes by method name into <see cref="HierarchyIdMethod"/>.
 /// </summary>
 /// <remarks>
-/// The method-name set is a closed accept-list against AW's exercised surface:
+/// The method-name set is a closed accept-list:
 /// <c>GetLevel</c>, <c>GetAncestor</c>, <c>GetDescendant</c>,
-/// <c>IsDescendantOf</c>, <c>ToString</c>. The closed-list shape means an
+/// <c>GetReparentedValue</c>, <c>IsDescendantOf</c>, <c>ToString</c>. The closed-list shape means an
 /// unrelated column literally named (for example) <c>GetLevel</c> can collide
 /// with the parser's dispatch — accepted as a known limitation given the
 /// AW-minimum-viable bundle scope.
@@ -57,6 +57,7 @@ internal sealed class HierarchyIdMethodCall : Expression
             case "GetAncestor": method = HierarchyIdMethod.GetAncestor; return true;
             case "GetDescendant": method = HierarchyIdMethod.GetDescendant; return true;
             case "GetLevel": method = HierarchyIdMethod.GetLevel; return true;
+            case "GetReparentedValue": method = HierarchyIdMethod.GetReparentedValue; return true;
             case "IsDescendantOf": method = HierarchyIdMethod.IsDescendantOf; return true;
             case "ToString": method = HierarchyIdMethod.ToStringMethod; return true;
             default: method = default; return false;
@@ -112,6 +113,7 @@ internal sealed class HierarchyIdMethodCall : Expression
             HierarchyIdMethod.GetAncestor => RunGetAncestor(path, runtime),
             HierarchyIdMethod.GetDescendant => RunGetDescendant(path, runtime),
             HierarchyIdMethod.IsDescendantOf => RunIsDescendantOf(path, runtime),
+            HierarchyIdMethod.GetReparentedValue => RunGetReparentedValue(path, runtime),
             HierarchyIdMethod.ToStringMethod => SqlValue.FromNVarchar(HierarchyIdSqlType.PathToString(path)),
             _ => throw new InvalidOperationException($"Unhandled method: {this.method}"),
         };
@@ -124,9 +126,9 @@ internal sealed class HierarchyIdMethodCall : Expression
         var depthArg = this.arguments[0].Run(runtime);
         if (depthArg.IsNull)
             return SqlValue.Null(SqlType.HierarchyId);
-        var depth = CoerceToInt32(depthArg, "GetAncestor");
+        var depth = depthArg.CoerceTo(SqlType.Int32).AsInt32;
         if (depth < 0)
-            throw SimulatedSqlException.InvalidHierarchyIdInput("GetAncestor depth must be >= 0");
+            throw SimulatedSqlException.HierarchyIdNegativeAncestor();
         if (depth > path.Length)
             return SqlValue.Null(SqlType.HierarchyId);
         var remaining = path.Length - depth;
@@ -141,15 +143,15 @@ internal sealed class HierarchyIdMethodCall : Expression
             throw SimulatedSqlException.InvalidHierarchyIdInput("GetDescendant expects two arguments");
         var c1Val = this.arguments[0].Run(runtime);
         var c2Val = this.arguments[1].Run(runtime);
-        var c1 = c1Val.IsNull ? null : RequireHierarchyId(c1Val, "GetDescendant child1");
-        var c2 = c2Val.IsNull ? null : RequireHierarchyId(c2Val, "GetDescendant child2");
+        var c1 = c1Val.IsNull ? null : AsPath(c1Val);
+        var c2 = c2Val.IsNull ? null : AsPath(c2Val);
 
         // Both children must be direct descendants of self (their depth =
         // self.depth + 1) and their prefix must equal self.
         if (c1 is not null && !IsDirectChildOfSelf(selfPath, c1))
-            throw SimulatedSqlException.InvalidHierarchyIdInput("GetDescendant child1 is not a direct descendant of self");
+            throw SimulatedSqlException.HierarchyIdDescendantNotAChild("child1", HierarchyIdSqlType.PathToString(c1), HierarchyIdSqlType.PathToString(selfPath));
         if (c2 is not null && !IsDirectChildOfSelf(selfPath, c2))
-            throw SimulatedSqlException.InvalidHierarchyIdInput("GetDescendant child2 is not a direct descendant of self");
+            throw SimulatedSqlException.HierarchyIdDescendantNotAChild("child2", HierarchyIdSqlType.PathToString(c2), HierarchyIdSqlType.PathToString(selfPath));
 
         // No constraints: emit self + [1]
         if (c1 is null && c2 is null)
@@ -176,7 +178,7 @@ internal sealed class HierarchyIdMethodCall : Expression
         var seg2 = c2![^1];
         var cmp = CompareLabels(seg1, seg2);
         if (cmp >= 0)
-            throw SimulatedSqlException.InvalidHierarchyIdInput("GetDescendant requires child1 < child2");
+            throw SimulatedSqlException.HierarchyIdDescendantOutOfOrder(HierarchyIdSqlType.PathToString(c1), HierarchyIdSqlType.PathToString(c2));
 
         // Look at the last segment's main label (index 0). If they differ by
         // > 1, pick the integer midpoint (matches probe: `/1/`.GetDescendant(`/1/2/`, `/1/4/`) = `/1/3/`).
@@ -207,8 +209,31 @@ internal sealed class HierarchyIdMethodCall : Expression
         var otherVal = this.arguments[0].Run(runtime);
         if (otherVal.IsNull)
             return SqlValue.Null(SqlType.Bit);
-        var other = RequireHierarchyId(otherVal, "IsDescendantOf argument");
-        return SqlValue.FromBoolean(IsDescendantOrSelf(selfPath, other));
+        return SqlValue.FromBoolean(IsDescendantOrSelf(selfPath, AsPath(otherVal)));
+    }
+
+    /// <summary>
+    /// <c>GetReparentedValue(oldRoot, newRoot)</c>: the receiver's path with its
+    /// <c>oldRoot</c> prefix replaced by <c>newRoot</c>. NULL for a NULL
+    /// argument; an <c>oldRoot</c> the receiver doesn't descend from (or equal)
+    /// is real's 24009 (probed 2026-09-25 against SQL Server 2025).
+    /// </summary>
+    private SqlValue RunGetReparentedValue(long[][] selfPath, RuntimeContext runtime)
+    {
+        if (this.arguments.Length != 2)
+            throw SimulatedSqlException.InvalidHierarchyIdInput("GetReparentedValue expects two arguments");
+        var oldRootVal = this.arguments[0].Run(runtime);
+        var newRootVal = this.arguments[1].Run(runtime);
+        if (oldRootVal.IsNull || newRootVal.IsNull)
+            return SqlValue.Null(SqlType.HierarchyId);
+        var oldRoot = AsPath(oldRootVal);
+        var newRoot = AsPath(newRootVal);
+        if (!IsDescendantOrSelf(selfPath, oldRoot))
+            throw SimulatedSqlException.HierarchyIdReparentNotAnAncestor(HierarchyIdSqlType.PathToString(oldRoot), HierarchyIdSqlType.PathToString(selfPath));
+        var reparented = new long[newRoot.Length + selfPath.Length - oldRoot.Length][];
+        Array.Copy(newRoot, reparented, newRoot.Length);
+        Array.Copy(selfPath, oldRoot.Length, reparented, newRoot.Length, selfPath.Length - oldRoot.Length);
+        return SqlValue.FromHierarchyId(reparented);
     }
 
     private static bool IsDescendantOrSelf(long[][] descendant, long[][] ancestor)
@@ -255,21 +280,25 @@ internal sealed class HierarchyIdMethodCall : Expression
         return SqlValue.FromHierarchyId(extended);
     }
 
-    private static long[][] RequireHierarchyId(SqlValue value, string context) =>
-        value.Type == SqlType.HierarchyId
-            ? value.AsHierarchyId
-            : throw SimulatedSqlException.InvalidHierarchyIdInput($"{context} must be hierarchyid, got {value.Type}");
+    /// <summary>
+    /// A hierarchyid argument's path, converted as an assignment would — a
+    /// string parses (<c>@h.GetDescendant('/1/3/', NULL)</c>), and a type that
+    /// can't convert was refused while binding.
+    /// </summary>
+    private static long[][] AsPath(SqlValue value) => value.CoerceTo(SqlType.HierarchyId).AsHierarchyId;
 
-    private static int CoerceToInt32(SqlValue value, string context) => value.Type switch
+    /// <summary>
+    /// Binds each argument to its parameter's type as an assignment would, so
+    /// a type that can't convert is real's Msg 206 and a string that can't
+    /// read as an integer its Msg 245 (probed 2026-09-25).
+    /// </summary>
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
-        _ when value.Type == SqlType.Int32 => value.AsInt32,
-        _ when value.Type == SqlType.SmallInt => value.AsInt16,
-        _ when value.Type == SqlType.TinyInt => value.AsByte,
-        _ when value.Type == SqlType.BigInt => checked((int)value.AsInt64),
-        _ => throw SimulatedSqlException.InvalidHierarchyIdInput($"{context} requires an integer, got {value.Type}"),
-    };
-
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => this.ResultType(batch);
+        SqlType parameter = this.method == HierarchyIdMethod.GetAncestor ? SqlType.Int32 : SqlType.HierarchyId;
+        foreach (var argument in this.arguments)
+            _ = AssignmentRules.ArgumentType(argument, parameter, batch, resolveColumnType);
+        return this.ResultType(batch);
+    }
 
     private SqlType ResultType(BatchContext batch) => this.method switch
     {
@@ -296,6 +325,7 @@ internal enum HierarchyIdMethod : byte
     GetLevel,
     GetAncestor,
     GetDescendant,
+    GetReparentedValue,
     IsDescendantOf,
     ToStringMethod,
 }

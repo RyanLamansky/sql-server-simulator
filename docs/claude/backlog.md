@@ -221,9 +221,9 @@ Already listed elsewhere here and not repeated: parenthesized set-op branches.
 
 - An alias type over numeric reads `decimal`, as does a numeric column's name in a type-pair message (raised while binding, before references are marked); everything else carries the name (see [`arithmetic.md`](arithmetic.md#numeric-vs-decimal-reported-type-name)).
 - Under a SQL collation, a `varchar` containing `CHAR(0)` compares unequal to the same string without it.
-- A constant-folded `CASE WHEN 1 = 0 …` takes the ELSE arm's type on real.
-- Binary or padded `char` converted to `xml` isn't validated or whitespace-stripped, and a `hierarchyid` parse failure's Msg 6522 wording differs.
-- A `UNION` whose second branch fails at runtime raises before sending the first branch's rows; real sends them first.
+- A set operation whose branches are all FROM-less and subquery-free computes every branch's projection before sending a row on real, so `SELECT 1 UNION ALL SELECT 1/0` raises before any row where the simulator sends the first — variables and `GETDATE()` in a projection fold the same way (probed 2026-09-25).
+  A `WHERE` on such a branch doesn't fold with it: an erroring predicate (`… SELECT 1 WHERE 1/0 = 1`) streams on both engines, and a constant-false one drops its branch unevaluated; a branch with a `FROM` or a subquery streams on both.
+  Matching it wants the set-op combine to know each branch's `WHERE`, which the leaf selections don't carry past their own execution.
 - The TDS UDT type name leaves the database part empty (`.sys.geography`; real sends `<db>.sys.geography`).
 - The one-way assignment rule (`Assign` grid, [`arithmetic.md`](arithmetic.md#type-pair-legality)) isn't applied to an `INSERT … EXEC` source, so a `datetime` result column reaching a `decimal` column converts here where real raises Msg 257 as the rows arrive (probed 2026-09-24).
   A result set doesn't record which of its columns were a bare `NULL`, which the rule exempts, so the check needs that carried out of the procedure's `SELECT` first.

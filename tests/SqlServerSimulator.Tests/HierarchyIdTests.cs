@@ -366,4 +366,57 @@ public sealed class HierarchyIdTests
             "/-281479271682120/,/-4169/,/-4168/,/5199/,/5200/,/4294972495/,/4294972496/,/281479271683151/",
             string.Join(",", actual));
     }
+
+    private const string Routine = "A .NET Framework error occurred during execution of user-defined routine or aggregate \"hierarchyid\": \r\n";
+    private const string HierarchyIdException = "Microsoft.SqlServer.Types.HierarchyIdException";
+
+    /// <summary>
+    /// Real's library wording for each refusal, at state 2, through the
+    /// repeated exception-type line (probed 2026-09-25 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select cast('/1/x/' as hierarchyid)", HierarchyIdException, "24001: SqlHierarchyId.Parse failed because the input string '/1/x/' is not a valid string representation of a SqlHierarchyId node.", null)]
+    [DataRow("select cast(0xFF as hierarchyid).ToString()", HierarchyIdException, "24000: SqlHierarchyId operation failed because HierarchyId object was constructed from an invalid binary string. ", null)]
+    [DataRow("declare @h hierarchyid = '/1/2/'; select @h.GetAncestor(-1)", "System.ArgumentOutOfRangeException", "Specified argument was out of the range of valid values.", "24011: SqlHierarchyId.GetAncestor failed because 'n' was negative.")]
+    [DataRow("declare @h hierarchyid = '/1/'; select @h.GetDescendant(null, '/2/')", HierarchyIdException, "24008: SqlHierarchyId.GetDescendant failed because 'child2' must be a child of 'this'.  'child2' was '/2/' and 'this' was '/1/'.", null)]
+    [DataRow("declare @h hierarchyid = '/1/'; select @h.GetDescendant('/1/5/', '/1/3/')", HierarchyIdException, "24007: SqlHierarchyId.GetDescendant failed because 'child1' must be less than 'child2'.  'child1' was '/1/5/' and 'child2' was '/1/3/'.", null)]
+    [DataRow("declare @h hierarchyid = '/1/'; select @h.GetReparentedValue('/2/', '/3/')", HierarchyIdException, "24009: SqlHierarchyId.GetReparentedValue failed because 'oldRoot' was not an ancestor node of 'this'.  'oldRoot' was '/2/', and 'this' was '/1/'.", null)]
+    public void Refusal_UsesTheLibrarysWording(string sql, string exceptionType, string message, string? parameter)
+    {
+        var ex = new Simulation().AssertSqlError(sql, 6522);
+        AreEqual(2, ex.State);
+        AreEqual($"{Routine}{exceptionType}: {message}\r\n{(parameter is null ? "" : $"Parameter name: {parameter}\r\n")}{exceptionType}: \r\n.", ex.Errors[0].Message);
+    }
+
+    /// <summary>
+    /// A CAST from binary stores the bytes unchecked — a comparison reads them
+    /// bytewise — and only a method that decodes them refuses.
+    /// </summary>
+    [TestMethod]
+    public void CastFromBinary_DefersValidationToTheMethodThatDecodes()
+    {
+        var simulation = new Simulation();
+        AreEqual("FF", Convert.ToHexString((byte[])simulation.ExecuteScalar("select cast(cast(0xFF as hierarchyid) as varbinary(10))")!));
+        AreEqual(1, simulation.ExecuteScalar("select case when cast(0xFF as hierarchyid) > cast(0x58 as hierarchyid) then 1 else 0 end"));
+        _ = simulation.AssertSqlError("select cast(0x59 as hierarchyid).GetLevel()", 6522);
+    }
+
+    [TestMethod]
+    public void GetReparentedValue_ReplacesTheOldRootPrefix()
+        => AreEqual("/5/6/2/3/|/|NULL|/9/1/2/3/|/1/2/3/", new Simulation().ExecuteScalar("""
+            declare @h hierarchyid = '/1/2/3/';
+            select concat_ws('|', @h.GetReparentedValue('/1/', '/5/6/').ToString(), @h.GetReparentedValue('/1/2/3/', '/').ToString(),
+                isnull(@h.GetReparentedValue(null, '/').ToString(), 'NULL'), @h.GetReparentedValue('/', '/9/').ToString(),
+                @h.GetReparentedValue('/1/2/', '/1/2/').ToString())
+            """));
+
+    /// <summary>Method arguments convert as assignments do: a string parses, other types are refused while binding.</summary>
+    [TestMethod]
+    public void MethodArguments_ConvertAsAssignmentsDo()
+    {
+        var simulation = new Simulation();
+        AreEqual("/1/4/", simulation.ExecuteScalar("declare @h hierarchyid = '/1/'; select @h.GetDescendant('/1/3/', '/1/5/').ToString()"));
+        simulation.AssertSqlError("declare @h hierarchyid = '/1/'; select @h.IsDescendantOf(1)", 206, "Operand type clash: int is incompatible with hierarchyid");
+        simulation.AssertSqlError("declare @h hierarchyid = '/1/'; select @h.GetAncestor('x')", 245, "Conversion failed when converting the varchar value 'x' to data type int.");
+    }
 }
