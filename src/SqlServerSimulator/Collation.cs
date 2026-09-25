@@ -249,40 +249,12 @@ internal abstract partial class Collation : IComparer<string>, IEqualityComparer
     /// <c>sys.database_permissions.permission_name</c>, the various
     /// <c>type</c> / <c>state</c> char(1) / char(2) enum codes, etc.).
     /// Resolved once via <see cref="Get"/> to
-    /// <c>Latin1_General_100_CI_AS_KS_WS_SC</c> — the contained-database
-    /// catalog collation real SQL Server reports through
-    /// <c>sys.fn_helpcollations()</c>.
+    /// <c>Latin1_General_CI_AS_KS_WS</c>, what SQL Server 2025 reports for
+    /// every catalog column that carries a collation (probed 2026-09-25) —
+    /// not the contained-database catalog collation
+    /// <c>Latin1_General_100_CI_AS_KS_WS_SC</c> Microsoft documents, which
+    /// a non-contained instance never reports.
     /// </summary>
-    /// <remarks>
-    /// <para>
-    /// Microsoft's "Contained Database Collations" reference describes
-    /// this as the catalog collation for contained databases (Windows
-    /// 100-series, accent + kanatype + width sensitive, supplementary-
-    /// character aware), fixed across every instance. That makes it the
-    /// authoritative anchor for "the catalog collation" even though the
-    /// simulator doesn't model containment as a database-level option.
-    /// </para>
-    /// <para>
-    /// The Microsoft doc spells the name <c>Latin1_General_100_CI_AS_WS_KS_SC</c>
-    /// (WS before KS) — a documentation typo. Probing real SQL Server's
-    /// <c>sys.fn_helpcollations()</c> confirms the canonical name has the
-    /// suffix tokens in the order <c>_CI_AS_KS_WS_SC</c> (KS before WS),
-    /// and the simulator's parser only accepts the canonical form.
-    /// </para>
-    /// <para>
-    /// Probing a non-contained SQL Server 2025 instance shows
-    /// <c>sys.system_columns.collation_name</c> reporting
-    /// <c>Latin1_General_CI_AS_KS_WS</c> (pre-100, no <c>_SC</c>) for
-    /// catalog <c>_desc</c> columns — a legacy carry-over rather than an
-    /// authoritative reference. The simulator picks the modern documented
-    /// value instead so apps that read catalog metadata see a forward-
-    /// looking collation; for the ASCII English identifiers that dominate
-    /// real catalog-view queries, both names give identical equality
-    /// results, and the modern value's <c>_SC</c> flag adds correct
-    /// supplementary-character handling if any catalog content ever
-    /// includes it.
-    /// </para>
-    /// </remarks>
     internal static Collation Catalog => catalogLazy.Value;
 
     // <see cref="Lazy{T}"/> wrappers defer the <see cref="TryGet"/> call
@@ -294,7 +266,7 @@ internal abstract partial class Collation : IComparer<string>, IEqualityComparer
         new(() => Get("SQL_Latin1_General_CP1_CI_AS"));
 
     private static readonly Lazy<Collation> catalogLazy =
-        new(() => Get("Latin1_General_100_CI_AS_KS_WS_SC"));
+        new(() => Get("Latin1_General_CI_AS_KS_WS"));
 
     /// <summary>
     /// SQL Server's collation-coercibility resolution for two operands.

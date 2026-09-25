@@ -1,4 +1,5 @@
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
+using static SqlServerSimulator.TestHelpers;
 
 namespace SqlServerSimulator;
 
@@ -1298,4 +1299,16 @@ public sealed class CatalogViewTests
     [TestMethod]
     public void ReorderedView_ColumnIdFollowsRealsOrder()
         => AreEqual(1, new Simulation().ExecuteScalar("select columnproperty(object_id('sys.objects'), 'name', 'ColumnId')"));
+
+    [TestMethod]
+    public void CatalogColumns_CarryRealsCatalogCollation()
+        => AreEqual("Latin1_General_CI_AS_KS_WS", ExecuteScalar(
+            "select top 1 cast(sql_variant_property(state_desc, 'Collation') as sysname) from sys.databases"));
+
+    [TestMethod]
+    public void CatalogColumnMeetingADatabaseCollation_NamesRealsCatalogCollation()
+        => AssertSqlError(
+            "create table t (a int); select top 1 name + type from sys.objects",
+            451,
+            "Cannot resolve collation conflict between \"Latin1_General_CI_AS_KS_WS\" and \"SQL_Latin1_General_CP1_CI_AS\" in add operator occurring in SELECT statement column 1.");
 }

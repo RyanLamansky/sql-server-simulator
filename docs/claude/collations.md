@@ -264,10 +264,8 @@ Sites that intentionally stay on `Collation.Baseline`:
 
 ## Catalog views pin `_desc` / enum columns to `Collation.Catalog`
 
-`Collation.Catalog` resolves to `Latin1_General_100_CI_AS_KS_WS_SC` — the contained-database catalog collation real SQL Server reports through `sys.fn_helpcollations()`.
-Microsoft's "Contained Database Collations" doc names it as `Latin1_General_100_CI_AS_WS_KS_SC` (WS before KS — documentation typo); the canonical name confirmed via the live `fn_helpcollations` catalog is `_CI_AS_KS_WS_SC` (KS before WS), and the simulator's parser only accepts the canonical form.
-The simulator picks this as the catalog anchor even though it doesn't model containment, because the documented value is more authoritative than empirical probes of non-contained instances.
-A non-contained SQL Server 2025 probe surfaced `Latin1_General_CI_AS_KS_WS` for catalog `_desc` columns — a pre-100, no-`_SC` legacy carry-over rather than a reference value; both names give identical equality results for the ASCII English identifiers that dominate real catalog-view queries, and the documented `_SC` flag adds correct supplementary-character handling if catalog content ever includes any.
+`Collation.Catalog` resolves to `Latin1_General_CI_AS_KS_WS`, the collation SQL Server 2025 reports on every one of its 425 catalog columns that carry one (`sys.all_columns.collation_name`, and `SQL_VARIANT_PROPERTY(…, 'Collation')` on `type_desc` / `type` / `permission_name` / `state_desc`, probed 2026-09-25), and the name its Msg 451 names when a catalog column meets a database-collation one.
+The simulator once pinned `Latin1_General_100_CI_AS_KS_WS_SC` instead — the contained-database catalog collation Microsoft's "Contained Database Collations" doc names — but a non-contained instance never reports it, and the two sort some characters differently, so real's value is the one that matches both the metadata and the behavior.
 
 The catalog-view registrations (across the `BuiltInResources.<Topic>.cs` partials) share `nvarchar60Catalog` / `nvarchar128Catalog` / `charTwo` / `charOne` as `private static readonly` fields in root `BuiltInResources.cs`, all at `Collation.Catalog` + `Coercibility.Implicit`.
 Sites that pin to catalog:
