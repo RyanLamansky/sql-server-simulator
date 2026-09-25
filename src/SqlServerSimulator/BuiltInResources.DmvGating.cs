@@ -24,6 +24,7 @@ internal static partial class BuiltInResources
         ("sys.dm_exec_sessions", DmvGateKind.SessionSelfFilter),
         ("sys.dm_hadr_cluster", DmvGateKind.ServerState),
         ("sys.dm_hadr_database_replica_states", DmvGateKind.DatabaseState),
+        ("sys.dm_os_sys_info", DmvGateKind.ServerState),
         ("sys.dm_os_waiting_tasks", DmvGateKind.ServerState),
         ("sys.dm_tran_active_snapshot_database_transactions", DmvGateKind.ServerState),
         ("sys.dm_tran_locks", DmvGateKind.ServerState),

@@ -172,6 +172,54 @@ internal static partial class BuiltInResources
             new("host_architecture", SqlType.NVarchar, 256, false),
         ], (batch, database) => DmOsHostInfoRows);
 
+        // sys.dm_os_sys_info: single-row, server-scope DMV describing the
+        // instance's host resources (probed 2026-09-25 against SQL Server
+        // 2025). Like dm_os_host_info it reflects the .NET host process: the
+        // processor count, the memory the runtime sees, the process's CPU
+        // times, and the simulation's construction as the server start; the
+        // worker and scheduler counts follow real's formulas from the CPU
+        // count, and the configuration columns carry real's defaults.
+        Sys("dm_os_sys_info",
+        [
+            new("cpu_ticks", SqlType.BigInt, null, false),
+            new("ms_ticks", SqlType.BigInt, null, false),
+            new("cpu_count", SqlType.Int32, null, false),
+            new("hyperthread_ratio", SqlType.Int32, null, false),
+            new("physical_memory_kb", SqlType.BigInt, null, false),
+            new("virtual_memory_kb", SqlType.BigInt, null, false),
+            new("committed_kb", SqlType.BigInt, null, false),
+            new("committed_target_kb", SqlType.BigInt, null, false),
+            new("visible_target_kb", SqlType.BigInt, null, false),
+            new("stack_size_in_bytes", SqlType.Int32, null, false),
+            new("os_quantum", SqlType.BigInt, null, false),
+            new("os_error_mode", SqlType.Int32, null, false),
+            new("os_priority_class", SqlType.Int32, null, true),
+            new("max_workers_count", SqlType.Int32, null, false),
+            new("scheduler_count", SqlType.Int32, null, false),
+            new("scheduler_total_count", SqlType.Int32, null, false),
+            new("deadlock_monitor_serial_number", SqlType.Int32, null, false),
+            new("sqlserver_start_time_ms_ticks", SqlType.BigInt, null, false),
+            new("sqlserver_start_time", SqlType.DateTime, null, false),
+            new("affinity_type", SqlType.Int32, null, false),
+            new("affinity_type_desc", SqlType.NVarchar, 60, false),
+            new("process_kernel_time_ms", SqlType.BigInt, null, false),
+            new("process_user_time_ms", SqlType.BigInt, null, false),
+            new("time_source", SqlType.Int32, null, false),
+            new("time_source_desc", SqlType.NVarchar, 60, false),
+            new("virtual_machine_type", SqlType.Int32, null, false),
+            new("virtual_machine_type_desc", SqlType.NVarchar, 60, false),
+            new("softnuma_configuration", SqlType.Int32, null, false),
+            new("softnuma_configuration_desc", SqlType.NVarchar, 60, false),
+            new("process_physical_affinity", SqlType.NVarchar, 3072, false),
+            new("sql_memory_model", SqlType.Int32, null, false),
+            new("sql_memory_model_desc", SqlType.NVarchar, 60, false),
+            new("socket_count", SqlType.Int32, null, false),
+            new("cores_per_socket", SqlType.Int32, null, false),
+            new("numa_node_count", SqlType.Int32, null, false),
+            new("container_type", SqlType.Int32, null, false),
+            new("container_type_desc", SqlType.NVarchar, 60, false),
+        ], (batch, database) => DmOsSysInfoRows(batch.Connection.Simulation));
+
         // sys.time_zone_info: the Windows time-zone catalog, server-scope.
         // mssql-django probes it as its `has_zoneinfo_database` capability
         // check (`SELECT TOP 1 1 FROM sys.time_zone_info`), and the capability
@@ -1203,6 +1251,57 @@ internal static partial class BuiltInResources
     /// to <c>sys.databases</c> on <c>database_id</c> and reads
     /// <c>ISNULL(mirroring_role, 0)</c> / <c>ISNULL(mirroring_state + 1, 0)</c>.
     /// </summary>
+    /// <summary>The one row of <c>sys.dm_os_sys_info</c>, read from the host process at query time.</summary>
+    private static SqlValue[][] DmOsSysInfoRows(Simulation simulation)
+    {
+        var cpus = Environment.ProcessorCount;
+        var memoryKb = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes / 1024;
+        using var process = System.Diagnostics.Process.GetCurrentProcess();
+        var committedKb = process.WorkingSet64 / 1024;
+        return [[
+            SqlValue.FromInt64(System.Diagnostics.Stopwatch.GetTimestamp()),
+            SqlValue.FromInt64(Environment.TickCount64),
+            SqlValue.FromInt32(cpus),
+            SqlValue.FromInt32(cpus),
+            SqlValue.FromInt64(memoryKb),
+            SqlValue.FromInt64(68719476672),
+            SqlValue.FromInt64(committedKb),
+            SqlValue.FromInt64(memoryKb),
+            SqlValue.FromInt64(memoryKb),
+            SqlValue.FromInt32(2093056),
+            SqlValue.FromInt64(4),
+            SqlValue.FromInt32(5),
+            // NORMAL_PRIORITY_CLASS on Windows; real on Linux reports 16384.
+            SqlValue.FromInt32(OperatingSystem.IsWindows() ? 32 : 16384),
+            // Real's default max worker threads on 64-bit: 512, plus 16 per
+            // CPU past the fourth.
+            SqlValue.FromInt32(cpus <= 4 ? 512 : 512 + ((cpus - 4) * 16)),
+            SqlValue.FromInt32(cpus),
+            SqlValue.FromInt32(cpus + 8),
+            SqlValue.FromInt32(0),
+            SqlValue.FromInt64(simulation.StartTicks),
+            SqlValue.FromDateTime(simulation.SeedDate),
+            SqlValue.FromInt32(2),
+            SqlValue.FromNVarchar("AUTO"),
+            SqlValue.FromInt64((long)process.PrivilegedProcessorTime.TotalMilliseconds),
+            SqlValue.FromInt64((long)process.UserProcessorTime.TotalMilliseconds),
+            SqlValue.FromInt32(0),
+            SqlValue.FromNVarchar("QUERY_PERFORMANCE_COUNTER"),
+            SqlValue.FromInt32(0),
+            SqlValue.FromNVarchar("NONE"),
+            SqlValue.FromInt32(0),
+            SqlValue.FromNVarchar("OFF"),
+            SqlValue.FromNVarchar("{}"),
+            SqlValue.FromInt32(1),
+            SqlValue.FromNVarchar("CONVENTIONAL"),
+            SqlValue.FromInt32(1),
+            SqlValue.FromInt32(cpus),
+            SqlValue.FromInt32(1),
+            SqlValue.FromInt32(0),
+            SqlValue.FromNVarchar("NONE"),
+        ]];
+    }
+
     /// <summary>
     /// Rows for <c>sys.dm_exec_connections</c> — one per live connection on the
     /// simulation, from the <see cref="Network.ConnectionTransport"/> each

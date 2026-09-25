@@ -64,6 +64,7 @@ public sealed class DmvServerStateGatingTests
 
     [DataRow("sys.dm_tran_locks")]
     [DataRow("sys.dm_os_waiting_tasks")]
+    [DataRow("sys.dm_os_sys_info")]
     [DataRow("sys.dm_tran_version_store")]
     [DataRow("sys.dm_tran_version_store_space_usage")]
     [DataRow("sys.dm_tran_active_snapshot_database_transactions")]

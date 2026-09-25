@@ -76,6 +76,7 @@ internal static class CatalogViewObjectIds
         ["sys.dm_hadr_cluster"] = -951091328,
         ["sys.dm_hadr_database_replica_states"] = -233577667,
         ["sys.dm_os_host_info"] = -558058590,
+        ["sys.dm_os_sys_info"] = -215103612,
         ["sys.dm_os_waiting_tasks"] = -841805201,
         ["sys.dm_tran_active_snapshot_database_transactions"] = -329906142,
         ["sys.dm_tran_locks"] = -214867882,

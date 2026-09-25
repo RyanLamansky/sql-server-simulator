@@ -512,11 +512,15 @@ public sealed partial class Simulation
     /// <summary>
     /// Stable install-time timestamp used as the <c>create_date</c> /
     /// <c>modify_date</c> of the synthetic fixed <c>sys.server_principals</c>
-    /// rows (<c>sa</c> / <c>public</c>). Captured once at construction, exactly
+    /// rows (<c>sa</c> / <c>public</c>) and as <c>sys.dm_os_sys_info</c>'s
+    /// <c>sqlserver_start_time</c>. Captured once at construction, exactly
     /// as each <see cref="Database"/> seeds its fixed database principals' dates
     /// from a single <c>DateTime.UtcNow</c>.
     /// </summary>
     internal readonly DateTime SeedDate = DateTime.UtcNow;
+
+    /// <summary><c>Environment.TickCount64</c> at construction, <c>sys.dm_os_sys_info</c>'s <c>sqlserver_start_time_ms_ticks</c>.</summary>
+    internal readonly long StartTicks = Environment.TickCount64;
 
     /// <summary>
     /// System tables (e.g. <c>systypes</c>). Materialized once per process and

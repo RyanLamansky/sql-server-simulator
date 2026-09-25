@@ -123,4 +123,17 @@ public sealed class ClientIdentityTests
             + " from sys.dm_exec_requests where session_id > 50");
         AreEqual("1|running|SELECT|0|-|3|0|1", command.ExecuteScalar());
     }
+
+    // sys.dm_os_sys_info describes the host process, with the simulation's
+    // construction as the server start.
+    [TestMethod]
+    public void SysInfo_ReflectsTheHost()
+    {
+        var cpus = Environment.ProcessorCount;
+        var workers = cpus <= 4 ? 512 : 512 + ((cpus - 4) * 16);
+        AreEqual(
+            $"{cpus}|{cpus + 8}|{workers}|started|AUTO|CONVENTIONAL",
+            new Simulation().ExecuteScalar(
+                "select concat(cpu_count, '|', scheduler_total_count, '|', max_workers_count, '|', iif(sqlserver_start_time <= getutcdate() and physical_memory_kb > 0, 'started', 'x'), '|', affinity_type_desc, '|', sql_memory_model_desc) from sys.dm_os_sys_info"));
+    }
 }
