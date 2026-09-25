@@ -260,7 +260,6 @@ Already listed elsewhere here and not repeated: parenthesized set-op branches.
 
 **Same error, different number, state or class** (probed 2026-09-24):
 
-- `BEGIN ATOMIC` outside a natively compiled module is Msg 10782 on real; an empty one here is Msg 102.
 - Real follows a table hint the grammar refuses (`INSERT t (c) WITH (TABLOCK) …`, `MERGE t AS a WITH (…)`) with Msg 319 after its Msg 156, and an empty `BEGIN TRY … END TRY` with a second Msg 102 near `catch`.
 - `CREATE FUNCTION` with a refused parameter type is followed by Msg 178 on real, since the body's `RETURN` then parses outside a function.
 
@@ -323,6 +322,8 @@ Entries are verified against the simulator, so one that no longer reproduces is 
 - **Statement-permission residue** — every modeled CREATE / ALTER / DROP statement is gated (see [`permissions.md`](permissions.md#ddl-statement-gates)), but three securable classes real accepts a grant on have no GRANT surface here, so the alternative each offers isn't honored: `CONTROL ON TYPE::t` (DROP TYPE takes schema ALTER only), `CONTROL ON XML SCHEMA COLLECTION::c` (same), and `CONTROL ON <fulltext catalog>` (DROP FULLTEXT CATALOG takes `ALTER ANY FULLTEXT CATALOG` only).
   That direction is *under*-permissive, so it isn't a register entry — the register keeps it because closing it is the same piece of work.
   → [`permissions.md`](permissions.md#known-gaps).
+- **`BEGIN ATOMIC` in the body of a module that isn't natively compiled** runs as a plain block, where real refuses it with **Msg 10782** and a Msg 102 near its `END` (probed 2026-09-25); the batch-level form is refused as real refuses it.
+  Closing it means carrying `NATIVE_COMPILATION` from the `CREATE` header onto the procedure, function and trigger frames the body runs under.
 - **A character real weights and `CompareInfo` ignores compares equal to nothing** — `N'x' + NCHAR(0x00AD) = N'x'` (soft hyphen) is true here and false on real, so a row real excludes comes back (probed 2026-08-05, matrix re-run 2026-08-05 across the whole ignorable family).
   The probed set is the C0 controls U+0001..U+001F, U+200B, U+2007, U+00A0, U+2028, U+2029 and U+E0001 everywhere, plus U+00AD and U+200C on the pre-100 names only.
   It reaches the [character-matching scalars](collations.md#the-character-matching-string-scalars-search-under-the-collation-too) as well as `=` and `LIKE`'s literal runs, and the **reverse** direction exists too: `CompareInfo` folds NBSP onto a space where real holds them apart, so `TRIM(N' ' FROM …)` removes an NBSP real keeps.

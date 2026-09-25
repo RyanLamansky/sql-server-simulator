@@ -171,18 +171,16 @@ public sealed class IfBlockTests
         => AreEqual("inside-if", new Simulation().ExecuteScalar(
             "begin if 1=1 select 'inside-if' end"));
 
+    // BEGIN ATOMIC belongs to a natively compiled module's body; at batch top
+    // level, dynamic SQL included, real refuses ATOMIC itself before anything
+    // runs (probed 2026-09-25 against SQL Server 2025). The natively compiled
+    // procedure shape lives in StoredProcedureTests.
     [TestMethod]
-    public void BeginAtomic_AtBatchTopLevel_DispatchesBody()
-    {
-        // BEGIN ATOMIC at batch top level (no enclosing CREATE PROCEDURE)
-        // is uncommon but legal grammar. The body dispatches like a regular
-        // BEGIN…END block; the WITH (...) options block parses-and-discards.
-        // Coverage of the natively-compiled-SP shape lives in
-        // StoredProcedureTests; this one verifies the dispatcher path
-        // outside the procedure context.
-        AreEqual(1, new Simulation().ExecuteScalar(
-            "begin atomic with (transaction isolation level = snapshot, language = N'us_english') select 1 end"));
-    }
+    [DataRow("begin atomic with (transaction isolation level = snapshot, language = N'us_english') select 1 end")]
+    [DataRow("select 1; begin atomic select 2 end")]
+    [DataRow("exec('begin atomic select 2 end')")]
+    public void BeginAtomic_OutsideAModuleBody_IsMsg102AtAtomic(string sql)
+        => new Simulation().ValidateSyntaxError(sql, "atomic");
 
     [TestMethod]
     public void BeginDistributedTran_RoutesToTheTransactionPath()
