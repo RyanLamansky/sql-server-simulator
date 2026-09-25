@@ -308,7 +308,7 @@ internal sealed partial class Selection
     internal static TableHintInfo ParseOptionalTableHints(ParserContext context, bool allowLegacyParenForm = true, bool commitOnLegacyParen = false)
     {
         var info = default(TableHintInfo);
-        if (context.Token is ReservedKeyword { Keyword: Keyword.With })
+        if (context.Token is ReservedKeyword { Keyword: Keyword.With } && !AtWithCheckOption(context))
         {
             // A name after the hint position's WITH is a CTE the previous
             // statement ran into (Msg 336, probed 2026-09-24).

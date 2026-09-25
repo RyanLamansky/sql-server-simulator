@@ -74,6 +74,11 @@ partial class Simulation
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
         var viewName = BatchContext.ParseObjectName(context);
+        // Every error from here on names the view as its Procedure — its
+        // syntax, its binding, its shape, even the name collision — as the
+        // statement wrote it (probed 2026-09-25 against SQL Server 2025). The
+        // statement is its batch's only one, so nothing after it inherits this.
+        context.Batch.ErrorProcedureName = viewName.Leaf;
         RejectQualifiedModuleName(viewName, "VIEW");
         var schema = ResolveModuleSchema(context, viewName, isAlter);
 
@@ -120,12 +125,30 @@ partial class Simulation
         // un-consumed token after the SELECT — typically the next
         // statement-starting keyword OR the trailing WITH CHECK OPTION.
         context.MoveNextRequired();
+        // The body may be parenthesized, to any depth (probed 2026-09-25
+        // against SQL Server 2025); the stored body is the query inside.
+        var bodyParens = 0;
+        while (context.Token is Operator { Character: '(' })
+        {
+            bodyParens++;
+            context.MoveNextRequired();
+        }
         var commandText = context.Command.CommandText;
         var bodyStart = context.Token?.StartIndex
             ?? throw SimulatedSqlException.SyntaxErrorNear(context);
-        var bodySelection = ParseBodyQuery(context, rejectsNextValueFor: true);
+        var bodySelection = ParseBodyQuery(context, rejectsNextValueFor: true, bodyParens > 0 ? QueryPosition.ParenthesizedModuleBody : QueryPosition.Statement);
         var bodyEnd = context.Token?.StartIndex ?? commandText.Length;
         var bodyText = commandText[bodyStart..bodyEnd];
+        // The stored definition runs to the last token the statement took —
+        // a closing parenthesis or WITH CHECK OPTION included.
+        var definitionEnd = bodyEnd;
+        for (; bodyParens > 0; bodyParens--)
+        {
+            if (context.Token is not Operator { Character: ')' })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            definitionEnd = context.Token.EndIndex;
+            context.MoveNextOptional();
+        }
 
         // Msg 1033: a view body's ORDER BY requires a companion TOP / OFFSET /
         // FETCH. Same wording the existing CTE-body check raises (probe-
@@ -145,9 +168,10 @@ partial class Simulation
             var checkpoint = context.SaveCheckpoint();
             context.MoveNextOptional();
             if (context.Token is ReservedKeyword { Keyword: Keyword.Check }
-                && context.GetNextOptional() is ReservedKeyword { Keyword: Keyword.Option })
+                && context.GetNextOptional() is ReservedKeyword { Keyword: Keyword.Option } option)
             {
                 withCheckOption = true;
+                definitionEnd = option.EndIndex;
                 context.MoveNextOptional();
             }
             else
@@ -201,7 +225,7 @@ partial class Simulation
             checkOptionCheck: checkOptionCheck,
             isJoinUpdatable: isJoinUpdatable)
         {
-            DefinitionText = BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, bodyEnd, isAlter, createOrAlter),
+            DefinitionText = BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, definitionEnd, isAlter, createOrAlter),
             UsesQuotedIdentifier = context.QuotedIdentifiers,
             UsesAnsiNulls = context.Batch.Connection.AnsiNulls,
         };

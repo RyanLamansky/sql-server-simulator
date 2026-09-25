@@ -402,10 +402,6 @@ Real bugs / limitations against shipped behavior — fixes are concrete work, no
   The `_SC` character count is already available (`Collation.IsSupplementaryCharacterAware`, the same dispatch `CHARINDEX` and `LEN` take), so the gate is what needs the reading, not the split.
 - **`TRANSLATE` maps the halves of a surrogate pair separately** — real answers `ZZ` for a pair whose two halves sit in `chars` with different translations, the simulator answers `ZQ` (probed 2026-08-05), and under an `_SC` collation real counts the pair as one character for the Msg 9828 length check where the simulator counts two.
   The per-character walk is by code unit; a `_SC`-aware walk would settle both halves of this at once.
-- **A view's `CREATE`-time errors carry no `Procedure` attribution** — real attributes *every* error raised inside a `CREATE VIEW` to the view being defined (probed 2026-08-04 for the syntax family Msg 156 / 102, the binder's Msg 207, the body-shape Msg 1033 / 4511, and even the Msg 2714 name collision), where the simulator leaves the field empty.
-  Functions already attribute, because their bodies go through `BindModuleBodyAtCreate`, which sets `BatchContext.ErrorProcedureName`; a view's body is parsed inline instead, so nothing sets it.
-  The batch-position check added alongside this attributes explicitly and is the one view-`CREATE` error that carries the name.
-  → [`programmable.md`](programmable.md#where-a-module-statement-may-sit-in-its-batch).
 - **The read-only-database gate doesn't reach every write statement** — `Database.IsReadOnly` refuses the DML row writes and the object-DDL family, but the `GRANT` / `REVOKE` / `DENY` family, `sp_rename`, `sp_addextendedproperty`, `ALTER SCHEMA … TRANSFER`, `ALTER INDEX` / `DROP INDEX` and the principal / assembly DDL carry no gate, where real raises **Msg 3906** for all of them (probe-confirmed for GRANT and `sp_addextendedproperty`).
   Real also varies the Msg 3906 state at a few sites (`ALTER TABLE` reports state 12) where the simulator raises state 1 throughout.
   → [`database-options.md`](database-options.md#read-only-databases).

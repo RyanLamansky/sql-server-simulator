@@ -76,6 +76,10 @@ partial class Simulation
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
         var functionName = BatchContext.ParseObjectName(context);
+        // Every error from here on names the function as its Procedure, as the
+        // statement wrote it (probed 2026-09-25 against SQL Server 2025; see
+        // the matching note in TryParseCreateView).
+        context.Batch.ErrorProcedureName = functionName.Leaf;
         RejectQualifiedModuleName(functionName, "FUNCTION");
         var schema = ResolveModuleSchema(context, functionName, isAlter);
 

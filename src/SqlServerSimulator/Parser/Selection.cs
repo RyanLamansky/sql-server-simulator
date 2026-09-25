@@ -747,6 +747,20 @@ internal sealed partial class Selection
     }
 
     /// <summary>
+    /// Whether the <c>WITH</c> under the cursor opens a view's trailing
+    /// <c>WITH CHECK OPTION</c>, which ends the body's query rather than
+    /// starting a CTE-prefixed statement or a table hint. Restores the cursor.
+    /// </summary>
+    internal static bool AtWithCheckOption(ParserContext context)
+    {
+        var checkpoint = context.SaveCheckpoint();
+        context.MoveNextOptional();
+        var opensCheckOption = context.Token is ReservedKeyword { Keyword: Keyword.Check };
+        context.RestoreCheckpoint(checkpoint);
+        return opensCheckOption;
+    }
+
+    /// <summary>
     /// Parses a single SELECT statement (the leaf of a set-op chain).
     /// Each branch gets its own aggregate-collector scope so aggregates
     /// inside one branch don't leak into another.
@@ -1372,12 +1386,15 @@ internal sealed partial class Selection
                     goto ExitWhileTokenLoop;
 
                 // WITH at the start of a projection element is unambiguous:
-                // it can only mean a CTE-prefixed follow-up statement. Real
-                // SQL Server raises Msg 319 here rather than the generic
-                // Msg 156 from the catch-all below — telling the user to
-                // separate statements with `;`. Checked before the general
+                // it can only mean a CTE-prefixed follow-up statement — unless
+                // it opens a view's trailing WITH CHECK OPTION, which ends the
+                // body. Real SQL Server raises Msg 319 here rather than the
+                // generic Msg 156 from the catch-all below — telling the user
+                // to separate statements with `;`. Checked before the general
                 // statement-boundary case (which also treats WITH as a
                 // boundary) so the more specific Msg 319 wins.
+                case ReservedKeyword { Keyword: Keyword.With } when !scope.Parenthesized && AtWithCheckOption(context):
+                    goto ExitWhileTokenLoop;
                 case ReservedKeyword { Keyword: Keyword.With } when !scope.Parenthesized:
                     throw SimulatedSqlException.CteRequiresPrecedingSemicolon();
 
@@ -1640,10 +1657,13 @@ internal sealed partial class Selection
                     goto ExitWhileTokenLoop;
 
                 // WITH at the projection-element-end position can only mean a
-                // CTE-prefixed follow-up statement; raise Msg 319 to mirror
+                // CTE-prefixed follow-up statement, or a view's WITH CHECK
+                // OPTION ending the body; raise Msg 319 for the first to mirror
                 // SQL Server's specific error here. Checked before the general
                 // statement-boundary case (which also treats WITH as a
                 // boundary) so the more specific Msg 319 wins.
+                case ReservedKeyword { Keyword: Keyword.With } when !scope.Parenthesized && AtWithCheckOption(context):
+                    goto ExitWhileTokenLoop;
                 case ReservedKeyword { Keyword: Keyword.With } when !scope.Parenthesized:
                     throw SimulatedSqlException.CteRequiresPrecedingSemicolon();
 
@@ -3984,7 +4004,7 @@ internal sealed partial class Selection
         // equivalent to `GROUP BY ROLLUP(<cols>)` / `CUBE(<cols>)`. It applies
         // over the full (simple) column list, so the Cartesian product above is
         // a single set whose members are those columns; expand it in place.
-        if (context.Token is ReservedKeyword { Keyword: Keyword.With })
+        if (context.Token is ReservedKeyword { Keyword: Keyword.With } && !AtWithCheckOption(context))
         {
             var modifierToken = context.GetNextRequired();
             fromClause.GroupingSetsWritten = true;

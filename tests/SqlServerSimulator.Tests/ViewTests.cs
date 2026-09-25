@@ -603,4 +603,47 @@ public sealed class ViewTests
         CollectionAssert.AreEqual(new[] { 3, 1, 2 }, values);
         Assert.AreEqual(3, sim.ExecuteScalar($"select top 1 a from ({body}) d"));
     }
+
+    /// <summary>
+    /// Every error a <c>CREATE VIEW</c> or <c>CREATE FUNCTION</c> raises names
+    /// the module as its Procedure, as the statement wrote it (probed
+    /// 2026-09-25 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("create view vw1 as select nocol from sys.objects", 207, "vw1")]
+    [DataRow("create view [dbo].[VW3] as select 1 as a order by a", 1033, "VW3")]
+    [DataRow("create view vw5 as selec 1", 102, "vw5")]
+    [DataRow("create function fb1() returns table as return selec 1", 102, "fb1")]
+    [DataRow("create function fa2() returns int as begi return 1 end", 102, "fa2")]
+    public void ModuleCreateError_NamesTheModule(string sql, int number, string procedure)
+        => Assert.AreEqual(procedure, new Simulation().AssertSqlError(sql, number).Procedure);
+
+    [TestMethod]
+    [DataRow("create view v as insert t values (1)", 156, "Incorrect syntax near the keyword 'insert'.")]
+    [DataRow("create view v as values (1)", 156, "Incorrect syntax near the keyword 'values'.")]
+    [DataRow("create view v as (selec 1)", 102, "Incorrect syntax near 'selec'.")]
+    [DataRow("create procedure p as selec 1", 102, "Incorrect syntax near 'selec'.")]
+    public void ModuleBody_NotOpeningWithAQuery_IsASyntaxError(string sql, int number, string message)
+        => new Simulation().AssertSqlError(sql, number, message);
+
+    /// <summary>
+    /// A view body may sit in parentheses, and <c>WITH CHECK OPTION</c> may
+    /// follow any body — a projection, a table, a hint, an alias, a
+    /// <c>GROUP BY</c> — with the stored definition running through it
+    /// (probed 2026-09-25 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("create view v as ((select 1 as a))")]
+    [DataRow("create view v as select 1 as a with check option")]
+    [DataRow("create view v as select a from t with check option")]
+    [DataRow("create view v as select a from t with (nolock) with check option")]
+    [DataRow("create view v as select a from t x with check option")]
+    [DataRow("create view v as select a from t group by a with check option")]
+    public void ViewBody_ParenthesizedOrCheckOptioned_Creates(string create)
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create table t (a int); insert t values (1)", create);
+        Assert.AreEqual(1, sim.ExecuteScalar("select count(*) from v"));
+        Assert.AreEqual(create, sim.ExecuteScalar("select definition from sys.sql_modules where object_id = object_id('v')"));
+    }
 }

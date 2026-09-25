@@ -1624,8 +1624,11 @@ public sealed partial class Simulation
         // `sp_who` works, `SELECT 1; sp_who` and even a leading `;sp_who` raise
         // Msg 102). Only top-level batches (endKeyword is null) qualify — never
         // a BEGIN…END block's first statement; a leading `;` or any dispatched
-        // statement clears it.
-        var atBatchStart = endKeyword is null;
+        // statement clears it. A module body isn't a batch of its own: its
+        // CREATE is the batch's first statement, so a bare name opening the
+        // body is Msg 102 too (probed 2026-09-25 for a procedure and a
+        // trigger).
+        var atBatchStart = endKeyword is null && batch.ProcFrame is null && batch.TriggerFrame is null && batch.UdfFrame is null;
         // BEGIN...END block dispatch (endKeyword=End) bumps BlockDepth so the
         // must-be-first-statement check on CREATE/ALTER
         // PROCEDURE / FUNCTION / VIEW / TRIGGER / SCHEMA rejects them inside

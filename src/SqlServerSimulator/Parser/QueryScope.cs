@@ -15,6 +15,13 @@ internal enum QueryPosition
     /// </summary>
     Statement,
 
+    /// <summary>
+    /// A view body being created that was written in parentheses,
+    /// <c>CREATE VIEW v AS (SELECT …)</c>: the statement's own query in every
+    /// respect but that a closing parenthesis ends it.
+    /// </summary>
+    ParenthesizedModuleBody,
+
     /// <summary>The source query of <c>INSERT … SELECT</c>, written without parentheses.</summary>
     InsertSource,
 
@@ -76,7 +83,7 @@ internal readonly struct QueryScope(QueryPosition position, Func<MultiPartName, 
     /// enclosing select list, a comparison, a conversion — which settles or
     /// refuses it there (probed 2026-09-23 against SQL Server 2025).
     /// </summary>
-    public bool NamesOutputCollation => this.Position is QueryPosition.Statement;
+    public bool NamesOutputCollation => this.Position is QueryPosition.Statement or QueryPosition.ParenthesizedModuleBody;
 
     /// <summary>
     /// Whether the select list may hold <c>SELECT … INTO</c>'s

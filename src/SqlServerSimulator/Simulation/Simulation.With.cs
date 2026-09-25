@@ -58,6 +58,11 @@ partial class Simulation
         {
             if (context.Token is ReservedKeyword { Keyword: Keyword.With })
                 ParseCteBindings(context);
+            // The body is a query: anything else opening it is the syntax
+            // error at that token (`AS selec 1`, `AS VALUES (1)`; probed
+            // 2026-09-25 against SQL Server 2025).
+            if (context.Token is not (ReservedKeyword { Keyword: Keyword.Select } or Operator { Character: '(' }))
+                throw SimulatedSqlException.SyntaxErrorNear(context);
             return Selection.Parse(context, new QueryScope(position, null));
         }
         finally

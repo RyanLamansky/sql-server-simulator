@@ -23,12 +23,8 @@ Their bodies are multi-statement and read to end-of-batch, so a trailing stateme
 `RejectStatementAfterModuleBody` in `Simulation.ModuleDefinition.cs` is the shared check, called from the view parser and from all three function tails once each has captured its body.
 All of the above probed against SQL Server 2025 on 2026-08-04.
 
-### Divergences
-
-- A **view's body errors carry no `Procedure` attribution**, where real attributes every error raised inside a `CREATE VIEW` to the view being defined — the syntax family (Msg 156 / 102), the binder family (Msg 207), the body-shape ones (Msg 1033 / 4511) and even the Msg 2714 name collision.
-  Functions already attribute, because their bodies go through `BindModuleBodyAtCreate`, which sets `BatchContext.ErrorProcedureName`; a view's body is parsed inline instead, so nothing sets it.
-  The trailing-statement check above attributes explicitly, so it is the one view-`CREATE` error that carries the name.
-  Note this also decides which error a trailing **non-keyword** token produces: the body's own parse is greedy and rejects it first, so `CREATE VIEW v AS SELECT 1 AS x` + `)` is Msg 102 from the body parser, with real's number and message but no attribution.
+**Every error a `CREATE VIEW` or `CREATE FUNCTION` raises names the module as its `Procedure`**, as the statement wrote it (leaf name, brackets dropped, case kept) — the syntax family, the binder, the body-shape ones and even the Msg 2714 name collision (probed 2026-09-25): both set `BatchContext.ErrorProcedureName` once the name parses.
+A body that doesn't open with a query (after an optional `WITH` prefix) is the syntax error at its first token, and a procedure or trigger body can't open with a bare procedure name — the module's `CREATE`, not the body, is its batch's first statement, so the implicit `EXECUTE` form is Msg 102 there.
 
 ## CREATE-time body binding
 
@@ -300,7 +296,8 @@ Probed against SQL Server 2025.
   Since the refresh *is* an ALTER, it also fires an `ALTER_VIEW` / `ALTER_PROCEDURE` DDL trigger and advances `modify_date`, which hasn't been checked against real.
 - **WITH-clause options**: `SCHEMABINDING` is captured on `View.IsSchemaBound` (it gates `CREATE INDEX` on the view, surfaces through `sys.sql_modules.is_schema_bound` / `OBJECTPROPERTY(id,'IsSchemaBound')`, is the precondition `OBJECTPROPERTY(id,'IsDeterministic')` reads — see [`catalog-views.md`](catalog-views.md#isdeterministic) — and enrolls the body's references in the dependency gate, [Schema binding](#schema-binding-with-schemabinding)).
   `ENCRYPTION` / `VIEW_METADATA` parse-and-ignore.
-  **`WITH CHECK OPTION`** (trailing the body) parses and records on `View.WithCheckOption`, enforced at DML time (Msg 550).
+  **`WITH CHECK OPTION`** (trailing the body) parses and records on `View.WithCheckOption`, enforced at DML time (Msg 550); it may follow any body end — a bare projection, a table name, a hint, an alias, a `GROUP BY` — since a `WITH` followed by `CHECK` ends the query rather than opening a CTE or a hint.
+  The body may also sit in parentheses, to any depth, which the stored definition keeps along with the option (probed 2026-09-25).
   A schema-bound view can carry a unique clustered index — an **indexed view** — see [`indexes.md`](indexes.md).
 - **Routing in expression position**: a view name used as a scalar value raises **Msg 4104** (`"The multi-part identifier '...' could not be bound."`), NOT Msg 4121 — views look like tables to the expression parser.
 - **Unqualified names work**: `FROM v1` falls back to `dbo.v1` (probe-confirmed real SQL Server accepts both).
