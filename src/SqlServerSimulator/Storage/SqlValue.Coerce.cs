@@ -484,8 +484,13 @@ internal readonly partial struct SqlValue
     /// half-up rounding to legacy 1/300-second tick that string and direct
     /// <c>DateTime</c> sources use.
     /// </summary>
+    /// <remarks>
+    /// The last day's fraction is in range (probed 2026-09-25 against SQL
+    /// Server 2025: <c>CAST(2958463.99e0 AS datetime)</c> is 9999-12-31
+    /// 23:45:36).
+    /// </remarks>
     private static SqlValue CoerceFractionalDaysToDateTime(decimal days) =>
-        days is < DateTimeSqlType.MinDayCount or > DateTimeSqlType.MaxDayCount
+        days is < DateTimeSqlType.MinDayCount or >= DateTimeSqlType.MaxDayCount + 1
             ? throw SimulatedSqlException.ArithmeticOverflow("datetime")
             : FromDateTime(DateTimeSqlType.BaseDate.AddTicks((long)decimal.Round(days * TimeSpan.TicksPerDay, 0, MidpointRounding.AwayFromZero)));
 
@@ -494,10 +499,18 @@ internal readonly partial struct SqlValue
     /// Routes through <see cref="FromSmallDateTime(DateTime)"/> for
     /// minute-boundary rounding.
     /// </summary>
-    private static SqlValue CoerceFractionalDaysToSmallDateTime(decimal days) =>
-        days is < 0 or > SmallDateTimeSqlType.MaxDayCount
+    private static SqlValue CoerceFractionalDaysToSmallDateTime(decimal days)
+    {
+        if (days is < 0 or >= SmallDateTimeSqlType.MaxDayCount + 1)
+            throw SimulatedSqlException.ArithmeticOverflow("smalldatetime");
+        // A fraction that rounds past the last minute overflows the same way
+        // (65535.9999 is Msg 8115, probed 2026-09-25 against SQL Server 2025).
+        var ticks = (long)decimal.Round(days * TimeSpan.TicksPerDay, 0, MidpointRounding.AwayFromZero);
+        var minutes = (ticks + (TimeSpan.TicksPerMinute / 2)) / TimeSpan.TicksPerMinute;
+        return minutes >= (SmallDateTimeSqlType.MaxDayCount + 1L) * SmallDateTimeSqlType.MinutesPerDay
             ? throw SimulatedSqlException.ArithmeticOverflow("smalldatetime")
-            : FromSmallDateTime(SmallDateTimeSqlType.BaseDate.AddTicks((long)decimal.Round(days * TimeSpan.TicksPerDay, 0, MidpointRounding.AwayFromZero)));
+            : FromSmallDateTime(SmallDateTimeSqlType.BaseDate.AddTicks(ticks));
+    }
 
     /// <summary>
     /// Coerces a legacy <c>datetime</c> or <c>smalldatetime</c> value to an

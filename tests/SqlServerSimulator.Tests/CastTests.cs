@@ -913,5 +913,18 @@ public sealed class CastTests
     [TestMethod]
     public void StringComparedWithASmallIntegerVariable_ComparesAsInt()
         => AreEqual(1, new Simulation().ExecuteScalar("declare @t tinyint = 1; select case when '300' > @t then 1 else 0 end"));
+
+    [TestMethod]
+    [DataRow("cast(2958463.99e0 as datetime)", "9999-12-31 23:45:36.000")]
+    [DataRow("cast(cast(2958463.5 as decimal(10,1)) as datetime)", "9999-12-31 12:00:00.000")]
+    [DataRow("cast(65535.99e0 as smalldatetime)", "2079-06-06 23:46:00.000")]
+    public void FractionalDays_OnTheLastDay_AreInRange(string expression, string expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar($"select convert(varchar(30), {expression}, 121)"));
+
+    [TestMethod]
+    [DataRow("cast(2958464e0 as datetime)", "datetime")]
+    [DataRow("cast(65535.9999e0 as smalldatetime)", "smalldatetime")]
+    public void FractionalDays_PastTheLastDay_Overflow(string expression, string type)
+        => new Simulation().AssertSqlError($"select {expression}", 8115, $"Arithmetic overflow error converting expression to data type {type}.");
 }
 
