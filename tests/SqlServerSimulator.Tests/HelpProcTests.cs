@@ -541,4 +541,8 @@ public sealed class HelpProcTests
         sim.ExecuteBatches("create table dbo.t (a int, b int, constraint CK_ab check (a < b))");
         AreEqual("CHECK Table Level ", ResultSets(sim, "exec sp_helpconstraint 't', 'nomsg'")[0].Rows[0][0]);
     }
+
+    [TestMethod]
+    public void HelpProtect_NameThatIsNotAnIdentifier_IsMsg15253()
+        => new Simulation().AssertSqlError("exec sp_helprotect 'a]b'", 15253, "Syntax error parsing SQL identifier 'a]b'.");
 }

@@ -514,4 +514,8 @@ public sealed class ServerRoleAndScopeTests
         _ = sim.ExecuteNonQuery("alter login other1 with password = 'P@ss2word'; drop login other2");
         AreEqual(0, sim.ExecuteScalar("select count(*) from sys.server_principals where name = 'other2'"));
     }
+
+    [TestMethod]
+    public void DropServerRole_Missing_IsMsg15151()
+        => new Simulation().AssertSqlError("drop server role nosuchrole", 15151, "Cannot drop the server role 'nosuchrole', because it does not exist or you do not have permission.");
 }

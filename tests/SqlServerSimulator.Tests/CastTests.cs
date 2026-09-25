@@ -1094,5 +1094,8 @@ public sealed class CastTests
     [DataRow("declare @v varchar(max) = 'a'; select cast(@v as decimal(5,2))", 8114, "Error converting data type varchar to numeric.")]
     public void MaxFormConversionFailure_NamesTheFamily(string sql, int number, string message)
         => new Simulation().AssertSqlError(sql, number, message);
-}
 
+    [TestMethod]
+    public void MoneyPastIntsRange_ToInt_IsMsg237()
+        => new Simulation().AssertSqlError("select cast(cast(922337203685477.5807 as money) as int)", 237, "There is insufficient result space to convert a money value to int.");
+}

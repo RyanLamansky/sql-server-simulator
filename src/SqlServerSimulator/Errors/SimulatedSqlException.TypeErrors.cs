@@ -277,8 +277,8 @@ partial class SimulatedSqlException
     /// <c>"numeric"</c> for both decimal and numeric targets — verified
     /// against SQL Server 2025.
     /// </summary>
-    internal static SimulatedSqlException ConvertingDataTypeError(SqlType source, string targetWord) =>
-        new($"Error converting data type {FamilyRootName(source)} to {targetWord}.", 8114, 16, 5);
+    internal static SimulatedSqlException ConvertingDataTypeError(SqlType source, string targetWord, byte state = 5) =>
+        new($"Error converting data type {FamilyRootName(source)} to {targetWord}.", 8114, 16, state);
 
     /// <summary>
     /// Msg 8114 state 31: a <c>datetimeoffset</c> string whose offset moves its
@@ -313,7 +313,7 @@ partial class SimulatedSqlException
     };
 
     /// <summary>
-    /// Variant of <see cref="ConvertingDataTypeError(SqlType, string)"/>
+    /// Variant of <see cref="ConvertingDataTypeError(SqlType, string, byte)"/>
     /// taking the source-family wording directly — for callers that don't
     /// have a <see cref="SqlType"/> instance handy (e.g. the time-source
     /// arm of CONVERT-style dispatch where no <c>time</c> singleton exists
@@ -709,16 +709,6 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException IncompatibleDataTypesInOperator(string a, string b, string operatorName) =>
         new($"The data types {a} and {b} are incompatible in the {operatorName} operator.", 402, 16, 1);
-
-    /// <summary>
-    /// Mimics SQL Server error 257: an <c>sql_variant</c> operand meets a
-    /// non-variant type in an arithmetic operator, which requires an implicit
-    /// conversion the server forbids. Probe-confirmed State 3 and the verbatim
-    /// "Use the CONVERT function to run this query." tail (SQL Server 2025);
-    /// <paramref name="target"/> is the non-variant operand's type.
-    /// </summary>
-    internal static SimulatedSqlException ImplicitConversionFromSqlVariantNotAllowed(SqlType target) =>
-        ImplicitConversionNotAllowed("sql_variant", FamilyRootName(target));
 
     /// <summary>
     /// Mimics SQL Server error 257: the implicit conversion a unification or

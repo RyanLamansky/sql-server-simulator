@@ -306,4 +306,19 @@ public class LinkedServerTests
         _ = local.ExecuteNonQuery("exec sp_dropserver 'OTHER'");
         AreEqual(1, local.ExecuteScalar("select count(*) from sys.servers"));
     }
+
+    // The procedures refuse bad arguments with real's own signature rules
+    // (probed 2026-09-25 against SQL Server 2025).
+    [TestMethod]
+    [DataRow("exec sp_addlinkedserver", 201)]
+    [DataRow("exec sp_addlinkedserver null", 15004)]
+    [DataRow("exec sp_addlinkedserver @server = 'a', @bogus = 1", 8145)]
+    [DataRow("exec sp_addlinkedserver 'a','b','c','d','e','f','g','h'", 8114)]
+    [DataRow("exec sp_addlinkedserver 'a','b','c','d','e','f','g',1,'i'", 8144)]
+    [DataRow("exec sp_dropserver", 201)]
+    [DataRow("exec sp_dropserver 'x', 'y', 'z'", 8144)]
+    [DataRow("exec sp_dropserver null", 15015)]
+    [DataRow("exec sp_dropserver 'x', 'bad'", 15600)]
+    public void LinkedServerProcedures_RefuseBadArgumentsAsRealDoes(string sql, int number)
+        => _ = new Simulation().AssertSqlError(sql, number);
 }

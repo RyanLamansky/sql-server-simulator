@@ -488,4 +488,14 @@ public sealed class CreateSchemaTests
             """);
         AreEqual(DBNull.Value, simulation.ExecuteScalar("select schema_id('src')"));
     }
+
+    [TestMethod]
+    [DataRow("alter schema dbo transfer type::nosch.nosuchtype")]
+    [DataRow("alter schema s2 transfer type::dbo.nosuchtype")]
+    public void TransferType_Missing_IsMsg15151(string sql)
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create schema s2");
+        simulation.AssertSqlError(sql, 15151, "Cannot find the type 'nosuchtype', because it does not exist or you do not have permission.");
+    }
 }

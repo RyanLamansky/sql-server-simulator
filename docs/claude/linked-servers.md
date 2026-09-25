@@ -97,5 +97,7 @@ Distinct from real SQL Server's `server_id` allocation, which is `sys.servers`-r
 | Msg | When |
 |---|---|
 | 15015 | `sp_dropserver 'X'` where X isn't an active linked server: `"The server 'X' does not exist. Use sp_helpserver to show available servers."` |
-| 15600 | `sp_addlinkedserver` / `sp_dropserver` / etc. with an invalid parameter (unknown @-name, missing required arg, positional past the parameter list). |
+| 201 / 8144 / 8145 | `sp_addlinkedserver` / `sp_dropserver` without `@server`, past their parameter lists, and (`sp_addlinkedserver`) with an unknown `@`-name — real's signatures, `@provstr` and the `bit` `@linkedstyle` included (probed 2026-09-25). |
+| 15004 | `sp_addlinkedserver` with a NULL `@server`; `sp_dropserver`'s NULL is Msg 15015 naming `(null)`. |
+| 15600 | `sp_dropserver` with a `@droplogins` other than `'droplogins'`, naming `sys.sp_dropserver`. |
 | 208 | Four-part name whose leading segment isn't an active linked server. (Real SQL Server raises Msg 7202; the simulator routes through the same `InvalidObjectName` path as a missing 1- to 3-part table.) |

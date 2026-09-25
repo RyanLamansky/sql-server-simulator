@@ -877,6 +877,13 @@ partial class SimulatedSqlException
         new($"An invalid parameter or option was specified for procedure '{procLabel}'.", 15600, 15, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 15004: <c>sp_addlinkedserver</c> given a NULL
+    /// <c>@server</c>. Probed 2026-09-25 against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException NameCannotBeNull() =>
+        new("Name cannot be NULL.", 15004, 16, 1);
+
+    /// <summary>
     /// Msg 15600 for <c>sp_settriggerorder</c> — an <c>@order</c> outside
     /// First / Last / None, or an <c>@stmttype</c> outside INSERT / UPDATE /
     /// DELETE. Shares the wording every system-procedure parameter miss uses.
@@ -2726,14 +2733,6 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException CannotFindUser(string name) =>
         new($"Cannot find the user '{name}', because it does not exist or you do not have permission.", 15151, 16, 1);
-
-    /// <summary>
-    /// Mimics SQL Server error 15151's object variant, which is what a
-    /// <c>GRANT</c> element inside a <c>CREATE SCHEMA</c> reports for a
-    /// securable that doesn't resolve. Probe-confirmed verbatim.
-    /// </summary>
-    internal static SimulatedSqlException CannotFindObjectForGrant(string name) =>
-        new($"Cannot find the object '{name}', because it does not exist or you do not have permission.", 15151, 16, 1);
 
     /// <summary>
     /// Mimics SQL Server error 2759 — the trailer real appends to <i>every</i>

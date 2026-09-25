@@ -1050,5 +1050,15 @@ public sealed class AlterTableColumnTests
             new[] { "df", "c", "ck", "uq", "ix", "fk" },
             error.Errors.Cast<SimulatedError>().Where(e => e.Number == 5074).Select(e => e.Message.Split('\'')[1]).ToArray());
     }
-}
 
+    // Narrowing a decimal below a stored value is Msg 8115 state 8, with the
+    // statement's Msg 3621 after it (probed 2026-09-25 against SQL Server 2025).
+    [TestMethod]
+    public void AlterColumn_DecimalNarrowedBelowAStoredValue_IsMsg8115State8()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table cn (d decimal(10,2)); insert cn values (12345678.12)");
+        var ex = simulation.AssertSqlError("alter table cn alter column d decimal(5,2)", 8115);
+        AreEqual((byte)8, ex.State);
+    }
+}
