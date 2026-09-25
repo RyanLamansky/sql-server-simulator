@@ -318,24 +318,31 @@ public class ApplicationLockTests
         var simulation = new Simulation();
         using var a = simulation.CreateOpenConnection();
         using var b = simulation.CreateOpenConnection();
+        using var observer = simulation.CreateOpenConnection();
 
         AreEqual(0, GetAppLock(a, "dlA", "Exclusive"));
         AreEqual(0, GetAppLock(b, "dlB", "Exclusive"));
 
-        // A wants dlB (held by B); B wants dlA (held by A). One is chosen the
-        // deadlock victim and gets -3 — with no exception raised.
-        var aTask = Task.Run(() => GetAppLock(a, "dlB", "Exclusive", timeout: 5000), this.TestContext.CancellationToken);
-        var bTask = Task.Run(() => GetAppLock(b, "dlA", "Exclusive", timeout: 5000), this.TestContext.CancellationToken);
+        // A wants dlB (held by B); B wants dlA (held by A). B asks only once A
+        // is observably waiting, so the cycle forms however late a threadpool
+        // slot comes — starting both at once let A's wait expire before B had
+        // asked, under a loaded run.
+        var aTask = Task.Run(() => GetAppLock(a, "dlB", "Exclusive", timeout: 60_000), this.TestContext.CancellationToken);
+        IsTrue(SpinUntilApplicationLockWait(observer), "A never registered as waiting for the application lock.");
+        var bTask = Task.Run(() => GetAppLock(b, "dlA", "Exclusive", timeout: 60_000), this.TestContext.CancellationToken);
 
-        IsTrue(Task.WaitAll([aTask, bTask], TimeSpan.FromSeconds(15)), "Deadlock tasks did not complete in time.");
-
-        var codes = new[] { aTask.Result, bTask.Result };
-        // Exactly one connection is the deadlock victim (-3), with no
-        // exception raised. The survivor's Session-owned hold isn't released
-        // by the victim's -3 (a proc return, not a rolled-back transaction),
-        // so the survivor stays blocked and times out (-1) at its 5s deadline.
-        _ = ContainsSingle(codes.Where(c => c == -3));
-        _ = ContainsSingle(codes.Where(c => c == -1));
+        // One is chosen the deadlock victim and gets -3, with no exception
+        // raised. The -3 is a proc return, not a rolled-back transaction, so
+        // the victim still holds its own lock; releasing it lets the survivor
+        // through.
+        Task[] requests = [aTask, bTask];
+        var victim = Task.WaitAny(requests, 60_000, this.TestContext.CancellationToken);
+        IsGreaterThanOrEqualTo(0, victim, "Neither request was chosen as the deadlock victim.");
+        AreEqual(-3, (victim == 0 ? aTask : bTask).Result);
+        _ = victim == 0 ? ReleaseAppLock(a, "dlA") : ReleaseAppLock(b, "dlB");
+        var survivor = victim == 0 ? bTask : aTask;
+        IsTrue(survivor.Wait(TimeSpan.FromSeconds(60), this.TestContext.CancellationToken), "The survivor was not granted its lock.");
+        AreEqual(1, survivor.Result);
     }
 
     [TestMethod]
