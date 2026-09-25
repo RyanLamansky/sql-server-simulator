@@ -1010,7 +1010,11 @@ internal readonly partial struct SqlValue
             // valid digits — overflow rather than format error.
             if (System.Numerics.BigInteger.TryParse(trimmed, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out _))
                 throw OverflowOnConvert(sourceType, source, target);
-            throw SimulatedSqlException.ConversionFailedFromString(sourceType, source, target);
+            // A bigint target reports the 8114 form where the narrower integers
+            // report Msg 245 (probed 2026-09-25 against SQL Server 2025).
+            throw target == SqlType.BigInt
+                ? SimulatedSqlException.StringConversionToNumberFailed(sourceType, "bigint")
+                : SimulatedSqlException.ConversionFailedFromString(sourceType, source, target);
         }
 
         try
@@ -1072,7 +1076,7 @@ internal readonly partial struct SqlValue
 
     private SqlValue CoerceToMoney(SqlType target) => this.Type switch
     {
-        _ when SqlType.IsStringCategory(this.Type) => this.MoneyFromNonDecimalSource(target, Decimal38.FromDotNetDecimal(ParseMoneyString(this.AsString))),
+        _ when SqlType.IsStringCategory(this.Type) => this.MoneyFromNonDecimalSource(target, Decimal38.FromDotNetDecimal(ParseMoneyString(this.AsString, target))),
         _ when SqlType.IsIntegerCategory(this.Type) => this.MoneyFromNonDecimalSource(target, Decimal38.FromInt64(AsInt64Widened(this))),
         DecimalSqlType => FromMoney(target, this.AsDecimal38),
         _ when SqlType.IsMoneyCategory(this.Type) => this.MoneyFromNonDecimalSource(target, this.AsMoneyDecimal38),
@@ -1182,7 +1186,7 @@ internal readonly partial struct SqlValue
     /// 2026-09-24)</item>
     /// </list>
     /// </summary>
-    private static decimal ParseMoneyString(string source)
+    private static decimal ParseMoneyString(string source, SqlType target)
     {
         // Only spaces may lead the amount, while whitespace of any kind may
         // trail it (probe-confirmed against SQL Server 2025).
@@ -1224,7 +1228,7 @@ internal readonly partial struct SqlValue
                 System.Globalization.NumberStyles.AllowDecimalPoint,
                 System.Globalization.CultureInfo.InvariantCulture,
                 out var d)
-                    ? throw SimulatedSqlException.CannotConvertCharToMoney()
+                    ? throw (target == SqlType.SmallMoney ? SimulatedSqlException.CannotConvertCharToSmallMoney() : SimulatedSqlException.CannotConvertCharToMoney())
                     : negative ? -d : d;
     }
 
@@ -1331,7 +1335,7 @@ internal readonly partial struct SqlValue
             System.Globalization.CultureInfo.InvariantCulture,
             out var d) || double.IsNaN(d) || !trimmed.AsSpan().ContainsAnyInRange('0', '9'))
         {
-            throw SimulatedSqlException.StringConversionToNumberFailed(sourceType, "float");
+            throw SimulatedSqlException.StringConversionToNumberFailed(sourceType, target == SqlType.Real ? "real" : "float");
         }
         // A number past float's range is an overflow rather than unreadable.
         return double.IsInfinity(d) ? throw SimulatedSqlException.ArithmeticOverflow("float") : d;

@@ -565,13 +565,14 @@ internal sealed class Cast : Expression
     internal static bool IsConversionFailure(int number) => number is
         220    // ArithmeticOverflowForDataType (integer → tinyint/smallint)
         or 232 // ArithmeticOverflowForType (float/real/money → integer)
-        or 235 // money / smallmoney string syntax
+        or 235 // money string syntax
         or 237 // InsufficientResultSpaceForMoneyToInt
         or 241 // ConversionFailedDateTimeFromString
         or 242 // ConversionToDateTimeOutOfRange
         or 244 // OverflowConvertingNarrowInt (INT1/INT2)
         or 245 // ConversionFailedFromString
         or 248 // OverflowConvertingToInt
+        or 293 // smallmoney string syntax
         or 295 // ConversionFailedSmallDateTimeFromString
         or 8114 // ConvertingDataTypeError
         or 8115 // ArithmeticOverflow

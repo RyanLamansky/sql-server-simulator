@@ -296,7 +296,19 @@ partial class SimulatedSqlException
     /// procedure or <c>sp_executesql</c> argument lets the batch carry on.
     /// </summary>
     internal static SimulatedSqlException StringConversionToNumberFailed(SqlType source, string targetWord) =>
-        new($"Error converting data type {FamilyRootName(source)} to {targetWord}.", 8114, 16, 5) { AbortsAsUnderXactAbort = true };
+        new($"Error converting data type {ConversionSourceName(source)} to {targetWord}.", 8114, 16, 5) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>
+    /// A string source as real's conversion failures name it: a fixed-length
+    /// <c>char</c> / <c>nchar</c> reads as <c>varchar</c> / <c>nvarchar</c>
+    /// (probed 2026-09-25 against SQL Server 2025, columns and CASTs alike).
+    /// </summary>
+    private static string ConversionSourceName(SqlType source) => source switch
+    {
+        CharSqlType => "varchar",
+        NCharSqlType => "nvarchar",
+        _ => FamilyRootName(source),
+    };
 
     /// <summary>
     /// Variant of <see cref="ConvertingDataTypeError(SqlType, string)"/>
@@ -360,6 +372,13 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException CannotConvertCharToMoney() =>
         new("Cannot convert a char value to money. The char value has incorrect syntax.", 235, 16, 0) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>
+    /// The <c>smallmoney</c> form of <see cref="CannotConvertCharToMoney"/>,
+    /// a message of its own (probed 2026-09-25 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException CannotConvertCharToSmallMoney() =>
+        new("Cannot convert char value to smallmoney. The char value has incorrect syntax.", 293, 16, 0) { AbortsAsUnderXactAbort = true };
 
     /// <summary>
     /// Mimics SQL Server error 8134: division by zero in integer, decimal,
@@ -612,7 +631,7 @@ partial class SimulatedSqlException
     /// (<c>varchar</c>, <c>nvarchar</c>, etc.).
     /// </summary>
     internal static SimulatedSqlException ConversionFailedFromString(SqlType sourceType, string sourceValue, SqlType targetType) =>
-        new($"Conversion failed when converting the {sourceType.SqlServerName} value '{sourceValue}' to data type {targetType.SqlServerName}.", 245, 16, 1) { AbortsAsUnderXactAbort = true };
+        new($"Conversion failed when converting the {ConversionSourceName(sourceType)} value '{sourceValue}' to data type {targetType.SqlServerName}.", 245, 16, 1) { AbortsAsUnderXactAbort = true };
 
     /// <summary>
     /// Mimics SQL Server error 244: parsing a string succeeded but the

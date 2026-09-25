@@ -60,6 +60,12 @@ The guard is on the binary exponent rather than a `>= 1e38` magnitude test, sinc
 
 Load-bearing for ODBC / pyodbc callers, which bind a Python/CLR `float` parameter as `float`: a decimal-column insert (e.g. SQLAlchemy's) arrives as a float-to-decimal assignment.
 
+## Which message an unreadable string reports
+
+The target picks the message (probed 2026-09-25 against SQL Server 2025): `tinyint` / `smallint` / `int` / `bit` report Msg 245 naming the value, `bigint` — like `decimal` / `numeric` / `float` / `real`, each named as itself — Msg 8114 naming only the types, `money` Msg 235 and `smallmoney` a message of its own, Msg 293.
+A `char` / `nchar` source is named `varchar` / `nvarchar` in all of them, column or CAST alike.
+A string compared with a `tinyint` or `smallint` converts to `int` rather than to the narrow type — `'300' = CAST(1 AS tinyint)` is false — while arithmetic and unification keep the narrow type and overflow (`BooleanExpression.ComparisonType`).
+
 ## Whitespace around a number, by target
 
 Which characters a string → number conversion trims differs by target, varchar and nvarchar alike (probed 2026-09-24 over every character 1–32 plus U+00A0 and U+3000 on each side):

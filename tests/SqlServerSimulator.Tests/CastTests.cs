@@ -797,4 +797,36 @@ public sealed class CastTests
     [DataRow("smalldatetime", 295)]
     public void StringToLegacyDateTime_FourFractionDigits_Refused(string type, int number)
         => new Simulation().AssertSqlError($"select cast('2024-01-01 10:00:00.1234' as {type})", number);
+
+    // ---- which message an unreadable string reports, probed 2026-09-25 ----
+
+    [TestMethod]
+    [DataRow("cast('abc' as int)", 245, "Conversion failed when converting the varchar value 'abc' to data type int.")]
+    [DataRow("cast(cast('abc' as char(5)) as int)", 245, "Conversion failed when converting the varchar value 'abc  ' to data type int.")]
+    [DataRow("cast(cast(N'abc' as nchar(4)) as smallint)", 245, "Conversion failed when converting the nvarchar value 'abc ' to data type smallint.")]
+    [DataRow("cast('abc' as bigint)", 8114, "Error converting data type varchar to bigint.")]
+    [DataRow("cast('1.5' as bigint)", 8114, "Error converting data type varchar to bigint.")]
+    [DataRow("cast(cast('abc' as char(5)) as float)", 8114, "Error converting data type varchar to float.")]
+    [DataRow("cast(N'abc' as real)", 8114, "Error converting data type nvarchar to real.")]
+    [DataRow("cast('abc' as money)", 235, "Cannot convert a char value to money. The char value has incorrect syntax.")]
+    [DataRow("cast('abc' as smallmoney)", 293, "Cannot convert char value to smallmoney. The char value has incorrect syntax.")]
+    public void UnreadableString_ReportsTheTargetsMessage(string expression, int error, string message)
+        => new Simulation().AssertSqlError($"select {expression}", error, message);
+
+    [TestMethod]
+    public void TryConvert_UnreadableSmallMoney_IsNull()
+        => IsInstanceOfType<DBNull>(new Simulation().ExecuteScalar("select try_convert(smallmoney, 'abc')"));
+
+    [TestMethod]
+    [DataRow("'300' = cast(1 as tinyint)", 0)]
+    [DataRow("cast(1 as tinyint) < '300'", 1)]
+    [DataRow("'70000' = cast(1 as smallint)", 0)]
+    [DataRow("cast(1 as tinyint) in ('300', 2)", 0)]
+    public void StringComparedWithASmallInteger_ComparesAsInt(string predicate, int expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar($"select case when {predicate} then 1 else 0 end"));
+
+    [TestMethod]
+    public void StringAddedToATinyint_StillOverflows()
+        => _ = new Simulation().AssertSqlError("select '300' + cast(1 as tinyint)", 244);
 }
+

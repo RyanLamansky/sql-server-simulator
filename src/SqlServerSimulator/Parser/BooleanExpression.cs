@@ -2684,10 +2684,26 @@ internal abstract class BooleanExpression : ExpressionNode
         // why a missing memo just means the old behavior.
         if (SqlType.PairError(TypePairOperation.Compare, l.Type, r.Type, operatorName) is { } error)
             throw error;
-        var common = SqlType.Promote(l.Type, r.Type);
+        var common = ComparisonType(l.Type, r.Type);
         return compare(
             leftMemo is null ? l.CoerceTo(common) : leftMemo.Coerce(l, common),
             rightMemo is null ? r.CoerceTo(common) : rightMemo.Coerce(r, common));
+    }
+
+    /// <summary>
+    /// The type two differently-typed operands compare in: the unification's,
+    /// save that a string beside a <c>tinyint</c> or <c>smallint</c> compares
+    /// as <c>int</c> — `'300' = CAST(1 AS tinyint)` is false rather than the
+    /// overflow arithmetic and unification report (probed 2026-09-25 against
+    /// SQL Server 2025).
+    /// </summary>
+    internal static SqlType ComparisonType(SqlType left, SqlType right)
+    {
+        var common = SqlType.Promote(left, right);
+        return (common == SqlType.TinyInt || common == SqlType.SmallInt)
+            && (left.PairClass is TypePairClass.AnsiString or TypePairClass.UnicodeString || right.PairClass is TypePairClass.AnsiString or TypePairClass.UnicodeString)
+                ? SqlType.Int32
+                : common;
     }
 
     private sealed class EqualityExpression(Expression left, Expression right) : CompareExpression(left, right)
