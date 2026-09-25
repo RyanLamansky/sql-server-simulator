@@ -342,6 +342,46 @@ partial class SimulatedSqlException
         new($"Could not locate statistics '{statisticsName}' in the system catalogs.", 2767, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 2583: a <c>DBCC</c> statement given too few or
+    /// too many parameters. Probed 2026-09-25 against SQL Server 2025 on
+    /// <c>DBCC INPUTBUFFER</c>, state 3.
+    /// </summary>
+    internal static SimulatedSqlException DbccWrongParameterCount() =>
+        new("An incorrect number of parameters was given to the DBCC statement.", 2583, 16, 3);
+
+    /// <summary>
+    /// Mimics SQL Server error 2532: a <c>DBCC</c> statement's <c>WITH</c>
+    /// list names an option the command doesn't take. Probed 2026-09-25
+    /// against SQL Server 2025 on <c>DBCC INPUTBUFFER … WITH TABLERESULTS</c>.
+    /// </summary>
+    internal static SimulatedSqlException DbccWithOptionNotValid() =>
+        new("One or more WITH options specified are not valid for this command.", 2532, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 2571: a <c>DBCC</c> command the session lacks
+    /// the permission for — <c>DBCC INPUTBUFFER</c> of another session without
+    /// <c>VIEW SERVER STATE</c>. Severity 14, state 10, probed 2026-09-25
+    /// against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException DbccPermissionDenied(string userName, string command) =>
+        new($"User '{userName}' does not have permission to run DBCC {command}.", 2571, 14, 10);
+
+    /// <summary>
+    /// Mimics SQL Server error 7955: <c>DBCC INPUTBUFFER</c> of a session id
+    /// no session holds. State 2, probed 2026-09-25 against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException InvalidSpidSpecified(int spid) =>
+        new($"Invalid SPID {spid} specified.", 7955, 16, 2);
+
+    /// <summary>
+    /// Mimics SQL Server error 7960: <c>DBCC INPUTBUFFER</c> naming a request
+    /// id the session has no request under. Probed 2026-09-25 against SQL
+    /// Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException InvalidSpidOrBatchId(int spid, int batchId) =>
+        new($"An invalid server process identifier (SPID) {spid} or batch ID {batchId} was specified.", 7960, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 2560: a <c>DBCC</c> statement's parameter is
     /// unusable. Probe-confirmed against SQL Server 2025: state 9 for
     /// <c>DBCC SHOW_STATISTICS(NULL, NULL)</c>'s missing first parameter, 14

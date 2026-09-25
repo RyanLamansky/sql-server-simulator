@@ -2474,8 +2474,9 @@ internal sealed partial class Selection
                 }
             }
 
-            var resolvedIsTvf = context.Batch.TryResolveFunction(resolvedName, out var resolvedFn)
-                && resolvedFn is InlineTableValuedFunction or MultiStatementTableValuedFunction;
+            var resolvedIsTvf = IsSysRowsetFunction(resolvedName)
+                || (context.Batch.TryResolveFunction(resolvedName, out var resolvedFn)
+                    && resolvedFn is InlineTableValuedFunction or MultiStatementTableValuedFunction);
             // A '(' after the name marks a function-call shape (TVF invocation).
             // ParseObjectName leaves the cursor on the leaf; peek one past it.
             var isFunctionCallShape = context.MoveNext() && context.Token is Operator { Character: '(' };
@@ -2680,9 +2681,9 @@ internal sealed partial class Selection
                     return BuiltInRowsetSource(context, ParseVirtualFileStats(context, objectName.ToString()));
                 }
 
-                // The two dependency DMVs (2-arg) and the describe DMV (3-arg) are
-                // system TVFs, `sys.`-qualified like fn_virtualfilestats and
-                // dispatched on the same terms.
+                // The dependency DMVs, the describe DMV, dm_exec_sql_text and
+                // dm_exec_input_buffer are system TVFs, `sys.`-qualified like
+                // fn_virtualfilestats and dispatched on the same terms.
                 if (objectName.Count == 2 && BuiltInToken.Equals(objectName.ImmediateQualifier, "sys"))
                 {
                     if (BuiltInToken.Equals(objectName.Leaf, "dm_sql_referencing_entities"))
@@ -2691,6 +2692,10 @@ internal sealed partial class Selection
                         return BuiltInRowsetSource(context, ParseSqlReferencedEntities(context, objectName.ToString()));
                     if (BuiltInToken.Equals(objectName.Leaf, "dm_exec_describe_first_result_set"))
                         return BuiltInRowsetSource(context, ParseDescribeFirstResultSet(context, objectName.ToString()));
+                    if (BuiltInToken.Equals(objectName.Leaf, "dm_exec_sql_text"))
+                        return BuiltInRowsetSource(context, ParseSqlText(context, objectName.ToString()));
+                    if (BuiltInToken.Equals(objectName.Leaf, "dm_exec_input_buffer"))
+                        return BuiltInRowsetSource(context, ParseInputBuffer(context, objectName.ToString()));
                 }
 
                 // Linked-server fork: four-part `server.db.schema.t` routes
@@ -3212,6 +3217,17 @@ internal sealed partial class Selection
     /// with the cursor just past the function's closing <c>)</c> (each parser
     /// consumes through its own argument list).
     /// </summary>
+    /// <summary>
+    /// Whether a name is one of the <c>sys.</c>-qualified system TVFs the FROM
+    /// clause dispatches by name, which an APPLY routes the way it routes a
+    /// user TVF — the monitoring shape
+    /// <c>CROSS APPLY sys.dm_exec_sql_text(r.sql_handle)</c>.
+    /// </summary>
+    private static bool IsSysRowsetFunction(MultiPartName name) =>
+        name.Count == 2
+        && BuiltInToken.Equals(name.ImmediateQualifier, "sys")
+        && BuiltInToken.EqualsAny(name.Leaf, "dm_exec_describe_first_result_set", "dm_exec_input_buffer", "dm_exec_sql_text", "dm_sql_referenced_entities", "dm_sql_referencing_entities", "fn_virtualfilestats");
+
     private static FromSource BuiltInRowsetSource(ParserContext context, Selection plan)
     {
         var columns = new HeapColumn[plan.Schema.Length];

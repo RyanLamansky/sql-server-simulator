@@ -102,6 +102,16 @@ internal sealed class SessionToken(int spid)
     public DateTime RequestStartUtc;
 
     /// <summary>
+    /// The text of the session's current or most recent command, which its
+    /// SQL handle hashes and <c>sys.dm_exec_sql_text</c> / the input buffer
+    /// return; null before the session's first command.
+    /// </summary>
+    public string? BatchText;
+
+    /// <summary>Where in <see cref="BatchText"/> the running top-level statement starts, in characters.</summary>
+    public int StatementStartIndex;
+
+    /// <summary>
     /// Set once the abandoned-session sweep has torn this session down, so a
     /// second pass (or a late <see cref="SimulatedDbConnection.Dispose(bool)"/>
     /// on a resurrected connection) doesn't repeat the work.

@@ -922,6 +922,22 @@ partial class SimulatedSqlException
         new($"The column prefix '{qualifier}' does not match with a table name or alias name used in the query.", 107, 15, 1);
 
     /// <summary>
+    /// Mimics SQL Server's Msg 569 — <c>sys.dm_exec_sql_text</c> given a
+    /// handle shorter than a SQL handle or of a type it doesn't take. State 4,
+    /// probed 2026-09-25 against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException InvalidSqlTextHandle() =>
+        new("The handle that was passed to dm_exec_sql_text was invalid.", 569, 16, 4);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 12413 — <c>sys.dm_exec_sql_text</c> given a
+    /// statement SQL handle (type byte 9), which only Query Store resolves.
+    /// Probed 2026-09-25 against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException StatementSqlHandleNotProcessed() =>
+        new("Cannot process statement SQL handle. Try querying the sys.query_store_query_text view instead.", 12413, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server's Msg 11529 — <c>sp_describe_first_result_set</c>'s
     /// batch fails on every path, as a missing object makes it. Probe-confirmed
     /// against SQL Server 2025 (2026-09-24).

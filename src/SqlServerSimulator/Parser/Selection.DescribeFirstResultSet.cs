@@ -1,4 +1,3 @@
-using SqlServerSimulator.Parser.Tokens;
 using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator.Parser;
@@ -40,27 +39,7 @@ partial class Selection
     /// </summary>
     public static Selection ParseDescribeFirstResultSet(ParserContext context, string functionName)
     {
-        if (context.GetNextRequired() is not Operator { Character: '(' })
-            throw SimulatedSqlException.SyntaxErrorNear(context);
-
-        var arguments = new Expression[3];
-        for (var i = 0; ; i++)
-        {
-            context.MoveNextRequired();
-            var argument = Expression.Parse(context);
-            if (i < arguments.Length)
-                arguments[i] = argument;
-            if (context.Token is Operator { Character: ',' })
-                continue;
-            if (context.Token is not Operator { Character: ')' })
-                throw SimulatedSqlException.SyntaxErrorNear(context);
-            if (i < arguments.Length - 1)
-                throw SimulatedSqlException.InsufficientArgumentsToFunction(functionName, 3);
-            if (i >= arguments.Length)
-                throw SimulatedSqlException.TooManyArgumentsToFunction(functionName, 3);
-            break;
-        }
-        context.MoveNextOptional();
+        var arguments = ParseSystemFunctionArguments(context, functionName, 3);
         return new Selection(DescribeDmvSchema, DescribeDmvColumnNames,
             hasOrderBy: false,
             hasTopOrOffsetOrFetch: false,

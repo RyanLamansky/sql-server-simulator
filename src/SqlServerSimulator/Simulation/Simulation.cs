@@ -1052,7 +1052,12 @@ public sealed partial class Simulation
         // don't re-enter here, so one execution counts once.
         _ = Interlocked.Increment(ref this.statementsInFlight);
         if (command.Connection is { } requester)
-            requester.Session.RequestStartUtc = DateTime.UtcNow;
+        {
+            var session = requester.Session;
+            session.RequestStartUtc = DateTime.UtcNow;
+            session.BatchText = command.CommandText;
+            session.StatementStartIndex = 0;
+        }
         try
         {
             foreach (var outcome in this.CreateResultSetsForCommandCore(command, continueOnError))
@@ -1816,9 +1821,18 @@ public sealed partial class Simulation
             ReservedKeyword { Keyword: Keyword.Merge } => "MERGE",
             _ => "SELECT",
         };
-        batch.Connection.Session.CurrentCommand = batch.Parser.Token is ReservedKeyword { Keyword: Keyword.WaitFor }
-            ? "WAITFOR"
-            : batch.CurrentStatement.StatementVerb;
+        if (!batch.IsSkipping)
+        {
+            var session = batch.Connection.Session;
+            session.CurrentCommand = batch.Parser.Token is ReservedKeyword { Keyword: Keyword.WaitFor }
+                ? "WAITFOR"
+                : batch.CurrentStatement.StatementVerb;
+            // Offsets are into the command's own text, so only a top-level
+            // statement moves them; a module or dynamic-SQL body runs inside
+            // the statement that called it.
+            if (batch.Connection.NestingLevel == 0)
+                session.StatementStartIndex = batch.Parser.Token!.StartIndex;
+        }
         // READ_COMMITTED_SNAPSHOT readers take a fresh snapshot per statement;
         // clearing here ensures the next statement allocates a new Xid on its
         // first user-table read.
@@ -2847,6 +2861,17 @@ public sealed partial class Simulation
                     connection.LastStatementRowCount = 0;
                     if (outcome is not null)
                         yield return outcome;
+                }
+                break;
+
+            case ReservedKeyword { Keyword: Keyword.Dbcc } when TryParseInputBuffer(context, batch, out outcome, out var completion):
+                // The row, then Msg 2528 after it, as real sends them.
+                if (!batch.IsSkipping)
+                {
+                    connection.LastStatementRowCount = 1;
+                    yield return outcome!;
+                    if (completion is not null)
+                        yield return new SimulatedInfoOutcome(completion, followsRows: true);
                 }
                 break;
 

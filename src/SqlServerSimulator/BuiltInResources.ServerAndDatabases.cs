@@ -1367,7 +1367,7 @@ internal static partial class BuiltInResources
                     SqlValue.FromNVarchar("FALSE"), SqlValue.FromNVarchar("SQL"), SqlValue.FromInt16(0),
                     nullInt, nullInt, nullDateTime, nullDateTime, nullInt,
                     SqlValue.FromNVarchar("<local machine>"), nullInt, SqlValue.Null(SqlType.NVarchar), nullInt,
-                    SqlValue.FromGuid(transport.ConnectionId), SqlValue.Null(SqlType.UniqueIdentifier), SqlValue.Null(SqlType.Varbinary),
+                    SqlValue.FromGuid(transport.ConnectionId), SqlValue.Null(SqlType.UniqueIdentifier), SqlHandleValue(connection.Session.BatchText),
                 ];
                 continue;
             }
@@ -1381,10 +1381,32 @@ internal static partial class BuiltInResources
                 SqlValue.FromNVarchar(client.Address.ToString()), SqlValue.FromInt32(client.Port),
                 transport.Local is { } local ? SqlValue.FromNVarchar(local.Address.ToString()) : SqlValue.Null(SqlType.NVarchar),
                 transport.Local is { } localPort ? SqlValue.FromInt32(localPort.Port) : nullInt,
-                SqlValue.FromGuid(transport.ConnectionId), SqlValue.Null(SqlType.UniqueIdentifier), SqlValue.Null(SqlType.Varbinary),
+                SqlValue.FromGuid(transport.ConnectionId), SqlValue.Null(SqlType.UniqueIdentifier), SqlHandleValue(connection.Session.BatchText),
             ];
         }
     }
+
+    /// <summary>
+    /// The SQL handle of a command's text, in real's 44-byte shape: the
+    /// ad hoc type byte 2, three zero bytes, 20 bytes of a hash of the text
+    /// and 20 zero bytes. Real hashes the batch too, so equal texts share a
+    /// handle, but its hash input isn't documented and the bytes won't match.
+    /// </summary>
+    internal static byte[] SqlHandleOf(string text)
+    {
+        var handle = new byte[SqlHandleLength];
+        handle[0] = 2;
+        Span<byte> hash = stackalloc byte[32];
+        _ = System.Security.Cryptography.SHA256.HashData(MemoryMarshal.AsBytes(text.AsSpan()), hash);
+        hash[..20].CopyTo(handle.AsSpan(4));
+        return handle;
+    }
+
+    /// <summary>The length of a SQL handle, below which <c>sys.dm_exec_sql_text</c> refuses one as invalid.</summary>
+    internal const int SqlHandleLength = 44;
+
+    private static SqlValue SqlHandleValue(string? text) =>
+        text is null ? SqlValue.Null(SqlType.Varbinary) : SqlValue.FromVarbinary(SqlHandleOf(text));
 
     /// <summary>
     /// Rows for <c>sys.dm_exec_requests</c> — the querying session's, then each
@@ -1426,7 +1448,10 @@ internal static partial class BuiltInResources
                 SqlValue.FromDateTime(start),
                 SqlValue.FromNVarchar(isSelf ? "running" : waitType is not null ? "suspended" : "runnable"),
                 SqlValue.FromNVarchar(session.CurrentCommand),
-                nullBinary, nullInt, nullInt, nullBinary,
+                SqlHandleValue(session.BatchText),
+                session.BatchText is null ? nullInt : SqlValue.FromInt32(session.StatementStartIndex * 2),
+                session.BatchText is null ? nullInt : SqlValue.FromInt32(-1),
+                nullBinary,
                 SqlValue.FromInt16(SessionDatabaseId(simulation, connection)),
                 SqlValue.FromInt32(connection.Security.Effective.DatabasePrincipalId),
                 SqlValue.FromGuid(connection.Transport.ConnectionId),

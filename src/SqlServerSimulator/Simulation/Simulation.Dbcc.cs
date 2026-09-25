@@ -411,6 +411,94 @@ partial class Simulation
         return 1;
     }
 
+    private static readonly string[] InputBufferColumnNames = ["EventType", "Parameters", "EventInfo"];
+
+    private static readonly SqlType[] InputBufferSchema =
+    [
+        NVarcharSqlType.Get(30, Collation.Baseline, Coercibility.Implicit), SqlType.SmallInt, NVarcharSqlType.Get(4000, Collation.Baseline, Coercibility.Implicit),
+    ];
+
+    /// <summary>
+    /// Parses and executes <c>DBCC INPUTBUFFER(spid [, request_id]) [WITH NO_INFOMSGS]</c>:
+    /// the row <c>sys.dm_exec_input_buffer</c> reports, under the legacy
+    /// column names, then Msg 2528. A session may read its own buffer; any
+    /// other takes <c>VIEW SERVER STATE</c> (Msg 2571). A session id no
+    /// session holds is Msg 7955, a request id other than 0 Msg 7960, and
+    /// a non-integer id Msg 2560 — each probed 2026-09-25 against SQL Server 2025.
+    /// </summary>
+    private static bool TryParseInputBuffer(ParserContext context, BatchContext batch, out SimulatedStatementOutcome? outcome, out SimulatedError? completion)
+    {
+        outcome = null;
+        completion = null;
+        var checkpoint = context.SaveCheckpoint();
+        if (context.GetNextRequired() is not UnquotedString subcommand || !BuiltInToken.Equals(subcommand.ToString(), "INPUTBUFFER"))
+        {
+            context.RestoreCheckpoint(checkpoint);
+            return false;
+        }
+
+        var arguments = new List<Expression>(2);
+        var afterName = context.SaveCheckpoint();
+        context.MoveNextOptional();
+        if (context.Token is Operator { Character: '(' })
+        {
+            do
+            {
+                context.MoveNextRequired();
+                arguments.Add(Expression.Parse(context));
+            }
+            while (context.Token is Operator { Character: ',' });
+            if (context.Token is not Operator { Character: ')' })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            afterName = context.SaveCheckpoint();
+            context.MoveNextOptional();
+        }
+
+        var informational = true;
+        if (context.Token is ReservedKeyword { Keyword: Keyword.With })
+        {
+            var option = context.GetNextRequired<Name>();
+            if (!BuiltInToken.Equals(option.ToString(), "NO_INFOMSGS"))
+                throw SimulatedSqlException.DbccWithOptionNotValid();
+            informational = false;
+        }
+        else
+        {
+            context.RestoreCheckpoint(afterName);
+        }
+
+        if (arguments.Count is 0 or > 2)
+            throw SimulatedSqlException.DbccWrongParameterCount();
+        if (batch.IsSkipping)
+            return true;
+
+        var runtime = new RuntimeContext(name => throw SimulatedSqlException.InvalidColumnName(name), batch);
+        var spid = DbccIntegerArgument(arguments[0].Run(runtime), 1);
+        var requestId = arguments.Count == 2 ? DbccIntegerArgument(arguments[1].Run(runtime), 2) : 0;
+
+        var connection = batch.Connection;
+        var security = connection.Security;
+        if (spid != connection.Spid && !security.EffectiveIsDbo
+            && !connection.Simulation.HoldsServerPermission(security.Effective.LoginName, Permission.ViewServerState))
+        {
+            throw SimulatedSqlException.DbccPermissionDenied(security.Effective.DatabasePrincipalName, "inputbuffer");
+        }
+        if (Selection.InputBufferOf(connection.Simulation, spid) is not { } row)
+            throw SimulatedSqlException.InvalidSpidSpecified(spid);
+        if (requestId != 0)
+            throw SimulatedSqlException.InvalidSpidOrBatchId(spid, requestId);
+
+        outcome = new SimulatedSqlResultSet(InputBufferSchema, InputBufferColumnNames, [RowEncoder.EncodeRow(InputBufferSchema, [
+            row[0], row[1], row[2].IsNull ? SqlValue.Null(InputBufferSchema[2]) : SqlValue.FromNVarchar(row[2].AsString.Length > 4000 ? row[2].AsString[..4000] : row[2].AsString),
+        ])]);
+        if (informational)
+            completion = batch.InfoMessage(@class: 0, state: 1, number: 2528, message: "DBCC execution completed. If DBCC printed error messages, contact your system administrator.");
+        return true;
+
+        static int DbccIntegerArgument(SqlValue value, int position) =>
+            !value.IsNull && SqlType.IsIntegerCategory(value.Type) ? value.CoerceTo(SqlType.Int32).AsInt32 : throw SimulatedSqlException.DbccParameterIsIncorrect(position);
+    }
+
     /// <summary>
     /// Parses <c>DBCC TRACEON(N)</c> / <c>DBCC TRACEOFF(N)</c>. The optional
     /// <c>, -1</c> suffix that promotes the flag to global scope isn't modeled

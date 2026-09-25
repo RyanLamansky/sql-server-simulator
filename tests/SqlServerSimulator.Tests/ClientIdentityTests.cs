@@ -136,4 +136,61 @@ public sealed class ClientIdentityTests
             new Simulation().ExecuteScalar(
                 "select concat(cpu_count, '|', scheduler_total_count, '|', max_workers_count, '|', iif(sqlserver_start_time <= getutcdate() and physical_memory_kb > 0, 'started', 'x'), '|', affinity_type_desc, '|', sql_memory_model_desc) from sys.dm_os_sys_info"));
     }
+
+    // A request's SQL handle resolves through sys.dm_exec_sql_text to the
+    // command's text — the monitoring join — and the input buffer reports the
+    // same text as a language event (probed 2026-09-25 against SQL Server 2025).
+    [TestMethod]
+    public void SqlHandle_ResolvesToTheCommandText()
+    {
+        const string Text = "select 1;\nselect concat(t.encrypted, '|', isnull(t.dbid, -1), '|', r.statement_start_offset, '|', r.statement_end_offset, '|', iif(t.text = b.event_info, b.event_type, 'differs'))"
+            + " from sys.dm_exec_requests r cross apply sys.dm_exec_sql_text(r.sql_handle) t cross apply sys.dm_exec_input_buffer(r.session_id, 0) b where r.session_id = @@spid";
+        using var connection = new Simulation().CreateOpenConnection();
+        using var reader = connection.CreateCommand(Text).ExecuteReader();
+        IsTrue(reader.NextResult());
+        IsTrue(reader.Read());
+        AreEqual("0|-1|20|-1|Language Event", reader.GetString(0));
+    }
+
+    [TestMethod]
+    public void SqlText_UnknownOrNullHandle_AnswersNothing()
+    {
+        var simulation = new Simulation();
+        AreEqual(0, simulation.ExecuteScalar("select count(*) from sys.dm_exec_sql_text(null)"));
+        AreEqual(0, simulation.ExecuteScalar("select count(*) from sys.dm_exec_sql_text(cast(0x02 as varbinary(64)) + cast(replicate(char(0), 43) as varbinary(64)))"));
+        AreEqual(1, simulation.ExecuteScalar("select count(*) from sys.dm_exec_sql_text((select most_recent_sql_handle from sys.dm_exec_connections where session_id = @@spid))"));
+        AreEqual(0, simulation.ExecuteScalar("select count(*) from sys.dm_exec_input_buffer(999, 0)"));
+    }
+
+    [TestMethod]
+    [DataRow("0x01", 569)]
+    [DataRow("cast(0x03 as varbinary(64)) + cast(replicate(char(0), 43) as varbinary(64))", 569)]
+    [DataRow("cast(0x09 as varbinary(64)) + cast(replicate(char(0), 43) as varbinary(64))", 12413)]
+    public void SqlText_MalformedHandle_Raises(string handle, int number)
+        => _ = new Simulation().AssertSqlError($"select count(*) from sys.dm_exec_sql_text({handle})", number);
+
+    [TestMethod]
+    public void DbccInputBuffer_ReportsTheCommandThenMsg2528()
+    {
+        using var connection = new Simulation().CreateOpenConnection();
+        var messages = new List<int>();
+        ((SimulatedDbConnection)connection).InfoMessage += (_, e) => messages.AddRange(e.Errors.Cast<SimulatedError>().Select(error => error.Number));
+        using var reader = connection.CreateCommand("dbcc inputbuffer(@@spid)").ExecuteReader();
+        AreEqual("EventType|Parameters|EventInfo", string.Join("|", Enumerable.Range(0, reader.FieldCount).Select(reader.GetName)));
+        IsTrue(reader.Read());
+        AreEqual("Language Event|0|dbcc inputbuffer(@@spid)", string.Join("|", Enumerable.Range(0, reader.FieldCount).Select(reader.GetValue)));
+        IsFalse(reader.Read());
+        IsFalse(reader.NextResult());
+        AreEqual("2528", string.Join(",", messages));
+    }
+
+    [TestMethod]
+    [DataRow("dbcc inputbuffer(999)", 7955, "Invalid SPID 999 specified.")]
+    [DataRow("dbcc inputbuffer(@@spid, 5)", 7960, "An invalid server process identifier (SPID) 51 or batch ID 5 was specified.")]
+    [DataRow("dbcc inputbuffer", 2583, "An incorrect number of parameters was given to the DBCC statement.")]
+    [DataRow("dbcc inputbuffer(@@spid, 0, 1)", 2583, "An incorrect number of parameters was given to the DBCC statement.")]
+    [DataRow("dbcc inputbuffer('x')", 2560, "Parameter 1 is incorrect for this DBCC statement.")]
+    [DataRow("dbcc inputbuffer(@@spid) with tableresults", 2532, "One or more WITH options specified are not valid for this command.")]
+    public void DbccInputBuffer_Refusals(string sql, int number, string message)
+        => new Simulation().AssertSqlError(sql, number, message);
 }

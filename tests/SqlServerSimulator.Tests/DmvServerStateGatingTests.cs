@@ -59,6 +59,23 @@ public sealed class DmvServerStateGatingTests
             "The user does not have the external policy action 'Microsoft.Sql/Sqlservers/SystemViewsAndFunctions/ServerPerformanceState/Rows/Select' or permission 'VIEW SERVER PERFORMANCE STATE' to perform this action.");
 
     [TestMethod]
+    public void SqlText_RestrictedWithoutPermission_Raises371()
+        => _ = Seeded().AssertSqlError("execute as user = 'u_none'; select count(*) from sys.dm_exec_sql_text(null)", 371);
+
+    [TestMethod]
+    public void InputBuffer_RestrictedWithoutPermission_Raises300EvenForItsOwnSession()
+        => _ = Seeded().AssertSqlError("execute as user = 'u_none'; select count(*) from sys.dm_exec_input_buffer(@@spid, 0)", 300);
+
+    [TestMethod]
+    public void DbccInputBuffer_RestrictedReadsItsOwnSessionOnly()
+    {
+        var sim = Seeded();
+        using var other = sim.CreateOpenConnection();
+        AreEqual("Language Event", sim.ExecuteScalar("execute as user = 'u_none'; dbcc inputbuffer(@@spid) with no_infomsgs"));
+        sim.AssertSqlError("execute as user = 'u_none'; dbcc inputbuffer(52)", 2571, "User 'u_none' does not have permission to run DBCC inputbuffer.");
+    }
+
+    [TestMethod]
     public void Connections_ServerStateGrant_Reads()
         => AreEqual(1, Seeded().ExecuteScalar("use master; execute as login = 'srvl'; select count(*) from sys.dm_exec_connections"));
 

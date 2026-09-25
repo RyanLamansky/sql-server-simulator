@@ -86,6 +86,22 @@ internal static partial class BuiltInResources
         }
     }
 
+    /// <summary>
+    /// The server-state gate for a system TVF, which has no catalog-view
+    /// descriptor to hang it on: a restricted session without
+    /// <c>VIEW SERVER PERFORMANCE STATE</c> raises Msg 371 when
+    /// <paramref name="policyWording"/> is set and Msg 300 otherwise.
+    /// </summary>
+    internal static void DemandServerPerformanceState(BatchContext batch, bool policyWording)
+    {
+        var security = batch.Connection.Security;
+        if (security.EffectiveIsDbo || batch.Connection.Simulation.HoldsServerPermission(security.Effective.LoginName, Permission.ViewServerPerformanceState))
+            return;
+        throw policyWording
+            ? SimulatedSqlException.ServerStatePolicyDenied()
+            : SimulatedSqlException.ServerStatePermissionDenied("VIEW SERVER PERFORMANCE STATE", batch.CurrentDatabase.Name);
+    }
+
     // A database VIEW DATABASE PERFORMANCE STATE requirement is met by that
     // permission (or VIEW DATABASE STATE, which covers it) at database scope, OR
     // by a covering server permission (VIEW SERVER PERFORMANCE STATE, itself
