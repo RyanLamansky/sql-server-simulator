@@ -81,7 +81,7 @@ internal abstract class Aggregator
     /// it.
     /// </para>
     /// </summary>
-    public static Aggregator Create(AggregateExpression aggregate, SqlType operandType, SqlType resultType, bool removable = false) => aggregate.Kind switch
+    public static Aggregator Create(AggregateExpression aggregate, SqlType operandType, SqlType resultType, bool removable = false, bool numericRoundabort = false) => aggregate.Kind switch
     {
         AggregateKind.Count => CountsUncountable(aggregate, operandType)
             ? throw SimulatedSqlException.OperandDataTypeInvalid(operandType, "count", CountState(aggregate))
@@ -97,7 +97,7 @@ internal abstract class Aggregator
             ? throw MinMaxRejection(operandType, "min")
             : new MinMaxAggregator(resultType, isMax: false, removable),
         AggregateKind.Sum => SumAggregator.Create(resultType, aggregate.Distinct),
-        AggregateKind.Avg => AverageAggregator.Create(resultType, aggregate.Distinct),
+        AggregateKind.Avg => AverageAggregator.Create(resultType, aggregate.Distinct, numericRoundabort),
         AggregateKind.Stdev or AggregateKind.StdevP or AggregateKind.Var or AggregateKind.VarP => new StatisticalAggregator(aggregate.Kind),
         AggregateKind.StringAgg => new StringAggAggregator(resultType, aggregate.OrderBy),
         AggregateKind.JsonArrayAgg => new JsonArrayAggAggregator(resultType, aggregate.JsonNulls, JsonValueRender.ProducesJson(aggregate.Operand!), aggregate.OrderBy),

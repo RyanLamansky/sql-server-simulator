@@ -784,7 +784,7 @@ internal sealed partial class Selection
                             // explicit frame → compute once + broadcast.
                             if (orderByList.Count == 0 && win.Frame is null)
                             {
-                                var aggregator = Aggregator.Create(aggregate, operandType, resultType);
+                                var aggregator = Aggregator.Create(aggregate, operandType, resultType, numericRoundabort: batch.Connection.NumericRoundabort);
                                 foreach (var i in indices)
                                 {
                                     var operandValue = aggregate.Operand is null
@@ -822,7 +822,7 @@ internal sealed partial class Selection
                             // UNBOUNDED PRECEDING TO CURRENT ROW — start pinned at
                             // row 0, so it's a pure forward accumulation.
                             var startAdvances = win.Frame is { } frame && frame.Start.Kind != FrameBoundKind.UnboundedPreceding;
-                            var slider = Aggregator.Create(aggregate, operandType, resultType, removable: startAdvances);
+                            var slider = Aggregator.Create(aggregate, operandType, resultType, removable: startAdvances, numericRoundabort: batch.Connection.NumericRoundabort);
 
                             // DISTINCT forms can't undo an Add (illegal with OVER
                             // anyway): re-aggregate each frame, but off the
@@ -832,7 +832,7 @@ internal sealed partial class Selection
                                 for (var i = 0; i < count; i++)
                                 {
                                     var (rebuildStart, rebuildEnd) = ComputeFrameExtent(win, indices, perWindowKeys, w, orderByList, i);
-                                    var aggregator = Aggregator.Create(aggregate, operandType, resultType);
+                                    var aggregator = Aggregator.Create(aggregate, operandType, resultType, numericRoundabort: batch.Connection.NumericRoundabort);
                                     for (var j = rebuildStart; j <= rebuildEnd; j++)
                                         aggregator.Add(operandByPos[j]);
                                     results[indices[i]] = aggregator.Result();

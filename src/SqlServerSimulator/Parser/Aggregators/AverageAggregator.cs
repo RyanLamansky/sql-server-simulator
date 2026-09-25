@@ -14,11 +14,11 @@ namespace SqlServerSimulator.Parser.Aggregators;
 /// </summary>
 internal static class AverageAggregator
 {
-    public static Aggregator Create(SqlType resultType, bool distinct) => resultType switch
+    public static Aggregator Create(SqlType resultType, bool distinct, bool numericRoundabort) => resultType switch
     {
         var t when t == SqlType.Int32 || t == SqlType.BigInt => new LongAvg(resultType, distinct),
         var t when t == SqlType.Float => new DoubleAvg(resultType, distinct),
-        var t when t == SqlType.Money || t is DecimalSqlType => new DecimalAvg(resultType, distinct),
+        var t when t == SqlType.Money || t is DecimalSqlType => new DecimalAvg(resultType, distinct, numericRoundabort),
         _ => throw new NotSupportedException($"AVG not supported for {resultType}."),
     };
 
@@ -33,15 +33,22 @@ internal static class AverageAggregator
             type == SqlType.Int32 ? SqlValue.FromInt32((int)value) : SqlValue.FromInt64(value);
     }
 
-    private sealed class DecimalAvg(SqlType resultType, bool distinct) : Decimal38Aggregator(resultType, distinct)
+    private sealed class DecimalAvg(SqlType resultType, bool distinct, bool numericRoundabort) : Decimal38Aggregator(resultType, distinct)
     {
         // Real computes AVG as SUM / COUNT and so inherits division's own
         // digit rule: the quotient truncates toward zero at the result scale
         // rather than rounding (probe-confirmed — seven values summing to
         // 4.00 average to 0.571428, and AVG(money) of $1.00 over seven rows
         // is 0.1428).
+        //
+        // That division always has the 38-digit cap cut its scale, since the
+        // total is carried at precision 38, so under NUMERIC_ROUNDABORT a
+        // decimal AVG over any row is Msg 8115 state 1 (probed 2026-09-25
+        // against SQL Server 2025).
         protected override Decimal38 Finalize(in Decimal38 total, long count)
         {
+            if (numericRoundabort && this.ResultType is DecimalSqlType)
+                throw SimulatedSqlException.ArithmeticOverflowToTarget("numeric", 1);
             if (!Decimal38.TryDivide(total, Decimal38.FromInt64(count), Decimal38.MaxPrecision, this.Scale, out var mean))
                 throw this.AccumulatorOverflow();
             return mean;

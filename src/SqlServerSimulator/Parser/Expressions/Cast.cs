@@ -73,6 +73,7 @@ internal sealed class Cast : Expression
         SqlValue coerced;
         try
         {
+            RejectRoundingUnderRoundAbort(sourceValue, this.targetType, runtime.Batch);
             coerced = ApplyCoercion(sourceValue, this.targetType, this.targetMaxLength, ResultCollation(this.targetType, sourceValue.Type, dbCollation));
         }
         catch (SimulatedSqlException ex) when (this.tryMode && IsConversionFailure(ex.Number))
@@ -85,6 +86,55 @@ internal sealed class Cast : Expression
         }
 
         return RecollateStringResult(coerced, this.targetType, sourceValue.Type, dbCollation);
+    }
+
+    /// <summary>
+    /// Under <c>SET NUMERIC_ROUNDABORT ON</c>, a conversion into <c>decimal</c>
+    /// that would drop fractional digits is Msg 8115 state 7 rather than a
+    /// rounding.
+    /// The test is the source's scale against the target's, not the value, so
+    /// <c>CAST(1.20 AS decimal(2, 1))</c> and a zero raise alike; a <c>money</c>
+    /// source carries scale 4, a string the digits it writes after its point,
+    /// and a NULL passes (probed 2026-09-25 against SQL Server 2025).
+    /// An approximate or integer source never raises.
+    /// </summary>
+    internal static void RejectRoundingUnderRoundAbort(SqlValue source, SqlType target, BatchContext batch)
+    {
+        if (!batch.Connection.NumericRoundabort || source.IsNull || target is not DecimalSqlType { scale: var targetScale })
+            return;
+        var sourceScale = source.Type switch
+        {
+            DecimalSqlType { scale: var scale } => scale,
+            MoneySqlType or SmallMoneySqlType => 4,
+            _ when SqlType.IsStringCategory(source.Type) => FractionalDigitsWritten(source.AsString),
+            _ => 0,
+        };
+        if (sourceScale > targetScale)
+            throw SimulatedSqlException.ArithmeticOverflowToTarget("numeric", 7);
+    }
+
+    /// <summary>
+    /// Converts a CASE-family arm's value to the type the arms unify to, which
+    /// <c>NUMERIC_ROUNDABORT</c> refuses as it does a CAST when the unified
+    /// <c>decimal</c> kept less scale than the arm carries
+    /// (<c>COALESCE(decimal(38, 2), decimal(38, 0))</c>, probed 2026-09-25).
+    /// </summary>
+    internal static SqlValue CoerceArm(SqlValue value, SqlType target, BatchContext batch)
+    {
+        RejectRoundingUnderRoundAbort(value, target, batch);
+        return value.CoerceTo(target);
+    }
+
+    /// <summary>The digits a numeric string writes after its decimal point.</summary>
+    private static int FractionalDigitsWritten(string text)
+    {
+        var point = text.IndexOf('.', StringComparison.Ordinal);
+        if (point < 0)
+            return 0;
+        var end = point + 1;
+        while (end < text.Length && char.IsAsciiDigit(text[end]))
+            end++;
+        return end - point - 1;
     }
 
     /// <summary>

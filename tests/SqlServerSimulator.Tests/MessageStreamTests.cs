@@ -280,6 +280,7 @@ public sealed class MessageStreamTests
     [DataRow("select isnull(1/0, 5)", "5", 3607)]
     [DataRow("select 2147483647 + 1", "NULL", 3606)]
     [DataRow("select cast(300 as tinyint)", "NULL", 3606)]
+    [DataRow("set numeric_roundabort on; select cast(1.25 as decimal(2,1))", "NULL", 3606)]
     [DataRow("select convert(smallint, 70000)", "NULL", 3606)]
     [DataRow("select cast(1e300 as real)", "0", 3606)]
     public void ArithmeticFault_UnderAnsiWarningsOff_AnswersNull(string sql, string expected, int notice)

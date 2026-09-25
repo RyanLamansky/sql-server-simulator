@@ -254,6 +254,16 @@ The TDS encoder writes the magnitude straight from the column metadata's scale, 
 Probed against SQL Server 2025 through `JSON_ARRAY`, which writes the raw value: `+ - %` carry `max(s1, s2)`, `*` carries `s1 + s2`, `/` carries `max(6, s1 + p2 + 1)`, `SUM` keeps the column's scale, `AVG` promotes to `numeric(38, max(s, 6))`, `ROUND` / `ABS` / `SIGN` / `POWER` keep the operand's, and `CEILING` / `FLOOR` drop to `numeric(p, 0)`.
 Oracle: `DecimalTests`, `WideDecimalTests`, `MoneyTests`, `JsonBuilderTests`, and `TypeRoundTripTests` for the wire reader.
 
+### `NUMERIC_ROUNDABORT` refuses by type, not by value
+
+Under `SET NUMERIC_ROUNDABORT ON` real raises Msg 8115 wherever a fractional digit *could* be lost, judged from the types involved (probed 2026-09-25 against SQL Server 2025).
+A conversion into a `decimal` of smaller scale is state 7 for any non-NULL value, so `CAST(1.20 AS decimal(2, 1))` and a zero raise alike; that covers CAST / CONVERT, every write and variable assignment, and the arm conversion CASE, `COALESCE`, `IIF` and `CHOOSE` make to their unified type.
+A `*` or `/` whose result scale the 38-digit cap cut is state 1 even when the product is exact, while an uncapped `1.0/3` rounds silently; `AVG` over a `decimal` divides a precision-38 total, so it always raises.
+The errors take the same `ANSI_WARNINGS OFF` absorption to NULL and Msg 3606 as any overflow.
+
+**Divergence:** real's optimizer folds `AVG(x) … GROUP BY x` to `x` when it can prove each group is one row — a primary-key column, or distinct constants in a `VALUES` list — and then never divides, so those shapes answer on real and raise here.
+Over a heap real raises as the simulator does.
+
 ### The backing type
 
 `Storage/Decimal38` is the exact-numeric value: a `UInt128` magnitude, a sign flag and a scale byte, normalized at construction so zero is never negative.

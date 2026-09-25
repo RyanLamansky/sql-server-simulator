@@ -98,6 +98,13 @@ internal abstract class TwoSidedExpression : Expression
     {
         try
         {
+            if (batch.Connection.NumericRoundabort
+                && !left.IsNull
+                && !right.IsNull
+                && SqlType.DecimalScaleIsCapped(left.Type, right.Type, this.Operator))
+            {
+                throw SimulatedSqlException.ArithmeticOverflowToTarget("numeric", 1);
+            }
             return Run(left, right);
         }
         catch (SimulatedSqlException error) when (batch.AbsorbsArithmeticFault(error))

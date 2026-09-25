@@ -96,7 +96,7 @@ internal sealed partial class Selection
         {
             var freshAggregators = new Aggregator[aggregates.Count];
             for (var i = 0; i < aggregates.Count; i++)
-                freshAggregators[i] = Aggregator.Create(aggregates[i], aggregateOperandTypes[i], aggregateResultTypes[i]);
+                freshAggregators[i] = Aggregator.Create(aggregates[i], aggregateOperandTypes[i], aggregateResultTypes[i], numericRoundabort: batch.Connection.NumericRoundabort);
             return new(keyValues, freshAggregators);
         }
 

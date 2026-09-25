@@ -685,6 +685,7 @@ partial class Simulation
         UnresolvedCollation.RequireAssignable(assignedType);
         AssignmentRules.RequireAssignable(assignedExpr, assignedType, slot.DeclaredType);
         var rhsValue = assignedExpr.Run(new RuntimeContext(NoColumnResolver, context.Batch));
+        Cast.RejectRoundingUnderRoundAbort(rhsValue, slot.DeclaredType, context.Batch);
         slot.Assign(Cast.ApplyCoercion(rhsValue, slot.DeclaredType, slot.DeclaredMaxLength));
         return true;
     }

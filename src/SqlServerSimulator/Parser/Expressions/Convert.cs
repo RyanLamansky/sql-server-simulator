@@ -99,6 +99,7 @@ internal sealed class ConvertExpression : Expression
         SqlValue coerced;
         try
         {
+            Cast.RejectRoundingUnderRoundAbort(sourceValue, this.targetType, runtime.Batch);
             // Style is meaningful only for the six (source-family, target-
             // family) pairs listed below; the default arm and the no-style
             // branch both fall through to the styleless coercion, matching

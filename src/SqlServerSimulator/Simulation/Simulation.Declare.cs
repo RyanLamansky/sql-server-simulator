@@ -146,7 +146,24 @@ partial class Simulation
                     var initType = initExpression.GetSqlType(context.Batch, NoColumnTypeResolver);
                     UnresolvedCollation.RequireAssignable(initType);
                     AssignmentRules.RequireAssignable(initExpression, initType, declaredType);
-                    initialValue = Parser.Expressions.Cast.ApplyCoercion(initExpression.Run(new RuntimeContext(NoColumnResolver, context.Batch)), declaredType, declaredMaxLength);
+                    try
+                    {
+                        var initSource = initExpression.Run(new RuntimeContext(NoColumnResolver, context.Batch));
+                        Parser.Expressions.Cast.RejectRoundingUnderRoundAbort(initSource, declaredType, context.Batch);
+                        initialValue = Parser.Expressions.Cast.ApplyCoercion(initSource, declaredType, declaredMaxLength);
+                    }
+                    catch (SimulatedSqlException) when (!reExecution)
+                    {
+                        // An initializer that fails still declares the variable,
+                        // NULL, for whatever runs after the error (probed
+                        // 2026-09-25 against SQL Server 2025).
+                        context.Batch.Variables[variableName] = new VariableSlot(declaredType, declaredMaxLength, SqlValue.Null(declaredType), parameter: null)
+                        {
+                            XmlSchemaCollection = xmlSchemaCollection,
+                            SpelledNumeric = spelledNumeric,
+                        };
+                        throw;
+                    }
                     rowsAffected = 1; // initializer counts as one row for @@ROWCOUNT (probe-confirmed)
                 }
             }

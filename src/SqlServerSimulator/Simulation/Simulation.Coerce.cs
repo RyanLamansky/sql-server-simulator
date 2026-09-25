@@ -157,6 +157,7 @@ partial class Simulation
     {
         try
         {
+            Parser.Expressions.Cast.RejectRoundingUnderRoundAbort(source, column.Type, batch);
             return CoerceForInsert(source, column);
         }
         catch (SimulatedSqlException error) when (batch.AbsorbsArithmeticFault(error))

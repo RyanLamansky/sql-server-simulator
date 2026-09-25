@@ -238,7 +238,6 @@ Already listed elsewhere here and not repeated: parenthesized set-op branches.
 **Session options with no effect**:
 
 - `SET ANSI_WARNINGS OFF` (with `ARITHABORT OFF`, a fresh session's default) answers a divide by zero or an overflow with NULL and Msg 3607 / 3606 ([`errors.md`](errors.md)), but an overflowing `SUM` / `AVG` still raises here where real answers NULL, and a multi-row `VALUES` sends the two notices in evaluation order rather than row order (probed 2026-09-25).
-- `SET NUMERIC_ROUNDABORT ON` — `CAST(1.25 AS decimal(2,1))` should raise Msg 8115 state 7 ("converting numeric to data type numeric") rather than round.
 
 **Wrong results**:
 

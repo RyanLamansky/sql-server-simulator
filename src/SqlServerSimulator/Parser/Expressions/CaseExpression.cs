@@ -106,7 +106,7 @@ internal sealed class CaseExpression : Expression
     public override SqlValue Run(RuntimeContext runtime)
     {
         var raw = this.input is null ? FindSearchedMatch(runtime) : FindSimpleMatch(runtime);
-        return this.cachedResultType is { } target && !raw.IsNull ? raw.CoerceTo(target) : raw;
+        return this.cachedResultType is { } target && !raw.IsNull ? Cast.CoerceArm(raw, target, runtime.Batch) : raw;
     }
 
     private SqlValue FindSearchedMatch(RuntimeContext runtime)

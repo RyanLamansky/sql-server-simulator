@@ -231,7 +231,8 @@ public sealed class SimulatedDbConnection : DbConnection
     /// <summary>
     /// Session-scoped <c>NUMERIC_ROUNDABORT</c> setting (default
     /// <see langword="false"/>), surfaced by
-    /// <c>SESSIONPROPERTY('NUMERIC_ROUNDABORT')</c>. Recorded only.
+    /// <c>SESSIONPROPERTY('NUMERIC_ROUNDABORT')</c>; when set, a lost
+    /// fractional digit is Msg 8115 (<c>Cast.RejectRoundingUnderRoundAbort</c>).
     /// Scoping mirrors <see cref="AnsiNulls"/>.
     /// </summary>
     internal bool NumericRoundabort;

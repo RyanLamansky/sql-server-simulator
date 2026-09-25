@@ -64,7 +64,7 @@ internal sealed class Iif : Expression
         var picked = this.condition.Run(runtime) == true
             ? this.trueValue.Run(runtime)
             : this.falseValue.Run(runtime);
-        return this.cachedResultType is { } target && !picked.IsNull && picked.Type != target ? picked.CoerceTo(target) : picked;
+        return this.cachedResultType is { } target && !picked.IsNull && picked.Type != target ? Cast.CoerceArm(picked, target, runtime.Batch) : picked;
     }
 
     // Shares CASE's branch-type unification: an untyped-NULL arm yields to the

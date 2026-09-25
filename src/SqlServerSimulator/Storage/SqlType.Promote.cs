@@ -555,6 +555,31 @@ internal abstract partial class SqlType
     }
 
     /// <summary>
+    /// Whether a <c>*</c> or <c>/</c> over these operand types lands on a
+    /// <c>decimal</c> whose scale the 38-digit cap cut below what the operator
+    /// would otherwise give, which <c>SET NUMERIC_ROUNDABORT ON</c> refuses
+    /// (Msg 8115 state 1) whatever the operands' values; an uncapped quotient
+    /// rounds silently even when it can't be exact, and addition, subtraction
+    /// and modulo never refuse (probed 2026-09-25 against SQL Server 2025).
+    /// </summary>
+    internal static bool DecimalScaleIsCapped(SqlType a, SqlType b, char op)
+    {
+        if (op is not ('*' or '/')
+            || !IsDecimalArithmeticOperand(a)
+            || !IsDecimalArithmeticOperand(b)
+            || PromoteForArithmetic(a, b, op) is not DecimalSqlType result)
+        {
+            return false;
+        }
+        var (_, s1) = AsDecimalPrecisionScale(a);
+        var (p2, s2) = AsDecimalPrecisionScale(b);
+        return result.scale < (op == '*' ? s1 + s2 : Math.Max(6, s1 + p2 + 1));
+    }
+
+    private static bool IsDecimalArithmeticOperand(SqlType type) =>
+        type is DecimalSqlType || IsMoneyCategory(type) || IsIntegerCategory(type);
+
+    /// <summary>
     /// Canonicalizes any decimal-arithmetic-eligible operand type to its
     /// (precision, scale) pair. Decimals return their declared p/s; money
     /// and integers map to documented equivalents.

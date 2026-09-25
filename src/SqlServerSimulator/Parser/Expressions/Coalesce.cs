@@ -78,7 +78,7 @@ internal sealed class Coalesce : Expression
         {
             value = this.arguments[i].Run(runtime);
             if (!value.IsNull)
-                return this.cachedResultType is { } target && value.Type != target ? value.CoerceTo(target) : value;
+                return this.cachedResultType is { } target && value.Type != target ? Cast.CoerceArm(value, target, runtime.Batch) : value;
         }
         return value; // all NULL — return the last (typed-NULL) result
     }

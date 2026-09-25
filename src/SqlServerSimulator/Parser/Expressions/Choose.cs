@@ -42,7 +42,7 @@ internal sealed class Choose : Expression
         var picked = this.values[idx - 1].Run(runtime);
         return picked.IsNull
             ? SqlValue.Null(resultType)
-            : picked.Type != resultType ? picked.CoerceTo(resultType) : picked;
+            : picked.Type != resultType ? Cast.CoerceArm(picked, resultType, runtime.Batch) : picked;
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
