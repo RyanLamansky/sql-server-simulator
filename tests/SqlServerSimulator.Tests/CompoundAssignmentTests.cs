@@ -227,4 +227,15 @@ public sealed class CompoundAssignmentTests
         simulation.ValidateSyntaxError("declare @x int; update t set @x += v = 1", "+=");
         AreEqual(3, simulation.ExecuteScalar("declare @x int = 0; insert t values (3); update t set @x += v; select @x"));
     }
+
+    // A SELECT list assigns with the compound operators too, reading the
+    // variable as each row assigns it (probed 2026-09-25 against SQL Server
+    // 2025) — the dynamic-SQL-building idiom `SELECT @sql += … FROM sys.…`.
+    [TestMethod]
+    [DataRow("declare @s varchar(100) = ''; select @s += name from (values ('a'), ('b'), ('c')) v(name); select @s", "abc")]
+    [DataRow("declare @n int = 1; select @n *= x from (values (2), (3)) v(x); select @n", 6)]
+    [DataRow("declare @n int = 1; select @n += 1, @n *= 10; select @n", 20)]
+    [DataRow("declare @n int = 5; select @n - 1 as r", 4)]
+    public void SelectList_CompoundAssignment(string sql, object expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar(sql));
 }

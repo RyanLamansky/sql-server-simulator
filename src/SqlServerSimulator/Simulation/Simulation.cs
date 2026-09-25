@@ -2025,8 +2025,15 @@ public sealed partial class Simulation
                     if (ex.Number == 529)
                         batch.BatchAborted = true;
                 }
-                else if (batch.TryFrameDepth > 0 && !ex.AbortsTransaction)
+                else if (batch.TryFrameDepth > 0 && !ex.AbortsTransaction && !batch.CreateTimeBinding)
                 {
+                    // Only a batch that runs raises into a TRY frame: an error
+                    // met while the batch compiles — a syntax error in the TRY
+                    // body — refuses the whole batch on real rather than
+                    // reaching the CATCH (probed 2026-09-25 against SQL Server
+                    // 2025). At run time this arm also absorbs the tail of a
+                    // statement that failed mid-parse, which the rest of the
+                    // TRY body skips.
                     caught = ex;
                 }
                 else if (batch.ContinueOnError && batch.ProcFrame is null && batch.TriggerFrame is null && EndsBatch(ex))
@@ -2892,6 +2899,12 @@ public sealed partial class Simulation
                             foreach (var o in ParseTryCatch(batch))
                                 yield return o;
                             break;
+                        case UnquotedString { ContextualKeyword: ContextualKeyword.Catch }:
+                            // A CATCH block opening where a statement belongs —
+                            // at batch start, or inside a TRY body that never
+                            // reached END TRY — is Msg 102 naming its BEGIN
+                            // (probed 2026-09-25 against SQL Server 2025).
+                            throw SimulatedSqlException.SyntaxErrorNear(context.Token);
                         case UnquotedString { ContextualKeyword: ContextualKeyword.Atomic }:
                             foreach (var o in ParseBeginAtomicBlock(batch))
                                 yield return o;

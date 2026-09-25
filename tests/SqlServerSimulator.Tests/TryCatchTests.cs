@@ -465,4 +465,21 @@ public sealed class TryCatchTests
             while (reader.Read() || reader.NextResult()) { }
         });
     }
+
+    // A syntax error in a TRY body is a compile error of the whole batch, not
+    // an error the CATCH handles; and a CATCH block opening where a statement
+    // belongs is Msg 102 naming its BEGIN (probed 2026-09-25 against SQL
+    // Server 2025).
+    [TestMethod]
+    [DataRow("select 0; begin try select from end try begin catch select 1 end catch", 156, "Incorrect syntax near the keyword 'from'.")]
+    [DataRow("select 0; begin try selec 1 end try begin catch select 1 end catch", 102, "Incorrect syntax near 'selec'.")]
+    [DataRow("begin catch", 102, "Incorrect syntax near 'begin'.")]
+    [DataRow("begin try begin catch", 102, "Incorrect syntax near 'begin'.")]
+    [DataRow("begin try select 1 begin catch end catch", 102, "Incorrect syntax near 'begin'.")]
+    public void SyntaxErrorInATryBody_RefusesTheBatch(string sql, int number, string message)
+        => new Simulation().AssertSqlError(sql, number, message);
+
+    [TestMethod]
+    public void SyntaxErrorInDynamicSql_IsCaughtByTheCallersTry()
+        => AreEqual(102, new Simulation().ExecuteScalar("begin try exec('selec 1') end try begin catch select error_number() end catch"));
 }

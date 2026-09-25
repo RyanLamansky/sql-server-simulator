@@ -1484,6 +1484,19 @@ internal sealed partial class Selection
                             var rhs = Expression.Parse(context);
                             expressions.Add(new AssignmentExpression(slot, rhs));
                         }
+                        // The compound forms, `@v += expr` and its siblings, read
+                        // the variable as each row assigns it, so a SELECT over a
+                        // table accumulates: `SELECT @s += name FROM t`.
+                        else if (context.Token is Operator { Character: '+' or '-' or '*' or '/' or '%' or '&' or '|' or '^' } compound
+                            && context.GetNextOptional() is Operator { Character: '=' } equals
+                            && equals.StartIndex == compound.EndIndex)
+                        {
+                            var slot = context.Batch.GetVariableSlot(atPrefixed.Value);
+                            context.MoveNextRequired();
+                            var rhs = Expression.Parse(context);
+                            expressions.Add(new AssignmentExpression(slot,
+                                TwoSidedExpression.FromCompoundOp(compound.Character, new VariableReference(atPrefixed, context), rhs, context)));
+                        }
                         else
                         {
                             context.RestoreCheckpoint(checkpoint);
