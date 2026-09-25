@@ -59,7 +59,7 @@ internal sealed class Substring : Expression
         if (s.IsNull || startValue.IsNull || lengthValue.IsNull)
             return SqlValue.Null(resultType);
         var isBinarySource = IsBinarySource(s.Type);
-        if (!isBinarySource && !SqlType.IsStringCategory(s.Type))
+        if (!isBinarySource && (!SqlType.IsStringCategory(s.Type) || s.Type is XmlSqlType))
             throw SimulatedSqlException.InvalidArgumentDataType(s.Type.SqlServerName, argumentIndex: 1, "substring");
 
         var startIndex = StringScalars.CoerceLengthArgument(startValue);
@@ -106,7 +106,7 @@ internal sealed class Substring : Expression
     private static bool IsBinarySource(SqlType type) => type is VarbinarySqlType or BinarySqlType or ImageSqlType;
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
-        ResolveResultType(source.GetSqlType(batch, resolveColumnType), batch);
+        ResolveResultType(StringScalars.RequireStringArgument(source, source.GetSqlType(batch, resolveColumnType), "substring", 1, acceptsBinary: true), batch);
 
     /// <summary>
     /// SUBSTRING preserves the input's string family; a constant length

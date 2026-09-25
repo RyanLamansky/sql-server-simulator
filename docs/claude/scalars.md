@@ -388,12 +388,17 @@ The gate is a **compile-time** one, as it is on real: each member's `GetSqlType`
 Probe-confirmed on SQL Server 2025: `SELECT LEN(nt) FROM t` fails on an empty table, `WHERE 1 = 0` doesn't rescue it, `WHERE LEN(nt) > 1` fails with the function nowhere in the projection, and `CREATE PROCEDURE` / `CREATE VIEW` / `CREATE FUNCTION` over such a body is refused.
 Binding the argument is also what carries an unknown column's Msg 207 out of a predicate — see [`collations.md`](collations.md#compile-time-binding) for the drive sites.
 
+`xml` and `sql_variant` are refused the same way by every string scalar, through the same two gates, save that an argument taking a legacy LOB converts them to `varchar` and so raises that conversion's Msg 257 (probed 2026-09-25 against SQL Server 2025).
+The members that read text without converting anything to reach it — SUBSTRING's source, PATINDEX's subject, TRIM, CHARINDEX's needle, STRING_ESCAPE, ISJSON, JSON_VALUE and COMPRESS — go further through `StringScalars.RequireStringArgument`: a number, a date or a `uniqueidentifier` is Msg 8116 too, naming a literal decimal `numeric` as real does.
+
 The types are column-only besides: a local variable declared `text` / `ntext` / `image` raises **Msg 2739** (`The text, ntext, and image data types are invalid for local variables.`), so a string function only ever sees one through a column or a CAST.
 
 This is the *argument* rule; the slots these types can't reach at all — sorting, grouping, DISTINCT, the deduping set operators, the aggregates and comparison — are tabulated in [`legacy-lob.md`](legacy-lob.md#where-the-types-cant-go).
 
 ### Divergences
 
+- **`TRIM` of a binary** answers its `varchar` rendering on real (`TRIM(0x41)` is `A`) and raises Msg 8116 here.
+- **`QUOTENAME` / `CONCAT` / `CONCAT_WS` over `xml` or `sql_variant`** answer where real raises Msg 257 converting to `nvarchar` / `varchar`.
 - **`CHARINDEX(<needle>, <image>)`** reports Msg 8116 for argument 2 where real reports Msg 206 (`image is incompatible with varchar`); real accepts the pair when the needle is binary too, which needs the unbuilt binary CHARINDEX.
 
 ## EF.Functions-driven type-check / random scalars: `ISNUMERIC` / `ISDATE` / `RAND`
@@ -401,7 +406,8 @@ This is the *argument* rule; the slots these types can't reach at all — sortin
   Famously lossy on real SQL Server: a bare sign / decimal point / comma / currency symbol returns 1, hex prefixes return 0, internal whitespace breaks the match.
   The simulator's hand-rolled scanner consumes (in order: optional sign and currency in either order; digit / decimal / comma run; optional `e`/`E`/`d`/`D` exponent requiring a leading digit AND a trailing digit after optional sign).
   At least one of {digit, decimal/comma, sign, currency} must have been consumed for the result to be true.
-  Bit-typed input returns 0 even though bit lives in the Integer category (probe-confirmed).
+  Every number returns 1, a `bit` included (probed 2026-09-25 against SQL Server 2025).
+  `ISNUMERIC` and `ISDATE` refuse the legacy LOBs, `xml`, `sql_variant` and the post-2008 date and time types with Msg 8116 while compiling, and answer 0 for the other types they can't read.
   Anything that doesn't fully consume after trimming whitespace returns 0.
 - **`ISDATE(expression)`** returns `int` (1 / 0) and validates against the legacy `datetime` range (1753-9999).
   Empty string short-circuits to 0 (the shared `TryParseLegacyDateTime` treats `""` as datetime base-date for CAST support, but ISDATE specifically rejects).
@@ -525,13 +531,17 @@ Probe-confirmed against SQL Server 2025:
 
 `COMPRESS(expr)` (`Parser/Expressions/Compress.cs`) gzip-deflates its argument and returns `varbinary(max)`; `DECOMPRESS(varbinary)` (`Decompress.cs`) inflates it back to `varbinary(max)`.
 NULL in → NULL out on both.
-Backed by `GZipStream` at the default compression level — real SQL Server doesn't expose the level either, so there's nothing to match.
+Backed by `GZipStream` at the default compression level, with the header's XFL and OS bytes rewritten to real's `04 00`; empty input compresses to no bytes at all.
+The argument is settled while compiling (probed 2026-09-25 against SQL Server 2025): `COMPRESS` takes a string or a binary but no `text` / `ntext` / `image` / `xml`, and `DECOMPRESS` only a `binary` / `varbinary`; anything else is Msg 8116, spelling the functions `Compress` / `Decompress`.
 
 **Input encoding** is the load-bearing detail: `COMPRESS` encodes `nchar`/`nvarchar`/`ntext` as UTF-16 LE and `char`/`varchar`/`text` through the collation's ANSI code page before compressing, matching the bytes real SQL Server compresses for those column types; binary types pass through, and anything else falls through to the value's UTF-16 string form.
 `DECOMPRESS` returns raw inflated bytes, so callers cast to get text back — WWI's `Website.VehicleTemperatures` does `CAST(DECOMPRESS(…) AS nvarchar(1000))`, which is the shape DacFx-emitted views rely on.
 
-**Divergence**: an invalid gzip stream raises **Msg 9803** in real SQL Server; the simulator catches the `InvalidDataException` and returns NULL instead.
-DacFx-emitted views only call `DECOMPRESS` on known-compressed columns, so the bacpac path doesn't reach it.
+`DECOMPRESS` of bytes that don't open with gzip's magic, or whose trailer disagrees with what inflates, is **Msg 9826**; a stream shorter than its own header and trailer is NULL; no bytes decompress to none.
+
+**Divergences**:
+- Real's deflate encoder isn't zlib's, so past a handful of input bytes `COMPRESS`'s payload differs byte-for-byte, though each side inflates the other's.
+- A gzip stream long enough to carry a trailer but cut short inside the deflate data inflates to what `GZipStream` recovers, where real answers NULL.
 
 ## `FORMATMESSAGE`
 

@@ -183,7 +183,7 @@ internal sealed class Format : Expression
 
     /// <summary>
     /// Eagerly raises Msg 8116 for value types SQL Server's FORMAT rejects.
-    /// Strings and binaries reject; bit also rejects (probe-confirmed).
+    /// Strings and binaries reject; bit and sql_variant also reject (probe-confirmed).
     /// Datetime, time, all numerics accept.
     /// </summary>
     private static void RejectUnsupportedValueType(SqlType type)
@@ -191,7 +191,8 @@ internal sealed class Format : Expression
         if (SqlType.IsStringCategory(type) || type == SqlType.Bit
             || type is BinarySqlType or VarbinarySqlType
             || type == SqlType.UniqueIdentifier
-            || type == SqlType.RowVersion)
+            || type == SqlType.RowVersion
+            || type is SqlVariantSqlType)
         {
             throw SimulatedSqlException.InvalidArgumentDataType(type.SqlServerName, argumentIndex: 1, "format");
         }

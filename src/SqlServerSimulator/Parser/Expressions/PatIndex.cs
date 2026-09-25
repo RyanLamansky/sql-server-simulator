@@ -40,7 +40,7 @@ internal sealed class PatIndex : Expression
     {
         var s = this.subject.Run(runtime);
         RejectUntypedNullSubject(this.subject);
-        if (!SqlType.IsStringCategory(s.Type))
+        if (!SqlType.IsStringCategory(s.Type) || s.Type is XmlSqlType)
             throw SimulatedSqlException.InvalidArgumentDataType(s.Type.SqlServerName, argumentIndex: 2, "patindex");
 
         var isBig = IsBigResult(s.Type);
@@ -85,7 +85,7 @@ internal sealed class PatIndex : Expression
     {
         _ = StringScalars.BindArgument(this.pattern, batch, resolveColumnType, "patindex");
         RejectUntypedNullSubject(this.subject);
-        var subjectType = this.subject.GetSqlType(batch, resolveColumnType);
+        var subjectType = StringScalars.RequireStringArgument(this.subject, this.subject.GetSqlType(batch, resolveColumnType), "patindex", 2);
         // The subject is matched rather than transformed, so it takes no
         // legacy-LOB rejection — but the match still needs a definite
         // collation, so an unresolved one reports from either operand.

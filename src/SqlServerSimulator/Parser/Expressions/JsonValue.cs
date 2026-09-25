@@ -83,7 +83,11 @@ internal sealed class JsonValue : Expression
         return SqlValue.Null(SqlType.NVarchar);
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.NVarchar;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        _ = StringScalars.RequireStringArgument(this.jsonInput, this.jsonInput.GetSqlType(batch, resolveColumnType), "json_value", 1, acceptsLegacyLob: false);
+        return SqlType.NVarchar;
+    }
 
     internal override string DebugDisplay() => $"JSON_VALUE({this.jsonInput.DebugDisplay()}, {this.pathInput.DebugDisplay()})";
 

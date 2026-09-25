@@ -64,7 +64,7 @@ internal sealed class StringEscape : Expression
     {
         // STRING_ESCAPE rewrites characters without comparing any, so an
         // unresolved collation rides through to the result (probe-confirmed).
-        var textType = StringScalars.BindArgument(this.textArg, batch, resolveColumnType, "string_escape", propagatesUnresolvedCollation: true);
+        var textType = StringScalars.RequireStringArgument(this.textArg, StringScalars.BindArgument(this.textArg, batch, resolveColumnType, "string_escape", propagatesUnresolvedCollation: true), "string_escape", 1);
         return UnresolvedCollation.On(textType) is { } conflict ? conflict.Mark(SqlType.NVarcharMax) : SqlType.NVarcharMax;
     }
 

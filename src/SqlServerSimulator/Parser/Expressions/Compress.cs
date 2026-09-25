@@ -13,9 +13,10 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// String inputs are encoded as UTF-16 LE (nchar/nvarchar) or CP1252
 /// (char/varchar) before compression — matches real SQL Server's
 /// observed-on-wire bytes when the column is one of those types. Empty
-/// input still produces a valid (small) gzip stream so DECOMPRESS round-
-/// trips correctly. Default GZipStream level is sufficient — real SQL
-/// Server doesn't expose the compression level either.
+/// input compresses to no bytes at all, as real's does. Real's deflate
+/// encoder isn't zlib's, so past a few bytes the compressed payload differs
+/// though it inflates to the same input (probed 2026-09-25 against SQL
+/// Server 2025).
 /// </remarks>
 internal sealed class Compress(ParserContext context) : Expression
 {
@@ -28,12 +29,20 @@ internal sealed class Compress(ParserContext context) : Expression
             return SqlValue.Null(SqlType.VarbinaryMax);
 
         var inputBytes = ExtractBytes(value);
+        if (inputBytes.Length == 0)
+            return SqlValue.FromVarbinary(SqlType.VarbinaryMax, []);
         using var output = new MemoryStream();
         using (var gz = new GZipStream(output, CompressionMode.Compress, leaveOpen: true))
         {
             gz.Write(inputBytes, 0, inputBytes.Length);
         }
-        return SqlValue.FromVarbinary(SqlType.VarbinaryMax, output.ToArray());
+        // Real's header names the fastest compression (XFL 4) and a FAT
+        // file system (OS 0) where zlib's names neither and Unix (probed
+        // 2026-09-25 against SQL Server 2025).
+        var compressed = output.ToArray();
+        compressed[8] = 4;
+        compressed[9] = 0;
+        return SqlValue.FromVarbinary(SqlType.VarbinaryMax, compressed);
     }
 
     private static byte[] ExtractBytes(SqlValue value)
@@ -46,11 +55,15 @@ internal sealed class Compress(ParserContext context) : Expression
         // bytes SQL Server stores and therefore compresses.
         if (value.Type is VarcharSqlType or CharSqlType or TextSqlType)
             return (value.Type.Collation ?? Collation.Baseline).StorageEncoding.GetBytes(value.AsString);
-        // Fall-through: coerce via the value's string form (numeric / etc.).
+        // Every other type was refused while compiling.
         return System.Text.Encoding.Unicode.GetBytes(value.AsString);
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.VarbinaryMax;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        _ = StringScalars.RequireStringArgument(this.operand, this.operand.GetSqlType(batch, resolveColumnType), "Compress", 1, acceptsBinary: true, acceptsLegacyLob: false);
+        return SqlType.VarbinaryMax;
+    }
 
     internal override string DebugDisplay() => $"COMPRESS({this.operand.DebugDisplay()})";
 

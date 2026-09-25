@@ -49,8 +49,8 @@ public sealed class IsNumericTests
     [TestMethod] public void IntegerInput_ReturnsOne() => AreEqual(1, ExecuteScalar<int>("select ISNUMERIC(123)"));
     [TestMethod] public void FloatInput_ReturnsOne() => AreEqual(1, ExecuteScalar<int>("select ISNUMERIC(cast(1.5 as float))"));
 
-    /// <summary>Probe-confirmed: bit is the one numeric-category type that returns 0.</summary>
-    [TestMethod] public void BitInput_ReturnsZero() => AreEqual(0, ExecuteScalar<int>("select ISNUMERIC(cast(1 as bit))"));
+    /// <summary>Probe-confirmed 2026-09-25: a bit is numeric, whichever value it holds.</summary>
+    [TestMethod] public void BitInput_ReturnsOne() => AreEqual(1, ExecuteScalar<int>("select ISNUMERIC(cast(0 as bit))"));
 
     [TestMethod] public void LeadingAndTrailingWhitespace_TrimmedAccepted() => AreEqual(1, ExecuteScalar<int>("select ISNUMERIC('   123   ')"));
     [TestMethod] public void ThousandsSeparated_Accepted() => AreEqual(1, ExecuteScalar<int>("select ISNUMERIC('1,000')"));

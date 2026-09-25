@@ -73,9 +73,12 @@ internal static class StringScalars
     /// <c>CREATE</c> of a module whose body carries it — and the two callers
     /// share this body so the compile-time and per-value gates can't drift.
     /// </summary>
+    /// <para>An <c>xml</c> or <c>sql_variant</c> argument is refused the same
+    /// way by every string scalar (probed 2026-09-25 against SQL Server 2025),
+    /// so the gate takes those two as well.</para>
     public static void RejectLegacyLobType(SqlType type, string functionLowerName, int argumentIndex = 1, bool allowAnsiText = false)
     {
-        if (type is NTextSqlType or ImageSqlType || (!allowAnsiText && type is TextSqlType))
+        if (type is NTextSqlType or ImageSqlType or XmlSqlType or SqlVariantSqlType || (!allowAnsiText && type is TextSqlType))
             throw SimulatedSqlException.InvalidArgumentDataType(type.SqlServerName, argumentIndex, functionLowerName);
     }
 
@@ -84,10 +87,20 @@ internal static class StringScalars
     /// so the compile-time path applies exactly the same rule. Narrower than
     /// <see cref="RejectLegacyLobType"/>: the coercing sites refuse
     /// <c>text</c> / <c>ntext</c> and leave <c>image</c> to the
-    /// coerceable-family check that follows it at runtime.
+    /// coerceable-family check that follows it at runtime. An <c>xml</c> or
+    /// <c>sql_variant</c> is refused alongside them, except by an argument
+    /// that takes a legacy LOB, which converts to <c>varchar</c> and so
+    /// raises the Msg 257 that conversion does (probed 2026-09-25:
+    /// <c>CHARINDEX('a', &lt;xml&gt;)</c>).
     /// </summary>
     public static void RejectLegacyLobInCoercion(SqlType type, string functionLowerName, int argumentIndex = 1, bool allowLegacyLob = false)
     {
+        if (type is XmlSqlType or SqlVariantSqlType)
+        {
+            throw allowLegacyLob
+                ? SimulatedSqlException.ImplicitConversionNotAllowed(type.SqlServerName, "varchar")
+                : SimulatedSqlException.InvalidArgumentDataType(type.SqlServerName, argumentIndex, functionLowerName);
+        }
         if (!allowLegacyLob && (type == SqlType.Text || type == SqlType.NText))
             throw SimulatedSqlException.InvalidArgumentDataType(type.SqlServerName, argumentIndex, functionLowerName);
     }
@@ -106,6 +119,32 @@ internal static class StringScalars
         if (!propagatesUnresolvedCollation)
             RequireSettledCollation(type, functionLowerName);
         return type;
+    }
+
+    /// <summary>
+    /// The compile-time rule for an argument a built-in reads as text without
+    /// converting anything to get there — <c>STRING_ESCAPE</c>, <c>ISJSON</c>,
+    /// <c>JSON_VALUE</c>, <c>COMPRESS</c> and the subjects of
+    /// <c>SUBSTRING</c> / <c>PATINDEX</c> / <c>TRIM</c>: a string (<c>xml</c>
+    /// aside), a binary where <paramref name="acceptsBinary"/> says, a legacy
+    /// LOB where <paramref name="acceptsLegacyLob"/> says, and otherwise Msg
+    /// 8116 naming the type as real spells it (<c>numeric</c> for a literal,
+    /// probed 2026-09-25 against SQL Server 2025). A bare <c>NULL</c> passes;
+    /// the functions that refuse one do so while parsing.
+    /// </summary>
+    public static SqlType RequireStringArgument(Expression argument, SqlType type, string functionName, int argumentIndex, bool acceptsBinary = false, bool acceptsLegacyLob = true)
+    {
+        var accepted = type switch
+        {
+            TextSqlType or NTextSqlType => acceptsLegacyLob,
+            ImageSqlType => acceptsLegacyLob && acceptsBinary,
+            BinarySqlType or VarbinarySqlType => acceptsBinary,
+            XmlSqlType => false,
+            _ => SqlType.IsStringCategory(type),
+        };
+        return accepted || Expression.IsUntypedNullLiteral(argument)
+            ? type
+            : throw SimulatedSqlException.InvalidArgumentDataType(SqlType.OperandName(type, argument), argumentIndex, functionName);
     }
 
     /// <summary>
@@ -201,7 +240,9 @@ internal static class StringScalars
     /// one-argument space strip; a SQL NULL argument comes back as a NULL
     /// <see cref="SqlValue"/> and makes the whole call NULL (probe-confirmed
     /// against SQL Server 2025). A legacy LOB set raises Msg 8116 naming
-    /// argument 2, the position the character set occupies in both functions.
+    /// argument 2, the position the character set occupies in both functions;
+    /// any other type reads as the <c>varchar</c> it converts to (probed
+    /// 2026-09-25: <c>LTRIM('a', 0x41)</c> is empty).
     /// </summary>
     public static SqlValue? ResolveTrimCharacters(Expression? trimChars, RuntimeContext runtime, string functionLowerName)
     {
@@ -209,7 +250,7 @@ internal static class StringScalars
             return null;
         var value = trimChars.Run(runtime);
         RejectLegacyLob(value, functionLowerName, argumentIndex: 2);
-        return value;
+        return SqlType.IsStringCategory(value.Type) ? value : value.CoerceTo(VarcharSqlType.Get(0, runtime.Batch.CurrentDatabase.Collation, Coercibility.CoercibleDefault));
     }
 
     /// <summary>

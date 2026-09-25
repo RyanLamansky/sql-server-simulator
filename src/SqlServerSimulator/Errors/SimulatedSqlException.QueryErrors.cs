@@ -6,6 +6,14 @@ namespace SqlServerSimulator;
 partial class SimulatedSqlException
 {
     /// <summary>
+    /// Mimics SQL Server error 9826: <c>DECOMPRESS</c> was handed bytes that
+    /// aren't a gzip stream, or one whose trailer disagrees with its contents
+    /// (probed 2026-09-25 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException CorruptedDataForDecompress() =>
+        new("Uncompressed or corrupted data passed as argument to DECOMPRESS builtin.", 9826, 16, 1);
+
+    /// <summary>
     /// Mimics the SqlException that occurs then when a TOP/OFFSET/FETCH clause has an inappropriate column reference.
     /// </summary>
     /// <param name="name">The name of the column.</param>

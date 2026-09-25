@@ -27,12 +27,32 @@ internal sealed class IsNumeric(ParserContext context) : Expression
         return v.IsNull ? SqlValue.FromInt32(0)
             : v.Type.Category is SqlTypeCategory.Integer or SqlTypeCategory.Decimal
                 or SqlTypeCategory.Approximate or SqlTypeCategory.Money
-                ? SqlValue.FromInt32(v.Type == SqlType.Bit ? 0 : 1)
+                ? SqlValue.FromInt32(1)
             : !SqlType.IsStringCategory(v.Type) ? SqlValue.FromInt32(0)
             : SqlValue.FromInt32(LooksNumeric(v.AsString) ? 1 : 0);
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        RequireCheckableArgument(this.operand, this.operand.GetSqlType(batch, resolveColumnType), "isnumeric");
+        return SqlType.Int32;
+    }
+
+    /// <summary>
+    /// <c>ISNUMERIC</c> and <c>ISDATE</c> answer 0 for most types they can't
+    /// read, but refuse the legacy LOBs, <c>xml</c>, <c>sql_variant</c> and
+    /// the post-2008 date and time types outright — Msg 8116 while compiling
+    /// (probed 2026-09-25 against SQL Server 2025; <c>datetime</c> and
+    /// <c>smalldatetime</c> are accepted).
+    /// </summary>
+    internal static void RequireCheckableArgument(Expression operand, SqlType type, string functionName)
+    {
+        if ((type is TextSqlType or NTextSqlType or ImageSqlType or XmlSqlType or SqlVariantSqlType or DateTime2SqlType or TimeSqlType or DateTimeOffsetSqlType || type == SqlType.Date)
+            && !IsUntypedNullLiteral(operand))
+        {
+            throw SimulatedSqlException.InvalidArgumentDataType(type.SqlServerName, 1, functionName);
+        }
+    }
 
     /// <summary>
     /// Hand-rolled scanner matching the probed real-server acceptances. The

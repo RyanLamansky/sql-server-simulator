@@ -73,11 +73,13 @@ internal sealed class CharIndex : Expression
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
-        _ = StringScalars.BindArgument(needle, batch, resolveColumnType, "charindex");
+        _ = StringScalars.RequireStringArgument(needle, StringScalars.BindArgument(needle, batch, resolveColumnType, "charindex"), "charindex", 1, acceptsBinary: true);
         // The haystack is searched rather than transformed, so it takes no
         // legacy-LOB rejection — but the search still needs a definite
         // collation, so an unresolved one reports from either operand.
-        StringScalars.RequireSettledCollation(haystack.GetSqlType(batch, resolveColumnType), "charindex");
+        var haystackType = haystack.GetSqlType(batch, resolveColumnType);
+        StringScalars.RejectLegacyLobInCoercion(haystackType, "charindex", argumentIndex: 2, allowLegacyLob: true);
+        StringScalars.RequireSettledCollation(haystackType, "charindex");
         return SqlType.Int32;
     }
 

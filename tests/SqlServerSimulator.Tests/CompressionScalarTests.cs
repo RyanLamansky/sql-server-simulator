@@ -43,12 +43,29 @@ public sealed class CompressionScalarTests
     public void Decompress_NullInput_ReturnsNull()
         => _ = IsInstanceOfType<DBNull>(new Simulation().ExecuteScalar("select decompress(cast(null as varbinary(10)))"));
 
-    /// <summary>DECOMPRESS on invalid gzip → NULL (lax disposition; real SQL Server raises Msg 9803).</summary>
     [TestMethod]
-    public void Decompress_InvalidGzip_ReturnsNull()
-        => _ = IsInstanceOfType<DBNull>(new Simulation().ExecuteScalar("select decompress(cast(0xDEADBEEF as varbinary(100)))"));
+    public void Compress_WritesRealsGzipHeader()
+        => AreEqual("0x1F8B08000000000004004B040043BEB7E801000000", new Simulation().ExecuteScalar("select convert(varchar(max), compress('a'), 1)"));
 
-    /// <summary>COMPRESS output starts with gzip magic bytes 1f 8b regardless of input size.</summary>
+    [TestMethod]
+    public void Compress_OfNothing_IsNoBytes()
+        => AreEqual(0L, new Simulation().ExecuteScalar("select datalength(compress(''))"));
+
+    [TestMethod]
+    [DataRow("cast(0xDEADBEEF as varbinary(100))")]
+    [DataRow("0x1F8B08000000000004004B040043BEB7E801000001")]
+    public void Decompress_OfCorruptBytes_RaisesMsg9826(string bytes)
+        => new Simulation().AssertSqlError($"select decompress({bytes})", 9826, "Uncompressed or corrupted data passed as argument to DECOMPRESS builtin.");
+
+    [TestMethod]
+    public void Decompress_OfATruncatedStream_IsNull()
+        => AreEqual(DBNull.Value, new Simulation().ExecuteScalar("select decompress(0x1F8B08000000000004004B04)"));
+
+    [TestMethod]
+    public void Decompress_RoundTripsCompress()
+        => AreEqual("abcabc|0x", new Simulation().ExecuteScalar("select concat(cast(decompress(compress(replicate('abc', 2))) as varchar(10)), '|', convert(varchar(10), decompress(0x), 1))"));
+
+    /// <summary>COMPRESS output of any non-empty input starts with gzip magic bytes 1f 8b.</summary>
     [TestMethod]
     public void Compress_HasGzipMagic()
     {

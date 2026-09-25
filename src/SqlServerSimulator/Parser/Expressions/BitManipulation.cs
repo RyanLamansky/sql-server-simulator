@@ -17,6 +17,21 @@ internal static class BitOperandHelpers
         SimulatedSqlException.ArgumentDataTypeInvalidForBitFunction(typeName, argumentIndex, functionName);
 
     /// <summary>
+    /// The first operand's rule, settled while compiling: an integer type —
+    /// or, for <c>BIT_COUNT</c>, a binary — and otherwise Msg 8116 naming the
+    /// type as real spells it (probed 2026-09-25 against SQL Server 2025:
+    /// <c>BIT_COUNT(1.5)</c> names <c>numeric</c>, <c>BIT_COUNT('a')</c>
+    /// <c>varchar</c>). A bare <c>NULL</c> is left to the per-value check.
+    /// </summary>
+    public static SqlType RequireOperand(Expression operand, BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType, string functionName, bool acceptsBinary)
+    {
+        var type = operand.GetSqlType(batch, resolveColumnType);
+        return IntegerBitWidth(type) > 0 || (acceptsBinary && type is BinarySqlType or VarbinarySqlType) || Expression.IsUntypedNullLiteral(operand)
+            ? type
+            : throw ArgInvalidForBitFunc(functionName, SqlType.OperandName(type, operand), 1);
+    }
+
+    /// <summary>
     /// Returns the bit-width of the integer category for the operand —
     /// 8 / 16 / 32 / 64 for tinyint / smallint / int / bigint. Used for
     /// per-type range-checking of bit indices in <c>GET_BIT</c> / <c>SET_BIT</c>
@@ -90,7 +105,11 @@ internal sealed class BitCount : Expression
                 : SqlValue.FromInt64(System.Numerics.BitOperations.PopCount(ToUnsignedBits(v)));
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.BigInt;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        _ = BitOperandHelpers.RequireOperand(this.operand, batch, resolveColumnType, "bit_count", acceptsBinary: true);
+        return SqlType.BigInt;
+    }
 
     internal override string DebugDisplay() => $"BIT_COUNT({this.operand.DebugDisplay()})";
 
@@ -124,7 +143,7 @@ internal sealed class BitCount : Expression
             }
             return total;
         }
-        throw BitOperandHelpers.ArgInvalidForBitFunc("bit_count", t.ToString()!, 1);
+        throw BitOperandHelpers.ArgInvalidForBitFunc("bit_count", SimulatedSqlException.FamilyRootName(t), 1);
     }
 }
 
@@ -157,7 +176,7 @@ internal sealed class GetBit : Expression
             throw BitOperandHelpers.ArgInvalidForBitFunc("get_bit", "NULL", 1);
         var width = BitOperandHelpers.IntegerBitWidth(v.Type);
         if (width < 0)
-            throw BitOperandHelpers.ArgInvalidForBitFunc("get_bit", v.Type.ToString()!, 1);
+            throw BitOperandHelpers.ArgInvalidForBitFunc("get_bit", SimulatedSqlException.FamilyRootName(v.Type), 1);
         var pos = BitOperandHelpers.IntegerArgument(this.positionArg.Run(runtime), "get_bit", 2, allowBit: false);
         if (pos < 0 || pos >= width)
             throw SimulatedSqlException.BitFunctionPositionOutOfRange("get_bit", width - 1, state: 1);
@@ -165,7 +184,11 @@ internal sealed class GetBit : Expression
         return SqlValue.FromBoolean(((bits >> (int)pos) & 1UL) == 1UL);
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Bit;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        _ = BitOperandHelpers.RequireOperand(this.numArg, batch, resolveColumnType, "get_bit", acceptsBinary: false);
+        return SqlType.Bit;
+    }
 
     internal override string DebugDisplay() => $"GET_BIT({this.numArg.DebugDisplay()}, {this.positionArg.DebugDisplay()})";
 
@@ -205,7 +228,7 @@ internal sealed class SetBit : Expression
             throw BitOperandHelpers.ArgInvalidForBitFunc("set_bit", "NULL", 1);
         var width = BitOperandHelpers.IntegerBitWidth(v.Type);
         if (width < 0)
-            throw BitOperandHelpers.ArgInvalidForBitFunc("set_bit", v.Type.ToString()!, 1);
+            throw BitOperandHelpers.ArgInvalidForBitFunc("set_bit", SimulatedSqlException.FamilyRootName(v.Type), 1);
         var pos = BitOperandHelpers.IntegerArgument(this.positionArg.Run(runtime), "set_bit", 2, allowBit: false);
         if (pos < 0 || pos >= width)
             throw SimulatedSqlException.BitFunctionPositionOutOfRange("set_bit", width - 1, state: 2);
@@ -218,7 +241,7 @@ internal sealed class SetBit : Expression
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
-        this.numArg.GetSqlType(batch, resolveColumnType);
+        BitOperandHelpers.RequireOperand(this.numArg, batch, resolveColumnType, "set_bit", acceptsBinary: false);
 
     internal override string DebugDisplay() => $"SET_BIT({this.numArg.DebugDisplay()}, {this.positionArg.DebugDisplay()})";
 
@@ -289,7 +312,7 @@ internal sealed class BitShift : Expression
             throw BitOperandHelpers.ArgInvalidForBitFunc(this.functionName, "NULL", 1);
         var width = BitOperandHelpers.IntegerBitWidth(v.Type);
         if (width < 0)
-            throw BitOperandHelpers.ArgInvalidForBitFunc(this.functionName, v.Type.ToString()!, 1);
+            throw BitOperandHelpers.ArgInvalidForBitFunc(this.functionName, SimulatedSqlException.FamilyRootName(v.Type), 1);
         var shift = BitOperandHelpers.IntegerArgument(this.shiftArg.Run(runtime), this.functionName, 2, allowBit: false);
         var mask = width == 64 ? ulong.MaxValue : (1UL << width) - 1;
         var bits = BitCount.ToUnsignedBits(v) & mask;
@@ -310,7 +333,7 @@ internal sealed class BitShift : Expression
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
-        this.numArg.GetSqlType(batch, resolveColumnType);
+        BitOperandHelpers.RequireOperand(this.numArg, batch, resolveColumnType, this.functionName, acceptsBinary: false);
 
     internal override string DebugDisplay() => $"{(this.isLeftShift ? "LEFT_SHIFT" : "RIGHT_SHIFT")}({this.numArg.DebugDisplay()}, {this.shiftArg.DebugDisplay()})";
 

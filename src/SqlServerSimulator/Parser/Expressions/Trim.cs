@@ -119,8 +119,9 @@ internal sealed class Trim : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
         if (this.trimChars is not null)
-            _ = StringScalars.BindArgument(this.trimChars, batch, resolveColumnType, "Trim", argumentIndex: 1);
-        return StringScalars.BindArgument(source, batch, resolveColumnType, "Trim", argumentIndex: this.trimChars is null ? 1 : 2);
+            _ = StringScalars.RequireStringArgument(this.trimChars, StringScalars.BindArgument(this.trimChars, batch, resolveColumnType, "Trim", argumentIndex: 1), "Trim", 1);
+        var sourceIndex = this.trimChars is null ? 1 : 2;
+        return StringScalars.RequireStringArgument(source, StringScalars.BindArgument(source, batch, resolveColumnType, "Trim", argumentIndex: sourceIndex), "Trim", sourceIndex);
     }
 
     private static bool TryParseSide(ReadOnlySpan<char> span, out TrimSide side)

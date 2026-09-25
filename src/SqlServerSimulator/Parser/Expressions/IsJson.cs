@@ -32,7 +32,11 @@ internal sealed class IsJson(ParserContext context) : Expression
             : SqlValue.FromInt32(SqlType.IsStringCategory(value.Type) && !JsonText.Scan(value.AsString).HasError ? 1 : 0);
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        _ = StringScalars.RequireStringArgument(this.operand, this.operand.GetSqlType(batch, resolveColumnType), "isjson", 1, acceptsLegacyLob: false);
+        return SqlType.Int32;
+    }
 
     internal override string DebugDisplay() => $"ISJSON({this.operand.DebugDisplay()})";
 

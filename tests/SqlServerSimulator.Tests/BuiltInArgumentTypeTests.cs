@@ -112,4 +112,49 @@ public sealed class BuiltInArgumentTypeTests
     [TestMethod]
     public void DateOnlyFunction_OverAStringOrNull_StillAnswers()
         => AreEqual("2020-01-31|2020-01-05 00:00:00.0000000||", new Simulation().ExecuteScalar("select concat(eomonth('2020-01-05'), '|', datetrunc(day, '2020-01-05 10:00'), '|', datetrunc(day, null), '|', eomonth(null))"));
+
+    // ---- the string scalars ----
+
+    [TestMethod]
+    [DataRow("len(cast('<a/>' as xml))", "xml", 1, "len")]
+    [DataRow("upper(cast('<a/>' as xml))", "xml", 1, "upper")]
+    [DataRow("left(cast('<a/>' as xml), 1)", "xml", 1, "left")]
+    [DataRow("substring(cast('<a/>' as xml), 1, 1)", "xml", 1, "substring")]
+    [DataRow("replace('a', 'a', cast('<a/>' as xml))", "xml", 3, "replace")]
+    [DataRow("stuff('a', 1, 1, cast('<a/>' as xml))", "xml", 4, "stuff")]
+    [DataRow("patindex('%a%', cast('<a/>' as xml))", "xml", 2, "patindex")]
+    [DataRow("ascii(cast(1 as sql_variant))", "sql_variant", 1, "ascii")]
+    [DataRow("soundex(cast(1 as sql_variant))", "sql_variant", 1, "soundex")]
+    [DataRow("translate('a', 'a', cast(1 as sql_variant))", "sql_variant", 3, "translate")]
+    [DataRow("ltrim('a', cast(1 as sql_variant))", "sql_variant", 2, "ltrim")]
+    [DataRow("trim(1.5)", "numeric", 1, "Trim")]
+    [DataRow("trim(cast(1 as bit) from 'a')", "bit", 1, "Trim")]
+    [DataRow("substring(1.5, 1, 1)", "numeric", 1, "substring")]
+    [DataRow("charindex(1.5, 'a')", "numeric", 1, "charindex")]
+    [DataRow("string_escape(1.5, 'json')", "numeric", 1, "string_escape")]
+    [DataRow("isjson(1)", "int", 1, "isjson")]
+    [DataRow("isjson(cast('a' as text))", "text", 1, "isjson")]
+    [DataRow("json_value(0x41, '$.a')", "varbinary", 1, "json_value")]
+    [DataRow("compress(1.5)", "numeric", 1, "Compress")]
+    [DataRow("compress(cast('a' as text))", "text", 1, "Compress")]
+    [DataRow("decompress('a')", "varchar", 1, "Decompress")]
+    [DataRow("isnumeric(cast('2020-01-01' as date))", "date", 1, "isnumeric")]
+    [DataRow("isdate(cast(1 as sql_variant))", "sql_variant", 1, "isdate")]
+    [DataRow("bit_count(1.5)", "numeric", 1, "bit_count")]
+    [DataRow("bit_count('a')", "varchar", 1, "bit_count")]
+    [DataRow("format(cast(1 as sql_variant), 'd')", "sql_variant", 1, "format")]
+    public void StringArgument_OfARefusedType_RaisesMsg8116(string call, string type, int index, string function)
+        => new Simulation().AssertSqlError($"select {call}", 8116, $"Argument data type {type} is invalid for argument {index} of {function} function.");
+
+    [TestMethod]
+    public void StringArgument_OverAnEmptyTablesXmlColumn_RaisesMsg8116()
+        => new Simulation().AssertSqlError("create table e (x xml); select left(x, 1) from e", 8116, "Argument data type xml is invalid for argument 1 of left function.");
+
+    [TestMethod]
+    public void CharIndex_OverAnXmlHaystack_RaisesMsg257()
+        => new Simulation().AssertSqlError("select charindex('a', cast('<a/>' as xml))", 257, "Implicit conversion from data type xml to varchar is not allowed. Use the CONVERT function to run this query.");
+
+    [TestMethod]
+    public void TrimCharacters_OfANonString_ReadAsVarchar()
+        => AreEqual("a|", new Simulation().ExecuteScalar("select concat(ltrim('a', 1.5), '|', ltrim('a', 0x41))"));
 }
