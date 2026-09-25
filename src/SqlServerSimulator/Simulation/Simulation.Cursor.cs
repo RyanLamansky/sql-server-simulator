@@ -394,14 +394,15 @@ partial class Simulation
         var (status, values) = cursor.Fetch(batch, direction, offset);
         connection.LastFetchStatus = status;
         connection.LastStatementRowCount = status == 0 ? 1 : 0;
+        if (status == -2)
+            values = cursor.DeletedMemberValues();
 
         if (intoVariables is not null)
         {
-            // Variables are written only on a successful fetch; on -1 (past
-            // end) they retain their prior value (probe-confirmed). The rare
-            // keyset -2 case leaves them unchanged too (minor divergence: real
-            // SQL Server zeroes/NULLs them).
-            if (status == 0 && values is not null)
+            // Variables are written by a fetch that lands on a row, even a
+            // deleted keyset member's zero-and-NULL row; on -1 (past end)
+            // they retain their prior value (probe-confirmed).
+            if (values is not null)
             {
                 for (var i = 0; i < intoVariables.Count; i++)
                 {
@@ -413,14 +414,8 @@ partial class Simulation
             yield break;
         }
 
-        // No INTO: a landed fetch produces a single-row result set.
-        if (status == 0 && values is not null)
-        {
-            yield return new SimulatedSqlResultSet(
-                cursor.Selection.Schema,
-                cursor.Selection.ColumnNames,
-                [RowEncoder.EncodeRow(cursor.Selection.Schema, values)]);
-        }
+        // No INTO: every fetch answers a result set, empty past either end.
+        yield return cursor.FetchResult(values is null ? [] : [Cursor.WithRowStat(values, status == 0 ? 1 : 2)]);
     }
 
     /// <summary>

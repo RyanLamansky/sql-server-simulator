@@ -426,6 +426,84 @@ internal sealed class Cursor(
     }
 
     /// <summary>
+    /// The result set a fetch sends its rows in: the cursor's columns plus a
+    /// trailing hidden <c>ROWSTAT</c> int, NOT NULL, which every T-SQL
+    /// <c>FETCH</c> without <c>INTO</c> and every <c>sp_cursorfetch</c> carries
+    /// on real, even when no row is fetched (probed 2026-09-25 against SQL
+    /// Server 2025). Each row already ends in its ROWSTAT (see
+    /// <see cref="WithRowStat"/>).
+    /// </summary>
+    public SimulatedSqlResultSet FetchResult(IEnumerable<SqlValue[]> rows)
+    {
+        var selection = this.Selection;
+        var width = selection.Schema.Length;
+        var nullability = new bool[width + 1];
+        for (var i = 0; i < width; i++)
+            nullability[i] = selection.ColumnNullability?[i] ?? true;
+        return new SimulatedSqlResultSet([.. selection.Schema, SqlType.Int32], [.. selection.ColumnNames, "ROWSTAT"], rows)
+        {
+            ColumnNullability = nullability,
+            ColumnReportsNumeric = selection.ColumnReportsNumeric is { } numeric ? [.. numeric, false] : null,
+            HiddenColumnCount = 1,
+        };
+    }
+
+    /// <summary>
+    /// <paramref name="values"/> extended by its <c>ROWSTAT</c>: 1 for a
+    /// fetched row, 2 for a keyset member deleted out from under the cursor.
+    /// </summary>
+    public static SqlValue[] WithRowStat(SqlValue[] values, int rowStat) => [.. values, SqlValue.FromInt32(rowStat)];
+
+    /// <summary>
+    /// The values real answers for a keyset member deleted out from under the
+    /// cursor (<c>@@FETCH_STATUS</c> -2), both in a fetch's result set and in
+    /// its <c>INTO</c> variables: NULL for a column the projection reports
+    /// nullable, else the type's zero — numeric 0, the empty GUID, 1900-01-01
+    /// for <c>datetime</c> / <c>smalldatetime</c> and 0001-01-01 for the
+    /// newer dates, a bounded string or binary filled to its declared length
+    /// with spaces or zero bytes, and an empty <c>max</c> / LOB value (probed
+    /// 2026-09-25 against SQL Server 2025). A projection whose nullability
+    /// isn't inferred reads as all-nullable, so every value is NULL.
+    /// </summary>
+    public SqlValue[] DeletedMemberValues()
+    {
+        var schema = this.Selection.Schema;
+        var nullability = this.Selection.ColumnNullability;
+        var values = new SqlValue[schema.Length];
+        for (var i = 0; i < values.Length; i++)
+            values[i] = nullability is null || nullability[i] ? SqlValue.Null(schema[i]) : ZeroOf(schema[i]);
+        return values;
+    }
+
+    private static SqlValue ZeroOf(SqlType type) => type switch
+    {
+        VarcharSqlType varchar => SqlValue.FromVarchar(varchar, new string(' ', Math.Max((int)varchar.length, 0))),
+        NVarcharSqlType nvarchar => SqlValue.FromNVarchar(nvarchar, new string(' ', Math.Max((int)nvarchar.length, 0))),
+        CharSqlType fixedChar => SqlValue.FromChar(type, new string(' ', fixedChar.length)),
+        NCharSqlType fixedNChar => SqlValue.FromNChar(type, new string(' ', fixedNChar.length)),
+        SystemNameSqlType => SqlValue.FromSystemName(new string(' ', 128)),
+        VarbinarySqlType varbinary => SqlValue.FromVarbinary(varbinary, new byte[Math.Max((int)varbinary.length, 0)]),
+        BinarySqlType binary => SqlValue.FromBinary(binary, new byte[binary.length]),
+        RowVersionSqlType => SqlValue.FromRowVersion(0),
+        TextSqlType => SqlValue.FromText(""),
+        NTextSqlType => SqlValue.FromNText(""),
+        ImageSqlType => SqlValue.FromImage([]),
+        XmlSqlType => SqlValue.FromXml(""),
+        UniqueIdentifierSqlType => SqlValue.FromGuid(Guid.Empty),
+        DateSqlType => SqlValue.FromDate(DateOnly.MinValue),
+        DateTime2SqlType => SqlValue.FromDateTime2(type, DateTime.MinValue),
+        DateTimeOffsetSqlType => SqlValue.FromDateTimeOffset(type, DateTimeOffset.MinValue),
+        TimeSqlType => SqlValue.FromTime(type, TimeSpan.Zero),
+        SqlVariantSqlType => SqlValue.FromVariant(SqlValue.FromInt32(0)),
+        // Real sends a hierarchyid of 892 zero bytes, its maximum length.
+        HierarchyIdSqlType => SqlValue.FromHierarchyIdBytes(new byte[892]),
+        // Real sends a zero-length spatial value, which the parsed value
+        // model can't carry.
+        SpatialSqlType => SqlValue.Null(type),
+        _ => SqlValue.FromInt32(0).CoerceTo(type),
+    };
+
+    /// <summary>
     /// FETCH one row in the requested direction. Returns the SQL Server
     /// <c>@@FETCH_STATUS</c> (0 success, -1 past end / no row, -2 keyset member
     /// deleted) and the projected values (null when status ≠ 0). Validates

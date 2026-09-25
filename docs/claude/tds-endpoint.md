@@ -180,7 +180,7 @@ Each open cursor rides an engine `Cursor` (built by synthesizing a `DECLARE … 
 Fetch drives `Cursor.Fetch` directly per row; positioned DML sets `Cursor.CurrentRids` to a buffered RID and runs a synthesized `UPDATE/DELETE … WHERE CURRENT OF <name>` so the full engine machinery (triggers, constraints, statement atomicity) fires.
 Probed against SQL Server 2025.
 
-**sp_cursoropen**(@cursor OUT, @stmt, @scrollopt IN/OUT, @ccopt IN/OUT, @rowcount OUT) — builds + opens the cursor and writes a **metadata-only announce**: COLMETADATA for the projection plus a trailing `ROWSTAT` int column, **zero rows**.
+**sp_cursoropen**(@cursor OUT, @stmt, @scrollopt IN/OUT, @ccopt IN/OUT, @rowcount OUT) — builds + opens the cursor and writes a **metadata-only announce**: COLMETADATA for the projection plus a trailing `ROWSTAT` int column — NOT NULL and read-only, with a COLINFO token after the COLMETADATA giving it the HIDDEN | EXPRESSION status that SqlClient's `VisibleFieldCount` reads, as real sends a T-SQL `FETCH`'s (captured 2026-09-25) — **zero rows**.
 Return status 0.
 The OUT scrollopt/ccopt are the *effective* (resolved) options, and @rowcount is the row count for keyset/static or −1 for the non-materialized shapes:
 

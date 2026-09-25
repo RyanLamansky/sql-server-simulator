@@ -59,6 +59,14 @@ internal abstract class SimulatedQueryResult : SimulatedStatementOutcome
     public bool[]? ColumnReportsNumeric;
 
     /// <summary>
+    /// How many of the trailing columns are hidden: counted by <c>FieldCount</c>
+    /// but not by <c>VisibleFieldCount</c> or <c>GetValues</c>, and flagged
+    /// <c>fHidden</c> in TDS COLMETADATA. Only a cursor fetch's trailing
+    /// <c>ROWSTAT</c> column is hidden.
+    /// </summary>
+    public int HiddenColumnCount;
+
+    /// <summary>
     /// Per column, the base-table column it reads directly, or null for an
     /// expression — set only by the <c>SET FMTONLY</c> metadata path, which
     /// is what <c>sp_describe_first_result_set</c> describes through.

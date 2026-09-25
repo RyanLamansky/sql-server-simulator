@@ -472,4 +472,45 @@ public sealed class CursorRpcTests
         HasCount(1, rows);
         _ = await CloseAsync(connection, handle, Token);
     }
+
+    [TestMethod]
+    public async Task TSqlFetch_RowStatIsHiddenOnTheWire()
+    {
+        var simulation = new Simulation();
+        await using var listener = await simulation.ListenLocalAsync(0, Token);
+        await using var connection = await Wire.OpenAsync(listener, Token);
+        await using var cmd = new SqlCommand("declare c cursor local static for select 1 a; open c; fetch next from c; fetch next from c", connection);
+        await using var reader = await cmd.ExecuteReaderAsync(Token);
+
+        AreEqual(2, reader.FieldCount);
+        AreEqual(1, reader.VisibleFieldCount);
+        var rowStat = reader.GetSchemaTable()!.Rows[1];
+        AreEqual("ROWSTAT", rowStat["ColumnName"]);
+        IsTrue((bool)rowStat["IsHidden"]);
+        IsFalse((bool)rowStat["AllowDBNull"]);
+        IsTrue((bool)rowStat["IsReadOnly"]);
+        IsTrue(await reader.ReadAsync(Token));
+        AreEqual(1, reader.GetInt32(1));
+        IsTrue(await reader.NextResultAsync(Token));
+        AreEqual(1, reader.VisibleFieldCount);
+        IsFalse(await reader.ReadAsync(Token));
+    }
+
+    [TestMethod]
+    public async Task CursorFetch_RowStatIsHidden()
+    {
+        var simulation = new Simulation();
+        await using var listener = await simulation.ListenLocalAsync(0, Token);
+        await using var connection = await OpenWithTableAsync(listener, Token);
+        var (handle, _, _, _) = await OpenAsync(connection, "SELECT id FROM dbo.curp", 0x8, 0x1, Token);
+        await using var cmd = Proc("sp_cursorfetch", connection);
+        _ = cmd.Parameters.Add(new SqlParameter("@cursor", SqlDbType.Int) { Value = handle });
+        _ = cmd.Parameters.Add(new SqlParameter("@fetchtype", SqlDbType.Int) { Value = 2 });
+        _ = cmd.Parameters.Add(new SqlParameter("@rownum", SqlDbType.Int) { Value = 1 });
+        _ = cmd.Parameters.Add(new SqlParameter("@nrows", SqlDbType.Int) { Value = 1 });
+        await using var reader = await cmd.ExecuteReaderAsync(Token);
+
+        AreEqual(2, reader.FieldCount);
+        AreEqual(1, reader.VisibleFieldCount);
+    }
 }

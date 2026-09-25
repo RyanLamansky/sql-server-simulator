@@ -421,37 +421,22 @@ internal sealed partial class TdsSession
     // ---- shared helpers ---------------------------------------------------
 
     /// <summary>
-    /// Writes the cursor's COLMETADATA (its projection schema plus a trailing
-    /// <c>ROWSTAT</c> int column, matching real client-cursor result sets) and,
+    /// Writes the cursor's COLMETADATA (<see cref="Cursor.FetchResult"/>'s shape,
+    /// ending in the hidden <c>ROWSTAT</c> column) and,
     /// when <paramref name="rows"/> is non-null, one ROW per fetched row with
     /// ROWSTAT = 1. A null rows list is the metadata-only announce (sp_cursoropen).
     /// </summary>
     private static void WriteCursorMetadata(TdsTokenWriter writer, Cursor cursor, List<SqlValue[]>? rows)
     {
-        var baseSchema = cursor.Selection.Schema;
-        var schema = new SqlType[baseSchema.Length + 1];
-        Array.Copy(baseSchema, schema, baseSchema.Length);
-        schema[^1] = SqlType.Int32;
-
-        var names = new string[schema.Length];
-        Array.Copy(cursor.Selection.ColumnNames, names, baseSchema.Length);
-        names[^1] = "ROWSTAT";
-
-        TdsTypeCodec.WriteColMetadata(writer, schema, names, columnNullability: null);
+        var result = cursor.FetchResult(rows is null ? [] : rows.ConvertAll(values => Cursor.WithRowStat(values, 1)));
+        TdsTypeCodec.WriteColMetadata(writer, result.Schema, result.ColumnNames, result.ColumnNullability, result.ColumnReportsNumeric, result.HiddenColumnCount);
 
         if (rows is null)
             return;
 
-        foreach (var values in rows)
-        {
-            var full = new SqlValue[schema.Length];
-            Array.Copy(values, full, values.Length);
-            full[^1] = SqlValue.FromInt32(1);
-            var result = new SimulatedSqlResultSet(schema, names, [full]);
-            using var cur = result.CreateCursor();
-            while (cur.MoveNext())
-                TdsTypeCodec.WriteRow(writer, schema, cur, columnNullability: null);
-        }
+        using var cur = result.CreateCursor();
+        while (cur.MoveNext())
+            TdsTypeCodec.WriteRow(writer, result.Schema, cur, result.ColumnNullability);
     }
 
     /// <summary>

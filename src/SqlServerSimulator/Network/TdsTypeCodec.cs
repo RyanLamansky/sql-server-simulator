@@ -37,9 +37,15 @@ internal static class TdsTypeCodec
     /// fixed-width columns whose result metadata says NOT NULL, and the
     /// bacpac loader decodes per the model.xml declaration, so a false
     /// nullable claim here misaligns every exported row.
+    /// The last <paramref name="hiddenColumnCount"/> columns are read-only
+    /// and followed by a COLINFO token marking them hidden, which is where
+    /// SqlClient reads hidden status from — real flags a cursor fetch's
+    /// trailing <c>ROWSTAT</c> that way, with COLMETADATA flags of zero
+    /// (captured against SQL Server 2025, 2026-09-25).
     /// </summary>
-    public static void WriteColMetadata(TdsTokenWriter writer, SqlType[] schema, string[] columnNames, bool[]? columnNullability, bool[]? columnReportsNumeric = null)
+    public static void WriteColMetadata(TdsTokenWriter writer, SqlType[] schema, string[] columnNames, bool[]? columnNullability, bool[]? columnReportsNumeric = null, int hiddenColumnCount = 0)
     {
+        var firstHidden = schema.Length - hiddenColumnCount;
         writer.EnterComposite();
         writer.WriteByte(Tds.TokenColMetadata);
         writer.WriteUInt16(checked((ushort)schema.Length));
@@ -48,11 +54,26 @@ internal static class TdsTypeCodec
             var type = schema[i];
             writer.WriteUInt32(type is RowVersionSqlType ? 0x50u : 0u);
             var notNull = columnNullability is not null && !columnNullability[i];
-            writer.WriteByte(notNull ? (byte)0x08 : (byte)0x09);
+            var hidden = i >= firstHidden;
+            writer.WriteByte(hidden ? (byte)(notNull ? 0x00 : 0x01) : notNull ? (byte)0x08 : (byte)0x09);
             writer.WriteByte(0);
             var reportsNumeric = columnReportsNumeric is not null && columnReportsNumeric[i];
             WriteTypeInfo(writer, type, notNull, reportsNumeric);
             writer.WriteBVarchar(columnNames[i]);
+        }
+
+        if (hiddenColumnCount > 0)
+        {
+            // COLINFO: per column its 1-based number, table number (0, no
+            // TABNAME) and status — a hidden column's is HIDDEN | EXPRESSION.
+            writer.WriteByte(Tds.TokenColInfo);
+            writer.WriteUInt16(checked((ushort)(schema.Length * 3)));
+            for (var i = 0; i < schema.Length; i++)
+            {
+                writer.WriteByte(checked((byte)(i + 1)));
+                writer.WriteByte(0);
+                writer.WriteByte(i >= firstHidden ? (byte)0x14 : (byte)0);
+            }
         }
 
         writer.LeaveComposite();

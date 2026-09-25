@@ -202,7 +202,10 @@ Cursors are the row-at-a-time slow path, and this matches the single-source desi
 - **INTO** assigns the projected columns to the variables (coerced to each declared type).
   A count mismatch raises **Msg 16924** regardless of whether the FETCH lands on a row.
   On a successful fetch the variables are written; on `-1` (past end) they retain their prior value (probe-confirmed).
-- **Without INTO** a landed FETCH yields a single-row result set.
+- **Without INTO** every FETCH yields a result set — one row when it lands, empty past either end — whose columns end in a hidden `ROWSTAT` int (`VisibleFieldCount` excludes it, and so does `GetValues`), matching what SqlClient reports against SQL Server 2025 (probed 2026-09-25).
+  ROWSTAT is 1 for a fetched row and 2 for a deleted keyset member.
+- **A deleted keyset member (`-2`) still lands on a row**, which reads as NULL in each column the projection reports nullable and as the type's zero in the rest — 0, the empty GUID, 1900-01-01 for `datetime`, 0001-01-01 for the newer dates, a bounded string or binary filled to its declared length with spaces or zero bytes, an empty `max` value.
+  That row goes into INTO variables as well as into the result set (probed 2026-09-25).
 - `@@FETCH_STATUS`: `0` success, `-1` past end / no row, `-2` keyset member deleted.
 
 ## WHERE CURRENT OF
@@ -335,10 +338,8 @@ A deferred body the cursor *can* follow warns about nothing, matching real: `DEC
   For the left-deep heap-scan shape the two agree; a plan real would run differently (a hash join reordering the inner) could emit the same rows in another order.
 - **`@@CURSOR_ROWS` is `-1` throughout for DYNAMIC.**
   Real SQL Server may report a transient positive count for a freshly-opened dynamic cursor before the first fetch (asynchronous population heuristic); the simulator doesn't model the transition.
-- **Keyset `-2` leaves INTO variables unchanged.**
-  Real SQL Server zeroes numeric / NULLs other INTO variables on a deleted-member fetch; the simulator retains their prior value (same as the `-1` case).
-  The values are meaningless when `@@FETCH_STATUS ≠ 0` and loops check the status before reading them.
-- **FETCH-without-INTO omits the trailing `ROWSTAT` column** real SQL Server appends to client-cursor fetch result sets.
+- **A deleted keyset member's row follows the projection's inferred nullability**, so where that isn't inferred (a join, a deferred source) every column reads NULL where real zeroes the NOT NULL ones.
+  A NOT NULL `geography` / `geometry` column reads NULL too: real sends a zero-length spatial value, which the parsed value model can't carry.
 - **OPTIMISTIC double-positioned-DML without an intervening FETCH** falsely conflicts: the snapshot is refreshed only at FETCH, so a second `UPDATE … WHERE CURRENT OF` on the same row (without re-fetching) sees its own first UPDATE as an out-of-band change.
   Pathological — well-formed cursor loops always FETCH between positioned mutations.
 - **OPTIMISTIC over a forwarded (oversize) UPDATE**: detection reads `Heap.ReadSlotBytes` at the row's address.

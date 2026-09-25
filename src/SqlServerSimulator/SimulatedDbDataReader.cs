@@ -130,6 +130,13 @@ public sealed class SimulatedDbDataReader : DbDataReader
     /// <inheritdoc/>
     public override int FieldCount => cursor.FieldCount;
 
+    /// <summary>
+    /// <see cref="FieldCount"/> less any hidden trailing columns, which only
+    /// a T-SQL <c>FETCH</c> without <c>INTO</c> carries: its result set ends
+    /// in a hidden <c>ROWSTAT</c> column, as SqlClient reports it.
+    /// </summary>
+    public override int VisibleFieldCount => cursor.FieldCount - (this.currentResult?.HiddenColumnCount ?? 0);
+
     /// <inheritdoc/>
     public override bool HasRows => cursor.HasRows;
 
@@ -449,7 +456,9 @@ public sealed class SimulatedDbDataReader : DbDataReader
     public override int GetValues(object[] values)
     {
         ArgumentNullException.ThrowIfNull(values);
-        var count = Math.Min(values.Length, this.FieldCount);
+        // SqlClient fills only the visible columns, leaving a hidden trailing
+        // column's slot untouched however long the array.
+        var count = Math.Min(values.Length, this.VisibleFieldCount);
         for (var i = 0; i < count; i++)
             values[i] = this.GetValue(i);
         return count;

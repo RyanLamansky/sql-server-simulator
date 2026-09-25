@@ -117,6 +117,9 @@ public partial class QualityTests
                 // is a no-op, and closing has to run the batch's remaining
                 // statements so RecordsAffected is final afterward.
                 nameof(SimulatedDbDataReader.Close),
+                // Overridden rather than inherited: a cursor FETCH's result
+                // set ends in a hidden ROWSTAT column the base would count.
+                nameof(SimulatedDbDataReader.VisibleFieldCount),
             ],
             [typeof(SimulatedSqlException)] = [
                 nameof(SimulatedSqlException.ErrorCode),
