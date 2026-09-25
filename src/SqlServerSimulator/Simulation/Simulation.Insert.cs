@@ -956,7 +956,7 @@ partial class Simulation
     {
         if (tuples.Count < 2 || rows.Count != tuples.Count)
             return;
-        var cells = new (SqlType Type, int IntegerLiteralDigits)[tuples.Count];
+        var cells = new (SqlType Type, int IntegerLiteralDigits, Expression Source)[tuples.Count];
         for (var c = 0; c < tuples[0].Length; c++)
         {
             var count = 0;
@@ -964,7 +964,7 @@ partial class Simulation
             {
                 var cell = tuple[c];
                 if (cell is not Parser.Expressions.DefaultValueExpression && !Expression.IsUntypedNullLiteral(cell))
-                    cells[count++] = (cell.GetSqlType(batch, NoColumnTypeResolver), Expression.IntegerLiteralDigits(cell));
+                    cells[count++] = (cell.GetSqlType(batch, NoColumnTypeResolver), Expression.IntegerLiteralDigits(cell), cell);
             }
             if (count < 2)
                 continue;

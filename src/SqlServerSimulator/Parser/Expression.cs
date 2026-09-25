@@ -1067,7 +1067,7 @@ internal abstract class Expression : ExpressionNode
     /// </summary>
     internal static SqlType PromoteValueArms(ReadOnlySpan<Expression> arms, BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
-        var branches = new (SqlType, int)[arms.Length];
+        var branches = new (SqlType, int, Expression)[arms.Length];
         var count = 0;
         SqlType? stringSoFar = null;
         foreach (var arm in arms)
@@ -1088,7 +1088,7 @@ internal abstract class Expression : ExpressionNode
                     stringSoFar = armType;
                 }
             }
-            branches[count++] = (armType, IntegerLiteralDigits(arm));
+            branches[count++] = (armType, IntegerLiteralDigits(arm), arm);
         }
         var promoted = SqlType.PromoteBranches(branches.AsSpan(0, count));
         // The width / family promotion above resolves collation pairwise on its

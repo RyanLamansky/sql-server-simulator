@@ -760,13 +760,25 @@ partial class SimulatedSqlException
     /// reports Msg 536 naming the one function, but a value that only turns
     /// negative at run time reports a different message per family —
     /// <c>LEFT</c> and <c>SUBSTRING</c> share Msg 537 state 2 naming both, and
-    /// <c>RIGHT</c> keeps Msg 536 at state 2 with its own name capitalized.
-    /// Probe-confirmed against SQL Server 2025.
+    /// <c>RIGHT</c> keeps Msg 536 with its own name capitalized. The state
+    /// follows the source's type: 2 over a bounded ANSI string or binary, 3 (4
+    /// for RIGHT) over a bounded Unicode one, 3 (5 for RIGHT) over any MAX
+    /// form, and for SUBSTRING 4 over <c>text</c> / <c>image</c> and 6 over
+    /// <c>ntext</c> (probed 2026-09-25 against SQL Server 2025).
     /// </summary>
-    internal static SimulatedSqlException NegativeLengthNotAllowedAtRuntime(bool isRight) =>
-        isRight
-            ? new("Invalid length parameter passed to the RIGHT function.", 536, 16, 2)
-            : new("Invalid length parameter passed to the LEFT or SUBSTRING function.", 537, 16, 2);
+    internal static SimulatedSqlException NegativeLengthNotAllowedAtRuntime(bool isRight, SqlType sourceType)
+    {
+        var isMax = sourceType is VarcharSqlType { length: SqlType.MaxLengthSentinel } or NVarcharSqlType { length: SqlType.MaxLengthSentinel } or VarbinarySqlType { length: SqlType.MaxLengthSentinel };
+        var isUnicode = sourceType is NVarcharSqlType or NCharSqlType;
+        return isRight
+            ? new("Invalid length parameter passed to the RIGHT function.", 536, 16, isMax ? (byte)5 : isUnicode ? (byte)4 : (byte)2)
+            : new("Invalid length parameter passed to the LEFT or SUBSTRING function.", 537, 16, sourceType switch
+            {
+                NTextSqlType => 6,
+                TextSqlType or ImageSqlType => 4,
+                _ => isMax || isUnicode ? (byte)3 : (byte)2,
+            });
+    }
 
     /// <summary>
     /// Mimics SQL Server error 1007: a numeric literal carries more than 38

@@ -45,7 +45,7 @@ internal sealed class GreatestLeast : Expression
     // (probe-confirmed against SQL Server 2025).
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
-        var branches = new (SqlType, int)[this.arguments.Length];
+        var branches = new (SqlType, int, Expression)[this.arguments.Length];
         var count = 0;
         for (var i = 0; i < this.arguments.Length; i++)
         {
@@ -60,7 +60,7 @@ internal sealed class GreatestLeast : Expression
             // (probe-confirmed against SQL Server 2025, 2026-09-23).
             if (type.IsLob)
                 throw SimulatedSqlException.InvalidArgumentDataType(type.SqlServerName, i + 1, this.isLeast ? "least" : "greatest", state: 4);
-            branches[count++] = (type, IntegerLiteralDigits(this.arguments[i]));
+            branches[count++] = (type, IntegerLiteralDigits(this.arguments[i]), this.arguments[i]);
         }
         this.cachedResultType = SqlType.PromoteBranches(branches.AsSpan(0, count));
         this.namingArm = FirstDecimalArm(this.arguments, batch, resolveColumnType);

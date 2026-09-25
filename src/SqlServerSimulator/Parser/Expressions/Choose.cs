@@ -51,11 +51,16 @@ internal sealed class Choose : Expression
         // A bare NULL has no type to contribute (probed 2026-09-25 against
         // SQL Server 2025: CHOOSE(2, NULL, 'x') is 'x').
         SqlType? t = null;
+        Expression? tSource = null;
         foreach (var value in this.values)
         {
             var type = value.GetSqlType(batch, resolveColumnType);
-            if (!IsUntypedNullLiteral(value))
-                t = t is null ? type : SqlType.Promote(t, type);
+            if (IsUntypedNullLiteral(value))
+                continue;
+            if (t is null)
+                (t, tSource) = (type, value);
+            else
+                t = SqlType.PromoteOperands(new(t, tSource), new(type, value));
         }
         t ??= this.values[0].GetSqlType(batch, resolveColumnType);
         this.cachedResultType = t;

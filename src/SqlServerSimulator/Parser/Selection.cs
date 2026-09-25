@@ -3266,7 +3266,7 @@ internal sealed partial class Selection
         // decimal one (probe-confirmed 2026-09-23: `(VALUES ('a'), (NULL))`
         // is varchar, `(VALUES (1), (2.5))` numeric(2, 1)).
         var schema = new SqlType[arity];
-        var cells = new (SqlType, int)[tuples.Count];
+        var cells = new (SqlType, int, Expression)[tuples.Count];
         for (var c = 0; c < arity; c++)
         {
             var count = 0;
@@ -3274,7 +3274,7 @@ internal sealed partial class Selection
             {
                 var cell = tuple[c];
                 if (!Expression.IsUntypedNullLiteral(cell))
-                    cells[count++] = (cell.GetSqlType(context.Batch, TypeResolver), Expression.IntegerLiteralDigits(cell));
+                    cells[count++] = (cell.GetSqlType(context.Batch, TypeResolver), Expression.IntegerLiteralDigits(cell), cell);
             }
             schema[c] = SqlType.PromoteBranches(cells.AsSpan(0, count));
         }

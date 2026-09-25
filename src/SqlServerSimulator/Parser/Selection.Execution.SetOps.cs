@@ -148,7 +148,9 @@ internal sealed partial class Selection
             // Msg 468 / 457 / 456 split and the marker it propagates otherwise.
             // A branch carrying an explicit COLLATE, or a literal (which is
             // coercible-default), outranks its partner and resolves cleanly.
-            combinedSchema[i] = SqlType.Promote(effectiveLeft, effectiveRight);
+            combinedSchema[i] = SqlType.PromoteOperands(
+                new(effectiveLeft, reportsNumeric: leftReportsNumeric is not null && leftReportsNumeric[i]),
+                new(effectiveRight, reportsNumeric: rightReportsNumeric is not null && rightReportsNumeric[i]));
             // A deduping operator has to compare the values it folds, so a type
             // that can't be compared at all is refused outright — the legacy
             // LOB trio, xml and the spatial pair alike, all naming the type in

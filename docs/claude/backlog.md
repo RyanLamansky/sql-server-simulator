@@ -377,7 +377,7 @@ Real bugs / limitations against shipped behavior — fixes are concrete work, no
   an **ordinary `UPDATE`** of the cell strands a pointer read before it (Msg 7123 on next use) where real's stays valid and reads the new value;
   and a **`WRITETEXT` of NULL** leaves the cell with no pointer where real keeps handing one out, since real's pointer reflects an allocated LOB root rather than a non-NULL value.
 - **A constant negative length is a statement error where real aborts the batch** — `SELECT SUBSTRING('abc', 1, -1)` is settled while compiling on both engines and reports the same Msg 536 (see [`legacy-lob.md`](legacy-lob.md#negative-length-msg-536-while-compiling-msg-537-at-run-time)), but real's is a batch-level compile failure that the same batch's `BEGIN TRY` can't catch, while the simulator's is an ordinary statement error.
-  The runtime half (Msg 537 for `LEFT` / `SUBSTRING`, Msg 536 state 2 for `RIGHT`) matches on both engines.
+  The runtime half (Msg 537 for `LEFT` / `SUBSTRING`, Msg 536 for `RIGHT`) matches on both engines.
 - **Two `ROWGUIDCOL` columns added in one `ALTER TABLE`** report only Msg 2761 here; real sends Msg 8196 (`Duplicate column specified as ROWGUIDCOL.`) ahead of it (probed 2026-09-24).
 
 - **`FORMAT`'s culture data is .NET's ICU set where real's is the .NET Framework's NLS set** — every divergence below is width-independent, reproducing for an `int`, a `money` and a narrow `decimal` alike, and each is what .NET itself produces for the same call (probed 2026-08-06):

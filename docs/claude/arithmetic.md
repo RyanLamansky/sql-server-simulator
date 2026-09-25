@@ -67,6 +67,8 @@ What the cells say:
 
 - **Msg 206** `Operand type clash: X is incompatible with Y` — no conversion at all.
   In a unification X is the lower-precedence side (the one that would convert), except that `xml` outranks a CLR type and `sql_variant`, and between two CLR types the later branch is named first.
+  Over three or more arms (CASE, COALESCE, IIF, CHOOSE, GREATEST / LEAST, a `VALUES` column) real settles the highest-precedence arm's type first and names the first arm that can't convert to it, as written: `COALESCE(1, 2.25, @time)` is `int is incompatible with time`, not the `numeric` the first two would unify to.
+  Real goes on to report every such arm; the simulator raises the first (probed 2026-09-25 against SQL Server 2025).
   In a comparison or an operator the order is fixed per pair whichever side each is written on (`int = date` and `date = int` both name `date` first; `int <> hierarchyid` names `int` first).
 - **Msg 257** `Implicit conversion from data type X to Y is not allowed. Use the CONVERT function to run this query.` (state 3) — a conversion real only performs explicitly: a binary to `date` / `time` / `datetime2` / `datetimeoffset` in a unification, a string to `timestamp`, `datetime` / `smalldatetime` / `sql_variant` meeting a number under `*` `/`, and `sql_variant` meeting a number under `+` `-`.
   An **operator** whose converted operand is a column reports **Msg 260** instead — `Disallowed implicit conversion from data type X to data type Y, table 'T', column 'C'.` — naming the object as the FROM clause wrote it, alias ignored (`#t`, `dbo.t`, a derived table or CTE by its alias, the column by its name there); a unification never does, even over two columns.

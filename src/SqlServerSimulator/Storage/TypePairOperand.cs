@@ -16,7 +16,7 @@ namespace SqlServerSimulator.Storage;
 /// made the bind quadratic and as deep as the chain. Only an error message
 /// reads it.
 /// </remarks>
-internal readonly struct TypePairOperand(SqlType type, Expression? source = null, string? sourceTable = null, string? sourceColumn = null)
+internal readonly struct TypePairOperand(SqlType type, Expression? source = null, string? sourceTable = null, string? sourceColumn = null, bool reportsNumeric = false)
 {
     public readonly SqlType Type = type;
 
@@ -30,4 +30,10 @@ internal readonly struct TypePairOperand(SqlType type, Expression? source = null
     public readonly string? SourceTable = sourceTable;
 
     public readonly string? SourceColumn = sourceColumn;
+
+    /// <summary>
+    /// A set operation's column arrives with no one expression to ask, so its
+    /// precomputed <see cref="Expression.ResultReportsNumeric"/> rides here.
+    /// </summary>
+    public readonly bool ReportsNumeric = reportsNumeric;
 }

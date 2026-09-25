@@ -97,7 +97,8 @@ public sealed class LegacyLobTests
     /// A constant negative length is settled while compiling (Msg 536, state 8
     /// for <c>SUBSTRING</c> and 6 for <c>LEFT</c> / <c>RIGHT</c>); one that only
     /// turns negative at run time reports Msg 537 for <c>LEFT</c> /
-    /// <c>SUBSTRING</c> and Msg 536 state 2 for <c>RIGHT</c>.
+    /// <c>SUBSTRING</c> and Msg 536 for <c>RIGHT</c>, at a state the source's
+    /// type picks.
     /// </summary>
     [TestMethod]
     [DataRow("select substring(0x0102, 1, -1)", 536, (byte)8, "Invalid length parameter passed to the substring function.")]
@@ -107,6 +108,13 @@ public sealed class LegacyLobTests
     [DataRow("declare @n int = -1; select substring('abc', 1, @n)", 537, (byte)2, "Invalid length parameter passed to the LEFT or SUBSTRING function.")]
     [DataRow("declare @n int = -1; select left('abc', @n)", 537, (byte)2, "Invalid length parameter passed to the LEFT or SUBSTRING function.")]
     [DataRow("declare @n int = -1; select right('abc', @n)", 536, (byte)2, "Invalid length parameter passed to the RIGHT function.")]
+    [DataRow("declare @n int = -1; select left(N'abc', @n)", 537, (byte)3, "Invalid length parameter passed to the LEFT or SUBSTRING function.")]
+    [DataRow("declare @n int = -1; select substring(cast('abc' as varchar(max)), 1, @n)", 537, (byte)3, "Invalid length parameter passed to the LEFT or SUBSTRING function.")]
+    [DataRow("declare @n int = -1; select left(cast(0x01 as varbinary(max)), @n)", 537, (byte)3, "Invalid length parameter passed to the LEFT or SUBSTRING function.")]
+    [DataRow("declare @n int = -1; select right(cast('abc' as nchar(3)), @n)", 536, (byte)4, "Invalid length parameter passed to the RIGHT function.")]
+    [DataRow("declare @n int = -1; select right(cast(0x01 as varbinary(max)), @n)", 536, (byte)5, "Invalid length parameter passed to the RIGHT function.")]
+    [DataRow("create table t (tx text); insert t values ('a'); declare @n int = -1; select substring(tx, 1, @n) from t", 537, (byte)4, "Invalid length parameter passed to the LEFT or SUBSTRING function.")]
+    [DataRow("create table t (nt ntext); insert t values ('a'); declare @n int = -1; select substring(nt, 1, @n) from t", 537, (byte)6, "Invalid length parameter passed to the LEFT or SUBSTRING function.")]
     public void NegativeLength_SplitsBetweenCompileAndRuntime(string sql, int number, byte state, string message)
     {
         var ex = new Simulation().AssertSqlError(sql, number);

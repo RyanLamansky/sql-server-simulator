@@ -55,7 +55,8 @@ The same constant-length narrowing reaches the *character* legacy LOBs: `SUBSTRI
 ### Negative length: Msg 536 while compiling, Msg 537 at run time
 
 SQL Server settles a **constant** negative length while compiling and reports **Msg 536** naming the one function — state 8 for `SUBSTRING`, state 6 for `LEFT` and `RIGHT`.
-A length that only turns negative at run time reports a different message per family: `LEFT` and `SUBSTRING` share **Msg 537** state 2 (`Invalid length parameter passed to the LEFT or SUBSTRING function.`) and `RIGHT` keeps **Msg 536** at state 2 with its own name capitalized (`Invalid length parameter passed to the RIGHT function.`).
+A length that only turns negative at run time reports a different message per family: `LEFT` and `SUBSTRING` share **Msg 537** (`Invalid length parameter passed to the LEFT or SUBSTRING function.`) and `RIGHT` keeps **Msg 536** with its own name capitalized (`Invalid length parameter passed to the RIGHT function.`).
+The state follows the source's bound type: 2 over a bounded ANSI string or binary, 3 (`RIGHT`: 4) over a bounded Unicode one, 3 (`RIGHT`: 5) over any MAX form, and for `SUBSTRING` 4 over `text` / `image` and 6 over `ntext` (probed 2026-09-25 against SQL Server 2025).
 The binary form takes the same split.
 
 The simulator raises the constant case from the result-type resolution the three scalars share, so it fires while the batch compiles, over an empty rowset and before any statement runs, the way real's check does.

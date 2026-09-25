@@ -1,3 +1,5 @@
+using SqlServerSimulator.Parser;
+
 namespace SqlServerSimulator.Storage;
 
 /// <summary>
@@ -36,7 +38,24 @@ internal abstract partial class SqlType
             return a;
         if (PairError(TypePairOperation.Unify, a, b, "") is { } error)
             throw error;
+        return PromoteUnifiable(a, b);
+    }
 
+    /// <summary>
+    /// <see cref="Promote"/> for operands whose diagnostic
+    /// may spell a <c>decimal</c> as <c>numeric</c>.
+    /// </summary>
+    public static SqlType PromoteOperands(TypePairOperand a, TypePairOperand b)
+    {
+        if (a.Type == b.Type)
+            return a.Type;
+        if (OperandPairError(TypePairOperation.Unify, a, b, "") is { } error)
+            throw error;
+        return PromoteUnifiable(a.Type, b.Type);
+    }
+
+    private static SqlType PromoteUnifiable(SqlType a, SqlType b)
+    {
         return a is SqlVariantSqlType || b is SqlVariantSqlType ? SqlVariant
             : IsNumericPairClass(a) && IsNumericPairClass(b) ? PromoteNumericPair(a, b)
             : a.Category == SqlTypeCategory.DateTime && b.Category == SqlTypeCategory.DateTime ? PromoteDateTime(a, b)
@@ -63,7 +82,7 @@ internal abstract partial class SqlType
     /// <c>(type, integerLiteralDigits)</c>; a digit count of <c>0</c> marks a
     /// non-literal. Callers pre-filter untyped NULLs out of the span.
     /// </summary>
-    public static SqlType PromoteBranches(ReadOnlySpan<(SqlType Type, int IntegerLiteralDigits)> branches)
+    public static SqlType PromoteBranches(ReadOnlySpan<(SqlType Type, int IntegerLiteralDigits, Expression Source)> branches)
     {
         var hasDecimal = false;
         foreach (var branch in branches)
@@ -81,9 +100,36 @@ internal abstract partial class SqlType
             var effective = hasDecimal && branch.IntegerLiteralDigits > 0
                 ? GetDecimal(branch.IntegerLiteralDigits, 0)
                 : branch.Type;
+            if (accumulated is not null && PairError(TypePairOperation.Unify, accumulated, effective, "") is { } pairError)
+                throw BranchUnificationError(branches) ?? pairError;
             accumulated = accumulated is null ? effective : Promote(accumulated, effective);
         }
         return accumulated ?? Int32;
+    }
+
+    /// <summary>
+    /// Real refuses a set of value arms by settling their type first — the
+    /// highest <see cref="Precedence"/> among them — and then converting each
+    /// arm to it in order, so the error names the first arm that can't convert,
+    /// as written, against that type: <c>COALESCE(1, 2.25, @time)</c> is
+    /// <c>int is incompatible with time</c>, not the <c>numeric(3, 2)</c> the
+    /// first two arms unify to (probed 2026-09-25 against SQL Server 2025, which
+    /// goes on to report every arm that fails; only the first is raised here).
+    /// </summary>
+    private static SimulatedSqlException? BranchUnificationError(ReadOnlySpan<(SqlType Type, int IntegerLiteralDigits, Expression Source)> branches)
+    {
+        var target = branches[0];
+        foreach (var branch in branches)
+        {
+            if (branch.Type.Precedence > target.Type.Precedence)
+                target = branch;
+        }
+        foreach (var branch in branches)
+        {
+            if (OperandPairError(TypePairOperation.Unify, new TypePairOperand(branch.Type, branch.Source), new TypePairOperand(target.Type, target.Source), "") is { } error)
+                return error;
+        }
+        return null;
     }
 
     /// <summary>

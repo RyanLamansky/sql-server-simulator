@@ -355,4 +355,27 @@ public class TypePromotionTests
         var ex = Throws<SimulatedSqlException>(() => connection.CreateCommand($"select id from t where {predicate}").ExecuteReader().Read());
         AreEqual(expectedMessage, ex.Message);
     }
+
+    /// <summary>
+    /// Real settles a set of value arms on the highest-precedence type and
+    /// names the first arm that can't convert to it, as written — a decimal
+    /// literal as numeric (probed 2026-09-25 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("coalesce(1.5, @t)", "numeric", "time")]
+    [DataRow("coalesce(@t, 1.5)", "numeric", "time")]
+    [DataRow("coalesce(1, 2.25, @t)", "int", "time")]
+    [DataRow("coalesce(cast(1 as decimal(5,1)), 1.5, @t)", "decimal", "time")]
+    [DataRow("coalesce(-1.5, @t)", "numeric", "time")]
+    [DataRow("iif(1 = 1, 1.5, @t)", "numeric", "time")]
+    [DataRow("greatest(@t, 12345.678)", "numeric", "time")]
+    [DataRow("choose(1, @t, 1.5)", "numeric", "time")]
+    [DataRow("coalesce('a', @g, 1)", "uniqueidentifier", "int")]
+    [DataRow("a from (values (1.5), (@t)) v(a)", "numeric", "time")]
+    public void ArmUnificationClash_NamesTheArmAsWritten(string expression, string arm, string target)
+        => new Simulation().AssertSqlError($"declare @t time, @g uniqueidentifier; select {expression}", 206, $"Operand type clash: {arm} is incompatible with {target}");
+
+    [TestMethod]
+    public void SetOperationClash_NamesADecimalLiteralNumeric()
+        => new Simulation().AssertSqlError("declare @t time; select @t union select 1.5", 206, "Operand type clash: numeric is incompatible with time");
 }

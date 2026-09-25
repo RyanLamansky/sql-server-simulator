@@ -405,5 +405,6 @@ partial class SqlType
         : type is DecimalSqlType && source is { ResultReportsNumeric: true } ? "numeric"
         : SimulatedSqlException.FamilyRootName(type);
 
-    private static string OperandName(TypePairOperand operand) => OperandName(operand.Type, operand.Source);
+    private static string OperandName(TypePairOperand operand) =>
+        operand.ReportsNumeric && operand.Type is DecimalSqlType ? "numeric" : OperandName(operand.Type, operand.Source);
 }

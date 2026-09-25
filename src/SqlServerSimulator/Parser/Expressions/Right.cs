@@ -10,6 +10,10 @@ namespace SqlServerSimulator.Parser.Expressions;
 internal sealed class Right : Expression
 {
     private readonly Expression source;
+
+    // The source's bound type, which the negative-length state reads: a MAX
+    // value doesn't carry its MAX-ness at runtime.
+    private SqlType? boundSourceType;
     private readonly Expression count;
 
     public Right(ParserContext context)
@@ -34,7 +38,7 @@ internal sealed class Right : Expression
 
         var len = StringScalars.CoerceLengthArgument(n);
         if (len < 0)
-            throw SimulatedSqlException.NegativeLengthNotAllowedAtRuntime(isRight: true);
+            throw SimulatedSqlException.NegativeLengthNotAllowedAtRuntime(isRight: true, this.boundSourceType ?? rawSource.Type);
 
         var input = s.AsString;
         var result = s.Type.Collation?.IsSupplementaryCharacterAware == true
@@ -46,6 +50,7 @@ internal sealed class Right : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
         var sourceType = StringScalars.BindArgument(source, batch, resolveColumnType, "right");
+        this.boundSourceType = sourceType;
         _ = AssignmentRules.ArgumentType(this.count, SqlType.Int32, batch, resolveColumnType);
         return ResolveResultType(sourceType, batch);
     }

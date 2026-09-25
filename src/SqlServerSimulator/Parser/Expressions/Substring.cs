@@ -19,6 +19,10 @@ namespace SqlServerSimulator.Parser.Expressions;
 internal sealed class Substring : Expression
 {
     private readonly Expression source;
+
+    // The source's bound type, which the negative-length state reads: a MAX
+    // value doesn't carry its MAX-ness at runtime.
+    private SqlType? boundSourceType;
     private readonly Expression start;
     private readonly Expression length;
 
@@ -65,7 +69,7 @@ internal sealed class Substring : Expression
         var startIndex = StringScalars.CoerceLengthArgument(startValue);
         var len = StringScalars.CoerceLengthArgument(lengthValue);
         if (len < 0)
-            throw SimulatedSqlException.NegativeLengthNotAllowedAtRuntime(isRight: false);
+            throw SimulatedSqlException.NegativeLengthNotAllowedAtRuntime(isRight: false, this.boundSourceType ?? s.Type);
 
         if (isBinarySource)
         {
@@ -108,6 +112,7 @@ internal sealed class Substring : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
         var sourceType = StringScalars.RequireStringArgument(source, source.GetSqlType(batch, resolveColumnType), "substring", 1, acceptsBinary: true);
+        this.boundSourceType = sourceType;
         ScalarArguments.RequireNumericSlot(start, batch, resolveColumnType, "substring", 2, NumericSlot.IntegerOrDecimal);
         ScalarArguments.RequireNumericSlot(length, batch, resolveColumnType, "substring", 3, NumericSlot.IntegerOrDecimal);
         return ResolveResultType(sourceType, batch);
