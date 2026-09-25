@@ -106,6 +106,9 @@ internal sealed partial class Selection
         // Excluders as residual filters below, so the aggregate sees exactly
         // the WHERE-passing rows (e.g. SELECT SUM(x) ... WHERE indexedcol = @v
         // seeks instead of scanning the whole heap).
+        var projectionGroupingKeys = fromClause.GroupingSetsWritten ? ProjectionGroupingKeys(sources, expressions, fromClause) : null;
+        ShapeKey[] currentSetKeys = [];
+
         sources = MaybeApplyIndexSeek(sources, joins, fromClause.Excluders, batch, outerResolver);
         (sources, joins) = NarrowJoinSources(sources, joins, fromClause.Excluders, batch, outerResolver);
 
@@ -470,6 +473,8 @@ internal sealed partial class Selection
         foreach (var groupingSet in effectiveSets)
         {
             currentGroupingSet = groupingSet;
+            if (projectionGroupingKeys is not null)
+                currentSetKeys = Array.ConvertAll(groupingSet, grouping => GroupingKey(sources, Peel(grouping)));
             Dictionary<SqlValueKey, GroupState> groups;
             if (streamedGroups is not null)
             {
@@ -562,7 +567,13 @@ internal sealed partial class Selection
                     // reused scratch and only copied out on admission.
                     var projected = topNGroups is null ? new SqlValue[expressions.Count] : projectionScratch;
                     for (var i = 0; i < expressions.Count; i++)
-                        projected[i] = expressions[i].Run(groupRuntime);
+                    {
+                        projected[i] = projectionGroupingKeys?[i] is { } matched
+                            ? Array.IndexOf(currentSetKeys, matched) is >= 0 and var position
+                                ? currentState.KeyValues[position]
+                                : SqlValue.Null(expressions[i].GetSqlType(batch, resolveColumnType))
+                            : expressions[i].Run(groupRuntime);
+                    }
 
                     // Aggregate-query ORDER BY: keys are computed here, where
                     // each aggregate is bound and the grouping context is
@@ -712,6 +723,61 @@ internal sealed partial class Selection
     /// from the GROUP BY's column references) plus one aggregator per
     /// <see cref="AggregateExpression"/> in the projection.
     /// </summary>
+    /// <summary>
+    /// Under a grouping-set form, the grouping expression each projection
+    /// takes its value from, or null where it computes: a projection that
+    /// reads only bare grouping columns computes from them (NULL where its set
+    /// groups one away), while any other one matching a grouping expression by
+    /// shape reads that expression's key — NULL in a set that groups it away,
+    /// though a column it shares with a kept expression is live. Probed
+    /// 2026-09-24: over GROUPING SETS ((a + 1), (a + 2)) each set NULLs the
+    /// other's expression, and over ((a + b), (a)) `a + b` keeps its value in
+    /// its own set though `a` is grouped away there.
+    /// </summary>
+    private static ShapeKey?[]? ProjectionGroupingKeys(FromSource[] sources, List<Expression> expressions, FromClause fromClause)
+    {
+        var bareGrouped = new HashSet<(int Source, int Column)>();
+        var expressionKeys = new HashSet<ShapeKey>();
+        foreach (var grouping in fromClause.AllGroupingExpressions)
+        {
+            var peeled = Peel(grouping);
+            if (peeled is Reference bare)
+            {
+                if (TryResolveSourceColumn(sources, bare.ReferencedName) is { } id)
+                    _ = bareGrouped.Add(id);
+            }
+            else
+            {
+                _ = expressionKeys.Add(GroupingKey(sources, peeled));
+            }
+        }
+        if (expressionKeys.Count == 0)
+            return null;
+
+        ShapeKey?[]? keys = null;
+        for (var i = 0; i < expressions.Count; i++)
+        {
+            var projection = Peel(expressions[i]);
+            if (projection is Reference or AggregateExpression)
+                continue;
+            var readsOnlyBareKeys = true;
+            projection.VisitColumnReferences(name => readsOnlyBareKeys &= TryResolveSourceColumn(sources, name) is { } id && bareGrouped.Contains(id));
+            if (readsOnlyBareKeys)
+                continue;
+            var key = GroupingKey(sources, projection);
+            if (expressionKeys.Contains(key))
+                (keys ??= new ShapeKey?[expressions.Count])[i] = key;
+        }
+        return keys;
+    }
+
+    private static Expression Peel(Expression expression)
+    {
+        while (expression is NamedExpression or Parenthesized)
+            expression = expression is NamedExpression named ? named.Inner : ((Parenthesized)expression).Wrapped;
+        return expression;
+    }
+
     private sealed class GroupState(SqlValue[] keyValues, Aggregator[] aggregators)
     {
         public readonly SqlValue[] KeyValues = keyValues;

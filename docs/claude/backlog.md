@@ -245,7 +245,6 @@ Already listed elsewhere here and not repeated: parenthesized set-op branches.
 
 **Wrong results**:
 
-- `GROUPING SETS ((a + 1), (a + 2))` projecting both expressions: the grouped-away one reads NULL on real, but a column shared with the kept expression still resolves here (the grouped-key resolver NULLs columns, not whole expressions).
 - `STRING_AGG(s, CAST(',' AS varchar(2)))` over a table is Msg 8733 on real and aggregates here; over a `VALUES` source real accepts it too, so what separates the two isn't settled (probed 2026-09-24).
 - `LOWER` / `UPPER` use English case mapping under every collation; a Turkish collation's own mapping isn't modeled.
 

@@ -643,4 +643,21 @@ public sealed class GroupingSetTests
                 select {projection} x from (values (1, cast('2024-01-01' as date)), (2, cast('2025-01-01' as date))) v(a, d) group by {groupBy}
             ) q where x is null
             """));
+
+    // A projection matching a grouping expression takes that expression's key,
+    // NULL where the set groups it away — unless it reads only bare grouping
+    // columns, which compute (probed 2026-09-24 against SQL Server 2025).
+    [TestMethod]
+    [DataRow("select a + 1, a + 2 from (values (1), (2)) t(a) group by grouping sets ((a + 1), (a + 2))", "2,NULL;3,NULL;NULL,3;NULL,4")]
+    [DataRow("select a + b, a from (values (1, 10), (2, 20)) t(a, b) group by grouping sets ((a + b), (a))", "11,NULL;22,NULL;NULL,1;NULL,2")]
+    [DataRow("select a + 1, a from (values (1), (2)) t(a) group by grouping sets ((a + 1), (a))", "2,1;3,2;NULL,NULL;NULL,NULL")]
+    public void GroupingExpression_IsMatchedWhole(string sql, string expected)
+    {
+        var rows = new List<string>();
+        using var reader = new Simulation().ExecuteReader(sql);
+        while (reader.Read())
+            rows.Add(string.Join(",", reader.IsDBNull(0) ? "NULL" : reader.GetValue(0).ToString(), reader.IsDBNull(1) ? "NULL" : reader.GetValue(1).ToString()));
+        rows.Sort(StringComparer.Ordinal);
+        AreEqual(expected, string.Join(";", rows));
+    }
 }
