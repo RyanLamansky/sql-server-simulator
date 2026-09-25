@@ -480,4 +480,10 @@ public sealed class RefusalFidelityTests
         AreEqual($"Incorrect syntax near the keyword '{keyword}'.", ex.Errors[0].Message);
         AreEqual((byte)state, ex.Errors[0].State);
     }
+
+    [TestMethod]
+    [DataRow("select .e1", ".e1")]
+    [DataRow("select 1 from (select 1 a) t where .e1 = 1", ".e1")]
+    public void LeadingDotName_IsAMultiPartIdentifier(string sql, string name)
+        => new Simulation().AssertSqlError(sql, 4104, $"The multi-part identifier \"{name}\" could not be bound.");
 }

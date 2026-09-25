@@ -247,7 +247,6 @@ Already listed elsewhere here and not repeated: parenthesized set-op branches.
 
 **Real accepts, the simulator refuses**:
 
-- `.e1` is a column reference on real (Msg 4104), a syntax error here.
 - Numbered procedures (`CREATE PROC p;2`, `EXEC p;2`).
 - A `decimal(p, 0)` identity seed or increment past `bigint`'s range (`NotSupportedException` here; the identity state is a `long`).
 - `RAISERROR` at severity 20 and up `WITH LOG`, which ends the connection on real (`NotSupportedException` here).

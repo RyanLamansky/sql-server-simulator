@@ -287,6 +287,7 @@ internal abstract class Expression : ExpressionNode
         ReservedKeyword { Keyword: Keyword.Left or Keyword.Right or Keyword.Convert or Keyword.Try_Convert or Keyword.Coalesce or Keyword.NullIf } reserved => Counted(context, new Reference(reserved.ToString())),
         UnquotedString { ContextualKeyword: ContextualKeyword.Next } nextToken => (Expression?)TryParseNextValueForOrFallback(context) ?? Counted(context, new Reference(nextToken)),
         Name name => Counted(context, new Reference(name)),
+        Operator { Character: '.' } when LeadingDotReference(context) is { } dotted => dotted,
         Operator { Character: '(' } => ParseGroupedExpression(context),
         // ODBC escape sequence: {d '…'} / {t '…'} / {ts '…'} / {guid '…'} typed
         // literals and {fn NAME(…)} the scalar-function escape.
@@ -299,6 +300,20 @@ internal abstract class Expression : ExpressionNode
         ReservedKeyword reservedAtom => throw SimulatedSqlException.SyntaxErrorNearKeyword(reservedAtom),
         _ => throw SimulatedSqlException.SyntaxErrorNear(context)
     };
+
+    /// <summary>
+    /// A name with an empty leading part — <c>.e1</c> — which real reads as a
+    /// multi-part identifier and reports as Msg 4104 when nothing binds it
+    /// (probed 2026-09-24). Null, with the cursor unmoved, when no name follows.
+    /// </summary>
+    private static Reference? LeadingDotReference(ParserContext context)
+    {
+        var checkpoint = context.SaveCheckpoint();
+        if (context.GetNextOptional() is Name name)
+            return Counted(context, new Reference(string.Empty, name.Value));
+        context.RestoreCheckpoint(checkpoint);
+        return null;
+    }
 
     /// <summary>
     /// Consumes the postfix operators that bind tighter than any binary
