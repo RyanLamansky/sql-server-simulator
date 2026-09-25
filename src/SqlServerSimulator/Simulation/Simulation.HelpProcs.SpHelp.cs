@@ -139,6 +139,14 @@ partial class Simulation
         // sys.all_objects first and only falls back to type_id).
         if (!TryResolveHelpTargetForHelp(batch, objectName, out var target))
         {
+            var parsedName = ParseHelpObjectName(database, objectName);
+            if (batch.TryResolveCatalogView(parsedName, out var catalogView, out _))
+            {
+                foreach (var outcome in HelpCatalogView(batch, catalogView, parsedName, objectName))
+                    yield return outcome;
+                yield break;
+            }
+
             var typeRows = HelpNamedUserType(batch, objectName) is { Count: > 0 } found
                 ? found
                 : throw SimulatedSqlException.HelpObjectDoesNotExist(objectName, database.Name);
@@ -196,6 +204,39 @@ partial class Simulation
             foreach (var outcome in HelpIndexResultSets(batch, target, objectName))
                 yield return outcome;
         }
+    }
+
+    /// <summary>
+    /// <c>sp_help</c> over a catalog view, which real describes as a view
+    /// owned by its schema — its columns, the identity / rowguidcol pair, and
+    /// the no-constraints, no-foreign-keys and no-indexes messages (probed
+    /// 2026-09-25 against SQL Server 2025 with <c>sys.objects</c>).
+    /// </summary>
+    private static IEnumerable<SimulatedStatementOutcome> HelpCatalogView(
+        BatchContext batch, CatalogView view, MultiPartName name, string objectName)
+    {
+        var owner = name.ImmediateQualifier switch
+        {
+            { } qualifier when BuiltInToken.Equals(qualifier, "INFORMATION_SCHEMA") => "INFORMATION_SCHEMA",
+            { } qualifier when BuiltInToken.Equals(qualifier, Database.DefaultSchemaName) => Database.DefaultSchemaName,
+            _ => "sys",
+        };
+        List<SqlValue[]> objectInfo =
+        [
+            [
+                SqlValue.FromSystemName(view.Name),
+                SqlValue.FromSystemName(owner),
+                SqlValue.FromString(HelpObjectTypeType, "view"),
+                SqlValue.FromDateTime(BuiltInResources.SystemObjectDate),
+            ],
+        ];
+        yield return new SimulatedSqlResultSet(SpHelpObjectSchema, SpHelpObjectColumnNames, objectInfo);
+        yield return HelpColumnResultSet(batch.CurrentDatabase, view.Columns);
+        yield return HelpIdentityResultSet(view.Columns);
+        yield return HelpRowGuidColResultSet(view.Columns);
+        HelpNoConstraints(batch, objectName);
+        HelpNoReferencingForeignKeys(batch, objectName);
+        HelpNoIndexes(batch, objectName);
     }
 
     // sp_help's own resolution, which must not raise when the name is a type
@@ -443,7 +484,9 @@ partial class Simulation
 
     private static SqlValue HelpColumnCollation(Database database, HeapColumn column) =>
         column.Type.Category != SqlTypeCategory.String ? SqlValue.Null(SqlType.SystemName)
-        : SqlValue.FromSystemName(column.Collation ?? database.CollationName);
+        : SqlValue.FromSystemName(column.Collation
+            ?? (column.Type is SystemNameSqlType ? null : column.Type.Collation?.Name)
+            ?? database.CollationName);
 
     // The types whose Prec / Scale cells real renders — matched by name against
     // its @precscaletypes list. Everything else gets five blanks.

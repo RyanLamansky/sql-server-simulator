@@ -326,6 +326,18 @@ public sealed class HelpProcTests
     }
 
     [TestMethod]
+    public void SpHelp_CatalogView_DescribesItAsASysView()
+    {
+        var (sets, errors) = RunHelp(new Simulation(), "exec sp_help 'sys.objects'");
+        HasCount(4, sets);
+        CollectionAssert.AreEqual(new object?[] { "objects", "sys", "view" }, sets[0].Rows[0][..3]);
+        CollectionAssert.AreEqual(
+            new object?[] { "type", "char", "no", 2, "     ", "     ", "yes", "no", "yes", "Latin1_General_CI_AS_KS_WS" },
+            sets[1].Rows[5]);
+        CollectionAssert.AreEqual(new[] { 15469, 15470, 15472 }, errors.ConvertAll(e => e.Number));
+    }
+
+    [TestMethod]
     public void SpHelp_Table_ListsTheSchemaBoundViewsReferencingIt()
     {
         var sim = new Simulation();

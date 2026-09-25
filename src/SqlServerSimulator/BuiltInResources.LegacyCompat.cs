@@ -11,7 +11,7 @@ internal static partial class BuiltInResources
     // date here; the simulator has no such artifact, so a stable constant keeps
     // the projection deterministic across runs. Never read for a semantic
     // decision — SSMS's system-object probes gate on name/existence only.
-    private static readonly DateTime SystemObjectDate = new(2025, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+    internal static readonly DateTime SystemObjectDate = new(2025, 1, 1, 0, 0, 0, DateTimeKind.Utc);
 
     /// <summary>
     /// Canonical list of the system procedures the simulator dispatches — the
