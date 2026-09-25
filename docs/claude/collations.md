@@ -264,13 +264,14 @@ Sites that intentionally stay on `Collation.Baseline`:
 
 ## Catalog views pin `_desc` / enum columns to `Collation.Catalog`
 
-`Collation.Catalog` resolves to `Latin1_General_CI_AS_KS_WS`, the collation SQL Server 2025 reports on every one of its 425 catalog columns that carry one (`sys.all_columns.collation_name`, and `SQL_VARIANT_PROPERTY(…, 'Collation')` on `type_desc` / `type` / `permission_name` / `state_desc`, probed 2026-09-25), and the name its Msg 451 names when a catalog column meets a database-collation one.
+`Collation.Catalog` resolves to `Latin1_General_CI_AS_KS_WS`, the collation SQL Server 2025 reports on 425 of its catalog columns — the `_desc` enums, the type codes, `permission_name` — and the one its Msg 451 names when such a column meets a database-collation one (`sys.all_columns.collation_name` and `SQL_VARIANT_PROPERTY(…, 'Collation')`, probed 2026-09-25).
+The rest of real's collated catalog columns carry the server collation (`Collation.Baseline`) or a fixed one of their own — `Latin1_General_BIN` for the Service Broker and CLR-assembly names, `Latin1_General_CI_AI` for `sys.spatial_reference_systems`' text — and each declaration names whichever real reports, found by sweeping every view's `sp_describe_first_result_set` against real (2026-09-25); so not every `_desc` column is catalog-collated (the availability-group ones are the server's).
 The simulator once pinned `Latin1_General_100_CI_AS_KS_WS_SC` instead — the contained-database catalog collation Microsoft's "Contained Database Collations" doc names — but a non-contained instance never reports it, and the two sort some characters differently, so real's value is the one that matches both the metadata and the behavior.
 
 The catalog-view registrations (across the `BuiltInResources.<Topic>.cs` partials) share `nvarchar60Catalog` / `nvarchar128Catalog` / `charTwo` / `charOne` as `private static readonly` fields in root `BuiltInResources.cs`, all at `Collation.Catalog` + `Coercibility.Implicit`.
 Sites that pin to catalog:
 
-- 25 `_desc` columns (`type_desc`, `class_desc`, `state_desc`, `temporal_type_desc`, `delete_referential_action_desc`, etc.).
+- Most `_desc` columns (`type_desc`, `class_desc`, `state_desc`, `temporal_type_desc`, `delete_referential_action_desc`, etc.).
 - `sys.database_permissions.permission_name`.
 - The `type` / `state` char(1)/char(2) enum-code columns and matching cell-value sites (`fkType` 'F ', `ckType` 'C ', `dfType` 'D ', `pkType` 'PK', `uqType` 'UQ', etc.).
 - The null-`_desc` placeholder in `sys.spatial_indexes` (cell carries the catalog tag for visual consistency; row encode/decode routes through the column type anyway).

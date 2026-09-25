@@ -147,7 +147,7 @@ internal static partial class BuiltInResources
             new("data_compression", SqlType.TinyInt, null, false),
             new("data_compression_desc", nvarchar60Catalog, 60, true),
             new("xml_compression", SqlType.Bit, null, true),
-            new("xml_compression_desc", varchar3Catalog, 3, true),
+            new("xml_compression_desc", VarcharSqlType.Get(3, Collation.Baseline, Coercibility.Implicit), 3, true),
         ], EnumerateSysPartitions);
 
         // sys.allocation_units: probe-confirmed 8-column shape against SQL
@@ -383,12 +383,12 @@ internal static partial class BuiltInResources
             new("object_id", SqlType.Int32, null, false),
             new("index_id", SqlType.Int32, null, false),
             new("path_id", SqlType.Int32, null, true),
-            new("path", SqlType.NVarchar, 4000, true),
+            new("path", NVarcharSqlType.Get(4000, Collation.Get("Latin1_General_BIN2"), Coercibility.Implicit), 4000, true),
             new("name", SqlType.SystemName, 128, true),
             new("path_type", SqlType.TinyInt, null, true),
-            new("path_type_desc", NVarcharSqlType.Get(128, Collation.Catalog, Coercibility.Implicit), 128, true),
+            new("path_type_desc", NVarcharSqlType.Get(128, Collation.Baseline, Coercibility.Implicit), 128, true),
             new("xml_component_id", SqlType.Int32, null, true),
-            new("xquery_type_description", SqlType.NVarchar, 4000, true),
+            new("xquery_type_description", NVarcharSqlType.Get(4000, Collation.Get("Latin1_General_BIN2"), Coercibility.Implicit), 4000, true),
             new("is_xquery_type_inferred", SqlType.Bit, null, true),
             new("xquery_max_length", SqlType.Int32, null, true),
             new("is_xquery_max_length_inferred", SqlType.Bit, null, true),
@@ -419,7 +419,7 @@ internal static partial class BuiltInResources
         [
             new("object_id", SqlType.Int32, null, false),
             new("index_id", SqlType.Int32, null, false),
-            new("path", VarcharSqlType.Get(8000, Collation.Baseline, Coercibility.CoercibleDefault), 8000, true),
+            new("path", VarcharSqlType.Get(8000, Collation.Get("Latin1_General_100_BIN2_UTF8"), Coercibility.Implicit), 8000, true),
         ], static (_, _) => EmptyCatalogRows);
         Sys("selective_xml_index_namespaces",
         [
@@ -453,7 +453,7 @@ internal static partial class BuiltInResources
             new("auto_created", SqlType.Bit, null, true),
             new("vector_index_type", nvarchar60Catalog, 60, true),
             new("distance_metric", nvarchar60Catalog, 60, true),
-            new("build_parameters", SqlType.NVarchar, 4000, true),
+            new("build_parameters", NVarcharSqlType.Get(4000, Collation.Get("Latin1_General_100_BIN2_UTF8"), Coercibility.Implicit), 4000, true),
         ], static (_, _) => EmptyCatalogRows);
 
         // sys.partition_functions / sys.partition_schemes /

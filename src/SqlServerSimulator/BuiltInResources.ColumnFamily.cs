@@ -95,7 +95,7 @@ internal static partial class BuiltInResources
         [
             new("object_id", SqlType.Int32, null, false),
             new("is_enabled", SqlType.Bit, null, false),
-            new("directory_name", SqlType.NVarchar, 256, false),
+            new("directory_name", NVarcharSqlType.Get(256, Collation.Catalog, Coercibility.Implicit), 256, false),
             new("filename_collation_id", SqlType.Int32, null, false),
             new("filename_collation_name", SqlType.NVarchar, 129, false),
         ], static (batch, database) => []);
@@ -111,7 +111,7 @@ internal static partial class BuiltInResources
             new("name", SqlType.SystemName, 128, true),
             new("column_id", SqlType.Int32, null, false),
             new("is_masked", SqlType.Bit, null, true),
-            new("masking_function", SqlType.NVarchar, 4000, true),
+            new("masking_function", NVarcharSqlType.Get(4000, Collation.Catalog, Coercibility.Implicit), 4000, true),
         ], static (batch, database) => []);
 
         // sys.computed_columns: one row per computed column. Real SQL Server
@@ -208,7 +208,7 @@ internal static partial class BuiltInResources
             new("is_auto_cleanup_on", SqlType.TinyInt, null, true),
             new("retention_period", SqlType.Int32, null, true),
             new("retention_period_units", SqlType.TinyInt, null, true),
-            new("retention_period_units_desc", nvarchar60Catalog, 60, true),
+            new("retention_period_units_desc", NVarcharSqlType.Get(60, Collation.Baseline, Coercibility.Implicit), 60, true),
             new("max_cleanup_version", SqlType.BigInt, null, true),
         ], static (batch, database) => []);
 
@@ -217,7 +217,7 @@ internal static partial class BuiltInResources
             new("database_id", SqlType.Int32, null, false),
             new("non_transacted_access", SqlType.TinyInt, null, false),
             new("non_transacted_access_desc", nvarchar60Catalog, 60, false),
-            new("directory_name", SqlType.NVarchar, 256, true),
+            new("directory_name", NVarcharSqlType.Get(256, Collation.Catalog, Coercibility.Implicit), 256, true),
         ], static (batch, database) => []);
 
         // sys.external_data_sources: PolyBase / external data sources aren't

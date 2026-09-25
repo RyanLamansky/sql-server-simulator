@@ -1353,4 +1353,11 @@ public sealed class CatalogViewTests
             select string_agg(concat(type_name(system_type_id), '|', max_length), ';') within group (order by column_id)
             from tempdb.sys.columns where object_id = object_id('tempdb..#x')
             """));
+
+    [TestMethod]
+    public void CatalogColumnCollations_FollowReal()
+        => AreEqual("SQL_Latin1_General_CP1_CI_AS|Latin1_General_BIN", ExecuteScalar("""
+            select (select top 1 cast(sql_variant_property(delayed_durability_desc, 'Collation') as sysname) from sys.databases)
+                + '|' + (select top 1 cast(sql_variant_property(assembly_class, 'Collation') as sysname) from sys.assembly_types where assembly_class is not null)
+            """));
 }

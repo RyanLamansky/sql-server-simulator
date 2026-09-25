@@ -396,7 +396,7 @@ internal static partial class BuiltInResources
             new("is_ansi_padded", SqlType.Bit, null, false),
             new("column_encryption_key_id", SqlType.Int32, null, true),
             new("default_object_id", SqlType.Int32, null, false),
-            new("encryption_algorithm_name", SqlType.SystemName, 128, true),
+            new("encryption_algorithm_name", nvarchar128Catalog, 128, true),
             new("encryption_type", SqlType.Int32, null, true),
             new("generated_always_type", SqlType.TinyInt, null, true),
             new("graph_type", SqlType.Int32, null, true),

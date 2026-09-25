@@ -404,7 +404,7 @@ internal static partial class BuiltInResources
             new("credential_identity", SqlType.NVarchar, 4000, true),
             new("create_date", SqlType.DateTime, null, false),
             new("modify_date", SqlType.DateTime, null, false),
-            new("target_type", SqlType.NVarchar, 60, true),
+            new("target_type", nvarchar60Catalog, 60, true),
             new("target_id", SqlType.Int32, null, true),
         ], static (_, _) => EmptyCatalogRows);
         Sys("security_policies",

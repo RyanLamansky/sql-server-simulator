@@ -26,7 +26,7 @@ internal static partial class BuiltInResources
 
         Sys("services",
         [
-            new("name", SqlType.SystemName, 128, false),
+            new("name", NVarcharSqlType.Get(128, Collation.Get("Latin1_General_BIN"), Coercibility.Implicit), 128, false),
             new("service_id", SqlType.Int32, null, false),
             new("principal_id", SqlType.Int32, null, true),
             new("service_queue_id", SqlType.Int32, null, false),
@@ -56,7 +56,7 @@ internal static partial class BuiltInResources
         ]);
         Sys("service_contracts",
         [
-            new("name", SqlType.SystemName, 128, false),
+            new("name", NVarcharSqlType.Get(128, Collation.Get("Latin1_General_BIN"), Coercibility.Implicit), 128, false),
             new("service_contract_id", SqlType.Int32, null, false),
             new("principal_id", SqlType.Int32, null, true),
         ]);
@@ -74,10 +74,10 @@ internal static partial class BuiltInResources
         ]);
         Sys("service_message_types",
         [
-            new("name", SqlType.SystemName, 128, false),
+            new("name", NVarcharSqlType.Get(128, Collation.Get("Latin1_General_BIN"), Coercibility.Implicit), 128, false),
             new("message_type_id", SqlType.Int32, null, false),
             new("principal_id", SqlType.Int32, null, true),
-            new("validation", charTwo, 2, false),
+            new("validation", CharSqlType.Get(2, Collation.Get("Latin1_General_BIN"), Coercibility.Implicit), 2, false),
             new("validation_desc", nvarchar60Catalog, 60, true),
             new("xml_collection_id", SqlType.Int32, null, true),
         ]);
@@ -86,11 +86,11 @@ internal static partial class BuiltInResources
             new("name", SqlType.SystemName, 128, false),
             new("route_id", SqlType.Int32, null, false),
             new("principal_id", SqlType.Int32, null, true),
-            new("remote_service_name", SqlType.NVarchar, 256, true),
-            new("broker_instance", SqlType.NVarchar, 128, true),
+            new("remote_service_name", NVarcharSqlType.Get(256, Collation.Get("Latin1_General_BIN"), Coercibility.Implicit), 256, true),
+            new("broker_instance", NVarcharSqlType.Get(128, Collation.Get("Latin1_General_BIN"), Coercibility.Implicit), 128, true),
             new("lifetime", SqlType.DateTime, null, true),
-            new("address", SqlType.NVarchar, 256, true),
-            new("mirror_address", SqlType.NVarchar, 256, true),
+            new("address", NVarcharSqlType.Get(256, Collation.Get("Latin1_General_BIN"), Coercibility.Implicit), 256, true),
+            new("mirror_address", NVarcharSqlType.Get(256, Collation.Get("Latin1_General_BIN"), Coercibility.Implicit), 256, true),
         ]);
         Sys("conversation_priorities",
         [
@@ -106,7 +106,7 @@ internal static partial class BuiltInResources
             new("name", SqlType.SystemName, 128, false),
             new("remote_service_binding_id", SqlType.Int32, null, false),
             new("principal_id", SqlType.Int32, null, true),
-            new("remote_service_name", SqlType.NVarchar, 256, true),
+            new("remote_service_name", NVarcharSqlType.Get(256, Collation.Get("Latin1_General_BIN"), Coercibility.Implicit), 256, true),
             new("service_contract_id", SqlType.Int32, null, false),
             new("remote_principal_id", SqlType.Int32, null, true),
             new("is_anonymous_on", SqlType.Bit, null, false),
@@ -120,8 +120,8 @@ internal static partial class BuiltInResources
             new("parent_id", SqlType.Int32, null, false),
             new("create_date", SqlType.DateTime, null, false),
             new("modify_date", SqlType.DateTime, null, false),
-            new("service_name", SqlType.NVarchar, 256, true),
-            new("broker_instance", SqlType.NVarchar, 128, true),
+            new("service_name", NVarcharSqlType.Get(256, Collation.Get("Latin1_General_BIN"), Coercibility.Implicit), 256, true),
+            new("broker_instance", NVarcharSqlType.Get(128, Collation.Get("Latin1_General_BIN"), Coercibility.Implicit), 128, true),
             new("creator_sid", SqlType.Varbinary, 85, true),
             new("principal_id", SqlType.Int32, null, true),
         ]);

@@ -50,11 +50,11 @@ internal static partial class BuiltInResources
         [
             new("object_id", SqlType.Int32, null, false),
             new("type", SqlType.Int32, null, false),
-            new("type_desc", SqlType.NVarchar, 128, false),
+            new("type_desc", nvarchar128Catalog, 128, false),
             new("is_first", SqlType.Bit, null, true),
             new("is_last", SqlType.Bit, null, true),
             new("event_group_type", SqlType.Int32, null, true),
-            new("event_group_type_desc", SqlType.NVarchar, 128, true),
+            new("event_group_type_desc", nvarchar128Catalog, 128, true),
             new("is_trigger_event", SqlType.Bit, null, true),
         ], EnumerateSysTriggerEvents);
 
@@ -68,7 +68,7 @@ internal static partial class BuiltInResources
         Sys("trigger_event_types",
         [
             new("type", SqlType.Int32, null, false),
-            new("type_name", eventTypeNameCol, 64, true),
+            new("type_name", NVarcharSqlType.Get(64, Collation.Baseline, Coercibility.Implicit), 64, true),
             new("parent_type", SqlType.Int32, null, true),
         ], (batch, database) => EnumerateSysTriggerEventTypes(eventTypeNameCol));
 
@@ -80,8 +80,8 @@ internal static partial class BuiltInResources
         [
             new("object_id", SqlType.Int32, null, false),
             new("assembly_id", SqlType.Int32, null, false),
-            new("assembly_class", SqlType.NVarchar, 128, true),
-            new("assembly_method", SqlType.NVarchar, 128, true),
+            new("assembly_class", NVarcharSqlType.Get(128, Collation.Get("Latin1_General_BIN"), Coercibility.Implicit), 128, true),
+            new("assembly_method", NVarcharSqlType.Get(128, Collation.Get("Latin1_General_BIN"), Coercibility.Implicit), 128, true),
             new("null_on_null_input", SqlType.Bit, null, true),
             new("execute_as_principal_id", SqlType.Int32, null, true),
         ], static (batch, database) => EnumerateAssemblyModules(database));
@@ -96,7 +96,7 @@ internal static partial class BuiltInResources
             new("name", SqlType.SystemName, 128, false),
             new("principal_id", SqlType.Int32, null, true),
             new("assembly_id", SqlType.Int32, null, false),
-            new("clr_name", SqlType.NVarchar, 4000, true),
+            new("clr_name", NVarcharSqlType.Get(4000, Collation.Get("Latin1_General_BIN"), Coercibility.Implicit), 4000, true),
             new("permission_set", SqlType.TinyInt, null, true),
             new("permission_set_desc", nvarchar60Catalog, 60, true),
             new("is_visible", SqlType.Bit, null, false),
@@ -364,10 +364,10 @@ internal static partial class BuiltInResources
         [
             new("object_id", SqlType.Int32, null, false),
             new("type", SqlType.Int32, null, false),
-            new("type_desc", SqlType.NVarchar, 128, false),
+            new("type_desc", nvarchar128Catalog, 128, false),
             new("is_trigger_event", SqlType.Bit, null, true),
             new("event_group_type", SqlType.Int32, null, true),
-            new("event_group_type_desc", SqlType.NVarchar, 128, true),
+            new("event_group_type_desc", nvarchar128Catalog, 128, true),
         ], static (_, _) => EmptyCatalogRows);
 
         // sys.assembly_files: one row per registered assembly, carrying the

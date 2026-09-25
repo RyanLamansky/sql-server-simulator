@@ -70,7 +70,7 @@ internal static partial class BuiltInResources
             new("size_based_cleanup_mode_desc", nvarchar60Catalog, 60, true),
             new("wait_stats_capture_mode", SqlType.SmallInt, null, false),
             new("wait_stats_capture_mode_desc", nvarchar60Catalog, 60, true),
-            new("actual_state_additional_info", SqlType.NVarchar, 4000, true),
+            new("actual_state_additional_info", NVarcharSqlType.Get(4000, Collation.Catalog, Coercibility.Implicit), 4000, true),
         ], EnumerateSysDatabaseQueryStoreOptions);
 
         Sys("database_query_store_internal_state",

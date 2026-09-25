@@ -422,7 +422,7 @@ internal static partial class BuiltInResources
             new("is_disabled", SqlType.Bit, null, false),
             new("query_text", SqlType.NVarcharMax, null, true),
             new("scope_type", SqlType.TinyInt, null, false),
-            new("scope_type_desc", nvarchar60Catalog, 60, true),
+            new("scope_type_desc", NVarcharSqlType.Get(60, Collation.Baseline, Coercibility.Implicit), 60, true),
             new("scope_object_id", SqlType.Int32, null, true),
             new("scope_batch", SqlType.NVarcharMax, null, true),
             new("parameters", SqlType.NVarcharMax, null, true),
@@ -476,7 +476,7 @@ internal static partial class BuiltInResources
             // assembly_class: the CLR type name (probe-confirmed
             // Microsoft.SqlServer.Types.Sql{HierarchyId,Geometry,Geography}).
             // DacFx's assembly-type scripting query joins it.
-            new("assembly_class", SqlType.SystemName, 128, true),
+            new("assembly_class", NVarcharSqlType.Get(128, Collation.Get("Latin1_General_BIN"), Coercibility.Implicit), 128, true),
             // is_binary_ordered: 1 only for hierarchyid (byte-comparable
             // OrdPath), 0 for the two spatial types. is_fixed_length: 0 for
             // all three. prog_id: always NULL. assembly_qualified_name: the
@@ -485,7 +485,7 @@ internal static partial class BuiltInResources
             new("is_binary_ordered", SqlType.Bit, null, true),
             new("is_fixed_length", SqlType.Bit, null, true),
             new("prog_id", SqlType.NVarchar, 40, true),
-            new("assembly_qualified_name", SqlType.NVarchar, 4000, true),
+            new("assembly_qualified_name", NVarcharSqlType.Get(4000, Collation.Get("Latin1_General_BIN"), Coercibility.Implicit), 4000, true),
             new("is_table_type", SqlType.Bit, null, false),
         ], EnumerateAssemblyTypes);
 
@@ -569,7 +569,7 @@ internal static partial class BuiltInResources
             new("location", SqlType.NVarchar, 4000, true),
             new("api_format", SqlType.NVarchar, 100, true),
             new("model_type_id", SqlType.Int32, null, true),
-            new("model_type_desc", NVarcharSqlType.Get(65, Collation.Catalog, Coercibility.Implicit), 65, true),
+            new("model_type_desc", NVarcharSqlType.Get(65, Collation.Baseline, Coercibility.Implicit), 65, true),
             new("model", SqlType.NVarchar, 100, true),
             new("credential_id", SqlType.Int32, null, true),
             new("parameters", NVarcharSqlType.Get(-1, Collation.Baseline, Coercibility.CoercibleDefault), SqlType.MaxLengthSentinel, true),
@@ -617,7 +617,7 @@ internal static partial class BuiltInResources
             zeroInt,
             zeroInt,
             assemblyId,
-            SqlValue.FromSystemName(assemblyClass),
+            SqlValue.FromNVarchar(assemblyClass),
             SqlValue.FromBoolean(binaryOrdered),
             falseBit,
             nullProgId,

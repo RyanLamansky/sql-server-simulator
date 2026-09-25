@@ -368,7 +368,7 @@ internal static partial class BuiltInResources
         [
             new("name", SqlType.SystemName, 128, false),
             new("id", SqlType.Int32, null, false),
-            new("xtype", charTwo, 2, false),
+            new("xtype", CharSqlType.Get(2, Collation.Baseline, Coercibility.Implicit), 2, false),
             new("uid", SqlType.SmallInt, null, true),
             new("info", SqlType.SmallInt, null, true),
             new("status", SqlType.Int32, null, true),
@@ -379,7 +379,7 @@ internal static partial class BuiltInResources
             new("ftcatid", SqlType.SmallInt, null, true),
             new("schema_ver", SqlType.Int32, null, true),
             new("stats_schema_ver", SqlType.Int32, null, true),
-            new("type", charTwo, 2, true),
+            new("type", CharSqlType.Get(2, Collation.Baseline, Coercibility.Implicit), 2, true),
             new("userstat", SqlType.SmallInt, null, true),
             new("sysstat", SqlType.SmallInt, null, true),
             new("indexdel", SqlType.SmallInt, null, true),
