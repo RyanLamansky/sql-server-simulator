@@ -445,7 +445,7 @@ internal sealed class Cast : Expression
         }
 
         coerced = NarrowToCodePage(coerced, sourceType, budgetCollation);
-        return EnforceTargetMaxLength(coerced, targetType, targetMaxLength, sourceType, budgetCollation);
+        return EnforceTargetMaxLength(coerced, targetType, targetMaxLength, value, budgetCollation);
     }
 
     /// <summary>
@@ -520,8 +520,9 @@ internal sealed class Cast : Expression
     /// arrives as <c>null</c> from <see cref="SqlType.GetByName"/> and they
     /// short-circuit this method.
     /// </summary>
-    internal static SqlValue EnforceTargetMaxLength(SqlValue coerced, SqlType targetType, int? targetMaxLength, SqlType sourceType, Collation? budgetCollation)
+    internal static SqlValue EnforceTargetMaxLength(SqlValue coerced, SqlType targetType, int? targetMaxLength, SqlValue source, Collation? budgetCollation)
     {
+        var sourceType = source.Type;
         if (coerced.IsNull || targetMaxLength is not int max || max <= 0)
             return coerced;
 
@@ -573,28 +574,19 @@ internal sealed class Cast : Expression
                 SqlTypeCategory.Approximate when targetType is NVarcharSqlType
                     => throw SimulatedSqlException.ArithmeticOverflow(familyName),
                 SqlTypeCategory.Approximate
-                    => throw SimulatedSqlException.ArithmeticOverflowForType(familyName, FormatApproximateForOverflow(text), state: 2),
+                    => throw SimulatedSqlException.ArithmeticOverflowForType(familyName, sourceType == SqlType.Real ? source.AsSingle : source.AsDouble, state: 2),
                 _ => coerced,
             };
         }
 
-        return targetType is VarbinarySqlType && coerced.AsBytes.Length > max
-            ? SqlValue.FromVarbinary(coerced.AsBytes[..max])
-            : coerced;
+        if (targetType is not VarbinarySqlType || coerced.AsBytes.Length <= max)
+            return coerced;
+        // A time, datetime2 or datetimeoffset won't be cut short of its layout
+        // (a date is; see SqlValue.EncodeModernTemporal).
+        return sourceType is TimeSqlType or DateTime2SqlType or DateTimeOffsetSqlType
+            ? throw SimulatedSqlException.StringOrBinaryWouldBeTruncatedLegacy(state: 17)
+            : SqlValue.FromVarbinary(coerced.AsBytes[..max]);
     }
-
-    /// <summary>
-    /// Formats a float / real value for a Msg 232 message slot. SQL Server
-    /// embeds the value as a fixed-point string with six fractional digits;
-    /// the runtime value here is already a coerced <c>varchar</c> string
-    /// from <see cref="SqlValue.CoerceTo"/>, so we re-parse it as a double
-    /// and re-format with <c>F6</c>. Bare-fail formatting falls back to the
-    /// raw string so the error stays informative either way.
-    /// </summary>
-    private static string FormatApproximateForOverflow(string raw) =>
-        double.TryParse(raw, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var d)
-            ? d.ToString("F6", System.Globalization.CultureInfo.InvariantCulture)
-            : raw;
 
     /// <summary>
     /// Set of <see cref="SimulatedSqlException.Number"/> values that
@@ -619,6 +611,7 @@ internal sealed class Cast : Expression
         or 295 // ConversionFailedSmallDateTimeFromString
         or 8114 // ConvertingDataTypeError
         or 8115 // ArithmeticOverflow
+        or 8152 // a scale-prefixed date type's layout into too narrow a binary
         or 8169 // ConversionFailedFromStringToUniqueIdentifier
         or 8170 // InsufficientResultSpaceForUniqueIdentifier
         or (>= 9400 and <= 9465) // XmlParsingFailed

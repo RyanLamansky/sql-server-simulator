@@ -1021,5 +1021,58 @@ public sealed class CastTests
     [DataRow("convert(decimal(5,1), cast('2020-01-02' as date))", "decimal")]
     public void IllegalConversion_NamesTheTargetAsWritten(string expression, string target)
         => new Simulation().AssertSqlError($"select {expression}", 529, $"Explicit conversion from data type date to {target} is not allowed.");
+
+    [TestMethod]
+    [DataRow("'a' + char(0) + 'b' + 1", "varchar", "a.b")]
+    [DataRow("N'a' + nchar(0) + N'b' + 1", "nvarchar", "a.b")]
+    [DataRow("cast(0xFF00 as varchar(5)) + 1", "varchar", "ÿ.")]
+    public void MessageQuotingANul_PrintsItAsAPeriod(string expression, string type, string shown)
+        => new Simulation().AssertSqlError($"select {expression}", 245, $"Conversion failed when converting the {type} value '{shown}' to data type int.");
+
+    [TestMethod]
+    [DataRow("power(2147483647, 2)", "int", "4611686014132420600.000000", 3)]
+    [DataRow("cast(cast(12345678901234567890123 as float) as varchar(10))", "varchar", "12345678901234568000000.000000", 2)]
+    public void ApproximateOverflow_NamesSeventeenDigits(string expression, string type, string value, int state)
+    {
+        var error = new Simulation().AssertSqlError($"select {expression}", 232);
+        AreEqual($"Arithmetic overflow error for type {type}, value = {value}.", error.Errors[0].Message);
+        AreEqual((byte)state, error.Errors[0].State);
+    }
+
+    /// <summary>
+    /// The newer date types write the layout their binary reading takes —
+    /// scale, scaled time, days since 0001-01-01, offset — and refuse too
+    /// narrow a target except for a date, which is cut (probed 2026-09-25
+    /// against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("cast(cast('2020-01-02 03:04:05.1234567' as datetime2) as varbinary(20))", "0x07071768B71991400B")]
+    [DataRow("cast(cast('2020-01-02 03:04:05.12' as datetime2(2)) as varbinary(20))", "0x0280DA1091400B")]
+    [DataRow("cast(cast('03:04:05' as time(0)) as varbinary(20))", "0x00252B00")]
+    [DataRow("cast(cast('2020-01-02 03:04:05.1234567 +01:30' as datetimeoffset) as varbinary(20))", "0x07077BC1240D91400B5A00")]
+    [DataRow("cast(cast('2020-01-02 03:04:05.1234567' as datetime2) as binary(12))", "0x07071768B71991400B000000")]
+    [DataRow("cast(cast('2020-01-02' as date) as binary(2))", "0x9140")]
+    [DataRow("cast(cast('2020-01-02' as date) as varbinary(1))", "0x91")]
+    public void ModernTemporalToBinary_WritesItsLayout(string expression, string expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar($"select convert(varchar(40), {expression}, 1)"));
+
+    [TestMethod]
+    [DataRow("cast(cast('2020-01-02 03:04:05' as datetime2) as varbinary(8))")]
+    [DataRow("cast(cast('03:04:05' as time) as binary(2))")]
+    [DataRow("cast(cast('2020-01-02 03:04:05 +01:30' as datetimeoffset(0)) as binary(4))")]
+    public void ScalePrefixedTemporalIntoTooNarrowBinary_RaisesMsg8152(string expression)
+    {
+        var error = new Simulation().AssertSqlError($"select {expression}", 8152);
+        AreEqual("String or binary data would be truncated.", error.Errors[0].Message);
+        AreEqual((byte)17, error.Errors[0].State);
+    }
+
+    [TestMethod]
+    public void ModernTemporalToBinary_RoundTrips()
+        => AreEqual("2020-01-02 03:04:05.1234567", new Simulation().ExecuteScalar("select convert(varchar(30), cast(cast(cast('2020-01-02 03:04:05.1234567' as datetime2) as varbinary(20)) as datetime2), 121)"));
+
+    [TestMethod]
+    public void TryCastOfScalePrefixedTemporalIntoTooNarrowBinary_IsNull()
+        => IsInstanceOfType<DBNull>(new Simulation().ExecuteScalar("select try_cast(sysdatetime() as binary(4))"));
 }
 

@@ -148,8 +148,8 @@ A `timestamp` source refuses the same `smalldatetime` payload with **Msg 8115** 
 These are the conversions a binary meeting a legacy date in a comparison, a CASE or `+` / `-` takes (see [`arithmetic.md`](arithmetic.md#type-pair-legality)).
 
 Decoders live next to `VarbinaryToGuid` in `Storage/SqlValue.Coerce.cs`.
-The reverse direction is modeled for the legacy pair only: `datetime` / `smalldatetime` → `binary(N)` / `varbinary(N)` writes the same big-endian form right-aligned, `binary(N)` padding or cutting on the left and `varbinary(N)` only cutting (`CAST(<datetime> AS binary(4))` keeps the time half).
-The other date types → binary isn't modeled — no production scripts emit that direction; `bcp` and BACPAC do the encoding upstream.
+The reverse direction: `datetime` / `smalldatetime` → `binary(N)` / `varbinary(N)` writes the same big-endian form right-aligned, `binary(N)` padding or cutting on the left and `varbinary(N)` only cutting (`CAST(<datetime> AS binary(4))` keeps the time half).
+The other four write the little-endian layout their binary reading takes, left-aligned, `binary(N)` padding with zeros on the right; a target too narrow for it cuts a `date`, but is **Msg 8152 state 17** for the three scale-prefixed types, which `TRY_CAST` answers NULL (probed 2026-09-25 against SQL Server 2025).
 
 Bytes the layout can't read are Msg 241, the failure a string reports (probed 2026-09-25 against SQL Server 2025).
 **Not modeled yet**: real also reads a few other lengths — an all-zero `0x00000000` as `0001-01-01`, a five-byte time — which the simulator refuses with that Msg 241.

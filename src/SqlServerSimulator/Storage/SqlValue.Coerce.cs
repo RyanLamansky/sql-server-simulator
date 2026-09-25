@@ -271,6 +271,21 @@ internal readonly partial struct SqlValue
                 : FromVarbinary(((VarbinarySqlType)target).length is > 0 and var width && width < legacy.Length ? RightAligned(legacy, width) : legacy);
         }
 
+        // date / time / datetime2 / datetimeoffset → binary: the layouts the
+        // decoders below read, left-aligned — binary(N) pads with zeros on the
+        // right. Too narrow a target cuts a date silently, but the three
+        // scale-prefixed types refuse with Msg 8152 state 17 (probed 2026-09-25
+        // against SQL Server 2025); a varbinary(N)'s own width is checked with
+        // the declared length in Cast.EnforceTargetMaxLength.
+        if (EncodeModernTemporal() is { } temporal && target is BinarySqlType or VarbinarySqlType)
+        {
+            if (target is not BinarySqlType fixedTarget)
+                return FromVarbinary(temporal);
+            if (fixedTarget.length < temporal.Length && this.Type != SqlType.Date)
+                throw SimulatedSqlException.StringOrBinaryWouldBeTruncatedLegacy(state: 17);
+            return FromBinary(fixedTarget, temporal);
+        }
+
         // hierarchyid ↔ string: the canonical /1/2/ path text both ways, the
         // conversion a CASE or a comparison against a string literal needs.
         if (this.Type is HierarchyIdSqlType && SqlType.IsStringCategory(target))
@@ -1769,6 +1784,55 @@ internal readonly partial struct SqlValue
     // string reports (probed 2026-09-25 against SQL Server 2025: 0x01 and
     // 0xFF0A0B0C to date). Real also reads some longer all-zero forms and a
     // few other lengths the layout above doesn't, which aren't modeled.
+
+    /// <summary>
+    /// The inverse of the decoders below for a <c>date</c>, <c>time</c>,
+    /// <c>datetime2</c> or <c>datetimeoffset</c> value; null for any other type.
+    /// </summary>
+    private byte[]? EncodeModernTemporal() => this.Type switch
+    {
+        DateTime2SqlType dateTime2 => EncodeScaledTemporal((byte)dateTime2.precision, this.AsDateTime2.TimeOfDay, DateOnly.FromDateTime(this.AsDateTime2), offsetMinutes: null),
+        TimeSqlType time => EncodeScaledTemporal((byte)time.precision, this.AsTime, date: null, offsetMinutes: null),
+        DateTimeOffsetSqlType offset => EncodeScaledTemporal(
+            (byte)offset.precision,
+            this.AsDateTimeOffset.UtcDateTime.TimeOfDay,
+            DateOnly.FromDateTime(this.AsDateTimeOffset.UtcDateTime),
+            (short)this.AsDateTimeOffset.Offset.TotalMinutes),
+        _ when this.Type == SqlType.Date => EncodeDate(this.AsDate),
+        _ => null,
+    };
+
+    private static byte[] EncodeDate(DateOnly date)
+    {
+        var bytes = new byte[3];
+        WriteLittleEndian(bytes, 0, 3, (ulong)date.DayNumber);
+        return bytes;
+    }
+
+    /// <summary>
+    /// The scale byte, the time of day in 10^-scale-second units, then the
+    /// date and the offset where the type has them.
+    /// </summary>
+    private static byte[] EncodeScaledTemporal(byte scale, TimeSpan timeOfDay, DateOnly? date, short? offsetMinutes)
+    {
+        var width = TimeWidthForScale(scale);
+        var bytes = new byte[1 + width + (date is null ? 0 : 3) + (offsetMinutes is null ? 0 : 2)];
+        bytes[0] = scale;
+        WriteLittleEndian(bytes, 1, width, (ulong)(timeOfDay.Ticks / TicksPerScaledUnit(scale)));
+        if (date is DateOnly day)
+            WriteLittleEndian(bytes, 1 + width, 3, (ulong)day.DayNumber);
+        if (offsetMinutes is short minutes)
+            WriteLittleEndian(bytes, 1 + width + 3, 2, (ushort)minutes);
+        return bytes;
+    }
+
+    private static long TicksPerScaledUnit(byte scale) => (long)Math.Pow(10, 7 - scale);
+
+    private static void WriteLittleEndian(byte[] bytes, int offset, int width, ulong value)
+    {
+        for (var i = 0; i < width; i++)
+            bytes[offset + i] = (byte)(value >> (8 * i));
+    }
 
     private static DateOnly DecodeDateFromBytes(byte[] bytes) =>
         bytes.Length != 3

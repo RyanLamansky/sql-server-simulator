@@ -45,10 +45,12 @@ partial class SimulatedSqlException
     /// Mimics the legacy SQL Server truncation error (Msg 8152): same trigger
     /// as the verbose factory above but without the table, column, or value
     /// detail. Default behavior on compatibility levels before 160 (SQL Server
-    /// 2022) and on older levels with the verbose option off.
+    /// 2022) and on older levels with the verbose option off. A <c>time</c>,
+    /// <c>datetime2</c> or <c>datetimeoffset</c> converted to a binary too
+    /// narrow for its layout reports it at state 17.
     /// </summary>
-    internal static SimulatedSqlException StringOrBinaryWouldBeTruncatedLegacy() =>
-        new("String or binary data would be truncated.", 8152, 16, 14);
+    internal static SimulatedSqlException StringOrBinaryWouldBeTruncatedLegacy(byte state = 14) =>
+        new("String or binary data would be truncated.", 8152, 16, state);
 
     /// <summary>
     /// Mimics SQL Server error 511: an INSERT or UPDATE produced a row that

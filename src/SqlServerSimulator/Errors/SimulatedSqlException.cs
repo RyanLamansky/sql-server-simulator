@@ -37,9 +37,17 @@ public sealed partial class SimulatedSqlException : DbException
     private const string SourceName = "Core Microsoft SqlClient Data Provider";
 
     private SimulatedSqlException(string message, int number, byte @class, byte state)
-        : this(message, new SimulatedError(@class, lineNumber: 0, message, number, procedure: "", server: SimulatedDbConnection.DataSourceName, source: SourceName, state))
+        : this(Printable(message), new SimulatedError(@class, lineNumber: 0, Printable(message), number, procedure: "", server: SimulatedDbConnection.DataSourceName, source: SourceName, state))
     {
     }
+
+    /// <summary>
+    /// A value a message quotes can't carry a NUL, which real prints as a
+    /// period (<c>'a.b'</c> for <c>'a' + CHAR(0) + 'b'</c>; probed 2026-09-25
+    /// against SQL Server 2025) where every other control character passes
+    /// through.
+    /// </summary>
+    private static string Printable(string message) => message.Replace('\0', '.');
 
     private SimulatedSqlException(string message, params ReadOnlySpan<SimulatedError> errors)
         : base(message)

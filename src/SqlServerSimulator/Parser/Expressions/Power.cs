@@ -75,7 +75,7 @@ internal sealed class Power : Expression
             ? throw SimulatedSqlException.ArithmeticOverflow("bigint")
             : SqlValue.FromInt64((long)raw)
         : raw is < int.MinValue or > int.MaxValue
-            ? throw SimulatedSqlException.ArithmeticOverflowForType("int", raw.ToString("F6", System.Globalization.CultureInfo.InvariantCulture))
+            ? throw SimulatedSqlException.ArithmeticOverflowForType("int", raw, state: 3)
             : SqlValue.FromInt32((int)raw);
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)

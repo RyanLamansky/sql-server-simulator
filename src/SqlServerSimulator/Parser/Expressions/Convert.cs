@@ -139,7 +139,7 @@ internal sealed class ConvertExpression : Expression
                     var prefix = style == 1 ? 2 : 0;
                     coerced = SqlValue.FromString(renderTarget, coerced.AsString[..(max < prefix ? 0 : prefix + ((max - prefix) / 2 * 2))]);
                 }
-                coerced = Cast.EnforceTargetMaxLength(coerced, renderTarget, renderLength, sourceValue.Type, budgetCollation);
+                coerced = Cast.EnforceTargetMaxLength(coerced, renderTarget, renderLength, sourceValue, budgetCollation);
                 if (renderTarget != this.targetType)
                     coerced = coerced.CoerceTo(this.targetType);
             }
