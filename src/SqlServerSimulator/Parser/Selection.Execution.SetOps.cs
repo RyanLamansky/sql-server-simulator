@@ -181,10 +181,14 @@ internal sealed partial class Selection
             }
             if (leftDigit > 0 && rightDigit > 0)
                 (combinedDigits ??= new int[combinedSchema.Length])[i] = Math.Max(leftDigit, rightDigit);
-            // A set-op result column is numeric-named when either branch's
-            // column is (and the unified type is decimal) — SELECT 10.0 UNION
-            // SELECT 20.0 reports numeric, matching each branch's literal.
-            if (combinedSchema[i] is DecimalSqlType && ((leftReportsNumeric is not null && leftReportsNumeric[i]) || (rightReportsNumeric is not null && rightReportsNumeric[i])))
+            // A set-op result column takes its name from the first branch that
+            // is decimal-family: SELECT 2.0 UNION ALL SELECT CAST(… AS decimal)
+            // is numeric and the reverse decimal, while an int first branch
+            // leaves the choice to the next (probed 2026-09-24).
+            var namingNumeric = left.Schema[i] is DecimalSqlType
+                ? leftReportsNumeric is not null && leftReportsNumeric[i]
+                : rightReportsNumeric is not null && rightReportsNumeric[i];
+            if (combinedSchema[i] is DecimalSqlType && namingNumeric)
                 (combinedReportsNumeric ??= new bool[combinedSchema.Length])[i] = true;
         }
 

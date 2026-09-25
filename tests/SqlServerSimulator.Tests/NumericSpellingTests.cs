@@ -52,4 +52,15 @@ public sealed class NumericSpellingTests
         AreEqual("n:numeric:numeric,xn:numeric:numeric,lit:numeric:numeric,d:decimal:decimal,da:decimal:decimal,v:numeric:numeric", ColumnTypes(sim, "nmi"));
         AreEqual("n:numeric:numeric", ColumnTypes(sim, "nmc"));
     }
+
+    [TestMethod]
+    [DataRow("select 2.0 as v into t union all select cast(1 as decimal(5, 1))", "numeric")]
+    [DataRow("select cast(1 as decimal(5, 1)) as v into t union all select 2.0", "decimal")]
+    [DataRow("select 1 as v into t union all select 2.0", "numeric")]
+    [DataRow("select 1 as v into t union all select cast(1 as decimal(5, 1)) union all select 2.0", "decimal")]
+    [DataRow("select v into t from (values (2.0), (cast(1 as decimal(5, 1)))) x(v)", "numeric")]
+    [DataRow("select v into t from (values (cast(1 as decimal(5, 1))), (2.0)) x(v)", "decimal")]
+    [DataRow("select avg(v) as v into t from (values (1.0), (2.0)) x(v)", "numeric")]
+    public void FirstDecimalBranch_NamesTheColumn(string sql, string expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar($"{sql}; select type_name(system_type_id) from sys.columns where object_id = object_id('t')"));
 }

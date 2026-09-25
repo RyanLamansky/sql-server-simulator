@@ -1669,13 +1669,15 @@ internal sealed partial class Selection
 
     /// <summary>
     /// Whether a projection is a bare reference to a column declared (or
-    /// derived as) <c>numeric</c> — real carries the spelling through a
-    /// reference, a derived table and a view (probed 2026-09-24).
+    /// derived as) <c>numeric</c>, or an aggregate over one — real carries
+    /// the spelling through a reference, a derived table and a view (probed
+    /// 2026-09-24).
     /// </summary>
     internal static bool ReadsNumericSpelledColumn(Expression expression, FromSource[]? sources)
     {
-        while (expression is Expressions.NamedExpression named)
-            expression = named.Inner;
+        // An aggregate keeps its operand's name, as it does for any source.
+        while (expression is Expressions.NamedExpression or Expressions.AggregateExpression { Operand: not null })
+            expression = expression is Expressions.NamedExpression named ? named.Inner : ((Expressions.AggregateExpression)expression).Operand!;
         if (sources is null || expression is not Expressions.Reference reference)
             return false;
         var (s, c) = FindSourceColumn(sources, reference.ReferencedName);

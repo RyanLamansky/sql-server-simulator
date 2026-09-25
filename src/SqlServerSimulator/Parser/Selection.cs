@@ -3280,7 +3280,21 @@ internal sealed partial class Selection
             var nullable = false;
             for (var i = 0; i < tuples.Count && !nullable; i++)
                 nullable = tuples[i][c].ResultIsNullable(cellNullability);
-            columns[c] = new HeapColumn(columnNames[c], schema[c], maxLength: null, nullable: nullable);
+            // The first decimal-family row names the column, as the first such
+            // branch of a set operation does (probed 2026-09-24).
+            var spelledNumeric = false;
+            if (schema[c] is DecimalSqlType)
+            {
+                foreach (var tuple in tuples)
+                {
+                    if (tuple[c].GetSqlType(context.Batch, TypeResolver) is DecimalSqlType)
+                    {
+                        spelledNumeric = tuple[c].ResultReportsNumeric;
+                        break;
+                    }
+                }
+            }
+            columns[c] = new HeapColumn(columnNames[c], schema[c], maxLength: null, nullable: nullable, spelledNumeric: spelledNumeric);
         }
 
         return new FromSource(

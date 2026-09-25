@@ -129,13 +129,13 @@ public sealed class DecimalTypeNameTests
         AreEqual("decimal", TypeName(expression));
 
     [TestMethod]
-    public void ColumnSourceName_StaysDecimal_Deferred()
+    public void ColumnSourceName_CarriesTheSpelling()
     {
-        // Deferred boundary: a VALUES constructor's column doesn't remember
-        // its cells' spelling, so it keeps `decimal` where real reports
-        // `numeric`; a derived table's column does.
-        AreEqual("decimal", ColumnTypeName("select v from (values(1.0),(2.0)) t(v)", 0));
-        AreEqual("decimal", ColumnTypeName("select avg(v) from (values(1.0),(2.0)) t(v)", 0));
+        // A VALUES column and a derived table's column remember their
+        // spelling, which a bare reference and an aggregate carry on (real
+        // reports numeric for all three, probed 2026-09-24).
+        AreEqual("numeric", ColumnTypeName("select v from (values(1.0),(2.0)) t(v)", 0));
+        AreEqual("numeric", ColumnTypeName("select avg(v) from (values(1.0),(2.0)) t(v)", 0));
         AreEqual("numeric", ColumnTypeName("select v from (select 1 as v union select 2.5) t", 0));
     }
 
