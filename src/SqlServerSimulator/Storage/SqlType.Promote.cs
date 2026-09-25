@@ -51,8 +51,35 @@ internal abstract partial class SqlType
             return a.Type;
         if (OperandPairError(TypePairOperation.Unify, a, b, "") is { } error)
             throw error;
-        return PromoteUnifiable(a.Type, b.Type);
+        return CapUnifiedDecimal(PromoteUnifiable(a.Type, b.Type), a.Type, b.Type);
     }
+
+    /// <summary>
+    /// The decimal a set of arms unifies to when their joint envelope — the
+    /// widest integral part beside the widest scale — passes 38 digits: real
+    /// keeps the integral digits and gives the scale what's left, so
+    /// <c>COALESCE(&lt;decimal(38, 18)&gt;, &lt;decimal(30, 0)&gt;)</c> is
+    /// <c>decimal(38, 8)</c> (probed 2026-09-25 against SQL Server 2025).
+    /// Only a unified result takes this; a comparison's common type keeps the
+    /// scale, so no arm's fraction is lost to it.
+    /// </summary>
+    private static SqlType CapUnifiedDecimal(SqlType unified, SqlType a, SqlType b)
+    {
+        if (unified is not DecimalSqlType || DecimalEnvelope(a) is not var (pa, sa) || DecimalEnvelope(b) is not var (pb, sb))
+            return unified;
+        var integral = Math.Max(pa - sa, pb - sb);
+        var scale = Math.Max(sa, sb);
+        return integral + scale > 38 ? GetDecimal(38, Math.Max(0, 38 - integral)) : unified;
+    }
+
+    /// <summary>The (precision, scale) an exact-numeric arm takes as a decimal, or null for any other.</summary>
+    private static (int Precision, int Scale)? DecimalEnvelope(SqlType type) => type switch
+    {
+        DecimalSqlType d => (d.precision, d.scale),
+        _ when type.Category == SqlTypeCategory.Integer => (IntegerAsDecimalType(type).precision, 0),
+        _ when type == Money || type == SmallMoney => (MoneyAsDecimalType(type).precision, MoneyAsDecimalType(type).scale),
+        _ => null,
+    };
 
     private static SqlType PromoteUnifiable(SqlType a, SqlType b)
     {
@@ -102,7 +129,7 @@ internal abstract partial class SqlType
                 : branch.Type;
             if (accumulated is not null && PairError(TypePairOperation.Unify, accumulated, effective, "") is { } pairError)
                 throw BranchUnificationError(branches) ?? pairError;
-            accumulated = accumulated is null ? effective : Promote(accumulated, effective);
+            accumulated = accumulated is null ? effective : CapUnifiedDecimal(Promote(accumulated, effective), accumulated, effective);
         }
         return accumulated ?? Int32;
     }

@@ -221,6 +221,8 @@ Integer/money operands canonicalize before formulas apply (bit→(1,0) … bigin
 Pure integer-pair, pure money-pair, and float-involving arithmetic skip the decimal path (joint-envelope `Promote` instead).
 
 `SqlType.Promote` (joint-envelope, `scale = max(s1, s2); precision = min(38, max(p1-s1, p2-s2) + scale)`) stays the right rule for non-arithmetic uses.
+Where arms unify into a result — `CASE`, `COALESCE`, `CHOOSE`, a set operation's columns — an envelope past 38 digits keeps its integral digits and gives the scale what's left (`SqlType.CapUnifiedDecimal`): `COALESCE(<decimal(38, 18)>, <decimal(30, 0)>)` is `decimal(38, 8)` and rounds the first arm to it (probed 2026-09-25).
+A comparison's common type doesn't take that cap, so no arm's fraction is lost to it.
 
 ### Division truncates where every other operator rounds
 

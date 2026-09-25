@@ -378,4 +378,26 @@ public class TypePromotionTests
     [TestMethod]
     public void SetOperationClash_NamesADecimalLiteralNumeric()
         => new Simulation().AssertSqlError("declare @t time; select @t union select 1.5", 206, "Operand type clash: numeric is incompatible with time");
+
+    // Arms whose decimal envelope passes 38 digits unify keeping the integral
+    // digits, the scale taking what's left, in CASE / COALESCE and set
+    // operations alike (probed 2026-09-25 against SQL Server 2025).
+    [TestMethod]
+    [DataRow("coalesce(cast(1 as decimal(38,18)), cast(2 as decimal(38,0)))", "decimal(38,0)")]
+    [DataRow("coalesce(cast(1 as decimal(38,18)), cast(2 as decimal(30,0)))", "decimal(38,8)")]
+    [DataRow("coalesce(cast(1 as decimal(38,10)), cast(2 as decimal(38,20)))", "decimal(38,10)")]
+    [DataRow("coalesce(cast(1 as decimal(20,10)), cast(2 as decimal(30,2)))", "decimal(38,10)")]
+    public void UnifiedDecimalPastThirtyEightDigits_KeepsTheIntegralDigits(string expression, string expected)
+    {
+        var simulation = new Simulation();
+        AreEqual(expected, simulation.ExecuteScalar($"select system_type_name from sys.dm_exec_describe_first_result_set(N'select {expression.Replace("'", "''", StringComparison.Ordinal)} a', null, 0)"));
+    }
+
+    [TestMethod]
+    public void UnifiedDecimalPastThirtyEightDigits_RoundsTheWiderScaledArm()
+    {
+        var simulation = new Simulation();
+        AreEqual(1.12345679m, simulation.ExecuteScalar("select coalesce(cast(1.123456789 as decimal(38,18)), cast(2 as decimal(30,0)))"));
+        AreEqual("decimal(38,8)", simulation.ExecuteScalar("select system_type_name from sys.dm_exec_describe_first_result_set(N'select cast(1 as decimal(38,18)) u union all select cast(2 as decimal(30,0))', null, 0)"));
+    }
 }
