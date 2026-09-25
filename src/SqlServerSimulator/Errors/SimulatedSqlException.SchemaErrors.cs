@@ -452,8 +452,23 @@ partial class SimulatedSqlException
     /// that already exists. Probe-confirmed verbatim wording (Class 16,
     /// State 3) against SQL Server 2025.
     /// </summary>
-    internal static SimulatedSqlException DatabaseAlreadyExists(string name) =>
-        new($"Database '{name}' already exists. Choose a different database name.", 1801, 16, 3);
+    internal static SimulatedSqlException DatabaseAlreadyExists(string name, byte state = 3) =>
+        new($"Database '{name}' already exists. Choose a different database name.", 1801, 16, state);
+
+    /// <summary>
+    /// Mimics SQL Server error 5016: <c>ALTER DATABASE … MODIFY NAME</c> on a
+    /// system database (probed 2026-09-25).
+    /// </summary>
+    internal static SimulatedSqlException CannotRenameSystemDatabase(string name) =>
+        new($"Cannot change the name of the system database {name}.", 5016, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 12104: <c>ALTER DATABASE CURRENT</c> while the
+    /// session sits in a system database, whatever the action (probed
+    /// 2026-09-25).
+    /// </summary>
+    internal static SimulatedSqlException AlterCurrentSystemDatabase(string name) =>
+        new($"ALTER DATABASE CURRENT failed because '{name}' is a system database. System databases cannot be altered by using the CURRENT keyword. Use the database name to alter a system database.", 12104, 16, 2);
 
     /// <summary>
     /// Mimics SQL Server error 3701 with the <c>database</c> wording variant:

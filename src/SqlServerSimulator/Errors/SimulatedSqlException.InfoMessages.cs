@@ -36,7 +36,11 @@ partial class SimulatedSqlException
     internal static SimulatedError MarkedForRecompilationMessage(BatchContext batch, string objectName) =>
         batch.InfoMessage(@class: 0, state: 1, number: 15070, $"Object '{objectName}' was successfully marked for recompilation.");
 
-    /// <summary>Msg 5701, after every <c>USE</c>.</summary>
+    /// <summary>Msg 5021, after an <c>ALTER DATABASE … MODIFY NAME</c> (probed 2026-09-25).</summary>
+    internal static SimulatedError DatabaseNameSetMessage(BatchContext batch, string databaseName) =>
+        batch.InfoMessage(@class: 0, state: 2, number: 5021, $"The database name '{databaseName}' has been set.");
+
+    /// <summary>Msg 5701, after every <c>USE</c> and after renaming the session's own database.</summary>
     internal static SimulatedError DatabaseContextChangedMessage(BatchContext batch, string databaseName) =>
         batch.InfoMessage(@class: 0, state: 1, number: 5701, $"Changed database context to '{databaseName}'.");
 

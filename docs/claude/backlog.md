@@ -306,7 +306,6 @@ Low priority / niche — simulatable (as placeholder constants or a small model)
   Wiring it means threading the schema's `PrincipalId` into the same-database chain suppression, which touches every module invocation — see [`permissions.md`](permissions.md).
 - **`CREATE SCHEMA`'s element rollback leaves permission rows behind** — an element list that granted a permission and then failed removes the schema (and the objects inside it) but not the `sys.database_permissions` rows keyed on those object ids, which are then unreachable.
   Real rolls the whole statement back including the grants.
-- **`ALTER DATABASE … MODIFY NAME`** is Msg 102 here; real renames the database (and reports Msg 911 for a missing one).
   `Database.Name` is fixed at construction, so a rename reaches every structure keyed by it.
 
 ## Over-permissive register

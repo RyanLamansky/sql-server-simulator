@@ -37,8 +37,12 @@ internal sealed class Database
     /// <summary>Principal id of the <c>sys</c> catalog principal (4).</summary>
     public const int SysPrincipalId = 4;
 
-    /// <summary>Database name (the key in <see cref="Simulation.Databases"/>).</summary>
-    public readonly string Name;
+    /// <summary>
+    /// Database name (the key in <see cref="Simulation.Databases"/>), mutable
+    /// for <c>ALTER DATABASE … MODIFY NAME</c>, which re-keys the registry under
+    /// its lock.
+    /// </summary>
+    public string Name;
 
     /// <summary>
     /// Stored <c>database_id</c>. System databases carry their fixed reserved

@@ -245,7 +245,7 @@ Database ids: the four system databases carry a **fixed reserved map (master = 1
 Every user-database entry point routes through `Simulation.RegisterUserDatabase` / `RegisterUserDatabaseLocked` (the id allocator): `CREATE DATABASE`, `Simulation.ImportBacpac`, and the lazy `simulated` seed in `ResolveInitialDatabase`.
 The single sources of truth are `Simulation.SystemDatabaseIds` (the system name↔id map + seed list) and `DbId.DatabasesWithIds(simulation)` (which projects `(db, db.Id)` ordered by id), consumed by `DB_ID` / `DB_NAME`, `OBJECT_NAME(id, db_id)`, the `sys.databases.database_id` column, and `DBCC SHRINKDATABASE`'s numeric-id form — keep them consistent by routing every id lookup through `DatabasesWithIds`.
 
-## `CREATE DATABASE` / `DROP DATABASE`
+## `CREATE DATABASE` / `DROP DATABASE` / `MODIFY NAME`
 
 `CREATE DATABASE <name> [COLLATE <collation>] [<file / option clauses>]` (`Simulation.CreateDatabase.cs`): the name is a single identifier (bare or bracketed, so `[app b-2]` with spaces works); `COLLATE` sets the new database's collation (default = the server collation, mirroring `model.collation`); every remaining clause (`ON (…)`, `LOG ON (…)`, `WITH …`, `CONTAINMENT = …`, `FOR ATTACH`, …) is parse-and-discarded — no physical-file model.
 A duplicate name raises **Msg 1801**.
@@ -255,6 +255,9 @@ The database registers with the smallest-free id (above) and is immediately usab
 Removing the database frees its id for reuse.
 Divergence from real: real also blocks *other* active sessions on the target (Msg 3702), but the teardown idiom apps run first — `ALTER DATABASE … SET SINGLE_USER WITH ROLLBACK IMMEDIATE` (parse-and-discarded, [`database-options.md`](database-options.md)) — evicts those on a real server; the simulator has no eviction model, so it treats other sessions as already evicted and blocks only the executing one, matching the idiom's intent.
 This is what lets an ORM's unmodified test runner (Django/mssql-django) create → migrate → run → drop its `test_*` database against the simulator with no configuration override.
+
+`ALTER DATABASE <name> MODIFY NAME = <newname>` renames in place — the `Database` object keeps its id and contents and is re-keyed in `Simulation.Databases` — and answers Msg 5021, plus Msg 5701 naming the new name when the session sits in it (probed 2026-09-25 against SQL Server 2025).
+Stored text that names the old database (a view's three-part reference, a synonym) is left as written, as real leaves it; the other-sessions divergence above applies here too.
 
 **`msdb.dbo.syspolicy_system_health_state`** is seeded as an empty object (six columns: `health_state_id bigint`, `policy_id int`, `last_run_date datetime`, `target_query_expression_with_id nvarchar(400)`, `target_query_expression nvarchar(max)`, `result bit`, probe-confirmed) so SSMS's server-level Policy Health feature — which reads `has_dbaccess('msdb')` and then `select … from msdb.dbo.syspolicy_system_health_state` at connect — renders cleanly instead of raising a permission error.
 It's modeled as a real **VIEW** (`sys.objects.type_desc` = `VIEW`, matching the reference) whose body is a `WHERE 1 = 0` filter yielding zero rows; it's constructed directly on msdb's `dbo` schema at Simulation construction (no `CREATE VIEW` DDL, so no connection is materialized and `simulated` isn't seeded prematurely), and exists only in msdb.

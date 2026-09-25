@@ -90,4 +90,47 @@ public sealed class CreateDropDatabaseTests
             insert t values (1);
             select count(*) from t
             """));
+
+    [TestMethod]
+    public void ModifyName_RenamesInPlace()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create database foo; create table foo.dbo.t (id int); insert foo.dbo.t values (1)");
+        var id = simulation.ExecuteScalar("select db_id('foo')");
+        _ = simulation.ExecuteNonQuery("alter database foo modify name = [bar baz]");
+        AreEqual(id, simulation.ExecuteScalar("select db_id('bar baz')"));
+        IsTrue(simulation.ExecuteScalar("select db_id('foo')") is DBNull);
+        AreEqual(1, simulation.ExecuteScalar("select count(*) from [bar baz].dbo.t"));
+    }
+
+    [TestMethod]
+    public void ModifyName_OfTheSessionsDatabase_AnnouncesTheNewContext()
+    {
+        using var connection = new Simulation().CreateDbConnection();
+        connection.Open();
+        var log = new List<string>();
+        connection.InfoMessage += (_, e) => log.Add($"{e.Errors[0].Number}: {e.Message}");
+        using var command = connection.CreateCommand();
+        command.CommandText = "create database foo; use foo; alter database foo modify name = Foo2; select db_name()";
+        AreEqual("Foo2", command.ExecuteScalar());
+        CollectionAssert.AreEqual(
+            new[] { "5701: Changed database context to 'foo'.", "5021: The database name 'Foo2' has been set.", "5701: Changed database context to 'Foo2'." },
+            log);
+    }
+
+    [TestMethod]
+    [DataRow("alter database nosuchdb modify name = x", 911, "Database 'nosuchdb' does not exist. Make sure that the name is entered correctly.")]
+    [DataRow("alter database foo modify name = master", 1801, "Database 'master' already exists. Choose a different database name.")]
+    [DataRow("alter database master modify name = m2", 5016, "Cannot change the name of the system database master.")]
+    [DataRow("alter database foo modify name = 'quoted'", 102, "Incorrect syntax near 'quoted'.")]
+    [DataRow("alter database foo modify name = foo2, file = (name = x)", 102, "Incorrect syntax near ','.")]
+    [DataRow("use master; alter database current modify name = x", 12104, "ALTER DATABASE CURRENT failed because 'master' is a system database. System databases cannot be altered by using the CURRENT keyword. Use the database name to alter a system database.")]
+    [DataRow("use tempdb; alter database current set ansi_nulls on", 12104, "ALTER DATABASE CURRENT failed because 'tempdb' is a system database. System databases cannot be altered by using the CURRENT keyword. Use the database name to alter a system database.")]
+    public void ModifyName_Refusals(string statement, int number, string message)
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create database foo");
+        simulation.AssertSqlError(statement, number, message);
+        AreEqual(1, simulation.ExecuteScalar("select count(*) from sys.databases where name = 'foo'"));
+    }
 }

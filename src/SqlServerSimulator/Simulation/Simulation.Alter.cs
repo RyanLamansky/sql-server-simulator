@@ -103,6 +103,10 @@ partial class Simulation
                     && !context.Connection.Simulation.Databases.ContainsKey(missing.Value)
                     => throw SimulatedSqlException.DatabaseDoesNotExist(missing.Value),
                 ReservedKeyword { Keyword: Keyword.Collate } => TryParseAlterDatabaseCollate(context, target),
+                Name modify when BuiltInToken.Equals(modify.Value, "MODIFY") && refusal is not null && afterDatabase is Name missing
+                    && !context.Connection.Simulation.Databases.ContainsKey(missing.Value)
+                    => throw SimulatedSqlException.DatabaseDoesNotExist(missing.Value),
+                Name modify when BuiltInToken.Equals(modify.Value, "MODIFY") => TryParseAlterDatabaseModifyName(context, target),
                 _ => false,
             };
         }
@@ -132,6 +136,8 @@ partial class Simulation
     /// </summary>
     private static Database ResolveAlterDatabaseTarget(ParserContext context, Token afterDatabase)
     {
+        if (afterDatabase is not Name && !context.Batch.IsSkipping && SystemDatabaseNames.Contains(context.CurrentDatabase.Name))
+            throw SimulatedSqlException.AlterCurrentSystemDatabase(context.CurrentDatabase.Name);
         var target = afterDatabase is not Name named ? context.CurrentDatabase
             : context.Connection.Simulation.Databases.TryGetValue(named.Value, out var named_) ? named_
             : context.Batch.IsSkipping ? context.CurrentDatabase
@@ -139,6 +145,51 @@ partial class Simulation
         return context.Batch.IsSkipping || PermissionEnforcement.HasDatabasePermission(context.Batch, target, Permission.Alter)
             ? target
             : throw SimulatedSqlException.AlterDatabasePermissionDenied(target.Name);
+    }
+
+    /// <summary>
+    /// Parses <c>ALTER DATABASE name MODIFY NAME = newname</c>, entered with the
+    /// cursor on <c>MODIFY</c>, and renames the database — re-keying
+    /// <see cref="Databases"/> — with real's Msg 5021 notice, plus Msg 5701
+    /// when the session sits in the renamed database. A system database is
+    /// Msg 5016 and a name another database holds Msg 1801 state 4; renaming a
+    /// database to its own name, in any case, succeeds (all probed 2026-09-25
+    /// against SQL Server 2025). Other sessions in the database aren't
+    /// consulted, as with <c>DROP DATABASE</c>.
+    /// </summary>
+    private static bool TryParseAlterDatabaseModifyName(ParserContext context, Database target)
+    {
+        if (context.GetNextRequired() is not Name nameWord || !BuiltInToken.Equals(nameWord.Value, "NAME"))
+            return false;
+        if (context.GetNextRequired() is not Operator { Character: '=' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        if (context.GetNextRequired() is not Name newNameToken)
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        // The rename takes no further clause: a comma is Msg 102 before
+        // anything is renamed (probed 2026-09-25).
+        if (context.GetNextOptional() is Operator { Character: ',' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        context.RejectTrailingToken();
+        if (context.Batch.IsSkipping)
+            return true;
+
+        var newName = newNameToken.Value;
+        if (SystemDatabaseNames.Contains(target.Name))
+            throw SimulatedSqlException.CannotRenameSystemDatabase(target.Name);
+        var databases = context.Connection.Simulation.Databases;
+        lock (databases)
+        {
+            if (databases.TryGetValue(newName, out var holder) && holder != target)
+                throw SimulatedSqlException.DatabaseAlreadyExists(newName, state: 4);
+            _ = databases.Remove(target.Name);
+            target.Name = newName;
+            databases.Add(newName, target);
+        }
+        var messages = context.Connection.PendingMessages;
+        messages.Enqueue(SimulatedSqlException.DatabaseNameSetMessage(context.Batch, newName));
+        if (context.CurrentDatabase == target)
+            messages.Enqueue(SimulatedSqlException.DatabaseContextChangedMessage(context.Batch, newName));
+        return true;
     }
 
     /// <summary>
