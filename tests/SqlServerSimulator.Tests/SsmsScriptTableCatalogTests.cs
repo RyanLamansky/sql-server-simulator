@@ -345,4 +345,21 @@ public sealed class SsmsScriptTableCatalogTests
             select case when ledger_view_column_type is null then 1 else 0 end
             from sys.columns where object_id = object_id('t') and name = 'id'
             """));
+
+    /// <summary>
+    /// <c>ALTER TABLE … SET (LOCK_ESCALATION = …)</c>, which SSMS's table
+    /// designer scripts, reads back through <c>sys.tables</c> (probed
+    /// 2026-09-25 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("auto", "2|AUTO")]
+    [DataRow("disable", "1|DISABLE")]
+    [DataRow("table", "0|TABLE")]
+    public void LockEscalation_ReadsBack(string setting, string expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar($"create table t (id int); alter table t set (lock_escalation = {setting}); select concat_ws('|', lock_escalation, lock_escalation_desc) from sys.tables where name = 't'"));
+
+    [TestMethod]
+    public void LockEscalation_UnknownSetting_RaisesMsg155()
+        => new Simulation().AssertSqlError("create table t (id int); alter table t set (lock_escalation = foo)", 155, "'foo' is not a recognized ALTER TABLE option.");
 }
+

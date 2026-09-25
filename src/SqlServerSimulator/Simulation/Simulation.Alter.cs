@@ -1456,8 +1456,39 @@ partial class Simulation
         if (context.GetNextRequired() is not Operator { Character: '(' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
-        if (context.GetNextRequired() is not UnquotedString { ContextualKeyword: ContextualKeyword.System_Versioning })
-            throw new NotSupportedException("Only ALTER TABLE … SET (SYSTEM_VERSIONING = OFF | ON (HISTORY_TABLE = name)) is supported.");
+        // LOCK_ESCALATION = {TABLE | DISABLE | AUTO}, which SSMS's table
+        // designer scripts: recorded for sys.tables, and DISABLE stops the
+        // row-lock escalation to table-X (AUTO is TABLE for an unpartitioned
+        // table). A SYSTEM_VERSIONING option may follow it after a comma
+        // (probed 2026-09-25 against SQL Server 2025).
+        if (context.GetNextRequired() is StringToken option && option.Span.Equals("LOCK_ESCALATION", StringComparison.OrdinalIgnoreCase))
+        {
+            if (context.GetNextRequired() is not Operator { Character: '=' })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            var escalation = context.GetNextRequired() switch
+            {
+                ReservedKeyword { Keyword: Keyword.Table } => (byte)0,
+                StringToken value when value.Span.Equals("DISABLE", StringComparison.OrdinalIgnoreCase) => (byte)1,
+                StringToken value when value.Span.Equals("AUTO", StringComparison.OrdinalIgnoreCase) => (byte)2,
+                StringToken value => throw SimulatedSqlException.NotARecognizedAlterTableOption(value.Span.ToString()),
+                _ => throw SimulatedSqlException.SyntaxErrorNear(context),
+            };
+            var afterOption = context.GetNextRequired();
+            if (afterOption is not Operator { Character: ')' or ',' })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            if (!context.Batch.IsSkipping)
+            {
+                if (!context.Batch.TryResolveTable(tableName, out var escalatingTable))
+                    throw SimulatedSqlException.CannotFindObjectForAlterTable(tableName.ToString());
+                escalatingTable.LockEscalation = escalation;
+            }
+            if (afterOption is Operator { Character: ')' })
+                return true;
+            context.MoveNextRequired();
+        }
+
+        if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.System_Versioning })
+            throw new NotSupportedException("Only ALTER TABLE … SET (SYSTEM_VERSIONING | LOCK_ESCALATION = …) is supported.");
 
         if (context.GetNextRequired() is not Operator { Character: '=' })
             throw SimulatedSqlException.SyntaxErrorNear(context);

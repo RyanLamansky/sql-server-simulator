@@ -2118,6 +2118,14 @@ partial class SimulatedSqlException
         new($"'{optionName}' is not a recognized ALTER INDEX option.", 155, 15, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 155 for <c>ALTER TABLE … SET (LOCK_ESCALATION = x)</c>
+    /// naming an escalation it doesn't know (probed 2026-09-25 against SQL
+    /// Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException NotARecognizedAlterTableOption(string optionName) =>
+        new($"'{optionName}' is not a recognized ALTER TABLE option.", 155, 15, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 1973: an operation that a disabled index can't
     /// take — <c>SET (…)</c> or <c>REORGANIZE</c> against one. Probe-confirmed
     /// verbatim.

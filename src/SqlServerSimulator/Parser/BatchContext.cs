@@ -1126,7 +1126,8 @@ internal sealed class BatchContext
             var counts = activeTx.RowLockCountsByTable;
             _ = counts.TryGetValue(table, out var prev);
             counts[table] = prev + 1;
-            if (counts[table] > SimulatedDbTransaction.RowLockEscalationThreshold && !activeTx.EscalatedTables.Contains(table))
+            // LOCK_ESCALATION = DISABLE keeps the row locks, however many.
+            if (counts[table] > SimulatedDbTransaction.RowLockEscalationThreshold && table.LockEscalation != 1 && !activeTx.EscalatedTables.Contains(table))
                 EscalateToTableX(table, activeTx);
         }
         else

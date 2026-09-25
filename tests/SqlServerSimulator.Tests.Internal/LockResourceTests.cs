@@ -629,4 +629,21 @@ public sealed class LockResourceTests
         ExecuteNonQuery(conn, "commit tran");
         IsEmpty(table.TableDataLock.Holders);
     }
+
+    [TestMethod]
+    public void RowLockEscalation_UnderLockEscalationDisable_KeepsTheRowLocks()
+    {
+        var sim = new Simulation();
+        ExecuteNonQuery(sim, "create table t (id int); alter table t set (lock_escalation = disable)");
+        using var conn = sim.CreateDbConnection();
+        conn.Open();
+        var table = conn.CurrentDatabase.Schemas["dbo"].HeapTables["t"];
+        ExecuteNonQuery(conn, "begin tran");
+        for (var i = 0; i < SimulatedDbTransaction.RowLockEscalationThreshold + 2; i++)
+            ExecuteNonQuery(conn, $"insert t values ({i})");
+        var tx = conn.CurrentTransaction;
+        IsNotNull(tx);
+        DoesNotContain(table, tx.EscalatedTables);
+        ExecuteNonQuery(conn, "commit tran");
+    }
 }

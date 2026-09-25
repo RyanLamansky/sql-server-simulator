@@ -12,6 +12,12 @@ namespace SqlServerSimulator.Storage;
 [DebuggerDisplay("{DebugDisplay(),nq}")]
 internal sealed class HeapTable : SchemaObject
 {
+    /// <summary>
+    /// <c>ALTER TABLE … SET (LOCK_ESCALATION = …)</c> as sys.tables reports
+    /// it: 0 TABLE (the default), 1 DISABLE, 2 AUTO.
+    /// </summary>
+    public byte LockEscalation;
+
     public HeapTable(string name, HeapColumn[] columns, int objectId, int schemaId = Database.DboSchemaId, DateTime createDate = default, KeyConstraint[]? keyConstraints = null, CheckConstraint[]? checkConstraints = null, bool isTableVariable = false, bool isTableValuedParameter = false, (int StartOrdinal, int EndOrdinal)? periodColumns = null)
         : base(name, objectId, schemaId, createDate == default ? DateTime.UtcNow : createDate)
     {

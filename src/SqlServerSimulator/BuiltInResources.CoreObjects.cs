@@ -65,7 +65,12 @@ internal static partial class BuiltInResources
         var temporalDescBase = SqlValue.FromNVarchar("SYSTEM_VERSIONED_TEMPORAL_TABLE");
         var falseTableFlag = SqlValue.FromBoolean(false);
         var ledgerTypeNone = SqlValue.FromByte(0);
-        var lockEscalationTable = SqlValue.FromString(nvarchar60Catalog, "TABLE");
+        SqlValue[] lockEscalationDesc =
+        [
+            SqlValue.FromString(nvarchar60Catalog, "TABLE"),
+            SqlValue.FromString(nvarchar60Catalog, "DISABLE"),
+            SqlValue.FromString(nvarchar60Catalog, "AUTO"),
+        ];
         // history_retention_period_unit_desc's five spellings, preallocated so
         // the projection doesn't format one per row.
         var retentionInfinite = SqlValue.FromString(nvarchar60Catalog, "INFINITE");
@@ -128,10 +133,10 @@ internal static partial class BuiltInResources
             // both.
             new("uses_ansi_nulls", SqlType.Bit, null, true),
             new("is_dropped_ledger_table", SqlType.Bit, null, true),
-            // Lock escalation isn't tunable in the simulator, so every table
-            // reports the default TABLE escalation (0 / TABLE). SMO's
-            // CREATE-scripting table query reads lock_escalation to emit the
-            // LOCK_ESCALATION option when it differs from the default.
+            // Lock escalation reports what ALTER TABLE … SET (LOCK_ESCALATION)
+            // recorded, TABLE by default. SMO's CREATE-scripting table query
+            // reads lock_escalation to emit the option when it differs from
+            // the default.
             new("lock_escalation", SqlType.TinyInt, null, true),
             new("lock_escalation_desc", nvarchar60Catalog, 60, true),
             // FILESTREAM isn't modeled, so filestream_data_space_id is always
@@ -219,8 +224,8 @@ internal static partial class BuiltInResources
                         SqlValue.Null(SqlType.Int32),
                         SqlValue.FromBoolean(t.UsesAnsiNulls),
                         falseTableFlag,
-                        SqlValue.FromByte(0),
-                        lockEscalationTable,
+                        SqlValue.FromByte(t.LockEscalation),
+                        lockEscalationDesc[t.LockEscalation],
                         SqlValue.Null(SqlType.Int32), // filestream_data_space_id
                         // lob_data_space_id names the filegroup holding the
                         // table's LOB allocation unit: the single PRIMARY
