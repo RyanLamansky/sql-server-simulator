@@ -417,6 +417,9 @@ partial class Simulation
             }
         }
 
+        if (valueTuples is not null)
+            UnifyValueRows(valueTuples, sourceRows, context.Batch);
+
         ApplyDmlTopCap(top, sourceRows, context.Batch);
         // Keep the parsed tuples aligned 1:1 with sourceRows so per-cell DEFAULT
         // lookup by row index stays valid — TOP trims from the tail, matching
@@ -936,6 +939,40 @@ partial class Simulation
             {
                 if (tuple[i] is not Parser.Expressions.DefaultValueExpression)
                     AssignmentRules.RequireAssignable(tuple[i], tuple[i].GetSqlType(batch, NoColumnTypeResolver), destinationColumns[i].Type);
+            }
+        }
+    }
+
+    /// <summary>
+    /// A multi-row <c>VALUES</c> list is a table constructor: each column takes
+    /// the type its rows unify to, as a <c>UNION ALL</c>'s branches do, before
+    /// converting to the target — so <c>INSERT t (varchar_col) VALUES (1),
+    /// ('a')</c> converts <c>'a'</c> to <c>int</c> and raises Msg 245, and
+    /// <c>VALUES (1.50), ('2')</c> stores <c>2.00</c> (probed 2026-09-25
+    /// against SQL Server 2025). A single row converts straight to the target.
+    /// A <c>DEFAULT</c> cell and a bare <c>NULL</c> take no part.
+    /// </summary>
+    private static void UnifyValueRows(List<Expression[]> tuples, List<SqlValue[]> rows, BatchContext batch)
+    {
+        if (tuples.Count < 2 || rows.Count != tuples.Count)
+            return;
+        var cells = new (SqlType Type, int IntegerLiteralDigits)[tuples.Count];
+        for (var c = 0; c < tuples[0].Length; c++)
+        {
+            var count = 0;
+            foreach (var tuple in tuples)
+            {
+                var cell = tuple[c];
+                if (cell is not Parser.Expressions.DefaultValueExpression && !Expression.IsUntypedNullLiteral(cell))
+                    cells[count++] = (cell.GetSqlType(batch, NoColumnTypeResolver), Expression.IntegerLiteralDigits(cell));
+            }
+            if (count < 2)
+                continue;
+            var unified = SqlType.PromoteBranches(cells.AsSpan(0, count));
+            for (var r = 0; r < rows.Count; r++)
+            {
+                if (tuples[r][c] is not Parser.Expressions.DefaultValueExpression && !rows[r][c].Type.Equals(unified))
+                    rows[r][c] = rows[r][c].CoerceTo(unified);
             }
         }
     }

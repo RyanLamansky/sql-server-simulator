@@ -22,29 +22,30 @@ public sealed class SqlVariantOrderingTests
         var sim = new Simulation();
         _ = sim.ExecuteNonQuery("""
             create table t (v sql_variant);
-            insert t values
-                (cast('6F9619FF-8B86-D011-B42D-00C04FC964FF' as uniqueidentifier)),
-                (cast(0x01 as varbinary(10))),
-                (cast(0x0202 as binary(2))),
-                (cast(N'apple' as nvarchar(20))),
-                (cast('banana' as varchar(20))),
-                (cast('cherry' as char(6))),
-                (cast(0.5 as smallmoney)),
-                (cast(1 as bit)),
-                (cast(2 as tinyint)),
-                (cast(3 as smallint)),
-                (cast(4 as int)),
-                (cast(5 as bigint)),
-                (cast(6.5 as decimal(5,2))),
-                (cast(7.5 as money)),
-                (cast(2.5 as real)),
-                (cast(3.5 as float)),
-                (cast('01:00' as time)),
-                (cast('2020-06-15' as date)),
-                (cast('2020-06-16 12:00' as smalldatetime)),
-                (cast('2020-06-17' as datetime)),
-                (cast('2020-06-18' as datetime2)),
-                (cast('2020-06-19 12:00:00 +02:00' as datetimeoffset))
+            -- One row per statement: a multi-row VALUES list would unify the
+            -- column's types first, which these don't.
+            insert t values (cast('6F9619FF-8B86-D011-B42D-00C04FC964FF' as uniqueidentifier));
+            insert t values (cast(0x01 as varbinary(10)));
+            insert t values (cast(0x0202 as binary(2)));
+            insert t values (cast(N'apple' as nvarchar(20)));
+            insert t values (cast('banana' as varchar(20)));
+            insert t values (cast('cherry' as char(6)));
+            insert t values (cast(0.5 as smallmoney));
+            insert t values (cast(1 as bit));
+            insert t values (cast(2 as tinyint));
+            insert t values (cast(3 as smallint));
+            insert t values (cast(4 as int));
+            insert t values (cast(5 as bigint));
+            insert t values (cast(6.5 as decimal(5,2)));
+            insert t values (cast(7.5 as money));
+            insert t values (cast(2.5 as real));
+            insert t values (cast(3.5 as float));
+            insert t values (cast('01:00' as time));
+            insert t values (cast('2020-06-15' as date));
+            insert t values (cast('2020-06-16 12:00' as smalldatetime));
+            insert t values (cast('2020-06-17' as datetime));
+            insert t values (cast('2020-06-18' as datetime2));
+            insert t values (cast('2020-06-19 12:00:00 +02:00' as datetimeoffset));
             """);
         return sim;
     }
@@ -93,7 +94,7 @@ public sealed class SqlVariantOrderingTests
     public void OrderBy_Null_SortsLowestAscending()
     {
         var sim = new Simulation();
-        _ = sim.ExecuteNonQuery("create table t (v sql_variant); insert t values (cast(1 as int)), (null), (cast(N'z' as nvarchar(5)))");
+        _ = sim.ExecuteNonQuery("create table t (v sql_variant); insert t values (cast(1 as int)); insert t values (null); insert t values (cast(N'z' as nvarchar(5)))");
         using var reader = sim.ExecuteReader("select v from t order by v");
         IsTrue(reader.Read());
         AreEqual(DBNull.Value, reader.GetValue(0));
@@ -166,10 +167,12 @@ public sealed class SqlVariantOrderingTests
         var sim = new Simulation();
         _ = sim.ExecuteNonQuery("""
             create table t (v sql_variant);
-            insert t values
-                (cast(5 as bigint)), (cast(5 as int)), (cast(5.00 as decimal(5,2))),
-                (cast(5.0 as float)),
-                (cast(N'x' as nvarchar(5))), (cast('x' as varchar(5)))
+            insert t values (cast(5 as bigint));
+            insert t values (cast(5 as int));
+            insert t values (cast(5.00 as decimal(5,2)));
+            insert t values (cast(5.0 as float));
+            insert t values (cast(N'x' as nvarchar(5)));
+            insert t values (cast('x' as varchar(5)))
             """);
         using var reader = sim.ExecuteReader("""
             select cast(sql_variant_property(v, 'BaseType') as nvarchar(20)), count(*)
@@ -194,10 +197,12 @@ public sealed class SqlVariantOrderingTests
     public void Distinct_SameFamilyScopedEquality()
         => AreEqual(3, new Simulation().ExecuteScalar("""
             create table t (v sql_variant);
-            insert t values
-                (cast(5 as bigint)), (cast(5 as int)), (cast(5.00 as decimal(5,2))),
-                (cast(5.0 as float)),
-                (cast(N'x' as nvarchar(5))), (cast('x' as varchar(5)));
+            insert t values (cast(5 as bigint));
+            insert t values (cast(5 as int));
+            insert t values (cast(5.00 as decimal(5,2)));
+            insert t values (cast(5.0 as float));
+            insert t values (cast(N'x' as nvarchar(5)));
+            insert t values (cast('x' as varchar(5)));
             select count(*) from (select distinct v from t) d
             """));
 
@@ -303,7 +308,9 @@ public sealed class SqlVariantOrderingTests
         var sim = new Simulation();
         _ = sim.ExecuteNonQuery("""
             create table a (id int, v sql_variant);
-            insert a values (1, cast(5 as int)), (2, cast(N'5' as nvarchar(10))), (3, cast(N'abc' as nvarchar(10)));
+            insert a values (1, cast(5 as int));
+            insert a values (2, cast(N'5' as nvarchar(10)));
+            insert a values (3, cast(N'abc' as nvarchar(10)));
             create table b (i int, s nvarchar(10));
             insert b values (5, N'5')
             """);

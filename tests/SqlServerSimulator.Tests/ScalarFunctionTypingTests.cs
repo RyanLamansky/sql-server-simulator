@@ -168,4 +168,15 @@ public sealed class ScalarFunctionTypingTests
         AreEqual(2, sim.ExecuteScalar(
             "select datalength(case when 1 = 1 then cast(0x0102 as varbinary(10)) else cast(0x as binary(4)) end)"));
     }
+
+    [TestMethod]
+    [DataRow("1", 4)]
+    [DataRow("1.5", 5)]
+    [DataRow("N'ab'", 4)]
+    [DataRow("cast('ab' as char(5))", 5)]
+    [DataRow("cast('2020-01-01' as date)", 3)]
+    [DataRow("0x0102", 2)]
+    public void DataLength_OfASqlVariant_MeasuresTheValueItCarries(string value, int expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar($"select datalength(cast({value} as sql_variant))"));
 }
+

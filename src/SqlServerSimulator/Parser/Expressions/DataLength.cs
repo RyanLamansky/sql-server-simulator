@@ -29,6 +29,12 @@ internal sealed class DataLength(ParserContext context) : Expression
         var value = source.Run(runtime);
         if (value.IsNull)
             return SqlValue.Null(this.returnsBigInt ? SqlType.BigInt : SqlType.Int32);
+        var byteCount = ByteCount(value);
+        return this.returnsBigInt ? SqlValue.FromInt64(byteCount) : SqlValue.FromInt32(byteCount);
+    }
+
+    private static int ByteCount(SqlValue value)
+    {
         // Spatial values report the CLR-UDT serialization length (what a
         // real server stores and sends), not the byte count of the WKT text
         // the simulator stores — GetVariableByteCount serves the storage
@@ -37,8 +43,12 @@ internal sealed class DataLength(ParserContext context) : Expression
         // it reads off the wire, so the two must measure the same form.
         // hierarchyid needs no special case: it stores its canonical OrdPath
         // bytes, so GetVariableByteCount already reports the real DATALENGTH.
-        var byteCount = value.Type switch
+        return value.Type switch
         {
+            // A sql_variant measures the value it carries, without the
+            // base-type header it stores (probed 2026-09-25 against SQL
+            // Server 2025: a variant int is 4, a variant 1.5 is 5).
+            SqlVariantSqlType => ByteCount(value.AsVariantInner),
             SpatialSqlType spatial => value.AsSpatial.Encoded(spatial.IsGeography).Length,
             // decimal / numeric is fixed-length on disk but DATALENGTH does not
             // report that width: real sizes the value by its own magnitude, so
@@ -52,7 +62,6 @@ internal sealed class DataLength(ParserContext context) : Expression
             { IsFixedLength: true } => value.Type.FixedLength,
             _ => value.Type.GetVariableByteCount(value),
         };
-        return this.returnsBigInt ? SqlValue.FromInt64(byteCount) : SqlValue.FromInt32(byteCount);
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)

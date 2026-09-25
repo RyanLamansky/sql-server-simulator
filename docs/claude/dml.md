@@ -179,6 +179,11 @@ Both engines compile a whole batch before running any of it, so a bad-arity stat
 
 **Divergence:** real reports a statement offending several rules at once as a multi-error response (an unknown column name *and* a bad count come back as Msg 207 then Msg 110; a ragged constructor into a rowversion table as Msg 273 then Msg 10709) — the simulator raises the leading error alone.
 
+## A multi-row `VALUES` list's column types
+
+A multi-row `INSERT … VALUES` list is a table constructor, so each column takes the type its rows unify to — the `UNION ALL` rule — before converting to the target (probed 2026-09-25 against SQL Server 2025).
+`VALUES (1), ('a')` into a `varchar` column is Msg 245 converting `'a'` to `int`, `VALUES (1.50), ('2')` stores `2.00`, and a `sql_variant` target stores `int` for both rows of `VALUES (1), ('2')`; a single row converts straight to the target, and a `DEFAULT` cell or a bare `NULL` takes no part (`Simulation.UnifyValueRows`).
+
 ## `DEFAULT` as a `VALUES` element
 
 `INSERT INTO t (a, b) VALUES (1, DEFAULT)` — the `DEFAULT` keyword in an individual value cell, distinct from the whole-row `DEFAULT VALUES` form below.

@@ -804,4 +804,28 @@ public class InsertTests
             declare @t table (id int);
             insert into @t (select 7)
             """, 156);
+
+    [TestMethod]
+    public void MultiRowValues_UnifyEachColumnBeforeConverting_RaisesMsg245()
+        => new Simulation().AssertSqlError("create table t (c varchar(10)); insert t values (1), ('a')", 245, "Conversion failed when converting the varchar value 'a' to data type int.");
+
+    [TestMethod]
+    public void MultiRowValues_UnifyEachColumnBeforeConverting_StoresTheUnifiedRendering()
+        => AreEqual("1.50|2.00|1|2.0", new Simulation().ExecuteScalar("""
+            create table t (c varchar(10));
+            insert t values (1.50), ('2');
+            create table u (c varchar(10));
+            insert u values ('1');
+            insert u values ('2'), (1.5);
+            select concat_ws('|', (select string_agg(c, '|') within group (order by c) from t), (select min(c) from u), (select max(c) from u))
+            """));
+
+    [TestMethod]
+    public void MultiRowValues_IntoSqlVariant_StoreTheUnifiedType()
+        => AreEqual("int|int", new Simulation().ExecuteScalar("""
+            create table t (v sql_variant);
+            insert t values (1), ('2');
+            select string_agg(cast(sql_variant_property(v, 'BaseType') as varchar(10)), '|') from t
+            """));
 }
+
