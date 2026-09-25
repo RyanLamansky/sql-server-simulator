@@ -37,8 +37,8 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// simulator's ANSI-trim behavior is always on), 0 otherwise.</description></item>
 /// </list>
 /// Unsupported / physical-storage properties (<c>IsDeterministic</c>,
-/// <c>IsIndexable</c>, <c>IsPrecise</c>, <c>IsSparse</c>, <c>IsColumnSet</c>,
-/// <c>StatisticalSemantics</c>, <c>GeneratedAlwaysType</c>) return NULL —
+/// <c>IsIndexable</c>, <c>IsPrecise</c>, <c>StatisticalSemantics</c>,
+/// <c>GeneratedAlwaysType</c>) return NULL —
 /// callers reading them on a real server with no stats / column-set also get
 /// NULL, so this matches the common case.
 /// </para>
@@ -104,6 +104,7 @@ internal sealed class ColumnProperty : Expression
             8 => upper switch
             {
                 "COLUMNID" => ordinal,
+                "ISSPARSE" => column.IsSparse ? 1 : 0,
                 _ => null,
             },
             9 => upper switch
@@ -117,6 +118,12 @@ internal sealed class ColumnProperty : Expression
                 "CHARMAXLEN" => GetCharMaxLen(column),
                 "ISCOMPUTED" => column.Computed is null ? 0 : 1,
                 "ISIDENTITY" => column.Identity is null ? 0 : 1,
+                _ => null,
+            },
+            11 => upper switch
+            {
+                // Column sets aren't modeled, so no column is one.
+                "ISCOLUMNSET" => 0,
                 _ => null,
             },
             12 => upper switch

@@ -1206,10 +1206,11 @@ partial class SimulatedSqlException
     /// Mimics SQL Server error 1919: a column whose type SQL Server doesn't
     /// allow as a key column appeared in a PRIMARY KEY or UNIQUE constraint.
     /// Triggers for <c>text</c>, <c>ntext</c>, <c>image</c>, and any
-    /// <c>varchar(MAX)</c> / <c>nvarchar(MAX)</c> / <c>varbinary(MAX)</c>.
+    /// <c>varchar(MAX)</c> / <c>nvarchar(MAX)</c> / <c>varbinary(MAX)</c>, and at
+    /// state 3 for a sparse column (probed 2026-09-25).
     /// </summary>
-    internal static SimulatedSqlException KeyColumnInvalidType(string columnName, string tableName) =>
-        new($"Column '{columnName}' in table '{tableName}' is of a type that is invalid for use as a key column in an index.", 1919, 16, 1);
+    internal static SimulatedSqlException KeyColumnInvalidType(string columnName, string tableName, byte state = 1) =>
+        new($"Column '{columnName}' in table '{tableName}' is of a type that is invalid for use as a key column in an index.", 1919, 16, state);
 
     /// <summary>
     /// Mimics SQL Server error 1711: <c>PRIMARY KEY</c> targeted a computed
@@ -2741,6 +2742,13 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException CannotCreateSparseColumn(string columnName, string tableName) =>
         new($"Cannot create the sparse column '{columnName}' in the table '{tableName}' because an option or data type specified is not valid. A sparse column must be nullable and cannot have the ROWGUIDCOL, IDENTITY, or FILESTREAM properties. A sparse column cannot be of the following data types: text, ntext, image, geometry, geography, or user-defined type.", 1731, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 1791, then Msg 1750: a sparse column declared
+    /// with a DEFAULT (probed 2026-09-25 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException SparseColumnWithDefault(string columnName, string tableName) =>
+        FollowedByConstraintNotCreated(new($"A DEFAULT constraint cannot be created on the column '{columnName}' in the table '{tableName}' because the column is a sparse column or sparse column set. Sparse columns or sparse column sets cannot have a DEFAULT constraint.", 1791, 16, 0), state: 0);
 
     /// <summary>
     /// Mimics SQL Server error 11410: a column carrying a DEFAULT can't be made

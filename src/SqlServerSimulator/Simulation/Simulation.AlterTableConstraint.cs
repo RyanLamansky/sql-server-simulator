@@ -54,7 +54,13 @@ partial class Simulation
             {
                 _ = ParseOneAddedConstraint(context, tableName, withNoCheck);
                 if (context.Token is not Operator { Character: ',' })
+                {
+                    // The list ends at its first unconsumed token, so a stray
+                    // one is Msg 102 / 156 there — `UNIQUE (w) WHERE …` names
+                    // the WHERE (probed 2026-09-25 against SQL Server 2025).
+                    context.RejectTrailingToken();
                     return true;
+                }
                 context.MoveNextRequired();
             }
         }

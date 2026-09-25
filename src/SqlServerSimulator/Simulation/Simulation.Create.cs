@@ -1292,6 +1292,7 @@ partial class Simulation
         var generatedAs = GeneratedAlwaysAsRow.None;
         var isHidden = false;
         var isRowGuidCol = false;
+        var isSparse = false;
         string? columnCollation = null;
         var inlineKeyKind = (KeyConstraintKind?)null;
         var inlineKeyClustered = (bool?)null;
@@ -1392,6 +1393,17 @@ partial class Simulation
                     }
                     context.MoveNextOptional();
                     continue;
+                // SPARSE: a storage marker the row encoder has nothing to buy
+                // from (it already omits a NULL), validated once the type
+                // resolves. After IDENTITY it's Msg 102, as on real.
+                case UnquotedString { ContextualKeyword: ContextualKeyword.Sparse } when !isSparse && identitySpec is null:
+                    isSparse = true;
+                    context.MoveNextOptional();
+                    continue;
+                // A sparse column set changes what SELECT * returns, which
+                // isn't built.
+                case StringToken columnSet when columnSet.Span.Equals("COLUMN_SET", StringComparison.OrdinalIgnoreCase):
+                    throw new NotSupportedException("Sparse column sets (COLUMN_SET FOR ALL_SPARSE_COLUMNS) aren't modeled.");
                 case ReservedKeyword { Keyword: Keyword.RowGuidCol } when !isRowGuidCol:
                     // ROWGUIDCOL: uniqueidentifier-only metadata marker. Type and
                     // duplicate validation run after the type resolves below.
@@ -1508,6 +1520,9 @@ partial class Simulation
             break;
         }
 
+        // A sparse column must be nullable as written; the NOT NULL an inline
+        // PRIMARY KEY implies is the key's refusal (Msg 1919) instead.
+        var writtenNotNull = nullable == false;
         if (inlineKeyKind == KeyConstraintKind.PrimaryKey)
         {
             if (nullable == true)
@@ -1541,6 +1556,11 @@ partial class Simulation
                 throw SimulatedSqlException.IdentityInvalidType(columnName.Value);
             identity = spec.Resolve(resolvedType, columnName.Value, identityNotForReplication);
         }
+
+        if (isSparse && (writtenNotNull || isRowGuidCol || !SparseEligible(resolvedType)))
+            throw SimulatedSqlException.CannotCreateSparseColumn(columnName.Value, tableName);
+        if (isSparse && defaultExpression is not null)
+            throw SimulatedSqlException.SparseColumnWithDefault(columnName.Value, tableName);
 
         if (isRowGuidCol)
         {
@@ -1598,6 +1618,7 @@ partial class Simulation
             spelledNumeric: SqlType.IsNumericSpelling(qualifiedTypeName, alias: context.Batch.TryResolveAliasType(qualifiedTypeName, out _)));
         if (xmlSchemaCollection is not null)
             newColumn.XmlSchemaCollection = xmlSchemaCollection;
+        newColumn.IsSparse = isSparse;
         if (defaultExpression is not null)
         {
             // Inline DEFAULT (with or without an explicit CONSTRAINT name)
@@ -2314,6 +2335,8 @@ partial class Simulation
                     throw SimulatedSqlException.ComputedColumnPkRequiresPersisted(column.Name, tableName);
                 if (column.IsLob)
                     throw SimulatedSqlException.KeyColumnInvalidType(column.Name, tableName);
+                if (column.IsSparse)
+                    throw SimulatedSqlException.FollowedByConstraintNotCreated(SimulatedSqlException.KeyColumnInvalidType(column.Name, tableName, state: 3));
                 if (pending.Kind == KeyConstraintKind.PrimaryKey && column.Nullable)
                     throw SimulatedSqlException.PrimaryKeyOnNullableColumn(tableName);
                 RejectComputedKeyColumnNotIndexable(

@@ -351,4 +351,36 @@ public sealed class AlterTableShapeTests
     [TestMethod]
     public void DefaultExpression_AConstantExpressionIsStillFine()
         => AreEqual(7, ExecuteScalar("create table t (v int, w int default (3 + 4)); insert t (v) values (1); select w from t"));
+
+    /// <summary>
+    /// <c>SPARSE</c> in a column definition marks the column (nullable by
+    /// default), with the same refusals <c>ALTER COLUMN … ADD SPARSE</c> has,
+    /// Msg 1919 for a key over it and Msg 1791 for a DEFAULT on it (probed
+    /// 2026-09-25 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void SparseColumn_InCreateTable()
+        => AreEqual("0|1|1|1", new Simulation().ExecuteScalar("""
+            create table t (id int primary key, v varchar(10) sparse null, w int sparse);
+            select concat_ws('|',
+                columnproperty(object_id('t'), 'id', 'IsSparse'),
+                columnproperty(object_id('t'), 'v', 'IsSparse'),
+                (select is_sparse from sys.columns where object_id = object_id('t') and name = 'w'),
+                columnproperty(object_id('t'), 'w', 'AllowsNull'))
+            """));
+
+    [TestMethod]
+    [DataRow("create table t (id int, v int sparse not null)", 1731)]
+    [DataRow("create table t (id int, v text sparse)", 1731)]
+    [DataRow("create table t (id int sparse primary key)", 1919)]
+    [DataRow("create table t (id int, v int sparse default 1)", 1791)]
+    [DataRow("create table t (id int, v int identity sparse)", 102)]
+    [DataRow("create table t (id int); alter table t add v int sparse not null", 1731)]
+    public void SparseColumn_Refusals(string sql, int number)
+        => _ = new Simulation().AssertSqlError(sql, number);
+
+    [TestMethod]
+    public void AddConstraint_TrailingWhere_IsMsg156()
+        => new Simulation().AssertSqlError("create table t (w int); alter table t add constraint uq unique (w) where w > 0", 156, "Incorrect syntax near the keyword 'where'.");
 }
+

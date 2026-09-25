@@ -163,7 +163,8 @@ A column-add list is a separate branch and consumes the rest of the statement, s
 
 `ALTER COLUMN col { ADD | DROP } { ROWGUIDCOL | SPARSE }` toggles a marker.
 Both are metadata here: the `$ROWGUID` pseudo-column isn't modeled, and the row encoder already omits a NULL from the row, so `SPARSE`'s storage bargain has nothing to buy.
-`sys.columns.is_rowguidcol` / `is_sparse` is what observes the toggle.
+`sys.columns.is_rowguidcol` / `is_sparse` and `COLUMNPROPERTY(…, 'IsSparse')` are what observe the toggle.
+A column definition takes `SPARSE` too (`CREATE TABLE`, `ADD`), nullable by default, with the same refusals below plus **Msg 1919** state 3 (and Msg 1750) for a key over it and **Msg 1791** (and Msg 1750) for a DEFAULT on it (probed 2026-09-25); a sparse column set (`COLUMN_SET FOR ALL_SPARSE_COLUMNS`) raises `NotSupportedException`.
 
 Probed refusals:
 
@@ -395,9 +396,9 @@ ALTER TABLE [schema.]table
 Single-column shape only (real SQL Server's grammar doesn't accept comma-separated multi-column ALTER COLUMN).
 Routed from `TryParseAlterTable` via `Keyword.Alter` into `TryParseAlterTableAlterColumn`.
 The trailing `NULL`/`NOT NULL` keyword is optional — omitting it preserves the column's existing nullability (probe-confirmed).
-`COLLATE` is parse-accepted and ignored (the simulator has a single default collation).
+`COLLATE` sets the column's collation, which a CHECK, DEFAULT or index on it refuses as a type change (see [Blockers](#blockers-msg-5074)).
 
-The `ALTER COLUMN col ADD/DROP {PERSISTED|MASKED|ROWGUIDCOL|SPARSE}` sub-clause forms aren't modeled — `Keyword.Add` / `Keyword.Drop` after the column name raises `NotSupportedException`.
+The `ALTER COLUMN col ADD/DROP {ROWGUIDCOL|SPARSE}` sub-clauses are [column attributes](#column-attributes); `PERSISTED` and `MASKED` raise `NotSupportedException`.
 
 ### Conversion fidelity
 
@@ -474,5 +475,4 @@ Storage cost is negligible at simulator workload sizes.
   Performance only; behavior matches.
 - **Index protection nuance**: Real SQL Server allows length widening AND length narrowing (when data fits) under an index — both pass with the same SqlType base.
   The simulator allows both only when the `SqlType` subclass matches; decimal precision narrowing under an index (same `DecimalSqlType` subclass) would pass in the simulator but is probably blocked in real SQL Server (not probed; EF Migrations drops indexes before significant type changes anyway, so the gap is application-unreachable through EF).
-- **No `ALTER COLUMN ADD/DROP` sub-clause**: PERSISTED, MASKED, ROWGUIDCOL, SPARSE sub-grammar forms raise `NotSupportedException` — none of these features are modeled at the simulator level.
 - **Non-transactional column DDL**: Same as ADD / DROP COLUMN — ALTER COLUMN bypasses the undo log; `BEGIN TRAN` / `ROLLBACK` doesn't undo the type change.
