@@ -256,14 +256,12 @@ Already listed elsewhere here and not repeated: parenthesized set-op branches.
 - `LAG` / `LEAD` / `FIRST_VALUE` / `LAST_VALUE` over a column typed only by `NULL` (`VALUES (1, null)`) answers NULL here; real raises Msg 8117 ("Operand data type NULL is invalid for lag operator").
   A bare `NULL` operand raises it; a derived source's column doesn't carry that it was an untyped `NULL`.
 - A stored `sql_variant` doesn't keep a decimal value's `decimal` / `numeric` name, so `SQL_VARIANT_PROPERTY(<variant>, 'BaseType')` reads `numeric` for a variant holding `CAST(… AS decimal)`, where real reads `decimal`; a direct argument reports its own spelling.
-- `UPDATE … SET @x += v = 1` is Msg 102 near `'='` here, near `'+='` on real; `IDENTITY(dbo.foo, 1, 1)` is Msg 243 here, Msg 102 near `'.'` on real.
 - `SUSER_SNAME()` is `dbo` for the in-process default session and `IS_SRVROLEMEMBER('sysadmin')` 0, where a real `sa` connection reports `sa` and 1.
 
 **Same error, different number, state or class** (probed 2026-09-24):
 
 - `BEGIN ATOMIC` outside a natively compiled module is Msg 10782 on real; an empty one here is Msg 102.
 - Real follows a table hint the grammar refuses (`INSERT t (c) WITH (TABLOCK) …`, `MERGE t AS a WITH (…)`) with Msg 319 after its Msg 156, and an empty `BEGIN TRY … END TRY` with a second Msg 102 near `catch`.
-- `ALTER TABLE <missing> ADD c decimal(39, 0)` reports the precision (Msg 2750) here, the missing table (Msg 4902) on real.
 - `CREATE FUNCTION` with a refused parameter type is followed by Msg 178 on real, since the body's `RETURN` then parses outside a function.
 
 ### Result-set serialization: `FOR XML` / `FOR JSON`

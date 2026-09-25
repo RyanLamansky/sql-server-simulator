@@ -2316,13 +2316,17 @@ public sealed partial class Simulation
     /// deferred-call fallback), so those statements parse to completion and are
     /// discarded whole. This swallow remains for the residual object-name sites
     /// that still resolve inline (DML target tables, <c>NEXT VALUE FOR</c>
-    /// sequences, XML schema collections). Msg 207 (invalid column on a
-    /// resolvable table) is deliberately excluded — probe-confirmed that real
-    /// SQL Server errors on it at compile time even in an un-taken branch, so it
-    /// falls through to the batch-aborting path (<see cref="IsBatchAbortingNameResolution"/>).
+    /// sequences, XML schema collections), and for Msg 4902, an
+    /// <c>ALTER TABLE … ADD</c> whose table doesn't exist yet: real defers that
+    /// statement whole, so its column definitions' own compile errors (a
+    /// precision past 38) wait behind the missing table (probed 2026-09-25).
+    /// Msg 207 (invalid column on a resolvable table) is deliberately excluded
+    /// — probe-confirmed that real SQL Server errors on it at compile time even
+    /// in an un-taken branch, so it falls through to the batch-aborting path
+    /// (<see cref="IsBatchAbortingNameResolution"/>).
     /// </remarks>
     private static bool IsDeferrableNameResolutionError(SimulatedSqlException ex)
-        => ex.Number is 208;
+        => ex.Number is 208 or 4902;
 
     /// <summary>
     /// True when <paramref name="ex"/> is a statement-terminating error that

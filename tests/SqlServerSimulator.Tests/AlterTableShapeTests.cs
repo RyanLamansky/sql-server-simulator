@@ -444,5 +444,27 @@ public sealed class AlterTableShapeTests
     [TestMethod]
     public void AddConstraint_TrailingWhere_IsMsg156()
         => new Simulation().AssertSqlError("create table t (w int); alter table t add constraint uq unique (w) where w > 0", 156, "Incorrect syntax near the keyword 'where'.");
-}
 
+    // An ADD against a table that doesn't exist defers to run time whole, so
+    // the batch runs up to it and its column errors wait behind Msg 4902;
+    // against an existing table they are compile errors (probed 2026-09-25
+    // against SQL Server 2025).
+    [TestMethod]
+    public void AddColumn_ToAMissingTable_DefersPastItsColumnErrors()
+    {
+        using var connection = new Simulation().CreateOpenConnection();
+        using var reader = connection.CreateCommand("select 1; alter table missing add c decimal(39, 0)").ExecuteReader();
+        IsTrue(reader.Read());
+        var ex = Throws<SimulatedSqlException>(() => reader.NextResult());
+        AreEqual(4902, ex.Number);
+    }
+
+    [TestMethod]
+    public void AddColumn_ToAnExistingTable_ChecksItsColumnsBeforeTheBatchRuns()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table t (a int)");
+        simulation.AssertSqlError("select 1; alter table t add c decimal(39, 0)", 2750,
+            "Column or parameter #2: Specified column precision 39 is greater than the maximum precision of 38.");
+    }
+}

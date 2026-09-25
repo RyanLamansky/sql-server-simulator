@@ -23,8 +23,7 @@ partial class Simulation
     /// </remarks>
     private sealed class AddedColumns
     {
-        public readonly HeapTable? Table;
-        public readonly MultiPartName TableName;
+        public readonly HeapTable Table;
         public readonly List<HeapColumn?> HeapColumns = [];
         public readonly List<bool> ExplicitNull = [];
         public readonly List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals, bool? Clustered, bool IgnoreDupKey, bool[] Descending)> PendingKeys = [];
@@ -36,25 +35,20 @@ partial class Simulation
 
         public AddedColumns(ParserContext context, MultiPartName tableName)
         {
-            this.TableName = tableName;
-            // Resolved in skip mode too, for the ordinals a column error names;
-            // only a run reports the table missing.
-            if (context.Batch.TryResolveTable(tableName, out var table))
-            {
-                this.Table = table;
-                this.identityCount = table.IdentityOrdinal >= 0 ? 1 : 0;
-            }
-            else if (!context.Batch.IsSkipping)
-            {
+            // Resolved in skip mode too, for the ordinals a column error names.
+            // A missing table defers the statement there (Msg 4902 is a
+            // deferrable name error), so no column is checked before it.
+            if (!context.Batch.TryResolveTable(tableName, out var table))
                 throw SimulatedSqlException.CannotFindObjectForAlterTable(tableName.ToString());
-            }
+            this.Table = table;
+            this.identityCount = table.IdentityOrdinal >= 0 ? 1 : 0;
         }
 
         /// <summary>Parses one column definition, leaving the cursor on the token after it.</summary>
         public void ParseOne(ParserContext context) =>
             ParseOneColumnIntoLists(
                 context,
-                this.Table?.Name ?? this.TableName.Leaf,
+                this.Table.Name,
                 isTableVariable: false,
                 isTableType: false,
                 this.HeapColumns,
@@ -66,7 +60,7 @@ partial class Simulation
                 this.PendingForeignKeys,
                 ref this.identityCount,
                 withValuesColumns: this.WithValuesColumns,
-                ordinalOffset: this.Table?.Columns.Length ?? 0);
+                ordinalOffset: this.Table.Columns.Length);
     }
 
     /// <summary>
@@ -91,7 +85,7 @@ partial class Simulation
     /// </remarks>
     private static AddedColumnsUndo ApplyAddedColumns(ParserContext context, AddedColumns added, List<string>? primaryKeyColumns)
     {
-        var table = added.Table!;
+        var table = added.Table;
         var heapColumns = added.HeapColumns;
         var pendingChecks = added.PendingChecks;
         var collation = context.Batch.CurrentDatabase.Collation;

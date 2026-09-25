@@ -95,7 +95,7 @@ partial class Simulation
         AddedColumnsUndo? columnsUndo = null;
         try
         {
-            if (columns is { Table: not null })
+            if (columns is not null)
                 columnsUndo = ApplyAddedColumns(context, columns, primaryKeyColumns);
             foreach (var start in constraintStarts)
             {

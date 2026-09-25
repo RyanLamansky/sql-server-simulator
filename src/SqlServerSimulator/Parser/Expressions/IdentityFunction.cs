@@ -40,6 +40,12 @@ internal sealed class IdentityFunction : Expression
         var typeName = TypeNameSynonyms.TryFoldMultiWordType(context)
             ?? context.Token as Name
             ?? throw SimulatedSqlException.SyntaxErrorNear(context);
+        // The type is a bare system type name: a schema-qualified one is a
+        // syntax error at its dot (probed 2026-09-24 against SQL Server 2025).
+        var afterName = context.SaveCheckpoint();
+        if (context.GetNextOptional() is Operator { Character: '.' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        context.RestoreCheckpoint(afterName);
         (this.Type, _) = Cast.ParseTargetTypeSpec(context, typeName);
         // The type is judged before the arguments are read, and its error
         // names the type as written where a column declaration names the column.

@@ -299,6 +299,16 @@ partial class Simulation
         }
 
         var rhs = Expression.Parse(context);
+        // `@v += col = expr` puts a compound operator on the variable of the
+        // three-part shape, which real refuses at that operator (probed
+        // 2026-09-24 against SQL Server 2025).
+        if (assignOp != '=' && rhs is Reference)
+        {
+            var afterValue = context.SaveCheckpoint();
+            if (TryConsumeAssignmentOperator(context) is not null)
+                throw SimulatedSqlException.SyntaxErrorNearText(assignOp + "=");
+            context.RestoreCheckpoint(afterValue);
+        }
         rawAssignments.Add((null, new AssignmentExpression(slot, assignOp == '='
             ? rhs
             : TwoSidedExpression.FromCompoundOp(assignOp, new VariableReference(variable, context), rhs, context))));

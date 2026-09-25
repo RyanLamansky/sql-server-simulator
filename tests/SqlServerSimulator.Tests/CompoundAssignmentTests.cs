@@ -216,4 +216,15 @@ public sealed class CompoundAssignmentTests
         IsTrue(reader.Read()); AreEqual(15, reader.GetInt32(0));
         IsTrue(reader.Read()); AreEqual(70, reader.GetInt32(0));
     }
+
+    // A compound operator on the variable of `@v = col = expr` is refused at
+    // that operator (probed 2026-09-24 against SQL Server 2025).
+    [TestMethod]
+    public void UpdateSet_CompoundVariableInTheThreePartShape_IsMsg102AtTheOperator()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table t (v int)");
+        simulation.ValidateSyntaxError("declare @x int; update t set @x += v = 1", "+=");
+        AreEqual(3, simulation.ExecuteScalar("declare @x int = 0; insert t values (3); update t set @x += v; select @x"));
+    }
 }

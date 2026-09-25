@@ -440,4 +440,10 @@ public sealed class SelectIntoTests
             end
             select @total
             """));
+
+    // IDENTITY()'s type is a bare system type name (probed 2026-09-24 against
+    // SQL Server 2025).
+    [TestMethod]
+    public void IdentityFunction_SchemaQualifiedType_IsMsg102AtTheDot()
+        => new Simulation().ValidateSyntaxError("select identity(dbo.foo, 1, 1) as id into #t", ".");
 }
