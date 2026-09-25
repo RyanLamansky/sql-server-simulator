@@ -36,8 +36,8 @@ public sealed class JsonPathExistsTests
         => AreEqual(DBNull.Value, new Simulation().ExecuteScalar("select json_path_exists(cast(null as nvarchar(max)), '$.a')")!);
 
     [TestMethod]
-    public void NullPath_ReturnsNull()
-        => AreEqual(DBNull.Value, new Simulation().ExecuteScalar("select json_path_exists('{}', cast(null as nvarchar(100)))")!);
+    public void NullPath_RaisesMsg8116()
+        => new Simulation().AssertSqlError("select json_path_exists('{}', cast(null as nvarchar(100)))", 8116, "Argument data type NULL is invalid for argument 2 of JSON_PATH_EXISTS function.");
 
     [TestMethod]
     public void InvalidJsonLax_Returns0()

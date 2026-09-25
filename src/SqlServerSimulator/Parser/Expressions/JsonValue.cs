@@ -41,8 +41,8 @@ internal sealed class JsonValue : Expression
     public override SqlValue Run(RuntimeContext runtime)
     {
         var jsonValue = this.jsonInput.Run(runtime);
-        var pathValue = this.pathInput.Run(runtime);
-        if (jsonValue.IsNull || pathValue.IsNull)
+        var pathValue = JsonText.RequirePathValue(this.pathInput.Run(runtime), "JSON_VALUE");
+        if (jsonValue.IsNull)
             return SqlValue.Null(SqlType.NVarchar);
 
         var path = JsonPath.Parse(pathValue.AsString);
@@ -85,7 +85,7 @@ internal sealed class JsonValue : Expression
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
-        _ = StringScalars.RequireStringArgument(this.jsonInput, this.jsonInput.GetSqlType(batch, resolveColumnType), "json_value", 1, acceptsLegacyLob: false);
+        JsonText.RequireDocumentAndPath(this.jsonInput, this.pathInput, batch, resolveColumnType, "json_value");
         return SqlType.NVarchar;
     }
 

@@ -25,8 +25,30 @@ public sealed class JsonScalarTests
         => IsInstanceOfType<DBNull>(ExecuteScalar("select json_value(null, '$.x')"));
 
     [TestMethod]
-    public void JsonValue_NullPath_ReturnsNull()
-        => IsInstanceOfType<DBNull>(ExecuteScalar("select json_value('{\"x\":1}', null)"));
+    [DataRow("select json_value('{}', null)", "json_value", 1)]
+    [DataRow("select json_modify('{}', null, 1)", "json_modify", 1)]
+    [DataRow("select json_query('{}', null)", "JSON_QUERY", 8)]
+    [DataRow("select json_path_exists('{}', null)", "JSON_PATH_EXISTS", 8)]
+    [DataRow("declare @p nvarchar(10); select json_value(null, @p)", "JSON_VALUE", 8)]
+    [DataRow("declare @p nvarchar(10); select json_query(null, @p)", "JSON_QUERY", 8)]
+    [DataRow("declare @p nvarchar(10); select json_path_exists('{}', @p)", "JSON_PATH_EXISTS", 8)]
+    [DataRow("declare @p nvarchar(10); select json_modify('{}', @p, 1)", "JSON_MODIFY", 8)]
+    public void NullPath_RaisesMsg8116(string sql, string function, int state)
+    {
+        var error = new Simulation().AssertSqlError(sql, 8116);
+        AreEqual($"Argument data type NULL is invalid for argument 2 of {function} function.", error.Errors[0].Message);
+        AreEqual((byte)state, error.Errors[0].State);
+    }
+
+    [TestMethod]
+    [DataRow("select json_value(1, '$')", "int", 1, "json_value")]
+    [DataRow("select json_query(1.5)", "numeric", 1, "json_query")]
+    [DataRow("select json_modify(0x01, '$.a', 1)", "varbinary", 1, "json_modify")]
+    [DataRow("select json_path_exists('{}', 1)", "int", 2, "json_path_exists")]
+    [DataRow("create table t (n ntext); select json_query('{}', n) from t", "ntext", 2, "json_query")]
+    [DataRow("select nullif(json_value(2147483647, '$.a'), 1)", "int", 1, "json_value")]
+    public void NonStringDocumentOrPath_RaisesMsg8116(string sql, string type, int argument, string function)
+        => new Simulation().AssertSqlError(sql, 8116, $"Argument data type {type} is invalid for argument {argument} of {function} function.");
 
     [TestMethod]
     public void JsonValue_BooleanValue_ReturnsLowercaseLiteral()
@@ -312,10 +334,6 @@ public sealed class JsonScalarTests
     [TestMethod]
     public void JsonQuery_NullJson_ReturnsNull()
         => IsInstanceOfType<DBNull>(new Simulation().ExecuteScalar("select json_query(null, '$.x')"));
-
-    [TestMethod]
-    public void JsonQuery_NullPath_ReturnsNull()
-        => IsInstanceOfType<DBNull>(new Simulation().ExecuteScalar("select json_query('{\"x\":[1]}', null)"));
 
     /// <summary>
     /// The path argument is optional — <c>JSON_QUERY(json)</c> reads as

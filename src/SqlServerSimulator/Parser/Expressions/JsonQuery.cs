@@ -40,13 +40,11 @@ internal sealed class JsonQuery : Expression
     public override SqlValue Run(RuntimeContext runtime)
     {
         var jsonValue = this.jsonInput.Run(runtime);
-        if (jsonValue.IsNull)
-            return SqlValue.Null(SqlType.NVarcharMax);
         if (this.pathInput is null)
-            return Extract(jsonValue, JsonPath.Root);
+            return jsonValue.IsNull ? SqlValue.Null(SqlType.NVarcharMax) : Extract(jsonValue, JsonPath.Root);
 
-        var pathValue = this.pathInput.Run(runtime);
-        return pathValue.IsNull
+        var pathValue = JsonText.RequirePathValue(this.pathInput.Run(runtime), "JSON_QUERY");
+        return jsonValue.IsNull
             ? SqlValue.Null(SqlType.NVarcharMax)
             : Extract(jsonValue, JsonPath.Parse(pathValue.AsString));
     }
@@ -74,7 +72,11 @@ internal sealed class JsonQuery : Expression
         return SqlValue.Null(SqlType.NVarcharMax);
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.NVarcharMax;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        JsonText.RequireDocumentAndPath(this.jsonInput, this.pathInput, batch, resolveColumnType, "json_query");
+        return SqlType.NVarcharMax;
+    }
 
     internal override string DebugDisplay() => this.pathInput is null
         ? $"JSON_QUERY({this.jsonInput.DebugDisplay()})"

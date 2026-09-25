@@ -6,7 +6,7 @@ JSON columns are plain `nvarchar(max)`.
 `JSON_VALUE(json, path)` returns `nvarchar(4000)`.
 Lax mode (default and EF's only emitted form): missing path / non-scalar match → SQL NULL.
 `strict $.foo` raises Msg 13608 on miss.
-NULL `json` or NULL path → NULL.
+NULL `json` → NULL; a NULL path is refused — see [Argument types](#argument-types).
 A document that isn't JSON text raises Msg 13609 under either mode — see [Msg 13609](#msg-13609--the-document-isnt-json-text).
 JSON booleans render as lowercase `'true'`/`'false'`; numbers as raw text via `JsonElement.GetRawText`.
 Object/array matches → NULL in lax, **Msg 13623** State 2 in strict.
@@ -16,7 +16,7 @@ Object/array matches → NULL in lax, **Msg 13623** State 2 in strict.
 Object/array match → raw JSON text via `JsonElement.GetRawText` (preserves the input's whitespace shape).
 Scalar match → NULL in lax, Msg 13624 State 2 in strict.
 Missing path → NULL in lax, Msg 13608 in strict.
-NULL `json` or NULL path → NULL.
+NULL `json` → NULL.
 The path is optional: `JSON_QUERY(json)` is shorthand for `JSON_QUERY(json, '$')` and hands back the whole document — the input's own text, so interior whitespace survives while the padding outside the document does not (`'  {"a" : 1}  '` → `{"a" : 1}`).
 A root-level JSON scalar isn't JSON text at all, so it raises Msg 13609 rather than answering NULL; a third argument → **Msg 189** ("The json_query function requires 1 to 2 arguments.", against `JSON_VALUE`'s fixed-arity Msg 174).
 DACFx-emitted computed columns (WWI's `Application.People.OtherLanguages`, `Warehouse.StockItems.Tags`) always supply explicit paths.
@@ -87,14 +87,20 @@ JSON-path quoted-property escape `""` → literal `"`.
 
 `JSON_PATH_EXISTS(json, path)` returns `int` (1 / 0 / NULL).
 Routes through the same `JsonPath.Walk` infrastructure as `JSON_VALUE` / `JSON_QUERY`: parses the path, walks the parsed `JsonDocument`, returns 1 if the path resolves to a node and 0 otherwise.
-NULL `json` or NULL `path` → NULL.
+NULL `json` → NULL.
 It is the one member of the family that never raises — see [Msg 13609](#msg-13609--the-document-isnt-json-text).
 
 `ISJSON(expression)` returns `int` (1 / 0 / NULL).
-NULL input → NULL; non-string input → 0 (real SQL Server raises Msg 8116 — the simulator's lax disposition is harmless for the CHECK-constraint use case); a well-formed JSON object or array with nothing but whitespace around it → 1; anything else → 0, root-level scalars (`'1'`, `'"abc"'`, `'true'`) and trailing text (`'{"a":1}extra'`) included.
+NULL input → NULL; a well-formed JSON object or array with nothing but whitespace around it → 1; anything else → 0, root-level scalars (`'1'`, `'"abc"'`, `'true'`) and trailing text (`'{"a":1}extra'`) included.
 It shares [the document scan](#msg-13609--the-document-isnt-json-text) with the rest of the family and reports what that scan objects to as 0 rather than raising.
 The 2-arg shape (`VALUE | ARRAY | OBJECT | SCALAR` modifier) isn't modeled — DACFx-emitted CHECK constraints (`isjson([col])<>0`) only use the 1-arg form.
 
+
+## Argument types
+
+`JSON_VALUE`, `JSON_QUERY`, `JSON_MODIFY`, `JSON_PATH_EXISTS` and `ISJSON` read the document, and the four path functions the path, as text: any other type — `text` / `ntext` and `xml` included — is Msg 8116 while compiling, so an empty rowset raises it too (probed 2026-09-25 against SQL Server 2025).
+A path is never NULL.
+A bare `NULL` literal is refused while compiling, `json_value` / `json_modify` at state 1 in lower case and `JSON_QUERY` / `JSON_PATH_EXISTS` at state 8 in capitals; a path that *evaluates* to NULL — a typed NULL, a variable, a column, a `NULLIF` — is refused at runtime by all four at state 8 in capitals, whatever the document holds, a NULL document included.
 ## The path grammar
 
 `['append'] ['lax' | 'strict'] '$' segment*`, where a segment is `.<name>` / `."<quoted name>"` / `[<index>]`.

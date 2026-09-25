@@ -196,7 +196,10 @@ internal static class ConstantFolding
             try
             {
                 // A written constant reaches no column, so the resolver is
-                // unreachable rather than merely unused.
+                // unreachable rather than merely unused. Typing it first lets
+                // a compile-time refusal (a JSON function's Msg 8116) stand in
+                // for a Run that would otherwise meet a value it never checks.
+                _ = expression.GetSqlType(context.Batch, static _ => throw new NotSupportedException());
                 value = expression.Run(new RuntimeContext(static _ => throw new NotSupportedException(), context.Batch));
                 return true;
             }

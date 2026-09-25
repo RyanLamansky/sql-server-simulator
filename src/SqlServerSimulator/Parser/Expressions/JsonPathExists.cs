@@ -30,8 +30,8 @@ internal sealed class JsonPathExists : Expression
     public override SqlValue Run(RuntimeContext runtime)
     {
         var jv = this.jsonInput.Run(runtime);
-        var pv = this.pathInput.Run(runtime);
-        if (jv.IsNull || pv.IsNull)
+        var pv = JsonText.RequirePathValue(this.pathInput.Run(runtime), "JSON_PATH_EXISTS");
+        if (jv.IsNull)
             return SqlValue.Null(SqlType.Int32);
         var path = JsonPath.Parse(pv.AsString);
 
@@ -48,7 +48,11 @@ internal sealed class JsonPathExists : Expression
         return SqlValue.FromInt32(path.Walk(doc.RootElement, scan, out _) == JsonWalkResult.Resolved ? 1 : 0);
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        JsonText.RequireDocumentAndPath(this.jsonInput, this.pathInput, batch, resolveColumnType, "json_path_exists");
+        return SqlType.Int32;
+    }
 
     internal override string DebugDisplay() => $"JSON_PATH_EXISTS({this.jsonInput.DebugDisplay()}, {this.pathInput.DebugDisplay()})";
 

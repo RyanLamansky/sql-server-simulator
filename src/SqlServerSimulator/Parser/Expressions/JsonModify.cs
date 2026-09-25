@@ -65,10 +65,10 @@ internal sealed class JsonModify : Expression
     public override SqlValue Run(RuntimeContext runtime)
     {
         var jsonInputValue = this.jsonInput.Run(runtime);
-        var pathValue = this.pathInput.Run(runtime);
+        var pathValue = JsonText.RequirePathValue(this.pathInput.Run(runtime), "JSON_MODIFY");
         var newSqlValue = this.newValueInput.Run(runtime);
         RequireWritableValueType(newSqlValue.Type);
-        if (jsonInputValue.IsNull || pathValue.IsNull)
+        if (jsonInputValue.IsNull)
             return SqlValue.Null(SqlType.NVarcharMax);
 
         var path = JsonPath.Parse(pathValue.AsString, acceptAppend: true);
@@ -231,6 +231,7 @@ internal sealed class JsonModify : Expression
     /// </summary>
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
+        JsonText.RequireDocumentAndPath(this.jsonInput, this.pathInput, batch, resolveColumnType, "json_modify");
         RequireWritableValueType(this.newValueInput.GetSqlType(batch, resolveColumnType));
         return SqlType.NVarcharMax;
     }

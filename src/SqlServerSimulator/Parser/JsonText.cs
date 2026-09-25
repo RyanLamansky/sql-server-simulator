@@ -1,5 +1,7 @@
 using System.Text;
 using System.Text.Json;
+using SqlServerSimulator.Parser.Expressions;
+using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator.Parser;
 
@@ -21,6 +23,37 @@ namespace SqlServerSimulator.Parser;
 /// </remarks>
 internal static class JsonText
 {
+    /// <summary>
+    /// The compile-time argument check the JSON path functions share: the
+    /// document and the path read as text, so any other type — the legacy LOBs
+    /// and xml included — is Msg 8116, and a bare <c>NULL</c> path is refused
+    /// too, JSON_QUERY and JSON_PATH_EXISTS naming themselves in capitals at
+    /// state 8 where JSON_VALUE and JSON_MODIFY use state 1 (probed 2026-09-25
+    /// against SQL Server 2025).
+    /// </summary>
+    internal static void RequireDocumentAndPath(Expression json, Expression? path, BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType, string functionName)
+    {
+        _ = StringScalars.RequireStringArgument(json, json.GetSqlType(batch, resolveColumnType), functionName, 1, acceptsLegacyLob: false);
+        if (path is null)
+            return;
+        if (Expression.IsUntypedNullLiteral(path))
+        {
+            throw functionName is "json_query" or "json_path_exists"
+                ? SimulatedSqlException.InvalidArgumentDataType("NULL", 2, functionName.ToUpperInvariant(), state: 8)
+                : SimulatedSqlException.InvalidArgumentDataType("NULL", 2, functionName);
+        }
+        _ = StringScalars.RequireStringArgument(path, path.GetSqlType(batch, resolveColumnType), functionName, 2, acceptsLegacyLob: false);
+    }
+
+    /// <summary>
+    /// A path that evaluates to NULL is refused at runtime, whatever the
+    /// document holds (NULL included) — Msg 8116 at state 8, naming the
+    /// function in capitals for all four (probed 2026-09-25 against SQL Server
+    /// 2025).
+    /// </summary>
+    internal static SqlValue RequirePathValue(SqlValue path, string upperFunctionName) =>
+        path.IsNull ? throw SimulatedSqlException.InvalidArgumentDataType("NULL", 2, upperFunctionName, state: 8) : path;
+
     /// <summary>
     /// The character SQL Server names in Msg 13609 when the reader ran off the
     /// end of the text rather than hitting an unexpected character.

@@ -144,9 +144,11 @@ public sealed class DefaultClauseTests
             """, 302);
 
     [TestMethod]
-    public void NewSequentialId_WithArguments_RaisesMsg302()
-        => _ = new Simulation().AssertSqlError(
-            "create table t (g uniqueidentifier not null default newsequentialid(1))", 302);
+    [DataRow("create table t (g uniqueidentifier not null default newsequentialid(1))")]
+    [DataRow("select newsequentialid(null)")]
+    [DataRow("select 1 + newsequentialid(1, 2)")]
+    public void NewSequentialId_WithArguments_RaisesMsg174(string sql)
+        => new Simulation().AssertSqlError(sql, 174, "The newsequentialid function requires 0 argument(s).");
 
     // SSMS-emitted DDL scripts wrap the DEFAULT body in parens around a
     // named constraint: `ALTER TABLE t ADD CONSTRAINT df DEFAULT

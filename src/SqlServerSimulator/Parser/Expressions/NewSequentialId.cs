@@ -14,8 +14,9 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// checks it. Both DEFAULT positions are covered: inline column
 /// (<c>CREATE TABLE … col uniqueidentifier DEFAULT newsequentialid()</c>)
 /// and named constraint (<c>ALTER TABLE t ADD CONSTRAINT df DEFAULT
-/// (newsequentialid()) FOR col</c>). Argumented calls
-/// (<c>newsequentialid(1)</c>) also raise Msg 302.
+/// (newsequentialid()) FOR col</c>). An argumented call
+/// (<c>newsequentialid(1)</c>) is Msg 174 in every context, the DEFAULT clause
+/// included, ahead of the placement rule.
 /// A function body is the one context where real answers differently — Msg 443
 /// for the side-effecting operator — so the gate stands down there and lets the
 /// body-shape walk speak.
@@ -29,6 +30,8 @@ internal sealed class NewSequentialId : Expression
 
     public NewSequentialId(ParserContext context)
     {
+        if (context.Token is not Operator { Character: ')' })
+            throw SimulatedSqlException.FunctionRequiresNArguments("newsequentialid", 0);
         // Inside a scalar-UDF / multi-statement-TVF body being bound, real's
         // answer is the side-effecting-operator rule instead — Msg 443 naming
         // 'newsequentialid' (probe-confirmed for both kinds, and for a call in
@@ -36,8 +39,6 @@ internal sealed class NewSequentialId : Expression
         // recorded it, so the CREATE reports it in the order real does;
         // everywhere else, including a procedure body, Msg 302 stands.
         if (!context.InDefaultClause && context.Batch.FunctionBodyShape is null)
-            throw SimulatedSqlException.NewSequentialIdNotInDefault();
-        if (context.Token is not Operator { Character: ')' })
             throw SimulatedSqlException.NewSequentialIdNotInDefault();
         this.simulation = context.Simulation;
     }
