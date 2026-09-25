@@ -399,7 +399,9 @@ Cascade behavior: a CHECK OPTION at any level "spans" the upstream views, matchi
 DELETE never fires Msg 550 (a row leaving the view is fine).
 
 **Errors** (all probe-confirmed verbatim against SQL Server 2025):
-- **Msg 4403**: INSERT / UPDATE / DELETE through a view with aggregate / DISTINCT / GROUP BY.
+- **Msg 4403**: INSERT / UPDATE / DELETE through a view with aggregate / DISTINCT / GROUP BY — when the write names only plain columns.
+  One naming a derived column (an aggregate, an expression, or a column an underlying view derived; an INSERT without a list names them all) is Msg 4406 instead, and an unknown name Msg 207, since real binds the written columns before refusing (`View.DerivedOutputColumns`, probed 2026-09-25).
+  These refusals name the view as the statement wrote it.
   Body of the message names the view (`"Cannot update the view or function 'dbo.v' because it contains aggregates, or a DISTINCT or GROUP BY clause, or PIVOT or UNPIVOT operator."`).
 - **Msg 4405**: DELETE through a multi-source view, an INSERT whose column list doesn't name one base table's columns, and an UPDATE whose SET list spans two of them.
   Real raises the same for all three (state 1, `"View or function 'dbo.v' is not updatable because the modification affects multiple base tables."`) — a DELETE removes a whole row and so touches every base table whatever the view projects.
@@ -415,8 +417,6 @@ The row lands in the base; the view's WHERE only filters reads.
 The simulator preserves this — `VisibilityCheck` gates UPDATE/DELETE *row selection* (which rows to mutate), not INSERT acceptance.
 
 **Fidelity gaps**:
-- **A GROUP BY view's aggregate column reports Msg 4403 where real reports Msg 4406** — real splits the two by which column the write names: `SET <group-by column>` is 4403 and `SET <aggregate column>` is 4406, since the aggregate is a derived field (probe-confirmed, and the same split through a view over such a view).
-  `RejectionReason` settles the whole view before any column is looked at, so the per-column 4406 gate never runs on a shape that already failed.
 - **OUTPUT through a view** raises `NotSupportedException` for INSERT / UPDATE / DELETE.
   Would need view-output-column rebinding for INSERTED.* / DELETED.* projection.
 - **Multi-source UPDATE / DELETE** (alias-form `UPDATE alias SET ... FROM ...` where the alias resolves to a view) raises `NotSupportedException` — the alias-form FROM clause can't compose with the view's visibility predicate in the existing joined-update infrastructure.

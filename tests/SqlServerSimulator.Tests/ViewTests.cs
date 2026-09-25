@@ -378,9 +378,43 @@ public sealed class ViewTests
     {
         var simulation = WithT1();
         _ = simulation.ExecuteNonQuery("create view dbo.v as select tag, count(*) as cnt from dbo.t1 group by tag");
-        var ex = simulation.AssertSqlError("insert dbo.v(tag,cnt) values ('q',1)", 4403);
+        var ex = simulation.AssertSqlError("insert dbo.v(tag) values ('q')", 4403);
         Assert.Contains("'dbo.v'", ex.Message);
         Assert.Contains("aggregates", ex.Message);
+    }
+
+    /// <summary>
+    /// An aggregate or DISTINCT view splits its refusal by what the write
+    /// names: any derived column (an aggregate, an expression, or one derived
+    /// in an underlying view) is Msg 4406, plain columns alone Msg 4403, and an
+    /// unknown name Msg 207 — the view named as written (probed 2026-09-25
+    /// against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("update gv set s = 1", 4406, "Update or insert of view or function 'gv' failed because it contains a derived or constant field.")]
+    [DataRow("update dbo.gv set g = 1", 4403, "Cannot update the view or function 'dbo.gv' because it contains aggregates, or a DISTINCT or GROUP BY clause, or PIVOT or UNPIVOT operator.")]
+    [DataRow("update gv set g = 1, s = 1", 4406, null)]
+    [DataRow("update gv with (nolock) set g = (select max(x) from gt), c = 2", 4406, null)]
+    [DataRow("insert gv (g, s) values (1, 1)", 4406, null)]
+    [DataRow("insert gv values (1, 1, 1)", 4406, null)]
+    [DataRow("insert gv (g) values (1)", 4403, null)]
+    [DataRow("delete gv", 4403, null)]
+    [DataRow("update gv2 set s = 1", 4406, null)]
+    [DataRow("update gv2 set g = 1", 4403, null)]
+    [DataRow("update dv set y = 1", 4406, null)]
+    [DataRow("insert dv (g) values (1)", 4403, null)]
+    [DataRow("update gv set nosuch = 1", 207, "Invalid column name 'nosuch'.")]
+    public void NonUpdatableView_SplitsItsRefusalByTheColumnsWritten(string statement, int number, string? message)
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            "create table gt (g int, x int)",
+            "create view gv as select g, sum(x) s, count(*) c from gt group by g",
+            "create view gv2 as select g, s from gv",
+            "create view dv as select distinct g, x + 1 y from gt");
+        var ex = simulation.AssertSqlError(statement, number);
+        if (message is not null)
+            Assert.AreEqual(message, ex.Errors[0].Message);
     }
 
     [TestMethod]

@@ -228,6 +228,9 @@ partial class Simulation
             DefinitionText = BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, definitionEnd, isAlter, createOrAlter),
             UsesQuotedIdentifier = context.QuotedIdentifiers,
             UsesAnsiNulls = context.Batch.Connection.AnsiNulls,
+            DerivedOutputColumns = baseTable is null && rejectionReason != ViewUpdatabilityRejection.MultipleSources
+                ? DerivedOutputColumnsOf(bodySelection)
+                : null,
         };
         if (replaced is not null)
         {

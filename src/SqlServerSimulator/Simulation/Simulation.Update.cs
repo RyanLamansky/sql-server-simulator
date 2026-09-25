@@ -76,9 +76,8 @@ partial class Simulation
             // below picks up once the SET list has parsed.
             if (resolvedView.BaseTable is null && !resolvedView.IsJoinUpdatable)
             {
-                throw resolvedView.RejectionReason == ViewUpdatabilityRejection.MultipleSources
-                    ? SimulatedSqlException.ViewUpdateAffectsMultipleTables($"{resolvedView.Schema.Name}.{resolvedView.Name}")
-                    : SimulatedSqlException.CannotUpdateNonUpdatableView($"{resolvedView.Schema.Name}.{resolvedView.Name}");
+                context.MoveNextOptional();
+                throw RefuseNonUpdatableViewWrite(context, resolvedView, leadingIdent, isUpdate: true);
             }
             leadingView = resolvedView;
             leadingTable = resolvedView.BaseTable;

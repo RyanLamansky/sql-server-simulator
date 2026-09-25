@@ -88,9 +88,7 @@ partial class Simulation
                 ? ProcessHeapInsert(baseTable, context, top, destinationName, destinationView)
                 : destinationView.IsJoinUpdatable
                     ? ProcessJoinViewInsert(destinationView, context, top, destinationName)
-                    : throw (destinationView.RejectionReason == ViewUpdatabilityRejection.MultipleSources
-                        ? SimulatedSqlException.ViewUpdateAffectsMultipleTables($"{destinationView.Schema.Name}.{destinationView.Name}")
-                        : SimulatedSqlException.CannotUpdateNonUpdatableView($"{destinationView.Schema.Name}.{destinationView.Name}"));
+                    : throw RefuseNonUpdatableViewWrite(context, destinationView, destinationName, isUpdate: false);
 
     /// <summary>
     /// INSERT into a view whose INSTEAD OF INSERT trigger replaces the

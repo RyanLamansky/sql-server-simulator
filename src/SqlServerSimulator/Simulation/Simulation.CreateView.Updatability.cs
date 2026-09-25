@@ -1,5 +1,6 @@
 using SqlServerSimulator.Parser;
 using SqlServerSimulator.Parser.Expressions;
+using SqlServerSimulator.Parser.Tokens;
 using SqlServerSimulator.Schemas;
 using SqlServerSimulator.Storage;
 
@@ -205,4 +206,149 @@ partial class Simulation
             (_, null) => a,
             _ => (row, batch) => a(row, batch) && b(row, batch),
         };
+
+    /// <summary>
+    /// <see cref="View.DerivedOutputColumns"/> for a view body: a column is
+    /// derived unless it is a bare reference to a source column that isn't
+    /// itself an underlying view's derived column. Null when the body kept no
+    /// projection to read (a set operation).
+    /// </summary>
+    private static bool[]? DerivedOutputColumnsOf(Selection bodySelection)
+    {
+        if (bodySelection.ProjectionExpressions is not { } expressions || bodySelection.BranchFromSources is not { } sources)
+            return null;
+        var derived = new bool[expressions.Length];
+        for (var i = 0; i < expressions.Length; i++)
+        {
+            var expression = expressions[i] is NamedExpression named ? named.Inner : expressions[i];
+            if (expression is not Reference reference)
+            {
+                derived[i] = true;
+                continue;
+            }
+            var (s, c) = Selection.FindSourceColumn(sources, reference.ReferencedName);
+            derived[i] = s < 0 || (sources[s].BackingView?.DerivedOutputColumns is { } underlying && underlying[c]);
+        }
+        return derived;
+    }
+
+    /// <summary>
+    /// Refuses an INSERT or UPDATE through a view with no base table to write,
+    /// once its written columns are known, as real does: an unknown name is
+    /// Msg 207, a derived column anywhere in the list Msg 4406, and otherwise
+    /// the view's own refusal (Msg 4405 for several sources, Msg 4403 else).
+    /// The written columns are read ahead without consuming them — the
+    /// <c>SET</c> targets, or an INSERT's column list, whose absence names
+    /// every column (probed 2026-09-25 against SQL Server 2025). Entered with
+    /// the cursor on the token after the view's name; the messages name the
+    /// view as the statement wrote it, as real's do.
+    /// </summary>
+    private static SimulatedSqlException RefuseNonUpdatableViewWrite(ParserContext context, View view, MultiPartName writtenName, bool isUpdate)
+    {
+        var viewLabel = writtenName.ToString();
+        if (view.DerivedOutputColumns is { } derivedColumns)
+        {
+            var checkpoint = context.SaveCheckpoint();
+            var written = isUpdate ? PeekSetTargets(context) : PeekInsertColumnList(context);
+            context.RestoreCheckpoint(checkpoint);
+            var anyDerived = false;
+            if (written is null)
+            {
+                anyDerived = Array.IndexOf(derivedColumns, true) >= 0;
+            }
+            else
+            {
+                foreach (var column in written)
+                {
+                    var ordinal = Array.FindIndex(view.OutputColumns, c => context.CurrentDatabase.Collation.Equals(c.Name, column));
+                    if (ordinal < 0)
+                        return SimulatedSqlException.InvalidColumnName(column);
+                    anyDerived |= derivedColumns[ordinal];
+                }
+            }
+            if (anyDerived)
+                return SimulatedSqlException.ViewDmlTouchesDerivedField(viewLabel);
+        }
+        return view.RejectionReason == ViewUpdatabilityRejection.MultipleSources
+            ? SimulatedSqlException.ViewUpdateAffectsMultipleTables(viewLabel)
+            : SimulatedSqlException.CannotUpdateNonUpdatableView(viewLabel);
+    }
+
+    /// <summary>The leaf names an UPDATE's SET list assigns, read from the cursor on; null when no SET follows.</summary>
+    private static List<string>? PeekSetTargets(ParserContext context)
+    {
+        // Skip a table-hint group between the name and SET.
+        if (context.Token is ReservedKeyword { Keyword: Keyword.With } && context.GetNextOptional() is Operator { Character: '(' })
+            SkipParenthesized(context);
+        if (context.Token is not ReservedKeyword { Keyword: Keyword.Set })
+            return null;
+        var targets = new List<string>();
+        do
+        {
+            if (context.GetNextOptional() is not Name target)
+                return targets;
+            var leaf = target.Value;
+            while (context.GetNextOptional() is Operator { Character: '.' })
+            {
+                if (context.GetNextOptional() is Name part)
+                    leaf = part.Value;
+            }
+            targets.Add(leaf);
+            // The assigned expression runs to the next comma outside any
+            // parentheses, or to the clause that ends the SET list.
+            var depth = 0;
+            var listContinues = false;
+            while (!listContinues && context.GetNextOptional() is { } token)
+            {
+                switch (token)
+                {
+                    case Operator { Character: '(' }:
+                        depth++;
+                        break;
+                    case Operator { Character: ')' }:
+                        depth--;
+                        break;
+                    case Operator { Character: ',' } when depth == 0:
+                        listContinues = true;
+                        break;
+                    case Operator { Character: ';' } when depth == 0:
+                    case ReservedKeyword { Keyword: Keyword.From or Keyword.Where or Keyword.Option } when depth == 0:
+                    case UnquotedString { ContextualKeyword: ContextualKeyword.Output } when depth == 0:
+                        return targets;
+                }
+            }
+        } while (context.Token is Operator { Character: ',' });
+        return targets;
+    }
+
+    /// <summary>An INSERT's column list, read from the cursor on; null when none is written.</summary>
+    private static List<string>? PeekInsertColumnList(ParserContext context)
+    {
+        if (context.Token is not Operator { Character: '(' })
+            return null;
+        var columns = new List<string>();
+        while (context.GetNextOptional() is Name column)
+        {
+            columns.Add(column.Value);
+            if (context.GetNextOptional() is not Operator { Character: ',' })
+                break;
+        }
+        return columns;
+    }
+
+    /// <summary>Advances past the parenthesized group whose opening parenthesis is under the cursor.</summary>
+    private static void SkipParenthesized(ParserContext context)
+    {
+        var depth = 1;
+        while (depth > 0 && context.GetNextOptional() is { } token)
+        {
+            depth += token switch
+            {
+                Operator { Character: '(' } => 1,
+                Operator { Character: ')' } => -1,
+                _ => 0,
+            };
+        }
+        _ = context.GetNextOptional();
+    }
 }

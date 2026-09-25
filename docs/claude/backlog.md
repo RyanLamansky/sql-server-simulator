@@ -334,9 +334,6 @@ Entries are verified against the simulator, so one that no longer reproduces is 
   MERGE reads `View.RejectionReason` up front; routing it wants the per-action column lists to pick the target the way INSERT's does.
   → [`programmable.md`](programmable.md#dml-through-a-join-view).
 - **`clr strict security` is a `sp_configure` option nothing reads** — real refuses `CREATE ASSEMBLY` of an unsigned SAFE / EXTERNAL_ACCESS assembly with **Msg 10343** while the option is 1; the simulator registers and validates the option but never consults it, and the Msg 10343 factory was removed as dead code rather than left as an unreferenced promise.
-- **A GROUP BY view's aggregate column is Msg 4403** where real reports **Msg 4406** — real splits by which column the write names, `SET <group-by column>` being 4403 and `SET <aggregate column>` 4406 since the aggregate is a derived field (probe-confirmed, through a chained view too).
-  `RejectionReason` settles the whole view before any column is looked at, so the per-column gate never runs on a shape that already failed; letting the 4406 walk run first on an aggregate / DISTINCT body is the work.
-  → [`programmable.md`](programmable.md#updatable-views-dml-through-views).
 - **An `sp_executesql` declaration string that is itself a query** (`N'select 2'`, the transposed-arguments shape) is Msg 156 at its first keyword here, where real reads `(select 2)` as a complete parenthesized expression and reports the text after it as **Msg 4124** (probed 2026-09-25).
   The declaration parse otherwise follows real's `(<declarations>)` reading: a list that ends early is Msg 102 near its closing `)`, and text after a complete list is Msg 4124.
 

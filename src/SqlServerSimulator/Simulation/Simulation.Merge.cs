@@ -59,8 +59,8 @@ partial class Simulation
             sourceView = resolvedView;
             destinationTable = resolvedView.BaseTable
                 ?? throw (resolvedView.RejectionReason == ViewUpdatabilityRejection.MultipleSources
-                    ? SimulatedSqlException.ViewUpdateAffectsMultipleTables($"{resolvedView.Schema.Name}.{resolvedView.Name}")
-                    : SimulatedSqlException.CannotUpdateNonUpdatableView($"{resolvedView.Schema.Name}.{resolvedView.Name}"));
+                    ? SimulatedSqlException.ViewUpdateAffectsMultipleTables(destinationName.ToString())
+                    : SimulatedSqlException.CannotUpdateNonUpdatableView(destinationName.ToString()));
         }
         else
         {

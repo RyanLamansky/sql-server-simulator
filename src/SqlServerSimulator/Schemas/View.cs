@@ -178,6 +178,16 @@ internal sealed class View(
     public readonly ViewUpdatabilityRejection RejectionReason = rejectionReason;
 
     /// <summary>
+    /// For a view refused as an aggregate / DISTINCT / GROUP BY shape (or one
+    /// over such a view), which output columns are derived — anything but a
+    /// bare column reference, or a reference to an underlying view's derived
+    /// column. Real refuses a write naming one of these with Msg 4406 and a
+    /// write naming only plain columns with Msg 4403 (probed 2026-09-25 against
+    /// SQL Server 2025). Null for every other view.
+    /// </summary>
+    public bool[]? DerivedOutputColumns;
+
+    /// <summary>
     /// True when the body reads several FROM sources but is otherwise
     /// DML-eligible (no DISTINCT / aggregate / GROUP BY / HAVING / window /
     /// set op). <see cref="BaseTable"/> is null and
