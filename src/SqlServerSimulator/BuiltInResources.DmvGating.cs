@@ -12,11 +12,14 @@ internal static partial class BuiltInResources
     // database-scope DMVs raise Msg 262 (VIEW DATABASE PERFORMANCE STATE, covered
     // by VIEW DATABASE STATE at db scope or a server VIEW …STATE cross-scope);
     // sys.dm_exec_sessions self-filters to the own session without VIEW SERVER
-    // STATE. sys.dm_os_host_info / sys.fn_helpcollations /
+    // STATE. sys.dm_exec_connections needs the same permission as a server
+    // DMV but refuses with Msg 371, naming the external policy action too.
+    // sys.dm_os_host_info / sys.fn_helpcollations /
     // sys.dm_db_xtp_table_memory_stats are ungated (probe: readable by guest).
     private static readonly (string Key, DmvGateKind Kind)[] GatedDmvs =
     [
         ("sys.dm_db_partition_stats", DmvGateKind.DatabaseState),
+        ("sys.dm_exec_connections", DmvGateKind.ServerStatePolicy),
         ("sys.dm_exec_sessions", DmvGateKind.SessionSelfFilter),
         ("sys.dm_hadr_cluster", DmvGateKind.ServerState),
         ("sys.dm_hadr_database_replica_states", DmvGateKind.DatabaseState),
@@ -62,6 +65,10 @@ internal static partial class BuiltInResources
             case DmvGateKind.ServerState:
                 if (!simulation.HoldsServerPermission(login, Permission.ViewServerPerformanceState))
                     throw SimulatedSqlException.ServerStatePermissionDenied("VIEW SERVER PERFORMANCE STATE", databaseName);
+                return rows;
+            case DmvGateKind.ServerStatePolicy:
+                if (!simulation.HoldsServerPermission(login, Permission.ViewServerPerformanceState))
+                    throw SimulatedSqlException.ServerStatePolicyDenied();
                 return rows;
             case DmvGateKind.DatabaseState:
                 if (!HoldsDatabaseState(batch, simulation, login))

@@ -22,9 +22,19 @@ public sealed class SimulatedDbConnection : DbConnection
     internal readonly Simulation Simulation;
 
     internal SimulatedDbConnection(Simulation simulation)
+        : this(simulation, simulation.AllocateSpid())
+    {
+    }
+
+    /// <summary>
+    /// A session under a given SPID: the TDS endpoint's <c>sp_reset_connection</c>
+    /// replaces a pooled session with a fresh one that keeps its predecessor's
+    /// <c>@@SPID</c>, as real's reset does.
+    /// </summary>
+    internal SimulatedDbConnection(Simulation simulation, int spid)
     {
         this.Simulation = simulation;
-        this.Session = new SessionToken(simulation.AllocateSpid())
+        this.Session = new SessionToken(spid)
         {
             Owner = new WeakReference<SimulatedDbConnection>(this, trackResurrection: true),
         };
@@ -404,6 +414,9 @@ public sealed class SimulatedDbConnection : DbConnection
     /// <c>CreateDbConnection()</c>.
     /// </summary>
     internal readonly DateTime LoginTimeUtc = DateTime.UtcNow;
+
+    /// <summary>The physical connection this session rides, which <c>sys.dm_exec_connections</c> reports.</summary>
+    internal Network.ConnectionTransport Transport = new(client: null, local: null, protocolVersion: 0, packetSize: 0);
 
     /// <summary>
     /// The client workstation name this session reported: the connection

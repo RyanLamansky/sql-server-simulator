@@ -154,6 +154,8 @@ The original single-owner assumption ("Expression instances aren't shared across
   The draw freezes in `StatementContext.StatementScopedValues` (per statement execution — cleared by the dispatch loop's top-of-iteration alongside the `UtcNow` refresh), preserving the probe-confirmed per-call-site-per-statement semantics.
 - **The statement clock on replay** — `ReplayCachedSelection` bypasses the dispatch loop and never stamped `CurrentStatement.UtcNow`, so a replayed `GETDATE()` read `default(DateTime)`.
   The replay path stamps `UtcNow` + `StartLine` itself.
+- **The session scalars** — `@@SPID`, `@@TRANCOUNT`, `@@DATEFIRST`, `@@LANGUAGE`, `@@LANGID`, `@@TEXTSIZE` and `@@LOCK_TIMEOUT` read the `ParserContext` they were parsed under, so a plan one session cached answered every later session with the first one's values (`WHERE session_id = @@SPID` over a DMV found no row).
+  They read `runtime.Batch.Connection` instead; a primary-constructor `ParserContext` an expression's `Run` touches is the shape to look for.
 
 When adding any executor or expression feature that computes per-row / per-group / per-execution values, bind them through `BatchContext` / `StatementContext` — never through fields on parse-time objects.
 

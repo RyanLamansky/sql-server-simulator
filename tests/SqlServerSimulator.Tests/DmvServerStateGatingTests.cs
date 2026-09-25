@@ -47,6 +47,18 @@ public sealed class DmvServerStateGatingTests
         AreEqual("VIEW SERVER PERFORMANCE STATE permission was denied on object 'server', database 'master'.", ex.Errors[0].Message);
     }
 
+    // sys.dm_exec_connections takes the same permission but refuses with Msg
+    // 371 (probed 2026-09-25 against SQL Server 2025).
+    [TestMethod]
+    public void Connections_RestrictedWithoutPermission_Raises371()
+        => Seeded().AssertSqlError(
+            "use master; execute as login = 'srvl2'; select count(*) from sys.dm_exec_connections", 371,
+            "The user does not have the external policy action 'Microsoft.Sql/Sqlservers/SystemViewsAndFunctions/ServerPerformanceState/Rows/Select' or permission 'VIEW SERVER PERFORMANCE STATE' to perform this action.");
+
+    [TestMethod]
+    public void Connections_ServerStateGrant_Reads()
+        => AreEqual(1, Seeded().ExecuteScalar("use master; execute as login = 'srvl'; select count(*) from sys.dm_exec_connections"));
+
     [DataRow("sys.dm_tran_locks")]
     [DataRow("sys.dm_os_waiting_tasks")]
     [DataRow("sys.dm_tran_version_store")]

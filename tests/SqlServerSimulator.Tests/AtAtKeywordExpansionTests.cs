@@ -94,4 +94,23 @@ public sealed class AtAtKeywordExpansionTests
         var result = new Simulation().ExecuteScalar("select @@dbts");
         IsTrue(result is byte[] { Length: 8 });
     }
+
+    // A plan cached by one session is reused by the next; the session scalars
+    // read the running session, not the one that compiled the plan. The FROM
+    // keeps the statement off the FROM-less path, which never caches, and the
+    // options set leave the plan-cache key alone (SET LANGUAGE would not).
+    [TestMethod]
+    public void SessionScalars_ReadTheRunningSessionThroughACachedPlan()
+    {
+        const string Text = "select concat(@@spid, '|', @@trancount, '|', @@datefirst, '|', @@language, '|', @@langid, '|', @@textsize, '|', @@lock_timeout) from sys.dm_exec_sessions where session_id = @@spid";
+        var simulation = new Simulation();
+        using var first = simulation.CreateOpenConnection();
+        using var second = simulation.CreateOpenConnection();
+        using (var read = first.CreateCommand(Text))
+            AreEqual("51|0|7|us_english|0|-1|-1", read.ExecuteScalar());
+        using (var set = second.CreateCommand("set datefirst 1; set textsize 100; set lock_timeout 5; begin tran"))
+            _ = set.ExecuteNonQuery();
+        using var again = second.CreateCommand(Text);
+        AreEqual("52|1|1|us_english|0|100|5", again.ExecuteScalar());
+    }
 }

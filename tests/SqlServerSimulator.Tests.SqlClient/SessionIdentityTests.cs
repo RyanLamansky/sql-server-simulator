@@ -94,4 +94,26 @@ public sealed class SessionIdentityTests
             + " from sys.dm_exec_sessions where session_id = @@spid", connection);
         AreEqual("wire-ws|WireApp|wire-ws|WireApp", await command.ExecuteScalarAsync(TestContext.CancellationToken));
     }
+
+    /// <summary>
+    /// <c>sys.dm_exec_connections</c> reports the session's TCP side: both
+    /// endpoints, LOGIN7's TDS version, the negotiated packet size and the
+    /// packets already exchanged, encrypted because the endpoint requires TLS.
+    /// </summary>
+    [TestMethod]
+    public async Task Connections_ReportTheTcpTransport()
+    {
+        var simulation = new Simulation();
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+        await using var command = new SqlCommand(
+            "select net_transport, encrypt_option, auth_scheme, client_net_address, local_net_address, local_tcp_port, protocol_version, net_packet_size,"
+            + " iif(num_reads > 0 and num_writes > 0 and last_read is not null, 'counted', 'idle'), iif(client_tcp_port > 0, 'port', 'none')"
+            + " from sys.dm_exec_connections where session_id = @@spid", connection);
+        await using var reader = await command.ExecuteReaderAsync(TestContext.CancellationToken);
+        IsTrue(await reader.ReadAsync(TestContext.CancellationToken));
+        AreEqual(
+            $"TCP|TRUE|SQL|127.0.0.1|127.0.0.1|{listener.Port}|1946157060|8000|counted|port",
+            string.Join("|", Enumerable.Range(0, reader.FieldCount).Select(reader.GetValue)));
+    }
 }

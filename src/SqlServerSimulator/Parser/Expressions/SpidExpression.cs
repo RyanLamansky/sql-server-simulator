@@ -7,10 +7,10 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// (real SQL Server's @@SPID is smallint — probe-confirmed). First user
 /// connection on a fresh <see cref="Simulation"/> reads 51.
 /// </summary>
-internal sealed class SpidExpression(ParserContext context) : Expression
+internal sealed class SpidExpression : Expression
 {
     public override SqlValue Run(RuntimeContext runtime) =>
-        SqlValue.FromInt16((short)context.Connection.Spid);
+        SqlValue.FromInt16((short)runtime.Batch.Connection.Spid);
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SmallInt;
 

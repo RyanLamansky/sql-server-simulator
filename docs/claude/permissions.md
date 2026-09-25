@@ -531,6 +531,7 @@ The `dbo` / sysadmin fast path short-circuits on `SessionSecurityContext.Effecti
 | DMV | Gate | Denial |
 |---|---|---|
 | `sys.dm_tran_locks`, `sys.dm_os_waiting_tasks`, `sys.dm_tran_version_store`, `sys.dm_tran_version_store_space_usage`, `sys.dm_tran_active_snapshot_database_transactions`, `sys.dm_hadr_cluster` | server-scope — `VIEW SERVER PERFORMANCE STATE` (covered by `VIEW SERVER STATE`) | **Msg 300** sev 14 state 1: `VIEW SERVER PERFORMANCE STATE permission was denied on object 'server', database '<db>'.` |
+| `sys.dm_exec_connections` | server-scope, as above | **Msg 371** sev 14 state 3, naming the external policy action as well as the permission (probed 2026-09-25) |
 | `sys.dm_db_partition_stats`, `sys.dm_hadr_database_replica_states` | database-scope — `VIEW DATABASE PERFORMANCE STATE` at db scope, or a covering server permission cross-scope | **Msg 262** sev 14 state 1: `VIEW DATABASE PERFORMANCE STATE permission denied in database '<db>'.` |
 | `sys.dm_exec_sessions` | self-filter — restricted sessions without `VIEW SERVER STATE` see only their own SPID's row (a row filter, not a hard denial) | — |
 | `sys.dm_os_host_info`, `sys.fn_helpcollations`, `sys.dm_db_xtp_table_memory_stats` | ungated (probe: readable by `guest`) | — |

@@ -10,10 +10,10 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// have been issued without matching <c>COMMIT</c>s. Probe-confirmed
 /// behavior against SQL Server 2025 (2026-05-08).
 /// </summary>
-internal sealed class TranCountExpression(ParserContext context) : Expression
+internal sealed class TranCountExpression : Expression
 {
     public override SqlValue Run(RuntimeContext runtime) =>
-        SqlValue.FromInt32(context.Connection.CurrentTransaction?.TranCount ?? 0);
+        SqlValue.FromInt32(runtime.Batch.Connection.CurrentTransaction?.TranCount ?? 0);
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
 

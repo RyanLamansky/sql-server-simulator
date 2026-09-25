@@ -88,6 +88,7 @@ The session maps 1:1 onto a `SimulatedDbConnection`; execution flows through `Si
   Ordering is load-bearing: SqlClient's token reader stalls until command timeout on an ENVCHANGE that arrives after the last DONE (probe-confirmed — this froze SSMS on its first `use [master]` once master existed; go-mssqldb tolerates the late position, which is how the original after-the-DONEs ordering shipped unnoticed).
   The statement's INFO 5701 (`Changed database context to '<db>'.`) is the engine's own message, so it precedes the ENVCHANGE here where real sends it after; the login response synthesizes its own 5701.
 - **Reset-connection status bit** (pooled-connection recycle): backing connection disposed and recreated on the same database, acked with the empty ENVCHANGE type 18 before the batch's tokens.
+  The fresh session keeps its predecessor's `@@SPID`, LOGIN7 client identity and physical-connection record, as real's `sp_reset_connection` does.
 - **Attention** (type 6, mid-stream cancel): a client `SqlCommand.Cancel()` or expiring `CommandTimeout` sends an attention while a batch executes or streams.
   The session notices it *concurrently* — see [Mid-stream attention](#mid-stream-attention-cancel) below — aborts the batch at the next safe point, and replies with a single DONE carrying `DONE_ATTN` and **no error token** (SqlClient synthesizes the surfaced exception itself: Msg -2 "Execution Timeout Expired" for a timeout, Msg 0 "Operation cancelled by user" for an explicit cancel).
   The session stays alive and reusable.

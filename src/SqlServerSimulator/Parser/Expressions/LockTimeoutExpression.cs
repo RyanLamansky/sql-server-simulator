@@ -10,10 +10,10 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// <c>0</c> = fail-fast; positive <c>N</c> = wait up to N ms. Mutated by
 /// <c>SET LOCK_TIMEOUT &lt;N&gt;</c>.
 /// </summary>
-internal sealed class LockTimeoutExpression(ParserContext context) : Expression
+internal sealed class LockTimeoutExpression : Expression
 {
     public override SqlValue Run(RuntimeContext runtime) =>
-        SqlValue.FromInt32(context.Connection.LockTimeoutMillis);
+        SqlValue.FromInt32(runtime.Batch.Connection.LockTimeoutMillis);
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
 

@@ -258,6 +258,38 @@ internal static partial class BuiltInResources
             new("contained_availability_group_id", SqlType.UniqueIdentifier, null, true),
         ], EnumerateSysDmExecSessions);
 
+        // sys.dm_exec_connections: one row per session's physical connection
+        // (probed 2026-09-25 against SQL Server 2025). A TDS-endpoint session
+        // reports its TCP endpoints, LOGIN7's TDS version, the negotiated
+        // packet size and its packet counts, always encrypted since the
+        // endpoint requires TLS; an in-process connection reports the
+        // shared-memory shape, with no network columns.
+        Sys("dm_exec_connections",
+        [
+            new("session_id", SqlType.Int32, null, true),
+            new("most_recent_session_id", SqlType.Int32, null, true),
+            new("connect_time", SqlType.DateTime, null, false),
+            new("net_transport", SqlType.NVarchar, 40, false),
+            new("protocol_type", SqlType.NVarchar, 40, true),
+            new("protocol_version", SqlType.Int32, null, true),
+            new("endpoint_id", SqlType.Int32, null, true),
+            new("encrypt_option", SqlType.NVarchar, 40, false),
+            new("auth_scheme", SqlType.NVarchar, 40, false),
+            new("node_affinity", SqlType.SmallInt, null, false),
+            new("num_reads", SqlType.Int32, null, true),
+            new("num_writes", SqlType.Int32, null, true),
+            new("last_read", SqlType.DateTime, null, true),
+            new("last_write", SqlType.DateTime, null, true),
+            new("net_packet_size", SqlType.Int32, null, true),
+            new("client_net_address", SqlType.NVarchar, 48, true),
+            new("client_tcp_port", SqlType.Int32, null, true),
+            new("local_net_address", SqlType.NVarchar, 48, true),
+            new("local_tcp_port", SqlType.Int32, null, true),
+            new("connection_id", SqlType.UniqueIdentifier, null, false),
+            new("parent_connection_id", SqlType.UniqueIdentifier, null, true),
+            new("most_recent_sql_handle", SqlType.Varbinary, 64, true),
+        ], EnumerateSysDmExecConnections);
+
         // sys.configurations: server-scoped static server-configuration
         // catalog. value / minimum / maximum / value_in_use are sql_variant,
         // matching real SQL Server — every option carries an inner base type of
@@ -1098,6 +1130,48 @@ internal static partial class BuiltInResources
     /// to <c>sys.databases</c> on <c>database_id</c> and reads
     /// <c>ISNULL(mirroring_role, 0)</c> / <c>ISNULL(mirroring_state + 1, 0)</c>.
     /// </summary>
+    /// <summary>
+    /// Rows for <c>sys.dm_exec_connections</c> — one per live connection on the
+    /// simulation, from the <see cref="Network.ConnectionTransport"/> each
+    /// session rides.
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateSysDmExecConnections(Parser.BatchContext batch, Database database)
+    {
+        _ = database;
+        var nullInt = SqlValue.Null(SqlType.Int32);
+        var nullDateTime = SqlValue.Null(SqlType.DateTime);
+        foreach (var connection in batch.Connection.Simulation.SnapshotConnections())
+        {
+            var transport = connection.Transport;
+            var spid = SqlValue.FromInt32(connection.Spid);
+            SqlValue Ticks(long ticks) => ticks == 0 ? nullDateTime : SqlValue.FromDateTime(new DateTime(ticks, DateTimeKind.Utc));
+            if (transport.Client is not { } client)
+            {
+                yield return [
+                    spid, spid, SqlValue.FromDateTime(transport.ConnectTimeUtc),
+                    SqlValue.FromNVarchar("Shared memory"), SqlValue.FromNVarchar("TSQL"), nullInt, SqlValue.FromInt32(2),
+                    SqlValue.FromNVarchar("FALSE"), SqlValue.FromNVarchar("SQL"), SqlValue.FromInt16(0),
+                    nullInt, nullInt, nullDateTime, nullDateTime, nullInt,
+                    SqlValue.FromNVarchar("<local machine>"), nullInt, SqlValue.Null(SqlType.NVarchar), nullInt,
+                    SqlValue.FromGuid(transport.ConnectionId), SqlValue.Null(SqlType.UniqueIdentifier), SqlValue.Null(SqlType.Varbinary),
+                ];
+                continue;
+            }
+            yield return [
+                spid, spid, SqlValue.FromDateTime(transport.ConnectTimeUtc),
+                SqlValue.FromNVarchar("TCP"), SqlValue.FromNVarchar("TSQL"), SqlValue.FromInt32(unchecked((int)transport.ProtocolVersion)), SqlValue.FromInt32(4),
+                SqlValue.FromNVarchar("TRUE"), SqlValue.FromNVarchar("SQL"), SqlValue.FromInt16(0),
+                SqlValue.FromInt32(Volatile.Read(ref transport.PacketsRead)), SqlValue.FromInt32(Volatile.Read(ref transport.PacketsWritten)),
+                Ticks(Interlocked.Read(ref transport.LastReadTicks)), Ticks(Interlocked.Read(ref transport.LastWriteTicks)),
+                SqlValue.FromInt32(transport.PacketSize),
+                SqlValue.FromNVarchar(client.Address.ToString()), SqlValue.FromInt32(client.Port),
+                transport.Local is { } local ? SqlValue.FromNVarchar(local.Address.ToString()) : SqlValue.Null(SqlType.NVarchar),
+                transport.Local is { } localPort ? SqlValue.FromInt32(localPort.Port) : nullInt,
+                SqlValue.FromGuid(transport.ConnectionId), SqlValue.Null(SqlType.UniqueIdentifier), SqlValue.Null(SqlType.Varbinary),
+            ];
+        }
+    }
+
     /// <summary>
     /// Rows for <c>sys.dm_exec_sessions</c> — one per live connection on the
     /// simulation, snapshotted under the registry lock. Session-backed

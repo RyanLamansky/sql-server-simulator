@@ -42,6 +42,35 @@ public sealed class PoolingResetTests
     }
 
     /// <summary>
+    /// The reset clears session state but not the session id, the physical
+    /// connection or the client identity LOGIN7 reported: <c>@@SPID</c>,
+    /// <c>connection_id</c> and <c>HOST_NAME()</c> read the same after a
+    /// pooled reopen.
+    /// </summary>
+    [TestMethod]
+    public async Task PooledReopen_KeepsThePhysicalConnectionAndClientIdentity()
+    {
+        var simulation = new Simulation();
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        var connectionString = Wire.PooledConnectionString(listener) + ";Workstation ID=pool-ws";
+        const string Identity = "select cast(@@spid as varchar) + '|' + cast(connection_id as nvarchar(36)) + '|' + host_name() from sys.dm_exec_connections where session_id = @@spid";
+
+        object? before;
+        await using (var first = new SqlConnection(connectionString))
+        {
+            await first.OpenAsync(TestContext.CancellationToken);
+            await using var read = new SqlCommand(Identity, first);
+            before = await read.ExecuteScalarAsync(TestContext.CancellationToken);
+        }
+
+        await using var second = new SqlConnection(connectionString);
+        await second.OpenAsync(TestContext.CancellationToken);
+        await using var again = new SqlCommand(Identity, second);
+        EndsWith("|pool-ws", (string)before);
+        AreEqual(before, await again.ExecuteScalarAsync(TestContext.CancellationToken));
+    }
+
+    /// <summary>
     /// An application role set on a pooled connection does not survive the
     /// reset: the reused physical connection is back to its login's own
     /// principal and is usable. Real SQL Server instead refuses to reset a

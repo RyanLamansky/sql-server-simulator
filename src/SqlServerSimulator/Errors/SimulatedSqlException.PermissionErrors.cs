@@ -92,6 +92,14 @@ public sealed partial class SimulatedSqlException
         new($"{permission} permission denied in database '{databaseName}'.", 262, 14, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 371 — <c>sys.dm_exec_connections</c> read without
+    /// <c>VIEW SERVER PERFORMANCE STATE</c>, where the other server DMVs raise
+    /// Msg 300. Severity 14, state 3, probed 2026-09-25 against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException ServerStatePolicyDenied() =>
+        new("The user does not have the external policy action 'Microsoft.Sql/Sqlservers/SystemViewsAndFunctions/ServerPerformanceState/Rows/Select' or permission 'VIEW SERVER PERFORMANCE STATE' to perform this action.", 371, 14, 3);
+
+    /// <summary>
     /// Mimics SQL Server error 300 for a server-scope DMV read denied by a missing
     /// <c>VIEW SERVER PERFORMANCE STATE</c> (or covering <c>VIEW SERVER STATE</c>)
     /// permission. Severity 14, state 1, probe-confirmed wording. Real also raises

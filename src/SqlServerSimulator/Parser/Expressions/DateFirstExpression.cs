@@ -8,10 +8,10 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// <c>7</c> — Sunday, the us_english setting a fresh session gets under both
 /// sqlcmd and SqlClient (probe-confirmed).
 /// </summary>
-internal sealed class DateFirstExpression(ParserContext context) : Expression
+internal sealed class DateFirstExpression : Expression
 {
     public override SqlValue Run(RuntimeContext runtime) =>
-        SqlValue.FromByte(context.Connection.DateFirst);
+        SqlValue.FromByte(runtime.Batch.Connection.DateFirst);
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.TinyInt;
 
@@ -28,10 +28,10 @@ internal sealed class DateFirstExpression(ParserContext context) : Expression
 /// the alias the statement may have been written with, so
 /// <c>SET LANGUAGE German</c> reads back <c>Deutsch</c> (probe-confirmed).
 /// </summary>
-internal sealed class LanguageExpression(ParserContext context) : Expression
+internal sealed class LanguageExpression : Expression
 {
     public override SqlValue Run(RuntimeContext runtime) =>
-        SqlValue.FromNVarchar(context.Connection.Language.Name);
+        SqlValue.FromNVarchar(runtime.Batch.Connection.Language.Name);
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.NVarchar;
 
@@ -47,10 +47,10 @@ internal sealed class LanguageExpression(ParserContext context) : Expression
 /// <c>SET LANGUAGE</c>, as real's <c>smallint</c>. Default <c>0</c>
 /// (us_english).
 /// </summary>
-internal sealed class LangIdExpression(ParserContext context) : Expression
+internal sealed class LangIdExpression : Expression
 {
     public override SqlValue Run(RuntimeContext runtime) =>
-        SqlValue.FromInt16(context.Connection.Language.LangId);
+        SqlValue.FromInt16(runtime.Batch.Connection.Language.LangId);
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SmallInt;
 

@@ -1,3 +1,4 @@
+using System.Net;
 using System.Net.Security;
 using System.Net.Sockets;
 using System.Security.Authentication;
@@ -150,6 +151,8 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
             }
 
             transport.Spid = unchecked((ushort)this.connection!.Spid);
+            this.connection.Transport = transport.Counters = new ConnectionTransport(
+                Ipv4Form(socket.RemoteEndPoint), Ipv4Form(socket.LocalEndPoint), login.TdsVersion, transport.PacketSize);
             this.WriteLoginResponse(writer, transport.PacketSize, login.TdsVersion == Tds.Version8 ? Tds.Version8 : Tds.Version74);
             await writer.FlushAsync(final: true, cancellationToken).ConfigureAwait(false);
 
@@ -497,6 +500,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
         {
             PacketSize = this.marsPacketSize,
             Spid = unchecked((ushort)this.connection!.Spid),
+            Counters = this.connection.Transport,
         };
         var writer = new TdsTokenWriter(transport) { DeferFlush = true };
         try
@@ -922,17 +926,33 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
         }
     }
 
+    /// <summary>
+    /// An endpoint as <c>sys.dm_exec_connections</c> prints it: a dual-mode
+    /// socket's IPv4-mapped address in its IPv4 form.
+    /// </summary>
+    private static IPEndPoint? Ipv4Form(EndPoint? endPoint) =>
+        endPoint is IPEndPoint { Address.IsIPv4MappedToIPv6: true } mapped
+            ? new IPEndPoint(mapped.Address.MapToIPv4(), mapped.Port)
+            : endPoint as IPEndPoint;
+
     private void ResetConnection()
     {
         var previous = this.connection!;
         var database = previous.Database;
+        var clientHostName = previous.ClientHostName;
+        var clientApplicationName = previous.ClientApplicationName;
         var loginName = previous.Security.OriginalLoginName;
         this.transaction = null;
         previous.Dispose();
 
-        var fresh = simulation.CreateDbConnection();
+        var fresh = new SimulatedDbConnection(simulation, previous.Spid);
         fresh.Open();
         fresh.InfoMessage += this.OnInfoMessage;
+        // The SPID, the physical connection and the client identity LOGIN7
+        // reported outlive the reset.
+        fresh.Transport = previous.Transport;
+        fresh.ClientHostName = clientHostName;
+        fresh.ClientApplicationName = clientApplicationName;
         this.pendingInfoMessages.Clear();
         if (!string.Equals(fresh.Database, database, StringComparison.Ordinal))
             fresh.ChangeDatabase(database);

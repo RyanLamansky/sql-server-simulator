@@ -92,4 +92,21 @@ public sealed class ClientIdentityTests
         using (connection)
             AreEqual("|second-app", connection.CreateCommand("select host_name() + '|' + app_name()").ExecuteScalar());
     }
+
+    // An in-process connection has no network side; sys.dm_exec_connections
+    // reports it in real's shared-memory shape.
+    [TestMethod]
+    public void InProcessConnection_ReportsTheSharedMemoryShape()
+    {
+        var simulation = new Simulation();
+        using var connection = simulation.CreateOpenConnection();
+        using var other = simulation.CreateOpenConnection();
+        using var command = connection.CreateCommand(
+            "select net_transport, encrypt_option, client_net_address, isnull(client_tcp_port, -1), isnull(net_packet_size, -1), isnull(protocol_version, -1), endpoint_id,"
+            + " (select count(*) from sys.dm_exec_connections), (select count(distinct connection_id) from sys.dm_exec_connections)"
+            + " from sys.dm_exec_connections where session_id = @@spid");
+        using var reader = command.ExecuteReader();
+        IsTrue(reader.Read());
+        AreEqual("Shared memory|FALSE|<local machine>|-1|-1|-1|2|2|2", string.Join("|", Enumerable.Range(0, reader.FieldCount).Select(reader.GetValue)));
+    }
 }

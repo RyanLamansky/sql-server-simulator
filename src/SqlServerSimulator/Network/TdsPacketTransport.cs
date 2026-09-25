@@ -19,6 +19,9 @@ internal sealed class TdsPacketTransport(Stream stream)
     /// <summary>Session SPID stamped into outbound packet headers.</summary>
     public ushort Spid;
 
+    /// <summary>The session's traffic counters, once its login has opened one.</summary>
+    public ConnectionTransport? Counters;
+
     private byte nextPacketId = 1;
 
     /// <summary>
@@ -59,6 +62,7 @@ internal sealed class TdsPacketTransport(Stream stream)
 
             var chunk = new byte[length - Tds.HeaderSize];
             await this.stream.ReadExactlyAsync(chunk.AsMemory(), cancellationToken).ConfigureAwait(false);
+            this.Counters?.CountRead();
 
             if (first)
             {
@@ -99,6 +103,7 @@ internal sealed class TdsPacketTransport(Stream stream)
             payload.Span.CopyTo(rented.AsSpan(Tds.HeaderSize));
             await this.stream.WriteAsync(rented.AsMemory(0, total), cancellationToken).ConfigureAwait(false);
             await this.stream.FlushAsync(cancellationToken).ConfigureAwait(false);
+            this.Counters?.CountWrite();
         }
         finally
         {
