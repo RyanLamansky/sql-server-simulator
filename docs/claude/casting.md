@@ -72,6 +72,8 @@ A string or a binary compared with a *constant* `tinyint` or `smallint` — a li
 
 ## Whitespace around a number, by target
 
+A sign may be spaced from its digits (`'- 1'` is -1 to an integer, a `decimal` and a `bit`) and may stand alone — `'-'` is 0 to an integer and `False` to a `bit`, but Msg 8115 state 6 to a `decimal` — and a decimal point alone (`'.'`, `'-.'`) is 0 to `money` (probed 2026-09-25 against SQL Server 2025).
+
 Which characters a string → number conversion trims differs by target, varchar and nvarchar alike (probed 2026-09-24 over every character 1–32 plus U+00A0 and U+3000 on each side):
 
 | target | leading | trailing |

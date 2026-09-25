@@ -926,5 +926,25 @@ public sealed class CastTests
     [DataRow("cast(65535.9999e0 as smalldatetime)", "smalldatetime")]
     public void FractionalDays_PastTheLastDay_Overflow(string expression, string type)
         => new Simulation().AssertSqlError($"select {expression}", 8115, $"Arithmetic overflow error converting expression to data type {type}.");
+
+    [TestMethod]
+    [DataRow("cast('-' as int)", "0")]
+    [DataRow("cast(' + ' as bigint)", "0")]
+    [DataRow("cast('- 1' as int)", "-1")]
+    [DataRow("cast('- 1' as decimal(5,2))", "-1.00")]
+    [DataRow("cast('-' as bit)", "0")]
+    [DataRow("cast('- 1' as bit)", "1")]
+    [DataRow("cast('.' as money)", "0.00")]
+    [DataRow("cast('-.' as money)", "0.00")]
+    public void SignSpacedFromOrStandingWithoutDigits_Reads(string expression, string expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar($"select cast({expression} as varchar(10))"));
+
+    [TestMethod]
+    public void SignAloneIntoDecimal_Overflows()
+    {
+        var error = new Simulation().AssertSqlError("select cast('-' as decimal(5,2))", 8115);
+        AreEqual("Arithmetic overflow error converting varchar to data type numeric.", error.Errors[0].Message);
+        AreEqual((byte)6, error.Errors[0].State);
+    }
 }
 

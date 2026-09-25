@@ -1032,6 +1032,16 @@ internal readonly partial struct SqlValue
         var trimmed = source.Trim(' ');
         if (trimmed.Length == 0)
             return FromInt64(0).CoerceTo(target);
+        // A sign may stand alone — reading as 0 — or be spaced from its digits
+        // (probed 2026-09-25 against SQL Server 2025: '-' is 0, '- 1' is -1).
+        if (trimmed[0] is '+' or '-')
+        {
+            var digits = trimmed.AsSpan(1).TrimStart(' ');
+            if (digits.IsEmpty)
+                return FromInt64(0).CoerceTo(target);
+            if (digits[0] is not ('+' or '-'))
+                trimmed = string.Concat(trimmed.AsSpan(0, 1), digits);
+        }
 
         if (!long.TryParse(trimmed, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out var parsed))
         {
@@ -1075,9 +1085,11 @@ internal readonly partial struct SqlValue
         if (trimmed.Length == 0)
             return FromBoolean(false);
 
-        var body = trimmed[0] is '+' or '-' ? trimmed[1..] : trimmed;
+        // A sign may stand alone or be spaced from the digits (probed
+        // 2026-09-25 against SQL Server 2025: '-' is 0, '- 1' is 1).
+        var body = trimmed[0] is '+' or '-' ? trimmed[1..].TrimStart(' ') : trimmed;
         if (body.Length == 0)
-            throw SimulatedSqlException.ConversionFailedFromString(sourceType, source, SqlType.Bit);
+            return FromBoolean(false);
 
         var sawNonZero = false;
         foreach (var c in body)
@@ -1268,8 +1280,9 @@ internal readonly partial struct SqlValue
                 buffer[written++] = c;
         }
         var body = buffer[..written].TrimStart(' ');
-        // SQL Server's money parser does NOT accept scientific notation.
-        if (body.Length == 0)
+        // SQL Server's money parser does NOT accept scientific notation. A
+        // decimal point alone is 0 too ('.' and '-.', probed 2026-09-25).
+        if (body.Length == 0 || body is ".")
             return 0;
         return body.IndexOfAny(['e', 'E']) >= 0
             || !decimal.TryParse(
@@ -1651,6 +1664,18 @@ internal readonly partial struct SqlValue
         // shared parser also serves PARSE(), which trims every kind.
         if (HasNonSpaceWhitespaceEdge(source))
             throw SimulatedSqlException.StringConversionToNumberFailed(sourceType, "numeric");
+        // A sign may be spaced from its digits ('- 1' is -1), and a sign
+        // alone is the overflow a number past numeric's domain reports
+        // (probed 2026-09-25 against SQL Server 2025).
+        var trimmed = source.AsSpan().Trim(' ');
+        if (trimmed.Length > 0 && trimmed[0] is '+' or '-')
+        {
+            var digits = trimmed[1..].TrimStart(' ');
+            if (digits.IsEmpty)
+                throw SimulatedSqlException.ArithmeticOverflowConverting(sourceType, "numeric", state: 6);
+            if (digits[0] is not ('+' or '-'))
+                source = string.Concat(trimmed[..1], digits);
+        }
         return Decimal38.TryParse(source, target.precision, target.scale, out var parsed) switch
         {
             Decimal38ParseOutcome.Success => parsed,
