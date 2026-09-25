@@ -16,6 +16,37 @@ public sealed class PropertyFunctionsTests
     // === COLUMNPROPERTY ===
 
     [TestMethod]
+    public void ColumnProperty_ReadsAViewsColumns()
+        => AreEqual("0|3|9|2", new Simulation().ExecuteBatchesScalar(
+            "create table t (id int not null, name varchar(10))",
+            "create view v as select id, name, cast(1 as decimal(9, 3)) d from t",
+            """
+            select concat(columnproperty(object_id('v'), 'id', 'AllowsNull'), '|', columnproperty(object_id('v'), 'd', 'Scale'), '|',
+                columnproperty(object_id('v'), 'd', 'Precision'), '|', columnproperty(object_id('v'), 'name', 'ColumnId'))
+            """));
+
+    [TestMethod]
+    public void ColumnProperty_ReadsACatalogViewsColumns()
+        => AreEqual("7|128|2|5", new Simulation().ExecuteScalar("""
+            select concat(columnproperty(object_id('sys.objects'), 'type_desc', 'ColumnId'), '|',
+                columnproperty(object_id('sys.objects'), 'name', 'Precision'), '|',
+                columnproperty(object_id('sys.objects'), 'type', 'CharMaxLen'), '|',
+                columnproperty(object_id('sys.columns'), 'max_length', 'Precision'))
+            """));
+
+    [TestMethod]
+    public void ColumnProperty_ReadsModuleParametersByTheirAtName()
+        => AreEqual("10|2|1|1|10|1|-", new Simulation().ExecuteBatchesScalar(
+            "create procedure p @a int, @b varchar(10) = 'x', @c decimal(7, 2) output as select 1",
+            "create function f (@x int) returns table as return select @x x, 'a' y",
+            """
+            select concat(columnproperty(object_id('p'), '@b', 'Precision'), '|', columnproperty(object_id('p'), '@c', 'Scale'), '|',
+                columnproperty(object_id('p'), '@a', 'AllowsNull'), '|', columnproperty(object_id('p'), '@a', 'ColumnId'), '|',
+                columnproperty(object_id('f'), '@x', 'Precision'), '|', columnproperty(object_id('f'), 'y', 'Precision'), '|',
+                isnull(str(columnproperty(object_id('p'), 'a', 'ColumnId')), '-'))
+            """));
+
+    [TestMethod]
     public void ColumnProperty_AllowsNull_NullableCol_Returns1()
         => AreEqual(1, new Simulation().ExecuteScalar(
             "create table t (id int not null, name varchar(50) null); " +

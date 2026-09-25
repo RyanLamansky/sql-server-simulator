@@ -1,10 +1,12 @@
+using SqlServerSimulator.Schemas;
 using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator.Parser.Expressions;
 
 /// <summary>
 /// SQL <c>COLUMNPROPERTY(table_or_proc_id, 'column_or_param_name', 'property')</c>:
-/// per-column metadata flags / counts for a table column. Returns <c>int</c>;
+/// per-column metadata flags / counts for a column or module parameter (see
+/// <see cref="FindColumn"/> for what the id may name). Returns <c>int</c>;
 /// unknown property / column / id / NULL on any arg → NULL (matches real
 /// SQL Server, probe-confirmed 2026-05-23). Property names and column names
 /// are both case-insensitive.
@@ -74,10 +76,7 @@ internal sealed class ColumnProperty : Expression
         var columnName = columnValue.CoerceTo(SqlType.NVarchar).AsString;
         var prop = propValue.CoerceTo(SqlType.NVarchar).AsString;
 
-        if (ObjectProperty.FindObject(runtime.Batch.CurrentDatabase, id) is not HeapTable table)
-            return SqlValue.Null(SqlType.Int32);
-
-        var (column, ordinal) = FindColumn(table, columnName);
+        var (column, ordinal) = FindColumn(runtime.Batch.CurrentDatabase, id, columnName);
         return column is null
             ? SqlValue.Null(SqlType.Int32)
             : EvaluateColumnProperty(column, ordinal, prop) is int result
@@ -85,14 +84,67 @@ internal sealed class ColumnProperty : Expression
                 : SqlValue.Null(SqlType.Int32);
     }
 
-    private static (HeapColumn? Column, int Ordinal) FindColumn(HeapTable table, string columnName)
+    /// <summary>
+    /// The column or parameter <paramref name="name"/> names on object
+    /// <paramref name="id"/>, with its <c>ColumnId</c>: a table's, view's or
+    /// catalog view's column, a table-valued function's result column, or —
+    /// written with its <c>@</c> — a procedure's or function's parameter,
+    /// whose id is its position and which always allows NULL (probed
+    /// 2026-09-25 against SQL Server 2025).
+    /// </summary>
+    private static (HeapColumn? Column, int Ordinal) FindColumn(Database database, int id, string name)
     {
-        for (var i = 0; i < table.Columns.Length; i++)
+        if (name.StartsWith('@'))
         {
-            if (Collation.Baseline.Equals(table.Columns[i].Name, columnName))
-                return (table.Columns[i], table.Columns[i].ColumnId);
+            var parameterName = name[1..];
+            switch (ObjectProperty.FindObject(database, id))
+            {
+                case Procedure procedure:
+                    for (var i = 0; i < procedure.Parameters.Length; i++)
+                    {
+                        var parameter = procedure.Parameters[i];
+                        if (Collation.Baseline.Equals(parameter.Name, parameterName))
+                            return (new HeapColumn(name, parameter.Type, parameter.DeclaredMaxLength, nullable: true), i + 1);
+                    }
+                    break;
+                case UserDefinedFunction function:
+                    for (var i = 0; i < function.Parameters.Length; i++)
+                    {
+                        var parameter = function.Parameters[i];
+                        if (Collation.Baseline.Equals(parameter.Name, parameterName))
+                            return (new HeapColumn(name, parameter.Type, maxLength: null, nullable: true), i + 1);
+                    }
+                    break;
+            }
+            return (null, 0);
+        }
+
+        var columns = ObjectProperty.FindObject(database, id) switch
+        {
+            HeapTable table => table.Columns,
+            View view => view.OutputColumns,
+            InlineTableValuedFunction inline => inline.OutputColumns,
+            MultiStatementTableValuedFunction multiStatement => multiStatement.OutputColumns,
+            null => CatalogViewColumns(id),
+            _ => null,
+        };
+        for (var i = 0; i < columns?.Length; i++)
+        {
+            var column = columns[i];
+            if (Collation.Baseline.Equals(column.Name, name))
+                return (column, column.ColumnId == 0 ? i + 1 : column.ColumnId);
         }
         return (null, 0);
+    }
+
+    private static HeapColumn[]? CatalogViewColumns(int id)
+    {
+        foreach (var view in Simulation.CatalogViews.Values)
+        {
+            if (view.ObjectId == id)
+                return view.Columns;
+        }
+        return null;
     }
 
     private static int? EvaluateColumnProperty(HeapColumn column, int ordinal, string property)
@@ -149,7 +201,22 @@ internal sealed class ColumnProperty : Expression
         _ when SqlType.IsStringCategory(column.Type)
             && column.MaxLength is int n
             && n != SqlType.MaxLengthSentinel => n,
-        _ => 0,
+        _ => DeclaredCharacterLength(column.Type) ?? 0,
+    };
+
+    /// <summary>
+    /// The character length a string type declares, for a column that
+    /// carries no separate <see cref="HeapColumn.MaxLength"/> — a view's or a
+    /// catalog view's output, a function parameter.
+    /// </summary>
+    private static int? DeclaredCharacterLength(SqlType type) => type switch
+    {
+        VarcharSqlType { length: > 0 and var n } => n,
+        NVarcharSqlType { length: > 0 and var n } => n,
+        CharSqlType fixedChar => fixedChar.length,
+        NCharSqlType fixedNChar => fixedNChar.length,
+        SystemNameSqlType => 128,
+        _ => null,
     };
 
     private static int GetScale(SqlType type) => type switch
@@ -162,7 +229,7 @@ internal sealed class ColumnProperty : Expression
     private static int? GetCharMaxLen(HeapColumn column) =>
         SqlType.IsStringCategory(column.Type) && column.MaxLength is int n && n != SqlType.MaxLengthSentinel
             ? n
-            : null;
+            : DeclaredCharacterLength(column.Type);
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
 

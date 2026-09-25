@@ -894,8 +894,9 @@ NULL `object_id` / NULL property / non-table object on a `TableHas*` query → N
 
 **`COLUMNPROPERTY(table_id, column_name, property)`** (`Parser/Expressions/ColumnProperty.cs`): per-column metadata returning `int`.
 Properties (probe-confirmed): `AllowsNull` / `IsIdentity` / `IsComputed` (1/0 from `HeapColumn.Nullable` / `Identity` / `Computed`), `IsRowGuidCol` (1/0 from `HeapColumn.IsRowGuidCol`), `IsIdNotForRepl` (1 for an `IDENTITY … NOT FOR REPLICATION` column, else 0 — 0 on non-identity columns, probe-confirmed), `Precision` (decimal-equivalent for integer family, declared `N` for `varchar(N)` / `nvarchar(N)`, 19/10 for money/smallmoney), `Scale` (4 for money, declared scale for decimal, 0 otherwise), `CharMaxLen` (`N` for character types, NULL otherwise), `ColumnId` (the [stable column id](#stable-column-ids), agreeing with `sys.columns.column_id` after a DROP COLUMN — probe-confirmed that real reports the same value from both surfaces), `UsesAnsiTrim` (1 for character types, 0 otherwise).
-Column lookup matches by name through `Collation.Baseline` (case-insensitive).
-NULL on any arg / unknown column / unknown property / unknown table → NULL.
+Column lookup matches by name through `Collation.Baseline` (case-insensitive), over a table's, a view's, a catalog view's or a table-valued function's columns, or — named with its `@` — a procedure's or function's parameters, which always allow NULL and whose `ColumnId` is their position (probed 2026-09-25).
+A catalog view's answers follow the simulator's declaration of it, so its column order and nullability divergences show through (`COLUMNPROPERTY(OBJECT_ID('sys.objects'), 'name', 'AllowsNull')` is 1 where real says 0).
+NULL on any arg / unknown column / unknown property / unknown object → NULL.
 
 **`INDEXPROPERTY(object_id, index_name, property)`** (`Parser/Expressions/IndexProperty.cs`): per-index metadata returning `int`.
 Index lookup unions `HeapTable.Indexes` (CREATE INDEX) and `HeapTable.KeyConstraints` (PK / UNIQUE — surface in `sys.indexes` by constraint name; the simulator auto-generates these as `PK__<table8>__<hex>`).
