@@ -63,7 +63,7 @@ internal static class ReferenceBuild
         $"Microsoft SQL Server 2025 (RTM-{UpdateLevel}) ({UpdateReference}) - {ProductVersion} (X64) \n" +
         "\tJul  8 2026 23:26:08 \n" +
         "\tCopyright (C) 2025 Microsoft Corporation\n" +
-        "\tDeveloper Edition (64-bit) on SQL Server Simulator";
+        "\tEnterprise Developer Edition (64-bit) on SQL Server Simulator";
 
     /// <summary>
     /// The <c>xp_msver</c> FileVersion row. The encoding (product year,

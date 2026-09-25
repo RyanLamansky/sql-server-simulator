@@ -97,7 +97,7 @@ public sealed class SqlVariantWireTests
         IsTrue(await reader.ReadAsync(TestContext.CancellationToken));
         _ = IsInstanceOfType<int>(reader.GetValue(0));
         AreEqual(3, reader.GetValue(0));
-        AreEqual("Developer Edition (64-bit)", reader.GetValue(1));
+        AreEqual("Enterprise Developer Edition (64-bit)", reader.GetValue(1));
     }
 
     // SESSION_CONTEXT round-trips the stored value's base type through the

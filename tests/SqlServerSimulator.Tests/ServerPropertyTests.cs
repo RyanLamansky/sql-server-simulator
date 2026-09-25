@@ -12,7 +12,7 @@ public sealed class ServerPropertyTests
 {
     [TestMethod]
     public void Edition_ReturnsDeveloper()
-        => AreEqual("Developer Edition (64-bit)", new Simulation().ExecuteScalar("select serverproperty('Edition')"));
+        => AreEqual("Enterprise Developer Edition (64-bit)", new Simulation().ExecuteScalar("select serverproperty('Edition')"));
 
     [TestMethod]
     public void ProductLevel_ReturnsRTM()
@@ -98,7 +98,7 @@ public sealed class ServerPropertyTests
         AreEqual(3, reader.GetValue(0));
         IsTrue(reader.Read());
         _ = Assert.IsInstanceOfType<string>(reader.GetValue(0));
-        AreEqual("Developer Edition (64-bit)", reader.GetValue(0));
+        AreEqual("Enterprise Developer Edition (64-bit)", reader.GetValue(0));
     }
 
     [TestMethod]

@@ -63,7 +63,7 @@ internal sealed class ServerProperty : Expression
             // casts without a NULL check ("Object cannot be cast from DBNull
             // to other types").
             "COMPUTERNAMEPHYSICALNETBIOS" => SqlValue.FromNVarchar("SIMULATED"),
-            "EDITION" => SqlValue.FromNVarchar("Developer Edition (64-bit)"),
+            "EDITION" => SqlValue.FromNVarchar("Enterprise Developer Edition (64-bit)"),
             "EDITIONID" => SqlValue.FromInt32(-2117995310),
             "ENGINEEDITION" => SqlValue.FromInt32(3),
             "FILESTREAMCONFIGUREDLEVEL" => SqlValue.FromInt32(0),

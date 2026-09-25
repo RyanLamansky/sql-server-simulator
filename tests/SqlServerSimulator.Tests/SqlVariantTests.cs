@@ -128,7 +128,7 @@ public sealed class SqlVariantTests
             "SELECT SERVERPROPERTY('Edition') AS e INTO #t; SELECT e, SQL_VARIANT_PROPERTY(e, 'BaseType') AS bt FROM #t");
         AreEqual("sql_variant", reader.GetDataTypeName(0));
         IsTrue(reader.Read());
-        AreEqual("Developer Edition (64-bit)", reader.GetValue(0));
+        AreEqual("Enterprise Developer Edition (64-bit)", reader.GetValue(0));
         AreEqual("nvarchar", reader.GetValue(1));
     }
 
