@@ -478,4 +478,26 @@ public sealed class RaiserrorTests
         var sql = $"begin try {raiserrorStatement} end try begin catch select error_message() end catch";
         return (string)new Simulation().ExecuteScalar(sql)!;
     }
+
+    // Severity 20 WITH LOG ends the session: four errors, the transaction
+    // rolled back, no CATCH, the rest of the batch skipped and the connection
+    // closed (probed 2026-09-25 against SQL Server 2025).
+    [TestMethod]
+    public void Severity20WithLog_EndsTheSession()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table t (a int)");
+        using var connection = simulation.CreateOpenConnection();
+        var spid = connection.CreateCommand("select @@spid").ExecuteScalar();
+        using var command = connection.CreateCommand(
+            "begin tran; insert t values (1); begin try raiserror('boom %d', 20, 3, 7) with log; end try begin catch insert t values (2) end catch; insert t values (3)");
+        var ex = Throws<SimulatedSqlException>(() => command.ExecuteNonQuery());
+        AreEqual(
+            $"50000/20/3 boom 7|2745/16/2 Process ID {spid} has raised user error 50000, severity 20. SQL Server is terminating this process.|596/21/1 Cannot continue the execution because the session is in the kill state.|0/20/0 A severe error occurred on the current command.  The results, if any, should be discarded.",
+            string.Join("|", ex.Errors.Cast<SimulatedError>().Select(error => $"{error.Number}/{error.Class}/{error.State} {error.Message}")));
+        AreEqual(System.Data.ConnectionState.Closed, connection.State);
+        var closed = Throws<InvalidOperationException>(() => connection.CreateCommand("select 1").ExecuteScalar());
+        AreEqual("ExecuteScalar requires an open and available Connection. The connection's current state is closed.", closed.Message);
+        AreEqual(0, simulation.ExecuteScalar("select count(*) from t"));
+    }
 }

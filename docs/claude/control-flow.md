@@ -410,11 +410,12 @@ Statement adjacency requires `;` before THROW (probe-confirmed: `select 1 throw 
 **Grammar restriction**: `msg` / severity / state / sub args accept only literals, signed numeric literals, `@variable` references, and `NULL` — arbitrary expressions (`CAST(...)`, function calls, arithmetic) raise Msg 102 at parse time.
 Matches real SQL Server's grammar (probe-confirmed).
 
+**Severity 19 and up** takes `WITH LOG` (Msg 2754 without it), and `WITH LOG` takes a sysadmin — which the in-process default is, as it passes every server-scope gate.
+**Severity 20 and up ends the session** (probed 2026-09-25 against SQL Server 2025): the raised error arrives followed by Msg 2745 (`Process ID n has raised user error 50000, severity 20. SQL Server is terminating this process.`), Msg 596 at severity 21 and the severity-20 Msg 0 `A severe error occurred on the current command.  The results, if any, should be discarded.`; the transaction rolls back, no `CATCH` intercepts it, the rest of the batch never runs, and the connection is closed once the command has delivered it — `SimulatedDbConnection.SessionEnding`, read by the command wrapper, and over the TDS endpoint the socket closes too.
+A command on the closed connection is then SqlClient's `InvalidOperationException` (`ExecuteReader requires an open and available Connection. The connection's current state is closed.`), as it is for any connection that isn't open.
+
 **Fidelity gaps** (modeled deviations):
-- Severity ≥ 20 is uniformly rejected via Msg 2754; the simulator has no principal model to distinguish sysadmin from non-sysadmin callers.
-  Apps running as sysadmin on real SQL Server would see different behavior — but the simulator's non-sysadmin posture matches the typical production posture.
-- `WITH LOG` is uniformly rejected via Msg 2778 for the same reason.
-  Apps that depend on the message being logged (real SQL Server writes to the Windows event log + SQL Server error log) get neither logging nor the implicit sysadmin permission grant.
+- `WITH LOG` writes nothing anywhere: real writes the SQL Server error log and the Windows event log.
 - System-message ids registered in real SQL Server's `sys.messages` (e.g. `RAISERROR(13001, 16, 1)` surfaces the system "file name" message text) fall through to Msg 18054 here.
 - Severity ≤ 10 messages are informational and flow to `SimulatedDbConnection.InfoMessage` (verified for both `RAISERROR('m', 10, 1)` and `RAISERROR('m', 0, 1)`) rather than being raised — matching the severity table above.
   Severity 10 arrives with class 0, as every severity-10 message does on real; severities 1-9 keep their number (probed 2026-09-23).

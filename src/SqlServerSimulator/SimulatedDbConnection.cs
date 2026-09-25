@@ -415,6 +415,13 @@ public sealed class SimulatedDbConnection : DbConnection
     /// </summary>
     internal readonly DateTime LoginTimeUtc = DateTime.UtcNow;
 
+    /// <summary>
+    /// Set when the running command raised an error that ends the session (a
+    /// severity 20 <c>RAISERROR … WITH LOG</c>); the command closes the
+    /// connection once the error has been delivered.
+    /// </summary>
+    internal bool SessionEnding;
+
     /// <summary>The physical connection this session rides, which <c>sys.dm_exec_connections</c> reports.</summary>
     internal Network.ConnectionTransport Transport = new(client: null, local: null, protocolVersion: 0, packetSize: 0);
 

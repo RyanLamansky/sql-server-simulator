@@ -115,4 +115,20 @@ public class CommandTests
         _ = Throws<Exception>(() => command2.Transaction = transaction);
         _ = Throws<Exception>(() => command2.Transaction = new TestTransaction());
     }
+
+    // SqlClient refuses to run a command on a connection that isn't open,
+    // naming the method it was asked through.
+    [TestMethod]
+    public void Execute_OnAConnectionThatIsNotOpen_IsInvalidOperation()
+    {
+        using var connection = new Simulation().CreateDbConnection();
+        using var command = connection.CreateCommand();
+        command.CommandText = "select 1";
+        AreEqual("ExecuteReader requires an open and available Connection. The connection's current state is closed.", Throws<InvalidOperationException>(command.ExecuteReader).Message);
+        AreEqual("ExecuteNonQuery requires an open and available Connection. The connection's current state is closed.", Throws<InvalidOperationException>(() => command.ExecuteNonQuery()).Message);
+        connection.Open();
+        AreEqual(1, command.ExecuteScalar());
+        connection.Close();
+        AreEqual("ExecuteScalar requires an open and available Connection. The connection's current state is closed.", Throws<InvalidOperationException>(command.ExecuteScalar).Message);
+    }
 }

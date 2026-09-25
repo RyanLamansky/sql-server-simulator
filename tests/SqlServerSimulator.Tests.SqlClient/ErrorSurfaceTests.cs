@@ -174,4 +174,28 @@ public sealed class ErrorSurfaceTests
         // the connection's data source rather than the token's "SIMULATED".
         AreEqual(connection.DataSource, ex.Server);
     }
+
+    /// <summary>
+    /// A severity-20 <c>RAISERROR … WITH LOG</c> ends the session over the wire
+    /// as it does on real: the client sees the error and its companions, and
+    /// the connection is closed.
+    /// </summary>
+    [TestMethod]
+    public async Task Severity20Raiserror_ClosesTheConnection()
+    {
+        var simulation = new Simulation();
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+        await using var command = new SqlCommand("select 1; raiserror('boom', 20, 1) with log; select 2", connection);
+        var ex = await ThrowsAsync<SqlException>(async () =>
+        {
+            await using var reader = await command.ExecuteReaderAsync(TestContext.CancellationToken);
+            while (await reader.NextResultAsync(TestContext.CancellationToken))
+            {
+            }
+        });
+        AreEqual(50000, ex.Number);
+        AreEqual(20, ex.Class);
+        AreEqual(System.Data.ConnectionState.Closed, connection.State);
+    }
 }

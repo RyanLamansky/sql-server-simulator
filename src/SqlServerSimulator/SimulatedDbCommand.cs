@@ -153,6 +153,7 @@ public sealed class SimulatedDbCommand : DbCommand
     /// </summary>
     public override int ExecuteNonQuery()
     {
+        this.RequireOpenConnection(nameof(ExecuteNonQuery));
         List<SimulatedSqlException>? errors = null;
         List<SimulatedError>? messages = null;
         var affected = 0;
@@ -190,6 +191,7 @@ public sealed class SimulatedDbCommand : DbCommand
     /// </summary>
     public override object? ExecuteScalar()
     {
+        this.RequireOpenConnection(nameof(ExecuteScalar));
         List<SimulatedSqlException>? errors = null;
         List<SimulatedError>? messages = null;
         object? scalar = null;
@@ -265,6 +267,7 @@ public sealed class SimulatedDbCommand : DbCommand
         // the check costs no extra eagerness. Real SqlClient throws out of
         // ExecuteReader rather than handing back an empty reader, so a caller
         // can't mistake a cancelled batch for a zero-row answer.
+        this.RequireOpenConnection(nameof(ExecuteReader));
         var reader = new SimulatedDbDataReader(this.simulation.CreateResultSetsForCommand(this), this.Connection);
         if (WasExecutionCancelled())
         {
@@ -304,6 +307,28 @@ public sealed class SimulatedDbCommand : DbCommand
         this.Connection?.ExecutionTimedOut == true
             ? SimulatedSqlException.ExecutionTimeoutExpired()
             : SimulatedSqlException.CommandCancelled();
+
+    /// <summary>
+    /// SqlClient's refusal to run a command without an open connection — one
+    /// the caller never opened, closed, or lost to an error that ended its
+    /// session — as the <see cref="InvalidOperationException"/> it throws,
+    /// worded as it words it.
+    /// </summary>
+    private void RequireOpenConnection(string method)
+    {
+        if (this.Connection is not { } connection)
+            throw new InvalidOperationException($"{method}: Connection property has not been initialized.");
+        if (connection.State != ConnectionState.Open)
+        {
+            var state = connection.State switch
+            {
+                ConnectionState.Broken => "broken",
+                ConnectionState.Connecting => "connecting",
+                _ => "closed",
+            };
+            throw new InvalidOperationException($"{method} requires an open and available Connection. The connection's current state is {state}.");
+        }
+    }
 
     /// <summary>Strongly-typed shadow over <see cref="DbCommand.CreateParameter"/>.</summary>
     public new SimulatedDbParameter CreateParameter() => (SimulatedDbParameter)base.CreateParameter();

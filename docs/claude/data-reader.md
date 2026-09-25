@@ -1,6 +1,7 @@
 # `SimulatedDbDataReader` client surface
 
 Full `DbDataReader` contract.
+A command runs only on an open connection: `ExecuteReader` / `ExecuteNonQuery` / `ExecuteScalar` on one never opened, closed, or closed by an error that ended its session throw SqlClient's `InvalidOperationException`, worded as it words it and naming the method.
 Typed accessors read `SqlValue` via the cursor indexer, unwrap via `As*` (no boxing); NULL → `SqlNullValueException` (SqlClient parity).
 
 - `GetDateTime` covers Date/DateTime/SmallDateTime/DateTime2 (Date at midnight, `Kind=Unspecified`).

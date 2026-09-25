@@ -34,8 +34,9 @@ partial class Simulation
     /// <c>Number = 50000</c>, <c>State = state</c>.</item>
     /// <item>Severity 19 and up → Msg 2754 unless a sysadmin (or the
     /// unrestricted in-process default) writes <c>WITH LOG</c>; severity 19
-    /// then raises as 11-18 does. Severity 20 and up ends the connection on
-    /// real, which isn't built yet and raises <see cref="NotSupportedException"/>.</item>
+    /// then raises as 11-18 does. Severity 20 and up ends the session: the
+    /// error arrives with real's Msg 2745 / 596 / 0 companions, uncatchable,
+    /// and the connection closes.</item>
     /// </list>
     /// <para>
     /// State: NULL is 0, a negative state reports 1, and anything past 255
@@ -155,8 +156,6 @@ partial class Simulation
         {
             if (!withLog)
                 throw SimulatedSqlException.RaiserrorSeverityRequiresSysadmin();
-            if (severity > 19)
-                throw new NotSupportedException("RAISERROR with a severity of 20 or more ends the connection, which isn't modeled yet.");
         }
 
         var state = CoerceToInt32OrNull(stateValue) switch
@@ -192,6 +191,13 @@ partial class Simulation
         }
 
         var formatted = MessageFormatter.Format(formatString, substitutions);
+
+        // Severity 20 and up ends the session.
+        if (severity >= 20)
+        {
+            batch.Connection.SessionEnding = true;
+            throw SimulatedSqlException.RaiserrorEndsSession(formatted, (byte)Math.Min(severity, 25), state, batch.Connection.Spid);
+        }
 
         if (severity >= 11)
         {

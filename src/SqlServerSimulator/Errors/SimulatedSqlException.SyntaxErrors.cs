@@ -764,6 +764,29 @@ partial class SimulatedSqlException
         new(message, 50000, severity, state) { RaisedByRaiserror = true };
 
     /// <summary>
+    /// A <c>RAISERROR … WITH LOG</c> at severity 20 or more, which ends the
+    /// session: the raised error, then Msg 2745 naming the session, Msg 596 at
+    /// severity 21 and the severity-20 Msg 0 SqlClient reports a severed
+    /// command with (probed 2026-09-25 against SQL Server 2025). It rolls the
+    /// transaction back and no <c>CATCH</c> intercepts it; the caller marks
+    /// the connection so the command closes it once this has been delivered.
+    /// </summary>
+    internal static SimulatedSqlException RaiserrorEndsSession(string message, byte severity, byte state, int spid)
+    {
+        List<SimulatedError> entries =
+        [
+            .. new SimulatedSqlException(message, 50000, severity, state).Errors,
+            .. new SimulatedSqlException($"Process ID {spid} has raised user error 50000, severity {severity}. SQL Server is terminating this process.", 2745, 16, 2).Errors,
+            .. new SimulatedSqlException("Cannot continue the execution because the session is in the kill state.", 596, 21, 1).Errors,
+            .. new SimulatedSqlException("A severe error occurred on the current command.  The results, if any, should be discarded.", 0, 20, 0).Errors,
+        ];
+        return new(string.Join(Environment.NewLine, entries.Select(entry => entry.Message)), System.Runtime.InteropServices.CollectionsMarshal.AsSpan(entries))
+        {
+            AbortsTransaction = true,
+        };
+    }
+
+    /// <summary>
     /// Mimics SQL Server's Msg 1018 — an <c>INDEX</c> hint written in the
     /// legacy no-<c>WITH</c> parenthesized form, which real refuses outright
     /// rather than reading as an argument list. Probe-confirmed verbatim,

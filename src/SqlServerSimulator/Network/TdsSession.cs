@@ -284,6 +284,11 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
 
                 await writer.FlushAsync(final: true, cancellationToken).ConfigureAwait(false);
 
+                // A command whose error ended the session closed its connection;
+                // real drops the client there too.
+                if (this.connection!.State == System.Data.ConnectionState.Closed)
+                    return;
+
                 // Carry the in-flight read forward. When the watcher already
                 // consumed the attention, its read is spent — start a fresh one.
                 // Otherwise the same read is the next request (or still pending,

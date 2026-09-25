@@ -1066,6 +1066,13 @@ public sealed partial class Simulation
         finally
         {
             _ = Interlocked.Decrement(ref this.statementsInFlight);
+            // An error that ends the session closes the connection once the
+            // command has delivered it.
+            if (command.Connection is { SessionEnding: true } ended)
+            {
+                ended.SessionEnding = false;
+                ended.Close();
+            }
         }
     }
 
