@@ -463,4 +463,8 @@ public sealed class RefusalFidelityTests
     [DataRow("create table t336 (a int); select * from t336 with (nolock) with c2 as (select 2 b) select * from c2", 319)]
     public void CteAfterAnUnterminatedStatement_NamesTheCteAfterAFromSource(string sql, int number)
         => new Simulation().AssertSqlError(sql, number);
+
+    [TestMethod]
+    public void TableSample_OnADerivedTable_RaisesMsg156()
+        => new Simulation().AssertSqlError("select * from (select 1 a) d tablesample (10 percent)", 156, "Incorrect syntax near the keyword 'tablesample'.");
 }

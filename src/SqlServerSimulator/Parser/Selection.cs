@@ -3100,6 +3100,10 @@ internal sealed partial class Selection
                 var derivedQualifier = ConsumeOptionalAlias(context)
                     ?? throw SimulatedSqlException.SyntaxErrorNear(')');
                 var derivedNames = ResolveDerivedTableColumnNames(context, derivedSelection.ColumnNames, derivedQualifier);
+                // A derived table takes no TABLESAMPLE; real stops at the
+                // keyword itself (Msg 156, probed 2026-09-24).
+                if (context.Token is ReservedKeyword { Keyword: Keyword.TableSample } tableSample)
+                    throw SimulatedSqlException.SyntaxErrorNearKeyword(tableSample);
 
                 return new FromSource(
                     qualifier: derivedQualifier,
