@@ -447,4 +447,12 @@ public sealed class RefusalFidelityTests
     [DataRow("create table cz (a int, b as 1 / a); create index ix on cz(b)")]
     public void ErroringPersistedOrIndexedComputedColumn_FailsTheWrite(string create)
         => new Simulation().AssertSqlError($"{create}; insert cz (a) values (0)", 8134);
+
+    [TestMethod]
+    [DataRow("select 1 from ib where r in (select v from ib)")]
+    [DataRow("select 1 from ib where r = any (select v from ib)")]
+    [DataRow("select 1 from ib where v in (select r from ib)")]
+    public void InSubquery_IllegalConversion_NamesTheColumnInMsg260(string query)
+        => new Simulation().AssertSqlError($"create table ib (v varchar(10), r rowversion); {query}", 260,
+            "Disallowed implicit conversion from data type varchar to data type timestamp, table 'ib', column 'v'. Use the CONVERT function to run this query.");
 }

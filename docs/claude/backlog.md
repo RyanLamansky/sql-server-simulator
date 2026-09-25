@@ -220,7 +220,6 @@ Already listed elsewhere here and not repeated: parenthesized set-op branches.
 
 **Type-pair neighbors** — found by the type-pair probes and left open (probed 2026-09-23):
 
-- The subquery side of `IN (SELECT …)` / `= ANY (…)` reports Msg 257 where real reports Msg 260 naming the inner column.
 - An alias type over numeric reads `decimal`, as does a numeric column's name in a type-pair message (raised while binding, before references are marked); everything else carries the name (see [`arithmetic.md`](arithmetic.md#numeric-vs-decimal-reported-type-name)).
 - Under a SQL collation, a `varchar` containing `CHAR(0)` compares unequal to the same string without it.
 - A constant-folded `CASE WHEN 1 = 0 …` takes the ELSE arm's type on real.

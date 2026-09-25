@@ -1160,14 +1160,27 @@ internal abstract class BooleanExpression : ExpressionNode
 
     /// <summary>
     /// <see cref="RequireComparable"/> for an <c>IN</c> / quantified subquery,
-    /// whose right side is the inner plan's column type. A diagnostic that
-    /// would name that column's object (Msg 260) names the bare types instead.
+    /// whose right side is the inner plan's column. A column the inner query
+    /// reads directly carries its object and name, which Msg 260 names as it
+    /// does an outer one (probed 2026-09-24).
     /// </summary>
-    private static void RequireComparableToSubquery(Expression left, SqlType leftType, SqlType innerType, BatchContext batch, string operatorName)
+    private static void RequireComparableToSubquery(Expression left, SqlType leftType, Selection inner, BatchContext batch, string operatorName)
     {
+        var innerType = inner.Schema[0];
         if (!Expression.IsBareNullLiteral(left))
-            ThrowIfIncomparable(Expression.PairOperand(left, leftType, batch), new TypePairOperand(innerType), operatorName);
+            ThrowIfIncomparable(Expression.PairOperand(left, leftType, batch), InnerColumnOperand(inner, innerType), operatorName);
         RequireResolvableCollation(leftType, innerType, operatorName);
+    }
+
+    private static TypePairOperand InnerColumnOperand(Selection inner, SqlType innerType)
+    {
+        if (inner.AutoColumnSource is { Length: > 0 } source && source[0] >= 0
+            && inner.AutoColumnOrdinal is { } ordinal && inner.BranchFromSources is { } sources
+            && (sources[source[0]].WrittenObjectName ?? sources[source[0]].Qualifier) is { } table)
+        {
+            return new TypePairOperand(innerType, null, table, sources[source[0]].ColumnNames[ordinal[0]]);
+        }
+        return new TypePairOperand(innerType);
     }
 
     private static void ThrowIfIncomparable(TypePairOperand left, TypePairOperand right, string operatorName)
@@ -2267,7 +2280,7 @@ internal abstract class BooleanExpression : ExpressionNode
         internal override void VisitOperandExpressions(Action<Expression> visitor) => visitor(source);
 
         internal override void Bind(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
-            RequireComparableToSubquery(source, source.GetSqlType(batch, resolveColumnType), inner.Schema[0], batch, "equal to");
+            RequireComparableToSubquery(source, source.GetSqlType(batch, resolveColumnType), inner, batch, "equal to");
     }
 
     /// <summary>
@@ -2462,7 +2475,7 @@ internal abstract class BooleanExpression : ExpressionNode
         internal override void VisitOperandExpressions(Action<Expression> visitor) => visitor(left);
 
         internal override void Bind(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
-            RequireComparableToSubquery(left, left.GetSqlType(batch, resolveColumnType), inner.Schema[0], batch, GetComparator(op).OperatorName);
+            RequireComparableToSubquery(left, left.GetSqlType(batch, resolveColumnType), inner, batch, GetComparator(op).OperatorName);
 
         private static (string OperatorName, Func<SqlValue, SqlValue, bool> Compare) GetComparator(ComparisonOp op) => op switch
         {
