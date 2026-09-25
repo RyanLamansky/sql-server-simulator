@@ -523,6 +523,14 @@ partial class Simulation
         /// </summary>
         public bool HasTarget => outputTarget is not null;
 
+        // A non-persisted computed column is evaluated when OUTPUT reads it,
+        // so an expression that fails for the row raises here rather than
+        // having failed the write.
+        private SqlValue ReadOutputColumn(SqlValue[] row, int ordinal) =>
+            destinationTable.Columns[ordinal] is { Computed: not null, IsPersisted: false }
+                ? EvaluateComputedColumn(destinationTable, row, ordinal, this.batch)
+                : row[ordinal];
+
         /// <summary>
         /// Encodes one OUTPUT row, running each parsed expression against a
         /// per-row resolver over <c>INSERTED</c> / <c>DELETED</c> and — for
@@ -558,7 +566,7 @@ partial class Simulation
                     for (var i = 0; i < destinationTable.Columns.Length; i++)
                     {
                         if (this.batch.CurrentDatabase.Collation.Equals(destinationTable.Columns[i].Name, name.Leaf))
-                            return insertedValues is null ? SqlValue.Null(destinationTable.Columns[i].Type) : insertedValues[i];
+                            return insertedValues is null ? SqlValue.Null(destinationTable.Columns[i].Type) : this.ReadOutputColumn(insertedValues, i);
                     }
                 }
                 else if (BuiltInToken.Equals(name.ImmediateQualifier, "DELETED"))
@@ -566,7 +574,7 @@ partial class Simulation
                     for (var i = 0; i < destinationTable.Columns.Length; i++)
                     {
                         if (this.batch.CurrentDatabase.Collation.Equals(destinationTable.Columns[i].Name, name.Leaf))
-                            return deletedValues is null ? SqlValue.Null(destinationTable.Columns[i].Type) : deletedValues[i];
+                            return deletedValues is null ? SqlValue.Null(destinationTable.Columns[i].Type) : this.ReadOutputColumn(deletedValues, i);
                     }
                 }
                 else if (source is var (sourceAlias, sourceCols, sourceTypes)

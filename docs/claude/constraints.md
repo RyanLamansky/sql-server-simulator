@@ -85,6 +85,8 @@ A computed column takes several inline constraints in any order — `PERSISTED P
 A PRIMARY KEY naming the computed column promotes it to NOT NULL, inline and table-level alike, exactly as it does a regular column: the promotion happens where the computed `HeapColumn` is materialized, since `ParseColumnList`'s promotion loop walks the column list while that slot is still an unresolved placeholder.
 
 A **non-persisted** computed column is evaluated per read, and its expression resolves against **its own row's source** rather than the enclosing query's tuple.
+A write doesn't evaluate one either unless a key or index covers it: `b AS 1 / a` takes a zero `a`, and only the query or `OUTPUT` that reads `b` raises (probed 2026-09-24), where a persisted or indexed one fails the write.
+The write still fills the slot for the enforcement paths, swallowing that error into a NULL, and `OUTPUT` re-evaluates the column from the row rather than reading the slot; a trigger's `INSERTED.b` reads it the way a scan does.
 That distinction only shows when two sources expose the same underlying column name — `deleted d JOIN inserted i` in a trigger body, a self-join, or two tables that each have a column `a` — where resolving through the tuple made the expression's *own* column reference ambiguous and reported Msg 209 on a statement real answers.
 Msg 1759 is what makes the narrow scope sufficient: a computed column may only name stored columns of its own table, so the row is the whole scope its expression needs (`Selection.ResolveWithinSource`).
 

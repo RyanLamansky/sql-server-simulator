@@ -226,18 +226,62 @@ partial class Simulation
             if (column.Computed is null)
                 continue;
 
-            SqlValue ResolveByName(MultiPartName reference)
+            // A non-persisted column no key or index covers isn't evaluated by
+            // real's write at all — `b AS 1 / a` takes a zero `a` and fails
+            // only the query that reads `b` (probed 2026-09-24) — so its error
+            // doesn't reach the write, and the slot reads NULL.
+            if (!column.IsPersisted && !IsKeyedColumn(destinationTable, i))
             {
-                for (var k = 0; k < destinationTable.Columns.Length; k++)
+                try
                 {
-                    if (batch.CurrentDatabase.Collation.Equals(destinationTable.Columns[k].Name, reference.Leaf))
-                        return rowValues[k];
+                    rowValues[i] = EvaluateComputedColumn(destinationTable, rowValues, i, batch);
                 }
-                throw SimulatedSqlException.InvalidColumnName(reference);
+                catch (SimulatedSqlException)
+                {
+                    rowValues[i] = SqlValue.Null(column.Type);
+                }
+                continue;
             }
 
-            rowValues[i] = CoerceForInsert(column.Computed.Run(new RuntimeContext(ResolveByName, batch)), column.Type);
+            rowValues[i] = EvaluateComputedColumn(destinationTable, rowValues, i, batch);
         }
+    }
+
+    /// <summary>
+    /// Evaluates the computed column at <paramref name="ordinal"/> against a
+    /// row's other values — what OUTPUT reads for a non-persisted one, so an
+    /// erroring expression raises there as it does on real.
+    /// </summary>
+    internal static SqlValue EvaluateComputedColumn(HeapTable table, SqlValue[] rowValues, int ordinal, BatchContext batch)
+    {
+        SqlValue ResolveByName(MultiPartName reference)
+        {
+            for (var k = 0; k < table.Columns.Length; k++)
+            {
+                if (batch.CurrentDatabase.Collation.Equals(table.Columns[k].Name, reference.Leaf))
+                    return rowValues[k];
+            }
+            throw SimulatedSqlException.InvalidColumnName(reference);
+        }
+
+        var column = table.Columns[ordinal];
+        return CoerceForInsert(column.Computed!.Run(new RuntimeContext(ResolveByName, batch)), column.Type);
+    }
+
+    /// <summary>Whether a key constraint or an index keys or includes the column at <paramref name="ordinal"/>.</summary>
+    private static bool IsKeyedColumn(HeapTable table, int ordinal)
+    {
+        foreach (var key in table.KeyConstraints)
+        {
+            if (Array.IndexOf(key.FullOrdinals, ordinal) >= 0)
+                return true;
+        }
+        foreach (var index in table.Indexes)
+        {
+            if (Array.IndexOf(index.KeyFullOrdinals, ordinal) >= 0 || Array.IndexOf(index.IncludedColumnOrdinals, ordinal) >= 0)
+                return true;
+        }
+        return false;
     }
 
     /// <summary>

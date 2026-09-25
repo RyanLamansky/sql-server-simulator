@@ -427,4 +427,24 @@ public sealed class RefusalFidelityTests
     [DataRow("0000000002147483647", "numeric", 10)]
     public void IntegerLiteral_WrittenPastElevenCharacters_IsNumeric(string literal, string type, int precision)
         => AreEqual($"{type}|{precision}", new Simulation().ExecuteScalar($"select concat(sql_variant_property({literal}, 'BaseType'), '|', sql_variant_property({literal}, 'Precision'))"));
+
+    // ---- an erroring non-persisted computed column (probed 2026-09-24 against SQL Server 2025) ----
+
+    [TestMethod]
+    public void ErroringNonPersistedComputedColumn_FailsOnlyTheReadThatProjectsIt()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table cz (a int, b as 1 / a); insert cz (a) values (0); update cz set a = 0");
+        AreEqual(0, sim.ExecuteScalar("select a from cz"));
+        AreEqual(1, sim.ExecuteScalar("select count(*) from cz"));
+        _ = sim.AssertSqlError("select * from cz", 8134);
+        _ = sim.AssertSqlError("insert cz (a) output inserted.b values (0)", 8134);
+        AreEqual(0, sim.ExecuteScalar("insert cz (a) output inserted.a values (0)"));
+    }
+
+    [TestMethod]
+    [DataRow("create table cz (a int, b as 1 / a persisted)")]
+    [DataRow("create table cz (a int, b as 1 / a); create index ix on cz(b)")]
+    public void ErroringPersistedOrIndexedComputedColumn_FailsTheWrite(string create)
+        => new Simulation().AssertSqlError($"{create}; insert cz (a) values (0)", 8134);
 }
