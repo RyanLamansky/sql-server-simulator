@@ -3,50 +3,54 @@ using SqlServerSimulator.Storage;
 namespace SqlServerSimulator.Parser.Aggregators;
 
 /// <summary>
-/// Backs <c>CHECKSUM_AGG(expr)</c>: an order-independent XOR-fold of the
-/// per-row checksums (SQL Server's documented algorithm rotates and XORs).
-/// NULL operands are skipped. Empty input → 0 (per SQL Server probe).
-/// Result type is <see cref="SqlType.Int32"/>. Implementation here is a
-/// simple integer-XOR rotate over <see cref="int"/> hashes of the operand
-/// values; bit-for-bit match with SQL Server's CHECKSUM is not guaranteed
-/// (different domains require slightly different bit-twiddles), but the
-/// "order-independent, NULL-skipping, integer hash" contract is preserved.
+/// Backs <c>CHECKSUM_AGG(expr)</c>: the XOR of its <c>int</c> operands, NULLs
+/// skipped, and NULL when no value arrived — probed 2026-09-25 against SQL
+/// Server 2025 (<c>1, 2, 4</c> fold to 7, <c>-1, 5</c> to -6, two equal values
+/// cancel). <c>DISTINCT</c> folds each value once. The operand's type was
+/// settled while compiling.
 /// </summary>
-internal sealed class ChecksumAggAggregator : Aggregator
+internal sealed class ChecksumAggAggregator(bool distinct) : Aggregator
 {
+    private readonly HashSet<int>? seen = distinct ? [] : null;
     private int folded;
+    private long count;
 
     public override void Add(SqlValue value)
     {
         if (value.IsNull)
             return;
-        // Plain XOR keeps the fold commutative — same multiset of inputs
-        // produces the same checksum regardless of arrival order, matching
-        // SQL Server's documented order-independence guarantee.
-        this.folded ^= value.GetHashCode();
+        var operand = value.AsInt32;
+        if (this.seen is not null && !this.seen.Add(operand))
+            return;
+        this.folded ^= operand;
+        this.count++;
     }
 
     // XOR is its own inverse, so re-folding a value removes it — the window
-    // frame slides incrementally. (Two equal values XOR-cancel each other, which
-    // is exactly the multiset removal semantic.)
-    public override bool CanRemove => true;
+    // frame slides incrementally. A windowed aggregate takes no DISTINCT.
+    public override bool CanRemove => this.seen is null;
 
     public override void Remove(SqlValue value)
     {
         if (value.IsNull)
             return;
-        this.folded ^= value.GetHashCode();
+        this.folded ^= value.AsInt32;
+        this.count--;
     }
 
     /// <summary>
-    /// Exact — XOR is associative and commutative, which is the whole point of
-    /// the fold: any partition of the same multiset produces the same value.
+    /// Exact without DISTINCT — XOR is associative and commutative, so any
+    /// partition of the same multiset folds to the same value.
     /// </summary>
     public override bool TryMergeFrom(Aggregator other)
     {
-        this.folded ^= ((ChecksumAggAggregator)other).folded;
+        if (this.seen is not null)
+            return false;
+        var partial = (ChecksumAggAggregator)other;
+        this.folded ^= partial.folded;
+        this.count += partial.count;
         return true;
     }
 
-    public override SqlValue Result() => SqlValue.FromInt32(this.folded);
+    public override SqlValue Result() => this.count == 0 ? SqlValue.Null(SqlType.Int32) : SqlValue.FromInt32(this.folded);
 }

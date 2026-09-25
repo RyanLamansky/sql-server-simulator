@@ -102,7 +102,7 @@ internal abstract class Aggregator
         AggregateKind.StringAgg => new StringAggAggregator(resultType, aggregate.OrderBy),
         AggregateKind.JsonArrayAgg => new JsonArrayAggAggregator(resultType, aggregate.JsonNulls, JsonValueRender.ProducesJson(aggregate.Operand!), aggregate.OrderBy),
         AggregateKind.JsonObjectAgg => new JsonObjectAggAggregator(resultType, aggregate.JsonNulls, JsonValueRender.ProducesJson(aggregate.Operand!)),
-        AggregateKind.ChecksumAgg => new ChecksumAggAggregator(),
+        AggregateKind.ChecksumAgg => new ChecksumAggAggregator(aggregate.Distinct),
         _ => throw new NotSupportedException($"Aggregator for {aggregate.Kind} not implemented yet."),
     };
 

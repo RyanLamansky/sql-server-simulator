@@ -637,4 +637,35 @@ public sealed class AggregateTests
             "create table t (v datetime2(7)); insert t values (getdate()); select avg(v) from t",
             8117,
             "Operand data type datetime2 is invalid for avg operator.");
+
+    [TestMethod]
+    [DataRow("(1), (2), (4)", 7)]
+    [DataRow("(1), (1)", 0)]
+    [DataRow("(-1), (5)", -6)]
+    [DataRow("(1), (null)", 1)]
+    public void ChecksumAgg_XorsItsIntegers(string rows, int expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar($"select checksum_agg(x) from (values {rows}) v(x)"));
+
+    [TestMethod]
+    public void ChecksumAgg_OfNothing_IsNull()
+        => AreEqual("|3", new Simulation().ExecuteScalar("select concat((select checksum_agg(x) from (select 1 x where 1 = 0) v), '|', (select checksum_agg(distinct x) from (values (1), (1), (2)) v(x)))"));
+
+    [TestMethod]
+    [DataRow("checksum_agg", "cast(1 as bigint)", "bigint", 1)]
+    [DataRow("checksum_agg", "cast(1 as bit)", "bit", 1)]
+    [DataRow("stdev", "cast(1 as bit)", "bit", 1)]
+    [DataRow("var", "'1'", "varchar", 1)]
+    [DataRow("stdevp", "getdate()", "datetime", 1)]
+    [DataRow("varp", "cast(1 as sql_variant)", "sql_variant", 1)]
+    [DataRow("approx_count_distinct", "cast(1 as sql_variant)", "sql_variant", 1)]
+    [DataRow("approx_count_distinct", "cast('<a/>' as xml)", "xml", 2)]
+    [DataRow("stdev", "distinct cast('<a/>' as xml)", "xml", 2)]
+    [DataRow("sum", "distinct cast('<a/>' as xml)", "xml", 2)]
+    public void Aggregate_OfARefusedOperandType_RaisesMsg8117(string aggregate, string operand, string type, int state)
+    {
+        var error = new Simulation().AssertSqlError($"create table t (id int); select {aggregate}({operand}) from t", 8117);
+        AreEqual($"Operand data type {type} is invalid for {aggregate} operator.", error.Errors[0].Message);
+        AreEqual((byte)state, error.Errors[0].State);
+    }
 }
+

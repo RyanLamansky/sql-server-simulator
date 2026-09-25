@@ -292,9 +292,10 @@ internal sealed class AggregateExpression : Expression
     private SqlType ResultType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => this.Kind switch
     {
         AggregateKind.Count => SqlType.Int32,
-        AggregateKind.CountBig or AggregateKind.ApproxCountDistinct => SqlType.BigInt,
-        AggregateKind.ChecksumAgg => SqlType.Int32,
-        AggregateKind.Stdev or AggregateKind.StdevP or AggregateKind.Var or AggregateKind.VarP => SqlType.Float,
+        AggregateKind.CountBig => SqlType.BigInt,
+        AggregateKind.ApproxCountDistinct => this.RequireOperandType(batch, resolveColumnType, SqlType.BigInt),
+        AggregateKind.ChecksumAgg => this.RequireOperandType(batch, resolveColumnType, SqlType.Int32),
+        AggregateKind.Stdev or AggregateKind.StdevP or AggregateKind.Var or AggregateKind.VarP => this.RequireOperandType(batch, resolveColumnType, SqlType.Float),
         // MAX / MIN order their input, so an unresolved collation reports here
         // (Msg 4191 naming `max` / `min`) rather than travelling on.
         AggregateKind.Max or AggregateKind.Min => BindOrderedOperand(batch, resolveColumnType),
@@ -302,10 +303,43 @@ internal sealed class AggregateExpression : Expression
         // while compiling — so the gate runs here as well as per value.
         AggregateKind.StringAgg => BindStringAggArguments(batch, resolveColumnType),
         AggregateKind.JsonArrayAgg or AggregateKind.JsonObjectAgg => NVarcharMax,
-        AggregateKind.Sum => DeriveSumResultType(this.Operand!.GetSqlType(batch, resolveColumnType)),
-        AggregateKind.Avg => DeriveAvgResultType(this.Operand!.GetSqlType(batch, resolveColumnType)),
+        AggregateKind.Sum => DeriveSumResultType(this.RejectDistinctLob(this.Operand!.GetSqlType(batch, resolveColumnType))),
+        AggregateKind.Avg => DeriveAvgResultType(this.RejectDistinctLob(this.Operand!.GetSqlType(batch, resolveColumnType))),
         _ => throw new InvalidOperationException($"Unknown aggregate kind {this.Kind}."),
     };
+
+    /// <summary>
+    /// The operand rule of an aggregate that reads only some types, settled
+    /// while compiling (probed 2026-09-25 against SQL Server 2025): STDEV /
+    /// VAR and their population forms take a number other than <c>bit</c>,
+    /// CHECKSUM_AGG an <c>int</c> and nothing wider or narrower, and
+    /// APPROX_COUNT_DISTINCT anything comparable save <c>sql_variant</c> and
+    /// <c>hierarchyid</c>. Anything else is Msg 8117, at state 2 when the
+    /// operand also can't be compared for the distinct count it would need.
+    /// </summary>
+    private SqlType RequireOperandType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType, SqlType resultType)
+    {
+        var operandType = this.Operand!.GetSqlType(batch, resolveColumnType);
+        var accepted = this.Kind switch
+        {
+            AggregateKind.ChecksumAgg => operandType == SqlType.Int32,
+            AggregateKind.ApproxCountDistinct => !operandType.IsLob && operandType is not (SqlVariantSqlType or HierarchyIdSqlType),
+            _ => operandType.Category is SqlTypeCategory.Integer or SqlTypeCategory.Decimal or SqlTypeCategory.Money or SqlTypeCategory.Approximate
+                && operandType != SqlType.Bit,
+        };
+        return accepted
+            ? resultType
+            : throw SimulatedSqlException.OperandDataTypeInvalid(operandType, this.LowerName, (this.Distinct || this.Kind == AggregateKind.ApproxCountDistinct) && operandType.IsLob ? (byte)2 : (byte)1);
+    }
+
+    /// <summary>
+    /// SUM / AVG over a <c>DISTINCT</c> operand that can't be compared: the
+    /// same Msg 8117 the type itself earns, at state 2 (probed 2026-09-25).
+    /// </summary>
+    private SqlType RejectDistinctLob(SqlType operandType) =>
+        this.Distinct && operandType.IsLob
+            ? throw SimulatedSqlException.OperandDataTypeInvalid(operandType, this.LowerName, 2)
+            : operandType;
 
     /// <summary>
     /// Compile-time mirror of the two <c>RejectLegacyLob</c> calls STRING_AGG's

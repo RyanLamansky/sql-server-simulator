@@ -507,12 +507,14 @@ Probe-confirmed against SQL Server 2025:
 
 ## CHECKSUM family
 
-- **`CHECKSUM(args...)` / `BINARY_CHECKSUM(args...)`** (`Parser/Expressions/ChecksumAndRowVersion.cs`) — fast 32-bit fold over the argument list.
-  Implementation uses FNV-1a; semantic guarantee matches SQL Server (same inputs → same checksum, deterministically).
-  **Bit-pattern divergence**: real SQL Server uses an undocumented byte-mix; the simulator's FNV-1a output won't match real SQL Server bit-for-bit.
-  Same-value-same-checksum invariant holds; same-multiset-same-checksum doesn't (CHECKSUM is order-sensitive, unlike CHECKSUM_AGG).
-  Result `int`.
-- **`CHECKSUM_AGG(expr)`** uses an order-independent XOR fold for the aggregate form — same multiset → same checksum, bit pattern won't match real SQL Server.
+- **`CHECKSUM(args...)` / `BINARY_CHECKSUM(args...)`** (`Parser/Expressions/ChecksumAndRowVersion.cs`) reproduce real's algorithm, recovered from probes against SQL Server 2025 (2026-09-25): each argument reduces to a 32-bit value hash and the call folds them in order as `h = rotl(h, 4) ^ v` from zero, a string or binary folding its own units the same way.
+  The per-type reductions sit on `Checksum.ValueHash`; `*` expands to every FROM column (Msg 263 with no FROM).
+  `CHECKSUM` refuses the legacy LOBs, `xml` and the spatial pair with Msg 8116 state 4, where `BINARY_CHECKSUM` passes over them and raises Msg 8184 only when nothing is left to hash.
+  `CHECKSUM` folds a string's collation sort weights rather than its characters: the `varchar` table under `SQL_Latin1_General_CP1_CI_AS` is reproduced byte for byte.
+  **Divergences**: a `decimal` / `numeric` value's hash, and `CHECKSUM` over an `nvarchar` or under any other collation, don't match real's bits.
+  Each stand-in keeps real's equalities — a decimal ignores its sign, scale and trailing zeros as real's does, and a case-insensitive collation folds case — so equal values still hash equal.
+- **`CHECKSUM_AGG(expr)`** is the XOR of its `int` operands (NULLs skipped, NULL when none arrive) — real's exact value.
+  It takes only `int`; STDEV / VAR and their population forms take a number other than `bit`, and APPROX_COUNT_DISTINCT anything comparable save `sql_variant` / `hierarchyid`, each refusing the rest with Msg 8117 while compiling (state 2 when a DISTINCT would also have to compare an incomparable type).
 - **`APPROX_COUNT_DISTINCT(expr)`** is implemented as an exact `COUNT(DISTINCT expr)` — no HyperLogLog approximation, so results are exact rather than within real SQL Server's ~2% error bound.
 - **`DATALENGTH(expr)`** returns `bigint` when the operand is `varchar(max)` / `nvarchar(max)` / `varbinary(max)`, else `int` (bounded strings, `xml`, `geography`/`geometry`, fixed-length types) — real's documented split, probe-confirmed against SQL Server 2025.
   Load-bearing for DacFx bacpac export, whose bulk reader emits `DATALENGTH([maxCol])` companions and validates their wire type.

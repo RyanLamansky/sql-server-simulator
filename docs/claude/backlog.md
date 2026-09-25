@@ -515,9 +515,6 @@ Worth a look before re-affirming or changing.
   Original rationale: same semantic guarantee, no HyperLogLog dependency.
   Review: is the perf gap visible against in-process workloads?
   If not, the simpler form stays defensible.
-- **CHECKSUM_AGG** uses an order-independent XOR fold.
-  Rationale: same-multiset-same-checksum preserved, bit-identical wasn't required.
-  Review: has any consumer needed bit-identical checksums (e.g. replication-comparison parity)?
 
 ## Won't-model / explicitly excluded
 
