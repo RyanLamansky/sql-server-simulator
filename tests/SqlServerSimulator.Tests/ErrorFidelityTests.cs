@@ -166,6 +166,8 @@ public sealed class ErrorFidelityTests
     [DataRow("begin end", "Incorrect syntax near 'end'.")]
     [DataRow("select 1 end", "Incorrect syntax near 'end'.")]
     [DataRow("begin try end try begin catch select 1 end catch", "Incorrect syntax near 'try'.")]
+    [DataRow("begin try", "Incorrect syntax near 'begin'.")]
+    [DataRow("begin try select 1 end try begin catch", "Incorrect syntax near 'begin'.")]
     [DataRow("select", "Incorrect syntax near 'select'.")]
     public void StatementPositionEndAndEndOfInput_KeepMsg102(string sql, string message)
         => AssertError(sql, 102, 1, message);

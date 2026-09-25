@@ -60,8 +60,14 @@ partial class Simulation
     private IEnumerable<SimulatedStatementOutcome> ParseTryCatch(BatchContext batch)
     {
         var context = batch.Parser;
+        // A BEGIN TRY or BEGIN CATCH the batch ends on is named by its BEGIN,
+        // the block opener, rather than the last token read (probed 2026-09-25
+        // against SQL Server 2025).
+        var tryBegin = context.Token;
         context.MoveNextRequired(); // consume BEGIN
-        context.MoveNextRequired(); // consume TRY
+        context.MoveNextOptional(); // consume TRY
+        if (context.Token is null)
+            throw SimulatedSqlException.SyntaxErrorNear(tryBegin);
 
         // Drain leading separators inside TRY body. An empty body (BEGIN TRY
         // ; END TRY or BEGIN TRY END TRY) raises Msg 102 naming the TRY that
@@ -117,12 +123,14 @@ partial class Simulation
         context.MoveNextRequired();
 
         // Expect BEGIN CATCH.
-        if (context.Token is not ReservedKeyword { Keyword: Keyword.Begin })
+        if (context.Token is not ReservedKeyword { Keyword: Keyword.Begin } catchBegin)
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextRequired();
         if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.Catch })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextOptional();
+        if (context.Token is null)
+            throw SimulatedSqlException.SyntaxErrorNear(catchBegin);
 
         var didCatch = batch.ErrorSignaled;
         if (didCatch)

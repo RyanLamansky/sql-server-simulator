@@ -385,8 +385,8 @@ Real bugs / limitations against shipped behavior — fixes are concrete work, no
 - **`SqlValue.FromDecimal` validates scale but not precision** — it restates the payload at the declared scale and leaves the declared precision to the caller, which is what lets the storage decoder reconstruct whatever is on disk.
   The coercion path is the precision gate for every conversion, but a *computation* that lands on a narrower type has to check for itself — `ROUND` does (see [`scalars.md`](scalars.md#math-scalar-functions)), and a future scalar that narrows its own result would have to.
 
-- **An unterminated `BEGIN` block names the wrong token** — `BEGIN TRY` at end of batch is Msg 102 `near 'TRY'` here and `near 'BEGIN'` on real, which names the block opener rather than the last token it read (probed 2026-08-05).
-  The end-of-batch naming rule otherwise matches across the whole probed family (see [`grammar.md`](grammar.md#what-a-syntax-error-names-at-end-of-batch)); a block is the one construct real reports against its own start.
+- **An unterminated `BEGIN CATCH` inside a `TRY` body names the wrong token** — `BEGIN TRY BEGIN CATCH` at end of batch is Msg 102 `near 'catch'` here and `near 'begin'` on real, which names the block opener; a `BEGIN TRY` or `BEGIN CATCH` ending the batch in its own place already names it (probed 2026-09-25).
+  The inner pair parses as a plain `BEGIN` block opening a statement named `catch`.
 - **An unbalanced paren around a non-boolean reports Msg 4145 rather than Msg 102** — `IF ((1)` is real's Msg 102 `near ')'` and the simulator's Msg 4145 at the same token (probed 2026-08-05).
   Both engines refuse; the non-boolean check fires before the group's own closer is missed.
 - **Three `NEXT VALUE FOR` refusals report the wrong sibling message** — the whole nine-message family ships with real's precedence order (see [`sequences.md`](sequences.md#where-next-value-for-is-rejected)); what's left is which of two refusals a statement carrying both reports, and both engines refuse either way.

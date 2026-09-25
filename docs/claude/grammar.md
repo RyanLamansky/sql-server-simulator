@@ -312,6 +312,8 @@ Real names the **last token it consumed**, never an empty slot — probed agains
 
 `ParserContext.LastToken` carries it: `MoveNext` stashes the token it is leaving behind whenever the input runs out, and the Msg 102 / Msg 4145 factories fall back to it once `Token` is null.
 
+The one exception is a block opener: a `BEGIN TRY` or `BEGIN CATCH` the batch ends on is named by its `BEGIN` (probed 2026-09-25), which `ParseTryCatch` raises itself.
+
 An **argument list or parenthesized expression the batch never closed** is refused rather than treated as closed.
 The check sits at the postfix loop's call arm and in the grouped-expression parser: both promise to leave the cursor on the construct's `)`, and anything else there would otherwise be swallowed by the loop's next advance — the swallow that admits `SELECT abs(-1` and `SELECT abs(-1 x` without it.
 A window function is the one exception the check names: the bare `OVER w` named-window reference ends on the window's name.
