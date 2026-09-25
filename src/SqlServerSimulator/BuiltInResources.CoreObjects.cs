@@ -831,6 +831,8 @@ internal static partial class BuiltInResources
             // hierarchyid: 892-byte max representation per the probed
             // sys.types row shape; no numeric precision/scale.
             HierarchyIdSqlType => (892, 0, 0),
+            // sql_variant: its 8016-byte maximum (probed 2026-09-25).
+            SqlVariantSqlType => (8016, 0, 0),
             _ => throw new NotSupportedException($"No sys.columns metadata for {t}."),
         };
     }

@@ -1311,4 +1311,26 @@ public sealed class CatalogViewTests
             "create table t (a int); select top 1 name + type from sys.objects",
             451,
             "Cannot resolve collation conflict between \"Latin1_General_CI_AS_KS_WS\" and \"SQL_Latin1_General_CP1_CI_AS\" in add operator occurring in SELECT statement column 1.");
+
+    [TestMethod]
+    public void SqlVariantColumn_ReportsItsMaximumLength()
+        => AreEqual("8016|0|0", ExecuteScalar("""
+            create table t (v sql_variant);
+            select concat(max_length, '|', precision, '|', scale) from sys.columns where object_id = object_id('t')
+            """));
+
+    [TestMethod]
+    public void DescribeFirstResultSet_CoversASqlVariantCatalogColumn()
+        => AreEqual("sql_variant", ExecuteScalar("""
+            create table #d (is_hidden bit, column_ordinal int, name sysname, is_nullable bit, system_type_id int, system_type_name nvarchar(256),
+                max_length smallint, precision tinyint, scale tinyint, collation_name sysname null, user_type_id int, user_type_database sysname null,
+                user_type_schema sysname null, user_type_name sysname null, assembly_qualified_type_name nvarchar(4000), xml_collection_id int,
+                xml_collection_database sysname null, xml_collection_schema sysname null, xml_collection_name sysname null, is_xml_document bit,
+                is_case_sensitive bit, is_fixed_length_clr_type bit, source_server sysname null, source_database sysname null, source_schema sysname null,
+                source_table sysname null, source_column sysname null, is_identity_column bit, is_part_of_unique_key bit, is_updateable bit,
+                is_computed_column bit, is_sparse_column_set bit, ordinal_in_order_by_list smallint, order_by_is_descending smallint,
+                order_by_list_length smallint, tds_type_id int, tds_length int, tds_collation_id int, tds_collation_sort_id tinyint);
+            insert #d exec sp_describe_first_result_set N'select value from sys.configurations';
+            select system_type_name from #d
+            """));
 }
