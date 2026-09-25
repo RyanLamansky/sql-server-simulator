@@ -291,4 +291,20 @@ public class AliasTypeTests
             where tab.name = 't' and c.name = 'label'
             """));
     }
+
+    /// <summary>
+    /// sysname is itself a system alias type declared NOT NULL, so a column
+    /// or table-variable column that doesn't say otherwise refuses NULL
+    /// (probed 2026-09-25 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void BareSysnameColumn_IsNotNull()
+    {
+        AreEqual("a:0;b:1;c:0", new Simulation().ExecuteScalar("""
+            create table t (a sysname, b sysname null, c sysname not null);
+            select string_agg(concat(name, ':', cast(is_nullable as bit)), ';') within group (order by column_id)
+            from sys.columns where object_id = object_id('t')
+            """));
+        _ = TestHelpers.AssertSqlError("declare @t table (a sysname); insert @t values (null)", 515);
+    }
 }

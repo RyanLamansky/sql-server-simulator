@@ -25,6 +25,7 @@ Nullability default:
 
 The alias default propagates when a consumer omits the explicit marker (column / variable / parameter).
 Column-site explicit `NULL` / `NOT NULL` overrides the alias default.
+The built-in `sysname` is itself such an alias, declared NOT NULL, so a bare `sysname` column is NOT NULL too — table variables included (probed 2026-09-25).
 
 ## Type-reference parsing at consumer sites
 

@@ -80,7 +80,10 @@ partial class Simulation
                 throw SimulatedSqlException.CannotFindDataType(qualifiedTypeName.ToString(), index);
             }
             var (resolved, maxLength) = SqlType.GetByName(leafToken, declaredMaxLength, declaredScale, index, site, columnName);
-            return (resolved, maxLength, null);
+            // sysname is itself a system alias type declared NOT NULL, so a
+            // column that doesn't say otherwise is NOT NULL (probed 2026-09-25
+            // against SQL Server 2025, table variables included).
+            return (resolved, maxLength, resolved is SystemNameSqlType ? false : null);
         }
         return declaredMaxLength is not null || declaredScale is not null
             ? throw SimulatedSqlException.CannotSpecifyColumnWidthOnAlias(
