@@ -202,6 +202,34 @@ public sealed partial class SimulatedSqlException
         new($"Cannot alter the role '{name}', because it does not exist or you do not have permission.", 15151, 16, 2);
 
     /// <summary>
+    /// Mimics SQL Server error 15151 state 1 for <c>ALTER USER</c> of a user
+    /// that doesn't exist or can't be altered (probed 2026-09-25).
+    /// </summary>
+    internal static SimulatedSqlException CannotAlterUser(string name) =>
+        new($"Cannot alter the user '{name}', because it does not exist or you do not have permission.", 15151, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 15405: <c>ALTER ROLE … ADD MEMBER dbo</c>, the
+    /// special principal no role may hold (probed 2026-09-25).
+    /// </summary>
+    internal static SimulatedSqlException CannotUseSpecialPrincipal(string name) =>
+        new($"Cannot use the special principal '{name}'.", 15405, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 15144: <c>DROP ROLE</c> of a role that still has
+    /// members (probed 2026-09-25).
+    /// </summary>
+    internal static SimulatedSqlException RoleHasMembers() =>
+        new("The role has members. It must be empty before it can be dropped.", 15144, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 15413: <c>ALTER ROLE r ADD MEMBER r</c> (probed
+    /// 2026-09-25).
+    /// </summary>
+    internal static SimulatedSqlException RoleMemberOfItself() =>
+        new("Cannot make a role a member of itself.", 15413, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 15151 for the <c>ALTER SCHEMA … TRANSFER</c> half
     /// that checks the moved object: real requires CONTROL on it, over and above
     /// ALTER on the destination schema (which is checked first and reports

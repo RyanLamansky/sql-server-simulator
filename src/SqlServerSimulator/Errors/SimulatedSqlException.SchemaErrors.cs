@@ -2479,9 +2479,10 @@ partial class SimulatedSqlException
     /// when a principal of that name already exists in the database. Probe-confirmed
     /// wording (the message is identical for the two CREATE cases; SQL Server uses
     /// the principal-type column to disambiguate in catalog views).
+    /// State 10 for a rename onto a taken name (probed 2026-09-25).
     /// </summary>
-    internal static SimulatedSqlException PrincipalAlreadyExists(string name) =>
-        new($"User, group, or role '{name}' already exists in the current database.", 15023, 16, 1);
+    internal static SimulatedSqlException PrincipalAlreadyExists(string name, byte state = 1) =>
+        new($"User, group, or role '{name}' already exists in the current database.", 15023, 16, state);
 
     /// <summary>
     /// Mimics SQL Server error 15025: <c>CREATE LOGIN name</c> when a server

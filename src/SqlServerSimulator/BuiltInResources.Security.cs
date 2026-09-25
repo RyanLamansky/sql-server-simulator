@@ -573,10 +573,10 @@ internal static partial class BuiltInResources
                 SqlValue.FromInt32(p.PrincipalId),
                 SqlValue.FromChar(charOne, p.TypeCode),
                 SqlValue.FromNVarchar(p.TypeDescription),
-                // An application role carries a tracked default schema
-                // (CREATE APPLICATION ROLE … DEFAULT_SCHEMA, defaulting to
-                // dbo); dbo and every user default to dbo, guest to guest,
-                // and roles / the catalog principals stay NULL.
+                // An application role or a user carries a declared default
+                // schema where one was given; dbo and every other user default
+                // to dbo, guest to guest, and roles / the catalog principals
+                // stay NULL.
                 p.DefaultSchemaName is { } defaultSchema ? SqlValue.FromSystemName(defaultSchema)
                     : isGuest ? SqlValue.FromSystemName(p.Name)
                     : p.TypeCode == "R" || isCatalogPrincipal ? nullSchemaName

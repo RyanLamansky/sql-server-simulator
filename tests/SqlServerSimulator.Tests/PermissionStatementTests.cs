@@ -126,15 +126,16 @@ public sealed class PermissionStatementTests
         => AreEqual(0, new Simulation().ExecuteScalar("drop user if exists alice; select count(*) from sys.database_principals where name = 'alice'"));
 
     [TestMethod]
-    public void DropRole_CascadeDropsMembership()
+    public void DropRole_WithMembers_RaisesMsg15144_WhileDropUserTakesItsMemberships()
     {
         var sim = new Simulation();
         _ = sim.ExecuteNonQuery("""
             create user alice;
             create role data_reader;
-            alter role data_reader add member alice;
-            drop role data_reader
+            alter role data_reader add member alice
             """);
+        sim.AssertSqlError("drop role data_reader", 15144, "The role has members. It must be empty before it can be dropped.");
+        _ = sim.ExecuteNonQuery("drop user alice; drop role data_reader");
         AreEqual(0, sim.ExecuteScalar("select count(*) from sys.database_role_members"));
     }
 
@@ -158,4 +159,24 @@ public sealed class PermissionStatementTests
             """);
         AreEqual(3, sim.ExecuteScalar("select count(*) from sys.database_permissions where grantee_principal_id = 0 and class = 1"));
     }
+
+    /// <summary>
+    /// <c>CREATE / ALTER USER … WITH</c> take their option lists, <c>ALTER
+    /// ROLE … WITH NAME</c> renames, and a role refuses dbo or itself as a
+    /// member (probed 2026-09-25 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void UserAndRoleOptions()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create user u1 without login with default_schema = nosuch; create role r1");
+        AreEqual("nosuch", sim.ExecuteScalar("select default_schema_name from sys.database_principals where name = 'u1'"));
+        _ = sim.ExecuteNonQuery("alter user u1 with name = u2, default_schema = dbo; alter role r1 with name = r2");
+        AreEqual("u2:dbo|r2", sim.ExecuteScalar("select concat((select name + ':' + default_schema_name from sys.database_principals where name = 'u2'), '|', (select name from sys.database_principals where name = 'r2'))"));
+        sim.AssertSqlError("alter user nosuch with default_schema = dbo", 15151, "Cannot alter the user 'nosuch', because it does not exist or you do not have permission.");
+        sim.AssertSqlError("alter role r2 add member dbo", 15405, "Cannot use the special principal 'dbo'.");
+        sim.AssertSqlError("alter role r2 add member r2", 15413, "Cannot make a role a member of itself.");
+        sim.AssertSqlError("create role r3; alter role r3 with name = r2", 15023, "User, group, or role 'r2' already exists in the current database.");
+    }
 }
+

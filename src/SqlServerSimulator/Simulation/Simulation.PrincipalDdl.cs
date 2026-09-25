@@ -26,6 +26,7 @@ partial class Simulation
         var name = nameToken.Value;
         context.MoveNextOptional();
         var (loginLink, withoutLogin) = ParseCreateUserSource(context);
+        var (defaultSchema, _) = ParsePrincipalWithOptions(context);
         ConsumeToStatementBoundary(context);
         if (context.Batch.IsSkipping)
             return true;
@@ -40,7 +41,10 @@ partial class Simulation
         context.CurrentDatabase.Principals[name] = new DatabasePrincipal(
             id, name, "S", "SQL_USER", isFixedRole: false, context.Batch.CurrentStatement.UtcNow,
             loginName: loginLink,
-            securityIdentifierString: withoutLogin ? DeriveSyntheticUserSid(name) : null);
+            securityIdentifierString: withoutLogin ? DeriveSyntheticUserSid(name) : null)
+        {
+            DefaultSchemaName = defaultSchema,
+        };
         // CREATE USER auto-seeds a CONNECT grant (class 0 DATABASE, grantor dbo,
         // state G) — probe-confirmed against sys.database_permissions.
         context.CurrentDatabase.Permissions.Add(new DatabasePermission(
@@ -92,6 +96,82 @@ partial class Simulation
             context.RestoreCheckpoint(checkpoint);
         }
         return (null, false);
+    }
+
+    /// <summary>
+    /// Reads a user's or role's <c>WITH option = value [, …]</c> list, handing
+    /// back the <c>DEFAULT_SCHEMA</c> and <c>NAME</c> values; every other
+    /// option (<c>LOGIN</c>, <c>PASSWORD</c>, <c>LANGUAGE</c>, <c>SID</c>, …)
+    /// is read and discarded. No-op when the cursor isn't on <c>WITH</c>;
+    /// otherwise the cursor ends on the first token past the list.
+    /// </summary>
+    private static (string? DefaultSchema, string? NewName) ParsePrincipalWithOptions(ParserContext context)
+    {
+        if (context.Token is not ReservedKeyword { Keyword: Keyword.With })
+            return (null, null);
+        string? defaultSchema = null, newName = null;
+        do
+        {
+            if (context.GetNextRequired() is not StringToken option || context.GetNextRequired() is not Operator { Character: '=' })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            var value = context.GetNextRequired();
+            if (option.Span.Equals("DEFAULT_SCHEMA", StringComparison.OrdinalIgnoreCase))
+                defaultSchema = value is Name schemaName ? schemaName.Value : throw SimulatedSqlException.SyntaxErrorNear(context);
+            else if (option.Span.Equals("NAME", StringComparison.OrdinalIgnoreCase))
+                newName = value is Name nameValue ? nameValue.Value : throw SimulatedSqlException.SyntaxErrorNear(context);
+        }
+        while (context.GetNextOptional() is Operator { Character: ',' });
+        return (defaultSchema, newName);
+    }
+
+    /// <summary>
+    /// Parses <c>ALTER USER name WITH option = value [, …]</c>: <c>NAME</c>
+    /// renames the user and <c>DEFAULT_SCHEMA</c> sets its default schema; the
+    /// other options are read and discarded. A user that doesn't exist is Msg
+    /// 15151, and a name already taken Msg 15023 (probed 2026-09-25 against
+    /// SQL Server 2025). Cursor on entry: <c>USER</c>.
+    /// </summary>
+    internal static bool TryParseAlterUser(ParserContext context)
+    {
+        if (context.GetNextRequired() is not Name userNameToken)
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        var userName = userNameToken.Value;
+        context.MoveNextRequired();
+        if (context.Token is not ReservedKeyword { Keyword: Keyword.With })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        var (defaultSchema, newName) = ParsePrincipalWithOptions(context);
+        context.RejectTrailingToken();
+        if (context.Batch.IsSkipping)
+            return true;
+
+        var database = context.CurrentDatabase;
+        database.RejectWriteWhenReadOnly();
+        if (!PermissionEnforcement.HasDdlAdminCapability(context.Batch, database)
+            || !database.Principals.TryGetValue(userName, out var user)
+            || user.TypeCode == "R")
+        {
+            throw SimulatedSqlException.CannotAlterUser(userName);
+        }
+        if (newName is not null)
+            RenamePrincipal(database, user, newName);
+        if (defaultSchema is not null)
+            user.DefaultSchemaName = defaultSchema;
+        RecordDdlEvent(context, "ALTER_USER", null, user.Name, "SQL USER");
+        return true;
+    }
+
+    /// <summary>
+    /// Moves <paramref name="principal"/> to <paramref name="newName"/> in the
+    /// database's principal map; memberships and permissions key on its id, so
+    /// they follow. A taken name is Msg 15023 state 10.
+    /// </summary>
+    private static void RenamePrincipal(Database database, DatabasePrincipal principal, string newName)
+    {
+        if (database.Principals.ContainsKey(newName))
+            throw SimulatedSqlException.PrincipalAlreadyExists(newName, state: 10);
+        _ = database.Principals.TryRemove(principal.Name, out _);
+        principal.Name = newName;
+        database.Principals[newName] = principal;
     }
 
     /// <summary>
@@ -193,6 +273,12 @@ partial class Simulation
                 throw SimulatedSqlException.CannotFindPrincipal(roleName);
             if (!context.CurrentDatabase.Principals.TryGetValue(memberName, out var member))
                 throw SimulatedSqlException.CannotFindPrincipal(memberName);
+            // dbo can't be a member of any role, nor a role of itself (both
+            // probed 2026-09-25 against SQL Server 2025).
+            if (isAdd && member.PrincipalId == Database.DboPrincipalId)
+                throw SimulatedSqlException.CannotUseSpecialPrincipal(member.Name);
+            if (isAdd && member.PrincipalId == role.PrincipalId)
+                throw SimulatedSqlException.RoleMemberOfItself();
             if (isAdd)
             {
                 if (!context.CurrentDatabase.RoleMembers.Contains((role.PrincipalId, member.PrincipalId)))
@@ -206,10 +292,22 @@ partial class Simulation
             return true;
         }
 
-        // WITH NAME = newname — parse-and-discard.
+        // WITH NAME = newname renames the role; a taken name is Msg 15023.
         if (context.Token is ReservedKeyword { Keyword: Keyword.With })
         {
-            ConsumeToStatementBoundary(context);
+            var (_, newName) = ParsePrincipalWithOptions(context);
+            context.RejectTrailingToken();
+            if (context.Batch.IsSkipping || newName is null)
+                return true;
+            context.CurrentDatabase.RejectWriteWhenReadOnly();
+            if (!PermissionEnforcement.HasDatabasePermission(context.Batch, context.CurrentDatabase, Permission.AlterAnyRole)
+                || !context.CurrentDatabase.Principals.TryGetValue(roleName, out var renamed)
+                || renamed.TypeCode != "R")
+            {
+                throw SimulatedSqlException.CannotAlterRole(roleName);
+            }
+            RenamePrincipal(context.CurrentDatabase, renamed, newName);
+            RecordDdlEvent(context, "ALTER_ROLE", null, newName, "ROLE");
             return true;
         }
         throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -262,6 +360,10 @@ partial class Simulation
             if (schema.PrincipalId == removed.PrincipalId)
                 throw SimulatedSqlException.PrincipalOwnsASchema();
         }
+        // A role that still has members can't go (probed 2026-09-25 against
+        // SQL Server 2025); a user in roles can, its memberships going with it.
+        if (isRole && context.CurrentDatabase.RoleMembers.Exists(rm => rm.RoleId == removed.PrincipalId))
+            throw SimulatedSqlException.RoleHasMembers();
         _ = context.CurrentDatabase.Principals.TryRemove(name, out _);
         // Cascade: drop role memberships that reference the removed principal.
         _ = context.CurrentDatabase.RoleMembers.RemoveAll(rm =>

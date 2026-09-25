@@ -45,6 +45,8 @@ partial class Simulation
                 return TryParseAlterIndex(context);
             case UnquotedString { ContextualKeyword: ContextualKeyword.Role }:
                 return TryParseAlterRole(context);
+            case ReservedKeyword { Keyword: Keyword.User }:
+                return TryParseAlterUser(context);
             case UnquotedString { ContextualKeyword: ContextualKeyword.Login }:
                 return TryParseAlterLogin(context);
             case Name serverWord when serverWord.Value.Equals("SERVER", StringComparison.OrdinalIgnoreCase):

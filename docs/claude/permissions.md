@@ -373,13 +373,15 @@ Their bypass is the plain effective-`dbo` one rather than the boundary-aware `By
 
 ### Principal DDL
 
-- `CREATE USER name [{FOR | FROM} ...] [WITH ...]` — name + principal_id allocation; `type_code='S'`.
-  The optional clauses (FROM LOGIN / WITH PASSWORD / DEFAULT_SCHEMA / etc.) parse-and-discard through the next statement boundary via `ConsumeToStatementBoundary`.
+- `CREATE USER name [{FOR | FROM} ...] [WITH option = value, …]` — name + principal_id allocation; `type_code='S'`.
+  `FOR / FROM LOGIN` and `WITHOUT LOGIN` are read; the `WITH` list records `DEFAULT_SCHEMA` (as written, even when no such schema exists) and reads the other options without effect; anything else parses-and-discards through the next statement boundary.
+- `ALTER USER name WITH option = value, …` — `NAME` renames, `DEFAULT_SCHEMA` sets the default schema, the rest are read without effect; a missing user is **Msg 15151** state 1 and a taken name **Msg 15023** state 10.
+  The default schema is catalog-only: an unqualified name still resolves through `dbo` for every user (not built yet).
 - `CREATE ROLE name [AUTHORIZATION owner]` — `type_code='R'`.
   AUTHORIZATION clause parse-and-discards.
-- `ALTER ROLE name { ADD MEMBER name | DROP MEMBER name | WITH NAME = newname }` — ADD/DROP MEMBER append/remove `(role_id, member_id)` on `Database.RoleMembers`.
-  `WITH NAME` parses-and-discards.
-- `DROP USER [IF EXISTS] name` and `DROP ROLE [IF EXISTS] name` — drop from `Database.Principals` and cascade-remove `Database.RoleMembers` entries that reference the removed id.
+- `ALTER ROLE name { ADD MEMBER name | DROP MEMBER name | WITH NAME = newname }` — ADD/DROP MEMBER append/remove `(role_id, member_id)` on `Database.RoleMembers`, refusing `dbo` (**Msg 15405**) and the role itself (**Msg 15413**); `WITH NAME` renames, a taken name being **Msg 15023** state 10.
+- `DROP USER [IF EXISTS] name` and `DROP ROLE [IF EXISTS] name` — drop from `Database.Principals`; a user's memberships go with it, while a role that still has members is **Msg 15144**.
+  All probed 2026-09-25 against SQL Server 2025.
   Dispatched ahead of the generic DROP-target switch in `Simulation.Drop.cs` because principals don't live in a per-schema dict.
 
 ### Server logins (`Simulation/Simulation.LoginDdl.cs`)

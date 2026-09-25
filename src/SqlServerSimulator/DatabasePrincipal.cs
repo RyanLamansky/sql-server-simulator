@@ -28,7 +28,8 @@ internal sealed class DatabasePrincipal(
     string? securityIdentifierString = null)
 {
     public readonly int PrincipalId = principalId;
-    public readonly string Name = name;
+    /// <summary>Mutable for <c>ALTER USER / ROLE … WITH NAME</c>.</summary>
+    public string Name = name;
 
     /// <summary>
     /// The server login this database user is mapped to
@@ -86,10 +87,12 @@ internal sealed class DatabasePrincipal(
     public readonly DateTime CreateDate = createDate;
 
     /// <summary>
-    /// The <c>sys.database_principals.default_schema_name</c> value, non-null
-    /// only for an application role (<c>CREATE APPLICATION ROLE … [DEFAULT_SCHEMA
-    /// = s]</c>, defaulting to <c>dbo</c>). Every other principal projects NULL,
-    /// the shape the catalog view has always had.
+    /// The declared default schema — an application role's (<c>CREATE
+    /// APPLICATION ROLE … [DEFAULT_SCHEMA = s]</c>, defaulting to <c>dbo</c>) or
+    /// a user's (<c>CREATE / ALTER USER … WITH DEFAULT_SCHEMA = s</c>, stored as
+    /// written even when no such schema exists). Null when none was declared.
+    /// Reported by <c>sys.database_principals</c>; name resolution doesn't read
+    /// it, an unqualified name falling back to <c>dbo</c> for every user.
     /// </summary>
     public string? DefaultSchemaName;
 
