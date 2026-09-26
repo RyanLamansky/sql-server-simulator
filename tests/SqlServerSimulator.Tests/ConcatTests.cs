@@ -76,6 +76,22 @@ public sealed class ConcatTests
     public void ConcatWs_TooFewArguments_RaisesMsg189(string expression) =>
         AssertSqlError($"select {expression}", 189, "The concat_ws function requires 3 to 254 arguments.");
 
+    /// <summary>
+    /// A <c>sysname</c> operand is <c>nvarchar(128)</c> to every concatenation:
+    /// the result is national and 128 characters wide from it (probed
+    /// 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("concat(name, ':', n)", "nvarchar(141)")]
+    [DataRow("concat_ws(',', name, v)", "nvarchar(134)")]
+    [DataRow("name + v", "nvarchar(133)")]
+    [DataRow("v + name", "nvarchar(133)")]
+    public void Sysname_ConcatenatesAsNvarchar128(string expression, string expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar($"""
+            create table t (name sysname, n int, v varchar(5));
+            select system_type_name from sys.dm_exec_describe_first_result_set(N'select {expression.Replace("'", "''", StringComparison.Ordinal)} from t', null, 0)
+            """));
+
     [TestMethod]
     public void Concat_ResultIsVarcharByDefault()
     {

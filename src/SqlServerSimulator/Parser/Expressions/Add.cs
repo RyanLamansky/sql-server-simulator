@@ -118,7 +118,7 @@ internal sealed class Add : TwoSidedExpression
         if (a.Category == SqlTypeCategory.String && b.Category == SqlTypeCategory.String)
             return SqlType.PromoteForArithmetic(a, b, '+');
         var stringType = a.Category == SqlTypeCategory.String ? a : b;
-        var partner = OneCharacterPartner(stringType) ?? (IsNationalString(stringType) ? SqlType.NVarchar : SqlType.Varchar);
+        var partner = OneCharacterPartner(stringType) ?? (SqlType.IsNationalStringCategory(stringType) ? SqlType.NVarchar : SqlType.Varchar);
         return a.Category == SqlTypeCategory.String
             ? SqlType.PromoteForArithmetic(a, partner, '+')
             : SqlType.PromoteForArithmetic(partner, b, '+');
@@ -137,8 +137,6 @@ internal sealed class Add : TwoSidedExpression
         _ => null,
     };
 
-    private static bool IsNationalString(SqlType type) =>
-        type is NVarcharSqlType or NCharSqlType || type == SqlType.NText;
 
     protected override char Operator => '+';
 }

@@ -44,7 +44,7 @@ internal sealed class Concatenate(Expression left, Expression right) : Expressio
         if (!(leftIsString || rightIsString) || !IsConcatCompatible(leftType) || !IsConcatCompatible(rightType))
             throw SimulatedSqlException.IncompatibleDataTypesInOperator(leftType, rightType, "concat");
 
-        var national = IsNationalString(leftType) || IsNationalString(rightType);
+        var national = SqlType.IsNationalStringCategory(leftType) || SqlType.IsNationalStringCategory(rightType);
         SqlType baseType = national ? SqlType.NVarchar : SqlType.Varchar;
 
         // Real names this operator `concat`, where the `+` form's identical
@@ -73,8 +73,6 @@ internal sealed class Concatenate(Expression left, Expression right) : Expressio
         _ => type == SqlType.UniqueIdentifier,
     };
 
-    private static bool IsNationalString(SqlType type) =>
-        type is NVarcharSqlType or NCharSqlType || type == SqlType.NText;
 
     internal override string DebugDisplay() => $"{left.DebugDisplay()} || {right.DebugDisplay()}";
 

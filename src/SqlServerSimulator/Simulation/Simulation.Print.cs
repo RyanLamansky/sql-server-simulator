@@ -81,7 +81,7 @@ partial class Simulation
             return " ";
         var type = value.Type;
         if (SqlType.IsStringCategory(type))
-            return TruncateForPrint(value.AsString, IsNationalString(type) ? 4000 : 8000);
+            return TruncateForPrint(value.AsString, SqlType.IsNationalStringCategory(type) ? 4000 : 8000);
         var target = VarcharSqlType.Get(8000, Collation.Baseline, Coercibility.CoercibleDefault);
         var rendered = type switch
         {
@@ -99,8 +99,6 @@ partial class Simulation
         return TruncateForPrint(rendered.AsString, 8000);
     }
 
-    private static bool IsNationalString(SqlType type) =>
-        type is NVarcharSqlType or NCharSqlType or NTextSqlType;
 
     private static string TruncateForPrint(string text, int limit) =>
         text.Length == 0 ? " "

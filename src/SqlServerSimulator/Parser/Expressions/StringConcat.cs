@@ -86,7 +86,7 @@ internal sealed class StringConcat : Expression
             var type = this.arguments[i].GetSqlType(batch, resolveColumnType);
             if (type is XmlSqlType or SqlVariantSqlType or ImageSqlType)
                 unconvertible ??= type;
-            anyNational |= IsNationalString(type);
+            anyNational |= SqlType.IsNationalStringCategory(type);
             anyMax |= IsMaxForm(type);
             collation.Fold(type, this.kind);
             var argumentWidth = IsBareNullLiteral(this.arguments[i]) ? 0 : ArgumentWidth(type);
@@ -137,7 +137,7 @@ internal sealed class StringConcat : Expression
         for (var i = 0; i < this.arguments.Length; i++)
         {
             values[i] = this.arguments[i].Run(runtime);
-            anyNational |= IsNationalString(values[i].Type);
+            anyNational |= SqlType.IsNationalStringCategory(values[i].Type);
             anyMax |= IsMaxForm(values[i].Type);
             collation.Fold(values[i].Type, this.kind);
             var argumentWidth = IsBareNullLiteral(this.arguments[i]) ? 0 : ArgumentWidth(values[i].Type);
@@ -191,8 +191,6 @@ internal sealed class StringConcat : Expression
             ? value.AsString
             : value.CoerceTo(resultType).AsString;
 
-    private static bool IsNationalString(SqlType type) =>
-        type is NVarcharSqlType or NCharSqlType || type == SqlType.NText;
 
     /// <summary>
     /// A MAX-form argument (<c>varchar(max)</c> / <c>nvarchar(max)</c> or a
@@ -330,6 +328,7 @@ internal sealed class StringConcat : Expression
         NVarcharSqlType nv => nv.length > 0 ? nv.length : UnspecifiedWidth,
         CharSqlType c => c.length,
         NCharSqlType nc => nc.length,
+        SystemNameSqlType => 128,
         _ when type == SqlType.Bit => 1,
         _ when type == SqlType.TinyInt => 4,
         _ when type == SqlType.SmallInt => 6,
