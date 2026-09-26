@@ -1398,6 +1398,7 @@ public sealed partial class Simulation
                     {
                         ColumnNullability = selection.ColumnNullability,
                         ColumnReportsNumeric = selection.ColumnReportsNumeric,
+                        ColumnWireFlags = selection.ColumnWireFlags,
                     };
                     executed.EndedByError = true;
                 }
@@ -2561,6 +2562,7 @@ public sealed partial class Simulation
                     {
                         ColumnNullability = metadataSelection.ColumnNullability,
                         ColumnReportsNumeric = metadataSelection.ColumnReportsNumeric,
+                        ColumnWireFlags = metadataSelection.ColumnWireFlags,
                         ColumnOrigins = Selection.BaseColumnOrigins(metadataSelection),
                         ColumnIsComputed = Selection.ComputedColumnsOf(metadataSelection),
                         IsGrouped = metadataSelection.IsGrouped,
@@ -2679,6 +2681,7 @@ public sealed partial class Simulation
                         {
                             ColumnNullability = selection.ColumnNullability,
                             ColumnReportsNumeric = selection.ColumnReportsNumeric,
+                            ColumnWireFlags = selection.ColumnWireFlags,
                         };
                         executed.EndedByError = true;
                     }

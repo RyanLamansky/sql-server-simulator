@@ -1390,6 +1390,7 @@ internal sealed partial class Selection
         selection.BranchFromSources = sources;
         selection.AutoSourceNames = AutoSourceNamesOf(sources);
         (selection.AutoColumnSource, selection.AutoColumnOrdinal) = AutoColumnBindingOf(expressions, sources);
+        selection.ColumnWireFlags = WireFlagsOf(expressions, sources, selection.AutoColumnSource, selection.AutoColumnOrdinal);
         selection.IsGrouped = aggregates.Count > 0 || fromClause.GroupingSets.Count > 0 || fromClause.Having is not null;
         selection.HasWindows = windows.Count > 0;
         // A plain SELECT-project-filter body can carry an enclosing statement's
@@ -1656,6 +1657,49 @@ internal sealed partial class Selection
             computed[i] = expression is not (Expressions.Reference or Expressions.AggregateExpression or Expressions.WindowExpression);
         }
         return computed;
+    }
+
+    /// <summary>
+    /// Per projection column, the COLMETADATA flags
+    /// <see cref="SimulatedQueryResult.ColumnWireFlags"/> describes: a column
+    /// read takes its source column's character, traced through a view or a
+    /// derived table's own flags; anything else is an expression or an
+    /// aggregate.
+    /// </summary>
+    private static byte[] WireFlagsOf(List<Expression> expressions, FromSource[] sources, int[] source, int[] ordinal)
+    {
+        var flags = new byte[expressions.Count];
+        for (var i = 0; i < flags.Length; i++)
+        {
+            var expression = expressions[i];
+            while (expression is Expressions.NamedExpression named)
+                expression = named.Inner;
+            flags[i] = expression switch
+            {
+                Expressions.AggregateExpression or Expressions.WindowExpression => 0x00,
+                Reference when source[i] >= 0 => SourceColumnWireFlags(sources[source[i]], ordinal[i]),
+                Reference => 0x08,
+                _ => 0x20,
+            };
+        }
+        return flags;
+    }
+
+    private static byte SourceColumnWireFlags(FromSource from, int ordinal)
+    {
+        if (from.LateralPlan is { ColumnWireFlags: { } inner } && ordinal < inner.Length)
+            return inner[ordinal];
+        // An updatable view's column traces to the base column behind it.
+        var column = from.BackingView is { BaseTable: { } baseTable } view && view.BaseColumnOrdinals[ordinal] is >= 0 and var baseOrdinal
+            ? baseTable.Columns[baseOrdinal]
+            : from.Columns[ordinal];
+        return column switch
+        {
+            { Identity: not null } => 0x10,
+            { Computed: not null } => 0x20,
+            { Type: RowVersionSqlType } => 0x00,
+            _ => 0x08,
+        };
     }
 
     /// <summary>

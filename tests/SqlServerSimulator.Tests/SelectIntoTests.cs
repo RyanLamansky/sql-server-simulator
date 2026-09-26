@@ -456,4 +456,14 @@ public sealed class SelectIntoTests
             select (select string_agg(collation_name, ';') within group (order by column_id) from sys.columns where object_id = object_id('u'))
                 + '|' + (select collation_name from tempdb.sys.columns where object_id = object_id('tempdb..#v'))
             """));
+
+    [TestMethod]
+    public void DerivedTableAndCteColumns_KeepTheirNullability()
+        => AreEqual("0,1|0,1", new Simulation().ExecuteScalar("""
+            create table t (id int not null, n int null);
+            select d.id, d.n into x from (select id, n from t) d;
+            with c as (select id, n from t) select c.id, c.n into y from c;
+            select (select string_agg(cast(is_nullable as char(1)), ',') within group (order by column_id) from sys.columns where object_id = object_id('x'))
+                + '|' + (select string_agg(cast(is_nullable as char(1)), ',') within group (order by column_id) from sys.columns where object_id = object_id('y'))
+            """));
 }

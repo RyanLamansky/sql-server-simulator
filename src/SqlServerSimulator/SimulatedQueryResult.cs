@@ -59,6 +59,19 @@ internal abstract class SimulatedQueryResult : SimulatedStatementOutcome
     public bool[]? ColumnReportsNumeric;
 
     /// <summary>
+    /// Per column, the COLMETADATA flag bits a column carries besides
+    /// fNullable, as SQL Server 2025 sets them (captured 2026-09-26): a column
+    /// read from a table — through views, joins and derived tables alike —
+    /// keeps its table's character, <c>0x10</c> (fIdentity, read-only) for an
+    /// identity column, <c>0x20</c> (fComputed, read-only) for a computed one,
+    /// <c>0x00</c> (read-only) for a rowversion and <c>0x08</c> (updatability
+    /// unknown) for the rest; a scalar expression is <c>0x20</c>; an aggregate,
+    /// a window function or a set operation's column is <c>0x00</c>. Null
+    /// means every column is <c>0x08</c>.
+    /// </summary>
+    public byte[]? ColumnWireFlags;
+
+    /// <summary>
     /// How many of the trailing columns are hidden: counted by <c>FieldCount</c>
     /// but not by <c>VisibleFieldCount</c> or <c>GetValues</c>, and flagged
     /// <c>fHidden</c> in TDS COLMETADATA. Only a cursor fetch's trailing

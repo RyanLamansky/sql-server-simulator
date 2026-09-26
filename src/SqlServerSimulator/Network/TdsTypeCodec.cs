@@ -43,7 +43,7 @@ internal static class TdsTypeCodec
     /// trailing <c>ROWSTAT</c> that way, with COLMETADATA flags of zero
     /// (captured against SQL Server 2025, 2026-09-25).
     /// </summary>
-    public static void WriteColMetadata(TdsTokenWriter writer, SqlType[] schema, string[] columnNames, bool[]? columnNullability, bool[]? columnReportsNumeric = null, int hiddenColumnCount = 0)
+    public static void WriteColMetadata(TdsTokenWriter writer, SqlType[] schema, string[] columnNames, bool[]? columnNullability, bool[]? columnReportsNumeric = null, int hiddenColumnCount = 0, byte[]? columnWireFlags = null)
     {
         var firstHidden = schema.Length - hiddenColumnCount;
         writer.EnterComposite();
@@ -55,7 +55,8 @@ internal static class TdsTypeCodec
             writer.WriteUInt32(type is RowVersionSqlType ? 0x50u : 0u);
             var notNull = columnNullability is not null && !columnNullability[i];
             var hidden = i >= firstHidden;
-            writer.WriteByte(hidden ? (byte)(notNull ? 0x00 : 0x01) : notNull ? (byte)0x08 : (byte)0x09);
+            var character = hidden ? (byte)0x00 : columnWireFlags is { } flags ? flags[i] : (byte)0x08;
+            writer.WriteByte((byte)(character | (notNull ? 0 : 1)));
             writer.WriteByte(0);
             var reportsNumeric = columnReportsNumeric is not null && columnReportsNumeric[i];
             WriteTypeInfo(writer, type, notNull, reportsNumeric);

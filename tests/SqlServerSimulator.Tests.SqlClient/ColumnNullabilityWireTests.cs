@@ -342,4 +342,35 @@ public sealed class ColumnNullabilityWireTests
         AreEqual(leftNullable, columns[0].AllowDBNull);
         AreEqual(rightNullable, columns[1].AllowDBNull);
     }
+
+    [TestMethod]
+    public async Task ColumnCharacter_FollowsTheSourceColumnAsRealFlagsIt()
+    {
+        // Identity: read-only + auto-increment; computed column and scalar
+        // expression: read-only; plain column: updatable; aggregate and a set
+        // operation's column: read-only, neither identity nor computed —
+        // traced through views and derived tables (captured 2026-09-26).
+        var simulation = new Simulation();
+        Wire.ExecInProc(simulation, """
+            create table t (id int identity primary key, name nvarchar(50) not null, rv rowversion, calc as id * 2);
+            insert t (name) values (N'a')
+            """);
+        Wire.ExecInProc(simulation, "create view v as select id, name, calc from t");
+
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+
+        async Task<string> Describe(string sql)
+        {
+            await using var command = new SqlCommand(sql, connection);
+            await using var reader = await command.ExecuteReaderAsync(TestContext.CancellationToken);
+            return string.Join(";", reader.GetColumnSchema().Select(c =>
+                $"{c.ColumnName}:{(c.IsIdentity == true ? "I" : "")}{(c.IsAutoIncrement == true ? "A" : "")}{(c.IsReadOnly == true ? "R" : "")}"));
+        }
+
+        AreEqual("id:IAR;name:;rv:R;calc:R", await Describe("select * from t"));
+        AreEqual("id:IAR;name:;calc:R", await Describe("select id, name, calc from v"));
+        AreEqual("id:IAR;x:R;c:R", await Describe("select d.id, d.id + 1 as x, (select count(*) from t) as c from (select id from t) d"));
+        AreEqual("id:R", await Describe("select id from t union all select id from t"));
+    }
 }

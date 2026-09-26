@@ -444,6 +444,7 @@ internal sealed class Cursor(
         {
             ColumnNullability = nullability,
             ColumnReportsNumeric = selection.ColumnReportsNumeric is { } numeric ? [.. numeric, false] : null,
+            ColumnWireFlags = selection.ColumnWireFlags is { } flags ? [.. flags, 0] : null,
             HiddenColumnCount = 1,
         };
     }

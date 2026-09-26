@@ -225,6 +225,13 @@ internal sealed partial class Selection
     internal bool[]? ColumnNullability;
 
     /// <summary>
+    /// Per column, the TDS COLMETADATA flags beyond nullability — see
+    /// <see cref="SimulatedQueryResult.ColumnWireFlags"/>; null for a shape
+    /// that sets none (every column then reads as a plain updatable one).
+    /// </summary>
+    internal byte[]? ColumnWireFlags;
+
+    /// <summary>
     /// Per-column significant-digit count for projection columns that are
     /// non-negative integer literals (<c>0</c> for non-literal columns); null
     /// when no column is an integer literal. Lets set-op column-type unification
@@ -454,8 +461,8 @@ internal sealed partial class Selection
     /// </summary>
     public SimulatedSqlResultSet Execute(BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver = null) =>
         this.valueRowSource is { } values
-            ? new SimulatedSqlResultSet(this.Schema, this.ColumnNames, values(batch, outerResolver)) { ColumnNullability = this.ColumnNullability, ColumnReportsNumeric = this.ColumnReportsNumeric }
-            : new SimulatedSqlResultSet(this.Schema, this.ColumnNames, this.rowSource!(batch, outerResolver)) { ColumnNullability = this.ColumnNullability, ColumnReportsNumeric = this.ColumnReportsNumeric };
+            ? new SimulatedSqlResultSet(this.Schema, this.ColumnNames, values(batch, outerResolver)) { ColumnNullability = this.ColumnNullability, ColumnReportsNumeric = this.ColumnReportsNumeric, ColumnWireFlags = this.ColumnWireFlags }
+            : new SimulatedSqlResultSet(this.Schema, this.ColumnNames, this.rowSource!(batch, outerResolver)) { ColumnNullability = this.ColumnNullability, ColumnReportsNumeric = this.ColumnReportsNumeric, ColumnWireFlags = this.ColumnWireFlags };
 
     /// <summary>
     /// Whether the plan yields a row — the question an emptiness probe asks,
@@ -2818,7 +2825,7 @@ internal sealed partial class Selection
                     var cteColumns = new HeapColumn[cteBinding.Plan.Schema.Length];
                     for (var ci = 0; ci < cteColumns.Length; ci++)
                     {
-                        cteColumns[ci] = new HeapColumn(string.Empty, cteBinding.Plan.Schema[ci], maxLength: null, nullable: true, spelledNumeric: cteBinding.Plan.ColumnReportsNumeric is { } cteNumeric && cteNumeric[ci])
+                        cteColumns[ci] = new HeapColumn(string.Empty, cteBinding.Plan.Schema[ci], maxLength: null, nullable: cteBinding.Plan.ColumnNullability?[ci] ?? true, spelledNumeric: cteBinding.Plan.ColumnReportsNumeric is { } cteNumeric && cteNumeric[ci])
                         {
                             IsUntypedNull = cteBinding.Plan.ColumnIsUntypedNull is { } cteNulls && cteNulls[ci],
                         };
@@ -3157,7 +3164,7 @@ internal sealed partial class Selection
                 var derivedColumns = new HeapColumn[derivedSelection.Schema.Length];
                 for (var ci = 0; ci < derivedColumns.Length; ci++)
                 {
-                    derivedColumns[ci] = new HeapColumn(string.Empty, derivedSelection.Schema[ci], maxLength: null, nullable: true, spelledNumeric: derivedSelection.ColumnReportsNumeric is { } derivedNumeric && derivedNumeric[ci])
+                    derivedColumns[ci] = new HeapColumn(string.Empty, derivedSelection.Schema[ci], maxLength: null, nullable: derivedSelection.ColumnNullability?[ci] ?? true, spelledNumeric: derivedSelection.ColumnReportsNumeric is { } derivedNumeric && derivedNumeric[ci])
                     {
                         IsUntypedNull = derivedSelection.ColumnIsUntypedNull is { } derivedNulls && derivedNulls[ci],
                     };

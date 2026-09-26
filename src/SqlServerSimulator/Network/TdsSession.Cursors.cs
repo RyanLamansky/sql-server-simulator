@@ -429,7 +429,7 @@ internal sealed partial class TdsSession
     private static void WriteCursorMetadata(TdsTokenWriter writer, Cursor cursor, List<SqlValue[]>? rows)
     {
         var result = cursor.FetchResult(rows is null ? [] : rows.ConvertAll(values => Cursor.WithRowStat(values, 1)));
-        TdsTypeCodec.WriteColMetadata(writer, result.Schema, result.ColumnNames, result.ColumnNullability, result.ColumnReportsNumeric, result.HiddenColumnCount);
+        TdsTypeCodec.WriteColMetadata(writer, result.Schema, result.ColumnNames, result.ColumnNullability, result.ColumnReportsNumeric, result.HiddenColumnCount, result.ColumnWireFlags);
 
         if (rows is null)
             return;

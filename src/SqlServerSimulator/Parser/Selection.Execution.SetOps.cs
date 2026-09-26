@@ -255,6 +255,9 @@ internal sealed partial class Selection
             ColumnIsUntypedNull = combinedUntypedNulls,
             ColumnReportsNumeric = combinedReportsNumeric,
             ColumnNullability = CombinedNullability(left.ColumnNullability, right.ColumnNullability, kind, combinedSchema.Length),
+            // A set operation's columns read as neither updatable nor computed
+            // (captured 2026-09-26).
+            ColumnWireFlags = new byte[combinedSchema.Length],
         };
     }
 
