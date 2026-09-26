@@ -278,6 +278,10 @@ Blocked on a larger unmodeled parent feature (shipping a function here implies t
   A broad surface — each proc is its own result-shape contract over the catalog views.
   Ships piecemeal by popularity, not as a bundle.
 
+- **SQL Server 2025's `vector` type** — `vector(n)` storage and its TDS type, `VECTOR_DISTANCE` / `VECTOR_NORM` / `VECTOR_NORMALIZE` / `VECTORPROPERTY`, vector indexes and `VECTOR_SEARCH` (all probed present on SQL Server 2025; unrecognized here, Msg 195 / 243).
+- **SQL Server 2025's native `json` type** — the storage type and the functions that take only it (`JSON_CONTAINS` refuses a `varchar` document with Msg 8116), along with its catalog and TDS surface.
+- **`APPROX_PERCENTILE_CONT` / `APPROX_PERCENTILE_DISC`** (`WITHIN GROUP (ORDER BY …)`, SQL Server 2022) — Msg 195 here; over a small set real answers the exact percentile (`2.5` / `2` over 1–4, probed 2026-09-26).
+
 Low priority / niche — simulatable (as placeholder constants or a small model) but rarely hit, so not worth attention yet:
 
 - **`sql_variant` minor quirk** (cross-type family ordering and one-side-variant comparison both ship — see [`scalars.md`](scalars.md#sql_variant-expression-semantics)): a decimal-declared inner reports BaseType `numeric` rather than real's `decimal`.

@@ -1706,6 +1706,7 @@ internal abstract class Expression : ExpressionNode
                 "NULLIF" => ParseConditional(context, static c => new NullIf(c)),
                 "SQUARE" => new TrigFunction(context, TrigKind.Square),
                 "STDEVP" => AggregateExpression.Parse(context, AggregateKind.StdevP),
+                "UNISTR" => new Unistr(context),
                 _ => null
             },
             7 => uppercaseName switch
@@ -1844,6 +1845,8 @@ internal abstract class Expression : ExpressionNode
             },
             13 => uppercaseName switch
             {
+                "BASE64_DECODE" => new Base64Decode(context),
+                "BASE64_ENCODE" => new Base64Encode(context),
                 "CURSOR_STATUS" => new CursorStatusFunction(context),
                 "DATEFROMPARTS" => new DatePartsBuilder(context, DatePartsBuilderKind.DateFromParts),
                 "ERROR_MESSAGE" => new ErrorMessageFunction(context),

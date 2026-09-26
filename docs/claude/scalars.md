@@ -425,6 +425,15 @@ This is the *argument* rule; the slots these types can't reach at all — sortin
   Determinism per seed is preserved but the values aren't byte-identical to SQL Server's undocumented seed algorithm.
   NULL seed → NULL output.
 
+## SQL Server 2025 string additions: 2-arg `SUBSTRING` / `UNISTR` / `BASE64_ENCODE` / `BASE64_DECODE`
+
+Probed 2026-09-26 against SQL Server 2025; none is gated on the compatibility level.
+- **`SUBSTRING(x, start)`** reads from `start` to the end, keeping the input's type and width as the three-argument form does without a constant length; a start at or below 1 reads the whole string.
+- **`UNISTR(x [, escape])`** replaces `\XXXX` (a UTF-16 code unit — a lone surrogate passes through), `\+XXXXXX` (a code point) and a doubled escape character, in the input's own family: a char-family input needs a UTF-8 collation (Msg 9844 otherwise) and stays `varchar`.
+  The escape character must be one printable ASCII character (Msg 9843) and not `+`, a quote, a space or a hexit (Msg 9842, which SqlClient reads at state 0); a malformed sequence is Msg 9841, at state 3 when the escape character ends the input.
+- **`BASE64_ENCODE(varbinary [, url_safe])`** gives the padded standard alphabet, or with a non-zero `url_safe` the `-` / `_` alphabet unpadded, as `varchar(8000)` (`varchar(max)` over a MAX input); **`BASE64_DECODE(varchar)`** reads either alphabet with or without padding as `varbinary(8000)` / `varbinary(max)`, and text that isn't Base64 is Msg 9803 state 20.
+  Each refuses the other's operand family with Msg 8116.
+
 ## SOUNDEX-family + STR + TRANSLATE + STRING_ESCAPE
 
 - **`SOUNDEX(s)`** (`Parser/Expressions/SoundexStrAdditions.cs`) — returns a 4-character `varchar` SOUNDEX code under the standard algorithm (first letter uppercased, then the consonant-digit map B/F/P/V=1, C/G/J/K/Q/S/X/Z=2, D/T=3, L=4, M/N=5, R=6, vowels/H/W skipped, runs of identical-code letters collapsed, padded with `0` or truncated to length 4).

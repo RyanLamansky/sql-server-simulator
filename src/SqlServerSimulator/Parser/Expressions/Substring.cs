@@ -13,6 +13,8 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// <item><description><c>start + length</c> past the end clamps to the
 /// available remainder.</description></item>
 /// <item><description>Negative <c>length</c> is an error.</description></item>
+/// <item><description>SQL Server 2025's two-argument form omits
+/// <c>length</c> and reads to the end (probed 2026-09-26).</description></item>
 /// </list>
 /// </summary>
 /// <remarks>Reference: https://learn.microsoft.com/en-us/sql/t-sql/functions/substring-transact-sql</remarks>
@@ -24,7 +26,9 @@ internal sealed class Substring : Expression
     // value doesn't carry its MAX-ness at runtime.
     private SqlType? boundSourceType;
     private readonly Expression start;
-    private readonly Expression length;
+
+    // Null for the two-argument form, which reads to the end.
+    private readonly Expression? length;
 
     public Substring(ParserContext context)
     {
@@ -35,6 +39,8 @@ internal sealed class Substring : Expression
             throw SimulatedSqlException.InvalidArgumentDataType("NULL", 1, "substring");
         ExpectArgumentSeparator(context);
         this.start = Parse(context.MoveNextRequiredReturnSelf());
+        if (context.Token is Tokens.Operator { Character: ')' })
+            return;
         ExpectArgumentSeparator(context);
         this.length = Parse(context.MoveNextRequiredReturnSelf());
     }
@@ -52,13 +58,13 @@ internal sealed class Substring : Expression
             : SimulatedSqlException.SyntaxErrorNear(context);
     }
 
-    internal override bool ParallelSafe => this.source.ParallelSafe && this.start.ParallelSafe && this.length.ParallelSafe;
+    internal override bool ParallelSafe => this.source.ParallelSafe && this.start.ParallelSafe && this.length?.ParallelSafe != false;
 
     public override SqlValue Run(RuntimeContext runtime)
     {
         var s = source.Run(runtime);
         var startValue = start.Run(runtime);
-        var lengthValue = length.Run(runtime);
+        var lengthValue = length?.Run(runtime) ?? SqlValue.FromInt32(int.MaxValue);
         var resultType = ResolveResultType(s.Type, runtime.Batch);
         if (s.IsNull || startValue.IsNull || lengthValue.IsNull)
             return SqlValue.Null(resultType);
@@ -114,7 +120,8 @@ internal sealed class Substring : Expression
         var sourceType = StringScalars.RequireStringArgument(source, source.GetSqlType(batch, resolveColumnType), "substring", 1, acceptsBinary: true);
         this.boundSourceType = sourceType;
         ScalarArguments.RequireNumericSlot(start, batch, resolveColumnType, "substring", 2, NumericSlot.IntegerOrDecimal);
-        ScalarArguments.RequireNumericSlot(length, batch, resolveColumnType, "substring", 3, NumericSlot.IntegerOrDecimal);
+        if (length is not null)
+            ScalarArguments.RequireNumericSlot(length, batch, resolveColumnType, "substring", 3, NumericSlot.IntegerOrDecimal);
         return ResolveResultType(sourceType, batch);
     }
 
@@ -138,11 +145,12 @@ internal sealed class Substring : Expression
         StringScalars.RequireSettledCollation(sourceType, "substring");
         if (!SqlType.IsStringCategory(sourceType))
             return sourceType;
-        if (StringScalars.IsConstantNegativeCount(length))
+        if (length is not null && StringScalars.IsConstantNegativeCount(length))
             throw SimulatedSqlException.NegativeLengthNotAllowed("substring", 8);
         if (sourceType is VarcharSqlType { length: SqlType.MaxLengthSentinel } or NVarcharSqlType { length: SqlType.MaxLengthSentinel })
             return sourceType;
-        var hasConstantLength = StringScalars.TryConstantCount(length, out var n);
+        var n = 0;
+        var hasConstantLength = length is not null && StringScalars.TryConstantCount(length, out n);
         if (sourceType.IsLob)
         {
             return hasConstantLength
@@ -165,7 +173,7 @@ internal sealed class Substring : Expression
     /// </summary>
     private VarbinarySqlType ResolveBinaryResultType(SqlType sourceType)
     {
-        if (StringScalars.IsConstantNegativeCount(length))
+        if (length is not null && StringScalars.IsConstantNegativeCount(length))
             throw SimulatedSqlException.NegativeLengthNotAllowed("substring", 8);
         if (sourceType is VarbinarySqlType { length: SqlType.MaxLengthSentinel })
             return VarbinarySqlType.MaxForm;
@@ -175,12 +183,19 @@ internal sealed class Substring : Expression
             BinarySqlType b => b.length,
             _ => 8000,
         };
-        return StringScalars.TryConstantCount(length, out var n)
+        return length is not null && StringScalars.TryConstantCount(length, out var n)
             ? VarbinarySqlType.Get(Math.Max(1, Math.Min(sourceWidth, n)))
             : VarbinarySqlType.Get(sourceWidth);
     }
 
-    internal override string DebugDisplay() => $"SUBSTRING({source.DebugDisplay()}, {start.DebugDisplay()}, {length.DebugDisplay()})";
+    internal override string DebugDisplay() => length is null
+        ? $"SUBSTRING({source.DebugDisplay()}, {start.DebugDisplay()})"
+        : $"SUBSTRING({source.DebugDisplay()}, {start.DebugDisplay()}, {length.DebugDisplay()})";
 
-    internal override void Describe(NodeShape shape) => shape.Child(this.source).Child(this.start).Child(this.length);
+    internal override void Describe(NodeShape shape)
+    {
+        _ = shape.Child(this.source).Child(this.start);
+        if (this.length is not null)
+            _ = shape.Child(this.length);
+    }
 }

@@ -597,6 +597,36 @@ partial class SimulatedSqlException
     /// <c>GREATEST</c> / <c>LEAST</c> refusing a type it can't compare
     /// (probe-confirmed 2026-09-23).
     /// </summary>
+    /// <summary>
+    /// Mimics SQL Server error 9803 from <c>BASE64_DECODE</c> over text that
+    /// isn't Base64 (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException InvalidBase64Data() =>
+        new("Invalid data for type \"Base64Decode\".", 9803, 16, 20);
+
+    /// <summary>
+    /// Mimics SQL Server error 9841 from <c>UNISTR</c>: a malformed escape
+    /// sequence, state 3 when the escape character ends the input (probed
+    /// 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException UnistrEscapeSequenceInvalid(byte state) =>
+        new("An invalid Unicode escape sequence was specified in the input. Unicode escape sequences should be specified as <UESCAPE character>XXXX or <UESCAPE character>+XXXXXX where X is a <hexit>.", 9841, 16, state);
+
+    /// <summary>
+    /// Mimics SQL Server error 9842: <c>UNISTR</c>'s escape character is one it
+    /// refuses. State 0 as SqlClient reads it (sqlcmd displays 1).
+    /// </summary>
+    internal static SimulatedSqlException UnistrEscapeCharacterRefused() =>
+        new("Invalid Unicode escape character was provided. The <UESCAPE character> cannot be <plus sign> <single quote> <double quotes> <space> <hexit>.", 9842, 16, 0);
+
+    /// <summary>Mimics SQL Server error 9843: <c>UNISTR</c>'s escape character isn't one printable ASCII character.</summary>
+    internal static SimulatedSqlException UnistrEscapeCharacterInvalid(string written) =>
+        new($"Unicode escape character '{written}' is invalid. Unicode escape character should be of 1 character length and a code point ranging from U+0020 up to U+007E.", 9843, 16, 4);
+
+    /// <summary>Mimics SQL Server error 9844: <c>UNISTR</c> over a char-family input without a UTF-8 collation.</summary>
+    internal static SimulatedSqlException UnistrRequiresUtf8() =>
+        new("The char/varchar input type uses an unsupported collation. Only a UTF8 collation is supported with char/varchar input type in UNISTR function.", 9844, 16, 4);
+
     internal static SimulatedSqlException InvalidArgumentDataType(string sourceTypeWord, int argumentIndex, string functionName, byte state = 1) =>
         new($"Argument data type {sourceTypeWord} is invalid for argument {argumentIndex} of {functionName} function.", 8116, 16, state);
 
