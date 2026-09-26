@@ -136,6 +136,19 @@ partial class Simulation
             // peek for the comma list separator without permanently advancing
             // past statement-boundary tokens.
             context.MoveNextOptional();
+
+            // A numbered procedure can't be dropped alone: `DROP PROCEDURE p;2`
+            // is a syntax error at its `;` (probed 2026-09-26 against SQL
+            // Server 2025), and `DROP PROCEDURE p` drops the whole group.
+            if (targetKind == DropTargetKind.Procedure && context.Token is Operator { Character: ';' })
+            {
+                var atSemicolon = context.SaveCheckpoint();
+                var followedByNumber = context.GetNextOptional() is Numeric;
+                context.RestoreCheckpoint(atSemicolon);
+                if (followedByNumber)
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+            }
+
             if (context.Token is not Operator { Character: ',' })
                 break;
             context.MoveNextRequired();

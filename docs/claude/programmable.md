@@ -537,6 +537,12 @@ Probed against SQL Server 2025.
   A body an error ends assigns the caller's `@rc` nothing.
 - Value-form RETURN is also legal inside scalar UDF bodies (existing); the parse-time check accepts either `BatchContext.UdfFrame` or `BatchContext.ProcFrame` being non-null.
 
+**Numbered procedures** (probed 2026-09-26 against SQL Server 2025): `CREATE PROCEDURE p;N` (N from 2 to 32767, else Msg 1005 carrying the number's line) adds member N to the group whose number 1 is `p`, and `EXEC p;N` runs it — the `;` there is never a statement separator, since no statement opens with a number.
+A member lives on its group (`Procedure.Numbered`), shares its name and object id, and reports as it (`ERROR_PROCEDURE`, `@@PROCID`, Msg 201).
+Creating one needs number 1 (Msg 2730, severity 11) and a free number (Msg 2004), and altering one needs it to exist (Msg 208 state 7); `ALTER PROCEDURE p` keeps the members, `sp_rename` carries them, and `DROP PROCEDURE p` drops the whole group, a member alone being a syntax error at its `;`.
+`sys.procedures`, `sys.parameters`, `sys.sql_modules` and `OBJECT_DEFINITION` see only number 1; the members list in `sys.numbered_procedures` / `sys.numbered_procedure_parameters` and in `sp_stored_procedures` as `p;N`, and `sp_helptext p` runs on through their text.
+Every error a `CREATE PROCEDURE` raises names the procedure, and a repeated parameter name is Msg 134, as in a function's list.
+
 **Multi-result-set forwarding**: a procedure body's `SELECT` statements yield result sets through the outer caller's iterator (`ExecuteReader().NextResult()` walks them).
 Unlike UDF bodies, the proc invocation iterates `DispatchStatementsUntil` and yields each outcome.
 Output parameter values populate AFTER reader close — probe-confirmed: real SQL Server holds OUTPUT param values until the response stream's done message, which `SimulatedDbDataReader` mirrors via the standard ADO.NET timing.
@@ -565,8 +571,6 @@ Each `DbParameter` binds to a proc parameter by name (the `@` prefix is stripped
   **`sys.all_parameters`** shares the same shape and row generator (`EnumerateParameters`) — user-object parity, like `sys.all_columns` / `sys.all_objects` (real SQL Server's `all_parameters` also surfaces system-object parameters; SMO filters by `object_id` so the identical user-object set suffices).
   SMO's UserDefinedFunction / StoredProcedure scripting reads the return / parameter metadata through `sys.all_parameters` (`LEFT JOIN … ret_param.object_id = udf.object_id AND ret_param.is_output = 1`), reading `max_length` / `precision` / `scale` / `is_xml_document` / `xml_collection_id`.
 - **`sys.parameters.has_default_value`** is hardcoded `False` (matches probed real SQL Server behavior: the column reflects CLR-side DEFAULT_VALUE metadata, not the `= value` parameter default — even `@x int = 5` shows `has_default_value=False`).
-- **`sys.numbered_procedures`** (3-col: `object_id` / `procedure_number` / `definition`) is always empty — numbered stored procedures are a removed legacy feature.
-  SMO's StoredProcedure scripting `LEFT JOIN`s it; modeling it also cleared the sweep's proc-Script transport crash (the unresolved name was hitting the skip-mode deferred-name-resolution wire death, not a distinct fault).
 - **`sys.procedures.modify_date`** tracks the last ALTER: an unaltered module reports `create_date`, and every `ALTER` / `CREATE OR ALTER` leg advances `modify_date` while `create_date` holds (probe-confirmed).
 - **EXEC argument value-grammar limited to literals + `@var` + `DEFAULT`** — matches real SQL Server (Msg 102 on arithmetic), but the *type* of the literal is taken from the source token, not coerced through any inference like real SQL Server's procedure-call binding.
 - **`@@ROWCOUNT` inside a proc body** isn't isolated from the caller — same gap documented for UDF bodies.

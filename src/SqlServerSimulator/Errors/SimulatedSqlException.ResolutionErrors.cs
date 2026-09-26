@@ -212,6 +212,21 @@ partial class SimulatedSqlException
         new("Maximum stored procedure, function, trigger, or view nesting level exceeded (limit 32).", 217, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server's Msg 1005 — a numbered procedure's <c>;N</c> outside
+    /// 1 to 32767, the number as written and its line in the text.
+    /// </summary>
+    internal static SimulatedSqlException InvalidProcedureNumber(int line, string written) =>
+        new($"Line {line}: Invalid procedure number ({written}). Must be between 1 and 32767.", 1005, 15, 1);
+
+    /// <summary>Mimics SQL Server's Msg 2730 — <c>CREATE PROCEDURE p;N</c> before <c>p</c> (its number 1) exists.</summary>
+    internal static SimulatedSqlException NumberedProcedureWithoutGroupOne(string name, short groupNumber) =>
+        new($"Cannot create procedure '{name}' with a group number of {groupNumber} because a procedure with the same name and a group number of 1 does not currently exist in the database. Must execute CREATE PROCEDURE '{name}';1 first.", 2730, 11, 1);
+
+    /// <summary>Mimics SQL Server's Msg 2004 — <c>CREATE PROCEDURE p;N</c> over a number the group already holds.</summary>
+    internal static SimulatedSqlException ProcedureGroupNumberTaken(string name, short groupNumber) =>
+        new($"Procedure '{name}' has already been created with group number {groupNumber}. Create procedure with an unused group number.", 2004, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server's Msg 2812 — EXEC named a stored procedure that
     /// doesn't exist. Distinct error number from Msg 208 / 3701; the State
     /// (62) is probe-confirmed. Wording mirrors real SQL Server verbatim.

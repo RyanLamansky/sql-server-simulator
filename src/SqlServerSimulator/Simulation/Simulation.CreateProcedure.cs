@@ -88,10 +88,16 @@ partial class Simulation
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
         var procName = BatchContext.ParseObjectName(context);
+        // Every error from here on names the procedure — its name collision and
+        // its parameter list's included (probed 2026-09-26 against SQL Server
+        // 2025). The statement is its batch's only one, so nothing after it
+        // inherits this.
+        context.Batch.ErrorProcedureName = procName.Leaf;
         RejectQualifiedModuleName(procName, "PROCEDURE");
         var schema = ResolveModuleSchema(context, procName, isAlter);
 
         context.MoveNextRequired();
+        var groupNumber = ParseProcedureGroupNumber(context, procName.Leaf);
 
         // Optional parenthesized parameter list. Inside or outside parens,
         // parameter parsing is identical — the only difference is the
@@ -114,7 +120,10 @@ partial class Simulation
             if (!openParen && context.Token is ReservedKeyword { Keyword: Keyword.With or Keyword.As })
                 break;
 
-            parameters.Add(ParseProcedureParameter(context, parameters.Count + 1));
+            var parameter = ParseProcedureParameter(context, parameters.Count + 1);
+            if (parameters.Exists(declared => BatchContext.VariableNameComparer.Equals(declared.Name, parameter.Name)))
+                throw SimulatedSqlException.VariableAlreadyDeclared(parameter.Name);
+            parameters.Add(parameter);
 
             if (context.Token is Operator { Character: ',' })
             {
@@ -181,6 +190,21 @@ partial class Simulation
         // that doesn't exist.
         context.Simulation.BindProcedureBodyAtCreate(context, procName.Leaf, parameters, bodyText, bodyLineOffset, nativelyCompiled);
 
+        if (groupNumber > 1)
+        {
+            StoreNumberedProcedure(context, schema, procName, groupNumber, isAlter, createOrAlter, new Procedure(
+                schema, procName.Leaf, 0, [.. parameters], bodyText, context.Batch.CurrentStatement.UtcNow, bodyLineOffset)
+            {
+                DefinitionText = BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, isAlter, createOrAlter),
+                ExecuteAsClause = executeAsClause,
+                ExecuteAsPrincipalId = ResolveExecuteAsPrincipalId(context, executeAsClause),
+                UsesQuotedIdentifier = context.QuotedIdentifiers,
+                UsesAnsiNulls = context.Batch.Connection.AnsiNulls,
+                GroupNumber = groupNumber,
+            });
+            return true;
+        }
+
         // CREATE-only (no OR ALTER) collides with any existing object of the
         // same name (procs share the namespace with tables / views /
         // functions); either ALTER leg over a name another kind holds is Msg
@@ -207,6 +231,8 @@ partial class Simulation
             ExecuteAsPrincipalId = ResolveExecuteAsPrincipalId(context, executeAsClause),
             UsesQuotedIdentifier = context.QuotedIdentifiers,
             UsesAnsiNulls = context.Batch.Connection.AnsiNulls,
+            // The group's numbered procedures stay with it across an ALTER.
+            Numbered = replaced?.Numbered,
         };
         if (replaced is not null)
             procedure.ModifyDate = context.Batch.CurrentStatement.UtcNow;
@@ -214,6 +240,85 @@ partial class Simulation
         RecordSlotUndo(context, schema.Procedures, procName.Leaf, replaced);
         RecordDdlEvent(context, replaced is null ? "CREATE_PROCEDURE" : "ALTER_PROCEDURE", schema.Name, procName.Leaf, "PROCEDURE");
         return true;
+    }
+
+    /// <summary>
+    /// Reads a numbered procedure's <c>;N</c> after its name, answering 1 when
+    /// there is none. Cursor on entry: the token after the name; on exit, the
+    /// token after the number. A number outside 1 to 32767 is Msg 1005, whose
+    /// text carries its line (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    private static short ParseProcedureGroupNumber(ParserContext context, string procedureName)
+    {
+        if (context.Token is not Operator { Character: ';' })
+            return 1;
+        if (context.GetNextRequired() is not Numeric number)
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        var written = context.Command.CommandText[number.StartIndex..number.EndIndex];
+        if (!short.TryParse(written, out var groupNumber) || groupNumber < 1)
+        {
+            var error = SimulatedSqlException.InvalidProcedureNumber(number.LineNumber + context.Batch.LineOffset, written);
+            error.Errors[0].Procedure = procedureName;
+            throw error;
+        }
+        context.MoveNextRequired();
+        return groupNumber;
+    }
+
+    /// <summary>
+    /// Stores <paramref name="numbered"/> as number
+    /// <see cref="Procedure.GroupNumber"/> of the group <paramref name="name"/>
+    /// names, under its object id. Creating one needs the group's number-1
+    /// procedure (Msg 2730) and a number not yet taken (Msg 2004); altering one
+    /// needs it to exist (Msg 208, state 7) — all naming the group as their
+    /// procedure (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    private static void StoreNumberedProcedure(
+        ParserContext context, Schema schema, MultiPartName name, short groupNumber, bool isAlter, bool createOrAlter, Procedure numbered)
+    {
+        var leaf = name.Leaf;
+        var group = schema.Procedures.GetValueOrDefault(leaf);
+        var existing = group?.Numbered?.GetValueOrDefault(groupNumber);
+        SimulatedSqlException? refusal = null;
+        if (group is null || (isAlter && existing is null))
+        {
+            refusal = isAlter
+                ? SimulatedSqlException.InvalidObjectName(name, state: 7)
+                : SimulatedSqlException.NumberedProcedureWithoutGroupOne(leaf, groupNumber);
+        }
+        else if (existing is not null && !isAlter && !createOrAlter)
+        {
+            refusal = SimulatedSqlException.ProcedureGroupNumberTaken(leaf, groupNumber);
+        }
+        if (refusal is not null)
+        {
+            refusal.Errors[0].Procedure = leaf;
+            throw refusal;
+        }
+
+        var stored = new Procedure(schema, leaf, group!.ObjectId, numbered.Parameters, numbered.BodyText, existing?.CreateDate ?? numbered.CreateDate, numbered.BodyLineOffset)
+        {
+            DefinitionText = numbered.DefinitionText,
+            ExecuteAsClause = numbered.ExecuteAsClause,
+            ExecuteAsPrincipalId = numbered.ExecuteAsPrincipalId,
+            UsesQuotedIdentifier = numbered.UsesQuotedIdentifier,
+            UsesAnsiNulls = numbered.UsesAnsiNulls,
+            GroupNumber = groupNumber,
+        };
+        if (existing is not null)
+            stored.ModifyDate = numbered.CreateDate;
+        var hadGroup = group.Numbered is not null;
+        (group.Numbered ??= [])[groupNumber] = stored;
+        RecordDdlUndo(context, () =>
+        {
+            if (existing is not null)
+                group.Numbered![groupNumber] = existing;
+            else if (hadGroup)
+                _ = group.Numbered!.Remove(groupNumber);
+            else
+                group.Numbered = null;
+        });
+        RecordDdlEvent(context, existing is null ? "CREATE_PROCEDURE" : "ALTER_PROCEDURE", schema.Name, leaf, "PROCEDURE");
     }
 
     /// <summary>

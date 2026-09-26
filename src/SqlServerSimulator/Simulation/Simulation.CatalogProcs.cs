@@ -1060,6 +1060,15 @@ partial class Simulation
                         SqlValue.FromString(CatalogNVarchar134, procedure.Name + ";1"),
                         negativeOne, negativeOne, negativeOne, nullRemarks, procedureType,
                     ]);
+                    // A procedure group lists each numbered member under its own number.
+                    foreach (var groupNumber in procedure.Numbered?.Keys ?? Enumerable.Empty<short>())
+                    {
+                        rows.Add([
+                            qualifier, owner,
+                            SqlValue.FromString(CatalogNVarchar134, $"{procedure.Name};{groupNumber}"),
+                            negativeOne, negativeOne, negativeOne, nullRemarks, procedureType,
+                        ]);
+                    }
                 }
                 // Functions list too, numbered ;0 but typed as procedures
                 // (probed 2026-09-26 against SQL Server 2025).

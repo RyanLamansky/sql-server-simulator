@@ -81,6 +81,21 @@ internal sealed class Procedure(
     /// no-op).
     /// </summary>
     public string? ExecuteAsClause;
+
+    /// <summary>
+    /// The procedure's number in its group — 1 for the procedure the schema
+    /// holds, 2 to 32767 for a numbered procedure (<c>CREATE PROCEDURE p;2</c>),
+    /// which shares the group's name and object id and runs as
+    /// <c>EXEC p;2</c>.
+    /// </summary>
+    public short GroupNumber = 1;
+
+    /// <summary>
+    /// The group's numbered procedures by number, on its number-1 procedure;
+    /// null while it has none. <c>ALTER PROCEDURE p</c> carries them onto the
+    /// replacement and <c>DROP PROCEDURE p</c> drops them with it.
+    /// </summary>
+    public SortedDictionary<short, Procedure>? Numbered;
 }
 
 /// <summary>

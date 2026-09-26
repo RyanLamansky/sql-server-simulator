@@ -31,6 +31,8 @@ internal static partial class BuiltInResources
         "sys.index_columns",
         "sys.indexes",
         "sys.key_constraints",
+        "sys.numbered_procedure_parameters",
+        "sys.numbered_procedures",
         "sys.objects",
         "sys.parameters",
         "sys.procedures",

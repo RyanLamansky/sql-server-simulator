@@ -153,6 +153,25 @@ partial class Simulation
         }
         context.MoveNextOptional();
 
+        // `EXEC p;2` runs number 2 of the procedure group p; a statement can't
+        // open with a number, so a `;` before one is never a separator.
+        short groupNumber = 1;
+        if (context.Token is Operator { Character: ';' })
+        {
+            var beforeNumber = context.SaveCheckpoint();
+            if (context.GetNextOptional() is Numeric number
+                && short.TryParse(context.Command.CommandText.AsSpan(number.StartIndex, number.EndIndex - number.StartIndex), out groupNumber)
+                && groupNumber >= 1)
+            {
+                context.MoveNextOptional();
+            }
+            else
+            {
+                groupNumber = 1;
+                context.RestoreCheckpoint(beforeNumber);
+            }
+        }
+
         // System procedures route to built-in handlers before generic
         // resolution. ResolveSystemProcedureName does the collation-aware
         // match and hands back the canonical as-declared name, so the
@@ -264,6 +283,11 @@ partial class Simulation
         procName = batch.ExpandSynonym(procName);
         if (!batch.TryResolveProcedure(procName, out var procedure))
             throw SimulatedSqlException.CouldNotFindStoredProcedure(procName.WithoutOmittedLeading().Written);
+        if (groupNumber > 1)
+        {
+            procedure = procedure.Numbered?.GetValueOrDefault(groupNumber)
+                ?? throw SimulatedSqlException.CouldNotFindStoredProcedure(procName.WithoutOmittedLeading().Written);
+        }
 
         var invocation = this.InvokeProcedure(
             batch, procedure, arguments, returnCodeVar, execSynonym is null ? writtenName : $"{procedure.Schema.Name}.{procedure.Name}", execSynonym);

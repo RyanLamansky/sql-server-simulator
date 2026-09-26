@@ -140,6 +140,9 @@ partial class Simulation
 
         if (target.DefinitionText is { } definition)
         {
+            // A procedure group's text runs on through its numbered procedures.
+            if (target.Object is Procedure { Numbered: { } numbered })
+                definition += string.Concat(numbered.Values.Select(member => member.DefinitionText));
             yield return HelpTextResultSet(definition);
         }
         else if (SchemaObject.IsSqlModule(target.Object))

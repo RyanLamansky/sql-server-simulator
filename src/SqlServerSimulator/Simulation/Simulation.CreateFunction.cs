@@ -92,7 +92,10 @@ partial class Simulation
         {
             while (true)
             {
-                parameters.Add(ParseParameter(context, parameters.Count + 1));
+                var parameter = ParseParameter(context, parameters.Count + 1);
+                if (parameters.Exists(declared => BatchContext.VariableNameComparer.Equals(declared.Name, parameter.Name)))
+                    throw SimulatedSqlException.VariableAlreadyDeclared(parameter.Name);
+                parameters.Add(parameter);
                 if (context.Token is Operator { Character: ')' })
                     break;
                 if (context.Token is not Operator { Character: ',' })

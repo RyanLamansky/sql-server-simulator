@@ -234,6 +234,33 @@ internal static partial class BuiltInResources
         ], (batch, database) =>
             EnumerateProcedures(batch, database, charTwo, notMsShipped));
 
+        // sys.numbered_procedures / sys.numbered_procedure_parameters: a
+        // procedure group's members numbered 2 and up, under the group's
+        // object_id, and their parameters (column shapes probed 2026-09-26
+        // against SQL Server 2025). Number 1 lists in sys.procedures and
+        // sys.parameters instead. SMO's StoredProcedure scripting LEFT JOINs
+        // the first to detect the numbered form.
+        Sys("numbered_procedures",
+        [
+            new("object_id", SqlType.Int32, null, false),
+            new("procedure_number", SqlType.SmallInt, null, true),
+            new("definition", SqlType.NVarcharMax, null, true),
+        ], (_, database) => EnumerateNumberedProcedures(database));
+        Sys("numbered_procedure_parameters",
+        [
+            new("object_id", SqlType.Int32, null, false),
+            new("procedure_number", SqlType.SmallInt, null, false),
+            new("name", SqlType.SystemName, 128, true),
+            new("parameter_id", SqlType.Int32, null, false),
+            new("system_type_id", SqlType.TinyInt, null, false),
+            new("user_type_id", SqlType.Int32, null, false),
+            new("max_length", SqlType.SmallInt, null, false),
+            new("precision", SqlType.TinyInt, null, false),
+            new("scale", SqlType.TinyInt, null, false),
+            new("is_output", SqlType.Bit, null, false),
+            new("is_cursor_ref", SqlType.Bit, null, false),
+        ], (_, database) => EnumerateNumberedProcedureParameters(database));
+
         // INFORMATION_SCHEMA.ROUTINES: ISO-shape view listing both procedures
         // and functions. The simulator ships the load-bearing column subset:
         // ROUTINE_CATALOG / SCHEMA / NAME / TYPE / DATA_TYPE. For procedures
@@ -511,19 +538,6 @@ internal static partial class BuiltInResources
             new("hints", SqlType.NVarcharMax, null, true),
         ], static (_, _) => EmptyCatalogRows);
 
-        // sys.numbered_procedures: numbered stored procedures are a removed
-        // legacy feature, so the view is always empty. SMO's StoredProcedure
-        // scripting LEFT JOINs it (and reads its definition) to detect the
-        // deprecated numbered-proc form; an empty result scripts the ordinary
-        // single-body procedure. Probe-confirmed 3-column shape (SQL Server
-        // 2025).
-        Sys("numbered_procedures",
-        [
-            new("object_id", SqlType.Int32, null, false),
-            new("procedure_number", SqlType.SmallInt, null, true),
-            new("definition", SqlType.NVarcharMax, null, true),
-        ], static (_, _) => EmptyCatalogRows);
-
         // sys.assembly_types: the three CLR-backed system types shipped by
         // SQL Server (hierarchyid / geometry / geography), all owned by the
         // Microsoft.SqlServer.Types assembly (assembly_id 1). Probe-confirmed
@@ -571,24 +585,9 @@ internal static partial class BuiltInResources
             new("is_table_type", SqlType.Bit, null, false),
         ], EnumerateAssemblyTypes);
 
-        // sys.numbered_procedure_parameters / sys.function_order_columns:
-        // numbered stored procedures (CREATE PROCEDURE ...;N) and ordered-set
-        // aggregate order columns aren't modeled, so both ship empty with the
-        // full probe-confirmed shape (SQL Server 2025, 2026-07-16).
-        Sys("numbered_procedure_parameters",
-        [
-            new("object_id", SqlType.Int32, null, false),
-            new("procedure_number", SqlType.SmallInt, null, false),
-            new("name", SqlType.SystemName, 128, true),
-            new("parameter_id", SqlType.Int32, null, false),
-            new("system_type_id", SqlType.TinyInt, null, false),
-            new("user_type_id", SqlType.Int32, null, false),
-            new("max_length", SqlType.SmallInt, null, false),
-            new("precision", SqlType.TinyInt, null, false),
-            new("scale", SqlType.TinyInt, null, false),
-            new("is_output", SqlType.Bit, null, false),
-            new("is_cursor_ref", SqlType.Bit, null, false),
-        ], static (_, _) => EmptyCatalogRows);
+        // sys.function_order_columns: ordered-set aggregate order columns
+        // aren't modeled, so it ships empty with the full probe-confirmed
+        // shape (SQL Server 2025, 2026-07-16).
         Sys("function_order_columns",
         [
             new("object_id", SqlType.Int32, null, false),
@@ -1012,6 +1011,61 @@ internal static partial class BuiltInResources
                 falseBit,
                 falseBit,
             ];
+        }
+    }
+
+    private static IEnumerable<Procedure> NumberedProcedures(Database database)
+    {
+        foreach (var schema in database.Schemas.Values)
+        {
+            foreach (var proc in schema.Procedures.Values.OrderBy(p => p.ObjectId))
+            {
+                if (proc.Numbered is { } numbered)
+                {
+                    foreach (var member in numbered.Values)
+                        yield return member;
+                }
+            }
+        }
+    }
+
+    private static IEnumerable<SqlValue[]> EnumerateNumberedProcedures(Database database)
+    {
+        foreach (var member in NumberedProcedures(database))
+        {
+            yield return [
+                SqlValue.FromInt32(member.ObjectId),
+                SqlValue.FromInt16(member.GroupNumber),
+                member.DefinitionText is { } definition ? SqlValue.FromNVarchar(definition) : SqlValue.Null(SqlType.NVarchar),
+            ];
+        }
+    }
+
+    private static IEnumerable<SqlValue[]> EnumerateNumberedProcedureParameters(Database database)
+    {
+        foreach (var member in NumberedProcedures(database))
+        {
+            for (var i = 0; i < member.Parameters.Length; i++)
+            {
+                var param = member.Parameters[i];
+                var isTvp = param.TableType is not null;
+                var (maxLength, precision, scale) = isTvp
+                    ? ((short)SqlType.MaxLengthSentinel, (byte)0, (byte)0)
+                    : GetSysColumnMetadata(new HeapColumn(param.Name, param.Type, param.DeclaredMaxLength, nullable: true));
+                yield return [
+                    SqlValue.FromInt32(member.ObjectId),
+                    SqlValue.FromInt16(member.GroupNumber),
+                    SqlValue.FromSystemName("@" + param.Name),
+                    SqlValue.FromInt32(i + 1),
+                    SqlValue.FromByte(isTvp ? (byte)243 : SpelledTypeId(param.Type, param.SpelledNumeric)),
+                    SqlValue.FromInt32(isTvp ? param.TableType!.UserTypeId : param.AliasType?.UserTypeId ?? (SpelledTypeId(param.Type, param.SpelledNumeric) is 108 ? 108 : param.Type.UserTypeId)),
+                    SqlValue.FromInt16(maxLength),
+                    SqlValue.FromByte(precision),
+                    SqlValue.FromByte(scale),
+                    SqlValue.FromBoolean(param.IsOutput),
+                    SqlValue.FromBoolean(param.IsCursor),
+                ];
+            }
         }
     }
 

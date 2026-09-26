@@ -238,7 +238,6 @@ Already listed elsewhere here and not repeated: parenthesized set-op branches.
 
 **Real accepts, the simulator refuses**:
 
-- Numbered procedures (`CREATE PROC p;2`, `EXEC p;2`).
 - A `decimal(p, 0)` identity seed or increment past `bigint`'s range (`NotSupportedException` here; the identity state is a `long`).
 
 **Smaller divergences found alongside** (probed 2026-09-24):

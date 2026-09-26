@@ -226,11 +226,22 @@ partial class Simulation
                 renamed.Name = newName;
                 renamed.ModifyDate = batch.CurrentStatement.UtcNow;
                 objects[newName] = renamed;
+                // A procedure group's numbered members carry its name.
+                if (renamed is Procedure { Numbered: { } numbered })
+                {
+                    foreach (var member in numbered.Values)
+                        member.Name = newName;
+                }
                 RecordDdlUndo(batch, () =>
                 {
                     _ = objects.TryRemove(newName, out _);
                     (renamed.Name, renamed.ModifyDate) = (oldName, oldModifyDate);
                     objects[oldName] = renamed;
+                    if (renamed is Procedure { Numbered: { } renamedMembers })
+                    {
+                        foreach (var member in renamedMembers.Values)
+                            member.Name = oldName;
+                    }
                 });
                 return eventType;
             }
