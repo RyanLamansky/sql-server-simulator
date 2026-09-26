@@ -244,7 +244,7 @@ partial class Simulation
 
         if (context.Token is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
-        var definition = $"({context.SourceTextFrom(predicateStart)})";
+        var definition = context.CanonicalDefinitionFrom(predicateStart, predicate: true) ?? $"({context.SourceTextFrom(predicateStart)})";
         context.MoveNextOptional();
 
         if (context.Batch.IsSkipping)
@@ -501,7 +501,7 @@ partial class Simulation
         {
             if (context.Token is not Operator { Character: ')' })
                 throw SimulatedSqlException.SyntaxErrorNear(context);
-            definition = $"({context.SourceTextFrom(expressionStart)})";
+            definition = context.CanonicalDefinitionFrom(expressionStart, predicate: false) ?? $"({context.SourceTextFrom(expressionStart)})";
             context.MoveNextRequired();
         }
         else
@@ -510,7 +510,7 @@ partial class Simulation
             // (the FOR keyword); SourceTextFrom slices to that token, so it
             // captures exactly the value text. Wrap it to mirror the stored
             // parenthesized definition.
-            definition = $"({context.SourceTextFrom(expressionStart)})";
+            definition = context.CanonicalDefinitionFrom(expressionStart, predicate: false) ?? $"({context.SourceTextFrom(expressionStart)})";
         }
         if (context.Token is not ReservedKeyword { Keyword: Keyword.For })
             throw SimulatedSqlException.SyntaxErrorNear(context);

@@ -46,7 +46,7 @@ internal static class DatePartKinds
     /// <c>Storage/SqlType.cs:GetByName</c> so the parser stays
     /// allocation-free in its keyword-resolution hot paths.
     /// </summary>
-    private static DatePartKind? Resolve(string keyword)
+    public static DatePartKind? Resolve(string keyword)
     {
         Span<char> upper = stackalloc char[keyword.Length];
         // SSS005 disabled: inner-length arms run by descending time-unit magnitude

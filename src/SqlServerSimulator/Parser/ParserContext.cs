@@ -627,6 +627,27 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
         this.commandText[startIndex..(this.Token?.StartIndex ?? this.commandText.Length)].TrimEnd();
 
     /// <summary>
+    /// The expression from <paramref name="startIndex"/> to <see cref="Token"/>,
+    /// as <see cref="SourceTextFrom"/> slices it, in the form real stores in a
+    /// CHECK (a <paramref name="predicate"/>), DEFAULT or computed column's
+    /// <c>definition</c>, wrapped in the one parenthesis pair every such
+    /// column adds; null when the expression is outside the grammar
+    /// <see cref="CanonicalDefinition"/> renders.
+    /// </summary>
+    public string? CanonicalDefinitionFrom(int startIndex, bool predicate)
+    {
+        var end = this.Token?.StartIndex ?? this.commandText.Length;
+        var tokens = new List<Token>();
+        var index = startIndex;
+        while (index < end && Tokenizer.NextToken(this.commandText, ref index, this.CurrentDatabase.Collation, this.QuotedIdentifiers, this.CurrentDatabase.CompatibilityLevel) is Token token)
+        {
+            if (token is not (Tokens.Whitespace or Tokens.Comment))
+                tokens.Add(token);
+        }
+        return CanonicalDefinition.Render(tokens, predicate) is { } canonical ? $"({canonical})" : null;
+    }
+
+    /// <summary>
     /// The command-text character just ahead of <paramref name="token"/>, or
     /// <c>'\0'</c> at the start of the text.
     /// </summary>

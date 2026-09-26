@@ -182,14 +182,14 @@ internal sealed class HeapColumn(string name, SqlType type, int? maxLength, bool
     public readonly Expression? Computed = computedExpression;
 
     /// <summary>
-    /// The parenthesized source text of the computed-column expression, as
-    /// written at <c>CREATE TABLE</c> / <c>ALTER TABLE ADD</c> (captured
-    /// verbatim between <c>AS</c> and the end of the expression, wrapped in a
-    /// single paren pair when not already fully parenthesized). Non-null only
-    /// for computed columns; surfaces through <c>sys.computed_columns.definition</c>
-    /// so DacFx / SMO can re-emit the <c>AS (…)</c> body. Captured text rather
-    /// than a re-serialized expression tree — re-parseable, though not
-    /// byte-identical to SQL Server's bracket-normalized form.
+    /// The computed-column expression in SQL Server's canonical form, one
+    /// paren pair around it, as captured at <c>CREATE TABLE</c> /
+    /// <c>ALTER TABLE ADD</c> — or, where the canonical renderer doesn't reach,
+    /// the source text between <c>AS</c> and the end of the expression, wrapped
+    /// in a single paren pair when not already fully parenthesized. Non-null
+    /// only for computed columns; surfaces through
+    /// <c>sys.computed_columns.definition</c> so DacFx / SMO can re-emit the
+    /// <c>AS (…)</c> body.
     /// </summary>
     public readonly string? ComputedDefinition = computedDefinition;
 

@@ -149,7 +149,7 @@ public sealed class HelpProcTests
     public void SpHelpText_CheckAndDefaultConstraints()
     {
         var sim = NewFixture();
-        AreEqual("(amount >= 0)", string.Concat(HelpText(sim, "exec sp_helptext 'CK_amt'")));
+        AreEqual("([amount]>=(0))", string.Concat(HelpText(sim, "exec sp_helptext 'CK_amt'")));
         AreEqual("(newid())", string.Concat(HelpText(sim, "exec sp_helptext 'DF_g'")));
     }
 
@@ -157,8 +157,8 @@ public sealed class HelpProcTests
     public void SpHelpText_ComputedColumn_PositionalAndNamedArguments()
     {
         var sim = NewFixture();
-        AreEqual("(name + '!')", string.Concat(HelpText(sim, "exec sp_helptext 't_full', 'calc'")));
-        AreEqual("(name + '!')",
+        AreEqual("([name]+'!')", string.Concat(HelpText(sim, "exec sp_helptext 't_full', 'calc'")));
+        AreEqual("([name]+'!')",
             string.Concat(HelpText(sim, "exec sp_helptext @objname = 't_full', @columnname = 'calc'")));
     }
 
@@ -479,7 +479,7 @@ public sealed class HelpProcTests
             new object?[]
             {
                 "CHECK on column amount", "CK_amt", "(n/a)", "(n/a)", "Enabled",
-                "Is_For_Replication", "(amount >= 0)",
+                "Is_For_Replication", "([amount]>=(0))",
             },
             sets[1].Rows[0]);
         CollectionAssert.AreEqual(

@@ -145,13 +145,13 @@ public class BacpacLoaderTests
                 .Column("Id", "int")
                 .Column("N", "int")
                 .PrimaryKey("PK_T", "Id")
-                .Default("DF_T_N", "N", "(1)"))
+                .Default("DF_T_N", "N", "((1))"))
             .Build();
 
         var sim = new Simulation();
         sim.ImportBacpac(bacpac, out var diag);
         IsEmpty(diag.Skipped);
-        AreEqual("(1)", sim.ExecuteScalar("SELECT definition FROM sys.default_constraints WHERE name = 'DF_T_N';"));
+        AreEqual("((1))", sim.ExecuteScalar("SELECT definition FROM sys.default_constraints WHERE name = 'DF_T_N';"));
     }
 
     [TestMethod]

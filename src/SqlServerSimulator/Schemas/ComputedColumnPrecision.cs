@@ -90,8 +90,9 @@ internal static class ComputedColumnPrecision
         }
 
         var approximateBuiltIns = ApproximateResultBuiltIns.GetAlternateLookup<ReadOnlySpan<char>>();
-        foreach (var token in tokens)
+        for (var i = 0; i < tokens.Count; i++)
         {
+            var token = tokens[i];
             // A scientific-notation literal is a float in its own right.
             if (token is Numeric numeric && IsApproximate(numeric.Value.Type))
                 return false;
@@ -99,13 +100,15 @@ internal static class ComputedColumnPrecision
                 continue;
 
             // An explicit conversion target or a float-returning call, matched
-            // on the *undelimited* spelling only: a column delimited `[float]`
-            // arrives as a DelimitedIdentifier and reaches the column walk
-            // below instead, where its declared type answers.
-            if (token is UnquotedString
-                && (name.Span.Equals("float", StringComparison.OrdinalIgnoreCase)
-                    || name.Span.Equals("real", StringComparison.OrdinalIgnoreCase)
-                    || approximateBuiltIns.Contains(name.Span)))
+            // on the *undelimited* spelling, or delimited in a conversion's
+            // type position as a stored definition writes it
+            // (`CONVERT([float],…)`): a column delimited `[float]` elsewhere
+            // reaches the column walk below instead, where its declared type
+            // answers.
+            var isApproximateType = name.Span.Equals("float", StringComparison.OrdinalIgnoreCase)
+                || name.Span.Equals("real", StringComparison.OrdinalIgnoreCase);
+            if ((token is UnquotedString && (isApproximateType || approximateBuiltIns.Contains(name.Span)))
+                || (isApproximateType && IsConversionTarget(tokens, i)))
             {
                 return false;
             }
@@ -119,6 +122,14 @@ internal static class ComputedColumnPrecision
 
         return true;
     }
+
+    // The type of `CONVERT(T, …)` / `TRY_CONVERT(T, …)`, or the one after a
+    // CAST's AS.
+    private static bool IsConversionTarget(List<Token> tokens, int index) =>
+        (index >= 1 && tokens[index - 1] is ReservedKeyword { Keyword: Keyword.As })
+        || (index >= 2 && tokens[index - 1] is Operator { Character: '(' }
+            && (tokens[index - 2].Source.Equals("CONVERT", StringComparison.OrdinalIgnoreCase)
+                || tokens[index - 2].Source.Equals("TRY_CONVERT", StringComparison.OrdinalIgnoreCase)));
 
     private static bool IsApproximate(SqlType type) => type == SqlType.Float || type == SqlType.Real;
 }

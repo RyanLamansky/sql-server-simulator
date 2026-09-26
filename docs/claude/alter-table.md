@@ -235,9 +235,9 @@ Two refusals, both naming the table three-part (`db.schema.table`, unlike most o
 
 Three catalog views cover constraint metadata:
 
-- **`sys.check_constraints`** — one row per CHECK constraint, with `is_not_trusted`, `is_system_named`, `parent_column_id` (the attached column's stable `sys.columns.column_id` for inline column-level; `0` for table-level), `uses_database_collation` (1 — real reports 1 for every CHECK, numeric-only predicates included), and `definition` (the predicate's original source syntax, paren-wrapped — see [Definition columns](#definition-columns)).
+- **`sys.check_constraints`** — one row per CHECK constraint, with `is_not_trusted`, `is_system_named`, `parent_column_id` (the attached column's stable `sys.columns.column_id` for inline column-level; `0` for table-level), `uses_database_collation` (1 — real reports 1 for every CHECK, numeric-only predicates included), and `definition` (the predicate in real's canonical form — see [Definition columns](#definition-columns)).
 - **`sys.key_constraints`** — one row per PRIMARY KEY / UNIQUE constraint, with `type` = `PK` / `UQ`, `type_desc` = `PRIMARY_KEY_CONSTRAINT` / `UNIQUE_CONSTRAINT`, and `is_system_named` inferred from the auto-name prefix.
-- **`sys.default_constraints`** — one row per named DEFAULT (inline + ALTER ADD), with `parent_column_id` (the bound column's stable `sys.columns.column_id`), `is_system_named`, and `definition` (the default expression's original source syntax, paren-wrapped — see [Definition columns](#definition-columns)).
+- **`sys.default_constraints`** — one row per named DEFAULT (inline + ALTER ADD), with `parent_column_id` (the bound column's stable `sys.columns.column_id`), `is_system_named`, and `definition` (the default expression in real's canonical form — see [Definition columns](#definition-columns)).
 
 `sys.foreign_keys.is_not_trusted` / `is_disabled` read from `ForeignKey.IsNotTrusted` / `IsDisabled`; `sys.check_constraints.is_not_trusted` / `is_disabled` read from the corresponding `CheckConstraint` flags.
 
@@ -256,19 +256,26 @@ A **DEFAULT** constraint also has no `sys.objects` row here, so only `sys.defaul
 
 ## Definition columns
 
-`sys.check_constraints.definition` and `sys.default_constraints.definition` hold the **original source syntax** of the predicate / default expression, captured at CREATE / ALTER time and wrapped in one paren pair — *not* re-normalized into SQL Server's canonical serialization.
-The capture slices the command text from the expression's first-token `StartIndex` to the lookahead token (`ParserContext.SourceTextFrom`, the same source-span mechanism `OBJECT_DEFINITION` uses for module bodies), so `CHECK (a > 0 and b < 10)` stores `(a > 0 and b < 10)` and `DEFAULT getdate()` stores `(getdate())`.
+`sys.check_constraints.definition`, `sys.default_constraints.definition` and `sys.computed_columns.definition` hold the expression in SQL Server's **canonical form**, rendered at CREATE / ALTER time by `Parser/CanonicalDefinition.cs` from the expression's tokens and wrapped in one paren pair (probed 2026-09-26 against SQL Server 2025).
+The same text reaches every surface that reads it — `INFORMATION_SCHEMA.CHECK_CONSTRAINTS` / `COLUMNS.COLUMN_DEFAULT`, `sp_helptext`, `sp_helpconstraint`, the bacpac round trip.
+The rules the renderer reproduces:
 
-This **deliberately diverges** from real SQL Server, which re-renders into a normalized canonical form (`([a]>(0) AND [b]<(10))`, `IN` desugared to reversed OR-of-equalities, `BETWEEN` to AND, multiplicative vs additive parenthesization rules, etc.).
-Matching that byte-for-byte across the full CHECK / DEFAULT expression grammar is a rabbit hole (and needs a per-function canonical-name registry), so the simulator retains the user's syntax instead — readable, round-trip-stable for the simulator's own re-parse, and sufficient for the apps that read these columns.
-(The narrower `sys.indexes.filter_definition` *is* byte-exact normalized — its filtered-predicate grammar is small enough to render canonically; see [`indexes.md`](indexes.md#filtered-index-filter_definition).
-The two columns intentionally take different approaches: small fixed grammar → canonical, open-ended grammar → original syntax.)
-A user-written paren wrapping the expression yields a doubled pair (`DEFAULT (0)` → `((0))`), matching the user's text plus the convention's outer pair.
+- names bracketed as written (`A` → `[A]`, `dbo.f` → `[dbo].[f]`); built-in names lowercased, except the few real keeps in a case of its own (`Trim`, `Compress`, `Decompress`, `Date_Bucket`, `Crypt_Gen_Random`) and `CONVERT` / `TRY_CAST` / `TRY_CONVERT`;
+- numeric literals parenthesized — an integer by value (`0002` → `(2)`), a decimal with its written scale and a scale-0 one with a trailing point (`1.` → `(1.)`, `2147483648` → `(2147483648.)`), a float as `%.16e` with a three-digit exponent, money as `$` plus four places; string, binary and `NULL` bare;
+- a minus takes a whole multiplicative term (`-a*b` is `-(a*b)`) and folds into a numeric literal, rendering ` -x` otherwise; `+` vanishes; `~` binds tightest;
+- written parentheses dropped, and put back by precedence: an arithmetic operand binding no tighter than its operator is parenthesized on either side (`a+b-c` → `([a]+[b])-[c]`), a comparison binds at the additive level, a negation is always parenthesized as an operand;
+- `AND` / `OR` flatten a left operand of their own kind and parenthesize a right one; an `OR` under an `AND` is parenthesized;
+- `IN` becomes an OR chain over its list **reversed**, `BETWEEN` a `>=` / `<=` pair, `NOT` over either parenthesizing the chain; `!=` / `!<` / `!>` become `<>` / `>=` / `<=`; `LIKE` stays lowercase and an `ESCAPE` leaves a trailing space;
+- `CAST` → `CONVERT([type],x)`, `TRY_CONVERT` without a style → `TRY_CAST(x AS [type])`, the type name folded to its system name (`integer` → `int`, `rowversion` → `timestamp`, `national char varying` → `nvarchar`); `IIF` → `CASE`; a `CASE` with no `ELSE` leaves two spaces before `end`; `YEAR` / `MONTH` / `DAY` → `datepart`, and a date part's alias its full name; `CURRENT_TIMESTAMP` → `getdate()`, `CURRENT_USER` / `SESSION_USER` / `USER` → `user_name()`, `SYSTEM_USER` → `suser_sname()`; `<<` / `>>` → `left_shift` / `right_shift`;
+- `COLLATE` parenthesizes its operand, `AT TIME ZONE` its whole expression.
+
+A shape outside that grammar — an ODBC `{fn …}` escape, `NEXT VALUE FOR`, an xml or spatial method call — keeps its **source text**, wrapped in one paren pair (a computed column's body once, not twice), so the column is never empty.
+The filtered-index `sys.indexes.filter_definition` has its own, narrower renderer (see [`indexes.md`](indexes.md#filtered-index-filter_definition)).
+The text scans that read a stored definition — the determinism and precision checks behind persisted and indexed computed columns — accept both forms.
 
 ## Fidelity gaps
 
-- **`definition` columns hold original syntax, not SQL Server's canonical form** — see [Definition columns](#definition-columns).
-  A schema-diff tool comparing the simulator's `([a]>(0))`-equivalent against a live server's normalized text will see a cosmetic difference even when the predicate is identical.
+- **An ODBC escape, `NEXT VALUE FOR` or a method call in a definition keeps its source text** rather than real's canonical rendering — see [Definition columns](#definition-columns).
 - **`KeyConstraint.IsSystemNamed` is inferred from the name prefix** — `PK__` / `UQ__` → system-named.
   Custom names matching the prefix would report `is_system_named = true` incorrectly.
   Real SQL Server tracks the flag explicitly; the simulator inherits a no-flag pre-bundle storage layout and infers rather than adding a column-mutating change.

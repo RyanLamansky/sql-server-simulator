@@ -146,6 +146,9 @@ internal static partial class ModuleDeterminism
         };
     }
 
+    // A type name as written or as a stored definition brackets it.
+    private static ReadOnlySpan<char> TypeNameText(Token token) => token is Name name ? name.Span : token.Source;
+
     /// <summary>The family a stored column / parameter type falls on.</summary>
     private static ConversionFamily FamilyOfSqlType(SqlType type) =>
         type.Category switch
@@ -249,15 +252,26 @@ internal static partial class ModuleDeterminism
             var asIndex = separators[^1];
             if (asIndex + 1 >= close)
                 return false;
-            conversion = new(FamilyOfTypeName(tokens[asIndex + 1].Source), index + 2, asIndex, -1);
+            conversion = new(FamilyOfTypeName(TypeNameText(tokens[asIndex + 1])), index + 2, asIndex, -1);
             return true;
         }
 
         var style = -1;
         var sourceTo = separators.Count > 1 ? separators[1] : close;
-        if (separators.Count > 1 && separators[1] + 2 == close && tokens[separators[1] + 1] is Numeric { Value.Type: Int32SqlType } styleLiteral)
-            style = styleLiteral.Value.AsInt32;
-        conversion = new(FamilyOfTypeName(tokens[index + 2].Source), separators[0] + 1, sourceTo, style);
+        if (separators.Count > 1)
+        {
+            // A stored definition writes the style parenthesized, `(112)`.
+            var styleFrom = separators[1] + 1;
+            var styleTo = close;
+            while (styleTo - styleFrom > 2 && tokens[styleFrom] is Operator { Character: '(' } && tokens[styleTo - 1] is Operator { Character: ')' })
+            {
+                styleFrom++;
+                styleTo--;
+            }
+            if (styleTo == styleFrom + 1 && tokens[styleFrom] is Numeric { Value.Type: Int32SqlType } styleLiteral)
+                style = styleLiteral.Value.AsInt32;
+        }
+        conversion = new(FamilyOfTypeName(TypeNameText(tokens[index + 2])), separators[0] + 1, sourceTo, style);
         return true;
     }
 

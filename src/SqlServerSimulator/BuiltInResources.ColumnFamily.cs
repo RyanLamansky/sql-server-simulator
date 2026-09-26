@@ -118,9 +118,9 @@ internal static partial class BuiltInResources
         // surfaces the full sys.columns shape plus definition / is_persisted /
         // uses_database_collation; the simulator ships the load-bearing subset
         // SMO's CREATE-scripting column query LEFT JOINs (object_id / column_id
-        // / definition / is_persisted). definition carries the captured
-        // parenthesized source text of the AS (…) body (HeapColumn.ComputedDefinition),
-        // so DacFx / SMO re-emit a re-parseable computed-column DDL.
+        // / definition / is_persisted). definition carries the AS (…) body in
+        // its stored canonical form (HeapColumn.ComputedDefinition), so DacFx /
+        // SMO re-emit a re-parseable computed-column DDL.
         // See docs/claude/catalog-views.md.
         Sys("computed_columns",
         [

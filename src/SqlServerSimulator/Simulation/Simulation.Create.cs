@@ -1206,7 +1206,7 @@ partial class Simulation
                 context.NextValueForRejection = savedComputedRejection;
             }
 
-            var computedDefinition = EnsureParenthesized(context.SourceTextFrom(computedStart));
+            var computedDefinition = context.CanonicalDefinitionFrom(computedStart, predicate: false) ?? EnsureParenthesized(context.SourceTextFrom(computedStart));
             var (persisted, computedNullable) = ParseComputedSuffix(context);
             var computedIndex = heapColumns.Count;
             pendingComputed.Add((computedIndex, columnName.Value, computed, persisted, computedNullable, computedDefinition));
@@ -1412,7 +1412,7 @@ partial class Simulation
                     context.MoveNextRequired();
                     var defaultStart = context.Token.StartIndex;
                     defaultExpression = ParseDefaultClauseExpression(context);
-                    defaultDefinition = $"({context.SourceTextFrom(defaultStart)})";
+                    defaultDefinition = context.CanonicalDefinitionFrom(defaultStart, predicate: false) ?? $"({context.SourceTextFrom(defaultStart)})";
                     continue;
                 case ReservedKeyword { Keyword: Keyword.Default }:
                     throw SimulatedSqlException.MultipleColumnConstraints("DEFAULT", columnName.Value, tableName);
@@ -1871,11 +1871,8 @@ partial class Simulation
 
         if (context.Token is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
-        // Token sits on the closing `)`, so capture the original predicate text
-        // up to it (sys.check_constraints.definition holds the user's syntax,
-        // wrapped in one paren pair — the simulator doesn't re-normalize to SQL
-        // Server's canonical form).
-        var definition = $"({context.SourceTextFrom(predicateStart)})";
+        // Token sits on the closing `)`, so capture the predicate up to it.
+        var definition = context.CanonicalDefinitionFrom(predicateStart, predicate: true) ?? $"({context.SourceTextFrom(predicateStart)})";
         // Optional advance: CREATE TABLE always has a `)` or constraint after
         // a CHECK predicate; ALTER TABLE ADD COLUMN's inline CHECK may end
         // the statement.

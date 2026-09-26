@@ -77,11 +77,11 @@ internal sealed class CheckConstraint(string name, BooleanExpression predicate, 
 
     /// <summary>
     /// Text form of <see cref="Predicate"/> for
-    /// <c>sys.check_constraints.definition</c> — the predicate's original source
-    /// syntax wrapped in one paren pair, captured at CREATE / ALTER time via
-    /// <c>ParserContext.SourceTextFrom</c>. Deliberately not re-normalized into
-    /// SQL Server's canonical <c>([col]&gt;(0))</c> form (see the alter-table doc's
-    /// Definition columns section).
+    /// <c>sys.check_constraints.definition</c> — the predicate in SQL Server's
+    /// canonical <c>([col]&gt;(0))</c> form, captured at CREATE / ALTER time via
+    /// <c>ParserContext.CanonicalDefinitionFrom</c>, or its source text wrapped
+    /// in one paren pair where that renderer doesn't reach (see the alter-table
+    /// doc's Definition columns section).
     /// </summary>
     public string? Definition;
 }

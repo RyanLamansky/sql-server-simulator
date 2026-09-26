@@ -204,14 +204,13 @@ public sealed class ComputedColumnTests
                 """));
 
     /// <summary>
-    /// sys.computed_columns.definition captures the parenthesized source text of
-    /// the AS (…) body — so DacFx / SMO re-emit a re-parseable computed column.
-    /// The captured text is wrapped in a single paren pair: an unparenthesized
-    /// body gains one, an already-parenthesized body is not double-wrapped.
-    /// is_persisted reflects the PERSISTED marker.
+    /// sys.computed_columns.definition holds the AS body in SQL Server's
+    /// canonical form, in one parenthesis pair however many were written, so
+    /// DacFx / SMO re-emit a re-parseable computed column; is_persisted
+    /// reflects the PERSISTED marker.
     /// </summary>
     [TestMethod]
-    public void ComputedColumn_Definition_CapturesParenthesizedSourceText()
+    public void ComputedColumn_Definition_HoldsTheCanonicalForm()
     {
         var sim = new Simulation();
         _ = sim.ExecuteNonQuery(
@@ -219,9 +218,9 @@ public sealed class ComputedColumnTests
             "s1 as a + b, " +
             "s2 as (a + b) persisted, " +
             "s3 as (concat(a, 'x')))");
-        Assert.AreEqual("(a + b)", sim.ExecuteScalar("select definition from sys.computed_columns where name = 's1'"));
-        Assert.AreEqual("(a + b)", sim.ExecuteScalar("select definition from sys.computed_columns where name = 's2'"));
-        Assert.AreEqual("(concat(a, 'x'))", sim.ExecuteScalar("select definition from sys.computed_columns where name = 's3'"));
+        Assert.AreEqual("([a]+[b])", sim.ExecuteScalar("select definition from sys.computed_columns where name = 's1'"));
+        Assert.AreEqual("([a]+[b])", sim.ExecuteScalar("select definition from sys.computed_columns where name = 's2'"));
+        Assert.AreEqual("(concat([a],'x'))", sim.ExecuteScalar("select definition from sys.computed_columns where name = 's3'"));
         Assert.IsTrue((bool)sim.ExecuteScalar("select is_persisted from sys.computed_columns where name = 's2'")!);
         Assert.IsFalse((bool)sim.ExecuteScalar("select is_persisted from sys.computed_columns where name = 's1'")!);
     }
@@ -238,7 +237,7 @@ public sealed class ComputedColumnTests
         var sim = new Simulation();
         _ = sim.ExecuteNonQuery("create table dbo.t (a int, b int)");
         _ = sim.ExecuteNonQuery("alter table dbo.t add c as (a * b)");
-        Assert.AreEqual("(a * b)", sim.ExecuteScalar("select definition from sys.computed_columns where name = 'c'"));
+        Assert.AreEqual("([a]*[b])", sim.ExecuteScalar("select definition from sys.computed_columns where name = 'c'"));
     }
 
     // --- CHECK constraints over computed columns ---
