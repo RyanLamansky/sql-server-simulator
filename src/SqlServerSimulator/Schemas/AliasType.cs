@@ -37,7 +37,8 @@ internal sealed class AliasType(
     int? declaredScale,
     bool isNullable,
     int userTypeId,
-    DateTime createDate)
+    DateTime createDate,
+    bool spelledNumeric)
 {
     public readonly Schema Schema = schema;
 
@@ -97,4 +98,10 @@ internal sealed class AliasType(
     public readonly int UserTypeId = userTypeId;
 
     public readonly DateTime CreateDate = createDate;
+
+    /// <summary>Declared over <c>numeric</c> rather than <c>decimal</c>; see <see cref="HeapColumn.SpelledNumeric"/>.</summary>
+    public readonly bool SpelledNumeric = spelledNumeric;
+
+    /// <summary>The base type's <c>system_type_id</c>, <c>numeric</c>'s where the alias spelled it.</summary>
+    public byte SystemTypeId => this.SpelledNumeric && this.UnderlyingType is DecimalSqlType ? HeapColumn.NumericTypeId : this.UnderlyingType.SystemTypeId;
 }

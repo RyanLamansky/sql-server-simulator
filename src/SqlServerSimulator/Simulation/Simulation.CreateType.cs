@@ -197,16 +197,25 @@ partial class Simulation
     /// </remarks>
     private static bool TryParseCreateAliasType(ParserContext context, Schema schema, MultiPartName typeName)
     {
-        // Cursor on FROM; advance to the base-type name token. The base may
-        // be a 1- or 2-part dotted name (e.g. `[sys].[int]`), matching real
-        // SQL Server's grammar — but only the leaf is used for resolution,
-        // since alias-of-alias isn't legal (probe-confirmed: Msg 222).
+        // Cursor on FROM; advance to the base-type name. The base is a
+        // built-in, optionally qualified by sys; a multi-word synonym folds to
+        // its canonical name. A base real refuses is refused when the
+        // statement runs, so earlier statements of the batch run, and xml,
+        // json and vector are
+        // refused by name whatever their arguments say (probed 2026-09-26
+        // against SQL Server 2025).
         context.MoveNextRequired();
-        if (context.Token is not Name)
-            throw SimulatedSqlException.SyntaxErrorNear(context);
-        _ = BatchContext.ParseObjectName(context);
-        if (context.Token is not Name baseLeafToken)
-            throw SimulatedSqlException.SyntaxErrorNear(context);
+        var (baseName, baseLeafToken) = TypeNameSynonyms.ReadTypeName(context);
+        var refusal = baseName.Count == 1
+            || (baseName.Count == 2 && string.Equals(baseName.ImmediateQualifier, "sys", StringComparison.OrdinalIgnoreCase))
+            ? null
+            : SimulatedSqlException.InvalidBaseTypeForAlias(baseName.ToString());
+        if (refusal is null && string.Equals(baseName.Leaf, "json", StringComparison.OrdinalIgnoreCase))
+            refusal = SimulatedSqlException.AliasTypeFromJson();
+        if (refusal is null && string.Equals(baseName.Leaf, "vector", StringComparison.OrdinalIgnoreCase))
+            refusal = SimulatedSqlException.AliasTypeFromVector();
+        if (refusal is null && string.Equals(baseName.Leaf, "xml", StringComparison.OrdinalIgnoreCase))
+            refusal = SimulatedSqlException.AliasTypeFromXml();
 
         // Optional (N[, S]) length / scale + trailing [NULL | NOT NULL] —
         // both pieces are optional, and either can land at end-of-batch
@@ -215,7 +224,12 @@ partial class Simulation
         // cursor walk off the end without raising.
         int? declaredMaxLength = null;
         int? declaredScale = null;
-        if (context.GetNextOptional() is Operator { Character: '(' })
+        if (context.GetNextOptional() is Operator { Character: '(' } && refusal is not null)
+        {
+            Selection.SkipBalancedParens(context);
+            context.MoveNextOptional();
+        }
+        else if (context.Token is Operator { Character: '(' })
         {
             var lengthToken = context.GetNextRequired();
             declaredMaxLength = lengthToken is Numeric { Value: { IsNull: false } numericValue }
@@ -254,33 +268,41 @@ partial class Simulation
                 break;
         }
 
-        // Resolve the base type. Real SQL Server's Msg 222 only fires when the
-        // leaf isn't a recognized built-in; the simulator's GetByName raises a
-        // different message family for invalid args. Catch the unknown-name
-        // case and re-throw as Msg 222 verbatim.
-        SqlType resolvedType;
-        int? resolvedMaxLength;
-        try
+        // Resolve the base type. GetByName reports an unknown name in its own
+        // message families; CREATE TYPE FROM names it in Msg 222 instead.
+        SqlType resolvedType = SqlType.Int32;
+        int? resolvedMaxLength = null;
+        if (refusal is null)
         {
-            (resolvedType, resolvedMaxLength) = SqlType.GetByName(
-                baseLeafToken, declaredMaxLength, declaredScale,
-                index: 0, TypeSpecSite.Scalar, columnName: typeName.Leaf);
+            try
+            {
+                (resolvedType, resolvedMaxLength) = SqlType.GetByName(
+                    baseLeafToken, declaredMaxLength, declaredScale,
+                    index: 0, TypeSpecSite.Scalar, columnName: typeName.Leaf);
+            }
+            catch (SimulatedSqlException ex) when (ex.Number == 2750)
+            {
+                throw SimulatedSqlException.FollowedByUdtParametersInvalid(ex, typeName.Leaf);
+            }
+            catch (SimulatedSqlException ex) when (ex.Number is 2715 or 243 or 102)
+            {
+                refusal = SimulatedSqlException.InvalidBaseTypeForAlias(baseName.ToString());
+            }
         }
-        catch (SimulatedSqlException ex) when (ex.Number == 2750)
+
+        // The CLR system types, rowversion and sysname (itself a system
+        // alias) resolve but can't be an alias's base; the message names the
+        // type by its canonical name.
+        if (refusal is null && resolvedType is HierarchyIdSqlType or GeographySqlType or GeometrySqlType or RowVersionSqlType or SystemNameSqlType)
         {
-            throw SimulatedSqlException.FollowedByUdtParametersInvalid(ex, typeName.Leaf);
-        }
-        catch (SimulatedSqlException ex) when (ex.Number is 2715 or 243 or 102)
-        {
-            // GetByName routes unknown names through CannotFindDataType /
-            // CannotFindDataTypeInCast / SyntaxErrorNear; for CREATE TYPE
-            // FROM the canonical message is Msg 222 regardless of which path
-            // the inner lookup took.
-            throw SimulatedSqlException.InvalidBaseTypeForAlias(baseLeafToken.ToString());
+            refusal = SimulatedSqlException.InvalidBaseTypeForAlias(
+                baseName.Count == 2 ? $"{baseName.ImmediateQualifier}.{resolvedType.SqlServerName}" : resolvedType.SqlServerName);
         }
 
         if (context.Batch.IsSkipping)
             return true;
+        if (refusal is not null)
+            throw refusal;
 
         if (schema.TableTypes.ContainsKey(typeName.Leaf) || schema.AliasTypes.ContainsKey(typeName.Leaf))
             throw SimulatedSqlException.TypeAlreadyExists(typeName.ToString());
@@ -294,7 +316,8 @@ partial class Simulation
             declaredScale: declaredScale,
             isNullable: isNullable,
             userTypeId: context.CurrentDatabase.AllocateUserTypeId(),
-            createDate: context.Batch.CurrentStatement.UtcNow);
+            createDate: context.Batch.CurrentStatement.UtcNow,
+            spelledNumeric: SqlType.IsNumericSpelling(baseName, null));
         RecordSlotUndo<AliasType>(context, schema.AliasTypes, typeName.Leaf, null);
         RecordDdlEvent(context, "CREATE_TYPE", schema.Name, typeName.Leaf, "TYPE");
         return true;

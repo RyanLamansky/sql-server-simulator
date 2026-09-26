@@ -815,12 +815,35 @@ partial class SimulatedSqlException
 
     /// <summary>
     /// Mimics SQL Server error 222: <c>CREATE TYPE name FROM &lt;basetype&gt;</c>
-    /// referenced a base type that doesn't resolve to a built-in. Probe-
-    /// confirmed verbatim wording against SQL Server 2025 — the base-type name
-    /// appears in double-quotes inside the message text.
+    /// referenced a base type that doesn't resolve to a built-in or can't be
+    /// an alias's base. Probe-confirmed verbatim wording against SQL Server
+    /// 2025 — the base-type name appears in double-quotes inside the message
+    /// text. Like the other CREATE TYPE refusals, it aborts as under
+    /// <c>SET XACT_ABORT ON</c> (probed 2026-09-26).
     /// </summary>
     internal static SimulatedSqlException InvalidBaseTypeForAlias(string baseTypeName) =>
-        new($"The base type \"{baseTypeName}\" is not a valid base type for the alias data type.", 222, 16, 1);
+        new($"The base type \"{baseTypeName}\" is not a valid base type for the alias data type.", 222, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>
+    /// SQL Server error 15226: <c>CREATE TYPE … FROM xml</c>, with or without
+    /// a schema collection (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException AliasTypeFromXml() =>
+        new("Cannot create alias types from an XML datatype.", 15226, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>
+    /// SQL Server error 13657: <c>CREATE TYPE … FROM json</c> (probed
+    /// 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException AliasTypeFromJson() =>
+        new("Cannot create alias types from a JSON data type.", 13657, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>
+    /// SQL Server error 42212: <c>CREATE TYPE … FROM vector(n)</c> (probed
+    /// 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException AliasTypeFromVector() =>
+        new("Cannot create alias types from a vector datatype.", 42212, 16, 1) { AbortsAsUnderXactAbort = true };
 
     /// <summary>
     /// Alias-type variant of Msg 2716: an alias-typed column / parameter /

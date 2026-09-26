@@ -480,7 +480,7 @@ partial class Simulation
         return
         [
             SqlValue.FromSystemName(alias.Name),
-            SqlValue.FromSystemName(HelpTypeName(alias.UnderlyingType)),
+            SqlValue.FromSystemName(alias.SpelledNumeric ? "numeric" : HelpTypeName(alias.UnderlyingType)),
             SqlValue.FromInt16((short)maxLength),
             SqlValue.FromInt32(precision),
             scale is { } s ? SqlValue.FromInt32(s) : SqlValue.Null(SqlType.Int32),

@@ -801,7 +801,7 @@ internal static partial class BuiltInResources
                     new HeapColumn(alias.Name, alias.UnderlyingType, alias.DeclaredMaxLength, alias.IsNullable));
                 yield return [
                     SqlValue.FromSystemName(alias.Name),
-                    SqlValue.FromByte(alias.UnderlyingType.SystemTypeId),
+                    SqlValue.FromByte(alias.SystemTypeId),
                     SqlValue.FromInt32(alias.UserTypeId),
                     schemaId,
                     trueBit,

@@ -257,6 +257,7 @@ partial class Simulation
 
         var spelledNumeric = IsNumericTypeWord(context.Token);
         var (paramType, declaredMaxLength, aliasType) = ParseProcedureParameterType(context, ordinal);
+        spelledNumeric = aliasType?.SpelledNumeric ?? spelledNumeric;
 
         Expression? defaultExpression = null;
         if (context.Token is Operator { Character: '=' })

@@ -46,14 +46,18 @@ A length parameter at an alias-usage site (`c [dbo].[Name](100)`) raises **Msg 2
 | Msg | When |
 |---|---|
 | 219 | Duplicate type name (alias-vs-alias or alias-vs-table-type in the same schema). |
-| 222 | `The base type "X" is not a valid base type for the alias data type.` — also raised on alias-of-alias attempts (probe-confirmed). |
+| 222 | The base isn't a built-in (an alias of an alias, an unknown name, any qualifier but `sys`, named as written) or is one of the built-ins real refuses — `hierarchyid`, `geography`, `geometry`, `rowversion` (named `timestamp`) and `sysname`, named canonically. |
+| 15226 / 13657 / 42212 | An `xml` (with or without a schema collection), `json` or `vector` base, refused by name before its arguments are read. |
 | 2716 St 3 | Length / precision / scale specified at the alias-usage site. |
 | 218 | `DROP TYPE` on missing alias without `IF EXISTS`. |
+
+The base-type refusals are raised when the statement runs, not while the batch compiles, and abort as under `SET XACT_ABORT ON` (probed 2026-09-26 against SQL Server 2025): earlier statements of the batch have run, a `TRY` catches the error with the transaction doomed, and uncaught it rolls the transaction back and ends the batch.
+The base reads through the same multi-word synonym fold as every other type site (`national char varying(3)`, `double precision`), and an alias over `numeric` keeps that spelling everywhere a `numeric` column does — `sys.types.system_type_id` 108, `TYPE_NAME`, `sp_help`, and `DATA_TYPE` in `INFORMATION_SCHEMA.COLUMNS` / `PARAMETERS` / `ROUTINES` / `DOMAINS`.
 
 ## `sys.types` rows
 
 Alias rows ship via `BuiltInResources.cs::EnumerateSysTypes`:
-- `system_type_id` from the underlying built-in (e.g. 231 for nvarchar-backed, 56 for int-backed)
+- `system_type_id` from the underlying built-in (e.g. 231 for nvarchar-backed, 56 for int-backed, 108 for one declared over `numeric`)
 - `user_type_id` from the alias's per-database allocation (≥ 256)
 - `schema_id` from the owning schema
 - `is_user_defined = 1`
@@ -74,6 +78,7 @@ Real treats the alias as part of an expression's type, so a projection carries i
 ## Known gaps
 
 - **Alias-type `max_length` not emitted in `sys.types`** — gap from the catalog view's shipped subset.
-- **Alias-of-alias not modeled** — `CREATE TYPE T2 FROM T1` where T1 is an alias raises Msg 222 (matches probe behavior).
+- **`vector`'s own argument check** — real validates `vector(n, base)`'s arguments before refusing the alias (`float16` is Msg 195); the simulator refuses by name first.
+- **`DOMAIN_DEFAULT`** in `INFORMATION_SCHEMA.DOMAINS` is always NULL: it names a default bound with `sp_bindefault`, and `CREATE DEFAULT` / `sp_bindefault` aren't built yet.
 
 See [`table-valued-parameters.md`](table-valued-parameters.md) for the parallel `CREATE TYPE … AS TABLE` shape (table types share the namespace + collision check).

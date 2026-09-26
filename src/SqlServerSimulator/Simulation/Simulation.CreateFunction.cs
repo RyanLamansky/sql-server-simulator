@@ -323,6 +323,7 @@ partial class Simulation
     {
         var returnSpelledNumeric = IsNumericTypeWord(context.Token);
         var returnType = ParseFunctionReturnType(context, ordinal: 0, out var returnAliasType);
+        returnSpelledNumeric = returnAliasType?.SpelledNumeric ?? returnSpelledNumeric;
 
         // Optional WITH option [, option …] clause. RETURNS NULL ON NULL INPUT
         // is the only option that affects runtime semantics (NULL-propagation
@@ -808,6 +809,7 @@ partial class Simulation
 
         var spelledNumeric = IsNumericTypeWord(context.Token);
         var paramType = ParseFunctionReturnType(context, ordinal, out var aliasType);
+        spelledNumeric = aliasType?.SpelledNumeric ?? spelledNumeric;
 
         Expression? defaultExpression = null;
         if (context.Token is Operator { Character: '=' })

@@ -119,6 +119,7 @@ partial class Simulation
 
                 spelledNumeric = IsNumericTypeWord(context.Token);
                 (declaredType, declaredMaxLength, xmlSchemaCollection) = ParseDeclareTypeSpec(context, variableName, out aliasType);
+                spelledNumeric = aliasType?.SpelledNumeric ?? spelledNumeric;
             }
             catch (SimulatedSqlException missingType) when (missingType.Number is 2715 or 2717 or 2750 && context.Batch.CreateTimeBindErrors is { } bindErrors)
             {

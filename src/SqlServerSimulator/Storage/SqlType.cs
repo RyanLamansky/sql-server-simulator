@@ -301,6 +301,15 @@ internal abstract partial class SqlType
         type.Category == SqlTypeCategory.String && type is not (XmlSqlType or SpatialSqlType);
 
     /// <summary>
+    /// Whether a written type name spells <c>numeric</c> rather than
+    /// <c>decimal</c> — the one pair of names that share a type here but that
+    /// the catalog tells apart (<see cref="HeapColumn.SpelledNumeric"/>). An
+    /// alias type carries the spelling of its own base.
+    /// </summary>
+    public static bool IsNumericSpelling(Parser.MultiPartName typeName, Schemas.AliasType? alias) =>
+        alias?.SpelledNumeric ?? string.Equals(typeName.Leaf, "numeric", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
     /// True for the Unicode half of the string family (<c>nvarchar</c> /
     /// <c>nchar</c> / <c>ntext</c> / <c>sysname</c>) — the types whose storage
     /// is UTF-16 and so carries no code page. Its complement is the
@@ -308,15 +317,6 @@ internal abstract partial class SqlType
     /// materialized without one; that split decides whether an unresolved
     /// collation may propagate or has to be reported where it arises.
     /// </summary>
-    /// <summary>
-    /// Whether a written type name spells <c>numeric</c> rather than
-    /// <c>decimal</c> — the one pair of names that share a type here but that
-    /// the catalog tells apart (<see cref="HeapColumn.SpelledNumeric"/>). An
-    /// alias type reports its own name, so it never counts.
-    /// </summary>
-    public static bool IsNumericSpelling(Parser.MultiPartName typeName, bool alias) =>
-        !alias && string.Equals(typeName.Leaf, "numeric", StringComparison.OrdinalIgnoreCase);
-
     public static bool IsNationalStringCategory(SqlType type) =>
         type is NVarcharSqlType or NCharSqlType or SystemNameSqlType || type == NText;
 

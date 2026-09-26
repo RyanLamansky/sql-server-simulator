@@ -905,7 +905,7 @@ internal sealed partial class Selection
     /// payload's exact shape is irrelevant (e.g. <c>INDEX(IX_foo(c1, c2))</c>,
     /// <c>OPTIMIZE FOR (@p UNKNOWN, @q = 5)</c>).
     /// </summary>
-    private static void SkipBalancedParens(ParserContext context)
+    internal static void SkipBalancedParens(ParserContext context)
     {
         var depth = 1;
         while (depth > 0)

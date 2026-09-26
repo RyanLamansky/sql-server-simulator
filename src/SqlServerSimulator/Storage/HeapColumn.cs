@@ -123,7 +123,7 @@ internal sealed class HeapColumn(string name, SqlType type, int? maxLength, bool
     /// <summary>The column's type name as the catalog spells it.</summary>
     public string TypeName => this.SpelledNumeric && this.Type is DecimalSqlType ? "numeric" : this.Type.SqlServerName;
 
-    private const byte NumericTypeId = 108;
+    internal const byte NumericTypeId = 108;
 
     /// <summary>
     /// True when the column was declared or altered <c>SPARSE</c>. Real trades

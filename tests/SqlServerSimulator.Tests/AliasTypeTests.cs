@@ -415,4 +415,77 @@ public class AliasTypeTests
             select isnull(user_type_name, '-') from sys.dm_exec_describe_first_result_set(N'declare @v phone; select {expression.Replace("'", "''", StringComparison.Ordinal)} from t', null, 0)
             """));
     }
+
+    /// <summary>
+    /// The bases real refuses, each named as real names it (probed 2026-09-26
+    /// against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("hierarchyid", 222, "The base type \"hierarchyid\" is not a valid base type for the alias data type.")]
+    [DataRow("rowversion", 222, "The base type \"timestamp\" is not a valid base type for the alias data type.")]
+    [DataRow("sysname", 222, "The base type \"sysname\" is not a valid base type for the alias data type.")]
+    [DataRow("sys.geography", 222, "The base type \"sys.geography\" is not a valid base type for the alias data type.")]
+    [DataRow("dbo.int", 222, "The base type \"dbo.int\" is not a valid base type for the alias data type.")]
+    [DataRow("xml(content dbo.nope)", 15226, "Cannot create alias types from an XML datatype.")]
+    [DataRow("json", 13657, "Cannot create alias types from a JSON data type.")]
+    [DataRow("vector(3)", 42212, "Cannot create alias types from a vector datatype.")]
+    public void RefusedBase_RaisesRealsError(string baseType, int number, string message)
+        => new Simulation().AssertSqlError($"create type t from {baseType}", number, message);
+
+    [TestMethod]
+    [DataRow("national char varying(3)", "nvarchar3")]
+    [DataRow("double precision", "float53")]
+    [DataRow("char varying(4)", "varchar4")]
+    [DataRow("sys.int", "int10")]
+    [DataRow("numeric(7, 2)", "numeric7")]
+    public void MultiWordAndQualifiedBases_Resolve(string baseType, string expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar($"""
+            create type t from {baseType};
+            select concat(DATA_TYPE, coalesce(CHARACTER_MAXIMUM_LENGTH, NUMERIC_PRECISION)) from INFORMATION_SCHEMA.DOMAINS
+            """));
+
+    /// <summary>
+    /// A refused base is raised when the statement runs, as under
+    /// <c>SET XACT_ABORT ON</c>: earlier statements have run, a TRY catches it
+    /// with the transaction doomed, and uncaught it rolls the transaction back
+    /// and ends the batch.
+    /// </summary>
+    [TestMethod]
+    public void RefusedBase_AbortsAsUnderXactAbort()
+    {
+        var simulation = new Simulation();
+        using var connection = simulation.CreateOpenConnection();
+        AreEqual("-1", Convert.ToString(connection.CreateCommand("""
+            begin tran;
+            begin try create type t from geometry end try begin catch select xact_state(); rollback end catch
+            """).ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture));
+        _ = Throws<SimulatedSqlException>(() => connection.CreateCommand("begin tran; create type t0 from int; create type t from geometry; select 1").ExecuteNonQuery());
+        AreEqual(0, connection.CreateCommand("select @@trancount + (select count(*) from sys.types where name = 't0')").ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void NumericAlias_KeepsItsSpelling()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches("create type nu from numeric(7, 2)", "create table t (a nu)");
+        AreEqual("108|numeric|numeric|numeric", simulation.ExecuteScalar("""
+            select concat((select system_type_id from sys.types where name = 'nu'), '|',
+                type_name((select system_type_id from sys.columns where object_id = object_id('t'))), '|',
+                (select DATA_TYPE from INFORMATION_SCHEMA.COLUMNS where TABLE_NAME = 't'), '|',
+                (select DATA_TYPE from INFORMATION_SCHEMA.DOMAINS))
+            """));
+    }
+
+    [TestMethod]
+    public void Domains_ListAliasAndTableTypesInCreationOrder()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches("create schema s", "create type b from int; create type s.a as table (x int); create type c from varchar(5)");
+        using var reader = simulation.ExecuteReader("select * from INFORMATION_SCHEMA.DOMAINS");
+        AreEqual(17, reader.FieldCount);
+        var rows = new List<string>();
+        while (reader.Read())
+            rows.Add($"{reader.GetString(1)}.{reader.GetString(2)}:{reader.GetString(3)}");
+        AreEqual("dbo.b:int,s.a:table type,dbo.c:varchar", string.Join(",", rows));
+    }
 }

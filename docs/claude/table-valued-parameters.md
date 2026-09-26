@@ -157,7 +157,7 @@ The structured path routes through the constraint-enforcing insert rather than a
 - **`sys.columns`**: extended to project columns through `type_table_object_id` (probe G3 join shape works end-to-end). is_identity / is_computed inherit from the column definition.
 - **`sys.parameters`**: extended with `is_readonly` (true for TVP parameters, false otherwise).
   TVP rows surface `system_type_id = 243` and the TVP's `user_type_id` instead of the placeholder `Int32` type.
-- **`INFORMATION_SCHEMA.DOMAINS`**: ships with one row per user-defined table type; `data_type` is the literal `'table type'` (probe G6).
+- **`INFORMATION_SCHEMA.DOMAINS`**: one row per table type, interleaved with the alias types in `user_type_id` order; `DATA_TYPE` is the literal `'table type'` and every facet column NULL.
 - **`sys.objects`**: no rows for table types (probe G7 — types don't live in sys.objects).
 
 ## `TYPE_ID(name)`

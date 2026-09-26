@@ -149,20 +149,28 @@ internal static partial class BuiltInResources
             new("referenced_column_id", SqlType.Int32, null, false),
         ], EnumerateSysForeignKeyColumns);
 
-        // INFORMATION_SCHEMA.DOMAINS: ISO-standard surface. Real SQL Server
-        // emits a row for every user-defined type (scalar UDTs surface their
-        // base type; table types surface 'table type' as the data_type
-        // literal — probe-confirmed G6). Load-bearing subset: DOMAIN_CATALOG /
-        // DOMAIN_SCHEMA / DOMAIN_NAME / DATA_TYPE.
-        var tableTypeDataType = SqlValue.FromNVarchar("table type");
+        // INFORMATION_SCHEMA.DOMAINS: one row per alias type and table type,
+        // in real's 17 columns.
         Iso("DOMAINS",
         [
             new("DOMAIN_CATALOG", nvarchar128Baseline, 128, true),
             new("DOMAIN_SCHEMA", nvarchar128Baseline, 128, true),
             new("DOMAIN_NAME", SqlType.SystemName, 128, false),
-            new("DATA_TYPE", SqlType.NVarchar, 128, true),
-        ], (batch, database) =>
-            EnumerateInformationSchemaDomains(batch, database, tableTypeDataType));
+            new("DATA_TYPE", nvarchar128Baseline, 128, true),
+            new("CHARACTER_MAXIMUM_LENGTH", SqlType.Int32, null, true),
+            new("CHARACTER_OCTET_LENGTH", SqlType.Int32, null, true),
+            new("COLLATION_CATALOG", SqlType.SystemName, 128, true),
+            new("COLLATION_SCHEMA", SqlType.SystemName, 128, true),
+            new("COLLATION_NAME", SqlType.SystemName, 128, true),
+            new("CHARACTER_SET_CATALOG", SqlType.SystemName, 128, true),
+            new("CHARACTER_SET_SCHEMA", SqlType.SystemName, 128, true),
+            new("CHARACTER_SET_NAME", SqlType.SystemName, 128, true),
+            new("NUMERIC_PRECISION", SqlType.TinyInt, null, true),
+            new("NUMERIC_PRECISION_RADIX", SqlType.SmallInt, null, true),
+            new("NUMERIC_SCALE", SqlType.Int32, null, true),
+            new("DATETIME_PRECISION", SqlType.SmallInt, null, true),
+            new("DOMAIN_DEFAULT", SqlType.NVarchar, 4000, true),
+        ], EnumerateInformationSchemaDomains);
 
         // INFORMATION_SCHEMA.TABLE_CONSTRAINTS: one row per PRIMARY KEY /
         // UNIQUE / FOREIGN KEY / CHECK constraint in the current database.
@@ -939,22 +947,59 @@ internal static partial class BuiltInResources
         }
     }
 
-    private static IEnumerable<SqlValue[]> EnumerateInformationSchemaDomains(Parser.BatchContext batch, Database database, SqlValue tableTypeDataType)
+    /// <summary>
+    /// Rows for <c>INFORMATION_SCHEMA.DOMAINS</c>, one per alias type and
+    /// table type in <c>user_type_id</c> order, an alias type's base type
+    /// described as <c>INFORMATION_SCHEMA.COLUMNS</c> describes a column of it
+    /// and a table type's DATA_TYPE <c>table type</c> with no facets (probed
+    /// 2026-09-26 against SQL Server 2025). DOMAIN_DEFAULT names a default
+    /// bound with <c>sp_bindefault</c>, which isn't modeled, so it is NULL.
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateInformationSchemaDomains(Parser.BatchContext batch, Database database)
     {
         _ = batch;
         var catalog = SqlValue.FromSystemName(database.Name);
-        foreach (var schema in database.Schemas.Values)
+        var nullSysName = SqlValue.Null(SqlType.SystemName);
+        var nullInt32 = SqlValue.Null(SqlType.Int32);
+        var nullInt16 = SqlValue.Null(SqlType.SmallInt);
+        var nullByte = SqlValue.Null(SqlType.TinyInt);
+        var tableTypeDataType = SqlValue.FromNVarchar("table type");
+        var databaseCollation = SqlValue.FromSystemName(database.CollationName);
+
+        var types = database.Schemas.Values.SelectMany(schema => schema.AliasTypes.Values.Select(a => (a.UserTypeId, schema, Alias: (AliasType?)a, a.Name))
+            .Concat(schema.TableTypes.Values.Select(t => (t.UserTypeId, schema, Alias: (AliasType?)null, t.Name))))
+            .OrderBy(t => t.UserTypeId);
+        foreach (var (_, schema, alias, name) in types)
         {
             var schemaName = SqlValue.FromSystemName(schema.Name);
-            foreach (var tt in schema.TableTypes.Values.OrderBy(t => t.UserTypeId))
+            if (alias is null)
             {
-                yield return [
-                    catalog,
-                    schemaName,
-                    SqlValue.FromSystemName(tt.Name),
-                    tableTypeDataType,
-                ];
+                yield return [catalog, schemaName, SqlValue.FromSystemName(name), tableTypeDataType,
+                    nullInt32, nullInt32, nullSysName, nullSysName, nullSysName, nullSysName, nullSysName, nullSysName,
+                    nullByte, nullInt16, nullInt32, nullInt16, SqlValue.Null(SqlType.NVarchar)];
+                continue;
             }
+
+            var type = alias.UnderlyingType;
+            var (charLength, octetLength, numericPrecision, numericRadix, numericScale, dateTimePrecision) =
+                GetInformationSchemaColumnMetadata(new HeapColumn(name, type, alias.DeclaredMaxLength, alias.IsNullable));
+            var isString = SqlType.IsCollatedString(type);
+            yield return
+            [
+                catalog, schemaName, SqlValue.FromSystemName(name),
+                IsoDataTypeName(type, alias.SpelledNumeric),
+                charLength is int cl ? SqlValue.FromInt32(cl) : nullInt32,
+                octetLength is int ol ? SqlValue.FromInt32(ol) : nullInt32,
+                nullSysName, nullSysName,
+                isString ? databaseCollation : nullSysName,
+                nullSysName, nullSysName,
+                !isString ? nullSysName : SqlValue.FromSystemName(SqlType.IsNationalStringCategory(type) ? "UNICODE" : "iso_1"),
+                numericPrecision is byte np ? SqlValue.FromByte(np) : nullByte,
+                numericRadix is int radix ? SqlValue.FromInt16((short)radix) : nullInt16,
+                numericScale is int ns ? SqlValue.FromInt32(ns) : nullInt32,
+                dateTimePrecision is short dp ? SqlValue.FromInt16(dp) : nullInt16,
+                SqlValue.Null(SqlType.NVarchar),
+            ];
         }
     }
 

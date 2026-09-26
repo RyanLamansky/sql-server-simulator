@@ -818,7 +818,7 @@ partial class Simulation
             generatedAs: existingCol.GeneratedAs,
             isHidden: existingCol.IsHidden,
             collation: newCollationStored,
-            spelledNumeric: SqlType.IsNumericSpelling(qualifiedTypeName, alias: context.Batch.TryResolveAliasType(qualifiedTypeName, out _)))
+            spelledNumeric: SqlType.IsNumericSpelling(qualifiedTypeName, context.Batch.TryResolveAliasType(qualifiedTypeName, out var spellingAlias) ? spellingAlias : null))
         {
             DefaultConstraint = existingCol.DefaultConstraint,
             AliasType = aliasType,

@@ -1617,7 +1617,7 @@ partial class Simulation
         if (defaultExpression is not null)
             AssignmentRules.RequireAssignable(defaultExpression, defaultExpression.GetSqlType(context.Batch, NoColumnTypeResolver), resolvedType);
         var newColumn = new HeapColumn(columnName.Value, resolvedType, maxLength, actualNullable, identity, defaultExpression, generatedAs: generatedAs, isHidden: isHidden, collation: columnCollation, isRowGuidCol: isRowGuidCol,
-            spelledNumeric: SqlType.IsNumericSpelling(qualifiedTypeName, alias: context.Batch.TryResolveAliasType(qualifiedTypeName, out _)));
+            spelledNumeric: SqlType.IsNumericSpelling(qualifiedTypeName, context.Batch.TryResolveAliasType(qualifiedTypeName, out var spellingAlias) ? spellingAlias : null));
         if (xmlSchemaCollection is not null)
             newColumn.XmlSchemaCollection = xmlSchemaCollection;
         newColumn.AliasType = aliasType;
