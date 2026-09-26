@@ -110,8 +110,10 @@ partial class Simulation
         // pending; the batch root does the jump, so abandon the rest of the
         // construct rather than demanding its END TRY. Jumping *into* a TRY or
         // CATCH is refused while the batch compiles (Msg 1026), so the CATCH
-        // half never needs the same escape.
-        if (batch.PendingGotoLabel is not null)
+        // half never needs the same escape. An error that ended the batch in
+        // the TRY body — one no TRY in its scope catches — leaves the cursor
+        // inside it too.
+        if (batch.PendingGotoLabel is not null || batch.BatchAborted)
             yield break;
 
         // Consume END TRY.

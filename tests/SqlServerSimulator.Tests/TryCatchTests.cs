@@ -431,19 +431,28 @@ public sealed class TryCatchTests
         AreEqual(0, reader.GetInt32(0));
     }
 
-    // ---- fidelity divergence: parse-time errors ARE caught ----
+    // ---- a deferred statement's name-resolution error ----
+
+    /// <summary>
+    /// A missing object is met when real recompiles the statement it deferred,
+    /// and no TRY in the same scope catches that — nested ones included — so
+    /// the error ends the batch; raised inside a procedure or dynamic batch the
+    /// TRY called, it is caught (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("begin try select * from nonexistent end try begin catch select 'caught' end catch; select 'after'", 208)]
+    [DataRow("begin try begin try select * from nonexistent end try begin catch select 'inner' end catch end try begin catch select 'outer' end catch", 208)]
+    [DataRow("create table t (a int); begin try select zz from t end try begin catch select 'caught' end catch", 207)]
+    public void Try_DeferredNameResolutionError_IsNotCaught(string sql, int number)
+        => new Simulation().AssertSqlError(sql, number);
 
     [TestMethod]
-    public void Try_SelectFromMissingTable_IsCaught_Divergence()
+    public void Try_NameResolutionErrorOfACalledBatch_IsCaught()
     {
-        // Real SQL Server reports Msg 208 *outside* TRY/CATCH because name
-        // resolution fires during compile, before TRY's runtime activates.
-        // The simulator has no compile / runtime split — parse-time errors
-        // surface through the same dispatch path as runtime errors, so the
-        // TRY/CATCH wrapper catches them. Documented divergence; same root
-        // cause as the un-taken IF Q15 gap.
-        AreEqual("caught", new Simulation().ExecuteScalar(
-            "begin try select * from nonexistent end try begin catch select 'caught' end catch"));
+        var simulation = new Simulation();
+        simulation.ExecuteBatches("create proc p as select * from nonexistent");
+        AreEqual(208, simulation.ExecuteScalar("begin try exec p end try begin catch select error_number() end catch"));
+        AreEqual(208, simulation.ExecuteScalar("begin try exec ('select * from nonexistent') end try begin catch select error_number() end catch"));
     }
 
     // ---- ROWCOUNT interaction ----

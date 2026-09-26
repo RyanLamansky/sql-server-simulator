@@ -430,15 +430,15 @@ public sealed class QueryStoreCatalogViewTests
     /// raises with the cursor already on a statement boundary. Pre-guard the
     /// recovery scan advanced zero tokens and the dispatch loop never
     /// terminated (the SSMS Query Store probe crash of 2026-07-15). The guard
-    /// bounds it: the batch completes promptly and the CATCH returns the first
-    /// error, Msg 208.
+    /// bounds it: the batch completes promptly with the first error, Msg 208,
+    /// which no TRY in its own scope catches.
     /// </summary>
     [TestMethod]
     [Timeout(60000)]
-    public void SkipModeOrphanedElse_DoesNotHang_CatchReturnsFirstError()
-        => AreEqual(208, new Simulation().ExecuteScalar(
+    public void SkipModeOrphanedElse_DoesNotHang_EndsOnTheFirstError()
+        => _ = new Simulation().AssertSqlError(
             "BEGIN TRY " +
             "SELECT * FROM nosuchtable1 " +
             "IF EXISTS (SELECT 1 FROM nosuchtable2) SELECT 1 ELSE SELECT 2 " +
-            "END TRY BEGIN CATCH SELECT ERROR_NUMBER() END CATCH"));
+            "END TRY BEGIN CATCH SELECT ERROR_NUMBER() END CATCH", 208);
 }

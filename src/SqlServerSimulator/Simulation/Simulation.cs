@@ -2509,10 +2509,15 @@ public sealed partial class Simulation
 
     /// <summary>
     /// Whether a TRY frame catches <paramref name="ex"/> where it is raised:
-    /// any error but the transaction-aborting class, once the batch runs.
+    /// any error but the transaction-aborting class, once the batch runs — and
+    /// but a name-resolution miss of the batch's own, which real meets
+    /// recompiling a statement it deferred and which no TRY in the same scope
+    /// catches; raised by a procedure or dynamic batch it called, the same
+    /// error is catchable (probed 2026-09-26 against SQL Server 2025).
     /// </summary>
     private static bool CaughtByTryFrame(BatchContext batch, SimulatedSqlException ex) =>
-        batch.TryFrameDepth > 0 && !ex.AbortsTransaction && !batch.CreateTimeBinding;
+        batch.TryFrameDepth > 0 && !ex.AbortsTransaction && !batch.CreateTimeBinding
+        && !(IsBatchAbortingNameResolution(ex) && !ex.EndedCalledBatch);
 
     /// <summary>
     /// True for an error that ends the whole batch rather than its statement:
