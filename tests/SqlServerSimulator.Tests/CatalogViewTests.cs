@@ -1484,4 +1484,23 @@ public sealed class CatalogViewTests
         AreEqual(51, reader.FieldCount);
         AreEqual("LAST_ALTERED", reader.GetName(50));
     }
+
+    /// <summary>
+    /// A live file's LSN history is NULL, and a full-text index reports
+    /// version 2 with no incremental timestamp (probed 2026-09-26 against SQL
+    /// Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select count(*) from sys.database_files where is_persistent_log_buffer = 0 and coalesce(create_lsn, backup_lsn, redo_start_lsn) is null and differential_base_guid is null", 2)]
+    [DataRow("select index_version + isnull(datalength(incremental_timestamp), 0) from sys.fulltext_indexes", 2)]
+    public void FileAndFullTextViews_CarryRealsHistoryColumns(string query, int expected)
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            create fulltext catalog c as default;
+            create table t (id int not null constraint pk primary key, s nvarchar(100));
+            create fulltext index on t (s) key index pk
+            """);
+        AreEqual(expected, simulation.ExecuteScalar(query));
+    }
 }

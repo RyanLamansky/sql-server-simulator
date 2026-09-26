@@ -28,7 +28,7 @@ namespace SqlServerSimulator;
 /// <c>BEGIN DISTRIBUTED TRANSACTION</c>.
 /// </para>
 /// </remarks>
-internal sealed class LinkedServer(string name, Simulation target, string srvProduct, string provider, string? dataSource)
+internal sealed class LinkedServer(string name, Simulation target, string srvProduct, string provider, string? dataSource, string? location, string? providerString, string? catalog, DateTime createDate)
 {
     public readonly string Name = name;
 
@@ -53,4 +53,23 @@ internal sealed class LinkedServer(string name, Simulation target, string srvPro
     /// this).
     /// </summary>
     public readonly string? DataSource = dataSource;
+
+    /// <summary>The <c>@location</c> arg, surfaced via <c>sys.servers.location</c>.</summary>
+    public readonly string? Location = location;
+
+    /// <summary>The <c>@provstr</c> arg, surfaced via <c>sys.servers.provider_string</c>.</summary>
+    public readonly string? ProviderString = providerString;
+
+    /// <summary>The <c>@catalog</c> arg, surfaced via <c>sys.servers.catalog</c>.</summary>
+    public readonly string? Catalog = catalog;
+
+    /// <summary>When <c>sp_addlinkedserver</c> ran, surfaced via <c>sys.servers.modify_date</c>.</summary>
+    public readonly DateTime CreateDate = createDate;
+
+    /// <summary>
+    /// A <c>SQL Server</c> product: real enables remote login and RPC out for
+    /// it, where another product gets neither (probed 2026-09-26 against SQL
+    /// Server 2025).
+    /// </summary>
+    public bool IsSqlServerProduct => string.Equals(this.SrvProduct, "SQL Server", StringComparison.OrdinalIgnoreCase);
 }

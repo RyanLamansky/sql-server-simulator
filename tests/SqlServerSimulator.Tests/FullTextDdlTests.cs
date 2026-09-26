@@ -192,7 +192,7 @@ public sealed class FullTextDdlTests
         IsTrue((bool)sim.ExecuteScalar("select is_enabled from sys.fulltext_indexes")!);
         IsTrue((bool)sim.ExecuteScalar("select has_crawl_completed from sys.fulltext_indexes")!);
         AreEqual("AUTO", sim.ExecuteScalar("select change_tracking_state_desc from sys.fulltext_indexes"));
-        AreEqual("FULL", sim.ExecuteScalar("select crawl_type_desc from sys.fulltext_indexes"));
+        AreEqual("FULL_CRAWL", sim.ExecuteScalar("select crawl_type_desc from sys.fulltext_indexes"));
     }
 
     [TestMethod]

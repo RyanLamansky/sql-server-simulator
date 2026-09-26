@@ -321,4 +321,26 @@ public class LinkedServerTests
     [DataRow("exec sp_dropserver 'x', 'bad'", 15600)]
     public void LinkedServerProcedures_RefuseBadArgumentsAsRealDoes(string sql, int number)
         => _ = new Simulation().AssertSqlError(sql, number);
+
+    /// <summary>
+    /// sys.servers carries real's 26 columns: the optional arguments land in
+    /// location / provider_string / catalog, and a SQL Server product enables
+    /// remote login and RPC out and names itself as its data source (probed
+    /// 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void SysServers_CarriesRealsFlagsAndArguments()
+    {
+        var local = new Simulation();
+        local.AddRemoteSimulation("OTHER", new Simulation());
+        local.AddRemoteSimulation("THIRD", new Simulation());
+        _ = local.ExecuteNonQuery("exec sp_addlinkedserver @server = 'OTHER', @srvproduct = '', @provider = 'MSOLEDBSQL', @datasrc = 'h', @location = 'loc', @provstr = 'ps=1', @catalog = 'cat'");
+        _ = local.ExecuteNonQuery("exec sp_addlinkedserver 'THIRD', 'SQL Server'");
+        const string Flags = "concat(name, '|', location, '|', provider_string, '|', catalog, '|', data_source, '|', is_remote_login_enabled, is_rpc_out_enabled, is_data_access_enabled, uses_remote_collation, is_remote_proc_transaction_promotion_enabled)";
+        AreEqual("OTHER|loc|ps=1|cat|h|00111", local.ExecuteScalar($"select {Flags} from sys.servers where name = 'OTHER'"));
+        AreEqual("THIRD||||THIRD|11111", local.ExecuteScalar($"select {Flags} from sys.servers where name = 'THIRD'"));
+        AreEqual("SIMULATED||||SIMULATED|11011", local.ExecuteScalar($"select {Flags} from sys.servers where server_id = 0"));
+        using var reader = local.ExecuteReader("select * from sys.servers");
+        AreEqual(26, reader.FieldCount);
+    }
 }

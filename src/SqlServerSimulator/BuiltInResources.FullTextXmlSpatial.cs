@@ -353,7 +353,7 @@ internal static partial class BuiltInResources
     /// <c>has_crawl_completed</c> default to true (no crawl is performed
     /// but the FT index is "ready" from the catalog's POV);
     /// <c>change_tracking_state</c> = 'A' (AUTO) / 'AUTO';
-    /// <c>crawl_type</c> = 'F' (FULL) / 'FULL'.
+    /// <c>crawl_type</c> = 'F' / 'FULL_CRAWL'.
     /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateSysFullTextIndexes(Parser.BatchContext batch, Database database)
     {
@@ -362,7 +362,7 @@ internal static partial class BuiltInResources
         var autoCode = SqlValue.FromChar(charOneType, "A");
         var autoDesc = SqlValue.FromNVarchar("AUTO");
         var fullCode = SqlValue.FromChar(charOneType, "F");
-        var fullDesc = SqlValue.FromNVarchar("FULL");
+        var fullDesc = SqlValue.FromNVarchar("FULL_CRAWL");
         var nullDate = SqlValue.Null(SqlType.DateTime);
         var nullInt = SqlValue.Null(SqlType.Int32);
         // data_space_id points at the filegroup the FT index lives on — always

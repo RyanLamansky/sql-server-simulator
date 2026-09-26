@@ -37,6 +37,9 @@ partial class Simulation
         var srvProduct = string.Empty;
         var provider = "SQLNCLI";
         string? dataSource = null;
+        string? location = null;
+        string? providerString = null;
+        string? catalog = null;
         string[] positional = ["server", "srvproduct", "provider", "datasrc", "location", "provstr", "catalog", "linkedstyle"];
         var positionalIndex = 0;
         foreach (var arg in arguments)
@@ -76,8 +79,13 @@ partial class Simulation
                     }
                     break;
                 case var n when BuiltInToken.Equals(n, "location"):
-                case var n2 when BuiltInToken.Equals(n2, "provstr"):
-                case var n3 when BuiltInToken.Equals(n3, "catalog"):
+                    location = arg.Value.IsNull ? null : arg.Value.CoerceTo(SqlType.NVarchar).AsString;
+                    break;
+                case var n when BuiltInToken.Equals(n, "provstr"):
+                    providerString = arg.Value.IsNull ? null : arg.Value.CoerceTo(SqlType.NVarchar).AsString;
+                    break;
+                case var n when BuiltInToken.Equals(n, "catalog"):
+                    catalog = arg.Value.IsNull ? null : arg.Value.CoerceTo(SqlType.SystemName).AsString;
                     break;
                 default:
                     throw SimulatedSqlException.NotAParameterForProcedure(name, "sp_addlinkedserver");
@@ -93,7 +101,11 @@ partial class Simulation
         if (!simulation.AvailableRemotes.TryGetValue(server, out var target))
             throw new NotSupportedException($"sp_addlinkedserver '{server}' has no corresponding registered target Simulation; call Simulation.AddRemoteSimulation(\"{server}\", target) from the host code before activating the linked server.");
 
-        simulation.ActiveLinkedServers[server] = new LinkedServer(server, target, srvProduct, provider, dataSource);
+        // A SQL Server product names the server itself as its data source.
+        if (string.Equals(srvProduct, "SQL Server", StringComparison.OrdinalIgnoreCase))
+            dataSource = server;
+        simulation.ActiveLinkedServers[server] = new LinkedServer(
+            server, target, srvProduct, provider, dataSource, location, providerString, catalog, batch.CurrentStatement.UtcNow);
         // Activating (or re-activating) a linked server changes how
         // four-part-name FROM clauses bind at parse time; cached plans
         // parsed before this call must be invalidated.

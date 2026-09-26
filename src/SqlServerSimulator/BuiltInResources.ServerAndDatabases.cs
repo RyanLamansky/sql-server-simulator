@@ -135,12 +135,7 @@ internal static partial class BuiltInResources
 
         // sys.servers: the local instance projects as row 0 (is_linked = 0);
         // each entry in <see cref="Simulation.ActiveLinkedServers"/> follows
-        // with a stable monotonic server_id keyed by name-sort. Real SQL
-        // Server exposes ~26 columns; the simulator surfaces the
-        // load-bearing subset that BACPAC scripts + diagnostic queries
-        // touch (server_id / name / product / provider / data_source /
-        // is_linked). modify_date is always epoch-zero since linked-server
-        // registration doesn't carry a creation timestamp.
+        // with a stable monotonic server_id keyed by name-sort.
         Sys("servers",
         [
             new("server_id", SqlType.Int32, null, false),
@@ -148,7 +143,27 @@ internal static partial class BuiltInResources
             new("product", SqlType.SystemName, 128, false),
             new("provider", SqlType.SystemName, 128, false),
             new("data_source", SqlType.NVarchar, 4000, true),
+            new("location", SqlType.NVarchar, 4000, true),
+            new("provider_string", SqlType.NVarchar, 4000, true),
+            new("catalog", SqlType.SystemName, 128, true),
+            new("connect_timeout", SqlType.Int32, null, true),
+            new("query_timeout", SqlType.Int32, null, true),
             new("is_linked", SqlType.Bit, null, false),
+            new("is_remote_login_enabled", SqlType.Bit, null, false),
+            new("is_rpc_out_enabled", SqlType.Bit, null, false),
+            new("is_data_access_enabled", SqlType.Bit, null, false),
+            new("is_collation_compatible", SqlType.Bit, null, false),
+            new("uses_remote_collation", SqlType.Bit, null, false),
+            new("collation_name", SqlType.SystemName, 128, true),
+            new("lazy_schema_validation", SqlType.Bit, null, false),
+            new("is_system", SqlType.Bit, null, false),
+            new("is_publisher", SqlType.Bit, null, false),
+            new("is_subscriber", SqlType.Bit, null, true),
+            new("is_distributor", SqlType.Bit, null, true),
+            new("is_nonsql_subscriber", SqlType.Bit, null, true),
+            new("is_remote_proc_transaction_promotion_enabled", SqlType.Bit, null, true),
+            new("modify_date", SqlType.DateTime, null, false),
+            new("is_rda_server", SqlType.Bit, null, true),
         ], EnumerateSysServers);
 
         // sys.dm_os_host_info: single-row, server-scope DMV describing the
@@ -1788,30 +1803,42 @@ internal static partial class BuiltInResources
     private static IEnumerable<SqlValue[]> EnumerateSysServers(Parser.BatchContext batch, Database database)
     {
         _ = database;
-        var notLinked = SqlValue.FromBoolean(false);
-        var isLinked = SqlValue.FromBoolean(true);
-        var localProduct = SqlValue.FromNVarchar("SQL Server");
-        var nullDataSource = SqlValue.Null(SqlType.NVarchar);
-        yield return [
-            SqlValue.FromInt32(0),
-            SqlValue.FromSystemName("SIMULATED"),
-            localProduct,
-            SqlValue.FromNVarchar("SQLNCLI"),
-            SqlValue.FromNVarchar("SIMULATED"),
-            notLinked,
+        var yes = SqlValue.FromBoolean(true);
+        var no = SqlValue.FromBoolean(false);
+        var zero = SqlValue.FromInt32(0);
+        var nullNVarchar = SqlValue.Null(SqlType.NVarchar);
+        var nullSysName = SqlValue.Null(SqlType.SystemName);
+        var simulation = batch.Connection.Simulation;
+
+        // Real's flags for its own row and a linked one (probed 2026-09-26
+        // against SQL Server 2025); sp_serveroption doesn't change them here.
+        SqlValue[] Row(int serverId, string name, string product, string provider, string? dataSource, string? location, string? providerString, string? catalog,
+            bool linked, bool remoteLoginAndRpcOut, DateTime modifyDate) =>
+        [
+            SqlValue.FromInt32(serverId),
+            SqlValue.FromSystemName(name),
+            SqlValue.FromSystemName(product),
+            SqlValue.FromSystemName(provider),
+            dataSource is null ? nullNVarchar : SqlValue.FromNVarchar(dataSource),
+            location is null ? nullNVarchar : SqlValue.FromNVarchar(location),
+            providerString is null ? nullNVarchar : SqlValue.FromNVarchar(providerString),
+            catalog is null ? nullSysName : SqlValue.FromSystemName(catalog),
+            zero, zero,
+            linked ? yes : no,
+            remoteLoginAndRpcOut ? yes : no,
+            remoteLoginAndRpcOut ? yes : no,
+            linked ? yes : no,
+            no, yes, nullSysName, no, no, no, no, no, no, yes,
+            SqlValue.FromDateTime(modifyDate),
+            no,
         ];
 
+        yield return Row(0, "SIMULATED", "SQL Server", "SQLNCLI", "SIMULATED", null, null, null, linked: false, remoteLoginAndRpcOut: true, simulation.SeedDate);
         var serverId = 1;
-        foreach (var ls in batch.Connection.Simulation.ActiveLinkedServers.Values.OrderBy(s => s.Name, StringComparer.OrdinalIgnoreCase))
+        foreach (var ls in simulation.ActiveLinkedServers.Values.OrderBy(s => s.Name, StringComparer.OrdinalIgnoreCase))
         {
-            yield return [
-                SqlValue.FromInt32(serverId++),
-                SqlValue.FromSystemName(ls.Name),
-                SqlValue.FromNVarchar(ls.SrvProduct),
-                SqlValue.FromNVarchar(ls.Provider),
-                ls.DataSource is null ? nullDataSource : SqlValue.FromNVarchar(ls.DataSource),
-                isLinked,
-            ];
+            yield return Row(serverId++, ls.Name, ls.SrvProduct, ls.Provider, ls.DataSource, ls.Location, ls.ProviderString, ls.Catalog,
+                linked: true, remoteLoginAndRpcOut: ls.IsSqlServerProduct, ls.CreateDate);
         }
     }
 

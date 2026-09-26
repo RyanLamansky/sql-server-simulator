@@ -58,7 +58,7 @@ Divergences:
 - **Read paths**: SELECT, JOIN (INNER / LEFT / RIGHT / FULL / CROSS / APPLY) across a four-part reference.
   Correlated subqueries re-execute the remote query per outer row via the existing lateral-plan re-execution pattern.
 - **Sprocs**: `sp_addlinkedserver` (activate), `sp_dropserver` (Msg 15015 on miss), `sp_addlinkedsrvlogin` / `sp_droplinkedsrvlogin` / `sp_serveroption` (parse-and-discard — no principal-mapping or per-server-option model).
-- **`sys.servers`**: local instance as row 0 (`is_linked = 0`, name `"SIMULATED"`), one row per active linked server with the `srvproduct` / `provider` / `datasrc` from `sp_addlinkedserver`.
+- **`sys.servers`**: local instance as row 0 (`is_linked = 0`, name `"SIMULATED"`), one row per active linked server carrying `sp_addlinkedserver`'s arguments — see [sys.servers shape](#sysservers-shape).
   Load-bearing 6-column subset (`server_id`, `name`, `product`, `provider`, `data_source`, `is_linked`) of real SQL Server's ~26-column shape.
 
 ## Not modeled yet
@@ -80,14 +80,22 @@ Divergences:
 
 ## sys.servers shape
 
-| Column | Type | Notes |
-|---|---|---|
-| `server_id` | int | 0 = local, 1+ = monotonic over linked servers in name-sort order |
-| `name` | sysname | `"SIMULATED"` for local; the registered name for linked |
-| `product` | nvarchar(128) | `"SQL Server"` for local; `@srvproduct` arg from sp_addlinkedserver for linked |
-| `provider` | nvarchar(128) | `"SQLNCLI"` for local (probed 2026-09-25); `@provider` arg (defaults to `"SQLNCLI"`) for linked |
-| `data_source` | nvarchar(4000) | the server name for local (probed 2026-09-25); `@datasrc` arg or NULL if unspecified |
-| `is_linked` | bit | 0 / 1 |
+The view carries real's 26 columns (probed 2026-09-26 against SQL Server 2025); the ones with a rule of their own:
+
+| Column | Notes |
+|---|---|
+| `server_id` | 0 = local, 1+ = monotonic over linked servers in name-sort order |
+| `name` | `"SIMULATED"` for local; the registered name for linked |
+| `product` | `"SQL Server"` for local; `@srvproduct` for linked |
+| `provider` | `"SQLNCLI"` for local (probed 2026-09-25); `@provider` (defaults to `"SQLNCLI"`) for linked |
+| `data_source` | the server name for local and for a `SQL Server` product (probed 2026-09-25); `@datasrc` or NULL otherwise |
+| `location` / `provider_string` / `catalog` | `@location` / `@provstr` / `@catalog`, NULL for local |
+| `is_remote_login_enabled` / `is_rpc_out_enabled` | 1 for local and for a `SQL Server` product, 0 for any other product |
+| `is_data_access_enabled` | 1 for linked, 0 for local |
+| `modify_date` | when `sp_addlinkedserver` ran; the simulation's seed date for local |
+
+The rest are real's defaults for both kinds: timeouts 0, `uses_remote_collation` and `is_remote_proc_transaction_promotion_enabled` 1, the other flags 0 and `collation_name` NULL.
+`sp_serveroption` parses and changes none of them.
 
 Stable ordering across runs (name-sorted with the local row first).
 Distinct from real SQL Server's `server_id` allocation, which is `sys.servers`-row-driven and persists across restarts.

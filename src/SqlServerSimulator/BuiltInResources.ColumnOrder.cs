@@ -54,11 +54,19 @@ internal static partial class BuiltInResources
         [
             "session_id", "wait_type", "blocking_session_id", "resource_description",
         ],
+        ["sys.database_files"] =
+        [
+            "file_id", "file_guid", "type", "type_desc", "data_space_id", "name", "physical_name", "state", "state_desc", "size",
+            "max_size", "growth", "is_media_read_only", "is_read_only", "is_sparse", "is_percent_growth", "is_name_reserved",
+            "is_persistent_log_buffer", "create_lsn", "drop_lsn", "read_only_lsn", "read_write_lsn", "differential_base_lsn",
+            "differential_base_guid", "differential_base_time", "redo_start_lsn", "redo_start_fork_guid", "redo_target_lsn",
+            "redo_target_fork_guid", "backup_lsn",
+        ],
         ["sys.fulltext_indexes"] =
         [
-            "object_id", "unique_index_id", "fulltext_catalog_id", "is_enabled", "change_tracking_state", "change_tracking_state_desc",
-            "has_crawl_completed", "crawl_type", "crawl_type_desc", "crawl_start_date", "crawl_end_date", "stoplist_id",
-            "property_list_id", "data_space_id",
+            "object_id", "unique_index_id", "index_version", "fulltext_catalog_id", "is_enabled", "change_tracking_state",
+            "change_tracking_state_desc", "has_crawl_completed", "crawl_type", "crawl_type_desc", "crawl_start_date", "crawl_end_date",
+            "incremental_timestamp", "stoplist_id", "property_list_id", "data_space_id",
         ],
         ["sys.identity_columns"] =
         [
@@ -304,6 +312,30 @@ internal static partial class BuiltInResources
             (new("column_encryption_key_id", SqlType.Int32, null, true), SqlValue.Null(SqlType.Int32)),
             (new("column_encryption_key_database_name", SqlType.SystemName, 128, true), SqlValue.Null(SqlType.SystemName)),
             (new("vector_base_type", SqlType.TinyInt, null, true), SqlValue.Null(SqlType.TinyInt)),
+        ],
+        // A live file's LSN history reads NULL on a database no backup or
+        // restore has touched (probed 2026-09-26 against SQL Server 2025).
+        ["sys.database_files"] =
+        [
+            (new("is_persistent_log_buffer", SqlType.Bit, null, false), SqlValue.FromBoolean(false)),
+            (new("create_lsn", lsnNumeric, null, true, spelledNumeric: true), SqlValue.Null(lsnNumeric)),
+            (new("read_only_lsn", lsnNumeric, null, true, spelledNumeric: true), SqlValue.Null(lsnNumeric)),
+            (new("read_write_lsn", lsnNumeric, null, true, spelledNumeric: true), SqlValue.Null(lsnNumeric)),
+            (new("differential_base_lsn", lsnNumeric, null, true, spelledNumeric: true), SqlValue.Null(lsnNumeric)),
+            (new("differential_base_guid", SqlType.UniqueIdentifier, null, true), SqlValue.Null(SqlType.UniqueIdentifier)),
+            (new("differential_base_time", SqlType.DateTime, null, true), SqlValue.Null(SqlType.DateTime)),
+            (new("redo_start_lsn", lsnNumeric, null, true, spelledNumeric: true), SqlValue.Null(lsnNumeric)),
+            (new("redo_start_fork_guid", SqlType.UniqueIdentifier, null, true), SqlValue.Null(SqlType.UniqueIdentifier)),
+            (new("redo_target_lsn", lsnNumeric, null, true, spelledNumeric: true), SqlValue.Null(lsnNumeric)),
+            (new("redo_target_fork_guid", SqlType.UniqueIdentifier, null, true), SqlValue.Null(SqlType.UniqueIdentifier)),
+            (new("backup_lsn", lsnNumeric, null, true, spelledNumeric: true), SqlValue.Null(lsnNumeric)),
+        ],
+        // Real reports version 2 and no incremental timestamp whatever the
+        // index's population history (probed 2026-09-26 against SQL Server 2025).
+        ["sys.fulltext_indexes"] =
+        [
+            (new("index_version", SqlType.Int32, null, true), SqlValue.FromInt32(2)),
+            (new("incremental_timestamp", BinarySqlType.Get(8), 8, true), SqlValue.Null(BinarySqlType.Get(8))),
         ],
         ["sys.all_parameters"] =
         [
