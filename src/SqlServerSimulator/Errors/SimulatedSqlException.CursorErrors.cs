@@ -19,6 +19,15 @@ partial class SimulatedSqlException
         new($"A cursor with the name '{name}' does not exist.", 16916, 16, 1);
 
     /// <summary>
+    /// Msg 16902: <c>CURSOR_STATUS</c> was handed an argument it can't use —
+    /// a NULL source (state 40), a source other than <c>global</c> /
+    /// <c>local</c> / <c>variable</c> (state 42), or a NULL or empty cursor
+    /// name (state 43). Probe-confirmed verbatim against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException CursorStatusInvalidParameter(string parameterName, byte state) =>
+        new($"cursor_status: The value of the parameter '{parameterName}' is invalid.", 16902, 16, state);
+
+    /// <summary>
     /// Msg 16905: <c>OPEN</c> on a cursor that is already open. Probe-confirmed
     /// verbatim against SQL Server 2025.
     /// </summary>

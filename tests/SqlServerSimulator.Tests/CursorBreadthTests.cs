@@ -490,4 +490,27 @@ public sealed class CursorBreadthTests
         HasCount(1, messages);
         AreEqual(16956, messages[0].Number);
     }
+
+    /// <summary>
+    /// An argument <c>CURSOR_STATUS</c> can't use raises Msg 16902, the
+    /// source judged before the name; case and a trailing space in the source
+    /// don't matter. Probed 2026-09-26 against SQL Server 2025.
+    /// </summary>
+    [TestMethod]
+    [DataRow("select cursor_status(null, 'x')", 40)]
+    [DataRow("select cursor_status(null, null)", 40)]
+    [DataRow("select cursor_status('bogus', 'x')", 42)]
+    [DataRow("select cursor_status('bogus', null)", 42)]
+    [DataRow("select cursor_status('', 'x')", 42)]
+    [DataRow("select cursor_status('global', null)", 43)]
+    [DataRow("select cursor_status('local', null)", 43)]
+    [DataRow("select cursor_status('variable', null)", 43)]
+    [DataRow("select cursor_status('global', '')", 43)]
+    public void CursorStatus_UnusableArgument_RaisesMsg16902(string sql, int state) =>
+        AreEqual(state, new Simulation().AssertSqlError(sql, 16902).State);
+
+    [TestMethod]
+    public void CursorStatus_SourceIgnoresCaseAndTrailingSpace() =>
+        AreEqual("-3|-3|-3", new Simulation().ExecuteScalar(
+            "select concat(cursor_status('GLOBAL', 'x'), '|', cursor_status('global ', 'x'), '|', cursor_status(N'Local', N'x'))"));
 }

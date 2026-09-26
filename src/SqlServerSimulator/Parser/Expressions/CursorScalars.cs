@@ -47,7 +47,8 @@ internal sealed class CursorRowsExpression : Expression
 /// the cursor variable <c>@name</c>. Return codes: <c>1</c> open (with rows, or
 /// any open DYNAMIC cursor), <c>0</c> open but empty, <c>-1</c> closed /
 /// allocated-not-open, <c>-2</c> a cursor variable declared with no cursor
-/// allocated, <c>-3</c> no cursor of that name in the named scope.
+/// allocated, <c>-3</c> no cursor of that name in the named scope. An
+/// unusable argument raises Msg 16902 rather than answering NULL.
 /// </summary>
 internal sealed class CursorStatusFunction : Expression
 {
@@ -68,15 +69,25 @@ internal sealed class CursorStatusFunction : Expression
     {
         var scopeValue = this.scopeArg.Run(runtime);
         var nameValue = this.nameArg.Run(runtime);
-        if (nameValue.IsNull)
-            return SqlValue.Null(SqlType.SmallInt);
         var batch = runtime.Batch;
-        var scope = scopeValue.IsNull ? "" : scopeValue.AsString;
+
+        // The source is judged first, then the name; a trailing space is
+        // tolerated in the source and case is not significant (probed
+        // 2026-09-26 against SQL Server 2025).
+        if (scopeValue.IsNull)
+            throw SimulatedSqlException.CursorStatusInvalidParameter("cursor_source", 40);
+        var scope = scopeValue.AsString.TrimEnd(' ');
+        var isVariable = string.Equals(scope, "variable", StringComparison.OrdinalIgnoreCase);
+        var isLocal = string.Equals(scope, "local", StringComparison.OrdinalIgnoreCase);
+        if (!isVariable && !isLocal && !string.Equals(scope, "global", StringComparison.OrdinalIgnoreCase))
+            throw SimulatedSqlException.CursorStatusInvalidParameter("cursor_source", 42);
+        if (nameValue.IsNull || nameValue.AsString.Length == 0)
+            throw SimulatedSqlException.CursorStatusInvalidParameter("cursor_identity", 43);
         var name = nameValue.AsString;
 
         // 'variable' scope: @name is a cursor variable. -2 = declared but no
         // cursor allocated; -3 = not a declared cursor variable at all.
-        if (string.Equals(scope, "variable", StringComparison.OrdinalIgnoreCase))
+        if (isVariable)
         {
             var varName = name.StartsWith('@') ? name[1..] : name;
             return SqlValue.FromInt16((short)(batch.CursorVariables.TryGetValue(varName, out var bound)
@@ -85,9 +96,7 @@ internal sealed class CursorStatusFunction : Expression
         }
 
         // 'local' / 'global' scope: the respective named-cursor map only.
-        var map = string.Equals(scope, "local", StringComparison.OrdinalIgnoreCase)
-            ? batch.LocalCursors
-            : batch.Connection.Cursors;
+        var map = isLocal ? batch.LocalCursors : batch.Connection.Cursors;
         return SqlValue.FromInt16((short)(map.TryGetValue(name, out var cursor)
             ? cursor.StatusValue
             : -3));
@@ -95,8 +104,9 @@ internal sealed class CursorStatusFunction : Expression
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SmallInt;
 
-    internal override bool ResultIsNullable(NullabilityContext context) =>
-        this.scopeArg.ResultIsNullable(context) || this.nameArg.ResultIsNullable(context);
+    // Every return is a status code; an argument that would have answered
+    // NULL raises instead.
+    internal override bool ResultIsNullable(NullabilityContext context) => false;
 
     internal override string DebugDisplay() => $"CURSOR_STATUS({this.scopeArg.DebugDisplay()}, {this.nameArg.DebugDisplay()})";
 

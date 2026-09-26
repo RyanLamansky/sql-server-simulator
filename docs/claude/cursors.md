@@ -267,6 +267,7 @@ Resolution at a use site (`OPEN` / `CLOSE` / `DEALLOCATE` / `FETCH … FROM` / `
 
 `ResolveCursor` / `ReadCursorReference` in `Simulation.Cursor.cs` centralize this; the use-site parsers all route through them.
 `CURSOR_STATUS(scope, name)` is scope-aware: `'local'` / `'global'` consult the respective named map, `'variable'` consults the cursor-variable namespace, and asking the wrong scope returns `-3`.
+A NULL or unknown source, or a NULL or empty name, raises Msg 16902 (the source judged first), so the function never answers NULL.
 
 ## Cursor variables
 
