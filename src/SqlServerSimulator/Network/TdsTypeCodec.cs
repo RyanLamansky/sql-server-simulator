@@ -1192,7 +1192,7 @@ internal static class TdsTypeCodec
     /// <c>GetSqlBytes</c> / <c>GetBytes</c>. Version/token match SQL Server 2025
     /// (probed 2026-07-16).
     /// </summary>
-    private static string SpatialAssemblyQualifiedName(SpatialSqlType type)
+    internal static string SpatialAssemblyQualifiedName(SpatialSqlType type)
     {
         const string tail = ", Microsoft.SqlServer.Types, Version=11.0.0.0, Culture=neutral, PublicKeyToken=89845dcd8080cc91";
         return type is GeographySqlType
@@ -1208,6 +1208,6 @@ internal static class TdsTypeCodec
     /// <c>GetSqlBytes</c> / <c>GetBytes</c>. Version/token probe-matched to SQL
     /// Server 2025 (2026-07-16).
     /// </summary>
-    private const string HierarchyIdAssemblyQualifiedName =
+    internal const string HierarchyIdAssemblyQualifiedName =
         "Microsoft.SqlServer.Types.SqlHierarchyId, Microsoft.SqlServer.Types, Version=11.0.0.0, Culture=neutral, PublicKeyToken=89845dcd8080cc91";
 }

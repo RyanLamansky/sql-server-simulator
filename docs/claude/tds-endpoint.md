@@ -421,7 +421,8 @@ A grouped or DISTINCT query is described without hidden columns, a set operation
 A plan parsed under the option is never cached, since what it projects depends on it.
 A trailing `FOR BROWSE` puts its one statement in browse mode without the option — the clause arrives after the projection it decides, so the SELECT dispatch reads the statement again as a browse statement when `ParserContext.ForBrowseSeen` says it met one — and over a set operation it is Msg 198.
 
-**Not modeled yet**: real flattens a derived table (and presumably a view) into its base tables — `SELECT name FROM (SELECT name, id FROM w1) d` names `w1.name` and still appends `id` and `rv` — where the simulator reports such a column with no base table and appends nothing for it; and the in-process reader's `GetSchemaTable`, which has no base-column metadata to offer.
+**Not modeled yet**: real flattens a derived table (and presumably a view) into its base tables — `SELECT name FROM (SELECT name, id FROM w1) d` names `w1.name` and still appends `id` and `rv` — where the simulator reports such a column with no base table and appends nothing for it.
+The in-process reader's `GetSchemaTable` reads the same `BrowseInfo` (see [`data-reader.md`](data-reader.md#getschematable-answers-sqlclients-table)).
 
 ## Legacy text / ntext / image wire forms
 

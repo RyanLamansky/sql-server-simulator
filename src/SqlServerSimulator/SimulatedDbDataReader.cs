@@ -1,3 +1,4 @@
+using System.Data;
 using System.Collections;
 using System.Data.Common;
 using System.Data.SqlTypes;
@@ -326,6 +327,20 @@ public sealed class SimulatedDbDataReader : DbDataReader
     [UnconditionalSuppressMessage("Trimming", "IL2073:Member return value does not satisfy 'DynamicallyAccessedMembersAttribute' requirements.", Justification = "The closed set of concrete SqlType subclasses returns BCL types whose public surface is not trimmed away in practice; the simulator never feeds linker-pruned types here.")]
     public override Type GetFieldType(int ordinal) => CurrentSchema[ordinal].ClrType;
 
+    /// <summary>
+    /// Describes the current result set's columns in the table SqlClient's
+    /// <c>SqlDataReader.GetSchemaTable</c> answers — the same 31 columns, the
+    /// same per-type sizes, precisions and provider types, and, for a result
+    /// read under <c>SET NO_BROWSETABLE ON</c>, the base table and column and
+    /// the key / hidden / expression / alias flags — which is what
+    /// <c>DataTable.Load</c> and <c>DataAdapter</c> read. <see langword="null"/>
+    /// when no result set is current.
+    /// </summary>
+    public override DataTable? GetSchemaTable() =>
+        this.currentResult is { } result
+            ? ResultSchemaTable.Build(result, this.connection?.CurrentDatabase.Name ?? string.Empty)
+            : null;
+
     /// <inheritdoc/>
     public override float GetFloat(int ordinal)
     {
@@ -572,7 +587,16 @@ public sealed class SimulatedDbDataReader : DbDataReader
         }
 
         this.outcomes.Dispose();
+        this.AfterClose?.Invoke();
     }
+
+    /// <summary>
+    /// Runs once the batch has been drained on close — how a
+    /// <see cref="CommandBehavior.KeyInfo"/> reader turns <c>NO_BROWSETABLE</c>
+    /// back off when its batch is done, as SqlClient's trailing
+    /// <c>SET NO_BROWSETABLE OFF</c> does.
+    /// </summary>
+    internal Action? AfterClose;
 
     /// <summary>
     /// Reads on from an error <c>ExecuteReader</c> met to the next result set,

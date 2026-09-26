@@ -120,6 +120,10 @@ public partial class QualityTests
                 // Overridden rather than inherited: a cursor FETCH's result
                 // set ends in a hidden ROWSTAT column the base would count.
                 nameof(SimulatedDbDataReader.VisibleFieldCount),
+                // Overridden rather than inherited: the base throws
+                // NotSupportedException, which DataTable.Load and DataAdapter
+                // can't work without; this answers SqlClient's table.
+                nameof(SimulatedDbDataReader.GetSchemaTable),
             ],
             [typeof(SimulatedSqlException)] = [
                 nameof(SimulatedSqlException.ErrorCode),

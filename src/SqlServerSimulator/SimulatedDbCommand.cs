@@ -268,7 +268,27 @@ public sealed class SimulatedDbCommand : DbCommand
         // ExecuteReader rather than handing back an empty reader, so a caller
         // can't mistake a cancelled batch for a zero-row answer.
         this.RequireOpenConnection(nameof(ExecuteReader));
-        var reader = new SimulatedDbDataReader(this.simulation.CreateResultSetsForCommand(this), this.Connection);
+        // KeyInfo runs the batch in browse mode, as SqlClient's
+        // `SET NO_BROWSETABLE ON` / `OFF` wrapper around the command text does.
+        var browse = behavior.HasFlag(CommandBehavior.KeyInfo) && this.CommandType == CommandType.Text && this.Connection is { NoBrowseTable: false };
+        if (browse)
+            this.Connection!.NoBrowseTable = true;
+        SimulatedDbDataReader reader;
+        try
+        {
+            reader = new SimulatedDbDataReader(this.simulation.CreateResultSetsForCommand(this), this.Connection);
+        }
+        catch
+        {
+            if (browse)
+                this.Connection!.NoBrowseTable = false;
+            throw;
+        }
+        if (browse)
+        {
+            var connection = this.Connection!;
+            reader.AfterClose = () => connection.NoBrowseTable = false;
+        }
         if (WasExecutionCancelled())
         {
             reader.Dispose();

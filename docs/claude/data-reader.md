@@ -45,6 +45,12 @@ Two of the simulator's own type names never reach a SqlClient consumer as writte
 
 Everything else in the type matrix already matched: the whole numeric / character / binary / date-time family, `xml`, `sql_variant`, `hierarchyid`, `rowversion` (reported `timestamp`), and an alias type, which reports its base type's name on both.
 
+## `GetSchemaTable` answers SqlClient's table
+
+`GetSchemaTable` (`ResultSchemaTable.Build`) returns SqlClient's 31-column schema table — `ColumnSize`, `NumericPrecision` / `NumericScale` (255 where a type has none), `ProviderType` as `SqlDbType`, `DataType` and `ProviderSpecificDataType` (the `System.Data.SqlTypes` type, a CLR type resolved by its assembly-qualified name as SqlClient resolves it), `IsIdentity` / `IsAutoIncrement` / `IsReadOnly` from the column-character flags the endpoint writes to COLMETADATA, `IsLong` for the MAX and legacy LOB types — which is what `DataTable.Load` and `DataAdapter` read; without it both threw `NotSupportedException`.
+`SchemaTableDualReadTests` holds every cell equal to SqlClient's own table for the same result read over the TDS endpoint, which is how the per-type values were settled.
+`ExecuteReader(CommandBehavior.KeyInfo)` turns `NO_BROWSETABLE` on for the command and back off when the reader closes, as SqlClient's `SET NO_BROWSETABLE ON` / `OFF` wrapper does, so the table then carries the base table and column and the key / hidden / expression / alias flags (see [`tds-endpoint.md`](tds-endpoint.md#browse-mode-commandbehaviorkeyinfo)).
+
 ## An `xml` value reads through `SqlXml`
 
 SqlClient hands an `xml` column over as the text `SqlXml.Value` writes — its reader-to-writer round trip spells an empty element `<a />` and single-spaces attributes — from `GetValue`, `GetString`, `GetChars`, `GetFieldValue<string>` and `ExecuteScalar` alike (confirmed 2026-09-25 against SqlClient 6.1 over SQL Server 2025), so the reader and `SimulatedDbCommand.ExecuteScalar` pass an `xml` value through the same round trip; the stored text, which `CAST(x AS nvarchar(max))` reads, keeps the server's own `<a/>`.
