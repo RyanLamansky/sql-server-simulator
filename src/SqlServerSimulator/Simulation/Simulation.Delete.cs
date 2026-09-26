@@ -446,7 +446,10 @@ partial class Simulation
         {
             table.OwningDatabase?.RejectWriteWhenReadOnly();
             if (lockableTable)
+            {
                 context.Batch.AcquireRowLockTxScoped(table, pageIndex, slotIndex, LockMode.Exclusive);
+                context.Batch.NoteSupersededRow(table, pageIndex, slotIndex);
+            }
             var oldBytes = captureVersions ? table.Heap.ReadSlotBytes(pageIndex, slotIndex) : null;
             table.Heap.DeleteAt(pageIndex, slotIndex, undoLog, ReclaimSuperseded(table, context));
             if (oldBytes is not null)

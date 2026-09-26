@@ -916,7 +916,10 @@ partial class Simulation
             var (pageIndex, slotIndex, fullNew, _) = affected[i];
             table.OwningDatabase?.RejectWriteWhenReadOnly();
             if (lockableTable)
+            {
                 context.Batch.AcquireRowLockTxScoped(table, pageIndex, slotIndex, LockMode.Exclusive);
+                context.Batch.NoteSupersededRow(table, pageIndex, slotIndex);
+            }
             var newImage = RowEncoder.EncodeRow(table.StoredColumns, ProjectStoredValues(table, fullNew), table.Heap);
             // The row-X above probed the key ranges the row is leaving; a key
             // change can also carry it INTO a range some SERIALIZABLE reader
@@ -1723,6 +1726,7 @@ partial class Simulation
 
                 if (TryPrepareKeySeek(table, constraint.StorageOrdinals, myStored, out var commons, out var probe))
                 {
+                    AwaitUncommittedKeyWriters(batch, table, constraint.StorageOrdinals, commons, probe);
                     foreach (var (p, s, _) in HeapSeekCache.For(table.Heap)
                         .MatchingRows(table.Heap, storedColumns, constraint.StorageOrdinals, commons, probe))
                     {
@@ -1850,6 +1854,7 @@ partial class Simulation
 
                 if (TryPrepareKeySeek(table, index.KeyStorageOrdinals, myStored, out var commons, out var probe))
                 {
+                    AwaitUncommittedKeyWriters(batch, table, index.KeyStorageOrdinals, commons, probe);
                     foreach (var (p, s, bytes) in HeapSeekCache.For(table.Heap)
                         .MatchingRows(table.Heap, storedColumns, index.KeyStorageOrdinals, commons, probe))
                     {

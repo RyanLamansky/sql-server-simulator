@@ -249,7 +249,7 @@ internal sealed class HeapSeekCache
     // to the entry's promoted type. Returns false when any component is NULL —
     // a NULL key can never equal a (non-NULL by construction) probe, so the
     // row joins no bucket.
-    private static bool TryComputeKey(
+    internal static bool TryComputeKey(
         ReadOnlySpan<byte> image, int[] ordinals, SqlType[] commons, HeapColumn[] schema, Heap? lobStore, out SqlValueKey key)
     {
         var components = new SqlValue[ordinals.Length];

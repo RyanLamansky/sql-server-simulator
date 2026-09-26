@@ -99,6 +99,13 @@ internal sealed class LockResource
     public HeapTable? OwningTable;
 
     /// <summary>
+    /// The row this resource locks, for a row lock; <c>null</c> otherwise.
+    /// Lets the final release of a row X retire that row's entry in
+    /// <see cref="HeapTable.SupersededKeyImages"/>.
+    /// </summary>
+    public (int PageIndex, int SlotIndex)? RowAddress;
+
+    /// <summary>
     /// One owner's hold on this resource, with re-entrance count. Stored
     /// as a struct in <see cref="Holders"/>; same-owner / same-mode re-
     /// acquires bump <see cref="Count"/> instead of appending a second
@@ -402,6 +409,20 @@ internal sealed class LockManager
         }
     }
 
+    /// <summary>Whether <paramref name="owner"/> holds <paramref name="mode"/> on <paramref name="resource"/>.</summary>
+    public bool Holds(LockResource resource, LockMode mode, SessionToken owner)
+    {
+        lock (this.gate)
+        {
+            foreach (var hold in resource.Holders)
+            {
+                if (ReferenceEquals(hold.Owner, owner) && hold.Mode == mode)
+                    return true;
+            }
+            return false;
+        }
+    }
+
     /// <summary>
     /// Releases one acquisition of <paramref name="mode"/> by
     /// <paramref name="owner"/>. Re-entrant acquires must match release
@@ -425,9 +446,15 @@ internal sealed class LockManager
                         if (resource.OwningTable is { } table)
                         {
                             if (mode == LockMode.Exclusive)
+                            {
                                 _ = Interlocked.Decrement(ref table.ActiveDataWriters);
+                                if (resource.RowAddress is { } address)
+                                    table.RetireSupersededKeyImage(owner, address);
+                            }
                             else if (IsRangeMode(mode))
+                            {
                                 _ = Interlocked.Decrement(ref table.ActiveKeyRangeLocks);
+                            }
                         }
                         Monitor.PulseAll(this.gate);
                     }

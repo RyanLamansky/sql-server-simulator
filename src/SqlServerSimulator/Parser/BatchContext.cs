@@ -1152,6 +1152,110 @@ internal sealed class BatchContext
     }
 
     /// <summary>
+    /// Records the image of the row at <paramref name="pageIndex"/> /
+    /// <paramref name="slotIndex"/> — which this session holds X on and is
+    /// about to delete or rewrite — in
+    /// <see cref="HeapTable.SupersededKeyImages"/>, so another session's
+    /// uniqueness check can wait on the key the write takes away until this
+    /// session's transaction settles. Only a table with a unique key or index
+    /// has keys to protect; an escalated table's X covers every row already.
+    /// </summary>
+    public void NoteSupersededRow(HeapTable table, int pageIndex, int slotIndex)
+    {
+        if (!HasUniqueKey(table))
+            return;
+        var connection = this.Connection;
+        if (connection.CurrentTransaction is { } tx && tx.EscalatedTables.Contains(table))
+            return;
+        // Only a row this session holds X on: the entry retires with that
+        // hold's release, so one recorded without it would never retire.
+        if (!table.RowLocks.TryGetValue((pageIndex, slotIndex), out var resource)
+            || !connection.Simulation.LockManager.Holds(resource, LockMode.Exclusive, connection.Session)
+            || table.Heap.ReadSlotBytes(pageIndex, slotIndex) is not { } image)
+        {
+            return;
+        }
+        table.SupersededKeyImages.GetOrAdd(connection.Session, static _ => new())[(pageIndex, slotIndex)] = (image, resource);
+    }
+
+    private static bool HasUniqueKey(HeapTable table)
+    {
+        if (table.KeyConstraints.Count > 0)
+            return true;
+        foreach (var index in table.Indexes)
+        {
+            if (index.IsUnique)
+                return true;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Waits out every other session's uncommitted delete or rewrite of a row
+    /// whose <paramref name="storageOrdinals"/> tuple was
+    /// <paramref name="probe"/> (see <see cref="HeapTable.SupersededKeyImages"/>),
+    /// the way real's insert of a key waits on that key's lock. Cheap when
+    /// no other session has one pending on the table.
+    /// </summary>
+    public void AwaitSupersededKeyHolders(HeapTable table, int[] storageOrdinals, SqlType[] commons, SqlValueKey probe)
+    {
+        if (table.SupersededKeyImages.IsEmpty)
+            return;
+        var connection = this.Connection;
+        List<LockResource>? holders = null;
+        foreach (var (owner, images) in table.SupersededKeyImages)
+        {
+            if (ReferenceEquals(owner, connection.Session))
+                continue;
+            foreach (var (_, (image, resource)) in images)
+            {
+                if (HeapSeekCache.TryComputeKey(image, storageOrdinals, commons, table.StoredColumns, table.Heap, out var key) && key.Equals(probe))
+                    (holders ??= []).Add(resource);
+            }
+        }
+
+        if (holders is not null)
+        {
+            foreach (var resource in holders)
+                _ = this.AwaitRowWriters(table, resource);
+        }
+    }
+
+    /// <summary>
+    /// Waits out another session's uncommitted write to a live row carrying
+    /// <paramref name="probe"/> — the duplicate a uniqueness check just
+    /// found, which is only a duplicate once that write commits (real's
+    /// second insert of a key waits on the first's lock rather than failing
+    /// at once). True when it waited, so the caller checks again.
+    /// </summary>
+    public bool AwaitLiveKeyHolders(HeapTable table, int[] storageOrdinals, SqlType[] commons, SqlValueKey probe)
+    {
+        if (Volatile.Read(ref table.ActiveDataWriters) == 0)
+            return false;
+        var waited = false;
+        foreach (var (page, slot, _) in HeapSeekCache.For(table.Heap).MatchingRows(table.Heap, table.StoredColumns, storageOrdinals, commons, probe))
+        {
+            if (table.RowLocks.TryGetValue((page, slot), out var resource))
+                waited |= this.AwaitRowWriters(table, resource);
+        }
+        return waited;
+    }
+
+    // Blocks until no other session holds `resource` incompatibly with S —
+    // the transient acquire-and-release real's "wait for the committed row"
+    // amounts to. True when there was someone to wait for.
+    private bool AwaitRowWriters(HeapTable table, LockResource resource)
+    {
+        var connection = this.Connection;
+        var manager = connection.Simulation.LockManager;
+        if (!manager.HasIncompatibleHolderOtherThan(resource, LockMode.Shared, connection.Session))
+            return false;
+        manager.Acquire(resource, LockMode.Shared, connection.Session, this.LockTimeoutFor(table));
+        manager.Release(resource, LockMode.Shared, connection.Session);
+        return true;
+    }
+
+    /// <summary>
     /// Promotes a transaction's accumulated per-row tx-scoped locks on
     /// <paramref name="table"/> into a single table-X. Releases every
     /// row-lock entry the transaction holds on this table; acquires

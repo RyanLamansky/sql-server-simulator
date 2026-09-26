@@ -1,0 +1,149 @@
+using System.Data.Common;
+using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
+
+namespace SqlServerSimulator;
+
+/// <summary>
+/// A uniqueness check against a key another open transaction is writing waits
+/// for that transaction instead of deciding on its uncommitted state: a second
+/// insert of a key waits on the first, and a key an uncommitted delete (or
+/// key-changing update) took away can't be reused until that write settles —
+/// otherwise a rollback would restore the old row beside the new one. Probed
+/// 2026-09-26 against SQL Server 2025.
+/// </summary>
+[TestClass]
+// Same scheduling caveat as LockingTests: the blocking assertions hand work to
+// a threadpool thread and assert on a deadline that it started.
+public sealed class UncommittedKeyTests
+{
+    private const int ThreadStartTimeoutMs = 10_000;
+
+    public TestContext TestContext { get; set; } = null!;
+
+    private static Simulation Keyed()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (k int not null primary key, v int not null);
+            create table u (id int not null, code int not null);
+            create unique index ux on u (code);
+            insert t values (10, 1), (20, 2), (30, 3);
+            insert u values (1, 100)
+            """);
+        return sim;
+    }
+
+    // Runs `sql` on `conn` from a threadpool thread, asserts it is still
+    // blocked once the holder has had time to matter, then runs `release` on
+    // the holder and returns the blocked statement's outcome.
+    private async Task<Exception?> BlockedUntil(DbConnection holder, DbConnection conn, string sql, string release)
+    {
+        using var started = new ManualResetEventSlim();
+        var task = Task.Run(
+            () =>
+            {
+                started.Set();
+                try
+                {
+                    _ = conn.CreateCommand(sql).ExecuteNonQuery();
+                    return null;
+                }
+                catch (SimulatedSqlException error)
+                {
+                    return (Exception)error;
+                }
+            },
+            TestContext.CancellationToken);
+        IsTrue(started.Wait(ThreadStartTimeoutMs, TestContext.CancellationToken));
+        await Task.Delay(150, TestContext.CancellationToken);
+        IsFalse(task.IsCompleted, $"expected `{sql}` to block");
+        _ = holder.CreateCommand(release).ExecuteNonQuery();
+        return await task;
+    }
+
+    [TestMethod]
+    [DataRow("insert t values (22, 1)", "insert t values (22, 9)")]
+    [DataRow("delete t where k = 10", "insert t values (10, 9)")]
+    [DataRow("update t set k = 15 where k = 10", "insert t values (10, 9)")]
+    [DataRow("update t set k = 15 where k = 10", "insert t values (15, 9)")]
+    [DataRow("insert u values (2, 200)", "insert u values (3, 200)")]
+    [DataRow("delete u where code = 100", "insert u values (3, 100)")]
+    [DataRow("delete t where k = 10", "update t set k = 10 where k = 20")]
+    public void KeyUnderAnotherTransactionsWrite_Waits(string write, string contender)
+    {
+        var sim = Keyed();
+        using var holder = sim.CreateOpenConnection();
+        using var other = sim.CreateOpenConnection();
+
+        _ = holder.CreateCommand("begin tran; " + write).ExecuteNonQuery();
+        _ = other.CreateCommand("set lock_timeout 0").ExecuteNonQuery();
+
+        AreEqual(1222, Throws<SimulatedSqlException>(() => other.CreateCommand(contender).ExecuteNonQuery()).Number);
+
+        _ = holder.CreateCommand("rollback").ExecuteNonQuery();
+    }
+
+    [TestMethod]
+    public async Task KeyFreedByADelete_IsNotReusedWhenTheDeleteRollsBack()
+    {
+        var sim = Keyed();
+        using var holder = sim.CreateOpenConnection();
+        using var other = sim.CreateOpenConnection();
+
+        _ = holder.CreateCommand("begin tran; delete t where k = 10").ExecuteNonQuery();
+        var outcome = await BlockedUntil(holder, other, "insert t values (10, 9)", "rollback");
+
+        AreEqual(2627, IsInstanceOfType<SimulatedSqlException>(outcome).Number);
+        AreEqual("10:1", sim.ExecuteScalar("select string_agg(concat(k, ':', v), ',') from t where k = 10"));
+    }
+
+    [TestMethod]
+    public async Task KeyFreedByADelete_IsReusedOnceTheDeleteCommits()
+    {
+        var sim = Keyed();
+        using var holder = sim.CreateOpenConnection();
+        using var other = sim.CreateOpenConnection();
+
+        _ = holder.CreateCommand("begin tran; delete t where k = 10").ExecuteNonQuery();
+        IsNull(await BlockedUntil(holder, other, "insert t values (10, 9)", "commit"));
+
+        AreEqual("10:9", sim.ExecuteScalar("select string_agg(concat(k, ':', v), ',') from t where k = 10"));
+    }
+
+    [TestMethod]
+    public async Task SecondInsertOfAKey_FailsOnlyOnceTheFirstCommits()
+    {
+        var sim = Keyed();
+        using var holder = sim.CreateOpenConnection();
+        using var other = sim.CreateOpenConnection();
+
+        _ = holder.CreateCommand("begin tran; insert t values (22, 1)").ExecuteNonQuery();
+        var outcome = await BlockedUntil(holder, other, "insert t values (22, 9)", "commit");
+
+        AreEqual(2627, IsInstanceOfType<SimulatedSqlException>(outcome).Number);
+    }
+
+    [TestMethod]
+    public async Task SecondInsertOfAKey_SucceedsWhenTheFirstRollsBack()
+    {
+        var sim = Keyed();
+        using var holder = sim.CreateOpenConnection();
+        using var other = sim.CreateOpenConnection();
+
+        _ = holder.CreateCommand("begin tran; insert t values (22, 1)").ExecuteNonQuery();
+        IsNull(await BlockedUntil(holder, other, "insert t values (22, 9)", "rollback"));
+
+        AreEqual(9, sim.ExecuteScalar("select v from t where k = 22"));
+    }
+
+    [TestMethod]
+    public void OwnUncommittedWrites_DontBlockTheirOwnSession()
+    {
+        var sim = Keyed();
+        using var conn = sim.CreateOpenConnection();
+
+        _ = conn.CreateCommand("begin tran; delete t where k = 10; insert t values (10, 5); update t set k = 11 where k = 20; insert t values (20, 6)").ExecuteNonQuery();
+        AreEqual(4, conn.CreateCommand("select count(*) from t").ExecuteScalar());
+        _ = conn.CreateCommand("commit").ExecuteNonQuery();
+    }
+}

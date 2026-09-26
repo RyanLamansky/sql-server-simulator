@@ -475,7 +475,27 @@ internal sealed class HeapTable : SchemaObject
     /// table) on first reference.
     /// </summary>
     public LockResource GetOrCreateRowLock(int pageIndex, int slotIndex) =>
-        this.RowLocks.GetOrAdd((pageIndex, slotIndex), static (_, t) => new LockResource { OwningTable = t }, this);
+        this.RowLocks.GetOrAdd((pageIndex, slotIndex), static (address, t) => new LockResource { OwningTable = t, RowAddress = address }, this);
+
+    /// <summary>
+    /// Per session, the pre-images of the rows it has deleted or rewritten
+    /// while it still holds their row X, each with that lock — the keys an
+    /// uncommitted DELETE or key-changing UPDATE took away, which a rollback
+    /// would bring back. A uniqueness check waits on a matching entry of
+    /// another session's before deciding, as real waits on the deleted key's
+    /// lock: so an insert of a key another transaction has deleted blocks
+    /// until that transaction ends rather than succeeding and leaving two
+    /// rows with the key after a rollback (probed 2026-09-26 against SQL
+    /// Server 2025). An entry retires with the release of its row X.
+    /// </summary>
+    public readonly ConcurrentDictionary<SessionToken, ConcurrentDictionary<(int PageIndex, int SlotIndex), (byte[] Image, LockResource Lock)>> SupersededKeyImages = new();
+
+    /// <summary>Retires <paramref name="owner"/>'s superseded image of <paramref name="address"/>, if any.</summary>
+    internal void RetireSupersededKeyImage(SessionToken owner, (int PageIndex, int SlotIndex) address)
+    {
+        if (this.SupersededKeyImages.TryGetValue(owner, out var images) && images.TryRemove(address, out _) && images.IsEmpty)
+            _ = this.SupersededKeyImages.TryRemove(owner, out _);
+    }
 
     /// <summary>
     /// Lazily-interned key-range <see cref="LockResource"/>s keyed by the

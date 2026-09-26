@@ -432,6 +432,7 @@ partial class Simulation
             if (IsLockableTable(childTable))
             {
                 context.Batch.AcquireRowLockTxScoped(childTable, pageIndex, slotIndex, LockMode.Exclusive);
+                context.Batch.NoteSupersededRow(childTable, pageIndex, slotIndex);
                 context.Batch.ProbeKeyRangesForWrite(childTable, rewritten);
             }
             childTable.Heap.UpdateAt(pageIndex, slotIndex, rewritten, undoLog, ReclaimSuperseded(childTable, context));
@@ -494,6 +495,7 @@ partial class Simulation
             if (IsLockableTable(childTable))
             {
                 context.Batch.AcquireRowLockTxScoped(childTable, pageIndex, slotIndex, LockMode.Exclusive);
+                context.Batch.NoteSupersededRow(childTable, pageIndex, slotIndex);
                 context.Batch.ProbeKeyRangesForWrite(childTable, rewritten);
             }
             childTable.Heap.UpdateAt(pageIndex, slotIndex, rewritten, undoLog, ReclaimSuperseded(childTable, context));

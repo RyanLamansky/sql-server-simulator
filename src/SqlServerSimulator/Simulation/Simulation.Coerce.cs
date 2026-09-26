@@ -828,6 +828,7 @@ partial class Simulation
                 (scanned ??= []).Add(constraint);
                 continue;
             }
+            AwaitUncommittedKeyWriters(batch, destinationTable, constraint.StorageOrdinals, commons, probe);
 
             if (HeapSeekCache.For(destinationTable.Heap).AnyRowMatches(
                     destinationTable.Heap, destinationTable.StoredColumns, constraint.StorageOrdinals, commons, probe))
@@ -869,6 +870,23 @@ partial class Simulation
         }
 
         return RowKeyVerdict.Unique;
+    }
+
+    /// <summary>
+    /// Before a uniqueness check decides, waits out every other session's
+    /// uncommitted write that decides it: a live row carrying the key that
+    /// another transaction inserted or rewrote, and a row carrying it that
+    /// another transaction deleted or re-keyed. Real waits on the key's lock
+    /// in both cases, so a duplicate is only reported against a committed row
+    /// and a key freed by an uncommitted delete isn't reused before that
+    /// delete settles (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    private static void AwaitUncommittedKeyWriters(BatchContext batch, HeapTable table, int[] storageOrdinals, SqlType[] commons, SqlValueKey probe)
+    {
+        if (batch.IsSkipping)
+            return;
+        batch.AwaitSupersededKeyHolders(table, storageOrdinals, commons, probe);
+        _ = batch.AwaitLiveKeyHolders(table, storageOrdinals, commons, probe);
     }
 
     /// <summary>Msg 2627 for <paramref name="constraint"/>, rendering the
@@ -976,6 +994,7 @@ partial class Simulation
 
             if (TryPrepareKeySeek(destinationTable, index.KeyStorageOrdinals, storedRowValues, out var commons, out var probe))
             {
+                AwaitUncommittedKeyWriters(batch, destinationTable, index.KeyStorageOrdinals, commons, probe);
                 foreach (var (_, _, bytes) in HeapSeekCache.For(lobStore)
                     .MatchingRows(lobStore, storedColumns, index.KeyStorageOrdinals, commons, probe))
                 {

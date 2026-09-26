@@ -1725,7 +1725,10 @@ partial class Simulation
             foreach (var (page, slot, _, _) in pendingDeletes)
             {
                 if (lockableTable)
+                {
                     context.Batch.AcquireRowLockTxScoped(destinationTable, page, slot, LockMode.Exclusive);
+                    context.Batch.NoteSupersededRow(destinationTable, page, slot);
+                }
                 destinationTable.Heap.DeleteAt(page, slot, undoLog, ReclaimSuperseded(destinationTable, context));
             }
         }
@@ -1737,6 +1740,7 @@ partial class Simulation
                 if (lockableTable)
                 {
                     context.Batch.AcquireRowLockTxScoped(destinationTable, page, slot, LockMode.Exclusive);
+                    context.Batch.NoteSupersededRow(destinationTable, page, slot);
                     context.Batch.ProbeKeyRangesForWrite(destinationTable, rewritten);
                 }
                 destinationTable.Heap.UpdateAt(page, slot, rewritten, undoLog, ReclaimSuperseded(destinationTable, context));
