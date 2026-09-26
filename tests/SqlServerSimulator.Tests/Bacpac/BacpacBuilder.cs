@@ -41,6 +41,7 @@ public sealed partial class BacpacBuilder
     private readonly List<TableTypeDef> _tableTypes = [];
     private readonly List<PermissionDef> _permissions = [];
     private readonly List<ViewIndexDef> _viewIndexes = [];
+    private readonly List<ColumnStoreIndexDef> _columnStoreIndexes = [];
     private readonly List<UserDefinedDataTypeDef> _uddts = [];
     private readonly List<XmlSchemaCollectionDef> _xmlSchemaCollections = [];
     private readonly List<XmlIndexDef> _xmlIndexes = [];
@@ -431,13 +432,13 @@ public sealed partial class BacpacBuilder
     }
 
     /// <summary>
-    /// Emits a <c>SqlColumnStoreIndex</c> element. Read-optimization shape
-    /// over the same row data; same silent-skip path as
-    /// <see cref="PartitionFunction"/>.
+    /// Emits a <c>SqlColumnStoreIndex</c> element on a table. DacFx lists a
+    /// clustered one's columns too, so <paramref name="columns"/> is written
+    /// for either kind.
     /// </summary>
-    public BacpacBuilder ColumnStoreIndex(string name)
+    public BacpacBuilder ColumnStoreIndex(string schemaName, string tableName, string indexName, bool isClustered, params string[] columns)
     {
-        _silentlySkipped.Add(("SqlColumnStoreIndex", $"[{name}]"));
+        _columnStoreIndexes.Add(new ColumnStoreIndexDef(schemaName, tableName, indexName, isClustered, columns));
         return this;
     }
 
@@ -576,6 +577,8 @@ public sealed partial class BacpacBuilder
 
         foreach (var vi in _viewIndexes)
             model.Add(BuildViewIndexElement(ns, vi));
+        foreach (var ci in _columnStoreIndexes)
+            model.Add(BuildColumnStoreIndexElement(ns, ci));
 
         foreach (var uddt in _uddts)
             model.Add(BuildUddtElement(ns, uddt));
@@ -1269,6 +1272,8 @@ internal sealed record TableTypeDef(string SchemaName, string TypeName, TableBui
 
 internal sealed record PermissionDef(string Action, string Permission, string Grantee);
 
+internal sealed record ColumnStoreIndexDef(string SchemaName, string TableName, string IndexName, bool IsClustered, string[] Columns);
+
 internal sealed record ViewIndexDef(string ViewSchema, string ViewName, string IndexName, string[] KeyColumns, bool IsUnique = true, bool IsClustered = true);
 
 internal sealed record XmlIndexDef(string SchemaName, string TableName, string IndexName, string Column, bool IsPrimary, string? UsingPrimaryIndexName, int? PrimaryXmlIndexUsage);
@@ -1436,6 +1441,34 @@ sealed partial class BacpacBuilder
             }
             element.Add(constraintsRel);
         }
+        return element;
+    }
+
+    private static XElement BuildColumnStoreIndexElement(XNamespace ns, ColumnStoreIndexDef ci)
+    {
+        var element = new XElement(ns + "Element",
+            new XAttribute("Type", "SqlColumnStoreIndex"),
+            new XAttribute("Name", $"[{ci.SchemaName}].[{ci.TableName}].[{ci.IndexName}]"));
+        if (ci.IsClustered)
+            element.Add(new XElement(ns + "Property", new XAttribute("Name", "IsClustered"), new XAttribute("Value", "True")));
+        var columnSpecs = new XElement(ns + "Relationship", new XAttribute("Name", "ColumnSpecifications"));
+        foreach (var col in ci.Columns)
+        {
+            columnSpecs.Add(new XElement(ns + "Entry",
+                new XElement(ns + "Element",
+                    new XAttribute("Type", "SqlIndexedColumnSpecification"),
+                    new XElement(ns + "Relationship",
+                        new XAttribute("Name", "Column"),
+                        new XElement(ns + "Entry",
+                            new XElement(ns + "References",
+                                new XAttribute("Name", $"[{ci.SchemaName}].[{ci.TableName}].[{col}]")))))));
+        }
+        element.Add(columnSpecs);
+        element.Add(new XElement(ns + "Relationship",
+            new XAttribute("Name", "IndexedObject"),
+            new XElement(ns + "Entry",
+                new XElement(ns + "References",
+                    new XAttribute("Name", $"[{ci.SchemaName}].[{ci.TableName}]")))));
         return element;
     }
 

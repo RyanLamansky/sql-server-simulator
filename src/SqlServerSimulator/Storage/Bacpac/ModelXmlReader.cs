@@ -267,18 +267,16 @@ internal static class ModelXmlReader
                     // FILEGROUP-scoped extended properties (phase 9) resolve the
                     // registered data_space_id.
                     ("SqlFilegroup", 1) => Run(() => EmitFilegroup(name, connection)),
-                    // Partitioning + columnstore are storage-layout concerns; the
-                    // simulator has a single in-process heap so all three are
-                    // parse-and-skip. PartitionFunction / PartitionScheme define
-                    // filegroup-mapping boundaries that tables / indexes reference
-                    // for physical placement (no semantic effect when placement
-                    // isn't tracked). ColumnStoreIndex is a read-optimization
-                    // shape over the same row data; the simulator's linear-scan
-                    // secondary indexes don't model column-major vs row-major
-                    // storage. Phase 1 placement is fine — no dependencies.
+                    // Partitioning is a storage-layout concern; the simulator has
+                    // a single in-process heap so both are parse-and-skip.
+                    // PartitionFunction / PartitionScheme define filegroup-mapping
+                    // boundaries that tables / indexes reference for physical
+                    // placement (no semantic effect when placement isn't
+                    // tracked). Phase 1 placement is fine — no dependencies.
                     ("SqlPartitionFunction", 1) => Run(static () => { }),
                     ("SqlPartitionScheme", 1) => Run(static () => { }),
-                    ("SqlColumnStoreIndex", 1) => Run(static () => { }),
+                    // A columnstore index lands with the other indexes.
+                    ("SqlColumnStoreIndex", 8) => Run(() => EmitColumnstoreIndex(element, name, connection, result)),
                     ("SqlExtendedProperty", 9) => Run(() => EmitExtendedProperty(element, name, connection, viewNames, result)),
                     // Permission statements emit after roles + everything-securable
                     // — phase 7 is "everything is in place except extended
@@ -2070,6 +2068,44 @@ internal static class ModelXmlReader
             // phase work shrinks this set.
             result.AddSkipped(new BacpacSkipped("SqlIndex", indexName,
                 $"CREATE INDEX on '{indexedObject}' failed: {ex.Message}"));
+        }
+    }
+
+    /// <summary>
+    /// Emits <c>CREATE [CLUSTERED | NONCLUSTERED] COLUMNSTORE INDEX</c> for a
+    /// <c>SqlColumnStoreIndex</c> element. DacFx lists a clustered one's
+    /// columns too — every column the table has — but the statement takes no
+    /// list for it, so only a nonclustered one's are written.
+    /// </summary>
+    private static void EmitColumnstoreIndex(XElement element, string? indexName, DbConnection connection, BacpacImportResult result)
+    {
+        if (string.IsNullOrEmpty(indexName))
+            throw new InvalidDataException("bacpac: SqlColumnStoreIndex missing Name attribute.");
+        var indexedObject = ReadSingleReference(element, "IndexedObject")
+            ?? throw new InvalidDataException($"bacpac: SqlColumnStoreIndex '{indexName}' missing IndexedObject.");
+        var isClustered = ReadBoolProperty(element, "IsClustered", defaultValue: false);
+        var columns = element.Elements(Ns + "Relationship")
+            .FirstOrDefault(r => r.Attribute("Name")?.Value == "ColumnSpecifications")
+            ?.Elements(Ns + "Entry").Elements(Ns + "Element")
+            .Select(ReadIndexedColumn)
+            .OfType<string>()
+            .ToList() ?? [];
+        var columnList = isClustered ? "" : $" ({string.Join(", ", columns)})";
+        var filterPredicate = ReadScriptProperty(element, "FilterPredicate");
+        var whereClause = string.IsNullOrWhiteSpace(filterPredicate) ? "" : $" WHERE {filterPredicate}";
+
+        using var command = connection.CreateCommand();
+#pragma warning disable CA2100 // bacpac content is caller-trusted; the loader is a translator, not an end-user input handler
+        command.CommandText = $"CREATE {(isClustered ? "CLUSTERED" : "NONCLUSTERED")} COLUMNSTORE INDEX {Leaf(indexName)} ON {indexedObject}{columnList}{whereClause};";
+#pragma warning restore CA2100
+        try
+        {
+            _ = command.ExecuteNonQuery();
+        }
+        catch (SimulatedSqlException ex)
+        {
+            result.AddSkipped(new BacpacSkipped("SqlColumnStoreIndex", indexName,
+                $"CREATE COLUMNSTORE INDEX on '{indexedObject}' failed: {ex.Message}"));
         }
     }
 

@@ -1907,22 +1907,26 @@ public class BacpacLoaderTests
     }
 
     [TestMethod]
-    public void PartitionFunction_PartitionScheme_ColumnStoreIndex_AreSilentlySkipped()
+    public void PartitionFunction_PartitionScheme_AreSilentlySkipped_ColumnStoreIndexesLand()
     {
-        // WWI-Full's three storage-layout decoration element types are
-        // loader no-ops — recognized by Type, action is empty. The key
-        // invariant: they don't show up on Skipped (Skipped is for
-        // unmodeled features; these are deliberately no-op-handled).
+        // WWI-Full's partitioning element types are loader no-ops —
+        // recognized by Type, action is empty, and not on Skipped. Its
+        // columnstore indexes are created, a clustered one without the column
+        // list DacFx writes for it.
         using var bacpac = BacpacBuilder.Create()
-            .Table("dbo", "Item", t => t.Column("Id", "int").Row(1))
+            .Table("dbo", "Item", t => t.Column("Id", "int").Column("Qty", "int").Row(1, 2))
+            .Table("dbo", "Line", t => t.Column("Id", "int").Column("Qty", "int").Row(1, 2))
             .PartitionFunction("PF_DateRange")
             .PartitionScheme("PS_DateRange")
-            .ColumnStoreIndex("CCI_Item")
+            .ColumnStoreIndex("dbo", "Item", "CCX_Item", isClustered: true, "Id", "Qty")
+            .ColumnStoreIndex("dbo", "Line", "NCCX_Line", isClustered: false, "Qty")
             .Build();
 
         var sim = new Simulation();
         sim.ImportBacpac(bacpac, out var diag);
         IsEmpty(diag.Skipped);
+        AreEqual("CLUSTERED COLUMNSTORE,NONCLUSTERED COLUMNSTORE", sim.ExecuteScalar(
+            "SELECT STRING_AGG(type_desc, ',') WITHIN GROUP (ORDER BY type) FROM sys.indexes WHERE type IN (5, 6);"));
         // Table + row payload still load.
         AreEqual(1, sim.ExecuteScalar("SELECT COUNT(*) FROM Item;"));
     }
