@@ -8,7 +8,8 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// (or current) principal. The simulator's seeded principals
 /// (<c>public</c>=0, <c>dbo</c>=1, <c>guest</c>=2,
 /// <c>INFORMATION_SCHEMA</c>=3, <c>sys</c>=4) drive USER_ID and
-/// DATABASE_PRINCIPAL_ID; SUSER_ID returns the fixed login id (1).
+/// DATABASE_PRINCIPAL_ID; SUSER_ID reads <c>sys.server_principals</c>, and
+/// with no argument answers the session's login.
 /// NULL argument or unknown name returns NULL.
 /// </summary>
 internal sealed class PrincipalIdLookup : Expression
@@ -30,12 +31,18 @@ internal sealed class PrincipalIdLookup : Expression
     {
         if (this.nameArg is null)
         {
-            // SUSER_ID = the fixed login id (1); USER_ID / DATABASE_PRINCIPAL_ID
+            // SUSER_ID = the session's login; USER_ID / DATABASE_PRINCIPAL_ID
             // = the effective database principal (the impersonation-stack top,
             // or dbo's id 1 for an unimpersonated session).
-            return this.kind == PrincipalIdKind.SUserId
-                ? SqlValue.FromInt32(1)
-                : SqlValue.FromInt32(runtime.Batch.Connection.Security.Effective.DatabasePrincipalId);
+            if (this.kind != PrincipalIdKind.SUserId)
+                return SqlValue.FromInt32(runtime.Batch.Connection.Security.Effective.DatabasePrincipalId);
+            var loginName = runtime.Batch.Connection.Security.Effective.LoginName;
+            foreach (var row in BuiltInResources.EnumerateSysServerPrincipals(runtime.Batch, runtime.Batch.CurrentDatabase))
+            {
+                if (BuiltInToken.Comparer.Equals(row[0].AsString, loginName))
+                    return SqlValue.FromInt32(row[1].AsInt32);
+            }
+            return SqlValue.FromInt32(1);
         }
         var v = this.nameArg.Run(runtime);
         if (v.IsNull)
@@ -43,11 +50,16 @@ internal sealed class PrincipalIdLookup : Expression
         var name = v.CoerceTo(SqlType.NVarchar).AsString;
         if (this.kind == PrincipalIdKind.SUserId)
         {
-            // SUSER_ID at server level — simulator has one login, so any
-            // recognized server-principal name maps to id 1; unknown → NULL.
-            return BuiltInToken.Comparer.Equals(name, PrincipalPlaceholders.CurrentLogin)
-                ? SqlValue.FromInt32(1)
-                : SqlValue.Null(SqlType.Int32);
+            // Any server principal sys.server_principals lists — a login, a
+            // fixed or user-defined server role — by its principal_id
+            // (probed 2026-09-25: sa 1, public 2, sysadmin 3, bulkadmin 10);
+            // unknown → NULL.
+            foreach (var row in BuiltInResources.EnumerateSysServerPrincipals(runtime.Batch, runtime.Batch.CurrentDatabase))
+            {
+                if (BuiltInToken.Comparer.Equals(row[0].AsString, name))
+                    return SqlValue.FromInt32(row[1].AsInt32);
+            }
+            return SqlValue.Null(SqlType.Int32);
         }
         return runtime.Batch.CurrentDatabase.Principals.TryGetValue(name, out var p)
             ? SqlValue.FromInt32(p.PrincipalId)

@@ -101,7 +101,7 @@ internal sealed class SUserName : Expression
         foreach (var row in BuiltInResources.EnumerateSysServerPrincipals(runtime.Batch, runtime.Batch.CurrentDatabase))
         {
             if (sid is not null ? !row[2].IsNull && row[2].AsBytes.AsSpan().SequenceEqual(sid) : row[1].AsInt32 == id)
-                return row[0];
+                return SqlValue.FromNVarchar(MetadataNameType(runtime.Batch), row[0].AsString);
         }
         return SqlValue.Null(MetadataNameType(runtime.Batch));
     }

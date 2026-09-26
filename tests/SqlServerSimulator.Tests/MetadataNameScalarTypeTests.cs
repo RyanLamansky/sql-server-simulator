@@ -29,4 +29,9 @@ public sealed class MetadataNameScalarTypeTests
             create table t (a int);
             select schema_name(schema_id) + type from sys.objects where object_id = object_id('t')
             """));
+
+    [TestMethod]
+    public void SuserId_ReadsTheServerPrincipals()
+        => AreEqual("1|1|2|3|10|", ExecuteScalar(
+            "select concat(suser_id(), '|', suser_id('sa'), '|', suser_id('public'), '|', suser_id('sysadmin'), '|', suser_id('bulkadmin'), '|', suser_id('nope'))"));
 }
