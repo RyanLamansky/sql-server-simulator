@@ -793,7 +793,7 @@ internal sealed partial class Selection
             return ParseSingleSelectStatement(context, scope, allowOrderBy);
 
         context.MoveNextRequired();
-        var inner = ParseUnionExceptChain(context, scope);
+        var inner = ParseUnionExceptChain(context, scope.InParentheses());
         if (context.Token is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextOptional();

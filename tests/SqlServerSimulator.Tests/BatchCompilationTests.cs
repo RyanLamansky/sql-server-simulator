@@ -230,4 +230,18 @@ public sealed class BatchCompilationTests
         AreEqual(207, ex.Number);
         IsEmpty(Messages(ex));
     }
+
+    /// <summary>
+    /// A syntax error the compile walk couldn't reach — past a statement
+    /// naming a table the batch creates — still ends the batch when it
+    /// surfaces, rather than the dispatch resuming inside the broken
+    /// statement's tail, since real would have refused the whole batch.
+    /// </summary>
+    [TestMethod]
+    public void SyntaxErrorPastADeferredTarget_EndsTheBatch()
+    {
+        var simulation = new Simulation();
+        _ = simulation.AssertSqlError("create table t (a int); insert t (a) with (tablock) values (1); create table u (b int)", 156);
+        AreEqual(DBNull.Value, simulation.ExecuteScalar("select object_id('u')"));
+    }
 }

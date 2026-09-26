@@ -25,7 +25,8 @@
   Per-branch ORDER BY in non-final branch → Msg 156.
   A branch may be **parenthesized**, and the parentheses may wrap a whole nested chain rather than a single SELECT — `SELECT … UNION (SELECT … UNION SELECT …)` and `… EXCEPT (… INTERSECT …)` are what an ORM emits when it combines an already-combined queryset (`ParseSetOpBranch`).
   Without it the opening paren read as a scalar subquery, so the branch looked like a one-column select list and the chain failed the equal-expression-count check.
-  **Not accepted yet**: a parenthesized *leading* branch at statement start (`(SELECT …) UNION SELECT …`) still raises Msg 102 — that needs the statement dispatcher to route a leading `(` into the SELECT parser, not just the branch position.
+  A statement may open with one too — `(SELECT 1) UNION (SELECT 2) ORDER BY 1`, `(SELECT 1)` alone, after a CTE prefix or as an IF body — since the dispatcher routes a leading `(` to the SELECT parser; the parentheses end their query whatever its position (`QueryScope.InParentheses`), so a FROM-less branch inside them no longer reads its `)` as a stray token (probed 2026-09-26).
+  **Not modeled yet**: real also ends a statement at a `(` that directly follows a complete one without a separator (`SELECT 1 (SELECT 2)` is two result sets), where the expression parser here reads on into it; and real refuses an `ORDER BY` inside a parenthesized branch even beside `TOP` (Msg 156 at `ORDER`), which the simulator accepts.
   Top-level ORDER BY binds against the first branch — see [Top-level ORDER BY over a set operation](#top-level-order-by-over-a-set-operation).
 - `SELECT *`: bare and qualified `<source>.*`.
   Multi-source `*` keeps duplicate names.

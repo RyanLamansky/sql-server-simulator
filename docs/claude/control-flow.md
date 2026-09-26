@@ -250,7 +250,8 @@ An error that ends a procedure's or dynamic SQL's batch — a compile error, or 
 
 ### Not modeled yet
 
-- **The walk stops at a deferred DML target** (`INSERT INTO <missing>`), since the recovery scan can't tell where that statement ends; real keeps compiling the statements after it, so an error past one surfaces here only when its statement runs.
+- **The walk stops at a deferred DML target** (`INSERT INTO <missing>`), since the recovery scan can't tell where that statement ends; real keeps compiling the statements after it, so an error past one surfaces here only when its statement runs — after the statements ahead of it have run.
+  A syntax error (Msg 102 / 156) surfacing that way at least ends the batch (`EndsBatch`), as real's refusal would have, rather than the dispatch resuming inside the broken statement's tail.
 - **A deferred statement's bind error at run time** is catchable here, and ends the batch only for the name-resolution set; real's recompile errors can't be caught in their own scope and end the batch whatever their number (`CREATE TABLE t2 (a int); INSERT t2 VALUES (1, 2); PRINT 'after'` never prints on real).
 - **A procedure body compiles only at `CREATE`**; real compiles it again as a whole at its first execution, so a body statement naming a table created after the procedure fails there before the body's first statement runs.
 - **An `INSERT … EXEC` body stops at its first error**, since the statement collects the body's rows rather than forwarding its outcomes; real runs that body on too, inserting what its later statements return (probed 2026-09-24).

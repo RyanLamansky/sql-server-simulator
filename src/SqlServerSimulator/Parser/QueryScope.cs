@@ -50,9 +50,12 @@ internal enum QueryPosition
 /// columns. Every rule that differs between a statement and a nested query
 /// reads one of the members below rather than testing the position itself.
 /// </summary>
-internal readonly struct QueryScope(QueryPosition position, Func<MultiPartName, SqlType>? outerTypeResolver)
+internal readonly struct QueryScope(QueryPosition position, Func<MultiPartName, SqlType>? outerTypeResolver, bool inParentheses = false)
 {
     public readonly QueryPosition Position = position;
+
+    /// <summary>Set by <see cref="InParentheses"/>.</summary>
+    private readonly bool inParentheses = inParentheses;
 
     /// <summary>
     /// The enclosing query's column-type resolver, or <see langword="null"/>
@@ -67,14 +70,21 @@ internal readonly struct QueryScope(QueryPosition position, Func<MultiPartName, 
         new(position, outerTypeResolver);
 
     /// <summary>This scope with its enclosing-column resolver replaced.</summary>
-    public QueryScope WithOuter(Func<MultiPartName, SqlType>? outerTypeResolver) => new(this.Position, outerTypeResolver);
+    public QueryScope WithOuter(Func<MultiPartName, SqlType>? outerTypeResolver) => new(this.Position, outerTypeResolver, this.inParentheses);
+
+    /// <summary>
+    /// This scope for a query expression written in parentheses within it —
+    /// <c>(SELECT 1) UNION (SELECT 2)</c> — which a closing parenthesis ends
+    /// whatever the position.
+    /// </summary>
+    public QueryScope InParentheses() => new(this.Position, this.OuterTypeResolver, inParentheses: true);
 
     /// <summary>
     /// Whether a closing parenthesis ends this query. Otherwise the query is a
     /// statement's own, which a <c>;</c> or the next statement's keyword ends
     /// and in which a <c>)</c> is a syntax error.
     /// </summary>
-    public bool Parenthesized => this.Position is not (QueryPosition.Statement or QueryPosition.InsertSource or QueryPosition.Inlined);
+    public bool Parenthesized => this.inParentheses || this.Position is not (QueryPosition.Statement or QueryPosition.InsertSource or QueryPosition.Inlined);
 
     /// <summary>
     /// Whether this query's result columns must each settle one collation

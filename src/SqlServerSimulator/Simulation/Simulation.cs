@@ -2513,16 +2513,25 @@ public sealed partial class Simulation
         => ex.Number is 195 or 207 or 208 or 209 or 4104 or 4121 or 4403 or 4405 or 4406;
 
     /// <summary>
-    /// True for an error that ends the whole batch rather than its statement:
-    /// a name-resolution miss the procedure or dynamic SQL it ended hasn't
-    /// already contained, an uncaught <c>THROW</c>, or an error
-    /// <c>SET XACT_ABORT ON</c> promoted.
+    /// Whether a TRY frame catches <paramref name="ex"/> where it is raised:
+    /// any error but the transaction-aborting class, once the batch runs.
     /// </summary>
     private static bool CaughtByTryFrame(BatchContext batch, SimulatedSqlException ex) =>
         batch.TryFrameDepth > 0 && !ex.AbortsTransaction && !batch.CreateTimeBinding;
 
+    /// <summary>
+    /// True for an error that ends the whole batch rather than its statement:
+    /// a name-resolution miss or a syntax error (Msg 102 / 156) the procedure
+    /// or dynamic SQL it ended hasn't already contained, an uncaught
+    /// <c>THROW</c>, or an error <c>SET XACT_ABORT ON</c> promoted. A syntax
+    /// error reaches run time only where the batch's compile walk stopped short
+    /// of it; real would have refused the whole batch, so none of what follows
+    /// it runs, where resuming at the next boundary keyword would read the
+    /// broken statement's tail as statements of its own. (Other severity-15
+    /// errors are not all the parse phase's: Msg 127 is raised at run time.)
+    /// </summary>
     private static bool EndsBatch(SimulatedSqlException ex)
-        => (IsBatchAbortingNameResolution(ex) && !ex.EndedCalledBatch) || ex.TerminatesBatch || ex.XactAbortPromoted;
+        => ((IsBatchAbortingNameResolution(ex) || ex.Number is 102 or 156) && !ex.EndedCalledBatch) || ex.TerminatesBatch || ex.XactAbortPromoted;
 
     private IEnumerable<SimulatedStatementOutcome> DispatchOneStatementCore(BatchContext batch, bool requireSemicolonBeforeCte, bool atBatchStart)
     {
@@ -2550,7 +2559,7 @@ public sealed partial class Simulation
             if (requireSemicolonBeforeCte)
                 throw SimulatedSqlException.CteRequiresPrecedingSemicolon();
             ParseCteBindings(context);
-            context.CtePrefixLeadsSelectStatement = context.Token is ReservedKeyword { Keyword: Keyword.Select };
+            context.CtePrefixLeadsSelectStatement = context.Token is ReservedKeyword { Keyword: Keyword.Select } or Operator { Character: '(' };
         }
 
         // A doomed transaction refuses object DDL with Msg 3930 the way it
@@ -2629,7 +2638,10 @@ public sealed partial class Simulation
         SimulatedStatementOutcome? outcome;
         switch (context.Token)
         {
+            // A query expression written in parentheses is a SELECT statement
+            // too, `(SELECT 1) UNION (SELECT 2)` (probed 2026-09-26).
             case ReservedKeyword { Keyword: Keyword.Select }:
+            case Operator { Character: '(' }:
                 {
                     var statementStart = context.SaveCheckpoint();
                     context.ForBrowseSeen = false;

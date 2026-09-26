@@ -654,4 +654,31 @@ public sealed class SetOperationTests
         rows.Sort(StringComparer.Ordinal);
         AreEqual(expected, string.Join("|", rows));
     }
+
+    /// <summary>
+    /// A query expression written in parentheses may open a statement — alone,
+    /// as a set operation's first branch, after a CTE prefix or as an IF body
+    /// — and a parenthesized branch without FROM ends at its own closing
+    /// parenthesis (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("(select 1)", "1")]
+    [DataRow("(select 1) union (select 2) order by 1", "1,2")]
+    [DataRow("((select 1)) union all select 2", "1,2")]
+    [DataRow("select 1 union (select 2)", "1,2")]
+    [DataRow("(select 1 a) order by a", "1")]
+    [DataRow("with c as (select 1 a) (select a from c) union all select 5", "1,5")]
+    [DataRow("if 1 = 1 (select 1) else (select 2)", "1")]
+    public void ParenthesizedQuery_IsAStatement(string sql, string expected)
+    {
+        using var reader = new Simulation().ExecuteReader(sql);
+        var values = new List<string>();
+        while (reader.Read())
+            values.Add($"{reader.GetValue(0)}");
+        AreEqual(expected, string.Join(",", values));
+    }
+
+    [TestMethod]
+    public void ParenthesizedBareProjection_UnderAnUnusedCte_IsMsg422()
+        => new Simulation().AssertSqlError("with c as (select 1 a) (select 7)", 422);
 }
