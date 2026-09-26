@@ -351,11 +351,12 @@ partial class Simulation
     }
 
     // Real reports the identity column's seed / increment / not-for-replication
-    // flag, or a single placeholder row naming the absence.
+    // flag, or a single placeholder row naming the absence. A view names the
+    // identity column it passes through (probed 2026-09-26).
     private static SimulatedSqlResultSet HelpIdentityResultSet(HeapColumn[] columns)
     {
-        var column = Array.Find(columns, c => c.Identity is not null);
-        var identity = column?.Identity;
+        var column = Array.Find(columns, c => (c.Identity ?? c.IdentitySource) is not null);
+        var identity = column?.Identity ?? column?.IdentitySource;
         List<SqlValue[]> rows =
         [
             [

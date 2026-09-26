@@ -31,8 +31,8 @@ internal sealed class IdentCurrent : Expression
 
     /// <summary>
     /// The identity state of the table <paramref name="tableName"/>
-    /// names, evaluated per row — a variable or a column works as well as a
-    /// literal — or null when the name is NULL, names no table, or names one
+    /// or view names, evaluated per row — a variable or a column works as well
+    /// as a literal — or null when the name is NULL, names no table, or names one
     /// without an identity column, all of which read NULL (probed 2026-09-26
     /// against SQL Server 2025). The name splits on <c>.</c> so
     /// <c>'schema.t'</c> routes through the named schema; bracket-quoted
@@ -48,8 +48,11 @@ internal sealed class IdentCurrent : Expression
         var multiPart = new MultiPartName(parts[0]);
         for (var i = 1; i < parts.Length; i++)
             multiPart = multiPart.WithAddedPart(parts[i]);
-        return runtime.Batch.TryResolveTable(multiPart, out var table) && table.IdentityOrdinal >= 0
-            ? table.Columns[table.IdentityOrdinal].Identity
+        if (runtime.Batch.TryResolveTable(multiPart, out var table))
+            return table.IdentityOrdinal >= 0 ? table.Columns[table.IdentityOrdinal].Identity : null;
+        // A view answers for the identity column it passes through.
+        return runtime.Batch.TryResolveView(multiPart, out var view)
+            ? Array.Find(view.OutputColumns, column => column.IdentitySource is not null)?.IdentitySource
             : null;
     }
 

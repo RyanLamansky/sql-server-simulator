@@ -128,6 +128,25 @@ internal sealed class ColumnProperty : Expression
             return (null, 0, []);
         }
 
+        var columns = ColumnsOf(database, id);
+        for (var i = 0; i < columns?.Length; i++)
+        {
+            var column = columns[i];
+            if (Collation.Baseline.Equals(column.Name, name))
+                return (column, column.ColumnId == 0 ? i + 1 : column.ColumnId, columns);
+        }
+        return (null, 0, []);
+    }
+
+    /// <summary>
+    /// The columns object <paramref name="id"/> carries — a table's, view's,
+    /// table-valued function's result, table type's or catalog view's — or
+    /// null for anything else. A column's <c>column_id</c> is its
+    /// <see cref="HeapColumn.ColumnId"/> where it has one and its position
+    /// otherwise.
+    /// </summary>
+    internal static HeapColumn[]? ColumnsOf(Database database, int id)
+    {
         var columns = ObjectProperty.FindObject(database, id) switch
         {
             HeapTable table => table.Columns,
@@ -137,13 +156,17 @@ internal sealed class ColumnProperty : Expression
             null => CatalogViewColumns(id),
             _ => null,
         };
-        for (var i = 0; i < columns?.Length; i++)
+        if (columns is not null)
+            return columns;
+        foreach (var schema in database.Schemas.Values)
         {
-            var column = columns[i];
-            if (Collation.Baseline.Equals(column.Name, name))
-                return (column, column.ColumnId == 0 ? i + 1 : column.ColumnId, columns);
+            foreach (var tableType in schema.TableTypes.Values)
+            {
+                if (tableType.ObjectId == id)
+                    return tableType.Columns;
+            }
         }
-        return (null, 0, []);
+        return null;
     }
 
     private static HeapColumn[]? CatalogViewColumns(int id)
@@ -178,7 +201,7 @@ internal sealed class ColumnProperty : Expression
                 "ALLOWSNULL" => column.Nullable ? 1 : 0,
                 "CHARMAXLEN" => GetCharMaxLen(column),
                 "ISCOMPUTED" => column.Computed is null ? 0 : 1,
-                "ISIDENTITY" => column.Identity is null ? 0 : 1,
+                "ISIDENTITY" => column.Identity is not null || column.IdentitySource is not null ? 1 : 0,
                 _ => null,
             },
             11 => upper switch

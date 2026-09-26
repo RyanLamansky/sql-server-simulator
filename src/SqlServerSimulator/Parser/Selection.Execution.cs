@@ -1481,6 +1481,7 @@ internal sealed partial class Selection
         selection.ColumnIsUntypedNull = UntypedNullsOf(expressions, sources);
         selection.ColumnReportsNumeric = ColumnReportsNumericOf(expressions, outputSchema);
         selection.ColumnAliasTypes = ColumnAliasTypesOf(expressions);
+        selection.ColumnIdentitySources = ColumnIdentitySourcesOf(expressions, sources, joins);
         selection.BranchFromSources = sources;
         selection.AutoSourceNames = AutoSourceNamesOf(sources);
         (selection.AutoColumnSource, selection.AutoColumnOrdinal) = AutoColumnBindingOf(expressions, sources);
@@ -1903,6 +1904,23 @@ internal sealed partial class Selection
                 (aliases ??= new Schemas.AliasType?[expressions.Count])[i] = alias;
         }
         return aliases;
+    }
+
+    /// <summary>Computes <see cref="ColumnIdentitySources"/>.</summary>
+    private static IdentityState?[]? ColumnIdentitySourcesOf(List<Expression> expressions, FromSource[] sources, JoinSpec[] joins)
+    {
+        if (Array.Exists(joins, join => join.Kind is not (JoinKind.CrossApply or JoinKind.OuterApply)))
+            return null;
+        IdentityState?[]? identity = null;
+        for (var i = 0; i < expressions.Count; i++)
+        {
+            if (UnwrapDirectRef(expressions[i]) is not { } reference)
+                continue;
+            var (s, c) = FindSourceColumn(sources, reference.ReferencedName);
+            if (s >= 0 && (sources[s].Columns[c].Identity ?? sources[s].Columns[c].IdentitySource) is { } source)
+                (identity ??= new IdentityState?[expressions.Count])[i] = source;
+        }
+        return identity;
     }
 
     private static bool[]? ColumnReportsNumericOf(List<Expression> expressions, SqlType[] schema)

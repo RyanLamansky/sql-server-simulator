@@ -227,5 +227,15 @@ internal sealed class HeapColumn(string name, SqlType type, int? maxLength, bool
     /// </summary>
     public Schemas.AliasType? AliasType;
 
+    /// <summary>
+    /// The identity a view's (or a derived source's) column passes straight
+    /// through from the base column it reads; see
+    /// <c>Selection.ColumnIdentitySources</c>. Real reports the column as
+    /// <c>is_identity</c> and answers <c>IDENT_SEED</c> / <c>IDENT_INCR</c> /
+    /// <c>IDENT_CURRENT</c> over the view from it, but the column generates
+    /// nothing — <see cref="Identity"/> stays null.
+    /// </summary>
+    public IdentityState? IdentitySource;
+
     internal string DebugDisplay() => $"{this.Name} {this.Type}{(this.MaxLength is int n ? $"({n})" : "")}";
 }

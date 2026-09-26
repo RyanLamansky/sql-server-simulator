@@ -31,17 +31,13 @@ internal sealed class ColName : Expression
             return SqlValue.Null(MetadataNameType(runtime.Batch));
         var tableId = ScalarArguments.CoerceToInt(tableIdValue);
         var colId = ScalarArguments.CoerceToInt(colIdValue);
-        foreach (var schema in runtime.Batch.CurrentDatabase.Schemas.Values)
+        // Any object with columns answers, by the stable column_id a dropped
+        // column leaves a hole in (probed 2026-09-26 against SQL Server 2025).
+        var columns = ColumnProperty.ColumnsOf(runtime.Batch.CurrentDatabase, tableId);
+        for (var i = 0; i < columns?.Length; i++)
         {
-            foreach (var table in schema.HeapTables.Values)
-            {
-                if (table.ObjectId == tableId)
-                {
-                    return colId >= 1 && colId <= table.Columns.Length
-                        ? SqlValue.FromNVarchar(MetadataNameType(runtime.Batch), table.Columns[colId - 1].Name)
-                        : SqlValue.Null(MetadataNameType(runtime.Batch));
-                }
-            }
+            if ((columns[i].ColumnId == 0 ? i + 1 : columns[i].ColumnId) == colId)
+                return SqlValue.FromNVarchar(MetadataNameType(runtime.Batch), columns[i].Name);
         }
         return SqlValue.Null(MetadataNameType(runtime.Batch));
     }

@@ -372,6 +372,7 @@ partial class Simulation
             output[i] = new HeapColumn(name, bodySelection.Schema[i], maxLength: null, nullable: nullable, spelledNumeric: bodySelection.ColumnReportsNumeric is { } numeric && numeric[i])
             {
                 AliasType = bodySelection.ColumnAliasTypes?[i],
+                IdentitySource = bodySelection.ColumnIdentitySources?[i],
             };
         }
         return output;

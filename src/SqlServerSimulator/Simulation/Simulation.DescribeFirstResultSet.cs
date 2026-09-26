@@ -160,7 +160,7 @@ partial class Simulation
             SqlValue.FromBoolean(type is XmlSqlType || (collation is not null && collation.Name.Contains("_CS", StringComparison.OrdinalIgnoreCase))),
             SqlValue.FromBoolean(false),
             nullName, nullName, nullName, nullName, nullName,
-            SqlValue.FromBoolean(origin?.Identity is not null),
+            SqlValue.FromBoolean((origin?.Identity ?? origin?.IdentitySource ?? result.ColumnIdentitySources?[index]) is not null),
             nullBit,
             SqlValue.FromBoolean(!result.IsGrouped && origin is { Identity: null, Computed: null } && type != SqlType.RowVersion),
             SqlValue.FromBoolean(origin?.Computed is not null || (origin is null && result.ColumnIsComputed is { } computed && computed[index])),

@@ -459,11 +459,18 @@ internal static partial class BuiltInResources
             new("last_value", SqlType.SqlVariant, null, true),
             new("is_not_for_replication", SqlType.Bit, null, true)), "is_computed", "is_sparse", "is_column_set", "is_hidden"),
             (batch, database) => UserColumnRows(batch, database)
-                .Where(static entry => entry.Host is ColumnHost.Table or ColumnHost.ReturnTable or ColumnHost.TableType && entry.Column.Identity is not null)
-                .Select(entry =>
+                .Where(static entry => (entry.Host is ColumnHost.Table or ColumnHost.ReturnTable or ColumnHost.TableType && entry.Column.Identity is not null)
+                    || (entry.Host == ColumnHost.Projection && entry.Column.IdentitySource is not null))
+                .Select(SqlValue[] (entry) =>
                 {
-                    var identity = entry.Column.Identity!;
-                    return (SqlValue[])[
+                    // A projection passing an identity through has no seed,
+                    // increment or last value of its own (probed 2026-09-26).
+                    if (entry.Column.Identity is not { } identity)
+                    {
+                        var nullVariant = SqlValue.Null(SqlType.SqlVariant);
+                        return [.. familyOrdinals.Select(i => entry.Row[i]), nullVariant, nullVariant, nullVariant, SqlValue.FromBoolean(false)];
+                    }
+                    return [
                         .. familyOrdinals.Select(i => entry.Row[i]),
                         IdentityVariant(identity.Seed, entry.Column.Type),
                         IdentityVariant(identity.Increment, entry.Column.Type),
@@ -605,7 +612,7 @@ internal static partial class BuiltInResources
                 SqlValue.FromByte(precision),
                 SqlValue.FromByte(scale),
                 SqlValue.FromBoolean(col.Nullable),
-                declared ? SqlValue.FromBoolean(col.Identity is not null) : falseBit,
+                SqlValue.FromBoolean(declared ? col.Identity is not null : col.IdentitySource is not null),
                 declared ? SqlValue.FromBoolean(col.Computed is not null) : falseBit,
                 CollationFor(col),
                 SqlValue.FromBoolean(col.IsSparse),

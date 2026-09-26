@@ -89,6 +89,7 @@ partial class Simulation
             rebound[i] = new HeapColumn(recorded[i].Name, bound[i], maxLength: null, nullable: nullable, spelledNumeric: recorded[i].SpelledNumeric)
             {
                 AliasType = recorded[i].AliasType,
+                IdentitySource = recorded[i].IdentitySource,
             };
         }
         return rebound ?? recorded;

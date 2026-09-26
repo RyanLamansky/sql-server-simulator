@@ -272,6 +272,17 @@ internal sealed partial class Selection
     /// </summary>
     internal Schemas.AliasType?[]? ColumnAliasTypes;
 
+    /// <summary>
+    /// Per output column, the identity it passes straight through: a direct
+    /// reference (aliases aside) to a column that is one, over
+    /// a single source apart from APPLY — through a derived table, <c>TOP</c>,
+    /// <c>GROUP BY</c>, <c>DISTINCT</c> or another view, but not an expression,
+    /// a join or a set operation (probed 2026-09-26 against SQL Server 2025).
+    /// A view's column reports it in <c>sys.columns.is_identity</c>. Null when
+    /// no column does.
+    /// </summary>
+    internal IdentityState?[]? ColumnIdentitySources;
+
     private readonly Func<BatchContext, Func<MultiPartName, SqlValue>?, IEnumerable<byte[]>>? rowSource;
 
     /// <summary>
@@ -469,8 +480,8 @@ internal sealed partial class Selection
     /// </summary>
     public SimulatedSqlResultSet Execute(BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver = null) =>
         this.valueRowSource is { } values
-            ? new SimulatedSqlResultSet(this.Schema, this.ColumnNames, values(batch, outerResolver)) { ColumnNullability = this.ColumnNullability, ColumnReportsNumeric = this.ColumnReportsNumeric, ColumnAliasTypes = this.ColumnAliasTypes, ColumnWireFlags = this.ColumnWireFlags, HiddenColumnCount = this.HiddenColumnCount, Browse = this.Browse }
-            : new SimulatedSqlResultSet(this.Schema, this.ColumnNames, this.rowSource!(batch, outerResolver)) { ColumnNullability = this.ColumnNullability, ColumnReportsNumeric = this.ColumnReportsNumeric, ColumnAliasTypes = this.ColumnAliasTypes, ColumnWireFlags = this.ColumnWireFlags, HiddenColumnCount = this.HiddenColumnCount, Browse = this.Browse };
+            ? new SimulatedSqlResultSet(this.Schema, this.ColumnNames, values(batch, outerResolver)) { ColumnNullability = this.ColumnNullability, ColumnReportsNumeric = this.ColumnReportsNumeric, ColumnAliasTypes = this.ColumnAliasTypes, ColumnIdentitySources = this.ColumnIdentitySources, ColumnWireFlags = this.ColumnWireFlags, HiddenColumnCount = this.HiddenColumnCount, Browse = this.Browse }
+            : new SimulatedSqlResultSet(this.Schema, this.ColumnNames, this.rowSource!(batch, outerResolver)) { ColumnNullability = this.ColumnNullability, ColumnReportsNumeric = this.ColumnReportsNumeric, ColumnAliasTypes = this.ColumnAliasTypes, ColumnIdentitySources = this.ColumnIdentitySources, ColumnWireFlags = this.ColumnWireFlags, HiddenColumnCount = this.HiddenColumnCount, Browse = this.Browse };
 
     /// <summary>
     /// Whether the plan yields a row — the question an emptiness probe asks,
@@ -2656,7 +2667,7 @@ internal sealed partial class Selection
         var columnNames = lateralPlan.ColumnNames;
         var lateralColumns = new HeapColumn[schema.Length];
         for (var ci = 0; ci < lateralColumns.Length; ci++)
-            lateralColumns[ci] = new HeapColumn(string.Empty, schema[ci], maxLength: null, nullable: true) { AliasType = lateralPlan.ColumnAliasTypes?[ci] };
+            lateralColumns[ci] = new HeapColumn(string.Empty, schema[ci], maxLength: null, nullable: true) { AliasType = lateralPlan.ColumnAliasTypes?[ci], IdentitySource = lateralPlan.ColumnIdentitySources?[ci] };
 
         var alias = ConsumeOptionalAlias(context);
         columnNames = ResolveDerivedTableColumnNames(context, columnNames, alias);
@@ -2917,6 +2928,7 @@ internal sealed partial class Selection
                         {
                             IsUntypedNull = cteBinding.Plan.ColumnIsUntypedNull is { } cteNulls && cteNulls[ci],
                             AliasType = cteBinding.Plan.ColumnAliasTypes?[ci],
+                            IdentitySource = cteBinding.Plan.ColumnIdentitySources?[ci],
                         };
                     }
 
@@ -3258,6 +3270,7 @@ internal sealed partial class Selection
                     {
                         IsUntypedNull = derivedSelection.ColumnIsUntypedNull is { } derivedNulls && derivedNulls[ci],
                         AliasType = derivedSelection.ColumnAliasTypes?[ci],
+                        IdentitySource = derivedSelection.ColumnIdentitySources?[ci],
                     };
                 }
 

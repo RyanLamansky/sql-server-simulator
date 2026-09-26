@@ -1535,4 +1535,60 @@ public sealed class CatalogViewTests
             "create function fn (@x decimal(5,1)) returns table as return select @x as x");
         AreEqual(expected, Convert.ToString(simulation.ExecuteScalar(query), System.Globalization.CultureInfo.InvariantCulture));
     }
+
+    /// <summary>
+    /// A view column that passes an identity column straight through reports as
+    /// identity — through an alias, a derived table, TOP, GROUP BY, DISTINCT,
+    /// APPLY or another view, but not an expression, a join or a UNION — and
+    /// the view answers IDENT_SEED / IDENT_CURRENT from it (probed 2026-09-26
+    /// against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select id as x from p", "1")]
+    [DataRow("select d.id from (select top 5 id from p) d", "1")]
+    [DataRow("select id from p group by id", "1")]
+    [DataRow("select p.id from p cross apply (select 1 one) c", "1")]
+    [DataRow("select id from v0", "1")]
+    [DataRow("select id + 0 as x from p", "0")]
+    [DataRow("select p.id from p join q on p.a = q.b", "0")]
+    [DataRow("select id from p union all select qid from q", "0")]
+    public void ViewColumn_PassesIdentityThrough(string body, string expected)
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            "create table p (id int identity(10, 5) not null primary key, a int); create table q (qid int identity, b int); insert p (a) values (1), (2)",
+            "create view v0 as select id from p",
+            $"create view v as {body}");
+        AreEqual(expected, simulation.ExecuteScalar("""
+            select concat(max(cast(c.is_identity as int)), '')
+            from sys.columns c where c.object_id = object_id('v') and c.column_id = 1
+            """));
+        if (expected == "1")
+        {
+            AreEqual("10|5|15|1|NULL", simulation.ExecuteScalar("""
+                select concat(ident_seed('v'), '|', ident_incr('v'), '|', ident_current('v'), '|', columnproperty(object_id('v'), col_name(object_id('v'), 1), 'IsIdentity'), '|',
+                    isnull(cast((select seed_value from sys.identity_columns where object_id = object_id('v')) as varchar), 'NULL'))
+                """));
+        }
+    }
+
+    /// <summary>
+    /// COL_NAME answers for any object with columns, by the stable column_id a
+    /// dropped column leaves a hole in (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void ColName_CoversEveryColumnHost()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            "create table p (id int not null primary key, a int, b int); alter table p drop column a",
+            "create view v as select id from p group by id",
+            "create function f() returns table as return select id, b from p",
+            "create type tt as table (q int)");
+        AreEqual("id||b|id|b|name|q", simulation.ExecuteScalar("""
+            select concat(col_name(object_id('p'), 1), '|', col_name(object_id('p'), 2), '|', col_name(object_id('p'), 3), '|',
+                col_name(object_id('v'), 1), '|', col_name(object_id('f'), 2), '|', col_name(object_id('sys.objects'), 1), '|',
+                col_name((select type_table_object_id from sys.table_types where name = 'tt'), 1))
+            """));
+    }
 }

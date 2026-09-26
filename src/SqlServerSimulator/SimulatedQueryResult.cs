@@ -65,6 +65,9 @@ internal abstract class SimulatedQueryResult : SimulatedStatementOutcome
     /// </summary>
     internal Schemas.AliasType?[]? ColumnAliasTypes;
 
+    /// <summary>The identity each column passes straight through (<c>Selection.ColumnIdentitySources</c>), which describing the result reports.</summary>
+    internal Storage.IdentityState?[]? ColumnIdentitySources;
+
     /// <summary>
     /// Per column, the COLMETADATA flag bits a column carries besides
     /// fNullable, as SQL Server 2025 sets them (captured 2026-09-26): a column
