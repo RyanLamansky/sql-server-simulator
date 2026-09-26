@@ -149,6 +149,34 @@ partial class Simulation
     /// here too (Msg 102, inherited from the column-list parser's
     /// <c>isTableVariable: true</c> branch).
     /// </remarks>
+    /// <summary>
+    /// Real names a return table's unnamed constraints after the function —
+    /// <c>DF__mfz__d__…</c>, <c>PK__mfz__…</c> — though its errors name the
+    /// table <c>@r</c> (probed 2026-09-26 against SQL Server 2025), so the
+    /// auto-names the shared column-list parser drew from
+    /// <paramref name="tableName"/> are drawn again from
+    /// <paramref name="functionName"/>.
+    /// </summary>
+    private static void NameReturnTableConstraintsAfterFunction(
+        string functionName, string tableName, HeapColumn[] columns, KeyConstraint[] keyConstraints, CheckConstraint[] checkConstraints)
+    {
+        foreach (var column in columns)
+        {
+            if (column.DefaultConstraint is { IsSystemNamed: true } defaultConstraint)
+                defaultConstraint.Name = AutoDefaultName(functionName, column.Name);
+        }
+        foreach (var key in keyConstraints)
+        {
+            if (key.Name == AutoConstraintName(tableName, key.Kind, key.FullOrdinals, columns))
+                key.Name = AutoConstraintName(functionName, key.Kind, key.FullOrdinals, columns);
+        }
+        for (var i = 0; i < checkConstraints.Length; i++)
+        {
+            if (checkConstraints[i].IsSystemNamed)
+                checkConstraints[i].Name = AutoCheckName(functionName, checkConstraints[i].InlineColumn, i);
+        }
+    }
+
     private static bool ParseMultiStatementTvfTail(ParserContext context, Schema schema, MultiPartName functionName, List<UdfParameter> parameters, bool isAlter, bool createOrAlter)
     {
         var returnVariableName = ((AtPrefixedString)context.Token!).Value;
@@ -171,6 +199,7 @@ partial class Simulation
             returnTableIndexes);
         if (returnTableIndexes.Count > 0)
             throw new NotSupportedException("An inline INDEX on a multi-statement function's return table isn't modeled.");
+        NameReturnTableConstraintsAfterFunction(functionName.Leaf, "@" + returnVariableName, outputColumns, keyConstraints, checkConstraints);
 
         // Optional WITH-clause (SCHEMABINDING is captured for
         // sys.sql_modules / OBJECTPROPERTY; ENCRYPTION parse-and-discards).

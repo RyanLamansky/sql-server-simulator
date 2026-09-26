@@ -910,10 +910,11 @@ internal static partial class BuiltInResources
         foreach (var schema in database.Schemas.Values)
         {
             var schemaId = SqlValue.FromInt32(schema.SchemaId);
-            foreach (var table in CatalogTables(schema, batch))
+            foreach (var (hostId, columns, positional) in DeclaredColumnHosts(schema, batch))
             {
-                foreach (var col in table.Columns)
+                for (var i = 0; i < columns.Length; i++)
                 {
+                    var col = columns[i];
                     if (col.DefaultConstraint is not { } df)
                         continue;
                     yield return [
@@ -921,7 +922,7 @@ internal static partial class BuiltInResources
                         SqlValue.FromInt32(df.ObjectId),
                         nullPrincipal,
                         schemaId,
-                        SqlValue.FromInt32(table.ObjectId),
+                        SqlValue.FromInt32(hostId),
                         dfType,
                         dfTypeDesc,
                         SqlValue.FromDateTime(df.CreateDate),
@@ -929,7 +930,7 @@ internal static partial class BuiltInResources
                         falseBit,
                         falseBit,
                         falseBit,
-                        SqlValue.FromInt32(col.ColumnId),
+                        SqlValue.FromInt32(positional ? i + 1 : col.ColumnId),
                         df.Definition is null ? SqlValue.Null(SqlType.NVarchar) : SqlValue.FromNVarchar(df.Definition),
                         df.IsSystemNamed ? trueBit : falseBit,
                     ];

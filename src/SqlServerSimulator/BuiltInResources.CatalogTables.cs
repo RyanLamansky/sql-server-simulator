@@ -1,4 +1,5 @@
 using SqlServerSimulator.Parser;
+using SqlServerSimulator.Schemas;
 using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator;
@@ -23,4 +24,21 @@ partial class BuiltInResources
                 .Concat(batch.Connection.TempTables.Values)
                 .Concat(batch.Connection.Simulation.GlobalTempTables.Values)
             : schema.HeapTables.Values;
+
+    /// <summary>
+    /// The objects whose declared columns the column-family catalog views
+    /// (<c>sys.identity_columns</c> / <c>sys.computed_columns</c> /
+    /// <c>sys.default_constraints</c>) report: <see cref="CatalogTables"/>, and
+    /// every multi-statement TVF's return table, which real lists the same way
+    /// (probed 2026-09-26 against SQL Server 2025). A table's column id is its
+    /// stable one; a return table's columns can't be dropped, so theirs is
+    /// their position.
+    /// </summary>
+    private static IEnumerable<(int ObjectId, HeapColumn[] Columns, bool Positional)> DeclaredColumnHosts(Schema schema, BatchContext batch)
+    {
+        foreach (var table in CatalogTables(schema, batch).OrderBy(t => t.ObjectId))
+            yield return (table.ObjectId, table.Columns, false);
+        foreach (var function in schema.Functions.Values.OfType<MultiStatementTableValuedFunction>().OrderBy(f => f.ObjectId))
+            yield return (function.ObjectId, function.OutputColumns, true);
+    }
 }

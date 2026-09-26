@@ -347,19 +347,22 @@ internal static partial class BuiltInResources
         var nullDefinition = SqlValue.Null(SqlType.NVarchar);
         foreach (var schema in database.Schemas.Values)
         {
-            foreach (var t in CatalogTables(schema, batch).OrderBy(t => t.ObjectId))
+            foreach (var (hostId, columns, positional) in DeclaredColumnHosts(schema, batch))
             {
-                var objectId = SqlValue.FromInt32(t.ObjectId);
-                foreach (var col in t.Columns)
+                var objectId = SqlValue.FromInt32(hostId);
+                for (var i = 0; i < columns.Length; i++)
                 {
+                    var col = columns[i];
                     if (col.Computed is null)
                         continue;
                     yield return [
                         objectId,
                         SqlValue.FromSystemName(col.Name),
-                        SqlValue.FromInt32(col.ColumnId),
+                        SqlValue.FromInt32(positional ? i + 1 : col.ColumnId),
                         SqlValue.FromBoolean(col.Nullable),
-                        col.ComputedDefinition is { } def ? SqlValue.FromNVarchar(def) : nullDefinition,
+                        // A return table's computed column reads no definition
+                        // (probed 2026-09-26 against SQL Server 2025).
+                        !positional && col.ComputedDefinition is { } def ? SqlValue.FromNVarchar(def) : nullDefinition,
                         trueBit, // uses_database_collation
                         SqlValue.FromBoolean(col.IsPersisted),
                         trueBit,
@@ -386,17 +389,18 @@ internal static partial class BuiltInResources
         var nullLast = SqlValue.Null(SqlType.SqlVariant);
         foreach (var schema in database.Schemas.Values)
         {
-            foreach (var t in CatalogTables(schema, batch).OrderBy(t => t.ObjectId))
+            foreach (var (hostId, columns, positional) in DeclaredColumnHosts(schema, batch))
             {
-                var objectId = SqlValue.FromInt32(t.ObjectId);
-                foreach (var col in t.Columns)
+                var objectId = SqlValue.FromInt32(hostId);
+                for (var i = 0; i < columns.Length; i++)
                 {
+                    var col = columns[i];
                     if (col.Identity is not { } identity)
                         continue;
                     yield return [
                         objectId,
                         SqlValue.FromSystemName(col.Name),
-                        SqlValue.FromInt32(col.ColumnId),
+                        SqlValue.FromInt32(positional ? i + 1 : col.ColumnId),
                         IdentityVariant(identity.Seed, col.Type),
                         IdentityVariant(identity.Increment, col.Type),
                         identity.Snapshot() is { } last ? IdentityVariant(last, col.Type) : nullLast,

@@ -259,6 +259,7 @@ Probed against SQL Server 2025.
   Arguments evaluate against the outer row scope per call.
 - **Catalog surface**: `sys.objects` `type='TF'` / `type_desc='SQL_TABLE_VALUED_FUNCTION'` (distinct from inline TVF's `'IF'`).
   `OBJECT_ID(name, 'TF')` resolves multi-statement TVFs only.
+  The return table's columns are catalogued as a table's are (probed 2026-09-26): `sys.columns` with their declared nullability, identity and computed flags, and `sys.identity_columns` / `sys.computed_columns` / `sys.default_constraints` rows keyed by the function — a computed column's `definition` NULL, and an unnamed constraint named after the function (`DF__f__x__…`) though its errors name the table `@r`.
 - **EF Core integration**: `HasDbFunction` mapped to an `IQueryable<T>`-returning DbContext method emits `SELECT ... FROM dbo.fn(@p)` through the SqlServer provider; the simulator dispatches the body and yields rows back through the same FROM-source pipeline.
   LINQ composition (`Where` / `OrderBy` / `Select`) applies to the function's result rows post-dispatch — no pushdown into the body.
 
@@ -270,7 +271,7 @@ Probed against SQL Server 2025.
 - **Constraint enforcement is row-level strict**: PK / UNIQUE / CHECK violations in the body surface as runtime errors (Msg 2627 / Msg 547).
   Real SQL Server's probe-observed behavior is more forgiving in some cases — for shared-key collisions it returns an empty result set rather than raising.
   Stricter behavior is defensible since apps that hit it are buggy.
-- **`is_nullable` always True** in `sys.columns` for return-table output (same gap as inline TVFs).
+- **Not modeled yet**: the return table's PRIMARY KEY / UNIQUE / CHECK constraints in `sys.objects`, `sys.key_constraints`, `sys.check_constraints` and `sys.indexes`, which real lists keyed by the function, and the Msg 1750 real adds after a column CHECK's Msg 8141.
 
 ## Views
 `CREATE VIEW schema.name [(col_list)] [WITH SCHEMABINDING | ENCRYPTION | VIEW_METADATA] AS <SELECT> [WITH CHECK OPTION]`, referenced from FROM as `FROM schema.view [alias]` (or unqualified `FROM view`).

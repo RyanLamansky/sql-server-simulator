@@ -273,4 +273,24 @@ public sealed class MultiStatementTvfTests
         _ = connection.CreateCommand("drop function dbo.fDrop").ExecuteNonQuery();
         AreEqual(0, connection.CreateCommand("select count(*) from sys.objects where name = 'fDrop'").ExecuteScalar());
     }
+
+    /// <summary>
+    /// The return table's columns are catalogued like a table's — in
+    /// sys.columns, and their identity, computed column and defaults in their
+    /// own views, the default named after the function and a computed column
+    /// reading no definition (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void ReturnTableColumns_AreCatalogued()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches("create function dbo.f (@p int) returns @r table (id int identity(5, 2), x int not null default (5), z as x + 1) as begin return end");
+        AreEqual("id:1:1:0,x:2:0:1,z:3:0:0", simulation.ExecuteScalar("""
+            select string_agg(concat(name, ':', column_id, ':', cast(is_identity as int), ':', sign(default_object_id)), ',') within group (order by column_id)
+            from sys.columns where object_id = object_id('dbo.f')
+            """));
+        AreEqual("id:5:2", simulation.ExecuteScalar("select concat(name, ':', cast(seed_value as int), ':', cast(increment_value as int)) from sys.identity_columns where object_id = object_id('dbo.f')"));
+        AreEqual("z:-", simulation.ExecuteScalar("select concat(name, ':', isnull(definition, '-')) from sys.computed_columns where object_id = object_id('dbo.f')"));
+        AreEqual("DF__f__x:((5))", simulation.ExecuteScalar("select concat(left(name, 8), ':', definition) from sys.default_constraints where parent_object_id = object_id('dbo.f')"));
+    }
 }

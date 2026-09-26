@@ -493,6 +493,62 @@ internal static partial class BuiltInResources
             c.Type.Category != SqlTypeCategory.String ? nullCollation
             : c.Collation is { } overrideName ? SqlValue.FromSystemName(overrideName)
             : dbDefaultCollation;
+        // One sys.columns row. A table's column carries its stable id (DROP
+        // COLUMN leaves a permanent hole in the sequence), identity, computed
+        // and xml-collection binding, as does a table type's or a
+        // multi-statement TVF's return-table column; a view's or inline TVF's
+        // column is a SELECT projection numbered by position, never identity
+        // or computed.
+        SqlValue[] Row(SqlValue objectId, HeapColumn col, int columnId, bool declared)
+        {
+            var (maxLength, precision, scale) = GetSysColumnMetadata(col);
+            return [
+                objectId,
+                SqlValue.FromSystemName(col.Name),
+                SqlValue.FromInt32(columnId),
+                SqlValue.FromByte(col.SystemTypeId),
+                SqlValue.FromInt32(col.UserTypeId),
+                SqlValue.FromInt16(maxLength),
+                SqlValue.FromByte(precision),
+                SqlValue.FromByte(scale),
+                SqlValue.FromBoolean(col.Nullable),
+                declared ? SqlValue.FromBoolean(col.Identity is not null) : falseBit,
+                declared ? SqlValue.FromBoolean(col.Computed is not null) : falseBit,
+                CollationFor(col),
+                SqlValue.FromBoolean(col.IsSparse),
+                falseBit,
+                declared ? XmlCollectionIdFor(col) : zeroInt,
+                falseBit,
+                falseBit,
+                nullInt,
+                nullVectorBaseType,
+                nullInt,
+                nullLedgerViewColumnTypeDesc,
+                AnsiPaddedFor(col),
+                nullInt,
+                DefaultObjectIdFor(col),
+                nullSysName,
+                nullInt,
+                SqlValue.FromByte((byte)col.GeneratedAs),
+                nullInt,
+                falseBit,
+                SqlValue.FromBoolean(col.IsHidden),
+                falseBit,
+                SqlValue.FromBoolean(col.IsRowGuidCol),
+                zeroInt,
+                falseBit,
+                falseBit,
+                falseBit,
+                falseBit,
+                GeneratedAlwaysDescFor(col),
+                nullEncryptionTypeDesc,
+                nullSysName,
+                nullGraphTypeDesc,
+                falseBit,
+                nullVectorBaseTypeId,
+            ];
+        }
+
         foreach (var schema in database.Schemas.Values)
         {
             foreach (var t in CatalogTables(schema, batch).OrderBy(t => t.ObjectId))
@@ -500,235 +556,40 @@ internal static partial class BuiltInResources
                 if (hasIdFilter && t.ObjectId != wantObjectId)
                     continue;
                 var objectId = SqlValue.FromInt32(t.ObjectId);
-                for (var i = 0; i < t.Columns.Length; i++)
-                {
-                    var col = t.Columns[i];
-                    var (maxLength, precision, scale) = GetSysColumnMetadata(col);
-                    yield return [
-                        objectId,
-                        SqlValue.FromSystemName(col.Name),
-                        // The stable id, not the loop position: DROP COLUMN
-                        // leaves a permanent hole in the id sequence.
-                        SqlValue.FromInt32(col.ColumnId),
-                        SqlValue.FromByte(col.SystemTypeId),
-                        SqlValue.FromInt32(col.UserTypeId),
-                        SqlValue.FromInt16(maxLength),
-                        SqlValue.FromByte(precision),
-                        SqlValue.FromByte(scale),
-                        SqlValue.FromBoolean(col.Nullable),
-                        SqlValue.FromBoolean(col.Identity is not null),
-                        SqlValue.FromBoolean(col.Computed is not null),
-                        CollationFor(col),
-                        SqlValue.FromBoolean(col.IsSparse),
-                        falseBit,
-                        XmlCollectionIdFor(col),
-                        falseBit,
-                        falseBit,
-                        nullInt,
-                        nullVectorBaseType,
-                        nullInt,
-                        nullLedgerViewColumnTypeDesc,
-                        AnsiPaddedFor(col),
-                        nullInt,
-                        DefaultObjectIdFor(col),
-                        nullSysName,
-                        nullInt,
-                        SqlValue.FromByte((byte)col.GeneratedAs),
-                        nullInt,
-                        falseBit,
-                        SqlValue.FromBoolean(col.IsHidden),
-                        falseBit,
-                        SqlValue.FromBoolean(col.IsRowGuidCol),
-                        zeroInt,
-                        falseBit,
-                        falseBit,
-                        falseBit,
-                        falseBit,
-                        GeneratedAlwaysDescFor(col),
-                        nullEncryptionTypeDesc,
-                        nullSysName,
-                        nullGraphTypeDesc,
-                        falseBit,
-                        nullVectorBaseTypeId,
-                    ];
-                }
+                foreach (var col in t.Columns)
+                    yield return Row(objectId, col, col.ColumnId, declared: true);
             }
-            // Inline TVFs surface their output projection through sys.columns —
-            // is_identity / is_computed always false (TVF output is a SELECT
-            // projection, not a heap).
-            foreach (var fn in schema.Functions.Values.OfType<InlineTableValuedFunction>().OrderBy(f => f.ObjectId))
+            foreach (var fn in schema.Functions.Values.OrderBy(f => f.ObjectId))
             {
                 if (hasIdFilter && fn.ObjectId != wantObjectId)
                     continue;
-                var fnObjectId = SqlValue.FromInt32(fn.ObjectId);
-                for (var i = 0; i < fn.OutputColumns.Length; i++)
+                var (outputColumns, declared) = fn switch
                 {
-                    var col = fn.OutputColumns[i];
-                    var (maxLength, precision, scale) = GetSysColumnMetadata(col);
-                    yield return [
-                        fnObjectId,
-                        SqlValue.FromSystemName(col.Name),
-                        SqlValue.FromInt32(i + 1),
-                        SqlValue.FromByte(col.SystemTypeId),
-                        SqlValue.FromInt32(col.UserTypeId),
-                        SqlValue.FromInt16(maxLength),
-                        SqlValue.FromByte(precision),
-                        SqlValue.FromByte(scale),
-                        SqlValue.FromBoolean(col.Nullable),
-                        falseBit,
-                        falseBit,
-                        CollationFor(col),
-                        SqlValue.FromBoolean(col.IsSparse),
-                        falseBit,
-                        zeroInt,
-                        falseBit,
-                        falseBit,
-                        nullInt,
-                        nullVectorBaseType,
-                        nullInt,
-                        nullLedgerViewColumnTypeDesc,
-                        AnsiPaddedFor(col),
-                        nullInt,
-                        DefaultObjectIdFor(col),
-                        nullSysName,
-                        nullInt,
-                        SqlValue.FromByte((byte)col.GeneratedAs),
-                        nullInt,
-                        falseBit,
-                        SqlValue.FromBoolean(col.IsHidden),
-                        falseBit,
-                        SqlValue.FromBoolean(col.IsRowGuidCol),
-                        zeroInt,
-                        falseBit,
-                        falseBit,
-                        falseBit,
-                        falseBit,
-                        GeneratedAlwaysDescFor(col),
-                        nullEncryptionTypeDesc,
-                        nullSysName,
-                        nullGraphTypeDesc,
-                        falseBit,
-                        nullVectorBaseTypeId,
-                    ];
-                }
+                    InlineTableValuedFunction inline => (inline.OutputColumns, false),
+                    MultiStatementTableValuedFunction multiStatement => (multiStatement.OutputColumns, true),
+                    _ => ([], false),
+                };
+                var fnObjectId = SqlValue.FromInt32(fn.ObjectId);
+                for (var i = 0; i < outputColumns.Length; i++)
+                    yield return Row(fnObjectId, outputColumns[i], i + 1, declared);
             }
-            // Views surface their output projection through sys.columns —
-            // same shape as inline TVFs (is_identity / is_computed always
-            // false; nullability conservatively True).
             foreach (var view in schema.Views.Values.OrderBy(v => v.ObjectId))
             {
                 if (hasIdFilter && view.ObjectId != wantObjectId)
                     continue;
                 var viewObjectId = SqlValue.FromInt32(view.ObjectId);
                 for (var i = 0; i < view.OutputColumns.Length; i++)
-                {
-                    var col = view.OutputColumns[i];
-                    var (maxLength, precision, scale) = GetSysColumnMetadata(col);
-                    yield return [
-                        viewObjectId,
-                        SqlValue.FromSystemName(col.Name),
-                        SqlValue.FromInt32(i + 1),
-                        SqlValue.FromByte(col.SystemTypeId),
-                        SqlValue.FromInt32(col.UserTypeId),
-                        SqlValue.FromInt16(maxLength),
-                        SqlValue.FromByte(precision),
-                        SqlValue.FromByte(scale),
-                        SqlValue.FromBoolean(col.Nullable),
-                        falseBit,
-                        falseBit,
-                        CollationFor(col),
-                        SqlValue.FromBoolean(col.IsSparse),
-                        falseBit,
-                        zeroInt,
-                        falseBit,
-                        falseBit,
-                        nullInt,
-                        nullVectorBaseType,
-                        nullInt,
-                        nullLedgerViewColumnTypeDesc,
-                        AnsiPaddedFor(col),
-                        nullInt,
-                        DefaultObjectIdFor(col),
-                        nullSysName,
-                        nullInt,
-                        SqlValue.FromByte((byte)col.GeneratedAs),
-                        nullInt,
-                        falseBit,
-                        SqlValue.FromBoolean(col.IsHidden),
-                        falseBit,
-                        SqlValue.FromBoolean(col.IsRowGuidCol),
-                        zeroInt,
-                        falseBit,
-                        falseBit,
-                        falseBit,
-                        falseBit,
-                        GeneratedAlwaysDescFor(col),
-                        nullEncryptionTypeDesc,
-                        nullSysName,
-                        nullGraphTypeDesc,
-                        falseBit,
-                        nullVectorBaseTypeId,
-                    ];
-                }
+                    yield return Row(viewObjectId, view.OutputColumns[i], i + 1, declared: false);
             }
-            // Table types surface their columns through sys.columns keyed by
-            // type_table_object_id (probe G3). Computed columns inherit
-            // is_computed=true; identity columns inherit is_identity=true.
+            // Table types surface their columns keyed by type_table_object_id
+            // (probe G3).
             foreach (var tt in schema.TableTypes.Values.OrderBy(t => t.ObjectId))
             {
                 if (hasIdFilter && tt.ObjectId != wantObjectId)
                     continue;
                 var typeObjectId = SqlValue.FromInt32(tt.ObjectId);
                 for (var i = 0; i < tt.Columns.Length; i++)
-                {
-                    var col = tt.Columns[i];
-                    var (maxLength, precision, scale) = GetSysColumnMetadata(col);
-                    yield return [
-                        typeObjectId,
-                        SqlValue.FromSystemName(col.Name),
-                        SqlValue.FromInt32(i + 1),
-                        SqlValue.FromByte(col.SystemTypeId),
-                        SqlValue.FromInt32(col.UserTypeId),
-                        SqlValue.FromInt16(maxLength),
-                        SqlValue.FromByte(precision),
-                        SqlValue.FromByte(scale),
-                        SqlValue.FromBoolean(col.Nullable),
-                        SqlValue.FromBoolean(col.Identity is not null),
-                        SqlValue.FromBoolean(col.Computed is not null),
-                        CollationFor(col),
-                        SqlValue.FromBoolean(col.IsSparse),
-                        falseBit,
-                        XmlCollectionIdFor(col),
-                        falseBit,
-                        falseBit,
-                        nullInt,
-                        nullVectorBaseType,
-                        nullInt,
-                        nullLedgerViewColumnTypeDesc,
-                        AnsiPaddedFor(col),
-                        nullInt,
-                        DefaultObjectIdFor(col),
-                        nullSysName,
-                        nullInt,
-                        SqlValue.FromByte((byte)col.GeneratedAs),
-                        nullInt,
-                        falseBit,
-                        SqlValue.FromBoolean(col.IsHidden),
-                        falseBit,
-                        SqlValue.FromBoolean(col.IsRowGuidCol),
-                        zeroInt,
-                        falseBit,
-                        falseBit,
-                        falseBit,
-                        falseBit,
-                        GeneratedAlwaysDescFor(col),
-                        nullEncryptionTypeDesc,
-                        nullSysName,
-                        nullGraphTypeDesc,
-                        falseBit,
-                        nullVectorBaseTypeId,
-                    ];
-                }
+                    yield return Row(typeObjectId, tt.Columns[i], i + 1, declared: true);
             }
         }
     }
