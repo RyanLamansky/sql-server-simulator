@@ -220,7 +220,8 @@ A conjunct that can't be evaluated cleanly (NULL probe, cross-collation string, 
 An UPDATE / DELETE under SERIALIZABLE — single-table or joined — or with a `HOLDLOCK` / `SERIALIZABLE` hint on its single-table target, fences its own WHERE too — `Selection.SettleSerializableWriteFence`, called before the target's rows are read.
 It collects the same top-level conjuncts the reader does and takes the winning interval in **`RangeX-X`**, so an insert into the range the writer named waits even where no row matched, while one outside it goes through.
 With no interval to take, a keyed table gets a **table S** on top of the writer's IX — real takes `RangeS-U` on every key and the infinity range there, which admits the same readers and refuses the same writers and inserters — and a keyless heap gets the **table X** real takes (all probed 2026-09-26).
-MERGE doesn't settle a writer fence yet; it still takes only table-IX plus its row-X.
+A MERGE under SERIALIZABLE or `WITH (HOLDLOCK)` fences per source row: the key its ON clause probes, in **`RangeS-U`** — real's mode for the upsert probe, and what makes two concurrent upserts of one missing key wait on each other rather than both insert.
+One with `WHEN NOT MATCHED BY SOURCE`, or whose ON pins no interval, takes the table fallback above.
 
 ### What the writer probes
 
@@ -291,8 +292,7 @@ A `RangeS-U` fence blocks an insert inside it and admits one outside, like `Rang
   Across a multi-column prefix the hull is taken per column, so the lexicographic interval spans the whole cartesian product and then some.
 - **The `UPDLOCK` / `XLOCK` row lock stays on top of the range**, where real folds the two into one key lock.
   Range modes live on resources of their own here, so dropping the row-U / row-X would stop blocking the readers and writers that take a row lock without ever probing a range.
-- **A SERIALIZABLE writer fences one interval, not one range per key** — real range-locks each key the WHERE reaches plus the next, and converts a unique-equality hit to a plain `KEY` X; the simulator takes the one interval the WHERE names, and a table S where real takes `RangeS-U` on every key.
-  `MERGE` takes no fence yet (see [what a SERIALIZABLE writer takes](#what-a-serializable-writer-takes)).
+- **A SERIALIZABLE writer fences one interval, not one range per key** — real range-locks each key the WHERE reaches plus the next, and converts a unique-equality hit to a plain `KEY` X; the simulator takes the one interval the WHERE names — so a key between the named one and its neighbor stays insertable, where real's next-key lock refuses it — and a table S where real takes `RangeS-U` on every key.
 - **`resource_description` names the interval**, e.g. `0:[15,25]` for one column and `0,1:[(1,2),(1,5)]` for a tuple — the ranged ordinals, then the interval in bracket notation with `*` for an unbounded side and for a component a shorter bound tuple leaves open.
   Real prints a hash of the anchoring index key there, so the `resource_type` (`KEY`) and `request_mode` (`RangeS-S` / `RangeS-U` / `RangeX-X`) match and the description doesn't.
 - **A non-default isolation level disables the plan cache.**

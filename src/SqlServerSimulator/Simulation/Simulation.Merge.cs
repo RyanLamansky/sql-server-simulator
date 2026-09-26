@@ -85,8 +85,13 @@ partial class Simulation
         // alias-then-hint. Legacy bare-paren form is rejected. Table-
         // variable targets reject hints — skip the parser for `@t`.
         context.MoveNextRequired();
+        var serializableHint = false;
         if (!BatchContext.IsTableVariableName(destinationName.Leaf))
-            Selection.ValidateDmlTargetHints(Selection.ParseOptionalTableHints(context, allowLegacyParenForm: false));
+        {
+            var targetHints = Selection.ParseOptionalTableHints(context, allowLegacyParenForm: false);
+            Selection.ValidateDmlTargetHints(targetHints);
+            serializableHint = targetHints.Serializable;
+        }
         // Phase 1b: acquire table-IX on the MERGE target; row-X on each
         // affected row at mutation time.
         RejectDisabledClusteredIndex(destinationTable);
@@ -193,7 +198,7 @@ partial class Simulation
             throw SimulatedSqlException.MergeMustBeTerminated();
         if (!context.Batch.IsSkipping)
             CheckMergePermissions(context.Batch, destinationName, (SchemaObject?)sourceView ?? destinationTable, whenClauses);
-        return ExecuteMerge(context, destinationTable, sourceView, targetAlias, materializeSource, sourceAlias, sourceColumnNames, sourceSchema, onPredicate, whenClauses, output);
+        return ExecuteMerge(context, destinationTable, sourceView, targetAlias, materializeSource, sourceAlias, sourceColumnNames, sourceSchema, onPredicate, whenClauses, output, serializableHint);
     }
 
     /// <summary>
@@ -1127,7 +1132,8 @@ partial class Simulation
         SqlType[] sourceSchema,
         BooleanExpression onPredicate,
         List<WhenClause> whenClauses,
-        OutputProjection? output)
+        OutputProjection? output,
+        bool serializableHint)
     {
         // Skip mode commits nothing (CommitMerge returns early), so the match
         // walk is pure cost — and running the ON predicate / WHEN actions
@@ -1178,6 +1184,10 @@ partial class Simulation
             }
             throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(name.ToString());
         }
+
+        Selection.SettleSerializableMergeFence(
+            destinationTable, targetAlias, onPredicate, whenClauses.Any(c => c.Kind == WhenClauseKind.NotMatchedBySource),
+            sourceRows, sourceValues => name => ResolveCombined(null, sourceValues, name), serializableHint, context.Batch);
 
         var pendingInserts = new List<(SqlValue[] NewValues, SqlValue[]? SourceValues)>();
         var pendingUpdates = new List<(int Page, int Slot, SqlValue[] OldValues, SqlValue[] NewValues, SqlValue[]? SourceValues)>();

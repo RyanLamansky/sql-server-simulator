@@ -794,4 +794,68 @@ public sealed class KeyRangeLockTests
 
         _ = holder.CreateCommand("rollback").ExecuteNonQuery();
     }
+
+    /// <summary>
+    /// A <c>MERGE … WITH (HOLDLOCK)</c> — or any MERGE under SERIALIZABLE —
+    /// fences the key its ON clause probes for each source row in
+    /// <c>RangeS-U</c>, so a concurrent insert of that key waits while one
+    /// elsewhere goes through; with <c>WHEN NOT MATCHED BY SOURCE</c> it
+    /// fences the whole table, and over a keyless heap it takes the table X.
+    /// Probed 2026-09-26 against SQL Server 2025.
+    /// </summary>
+    [TestMethod]
+    [DataRow("begin tran; merge t with (holdlock) using (select 22 k) s on t.k = s.k when matched then update set v = 1;")]
+    [DataRow("set transaction isolation level serializable; begin tran; merge t using (select 22 k) s on t.k = s.k when matched then update set v = 1;")]
+    public void SerializableMerge_FencesTheProbedKey(string merge)
+    {
+        var sim = KeyedTable();
+        using var holder = sim.CreateOpenConnection();
+        using var writer = sim.CreateOpenConnection();
+
+        _ = holder.CreateCommand(merge).ExecuteNonQuery();
+        _ = writer.CreateCommand("set lock_timeout 0").ExecuteNonQuery();
+
+        AreEqual(1222, Throws<SimulatedSqlException>(() => writer.CreateCommand("insert t values (22, 9)").ExecuteNonQuery()).Number);
+        AreEqual(1, writer.CreateCommand("insert t values (40, 9)").ExecuteNonQuery());
+        AreEqual("RangeS-U", holder.CreateCommand(
+            "select request_mode from sys.dm_tran_locks where request_session_id = @@spid and resource_type = 'KEY'").ExecuteScalar());
+
+        _ = holder.CreateCommand("rollback").ExecuteNonQuery();
+    }
+
+    [TestMethod]
+    public void HoldlockMerge_VisitingEveryTarget_FencesTheTable()
+    {
+        var sim = KeyedTable();
+        _ = sim.ExecuteNonQuery("create table h (k int, v int); insert h values (1, 1)");
+        using var holder = sim.CreateOpenConnection();
+        using var other = sim.CreateOpenConnection();
+
+        _ = holder.CreateCommand("""
+            begin tran;
+            merge t with (holdlock) using (select 22 k) s on t.k = s.k when not matched by source and t.k = 10 then delete;
+            merge h with (holdlock) using (select 22 k) s on h.k = s.k when matched then update set v = 1;
+            """).ExecuteNonQuery();
+        _ = other.CreateCommand("set lock_timeout 0").ExecuteNonQuery();
+
+        AreEqual(1222, Throws<SimulatedSqlException>(() => other.CreateCommand("insert t values (40, 9)").ExecuteNonQuery()).Number);
+        AreEqual(1222, Throws<SimulatedSqlException>(() => other.CreateCommand("select count(*) from h").ExecuteScalar()).Number);
+
+        _ = holder.CreateCommand("rollback").ExecuteNonQuery();
+    }
+
+    [TestMethod]
+    public void UnhintedMerge_FencesNothing()
+    {
+        var sim = KeyedTable();
+        using var holder = sim.CreateOpenConnection();
+        using var writer = sim.CreateOpenConnection();
+
+        _ = holder.CreateCommand("begin tran; merge t using (select 22 k) s on t.k = s.k when matched then update set v = 1;").ExecuteNonQuery();
+        _ = writer.CreateCommand("set lock_timeout 0").ExecuteNonQuery();
+
+        AreEqual(1, writer.CreateCommand("insert t values (22, 9)").ExecuteNonQuery());
+
+        _ = holder.CreateCommand("rollback").ExecuteNonQuery();
+    }
 }

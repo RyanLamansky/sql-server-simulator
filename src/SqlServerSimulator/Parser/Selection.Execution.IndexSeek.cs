@@ -2397,40 +2397,81 @@ internal sealed partial class Selection
     /// </summary>
     internal static void SettleSerializableWriteFence(HeapTable table, BooleanExpression? where, bool serializableHint, BatchContext batch, string? qualifier = null)
     {
-        if (batch.IsSkipping || !(serializableHint || batch.Connection.SessionIsolationLevel == System.Data.IsolationLevel.Serializable)
-            || table.IsTableVariable || BatchContext.IsLocalTempName(table.Name) || Simulation.SystemHeapTables.Values.Contains(table)
-            || where?.IsNeverTrue == true)
-        {
+        if (!WriterFences(table, serializableHint, batch) || where?.IsNeverTrue == true)
             return;
-        }
+        if (where is null || !TryFenceWriterInterval(table, where, qualifier ?? table.Name, outerResolver: null, LockMode.RangeExclusiveExclusive, batch))
+            FenceWriterTable(table, batch);
+    }
 
-        if (where is not null)
+    /// <summary>
+    /// The MERGE counterpart of <see cref="SettleSerializableWriteFence"/>,
+    /// settled once per source row: the interval the ON clause pins on the
+    /// target for that row's values, in <c>RangeS-U</c> — the mode real's
+    /// <c>MERGE … WITH (HOLDLOCK)</c> probe takes, which is what serializes two
+    /// concurrent upserts of one key rather than letting both insert (probed
+    /// 2026-09-26 against SQL Server 2025). A MERGE that has to visit every
+    /// target row — one with <c>WHEN NOT MATCHED BY SOURCE</c> — or whose ON
+    /// pins no interval fences the whole table instead.
+    /// </summary>
+    internal static void SettleSerializableMergeFence(
+        HeapTable table, string targetAlias, BooleanExpression on, bool visitsEveryTarget, List<SqlValue[]> sourceRows,
+        Func<SqlValue[], Func<MultiPartName, SqlValue>> sourceResolver, bool serializableHint, BatchContext batch)
+    {
+        if (!WriterFences(table, serializableHint, batch))
+            return;
+        if (!visitsEveryTarget)
         {
-            var source = BuildBaseTableSeekSource(table, qualifier ?? table.Name);
-            var conjuncts = new List<BooleanExpression>();
-            where.CollectConjuncts(conjuncts);
-            var equalities = new Dictionary<int, Expression[]>();
-            foreach (var conjunct in conjuncts)
+            var fenced = true;
+            foreach (var sourceRow in sourceRows)
             {
-                if (conjunct.TryGetEqualityOperands(out var left, out var right))
-                {
-                    _ = TryRecordColumnEquality(source, left, right, equalities, allowCorrelatedColumnValue: false)
-                        || TryRecordColumnEquality(source, right, left, equalities, allowCorrelatedColumnValue: false);
-                    continue;
-                }
-                if (conjunct.TryGetEqualityFamily(out var family))
-                    _ = TryRecordEqualityFamily(source, family, equalities, allowCorrelatedColumnValue: false);
+                fenced = TryFenceWriterInterval(table, on, targetAlias, sourceResolver(sourceRow), LockMode.RangeSharedUpdate, batch);
+                if (!fenced)
+                    break;
             }
-
-            var bounds = CollectRangeBounds(source, conjuncts, allowCorrelatedColumnValue: false);
-            if (ComputeSerializableKeyRange(source, table, batch, outerResolver: null, equalities, bounds) is { } range)
-            {
-                batch.AcquireKeyRangeLockTxScoped(table, range, LockMode.RangeExclusiveExclusive);
+            if (fenced)
                 return;
+        }
+        FenceWriterTable(table, batch);
+    }
+
+    private static bool WriterFences(HeapTable table, bool serializableHint, BatchContext batch) =>
+        !batch.IsSkipping && (serializableHint || batch.Connection.SessionIsolationLevel == System.Data.IsolationLevel.Serializable)
+            && !table.IsTableVariable && !BatchContext.IsLocalTempName(table.Name) && !Simulation.SystemHeapTables.Values.Contains(table);
+
+    // A keyed table's fallback is a table S — real takes RangeS-U on every key
+    // and the infinity range, which admits the same readers and refuses the
+    // same writers — and a keyless heap's the table X real takes.
+    private static void FenceWriterTable(HeapTable table, BatchContext batch) =>
+        batch.AcquireTransactionLock(table.TableDataLock, EnumerateKeyOrdinals(table).Any() ? LockMode.Shared : LockMode.Exclusive);
+
+    // Takes `mode` over the interval `predicate`'s top-level conjuncts pin on
+    // one of the table's keys, reading a value side through `outerResolver`
+    // when one is given; false when they pin none.
+    private static bool TryFenceWriterInterval(
+        HeapTable table, BooleanExpression predicate, string qualifier, Func<MultiPartName, SqlValue>? outerResolver, LockMode mode, BatchContext batch)
+    {
+        var source = BuildBaseTableSeekSource(table, qualifier);
+        var conjuncts = new List<BooleanExpression>();
+        predicate.CollectConjuncts(conjuncts);
+        var correlated = outerResolver is not null;
+        var equalities = new Dictionary<int, Expression[]>();
+        foreach (var conjunct in conjuncts)
+        {
+            if (conjunct.TryGetEqualityOperands(out var left, out var right))
+            {
+                _ = TryRecordColumnEquality(source, left, right, equalities, correlated)
+                    || TryRecordColumnEquality(source, right, left, equalities, correlated);
+                continue;
             }
+            if (conjunct.TryGetEqualityFamily(out var family))
+                _ = TryRecordEqualityFamily(source, family, equalities, correlated);
         }
 
-        batch.AcquireTransactionLock(table.TableDataLock, EnumerateKeyOrdinals(table).Any() ? LockMode.Shared : LockMode.Exclusive);
+        var bounds = CollectRangeBounds(source, conjuncts, correlated);
+        if (ComputeSerializableKeyRange(source, table, batch, outerResolver, equalities, bounds) is not { } range)
+            return false;
+        batch.AcquireKeyRangeLockTxScoped(table, range, mode);
+        return true;
     }
 
     /// <summary>
