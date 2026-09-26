@@ -432,10 +432,10 @@ Measured over a tight poll of a session blocked on a row-U conflict, that window
 - **Cascade-FK SET NULL / SET DEFAULT / CASCADE writes on child tables** — each cascade-rewrite acquires row-X on the old + new RID.
 - **OUTPUT INTO target / SELECT INTO destination** — per-row row-X on the destination table.
 - **Row-lock cleanup on DELETE** — per-row `DeleteAt` is followed by `table.RowLocks.TryRemove((page, slot), out _)` for every successfully tombstoned slot (guard: `IsLockableTable(table)` so table-vars / temp-tables / system tables skip the path that never populated the dict).
-  Safe because slot directory entries never reuse (the heap's slot-leak quirk doubles as a guarantee here) and concurrent accessors can't reach a tombstoned slot — heap iteration skips them, and SI / RCSI tombstoned-slot resolution walks via the separate `RowVersions` dict without probing `RowLocks`.
+  Safe because slot directory entries never reuse (the heap's slot-leak quirk doubles as a guarantee here) and nothing looks a tombstoned slot's lock up by address — heap iteration skips the slot, SI / RCSI tombstoned-slot resolution walks via the separate `RowVersions` dict, and the readers and uniqueness checks that wait on an uncommitted delete reach its lock through `HeapTable.SupersededKeyImages` (see [uncommitted keys and deletes](#uncommitted-keys-and-deletes-make-their-readers-wait)).
   The row-X acquired during the DELETE remains held in `tx.HeldLocks` / `StatementSchemaLocks` until commit / statement end; the LockResource reference there keeps the resource alive even after the dict entry is dropped.
 
-## Uniqueness checks wait on uncommitted keys
+## Uncommitted keys and deletes make their readers wait
 
 A PRIMARY KEY / UNIQUE constraint or unique index check against a key another open transaction is writing waits for that transaction rather than deciding on its uncommitted state, as real's check waits on the key's lock (probed 2026-09-26): a second insert of a key blocks until the first commits (then Msg 2627) or rolls back (then succeeds), and a key an uncommitted DELETE or key-changing UPDATE took away can't be reused until that write settles.
 Without the second half a rollback restored the deleted row beside its replacement — two rows with one key.
@@ -446,7 +446,12 @@ Two sources feed the wait (`Simulation.AwaitUncommittedKeyWriters`, called once 
 - **`HeapTable.SupersededKeyImages`**, each session's pre-images of the rows it deleted or rewrote while it still holds their row X (`BatchContext.NoteSupersededRow`, called at every UPDATE / DELETE / MERGE / FK-cascade rewrite site after the row X is taken).
   An entry retires with the final release of its row X — `LockResource.RowAddress` tells `LockManager.Release` which — so the registry holds only writes still in flight, and a session's own entries are never consulted by its own checks.
 
-Only tables with a unique key or index record images, and a check whose key has a NULL component (the scan fallback) doesn't wait.
+A check whose key has a NULL component (the scan fallback) doesn't wait.
+
+The same registry covers **locking reads over an uncommitted DELETE**: the heap walk never reaches a tombstoned slot, where real's scan meets the deleted row's X-locked key and waits on it, so a READ COMMITTED / REPEATABLE READ / SERIALIZABLE / `UPDLOCK` read used to report the delete before it committed.
+A scan (`BatchContext.AwaitUncommittedDeletes`) waits on every other session's tombstoned entry for its table up front — earlier within the statement than real's wait at the row's turn, with the same outcome — and an equality seek (`AwaitUncommittedDeletesMatching`) on those whose pre-image matches its probes, so a seek to a different key proceeds as on real.
+NOLOCK / READ UNCOMMITTED, READPAST and the snapshot readers don't wait.
+A range seek doesn't wait yet.
 
 ## Granularity approximations
 

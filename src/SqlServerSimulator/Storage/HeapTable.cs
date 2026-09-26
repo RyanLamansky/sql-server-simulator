@@ -479,14 +479,15 @@ internal sealed class HeapTable : SchemaObject
 
     /// <summary>
     /// Per session, the pre-images of the rows it has deleted or rewritten
-    /// while it still holds their row X, each with that lock — the keys an
-    /// uncommitted DELETE or key-changing UPDATE took away, which a rollback
-    /// would bring back. A uniqueness check waits on a matching entry of
-    /// another session's before deciding, as real waits on the deleted key's
-    /// lock: so an insert of a key another transaction has deleted blocks
-    /// until that transaction ends rather than succeeding and leaving two
-    /// rows with the key after a rollback (probed 2026-09-26 against SQL
-    /// Server 2025). An entry retires with the release of its row X.
+    /// while it still holds their row X, each with that lock — the rows and
+    /// keys an uncommitted DELETE or key-changing UPDATE took away, which a
+    /// rollback would bring back. A uniqueness check waits on a matching entry
+    /// of another session's before deciding, as real waits on the deleted
+    /// key's lock — so an insert of a key another transaction has deleted
+    /// blocks until that transaction ends rather than succeeding and leaving
+    /// two rows with the key after a rollback — and a locking scan waits on
+    /// every deleted one (probed 2026-09-26 against SQL Server 2025). An
+    /// entry retires with the release of its row X.
     /// </summary>
     public readonly ConcurrentDictionary<SessionToken, ConcurrentDictionary<(int PageIndex, int SlotIndex), (byte[] Image, LockResource Lock)>> SupersededKeyImages = new();
 

@@ -409,20 +409,6 @@ internal sealed class LockManager
         }
     }
 
-    /// <summary>Whether <paramref name="owner"/> holds <paramref name="mode"/> on <paramref name="resource"/>.</summary>
-    public bool Holds(LockResource resource, LockMode mode, SessionToken owner)
-    {
-        lock (this.gate)
-        {
-            foreach (var hold in resource.Holders)
-            {
-                if (ReferenceEquals(hold.Owner, owner) && hold.Mode == mode)
-                    return true;
-            }
-            return false;
-        }
-    }
-
     /// <summary>
     /// Releases one acquisition of <paramref name="mode"/> by
     /// <paramref name="owner"/>. Re-entrant acquires must match release

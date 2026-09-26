@@ -1153,24 +1153,22 @@ internal sealed class BatchContext
 
     /// <summary>
     /// Records the image of the row at <paramref name="pageIndex"/> /
-    /// <paramref name="slotIndex"/> — which this session holds X on and is
-    /// about to delete or rewrite — in
+    /// <paramref name="slotIndex"/> — which this session has just taken X on
+    /// and is about to delete or rewrite — in
     /// <see cref="HeapTable.SupersededKeyImages"/>, so another session's
-    /// uniqueness check can wait on the key the write takes away until this
-    /// session's transaction settles. Only a table with a unique key or index
-    /// has keys to protect; an escalated table's X covers every row already.
+    /// uniqueness check can wait on the key the write takes away, and its
+    /// scan on the row a delete hides, until this session's transaction
+    /// settles. An escalated table's X covers every row already.
     /// </summary>
     public void NoteSupersededRow(HeapTable table, int pageIndex, int slotIndex)
     {
-        if (!HasUniqueKey(table))
-            return;
         var connection = this.Connection;
         if (connection.CurrentTransaction is { } tx && tx.EscalatedTables.Contains(table))
             return;
-        // Only a row this session holds X on: the entry retires with that
-        // hold's release, so one recorded without it would never retire.
+        // Every caller has just taken the row X through AcquireRowLockTxScoped,
+        // whose only way out without it is the escalation checked above; the
+        // entry retires with that hold's release.
         if (!table.RowLocks.TryGetValue((pageIndex, slotIndex), out var resource)
-            || !connection.Simulation.LockManager.Holds(resource, LockMode.Exclusive, connection.Session)
             || table.Heap.ReadSlotBytes(pageIndex, slotIndex) is not { } image)
         {
             return;
@@ -1178,16 +1176,37 @@ internal sealed class BatchContext
         table.SupersededKeyImages.GetOrAdd(connection.Session, static _ => new())[(pageIndex, slotIndex)] = (image, resource);
     }
 
-    private static bool HasUniqueKey(HeapTable table)
+    /// <summary>
+    /// Waits out every other session's uncommitted delete on
+    /// <paramref name="table"/> before a locking scan reads it. The scan's
+    /// heap walk never reaches a tombstoned slot, where real's scan meets the
+    /// deleted row's X-locked key and waits on it (probed 2026-09-26 against
+    /// SQL Server 2025) — a read that skipped it would report the delete
+    /// before it committed. Waiting up front rather than at the row's turn
+    /// only moves the wait earlier within the same statement.
+    /// </summary>
+    public void AwaitUncommittedDeletes(HeapTable table)
     {
-        if (table.KeyConstraints.Count > 0)
-            return true;
-        foreach (var index in table.Indexes)
+        if (table.SupersededKeyImages.IsEmpty)
+            return;
+        var connection = this.Connection;
+        List<LockResource>? holders = null;
+        foreach (var (owner, images) in table.SupersededKeyImages)
         {
-            if (index.IsUnique)
-                return true;
+            if (ReferenceEquals(owner, connection.Session))
+                continue;
+            foreach (var (address, (_, resource)) in images)
+            {
+                if (table.Heap.IsSlotTombstoned(address.PageIndex, address.SlotIndex))
+                    (holders ??= []).Add(resource);
+            }
         }
-        return false;
+
+        if (holders is not null)
+        {
+            foreach (var resource in holders)
+                _ = this.AwaitRowWriters(table, resource);
+        }
     }
 
     /// <summary>
@@ -1241,9 +1260,14 @@ internal sealed class BatchContext
         return waited;
     }
 
-    // Blocks until no other session holds `resource` incompatibly with S —
-    // the transient acquire-and-release real's "wait for the committed row"
-    // amounts to. True when there was someone to wait for.
+    /// <summary>
+    /// Blocks until no other session holds the row lock
+    /// <paramref name="resource"/> incompatibly with S — the transient
+    /// acquire-and-release real's "wait for the committed row" amounts to.
+    /// </summary>
+    public void AwaitRowWritersOf(HeapTable table, LockResource resource) => _ = this.AwaitRowWriters(table, resource);
+
+    // True when there was someone to wait for.
     private bool AwaitRowWriters(HeapTable table, LockResource resource)
     {
         var connection = this.Connection;
@@ -1425,6 +1449,8 @@ internal sealed class BatchContext
         // this one.
         batch.EnsureSerializableTableLock(table, plan);
         var snapshotXid = batch.ResolveSnapshotXidForRead(table);
+        if (snapshotXid is null && !plan.NoLockReader && !plan.SkipBlockedRows)
+            batch.AwaitUncommittedDeletes(table);
         foreach (var (pageIndex, slotIndex, bytes) in table.Heap.EnumerateRowsWithAddress())
         {
             if (snapshotXid is { } sx)

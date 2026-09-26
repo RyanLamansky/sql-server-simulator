@@ -1921,10 +1921,76 @@ internal sealed partial class Selection
         }
 
         candidateCount = candidates.Count;
+        if (snapshotXid is null && !plan.NoLockReader && !plan.SkipBlockedRows)
+            AwaitUncommittedDeletesMatching(table, batch, outerResolver, equalities);
         seekRows = snapshotXid is { } sx
             ? MaterializeSnapshotCandidates(table, batch, sx, candidates)
             : MaterializeWithLockChecks(table, batch, plan, candidates);
         return true;
+    }
+
+    // The seek's counterpart of BatchContext.AwaitUncommittedDeletes: waits out
+    // another session's uncommitted delete of a row the seek's equalities would
+    // have found, which the cache no longer lists — real's seek lands on that
+    // key's lock and waits (probed 2026-09-26 against SQL Server 2025). A row
+    // matches when every equality column's value in its pre-delete image equals
+    // one of that column's probes.
+    private static void AwaitUncommittedDeletesMatching(
+        HeapTable table, BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver, Dictionary<int, Expression[]> equalities)
+    {
+        if (table.SupersededKeyImages.IsEmpty)
+            return;
+        var session = batch.Connection.Session;
+        List<(byte[] Image, LockResource Lock)>? deleted = null;
+        foreach (var (owner, images) in table.SupersededKeyImages)
+        {
+            if (ReferenceEquals(owner, session))
+                continue;
+            foreach (var (address, entry) in images)
+            {
+                if (table.Heap.IsSlotTombstoned(address.PageIndex, address.SlotIndex))
+                    (deleted ??= []).Add(entry);
+            }
+        }
+        if (deleted is null)
+            return;
+
+        var runtime = new RuntimeContext(name => outerResolver is not null ? outerResolver(name) : throw SimulatedSqlException.InvalidColumnName(name), batch);
+        var probes = new List<(int Ordinal, SqlValue[] Values)>(equalities.Count);
+        foreach (var (ordinal, expressions) in equalities)
+            probes.Add((ordinal, Array.ConvertAll(expressions, expression => expression.Run(runtime))));
+
+        foreach (var (image, resource) in deleted)
+        {
+            var matches = true;
+            foreach (var (ordinal, values) in probes)
+            {
+                var stored = RowDecoder.DecodeColumn(table.StoredColumns, image, ordinal, table.Heap);
+                if (!Array.Exists(values, value => ProbeEquals(value, stored)))
+                {
+                    matches = false;
+                    break;
+                }
+            }
+            if (matches)
+                batch.AwaitRowWritersOf(table, resource);
+        }
+    }
+
+    // A probe the seek could use against a stored value; a pair that doesn't
+    // compare cleanly counts as a match, so the wait errs toward waiting.
+    private static bool ProbeEquals(SqlValue probe, SqlValue stored)
+    {
+        if (probe.IsNull || stored.IsNull)
+            return false;
+        try
+        {
+            return probe.CompareTo(stored) == 0;
+        }
+        catch (Exception e) when (e is SimulatedSqlException or InvalidOperationException or InvalidCastException)
+        {
+            return true;
+        }
     }
 
     // Computes the seek-narrowed (page, slot) candidate addresses for the longest

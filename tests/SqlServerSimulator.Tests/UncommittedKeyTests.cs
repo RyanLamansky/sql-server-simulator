@@ -146,4 +146,48 @@ public sealed class UncommittedKeyTests
         AreEqual(4, conn.CreateCommand("select count(*) from t").ExecuteScalar());
         _ = conn.CreateCommand("commit").ExecuteNonQuery();
     }
+
+    /// <summary>
+    /// A locking read that would have met a row another open transaction
+    /// deleted waits for that transaction, where the heap walk used to skip
+    /// the tombstone and report the delete before it committed; a seek to a
+    /// different key, a NOLOCK read and a READPAST read don't wait.
+    /// </summary>
+    [TestMethod]
+    [DataRow("select count(*) from t", true)]
+    [DataRow("select v from t where k = 10", true)]
+    [DataRow("select count(*) from h", true)]
+    [DataRow("select v from h where k = 20", true)]
+    [DataRow("select v from t where k = 20", false)]
+    [DataRow("select count(*) from t with (nolock)", false)]
+    [DataRow("select count(*) from t with (readpast)", false)]
+    public void ReadOverAnUncommittedDelete_Waits(string read, bool waits)
+    {
+        var sim = Keyed();
+        _ = sim.ExecuteNonQuery("create table h (k int, v int); insert h values (10, 1), (20, 2)");
+        using var holder = sim.CreateOpenConnection();
+        using var other = sim.CreateOpenConnection();
+
+        _ = holder.CreateCommand("begin tran; delete t where k = 10; delete h where k = 10").ExecuteNonQuery();
+        _ = other.CreateCommand("set lock_timeout 0").ExecuteNonQuery();
+
+        if (waits)
+            AreEqual(1222, Throws<SimulatedSqlException>(() => other.CreateCommand(read).ExecuteScalar()).Number);
+        else
+            IsNotNull(other.CreateCommand(read).ExecuteScalar());
+
+        _ = holder.CreateCommand("rollback").ExecuteNonQuery();
+    }
+
+    [TestMethod]
+    public async Task ScanOverAnUncommittedDelete_SeesTheRowAgainAfterRollback()
+    {
+        var sim = Keyed();
+        using var holder = sim.CreateOpenConnection();
+        using var other = sim.CreateOpenConnection();
+
+        _ = holder.CreateCommand("begin tran; delete t where k = 10").ExecuteNonQuery();
+        IsNull(await BlockedUntil(holder, other, "select count(*) from t", "rollback"));
+        AreEqual(3, other.CreateCommand("select count(*) from t").ExecuteScalar());
+    }
 }
