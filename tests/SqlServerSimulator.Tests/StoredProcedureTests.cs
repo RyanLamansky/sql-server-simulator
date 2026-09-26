@@ -961,4 +961,11 @@ public sealed class StoredProcedureTests
         sim.ExecuteBatches("create table t (a int)", create);
         AreEqual(expected, sim.ExecuteScalar("exec p; select @@rowcount"));
     }
+
+    /// <summary>A misplaced CREATE / ALTER PROCEDURE's Msg 111 names the procedure (probed 2026-09-26 against SQL Server 2025).</summary>
+    [TestMethod]
+    [DataRow("select 1; create procedure dbo.p2 as select 1", "p2")]
+    [DataRow("select 1; alter procedure p3 as select 1", "p3")]
+    public void AMisplacedProcedure_IsTheMessagesProcedure(string batch, string procedure)
+        => AreEqual(procedure, new Simulation().AssertSqlError(batch, 111).Errors[0].Procedure);
 }

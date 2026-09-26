@@ -70,7 +70,18 @@ partial class Simulation
     private static bool TryParseCreateProcedure(ParserContext context, bool isAlter, bool createOrAlter)
     {
         if (context.Batch.BlockDepth > 0 || context.Batch.HasDispatchedStatement)
-            throw SimulatedSqlException.MustBeFirstStatementInBatch("CREATE/ALTER PROCEDURE");
+        {
+            // Real attributes the refusal to the procedure it would have
+            // created, by its bare name (probed 2026-09-26 against SQL
+            // Server 2025).
+            var misplaced = SimulatedSqlException.MustBeFirstStatementInBatch("CREATE/ALTER PROCEDURE");
+            var checkpoint = context.SaveCheckpoint();
+            context.MoveNextRequired();
+            if (context.Token is Name)
+                misplaced.Errors[0].Procedure = BatchContext.ParseObjectName(context).Leaf;
+            context.RestoreCheckpoint(checkpoint);
+            throw misplaced;
+        }
 
         context.MoveNextRequired();
         if (context.Token is not Name)
