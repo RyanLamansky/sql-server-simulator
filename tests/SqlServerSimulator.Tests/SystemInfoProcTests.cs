@@ -417,8 +417,8 @@ public sealed class SystemInfoProcTests
         _ = sim.ExecuteNonQuery("alter database simulated set compatibility_level = 160");
         var row = Sets(sim, "exec sp_helpdb 'simulated'")[0].Rows[0];
         AreEqual("simulated", row[0]);
-        Assert.EndsWith(" MB", (string)row[1]!);
-        AreEqual("dbo", row[2]);
+        AreEqual("     16.00 MB", row[1]);
+        AreEqual("sa", row[2]);
         AreEqual((short)5, row[3]);
         AreEqual(11, ((string)row[4]!).Length);
         Assert.Contains("Collation=SQL_Latin1_General_CP1_CI_AS", (string)row[5]!);
@@ -994,4 +994,24 @@ public sealed class SystemInfoProcTests
         HasCount(ForEachDbNames.Length * 3, sets);
         CollectionAssert.AreEqual(new[] { 1, 2, 3 }, sets.GetRange(0, 3).ConvertAll(s => (int)s.Rows[0][0]!));
     }
+
+    /// <summary>The single-database form's blank line comes from sp_helpdb's line 193, between its two sets.</summary>
+    [TestMethod]
+    public void HelpDb_BlankLineComesFromTheProcedure()
+    {
+        using var connection = (SimulatedDbConnection)new Simulation().CreateOpenConnection();
+        var messages = new List<SimulatedError>();
+        connection.InfoMessage += (_, e) => messages.AddRange(e.Errors.Cast<SimulatedError>());
+        using var command = connection.CreateCommand();
+        command.CommandText = "exec sp_helpdb 'simulated'";
+        using var reader = command.ExecuteReader();
+        while (reader.Read())
+        {
+        }
+        IsEmpty(messages);
+        IsTrue(reader.NextResult());
+        var blank = messages.Single();
+        AreEqual((193, "sp_helpdb", " "), (blank.LineNumber, blank.Procedure, blank.Message));
+    }
 }
+

@@ -972,8 +972,8 @@ internal static partial class BuiltInResources
         return total;
     }
 
-    /// <summary>Synthetic per-database log-file size, in 8 KB pages.</summary>
-    internal const int LogFileSizePages = 128;
+    /// <summary>Synthetic per-database log-file size, in 8 KB pages: the 1024 a new SQL Server 2025 database's log starts at (probed 2026-09-26).</summary>
+    internal const int LogFileSizePages = 1024;
 
     /// <summary>
     /// Synthetic autogrowth increment, in KB — SQL Server's 64 MB default for
@@ -1032,14 +1032,15 @@ internal static partial class BuiltInResources
     /// <summary>
     /// Synthetic data-file <c>size</c> (pages) for <paramref name="database"/>:
     /// the live allocated-page total (<see cref="SumDataFilePages"/>) plus
-    /// generous headroom, floored at 640 pages so an empty database still
-    /// reports a plausible file. Guarantees size &gt; SUM(total_pages).
+    /// generous headroom, floored at the 1024 pages a new SQL Server 2025
+    /// database's data file starts at (probed 2026-09-26). Guarantees size
+    /// &gt; SUM(total_pages).
     /// </summary>
     internal static int ComputeDataFileSizePages(Database database)
     {
         var used = SumDataFilePages(database);
         var size = used + Math.Max(512L, used / 2);
-        return (int)Math.Min(int.MaxValue, Math.Max(640L, size));
+        return (int)Math.Min(int.MaxValue, Math.Max(1024L, size));
     }
 
     /// <summary>

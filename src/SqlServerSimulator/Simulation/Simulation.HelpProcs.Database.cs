@@ -108,7 +108,8 @@ partial class Simulation
             throw SimulatedSqlException.HelpDatabaseDoesNotExist(databaseName);
         }
 
-        var owner = SqlValue.FromSystemName("dbo");
+        // SUSER_SNAME of the owner_sid sys.databases reports, which is sa's.
+        var owner = SqlValue.FromSystemName("sa");
         var rows = new List<SqlValue[]>();
         foreach (var (database, id) in DbId.DatabasesWithIds(simulation))
         {
@@ -139,16 +140,17 @@ partial class Simulation
         // the target database's own sp_helpfile output.
         if (single is null || !HasDbAccess.IsAccessible(batch.Connection, single))
             yield break;
-        batch.AppendPrintMessage(" ");
+        yield return HelpBlankLine(batch, "sp_helpdb", 193);
         yield return HelpFileResultSet(single);
     }
 
     // `str(sum(size) / 128, 10, 2) + ' MB'` over the database's files — the two
-    // synthetic files sys.database_files reports.
+    // synthetic files sys.database_files reports — right-aligned in str's ten
+    // columns.
     private static string HelpDbSize(Database database)
     {
         long pages = BuiltInResources.ComputeDataFileSizePages(database) + BuiltInResources.LogFileSizePages;
-        return (pages / 128m).ToString("F2", CultureInfo.InvariantCulture) + " MB";
+        return (pages / 128m).ToString("F2", CultureInfo.InvariantCulture).PadLeft(10) + " MB";
     }
 
     // `convert(nvarchar(11), crdate)` — style-0 datetime text
