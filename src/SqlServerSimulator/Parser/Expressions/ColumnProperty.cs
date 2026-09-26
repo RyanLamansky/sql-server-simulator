@@ -297,7 +297,7 @@ internal sealed class ColumnProperty : Expression
     /// real), a date / time type's character width, a string's or binary's
     /// declared length (-1 for MAX), and each remaining type's fixed width.
     /// </summary>
-    private static int Precision(HeapColumn column) => column.Type switch
+    internal static int Precision(HeapColumn column) => column.Type switch
     {
         { Category: SqlTypeCategory.Integer } t => SqlType.IntegerAsDecimal(t).Precision,
         { Category: SqlTypeCategory.Money } t => SqlType.MoneyAsDecimal(t).Precision,
@@ -321,7 +321,7 @@ internal sealed class ColumnProperty : Expression
     /// <c>Scale</c>: a number's, a time type's fractional digits, 3 for
     /// datetime; NULL for every type that has none.
     /// </summary>
-    private static int? Scale(SqlType type) => type switch
+    internal static int? Scale(SqlType type) => type switch
     {
         BitSqlType => null,
         { Category: SqlTypeCategory.Integer } => 0,

@@ -9,11 +9,9 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// </summary>
 /// <remarks>
 /// <para>
-/// Backed by a static lookup table keyed by the system type's canonical name.
-/// User-defined alias types (UDDT) and table types would also be reachable
-/// through real SQL Server's <c>TYPEPROPERTY</c>, but they're rare in
-/// application code and not in this shipped slice. Property values are
-/// probe-confirmed against SQL Server 2025 (2026-05-23).
+/// Backed by a static lookup table keyed by the system type's canonical name,
+/// and by the schemas' alias and table types. Property values are
+/// probe-confirmed against SQL Server 2025 (2026-05-23, 2026-09-26).
 /// </para>
 /// <para>
 /// Shipped properties:
@@ -27,6 +25,7 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// <c>timestamp</c> / <c>sysname</c>.</description></item>
 /// <item><description><c>UsesAnsiTrim</c> — 1 for the blank-padded
 /// single-byte types and <c>sql_variant</c>.</description></item>
+/// <item><description><c>OwnerId</c> — the owning schema's principal.</description></item>
 /// </list>
 /// </para>
 /// <para>
@@ -65,7 +64,7 @@ internal sealed class TypeProperty : Expression
         var typeName = typeValue.CoerceTo(SqlType.NVarchar).AsString;
         var prop = propValue.CoerceTo(SqlType.NVarchar).AsString;
 
-        return LookupType(typeName) is not TypeMetadata meta
+        return Resolve(runtime.Batch, typeName) is not TypeMetadata meta
             ? SqlValue.Null(SqlType.Int32)
             : EvaluateProperty(meta, prop) is int result
                 ? SqlValue.FromInt32(result)
@@ -74,12 +73,47 @@ internal sealed class TypeProperty : Expression
 
     /// <summary>One row of the table; a null field is a property the type has
     /// no value for, which answers NULL.</summary>
-    private readonly struct TypeMetadata(int? precision, int? scale, int? allowsNull, int? usesAnsiTrim)
+    private readonly struct TypeMetadata(int? precision, int? scale, int? allowsNull, int? usesAnsiTrim, int ownerId = Database.SysPrincipalId)
     {
         public readonly int? Precision = precision;
         public readonly int? Scale = scale;
         public readonly int? AllowsNull = allowsNull;
         public readonly int? UsesAnsiTrim = usesAnsiTrim;
+        public readonly int OwnerId = ownerId;
+    }
+
+    /// <summary>
+    /// A built-in type by its bare or <c>sys</c>-qualified name, whose owner is
+    /// the <c>sys</c> schema's (principal 4); otherwise a user alias or table
+    /// type in the named or default schema, owned by its schema's principal —
+    /// an alias type reporting its declared precision, scale, nullability and
+    /// ANSI trimming, a table type 0 / NULL / 0 / NULL (probed 2026-09-26
+    /// against SQL Server 2025).
+    /// </summary>
+    private static TypeMetadata? Resolve(BatchContext batch, string typeName)
+    {
+        if (!ObjectId.TryParseObjectName(typeName, out var name) || name.Count > 2)
+            return null;
+        if (name.Count == 1 || Collation.Baseline.Equals(name.ImmediateQualifier, "sys"))
+        {
+            if (LookupType(name.Leaf) is { } builtIn)
+                return builtIn;
+            if (name.Count == 2)
+                return null;
+        }
+        if (!batch.TryResolveSchema(name, out var schema))
+            return null;
+        if (schema.AliasTypes.TryGetValue(name.Leaf, out var alias))
+        {
+            var column = new HeapColumn(alias.Name, alias.UnderlyingType, alias.DeclaredMaxLength, alias.IsNullable);
+            return new(
+                ColumnProperty.Precision(column),
+                ColumnProperty.Scale(alias.UnderlyingType),
+                alias.IsNullable ? 1 : 0,
+                alias.UnderlyingType is CharSqlType or VarcharSqlType or BinarySqlType or VarbinarySqlType or SqlVariantSqlType ? 1 : null,
+                schema.PrincipalId);
+        }
+        return schema.TableTypes.ContainsKey(name.Leaf) ? new(0, null, 0, null, schema.PrincipalId) : null;
     }
 
     private static TypeMetadata? LookupType(string typeName)
@@ -130,6 +164,7 @@ internal sealed class TypeProperty : Expression
             8 => upper switch
             {
                 "DATETIME" => new(23, 3, 1, null),
+                "GEOMETRY" => new(-1, null, 1, null),
                 "NVARCHAR" => new(4000, null, 1, null),
                 "SMALLINT" => new(5, 0, 1, null),
                 _ => null,
@@ -137,6 +172,7 @@ internal sealed class TypeProperty : Expression
             9 => upper switch
             {
                 "DATETIME2" => new(27, 7, 1, null),
+                "GEOGRAPHY" => new(-1, null, 1, null),
                 "TIMESTAMP" => new(8, null, 0, null),
                 "VARBINARY" => new(8000, null, 1, 1),
                 _ => null,
@@ -177,6 +213,7 @@ internal sealed class TypeProperty : Expression
         return property.AsSpan().ToUpperInvariant(upper) switch
         {
             5 => upper switch { "SCALE" => meta.Scale, _ => null },
+            7 => upper switch { "OWNERID" => meta.OwnerId, _ => null },
             9 => upper switch { "PRECISION" => meta.Precision, _ => null },
             10 => upper switch { "ALLOWSNULL" => meta.AllowsNull, _ => null },
             12 => upper switch { "USESANSITRIM" => meta.UsesAnsiTrim, _ => null },
