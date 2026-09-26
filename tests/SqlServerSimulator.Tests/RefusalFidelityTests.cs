@@ -247,6 +247,18 @@ public sealed class RefusalFidelityTests
     public void Iif_NonBooleanCondition_IsNearItsParenthesis(string sql)
         => new Simulation().AssertSqlError(sql, 4145, "An expression of non-boolean type specified in a context where a condition is expected, near '('.");
 
+    /// <summary>
+    /// A misplaced compound-assignment operator — the old <c>*=</c> outer
+    /// join — is named whole, as real's tokenizer reads it; spaced apart the
+    /// two characters are two tokens (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select * from (select 1 a) x, (select 1 b) y where x.a *= y.b", "*=")]
+    [DataRow("select 1 where 1 += 1", "+=")]
+    [DataRow("select 1 where 1 * = 1", "=")]
+    public void MisplacedCompoundOperator_IsNamedWhole(string sql, string near)
+        => new Simulation().AssertSqlError(sql, 102, $"Incorrect syntax near '{near}'.");
+
     [TestMethod]
     public void SpExecuteSql_UnicodeVariableStatement_Runs()
         => AreEqual(1, new Simulation().ExecuteScalar("declare @s nchar(20) = N'select 1'; exec sp_executesql @s"));

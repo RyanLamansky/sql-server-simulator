@@ -142,8 +142,17 @@ partial class SimulatedSqlException
     /// <c>VALUES</c> statement, <c>DELETE … ORDER BY</c>) — but not the last
     /// token named at the end of the input (<c>SELECT</c> alone is Msg 102).
     /// </summary>
-    internal static SimulatedSqlException SyntaxErrorNear(ParserContext context) =>
-        context.Token is ReservedKeyword keyword ? SyntaxErrorNearKeyword(keyword) : SyntaxErrorNear(context.Token ?? context.LastToken);
+    internal static SimulatedSqlException SyntaxErrorNear(ParserContext context) => context.Token switch
+    {
+        ReservedKeyword keyword => SyntaxErrorNearKeyword(keyword),
+        // Real's tokenizer reads a compound-assignment operator as one token,
+        // so a misplaced one — the old `*=` outer join — is named whole
+        // (probed 2026-09-26: `WHERE x.a *= y.b` is near '*=').
+        Operator { Character: '=' } equals when context.CharBefore(equals) is var op && op is '+' or '-' or '*' or '/' or '%' or '&' or '|' or '^' =>
+            new($"Incorrect syntax near '{op}='.", 102, 15, 1),
+        null => SyntaxErrorNear(context.LastToken),
+        var token => SyntaxErrorNear(token),
+    };
 
     /// <summary>
     /// Mimics SQL Server error 102, naming the offending token. The name comes

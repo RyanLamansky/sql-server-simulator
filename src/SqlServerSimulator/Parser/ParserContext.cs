@@ -627,6 +627,12 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
         this.commandText[startIndex..(this.Token?.StartIndex ?? this.commandText.Length)].TrimEnd();
 
     /// <summary>
+    /// The command-text character just ahead of <paramref name="token"/>, or
+    /// <c>'\0'</c> at the start of the text.
+    /// </summary>
+    public char CharBefore(Token token) => token.StartIndex > 0 ? this.commandText[token.StartIndex - 1] : '\0';
+
+    /// <summary>
     /// Whether this batch's raw text carries anything a <c>label:</c> or a
     /// <c>GOTO</c> could be spelled with — a necessary condition for both, so
     /// a false reading lets the label pre-scan skip its token walk outright.
