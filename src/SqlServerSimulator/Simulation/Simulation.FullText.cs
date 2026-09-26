@@ -260,12 +260,12 @@ partial class Simulation
         RejectFullTextDdlInTransaction(context, "CREATE FULLTEXT INDEX");
         context.CurrentDatabase.RejectFullTextWriteWhenReadOnly(state: 103);
 
-        if (!context.Batch.TryResolveTable(tableName, out var table)
-            || table.IsTableVariable
-            || BatchContext.IsLocalTempName(table.Name))
-        {
-            throw SimulatedSqlException.InvalidObjectName(tableName);
-        }
+        // Real splits the refusal by state: 49 for a name that resolves to
+        // nothing, 48 for a temporary table (probed 2026-09-26).
+        if (!context.Batch.TryResolveTable(tableName, out var table))
+            throw SimulatedSqlException.InvalidObjectName(tableName, state: 49);
+        if (table.IsTableVariable || BatchContext.IsLocalTempName(table.Name))
+            throw SimulatedSqlException.InvalidObjectName(tableName, state: 48);
 
         if (table.FullTextIndex is not null)
             throw SimulatedSqlException.FullTextIndexAlreadyExists(tableName.ToString());

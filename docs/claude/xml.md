@@ -630,7 +630,12 @@ The load-bearing core keeps its original positions: `object_id` / `name` / `inde
 `index_id` comes from real's dedicated **256000+** XML range, sequenced **per table** in creation order — a table's first XML index is 256000, its second 256001, and the first on a second table is 256000 again (all probe-confirmed against SQL Server 2025).
 A secondary's `using_xml_index_id` is its primary's value from that same range, `sys.index_columns` keys the index's row on it, and the primary's internal node table is named after it.
 Ordinary indexes keep the small ids starting at 1; spatial indexes have their own 384000+ range (see [`spatial.md`](spatial.md)).
-The allocation is a per-table watermark rather than a reused slot, matching real (probed: dropping the second XML index and creating another gives 256003, not 256001) — the simulator gets that for free because `DROP INDEX` doesn't remove XML indexes.
+A new index takes one past the table's highest surviving XML id, so a dropped top id is reused while a dropped middle one isn't (probed 2026-09-26: with 256000–256002 on a table, dropping the primary at 256000 with its secondary at 256002 gives the next index 256002).
+
+`DROP INDEX name ON table` drops an XML index, and a primary takes the secondaries built over it along (probed 2026-09-26).
+The deprecated `DROP INDEX table.name` form is refused for XML and spatial indexes alike with Msg 3749 — while compiling, so nothing ahead of it in the batch runs, and even under `IF EXISTS`.
+While either kind is on a table its primary key can't be dropped (Msg 3734 then Msg 3727).
+A `#temp` table takes XML indexes as a permanent one does; a full-text index refuses it (Msg 208 state 48, where a missing table is state 49).
 Appended after them (real orders these interleaved; the simulator appends since consumers read by name): `is_unique` (false) / `data_space_id` (1) / `ignore_dup_key` (false) / `is_unique_constraint` (false) / `fill_factor` (0) / `is_padded` (false) / `is_disabled` (false) / `is_hypothetical` (false) / `is_ignored_in_optimization` (false) / `allow_row_locks` (true) / `allow_page_locks` (true) / `has_filter` (false) / `filter_definition` (NULL) / `xml_index_type` (0 primary, 1 secondary) / `xml_index_type_description` (`PRIMARY_XML` / `SECONDARY_XML`) / `path_id` (NULL — the column names the promoted path a *selective* XML index tracks, and an ordinary primary or secondary index reports NULL; probe-confirmed) / `auto_created` (false).
 Values are the fresh-index defaults.
 DacFx's XML-index reverse-engineering query reads the `fill_factor` / `is_padded` / `allow_*_locks` / `is_disabled` / `xml_index_type` / `path_id` tail.

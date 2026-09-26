@@ -270,12 +270,10 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return true;
 
-        if (!context.Batch.TryResolveTable(tableName, out var table)
-            || table.IsTableVariable
-            || BatchContext.IsLocalTempName(table.Name))
-        {
+        if (!context.Batch.TryResolveTable(tableName, out var table))
+            throw SimulatedSqlException.CannotFindObjectForCreateIndex(tableName.ToString(), state: 201);
+        if (table.IsTableVariable)
             throw SimulatedSqlException.InvalidObjectName(tableName);
-        }
 
         var ordinal = -1;
         for (var i = 0; i < table.Columns.Length; i++)
@@ -307,16 +305,20 @@ partial class Simulation
 
         var internalTableObjectId = isPrimary ? context.CurrentDatabase.AllocateObjectId() : 0;
         // XML indexes take index ids from real's dedicated 256000+ range, one
-        // sequence per table in creation order — probe-confirmed (a second XML
-        // index on the same table is 256001, the first on a second table is
-        // 256000 again). Spatial indexes have their own 384000+ range.
+        // past the table's highest — probe-confirmed (a second XML index on
+        // the same table is 256001, the first on a second table is 256000
+        // again, and a dropped top id is reused). Spatial indexes have their
+        // own 384000+ range.
+        var nextIndexId = XmlIndexIdBase;
+        foreach (var existing in table.XmlIndexes)
+            nextIndexId = Math.Max(nextIndexId, existing.IndexId + 1);
         var index = new XmlIndex(
             indexName,
             ordinal,
             isPrimary,
             usingPrimaryName,
             secondaryType,
-            XmlIndexIdBase + table.XmlIndexes.Count,
+            nextIndexId,
             internalTableObjectId);
         table.XmlIndexes.Add(index);
         return true;

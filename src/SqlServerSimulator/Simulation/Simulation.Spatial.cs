@@ -75,7 +75,7 @@ partial class Simulation
             return true;
 
         if (!context.Batch.TryResolveTable(targetTableName, out var table))
-            throw SimulatedSqlException.CannotFindObjectForCreateIndex(targetTableName.ToString());
+            throw SimulatedSqlException.CannotFindObjectForCreateIndex(targetTableName.ToString(), state: 202);
 
         var colOrdinal = -1;
         for (var i = 0; i < table.Columns.Length; i++)
@@ -116,7 +116,10 @@ partial class Simulation
         if (IncorrectSetOptionNames(context) is { } setOptions)
             throw SimulatedSqlException.IncorrectSetOptionsForSpatialIndex(setOptions);
 
-        var indexId = 384000 + table.SpatialIndexes.Count;
+        // One past the table's highest spatial id (probed 2026-09-26).
+        var indexId = 384000;
+        foreach (var existing in table.SpatialIndexes)
+            indexId = Math.Max(indexId, existing.IndexId + 1);
         table.SpatialIndexes.Add(new SpatialIndex(
             objectId, indexName, indexId, colOrdinal + 1, kind, tessellationScheme,
             bboxXmin, bboxYmin, bboxXmax, bboxYmax,

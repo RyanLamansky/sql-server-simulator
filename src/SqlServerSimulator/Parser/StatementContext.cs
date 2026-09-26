@@ -263,7 +263,7 @@ internal sealed class StatementContext
 
     /// <summary>
     /// The statement changes a table's or index's structure — ALTER TABLE,
-    /// CREATE / ALTER INDEX, CREATE / UPDATE STATISTICS, DROP TABLE, TRUNCATE
+    /// CREATE / ALTER / DROP INDEX, CREATE / UPDATE STATISTICS, DROP TABLE, TRUNCATE
     /// TABLE — whose severity-16 run-time errors end the batch and roll the
     /// transaction back as under <c>SET XACT_ABORT ON</c> (probed 2026-09-26
     /// against SQL Server 2025). Set at dispatch entry.

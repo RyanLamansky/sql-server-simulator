@@ -194,6 +194,8 @@ CREATE SPATIAL INDEX name ON table(col)
 - `GRIDS` level arguments accept either numeric codes (1/2/3) or named levels (`LOW` / `MEDIUM` / `HIGH`).
 - Unknown options inside the `WITH` clause skip via balanced-paren consumption.
 - Non-spatial column → `NotSupportedException`; duplicate index name → Msg 2714.
+- `index_id` is one past the table's highest spatial id, from 384000 (probed 2026-09-26).
+- `DROP INDEX name ON table` drops one; the old `table.name` refusal and the primary-key lock-in are shared with XML indexes — see [`xml.md`](xml.md#catalog-views-in-builtinresourcescs).
 
 Statement dispatch: `Spatial` added to `ContextualKeyword` enum; CREATE SPATIAL routes via `UnquotedString { ContextualKeyword: ContextualKeyword.Spatial }`.
 `INDEX` is reserved, so the sub-keyword check uses `Keyword.Index`.

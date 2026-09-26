@@ -799,7 +799,8 @@ partial class Simulation
             context.MoveNextOptional();
             string indexName;
             MultiPartName tableName;
-            if (context.Token is ReservedKeyword { Keyword: Keyword.On })
+            var oldSyntax = context.Token is not ReservedKeyword { Keyword: Keyword.On };
+            if (!oldSyntax)
             {
                 // Standard `index_name ON table` form.
                 indexName = firstName.Leaf;
@@ -818,7 +819,7 @@ partial class Simulation
                 indexName = firstName.Leaf;
                 tableName = WithoutLeaf(firstName);
             }
-            DropOneIndex(context, indexName, tableName, ifExists);
+            DropOneIndex(context, indexName, tableName, ifExists, oldSyntax);
 
             if (context.Token is not Operator { Character: ',' })
                 break;
@@ -842,7 +843,8 @@ partial class Simulation
 
     /// <summary>
     /// Resolves the target table, then removes the matching entry from
-    /// <see cref="HeapTable.Indexes"/>. Surfaces:
+    /// <see cref="HeapTable.Indexes"/>, or else its XML or spatial index of
+    /// that name. Surfaces:
     /// <list type="bullet">
     /// <item>Msg 3701 St 6 when the parent table itself doesn't exist
     /// (unless <c>IF EXISTS</c>).</item>
@@ -853,10 +855,17 @@ partial class Simulation
     /// 2025).</item>
     /// </list>
     /// </summary>
-    private static void DropOneIndex(ParserContext context, string indexName, MultiPartName tableName, bool ifExists)
+    private static void DropOneIndex(ParserContext context, string indexName, MultiPartName tableName, bool ifExists, bool oldSyntax)
     {
         if (context.Batch.IsSkipping)
+        {
+            // Real refuses the old form for an XML or spatial index while
+            // compiling, so nothing ahead of it in the batch runs (probed
+            // 2026-09-26 against SQL Server 2025).
+            if (oldSyntax && context.Batch.TryResolveTable(tableName, out var compiled) && FindXmlOrSpatialIndex(context, compiled, indexName))
+                throw SimulatedSqlException.XmlIndexDropNeedsOnSyntax($"{tableName}.{indexName}");
             return;
+        }
 
         if (!context.Batch.TryResolveTable(tableName, out var table))
         {
@@ -878,7 +887,7 @@ partial class Simulation
         foreach (var kc in table.KeyConstraints)
         {
             if (context.Batch.CurrentDatabase.Collation.Equals(kc.Name, indexName))
-                throw SimulatedSqlException.ExplicitDropIndexNotAllowed(qualifiedTableName, indexName, kc.Kind == KeyConstraintKind.PrimaryKey ? "PRIMARY KEY" : "UNIQUE");
+                throw SimulatedSqlException.ExplicitDropIndexNotAllowed(tableName.ToString(), indexName, kc.Kind == KeyConstraintKind.PrimaryKey ? "PRIMARY KEY" : "UNIQUE");
         }
 
         for (var i = 0; i < table.Indexes.Count; i++)
@@ -897,9 +906,49 @@ partial class Simulation
             }
         }
 
+        if (DropXmlOrSpatialIndex(context, table, indexName, tableName, oldSyntax))
+            return;
+
         if (ifExists)
             return;
         throw SimulatedSqlException.CannotDropIndexDoesNotExist(tableName.ToString(), indexName, state: 7);
+    }
+
+    /// <summary>
+    /// Drops the XML or spatial index <paramref name="indexName"/> names on
+    /// <paramref name="table"/>, answering whether one did. A primary XML
+    /// index takes the secondaries built over it along, and neither kind may
+    /// be named in the deprecated <c>table.index</c> form — Msg 3749 even
+    /// under <c>IF EXISTS</c> (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    private static bool DropXmlOrSpatialIndex(ParserContext context, HeapTable table, string indexName, MultiPartName tableName, bool oldSyntax)
+    {
+        if (!FindXmlOrSpatialIndex(context, table, indexName))
+            return false;
+        var collation = context.Batch.CurrentDatabase.Collation;
+        var xmlIndex = table.XmlIndexes.Find(candidate => collation.Equals(candidate.Name, indexName));
+        if (oldSyntax)
+            throw SimulatedSqlException.XmlIndexDropNeedsOnSyntax($"{tableName}.{indexName}");
+
+        table.OwningDatabase?.RejectWriteWhenReadOnly();
+        if (xmlIndex is not null)
+        {
+            _ = table.XmlIndexes.RemoveAll(candidate => ReferenceEquals(candidate, xmlIndex)
+                || (xmlIndex.IsPrimary && collation.Equals(candidate.UsingPrimaryIndexName, xmlIndex.Name)));
+        }
+        else
+        {
+            _ = table.SpatialIndexes.RemoveAll(candidate => collation.Equals(candidate.Name, indexName));
+        }
+        RecordDdlEvent(context, "DROP_INDEX", EventSchemaName(tableName), indexName, "INDEX", table.Name, "TABLE");
+        return true;
+    }
+
+    private static bool FindXmlOrSpatialIndex(ParserContext context, HeapTable table, string indexName)
+    {
+        var collation = context.Batch.CurrentDatabase.Collation;
+        return table.XmlIndexes.Exists(candidate => collation.Equals(candidate.Name, indexName))
+            || table.SpatialIndexes.Exists(candidate => collation.Equals(candidate.Name, indexName));
     }
 
     /// <summary>

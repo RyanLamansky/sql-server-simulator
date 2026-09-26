@@ -2152,6 +2152,14 @@ partial class SimulatedSqlException
         FollowedByConstraintNotDropped(new($"'{name}' is not a constraint.", 3728, 16, 1));
 
     /// <summary>
+    /// Mimics SQL Server error 3734: <c>ALTER TABLE … DROP CONSTRAINT</c>
+    /// targeted the primary key of a table that still has an XML or spatial
+    /// index, followed by Msg 3727 (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException PrimaryKeyDropBlockedByXmlOrSpatialIndex(string constraintName) =>
+        FollowedByConstraintNotDropped(new($"Could not drop the primary key constraint '{constraintName}' because the table has an XML or spatial index.", 3734, 16, 1));
+
+    /// <summary>
     /// Mimics SQL Server error 3725: <c>ALTER TABLE … DROP CONSTRAINT</c>
     /// targeted a PRIMARY KEY / UNIQUE constraint still referenced by an
     /// incoming FOREIGN KEY. Probe-confirmed wording verbatim, followed by
@@ -2468,13 +2476,23 @@ partial class SimulatedSqlException
         new($"Cannot create more than one clustered index on table '{tableName}'. Drop the existing clustered index '{existingClusteredName}' before creating another.", 1902, 16, 3);
 
     /// <summary>
+    /// Mimics SQL Server error 3749: <c>DROP INDEX table.index</c> named an XML
+    /// or spatial index, which only the <c>index ON table</c> form may drop.
+    /// Real's wording says "XML Index" for a spatial one too.
+    /// </summary>
+    internal static SimulatedSqlException XmlIndexDropNeedsOnSyntax(string writtenName) =>
+        new($"Cannot drop XML Index '{writtenName}' using old 'Table.Index' syntax, use 'Index ON Table' syntax instead.", 3749, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 1088: <c>CREATE INDEX</c> (or any
     /// catalog-scoped reference) named a target object that doesn't exist.
     /// Distinct from Msg 208 (which surfaces from DML) — Msg 1088 is the
-    /// CREATE-INDEX / sp_help-shaped diagnostic. State 12 probe-confirmed.
+    /// CREATE-INDEX / sp_help-shaped diagnostic. State 12 for a relational
+    /// index; an XML index raises state 201 and a spatial index 202 (probed
+    /// 2026-09-26 against SQL Server 2025).
     /// </summary>
-    internal static SimulatedSqlException CannotFindObjectForCreateIndex(string qualifiedName) =>
-        new($"Cannot find the object \"{qualifiedName}\" because it does not exist or you do not have permissions.", 1088, 16, 12);
+    internal static SimulatedSqlException CannotFindObjectForCreateIndex(string qualifiedName, byte state = 12) =>
+        new($"Cannot find the object \"{qualifiedName}\" because it does not exist or you do not have permissions.", 1088, 16, state);
 
     /// <summary>
     /// The indexed-view qualifying battery real SQL Server runs at

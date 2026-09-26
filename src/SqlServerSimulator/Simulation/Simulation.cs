@@ -2579,7 +2579,7 @@ public sealed partial class Simulation
                 switch (parser.Token)
                 {
                     case ReservedKeyword { Keyword: Keyword.Table } when lead.Keyword is Keyword.Alter or Keyword.Drop or Keyword.Truncate:
-                    case ReservedKeyword { Keyword: Keyword.Index } when lead.Keyword is Keyword.Alter or Keyword.Create:
+                    case ReservedKeyword { Keyword: Keyword.Index } when lead.Keyword is Keyword.Alter or Keyword.Create or Keyword.Drop:
                     case ReservedKeyword { Keyword: Keyword.Statistics } when lead.Keyword is Keyword.Create or Keyword.Update:
                         return true;
                     // CREATE's index modifiers precede the INDEX keyword.
