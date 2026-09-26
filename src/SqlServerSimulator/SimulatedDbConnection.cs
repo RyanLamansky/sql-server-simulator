@@ -755,7 +755,9 @@ public sealed class SimulatedDbConnection : DbConnection
 
     /// <summary>
     /// The triggers mid-fire on this connection, innermost last: each frame
-    /// carries the trigger's ObjectId and whether it's an AFTER trigger. The
+    /// carries the trigger's ObjectId, whether it's an AFTER DML trigger and
+    /// whether it's a DDL trigger (which <c>TRIGGER_NESTLEVEL</c> counts as
+    /// AFTER, though the nesting rule below doesn't). The
     /// DML dispatcher reads it to decide whether a trigger fires at all —
     /// <c>Simulation.CanFireTrigger</c> holds the rules. A stack rather than a
     /// set because both rules are positional: direct recursion is the
@@ -764,7 +766,7 @@ public sealed class SimulatedDbConnection : DbConnection
     /// recursion), and the <c>nested triggers</c> server option asks whether
     /// any AFTER frame is present.
     /// </summary>
-    internal readonly List<(int ObjectId, bool IsAfter)> FiringTriggers = [];
+    internal readonly List<(int ObjectId, bool IsAfter, bool IsDdl)> FiringTriggers = [];
 
     /// <summary>
     /// Current trigger nesting depth — incremented each time a trigger

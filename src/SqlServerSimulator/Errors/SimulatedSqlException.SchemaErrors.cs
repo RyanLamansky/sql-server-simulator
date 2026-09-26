@@ -317,6 +317,15 @@ partial class SimulatedSqlException
         new($"The parameters supplied for the procedure \"{procedureName}\" are not valid.", 225, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server's Msg 225 for <c>TRIGGER_NESTLEVEL</c>: a trigger
+    /// type other than <c>AFTER</c> / <c>IOT</c>, an event category other than
+    /// <c>DML</c> / <c>DDL</c>, a type without a category, or <c>IOT</c> with
+    /// <c>DDL</c>.
+    /// </summary>
+    internal static SimulatedSqlException TriggerNestLevelParametersNotValid() =>
+        new("The parameters supplied for the built-in function \"Trigger_NestLevel\" are not valid.", 225, 16, 10);
+
+    /// <summary>
     /// Mimics SQL Server error 2520: <c>DBCC SHRINKDATABASE(&lt;name&gt;)</c>
     /// names a database not present in this <see cref="Simulation"/>. Distinct
     /// from the <c>USE</c> path's Msg 911 — DBCC reports its own wording.

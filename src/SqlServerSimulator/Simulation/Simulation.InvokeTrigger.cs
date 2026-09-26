@@ -369,7 +369,7 @@ partial class Simulation
             connection.AnsiNulls = usesAnsiNulls;
             connection.NestingLevel++;
             connection.TriggerNestLevel++;
-            connection.FiringTriggers.Add((objectId, countsAsAfterFrame));
+            connection.FiringTriggers.Add((objectId, countsAsAfterFrame, frame.DdlTrigger is not null));
             connection.TriggerBodyErrorRaised = false;
             connection.TriggerTransactionEnded = false;
             // Module WITH EXECUTE AS: run the body as the impersonated
@@ -543,7 +543,7 @@ partial class Simulation
         {
             if (!batch.Connection.Simulation.NestedTriggersEnabled)
             {
-                foreach (var (_, isAfter) in stack)
+                foreach (var (_, isAfter, _) in stack)
                 {
                     if (isAfter)
                         return false;

@@ -42,7 +42,7 @@ Database-scope DDL triggers (`CREATE TRIGGER … ON DATABASE`) fire on the DDL t
 - **Multiple triggers per table** — every enabled AFTER trigger matching the firing action runs, ordered by `sp_settriggerorder` at the two ends (see [Firing order](#firing-order)).
   Unpinned triggers follow the per-schema dictionary's enumeration, which is **not** guaranteed to be creation order and isn't asserted anywhere; SQL Server leaves the middle unspecified too.
   At most one INSTEAD OF per action per target.
-- **TRIGGER_NESTLEVEL()** — no-arg form only; returns the current trigger nesting depth (0 outside any trigger, 1 at top-level DML's first trigger fire, 2+ when nested).
+- **TRIGGER_NESTLEVEL()** — the current trigger nesting depth (0 outside any trigger, 1 at top-level DML's first trigger fire, 2+ when nested); with an object id, how many frames on the stack are that trigger's, and with a type and category only frames of that kind, a DDL trigger counting as AFTER (probed 2026-09-26 against SQL Server 2025).
   One-arg form (filter by trigger object id) deferred.
 - **`sys.triggers` catalog view** with the documented load-bearing column subset (`name`, `object_id`, `parent_class=1`, `parent_class_desc='OBJECT_OR_COLUMN'`, `parent_id`, `type='TR'`, `type_desc='SQL_TRIGGER'`, `create_date`, `modify_date`, `is_disabled`, `is_instead_of_trigger`, `is_not_for_replication=0`).
   `parent_id` is the table's `object_id` or the view's `object_id` depending on parent kind.

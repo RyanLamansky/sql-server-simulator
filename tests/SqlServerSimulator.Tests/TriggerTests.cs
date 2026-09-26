@@ -806,6 +806,58 @@ public sealed class TriggerTests
         AreEqual(0, reader.GetInt32(0));
     }
 
+    [TestMethod]
+    public void TriggerNestLevel_ByObjectAndKind_CountsTheMatchingFrames()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            "create table t (a int); create table u (a int); create table log (w varchar(40))",
+            """
+            create trigger tr on t after insert as
+            begin
+                insert log values (concat('tr ', trigger_nestlevel(), ' ', trigger_nestlevel(object_id('tr')), ' ', trigger_nestlevel(object_id('tu')), ' ',
+                    trigger_nestlevel(0, 'AFTER', 'DML'), ' ', trigger_nestlevel(0, 'IOT', 'DML'), ' ', trigger_nestlevel(object_id('tr'), 'IOT', 'DML')));
+                if trigger_nestlevel(object_id('tr')) < 2 insert u values (1);
+            end
+            """,
+            "create trigger tu on u after insert as insert t values (2)",
+            "insert t values (1)");
+        AreEqual("tr 1 1 0 1 0 0|tr 3 2 1 3 0 0", simulation.ExecuteScalar("select string_agg(w, '|') within group (order by w) from log"));
+    }
+
+    [TestMethod]
+    public void TriggerNestLevel_CountsAnInsteadOfTriggerAsIot()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            "create table t (a int); create table log (w varchar(40))",
+            "create view v as select a from t",
+            "create trigger tv on v instead of insert as insert log values (concat(trigger_nestlevel(0, 'IOT', 'DML'), ' ', trigger_nestlevel(0, 'AFTER', 'DML')))",
+            "insert v values (1)");
+        AreEqual("1 0", simulation.ExecuteScalar("select w from log"));
+    }
+
+    [TestMethod]
+    [DataRow("select trigger_nestlevel(1)", 0)]
+    [DataRow("select trigger_nestlevel(1.5, 'after', N'dml')", 0)]
+    public void TriggerNestLevel_OutsideATrigger_IsZero(string sql, int expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar(sql));
+
+    [TestMethod]
+    [DataRow("select trigger_nestlevel(null)")]
+    [DataRow("select trigger_nestlevel(1, null, 'DML')")]
+    public void TriggerNestLevel_NullArgument_IsNull(string sql)
+        => AreEqual(DBNull.Value, new Simulation().ExecuteScalar(sql));
+
+    [TestMethod]
+    [DataRow("select trigger_nestlevel(1, 'x', 'DML')")]
+    [DataRow("select trigger_nestlevel(1, 'AFTER')")]
+    [DataRow("select trigger_nestlevel(1, 'AFTER', 'x')")]
+    [DataRow("select trigger_nestlevel(1, 'IOT', 'DDL')")]
+    [DataRow("declare @t varchar(5) = 'x'; select trigger_nestlevel(1, @t, 'DML')")]
+    public void TriggerNestLevel_BadKind_RaisesMsg225(string sql)
+        => new Simulation().AssertSqlError(sql, 225, "The parameters supplied for the built-in function \"Trigger_NestLevel\" are not valid.");
+
     // === Inserted/Deleted resolution outside trigger ===
 
     [TestMethod]
