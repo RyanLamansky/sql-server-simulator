@@ -358,7 +358,9 @@ Probe-confirmed schema-inference rules:
 4. **Phase C — commit**: PK / UNIQUE validation runs on the union of pending inserts + updates via `EnforceKeyConstraintsForUpdate` (inserts use sentinel `(-1, i)` addresses).
    If a violation surfaces, every queued mutation is abandoned and the statement-atomic undo log already captures the no-heap-writes state.
    Then deletes tombstone, updates rewrite, inserts append, in that order.
-5. **Phase D — OUTPUT**: walk queued INSERT rows → UPDATE rows → DELETE rows; the `MergeOutputProjection` resolves `INSERTED.col` / `DELETED.col` / source-alias / `$action`.
+5. **Phase D — OUTPUT**: walk the queued actions in source-row order, each NOT MATCHED BY SOURCE delete after them all; the `MergeOutputProjection` resolves `INSERTED.col` / `DELETED.col` / source-alias / `$action`.
+   That is the order real's usual plan for an upsert produces, driving from the source side (probed 2026-09-26 against SQL Server 2025).
+   Where real chooses a merge join instead — a keyed target under a NOT MATCHED BY SOURCE clause, or a table source it sorts — it lists them in key order, which the simulator, having no plan choice to mirror, doesn't reproduce.
    For each row, the unmatched side projects all-NULL.
 6. **Phase E — triggers**: INSERT triggers fire once with the combined inserted set, then UPDATE triggers once with both inserted + deleted, then DELETE triggers once with the deleted set.
    Order is probe-confirmed (INSERT → UPDATE → DELETE); each kind fires once total per MERGE, regardless of how many WHEN clauses contributed to that kind.

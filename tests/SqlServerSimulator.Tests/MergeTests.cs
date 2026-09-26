@@ -159,6 +159,33 @@ public sealed class MergeTests
         CollectionAssert.AreEqual(new[] { ("UPDATE", 1), ("DELETE", 2), ("INSERT", 3) }, rows);
     }
 
+    /// <summary>
+    /// OUTPUT follows the source rows, not the action kinds — the order an
+    /// upsert's plan gives against SQL Server 2025 (probed 2026-09-26) — with a
+    /// NOT MATCHED BY SOURCE delete after them. (Real plans a keyed target
+    /// under a BY SOURCE clause as a merge join, which lists in key order.)
+    /// </summary>
+    [TestMethod]
+    [DataRow("create table t (id int primary key, v int)", "", "INSERT 2, UPDATE 1, INSERT 4, DELETE 3")]
+    [DataRow("create table t (id int, v int)", "when not matched by source then delete", "INSERT 2, UPDATE 1, INSERT 4, DELETE 3, DELETE 5")]
+    public void Output_FollowsTheSourceRows(string create, string bySource, string expected)
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery($"{create}; insert t values (1, 10), (3, 30), (5, 50)");
+        using var reader = simulation.ExecuteReader($"""
+            merge t using (values (2, 20), (1, 11), (4, 40), (3, 31)) s (id, v) on t.id = s.id
+            when matched and s.id = 3 then delete
+            when matched then update set v = s.v
+            when not matched then insert values (s.id, s.v)
+            {bySource}
+            output $action, isnull(inserted.id, deleted.id);
+            """);
+        var rows = new List<string>();
+        while (reader.Read())
+            rows.Add($"{reader.GetString(0)} {reader.GetInt32(1)}");
+        AreEqual(expected, string.Join(", ", rows));
+    }
+
     [TestMethod]
     public void DollarAction_TypeIsNVarchar()
     {

@@ -1200,6 +1200,26 @@ partial class Simulation
         var actionLimit = context.Connection.RowCountLimit is > 0 and var limit ? limit : long.MaxValue;
         bool ActionCapReached() => pendingInserts.Count + pendingUpdates.Count + pendingDeletes.Count >= actionLimit;
 
+        // OUTPUT lists the actions in source-row order, a NOT MATCHED BY
+        // SOURCE delete after them all — the order real's usual plan, driven
+        // from the source side, produces for an upsert (probed 2026-09-26
+        // against SQL Server 2025; a plan real sorts for a merge join lists
+        // them in key order instead). Each action queued since the last tag
+        // takes the key given.
+        var outputOrder = output is null ? null : new List<(int Key, MergeActionKind Kind, int Index)>();
+        int taggedInserts = 0, taggedUpdates = 0, taggedDeletes = 0;
+        void Tag(int key)
+        {
+            if (outputOrder is null)
+                return;
+            while (taggedInserts < pendingInserts.Count)
+                outputOrder.Add((key, MergeActionKind.Insert, taggedInserts++));
+            while (taggedUpdates < pendingUpdates.Count)
+                outputOrder.Add((key, MergeActionKind.Update, taggedUpdates++));
+            while (taggedDeletes < pendingDeletes.Count)
+                outputOrder.Add((key, MergeActionKind.Delete, taggedDeletes++));
+        }
+
         // Phase A finds, per matched target row, the source rows it matches, then
         // applies the WHEN MATCHED / WHEN NOT MATCHED BY SOURCE action. When the
         // ON carries a seekable target equality and the target isn't a view
@@ -1258,12 +1278,14 @@ partial class Simulation
                     if (matchedByTarget.TryGetValue((pageIndex, slotIndex), out var matchedSources))
                     {
                         ApplyMergeMatched(context, destinationTable, sourceView, whenClauses, pageIndex, slotIndex, targetValues, sourceRows, matchedSources, ResolveCombined, pendingUpdates, pendingDeletes);
+                        Tag(matchedSources[0]);
                     }
                     else
                     {
                         var chosen = PickClause(whenClauses, WhenClauseKind.NotMatchedBySource, targetValues, sourceValues: null, context.Batch, ResolveCombined);
                         if (chosen is not null)
                             ApplyChosenMatchedAction(context, destinationTable, sourceView, chosen, pageIndex, slotIndex, targetValues, sourceValues: null, ResolveCombined, pendingUpdates, pendingDeletes);
+                        Tag(sourceRows.Count);
                     }
                 }
             }
@@ -1279,6 +1301,7 @@ partial class Simulation
                     var targetValues = DecodeFullRow(destinationTable, destinationTable.Heap.ReadSlotBytes(address.Page, address.Slot)!);
                     EvaluateComputedColumns(destinationTable, targetValues, context.Batch);
                     ApplyMergeMatched(context, destinationTable, sourceView, whenClauses, address.Page, address.Slot, targetValues, sourceRows, matchedByTarget[address], ResolveCombined, pendingUpdates, pendingDeletes);
+                    Tag(matchedByTarget[address][0]);
                 }
             }
         }
@@ -1357,6 +1380,7 @@ partial class Simulation
                         throw SimulatedSqlException.MergeMultiMatch();
 
                     ApplyChosenMatchedAction(context, destinationTable, sourceView, chosen, pageIndex, slotIndex, targetValues, sourceValues, ResolveCombined, pendingUpdates, pendingDeletes);
+                    Tag(firstSourceIndex);
                 }
                 else
                 {
@@ -1364,6 +1388,7 @@ partial class Simulation
                     if (chosen is null)
                         continue;
                     ApplyChosenMatchedAction(context, destinationTable, sourceView, chosen, pageIndex, slotIndex, targetValues, sourceValues: null, ResolveCombined, pendingUpdates, pendingDeletes);
+                    Tag(sourceRows.Count);
                 }
             }
         }
@@ -1386,11 +1411,12 @@ partial class Simulation
                     continue;
                 }
                 ApplyInsert(context, destinationTable, sourceView, nmbtClause, sourceValues, ResolveCombined, pendingInserts, insteadOfInsert: HasInsteadOfTrigger(context.Batch, insteadOfInsertTarget, TriggerActions.Insert));
+                Tag(si);
             }
         }
 
         // Phase C: commit mutations.
-        return CommitMerge(context, destinationTable, sourceView, pendingInserts, pendingUpdates, pendingDeletes, output, whenClauses);
+        return CommitMerge(context, destinationTable, sourceView, pendingInserts, pendingUpdates, pendingDeletes, output, outputOrder, whenClauses);
     }
 
     /// <summary>
@@ -1626,6 +1652,7 @@ partial class Simulation
         List<(int Page, int Slot, SqlValue[] OldValues, SqlValue[] NewValues, SqlValue[]? SourceValues)> pendingUpdates,
         List<(int Page, int Slot, SqlValue[] OldValues, SqlValue[]? SourceValues)> pendingDeletes,
         OutputProjection? output,
+        List<(int Key, MergeActionKind Kind, int Index)>? outputOrder,
         List<WhenClause> whenClauses)
     {
         if (context.Batch.IsSkipping)
@@ -1785,7 +1812,7 @@ partial class Simulation
             context.Connection.LastIdentity = lastId.IsNull ? null : lastId.CoerceTo(SqlType.BigInt).AsInt64;
         }
 
-        // Build OUTPUT result: INSERT rows, then UPDATE rows, then DELETE rows.
+        // Build OUTPUT result, in the order the match phase keyed the actions.
         var outputRows = output is null ? null : new List<byte[]>();
         if (output is not null)
         {
@@ -1793,21 +1820,14 @@ partial class Simulation
             for (var i = 0; i < nullTarget.Length; i++)
                 nullTarget[i] = SqlValue.Null(destinationTable.Columns[i].Type);
 
-            foreach (var (newValues, sourceValues) in pendingInserts)
+            foreach (var (_, kind, index) in outputOrder!.OrderBy(action => action.Key))
             {
-                var bytes = output.ProjectRow(insertedValues: newValues, deletedValues: nullTarget, sourceValues: sourceValues, action: "INSERT");
-                if (bytes is not null)
-                    outputRows!.Add(bytes);
-            }
-            foreach (var (_, _, oldValues, newValues, sourceValues) in pendingUpdates)
-            {
-                var bytes = output.ProjectRow(insertedValues: newValues, deletedValues: oldValues, sourceValues: sourceValues, action: "UPDATE");
-                if (bytes is not null)
-                    outputRows!.Add(bytes);
-            }
-            foreach (var (_, _, oldValues, sourceValues) in pendingDeletes)
-            {
-                var bytes = output.ProjectRow(insertedValues: nullTarget, deletedValues: oldValues, sourceValues: sourceValues, action: "DELETE");
+                var bytes = kind switch
+                {
+                    MergeActionKind.Insert => output.ProjectRow(insertedValues: pendingInserts[index].NewValues, deletedValues: nullTarget, sourceValues: pendingInserts[index].SourceValues, action: "INSERT"),
+                    MergeActionKind.Update => output.ProjectRow(insertedValues: pendingUpdates[index].NewValues, deletedValues: pendingUpdates[index].OldValues, sourceValues: pendingUpdates[index].SourceValues, action: "UPDATE"),
+                    _ => output.ProjectRow(insertedValues: nullTarget, deletedValues: pendingDeletes[index].OldValues, sourceValues: pendingDeletes[index].SourceValues, action: "DELETE"),
+                };
                 if (bytes is not null)
                     outputRows!.Add(bytes);
             }
