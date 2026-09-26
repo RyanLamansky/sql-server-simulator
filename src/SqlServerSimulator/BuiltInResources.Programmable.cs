@@ -472,10 +472,7 @@ internal static partial class BuiltInResources
         // Probe-confirmed shipped subset: name / object_id / schema_id /
         // start_value / increment / minimum_value / maximum_value /
         // is_cycling / is_cached / cache_size / current_value /
-        // system_type_id / user_type_id / is_exhausted. cache_size is NULL
-        // when no explicit CACHE n was given (real SQL Server behavior;
-        // the simulator never tracks an explicit value so this is always
-        // NULL). start_value / increment / minimum_value / maximum_value /
+        // system_type_id / user_type_id / is_exhausted. start_value / increment / minimum_value / maximum_value /
         // current_value are first-class sql_variant, each carrying the
         // sequence's declared scalar type as its inner base type (int → int,
         // bigint → bigint, decimal(p, s) → decimal — probe-confirmed against
@@ -859,9 +856,9 @@ internal static partial class BuiltInResources
 
     /// <summary>
     /// Rows for <c>sys.sequences</c>: one per registered sequence object,
-    /// schema-ordered. <c>cache_size</c> is always NULL (the simulator
-    /// doesn't model the batched-allocation cache; real SQL Server returns
-    /// NULL when no explicit <c>CACHE n</c> was given anyway). Type-id
+    /// schema-ordered. <c>is_cached</c> is 0 only under <c>NO CACHE</c>, and
+    /// <c>cache_size</c> is the explicit <c>CACHE n</c>, else NULL (probed
+    /// 2026-09-26 against SQL Server 2025). Type-id
     /// columns derive from the declared type via <see cref="SystypesRowData"/>.
     /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateSysSequences(Parser.BatchContext batch, Database database)
@@ -889,8 +886,8 @@ internal static partial class BuiltInResources
                     seq.AsDeclaredVariant(seq.MinValue),
                     seq.AsDeclaredVariant(seq.MaxValue),
                     seq.Cycle ? trueBit : falseBit,
-                    trueBit,
-                    nullCache,
+                    seq.CacheSize == 0 ? falseBit : trueBit,
+                    seq.CacheSize is > 0 and var size ? SqlValue.FromInt32((int)size) : nullCache,
                     seq.CurrentValueAsVariant,
                     seq.LastUsedValueAsVariant,
                     SqlValue.FromByte(systemTypeId),

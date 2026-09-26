@@ -26,12 +26,9 @@ namespace SqlServerSimulator.Schemas;
 /// <para>
 /// Cache options (<c>CACHE n</c> / <c>NO CACHE</c>) don't batch allocation
 /// — the simulator is in-process so the optimization that backs real SQL
-/// Server's CACHE semantics doesn't apply — and are kept only for the
-/// Msg 11729 warning (<see cref="AllocatesShortFirstCache"/>).
-/// <c>is_cached</c> reports true (the SQL Server default) and
-/// <c>cache_size</c> reports <see cref="DBNull"/> through
-/// <c>sys.sequences</c>, matching the real server's behavior when no
-/// explicit cache size is set.
+/// Server's CACHE semantics doesn't apply — and are kept for the Msg 11729
+/// warning (<see cref="AllocatesShortFirstCache"/>) and for
+/// <c>sys.sequences</c>' <c>is_cached</c> / <c>cache_size</c>.
 /// </para>
 /// </remarks>
 internal sealed class Sequence(

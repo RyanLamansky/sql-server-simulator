@@ -20,8 +20,8 @@ Probed against SQL Server 2025.
 - **Cycle**: ascending wrap → `minvalue`; descending wrap → `maxvalue`.
   No-cycle exhaustion sticks (`Sequence.IsExhausted`) until `ALTER SEQUENCE … RESTART`; subsequent `NEXT VALUE FOR` → **Msg 11728**.
 - **`CACHE n` / `NO CACHE`**: parse-and-ignore (the simulator doesn't model the batched-allocation optimization that real SQL Server's CACHE represents).
-  `sys.sequences.is_cached` reports `true` unconditionally; `cache_size` always NULL (matches real SQL Server's reported behavior when no explicit size is supplied).
-  The declared size is kept for one thing: the first draw after CREATE or `RESTART` sends real's **Msg 11729** (`The sequence object 's' cache size is greater than the number of available values.`) when the cache — 50 values by default — is longer than the values left before the bound, and neither `NO CACHE` nor `CYCLE` ever does (probed 2026-09-23).
+  `sys.sequences` reports the declaration as real does (probed 2026-09-26): `is_cached` is 0 only under `NO CACHE`, and `cache_size` is an explicit `CACHE n`'s size, NULL for the default, a bare `CACHE` and `NO CACHE`.
+  The declared size does one more thing: the first draw after CREATE or `RESTART` sends real's **Msg 11729** (`The sequence object 's' cache size is greater than the number of available values.`) when the cache — 50 values by default — is longer than the values left before the bound, and neither `NO CACHE` nor `CYCLE` ever does (probed 2026-09-23).
 
 ## `NEXT VALUE FOR` semantics — per-row dedup
 
@@ -52,7 +52,7 @@ Bump sites:
 
 ## `sys.sequences` catalog view
 
-Columns: `name`, `object_id`, `schema_id`, `principal_id` (always NULL — ownership follows the schema), `create_date`, `modify_date` (both the ALTER-preserving `SchemaObject` timestamps), `start_value`, `increment`, `minimum_value`, `maximum_value`, `is_cycling`, `is_cached` (always `true`), `cache_size` (always NULL), `current_value`, `last_used_value`, `system_type_id`, `user_type_id`, `is_exhausted`, `precision tinyint`, `scale tinyint` (nullable).
+Columns: `name`, `object_id`, `schema_id`, `principal_id` (always NULL — ownership follows the schema), `create_date`, `modify_date` (both the ALTER-preserving `SchemaObject` timestamps), `start_value`, `increment`, `minimum_value`, `maximum_value`, `is_cycling`, `is_cached`, `cache_size`, `current_value`, `last_used_value`, `system_type_id`, `user_type_id`, `is_exhausted`, `precision tinyint`, `scale tinyint` (nullable).
 **`last_used_value`** is a genuine `sql_variant` (the one value column that isn't bigint-substituted): NULL until the first `NEXT VALUE FOR` in the process, then the last emitted value wrapped in the sequence's declared type, and reset to NULL by `ALTER SEQUENCE … RESTART`.
 Backed by the nullable `Sequence.LastUsedValue` (set to the emitted value in `Advance`), distinct from `current_value` (which tracks the *next* value to emit).
 Probe-confirmed: a fresh sequence reports `last_used_value` NULL even though `current_value` is the start value, and a bacpac-restored sequence reports NULL here (it's per-instance runtime state, not persisted) even when `current_value` is advanced.

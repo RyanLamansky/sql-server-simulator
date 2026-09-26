@@ -455,6 +455,19 @@ public sealed class SequenceTests
     }
 
     /// <summary>
+    /// <c>is_cached</c> is 0 only under <c>NO CACHE</c>; <c>cache_size</c> is an
+    /// explicit <c>CACHE n</c>'s size and otherwise NULL, through ALTER as
+    /// through CREATE. Probed 2026-09-26 against SQL Server 2025.
+    /// </summary>
+    [TestMethod]
+    public void SysSequences_ReportsTheDeclaredCache()
+        => AreEqual("a:1:20|b:0:-|c:1:7|d:1:-|e:0:-", new Simulation().ExecuteScalar("""
+            create sequence a cache 20; create sequence b no cache; create sequence c; create sequence d cache; create sequence e cache 20;
+            alter sequence e no cache; alter sequence c cache 7;
+            select string_agg(concat(name, ':', cast(is_cached as int), ':', isnull(cast(cache_size as varchar(10)), '-')), '|') within group (order by name) from sys.sequences
+            """));
+
+    /// <summary>
     /// All references to one sequence within a single inserted row return the
     /// same value — including a DEFAULT-clause reference on a column the
     /// INSERT didn't list. Probe-confirmed against SQL Server 2025: the row
