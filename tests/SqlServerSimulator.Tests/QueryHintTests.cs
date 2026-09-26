@@ -71,6 +71,23 @@ public sealed class QueryHintTests
             insert t with (nolock) values (1)
             """, 1065, "The NOLOCK and READUNCOMMITTED lock hints are not allowed for target tables of INSERT, UPDATE, DELETE or MERGE statements.");
 
+    /// <summary>
+    /// Real reports Msg 1065 at line 15 wherever the statement sits, and
+    /// refuses the batch while compiling it, so nothing ahead of it runs
+    /// (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void NoLockOnADmlTarget_IsLine15_AndRunsNothing()
+    {
+        var simulation = new Simulation();
+        AreEqual(15, simulation.AssertSqlError("""
+            create table t (id int);
+
+            insert t with (nolock) values (1)
+            """, 1065).LineNumber);
+        AreEqual(DBNull.Value, simulation.ExecuteScalar("select object_id('t')"));
+    }
+
     [TestMethod]
     public void Update_WithIndexHint_RaisesMsg1069()
         => new Simulation().AssertSqlError("""

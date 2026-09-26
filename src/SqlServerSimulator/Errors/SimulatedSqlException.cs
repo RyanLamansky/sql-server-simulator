@@ -239,6 +239,22 @@ public sealed partial class SimulatedSqlException : DbException
     /// </summary>
     private bool diagnosticsResolved;
 
+    /// <summary>Set by <see cref="PinLine"/>: the line holds wherever the error is caught.</summary>
+    private bool linePinned;
+
+    /// <summary>
+    /// Gives this exception a fixed line that no enclosing frame's statement
+    /// line or body offset replaces — for an error real reports at the same
+    /// line wherever it is raised — while the procedure is still attributed.
+    /// </summary>
+    internal SimulatedSqlException PinLine(int line)
+    {
+        this.linePinned = true;
+        foreach (var error in this.Errors)
+            error.LineNumber = line;
+        return this;
+    }
+
     /// <summary>
     /// Pre-stamps a known line / procedure and marks this exception resolved so
     /// the enclosing dispatch frame's <see cref="ResolveDiagnostics"/> leaves
@@ -289,7 +305,8 @@ public sealed partial class SimulatedSqlException : DbException
         this.diagnosticsResolved = true;
         foreach (var error in this.Errors)
         {
-            error.LineNumber = (error.LineNumber == 0 ? baseLine : error.LineNumber) + lineOffset;
+            if (!this.linePinned)
+                error.LineNumber = (error.LineNumber == 0 ? baseLine : error.LineNumber) + lineOffset;
             if (procedure.Length != 0 && error.Procedure.Length == 0)
                 error.Procedure = procedure;
         }

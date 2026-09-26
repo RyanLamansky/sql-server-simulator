@@ -67,10 +67,13 @@ partial class SimulatedSqlException
     /// <summary>
     /// Msg 1065 — raised when <c>WITH (NOLOCK)</c> or <c>WITH (READUNCOMMITTED)</c>
     /// appears on the target of an <c>INSERT</c> / <c>UPDATE</c> /
-    /// <c>DELETE</c> / <c>MERGE</c>. Probe-confirmed verbatim wording.
+    /// <c>DELETE</c> / <c>MERGE</c>. Probe-confirmed verbatim wording. Real
+    /// reports it at line 15 wherever the statement sits in the batch (probed
+    /// 2026-09-26 against SQL Server 2025).
     /// </summary>
     internal static SimulatedSqlException NoLockHintNotAllowedOnDmlTarget() =>
-        new("The NOLOCK and READUNCOMMITTED lock hints are not allowed for target tables of INSERT, UPDATE, DELETE or MERGE statements.", 1065, 15, 1);
+        new SimulatedSqlException("The NOLOCK and READUNCOMMITTED lock hints are not allowed for target tables of INSERT, UPDATE, DELETE or MERGE statements.", 1065, 15, 1)
+            .PinLine(15);
 
     /// <summary>
     /// Msg 1069 — raised when an <c>INDEX(…)</c> / <c>FORCESEEK</c> /

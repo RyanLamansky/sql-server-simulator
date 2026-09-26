@@ -26,6 +26,7 @@ All semantics below are probe-confirmed against SQL Server 2025.
 | Nested procedure call | **innermost** procedure/trigger frame's line + procedure | a UDF error inside a proc attributes to the **proc's** calling line, not the UDF |
 | `EXEC('…')` / `sp_executesql` | line relative to the **dynamic batch** | no `Procedure` |
 | PRINT / RAISERROR ≤ 10 (INFO) | statement start line | on `SqlError.LineNumber` |
+| NOLOCK / READUNCOMMITTED on a DML target (Msg 1065) | **15**, wherever the statement sits — batch, dynamic SQL, or a `CREATE PROC` body (which still attributes `Procedure`) | real's own constant; the sibling hint errors (Msg 1047 / 1069) report the statement's line (probed 2026-09-26); `SimulatedSqlException.PinLine` |
 
 `Server`: real SqlClient reports the **connection data source** on `SqlException.Server` / `SqlError.Server` (probe: `localhost,1433`), *not* the server's `@@SERVERNAME`.
 The wire ERROR/INFO token's server-name field carries `@@SERVERNAME` instead — SqlClient ignores it and substitutes the data source; token-rendering clients (sqlcmd) display it verbatim.
