@@ -301,11 +301,12 @@ partial class Simulation
     /// filter and <c>IGNORE_DUP_KEY</c> included; the table is empty, so there
     /// are no existing rows for a unique one to check.
     /// </summary>
-    internal static void AddInlineIndexes(BatchContext batch, HeapTable table, string writtenTableName, IReadOnlyList<PendingInlineIndex> pendingIndexes)
+    internal static void AddInlineIndexes(BatchContext batch, HeapTable table, string writtenTableName, IReadOnlyList<PendingInlineIndex> pendingIndexes, int[]? objectIds = null)
     {
         var collation = batch.CurrentDatabase.Collation;
-        foreach (var pending in pendingIndexes)
+        for (var position = 0; position < pendingIndexes.Count; position++)
         {
+            var pending = pendingIndexes[position];
             foreach (var existing in table.Indexes)
             {
                 if (collation.Equals(existing.Name, pending.Name))
@@ -345,7 +346,7 @@ partial class Simulation
             }
             table.Indexes.Add(new StoredIndex(
                 pending.Name,
-                batch.CurrentDatabase.AllocateObjectId(),
+                objectIds?[position] ?? batch.CurrentDatabase.AllocateObjectId(),
                 pending.IsUnique,
                 pending.IsClustered,
                 keyColumns,

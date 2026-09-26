@@ -155,21 +155,40 @@ partial class Simulation
         if (schema.TableTypes.ContainsKey(typeName.Leaf) || schema.AliasTypes.ContainsKey(typeName.Leaf))
             throw SimulatedSqlException.TypeAlreadyExists(typeName.ToString());
 
+        var typeTableObjectId = context.CurrentDatabase.AllocateObjectId();
+        var createDate = context.Batch.CurrentStatement.UtcNow;
+        var backingName = TableType.BackingTableNameOf(typeName.Leaf, typeTableObjectId);
+        // A system-named DEFAULT is named after the backing type table, as
+        // its keys and CHECKs are (probed 2026-09-26 against SQL Server 2025).
+        foreach (var column in heapColumns)
+        {
+            if (column!.DefaultConstraint is { IsSystemNamed: true } columnDefault)
+                columnDefault.Name = AutoDefaultName(backingName, column.Name);
+        }
         var tableType = new TableType(
             schema,
             typeName.Leaf,
-            typeTableObjectId: context.CurrentDatabase.AllocateObjectId(),
+            typeTableObjectId,
             userTypeId: context.CurrentDatabase.AllocateUserTypeId(),
-            createDate: context.Batch.CurrentStatement.UtcNow,
+            createDate,
             columns: [.. heapColumns!],
             pendingKeys: [.. pendingKeys],
             pendingChecks: [.. pendingChecks],
-            // One object id per key so the backing type table's PK / UNIQUE
-            // constraints hold a stable identity in sys.key_constraints. The
-            // constraints themselves are re-resolved per clone (each @t gets
-            // its own), but the catalog reports the type's, not a clone's.
-            keyConstraintObjectIds: [.. pendingKeys.Select(_ => context.CurrentDatabase.AllocateObjectId())],
             pendingIndexes: [.. pendingIndexes]);
+        // The catalog describes the type's own constraints and indexes on its
+        // backing type table, resolved once so their ids hold; each @t clone
+        // resolves copies of its own.
+        var (keyObjectIds, indexObjectIds) = AllocateDeclarationObjectIds(context.CurrentDatabase, tableType.PendingKeys, tableType.PendingIndexes);
+        var shape = new HeapTable(
+            backingName, tableType.Columns, typeTableObjectId, Database.SysSchemaId, createDate,
+            ResolveKeyConstraints(backingName, tableType.Columns, tableType.PendingKeys, context.CurrentDatabase, createDate, keyObjectIds),
+            ResolveCheckConstraints(backingName, tableType.PendingChecks, context.CurrentDatabase, createDate),
+            isTableVariable: true)
+        {
+            IsTypeTable = true,
+        };
+        AddInlineIndexes(context.Batch, shape, backingName, tableType.PendingIndexes, indexObjectIds);
+        tableType.CatalogShape = shape;
         schema.TableTypes[typeName.Leaf] = tableType;
         RecordSlotUndo<TableType>(context, schema.TableTypes, typeName.Leaf, null);
         RecordDdlEvent(context, "CREATE_TYPE", schema.Name, typeName.Leaf, "TYPE");

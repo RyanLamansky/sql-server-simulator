@@ -158,7 +158,9 @@ The structured path routes through the constraint-enforcing insert rather than a
 - **`sys.parameters`**: extended with `is_readonly` (true for TVP parameters, false otherwise).
   TVP rows surface `system_type_id = 243` and the TVP's `user_type_id` instead of the placeholder `Int32` type.
 - **`INFORMATION_SCHEMA.DOMAINS`**: one row per table type, interleaved with the alias types in `user_type_id` order; `DATA_TYPE` is the literal `'table type'` and every facet column NULL.
-- **`sys.objects`**: no rows for table types (probe G7 — types don't live in sys.objects).
+- **`sys.objects`**: the type itself doesn't appear, but its backing type table does — `TT_<type>_<object_id:X8>`, type `TT`, schema `sys`, `is_ms_shipped` 1.
+- **The type's own constraints and indexes** list as children of that type table wherever a table's would — `sys.objects` / `sys.all_objects`, `sys.key_constraints`, `sys.check_constraints`, `sys.default_constraints`, `sys.indexes` / `sys.index_columns`, `sys.stats` / `sys.stats_columns`, `INFORMATION_SCHEMA.TABLE_CONSTRAINTS` (schema `sys`, no table named), `CHECK_CONSTRAINTS` and `CONSTRAINT_COLUMN_USAGE` (its CHECKs only) — under the `sys` schema and shipped, but in no partition view (probed 2026-09-26 against SQL Server 2025).
+  `TableType.CatalogShape` holds them, resolved once at CREATE TYPE under the type table's id and named after it; each `@t` clone resolves copies of its own.
 
 ## `TYPE_ID(name)`
 

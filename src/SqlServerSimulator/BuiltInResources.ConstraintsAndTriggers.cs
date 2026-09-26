@@ -748,6 +748,7 @@ internal static partial class BuiltInResources
         var nullPrincipal = SqlValue.Null(SqlType.Int32);
         var ckType = SqlValue.FromChar(CharSqlType.Get(2, Collation.Catalog, Coercibility.Implicit), "C ");
         var ckTypeDesc = SqlValue.FromNVarchar("CHECK_CONSTRAINT");
+        var sysSchemaId = SqlValue.FromInt32(Database.SysSchemaId);
         foreach (var schema in database.Schemas.Values)
         {
             var schemaId = SqlValue.FromInt32(schema.SchemaId);
@@ -773,13 +774,13 @@ internal static partial class BuiltInResources
                         SqlValue.FromSystemName(ck.Name),
                         SqlValue.FromInt32(ck.ObjectId),
                         nullPrincipal,
-                        schemaId,
+                        table.IsTypeTable ? sysSchemaId : schemaId,
                         SqlValue.FromInt32(table.ObjectId),
                         ckType,
                         ckTypeDesc,
                         SqlValue.FromDateTime(ck.CreateDate),
                         SqlValue.FromDateTime(ck.ModifyDate),
-                        falseBit,
+                        table.IsTypeTable ? trueBit : falseBit, // is_ms_shipped
                         falseBit,
                         falseBit,
                         ck.IsDisabled ? trueBit : falseBit,
@@ -810,6 +811,7 @@ internal static partial class BuiltInResources
         var uqType = SqlValue.FromChar(charTwo, "UQ");
         var pkTypeDesc = SqlValue.FromNVarchar("PRIMARY_KEY_CONSTRAINT");
         var uqTypeDesc = SqlValue.FromNVarchar("UNIQUE_CONSTRAINT");
+        var sysSchemaId = SqlValue.FromInt32(Database.SysSchemaId);
         foreach (var schema in database.Schemas.Values)
         {
             var schemaId = SqlValue.FromInt32(schema.SchemaId);
@@ -842,13 +844,13 @@ internal static partial class BuiltInResources
                         SqlValue.FromSystemName(key.Name),
                         SqlValue.FromInt32(key.ObjectId),
                         nullPrincipal,
-                        schemaId,
+                        table.IsTypeTable ? sysSchemaId : schemaId,
                         SqlValue.FromInt32(table.ObjectId),
                         isPk ? pkType : uqType,
                         isPk ? pkTypeDesc : uqTypeDesc,
                         SqlValue.FromDateTime(key.CreateDate),
                         SqlValue.FromDateTime(key.ModifyDate),
-                        falseBit,
+                        table.IsTypeTable ? trueBit : falseBit, // is_ms_shipped — a type table's are the engine's
                         falseBit,
                         falseBit,
                         SqlValue.FromInt32(uniqueIndexId),
@@ -858,45 +860,6 @@ internal static partial class BuiltInResources
                 }
             }
 
-            // A table type's PRIMARY KEY / UNIQUE lives on its backing type
-            // table, which real homes in the sys schema and reports here
-            // alongside ordinary tables' constraints — DacFx's table-type
-            // scripting reads the pair to re-emit the key clause. The
-            // constraint is system-named after that backing table, never after
-            // the type, and the type's own PendingKeys are the shape (each
-            // @t clone re-resolves its own copies).
-            var sysSchemaId = SqlValue.FromInt32(Database.SysSchemaId);
-            foreach (var tableType in schema.TableTypes.Values.OrderBy(t => t.ObjectId))
-            {
-                var backingName = tableType.BackingTableName;
-                var parentObjectId = SqlValue.FromInt32(tableType.ObjectId);
-                var createdAt = SqlValue.FromDateTime(tableType.CreateDate);
-                var modifiedAt = SqlValue.FromDateTime(tableType.ModifyDate);
-                for (var i = 0; i < tableType.PendingKeys.Length; i++)
-                {
-                    var (kind, declaredName, fullOrdinals, _, _, _) = tableType.PendingKeys[i];
-                    var isPk = kind == KeyConstraintKind.PrimaryKey;
-                    var name = declaredName
-                        ?? Simulation.AutoConstraintName(backingName, kind, fullOrdinals, tableType.Columns);
-                    yield return [
-                        SqlValue.FromSystemName(name),
-                        SqlValue.FromInt32(tableType.KeyConstraintObjectIds[i]),
-                        nullPrincipal,
-                        sysSchemaId,
-                        parentObjectId,
-                        isPk ? pkType : uqType,
-                        isPk ? pkTypeDesc : uqTypeDesc,
-                        createdAt,
-                        modifiedAt,
-                        trueBit, // is_ms_shipped — the backing table is the engine's
-                        falseBit,
-                        falseBit,
-                        SqlValue.FromInt32(i + 1),
-                        declaredName is null ? trueBit : falseBit,
-                        trueBit,
-                    ];
-                }
-            }
         }
     }
 
@@ -915,10 +878,11 @@ internal static partial class BuiltInResources
         var nullPrincipal = SqlValue.Null(SqlType.Int32);
         var dfType = SqlValue.FromChar(CharSqlType.Get(2, Collation.Catalog, Coercibility.Implicit), "D ");
         var dfTypeDesc = SqlValue.FromNVarchar("DEFAULT_CONSTRAINT");
+        var sysSchemaId = SqlValue.FromInt32(Database.SysSchemaId);
         foreach (var schema in database.Schemas.Values)
         {
             var schemaId = SqlValue.FromInt32(schema.SchemaId);
-            foreach (var (hostId, columns, positional) in DeclaredColumnHosts(schema, batch))
+            foreach (var (hostId, columns, positional, isTypeTable) in DeclaredColumnHosts(schema, batch))
             {
                 for (var i = 0; i < columns.Length; i++)
                 {
@@ -929,13 +893,13 @@ internal static partial class BuiltInResources
                         SqlValue.FromSystemName(df.Name),
                         SqlValue.FromInt32(df.ObjectId),
                         nullPrincipal,
-                        schemaId,
+                        isTypeTable ? sysSchemaId : schemaId,
                         SqlValue.FromInt32(hostId),
                         dfType,
                         dfTypeDesc,
                         SqlValue.FromDateTime(df.CreateDate),
                         SqlValue.FromDateTime(df.ModifyDate),
-                        falseBit,
+                        isTypeTable ? trueBit : falseBit, // is_ms_shipped
                         falseBit,
                         falseBit,
                         SqlValue.FromInt32(positional ? i + 1 : col.ColumnId),
@@ -1020,6 +984,7 @@ internal static partial class BuiltInResources
         var foreignKey = SqlValue.FromVarchar("FOREIGN KEY");
         var check = SqlValue.FromVarchar("CHECK");
         var no = SqlValue.FromVarchar("NO");
+        var sysSchemaName = SqlValue.FromSystemName("sys");
         foreach (var schema in database.Schemas.Values)
         {
             var schemaName = SqlValue.FromSystemName(schema.Name);
@@ -1044,6 +1009,29 @@ internal static partial class BuiltInResources
                     yield return Row(fk.Name, foreignKey);
                 foreach (var ck in table.CheckConstraints.OrderBy(c => c.ObjectId))
                     yield return Row(ck.Name, check);
+            }
+
+            // A table type's constraints list under the sys schema with no
+            // table named (probed 2026-09-26 against SQL Server 2025).
+            foreach (var tableType in schema.TableTypes.Values.OrderBy(t => t.ObjectId))
+            {
+                var shape = tableType.CatalogShape;
+                SqlValue[] TypeRow(string constraintName, SqlValue constraintType) =>
+                [
+                    catalog,
+                    sysSchemaName,
+                    SqlValue.FromSystemName(constraintName),
+                    catalog,
+                    SqlValue.Null(SqlType.NVarchar),
+                    SqlValue.Null(SqlType.SystemName),
+                    constraintType,
+                    no,
+                    no,
+                ];
+                foreach (var key in shape.KeyConstraints.OrderBy(k => k.ObjectId))
+                    yield return TypeRow(key.Name, key.Kind == KeyConstraintKind.PrimaryKey ? primaryKey : unique);
+                foreach (var ck in shape.CheckConstraints.OrderBy(c => c.ObjectId))
+                    yield return TypeRow(ck.Name, check);
             }
         }
     }
@@ -1142,6 +1130,30 @@ internal static partial class BuiltInResources
                 {
                     foreach (var columnName in CheckConstraintColumns(database, table, ck))
                         yield return Row(ck.Name, columnName);
+                }
+            }
+
+            // A table type contributes only its CHECKs, named against its type
+            // table in the sys schema (probed 2026-09-26 against SQL Server 2025).
+            foreach (var tableType in schema.TableTypes.Values.OrderBy(t => t.ObjectId))
+            {
+                var shape = tableType.CatalogShape;
+                var sysSchema = SqlValue.FromSystemName("sys");
+                foreach (var ck in shape.CheckConstraints.OrderBy(c => c.ObjectId))
+                {
+                    foreach (var columnName in CheckConstraintColumns(database, shape, ck))
+                    {
+                        yield return
+                        [
+                            catalog,
+                            sysSchema,
+                            SqlValue.FromSystemName(shape.Name),
+                            SqlValue.FromSystemName(columnName),
+                            catalog,
+                            sysSchema,
+                            SqlValue.FromSystemName(ck.Name),
+                        ];
+                    }
                 }
             }
         }

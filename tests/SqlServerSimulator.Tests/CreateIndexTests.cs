@@ -1014,4 +1014,22 @@ public sealed class CreateIndexTests
         _ = simulation.ExecuteNonQuery("create table t (id int not null constraint pk primary key, a int, b int); create index ix on t (a)");
         AreEqual((byte)state, simulation.AssertSqlError(ddl, number).State);
     }
+
+    /// <summary>
+    /// A declaration's keys and inline indexes take object — so index — ids in
+    /// one sequence: the clustered one first, then the rest in reverse
+    /// declaration order (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("create table t (a int unique, b int, index ix (b))", "ix:2,UQ:3")]
+    [DataRow("create table t (b int, index ix (b), a int unique)", "UQ:2,ix:3")]
+    [DataRow("create table t (k int primary key nonclustered, u int unique, v int, index ix (v))", "ix:2,UQ:3,PK:4")]
+    [DataRow("create table t (a int unique, b int unique, c int, index i1 (c), d int, index i2 (d))", "i2:2,i1:3,UQ:4,UQ:5")]
+    [DataRow("create table t (a int unique, b int index ib)", "ib:2,UQ:3")]
+    public void InlineIndexes_InterleaveWithKeysInIdOrder(string ddl, string expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar($"""
+            {ddl};
+            select string_agg(concat(left(name, 2) + case when name like '%[_][_]%' then '' else substring(name, 3, 10) end, ':', index_id), ',') within group (order by index_id)
+            from sys.indexes where object_id = object_id('t') and index_id > 0
+            """));
 }

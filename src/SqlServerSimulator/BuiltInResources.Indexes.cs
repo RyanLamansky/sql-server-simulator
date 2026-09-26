@@ -696,6 +696,23 @@ internal static partial class BuiltInResources
     /// agrees with <c>sys.indexes</c>. Name is the constraint/index name (null
     /// only for the heap).
     /// </summary>
+    /// <summary>
+    /// A table type's own indexes, which real's <c>sys.stats</c> /
+    /// <c>sys.stats_columns</c> list under its type table though no partition
+    /// view does (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    private static IEnumerable<(HeapTable Table, int IndexId, string? Name, bool IsHeap)> TypeTableIndexIdentities(Database database)
+    {
+        foreach (var schema in database.Schemas.Values)
+        {
+            foreach (var tableType in schema.TableTypes.Values.OrderBy(t => t.ObjectId))
+            {
+                foreach (var identity in tableType.CatalogShape.IndexIdentities())
+                    yield return (tableType.CatalogShape, identity.IndexId, identity.Name, identity.IsHeap);
+            }
+        }
+    }
+
     private static IEnumerable<(HeapTable Table, int IndexId, string? Name, bool IsHeap)> EnumerateTableIndexIdentities(Database database, Parser.BatchContext? batch)
     {
         foreach (var schema in database.Schemas.Values)
@@ -997,7 +1014,7 @@ internal static partial class BuiltInResources
         var primaryRoleDesc = SqlValue.FromString(NVarcharSqlType.Get(60, Collation.Catalog, Coercibility.Implicit), "PRIMARY");
         var nullName = SqlValue.Null(SqlType.SystemName);
         var trueBit = SqlValue.FromBoolean(true);
-        foreach (var (table, indexId, name, isHeap) in EnumerateTableIndexIdentities(database, batch))
+        foreach (var (table, indexId, name, isHeap) in EnumerateTableIndexIdentities(database, batch).Concat(TypeTableIndexIdentities(database)))
         {
             if (isHeap)
                 continue;
@@ -1175,7 +1192,7 @@ internal static partial class BuiltInResources
         _ = batch;
         foreach (var schema in database.Schemas.Values)
         {
-            foreach (var table in CatalogTables(schema, batch))
+            foreach (var table in CatalogTables(schema, batch).Concat(schema.TableTypes.Values.OrderBy(t => t.ObjectId).Select(t => t.CatalogShape)))
             {
                 var tableObjectId = SqlValue.FromInt32(table.ObjectId);
                 foreach (var identity in table.IndexIdentities())

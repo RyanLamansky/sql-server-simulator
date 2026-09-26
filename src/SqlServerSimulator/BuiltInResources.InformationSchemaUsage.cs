@@ -81,14 +81,15 @@ internal static partial class BuiltInResources
         foreach (var schema in database.Schemas.Values)
         {
             var schemaName = SqlValue.FromNVarchar(schema.Name);
-            foreach (var table in CatalogTables(schema, batch).OrderBy(t => t.ObjectId))
+            var sysSchemaName = SqlValue.FromNVarchar("sys");
+            foreach (var table in ConstraintHosts(schema, batch))
             {
                 foreach (var check in table.CheckConstraints)
                 {
                     yield return
                     [
                         catalog,
-                        schemaName,
+                        table.IsTypeTable ? sysSchemaName : schemaName,
                         SqlValue.FromSystemName(check.Name),
                         check.Definition is { } definition ? RoutineDefinition(definition) : SqlValue.Null(SqlType.NVarchar),
                     ];

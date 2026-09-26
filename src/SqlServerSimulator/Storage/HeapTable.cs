@@ -281,6 +281,13 @@ internal sealed class HeapTable : SchemaObject
     public bool IsHistoryTable;
 
     /// <summary>
+    /// The catalog's shape of a table type's backing type table
+    /// (<c>TableType.CatalogShape</c>): its constraints and indexes report
+    /// under the <c>sys</c> schema and as <c>is_ms_shipped</c>.
+    /// </summary>
+    public bool IsTypeTable;
+
+    /// <summary>
     /// True when <see cref="PeriodColumns"/> was copied from a base table
     /// while building this table as its history sibling, rather than declared
     /// by a <c>PERIOD FOR SYSTEM_TIME</c> clause of its own. The copy exists

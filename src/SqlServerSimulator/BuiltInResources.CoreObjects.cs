@@ -933,6 +933,10 @@ internal static partial class BuiltInResources
                     notPublished,
                     notPublished,
                 ];
+                // The type's own constraints hang off its type table, in the
+                // sys schema and shipped (probed 2026-09-26).
+                foreach (var row in ConstraintRows(tt.CatalogShape, msShipped))
+                    yield return row;
             }
 
             // Schema-resident objects in ObjectId order. SchemaObject's
@@ -974,86 +978,11 @@ internal static partial class BuiltInResources
                 };
                 if (t is null)
                     continue;
-                var schemaIdValue = SqlValue.FromInt32(t.SchemaId);
+                foreach (var row in ConstraintRows(t, notMsShipped))
+                    yield return row;
                 var createDate = SqlValue.FromDateTime(t.CreateDate);
                 var modifyDate = SqlValue.FromDateTime(t.ModifyDate);
                 var tableObjectId = SqlValue.FromInt32(t.ObjectId);
-                // Constraints carry their own dates: an inline declaration
-                // shares the table's CREATE instant, an ALTER TABLE ADD the
-                // later one, and a trust toggle advances modify_date alone.
-                foreach (var key in t.KeyConstraints)
-                {
-                    yield return [
-                        SqlValue.FromInt32(key.ObjectId),
-                        SqlValue.FromSystemName(key.Name),
-                        schemaIdValue,
-                        tableObjectId,
-                        nullPrincipal,
-                        key.Kind == KeyConstraintKind.PrimaryKey ? pkType : uqType,
-                        key.Kind == KeyConstraintKind.PrimaryKey ? pkTypeDesc : uqTypeDesc,
-                        SqlValue.FromDateTime(key.CreateDate),
-                        SqlValue.FromDateTime(key.ModifyDate),
-                        notMsShipped,
-                        notPublished,
-                        notPublished,
-                    ];
-                }
-                // DEFAULT constraints sit between the key constraints and the
-                // CHECK constraints in real's own object-id order for one
-                // CREATE TABLE (probe-confirmed).
-                foreach (var column in t.Columns)
-                {
-                    if (column.DefaultConstraint is not { } df)
-                        continue;
-                    yield return [
-                        SqlValue.FromInt32(df.ObjectId),
-                        SqlValue.FromSystemName(df.Name),
-                        schemaIdValue,
-                        tableObjectId,
-                        nullPrincipal,
-                        defaultType,
-                        defaultTypeDesc,
-                        SqlValue.FromDateTime(df.CreateDate),
-                        SqlValue.FromDateTime(df.ModifyDate),
-                        notMsShipped,
-                        notPublished,
-                        notPublished,
-                    ];
-                }
-                foreach (var chk in t.CheckConstraints)
-                {
-                    yield return [
-                        SqlValue.FromInt32(chk.ObjectId),
-                        SqlValue.FromSystemName(chk.Name),
-                        schemaIdValue,
-                        tableObjectId,
-                        nullPrincipal,
-                        checkType,
-                        checkTypeDesc,
-                        SqlValue.FromDateTime(chk.CreateDate),
-                        SqlValue.FromDateTime(chk.ModifyDate),
-                        notMsShipped,
-                        notPublished,
-                        notPublished,
-                    ];
-                }
-                foreach (var fk in t.OutgoingForeignKeys)
-                {
-                    yield return [
-                        SqlValue.FromInt32(fk.ObjectId),
-                        SqlValue.FromSystemName(fk.Name),
-                        schemaIdValue,
-                        tableObjectId,
-                        nullPrincipal,
-                        SqlValue.FromChar(charTwo, "F "),
-                        SqlValue.FromNVarchar("FOREIGN_KEY_CONSTRAINT"),
-                        SqlValue.FromDateTime(fk.CreateDate),
-                        SqlValue.FromDateTime(fk.ModifyDate),
-                        notMsShipped,
-                        notPublished,
-                        notPublished,
-                    ];
-                }
                 // Each primary XML index owns an internal "node table"
                 // (type 'IT' / INTERNAL_TABLE), named
                 // xml_index_nodes_<tableObjectId>_<primaryIndexId> (the index's
@@ -1082,6 +1011,92 @@ internal static partial class BuiltInResources
                         notPublished,
                     ];
                 }
+            }
+        }
+
+        // One table's constraint rows — keys, then defaults, then CHECKs, then
+        // foreign keys, real's own object-id order for one CREATE TABLE.
+        IEnumerable<SqlValue[]> ConstraintRows(HeapTable t, SqlValue shipped)
+        {
+            var schemaIdValue = SqlValue.FromInt32(t.SchemaId);
+            var createDate = SqlValue.FromDateTime(t.CreateDate);
+            var modifyDate = SqlValue.FromDateTime(t.ModifyDate);
+            var tableObjectId = SqlValue.FromInt32(t.ObjectId);
+            // Constraints carry their own dates: an inline declaration
+            // shares the table's CREATE instant, an ALTER TABLE ADD the
+            // later one, and a trust toggle advances modify_date alone.
+            foreach (var key in t.KeyConstraints)
+            {
+                yield return [
+                    SqlValue.FromInt32(key.ObjectId),
+                    SqlValue.FromSystemName(key.Name),
+                    schemaIdValue,
+                    tableObjectId,
+                    nullPrincipal,
+                    key.Kind == KeyConstraintKind.PrimaryKey ? pkType : uqType,
+                    key.Kind == KeyConstraintKind.PrimaryKey ? pkTypeDesc : uqTypeDesc,
+                    SqlValue.FromDateTime(key.CreateDate),
+                    SqlValue.FromDateTime(key.ModifyDate),
+                    shipped,
+                    notPublished,
+                    notPublished,
+                ];
+            }
+            // DEFAULT constraints sit between the key constraints and the
+            // CHECK constraints in real's own object-id order for one
+            // CREATE TABLE (probe-confirmed).
+            foreach (var column in t.Columns)
+            {
+                if (column.DefaultConstraint is not { } df)
+                    continue;
+                yield return [
+                    SqlValue.FromInt32(df.ObjectId),
+                    SqlValue.FromSystemName(df.Name),
+                    schemaIdValue,
+                    tableObjectId,
+                    nullPrincipal,
+                    defaultType,
+                    defaultTypeDesc,
+                    SqlValue.FromDateTime(df.CreateDate),
+                    SqlValue.FromDateTime(df.ModifyDate),
+                    shipped,
+                    notPublished,
+                    notPublished,
+                ];
+            }
+            foreach (var chk in t.CheckConstraints)
+            {
+                yield return [
+                    SqlValue.FromInt32(chk.ObjectId),
+                    SqlValue.FromSystemName(chk.Name),
+                    schemaIdValue,
+                    tableObjectId,
+                    nullPrincipal,
+                    checkType,
+                    checkTypeDesc,
+                    SqlValue.FromDateTime(chk.CreateDate),
+                    SqlValue.FromDateTime(chk.ModifyDate),
+                    shipped,
+                    notPublished,
+                    notPublished,
+                ];
+            }
+            foreach (var fk in t.OutgoingForeignKeys)
+            {
+                yield return [
+                    SqlValue.FromInt32(fk.ObjectId),
+                    SqlValue.FromSystemName(fk.Name),
+                    schemaIdValue,
+                    tableObjectId,
+                    nullPrincipal,
+                    SqlValue.FromChar(charTwo, "F "),
+                    SqlValue.FromNVarchar("FOREIGN_KEY_CONSTRAINT"),
+                    SqlValue.FromDateTime(fk.CreateDate),
+                    SqlValue.FromDateTime(fk.ModifyDate),
+                    shipped,
+                    notPublished,
+                    notPublished,
+                ];
             }
         }
     }

@@ -51,7 +51,6 @@ internal sealed class TableType(
     HeapColumn[] columns,
     (KeyConstraintKind Kind, string? Name, int[] FullOrdinals, bool? Clustered, IndexOptions Options, bool[] Descending)[] pendingKeys,
     (string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition)[] pendingChecks,
-    int[] keyConstraintObjectIds,
     Simulation.PendingInlineIndex[] pendingIndexes)
     : SchemaObject(name, typeTableObjectId, schema.SchemaId, createDate)
 {
@@ -61,19 +60,22 @@ internal sealed class TableType(
     public override string ObjectTypeDescription => "TYPE_TABLE";
 
     /// <summary>
-    /// One object id per entry of <see cref="PendingKeys"/>, allocated at
-    /// CREATE TYPE, so the backing type table's PRIMARY KEY / UNIQUE
-    /// constraints have a stable identity to report in
-    /// <c>sys.key_constraints</c>. Each <see cref="Clone"/> re-resolves the
-    /// constraints for its own <c>@t</c>, but the catalog describes the type.
+    /// The backing type table as the catalog describes it: the type's own
+    /// PRIMARY KEY / UNIQUE / CHECK constraints and inline indexes, resolved
+    /// once at CREATE TYPE under the type table's id and the <c>sys</c>
+    /// schema. Each <see cref="Clone"/> resolves copies of its own; this one
+    /// is never stored into.
     /// </summary>
-    public readonly int[] KeyConstraintObjectIds = keyConstraintObjectIds;
+    public HeapTable CatalogShape = null!;
 
     /// <summary>
     /// The backing type table's name — <c>TT_&lt;type&gt;_&lt;object_id:X8&gt;</c>,
     /// the convention real uses and <c>sys.objects</c> reports.
     /// </summary>
-    public string BackingTableName => $"TT_{this.Name}_{this.ObjectId:X8}";
+    public string BackingTableName => BackingTableNameOf(this.Name, this.ObjectId);
+
+    /// <inheritdoc cref="BackingTableName"/>
+    public static string BackingTableNameOf(string typeName, int objectId) => $"TT_{typeName}_{objectId:X8}";
 
     /// <summary>
     /// Per-database <c>user_type_id</c> (allocated via

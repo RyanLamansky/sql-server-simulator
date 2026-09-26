@@ -1600,4 +1600,24 @@ public sealed class CatalogViewTests
         simulation.ExecuteBatches("create table p (code char(3) collate Latin1_General_BIN)", "create view v as select code from p");
         AreEqual("Latin1_General_BIN", simulation.ExecuteScalar("select COLLATION_NAME from INFORMATION_SCHEMA.COLUMNS where TABLE_NAME = 'v'"));
     }
+
+    /// <summary>
+    /// A table type's own constraints and indexes list as sys-schema, shipped
+    /// children of its type table (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select string_agg(concat(left(name, 6), ':', type, ':', schema_name(schema_id), ':', cast(is_ms_shipped as int)) collate database_default, ',') within group (order by type) from sys.objects where parent_object_id = @id", "CK__TT:C :sys:1,DF__TT:D :sys:1,PK__TT:PK:sys:1,UQ__TT:UQ:sys:1")]
+    [DataRow("select string_agg(concat(left(name, 6), ':', index_id), ',') within group (order by index_id) from sys.indexes where object_id = @id", "PK__TT:1,ix:2,UQ__TT:3")]
+    [DataRow("select string_agg(concat(left(name, 6), ':', stats_id), ',') within group (order by stats_id) from sys.stats where object_id = @id", "PK__TT:1,ix:2,UQ__TT:3")]
+    [DataRow("select concat(definition, ':', parent_column_id, ':', schema_name(schema_id)) from sys.default_constraints where parent_object_id = @id", "(N'x'):3:sys")]
+    [DataRow("select concat(definition, ':', schema_name(schema_id)) from sys.check_constraints where parent_object_id = @id", "([k]>(0)):sys")]
+    [DataRow("select string_agg(concat(CONSTRAINT_SCHEMA, ':', isnull(TABLE_NAME, 'NULL'), ':', CONSTRAINT_TYPE), ',') within group (order by CONSTRAINT_TYPE) from INFORMATION_SCHEMA.TABLE_CONSTRAINTS", "sys:NULL:CHECK,sys:NULL:PRIMARY KEY,sys:NULL:UNIQUE")]
+    [DataRow("select concat(TABLE_SCHEMA, ':', left(TABLE_NAME, 5), ':', COLUMN_NAME) from INFORMATION_SCHEMA.CONSTRAINT_COLUMN_USAGE", "sys:TT_tt:k")]
+    [DataRow("select concat(CONSTRAINT_SCHEMA, ':', CHECK_CLAUSE) from INFORMATION_SCHEMA.CHECK_CONSTRAINTS", "sys:([k]>(0))")]
+    public void TableType_ListsItsOwnConstraints(string query, string expected)
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches("create type tt as table (k int primary key, u int unique, v nvarchar(10) default N'x', check (k > 0), index ix (v))");
+        AreEqual(expected, simulation.ExecuteScalar($"declare @id int = (select type_table_object_id from sys.table_types where name = 'tt'); {query}"));
+    }
 }

@@ -510,7 +510,7 @@ It returns the table's canonical `IndexIdentity` rows — `(index_id, type, name
   Nonclustered ids on a heap still start at 2 — index_id 1 (the clustered slot) is never reused.
 - Every remaining (nonclustered) constraint / index — including a NONCLUSTERED PK — takes `index_id = 2..N`, `type = 2`, in **object-id order**.
 
-Object-id order is not declaration order for the key constraints of a single declaration: real allocates the clustered one's id first and the rest in **reverse** declaration order (probe-confirmed for `CREATE TABLE` — inline and table-level alike — and for an `ALTER TABLE ADD` of several constrained columns), which `Simulation.ResolveKeyConstraints` mirrors.
+Object-id order is not declaration order for the key constraints and inline indexes of a single declaration: real allocates the clustered one's id first and the rest in **reverse** declaration order, keys and inline `INDEX` clauses interleaved as written (probe-confirmed for `CREATE TABLE` — inline and table-level alike, 2026-09-26 for the indexes — and for an `ALTER TABLE ADD` of several constrained columns), which `Simulation.AllocateDeclarationObjectIds` mirrors for `CREATE TABLE` and `CREATE TYPE … AS TABLE`.
 So `create table t (id int primary key nonclustered, u int unique)` answers UNIQUE 2 / PRIMARY KEY 3, and `create table t (a int unique, b int primary key clustered, c int unique)` answers the clustered PK 1, `c`'s UNIQUE 2, `a`'s 3.
 A later `ALTER TABLE ADD CONSTRAINT` takes the next id up, since its own id is allocated after everything already there.
 

@@ -316,7 +316,8 @@ partial class Simulation
             throw SimulatedSqlException.ThereIsAlreadyAnObject(tableName.Leaf);
         RejectTakenConstraintNames(isTempTable ? null : schema, tableName.Leaf, heapColumns!, pendingKeys, pendingChecks, pendingForeignKeys);
 
-        var keyConstraints = ResolveKeyConstraints(tableName.Leaf, heapColumns!, pendingKeys, context.CurrentDatabase, context.Batch.CurrentStatement.UtcNow);
+        var (keyObjectIds, indexObjectIds) = AllocateDeclarationObjectIds(context.CurrentDatabase, pendingKeys, pendingIndexes);
+        var keyConstraints = ResolveKeyConstraints(tableName.Leaf, heapColumns!, pendingKeys, context.CurrentDatabase, context.Batch.CurrentStatement.UtcNow, keyObjectIds);
         var checkConstraints = ResolveCheckConstraints(tableName.Leaf, pendingChecks, context.CurrentDatabase, context.Batch.CurrentStatement.UtcNow);
         var resolvedPeriod = ResolvePeriodColumns(context.Batch.CurrentDatabase.Collation, heapColumns!, pendingPeriod);
 
@@ -434,7 +435,7 @@ partial class Simulation
             if (pendingForeignKeys.Count > 0)
                 ResolveForeignKeys(heapTable, pendingForeignKeys, context);
             if (pendingIndexes.Count > 0)
-                AddInlineIndexes(context.Batch, heapTable, tableName.ToString(), pendingIndexes);
+                AddInlineIndexes(context.Batch, heapTable, tableName.ToString(), pendingIndexes, indexObjectIds);
         }
         catch
         {
@@ -1191,7 +1192,9 @@ partial class Simulation
             // rejects the INDEX keyword.
             if (context.Token is ReservedKeyword { Keyword: Keyword.Index } && pendingIndexes is not null)
             {
-                pendingIndexes.Add(ParseTableLevelInlineIndex(context, tableName));
+                var tableLevelIndex = ParseTableLevelInlineIndex(context, tableName);
+                tableLevelIndex.KeysBefore = pendingKeys.Count;
+                pendingIndexes.Add(tableLevelIndex);
                 continue;
             }
 
@@ -1604,7 +1607,9 @@ partial class Simulation
                     if (context.GetNextRequired() is not Name indexNameToken)
                         throw SimulatedSqlException.SyntaxErrorNear(context);
                     context.MoveNextOptional();
-                    pendingIndexes.Add(ParseInlineIndexBody(context, indexNameToken.Value, tableName, columnLevelKey: columnName.Value));
+                    var columnLevelIndex = ParseInlineIndexBody(context, indexNameToken.Value, tableName, columnLevelKey: columnName.Value);
+                    columnLevelIndex.KeysBefore = pendingKeys.Count;
+                    pendingIndexes.Add(columnLevelIndex);
                     continue;
                 case ReservedKeyword { Keyword: Keyword.Primary or Keyword.Unique } when inlineKeyKind is null:
                     (inlineKeyKind, inlineKeyClustered, inlineKeyOptions) = ParseInlineKeyKindAndModifiers(context);
@@ -2447,7 +2452,8 @@ partial class Simulation
         IReadOnlyList<HeapColumn> heapColumns,
         IReadOnlyList<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals, bool? Clustered, IndexOptions Options, bool[] Descending)> pendingKeys,
         Database database,
-        DateTime createDate)
+        DateTime createDate,
+        int[]? objectIds = null)
     {
         if (pendingKeys.Count == 0)
             return [];
@@ -2529,7 +2535,7 @@ partial class Simulation
         {
             var (name, storageOrdinals, isClustered) = prepared[c];
             return new KeyConstraint(
-                pendingKeys[c].Kind, name, storageOrdinals, pendingKeys[c].FullOrdinals, database.AllocateObjectId(),
+                pendingKeys[c].Kind, name, storageOrdinals, pendingKeys[c].FullOrdinals, objectIds?[c] ?? database.AllocateObjectId(),
                 isClustered, pendingKeys[c].Options, createDate, pendingKeys[c].Descending);
         }
     }
@@ -2843,6 +2849,54 @@ partial class Simulation
         public readonly BooleanExpression? Filter = filter;
         public readonly string? FilterDefinition = filterDefinition;
         public readonly IndexOptions Options = options;
+
+        /// <summary>
+        /// How many PRIMARY KEY / UNIQUE constraints the declaration wrote
+        /// ahead of this index, which places it in the one sequence
+        /// <see cref="AllocateDeclarationObjectIds"/> hands object ids out over.
+        /// </summary>
+        public int KeysBefore;
+    }
+
+    /// <summary>
+    /// Object ids for one declaration's key constraints and inline indexes,
+    /// in real's order: the clustered one first, then the rest in
+    /// <b>reverse</b> declaration order, keys and indexes interleaved as
+    /// written (probed 2026-09-26 against SQL Server 2025). Index ids follow,
+    /// since <see cref="HeapTable.IndexIdentities"/> numbers in object-id order.
+    /// </summary>
+    internal static (int[] KeyIds, int[] IndexIds) AllocateDeclarationObjectIds(
+        Database database,
+        IReadOnlyList<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals, bool? Clustered, IndexOptions Options, bool[] Descending)> pendingKeys,
+        IReadOnlyList<PendingInlineIndex> pendingIndexes)
+    {
+        List<(bool IsIndex, int Position)> sequence = [];
+        var keys = 0;
+        for (var i = 0; i < pendingIndexes.Count; i++)
+        {
+            while (keys < pendingIndexes[i].KeysBefore && keys < pendingKeys.Count)
+                sequence.Add((false, keys++));
+            sequence.Add((true, i));
+        }
+        while (keys < pendingKeys.Count)
+            sequence.Add((false, keys++));
+
+        var keyIds = new int[pendingKeys.Count];
+        var indexIds = new int[pendingIndexes.Count];
+        var clustered = sequence.FindIndex(entry => entry.IsIndex
+            ? pendingIndexes[entry.Position].IsClustered
+            : pendingKeys[entry.Position].Clustered ?? (pendingKeys[entry.Position].Kind == KeyConstraintKind.PrimaryKey));
+        if (clustered >= 0)
+            Assign(sequence[clustered]);
+        for (var s = sequence.Count - 1; s >= 0; s--)
+        {
+            if (s != clustered)
+                Assign(sequence[s]);
+        }
+        return (keyIds, indexIds);
+
+        void Assign((bool IsIndex, int Position) entry) =>
+            (entry.IsIndex ? indexIds : keyIds)[entry.Position] = database.AllocateObjectId();
     }
 
     /// <summary>

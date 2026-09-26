@@ -29,28 +29,36 @@ partial class BuiltInResources
     /// The tables whose constraints and indexes a catalog view lists under
     /// <paramref name="schema"/>: <see cref="CatalogTables"/>, then every
     /// multi-statement TVF's return table, which real lists the same way under
-    /// the function's id (probed 2026-09-26 against SQL Server 2025).
+    /// the function's id, then every table type's backing type table, which
+    /// real lists under the <c>sys</c> schema as shipped
+    /// (<see cref="HeapTable.IsTypeTable"/>; probed 2026-09-26 against SQL
+    /// Server 2025).
     /// </summary>
     internal static IEnumerable<HeapTable> ConstraintHosts(Schema schema, BatchContext? batch) =>
-        CatalogTables(schema, batch).Concat(schema.Functions.Values
-            .OfType<MultiStatementTableValuedFunction>()
-            .OrderBy(f => f.ObjectId)
-            .Select(f => f.CatalogShape()));
+        CatalogTables(schema, batch)
+            .Concat(schema.Functions.Values
+                .OfType<MultiStatementTableValuedFunction>()
+                .OrderBy(f => f.ObjectId)
+                .Select(f => f.CatalogShape()))
+            .Concat(schema.TableTypes.Values.OrderBy(t => t.ObjectId).Select(t => t.CatalogShape));
 
     /// <summary>
     /// The objects whose declared columns the column-family catalog views
     /// (<c>sys.identity_columns</c> / <c>sys.computed_columns</c> /
     /// <c>sys.default_constraints</c>) report: <see cref="CatalogTables"/>, and
     /// every multi-statement TVF's return table, which real lists the same way
-    /// (probed 2026-09-26 against SQL Server 2025). A table's column id is its
-    /// stable one; a return table's columns can't be dropped, so theirs is
-    /// their position.
+    /// (probed 2026-09-26 against SQL Server 2025), then every table type's
+    /// backing type table, reported under the <c>sys</c> schema as shipped. A
+    /// table's column id is its stable one; a return table's or type table's
+    /// columns can't be dropped, so theirs is their position.
     /// </summary>
-    private static IEnumerable<(int ObjectId, HeapColumn[] Columns, bool Positional)> DeclaredColumnHosts(Schema schema, BatchContext batch)
+    private static IEnumerable<(int ObjectId, HeapColumn[] Columns, bool Positional, bool IsTypeTable)> DeclaredColumnHosts(Schema schema, BatchContext batch)
     {
         foreach (var table in CatalogTables(schema, batch).OrderBy(t => t.ObjectId))
-            yield return (table.ObjectId, table.Columns, false);
+            yield return (table.ObjectId, table.Columns, false, false);
         foreach (var function in schema.Functions.Values.OfType<MultiStatementTableValuedFunction>().OrderBy(f => f.ObjectId))
-            yield return (function.ObjectId, function.OutputColumns, true);
+            yield return (function.ObjectId, function.OutputColumns, true, false);
+        foreach (var tableType in schema.TableTypes.Values.OrderBy(t => t.ObjectId))
+            yield return (tableType.ObjectId, tableType.Columns, true, true);
     }
 }
