@@ -40,7 +40,7 @@ internal sealed class AliasType(
     DateTime createDate,
     bool spelledNumeric)
 {
-    public readonly Schema Schema = schema;
+    public Schema Schema = schema;
 
     public readonly string Name = name;
 

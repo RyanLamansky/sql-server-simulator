@@ -1209,18 +1209,18 @@ partial class Simulation
     }
 
     /// <summary>
-    /// Parses <c>ALTER SCHEMA dest TRANSFER [ (OBJECT|TYPE)::] source.obj</c>.
-    /// Entered with <see cref="ParserContext.Token"/> on the <c>SCHEMA</c>
-    /// keyword. Routes the named object between schemas:
+    /// Parses <c>ALTER SCHEMA dest TRANSFER [ (OBJECT | TYPE | XML SCHEMA
+    /// COLLECTION)::] source.obj</c>. Entered with
+    /// <see cref="ParserContext.Token"/> on the <c>SCHEMA</c> keyword. Routes
+    /// the named object between schemas:
     /// <list type="bullet">
-    /// <item><c>OBJECT</c> class (default if no prefix given): targets the
-    /// shared-namespace dicts on <see cref="Schema"/> —
-    /// <see cref="Schema.HeapTables"/>, <see cref="Schema.Views"/>,
-    /// <see cref="Schema.Functions"/>, <see cref="Schema.Procedures"/>,
-    /// <see cref="Schema.Sequences"/>. Triggers are not directly
-    /// transferable — they move along with their parent table or view
+    /// <item><c>OBJECT</c> class (default if no prefix given): the
+    /// shared-namespace kinds — tables, views, functions, procedures,
+    /// sequences, synonyms, rules and defaults. Triggers and constraints are
+    /// not directly transferable — they move along with their parent
     /// automatically (Msg 15347 if named directly).</item>
-    /// <item><c>TYPE</c> class: targets <see cref="Schema.TableTypes"/>.</item>
+    /// <item><c>TYPE</c> class: table and alias types.</item>
+    /// <item><c>XML SCHEMA COLLECTION</c> class.</item>
     /// </list>
     /// </summary>
     /// <remarks>
@@ -1237,8 +1237,8 @@ partial class Simulation
     /// silent no-op (probe-confirmed).</item>
     /// <item>Object with same leaf already exists in destination →
     /// <strong>Msg 15530</strong>.</item>
-    /// <item>Source is a trigger → <strong>Msg 15347</strong> (triggers
-    /// follow their parent's schema; can't be transferred directly).</item>
+    /// <item>Source is a trigger or constraint → <strong>Msg 15347</strong>
+    /// (each follows its parent's schema; can't be transferred directly).</item>
     /// </list>
     /// <para>
     /// When the transferred object is a heap table or view, any attached
@@ -1257,14 +1257,23 @@ partial class Simulation
         if (context.GetNextRequired() is not UnquotedString { ContextualKeyword: ContextualKeyword.Transfer })
             return false;
 
-        // Optional class prefix: OBJECT:: or TYPE::. Both Object and Type are
-        // contextual keywords, and the :: separator tokenizes as two adjacent
-        // single-character ':' operators.
+        // Optional class prefix: OBJECT::, TYPE:: or XML SCHEMA COLLECTION::.
+        // Object and Type are contextual keywords, and the :: separator
+        // tokenizes as two adjacent single-character ':' operators.
         var classIsType = false;
+        var classIsXmlSchemaCollection = false;
         var afterTransfer = context.SaveCheckpoint();
         if (context.MoveNext() && context.Token is UnquotedString { ContextualKeyword: var ck }
-            && ck is ContextualKeyword.Object or ContextualKeyword.Type)
+            && ck is ContextualKeyword.Object or ContextualKeyword.Type or ContextualKeyword.Xml)
         {
+            if (ck == ContextualKeyword.Xml)
+            {
+                if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Schema })
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                if (context.GetNextRequired() is not Name { Value: var collectionWord } || !BuiltInToken.Equals(collectionWord, "COLLECTION"))
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                classIsXmlSchemaCollection = true;
+            }
             var first = context.GetNextRequired();
             var second = context.GetNextRequired();
             if (first is not Operator { Character: ':' } || second is not Operator { Character: ':' })
@@ -1297,37 +1306,29 @@ partial class Simulation
 
         if (!context.Batch.TryResolveSchema(sourceName, out var sourceSchema))
         {
-            throw classIsType
-                ? SimulatedSqlException.CannotFindType(sourceName.Leaf)
+            throw classIsType ? SimulatedSqlException.CannotFindType(sourceName.Leaf)
+                : classIsXmlSchemaCollection ? SimulatedSqlException.CannotFindXmlSchemaCollection(sourceName.Leaf)
                 : SimulatedSqlException.CannotFindObject(sourceName.Leaf);
         }
         // The second half is CONTROL on the object being moved — probe-confirmed
         // that ALTER on the *source* schema is not enough, and that the refusal
         // is its own Msg 15151 wording.
-        RejectUnauthorizedSchemaTransfer(context, sourceSchema, sourceName, classIsType);
+        RejectUnauthorizedSchemaTransfer(context, sourceSchema, sourceName, classIsType || classIsXmlSchemaCollection);
 
-        if (classIsType)
-            TransferTableType(sourceSchema, destSchema, sourceName.Leaf, context.Batch);
-        else
-            TransferObject(sourceSchema, destSchema, sourceName.Leaf, context.Batch);
+        var objectType = classIsType ? TransferType(sourceSchema, destSchema, sourceName.Leaf, context.Batch)
+            : classIsXmlSchemaCollection ? TransferXmlSchemaCollection(sourceSchema, destSchema, sourceName.Leaf, context.Batch)
+            : TransferObject(sourceSchema, destSchema, sourceName.Leaf, context.Batch);
         // Real reports the transferred object, not the schema — SchemaName is
-        // the destination and ObjectName / ObjectType describe what moved.
-        RecordDdlEvent(context, "ALTER_SCHEMA", destSchemaName, sourceName.Leaf, classIsType ? "TYPE" : "OBJECT");
+        // the destination, ObjectName the object and ObjectType its kind
+        // (TABLE, RULE, TYPE, XML SCHEMA COLLECTION …, probed 2026-09-26).
+        RecordDdlEvent(context, "ALTER_SCHEMA", destSchemaName, sourceName.Leaf, objectType);
         return true;
     }
 
     /// <summary>
-    /// Moves a user-defined table type between schemas. Lookup miss →
-    /// Msg 15151 find-type; collision in destination → Msg 15530. Same-schema
-    /// transfer is a no-op (matches probe). Tests for fidelity: real SQL
-    /// Server also moves the type's underlying type-table id via
-    /// <see cref="SchemaObject.SchemaId"/>; <see cref="TableType.Schema"/>
-    /// reference updates in lockstep.
-    /// </summary>
-    /// <summary>
     /// The moved-object half of the <c>ALTER SCHEMA … TRANSFER</c> gate: CONTROL
-    /// on the object (or the type's owning schema, since the simulator's GRANT
-    /// surface carries no <c>TYPE::</c> securable class). Denial is Msg 15151
+    /// on the object (or the type's or XML schema collection's owning schema,
+    /// since the simulator's GRANT surface carries neither securable class). Denial is Msg 15151
     /// <c>Cannot transfer the object '…'</c>. No-op when the name resolves to
     /// nothing — the caller's own not-found record still runs.
     /// </summary>
@@ -1335,7 +1336,7 @@ partial class Simulation
     {
         if (classIsType)
         {
-            if (sourceSchema.TableTypes.ContainsKey(sourceName.Leaf)
+            if ((sourceSchema.TableTypes.ContainsKey(sourceName.Leaf) || sourceSchema.AliasTypes.ContainsKey(sourceName.Leaf) || sourceSchema.XmlSchemaCollections.ContainsKey(sourceName.Leaf))
                 && !PermissionEnforcement.HasSchemaControl(context.Batch, sourceSchema))
             {
                 throw SimulatedSqlException.CannotTransferObject(sourceName.Leaf);
@@ -1352,48 +1353,95 @@ partial class Simulation
         }
     }
 
-    private static void TransferTableType(Schema sourceSchema, Schema destSchema, string leafName, BatchContext batch)
+    /// <summary>
+    /// Moves a user-defined table or alias type between schemas, answering the
+    /// DDL event's object type. A type of either kind already named so in the
+    /// destination is Msg 15530 (probed 2026-09-26).
+    /// </summary>
+    private static string TransferType(Schema sourceSchema, Schema destSchema, string leafName, BatchContext batch)
     {
-        if (!sourceSchema.TableTypes.TryGetValue(leafName, out var tableType))
+        var sameSchema = ReferenceEquals(sourceSchema, destSchema);
+        var collides = destSchema.TableTypes.ContainsKey(leafName) || destSchema.AliasTypes.ContainsKey(leafName);
+        if (sourceSchema.TableTypes.TryGetValue(leafName, out var tableType))
+        {
+            if (sameSchema)
+                return "TYPE";
+            if (collides)
+                throw SimulatedSqlException.ObjectAlreadyExistsInDestination(leafName, "type");
+            batch.AcquireStatementLock(tableType.SchemaLock, LockMode.SchemaModification);
+            _ = sourceSchema.TableTypes.TryRemove(leafName, out _);
+            destSchema.TableTypes[leafName] = tableType;
+            tableType.Schema = destSchema;
+            tableType.SchemaId = destSchema.SchemaId;
+            RecordDdlUndo(batch, () =>
+            {
+                _ = destSchema.TableTypes.TryRemove(leafName, out _);
+                sourceSchema.TableTypes[leafName] = tableType;
+                tableType.Schema = sourceSchema;
+                tableType.SchemaId = sourceSchema.SchemaId;
+            });
+            return "TYPE";
+        }
+        if (!sourceSchema.AliasTypes.TryGetValue(leafName, out var aliasType))
             throw SimulatedSqlException.CannotFindType(leafName);
-        if (ReferenceEquals(sourceSchema, destSchema))
-            return;
-        if (destSchema.TableTypes.ContainsKey(leafName))
-            throw SimulatedSqlException.ObjectAlreadyExistsInDestination(leafName);
-        batch.AcquireStatementLock(tableType.SchemaLock, LockMode.SchemaModification);
-        _ = sourceSchema.TableTypes.TryRemove(leafName, out _);
-        destSchema.TableTypes[leafName] = tableType;
-        tableType.Schema = destSchema;
-        tableType.SchemaId = destSchema.SchemaId;
+        if (sameSchema)
+            return "TYPE";
+        if (collides)
+            throw SimulatedSqlException.ObjectAlreadyExistsInDestination(leafName, "type");
+        _ = sourceSchema.AliasTypes.TryRemove(leafName, out _);
+        destSchema.AliasTypes[leafName] = aliasType;
+        aliasType.Schema = destSchema;
         RecordDdlUndo(batch, () =>
         {
-            _ = destSchema.TableTypes.TryRemove(leafName, out _);
-            sourceSchema.TableTypes[leafName] = tableType;
-            tableType.Schema = sourceSchema;
-            tableType.SchemaId = sourceSchema.SchemaId;
+            _ = destSchema.AliasTypes.TryRemove(leafName, out _);
+            sourceSchema.AliasTypes[leafName] = aliasType;
+            aliasType.Schema = sourceSchema;
         });
+        return "TYPE";
     }
 
     /// <summary>
-    /// Moves an object between schemas. Walks the source schema's shared-
-    /// namespace dicts (heap tables / views / functions / procedures /
-    /// sequences / synonyms) — first hit by leaf name wins. Triggers explicitly raise
-    /// Msg 15347 since they're owned by their parent (the trigger's schema
-    /// follows its parent's schema automatically). After the move,
+    /// Moves an XML schema collection between schemas; the xml columns and
+    /// variables typed by it follow, since they hold the collection itself.
+    /// </summary>
+    private static string TransferXmlSchemaCollection(Schema sourceSchema, Schema destSchema, string leafName, BatchContext batch)
+    {
+        if (!sourceSchema.XmlSchemaCollections.TryGetValue(leafName, out var collection))
+            throw SimulatedSqlException.CannotFindXmlSchemaCollection(leafName);
+        if (ReferenceEquals(sourceSchema, destSchema))
+            return "XML SCHEMA COLLECTION";
+        if (destSchema.XmlSchemaCollections.ContainsKey(leafName))
+            throw SimulatedSqlException.ObjectAlreadyExistsInDestination(leafName, "xml schema collection");
+        _ = sourceSchema.XmlSchemaCollections.TryRemove(leafName, out _);
+        destSchema.XmlSchemaCollections[leafName] = collection;
+        collection.SchemaId = destSchema.SchemaId;
+        RecordDdlUndo(batch, () =>
+        {
+            _ = destSchema.XmlSchemaCollections.TryRemove(leafName, out _);
+            sourceSchema.XmlSchemaCollections[leafName] = collection;
+            collection.SchemaId = sourceSchema.SchemaId;
+        });
+        return "XML SCHEMA COLLECTION";
+    }
+
+    /// <summary>
+    /// Moves an object between schemas, answering the DDL event's object type.
+    /// Walks the source schema's shared-namespace dicts — first hit by leaf
+    /// name wins. A trigger or a constraint raises Msg 15347, since each
+    /// belongs to its parent and follows the parent's schema. After the move,
     /// HeapTable / View transfers reseat any attached triggers — they belong
     /// to the destination schema after the transfer.
     /// </summary>
-    private static void TransferObject(Schema sourceSchema, Schema destSchema, string leafName, BatchContext batch)
+    private static string TransferObject(Schema sourceSchema, Schema destSchema, string leafName, BatchContext batch)
     {
-        // Triggers can't be transferred directly — Msg 15347 owns this case.
-        if (sourceSchema.Triggers.TryGetValue(leafName, out _))
+        if (sourceSchema.Triggers.ContainsKey(leafName) || sourceSchema.HasConstraintNamed(leafName))
             throw SimulatedSqlException.CannotTransferObjectOwnedByParent();
 
         var sameSchema = ReferenceEquals(sourceSchema, destSchema);
 
         if (sourceSchema.HeapTables.TryGetValue(leafName, out var heap))
         {
-            if (sameSchema) return;
+            if (sameSchema) return "TABLE";
             if (destSchema.HasNameInSharedNamespace(leafName))
                 throw SimulatedSqlException.ObjectAlreadyExistsInDestination(leafName);
             RejectTransferOfSchemaBoundReferent(batch, heap);
@@ -1411,11 +1459,11 @@ partial class Simulation
                 heap.OwningDatabase = sourceSchema.Database;
                 ReseatAttachedTriggers(destSchema, sourceSchema, heap);
             });
-            return;
+            return "TABLE";
         }
         if (sourceSchema.Views.TryGetValue(leafName, out var view))
         {
-            if (sameSchema) return;
+            if (sameSchema) return "VIEW";
             if (destSchema.HasNameInSharedNamespace(leafName))
                 throw SimulatedSqlException.ObjectAlreadyExistsInDestination(leafName);
             RejectTransferOfSchemaBoundReferent(batch, view);
@@ -1433,90 +1481,66 @@ partial class Simulation
                 view.SchemaId = sourceSchema.SchemaId;
                 ReseatAttachedTriggers(destSchema, sourceSchema, view);
             });
-            return;
+            return "VIEW";
         }
         if (sourceSchema.Functions.TryGetValue(leafName, out var fn))
         {
-            if (sameSchema) return;
+            if (sameSchema) return "FUNCTION";
             if (destSchema.HasNameInSharedNamespace(leafName))
                 throw SimulatedSqlException.ObjectAlreadyExistsInDestination(leafName);
             RejectTransferOfSchemaBoundReferent(batch, fn);
-            batch.AcquireStatementLock(fn.SchemaLock, LockMode.SchemaModification);
-            _ = sourceSchema.Functions.TryRemove(leafName, out _);
-            destSchema.Functions[leafName] = fn;
-            fn.Schema = destSchema;
-            fn.SchemaId = destSchema.SchemaId;
-            RecordDdlUndo(batch, () =>
-            {
-                _ = destSchema.Functions.TryRemove(leafName, out _);
-                sourceSchema.Functions[leafName] = fn;
-                fn.Schema = sourceSchema;
-                fn.SchemaId = sourceSchema.SchemaId;
-            });
-            return;
+            return MoveSchemaObject(sourceSchema.Functions, destSchema.Functions, fn, leafName, sourceSchema, destSchema, batch, static (moved, schema) => moved.Schema = schema, "FUNCTION");
         }
         if (sourceSchema.Procedures.TryGetValue(leafName, out var proc))
-        {
-            if (sameSchema) return;
-            if (destSchema.HasNameInSharedNamespace(leafName))
-                throw SimulatedSqlException.ObjectAlreadyExistsInDestination(leafName);
-            batch.AcquireStatementLock(proc.SchemaLock, LockMode.SchemaModification);
-            _ = sourceSchema.Procedures.TryRemove(leafName, out _);
-            destSchema.Procedures[leafName] = proc;
-            proc.Schema = destSchema;
-            proc.SchemaId = destSchema.SchemaId;
-            RecordDdlUndo(batch, () =>
-            {
-                _ = destSchema.Procedures.TryRemove(leafName, out _);
-                sourceSchema.Procedures[leafName] = proc;
-                proc.Schema = sourceSchema;
-                proc.SchemaId = sourceSchema.SchemaId;
-            });
-            return;
-        }
+            return sameSchema ? "PROCEDURE" : MoveSchemaObject(sourceSchema.Procedures, destSchema.Procedures, proc, leafName, sourceSchema, destSchema, batch, static (moved, schema) => moved.Schema = schema, "PROCEDURE");
         if (sourceSchema.Sequences.TryGetValue(leafName, out var seq))
-        {
-            if (sameSchema) return;
-            if (destSchema.HasNameInSharedNamespace(leafName))
-                throw SimulatedSqlException.ObjectAlreadyExistsInDestination(leafName);
-            batch.AcquireStatementLock(seq.SchemaLock, LockMode.SchemaModification);
-            _ = sourceSchema.Sequences.TryRemove(leafName, out _);
-            destSchema.Sequences[leafName] = seq;
-            seq.Schema = destSchema;
-            seq.SchemaId = destSchema.SchemaId;
-            RecordDdlUndo(batch, () =>
-            {
-                _ = destSchema.Sequences.TryRemove(leafName, out _);
-                sourceSchema.Sequences[leafName] = seq;
-                seq.Schema = sourceSchema;
-                seq.SchemaId = sourceSchema.SchemaId;
-            });
-            return;
-        }
+            return sameSchema ? "SEQUENCE" : MoveSchemaObject(sourceSchema.Sequences, destSchema.Sequences, seq, leafName, sourceSchema, destSchema, batch, static (moved, schema) => moved.Schema = schema, "SEQUENCE");
         // A synonym moves as a plain name indirection: its stored base name is
         // untouched by the transfer (probe-confirmed — base_object_name still
         // reads [dbo].[t] after the synonym lands in another schema).
         if (sourceSchema.Synonyms.TryGetValue(leafName, out var synonym))
-        {
-            if (sameSchema) return;
-            if (destSchema.HasNameInSharedNamespace(leafName))
-                throw SimulatedSqlException.ObjectAlreadyExistsInDestination(leafName);
-            batch.AcquireStatementLock(synonym.SchemaLock, LockMode.SchemaModification);
-            _ = sourceSchema.Synonyms.TryRemove(leafName, out _);
-            destSchema.Synonyms[leafName] = synonym;
-            synonym.Schema = destSchema;
-            synonym.SchemaId = destSchema.SchemaId;
-            RecordDdlUndo(batch, () =>
-            {
-                _ = destSchema.Synonyms.TryRemove(leafName, out _);
-                sourceSchema.Synonyms[leafName] = synonym;
-                synonym.Schema = sourceSchema;
-                synonym.SchemaId = sourceSchema.SchemaId;
-            });
-            return;
-        }
+            return sameSchema ? "SYNONYM" : MoveSchemaObject(sourceSchema.Synonyms, destSchema.Synonyms, synonym, leafName, sourceSchema, destSchema, batch, static (moved, schema) => moved.Schema = schema, "SYNONYM");
+        if (sourceSchema.Rules.TryGetValue(leafName, out var rule))
+            return sameSchema ? "RULE" : MoveSchemaObject(sourceSchema.Rules, destSchema.Rules, rule, leafName, sourceSchema, destSchema, batch, static (moved, schema) => moved.Schema = schema, "RULE");
+        if (sourceSchema.Defaults.TryGetValue(leafName, out var defaultObject))
+            return sameSchema ? "DEFAULT" : MoveSchemaObject(sourceSchema.Defaults, destSchema.Defaults, defaultObject, leafName, sourceSchema, destSchema, batch, static (moved, schema) => moved.Schema = schema, "DEFAULT");
 
         throw SimulatedSqlException.CannotFindObject(leafName);
+    }
+
+    /// <summary>
+    /// The move shared by the kinds with nothing attached that follows them:
+    /// out of the source schema's dictionary and into the destination's, the
+    /// object's schema re-pointed, and all of it undone with the transaction.
+    /// Answers <paramref name="objectType"/> for the caller's DDL event.
+    /// </summary>
+    private static string MoveSchemaObject<T>(
+        System.Collections.Concurrent.ConcurrentDictionary<string, T> source,
+        System.Collections.Concurrent.ConcurrentDictionary<string, T> destination,
+        T moving,
+        string leafName,
+        Schema sourceSchema,
+        Schema destSchema,
+        BatchContext batch,
+        Action<T, Schema> repoint,
+        string objectType)
+        where T : SchemaObject
+    {
+        if (destSchema.HasNameInSharedNamespace(leafName))
+            throw SimulatedSqlException.ObjectAlreadyExistsInDestination(leafName);
+        batch.AcquireStatementLock(moving.SchemaLock, LockMode.SchemaModification);
+        _ = source.TryRemove(leafName, out _);
+        destination[leafName] = moving;
+        repoint(moving, destSchema);
+        moving.SchemaId = destSchema.SchemaId;
+        RecordDdlUndo(batch, () =>
+        {
+            _ = destination.TryRemove(leafName, out _);
+            source[leafName] = moving;
+            repoint(moving, sourceSchema);
+            moving.SchemaId = sourceSchema.SchemaId;
+        });
+        return objectType;
     }
 
     /// <summary>

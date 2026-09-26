@@ -1501,6 +1501,14 @@ partial class SimulatedSqlException
         new($"Cannot find the type '{typeLeafName}', because it does not exist or you do not have permission.", 15151, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 15151 (find-xml-schema-collection variant):
+    /// <c>ALTER SCHEMA … TRANSFER XML SCHEMA COLLECTION::name</c> named a
+    /// collection that doesn't resolve (probed 2026-09-26).
+    /// </summary>
+    internal static SimulatedSqlException CannotFindXmlSchemaCollection(string leafName) =>
+        new($"Cannot find the xml schema collection '{leafName}', because it does not exist or you do not have permission.", 15151, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 3729: <c>DROP SCHEMA</c> rejected because the
     /// schema still contains at least one object. SQL Server names the first
     /// object found in the dependency-graph walk (which often happens to be
@@ -1582,11 +1590,13 @@ partial class SimulatedSqlException
     /// Mimics SQL Server error 15530: <c>ALTER SCHEMA dest TRANSFER source.obj</c>
     /// rejected because <paramref name="objectLeafName"/> is already present
     /// in the destination schema. The canonical wording surfaces only the
-    /// object's leaf (the destination schema isn't part of the message).
-    /// Probe-confirmed verbatim against SQL Server 2025.
+    /// object's leaf (the destination schema isn't part of the message), and
+    /// the noun is the class transferred — <c>object</c>, <c>type</c> or
+    /// <c>xml schema collection</c>. Probe-confirmed verbatim against SQL
+    /// Server 2025.
     /// </summary>
-    internal static SimulatedSqlException ObjectAlreadyExistsInDestination(string objectLeafName) =>
-        new($"The object with name \"{objectLeafName}\" already exists.", 15530, 16, 1);
+    internal static SimulatedSqlException ObjectAlreadyExistsInDestination(string objectLeafName, string noun = "object") =>
+        new($"The {noun} with name \"{objectLeafName}\" already exists.", 15530, 16, 1);
 
     /// <summary>
     /// Mimics SQL Server error 15347: <c>ALTER SCHEMA TRANSFER</c> targeted

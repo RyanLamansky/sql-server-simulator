@@ -29,7 +29,7 @@ internal sealed class XmlSchemaCollection(
 {
     public readonly int Id = id;
     public readonly string Name = name;
-    public readonly int SchemaId = schemaId;
+    public int SchemaId = schemaId;
 
     /// <summary>
     /// Owning principal id. Probe-confirmed against SQL Server 2025: the

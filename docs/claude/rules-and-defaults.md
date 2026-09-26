@@ -39,5 +39,4 @@ NOT NULL is checked before the rule.
 
 ## Not modeled yet
 
-- `ALTER SCHEMA … TRANSFER` of a default or rule.
 - A second `CREATE DEFAULT` / `CREATE RULE` later in a batch whose first one was misplaced: real reports a Msg 111 for each.

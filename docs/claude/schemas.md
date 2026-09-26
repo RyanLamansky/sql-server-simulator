@@ -158,18 +158,19 @@ A synonym takes no column list at all (Msg 1020), so every check through one is 
 - `base_object_name` expands an omitted middle segment: `FOR tempdb..t` stores `[tempdb].[dbo].[t]` where real keeps `[tempdb]..[t]`, because `MultiPartName` compresses empty segments at parse.
 
 ## ALTER SCHEMA TRANSFER
-`ALTER SCHEMA <dest> TRANSFER [(OBJECT|TYPE)::] <source>.<obj>` moves a single object from one schema to another.
+`ALTER SCHEMA <dest> TRANSFER [(OBJECT | TYPE | XML SCHEMA COLLECTION)::] <source>.<obj>` moves a single object from one schema to another.
 Routes through `Simulation.Alter.cs`'s `TryParseAlterSchemaTransfer`.
-The `Object` and `Type` class prefixes parse via two adjacent `:` operators (the tokenizer accepts `:` as a single-char operator, so the `::` separator decomposes into two tokens for the prefix grammar).
+The class prefixes parse via two adjacent `:` operators (the tokenizer accepts `:` as a single-char operator, so the `::` separator decomposes into two tokens for the prefix grammar).
 Default class is `OBJECT` (the bare form with no prefix).
 
-- **OBJECT class** walks the shared object-name namespace dicts on the source `Schema`: `HeapTables` → `Views` → `Functions` → `Procedures` → `Sequences` → `Synonyms`, first-hit wins.
+- **OBJECT class** walks the shared object-name namespace dicts on the source `Schema`: `HeapTables` → `Views` → `Functions` → `Procedures` → `Sequences` → `Synonyms` → `Rules` → `Defaults`, first-hit wins.
   A transferred synonym keeps its stored base name verbatim (probe-confirmed: `base_object_name` still reads `[dbo].[t]` after the move).
-  Triggers fail-fast with **Msg 15347** (`"Cannot transfer an object that is owned by a parent object."`) — triggers belong to their parent's schema and follow the parent automatically.
+  Triggers and constraints fail fast with **Msg 15347** (`"Cannot transfer an object that is owned by a parent object."`) — each belongs to its parent and follows the parent automatically.
   Found-object collision check uses `Schema.HasNameInSharedNamespace` against the destination; collision → **Msg 15530** (`"The object with name \"<n>\" already exists."`).
   On success, the object's `SchemaId` updates to the destination's id, its `Schema` reference reseats (every concrete `SchemaObject` derivative except `HeapTable` carries a per-instance `Schema` field), and any attached DML triggers (matching `Trigger.Parent` to the moved table / view) co-migrate into the destination's `Triggers` dict via `ReseatAttachedTriggers`.
-- **TYPE class** targets the parallel `Schema.TableTypes` dict (user-defined table types occupy a separate namespace).
-  Same collision / found semantics, distinct factory wording (`CannotFindType` / `ObjectAlreadyExistsInDestination`).
+- **TYPE class** targets the parallel `Schema.TableTypes` and `Schema.AliasTypes` dicts (types occupy a namespace of their own, shared by both kinds), and **XML SCHEMA COLLECTION** class `Schema.XmlSchemaCollections`.
+  Same collision / found semantics, with the class as the messages' noun (`type`, `xml schema collection`; probed 2026-09-26).
+- The `ALTER_SCHEMA` DDL event's `ObjectType` is the moved object's kind (`TABLE`, `RULE`, `TYPE`, `XML SCHEMA COLLECTION` …; probed 2026-09-26).
 - **Missing destination schema** → **Msg 15151** alter-schema variant (`"Cannot alter the schema '<n>', …"`).
 - **Missing source object** → **Msg 15151** find-object variant (`"Cannot find the object '<leaf>', …"`); the qualifier doesn't echo into the message (probe-confirmed).
 - **Same-schema transfer** (source schema = destination schema) is a silent no-op — probe-confirmed against real SQL Server.
