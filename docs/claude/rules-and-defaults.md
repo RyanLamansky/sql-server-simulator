@@ -40,5 +40,4 @@ NOT NULL is checked before the rule.
 ## Not modeled yet
 
 - `ALTER SCHEMA … TRANSFER` of a default or rule.
-- `DROP VIEW` / `DROP PROCEDURE` / `DROP FUNCTION` naming a default or rule answer Msg 3701 where real answers Msg 3705.
 - A second `CREATE DEFAULT` / `CREATE RULE` later in a batch whose first one was misplaced: real reports a Msg 111 for each.

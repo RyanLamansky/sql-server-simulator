@@ -98,9 +98,10 @@ partial class Simulation
     /// <summary>
     /// Raises Msg 3705 when <paramref name="name"/> names an object of a kind
     /// other than <paramref name="attemptedDropKind"/> — the cross-kind
-    /// rejection real applies between <c>DROP TABLE</c> and <c>DROP SYNONYM</c>
-    /// in both directions. No-op when the name is free or already the right
-    /// kind, so the caller's own missing-object path (Msg 3701) still runs.
+    /// rejection real applies to every schema-object <c>DROP</c>, <c>IF
+    /// EXISTS</c> or not (probed 2026-09-26 against SQL Server 2025). No-op
+    /// when the name is free or already the right kind, so the caller's own
+    /// missing-object path (Msg 3701) still runs.
     /// </summary>
     private static void RejectDropOfOtherKind(Schema schema, MultiPartName name, string attemptedDropKind)
     {

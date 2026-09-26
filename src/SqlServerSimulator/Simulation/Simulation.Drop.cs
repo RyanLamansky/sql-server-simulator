@@ -352,6 +352,8 @@ partial class Simulation
         }
 
         var schema = context.Batch.TryResolveSchema(name, out var resolved) ? resolved : null;
+        if (schema is not null)
+            RejectDropOfOtherKind(schema, name, "TRIGGER");
         if (schema is null || !schema.Triggers.TryGetValue(name.Leaf, out var existing))
         {
             if (ifExists)
@@ -391,6 +393,8 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return;
         var schema = context.Batch.TryResolveSchema(name, out var resolved) ? resolved : null;
+        if (schema is not null)
+            RejectDropOfOtherKind(schema, name, "SEQUENCE");
         if (schema is null || !schema.Sequences.TryGetValue(name.Leaf, out var existing))
         {
             if (ifExists)
@@ -532,6 +536,8 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return;
         var schema = context.Batch.TryResolveSchema(name, out var resolved) ? resolved : null;
+        if (schema is not null)
+            RejectDropOfOtherKind(schema, name, "PROCEDURE");
         if (schema is null || !schema.Procedures.TryGetValue(name.Leaf, out var existing))
         {
             if (ifExists)
@@ -563,6 +569,8 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return;
         var schema = context.Batch.TryResolveSchema(name, out var resolved) ? resolved : null;
+        if (schema is not null)
+            RejectDropOfOtherKind(schema, name, "VIEW");
         if (schema is null || !schema.Views.TryGetValue(name.Leaf, out var droppedView))
         {
             if (ifExists)
@@ -608,6 +616,8 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return;
         var schema = context.Batch.TryResolveSchema(name, out var resolved) ? resolved : null;
+        if (schema is not null)
+            RejectDropOfOtherKind(schema, name, "FUNCTION");
         if (schema is null || !schema.Functions.TryGetValue(name.Leaf, out var existing))
         {
             if (ifExists)
