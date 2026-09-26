@@ -22,14 +22,13 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// <para>Chained COLLATE (<c>expr COLLATE A COLLATE B</c>) is a syntax
 /// error in real SQL Server (Msg 156); the simulator rejects with the same
 /// message number via the <c>SyntaxErrorNearKeyword</c> path.</para>
-/// <para>Type validation is deferred to <see cref="Run"/>: a non-string
-/// inner raises Msg 447 at runtime rather than at parse time. The probed
-/// real-server behavior raises Msg 447 at compile / bind time, but the
-/// simulator's lazy plan has no separate bind phase and the inner's
-/// <see cref="SqlType"/> isn't statically known for unresolved column refs;
-/// runtime enforcement gives the same end state for the common shapes.</para>
+/// <para>The operand's type is judged while compiling, ahead of the
+/// collation's name: a non-string operand is Msg 447 even under an unknown
+/// collation, which is Msg 448 only over a string (probed 2026-09-26 against
+/// SQL Server 2025). The same checks run per row for a site that never types
+/// the expression.</para>
 /// </remarks>
-internal sealed class CollateExpression(Expression inner, Collation collation) : Expression
+internal sealed class CollateExpression(Expression inner, Collation collation, string? unknownCollationName = null) : Expression
 {
     /// <summary>The wrapped expression. Exposed so consumers (notably <see cref="BooleanExpression"/>'s LIKE handler) can peer through to enforce binding rules.</summary>
     public readonly Expression Inner = inner;
@@ -37,8 +36,25 @@ internal sealed class CollateExpression(Expression inner, Collation collation) :
     /// <summary>The collation named by the postfix. <c>LIKE</c> reads <see cref="Collation.CaseSensitive"/> off this to choose the regex's case-folding behavior.</summary>
     public readonly Collation ResolvedCollation = collation;
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
-        Rewrap(this.Inner.GetSqlType(batch, resolveColumnType), this.ResolvedCollation);
+    /// <summary>The collation name as written when it names no collation, whose Msg 448 waits for the operand's type check.</summary>
+    private readonly string? unknownCollationName = unknownCollationName;
+
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        var innerType = this.Inner.GetSqlType(batch, resolveColumnType);
+        if (IsUntypedNullLiteral(this.Inner))
+            throw SimulatedSqlException.CollateClauseRequiresString("NULL");
+        RequireCollatable(innerType);
+        return Rewrap(innerType, this.ResolvedCollation);
+    }
+
+    private void RequireCollatable(SqlType innerType)
+    {
+        if (innerType.Category != SqlTypeCategory.String || innerType is XmlSqlType)
+            throw SimulatedSqlException.CollateClauseRequiresString(SimulatedSqlException.FamilyRootName(innerType));
+        if (this.unknownCollationName is { } name)
+            throw SimulatedSqlException.InvalidCollation(name);
+    }
 
     /// <summary>
     /// Stamps the postfix collation onto <paramref name="type"/> at
@@ -63,11 +79,10 @@ internal sealed class CollateExpression(Expression inner, Collation collation) :
     public override SqlValue Run(RuntimeContext runtime)
     {
         var value = this.Inner.Run(runtime);
+        RequireCollatable(value.Type);
         var rewrapped = Rewrap(value.Type, this.ResolvedCollation);
         if (value.IsNull)
             return SqlValue.Null(rewrapped);
-        if (value.Type.Category != SqlTypeCategory.String)
-            throw SimulatedSqlException.CollateClauseRequiresString(value.Type);
         // When the postfix swaps to a collation with a different storage
         // encoding (e.g. CP1252 → UTF-8 on the *_UTF8 collations), a fixed-
         // length char(N) value carries a .NET string sized for the inner
@@ -105,7 +120,8 @@ internal sealed class CollateExpression(Expression inner, Collation collation) :
     /// the cursor on the collation-name token so the caller's surrounding
     /// loop can advance via <c>GetNextOptional</c>. Rejects chained
     /// COLLATE (<c>expr COLLATE A COLLATE B</c>) with Msg 156 to match
-    /// probed real-server behavior. Unknown names raise Msg 448.
+    /// probed real-server behavior. An unknown name raises Msg 448 once the
+    /// operand's type has been judged.
     /// </summary>
     public static CollateExpression ParsePostfix(Expression source, ParserContext context)
     {
@@ -118,9 +134,9 @@ internal sealed class CollateExpression(Expression inner, Collation collation) :
             Name n => n.Value,
             _ => throw SimulatedSqlException.SyntaxErrorNear(context),
         };
-        var collation = Collation.TryGet(ResolvePseudoCollationName(collationName, context.Batch))
-            ?? throw SimulatedSqlException.InvalidCollation(collationName);
-        return new CollateExpression(source, collation);
+        return Collation.TryGet(ResolvePseudoCollationName(collationName, context.Batch)) is { } collation
+            ? new CollateExpression(source, collation)
+            : new CollateExpression(source, Collation.Baseline, collationName);
     }
 
     /// <summary>

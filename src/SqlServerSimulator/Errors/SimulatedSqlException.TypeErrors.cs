@@ -877,15 +877,12 @@ partial class SimulatedSqlException
 
     /// <summary>
     /// Mimics SQL Server error 447: an explicit <c>COLLATE</c> clause was
-    /// attached to a non-string expression (probe-confirmed wording:
-    /// <c>"Expression type int is invalid for COLLATE clause."</c>).
-    /// Real SQL Server raises this at bind time; the simulator raises at
-    /// runtime because <see cref="SqlType"/> isn't fully bound
-    /// during the parse pass (column refs without a resolver are typed
-    /// lazily). Same Msg + same wording; only the firing point differs.
+    /// attached to a non-string expression, named by its type's family or
+    /// <c>NULL</c> for a bare one (probed 2026-09-26 against SQL Server 2025:
+    /// state 0).
     /// </summary>
-    internal static SimulatedSqlException CollateClauseRequiresString(SqlType operandType) =>
-        new($"Expression type {FamilyRootName(operandType)} is invalid for COLLATE clause.", 447, 16, 1);
+    internal static SimulatedSqlException CollateClauseRequiresString(string operandTypeName) =>
+        new($"Expression type {operandTypeName} is invalid for COLLATE clause.", 447, 16, 0);
 
     /// <summary>
     /// Mimics SQL Server error 448: an explicit <c>COLLATE</c> clause names

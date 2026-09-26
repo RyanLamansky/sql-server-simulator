@@ -192,7 +192,7 @@ The check runs at parse, which a plan-cache hit skips — so a cached plan has t
 
 `CollateExpression.Run` rewraps the value's type via `WithCollation(this.ResolvedCollation, Coercibility.Explicit)`.
 `GetSqlType` propagates the same override through projection.
-Non-string inner raises Msg 447 at runtime (real SQL Server raises at bind time — same message, just earlier; lazy-plan parity).
+A non-string operand — xml and a bare `NULL` included — raises Msg 447 while compiling, and it outranks an unknown collation name's Msg 448, which real raises only over a string (probed 2026-09-26 against SQL Server 2025).
 
 Chained `expr COLLATE A COLLATE B` rejects with Msg 156 at parse time (probe-confirmed).
 Unknown collation name raises Msg 448 at parse time.

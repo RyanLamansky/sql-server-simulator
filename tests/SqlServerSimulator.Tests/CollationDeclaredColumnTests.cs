@@ -267,13 +267,24 @@ public sealed class CollationDeclaredColumnTests
     }
 
     /// <summary>
-    /// <c>COLLATE</c> postfix on a non-string operand raises Msg 447. The
-    /// simulator surfaces this at runtime rather than at bind time (lazy-plan
-    /// parity gap; same Msg + wording as real SQL Server).
+    /// <c>COLLATE</c> postfix on a non-string operand raises Msg 447 while
+    /// compiling — over an empty table, and ahead of an unknown collation's
+    /// Msg 448 (probed 2026-09-26 against SQL Server 2025).
     /// </summary>
     [TestMethod]
-    public void CollatePostfix_OnNonString_RaisesMsg447()
-        => _ = new Simulation().AssertSqlError("select 5 collate Latin1_General_CI_AS", 447);
+    [DataRow("select 5 collate Latin1_General_CI_AS", "int")]
+    [DataRow("select 1 collate nosuch", "int")]
+    [DataRow("select null collate Latin1_General_CI_AS", "NULL")]
+    [DataRow("select cast(null as int) collate Latin1_General_CI_AS", "int")]
+    [DataRow("select cast('<a/>' as xml) collate Latin1_General_CI_AS", "xml")]
+    [DataRow("create table t (a int); select 1 from t where a collate Latin1_General_CI_AS = 1", "int")]
+    [DataRow("create table t (a int); select a from t order by a collate nosuch", "int")]
+    public void CollatePostfix_OnNonString_RaisesMsg447(string sql, string type)
+        => new Simulation().AssertSqlError(sql, 447, $"Expression type {type} is invalid for COLLATE clause.");
+
+    [TestMethod]
+    public void CollatePostfix_UnknownCollationOverAString_RaisesMsg448()
+        => new Simulation().AssertSqlError("create table t (b varchar(5)); select 1 from t where b collate nosuch = 'x'", 448, "Invalid collation 'nosuch'.");
 
     /// <summary>
     /// <c>COLLATE</c> postfix on a NULL operand returns NULL of the
