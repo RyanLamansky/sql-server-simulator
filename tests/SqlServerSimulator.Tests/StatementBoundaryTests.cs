@@ -217,4 +217,14 @@ public sealed class StatementBoundaryTests
         _ = sim.ExecuteNonQuery("create table t (a int null)");
         AreEqual(42, sim.ExecuteScalar("insert into t values (1)\nset nocount on\nselect 42"));
     }
+
+    /// <summary>
+    /// A comma left after a complete SELECT is unconsumed input, reported at
+    /// the comma (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select 1 where 1 in (null), 2 where 1 not in (2, null)")]
+    [DataRow("select a from (values (1)) v (a) where a = 1, 5")]
+    public void SelectFollowedByAComma_RaisesMsg102AtTheComma(string sql)
+        => new Simulation().AssertSqlError(sql, 102, "Incorrect syntax near ','.");
 }

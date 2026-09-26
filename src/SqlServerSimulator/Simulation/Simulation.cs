@@ -2664,9 +2664,11 @@ public sealed partial class Simulation
                     // (the non-T-SQL `SELECT id FROM t LIMIT 2` parses `LIMIT`
                     // as the source's alias and leaves `2` dangling;
                     // `FROM t a hash` leaves `hash`, probed 2026-09-24). A
-                    // well-formed SELECT never ends on one; any other token is
-                    // left to the generic end-of-dispatch normalizer.
-                    if (context.Token is Numeric or Literal or Name)
+                    // well-formed SELECT never ends on one, nor on a comma
+                    // (`SELECT 1 WHERE 1 IN (NULL), 2` is near ',', probed
+                    // 2026-09-26); any other token is left to the generic
+                    // end-of-dispatch normalizer.
+                    if (context.Token is Numeric or Literal or Name or Operator { Character: ',' })
                         throw SimulatedSqlException.SyntaxErrorNear(context);
                     if (!batch.IsSkipping)
                         PermissionEnforcement.CheckReadSources(batch, selection.ReferencedSecurables, selection.ReadColumnsByObject);
