@@ -720,7 +720,10 @@ partial class Simulation
         // for one-shot parse-only inspection. We don't actually dispatch
         // anything here.
         var dummyFrame = new UdfFrame(SqlType.Int32);
-        var innerBatch = new BatchContext(bodyCommand, variables, dummyFrame);
+        // The body binds at CREATE as any module body does — a parameter has
+        // no value yet, so `TOP (@n)` is settled from its declared type rather
+        // than refused as a NULL count (probed 2026-09-26).
+        var innerBatch = new BatchContext(bodyCommand, variables, dummyFrame) { CreateTimeBinding = true };
         // Inspection runs the body's FROM-less projections, so the batch needs
         // the CREATE statement's own current-time freeze to evaluate a
         // GETDATE() / SYSDATETIME() column.

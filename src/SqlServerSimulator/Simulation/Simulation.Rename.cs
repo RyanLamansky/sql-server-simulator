@@ -13,6 +13,16 @@ partial class Simulation
     private const string RenameCautionMessage =
         "Caution: Changing any part of an object name could break scripts and stored procedures.";
 
+    // Real raises it from line 801 of sp_rename's own text, so it names that
+    // line and the procedure whatever was renamed (probed 2026-09-26).
+    private static void QueueRenameCaution(BatchContext batch)
+    {
+        var caution = batch.InfoMessage(@class: 10, state: 1, number: 15477, message: RenameCautionMessage);
+        caution.LineNumber = 801;
+        caution.Procedure = "sp_rename";
+        batch.Connection.PendingMessages.Enqueue(caution);
+    }
+
     /// <summary>
     /// Handles <c>EXEC sp_rename @objname, @newname [, @objtype]</c> — the
     /// object / column / index rename schema-migration tools (Alembic's
@@ -97,11 +107,11 @@ partial class Simulation
         {
             // Real cautions before it finds the database read-only, so the
             // caution precedes the Msg 3906 (probed 2026-09-25).
-            batch.AppendInfoError(@class: 10, state: 1, number: 15477, message: RenameCautionMessage);
+            QueueRenameCaution(batch);
             throw;
         }
 
-        batch.AppendInfoError(@class: 10, state: 1, number: 15477, message: RenameCautionMessage);
+        QueueRenameCaution(batch);
         yield break;
     }
 

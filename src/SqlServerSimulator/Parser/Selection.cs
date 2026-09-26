@@ -1261,11 +1261,12 @@ internal sealed partial class Selection
                 context.MoveNextRequired();
             }
             // Parse-time validation of the count / percent literal, mirroring
-            // SQL Server's compile-time rejection.
-            if (topPercent)
-                _ = ResolveTopPercentValue(topExpression, context.Batch);
-            else
+            // SQL Server's compile-time rejection. A module body binding a
+            // parameter has no value to check (see ResolveRowCountLimit).
+            if (!topPercent)
                 _ = ResolveRowCountLimit(topExpression, RowLimitKind.Top, context.Batch);
+            else if (!context.Batch.CreateTimeBinding || topExpression.IsWrittenConstant)
+                _ = ResolveTopPercentValue(topExpression, context.Batch);
         }
 
         // Both quantifiers precede the select list, so real's statement-level

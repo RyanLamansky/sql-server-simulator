@@ -232,6 +232,14 @@ public sealed partial class SimulatedSqlException : DbException
     internal bool EndedTriggerBody;
 
     /// <summary>
+    /// Set on a conversion error raised while <c>ALTER TABLE … ALTER COLUMN</c>
+    /// rewrites the column's values, which real follows with Msg 3621 though
+    /// the error ends the batch, where the same error from an INSERT or UPDATE
+    /// gets none (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    internal bool EndedColumnRewrite;
+
+    /// <summary>
     /// Guards <see cref="ResolveDiagnostics"/> against re-stamping. An error
     /// born inside a nested body (procedure / dynamic-SQL batch) is resolved at
     /// its own dispatch frame's catch boundary; as it propagates outward each

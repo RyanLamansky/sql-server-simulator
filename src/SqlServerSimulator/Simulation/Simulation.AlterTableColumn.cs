@@ -1013,6 +1013,11 @@ partial class Simulation
                         {
                             coerced = decoded.CoerceTo(newCol.Type);
                         }
+                        catch (SimulatedSqlException conversion)
+                        {
+                            conversion.EndedColumnRewrite = true;
+                            throw;
+                        }
                         catch (OverflowException)
                         {
                             // Same source-type-keyed error family as CAST and

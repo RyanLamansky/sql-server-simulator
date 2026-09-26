@@ -500,6 +500,9 @@ public sealed class AlterTableColumnTests
             """);
         var ex = Throws<SimulatedSqlException>(() => sim.ExecuteNonQuery("alter table t alter column v int"));
         AreEqual(245, ex.Number);
+        // Real follows it with Msg 3621, as it doesn't the same error from an
+        // INSERT or UPDATE (probed 2026-09-26).
+        AreEqual(3621, ex.Errors[^1].Number);
     }
 
     [TestMethod]

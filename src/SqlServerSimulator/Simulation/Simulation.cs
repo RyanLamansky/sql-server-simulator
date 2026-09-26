@@ -2347,6 +2347,7 @@ public sealed partial class Simulation
     /// </summary>
     private static bool IsStatementTerminationNoticed(BatchContext batch, SimulatedSqlException error) =>
         error.Number == 1505
+        || error.EndedColumnRewrite
         || ((!batch.BatchAborted || error.EndedTriggerBody)
             && batch.CurrentStatement.WritesRows
             && error.Number is 127 or 220 or 232 or 515 or 547 or 550 or 2601 or 2627 or 2628 or 8115 or 8134 or 8152 or 16947);

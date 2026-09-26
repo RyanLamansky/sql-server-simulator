@@ -312,4 +312,24 @@ public sealed class InlineTvfTests
             values.Add(reader.GetInt32(0));
         CollectionAssert.AreEqual(new[] { 3, 1, 2 }, values);
     }
+
+    /// <summary>
+    /// A row limit read from a parameter creates — the body binds without the
+    /// parameter's value, so the count is settled from its declared type — and
+    /// applies the argument (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select top (@n) v from (values (1), (2), (3)) t (v) order by v", 2, "1,2")]
+    [DataRow("select top (@n) percent v from (values (1), (2), (3), (4)) t (v) order by v", 50, "1,2")]
+    [DataRow("select v from (values (1), (2), (3)) t (v) order by v offset @n rows", 1, "2,3")]
+    public void RowLimitFromAParameter_Creates(string body, int argument, string expected)
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches($"create function f (@n int) returns table as return ({body})");
+        using var reader = simulation.ExecuteReader($"select v from dbo.f({argument})");
+        var values = new List<int>();
+        while (reader.Read())
+            values.Add(reader.GetInt32(0));
+        AreEqual(expected, string.Join(",", values));
+    }
 }

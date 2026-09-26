@@ -233,6 +233,9 @@ public sealed class RenameProcTests
         // Severity 10 arrives as class 0 (probed 2026-09-23).
         AreEqual<byte>(0, error.Class);
         AreEqual<byte>(1, error.State);
+        // Raised from line 801 of sp_rename itself (probed 2026-09-26).
+        AreEqual(801, error.LineNumber);
+        AreEqual("sp_rename", error.Procedure);
     }
 
     /// <summary>
