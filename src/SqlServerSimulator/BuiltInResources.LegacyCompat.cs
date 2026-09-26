@@ -613,6 +613,29 @@ internal static partial class BuiltInResources
     }
 
     /// <summary>
+    /// Every catalog view once, with the schema it lists under: the rows of
+    /// <c>sys.system_views</c> and, through their columns, of
+    /// <c>sys.system_columns</c> — the system halves of <c>sys.all_views</c> /
+    /// <c>sys.all_columns</c> (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    internal static readonly Lazy<(CatalogView View, int SchemaId)[]> SystemViews = new(() =>
+    {
+        var views = new List<(CatalogView, int)>();
+        var seen = new HashSet<int>();
+        foreach (var (key, view) in Simulation.CatalogViews)
+        {
+            if (!seen.Add(view.ObjectId))
+                continue;
+            var dot = key.IndexOf('.', StringComparison.Ordinal);
+            var schemaId = dot >= 0 && key.AsSpan(0, dot).Equals("INFORMATION_SCHEMA", StringComparison.OrdinalIgnoreCase)
+                ? Database.InformationSchemaId
+                : Database.SysSchemaId;
+            views.Add((view, schemaId));
+        }
+        return [.. views];
+    });
+
+    /// <summary>
     /// Every system object in object-id listing order, built once: the
     /// <c>sys.system_objects</c> rows, the system half of <c>sys.all_objects</c>,
     /// and what <c>OBJECT_NAME</c> / <c>OBJECT_SCHEMA_NAME</c> read a negative

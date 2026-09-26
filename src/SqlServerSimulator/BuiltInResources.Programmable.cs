@@ -183,7 +183,27 @@ internal static partial class BuiltInResources
             new("ledger_view_type", SqlType.TinyInt, null, true),
             new("has_opaque_metadata", SqlType.Bit, null, true),
             new("is_dropped_ledger_view", SqlType.Bit, null, true),
-        ], EnumerateViews);
+        ], (batch, database) => EnumerateViews(batch, database).Concat(EnumerateSystemViews()));
+
+        // sys.system_views: the catalog views themselves, the system half of
+        // sys.all_views (probed 2026-09-26 against SQL Server 2025).
+        Sys("system_views",
+        [
+            new("object_id", SqlType.Int32, null, false),
+            new("name", SqlType.SystemName, 128, false),
+            new("schema_id", SqlType.Int32, null, false),
+            new("principal_id", SqlType.Int32, null, true),
+            new("type", charTwo, 2, false),
+            new("type_desc", nvarchar60Catalog, 60, true),
+            new("create_date", SqlType.DateTime, null, false),
+            new("modify_date", SqlType.DateTime, null, false),
+            new("is_ms_shipped", SqlType.Bit, null, true),
+            new("with_check_option", SqlType.Bit, null, true),
+            new("is_date_correlation_view", SqlType.Bit, null, true),
+            new("ledger_view_type", SqlType.TinyInt, null, true),
+            new("has_opaque_metadata", SqlType.Bit, null, true),
+            new("is_dropped_ledger_view", SqlType.Bit, null, true),
+        ], (_, _) => EnumerateSystemViews());
 
         // sys.procedures: per-procedure rows. Shipped column subset matches
         // the load-bearing surface — object_id / name / schema_id /
@@ -920,6 +940,40 @@ internal static partial class BuiltInResources
     /// schema. <c>is_date_correlation_view</c> is always False (the feature
     /// isn't modeled).
     /// </summary>
+    /// <summary>
+    /// One <c>sys.system_views</c> row per catalog view, shaped as
+    /// <c>sys.views</c>' rows are, with <c>is_ms_shipped</c> set.
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateSystemViews()
+    {
+        var falseBit = SqlValue.FromBoolean(false);
+        var viewType = SqlValue.FromChar(CharSqlType.Get(2, Collation.Catalog, Coercibility.Implicit), "V ");
+        var viewTypeDesc = SqlValue.FromNVarchar("VIEW");
+        var nullPrincipal = SqlValue.Null(SqlType.Int32);
+        var ledgerViewTypeNone = SqlValue.FromByte(0);
+        var systemDate = SqlValue.FromDateTime(SystemObjectDate);
+        var msShipped = SqlValue.FromBoolean(true);
+        foreach (var (view, schemaId) in SystemViews.Value)
+        {
+            yield return [
+                SqlValue.FromInt32(view.ObjectId),
+                SqlValue.FromSystemName(view.Name),
+                SqlValue.FromInt32(schemaId),
+                nullPrincipal,
+                viewType,
+                viewTypeDesc,
+                systemDate,
+                systemDate,
+                msShipped,
+                falseBit,
+                falseBit,
+                ledgerViewTypeNone,
+                falseBit,
+                falseBit,
+            ];
+        }
+    }
+
     private static IEnumerable<SqlValue[]> EnumerateViews(Parser.BatchContext batch, Database database)
     {
         var falseBit = SqlValue.FromBoolean(false);

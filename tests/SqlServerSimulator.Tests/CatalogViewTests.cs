@@ -1361,4 +1361,24 @@ public sealed class CatalogViewTests
     public void GroupByDiagnostic_NamesTheCatalogViewAsWritten()
         => AssertSqlError("select o.name, count(*) from sys.objects o", 8120,
             "Column 'sys.objects.name' is invalid in the select list because it is not contained in either an aggregate function or the GROUP BY clause.");
+
+    /// <summary>
+    /// The catalog views are catalogued themselves, in the system halves of
+    /// sys.all_views / sys.all_columns, each column in its type's own
+    /// collation (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select concat(schema_name(schema_id), ':', cast(is_ms_shipped as int)) from sys.system_views where name = 'objects'", "sys:1")]
+    [DataRow("select concat(schema_name(schema_id), ':', cast(is_ms_shipped as int)) from sys.all_views where name = 'COLUMNS' and schema_id <> 4", "INFORMATION_SCHEMA:1")]
+    [DataRow("select collation_name from sys.system_columns where object_id = object_id('sys.objects') and name = 'name'", "SQL_Latin1_General_CP1_CI_AS")]
+    [DataRow("select collation_name from sys.all_columns where object_id = object_id('sys.objects') and name = 'type'", "Latin1_General_CI_AS_KS_WS")]
+    [DataRow("select name from sys.all_columns where object_id = object_id('INFORMATION_SCHEMA.COLUMNS') and column_id = 3", "TABLE_NAME")]
+    public void CatalogViews_AreCataloguedThemselves(string sql, string expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar(sql));
+
+    [TestMethod]
+    [DataRow("select count(*) from sys.columns where object_id = object_id('sys.objects')")]
+    [DataRow("select count(*) from sys.views where name = 'objects'")]
+    public void UserCatalogs_ListNoSystemViews(string sql)
+        => AreEqual(0, new Simulation().ExecuteScalar(sql));
 }

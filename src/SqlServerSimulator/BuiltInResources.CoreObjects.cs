@@ -427,9 +427,15 @@ internal static partial class BuiltInResources
             new("vector_base_type", SqlType.TinyInt, null, true),
         ];
         IEnumerable<SqlValue[]> ColumnRows(Parser.BatchContext batch, Database database, CatalogFilter filter) =>
-            EnumerateColumns(batch, database, defaultCollation, nullCollation, filter);
+            EnumerateColumns(batch, database, defaultCollation, nullCollation, filter, userColumns: true, systemColumns: false);
         SysP("columns", ColumnsShape(), ["object_id"], ColumnRows);
-        SysP("all_columns", ColumnsShape(), ["object_id"], ColumnRows);
+        // sys.all_columns adds sys.system_columns: the catalog views' own
+        // columns, each in its type's collation (probed 2026-09-26 against SQL
+        // Server 2025).
+        SysP("all_columns", ColumnsShape(), ["object_id"], (batch, database, filter) =>
+            EnumerateColumns(batch, database, defaultCollation, nullCollation, filter, userColumns: true, systemColumns: true));
+        SysP("system_columns", ColumnsShape(), ["object_id"], (batch, database, filter) =>
+            EnumerateColumns(batch, database, defaultCollation, nullCollation, filter, userColumns: false, systemColumns: true));
     }
 
     private static IEnumerable<SqlValue[]> EnumerateColumns(
@@ -437,7 +443,9 @@ internal static partial class BuiltInResources
         Database database,
         SqlValue defaultCollation,
         SqlValue nullCollation,
-        CatalogFilter filter)
+        CatalogFilter filter,
+        bool userColumns,
+        bool systemColumns)
     {
         _ = batch;
         // object_id pushdown: skip every object whose id doesn't match, so a
@@ -548,6 +556,29 @@ internal static partial class BuiltInResources
                 nullVectorBaseTypeId,
             ];
         }
+
+        // A catalog view's column carries its type's own collation rather
+        // than the database's.
+        if (systemColumns)
+        {
+            foreach (var (view, _) in SystemViews.Value)
+            {
+                if (hasIdFilter && view.ObjectId != wantObjectId)
+                    continue;
+                var viewObjectId = SqlValue.FromInt32(view.ObjectId);
+                for (var i = 0; i < view.Columns.Length; i++)
+                {
+                    var column = view.Columns[i];
+                    var row = Row(viewObjectId, column, i + 1, declared: false);
+                    row[11] = SqlType.IsCollatedString(column.Type) && column.Type.Collation is { } typeCollation
+                        ? SqlValue.FromSystemName(typeCollation.Name)
+                        : nullCollation;
+                    yield return row;
+                }
+            }
+        }
+        if (!userColumns)
+            yield break;
 
         foreach (var schema in database.Schemas.Values)
         {
