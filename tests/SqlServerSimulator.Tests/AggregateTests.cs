@@ -716,4 +716,11 @@ public sealed class AggregateTests
     [DataRow("select approx_percentile_cont(0.5) within group (order by v, v) from (values (1)) t (v)", 10751)]
     public void ApproxPercentile_RefusesAsRealDoes(string sql, int number)
         => new Simulation().AssertSqlError(sql, number);
+
+    /// <summary>A statistical aggregate's moment past float's range is Msg 8115 (probed 2026-09-26 against SQL Server 2025).</summary>
+    [TestMethod]
+    [DataRow("stdev")]
+    [DataRow("varp")]
+    public void AStatisticalAggregatePastFloatsRange_IsMsg8115(string aggregate)
+        => new Simulation().AssertSqlError($"select {aggregate}(f) from (values (1e300), (-1e300)) v(f)", 8115, "Arithmetic overflow error converting expression to data type float.");
 }

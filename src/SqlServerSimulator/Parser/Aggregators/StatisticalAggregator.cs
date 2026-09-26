@@ -27,6 +27,10 @@ internal sealed class StatisticalAggregator(AggregateKind kind) : Aggregator
         this.count++;
         this.sum += x;
         this.sumOfSquares += x * x;
+        // A moment past float's range is Msg 8115 at the row that took it
+        // there (probed 2026-09-26 against SQL Server 2025).
+        if (double.IsInfinity(this.sumOfSquares) || double.IsInfinity(this.sum))
+            throw SimulatedSqlException.ArithmeticOverflow("float");
     }
 
     // The classical sum / sum-of-squares moments subtract directly, so the

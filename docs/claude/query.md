@@ -476,6 +476,9 @@ The representative is what a projection reaching the column *underneath* a group
 
 Oracle: `GroupedAggregateStreamingTests`.
 
+**Not modeled yet**: real sends the groups (and window rows) that completed before an aggregate operand fails — `SELECT g, SUM(i) … GROUP BY g ORDER BY g` over an overflowing second group streams the first group's row, then the error — and follows the error with the Msg 8153 NULL-elimination warning when a NULL was skipped; here the statement fails before its first row and the warning isn't sent (probed 2026-09-26 against SQL Server 2025).
+Which groups completed first depends on real's plan (a stream aggregate over sorted input finishes them in key order, a hash aggregate at the end).
+
 ### Parallel grouped accumulation (built, proven, **off by default**)
 
 `Selection.Execution.AggregateParallel.cs` forks the streaming path's per-row *consumer* work — the WHERE excluders, the grouping-key evaluation, the aggregate operands, and the column decoding all three trigger — across worker threads while the calling thread keeps producing the row stream.
