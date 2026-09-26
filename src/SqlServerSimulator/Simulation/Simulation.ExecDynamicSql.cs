@@ -165,7 +165,12 @@ partial class Simulation
         if (connection.NestingLevel >= SimulatedDbConnection.MaxNestingLevel)
             throw SimulatedSqlException.MaximumNestingLevelExceeded();
 
-        // Bind declared params: positional fill first, then named lookup.
+        // Bind declared params: positional fill first, then named lookup. An
+        // error binding the arguments reports line 0, as a procedure's does —
+        // but a declared parameter missing from a call that supplied none is
+        // the statement's own line (probed 2026-09-26 against SQL Server 2025).
+        SimulatedSqlException ArgumentBindingError(SimulatedSqlException error) =>
+            argumentValues.Count > 0 ? error.PinLine(0) : error;
         var preDeclared = new Dictionary<string, VariableSlot>(BatchContext.VariableNameComparer);
         var outputBindings = new List<(SpExecuteSqlParam Param, VariableSlot CallerSlot)>();
         if (declaredParams is not null)
@@ -181,7 +186,7 @@ partial class Simulation
             // throw.
             var sawUnknownName = false;
             if (declaredParams.Count == 0 && argumentValues.Count > 0)
-                throw SimulatedSqlException.ArgumentsSuppliedToParameterlessRoutine("");
+                throw SimulatedSqlException.ArgumentsSuppliedToParameterlessRoutine("").PinLine(0);
             foreach (var (name, value, outputSlot, isUntypedNull) in argumentValues)
             {
                 int idx;
@@ -189,7 +194,7 @@ partial class Simulation
                 {
                     idx = positional++;
                     if (idx >= declaredParams.Count)
-                        throw SimulatedSqlException.TooManyArgumentsToFunction("");
+                        throw SimulatedSqlException.TooManyArgumentsToFunction("").PinLine(0);
                 }
                 else
                 {
@@ -210,7 +215,7 @@ partial class Simulation
                 }
                 // A second value for one parameter is a surplus argument.
                 if (bound[idx] is not null)
-                    throw SimulatedSqlException.TooManyArgumentsToFunction("");
+                    throw SimulatedSqlException.TooManyArgumentsToFunction("").PinLine(0);
                 bound[idx] = value;
                 boundOutputSlots[idx] = outputSlot;
                 boundIsUntypedNull[idx] = isUntypedNull;
@@ -226,7 +231,7 @@ partial class Simulation
                 // message spells it the way the declaration did.
                 if (bound[i] is null)
                 {
-                    bound[i] = param.Default ?? throw SimulatedSqlException.ParameterizedQueryExpectsParameter(paramDefsText, sqlText, "@" + param.Name);
+                    bound[i] = param.Default ?? throw ArgumentBindingError(SimulatedSqlException.ParameterizedQueryExpectsParameter(paramDefsText, sqlText, "@" + param.Name));
                     boundIsUntypedNull[i] = bound[i]!.Value.IsNull;
                 }
                 if (!boundIsUntypedNull[i])
@@ -243,7 +248,7 @@ partial class Simulation
             // declaration first when both are wrong. The name is empty, which
             // is why real's message carries a double space.
             if (sawUnknownName)
-                throw SimulatedSqlException.TooManyArgumentsToFunction("");
+                throw SimulatedSqlException.TooManyArgumentsToFunction("").PinLine(0);
         }
 
         // The status sp_executesql returns is @@ERROR as its batch left it,

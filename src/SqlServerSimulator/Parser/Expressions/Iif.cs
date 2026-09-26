@@ -40,7 +40,17 @@ internal sealed class Iif : Expression
 
     private void ParseBody(ParserContext context)
     {
-        this.condition = BooleanExpression.Parse(context);
+        // A condition that isn't a predicate is reported near IIF's own
+        // opening parenthesis, whatever follows it (probed 2026-09-26 against
+        // SQL Server 2025).
+        try
+        {
+            this.condition = BooleanExpression.Parse(context);
+        }
+        catch (SimulatedSqlException error) when (error.Number == 4145)
+        {
+            throw SimulatedSqlException.NonBooleanInConditionContext("(");
+        }
         if (context.Token is not Tokens.Operator { Character: ',' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         this.trueValue = Parse(context.MoveNextRequiredReturnSelf());

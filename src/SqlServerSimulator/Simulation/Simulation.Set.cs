@@ -79,7 +79,7 @@ partial class Simulation
                 if (context.GetNextRequired() is not UnquotedString next)
                     return false;
                 if (!RecognizedOptions.TryGetValue(next.Value, out var nextKind) || nextKind != SetOptionKind.OnOff)
-                    throw SimulatedSqlException.UnrecognizedSetOption(next.Value);
+                    throw SimulatedSqlException.UnrecognizedSetOption(next.Value, onOff: true);
                 affectsQuotedIdentifier |= IsQuotedIdentifierOption(next.Value);
                 sessionOptionNames.Add(next.Value);
                 context.MoveNextRequired();
@@ -357,9 +357,9 @@ partial class Simulation
         var peeked = context.GetNextOptional();
         context.RestoreCheckpoint(checkpoint);
         if (peeked is ReservedKeyword { Keyword: Keyword.On or Keyword.Off }
-            or Numeric or Literal or UnquotedString or DelimitedIdentifier)
+            or Numeric or Literal or UnquotedString or DelimitedIdentifier or Operator { Character: '-' or '+' })
         {
-            throw SimulatedSqlException.UnrecognizedSetOption(nameValue);
+            throw SimulatedSqlException.UnrecognizedSetOption(nameValue, onOff: peeked is ReservedKeyword);
         }
         throw SimulatedSqlException.SyntaxErrorNear(unrecognized);
     }

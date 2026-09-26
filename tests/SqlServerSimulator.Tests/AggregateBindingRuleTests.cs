@@ -110,6 +110,7 @@ public sealed class AggregateBindingRuleTests
     [DataRow("select count(*) from t group by rand()")]
     [DataRow("select count(*) from t group by cast(sysdatetime() as date)")]
     [DataRow("select count(*) from t group by a, getdate()")]
+    [DataRow("select b from t group by 1")]
     public void GroupByItemWithoutOwnColumn_RaisesMsg164(string sql) =>
         // Note the last row: the rule is per item, so a valid `a` beside an
         // offending expression doesn't rescue the statement. `GROUP BY 1` is a

@@ -1080,10 +1080,15 @@ partial class SimulatedSqlException
     /// Mimics SQL Server's Msg 214 — <c>sp_executesql</c>'s statement (state 2)
     /// or parameter-declaration (state 3) argument isn't a Unicode string: a
     /// <c>varchar</c>, a number, an untyped <c>NULL</c>. Raised when the call
-    /// runs. Probe-confirmed against SQL Server 2025 (2026-09-24).
+    /// runs, attributed to <c>sp_executesql</c>. Probe-confirmed against SQL
+    /// Server 2025 (2026-09-24; the attribution 2026-09-26).
     /// </summary>
-    internal static SimulatedSqlException SpExecuteSqlArgumentNotUnicode(string parameterName, byte state) =>
-        new($"Procedure expects parameter '{parameterName}' of type 'ntext/nchar/nvarchar'.", 214, 16, state);
+    internal static SimulatedSqlException SpExecuteSqlArgumentNotUnicode(string parameterName, byte state)
+    {
+        var error = new SimulatedSqlException($"Procedure expects parameter '{parameterName}' of type 'ntext/nchar/nvarchar'.", 214, 16, state);
+        error.Errors[0].Procedure = "sp_executesql";
+        return error;
+    }
 
     /// <summary>
     /// Mimics SQL Server's Msg 214 — fired by <c>STRING_SPLIT</c> when the

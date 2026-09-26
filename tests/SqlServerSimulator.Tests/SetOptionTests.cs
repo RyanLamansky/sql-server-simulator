@@ -84,6 +84,21 @@ public sealed class SetOptionTests
     public void UnknownOption_RaisesMsg195(string sql, string unrecognizedName)
         => new Simulation().AssertSqlError(sql, 195, $"'{unrecognizedName}' is not a recognized SET option.");
 
+    /// <summary>
+    /// Msg 195's state says what followed the name: 5 for ON / OFF, 7 for a
+    /// value (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("SET BANANA ON", 5)]
+    [DataRow("SET BANANA OFF", 5)]
+    [DataRow("SET ANSI_NULLS, BANANA ON", 5)]
+    [DataRow("SET BANANA 5", 7)]
+    [DataRow("SET BANANA -1", 7)]
+    [DataRow("SET BANANA 'x'", 7)]
+    [DataRow("SET BANANA foo", 7)]
+    public void UnknownOption_StateSaysWhatFollowed(string sql, int state)
+        => AreEqual((byte)state, new Simulation().AssertSqlError(sql, 195).State);
+
     [TestMethod]
     public void UnknownOption_NoTrailingTokens_RaisesMsg102()
     {

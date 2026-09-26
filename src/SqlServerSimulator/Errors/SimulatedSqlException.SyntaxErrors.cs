@@ -182,10 +182,11 @@ partial class SimulatedSqlException
     /// 2025 (2026-05-14): the offending name is preserved verbatim (uppercase
     /// in the probe) inside single quotes. The narrower failure mode where the
     /// name isn't followed by anything parseable falls through to the generic
-    /// Msg 102 path instead.
+    /// Msg 102 path instead. State 5 when ON / OFF follows the name, 7 when a
+    /// value does (probed 2026-09-26 against SQL Server 2025).
     /// </summary>
-    internal static SimulatedSqlException UnrecognizedSetOption(string name) =>
-        new($"'{name}' is not a recognized SET option.", 195, 15, 1);
+    internal static SimulatedSqlException UnrecognizedSetOption(string name, bool onOff) =>
+        new($"'{name}' is not a recognized SET option.", 195, 15, onOff ? (byte)5 : (byte)7);
 
     /// <summary>
     /// Mimics SQL Server error 111: the given <paramref name="statementKind"/>
@@ -491,7 +492,11 @@ partial class SimulatedSqlException
     /// </para>
     /// </summary>
     internal static SimulatedSqlException NonBooleanInConditionContext(ParserContext context) =>
-        new($"An expression of non-boolean type specified in a context where a condition is expected, near '{TokenAfterOpenBooleanGroups(context)?.ErrorText}'.", 4145, 15, 1);
+        NonBooleanInConditionContext(TokenAfterOpenBooleanGroups(context)?.ErrorText);
+
+    /// <summary>Msg 4145 reported near a token the caller names.</summary>
+    internal static SimulatedSqlException NonBooleanInConditionContext(string? near) =>
+        new($"An expression of non-boolean type specified in a context where a condition is expected, near '{near}'.", 4145, 15, 1);
 
     private static Token? TokenAfterOpenBooleanGroups(ParserContext context)
     {

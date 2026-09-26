@@ -122,15 +122,20 @@ public sealed class DerivedTableColumnAliasTests
 
     /// <summary>
     /// A derived table has no native name, so the alias is mandatory — real
-    /// reports Msg 102 near the closing <c>)</c> when it's missing
-    /// (probe-confirmed 2026-07-31).
+    /// reports a syntax error near the token where the alias belongs, the
+    /// closing <c>)</c> when the batch ends there (probed 2026-09-26; real
+    /// then reports a second error its parser recovers into, which isn't
+    /// modeled).
     /// </summary>
     [TestMethod]
-    [DataRow("select * from (select 1 x)")]
-    [DataRow("select x from (select 1 x)")]
-    [DataRow("select * from (select 1 x) join (select 2 y) on 1 = 1")]
-    public void DerivedTableWithoutAlias_RaisesSyntaxError(string sql)
-        => new Simulation().AssertSqlError(sql, 102, "Incorrect syntax near ')'.");
+    [DataRow("select * from (select 1 x)", 102, "Incorrect syntax near ')'.")]
+    [DataRow("select x from (select 1 x)", 102, "Incorrect syntax near ')'.")]
+    [DataRow("select * from (select 1 x);", 102, "Incorrect syntax near ';'.")]
+    [DataRow("select * from (select 1 x), (select 2 y) z", 102, "Incorrect syntax near ','.")]
+    [DataRow("select * from (select 1 x) join (select 2 y) on 1 = 1", 156, "Incorrect syntax near the keyword 'join'.")]
+    [DataRow("select * from (select 1 x) where 1 = 1", 156, "Incorrect syntax near the keyword 'where'.")]
+    public void DerivedTableWithoutAlias_RaisesSyntaxError(string sql, int number, string message)
+        => new Simulation().AssertSqlError(sql, number, message);
 
     /// <summary>An aliased derived table still works, with or without a column list.</summary>
     [TestMethod]

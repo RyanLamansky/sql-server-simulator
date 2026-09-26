@@ -18,6 +18,7 @@ All semantics below are probe-confirmed against SQL Server 2025.
 | `THROW;` (re-raise in CATCH) | the **original** error's line | not the re-raising statement's line |
 | Procedure body error | line relative to the **batch that created it** — comments and blank lines ahead of the `CREATE` count | + `Procedure` = the name as the invoking `EXEC` spelled it, brackets dropped and case kept (`exec p` → `p`, `exec DBO.P` → `DBO.P`, probed 2026-09-23) |
 | Procedure / `sp_executesql` argument that fails to convert | **0** | + `Procedure` for a procedure (Msg 8114, or an xml parse error) |
+| `sp_executesql` arguments that don't bind (Msg 8144 / 8146 / 8178) | **0** — but the statement's line for a declared parameter missing from a call that supplied no arguments at all | Msg 214 (a non-Unicode statement or declaration) keeps the statement's line and names `sp_executesql` as `Procedure` (probed 2026-09-26) |
 | Procedure call whose arguments don't bind (Msg 201 / 8144 / 8145) | **0** | + `Procedure` = the name as the `EXEC` spelled it (probed 2026-09-23) |
 | `GOTO` to an undeclared label (Msg 133) / a duplicate label (Msg 132) | the `GOTO`'s line / the second label's line | raised while the batch compiles, ahead of anything running (probed 2026-09-23) |
 | Trigger body error | creating-batch-relative line | + `Procedure = "<name>"` (**unqualified**) |

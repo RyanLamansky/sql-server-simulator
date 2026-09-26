@@ -1261,10 +1261,17 @@ internal sealed partial class Selection
         // read, so it runs here on the cached plan build.
         if (aggregates.Count > 0 || fromClause.GroupingSets.Count > 0 || fromClause.Having is not null)
         {
-            var grouped = fromClause.GroupingSets.Count > 0 || fromClause.Having is not null;
-            ValidateGroupByReferences(
-                sources, expressions, orderBy, outputColumnNames, fromClause, windows,
-                grouped ? new NullabilityContext(parseBatch, static _ => true, ResolveColumnType) : null);
+            // Real binds the GROUP BY items before judging the select list
+            // against them, so an item's own held Msg 144 / 164 — raised once
+            // the statement has parsed — outranks this check's (`SELECT a …
+            // GROUP BY 1` is Msg 164; probed 2026-09-26).
+            if (parseBatch.Parser.PendingGroupByBindError is null)
+            {
+                var grouped = fromClause.GroupingSets.Count > 0 || fromClause.Having is not null;
+                ValidateGroupByReferences(
+                    sources, expressions, orderBy, outputColumnNames, fromClause, windows,
+                    grouped ? new NullabilityContext(parseBatch, static _ => true, ResolveColumnType) : null);
+            }
         }
 
         var offsetExpression = fromClause.OffsetExpression;

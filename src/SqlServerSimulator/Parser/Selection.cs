@@ -3213,10 +3213,11 @@ internal sealed partial class Selection
                     throw SimulatedSqlException.OrderByInvalidInCte();
 
                 // A derived table has no native name, so the alias is
-                // mandatory: real reports Msg 102 near the closing ')' when
-                // it's missing (probe-confirmed 2026-07-31).
+                // mandatory: real reports Msg 102 near the token where it
+                // belongs, the closing ')' when the batch ends there (probed
+                // 2026-09-26: `FROM (SELECT 1 a);` is near ';').
                 var derivedQualifier = ConsumeOptionalAlias(context)
-                    ?? throw SimulatedSqlException.SyntaxErrorNear(')');
+                    ?? throw SimulatedSqlException.SyntaxErrorNear(context);
                 var derivedNames = ResolveDerivedTableColumnNames(context, derivedSelection.ColumnNames, derivedQualifier);
                 // A derived table takes no TABLESAMPLE; real stops at the
                 // keyword itself (Msg 156, probed 2026-09-24).
@@ -3375,6 +3376,9 @@ internal sealed partial class Selection
         if (context.Token is not Operator { Character: '(' })
             throw SimulatedSqlException.NoColumnNameSpecified(1, alias);
         var columnNames = ParseColumnAliasList(context);
+        // No TABLESAMPLE here either, as for a query derived table.
+        if (context.Token is ReservedKeyword { Keyword: Keyword.TableSample } tableSample)
+            throw SimulatedSqlException.SyntaxErrorNearKeyword(tableSample);
 
         // Msg 8158 (rows wider than the list) / Msg 8159 (rows narrower).
         if (arity > columnNames.Length)

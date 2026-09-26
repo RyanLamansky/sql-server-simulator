@@ -217,6 +217,36 @@ public sealed class RefusalFidelityTests
         AreEqual((byte)3, ex.Errors[0].State);
     }
 
+    /// <summary>
+    /// An argument that doesn't bind reports line 0, as a procedure call's
+    /// does — except a missing declared parameter where the call supplied no
+    /// arguments at all, which is the statement's line — and Msg 214 names
+    /// sp_executesql (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("exec sp_executesql N'select @a', N'@a int', @a = 5, @a = 6", 8144, 0, "")]
+    [DataRow("exec sp_executesql N'select @a', N'@a int', 5, 6", 8144, 0, "")]
+    [DataRow("exec sp_executesql N'select @a', N'@a int', @b = 5", 8178, 0, "")]
+    [DataRow("exec sp_executesql N'select 1', N'', 5", 8146, 0, "")]
+    [DataRow("exec sp_executesql N'select @a', N'@a int'", 8178, 2, "")]
+    [DataRow("exec sp_executesql 'select 1'", 214, 2, "sp_executesql")]
+    public void SpExecuteSql_ArgumentErrors_ReportRealsLineAndProcedure(string sql, int number, int line, string procedure)
+    {
+        var error = new Simulation().AssertSqlError($"select 1\n{sql}", number).Errors[0];
+        AreEqual(line, error.LineNumber);
+        AreEqual(procedure, error.Procedure);
+    }
+
+    /// <summary>
+    /// IIF reports a condition that isn't a predicate near its own opening
+    /// parenthesis (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select iif(1, 1, 2)")]
+    [DataRow("select iif('a' + 'b', 1, 2) x")]
+    public void Iif_NonBooleanCondition_IsNearItsParenthesis(string sql)
+        => new Simulation().AssertSqlError(sql, 4145, "An expression of non-boolean type specified in a context where a condition is expected, near '('.");
+
     [TestMethod]
     public void SpExecuteSql_UnicodeVariableStatement_Runs()
         => AreEqual(1, new Simulation().ExecuteScalar("declare @s nchar(20) = N'select 1'; exec sp_executesql @s"));
@@ -465,8 +495,10 @@ public sealed class RefusalFidelityTests
         => new Simulation().AssertSqlError(sql, number);
 
     [TestMethod]
-    public void TableSample_OnADerivedTable_RaisesMsg156()
-        => new Simulation().AssertSqlError("select * from (select 1 a) d tablesample (10 percent)", 156, "Incorrect syntax near the keyword 'tablesample'.");
+    [DataRow("select * from (select 1 a) d tablesample (10 percent)")]
+    [DataRow("select * from (values (1)) v (a) tablesample (10 percent)")]
+    public void TableSample_OnADerivedTable_RaisesMsg156(string sql)
+        => new Simulation().AssertSqlError(sql, 156, "Incorrect syntax near the keyword 'tablesample'.");
 
     [TestMethod]
     [DataRow("declare @t table (a int references x(a))", "REFERENCES", 1)]
