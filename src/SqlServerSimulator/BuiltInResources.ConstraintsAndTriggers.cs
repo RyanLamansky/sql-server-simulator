@@ -743,7 +743,7 @@ internal static partial class BuiltInResources
         foreach (var schema in database.Schemas.Values)
         {
             var schemaId = SqlValue.FromInt32(schema.SchemaId);
-            foreach (var table in CatalogTables(schema, batch))
+            foreach (var table in ConstraintHosts(schema, batch))
             {
                 foreach (var ck in table.CheckConstraints.OrderBy(c => c.ObjectId))
                 {
@@ -805,7 +805,7 @@ internal static partial class BuiltInResources
         foreach (var schema in database.Schemas.Values)
         {
             var schemaId = SqlValue.FromInt32(schema.SchemaId);
-            foreach (var table in CatalogTables(schema, batch))
+            foreach (var table in ConstraintHosts(schema, batch))
             {
                 // unique_index_id must point each constraint at ITS backing
                 // index in sys.indexes (DacFx's UQ query joins on it) — resolve

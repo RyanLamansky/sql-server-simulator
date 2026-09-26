@@ -280,6 +280,19 @@ internal sealed class MultiStatementTableValuedFunction(
     /// rule as <see cref="KeyConstraints"/>.
     /// </summary>
     public readonly CheckConstraint[] CheckConstraints = checkConstraints;
+
+    private HeapTable? catalogShape;
+
+    /// <summary>
+    /// The return table as the catalog views list it: real reports its
+    /// PRIMARY KEY / UNIQUE / CHECK / DEFAULT constraints and their indexes
+    /// under the function's own object id, as a table's (probed 2026-09-26
+    /// against SQL Server 2025). Built once and never stored into; a call's
+    /// <c>@r</c> is a table of its own.
+    /// </summary>
+    public HeapTable CatalogShape() => this.catalogShape ??= new HeapTable(
+        this.Name, this.OutputColumns, this.ObjectId, this.SchemaId, this.CreateDate,
+        this.KeyConstraints, this.CheckConstraints, isTableVariable: true);
 }
 
 /// <summary>

@@ -293,4 +293,36 @@ public sealed class MultiStatementTvfTests
         AreEqual("z:-", simulation.ExecuteScalar("select concat(name, ':', isnull(definition, '-')) from sys.computed_columns where object_id = object_id('dbo.f')"));
         AreEqual("DF__f__x:((5))", simulation.ExecuteScalar("select concat(left(name, 8), ':', definition) from sys.default_constraints where parent_object_id = object_id('dbo.f')"));
     }
+
+    /// <summary>
+    /// The return table's constraints and their indexes are listed under the
+    /// function's id, as a table's are (probed 2026-09-26 against SQL Server
+    /// 2025).
+    /// </summary>
+    [TestMethod]
+    public void ReturnTableConstraints_AreListedUnderTheFunction()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches("create function dbo.f() returns @t table (a int primary key, b int unique, c int check (c > 0), d int default 5) as begin return end");
+        AreEqual("CK__,DF__,PK__,UQ__", simulation.ExecuteScalar(
+            "select string_agg(left(name, 4), ',') within group (order by name) from sys.objects where parent_object_id = object_id('dbo.f')"));
+        AreEqual("PK:1,UQ:2", simulation.ExecuteScalar(
+            "select string_agg(concat(type, ':', unique_index_id), ',') within group (order by type) from sys.key_constraints where parent_object_id = object_id('dbo.f')"));
+        AreEqual("([c]>(0))", simulation.ExecuteScalar("select definition from sys.check_constraints where parent_object_id = object_id('dbo.f')"));
+        AreEqual("1:CLUSTERED:1,2:NONCLUSTERED:2", simulation.ExecuteScalar("""
+            select string_agg(concat(i.index_id, ':', i.type_desc, ':', c.column_id), ',') within group (order by i.index_id)
+            from sys.indexes i join sys.index_columns c on c.object_id = i.object_id and c.index_id = i.index_id
+            where i.object_id = object_id('dbo.f')
+            """));
+    }
+
+    [TestMethod]
+    public void ReturnTableWithoutAClusteredKey_IsAHeap()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches("create function dbo.f() returns @t table (a int unique, b int primary key nonclustered) as begin return end");
+        AreEqual("0:HEAP,2:NONCLUSTERED,3:NONCLUSTERED", simulation.ExecuteScalar(
+            "select string_agg(concat(index_id, ':', type_desc), ',') within group (order by index_id) from sys.indexes where object_id = object_id('dbo.f')"));
+        AreEqual(0, simulation.ExecuteScalar("select count(*) from sys.tables where object_id = object_id('dbo.f')"));
+    }
 }

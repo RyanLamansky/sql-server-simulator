@@ -271,7 +271,8 @@ Probed against SQL Server 2025.
 - **Constraint enforcement is row-level strict**: PK / UNIQUE / CHECK violations in the body surface as runtime errors (Msg 2627 / Msg 547).
   Real SQL Server's probe-observed behavior is more forgiving in some cases — for shared-key collisions it returns an empty result set rather than raising.
   Stricter behavior is defensible since apps that hit it are buggy.
-- **Not modeled yet**: the return table's PRIMARY KEY / UNIQUE / CHECK constraints in `sys.objects`, `sys.key_constraints`, `sys.check_constraints` and `sys.indexes`, which real lists keyed by the function, and the Msg 1750 real adds after a column CHECK's Msg 8141.
+  Its PRIMARY KEY / UNIQUE / CHECK / DEFAULT constraints and their indexes are listed the same way, in `sys.objects`, `sys.key_constraints`, `sys.check_constraints`, `sys.indexes` and `sys.index_columns` (a heap row where no key is clustered), through `MultiStatementTableValuedFunction.CatalogShape`.
+- **Not modeled yet**: the Msg 1750 real adds after a return-table column CHECK's Msg 8141.
 
 ## Views
 `CREATE VIEW schema.name [(col_list)] [WITH SCHEMABINDING | ENCRYPTION | VIEW_METADATA] AS <SELECT> [WITH CHECK OPTION]`, referenced from FROM as `FROM schema.view [alias]` (or unqualified `FROM view`).

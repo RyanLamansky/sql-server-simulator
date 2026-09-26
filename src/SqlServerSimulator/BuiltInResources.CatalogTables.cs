@@ -26,6 +26,18 @@ partial class BuiltInResources
             : schema.HeapTables.Values;
 
     /// <summary>
+    /// The tables whose constraints and indexes a catalog view lists under
+    /// <paramref name="schema"/>: <see cref="CatalogTables"/>, then every
+    /// multi-statement TVF's return table, which real lists the same way under
+    /// the function's id (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    internal static IEnumerable<HeapTable> ConstraintHosts(Schema schema, BatchContext? batch) =>
+        CatalogTables(schema, batch).Concat(schema.Functions.Values
+            .OfType<MultiStatementTableValuedFunction>()
+            .OrderBy(f => f.ObjectId)
+            .Select(f => f.CatalogShape()));
+
+    /// <summary>
     /// The objects whose declared columns the column-family catalog views
     /// (<c>sys.identity_columns</c> / <c>sys.computed_columns</c> /
     /// <c>sys.default_constraints</c>) report: <see cref="CatalogTables"/>, and

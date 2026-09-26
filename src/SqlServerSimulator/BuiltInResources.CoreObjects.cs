@@ -841,7 +841,16 @@ internal static partial class BuiltInResources
                 // immediately after the table they belong to so the natural
                 // sys.objects ordering matches probe-confirmed real-server
                 // shape (table rows interleaved with their own constraints).
-                if (obj is not HeapTable t) continue;
+                // A multi-statement TVF's return-table constraints hang off
+                // the function the same way (probed 2026-09-26).
+                var t = obj switch
+                {
+                    HeapTable table => table,
+                    MultiStatementTableValuedFunction function => function.CatalogShape(),
+                    _ => null,
+                };
+                if (t is null)
+                    continue;
                 var schemaIdValue = SqlValue.FromInt32(t.SchemaId);
                 var createDate = SqlValue.FromDateTime(t.CreateDate);
                 var modifyDate = SqlValue.FromDateTime(t.ModifyDate);

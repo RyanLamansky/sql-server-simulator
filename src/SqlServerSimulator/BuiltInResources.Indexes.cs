@@ -574,7 +574,7 @@ internal static partial class BuiltInResources
         var primaryDataSpace = SqlValue.FromInt32(1);
         foreach (var schema in database.Schemas.Values)
         {
-            foreach (var table in CatalogTables(schema, batch))
+            foreach (var table in ConstraintHosts(schema, batch))
             {
                 if (hasIdFilter && table.ObjectId != wantObjectId)
                     continue;
@@ -1267,7 +1267,7 @@ internal static partial class BuiltInResources
         var nullByte = SqlValue.Null(SqlType.TinyInt);
         foreach (var schema in database.Schemas.Values)
         {
-            foreach (var table in CatalogTables(schema, batch))
+            foreach (var table in ConstraintHosts(schema, batch))
             {
                 if (hasIdFilter && table.ObjectId != wantObjectId)
                     continue;
