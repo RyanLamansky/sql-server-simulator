@@ -83,7 +83,11 @@ internal sealed class DateBucket : Expression
             bucketOffset += widthInt;
             bucket = next;
         }
-        return bucket;
+        // A datetimeoffset's bucket is the same instant written at the date's
+        // own offset (probed 2026-09-26 against SQL Server 2025).
+        return dateValue.Type is DateTimeOffsetSqlType && bucket.Type is DateTimeOffsetSqlType
+            ? SqlValue.FromDateTimeOffset(bucket.Type, bucket.AsDateTimeOffset.ToOffset(dateValue.AsDateTimeOffset.Offset))
+            : bucket;
     }
 
     private SqlValue? NextBucketStart(SqlValue origin, long offset)

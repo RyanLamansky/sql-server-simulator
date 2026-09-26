@@ -137,13 +137,32 @@ public sealed class DatePartTests
         AreEqual(517, ex.Number);
     }
 
+    /// <summary>
+    /// The datepart × function × type refusals, with the state naming the
+    /// type (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
     [TestMethod]
-    public void DateAdd_TzOffsetOnDateTimeOffset_ShiftsWallClock()
-    {
-        // DATEADD(tzoffset, +60, ...) preserves the UTC instant but shifts
-        // the rendered offset by 60 minutes.
-        var v = (DateTimeOffset)ExecuteScalar("select dateadd(tzoffset, 60, cast('2024-06-15 13:00:00 +00:00' as datetimeoffset(0)))")!;
-        AreEqual(TimeSpan.FromHours(1), v.Offset);
-        AreEqual(new DateTime(2024, 6, 15, 14, 0, 0), v.DateTime);
-    }
+    [DataRow("dateadd(iso_week, 1, cast('2024-02-29' as datetime2))", 2)]
+    [DataRow("dateadd(iso_week, 1, cast('2024-02-29' as date))", 2)]
+    [DataRow("dateadd(microsecond, 1, cast('2024-02-29' as datetime))", 0)]
+    [DataRow("dateadd(nanosecond, 1, cast('2024-02-29' as smalldatetime))", 3)]
+    [DataRow("dateadd(tzoffset, 1, cast('2024-02-29' as date))", 1)]
+    [DataRow("dateadd(tzoffset, 1, cast('2024-02-29' as datetimeoffset))", 2)]
+    [DataRow("datetrunc(weekday, cast('2024-02-29' as datetime2))", 11)]
+    [DataRow("datetrunc(nanosecond, cast('12:00' as time))", 11)]
+    [DataRow("datetrunc(microsecond, cast('2024-02-29' as datetime))", 9)]
+    [DataRow("datetrunc(millisecond, cast('2024-02-29' as smalldatetime))", 8)]
+    [DataRow("datetrunc(tzoffset, cast('2024-02-29' as date))", 10)]
+    [DataRow("datetrunc(tzoffset, cast('2024-02-29' as datetimeoffset))", 11)]
+    public void AFunctionRefusesTheDatepart(string expression, int state)
+        => AreEqual((byte)state, new Simulation().AssertSqlError($"select {expression}", 9810).State);
+
+    [TestMethod]
+    public void TzOffset_ReadsZeroFromADateTime2()
+        => AreEqual("0:+00:00", new Simulation().ExecuteScalar("declare @d datetime2 = '2024-02-29'; select concat(datepart(tzoffset, @d), ':', datename(tzoffset, @d))"));
+
+    [TestMethod]
+    public void ASmallDateTime_IsNamedDatetime_InDatepartsRefusal()
+        => StartsWith("The datepart tzoffset is not supported by date function datepart for data type datetime.",
+            new Simulation().AssertSqlError("select datepart(tzoffset, cast('2024-02-29' as smalldatetime))", 9810).Errors[0].Message);
 }

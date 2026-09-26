@@ -274,19 +274,53 @@ internal static class DatePartKinds
     /// </summary>
     public static void RequireCompatible(DatePartKind kind, SqlType type, string functionLowerName)
     {
+        var legacy = type == SqlType.DateTime || type == SqlType.SmallDateTime;
         var ok = type switch
         {
             _ when type == SqlType.Date => IsDatePart(kind),
             TimeSqlType => IsTimePart(kind),
-            _ when type == SqlType.DateTime => IsDatePart(kind) || IsTimePart(kind),
-            _ when type == SqlType.SmallDateTime => IsDatePart(kind) || IsTimePart(kind),
-            DateTime2SqlType => IsDatePart(kind) || IsTimePart(kind),
+            _ when legacy => IsDatePart(kind) || IsTimePart(kind),
+            // DATEPART / DATENAME read a datetime2's offset as zero.
+            DateTime2SqlType => IsDatePart(kind) || IsTimePart(kind) || (IsTzPart(kind) && functionLowerName is "datepart" or "datename"),
             DateTimeOffsetSqlType => IsDatePart(kind) || IsTimePart(kind) || IsTzPart(kind),
             _ => throw new NotSupportedException($"DATEPART/DATEADD doesn't accept operand type {type}."),
         };
+        // DATEPART / DATENAME read a smalldatetime as a datetime, and name it
+        // so (probed 2026-09-26 against SQL Server 2025).
         if (!ok)
-            throw SimulatedSqlException.DatepartNotSupportedForType(CanonicalName(kind), functionLowerName, FamilyRootName(type), IncompatibleDatepartState(functionLowerName, type, kind));
+        {
+            var typeName = type == SqlType.SmallDateTime && functionLowerName is "datepart" or "datename" ? "datetime" : FamilyRootName(type);
+            throw SimulatedSqlException.DatepartNotSupportedForType(CanonicalName(kind), functionLowerName, typeName, IncompatibleDatepartState(functionLowerName, type, kind));
+        }
+
+        // What a type holds, some functions still refuse (probed 2026-09-26
+        // against SQL Server 2025): DATEADD moves no ISO week or offset, nor a
+        // legacy type's sub-millisecond parts; DATETRUNC truncates to no
+        // weekday, offset or nanosecond, nor a legacy type's microsecond —
+        // or a smalldatetime's millisecond.
+        var refused = functionLowerName switch
+        {
+            "dateadd" => kind is DatePartKind.IsoWeek or DatePartKind.TzOffset
+                || (legacy && kind is DatePartKind.Microsecond or DatePartKind.Nanosecond),
+            "datetrunc" => kind is DatePartKind.Weekday or DatePartKind.TzOffset or DatePartKind.Nanosecond
+                || (legacy && kind == DatePartKind.Microsecond)
+                || (type == SqlType.SmallDateTime && kind == DatePartKind.Millisecond),
+            _ => false,
+        };
+        if (refused)
+            throw SimulatedSqlException.DatepartNotSupportedForType(CanonicalName(kind), functionLowerName, FamilyRootName(type), FunctionRefusalState(functionLowerName, type));
     }
+
+    /// <summary>
+    /// The state of a function-level Msg 9810, which names the operand type:
+    /// DATEADD's 0 / 3 / 2 for datetime / smalldatetime / the rest, DATETRUNC's
+    /// 9 / 8 / 11 likewise (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    private static byte FunctionRefusalState(string functionName, SqlType type) => functionName switch
+    {
+        "dateadd" => type == SqlType.DateTime ? (byte)0 : type == SqlType.SmallDateTime ? (byte)3 : (byte)2,
+        _ => type == SqlType.DateTime ? (byte)9 : type == SqlType.SmallDateTime ? (byte)8 : (byte)11,
+    };
 
     /// <summary>
     /// The datepart's own name, which real's Msg 9810 reports whatever
@@ -318,10 +352,12 @@ internal static class DatePartKinds
     /// </summary>
     private static byte IncompatibleDatepartState(string functionName, SqlType type, DatePartKind kind) => functionName switch
     {
-        "dateadd" => IsTzPart(kind) ? (byte)0 : (byte)1,
+        // A date / time operand's own mismatch is 1 and 10; a type that could
+        // hold the part but not an offset takes the function-level state.
+        "dateadd" => type == SqlType.Date || type is TimeSqlType ? (byte)1 : FunctionRefusalState(functionName, type),
         "datename" => type == SqlType.Date ? (byte)4 : type is TimeSqlType ? (byte)5 : (byte)7,
         "datepart" => type == SqlType.Date ? (byte)2 : type is TimeSqlType ? (byte)3 : (byte)6,
-        "datetrunc" => 10,
+        "datetrunc" => IsTzPart(kind) && type != SqlType.Date && type is not TimeSqlType ? FunctionRefusalState(functionName, type) : (byte)10,
         _ => 1,
     };
 

@@ -59,6 +59,7 @@ The slot is a word, not an expression: `DATEADD('day', …)`, a variable or `NUL
 Result types: `DATEPART` → int; `DATEADD` preserves input type; `DATEDIFF` → int; `DATEDIFF_BIG` → bigint.
 
 `DATEPART`/`DATEADD` enforce per-type keyword compatibility: `date` accepts only date parts; `time(N)` only time parts; `datetime`/`smalldatetime`/`datetime2(N)` accept both; `datetimeoffset(N)` adds `tzoffset`.
+On top of what a type holds, `DATEADD` and `DATETRUNC` refuse parts of their own — each with a state naming the operand type — and `DATEPART` / `DATENAME` read a `datetime2`'s offset as zero (`DatePartKinds.RequireCompatible`; probed 2026-09-26 against SQL Server 2025).
 Wrong combination → Msg 9810.
 `DATEADD`'s interval count is `bigint` (`DatePartKinds.CoerceCount` → `CoerceTo(BigInt)`) — real accepts an interval exceeding int32 (`DATEADD(second, 2147483648, …)` lands in 2092); only an interval that pushes the *result* past the target type's range raises **Msg 517** (the `Add`/`checked` narrowing re-wraps it).
 ### `SET DATEFIRST` and the parts that read it

@@ -59,4 +59,10 @@ public sealed class DateBucketTests
             "select date_bucket(day, 1, '2024-01-01 10:00')",
             8116,
             "Argument data type varchar is invalid for argument 3 of Date_Bucket function.");
+
+    /// <summary>A datetimeoffset's bucket keeps the date's offset (probed 2026-09-26 against SQL Server 2025).</summary>
+    [TestMethod]
+    public void ADateTimeOffsetBucket_KeepsTheDatesOffset()
+        => AreEqual("2024-02-26 14:00:00.0000000 +14:00", new Simulation().ExecuteScalar(
+            "select convert(varchar(40), date_bucket(week, 2, cast('2024-02-29T23:59:59.9999999+14:00' as datetimeoffset)), 121)"));
 }
