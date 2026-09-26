@@ -882,6 +882,13 @@ internal sealed partial class Selection
         public readonly List<BooleanExpression> Excluders = [];
 
         /// <summary>
+        /// The aggregates the WHERE clause's own parse registered with this
+        /// query, which it may hold only when they read an enclosing query's
+        /// columns and so move there (Msg 147 otherwise).
+        /// </summary>
+        public List<AggregateExpression>? WhereAggregates;
+
+        /// <summary>
         /// Each entry is one grouping set — the list of expressions whose
         /// distinct combinations bucket rows for that set's pass. Simple
         /// <c>GROUP BY a, b</c> produces a single entry <c>[a, b]</c>; ROLLUP,
@@ -3846,11 +3853,15 @@ internal sealed partial class Selection
         _ = context.EnterNextValueForScope(NextValueForScope.Clause);
         try
         {
+            var collector = context.AggregateCollector;
+            var aggregatesBefore = collector?.Count ?? 0;
             while (context.Token is ReservedKeyword { Keyword: Keyword.Where })
             {
                 fromClause.Excluders.Add(BooleanExpression.SimplifyForFilter(
                     BooleanExpression.Parse(context.MoveNextRequiredReturnSelf()), context));
             }
+            if (collector is not null && collector.Count > aggregatesBefore)
+                fromClause.WhereAggregates = collector.GetRange(aggregatesBefore, collector.Count - aggregatesBefore);
 
             if (context.Token is ReservedKeyword { Keyword: Keyword.Group })
             {

@@ -508,6 +508,9 @@ internal sealed partial class Selection
     /// A constant term (<c>ORDER BY 'x'</c>) never reaches this walk — the
     /// ORDER BY parser rejects it with Msg 408 for both the set-op and the
     /// single-SELECT path.
+    /// Real reports every failure it finds rather than the first: each term's
+    /// unbound names in order, then that term's Msg 104, across every term
+    /// (probed 2026-09-26: <c>ORDER BY zz + a</c> is 207, 207, 104).
     /// </remarks>
     private static void ValidateSetOpOrderByTerms(
         List<OrderBySpec> orderBy,
@@ -515,6 +518,7 @@ internal sealed partial class Selection
         MultiPartName?[]? projectionSources,
         FromSource[] sources)
     {
+        List<SimulatedSqlException>? errors = null;
         foreach (var spec in orderBy)
         {
             if (spec.IsOrdinal)
@@ -528,18 +532,22 @@ internal sealed partial class Selection
             if (term is Expressions.Reference alias && OutputNameOrdinalOf(alias.ReferencedName, columnNames) >= 0)
                 continue;
 
+            var bound = true;
             term.VisitColumnReferences(name =>
             {
                 if (FindSourceColumn(sources, name).SourceIndex >= 0)
                     return;
-                throw UnresolvedNameError(sources, name);
+                (errors ??= []).Add(UnresolvedNameError(sources, name));
+                bound = false;
             });
 
-            if (term is Expressions.Reference projected && ProjectionSourceOrdinalOf(projected.ReferencedName, projectionSources) >= 0)
+            if (bound && term is Expressions.Reference projected && ProjectionSourceOrdinalOf(projected.ReferencedName, projectionSources) >= 0)
                 continue;
 
-            throw SimulatedSqlException.OrderByItemNotInSelectListWithSetOperator();
+            (errors ??= []).Add(SimulatedSqlException.OrderByItemNotInSelectListWithSetOperator());
         }
+        if (errors is not null)
+            throw SimulatedSqlException.Aggregate(errors);
     }
 
     /// <summary>

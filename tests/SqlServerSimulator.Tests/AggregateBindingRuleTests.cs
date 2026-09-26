@@ -101,6 +101,24 @@ public sealed class AggregateBindingRuleTests
         // column yet still reports 144.
         Seeded().AssertSqlError(sql, 144, "Cannot use an aggregate or a subquery in an expression used for the group by list of a GROUP BY clause.");
 
+    /// <summary>
+    /// An aggregate over the query's own columns (or none) may not stand in its
+    /// WHERE — SELECT, UPDATE and DELETE alike — while one over an enclosing
+    /// query's columns is that query's (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select 1 from t where count(*) > 0")]
+    [DataRow("select a from t where sum(a) > 0")]
+    [DataRow("select (select 1 from u where max(u.x) > 0) from t")]
+    [DataRow("update t set a = 1 where sum(a) > 0")]
+    [DataRow("delete t where max(a) > 0")]
+    public void AggregateInWhere_RaisesMsg147(string sql)
+        => Seeded().AssertSqlError(sql, 147, "An aggregate may not appear in the WHERE clause unless it is in a subquery contained in a HAVING clause or a select list, and the column being aggregated is an outer reference.");
+
+    [TestMethod]
+    public void OuterAggregateInASubquerysWhere_Stands()
+        => AreEqual(1, Seeded().ExecuteScalar("select count(*) from (select (select 1 from u where max(t.a) > 0) x from t) q"));
+
     [TestMethod]
     [DataRow("select count(*) from t group by 1")]
     [DataRow("select count(*) from t group by 1+1")]

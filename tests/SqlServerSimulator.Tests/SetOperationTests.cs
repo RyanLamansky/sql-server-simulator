@@ -541,9 +541,12 @@ public sealed class SetOperationTests
     // one binds against the sources and misses there.
     [DataRow("select id + 1 as zz from so_a union select id from so_b order by zz + 1", "zz")]
     public void SetOperation_TopLevelOrderBy_UnboundName_RaisesMsg207(string sql, string name)
-        => AreEqual(
-            $"Invalid column name '{name}'.",
-            SeededSetOpOrderByTables().AssertSqlError(sql, 207).Message);
+    {
+        // Msg 104 follows for the term, as it does on real (probed 2026-09-26).
+        var error = SeededSetOpOrderByTables().AssertSqlError(sql, 207);
+        AreEqual($"Invalid column name '{name}'.", error.Errors[0].Message);
+        AreEqual(104, error.Errors[^1].Number);
+    }
 
     /// <summary>
     /// A qualifier no FROM source in the first branch answers to is Msg 4104,
@@ -555,9 +558,22 @@ public sealed class SetOperationTests
     [DataRow("select id from so_a a union select id from so_b b order by x.id", "x.id")]
     [DataRow("select id as zz from so_a union select id from so_b order by zz.id", "zz.id")]
     public void SetOperation_TopLevelOrderBy_UnknownQualifier_RaisesMsg4104(string sql, string name)
-        => AreEqual(
-            $"The multi-part identifier \"{name}\" could not be bound.",
-            SeededSetOpOrderByTables().AssertSqlError(sql, 4104).Message);
+    {
+        var error = SeededSetOpOrderByTables().AssertSqlError(sql, 4104);
+        AreEqual($"The multi-part identifier \"{name}\" could not be bound.", error.Errors[0].Message);
+        AreEqual(104, error.Errors[^1].Number);
+    }
+
+    /// <summary>
+    /// Every term's failures are reported, each unbound name then the term's
+    /// Msg 104 (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select 1 a union select 2 order by zz, yy", "207,104,207,104")]
+    [DataRow("select 1 a union select 2 order by zz + a", "207,207,104")]
+    [DataRow("select 1 a union select 2 order by a, zz", "207,104")]
+    public void SetOperation_TopLevelOrderBy_ReportsEveryTermsErrors(string sql, string numbers)
+        => AreEqual(numbers, string.Join(",", new Simulation().AssertSqlError(sql, 207).Errors.Cast<SimulatedError>().Select(error => error.Number)));
 
     /// <summary>
     /// An ordinal outside the projection's column count is Msg 108, the same as
@@ -601,12 +617,15 @@ public sealed class SetOperationTests
     /// <summary>
     /// A FROM-less branch contributes an empty scope, not an unknown one: its
     /// output aliases are the only legal ORDER BY terms and anything else is
-    /// Msg 207 (real's binding failure), never Msg 104.
+    /// Msg 207 (real's binding failure) first, then the term's Msg 104.
     /// </summary>
     [TestMethod]
     public void SetOperation_TopLevelOrderBy_FromLessBranch_UnknownNameRaisesMsg207()
-        => AreEqual("Invalid column name 'y'.",
-            new Simulation().AssertSqlError("select 2 as x union all select 1 order by y", 207).Message);
+    {
+        var error = new Simulation().AssertSqlError("select 2 as x union all select 1 order by y", 207);
+        AreEqual("Invalid column name 'y'.", error.Errors[0].Message);
+        AreEqual(104, error.Errors[^1].Number);
+    }
 
     /// <summary>
     /// The set-op rule is confined to set-op statements: a single SELECT still

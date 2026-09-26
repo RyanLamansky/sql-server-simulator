@@ -517,6 +517,11 @@ internal sealed partial class Selection
         // it says so for an UPDATE / DELETE / MERGE as readily as for a SELECT
         // (probe-confirmed 2026-08-05: `DELETE FROM t WHERE n = NEXT VALUE FOR s`).
         var savedRejection = context.EnterNextValueForScope(NextValueForScope.Clause);
+        // An aggregate the WHERE registers at its own level — one an enclosing
+        // subquery moved here included — has no query to aggregate in: Msg 147.
+        var savedCollector = context.AggregateCollector;
+        var whereAggregates = new List<AggregateExpression>();
+        context.AggregateCollector = whereAggregates;
         BooleanExpression predicate;
         try
         {
@@ -526,7 +531,10 @@ internal sealed partial class Selection
         {
             context.OuterTypeResolver = saved;
             context.NextValueForRejection = savedRejection;
+            context.AggregateCollector = savedCollector;
         }
+        if (whereAggregates.Count > 0)
+            throw SimulatedSqlException.AggregateInWhereClause();
         predicate.Bind(context.Batch, resolveColumnType);
         return BooleanExpression.SimplifyForFilter(predicate, context);
     }
@@ -912,6 +920,11 @@ internal sealed partial class Selection
         RecordIndexedViewShape(parseBatch, sources, joins, fromClause, distinct, topExpression, aggregates);
 
         RehomeAggregatesOverOuterScope(parseBatch, sources, aggregates, parseBatch.Parser.OuterTypeResolver ?? scope.OuterTypeResolver);
+
+        // What WHERE aggregated is only legal once it has moved to the query
+        // whose columns it reads.
+        if (fromClause.WhereAggregates is { } whereAggregates && whereAggregates.Exists(aggregates.Contains))
+            throw SimulatedSqlException.AggregateInWhereClause();
 
         // Convert a comma-join / CROSS JOIN carrying an equi-join predicate in
         // WHERE into an INNER JOIN, so it rides the equi-join seek / hash path

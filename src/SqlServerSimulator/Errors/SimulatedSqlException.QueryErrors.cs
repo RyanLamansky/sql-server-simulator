@@ -358,6 +358,15 @@ partial class SimulatedSqlException
         new($"'{keyword}' is not a recognized {functionLowerName} option.", 155, 15, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 147 — an aggregate in a WHERE clause that reads
+    /// the query's own columns (or none, as <c>COUNT(*)</c>), in a SELECT, an
+    /// UPDATE or a DELETE alike; one reading only an enclosing query's columns
+    /// is that query's and stands (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException AggregateInWhereClause() =>
+        new("An aggregate may not appear in the WHERE clause unless it is in a subquery contained in a HAVING clause or a select list, and the column being aggregated is an outer reference.", 147, 15, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 1023 — a function's keyword-only argument
     /// written as something else, such as <c>ISJSON(x, 'scalar')</c> (probed
     /// 2026-09-26 against SQL Server 2025).
@@ -440,10 +449,9 @@ partial class SimulatedSqlException
     /// UNION / INTERSECT / EXCEPT chain names something other than a projected
     /// column — a source column the select list left out, or any expression
     /// over one. The combined stream carries only the projected columns, so
-    /// there is nothing else to sort by. Distinct from the Msg 207 a name that
-    /// binds nowhere in the first branch's FROM scope raises: real emits that
-    /// binding failure first and this second, so the first-error contract
-    /// makes the two mutually exclusive here.
+    /// there is nothing else to sort by. A term naming something that binds
+    /// nowhere in the first branch's FROM scope gets it too, after that name's
+    /// own Msg 207 / 4104.
     /// </summary>
     internal static SimulatedSqlException OrderByItemNotInSelectListWithSetOperator() =>
         new("ORDER BY items must appear in the select list if the statement contains a UNION, INTERSECT or EXCEPT operator.", 104, 16, 1);
