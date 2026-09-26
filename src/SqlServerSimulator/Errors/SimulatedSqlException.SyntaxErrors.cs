@@ -241,8 +241,8 @@ partial class SimulatedSqlException
     /// the function name is rendered with its documented PascalCase spelling,
     /// unlike the lowercase-rendered <see cref="FunctionArgumentCount"/> family.
     /// </summary>
-    internal static SimulatedSqlException FunctionArgumentCountRange(string functionName, int min, int max) =>
-        new($"The {functionName} function requires {min} to {max} arguments.", 189, 15, 1);
+    internal static SimulatedSqlException FunctionArgumentCountRange(string functionName, int min, int max, byte state = 1) =>
+        new($"The {functionName} function requires {min} to {max} arguments.", 189, 15, state);
 
     /// <summary>
     /// Mimics SQL Server error 3901: <c>BEGIN TRANSACTION WITH MARK</c> without

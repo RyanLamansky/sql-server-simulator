@@ -295,6 +295,23 @@ A scalar UDF that patindexes its own `varchar` parameter is the shape that meets
   SQL Server's FORMAT runs on Windows' NLS culture data where the simulator runs on .NET's ICU data; `Format.WithWindowsDecimalDigits` patches the number-format cells known to differ (default digits, the no-break group separator, the yen sign, en-US's parenthesized negative currency), which both paths read.
   **Divergence**: `FORMAT(CAST(0 AS decimal(5, 0)), 'P')` is `0.00%` against real's `000.00%` (probed 2026-09-24).
 
+## Argument counts
+
+A built-in's argument count is checked by one table, `BuiltInArity`, before the function's own parser reads a single argument, so a wrong count raises real's class-15 refusal rather than the Msg 102 a positional parser would meet at the stray comma or parenthesis.
+The table is real's own behavior read off a sweep of every built-in over zero to four arguments (probed 2026-09-26 against SQL Server 2025), and a new built-in gets its refusal by adding its row.
+What the sweep found that a simpler rule would miss:
+- The count is refused while parsing, so it outranks every bind error in the statement and fires in a dead `IF` branch.
+- The list's own syntax error still comes first — an empty argument, an aggregate's `DISTINCT`, a top-level `FROM` — and the counter steps aside for those.
+- Too few and too many can be refused by different messages (`TRIM`, `OBJECT_DEFINITION`), and the state varies by function and side (`JSON_VALUE`'s 2 and 3).
+- A few built-ins refuse an empty list as a syntax error instead (`LEFT()`, `RIGHT()`).
+- A built-in with an argument grammar of its own — `CAST` / `PARSE`'s `AS`, `JSON_OBJECT` / `JSON_OBJECTAGG`'s key-value pairs, a datepart, a window function that requires `OVER` — has no row, since a comma count doesn't describe its call.
+
+### Divergences
+
+- `JSON_QUERY` with four arguments raises state 2 on real and state 3 here, as with three.
+- An ODBC `{fn LEFT(x)}` is Msg 156 here; real counts it as Msg 174.
+- A `JSON_VALUE` whose `RETURNING` clause is followed by a third argument is counted here; real refuses the comma as Msg 102.
+
 ## An argument's type against the parameter's
 
 A built-in's argument converts to the type its parameter is declared as the way an assignment does, so which types may reach it is the Assign grid's (`SqlType.PairRules.cs`), checked while compiling through `AssignmentRules.ArgumentType` — a typed `NULL` and an empty table's column raise too (probed 2026-09-25 against SQL Server 2025).

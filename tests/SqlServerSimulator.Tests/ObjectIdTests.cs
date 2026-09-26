@@ -331,8 +331,8 @@ public sealed class ObjectIdTests
     }
 
     [TestMethod]
-    public void ObjectId_TooManyArgs_RaisesMsg174()
-        => new Simulation().AssertSqlError("select object_id('foo', 'U', 'extra')", 174);
+    public void ObjectId_TooManyArgs_RaisesMsg189()
+        => new Simulation().AssertSqlError("select object_id('foo', 'U', 'extra')", 189);
 
     [TestMethod]
     public void ObjectId_Trigger_NoFilter_Resolves()

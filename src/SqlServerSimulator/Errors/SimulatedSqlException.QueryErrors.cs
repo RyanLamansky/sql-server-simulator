@@ -318,8 +318,15 @@ partial class SimulatedSqlException
     /// (probe-confirmed), while the <c>geography::</c> / <c>geometry::</c>
     /// constructors keep the caller's casing.
     /// </summary>
-    internal static SimulatedSqlException FunctionRequiresNArguments(string functionName, int argumentCount) =>
-        new($"The {functionName} function requires {argumentCount} argument(s).", 174, 15, 1);
+    internal static SimulatedSqlException FunctionRequiresNArguments(string functionName, int argumentCount, byte state = 1) =>
+        new($"The {functionName} function requires {argumentCount} argument(s).", 174, 15, state);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 1076 — a built-in with an open-ended argument
+    /// list (<c>CHOOSE</c>, <c>CHECKSUM</c>) called with fewer than its minimum.
+    /// </summary>
+    internal static SimulatedSqlException FunctionRequiresAtLeastNArguments(string functionName, int minimum) =>
+        new($"Function '{functionName}' requires at least {minimum} argument(s).", 1076, 15, 1);
 
     /// <summary>
     /// Mimics SQL Server error 280 — <c>TEXTPTR</c> was applied to something

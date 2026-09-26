@@ -1633,6 +1633,7 @@ internal abstract class Expression : ExpressionNode
         RecordNondeterministicBuiltIn(name, context);
         RecordSideEffectingBuiltIn(name, context);
         _ = name.ToUpperInvariant(uppercaseName);
+        BuiltInArity.Check(uppercaseName, context);
         if (!ConstantFolding.IsFoldedBuiltIn(uppercaseName))
             return ResolveBuiltInCore(uppercaseName, name, context);
 

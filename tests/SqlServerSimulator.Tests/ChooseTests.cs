@@ -52,8 +52,8 @@ public sealed class ChooseTests
         => AreEqual(20m, new Simulation().ExecuteScalar("select choose(2, cast(10 as decimal(10, 2)), 20, 30)"));
 
     [TestMethod]
-    public void Choose_OnlyIndexNoValues_RaisesMsg174()
-        => new Simulation().AssertSqlError("select choose(1)", 174);
+    public void Choose_OnlyIndexNoValues_RaisesMsg1076()
+        => new Simulation().AssertSqlError("select choose(1)", 1076);
 
     [TestMethod]
     public void Choose_FromTableValues_RoundTrips()
