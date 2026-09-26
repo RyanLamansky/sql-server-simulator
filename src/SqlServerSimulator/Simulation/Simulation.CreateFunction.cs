@@ -589,7 +589,7 @@ partial class Simulation
         if (isSchemaBound)
             SchemaBinding.EnforceBody(context.CurrentDatabase, "function", $"{schema.Name}.{functionName.Leaf}", bodyText);
 
-        var outputColumns = InferInlineTvfOutputColumns(context, [.. parameters], bodyText, functionName.Leaf);
+        var outputColumns = InferInlineTvfOutputColumns(context, [.. parameters], bodyText, functionName.Leaf, CountNewlines(commandText, 0, bodyStart));
 
         var function = new InlineTableValuedFunction(
             schema,
@@ -722,7 +722,8 @@ partial class Simulation
         ParserContext outerContext,
         UdfParameter[] parameters,
         string bodyText,
-        string functionName)
+        string functionName,
+        int bodyLineOffset)
     {
         // Synthesize a command + batch to parse the body in isolation. The
         // batch shares the outer connection so it sees the same schemas /
@@ -749,7 +750,7 @@ partial class Simulation
         // The body binds at CREATE as any module body does — a parameter has
         // no value yet, so `TOP (@n)` is settled from its declared type rather
         // than refused as a NULL count (probed 2026-09-26).
-        var innerBatch = new BatchContext(bodyCommand, variables, dummyFrame) { CreateTimeBinding = true };
+        var innerBatch = new BatchContext(bodyCommand, variables, dummyFrame) { CreateTimeBinding = true, LineOffset = bodyLineOffset };
         // Inspection runs the body's FROM-less projections, so the batch needs
         // the CREATE statement's own current-time freeze to evaluate a
         // GETDATE() / SYSDATETIME() column.

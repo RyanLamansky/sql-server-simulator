@@ -155,10 +155,11 @@ internal static class SchemaBinding
             }
             // Schema binding defers nothing: a two-part name that doesn't
             // resolve is Msg 208 at CREATE, even in a scalar function's body
-            // whose unbound names otherwise defer (probed 2026-09-26 against
-            // SQL Server 2025).
+            // whose unbound names otherwise defer, and at line 12 as any
+            // module definition's missing qualified name is (probed 2026-09-26
+            // against SQL Server 2025).
             if (name.InSourcePosition && !name.IsCall && name.SegmentCount == 2 && resolved is null)
-                throw SimulatedSqlException.InvalidObjectName(new Parser.MultiPartName(name.Qualifier!).WithAddedPart(name.Leaf));
+                throw SimulatedSqlException.InvalidObjectName(new Parser.MultiPartName(name.Qualifier!).WithAddedPart(name.Leaf)).PinLine(12);
             switch (resolved)
             {
                 case View { IsSchemaBound: false } view:

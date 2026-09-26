@@ -630,4 +630,21 @@ public sealed class ModuleBodyBindingTests
         sim.ExecuteBatches("create procedure dbo.pdefer as select x from dbo.missing_xyz group by x having max(nosuchcol) = 1");
         AreEqual(1, ObjectCount(sim, "pdefer"));
     }
+
+    /// <summary>
+    /// Binding a view or function definition, a missing schema-qualified object
+    /// is reported at line 12 whatever the layout, and an unqualified one at
+    /// its own line, counted from the batch (probed 2026-09-26 against SQL
+    /// Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("create view v as select * from dbo.nope", 12)]
+    [DataRow("create view v\nas\nselect *\nfrom nope", 4)]
+    [DataRow("\n\ncreate view v as select * from nope", 3)]
+    [DataRow("create view v with schemabinding as select a from dbo.nope", 12)]
+    [DataRow("create function f() returns table as return select * from dbo.nope", 12)]
+    [DataRow("create function f()\nreturns table\nas\nreturn\nselect *\nfrom nope", 6)]
+    [DataRow("create function f() returns int with schemabinding as begin\nreturn (select count(*)\nfrom dbo.nope) end", 12)]
+    public void AModuleDefinitionsMissingObject_ReportsRealsLine(string statement, int line)
+        => AreEqual(line, new Simulation().AssertSqlError(statement, 208).Errors[0].LineNumber);
 }

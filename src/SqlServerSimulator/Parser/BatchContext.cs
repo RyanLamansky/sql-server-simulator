@@ -267,6 +267,14 @@ internal sealed class BatchContext
     /// </summary>
     public bool CreateTimeBinding;
 
+    /// <summary>
+    /// Set while <c>CREATE VIEW</c> / <c>ALTER VIEW</c> parses its body on the
+    /// statement's own batch — a module definition binding outside a
+    /// <see cref="CreateTimeBinding"/> batch, which the line a missing object
+    /// reports at depends on (see <see cref="UnresolvableObjectName"/>).
+    /// </summary>
+    public bool BindingViewDefinition;
+
     /// <summary>The <c>#</c> / <c>##</c> tables a create-time bind has seen a statement create.</summary>
     private HashSet<string>? tempTablesCreatedWhileBinding;
 
@@ -2630,10 +2638,22 @@ internal sealed class BatchContext
     /// base names nothing, 224 when it names an object the reference can't use
     /// (a procedure or sequence in a FROM clause).
     /// </summary>
-    public SimulatedSqlException UnresolvableObjectName(MultiPartName name) =>
-        this.TryResolveSynonym(name, out var synonym)
-            ? SimulatedSqlException.SynonymRefersToInvalidObject(name.ToString(), this.TryResolveSynonymBase(synonym, out _) ? (byte)224 : (byte)1)
-            : SimulatedSqlException.InvalidObjectName(name);
+    /// <remarks>
+    /// Binding a module definition, real reports a missing schema-qualified
+    /// object at line 12 whatever the definition's layout, and an unqualified
+    /// one at the line of its name (probed 2026-09-26 against SQL Server 2025).
+    /// </remarks>
+    public SimulatedSqlException UnresolvableObjectName(MultiPartName name)
+    {
+        if (this.TryResolveSynonym(name, out var synonym))
+            return SimulatedSqlException.SynonymRefersToInvalidObject(name.ToString(), this.TryResolveSynonymBase(synonym, out _) ? (byte)224 : (byte)1);
+        var error = SimulatedSqlException.InvalidObjectName(name);
+        if (!this.CreateTimeBinding && !this.BindingViewDefinition)
+            return error;
+        if (name.Count >= 2)
+            return error.PinLine(12);
+        return this.Parser.Token is { } leaf ? error.PinLine(leaf.LineNumber + this.LineOffset) : error;
+    }
 
     /// <summary>
     /// The shared synonym-redirect step behind <see cref="TryResolveTable"/> /
