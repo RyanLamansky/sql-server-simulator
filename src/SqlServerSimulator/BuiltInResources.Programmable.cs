@@ -31,7 +31,7 @@ internal static partial class BuiltInResources
 
         // INFORMATION_SCHEMA.COLUMNS: ISO-standard 23-column shape. Tooling
         // does SELECT * here so the full column set ships even though many
-        // are always NULL in the simulator (DOMAIN_*, CHARACTER_SET_SCHEMA,
+        // are always NULL in the simulator (CHARACTER_SET_SCHEMA,
         // COLLATION_CATALOG, etc.). Rows cover base tables and view output
         // columns alike (probe-confirmed — the same two sources sys.columns
         // walks); COLUMN_DEFAULT carries the captured DEFAULT text for a table
@@ -253,11 +253,32 @@ internal static partial class BuiltInResources
             new("SPECIFIC_NAME", SqlType.SystemName, 128, false),
             new("ORDINAL_POSITION", SqlType.Int32, null, false),
             new("PARAMETER_MODE", SqlType.NVarchar, 10, true),
+            new("IS_RESULT", SqlType.NVarchar, 10, true),
+            new("AS_LOCATOR", SqlType.NVarchar, 10, true),
             new("PARAMETER_NAME", SqlType.SystemName, 128, true),
-            new("DATA_TYPE", SqlType.SystemName, 128, false),
+            new("DATA_TYPE", SqlType.SystemName, 128, true),
             new("CHARACTER_MAXIMUM_LENGTH", SqlType.Int32, null, true),
+            new("CHARACTER_OCTET_LENGTH", SqlType.Int32, null, true),
+            new("COLLATION_CATALOG", SqlType.SystemName, 128, true),
+            new("COLLATION_SCHEMA", SqlType.SystemName, 128, true),
+            new("COLLATION_NAME", SqlType.SystemName, 128, true),
+            new("CHARACTER_SET_CATALOG", SqlType.SystemName, 128, true),
+            new("CHARACTER_SET_SCHEMA", SqlType.SystemName, 128, true),
+            new("CHARACTER_SET_NAME", SqlType.SystemName, 128, true),
+            new("NUMERIC_PRECISION", SqlType.TinyInt, null, true),
+            new("NUMERIC_PRECISION_RADIX", SqlType.SmallInt, null, true),
+            new("NUMERIC_SCALE", SqlType.Int32, null, true),
+            new("DATETIME_PRECISION", SqlType.SmallInt, null, true),
+            new("INTERVAL_TYPE", SqlType.NVarchar, 30, true),
+            new("INTERVAL_PRECISION", SqlType.SmallInt, null, true),
+            new("USER_DEFINED_TYPE_CATALOG", SqlType.SystemName, 128, true),
+            new("USER_DEFINED_TYPE_SCHEMA", SqlType.SystemName, 128, true),
+            new("USER_DEFINED_TYPE_NAME", SqlType.SystemName, 128, true),
+            new("SCOPE_CATALOG", SqlType.SystemName, 128, true),
+            new("SCOPE_SCHEMA", SqlType.SystemName, 128, true),
+            new("SCOPE_NAME", SqlType.SystemName, 128, true),
         ], (batch, database) =>
-            EnumerateInformationSchemaParameters(batch, database, modeIn, modeInOut, modeOut));
+            EnumerateInformationSchemaParameters(batch, database, modeIn, modeInOut, modeOut, unicodeCs, isoCs, radix10, radix2));
 
         // INFORMATION_SCHEMA.VIEWS: ISO-standard 6-column shape. Probe-
         // confirmed: VIEW_DEFINITION is NULL only for WITH ENCRYPTION views
@@ -979,7 +1000,7 @@ internal static partial class BuiltInResources
                         SqlValue.FromSystemName("@" + param.Name),
                         SqlValue.FromInt32(i + 1),
                         SqlValue.FromByte(isTvp ? (byte)243 : SpelledTypeId(param.Type, param.SpelledNumeric)),
-                        SqlValue.FromInt32(isTvp ? param.TableType!.UserTypeId : SpelledTypeId(param.Type, param.SpelledNumeric) is 108 ? 108 : param.Type.UserTypeId),
+                        SqlValue.FromInt32(isTvp ? param.TableType!.UserTypeId : param.AliasType?.UserTypeId ?? (SpelledTypeId(param.Type, param.SpelledNumeric) is 108 ? 108 : param.Type.UserTypeId)),
                         SqlValue.FromInt16(maxLength),
                         SqlValue.FromByte(precision),
                         SqlValue.FromByte(scale),
@@ -1012,7 +1033,7 @@ internal static partial class BuiltInResources
                         emptyName,
                         SqlValue.FromInt32(0),
                         SqlValue.FromByte(SpelledTypeId(scalarFn.ReturnType, scalarFn.ReturnSpelledNumeric)),
-                        SqlValue.FromInt32(SpelledTypeId(scalarFn.ReturnType, scalarFn.ReturnSpelledNumeric) is 108 ? 108 : scalarFn.ReturnType.UserTypeId),
+                        SqlValue.FromInt32(scalarFn.ReturnAliasType?.UserTypeId ?? (SpelledTypeId(scalarFn.ReturnType, scalarFn.ReturnSpelledNumeric) is 108 ? 108 : scalarFn.ReturnType.UserTypeId)),
                         SqlValue.FromInt16(returnMaxLength),
                         SqlValue.FromByte(returnPrecision),
                         SqlValue.FromByte(returnScale),
@@ -1038,7 +1059,7 @@ internal static partial class BuiltInResources
                         SqlValue.FromSystemName("@" + p.Name),
                         SqlValue.FromInt32(i + 1),
                         SqlValue.FromByte(SpelledTypeId(p.Type, p.SpelledNumeric)),
-                        SqlValue.FromInt32(SpelledTypeId(p.Type, p.SpelledNumeric) is 108 ? 108 : p.Type.UserTypeId),
+                        SqlValue.FromInt32(p.AliasType?.UserTypeId ?? (SpelledTypeId(p.Type, p.SpelledNumeric) is 108 ? 108 : p.Type.UserTypeId)),
                         SqlValue.FromInt16(maxLength),
                         SqlValue.FromByte(precision),
                         SqlValue.FromByte(scale),
@@ -1148,13 +1169,10 @@ internal static partial class BuiltInResources
         SqlValue[] Row(SqlValue schemaName, SqlValue tableName, HeapColumn col, int position)
         {
             var (charLength, octetLength, numericPrecision, numericRadix, numericScale, dateTimePrecision) = GetInformationSchemaColumnMetadata(col);
-            var cs = col.Type.Category switch
-            {
-                SqlTypeCategory.String when col.Type is NVarcharSqlType or NCharSqlType || col.Type == SqlType.SystemName || col.Type == SqlType.NText => unicodeCs,
-                SqlTypeCategory.String => isoCs,
-                _ => nullSysName,
-            };
-            var collation = col.Type.Category != SqlTypeCategory.String ? nullSysName
+            var cs = !SqlType.IsCollatedString(col.Type) ? nullSysName
+                : SqlType.IsNationalStringCategory(col.Type) ? unicodeCs
+                : isoCs;
+            var collation = !SqlType.IsCollatedString(col.Type) ? nullSysName
                 : col.Collation is { } overrideName ? SqlValue.FromSystemName(overrideName)
                 : dbDefaultCollation;
             return
@@ -1179,9 +1197,9 @@ internal static partial class BuiltInResources
                 nullSysName,
                 nullSysName,
                 collation,
-                nullSysName,
-                nullSysName,
-                nullSysName,
+                col.AliasType is null ? nullSysName : catalog,
+                col.AliasType is { } domain ? SqlValue.FromSystemName(domain.Schema.Name) : nullSysName,
+                col.AliasType is { } domainType ? SqlValue.FromSystemName(domainType.Name) : nullSysName,
             ];
         }
 
@@ -1356,16 +1374,82 @@ internal static partial class BuiltInResources
     /// OUTPUT-declared procedure params (probe-confirmed); functions have
     /// no OUTPUT semantics so all UDF params project as 'IN'.
     /// </summary>
+    /// <summary>
+    /// Rows for <c>INFORMATION_SCHEMA.PARAMETERS</c>: one per procedure and
+    /// function parameter, and a scalar function's return value as row 0 —
+    /// named by the empty string, <c>OUT</c> and <c>IS_RESULT</c> (probed
+    /// 2026-09-26 against SQL Server 2025). The type columns follow
+    /// <c>INFORMATION_SCHEMA.COLUMNS</c>, the collation is the database's
+    /// for a string type, and a table-valued parameter reports
+    /// <c>table type</c> and its type as the user-defined type, as an alias
+    /// type parameter reports its alias.
+    /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateInformationSchemaParameters(
         Parser.BatchContext batch,
         Database database,
         SqlValue modeIn,
         SqlValue modeInOut,
-        SqlValue modeOut)
+        SqlValue modeOut,
+        SqlValue unicodeCs,
+        SqlValue isoCs,
+        SqlValue radix10,
+        SqlValue radix2)
     {
         _ = batch;
         var catalog = SqlValue.FromSystemName(database.Name);
-        var nullInt = SqlValue.Null(SqlType.Int32);
+        var nullInt32 = SqlValue.Null(SqlType.Int32);
+        var nullInt16 = SqlValue.Null(SqlType.SmallInt);
+        var nullByte = SqlValue.Null(SqlType.TinyInt);
+        var nullSysName = SqlValue.Null(SqlType.SystemName);
+        var nullNVarchar = SqlValue.Null(SqlType.NVarchar);
+        var yes = SqlValue.FromNVarchar("YES");
+        var no = SqlValue.FromNVarchar("NO");
+        var tableTypeName = SqlValue.FromSystemName("table type");
+        var databaseCollation = SqlValue.FromSystemName(database.CollationName);
+
+        SqlValue[] Row(SqlValue schemaName, string routine, int ordinal, SqlValue mode, string name, SqlType type, bool spelledNumeric, int? declaredMaxLength, TableType? tableType, AliasType? alias)
+        {
+            var (charLength, octetLength, numericPrecision, numericRadix, numericScale, dateTimePrecision) = tableType is null
+                ? GetInformationSchemaColumnMetadata(new HeapColumn(name, type, declaredMaxLength, nullable: true))
+                : (null, null, null, null, null, null);
+            var isString = tableType is null && SqlType.IsCollatedString(type);
+            var (userTypeSchema, userTypeName) = tableType is not null ? (tableType.Schema.Name, tableType.Name)
+                : alias is not null ? (alias.Schema.Name, alias.Name)
+                : (null, null);
+            return
+            [
+                catalog,
+                schemaName,
+                SqlValue.FromSystemName(routine),
+                SqlValue.FromInt32(ordinal),
+                mode,
+                ordinal == 0 ? yes : no,
+                no,
+                SqlValue.FromSystemName(name),
+                tableType is null ? IsoDataTypeName(type, spelledNumeric) : tableTypeName,
+                charLength is int cl ? SqlValue.FromInt32(cl) : nullInt32,
+                octetLength is int ol ? SqlValue.FromInt32(ol) : nullInt32,
+                nullSysName,
+                nullSysName,
+                isString ? databaseCollation : nullSysName,
+                nullSysName,
+                nullSysName,
+                !isString ? nullSysName : SqlType.IsNationalStringCategory(type) ? unicodeCs : isoCs,
+                numericPrecision is byte np ? SqlValue.FromByte(np) : nullByte,
+                numericRadix switch { 2 => radix2, 10 => radix10, _ => nullInt16 },
+                numericScale is int ns ? SqlValue.FromInt32(ns) : nullInt32,
+                dateTimePrecision is short dp ? SqlValue.FromInt16(dp) : nullInt16,
+                nullNVarchar,
+                nullInt16,
+                userTypeName is null ? nullSysName : catalog,
+                userTypeSchema is null ? nullSysName : SqlValue.FromSystemName(userTypeSchema),
+                userTypeName is null ? nullSysName : SqlValue.FromSystemName(userTypeName),
+                nullSysName,
+                nullSysName,
+                nullSysName,
+            ];
+        }
+
         foreach (var schema in database.Schemas.Values)
         {
             var schemaName = SqlValue.FromSystemName(schema.Name);
@@ -1374,50 +1458,20 @@ internal static partial class BuiltInResources
                 for (var i = 0; i < proc.Parameters.Length; i++)
                 {
                     var param = proc.Parameters[i];
-                    yield return [
-                        catalog,
-                        schemaName,
-                        SqlValue.FromSystemName(proc.Name),
-                        SqlValue.FromInt32(i + 1),
-                        param.IsOutput ? modeInOut : modeIn,
-                        SqlValue.FromSystemName("@" + param.Name),
-                        IsoDataTypeName(param.Type, param.SpelledNumeric),
-                        ParameterCharacterLength(param.Type) is int len ? SqlValue.FromInt32(len) : nullInt,
-                    ];
+                    yield return Row(schemaName, proc.Name, i + 1, param.IsOutput ? modeInOut : modeIn, "@" + param.Name,
+                        param.Type, param.SpelledNumeric, param.DeclaredMaxLength, param.TableType, param.AliasType);
                 }
             }
             foreach (var fn in schema.Functions.Values.OrderBy(f => f.ObjectId))
             {
-                // A scalar function's return value is row 0, named by the empty
-                // string and reported as an OUT parameter (probe-confirmed).
-                // Table-valued functions have no such row.
+                // Table-valued functions have no return-value row.
                 if (fn is ScalarFunction scalar)
-                {
-                    yield return [
-                        catalog,
-                        schemaName,
-                        SqlValue.FromSystemName(fn.Name),
-                        SqlValue.FromInt32(0),
-                        modeOut,
-                        SqlValue.FromSystemName(string.Empty),
-                        IsoDataTypeName(scalar.ReturnType, scalar.ReturnSpelledNumeric),
-                        ParameterCharacterLength(scalar.ReturnType) is int returnLen ? SqlValue.FromInt32(returnLen) : nullInt,
-                    ];
-                }
+                    yield return Row(schemaName, fn.Name, 0, modeOut, string.Empty, scalar.ReturnType, scalar.ReturnSpelledNumeric, null, null, scalar.ReturnAliasType);
 
                 for (var i = 0; i < fn.Parameters.Length; i++)
                 {
                     var param = fn.Parameters[i];
-                    yield return [
-                        catalog,
-                        schemaName,
-                        SqlValue.FromSystemName(fn.Name),
-                        SqlValue.FromInt32(i + 1),
-                        modeIn,
-                        SqlValue.FromSystemName("@" + param.Name),
-                        IsoDataTypeName(param.Type, param.SpelledNumeric),
-                        ParameterCharacterLength(param.Type) is int paramLen ? SqlValue.FromInt32(paramLen) : nullInt,
-                    ];
+                    yield return Row(schemaName, fn.Name, i + 1, modeIn, "@" + param.Name, param.Type, param.SpelledNumeric, null, null, param.AliasType);
                 }
             }
         }
@@ -1440,30 +1494,6 @@ internal static partial class BuiltInResources
 
     private static SqlValue IsoDataTypeName(SqlType type) =>
         SqlValue.FromSystemName(type == SqlType.SystemName ? "nvarchar" : type.SqlServerName);
-
-    /// <summary>
-    /// INFORMATION_SCHEMA.PARAMETERS' CHARACTER_MAXIMUM_LENGTH: the declared
-    /// length for the string and binary families — character count, not bytes —
-    /// the MAX sentinel <c>-1</c> for a MAX-declared type and for <c>xml</c>,
-    /// and NULL for everything else. Probe-confirmed against SQL Server 2025:
-    /// the binary family reports a length here even though the column is named
-    /// for characters, and the legacy LOB types report their documented
-    /// sentinels.
-    /// </summary>
-    private static int? ParameterCharacterLength(SqlType type) => type switch
-    {
-        _ when type == SqlType.Text || type == SqlType.Image => 2147483647,
-        _ when type == SqlType.NText => 1073741823,
-        _ when type == SqlType.SystemName => 128,
-        CharSqlType c => c.length,
-        NCharSqlType nc => nc.length,
-        BinarySqlType b => b.length,
-        VarcharSqlType v => v.length,
-        NVarcharSqlType n => n.length,
-        VarbinarySqlType vb => vb.length,
-        XmlSqlType => SqlType.MaxLengthSentinel,
-        _ => null,
-    };
 
     /// <summary>
     /// Rows for <c>INFORMATION_SCHEMA.VIEWS</c>: per-view ISO-shape entries.

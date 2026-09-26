@@ -249,6 +249,32 @@ internal sealed class Cast : Expression
         int? declaredMaxLength = null;
         int? declaredScale = null;
         context.MoveNextRequired();
+
+        // CAST takes system types only: a user alias type is refused at state
+        // 2, and a qualified name is refused whole unless its schema is sys
+        // (probed 2026-09-26 against SQL Server 2025).
+        if (context.Token is Operator { Character: '.' })
+        {
+            var parts = new List<string> { typeName.Value };
+            while (context.Token is Operator { Character: '.' })
+            {
+                if (context.GetNextRequired() is not Name part)
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                parts.Add(part.Value);
+                typeName = part;
+                context.MoveNextRequired();
+            }
+            if (parts.Count != 2 || !string.Equals(parts[0], "sys", StringComparison.OrdinalIgnoreCase))
+            {
+                var written = string.Join('.', parts);
+                throw SimulatedSqlException.CannotFindDataTypeInCast(written, state: context.Batch.TryResolveAliasType(new MultiPartName(parts[0]).WithAddedPart(parts[1]), out _) ? (byte)2 : (byte)1);
+            }
+        }
+        else if (context.Batch.TryResolveAliasType(new MultiPartName(typeName.Value), out _))
+        {
+            throw SimulatedSqlException.CannotFindDataTypeInCast(typeName.Value, state: 2);
+        }
+
         if (context.Token is Operator { Character: '(' })
         {
             var lengthToken = context.GetNextRequired();

@@ -293,6 +293,14 @@ internal abstract partial class SqlType
     public static bool IsStringCategory(SqlType type) => type.Category == SqlTypeCategory.String;
 
     /// <summary>
+    /// True for the character string types, the ones a collation belongs to:
+    /// <c>xml</c> and the spatial pair share the string category without one
+    /// (probed 2026-09-26: their catalog collation is NULL).
+    /// </summary>
+    public static bool IsCollatedString(SqlType type) =>
+        type.Category == SqlTypeCategory.String && type is not (XmlSqlType or SpatialSqlType);
+
+    /// <summary>
     /// True for the Unicode half of the string family (<c>nvarchar</c> /
     /// <c>nchar</c> / <c>ntext</c> / <c>sysname</c>) — the types whose storage
     /// is UTF-16 and so carries no code page. Its complement is the

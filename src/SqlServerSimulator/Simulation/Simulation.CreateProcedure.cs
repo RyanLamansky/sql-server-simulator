@@ -256,7 +256,7 @@ partial class Simulation
         }
 
         var spelledNumeric = IsNumericTypeWord(context.Token);
-        var (paramType, declaredMaxLength) = ParseProcedureParameterType(context, ordinal);
+        var (paramType, declaredMaxLength, aliasType) = ParseProcedureParameterType(context, ordinal);
 
         Expression? defaultExpression = null;
         if (context.Token is Operator { Character: '=' })
@@ -276,7 +276,7 @@ partial class Simulation
             context.MoveNextRequired();
         }
 
-        return new ProcedureParameter(name, paramType, declaredMaxLength, defaultExpression, isOutput) { SpelledNumeric = spelledNumeric };
+        return new ProcedureParameter(name, paramType, declaredMaxLength, defaultExpression, isOutput) { SpelledNumeric = spelledNumeric, AliasType = aliasType };
     }
 
     /// <summary>
@@ -327,7 +327,7 @@ partial class Simulation
     /// <see cref="ProcedureParameter.DeclaredMaxLength"/> for catalog-view
     /// surfaces).
     /// </summary>
-    private static (SqlType Type, int? DeclaredMaxLength) ParseProcedureParameterType(ParserContext context, int ordinal)
+    private static (SqlType Type, int? DeclaredMaxLength, AliasType? Alias) ParseProcedureParameterType(ParserContext context, int ordinal)
     {
         var (qualifiedTypeName, typeName) = TypeNameSynonyms.ReadTypeName(context);
         context.MoveNextRequired();
@@ -359,10 +359,10 @@ partial class Simulation
             context.MoveNextRequired();
         }
 
-        var (resolvedType, _, _) = ResolveTypeReference(
+        var (resolvedType, _, _, alias) = ResolveTypeReference(
             context.Batch, qualifiedTypeName, typeName, declaredMaxLength, declaredScale,
             index: ordinal, TypeSpecSite.Scalar, columnName: null);
-        return (resolvedType, declaredMaxLength);
+        return (resolvedType, declaredMaxLength, alias);
     }
 
     /// <summary>

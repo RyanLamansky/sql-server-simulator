@@ -117,8 +117,8 @@ internal sealed class HeapColumn(string name, SqlType type, int? maxLength, bool
     /// <summary><c>sys.columns.system_type_id</c>: the type's, or 108 for a numeric-spelled column.</summary>
     public byte SystemTypeId => this.SpelledNumeric && this.Type is DecimalSqlType ? NumericTypeId : this.Type.SystemTypeId;
 
-    /// <summary><c>sys.columns.user_type_id</c>: the type's, or 108 for a numeric-spelled column.</summary>
-    public int UserTypeId => this.SpelledNumeric && this.Type is DecimalSqlType ? NumericTypeId : this.Type.UserTypeId;
+    /// <summary><c>sys.columns.user_type_id</c>: the alias type's, else the type's, or 108 for a numeric-spelled column.</summary>
+    public int UserTypeId => this.AliasType?.UserTypeId ?? (this.SpelledNumeric && this.Type is DecimalSqlType ? NumericTypeId : this.Type.UserTypeId);
 
     /// <summary>The column's type name as the catalog spells it.</summary>
     public string TypeName => this.SpelledNumeric && this.Type is DecimalSqlType ? "numeric" : this.Type.SqlServerName;
@@ -218,6 +218,14 @@ internal sealed class HeapColumn(string name, SqlType type, int? maxLength, bool
     /// xml payloads against the schema — the link is metadata only.
     /// </summary>
     public XmlSchemaCollection? XmlSchemaCollection;
+
+    /// <summary>
+    /// The user alias type the column was declared with (<c>CREATE TYPE …
+    /// FROM</c>), which the catalog reports as its <c>user_type_id</c> and
+    /// domain and <c>DROP TYPE</c> refuses to strand; null for a built-in type.
+    /// <see cref="Type"/> holds what the alias stands for.
+    /// </summary>
+    public Schemas.AliasType? AliasType;
 
     internal string DebugDisplay() => $"{this.Name} {this.Type}{(this.MaxLength is int n ? $"({n})" : "")}";
 }

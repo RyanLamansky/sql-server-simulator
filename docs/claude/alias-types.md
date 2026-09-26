@@ -60,11 +60,18 @@ Alias rows ship via `BuiltInResources.cs::EnumerateSysTypes`:
 - `is_table_type = 0`
 - `is_nullable` from the alias's stored marker
 
+## Alias-typed columns and parameters
+
+A declared column (`HeapColumn.AliasType`), procedure or function parameter and scalar return (`AliasType` / `ReturnAliasType`) keeps the alias it was written with, set wherever `ResolveTypeReference` resolves one — `CREATE TABLE`, `ALTER TABLE ADD` / `ALTER COLUMN`, a table variable, a table type, a multi-statement function's return table — and carried onto a temporal history table's copy.
+The catalog then reports it as real does (probed 2026-09-26 against SQL Server 2025): `sys.columns` / `sys.parameters` `user_type_id` (so `TYPE_NAME` names the alias), `INFORMATION_SCHEMA.COLUMNS.DOMAIN_*`, `INFORMATION_SCHEMA.PARAMETERS.USER_DEFINED_TYPE_*`, `sp_help`'s Type column, and `syscolumns`' `xusertype` / `usertype`.
+`DROP TYPE` of an alias still in use is **Msg 3732**, naming the referencing table, table type (by its `TT_…` backing name), procedure or function of lowest object id and the type as written.
+
+Two places refuse an alias outright: a `#temp` table's column is **Msg 2715** (its types resolve in `tempdb`, where the database's aliases don't exist; a table variable's resolve here), and `CAST` / `CONVERT` to one is **Msg 243** at state 2 — state 1 for a name that isn't a type at all, which a qualified name reports whole.
+
 ## Known gaps
 
-- **`HeapColumn` doesn't carry a back-pointer to its declaring `AliasType`.**
-  Consequence: `sys.columns.user_type_id` surfaces the underlying built-in's id (not the alias's) when a column is alias-typed, and `DROP TYPE` on an alias type doesn't enforce **Msg 3732** (referenced-by-object).
-  Real bacpac load never drops alias types during import, so this is acceptable for the baseline.
+- **A projection doesn't carry its source column's alias.**
+  Real keeps the alias on a view column, a `SELECT … INTO` column and `sp_describe_first_result_set`'s `user_type_name` when the projection is a bare reference to an alias-typed column; here those report the underlying type.
 - **Alias-type `max_length` not emitted in `sys.types`** — gap from the catalog view's shipped subset.
 - **Alias-of-alias not modeled** — `CREATE TYPE T2 FROM T1` where T1 is an alias raises Msg 222 (matches probe behavior).
 

@@ -375,7 +375,7 @@ internal sealed partial class Selection
                 context.MoveNextRequired();
             }
 
-            var (resolvedType, _, _) = Simulation.ResolveTypeReference(
+            var (resolvedType, _, _, _) = Simulation.ResolveTypeReference(
                 context.Batch, qualifiedTypeName, typeNameToken, declaredMaxLength, declaredScale,
                 index: columns.Count + 1, TypeSpecSite.Column, columnName: columnName);
 

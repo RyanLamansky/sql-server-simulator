@@ -749,7 +749,7 @@ partial class Simulation
         if (existingCol.GeneratedAs != GeneratedAlwaysAsRow.None)
             throw SimulatedSqlException.PeriodColumnCannotBeAltered(columnName);
 
-        var (newType, newMaxLength, aliasIsNullable) = ResolveTypeReference(
+        var (newType, newMaxLength, aliasIsNullable, aliasType) = ResolveTypeReference(
             context.Batch, qualifiedTypeName, typeName, declaredMaxLength, declaredScale,
             index: ordinal + 1, TypeSpecSite.Column, columnName: columnName);
         // For ALTER COLUMN, the precedence is: explicit NULL/NOT NULL on the
@@ -821,6 +821,7 @@ partial class Simulation
             spelledNumeric: SqlType.IsNumericSpelling(qualifiedTypeName, alias: context.Batch.TryResolveAliasType(qualifiedTypeName, out _)))
         {
             DefaultConstraint = existingCol.DefaultConstraint,
+            AliasType = aliasType,
             // ALTER COLUMN replaces the HeapColumn instance but not the
             // column's catalog identity — real keeps column_id across a type
             // change (probe-confirmed), as it does across sp_rename.

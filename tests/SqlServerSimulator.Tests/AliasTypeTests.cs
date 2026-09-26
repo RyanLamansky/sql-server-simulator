@@ -304,4 +304,73 @@ public class AliasTypeTests
             """));
         _ = TestHelpers.AssertSqlError("declare @t table (a sysname); insert @t values (null)", 515);
     }
+
+    /// <summary>
+    /// An alias-typed column or parameter keeps its alias in the catalog:
+    /// user_type_id, TYPE_NAME, the ISO domain and user-defined-type columns
+    /// and sp_help's Type (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void AliasTypedColumnsAndParameters_KeepTheirAlias()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create type dbo.phone from varchar(20) null",
+            "create table t (id int, p phone, q varchar(5))",
+            "alter table t alter column q phone",
+            "create procedure p @x phone as select 1",
+            "create function f (@a phone) returns phone as begin return @a end");
+        AreEqual("int,phone,phone", sim.ExecuteScalar(
+            "select string_agg(type_name(user_type_id), ',') within group (order by column_id) from sys.columns where object_id = object_id('t')"));
+        AreEqual("-,dbo.phone,dbo.phone", sim.ExecuteScalar(
+            "select string_agg(isnull(domain_schema + '.' + domain_name, '-'), ',') within group (order by ordinal_position) from information_schema.columns where table_name = 't'"));
+        AreEqual("phone,phone", sim.ExecuteScalar(
+            "select string_agg(type_name(user_type_id), ',') within group (order by parameter_id) from sys.parameters where object_id = object_id('f')"));
+        AreEqual("phone|varchar|20", sim.ExecuteScalar(
+            "select concat_ws('|', user_defined_type_name, data_type, character_maximum_length) from information_schema.parameters where specific_name = 'p'"));
+    }
+
+    [TestMethod]
+    public void SpHelp_NamesTheAlias()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create type dbo.phone from varchar(20) null", "create table t (p phone)");
+        using var reader = sim.ExecuteReader("exec sp_help 't'");
+        IsTrue(reader.NextResult());
+        IsTrue(reader.Read());
+        AreEqual("phone", reader.GetString(1));
+    }
+
+    [TestMethod]
+    [DataRow("create table x2 (p phone)", "create table x1 (p phone)", "drop type phone", "x2")]
+    [DataRow("create procedure dp @x phone as select 1", "create table x1 (a int)", "drop type dbo.phone", "dp")]
+    public void DropType_WhileReferenced_IsMsg3732(string first, string second, string drop, string referencing)
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create type dbo.phone from varchar(20) null", first, second);
+        sim.AssertSqlError(drop, 3732,
+            $"Cannot drop type '{drop["drop type ".Length..]}' because it is being referenced by object '{referencing}'. There may be other objects that reference this type.");
+    }
+
+    [TestMethod]
+    public void TempTable_CannotUseTheDatabasesAliasType()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create type dbo.phone from varchar(20) null");
+        sim.AssertSqlError("create table #t (p phone)", 2715, "Column, parameter, or variable #1: Cannot find data type phone.");
+        AreEqual("1", sim.ExecuteScalar("declare @t table (p phone); insert @t values ('1'); select p from @t"));
+    }
+
+    [TestMethod]
+    [DataRow("cast('1' as phone)", "Type phone is not a defined system type.", 2)]
+    [DataRow("convert(dbo.phone, '1')", "Type dbo.phone is not a defined system type.", 2)]
+    [DataRow("cast(1 as dbo.nosuch)", "Type dbo.nosuch is not a defined system type.", 1)]
+    public void Cast_RefusesAnAliasType(string expression, string message, int state)
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create type dbo.phone from varchar(20) null");
+        var exception = sim.AssertSqlError($"select {expression}", 243);
+        AreEqual(message, exception.Errors[0].Message);
+        AreEqual((byte)state, exception.State);
+    }
 }

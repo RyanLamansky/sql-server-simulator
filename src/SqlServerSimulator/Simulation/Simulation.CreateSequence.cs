@@ -210,7 +210,7 @@ partial class Simulation
             context.RestoreCheckpoint(afterTypeName);
         }
 
-        var (resolved, _, _) = ResolveTypeReference(
+        var (resolved, _, _, _) = ResolveTypeReference(
             context.Batch, qualifiedTypeName, typeName, declaredMaxLength, declaredScale,
             index: 1, TypeSpecSite.Scalar, columnName: typeName.Value);
         return resolved switch

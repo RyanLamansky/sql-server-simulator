@@ -322,7 +322,7 @@ partial class Simulation
     private static bool ParseScalarTail(ParserContext context, Schema schema, MultiPartName functionName, List<UdfParameter> parameters, bool isAlter, bool createOrAlter)
     {
         var returnSpelledNumeric = IsNumericTypeWord(context.Token);
-        var returnType = ParseFunctionReturnType(context, ordinal: 0);
+        var returnType = ParseFunctionReturnType(context, ordinal: 0, out var returnAliasType);
 
         // Optional WITH option [, option …] clause. RETURNS NULL ON NULL INPUT
         // is the only option that affects runtime semantics (NULL-propagation
@@ -488,6 +488,7 @@ partial class Simulation
             UsesQuotedIdentifier = context.QuotedIdentifiers,
             UsesAnsiNulls = context.Batch.Connection.AnsiNulls,
             ReturnSpelledNumeric = returnSpelledNumeric,
+            ReturnAliasType = returnAliasType,
         };
         if (replaced is not null)
             function.ModifyDate = context.Batch.CurrentStatement.UtcNow;
@@ -806,7 +807,7 @@ partial class Simulation
         context.MoveNextRequired();
 
         var spelledNumeric = IsNumericTypeWord(context.Token);
-        var paramType = ParseFunctionReturnType(context, ordinal);
+        var paramType = ParseFunctionReturnType(context, ordinal, out var aliasType);
 
         Expression? defaultExpression = null;
         if (context.Token is Operator { Character: '=' })
@@ -814,7 +815,7 @@ partial class Simulation
             context.MoveNextRequired();
             defaultExpression = Expression.Parse(context);
         }
-        return new UdfParameter(name, paramType, defaultExpression) { SpelledNumeric = spelledNumeric };
+        return new UdfParameter(name, paramType, defaultExpression) { SpelledNumeric = spelledNumeric, AliasType = aliasType };
     }
 
     /// <summary>
@@ -826,7 +827,7 @@ partial class Simulation
     /// <paramref name="ordinal"/> is the parameter's position, 0 for the
     /// return type.
     /// </summary>
-    private static SqlType ParseFunctionReturnType(ParserContext context, int ordinal)
+    private static SqlType ParseFunctionReturnType(ParserContext context, int ordinal, out AliasType? aliasType)
     {
         var (qualifiedTypeName, typeName) = TypeNameSynonyms.ReadTypeName(context);
         context.MoveNextRequired();
@@ -858,7 +859,7 @@ partial class Simulation
             context.MoveNextRequired();
         }
 
-        var (resolvedType, _, _) = ResolveTypeReference(
+        (var resolvedType, _, _, aliasType) = ResolveTypeReference(
             context.Batch, qualifiedTypeName, typeName, declaredMaxLength, declaredScale,
             index: ordinal, TypeSpecSite.Scalar, columnName: null);
         return resolvedType;

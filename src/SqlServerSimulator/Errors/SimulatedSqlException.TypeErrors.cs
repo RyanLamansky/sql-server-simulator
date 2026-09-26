@@ -71,8 +71,8 @@ partial class SimulatedSqlException
     /// Mimics SQL Server error 243: an unknown type name appears inside a
     /// CAST or CONVERT expression. (Column declarations use Msg 2715 instead.)
     /// </summary>
-    internal static SimulatedSqlException CannotFindDataTypeInCast(ReadOnlySpan<char> name) =>
-        new($"Type {name} is not a defined system type.", 243, 16, 1);
+    internal static SimulatedSqlException CannotFindDataTypeInCast(ReadOnlySpan<char> name, byte state = 1) =>
+        new($"Type {name} is not a defined system type.", 243, 16, state);
 
     /// <summary>
     /// Mimics SQL Server error 2716: a length was specified for a data type that

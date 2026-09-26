@@ -923,7 +923,10 @@ partial class Simulation
                 isHidden: pc.IsHidden,
                 collation: pc.Collation,
                 computedDefinition: pc.ComputedDefinition,
-                spelledNumeric: pc.SpelledNumeric);
+                spelledNumeric: pc.SpelledNumeric)
+            {
+                AliasType = pc.AliasType,
+            };
         }
         var history = new HeapTable(
             historyLeaf,
@@ -1524,9 +1527,14 @@ partial class Simulation
             nullable = false;
         }
 
-        var (resolvedType, maxLength, aliasIsNullable) = ResolveTypeReference(
+        var (resolvedType, maxLength, aliasIsNullable, aliasType) = ResolveTypeReference(
             context.Batch, qualifiedTypeName, typeName, declaredMaxLength, declaredScale,
             index: ordinalOffset + heapColumns.Count + 1, TypeSpecSite.Column, columnName: columnName.Value);
+        // A #temp table's types resolve in tempdb, where the current
+        // database's alias types don't exist (probed 2026-09-26 against SQL
+        // Server 2025); a table variable's resolve here.
+        if (aliasType is not null && tableName.StartsWith('#'))
+            throw SimulatedSqlException.CannotFindDataType(qualifiedTypeName.ToString(), ordinalOffset + heapColumns.Count + 1);
         // Alias-type-declared nullability propagates as the column default
         // when the column declaration omits an explicit NULL / NOT NULL. A
         // period column defaults to NOT NULL instead (probed 2026-09-25 against
@@ -1612,6 +1620,7 @@ partial class Simulation
             spelledNumeric: SqlType.IsNumericSpelling(qualifiedTypeName, alias: context.Batch.TryResolveAliasType(qualifiedTypeName, out _)));
         if (xmlSchemaCollection is not null)
             newColumn.XmlSchemaCollection = xmlSchemaCollection;
+        newColumn.AliasType = aliasType;
         newColumn.IsSparse = isSparse;
         if (defaultExpression is not null)
         {
@@ -3407,5 +3416,6 @@ partial class Simulation
             IsSparse = column.IsSparse,
             DefaultConstraint = column.DefaultConstraint,
             XmlSchemaCollection = column.XmlSchemaCollection,
+            AliasType = column.AliasType,
         };
 }

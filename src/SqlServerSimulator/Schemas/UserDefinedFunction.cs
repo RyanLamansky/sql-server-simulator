@@ -100,6 +100,9 @@ internal sealed class ScalarFunction(
     /// <summary>The return type was written <c>numeric</c>, which a call reports (probed 2026-09-24).</summary>
     public bool ReturnSpelledNumeric;
 
+    /// <summary>The user alias type the return type was written as; see <see cref="HeapColumn.AliasType"/>.</summary>
+    public AliasType? ReturnAliasType;
+
     /// <summary>
     /// True when the function was declared with
     /// <c>WITH RETURNS NULL ON NULL INPUT</c>. At call time, if any argument
@@ -288,6 +291,9 @@ internal sealed class UdfParameter(string name, SqlType type, Expression? defaul
 {
     /// <summary>Declared <c>numeric</c> rather than <c>decimal</c>; see <see cref="HeapColumn.SpelledNumeric"/>.</summary>
     public bool SpelledNumeric;
+
+    /// <summary>The user alias type the parameter was declared with; see <see cref="HeapColumn.AliasType"/>.</summary>
+    public AliasType? AliasType;
 
     public readonly string Name = name;
     public readonly SqlType Type = type;

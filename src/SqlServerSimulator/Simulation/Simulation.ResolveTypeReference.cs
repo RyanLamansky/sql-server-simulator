@@ -57,9 +57,10 @@ partial class Simulation
     /// alias, otherwise null. The third tuple element is the signal column
     /// declarations use to default their nullability from the alias when the
     /// column itself omits a <c>NULL</c> / <c>NOT NULL</c> marker — matches
-    /// probe behavior against SQL Server 2025.
+    /// probe behavior against SQL Server 2025. The fourth is the alias
+    /// itself, which a declared column or parameter keeps for the catalog.
     /// </returns>
-    internal static (SqlType Type, int? MaxLength, bool? AliasNullable) ResolveTypeReference(
+    internal static (SqlType Type, int? MaxLength, bool? AliasNullable, AliasType? Alias) ResolveTypeReference(
         BatchContext batch,
         MultiPartName qualifiedTypeName,
         Name leafToken,
@@ -83,11 +84,11 @@ partial class Simulation
             // sysname is itself a system alias type declared NOT NULL, so a
             // column that doesn't say otherwise is NOT NULL (probed 2026-09-25
             // against SQL Server 2025, table variables included).
-            return (resolved, maxLength, resolved is SystemNameSqlType ? false : null);
+            return (resolved, maxLength, resolved is SystemNameSqlType ? false : null, null);
         }
         return declaredMaxLength is not null || declaredScale is not null
             ? throw SimulatedSqlException.CannotSpecifyColumnWidthOnAlias(
                 $"{alias.Schema.Name}.{alias.Name}", index)
-            : ((SqlType Type, int? MaxLength, bool? AliasNullable))(alias.UnderlyingType, alias.DeclaredMaxLength, alias.IsNullable);
+            : (alias.UnderlyingType, alias.DeclaredMaxLength, alias.IsNullable, alias);
     }
 }

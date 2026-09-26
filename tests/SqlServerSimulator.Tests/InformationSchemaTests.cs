@@ -915,4 +915,19 @@ public sealed class InformationSchemaTests
             rows.Add(reader.GetString(0));
         return rows;
     }
+
+    /// <summary>
+    /// xml and the spatial types share the string family without a collation:
+    /// both catalog surfaces report none (probed 2026-09-26 against SQL Server
+    /// 2025).
+    /// </summary>
+    [TestMethod]
+    public void XmlAndSpatialColumns_HaveNoCollation()
+        => AreEqual("x:-:-:-,g:-:-:-,v:SQL_Latin1_General_CP1_CI_AS:iso_1:SQL_Latin1_General_CP1_CI_AS", new Simulation().ExecuteScalar("""
+            create table t (x xml, g geography, v varchar(5));
+            select string_agg(concat(c.column_name, ':', isnull(c.collation_name, '-'), ':', isnull(c.character_set_name, '-'), ':', isnull(s.collation_name, '-')), ',')
+                within group (order by c.ordinal_position)
+            from information_schema.columns c join sys.columns s on s.object_id = object_id('t') and s.name = c.column_name
+            where c.table_name = 't'
+            """));
 }

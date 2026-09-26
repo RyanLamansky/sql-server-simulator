@@ -418,23 +418,17 @@ partial class Simulation
     /// (same convention as CREATE / DROP regular tables — only temp-table
     /// DDL is transactional).
     /// </summary>
-    /// <remarks>
-    /// Alias-type drops do NOT scan tables for column references in this
-    /// bundle — the simulator's <c>HeapColumn</c> doesn't retain a back-
-    /// pointer to its declaring alias, so a fidelity-faithful Msg 3732 path
-    /// for alias types would require threading the alias pointer through
-    /// every column creation site. Deferred as a known fidelity gap; the
-    /// bacpac-loader use case never drops alias types during import.
-    /// </remarks>
     private static void DropOneType(ParserContext context, MultiPartName name, bool ifExists)
     {
         if (context.Batch.IsSkipping)
             return;
         var schema = context.Batch.TryResolveSchema(name, out var resolved) ? resolved : null;
-        if (schema is not null && schema.AliasTypes.TryGetValue(name.Leaf, out _))
+        if (schema is not null && schema.AliasTypes.TryGetValue(name.Leaf, out var alias))
         {
             schema.Database.RejectWriteWhenReadOnly();
             RejectUnauthorizedTypeDrop(context, schema, name);
+            if (FirstAliasTypeReference(schema.Database, alias) is { } referencing)
+                throw SimulatedSqlException.CannotDropTypeBecauseReferenced(name.ToString(), referencing);
             if (schema.AliasTypes.TryRemove(name.Leaf, out var droppedAlias))
                 RecordSlotUndo(context, schema.AliasTypes, name.Leaf, droppedAlias);
             RecordDdlEvent(context, "DROP_TYPE", schema.Name, name.Leaf, "TYPE");
@@ -471,6 +465,53 @@ partial class Simulation
         if (schema.TableTypes.TryRemove(name.Leaf, out var droppedTableType))
             RecordSlotUndo(context, schema.TableTypes, name.Leaf, droppedTableType);
         RecordDdlEvent(context, "DROP_TYPE", schema.Name, name.Leaf, "TYPE");
+    }
+
+    /// <summary>
+    /// The object an alias type still types a column or parameter of — a
+    /// table, a table type (by its backing name), a procedure or a function —
+    /// which <c>DROP TYPE</c>'s Msg 3732 names; real names the one of lowest
+    /// object id when several do (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    private static string? FirstAliasTypeReference(Database database, AliasType alias)
+    {
+        (int Id, string Name)? first = null;
+        void Consider(int id, string name)
+        {
+            if (first is null || id < first.Value.Id)
+                first = (id, name);
+        }
+        static bool Types(HeapColumn[] columns, AliasType alias) =>
+            Array.Exists(columns, column => ReferenceEquals(column.AliasType, alias));
+
+        foreach (var schema in database.Schemas.Values)
+        {
+            foreach (var table in schema.HeapTables.Values)
+            {
+                if (Types(table.Columns, alias))
+                    Consider(table.ObjectId, table.Name);
+            }
+            foreach (var tableType in schema.TableTypes.Values)
+            {
+                if (Types(tableType.Columns, alias))
+                    Consider(tableType.ObjectId, tableType.BackingTableName);
+            }
+            foreach (var procedure in schema.Procedures.Values)
+            {
+                if (Array.Exists(procedure.Parameters, parameter => ReferenceEquals(parameter.AliasType, alias)))
+                    Consider(procedure.ObjectId, procedure.Name);
+            }
+            foreach (var function in schema.Functions.Values)
+            {
+                if (Array.Exists(function.Parameters, parameter => ReferenceEquals(parameter.AliasType, alias))
+                    || (function is ScalarFunction scalar && ReferenceEquals(scalar.ReturnAliasType, alias))
+                    || (function is MultiStatementTableValuedFunction multiStatement && Types(multiStatement.OutputColumns, alias)))
+                {
+                    Consider(function.ObjectId, function.Name);
+                }
+            }
+        }
+        return first?.Name;
     }
 
     /// <summary>

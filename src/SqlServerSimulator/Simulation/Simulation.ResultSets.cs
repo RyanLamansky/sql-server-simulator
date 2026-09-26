@@ -180,7 +180,7 @@ partial class Simulation
                 }
                 context.MoveNextOptional();
             }
-            var (resolvedType, resolvedMaxLength, _) = ResolveTypeReference(
+            var (resolvedType, resolvedMaxLength, _, _) = ResolveTypeReference(
                 batch, qualifiedTypeName, typeLeaf, declaredMaxLength, declaredScale,
                 index: types.Count + 1, TypeSpecSite.Column, columnName: columnName.Value);
 

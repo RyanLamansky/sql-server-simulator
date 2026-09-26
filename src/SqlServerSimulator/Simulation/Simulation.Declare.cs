@@ -261,7 +261,7 @@ partial class Simulation
             context.MoveNextOptional();
         }
 
-        var (resolved, maxLength, _) = ResolveTypeReference(
+        var (resolved, maxLength, _, _) = ResolveTypeReference(
             context.Batch, qualifiedTypeName, typeName, declaredMaxLength, declaredScale,
             // Real numbers a variable among every one the batch declares.
             context.Batch.Variables.Count + 1, TypeSpecSite.Scalar, variableName);

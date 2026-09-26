@@ -490,7 +490,7 @@ internal static partial class BuiltInResources
         var dbDefaultCollation = SqlValue.FromSystemName(database.CollationName);
         _ = defaultCollation;
         SqlValue CollationFor(HeapColumn c) =>
-            c.Type.Category != SqlTypeCategory.String ? nullCollation
+            !SqlType.IsCollatedString(c.Type) ? nullCollation
             : c.Collation is { } overrideName ? SqlValue.FromSystemName(overrideName)
             : dbDefaultCollation;
         // One sys.columns row. A table's column carries its stable id (DROP

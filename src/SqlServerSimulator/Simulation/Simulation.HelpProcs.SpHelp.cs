@@ -304,7 +304,7 @@ partial class Simulation
                 or BinarySqlType or VarbinarySqlType;
             rows.Add([
                 SqlValue.FromSystemName(column.Name),
-                SqlValue.FromSystemName(column.SpelledNumeric ? column.TypeName : HelpTypeName(type)),
+                SqlValue.FromSystemName(column.AliasType?.Name ?? (column.SpelledNumeric ? column.TypeName : HelpTypeName(type))),
                 HelpFlag(column.Computed is not null),
                 SqlValue.FromInt32(maxLength),
                 showsPrecScale ? HelpPrecScaleCell(precision) : blank,
@@ -353,12 +353,12 @@ partial class Simulation
         var rows = new List<SqlValue[]>();
         var serverCollation = batch.Connection.Simulation.ServerCollationName;
 
-        void Add(string name, SqlType type, int? declaredMaxLength, int order)
+        void Add(string name, SqlType type, int? declaredMaxLength, int order, AliasType? alias)
         {
             var (maxLength, precision, scale) = HelpTypeGeometry(type, declaredMaxLength);
             rows.Add([
                 SqlValue.FromSystemName(name),
-                SqlValue.FromSystemName(HelpTypeName(type)),
+                SqlValue.FromSystemName(alias?.Name ?? HelpTypeName(type)),
                 SqlValue.FromInt16((short)maxLength),
                 SqlValue.FromInt32(precision),
                 scale is { } s ? SqlValue.FromInt32(s) : SqlValue.Null(SqlType.Int32),
@@ -375,7 +375,7 @@ partial class Simulation
                 for (var i = 0; i < procedure.Parameters.Length; i++)
                 {
                     var parameter = procedure.Parameters[i];
-                    Add("@" + parameter.Name, parameter.Type, parameter.DeclaredMaxLength, i + 1);
+                    Add("@" + parameter.Name, parameter.Type, parameter.DeclaredMaxLength, i + 1, parameter.AliasType);
                 }
 
                 break;
@@ -383,9 +383,9 @@ partial class Simulation
                 // A scalar function leads with its return value: an
                 // empty-named row at Param_order 0 (probe-confirmed).
                 if (function is ScalarFunction scalar)
-                    Add("", scalar.ReturnType, null, 0);
+                    Add("", scalar.ReturnType, null, 0, scalar.ReturnAliasType);
                 for (var i = 0; i < function.Parameters.Length; i++)
-                    Add("@" + function.Parameters[i].Name, function.Parameters[i].Type, null, i + 1);
+                    Add("@" + function.Parameters[i].Name, function.Parameters[i].Type, null, i + 1, function.Parameters[i].AliasType);
                 break;
         }
 
@@ -585,8 +585,7 @@ partial class Simulation
     /// <summary>
     /// <c>type_name(user_type_id)</c> for a storage type, read out of the same
     /// <c>sys.types</c> row data the catalog view projects so the two can't
-    /// drift. The simulator does not track a column's alias type, so an
-    /// alias-typed column reports its underlying base type name.
+    /// drift; an alias-typed column or parameter reports its alias instead.
     /// </summary>
     private static string HelpTypeName(SqlType type) =>
         BuiltInResources.SystemTypeName(type.UserTypeId) ?? type.SqlServerName;
