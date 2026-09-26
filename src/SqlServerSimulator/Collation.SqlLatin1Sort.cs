@@ -47,7 +47,7 @@ internal abstract partial class Collation
     {
         internal const string CollationName = "SQL_Latin1_General_CP1_CI_AS";
 
-        // Dense ranks indexed by CP1252 byte (1..255; index 0 unused). The
+        // Dense ranks indexed by CP1252 byte (0..255; byte 0 ranks 0, below every other). The
         // "Primary" arrays come from the accent-insensitive CI_AI form (so
         // accent variants of a base letter share a rank); the "Secondary"
         // arrays from the accent-sensitive CI_AS form (the within-base-letter
@@ -304,13 +304,16 @@ internal abstract partial class Collation
 
         // Decode each CP1252 byte to its .NET char and map char -> (primary,
         // secondary). The 0x80-0x9F window decodes to scattered BMP code points
-        // (€ ƒ Ÿ …); the rest are identity for ASCII / Latin-1.
+        // (€ ƒ Ÿ …); the rest are identity for ASCII / Latin-1. Byte 0 is a
+        // character like any other to the varchar sort, weighted below every
+        // other (rank 0 at both levels): 'a' + CHAR(0) + 'b' < 'ab' and
+        // CHAR(0) <> '' (probed 2026-09-26 against SQL Server 2025).
         private static FrozenDictionary<char, (int, int)> BuildWeights(ReadOnlySpan<byte> primary, ReadOnlySpan<byte> secondary)
         {
             var encoding = CharSqlType.Cp1252Encoder;
             var map = new Dictionary<char, (int, int)>(primary.Length);
             Span<byte> buffer = stackalloc byte[1];
-            for (var b = 1; b < primary.Length; b++)
+            for (var b = 0; b < primary.Length; b++)
             {
                 buffer[0] = (byte)b;
                 var decoded = encoding.GetString(buffer);
@@ -606,10 +609,14 @@ internal abstract partial class Collation
         }
 
         // Walks both operands through parallel weight cursors, comparing one
-        // level at a time. The shorter weight run sorts first once a shared
-        // prefix ties (matching the old list-length tie-break). The cursors are
-        // ref structs over the source strings — no weight lists are allocated,
-        // so the common single-pass primary comparison is allocation-free.
+        // level at a time. Once a shared prefix ties, nvarchar sorts the
+        // shorter weight run first; varchar compares the longer run's rest
+        // against a space, the padding real applies — so a control character
+        // (weighted below the space, CHAR(0) lowest of all) sorts a string
+        // before its own prefix: 'a' + CHAR(0) < 'a' (probed 2026-09-26
+        // against SQL Server 2025). The cursors are ref structs over the
+        // source strings — no weight lists are allocated, so the common
+        // single-pass primary comparison is allocation-free.
         private int CompareLevel(string x, string y, Level level)
         {
             var cx = this.NewCursor(x);
@@ -618,14 +625,36 @@ internal abstract partial class Collation
             {
                 var hasX = cx.MoveNext();
                 var hasY = cy.MoveNext();
+                if (!hasX && !hasY)
+                    return 0;
                 if (!hasX || !hasY)
-                    return (hasX ? 1 : 0) - (hasY ? 1 : 0);
+                {
+                    if (!this.varcharStorage)
+                        return hasX ? 1 : -1;
+                    var padded = PaddingWeight(level);
+                    var rest = hasX ? cx : cy;
+                    do
+                    {
+                        var w = level switch { Level.Primary => rest.Primary, Level.Secondary => rest.Secondary, _ => rest.Tertiary };
+                        if (w != padded)
+                            return (w < padded) == hasX ? -1 : 1;
+                    }
+                    while (rest.MoveNext());
+                    return 0;
+                }
                 var wx = level switch { Level.Primary => cx.Primary, Level.Secondary => cx.Secondary, _ => cx.Tertiary };
                 var wy = level switch { Level.Primary => cy.Primary, Level.Secondary => cy.Secondary, _ => cy.Tertiary };
                 if (wx != wy)
                     return wx < wy ? -1 : 1;
             }
         }
+
+        private static int PaddingWeight(Level level) => level switch
+        {
+            Level.Primary => varcharWeights[' '].Primary,
+            Level.Secondary => varcharWeights[' '].Secondary,
+            _ => 0,
+        };
 
         private WeightCursor NewCursor(string s) =>
             this.varcharStorage

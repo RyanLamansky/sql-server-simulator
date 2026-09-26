@@ -222,7 +222,7 @@ Already listed elsewhere here and not repeated: parenthesized set-op branches.
 **Type-pair neighbors** — found by the type-pair probes and left open (probed 2026-09-23):
 
 - An alias type over numeric reads `decimal`, as does a numeric column's name in a type-pair message (raised while binding, before references are marked); everything else carries the name (see [`arithmetic.md`](arithmetic.md#numeric-vs-decimal-reported-type-name)).
-- Under a SQL collation, a `varchar` containing `CHAR(0)` compares unequal to the same string without it.
+- `CHAR(0)` in `varchar` is a real, lowest-weight character under every non-binary SQL collation, but only the default collation's byte-exact body models it; the others (`SQL_Latin1_General_CP1_CS_AS`, `SQL_Latin1_General_CP1253_CI_AS` …) compare through ICU, which ignores it, and so does `LIKE` under the default collation — `'a' + CHAR(0) + 'b' LIKE 'ab'` is true here, false on real (probed 2026-09-26).
 - The one-way assignment rule (`Assign` grid, [`arithmetic.md`](arithmetic.md#type-pair-legality)) isn't applied to an `INSERT … EXEC` source, so a `datetime` result column reaching a `decimal` column converts here where real raises Msg 257 as the rows arrive (probed 2026-09-24).
   A result set doesn't record which of its columns were a bare `NULL`, which the rule exempts, so the check needs that carried out of the procedure's `SELECT` first.
 

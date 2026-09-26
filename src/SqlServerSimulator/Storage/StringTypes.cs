@@ -66,7 +66,7 @@ internal sealed class VarcharSqlType : SqlType
     public static VarcharSqlType Get(int length, Collation collation, Coercibility coercibility) =>
         length is not (0 or SqlType.MaxLengthSentinel) and (< 1 or > 8000)
             ? throw new ArgumentOutOfRangeException(nameof(length), $"varchar length must be 1-8000, 0 (unspecified), or -1 (MAX); got {length}.")
-            : cache.GetOrAdd(((short)length, collation, coercibility), static key => new VarcharSqlType(key.Length, key.Collation, key.Coercibility));
+            : cache.GetOrAdd(((short)length, collation.ForVarcharStorage(), coercibility), static key => new VarcharSqlType(key.Length, key.Collation, key.Coercibility));
 }
 
 /// <summary>
@@ -377,7 +377,7 @@ internal sealed class CharSqlType : SqlType
     public static CharSqlType Get(int length, Collation collation, Coercibility coercibility) =>
         length is < 1 or > 8000
             ? throw new ArgumentOutOfRangeException(nameof(length), $"char length must be 1-8000; got {length}.")
-            : cache.GetOrAdd(((short)length, collation, coercibility), static key => new CharSqlType(key.Item1, key.Item2, key.Item3));
+            : cache.GetOrAdd(((short)length, collation.ForVarcharStorage(), coercibility), static key => new CharSqlType(key.Item1, key.Item2, key.Item3));
 
     private static readonly ConcurrentDictionary<(short, Collation, Coercibility), CharSqlType> cache = new();
 

@@ -46,6 +46,34 @@ public sealed class CollationBehaviorTests
         => AreEqual(expected, new Simulation().ExecuteScalar($"select case when {condition} then 1 else 0 end"));
 
     /// <summary>
+    /// The default collation's varchar sort weighs a control character below
+    /// the space, <c>CHAR(0)</c> lowest of all, and compares a shorter string
+    /// as if space-padded — so the control sorts a string before its own
+    /// prefix — while the nvarchar sort ignores <c>CHAR(0)</c>.
+    /// Probed 2026-09-26 against SQL Server 2025.
+    /// </summary>
+    [TestMethod]
+    [DataRow("'a' + char(0) + 'b' = 'ab'", 0)]
+    [DataRow("'a' + char(0) + 'b' < 'ab'", 1)]
+    [DataRow("'a' + char(0) + 'b' < 'a b'", 1)]
+    [DataRow("'a' + char(0) = 'a'", 0)]
+    [DataRow("'a' + char(0) < 'a'", 1)]
+    [DataRow("'a' + char(0) < 'a '", 1)]
+    [DataRow("'a' + char(0) + ' ' = 'a' + char(0)", 1)]
+    [DataRow("char(0) = ''", 0)]
+    [DataRow("char(0) < char(1)", 1)]
+    [DataRow("'a' + char(1) < 'a'", 1)]
+    [DataRow("'a' + char(9) < 'a'", 1)]
+    [DataRow("N'a' + nchar(0) + N'b' = N'ab'", 1)]
+    [DataRow("'a' + char(0) + 'b' = 'ab' collate Latin1_General_CI_AS", 1)]
+    public void DefaultCollation_VarcharControlCharacters_WeighBelowSpace(string condition, int expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar($"select case when {condition} then 1 else 0 end"));
+
+    [TestMethod]
+    public void DefaultCollation_VarcharNul_KeepsDistinctValuesApart()
+        => AreEqual(2, new Simulation().ExecuteScalar("select count(distinct v) from (values ('a' + char(0) + 'b'), ('ab')) t(v)"));
+
+    /// <summary>
     /// ORDER BY routes through the default collation. <c>'a' &lt; 'B'</c>
     /// because case-fold yields <c>'A' &lt; 'B'</c>.
     /// </summary>

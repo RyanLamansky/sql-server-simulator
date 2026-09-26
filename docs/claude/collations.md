@@ -9,6 +9,7 @@ Cross-collation operand pairs that can't be resolved by coercibility either repo
 `VarcharSqlType` / `NVarcharSqlType` / `CharSqlType` / `NCharSqlType` intern per `(length, Collation, Coercibility)` trio via a 3-tuple `ConcurrentDictionary`.
 The existing length-only `Get(N)` overloads return the `(N, Collation.Baseline, CoercibleDefault)` variant — matching the literal / parameter / CAST-of-literal contexts that historically didn't pin collation.
 New `Get(length, collation, coercibility)` overloads return the column-pinned variant.
+The `varchar` / `char` pair intern under `Collation.ForVarcharStorage()`, so a type built from a database or column collation always carries the collation's non-Unicode sort body — a `CHAR(n)` result once compared through the default collation's Unicode weights, ignoring `CHAR(0)` where real's varchar sort doesn't.
 
 `SystemNameSqlType` / `TextSqlType` / `NTextSqlType` are single shared instances reporting `Collation.Baseline` at `Implicit` rank — sysname/text/ntext don't accept per-column COLLATE in the simulator (sysname rejects per grammar; text/ntext deferred as deprecated).
 
@@ -345,6 +346,7 @@ The override bakes four probe-extracted rank tables (DENSE_RANK over `CHAR(n)` /
 - **varchar** (SQL sort order 52, CP1252): pure per-character; **no** ignorable characters.
   Expands `æ Æ ß` to their base letters at the primary level, with a **tertiary** so the ligature sorts just after its expansion (`'ae' < 'æ'`, `'ss' < 'ß'`).
   `œ Œ þ Þ` are single-weight letters here (no expansion).
+  `CHAR(0)` is a character like any other, weighted below everything, and the controls weigh below the space; a shorter string compares as if space-padded, so a control sorts a string *before* its own prefix: `'a' + CHAR(0) + 'b' < 'ab'`, `'a' + CHAR(9) < 'a'`, `CHAR(0) <> ''` (probed 2026-09-26).
 - **nvarchar** (Unicode weights): control characters plus apostrophe, hyphen, en/em dash, and soft-hyphen are minimal-weight — ignored at the primary/secondary levels, consulted only to break a remaining tie (`'coop' < 'co-op'`, `'cant' < "can't"`, `'A' < "'A"`).
   Expands the full Latin ligature set `æ Æ œ Œ ß þ Þ` and treats a ligature as **equal** to its expansion (`'æ' = 'ae'`, `'ß' = 'ss'` — no tertiary).
 - **nvarchar — Thai block** (U+0E00–U+0E7F): extended onto the *same unified rank scale* as CP1252, from one combined `DENSE_RANK` over CP1252 ∪ Thai.
