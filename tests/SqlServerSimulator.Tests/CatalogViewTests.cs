@@ -1373,6 +1373,8 @@ public sealed class CatalogViewTests
     [DataRow("select collation_name from sys.system_columns where object_id = object_id('sys.objects') and name = 'name'", "SQL_Latin1_General_CP1_CI_AS")]
     [DataRow("select collation_name from sys.all_columns where object_id = object_id('sys.objects') and name = 'type'", "Latin1_General_CI_AS_KS_WS")]
     [DataRow("select name from sys.all_columns where object_id = object_id('INFORMATION_SCHEMA.COLUMNS') and column_id = 3", "TABLE_NAME")]
+    [DataRow("select rtrim(type) from sys.all_objects where name = 'fn_helpcollations'", "IF")]
+    [DataRow("select cast(count(*) as varchar(5)) from sys.all_objects where name = 'spt_values'", "0")]
     public void CatalogViews_AreCataloguedThemselves(string sql, string expected)
         => AreEqual(expected, new Simulation().ExecuteScalar(sql));
 

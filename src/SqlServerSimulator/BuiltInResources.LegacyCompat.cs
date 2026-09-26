@@ -613,6 +613,13 @@ internal static partial class BuiltInResources
     }
 
     /// <summary>
+    /// Whether a registered catalog view is one real implements as an inline
+    /// table-valued function, read with arguments — <c>sys.fn_helpcollations()</c>.
+    /// </summary>
+    private static bool IsInlineFunction(CatalogView view) =>
+        view.Name.StartsWith("fn_", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
     /// Every catalog view once, with the schema it lists under: the rows of
     /// <c>sys.system_views</c> and, through their columns, of
     /// <c>sys.system_columns</c> — the system halves of <c>sys.all_views</c> /
@@ -630,7 +637,8 @@ internal static partial class BuiltInResources
             var schemaId = dot >= 0 && key.AsSpan(0, dot).Equals("INFORMATION_SCHEMA", StringComparison.OrdinalIgnoreCase)
                 ? Database.InformationSchemaId
                 : Database.SysSchemaId;
-            views.Add((view, schemaId));
+            if (!view.MasterScoped && !IsInlineFunction(view))
+                views.Add((view, schemaId));
         }
         return [.. views];
     });
@@ -654,7 +662,15 @@ internal static partial class BuiltInResources
             var schemaId = dot >= 0 && key.AsSpan(0, dot).Equals("INFORMATION_SCHEMA", StringComparison.OrdinalIgnoreCase)
                 ? Database.InformationSchemaId
                 : Database.SysSchemaId;
-            objects.Add(new SystemObject(view.ObjectId, view.Name, schemaId, "V ", "VIEW"));
+            // A master-only view (spt_values, real's dbo view in master) lists
+            // nowhere else, and fn_helpcollations is an inline function to
+            // real rather than a view (probed 2026-09-26 against SQL Server
+            // 2025).
+            if (view.MasterScoped)
+                continue;
+            objects.Add(IsInlineFunction(view)
+                ? new SystemObject(view.ObjectId, view.Name, schemaId, "IF", "SQL_INLINE_TABLE_VALUED_FUNCTION")
+                : new SystemObject(view.ObjectId, view.Name, schemaId, "V ", "VIEW"));
         }
         foreach (var proc in SystemProcedureNames)
         {
