@@ -205,8 +205,8 @@ partial class SimulatedSqlException
     /// parameter that has no default). The State (4) and verbatim wording
     /// were probe-confirmed against SQL Server 2025.
     /// </summary>
-    internal static SimulatedSqlException ProcedureExpectsParameter(string procedureName, string parameterName) =>
-        new($"Procedure or function '{procedureName}' expects parameter '@{parameterName}', which was not supplied.", 201, 16, 4);
+    internal static SimulatedSqlException ProcedureExpectsParameter(string procedureName, string parameterName, byte state = 4) =>
+        new($"Procedure or function '{procedureName}' expects parameter '@{parameterName}', which was not supplied.", 201, 16, state);
 
     /// <summary>
     /// Mimics SQL Server's Msg 8145 — an EXEC named an argument the procedure

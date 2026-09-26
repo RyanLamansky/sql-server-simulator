@@ -223,6 +223,10 @@ partial class SqlType
     /// raises none of those, so it may pass anything.</param>
     public static SimulatedSqlException? OperandPairError(TypePairOperation operation, TypePairOperand left, TypePairOperand right, string operatorName)
     {
+        // An undeclared parameter sp_describe_undeclared_parameters is typing
+        // takes its type from this pair rather than being judged by it.
+        if (Parser.UndeclaredParameterDeduction.Intercept(operation, left, right, operatorName))
+            return null;
         if (operation == TypePairOperation.Compare)
         {
             left = NarrowedIntegerLiteral(left);

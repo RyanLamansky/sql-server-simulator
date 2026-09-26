@@ -175,6 +175,7 @@ partial class Simulation
             "sp_databases" => InvokeSpDatabases(batch),
             "sp_depends" => InvokeSpDepends(batch),
             "sp_describe_first_result_set" => this.InvokeSpDescribeFirstResultSet(batch),
+            "sp_describe_undeclared_parameters" => this.InvokeSpDescribeUndeclaredParameters(batch),
             "sp_dropextendedproperty" => InvokeSpExtendedProperty(batch, ExtendedPropertyOp.Drop),
             "sp_droprolemember" => InvokeSpRoleMember(batch, isAdd: false),
             "sp_dropserver" => InvokeSpDropServer(batch),

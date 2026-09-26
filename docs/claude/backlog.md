@@ -198,6 +198,8 @@ Roots **filed** (still open):
   Msg 8728 and its transaction-aborting semantics now ship ([`query.md`](query.md#range-frame-order-by-msg-8728), [`transactions.md`](transactions.md#the-transaction-aborting-error-class)), along with the Msg 6401 that used to be Msg 102 and the TDS transaction-state repairs behind it.
   Re-measured over the wire: `expressions_window` is **0 sim-only and 0 real-only**, 27 failing identically on both.
 
+Re-measured 2026-09-26 on the same 35-app slice after a busy stretch of fidelity work: **0 sim-only, 0 real-only**, 72 failing on both — the one sim-only failure on the way there (`bulk_create.test_bulk_insert_nullable_fields`) was the missing `sp_describe_undeclared_parameters`, which pyodbc uses to type a `None` bound for a `varbinary` column.
+
 Getting there took eleven roots, and the pattern worth keeping is that failures cluster by *cause*, not by test — grouping them that way found each one:
 
 - **Cascade beats breadth.** An unmodeled statement used to kill the TDS connection, so every later test in the class failed too; one statement accounted for 27 of 50 at the time. Now a statement-level fault is Msg 50000 severity 16 and the session survives ([`tds-endpoint.md`](tds-endpoint.md#statement-tier--severity-16-session-survives)).

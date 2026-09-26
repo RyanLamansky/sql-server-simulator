@@ -223,6 +223,7 @@ internal static class CatalogViewObjectIds
         ["sp_datatype_info_100"] = -255882266,
         ["sp_depends"] = -61771628,
         ["sp_describe_first_result_set"] = -276286976,
+        ["sp_describe_undeclared_parameters"] = -1018258851,
         ["sp_dropextendedproperty"] = -292408992,
         ["sp_droplinkedsrvlogin"] = -158885234,
         ["sp_dropserver"] = -729459578,

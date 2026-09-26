@@ -964,6 +964,10 @@ internal sealed partial class Selection
     {
         if (expression is null)
             return null;
+        // sp_describe_undeclared_parameters types a row count bigint (probed
+        // 2026-09-26 against SQL Server 2025).
+        if (UndeclaredParameterDeduction.NoteExact(expression, SqlType.BigInt))
+            return null;
         // A module body binds without running, so an operand naming a parameter
         // has no value to read — its slot is empty and would report Msg 1060 as
         // if it were NULL. Real settles that one from the operand's declared

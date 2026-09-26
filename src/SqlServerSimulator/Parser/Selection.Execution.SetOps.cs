@@ -185,8 +185,8 @@ internal sealed partial class Selection
             // A branch carrying an explicit COLLATE, or a literal (which is
             // coercible-default), outranks its partner and resolves cleanly.
             combinedSchema[i] = SqlType.PromoteOperands(
-                new(effectiveLeft, reportsNumeric: leftReportsNumeric is not null && leftReportsNumeric[i]),
-                new(effectiveRight, reportsNumeric: rightReportsNumeric is not null && rightReportsNumeric[i]));
+                new(effectiveLeft, BranchColumnSource(left, i), reportsNumeric: leftReportsNumeric is not null && leftReportsNumeric[i]),
+                new(effectiveRight, BranchColumnSource(right, i), reportsNumeric: rightReportsNumeric is not null && rightReportsNumeric[i]));
             // A deduping operator has to compare the values it folds, so a type
             // that can't be compared at all is refused outright — the legacy
             // LOB trio, xml and the spatial pair alike, all naming the type in
@@ -297,6 +297,13 @@ internal sealed partial class Selection
             ColumnWireFlags = new byte[combinedSchema.Length],
         };
     }
+
+    // The expression a branch projects in column `ordinal`, alias peeled, when
+    // the branch records its projection.
+    private static Expression? BranchColumnSource(Selection branch, int ordinal) =>
+        branch.ProjectionExpressions is { } projections && ordinal < projections.Length
+            ? projections[ordinal] is Expressions.NamedExpression named ? named.Inner : projections[ordinal]
+            : null;
 
     /// <summary>
     /// A set operation's column nullability, as real infers it (probed

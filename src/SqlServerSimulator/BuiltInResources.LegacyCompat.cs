@@ -65,6 +65,9 @@ internal static partial class BuiltInResources
         // sp_describe_first_result_set: the result metadata tools and ORMs
         // read without running the query, described through SET FMTONLY.
         "sp_describe_first_result_set",
+        // sp_describe_undeclared_parameters: the parameter types ODBC's
+        // SQLDescribeParam and JDBC's parameter metadata ask for.
+        "sp_describe_undeclared_parameters",
         // sp_refreshview / sp_refreshsqlmodule: rebind a module (a SELECT *
         // view frozen at CREATE, above all) to its sources' current shape.
         "sp_refreshview",
@@ -634,7 +637,7 @@ internal static partial class BuiltInResources
             // Real types these as extended procedures although they're named
             // sp_ (probed 2026-09-24).
             var isExtended = proc.StartsWith("xp_", StringComparison.OrdinalIgnoreCase)
-                || proc is "sp_describe_first_result_set" or "sp_executesql" or "sp_set_session_context" or "sp_xml_preparedocument" or "sp_xml_removedocument";
+                || proc is "sp_describe_first_result_set" or "sp_describe_undeclared_parameters" or "sp_executesql" or "sp_set_session_context" or "sp_xml_preparedocument" or "sp_xml_removedocument";
             objects.Add(new SystemObject(
                 Schemas.CatalogViewObjectIds.ByProcedureName.TryGetValue(proc, out var realId) ? realId : SystemObjectId(proc), proc, Database.SysSchemaId,
                 isExtended ? "X " : "P ", isExtended ? "EXTENDED_STORED_PROCEDURE" : "SQL_STORED_PROCEDURE"));

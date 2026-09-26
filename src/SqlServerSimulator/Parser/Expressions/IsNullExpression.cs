@@ -66,7 +66,9 @@ internal sealed class IsNullExpression : Expression
         // does, so it's the one-way assignment rule that refuses a pair rather
         // than the unification CASE and COALESCE apply (probed 2026-09-24:
         // ISNULL(<decimal>, <datetime>) is Msg 257 where COALESCE answers).
-        AssignmentRules.RequireAssignable(this.replacement, this.replacement.GetSqlType(batch, resolveColumnType), t);
+        var replacementType = this.replacement.GetSqlType(batch, resolveColumnType);
+        _ = UndeclaredParameterDeduction.NoteExact(this.check, replacementType);
+        AssignmentRules.RequireAssignable(this.replacement, replacementType, t);
         this.namingArm = FirstDecimalArm([this.check, this.replacement], batch, resolveColumnType);
         return this.cachedResultType = t;
     }

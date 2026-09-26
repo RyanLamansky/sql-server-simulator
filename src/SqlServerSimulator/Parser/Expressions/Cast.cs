@@ -159,7 +159,8 @@ internal sealed class Cast : Expression
     /// against SQL Server 2025).
     /// </summary>
     internal static SqlType RejectIllegalConversion(Expression source, SqlType sourceType, SqlType targetType, bool targetReportsNumeric, BatchContext batch) =>
-        source is not Value { IsUntypedNull: true } && IsIllegalExplicitConversion(sourceType, targetType)
+        UndeclaredParameterDeduction.NoteExact(source, targetType) ? ResultStringType(targetType, targetType, batch.CurrentDatabase.Collation) ?? targetType
+        : source is not Value { IsUntypedNull: true } && IsIllegalExplicitConversion(sourceType, targetType)
             ? throw SimulatedSqlException.ExplicitConversionNotAllowed(
                 ConversionName(sourceType, source, batch),
                 targetReportsNumeric && targetType is DecimalSqlType ? "numeric" : ConversionName(targetType, null, batch))

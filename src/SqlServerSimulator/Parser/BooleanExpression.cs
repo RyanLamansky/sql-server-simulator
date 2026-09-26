@@ -1167,6 +1167,8 @@ internal abstract class BooleanExpression : ExpressionNode
     private static void RequireComparableToSubquery(Expression left, SqlType leftType, Selection inner, BatchContext batch, string operatorName)
     {
         var innerType = inner.Schema[0];
+        if (UndeclaredParameterDeduction.NoteComparison(left, leftType, inner.ProjectionExpressions?[0], innerType, operatorName))
+            return;
         if (!Expression.IsBareNullLiteral(left))
             ThrowIfIncomparable(Expression.PairOperand(left, leftType, batch), InnerColumnOperand(inner, innerType), operatorName);
         RequireResolvableCollation(leftType, innerType, operatorName);
@@ -1713,6 +1715,14 @@ internal abstract class BooleanExpression : ExpressionNode
             source.Run(runtime).IsNull ^ negated;
 
         internal override string DebugDisplay() => $"{source.DebugDisplay()} IS {(negated ? "NOT NULL" : "NULL")}";
+
+        // sp_describe_undeclared_parameters falls back to int for a parameter
+        // only tested for NULL (probed 2026-09-26 against SQL Server 2025).
+        internal override void Bind(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+        {
+            if (!UndeclaredParameterDeduction.NoteExact(source, SqlType.Int32))
+                base.Bind(batch, resolveColumnType);
+        }
 
         internal override void Describe(NodeShape shape) => shape.Local(negated).Child(source);
 
@@ -2986,6 +2996,8 @@ internal abstract class BooleanExpression : ExpressionNode
             // where `textcol = 'a'` is not; only the collations must resolve.
             var leftType = left.GetSqlType(batch, resolveColumnType);
             var rightType = right.GetSqlType(batch, resolveColumnType);
+            if (UndeclaredParameterDeduction.NoteLike(left, leftType, right, rightType))
+                return;
             RejectUncomparableLikeArgument(leftType, 1);
             RejectUncomparableLikeArgument(rightType, 2);
             RequireResolvableCollation(leftType, rightType, "like");

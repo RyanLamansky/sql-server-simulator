@@ -951,8 +951,50 @@ partial class SimulatedSqlException
     /// batch doesn't compile, reported after the batch's own errors.
     /// Probe-confirmed against SQL Server 2025 (2026-09-24).
     /// </summary>
-    internal static SimulatedSqlException BatchCouldNotBeAnalyzed() =>
-        new("The batch could not be analyzed because of compile errors.", 11501, 16, 1);
+    internal static SimulatedSqlException BatchCouldNotBeAnalyzed(byte state = 1) =>
+        new("The batch could not be analyzed because of compile errors.", 11501, 16, state);
+
+    /// <summary>
+    /// Mimics SQL Server error 214 for a system procedure's
+    /// <c>nvarchar(max)</c> argument passed <c>NULL</c> —
+    /// <c>sp_describe_undeclared_parameters NULL</c> (state 21).
+    /// Probe-confirmed against SQL Server 2025 (2026-09-26).
+    /// </summary>
+    internal static SimulatedSqlException ProcedureExpectsNVarcharMaxParameter(string parameterName) =>
+        new($"Procedure expects parameter '@{parameterName}' of type 'nvarchar(max)'.", 214, 16, 21);
+
+    /// <summary>
+    /// Mimics SQL Server error 11503: <c>sp_describe_undeclared_parameters</c>
+    /// met two undeclared parameters in one expression (<c>@a = @b</c>), where
+    /// neither can type the other. Probe-confirmed against SQL Server 2025
+    /// (2026-09-26).
+    /// </summary>
+    internal static SimulatedSqlException TwoUntypedParameters(string first, string second) =>
+        new($"The parameter type cannot be deduced because a single expression contains two untyped parameters, '@{first}' and '@{second}'.", 11503, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 11506: nothing in the batch implies a type for
+    /// the undeclared parameter (<c>SELECT @p</c>). Probe-confirmed against
+    /// SQL Server 2025 (2026-09-26).
+    /// </summary>
+    internal static SimulatedSqlException ParameterTypeNotUnique(string name) =>
+        new($"The parameter type for '@{name}' cannot be uniquely deduced; two possibilities are 'sql_variant' and 'xml'.", 11506, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 11507: the only place the undeclared parameter
+    /// meets admits no type (<c>date_column + @p</c>). Probe-confirmed
+    /// against SQL Server 2025 (2026-09-26).
+    /// </summary>
+    internal static SimulatedSqlException NoValidParameterType(string name) =>
+        new($"The parameter type for '@{name}' cannot be deduced because no type would make the query valid.", 11507, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 11508: an undeclared parameter appears more
+    /// than once in the batch <c>sp_describe_undeclared_parameters</c>
+    /// analyzes. Probe-confirmed against SQL Server 2025 (2026-09-26).
+    /// </summary>
+    internal static SimulatedSqlException UndeclaredParameterUsedTwice(string name) =>
+        new($"The undeclared parameter '@{name}' is used more than once in the batch being analyzed.", 11508, 16, 1);
 
     /// <summary>
     /// Mimics SQL Server's Msg 4127 — every argument of a <c>COALESCE</c> is a

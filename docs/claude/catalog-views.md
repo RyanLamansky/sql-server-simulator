@@ -861,6 +861,16 @@ It never raises for what it describes: each error becomes a row of its own, numb
 Neither do real's describe-specific refusals — Msg 11509 `CONFLICTING_RESULTS` (an IF whose branches return different shapes), Msg 11521 `UNDECLARED_PARAMETER` (`select @p`, where the simulator reports Msg 137) and Msg 11525 `TEMPORARY_TABLE` (a `#t` the batch creates); the DMV already files each under real's `error_type`.
 Because FMTONLY runs the batch rather than binding it, DDL and control flow in `@tsql` execute, where real's analysis doesn't run anything.
 
+## `sp_describe_undeclared_parameters`
+
+The parameter types ODBC's `SQLDescribeParam` and JDBC's parameter metadata ask for — pyodbc types a `None` through it, and without it falls back to `varchar`, which a `varbinary` target then refuses (Msg 257, as real refuses a `varchar` NULL there).
+`Simulation.DescribeUndeclaredParameters.cs` compiles `@tsql` under `SET FMTONLY ON` with each undeclared parameter declared under an `int` placeholder, found one at a time from the batch's own Msg 137; `Parser/UndeclaredParameterDeduction.cs` records, at each binder site a parameter meets, the type that site implies, and the first site decides.
+The sites are the type-pair grid's single entry point (`SqlType.OperandPairError` — assignment, comparison, arithmetic, unification), the value-arm unifier behind CASE / COALESCE / IIF, a set operation's columns, `LIKE`, `IS NULL`, `ISNULL`, `IN (SELECT …)`, `INSERT … SELECT`'s columns, CAST / CONVERT and the row limits.
+Real's rules, probed 2026-09-26: an assignment, `=` / `<>` and `IN` take the other side's type exactly; an ordering comparison, an arithmetic operator and a unification take it widened (a decimal to `(38,19)`, a fractional-second type to scale 7, a sized string or binary to its 8000-byte form, a MAX type kept except under `+`), with the operators' own cases (a string under `*` is `float`, a bit under `+` is `datetime`, a date / time / uniqueidentifier / xml / sql_variant operand admits nothing); `LIKE` takes `varchar(8000)` against an ANSI string and `nvarchar(4000)` otherwise; a row limit takes `bigint`; `IS NULL` alone falls back to `int`.
+The refusals are real's: Msg 11508 for a parameter used twice, 11503 for two in one expression, 11506 when nothing implies a type, 11507 when nothing valid does, and a compile error followed by Msg 11501.
+
+**Not modeled yet**: a built-in's argument typing (real types `LEN(@p)` / `UPPER(@p)` `nvarchar(4000)` and `DATEADD`'s number `bigint`; the simulator either refuses with Msg 11506 or takes its own declared parameter type, and answers `YEAR(@p)` with `datetime` where real refuses it); an output parameter (`SELECT @p = 1`, which real describes as output); and a `numeric` column's spelling in a comparison, which reads `decimal`.
+
 ## Metadata scalars
 
 Function-form metadata queries that read from the same underlying state as the catalog-view rows.

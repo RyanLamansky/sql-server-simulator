@@ -1093,6 +1093,9 @@ partial class Simulation
         // while compiling, over an empty rowset too; a bare NULL is exempt.
         for (var i = 0; i < expectedColumnCount; i++)
         {
+            var projected = selection.ProjectionExpressions?[i] is Parser.Expressions.NamedExpression named ? named.Inner : selection.ProjectionExpressions?[i];
+            if (UndeclaredParameterDeduction.NoteExact(projected, destinationColumns[i].Type))
+                continue;
             if (selection.ColumnIsUntypedNull is not { } untyped || !untyped[i])
                 AssignmentRules.RequireAssignable(selection.Schema[i], destinationColumns[i].Type);
         }

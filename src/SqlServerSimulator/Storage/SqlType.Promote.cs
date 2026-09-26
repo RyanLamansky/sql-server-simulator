@@ -47,7 +47,7 @@ internal abstract partial class SqlType
     /// </summary>
     public static SqlType PromoteOperands(TypePairOperand a, TypePairOperand b)
     {
-        if (a.Type == b.Type)
+        if (a.Type == b.Type && Parser.UndeclaredParameterDeduction.Current is null)
             return a.Type;
         if (OperandPairError(TypePairOperation.Unify, a, b, "") is { } error)
             throw error;
@@ -111,6 +111,10 @@ internal abstract partial class SqlType
     /// </summary>
     public static SqlType PromoteBranches(ReadOnlySpan<(SqlType Type, int IntegerLiteralDigits, Expression Source)> branches)
     {
+        // Arms sp_describe_undeclared_parameters is typing take their type
+        // from the others and sit out the unification.
+        if (Parser.UndeclaredParameterDeduction.TypeParameterBranches(branches) is { } typed)
+            return typed.Length == 0 ? Int32 : PromoteBranches(typed);
         var hasDecimal = false;
         foreach (var branch in branches)
         {
