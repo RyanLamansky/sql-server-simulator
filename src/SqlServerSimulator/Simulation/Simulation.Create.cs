@@ -248,6 +248,8 @@ partial class Simulation
                 }));
         }
 
+        context.Batch.NoteTempTableCreation(tableName.Leaf);
+
         // In a skipped IF branch, gate both the existence check (Msg 2714)
         // and the dict add: the safe-CREATE idiom (`IF NOT EXISTS (...) CREATE
         // TABLE foo (...)`) relies on the un-taken CREATE not surfacing

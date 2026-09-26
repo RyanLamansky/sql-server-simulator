@@ -237,6 +237,7 @@ A statement naming an object that doesn't exist when the batch compiles — a ta
 Skip mode's placeholder source is that deferral, and a binder error in a statement over one defers with it (`StatementContext.BindsDeferredSource`).
 Everything else binds against the schema as the batch found it, which is where real's familiar same-batch traps come from: `ALTER TABLE t ADD b …; SELECT b FROM t` is Msg 207 with the column never added, a type created and used in one batch is Msg 2715, a table dropped and re-created with other columns binds its old definition, and `USE` doesn't change the database the rest of the batch compiles in.
 A variable whose `DECLARE` names a missing type is declared anyway, so later references bind rather than raising Msg 137.
+Two statements creating one `#` / `##` table — `CREATE TABLE` or `SELECT … INTO`, even from opposite IF branches or with a `DROP` between — are Msg 2714 state 1 while compiling (`BatchContext.NoteTempTableCreation`), so nothing runs and a module body doing it is refused at `CREATE` (probed 2026-09-24 and 2026-09-26).
 
 The walk runs nothing, so whatever a statement checks against session state or live rows waits for the run: `IDENTITY_INSERT`, a cursor's existence and position, a DML `TOP (@n)`, `NEXT VALUE FOR`, and data locks (`AcquireDataLockIfApplicable` bypasses in skip mode, since a transaction-scoped lock would outlive the statement it was taken for).
 
@@ -255,7 +256,6 @@ An error that ends a procedure's or dynamic SQL's batch — a compile error, or 
 - **A deferred statement's bind error at run time** is catchable here, and ends the batch only for the name-resolution set; real's recompile errors can't be caught in their own scope and end the batch whatever their number (`CREATE TABLE t2 (a int); INSERT t2 VALUES (1, 2); PRINT 'after'` never prints on real).
 - **A procedure body compiles only at `CREATE`**; real compiles it again as a whole at its first execution, so a body statement naming a table created after the procedure fails there before the body's first statement runs.
 - **An `INSERT … EXEC` body stops at its first error**, since the statement collects the body's rows rather than forwarding its outcomes; real runs that body on too, inserting what its later statements return (probed 2026-09-24).
-- **Creating a `#temp` twice in one batch or module body**: real reports Msg 2714 state 1 while compiling, so nothing in the batch runs and a procedure body that does it is refused at `CREATE PROC`, even with a `DROP` between the two (probed 2026-09-24); here the first `CREATE` runs and the second's run-time Msg 2714 ends the batch.
 
 ## Statement-terminating vs batch-aborting errors (unified continue-on-error)
 

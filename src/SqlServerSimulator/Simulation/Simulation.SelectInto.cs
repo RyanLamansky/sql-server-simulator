@@ -40,6 +40,7 @@ partial class Simulation
         var targetName = selection.IntoTarget!.Value;
         var destColumns = selection.DestColumnSchema!;
         var leaf = targetName.Leaf;
+        batch.NoteTempTableCreation(leaf);
 
         // In a skipped IF branch the destination shouldn't be created at all
         // — the existence check (Msg 2714) and the SELECT execution both

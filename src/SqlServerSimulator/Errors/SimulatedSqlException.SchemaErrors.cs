@@ -44,7 +44,9 @@ partial class SimulatedSqlException
     /// Msg 2714 for <c>CREATE SYNONYM</c> (state 8) and <c>CREATE SCHEMA</c>
     /// (state 6, followed there by Msg 2759), which unlike the other objects'
     /// end only their statement and leave the transaction committable (probed
-    /// 2026-09-24 against SQL Server 2025).
+    /// 2026-09-24 against SQL Server 2025) — and for a temp table a batch
+    /// creates twice (state 1), a compile error, so nothing the batch holds
+    /// has run and a dynamic batch's caller goes on (probed 2026-09-26).
     /// </summary>
     internal static SimulatedSqlException NameTakenEndingOnlyStatement(string name, byte state) =>
         new($"There is already an object named '{name}' in the database.", 2714, 16, state);

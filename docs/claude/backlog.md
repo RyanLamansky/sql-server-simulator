@@ -228,7 +228,7 @@ Already listed elsewhere here and not repeated: parenthesized set-op branches.
 
 **Batch compilation** ships ([`control-flow.md`](control-flow.md#batch-compilation)); what the sweep found past it:
 
-- The compile's remaining gaps (the walk stopping at a deferred DML target, a deferred statement's bind error staying catchable, procedure bodies compiled only at `CREATE`, a `#temp` created twice in one batch, an `INSERT … EXEC` body stopping at its first error) are listed in [`control-flow.md`](control-flow.md#not-modeled-yet).
+- The compile's remaining gaps (the walk stopping at a deferred DML target, a deferred statement's bind error staying catchable, procedure bodies compiled only at `CREATE`, an `INSERT … EXEC` body stopping at its first error) are listed in [`control-flow.md`](control-flow.md#not-modeled-yet).
 - A syntax error real recovers from and reports a second one after — `(select 1 a) d NATURAL JOIN (select 1 a) e` adds Msg 102 near `e` — reports only the first here.
 
 **Wrong results**:

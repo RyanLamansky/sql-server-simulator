@@ -264,6 +264,25 @@ internal sealed class BatchContext
     /// </summary>
     public bool CreateTimeBinding;
 
+    /// <summary>The <c>#</c> / <c>##</c> tables a create-time bind has seen a statement create.</summary>
+    private HashSet<string>? tempTablesCreatedWhileBinding;
+
+    /// <summary>
+    /// Under <see cref="CreateTimeBinding"/>, notes that a statement — a
+    /// <c>CREATE TABLE</c> or <c>SELECT … INTO</c> — creates the temp table
+    /// <paramref name="name"/>, raising Msg 2714 state 1 for a second one: real
+    /// refuses a batch or module body that creates one temp table twice while
+    /// compiling it, even from opposite IF branches or with a <c>DROP</c>
+    /// between (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    public void NoteTempTableCreation(string name)
+    {
+        if (!this.CreateTimeBinding || !(IsLocalTempName(name) || IsGlobalTempName(name)))
+            return;
+        if (!(this.tempTablesCreatedWhileBinding ??= new(BuiltInToken.Comparer)).Add(name))
+            throw SimulatedSqlException.NameTakenEndingOnlyStatement(name, state: 1);
+    }
+
     /// <summary>
     /// Set while a <c>NATIVE_COMPILATION</c> procedure's body binds at
     /// <c>CREATE</c>, the one module body that may hold <c>BEGIN ATOMIC</c>.

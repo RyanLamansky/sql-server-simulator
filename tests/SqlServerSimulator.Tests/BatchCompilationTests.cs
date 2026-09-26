@@ -244,4 +244,41 @@ public sealed class BatchCompilationTests
         _ = simulation.AssertSqlError("create table t (a int); insert t (a) with (tablock) values (1); create table u (b int)", 156);
         AreEqual(DBNull.Value, simulation.ExecuteScalar("select object_id('u')"));
     }
+
+    /// <summary>
+    /// A batch that creates one temp table twice is refused while compiling —
+    /// Msg 2714 state 1, nothing run — whether by CREATE TABLE or SELECT INTO,
+    /// from opposite IF branches or with a DROP between; a module body doing
+    /// it is refused at CREATE, and a dynamic batch doing it fails only its
+    /// EXEC (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("create table #t (a int); create table #t (a int)")]
+    [DataRow("create table #t (a int); drop table #t; create table #t (b int)")]
+    [DataRow("print 'x'; if 1 = 0 create table #t (a int) else create table #t (b int)")]
+    [DataRow("select 1 a into #t; create table #t (a int)")]
+    [DataRow("select 1 a into #t; select 1 a into #t")]
+    [DataRow("create table ##g (a int); create table ##g (a int)")]
+    public void TempTableCreatedTwice_FailsTheBatch(string sql)
+    {
+        var simulation = new Simulation();
+        AreEqual((byte)1, simulation.AssertSqlError(sql, 2714).State);
+        AreEqual(DBNull.Value, simulation.ExecuteScalar("select object_id('tempdb..#t')"));
+    }
+
+    [TestMethod]
+    public void TempTableCreatedTwice_InAProcedure_RefusesTheCreate()
+    {
+        var simulation = new Simulation();
+        AreEqual((byte)1, simulation.AssertSqlError("create proc p as create table #t (a int); create table #t (a int)", 2714).State);
+        AreEqual(DBNull.Value, simulation.ExecuteScalar("select object_id('p')"));
+    }
+
+    [TestMethod]
+    public void TempTableCreatedTwice_InDynamicSql_FailsOnlyTheExec()
+    {
+        var simulation = new Simulation();
+        _ = simulation.AssertSqlError("exec ('create table #t (a int); create table #t (a int)'); create table u (a int)", 2714);
+        AreNotEqual(DBNull.Value, simulation.ExecuteScalar("select object_id('u')"));
+    }
 }
