@@ -405,7 +405,7 @@ This is the *argument* rule; the slots these types can't reach at all — sortin
 - **`TRIM` of a binary** answers its `varchar` rendering on real (`TRIM(0x41)` is `A`) and raises Msg 8116 here.
 - **`CHARINDEX(<needle>, <image>)`** reports Msg 8116 for argument 2 where real reports Msg 206 (`image is incompatible with varchar`); real accepts the pair when the needle is binary too, which needs the unbuilt binary CHARINDEX.
 
-## EF.Functions-driven type-check / random scalars: `ISNUMERIC` / `ISDATE` / `RAND`
+## Type-check / random scalars: `ISNUMERIC` / `ISDATE` / `RAND` / `CRYPT_GEN_RANDOM`
 - **`ISNUMERIC(expression)`** returns `int` (1 / 0); NULL → 0 (not NULL).
   Famously lossy on real SQL Server: a bare sign / decimal point / comma / currency symbol returns 1, hex prefixes return 0, internal whitespace breaks the match.
   The simulator's hand-rolled scanner consumes (in order: optional sign and currency in either order; digit / decimal / comma run; optional `e`/`E`/`d`/`D` exponent requiring a leading digit AND a trailing digit after optional sign).
@@ -424,6 +424,9 @@ This is the *argument* rule; the slots these types can't reach at all — sortin
   Seeded form: any numeric / string-convertible seed coerces to `float`; the int passed to `new Random(int)` is XOR-folded from the 64-bit double's bits so small integer seeds (`1` vs `999999`) don't collapse to the same hash (their mantissas live in the high bits which a naive int cast would discard).
   Determinism per seed is preserved but the values aren't byte-identical to SQL Server's undocumented seed algorithm.
   NULL seed → NULL output.
+- **`CRYPT_GEN_RANDOM(length [, seed])`** draws fresh bytes per row as `varbinary(8000)`, unlike `RAND`'s per-site constant.
+  It takes only an `int` length and a `varbinary` seed, stricter than the shared integer-argument seam (`tinyint` is Msg 8116 too), and a non-empty seed shorter than the length answers NULL as an out-of-range length does (probed 2026-09-26 against SQL Server 2025).
+  The seed takes no part in the draw; real's values are cryptographically random either way.
 
 ## SQL Server 2025 string additions: 2-arg `SUBSTRING` / `UNISTR` / `BASE64_ENCODE` / `BASE64_DECODE`
 

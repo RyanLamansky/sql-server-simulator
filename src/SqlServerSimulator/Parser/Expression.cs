@@ -1536,7 +1536,8 @@ internal abstract class Expression : ExpressionNode
 
     /// <summary>
     /// Notes a nondeterministic built-in for the indexed-view battery
-    /// (Msg 1949, whose text embeds the function name lower-cased). Only the
+    /// (Msg 1949, whose text embeds the function name as the catalog spells
+    /// it — lower-case, but <c>'Crypt_Gen_Random'</c>). Only the
     /// closed set of built-ins whose value can differ between two evaluations
     /// of the same row matters here — that is exactly what makes a view's
     /// materialized contents unreproducible.
@@ -1546,7 +1547,7 @@ internal abstract class Expression : ExpressionNode
         if (context.IndexedViewShapeCollector is not { } shape || shape.NondeterministicFunction is not null)
             return;
 
-        // The arms yield the lower-cased spelling real reports, so no
+        // The arms yield the spelling real reports, so no
         // case conversion of the caller's text is needed (and CA1308's
         // normalization concern doesn't arise).
         Span<char> upper = stackalloc char[name.Length];
@@ -1560,6 +1561,7 @@ internal abstract class Expression : ExpressionNode
             11 => upper[..length] is "SYSDATETIME" ? "sysdatetime" : null,
             14 => upper[..length] is "SYSUTCDATETIME" ? "sysutcdatetime" : null,
             15 => upper[..length] is "NEWSEQUENTIALID" ? "newsequentialid" : null,
+            16 => upper[..length] is "CRYPT_GEN_RANDOM" ? "Crypt_Gen_Random" : null,
             17 => upper[..length] is "SYSDATETIMEOFFSET" ? "sysdatetimeoffset" : null,
             _ => null,
         };
@@ -1568,8 +1570,7 @@ internal abstract class Expression : ExpressionNode
     /// <summary>
     /// Notes a side-effecting built-in inside a function body being bound at
     /// <c>CREATE</c> — real's Msg 443, which embeds the name the way the
-    /// catalog spells it (probe-confirmed lower-case for these three; the
-    /// unmodeled <c>CRYPT_GEN_RANDOM</c> real reports as
+    /// catalog spells it (probe-confirmed: lower-case, but
     /// <c>'Crypt_Gen_Random'</c>). The date / time built-ins are deterministic
     /// enough for real to allow them here even though the indexed-view battery
     /// above rejects them, so the two sets deliberately differ.
@@ -1586,6 +1587,7 @@ internal abstract class Expression : ExpressionNode
             4 => upper[..length] is "RAND" ? "rand" : null,
             5 => upper[..length] is "NEWID" ? "newid" : null,
             15 => upper[..length] is "NEWSEQUENTIALID" ? "newsequentialid" : null,
+            16 => upper[..length] is "CRYPT_GEN_RANDOM" ? "Crypt_Gen_Random" : null,
             _ => null,
         };
         if (operatorName is not null)
@@ -1891,6 +1893,7 @@ internal abstract class Expression : ExpressionNode
             16 => uppercaseName switch
             {
                 "ASSEMBLYPROPERTY" => new AssemblyProperty(context),
+                "CRYPT_GEN_RANDOM" => new CryptGenRandom(context),
                 "IS_SRVROLEMEMBER" => new RoleMemberCheck(context, serverScope: true),
                 "JSON_PATH_EXISTS" => new JsonPathExists(context),
                 "OBJECTPROPERTYEX" => new ObjectPropertyEx(context),

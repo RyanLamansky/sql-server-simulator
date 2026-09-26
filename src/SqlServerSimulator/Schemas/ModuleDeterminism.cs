@@ -97,6 +97,7 @@ internal static partial class ModuleDeterminism
         "COMPRESS",
         "CONNECTIONPROPERTY",
         "CONTEXT_INFO",
+        "CRYPT_GEN_RANDOM",
         "CURRENT_REQUEST_ID",
         "CURRENT_TRANSACTION_ID",
         "CURSOR_STATUS",
