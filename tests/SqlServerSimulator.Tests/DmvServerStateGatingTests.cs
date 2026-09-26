@@ -168,14 +168,19 @@ public sealed class DmvServerStateGatingTests
     {
         var sim = Seeded();
         using var sleeper = sim.CreateOpenConnection();
-        var sleepTask = Task.Run(() => sleeper.CreateCommand("waitfor delay '00:00:01'").ExecuteNonQuery(), TestContext.CancellationToken);
+        // Long enough to outlast a starved poll, and cancelled once the
+        // assertions have seen it: a short delay could finish before the poll
+        // first ran, leaving it to wait for a request that was already gone.
+        using var sleep = sleeper.CreateCommand("waitfor delay '00:00:30'");
+        var sleepTask = Task.Run(sleep.ExecuteNonQuery, TestContext.CancellationToken);
         _ = await PollUntil(
             () => (int)sim.ExecuteScalar("select count(*) from sys.dm_exec_requests where command = 'WAITFOR'")!,
             count => count == 1,
             TestContext.CancellationToken);
         AreEqual(1, sim.ExecuteScalar("execute as user = 'u_none'; select count(*) from sys.dm_exec_requests"));
         AreEqual(2, sim.ExecuteScalar("use master; execute as login = 'srvl'; select count(*) from sys.dm_exec_requests"));
-        _ = await sleepTask;
+        sleep.Cancel();
+        _ = await ThrowsAsync<SimulatedSqlException>(() => sleepTask);
     }
 
     // ---- dbo / sysadmin bypass + ungated views ----
