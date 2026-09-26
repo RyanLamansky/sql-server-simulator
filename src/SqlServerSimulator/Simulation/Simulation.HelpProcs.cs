@@ -272,7 +272,11 @@ partial class Simulation
             rows.Add([
                 SqlValue.FromSystemName(identity.Name!),
                 SqlValue.FromString(HelpIndexDescriptionType, HelpIndexDescription(identity)),
-                SqlValue.FromString(HelpKeyListType, HelpIndexKeys(target, identity)),
+                // A columnstore index has no key to list (probed 2026-09-26
+                // against SQL Server 2025).
+                identity.Index is { IsColumnstore: true }
+                    ? SqlValue.Null(HelpKeyListType)
+                    : SqlValue.FromString(HelpKeyListType, HelpIndexKeys(target, identity)),
             ]);
         }
 
@@ -287,8 +291,8 @@ partial class Simulation
     }
 
     // The attribute phrase, in real's fixed clause order: clustered-ness,
-    // ignore-duplicate-keys, uniqueness, the constraint role, then the
-    // filegroup. The hypothetical / columnstore / hash / auto-create /
+    // columnstore, ignore-duplicate-keys, uniqueness, the constraint role, then
+    // the filegroup. The hypothetical / hash / auto-create /
     // stats-no-recompute clauses real can also emit have no simulator
     // counterpart, so they never appear.
     private static string HelpIndexDescription(IndexIdentity identity)
@@ -297,6 +301,7 @@ partial class Simulation
         var isUnique = identity.Constraint is not null || identity.Index!.IsUnique;
         var kind = identity.Constraint?.Kind;
         return (identity.IndexId == 1 ? "clustered" : "nonclustered")
+            + (identity.Index is { IsColumnstore: true } ? ", columnstore" : "")
             + (ignoreDupKey ? ", ignore duplicate keys" : "")
             + (isUnique ? ", unique" : "")
             + (kind == KeyConstraintKind.PrimaryKey ? ", primary key" : "")

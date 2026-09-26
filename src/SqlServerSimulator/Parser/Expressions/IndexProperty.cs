@@ -70,11 +70,13 @@ internal sealed class IndexProperty : Expression
         // constraint-backed index. KeyConstraint also surfaces in sys.indexes
         // under the constraint's auto-generated name (e.g. PK__<table8>__<hex>).
         bool isUnique, isClustered, isPadded;
+        var isColumnstore = false;
         byte fillFactor;
         if (FindIndex(table, indexName) is Index idx)
         {
             isUnique = idx.IsUnique;
             isClustered = idx.IsClustered;
+            isColumnstore = idx.IsColumnstore;
             (fillFactor, isPadded) = (idx.FillFactor, idx.IsPadded);
         }
         else if (FindKeyConstraint(table, indexName) is KeyConstraint kc)
@@ -88,7 +90,7 @@ internal sealed class IndexProperty : Expression
             return SqlValue.Null(SqlType.Int32);
         }
 
-        return EvaluateIndexProperty(isUnique, isClustered, fillFactor, isPadded, prop) is int result
+        return EvaluateIndexProperty(isUnique, isClustered, isColumnstore, fillFactor, isPadded, prop) is int result
             ? SqlValue.FromInt32(result)
             : SqlValue.Null(SqlType.Int32);
     }
@@ -113,7 +115,7 @@ internal sealed class IndexProperty : Expression
         return null;
     }
 
-    private static int? EvaluateIndexProperty(bool isUnique, bool isClustered, byte fillFactor, bool isPadded, string property)
+    private static int? EvaluateIndexProperty(bool isUnique, bool isClustered, bool isColumnstore, byte fillFactor, bool isPadded, string property)
     {
         Span<char> upper = stackalloc char[property.Length];
         return property.AsSpan().ToUpperInvariant(upper) switch
@@ -137,6 +139,7 @@ internal sealed class IndexProperty : Expression
             },
             13 => upper switch
             {
+                "ISCOLUMNSTORE" => isColumnstore ? 1 : 0,
                 // 0 for every modeled index — the full-text KEY index isn't
                 // surfaced through INDEXPROPERTY (probe-confirmed 0 on a
                 // non-full-text-key index).

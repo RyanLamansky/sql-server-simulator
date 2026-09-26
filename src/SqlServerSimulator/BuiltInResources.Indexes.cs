@@ -563,13 +563,15 @@ internal static partial class BuiltInResources
         var trueBit = SqlValue.FromBoolean(true);
         var falseBit = SqlValue.FromBoolean(false);
         // compression_delay is NULL for every rowstore index (probe-confirmed);
-        // it carries a minute-delay only for columnstore, which isn't modeled.
+        // a columnstore index carries its minute-delay.
         var nullCompressionDelay = SqlValue.Null(SqlType.Int32);
         var nullName = SqlValue.Null(SqlType.SystemName);
         var nullFilter = SqlValue.Null(SqlType.NVarchar);
         var heapDesc = SqlValue.FromNVarchar("HEAP");
         var clusteredDesc = SqlValue.FromNVarchar("CLUSTERED");
         var nonClusteredDesc = SqlValue.FromNVarchar("NONCLUSTERED");
+        var clusteredColumnstoreDesc = SqlValue.FromNVarchar("CLUSTERED COLUMNSTORE");
+        var nonClusteredColumnstoreDesc = SqlValue.FromNVarchar("NONCLUSTERED COLUMNSTORE");
         var primaryDataSpace = SqlValue.FromInt32(1);
         foreach (var schema in database.Schemas.Values)
         {
@@ -598,7 +600,17 @@ internal static partial class BuiltInResources
 
         SqlValue[] RowForIdentity(SqlValue objectId, IndexIdentity identity)
         {
-            var typeDesc = identity.Type switch { 0 => heapDesc, 1 => clusteredDesc, _ => nonClusteredDesc };
+            var typeDesc = identity.Type switch
+            {
+                0 => heapDesc,
+                1 => clusteredDesc,
+                5 => clusteredColumnstoreDesc,
+                6 => nonClusteredColumnstoreDesc,
+                _ => nonClusteredDesc,
+            };
+            var compressionDelay = identity.Index is { IsColumnstore: true } columnstore
+                ? SqlValue.FromInt32(columnstore.CompressionDelay)
+                : nullCompressionDelay;
             SqlValue name, isUnique, isPrimaryKey, isUniqueConstraint, hasFilter, filterDefinition, ignoreDupKey, isDisabled;
             byte fillFactor = 0;
             var isPadded = false;
@@ -652,14 +664,14 @@ internal static partial class BuiltInResources
                 filterDefinition: filterDefinition,
                 ignoreDupKey: ignoreDupKey,
                 isDisabled: isDisabled,
-                isPadded ? trueBit : falseBit, trueBit, SqlValue.FromByte(fillFactor));
+                isPadded ? trueBit : falseBit, trueBit, SqlValue.FromByte(fillFactor), compressionDelay);
         }
 
         SqlValue[] BuildIndexRow(
             SqlValue name, SqlValue objectId, SqlValue indexId, SqlValue type, SqlValue typeDesc,
             SqlValue isUnique, SqlValue dataSpaceId, SqlValue isPrimaryKey, SqlValue isUniqueConstraint,
             SqlValue hasFilter, SqlValue filterDefinition, SqlValue ignoreDupKey, SqlValue isDisabled,
-            SqlValue isPadded, SqlValue allowLocks, SqlValue fillFactor) =>
+            SqlValue isPadded, SqlValue allowLocks, SqlValue fillFactor, SqlValue compressionDelay) =>
             [
                 objectId,
                 name,
@@ -680,7 +692,7 @@ internal static partial class BuiltInResources
                 allowLocks, // allow_page_locks
                 hasFilter,
                 filterDefinition,
-                nullCompressionDelay,
+                compressionDelay,
                 falseBit, // suppress_dup_key_messages
                 falseBit, // auto_created
                 falseBit, // optimize_for_sequential_key
@@ -701,26 +713,26 @@ internal static partial class BuiltInResources
     /// <c>sys.stats_columns</c> list under its type table though no partition
     /// view does (probed 2026-09-26 against SQL Server 2025).
     /// </summary>
-    private static IEnumerable<(HeapTable Table, int IndexId, string? Name, bool IsHeap)> TypeTableIndexIdentities(Database database)
+    private static IEnumerable<(HeapTable Table, int IndexId, string? Name, bool IsHeap, Storage.Index? Index)> TypeTableIndexIdentities(Database database)
     {
         foreach (var schema in database.Schemas.Values)
         {
             foreach (var tableType in schema.TableTypes.Values.OrderBy(t => t.ObjectId))
             {
                 foreach (var identity in tableType.CatalogShape.IndexIdentities())
-                    yield return (tableType.CatalogShape, identity.IndexId, identity.Name, identity.IsHeap);
+                    yield return (tableType.CatalogShape, identity.IndexId, identity.Name, identity.IsHeap, identity.Index);
             }
         }
     }
 
-    private static IEnumerable<(HeapTable Table, int IndexId, string? Name, bool IsHeap)> EnumerateTableIndexIdentities(Database database, Parser.BatchContext? batch)
+    private static IEnumerable<(HeapTable Table, int IndexId, string? Name, bool IsHeap, Storage.Index? Index)> EnumerateTableIndexIdentities(Database database, Parser.BatchContext? batch)
     {
         foreach (var schema in database.Schemas.Values)
         {
             foreach (var table in CatalogTables(schema, batch))
             {
                 foreach (var identity in table.IndexIdentities())
-                    yield return (table, identity.IndexId, identity.Name, identity.IsHeap);
+                    yield return (table, identity.IndexId, identity.Name, identity.IsHeap, identity.Index);
             }
         }
     }
@@ -740,7 +752,7 @@ internal static partial class BuiltInResources
     {
         long reserved = 0, used = 0, data = 0, rows = 0;
         HeapTable? lastTable = null;
-        foreach (var (table, indexId, _, _) in EnumerateTableIndexIdentities(database, batch: null))
+        foreach (var (table, indexId, _, _, _) in EnumerateTableIndexIdentities(database, batch: null))
         {
             var isBase = !ReferenceEquals(table, lastTable);
             lastTable = table;
@@ -766,19 +778,21 @@ internal static partial class BuiltInResources
     /// table's live <see cref="Storage.Heap.RowCount"/>, so it reflects
     /// same-batch INSERT/DELETE. partition_id / hobt_id are synthetic-
     /// deterministic (distinct per object_id/index_id; not SQL Server's
-    /// allocation-unit ids). Compression is unmodeled: data_compression = 0
-    /// (NONE), xml_compression = 0 (OFF).
+    /// allocation-unit ids). Rowstore compression is unmodeled: data_compression
+    /// = 0 (NONE) but for a columnstore index's 3 / 4, and xml_compression = 0
+    /// (OFF).
     /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateSysPartitions(Parser.BatchContext batch, Database database)
     {
         _ = batch;
         var partitionNumber = SqlValue.FromInt32(1);
         var filestreamFg = SqlValue.FromInt16(0);
-        var noneCompression = SqlValue.FromByte(0);
-        var noneDesc = SqlValue.FromNVarchar("NONE");
+        SqlValue[] noneCompression = [SqlValue.FromByte(0), SqlValue.FromNVarchar("NONE")];
+        SqlValue[] columnstoreCompression = [SqlValue.FromByte(3), SqlValue.FromNVarchar("COLUMNSTORE")];
+        SqlValue[] archiveCompression = [SqlValue.FromByte(4), SqlValue.FromNVarchar("COLUMNSTORE_ARCHIVE")];
         var xmlOff = SqlValue.FromBoolean(false);
         var xmlOffDesc = SqlValue.FromVarchar(VarcharSqlType.Get(3, Collation.Catalog, Coercibility.Implicit), "OFF");
-        foreach (var (table, indexId, _, _) in EnumerateTableIndexIdentities(database, batch))
+        foreach (var (table, indexId, _, _, index) in EnumerateTableIndexIdentities(database, batch))
         {
             var objectId = table.ObjectId;
             var partitionId = ((long)(uint)objectId << 16) | (uint)indexId;
@@ -792,8 +806,9 @@ internal static partial class BuiltInResources
                 partitionIdValue,
                 SqlValue.FromInt64(table.Heap.RowCount),
                 filestreamFg,
-                noneCompression,
-                noneDesc,
+                .. index is { IsColumnstore: true } columnstore
+                    ? (columnstore.ColumnstoreArchive ? archiveCompression : columnstoreCompression)
+                    : noneCompression,
                 xmlOff,
                 xmlOffDesc,
             ];
@@ -814,7 +829,7 @@ internal static partial class BuiltInResources
     private static IEnumerable<(long ContainerId, byte Type, long TotalPages, long UsedPages, long DataPages)> EnumerateAllocationUnitData(Database database)
     {
         HeapTable? lastTable = null;
-        foreach (var (table, indexId, _, _) in EnumerateTableIndexIdentities(database, batch: null))
+        foreach (var (table, indexId, _, _, _) in EnumerateTableIndexIdentities(database, batch: null))
         {
             var partitionId = ((long)(uint)table.ObjectId << 16) | (uint)indexId;
             long dataPages = table.Heap.Pages.Count;
@@ -876,7 +891,7 @@ internal static partial class BuiltInResources
         var partitionNumber = SqlValue.FromInt32(1);
         var zeroPages = SqlValue.FromInt64(0);
         HeapTable? lastTable = null;
-        foreach (var (table, indexId, _, _) in EnumerateTableIndexIdentities(database, batch))
+        foreach (var (table, indexId, _, _, _) in EnumerateTableIndexIdentities(database, batch))
         {
             var isBase = !ReferenceEquals(table, lastTable);
             lastTable = table;
@@ -1014,7 +1029,7 @@ internal static partial class BuiltInResources
         var primaryRoleDesc = SqlValue.FromString(NVarcharSqlType.Get(60, Collation.Catalog, Coercibility.Implicit), "PRIMARY");
         var nullName = SqlValue.Null(SqlType.SystemName);
         var trueBit = SqlValue.FromBoolean(true);
-        foreach (var (table, indexId, name, isHeap) in EnumerateTableIndexIdentities(database, batch).Concat(TypeTableIndexIdentities(database)))
+        foreach (var (table, indexId, name, isHeap, _) in EnumerateTableIndexIdentities(database, batch).Concat(TypeTableIndexIdentities(database)))
         {
             if (isHeap)
                 continue;
@@ -1348,6 +1363,37 @@ internal static partial class BuiltInResources
         }
 
         IEnumerable<SqlValue[]> IndexColumnRows(SqlValue objectId, SqlValue indexIdValue, Storage.Index index, HeapTable? table, bool isClustered)
+        {
+            if (index.IsColumnstore)
+                return ColumnstoreColumnRows(objectId, indexIdValue, index, table!);
+            return RowstoreColumnRows(objectId, indexIdValue, index, table, isClustered);
+        }
+
+        // Every column a columnstore index holds is listed as included, with
+        // no key ordinal; a clustered one holds every column the table has
+        // (probed 2026-09-26 against SQL Server 2025).
+        IEnumerable<SqlValue[]> ColumnstoreColumnRows(SqlValue objectId, SqlValue indexIdValue, Storage.Index index, HeapTable table)
+        {
+            var ordinals = index.IsClustered ? [.. Enumerable.Range(0, table.Columns.Length)] : index.IncludedColumnOrdinals;
+            for (var i = 0; i < ordinals.Length; i++)
+            {
+                var orderOrdinal = Array.IndexOf(index.ColumnstoreOrder, ordinals[i]) + 1;
+                yield return [
+                    objectId,
+                    indexIdValue,
+                    SqlValue.FromInt32(i + 1),
+                    SqlValue.FromInt32(FullOrdinalToColumnId(table, ordinals[i])),
+                    zeroByte,
+                    zeroByte,
+                    falseBit,
+                    trueBit,
+                    SqlValue.FromByte((byte)orderOrdinal),
+                    zeroByte,
+                ];
+            }
+        }
+
+        IEnumerable<SqlValue[]> RowstoreColumnRows(SqlValue objectId, SqlValue indexIdValue, Storage.Index index, HeapTable? table, bool isClustered)
         {
             var columnIds = new int[index.KeyColumns.Length];
             for (var i = 0; i < columnIds.Length; i++)

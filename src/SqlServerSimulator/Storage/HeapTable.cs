@@ -639,7 +639,7 @@ internal sealed class HeapTable : SchemaObject
         else
         {
             var clustered = entries[clusteredIndex];
-            result.Add(new IndexIdentity(1, 1, clustered.Key is not null ? clustered.Key.Name : clustered.Index!.Name, clustered.Key, clustered.Index));
+            result.Add(new IndexIdentity(1, clustered.Index is { IsColumnstore: true } ? (byte)5 : (byte)1, clustered.Key is not null ? clustered.Key.Name : clustered.Index!.Name, clustered.Key, clustered.Index));
         }
 
         var nextId = 2;
@@ -648,7 +648,7 @@ internal sealed class HeapTable : SchemaObject
             if (i == clusteredIndex)
                 continue;
             var entry = entries[i];
-            result.Add(new IndexIdentity(nextId++, 2, entry.Key is not null ? entry.Key.Name : entry.Index!.Name, entry.Key, entry.Index));
+            result.Add(new IndexIdentity(nextId++, entry.Index is { IsColumnstore: true } ? (byte)6 : (byte)2, entry.Key is not null ? entry.Key.Name : entry.Index!.Name, entry.Key, entry.Index));
         }
         return result;
     }
@@ -660,7 +660,8 @@ internal sealed class HeapTable : SchemaObject
 /// allocation authority (<see cref="HeapTable.IndexIdentities"/>). Exactly one
 /// of <see cref="Constraint"/> / <see cref="Index"/> is non-null for a real
 /// index row; both are null for the synthetic HEAP row. <c>type</c> is 0
-/// (HEAP), 1 (CLUSTERED), or 2 (NONCLUSTERED).
+/// (HEAP), 1 (CLUSTERED), 2 (NONCLUSTERED), 5 (CLUSTERED COLUMNSTORE) or 6
+/// (NONCLUSTERED COLUMNSTORE).
 /// </summary>
 internal readonly struct IndexIdentity(int indexId, byte type, string? name, KeyConstraint? constraint, Index? index)
 {

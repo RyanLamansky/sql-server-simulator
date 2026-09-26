@@ -272,7 +272,7 @@ internal sealed class CursorSourcePlan
 
         foreach (var index in table.Indexes)
         {
-            if ((index.IsUnique || index.IsClustered) && index.Filter is null)
+            if ((index.IsUnique || index.IsClustered) && index.Filter is null && !index.IsColumnstore)
                 return true;
         }
 
@@ -516,7 +516,8 @@ internal sealed class CursorSourcePlan
         var clustering = ClusteringKey(table);
         foreach (var index in table.Indexes)
         {
-            if (index.IsDisabled || index.Filter is not null)
+            // A columnstore index has no key to order or locate rows by.
+            if (index.IsDisabled || index.Filter is not null || index.IsColumnstore)
                 continue;
             var ordinals = new List<int>(index.KeyColumns.Length);
             var descending = new List<bool>(index.KeyColumns.Length);
@@ -562,7 +563,7 @@ internal sealed class CursorSourcePlan
 
         foreach (var index in table.Indexes)
         {
-            if (!index.IsClustered || index.IsDisabled || index.Filter is not null)
+            if (!index.IsClustered || index.IsDisabled || index.Filter is not null || index.IsColumnstore)
                 continue;
             var ordinals = new int[index.KeyColumns.Length];
             var descending = new bool[index.KeyColumns.Length];

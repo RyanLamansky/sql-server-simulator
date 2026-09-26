@@ -348,7 +348,7 @@ Real bugs / limitations against shipped behavior — fixes are concrete work, no
   A statement calling a non-schema-bound scalar UDF whose body names a missing object gets Msg 208 **twice** on real, where the simulator raises only the second; a multi-statement TVF raises only the caller's on both.
   The first, attributed to the function at the line binding its definition would report, arrives while the **batch compiles** — ahead of an earlier statement's rows, past an enclosing `TRY` / `CATCH`, and even for a call a `1 = 0` conjunct short-circuits — which reads as real's compile-time inlining attempt.
   The second is the calling statement's own, at its line, and matches; a `DECLARE` / `SET` / assignment-`SELECT` / `IF` call reports only it.
-- **Index-option residues** — option names in the column-level clauses and `COMPRESSION_DELAY` in `ALTER INDEX … SET`; see [`indexes.md`](indexes.md#fidelity-gaps).
+- **Index-option residues** — option names in the column-level clauses; see [`indexes.md`](indexes.md#fidelity-gaps).
 
 - **A typed `xml` edit's `with` value isn't typed against the schema** — real refuses one whose type doesn't match the target (Msg 2247) and computes a schema-typed operand in its **declared** type, where the evaluator works in `double`; the difference shows in the last digits of a long decimal chain.
   The typing walk this needs now exists (a typed write validates and canonicalizes through it), so the work is reaching the target element's declared type from `XmlDmlParser` and evaluating the `with` expression under it.

@@ -8,7 +8,7 @@ namespace SqlServerSimulator.Storage;
 /// when the clause didn't name them, so an <c>ALTER INDEX … REBUILD</c>
 /// keeps what it leaves out.
 /// </summary>
-internal readonly struct IndexOptions(bool ignoreDupKey, byte? fillFactor, bool? padIndex, bool dropExisting = false)
+internal readonly struct IndexOptions(bool ignoreDupKey, byte? fillFactor, bool? padIndex, bool dropExisting = false, int? compressionDelay = null, bool? columnstoreArchive = null)
 {
     public readonly bool IgnoreDupKey = ignoreDupKey;
 
@@ -19,4 +19,13 @@ internal readonly struct IndexOptions(bool ignoreDupKey, byte? fillFactor, bool?
 
     /// <summary><c>DROP_EXISTING = ON</c>: a <c>CREATE INDEX</c> replaces the index of that name.</summary>
     public readonly bool DropExisting = dropExisting;
+
+    /// <summary>A columnstore index's <c>COMPRESSION_DELAY</c> in minutes, when given.</summary>
+    public readonly int? CompressionDelay = compressionDelay;
+
+    /// <summary>
+    /// A columnstore index's <c>DATA_COMPRESSION</c> when given: true for
+    /// <c>COLUMNSTORE_ARCHIVE</c>, false for <c>COLUMNSTORE</c>.
+    /// </summary>
+    public readonly bool? ColumnstoreArchive = columnstoreArchive;
 }

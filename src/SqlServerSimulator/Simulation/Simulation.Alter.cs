@@ -1863,7 +1863,7 @@ partial class Simulation
     {
         context.MoveNextOptional();
         var namedPartition = ParseOptionalIndexPartitionClause(context);
-        var namedPartitionList = ParseOptionalRebuildOptions(context);
+        var namedPartitionList = ParseOptionalRebuildOptions(context, out var compressionLevel);
 
         if (context.Batch.IsSkipping)
             return true;
@@ -1879,6 +1879,16 @@ partial class Simulation
                 : SimulatedSqlException.RebuildPartitionOnUnpartitioned(alterIndex: false, indexName: null, table.Name);
         }
 
+        // Rebuilding a clustered columnstore table recompresses its index
+        // (probed 2026-09-26 against SQL Server 2025).
+        if (compressionLevel is not null && table.Indexes.Find(index => index.IsColumnstore && index.IsClustered) is { } columnstore)
+        {
+            if (compressionLevel.Equals("COLUMNSTORE_ARCHIVE", StringComparison.OrdinalIgnoreCase))
+                columnstore.ColumnstoreArchive = true;
+            else if (compressionLevel.Equals("COLUMNSTORE", StringComparison.OrdinalIgnoreCase))
+                columnstore.ColumnstoreArchive = false;
+        }
+
         return true;
     }
 
@@ -1889,8 +1899,9 @@ partial class Simulation
     /// caller raises real's refusal once the table has resolved. Cursor on
     /// entry: the token after the PARTITION clause. On exit: past the block.
     /// </summary>
-    private static bool ParseOptionalRebuildOptions(ParserContext context)
+    private static bool ParseOptionalRebuildOptions(ParserContext context, out string? compressionLevel)
     {
+        compressionLevel = null;
         if (context.Token is not ReservedKeyword { Keyword: Keyword.With })
             return false;
         if (context.GetNextRequired() is not Operator { Character: '(' })
@@ -1917,6 +1928,7 @@ partial class Simulation
             {
                 if (!DataCompressionLevels.Contains(value.Source.ToString()))
                     throw SimulatedSqlException.SyntaxErrorNear(context);
+                compressionLevel = value.Source.ToString();
             }
             else if (value is not ReservedKeyword { Keyword: Keyword.On or Keyword.Off })
             {

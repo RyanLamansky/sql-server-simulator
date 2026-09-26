@@ -59,6 +59,8 @@ partial class Simulation
                     continue;
                 case ReservedKeyword { Keyword: Keyword.Index }:
                     break;
+                case UnquotedString { Span: var word } when word.Equals("COLUMNSTORE", StringComparison.OrdinalIgnoreCase):
+                    return ParseCreateColumnstoreIndex(context, isUnique, isClustered);
                 default:
                     return false;
             }
@@ -328,6 +330,12 @@ partial class Simulation
             if (pending.Filter is not null)
                 RejectComputedColumnInIndexFilter(batch, table, pending.Name, writtenTableName, pending.Filter);
 
+            if (pending.IsColumnstore)
+            {
+                table.Indexes.Add(ResolveInlineColumnstoreIndex(batch, table, pending, objectIds?[position] ?? batch.CurrentDatabase.AllocateObjectId()));
+                continue;
+            }
+
             RejectDuplicateIndexColumns(collation, [.. pending.Columns.Select(static c => c.ColumnName)], pending.IncludeColumnNames, inline: true);
 
             var keyColumns = new IndexKeyColumn[pending.Columns.Length];
@@ -356,6 +364,42 @@ partial class Simulation
                 pending.FilterDefinition,
                 pending.Options));
         }
+    }
+
+    /// <summary>
+    /// A declaration's columnstore index, checked as a standalone one is:
+    /// one per table, and only columns its kind can hold.
+    /// </summary>
+    private static StoredIndex ResolveInlineColumnstoreIndex(BatchContext batch, HeapTable table, PendingInlineIndex pending, int objectId)
+    {
+        var collation = batch.CurrentDatabase.Collation;
+        if (table.Indexes.Exists(ix => ix.IsColumnstore))
+            throw SimulatedSqlException.MultipleColumnstoreIndexes();
+        RejectDuplicateIndexColumns(collation, [.. pending.Columns.Select(static c => c.ColumnName)], [], inline: true);
+        var ordinals = pending.IsClustered
+            ? [.. Enumerable.Range(0, table.Columns.Length)]
+            : pending.Columns.Select(c => ResolveColumnOrdinal(collation, table, c.ColumnName)).ToArray();
+        foreach (var ordinal in ordinals)
+        {
+            if (!pending.IsClustered && table.Columns[ordinal].Computed is not null)
+                throw SimulatedSqlException.ColumnstoreIndexComputedColumn(table.Columns[ordinal].Name, table.Name);
+            if (ColumnstoreRefusesType(table.Columns[ordinal], pending.IsClustered))
+                throw SimulatedSqlException.ColumnstoreUnsupportedType(table.Columns[ordinal].Name);
+        }
+        var fullOrdinals = pending.IsClustered ? [] : ordinals;
+        return new StoredIndex(
+            pending.Name,
+            objectId,
+            isUnique: false,
+            pending.IsClustered,
+            keyColumns: [],
+            [.. fullOrdinals.Select(o => table.StorageOrdinals[o])],
+            fullOrdinals,
+            pending.Filter,
+            pending.FilterDefinition,
+            pending.Options,
+            isColumnstore: true,
+            columnstoreOrder: [.. pending.ColumnstoreOrder.Select(name => ResolveColumnOrdinal(collation, table, name))]);
     }
 
     /// <summary>
@@ -494,7 +538,7 @@ partial class Simulation
     /// <c>IGNORE_DUP_KEY</c>, the one with a semantic here.
     /// </summary>
     private static (List<string> IncludeColumnNames, BooleanExpression? Filter, string? FilterDefinition, IndexOptions Options) ParseIndexTail(
-        ParserContext context, string indexName, string tableLeaf, bool acceptsInclude, IndexOptionStatement statement = IndexOptionStatement.Unchecked)
+        ParserContext context, string indexName, string tableLeaf, bool acceptsInclude, IndexOptionStatement statement = IndexOptionStatement.Unchecked, string? optionIndexName = null)
     {
         var includeColumnNames = new List<string>();
         if (acceptsInclude && context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Include })
@@ -529,7 +573,7 @@ partial class Simulation
             filterDefinition = filter.RenderFilterDefinition(context.Batch);
         }
 
-        var options = ParseOptionalIndexWithClause(context, statement);
+        var options = ParseOptionalIndexWithClause(context, statement, optionIndexName);
         SkipOptionalFilegroupClause(context);
         return (includeColumnNames, filter, filterDefinition, options);
     }

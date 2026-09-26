@@ -179,7 +179,8 @@ internal static class ClusteredScan
         {
             if (!index.IsClustered)
                 continue;
-            if (index.IsDisabled || index.Filter is not null)
+            // A clustered columnstore index keeps no key order.
+            if (index.IsDisabled || index.Filter is not null || index.IsColumnstore)
                 return null;
             var ordinals = new int[index.KeyColumns.Length];
             var descending = new bool[ordinals.Length];

@@ -658,7 +658,15 @@ The heap stays in write order, so a scan of a clustered table walks the seek cac
 A key the ordered view can't serve — a nullable or a descending column — sorts every row's key once per heap generation instead, NULLs first under an ascending column and last under a descending one.
 A heap keeps write order, as real's allocation-order scan does, and a SNAPSHOT / RCSI read keeps the version sweep's order.
 
+## Columnstore indexes
+
+`CREATE [CLUSTERED | NONCLUSTERED] COLUMNSTORE INDEX`, standalone or inline in `CREATE TABLE`, is catalog metadata like every other index: it stores nothing, never seeks, and a clustered one leaves the heap in write order and scans unordered (`Simulation.CreateColumnstoreIndex.cs`).
+What real reports is modeled — types 5 / 6, every column listed as included with no key ordinal (a clustered one covering every column the table has or later gains), the `ORDER` ordinals, `compression_delay`, `COLUMNSTORE` / `COLUMNSTORE_ARCHIVE` in `sys.partitions` — and so is what real refuses creating, rebuilding or setting one: the factories in `SimulatedSqlException.ColumnstoreErrors.cs` carry the numbers (probed 2026-09-26 against SQL Server 2025).
+The option rules follow the target, so an `ALTER INDEX` resolves its index before reading its `WITH` / `SET` list.
+
 ## Fidelity gaps
+
+- **Columnstore residue**: the row-group DMVs (`sys.column_store_row_groups`, `sys.dm_db_column_store_row_group_physical_stats` …) aren't modeled, nor are the `json` / `vector` column types whose columnstore eligibility real splits by index kind.
 
 - **`filter_definition` edge cases**: the column is rendered (see [Filtered-index `filter_definition`](#filtered-index-filter_definition)) and byte-matches SQL Server across the common filtered grammar, but two literal-typing corners diverge: an integer literal larger than `int` range renders `(5000000000)` where SQL Server types it as `numeric` and renders `(5000000000.)` (trailing dot), and a scale-0 decimal literal likewise omits the trailing dot.
   Both are rare in filtered predicates.
@@ -667,7 +675,6 @@ A heap keeps write order, as real's allocation-order scan does, and a SNAPSHOT /
   Real may instead scan a narrower nonclustered index that covers the query and so return that index's order (`SELECT a FROM t` over `UNIQUE (a)` on a heap), which isn't modeled.
 - *(the one-clustered-per-table rule now covers every path — see [One clustered index per table](#grammar). The constraint paths raise **Msg 1902 State 3** naming the existing clustered index, except an all-inline CREATE TABLE pair, which real gives its own **Msg 8112** since neither entry exists yet to name; the multiple-PRIMARY-KEY check (Msg 8110) outranks both.)*
 - **Option names in a CREATE TABLE / CREATE TYPE / ALTER TABLE ADD column clause** — standalone `CREATE INDEX`, `ALTER INDEX … REBUILD` and `ALTER TABLE … ADD CONSTRAINT` refuse a name the statement doesn't take as real does (`IndexOptionStatement`), but the column-level parser those three statements share with table variables doesn't know which statement it serves, so a constraint or inline index there accepts any name — real refuses an unknown one naming `CREATE TABLE` / `CREATE TYPE` / `ALTER TABLE`, and `CREATE TABLE` refuses `SORT_IN_TEMPDB` / `ONLINE` / `MAXDOP` / `DROP_EXISTING` too (probed 2026-09-26).
-- **`COMPRESSION_DELAY`** in `ALTER INDEX … SET` — real's **Msg 35364** (columnstore only) on a rowstore index; the simulator accepts and discards it (the `WITH` clause's Msg 122 ships).
 - **No partition-aware index storage**: `partition_ordinal` always 0, `data_space_id` always 1 (PRIMARY).
 - **DROP INDEX comma list not atomic**: each entry resolves independently.
   Real SQL Server rolls back all on any failure.

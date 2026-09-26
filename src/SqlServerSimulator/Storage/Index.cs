@@ -45,7 +45,9 @@ internal sealed class Index(
     int[] includedColumnOrdinals,
     BooleanExpression? filter,
     string? filterDefinition,
-    IndexOptions options)
+    IndexOptions options,
+    bool isColumnstore = false,
+    int[]? columnstoreOrder = null)
 {
     // Mutable: EXEC sp_rename (INDEX rename) reassigns the name in place; the
     // index keeps its identity and surfaces the new name through sys.indexes.
@@ -176,6 +178,34 @@ internal sealed class Index(
     /// See <c>docs/claude/indexes.md</c>.
     /// </summary>
     public bool IsDisabled;
+
+    /// <summary>
+    /// A columnstore index: <c>sys.indexes</c> type 5 / 6. It has no key; a
+    /// nonclustered one's columns ride in <see cref="IncludedColumns"/>, which
+    /// is how <c>sys.index_columns</c> lists them, and a clustered one covers
+    /// every column the table has or later gains. Neither seeks nor enforces
+    /// anything. See <c>docs/claude/indexes.md</c>.
+    /// </summary>
+    public readonly bool IsColumnstore = isColumnstore;
+
+    /// <summary>
+    /// A columnstore index's <c>ORDER</c> columns as <c>HeapTable.Columns</c>
+    /// ordinals, in order — <c>sys.index_columns.column_store_order_ordinal</c>.
+    /// </summary>
+    public readonly int[] ColumnstoreOrder = columnstoreOrder ?? [];
+
+    /// <summary>
+    /// A columnstore index's <c>COMPRESSION_DELAY</c> in minutes, which
+    /// <c>ALTER INDEX … SET</c> may change; <c>sys.indexes</c> reads NULL for
+    /// a rowstore index.
+    /// </summary>
+    public int CompressionDelay = options.CompressionDelay ?? 0;
+
+    /// <summary>
+    /// Whether a columnstore index is <c>COLUMNSTORE_ARCHIVE</c>-compressed,
+    /// which a rebuild may change — <c>sys.partitions.data_compression</c>.
+    /// </summary>
+    public bool ColumnstoreArchive = options.ColumnstoreArchive ?? false;
 
     private static int[] BuildKeyFullOrdinals(IndexKeyColumn[] keyColumns)
     {

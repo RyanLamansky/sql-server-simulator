@@ -2375,6 +2375,13 @@ partial class SimulatedSqlException
         new($"Invalid usage of the option {optionName} in the INDEX statement.", 153, 15, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 11438: an index built with <c>RESUMABLE = ON</c>
+    /// but not <c>ONLINE = ON</c> (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException ResumableRequiresOnline() =>
+        new("The RESUMABLE option cannot be set to 'ON' when the ONLINE option is set to 'OFF'.", 11438, 15, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 7729: a partition number given where nothing is
     /// partitioned. Real splits the message by which object it could name — the
     /// index for <c>ALTER INDEX &lt;name&gt; … PARTITION = n</c> (State 1), the

@@ -35,6 +35,8 @@ partial class Simulation
                 return Simulation.TryParseCreateTrigger(context, isAlter: false, createOrAlter: false);
             case ReservedKeyword { Keyword: Keyword.Unique or Keyword.Clustered or Keyword.NonClustered or Keyword.Index }:
                 return Simulation.TryParseCreateIndex(context);
+            case UnquotedString { Span: var word } when word.Equals("COLUMNSTORE", StringComparison.OrdinalIgnoreCase):
+                return Simulation.TryParseCreateIndex(context);
             case UnquotedString { ContextualKeyword: ContextualKeyword.Type }:
                 return TryParseCreateType(context);
             case UnquotedString { ContextualKeyword: ContextualKeyword.Sequence }:
@@ -825,7 +827,7 @@ partial class Simulation
     /// No-op when the cursor isn't on <c>WITH</c>. Cursor on exit: first token
     /// past the closing <c>)</c>, or unchanged when no clause was present.
     /// </summary>
-    internal static IndexOptions ParseOptionalIndexWithClause(ParserContext context, IndexOptionStatement statement = IndexOptionStatement.Unchecked)
+    internal static IndexOptions ParseOptionalIndexWithClause(ParserContext context, IndexOptionStatement statement = IndexOptionStatement.Unchecked, string? indexName = null)
     {
         if (context.Token is not ReservedKeyword { Keyword: Keyword.With })
             return default;
@@ -856,20 +858,35 @@ partial class Simulation
         var expectName = true;
         var maxDuration = false;
         var resumable = false;
+        var online = false;
+        int? compressionDelay = null;
+        bool? columnstoreArchive = null;
+        var columnstore = statement is IndexOptionStatement.CreateColumnstoreIndex or IndexOptionStatement.RebuildColumnstoreIndex;
         while (depth > 0)
         {
             context.MoveNextRequired();
             if (expectName && statement != IndexOptionStatement.Unchecked && context.Token is StringToken or ReservedKeyword)
             {
                 var name = context.Token.Source.ToString();
-                CheckIndexOptionName(name, statement);
-                maxDuration |= name.Equals("MAX_DURATION", StringComparison.OrdinalIgnoreCase);
-                if (name.Equals("RESUMABLE", StringComparison.OrdinalIgnoreCase))
+                var checkpoint = context.SaveCheckpoint();
+                var valueToken = context.MoveNext() && context.Token is Operator { Character: '=' } && context.MoveNext() ? context.Token : null;
+                context.RestoreCheckpoint(checkpoint);
+                try
                 {
-                    var checkpoint = context.SaveCheckpoint();
-                    resumable = context.MoveNext() && context.Token is Operator { Character: '=' }
-                        && context.MoveNext() && context.Token is ReservedKeyword { Keyword: Keyword.On };
-                    context.RestoreCheckpoint(checkpoint);
+                    CheckIndexOptionName(name, statement, indexName);
+                }
+                // CREATE INDEX follows an unknown option given a number with
+                // Msg 153 (probed 2026-09-26 against SQL Server 2025).
+                catch (SimulatedSqlException unknown) when (unknown.Number == 155 && valueToken is Numeric
+                    && statement is IndexOptionStatement.CreateIndex or IndexOptionStatement.CreateColumnstoreIndex)
+                {
+                    throw SimulatedSqlException.Aggregate([unknown, SimulatedSqlException.InvalidUsageOfIndexOption(name)]);
+                }
+                maxDuration |= name.Equals("MAX_DURATION", StringComparison.OrdinalIgnoreCase);
+                if (valueToken is ReservedKeyword { Keyword: Keyword.On })
+                {
+                    resumable |= name.Equals("RESUMABLE", StringComparison.OrdinalIgnoreCase);
+                    online |= name.Equals("ONLINE", StringComparison.OrdinalIgnoreCase);
                 }
             }
             expectName = depth == 1 && context.Token is Operator { Character: ',' };
@@ -896,6 +913,41 @@ partial class Simulation
                 case Numeric or Operator { Character: '-' } when sawEquals && namedOption == "FILLFACTOR":
                     fillFactor = ReadFillFactor(context);
                     break;
+                case Operator { Character: '-' } when sawEquals && namedOption == "COMPRESSION_DELAY":
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                case Numeric delay when sawEquals && namedOption == "COMPRESSION_DELAY":
+                    compressionDelay = delay.Value.AsInt32;
+                    if (compressionDelay > 10080)
+                        throw SimulatedSqlException.CompressionDelayOutOfRange(compressionDelay.Value);
+                    // An optional MINUTE / MINUTES unit follows.
+                    var afterDelay = context.SaveCheckpoint();
+                    if (!(context.MoveNext() && context.Token is StringToken { Span: var unit }
+                        && (unit.Equals("MINUTE", StringComparison.OrdinalIgnoreCase) || unit.Equals("MINUTES", StringComparison.OrdinalIgnoreCase))))
+                    {
+                        context.RestoreCheckpoint(afterDelay);
+                    }
+                    break;
+                case StringToken level when sawEquals && namedOption == "DATA_COMPRESSION":
+                    var archive = level.Span.Equals("COLUMNSTORE_ARCHIVE", StringComparison.OrdinalIgnoreCase);
+                    var columnstoreLevel = archive || level.Span.Equals("COLUMNSTORE", StringComparison.OrdinalIgnoreCase);
+                    if (columnstore)
+                    {
+                        columnstoreArchive = columnstoreLevel
+                            ? archive
+                            : throw SimulatedSqlException.ColumnstoreInvalidCompression(statement == IndexOptionStatement.CreateColumnstoreIndex ? (byte)15 : (byte)16);
+                    }
+                    // A rebuild's target is known only once the batch runs.
+                    else if (columnstoreLevel && statement == IndexOptionStatement.AlterIndexRebuild && !context.Batch.IsSkipping)
+                    {
+                        throw SimulatedSqlException.RowstoreColumnstoreCompression();
+                    }
+                    break;
+                case StringToken name when depth == 1 && name.Span.Equals("COMPRESSION_DELAY", StringComparison.OrdinalIgnoreCase):
+                    namedOption = "COMPRESSION_DELAY";
+                    continue;
+                case StringToken name when depth == 1 && name.Span.Equals("DATA_COMPRESSION", StringComparison.OrdinalIgnoreCase):
+                    namedOption = "DATA_COMPRESSION";
+                    continue;
                 case ReservedKeyword { Keyword: Keyword.FillFactor } when depth == 1:
                     namedOption = "FILLFACTOR";
                     continue;
@@ -916,8 +968,17 @@ partial class Simulation
 
         if (maxDuration && !resumable)
             throw SimulatedSqlException.MaxDurationRequiresResumable();
+        // A resumable build has to be an online one, and a columnstore index
+        // can't be resumable at all (probed 2026-09-26 against SQL Server 2025).
+        if (resumable && statement is IndexOptionStatement.CreateIndex or IndexOptionStatement.CreateColumnstoreIndex)
+        {
+            if (!online)
+                throw SimulatedSqlException.ResumableRequiresOnline();
+            if (statement == IndexOptionStatement.CreateColumnstoreIndex)
+                throw SimulatedSqlException.ColumnstoreResumable();
+        }
         context.MoveNextOptional();
-        return new IndexOptions(ignoreDupKey, fillFactor, padIndex, dropExisting);
+        return new IndexOptions(ignoreDupKey, fillFactor, padIndex, dropExisting, compressionDelay, columnstoreArchive);
     }
 
     /// <summary>
@@ -939,7 +1000,7 @@ partial class Simulation
     /// TABLE can't take as theirs, and <c>COMPRESSION_DELAY</c> — a columnstore
     /// option — with Msg 122 wherever it isn't refused by name.
     /// </summary>
-    private static void CheckIndexOptionName(string name, IndexOptionStatement statement)
+    private static void CheckIndexOptionName(string name, IndexOptionStatement statement, string? indexName)
     {
         var known = IndexOptionNames.Contains(name);
         switch (statement)
@@ -962,6 +1023,20 @@ partial class Simulation
                 if (!known || name.Equals("DROP_EXISTING", StringComparison.OrdinalIgnoreCase))
                     throw SimulatedSqlException.UnrecognizedIndexOption(name, "ALTER TABLE");
                 break;
+            case IndexOptionStatement.CreateColumnstoreIndex or IndexOptionStatement.RebuildColumnstoreIndex:
+                var creating = statement == IndexOptionStatement.CreateColumnstoreIndex;
+                if (!known)
+                    throw SimulatedSqlException.UnrecognizedIndexOption(name, creating ? "CREATE INDEX" : "ALTER INDEX");
+                var upper = name.ToUpperInvariant();
+                if (ColumnstoreRefusedOptions.Contains(upper))
+                    throw creating ? SimulatedSqlException.ColumnstoreIndexOption(upper) : SimulatedSqlException.ColumnstoreRebuildOption(upper);
+                if (ColumnstoreRefusedLockOptions.Contains(upper))
+                    throw creating ? SimulatedSqlException.ColumnstoreIndexLockOption(upper) : SimulatedSqlException.ColumnstoreRebuildLockOption(upper);
+                if (upper == "XML_COMPRESSION")
+                    throw SimulatedSqlException.ColumnstoreXmlCompression(indexName ?? "");
+                if (!creating && upper is "DROP_EXISTING" or "COMPRESSION_DELAY")
+                    throw SimulatedSqlException.UnrecognizedIndexOption(name, "ALTER INDEX REBUILD");
+                return;
         }
         if (name.Equals("COMPRESSION_DELAY", StringComparison.OrdinalIgnoreCase))
             throw SimulatedSqlException.CompressionDelayRequiresColumnstore();
@@ -975,7 +1050,25 @@ partial class Simulation
         CreateIndex,
         AlterIndexRebuild,
         AlterTable,
+        CreateColumnstoreIndex,
+        RebuildColumnstoreIndex,
     }
+
+    /// <summary>
+    /// The rowstore options a columnstore index refuses by name — Msg 35317
+    /// creating it, Msg 35327 rebuilding it (probed 2026-09-26 against SQL
+    /// Server 2025).
+    /// </summary>
+    private static readonly FrozenSet<string> ColumnstoreRefusedOptions = new[]
+    {
+        "FILLFACTOR", "IGNORE_DUP_KEY", "PAD_INDEX", "SORT_IN_TEMPDB", "STATISTICS_INCREMENTAL", "STATISTICS_NORECOMPUTE",
+    }.ToFrozenSet(StringComparer.Ordinal);
+
+    /// <summary>The locking options a columnstore index refuses — Msg 35318 creating it, Msg 35328 rebuilding or setting them.</summary>
+    private static readonly FrozenSet<string> ColumnstoreRefusedLockOptions = new[]
+    {
+        "ALLOW_PAGE_LOCKS", "ALLOW_ROW_LOCKS", "OPTIMIZE_FOR_SEQUENTIAL_KEY",
+    }.ToFrozenSet(StringComparer.Ordinal);
 
     /// <summary>
     /// Reads a <c>FILLFACTOR</c> value at the cursor (a number, or a minus
@@ -1192,7 +1285,7 @@ partial class Simulation
             // rejects the INDEX keyword.
             if (context.Token is ReservedKeyword { Keyword: Keyword.Index } && pendingIndexes is not null)
             {
-                var tableLevelIndex = ParseTableLevelInlineIndex(context, tableName);
+                var tableLevelIndex = ParseTableLevelInlineIndex(context, tableName, isTableVariable || isTableType);
                 tableLevelIndex.KeysBefore = pendingKeys.Count;
                 pendingIndexes.Add(tableLevelIndex);
                 continue;
@@ -1607,7 +1700,7 @@ partial class Simulation
                     if (context.GetNextRequired() is not Name indexNameToken)
                         throw SimulatedSqlException.SyntaxErrorNear(context);
                     context.MoveNextOptional();
-                    var columnLevelIndex = ParseInlineIndexBody(context, indexNameToken.Value, tableName, columnLevelKey: columnName.Value);
+                    var columnLevelIndex = ParseInlineIndexBody(context, indexNameToken.Value, tableName, columnLevelKey: columnName.Value, isTableVariable || isTableType);
                     columnLevelIndex.KeysBefore = pendingKeys.Count;
                     pendingIndexes.Add(columnLevelIndex);
                     continue;
@@ -2850,6 +2943,12 @@ partial class Simulation
         public readonly string? FilterDefinition = filterDefinition;
         public readonly IndexOptions Options = options;
 
+        /// <summary>A columnstore index, whose <see cref="Columns"/> it holds rather than keys on.</summary>
+        public bool IsColumnstore;
+
+        /// <summary>A columnstore index's <c>ORDER</c> column names.</summary>
+        public List<string> ColumnstoreOrder = [];
+
         /// <summary>
         /// How many PRIMARY KEY / UNIQUE constraints the declaration wrote
         /// ahead of this index, which places it in the one sequence
@@ -2908,7 +3007,7 @@ partial class Simulation
     /// filtered <c>IGNORE_DUP_KEY</c>'s Msg 10618, each followed by Msg 1750
     /// state 0 (probed 2026-09-25 against SQL Server 2025).
     /// </summary>
-    private static PendingInlineIndex ParseInlineIndexBody(ParserContext context, string indexName, string tableName, string? columnLevelKey)
+    private static PendingInlineIndex ParseInlineIndexBody(ParserContext context, string indexName, string tableName, string? columnLevelKey, bool refusesColumnstore)
     {
         var isUnique = false;
         if (context.Token is ReservedKeyword { Keyword: Keyword.Unique })
@@ -2917,6 +3016,8 @@ partial class Simulation
             context.MoveNextRequired();
         }
         var isClustered = ParseOptionalIndexClustering(context);
+        if (context.Token is UnquotedString { Span: var word } && word.Equals("COLUMNSTORE", StringComparison.OrdinalIgnoreCase))
+            return ParseInlineColumnstoreIndexBody(context, indexName, tableName, isUnique, isClustered, columnLevelKey, refusesColumnstore);
         (string, bool)[] columns;
         if (columnLevelKey is not null)
         {
@@ -2957,17 +3058,59 @@ partial class Simulation
     }
 
     /// <summary>
+    /// The inline counterpart of <see cref="ParseCreateColumnstoreIndex"/>,
+    /// cursor on the <c>COLUMNSTORE</c> word; a table variable or table type
+    /// refuses the index outright (Msg 35310).
+    /// </summary>
+    private static PendingInlineIndex ParseInlineColumnstoreIndexBody(
+        ParserContext context, string indexName, string tableName, bool isUnique, bool isClustered, string? columnLevelKey, bool refusesColumnstore)
+    {
+        if (refusesColumnstore)
+            throw SimulatedSqlException.ColumnstoreIndexOnTableVariable();
+        if (isUnique)
+            throw SimulatedSqlException.ColumnstoreIndexCannotBeUnique();
+        context.MoveNextRequired();
+        List<string> columns = columnLevelKey is null ? [] : [columnLevelKey];
+        if (context.Token is Operator { Character: '(' })
+        {
+            if (isClustered)
+                throw SimulatedSqlException.ClusteredColumnstoreKeyList();
+            columns = ParseColumnstoreColumnList(context);
+        }
+        else if (!isClustered && columns.Count == 0)
+        {
+            throw SimulatedSqlException.ColumnstoreKeyListMissing();
+        }
+        if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Include })
+            throw SimulatedSqlException.ColumnstoreIndexIncludedColumns();
+        List<string> order = [];
+        if (context.Token is ReservedKeyword { Keyword: Keyword.Order })
+        {
+            context.MoveNextRequired();
+            if (context.Token is not Operator { Character: '(' })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            order = ParseColumnstoreColumnList(context);
+        }
+        var (_, filter, filterDefinition, options) = ParseIndexTail(context, indexName, tableName, acceptsInclude: false, IndexOptionStatement.CreateColumnstoreIndex, indexName);
+        return new PendingInlineIndex(indexName, isUnique: false, isClustered, [.. columns.Select(static c => (c, false))], [], filter, filterDefinition, options)
+        {
+            IsColumnstore = true,
+            ColumnstoreOrder = order,
+        };
+    }
+
+    /// <summary>
     /// Parses a table-level inline index element <c>INDEX name [CLUSTERED |
     /// NONCLUSTERED] (col [ASC | DESC], …)</c>. Cursor on entry: the
     /// <c>INDEX</c> keyword; on exit: the trailing comma / closing paren of
     /// the table's column-element list.
     /// </summary>
-    private static PendingInlineIndex ParseTableLevelInlineIndex(ParserContext context, string tableName)
+    private static PendingInlineIndex ParseTableLevelInlineIndex(ParserContext context, string tableName, bool refusesColumnstore)
     {
         if (context.GetNextRequired() is not Name indexName)
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextRequired();
-        return ParseInlineIndexBody(context, indexName.Value, tableName, columnLevelKey: null);
+        return ParseInlineIndexBody(context, indexName.Value, tableName, columnLevelKey: null, refusesColumnstore);
     }
 
     /// <summary>

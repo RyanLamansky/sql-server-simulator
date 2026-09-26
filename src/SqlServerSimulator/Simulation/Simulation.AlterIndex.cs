@@ -117,6 +117,7 @@ partial class Simulation
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextRequired();
         var tableName = BatchContext.ParseObjectName(context);
+        var targetColumnstore = TargetsColumnstoreIndex(context, tableName, indexName);
         context.MoveNextRequired();
 
         var form = context.Token switch
@@ -132,12 +133,13 @@ partial class Simulation
         };
 
         bool? ignoreDupKey = null;
+        int? compressionDelay = null;
         var rebuildOptions = default(IndexOptions);
         var namedPartition = false;
         switch (form)
         {
             case AlterIndexForm.Set:
-                ignoreDupKey = ParseAlterIndexSetOptions(context);
+                (ignoreDupKey, compressionDelay) = ParseAlterIndexSetOptions(context, targetColumnstore);
                 break;
             case AlterIndexForm.Pause:
             case AlterIndexForm.Abort:
@@ -163,7 +165,8 @@ partial class Simulation
                 // option block; neither describes anything a heap has.
                 context.MoveNextOptional();
                 namedPartition = ParseOptionalIndexPartitionClause(context);
-                rebuildOptions = ParseOptionalIndexWithClause(context, IndexOptionStatement.AlterIndexRebuild);
+                rebuildOptions = ParseOptionalIndexWithClause(
+                    context, targetColumnstore == true ? IndexOptionStatement.RebuildColumnstoreIndex : IndexOptionStatement.AlterIndexRebuild, indexName);
                 break;
         }
 
@@ -201,7 +204,7 @@ partial class Simulation
                 if (collation.Equals(index.Name, indexName))
                 {
                     RejectNamedIndexTarget(form, namedPartition, index.Name, table.Name);
-                    ApplyToIndex(context, table, index, form, ignoreDupKey, rebuildOptions);
+                    ApplyToIndex(context, table, index, form, ignoreDupKey, compressionDelay, rebuildOptions);
                     RecordDdlEvent(context, "ALTER_INDEX", EventSchemaName(tableName), indexName!, "INDEX", table.Name, "TABLE");
                     return true;
                 }
@@ -242,7 +245,7 @@ partial class Simulation
         {
             if (form == AlterIndexForm.Reorganize && index.IsDisabled)
                 continue;
-            ApplyToIndex(context, table, index, form, ignoreDupKey, rebuildOptions);
+            ApplyToIndex(context, table, index, form, ignoreDupKey, compressionDelay, rebuildOptions);
         }
         RecordDdlEvent(context, "ALTER_INDEX", EventSchemaName(tableName), table.Name, "INDEX", table.Name, "TABLE");
         return true;
@@ -319,7 +322,7 @@ partial class Simulation
     }
 
     private static void ApplyToIndex(
-        ParserContext context, HeapTable table, Storage.Index index, AlterIndexForm form, bool? ignoreDupKey, IndexOptions rebuildOptions)
+        ParserContext context, HeapTable table, Storage.Index index, AlterIndexForm form, bool? ignoreDupKey, int? compressionDelay, IndexOptions rebuildOptions)
     {
         switch (form)
         {
@@ -341,6 +344,7 @@ partial class Simulation
                 // out (probed 2026-09-26 against SQL Server 2025).
                 index.FillFactor = rebuildOptions.FillFactor ?? index.FillFactor;
                 index.IsPadded = rebuildOptions.PadIndex ?? index.IsPadded;
+                index.ColumnstoreArchive = rebuildOptions.ColumnstoreArchive ?? index.ColumnstoreArchive;
                 break;
             case AlterIndexForm.Reorganize:
                 if (index.IsDisabled)
@@ -349,6 +353,8 @@ partial class Simulation
             default:
                 if (index.IsDisabled)
                     throw SimulatedSqlException.OperationOnDisabledIndex(index.Name, table.Name);
+                if (compressionDelay is int delay && index.IsColumnstore)
+                    index.CompressionDelay = delay;
                 if (ignoreDupKey is not bool value)
                     return;
                 if (!index.IsUnique)
@@ -369,12 +375,13 @@ partial class Simulation
     /// Cursor on entry: the <c>SET</c> keyword. On exit: first token past the
     /// closing <c>)</c>.
     /// </summary>
-    private static bool? ParseAlterIndexSetOptions(ParserContext context)
+    private static (bool? IgnoreDupKey, int? CompressionDelay) ParseAlterIndexSetOptions(ParserContext context, bool? targetColumnstore)
     {
         if (context.GetNextRequired() is not Operator { Character: '(' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
         bool? ignoreDupKey = null;
+        int? compressionDelay = null;
         while (true)
         {
             // An empty list is a syntax error on real, so a name is required.
@@ -392,12 +399,27 @@ partial class Simulation
             {
                 var on = ReadOnOffOptionValue(context, value);
                 if (IgnoreDupKeyOption.Equals(optionName, StringComparison.OrdinalIgnoreCase))
+                {
                     ignoreDupKey = on;
+                }
+                // A columnstore index refuses the locking and statistics
+                // options as its rebuild does (probed 2026-09-26 against SQL
+                // Server 2025).
+                else if (targetColumnstore == true)
+                {
+                    var upper = optionName.ToUpperInvariant();
+                    throw ColumnstoreRefusedLockOptions.Contains(upper)
+                        ? SimulatedSqlException.ColumnstoreRebuildLockOption(upper)
+                        : SimulatedSqlException.ColumnstoreRebuildOption(upper);
+                }
             }
             else if (NumericIndexOptions.Contains(optionName))
             {
-                if (value is not Numeric)
+                if (value is not Numeric { Value: var delay })
                     throw SimulatedSqlException.SyntaxErrorNear(context);
+                if (targetColumnstore == false)
+                    throw SimulatedSqlException.CompressionDelayOnRowstoreIndex();
+                compressionDelay = delay.AsInt32 > 10080 ? throw SimulatedSqlException.CompressionDelayOutOfRange(delay.AsInt32) : delay.AsInt32;
             }
             else
             {
@@ -411,7 +433,28 @@ partial class Simulation
         if (context.Token is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextOptional();
-        return ignoreDupKey;
+        return (ignoreDupKey, compressionDelay);
+    }
+
+    /// <summary>
+    /// Whether the index an <c>ALTER INDEX</c> names — or, for <c>ALL</c>, any
+    /// of the table's — is a columnstore one, whose option rules differ; null
+    /// when the statement is being skipped or its target doesn't resolve, which
+    /// the statement reports on its own.
+    /// </summary>
+    private static bool? TargetsColumnstoreIndex(ParserContext context, MultiPartName tableName, string? indexName)
+    {
+        if (context.Batch.IsSkipping || !context.Batch.TryResolveTable(tableName, out var table))
+            return null;
+        var collation = context.Batch.CurrentDatabase.Collation;
+        if (indexName is null)
+            return table.Indexes.Exists(index => index.IsColumnstore);
+        foreach (var index in table.Indexes)
+        {
+            if (collation.Equals(index.Name, indexName))
+                return index.IsColumnstore;
+        }
+        return table.KeyConstraints.Exists(key => collation.Equals(key.Name, indexName)) ? false : null;
     }
 
     /// <summary>

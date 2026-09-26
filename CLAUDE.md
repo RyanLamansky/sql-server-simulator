@@ -308,7 +308,7 @@ Where an entry carries a second clause it is because that fact changes what you'
 - **`PERIOD FOR SYSTEM_TIME`, the history sibling and its validation, `HISTORY_RETENTION_PERIOD`, all five `FOR SYSTEM_TIME` query forms** → [`temporal-tables.md`](docs/claude/temporal-tables.md).
 - **`ALTER TABLE` ADD / DROP / ALTER COLUMN + CONSTRAINT, the period pair, `REBUILD`, trust toggling**.
   A DEFAULT expression has an **empty scope** — a name inside one is Msg 128 even when it *is* a column → [`alter-table.md`](docs/claude/alter-table.md).
-- **`CREATE INDEX`, inline indexes, indexed views, `ALTER INDEX`, disabled indexes, `CREATE STATISTICS`, computed columns as keys** — plus the **access-path choices** a read makes over the per-`Heap` seek cache, which is where query throughput actually lives.
+- **`CREATE INDEX`, inline indexes, columnstore indexes, indexed views, `ALTER INDEX`, disabled indexes, `CREATE STATISTICS`, computed columns as keys** — plus the **access-path choices** a read makes over the per-`Heap` seek cache, which is where query throughput actually lives.
   A scan of a clustered table follows its **key order**, not write order, so an unordered result or a bare `TOP` over one reads by key → [`indexes.md`](docs/claude/indexes.md).
 - **Table hints (`WITH (NOLOCK …)`) and statement `OPTION (…)` hints**, including `FORCESEEK`'s nested form and the legacy no-`WITH` parenthesized form → [`query-hints.md`](docs/claude/query-hints.md).
 - **Heap page lifecycle** — reclamation / reuse, tail-only shrink, `DBCC SHRINKDATABASE` / `SHRINKFILE`, `Heap.RowCount`, and which callers may take the reused encode buffer → [`heap-storage.md`](docs/claude/heap-storage.md).
