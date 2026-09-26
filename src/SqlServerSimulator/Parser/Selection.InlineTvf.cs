@@ -49,6 +49,13 @@ partial class Selection
             hasOrderBy: false,
             hasTopOrOffsetOrFetch: false,
             rowSource: (outerBatch, outerResolver) =>
-                outerBatch.Connection.Simulation.InvokeInlineTvf(outerBatch, outerResolver, function, arguments, writtenName));
+                outerBatch.Connection.Simulation.InvokeInlineTvf(outerBatch, outerResolver, function, arguments, writtenName))
+        {
+            // An identity column reads through the function as an ordinary
+            // updatable one (probed 2026-09-26 against SQL Server 2025).
+            ColumnWireFlags = function.OutputWireFlags is { } flags
+                ? Array.ConvertAll(flags, flag => (flag & 0x10) != 0 ? (byte)((flag & ~0x10) | 0x08) : flag)
+                : null,
+        };
     }
 }

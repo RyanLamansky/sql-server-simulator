@@ -592,7 +592,7 @@ partial class Simulation
         if (isSchemaBound)
             SchemaBinding.EnforceBody(context.CurrentDatabase, "function", $"{schema.Name}.{functionName.Leaf}", bodyText);
 
-        var outputColumns = InferInlineTvfOutputColumns(context, [.. parameters], bodyText, functionName.Leaf, CountNewlines(commandText, 0, bodyStart));
+        var outputColumns = InferInlineTvfOutputColumns(context, [.. parameters], bodyText, functionName.Leaf, CountNewlines(commandText, 0, bodyStart), out var outputWireFlags);
 
         var function = new InlineTableValuedFunction(
             schema,
@@ -607,6 +607,7 @@ partial class Simulation
             IsSchemaBound = isSchemaBound,
             UsesQuotedIdentifier = context.QuotedIdentifiers,
             UsesAnsiNulls = context.Batch.Connection.AnsiNulls,
+            OutputWireFlags = outputWireFlags,
         };
         if (replaced is not null)
             function.ModifyDate = context.Batch.CurrentStatement.UtcNow;
@@ -737,7 +738,8 @@ partial class Simulation
         UdfParameter[] parameters,
         string bodyText,
         string functionName,
-        int bodyLineOffset)
+        int bodyLineOffset,
+        out byte[]? wireFlags)
     {
         // Synthesize a command + batch to parse the body in isolation. The
         // batch shares the outer connection so it sees the same schemas /
@@ -794,8 +796,15 @@ partial class Simulation
                 if (!seenNames.Add(name))
                     throw SimulatedSqlException.DuplicateColumnInViewOrFunction(name, functionName);
                 var nullable = nullability is null || i >= nullability.Length || nullability[i];
-                columns[i] = new HeapColumn(name, selection.Schema[i], maxLength: null, nullable: nullable);
+                // A numeric literal's column reports numeric, and an alias-typed
+                // one its alias, as a view's column does (probed 2026-09-26).
+                columns[i] = new HeapColumn(name, selection.Schema[i], maxLength: null, nullable: nullable,
+                    spelledNumeric: selection.ColumnReportsNumeric is { } numeric && numeric[i])
+                {
+                    AliasType = selection.ColumnAliasTypes?[i],
+                };
             }
+            wireFlags = selection.ColumnWireFlags;
             return columns;
         }
         finally

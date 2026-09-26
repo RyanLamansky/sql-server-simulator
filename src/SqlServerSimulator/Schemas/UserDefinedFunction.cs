@@ -198,6 +198,13 @@ internal sealed class InlineTableValuedFunction(
     /// <see cref="SqlType"/>. Identity is never set.
     /// </summary>
     public readonly HeapColumn[] OutputColumns = outputColumns;
+
+    /// <summary>
+    /// The body's per-column COLMETADATA flags (updatable 0x08, identity 0x10,
+    /// computed 0x20), captured at CREATE, which a query reading the function
+    /// reports for its columns.
+    /// </summary>
+    public byte[]? OutputWireFlags;
 }
 
 /// <summary>

@@ -12,7 +12,7 @@ partial class Simulation
         SqlType.SystemName, SqlType.SystemName, NVarcharSqlType.Get(4000, Collation.Baseline, Coercibility.Implicit), SqlType.Int32, SqlType.SystemName, SqlType.SystemName,
         SqlType.SystemName, SqlType.Bit, SqlType.Bit, SqlType.Bit, SqlType.SystemName, SqlType.SystemName,
         SqlType.SystemName, SqlType.SystemName, SqlType.SystemName, SqlType.Bit, SqlType.Bit, SqlType.Bit,
-        SqlType.Bit, SqlType.Bit, SqlType.SmallInt, SqlType.SmallInt, SqlType.SmallInt, SqlType.Int32,
+        SqlType.Bit, SqlType.Bit, SqlType.SmallInt, SqlType.Bit, SqlType.SmallInt, SqlType.Int32,
         SqlType.Int32, SqlType.Int32, SqlType.TinyInt,
     ];
 
@@ -162,10 +162,17 @@ partial class Simulation
             nullName, nullName, nullName, nullName, nullName,
             SqlValue.FromBoolean((origin?.Identity ?? origin?.IdentitySource ?? result.ColumnIdentitySources?[index]) is not null),
             nullBit,
-            SqlValue.FromBoolean(!result.IsGrouped && origin is { Identity: null, Computed: null } && type != SqlType.RowVersion),
-            SqlValue.FromBoolean(origin?.Computed is not null || (origin is null && result.ColumnIsComputed is { } computed && computed[index])),
+            // The COLMETADATA flags trace a column through views, derived
+            // tables and inline functions to what it reads: updatable (0x08)
+            // or computed (0x20) (probed 2026-09-26 against SQL Server 2025).
+            SqlValue.FromBoolean(result.ColumnWireFlags is { } updatableFlags
+                ? !result.IsGrouped && (updatableFlags[index] & 0x08) != 0
+                : !result.IsGrouped && origin is { Identity: null, Computed: null } && type != SqlType.RowVersion),
+            SqlValue.FromBoolean(result.ColumnWireFlags is { } computedFlags
+                ? (computedFlags[index] & 0x20) != 0
+                : origin?.Computed is not null || (origin is null && result.ColumnIsComputed is { } computed && computed[index])),
             SqlValue.FromBoolean(false),
-            nullSmall, nullSmall, nullSmall,
+            nullSmall, SqlValue.Null(SqlType.Bit), nullSmall,
             SqlValue.FromInt32(tdsType),
             SqlValue.FromInt32(tdsLength),
             codec is null ? nullInt : SqlValue.FromInt32((int)codec.Info),

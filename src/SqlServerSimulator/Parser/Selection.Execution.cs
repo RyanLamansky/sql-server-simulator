@@ -1808,9 +1808,14 @@ internal sealed partial class Selection
 
     private static byte SourceColumnWireFlags(FromSource from, int ordinal)
     {
+        // A derived table or CTE passes its columns' updatability through but
+        // not their computed flag (probed 2026-09-26 against SQL Server 2025).
         if (from.LateralPlan is { ColumnWireFlags: { } inner } && ordinal < inner.Length)
-            return inner[ordinal];
-        // An updatable view's column traces to the base column behind it.
+            return from.LateralIsQueryBody ? (byte)(inner[ordinal] & ~0x20) : inner[ordinal];
+        // An updatable view's column traces to the base column behind it, and
+        // one of its expressions is computed.
+        if (from.BackingView is { BaseTable: not null } expressionView && expressionView.BaseColumnOrdinals[ordinal] < 0)
+            return 0x20;
         var column = from.BackingView is { BaseTable: { } baseTable } view && view.BaseColumnOrdinals[ordinal] is >= 0 and var baseOrdinal
             ? baseTable.Columns[baseOrdinal]
             : from.Columns[ordinal];

@@ -173,4 +173,38 @@ public sealed class DescribeFirstResultSetTests
         sim.AssertSqlError("select * from sys.dm_exec_describe_first_result_set(N'select 1', null, 0, 1)", 8144,
             "Procedure or function sys.dm_exec_describe_first_result_set has too many arguments specified.");
     }
+
+    /// <summary>
+    /// A column's identity / updatable / computed flags trace through a view, a
+    /// derived table, a CTE and an inline function to what it reads: a view's
+    /// expression stays computed, a derived table's doesn't, an inline
+    /// function's identity column reads as updatable, and its numeric literal
+    /// reports numeric (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select * from dbo.v", "id:1:0:0|a:0:1:0|x:0:0:1")]
+    [DataRow("select d.id, d.a, d.k from (select id, a, a + 1 k from dbo.t) d", "id:1:0:0|a:0:1:0|k:0:0:0")]
+    [DataRow("with c as (select id, a * 2 k from dbo.t) select id, k from c", "id:1:0:0|k:0:0:0")]
+    [DataRow("select * from dbo.itf()", "id:0:1:0|a:0:1:0|z:0:0:1|y:0:0:1")]
+    public void TheFlags_TraceThroughTheSource(string query, string expected)
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table t (id int identity primary key, a int)",
+            "create view v as select id, a, a + 1 x from dbo.t",
+            "create function itf() returns table as return select id, a, a * 2 z, 1.5 y from dbo.t");
+        AreEqual(expected, sim.ExecuteScalar($"""
+            select string_agg(concat(name, ':', 0 + is_identity_column, ':', 0 + is_updateable, ':', 0 + is_computed_column), '|') within group (order by column_ordinal)
+            from sys.dm_exec_describe_first_result_set(N'{query}', null, 0)
+            """));
+        AreEqual("numeric", sim.ExecuteScalar("select type_name(system_type_id) from sys.columns where object_id = object_id('itf') and name = 'y'"));
+    }
+
+    /// <summary>Real types order_by_is_descending bit (probed 2026-09-26 against SQL Server 2025).</summary>
+    [TestMethod]
+    public void OrderByIsDescending_IsBit()
+    {
+        using var reader = new Simulation().ExecuteReader("exec sp_describe_first_result_set N'select 1 a'");
+        AreEqual("bit", reader.GetDataTypeName(reader.GetOrdinal("order_by_is_descending")));
+    }
 }
