@@ -3092,7 +3092,7 @@ internal sealed partial class Selection
                 var heapQualifier = heapAlias ?? objectName.Leaf;
                 var heapRows = temporalRowSource
                     ?? (heapPlan.NoLockReader
-                        ? heapTable.Rows
+                        ? ClusteredScan.Rows(heapTable)
                         : BatchContext.WrapWithRowConflictChecks(heapTable, context.Batch, heapPlan));
 
                 return new FromSource(
@@ -3134,7 +3134,7 @@ internal sealed partial class Selection
                     storedSchema: tvTable.StoredColumns,
                     storageOrdinals: tvTable.StorageOrdinals,
                     lobStore: tvTable.Heap,
-                    rows: tvTable.Rows,
+                    rows: ClusteredScan.Rows(tvTable),
                     backingTable: tvTable,
                     writtenObjectName: tvName.Leaf);
 

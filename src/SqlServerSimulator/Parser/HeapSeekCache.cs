@@ -151,6 +151,33 @@ internal sealed class HeapSeekCache
     }
 
     /// <summary>
+    /// The live row addresses in ascending key order for a scan that has to
+    /// follow the key (see <c>ClusteredScan</c>), or <see langword="null"/>
+    /// when ascending heap addresses already read the rows in that order — the
+    /// common case, a key assigned in insertion order, where the caller's
+    /// plain heap walk is the cheaper way to the same sequence. Declines too
+    /// (null) when the entry serving the key has widened past it onto a
+    /// nullable column, whose NULL-keyed rows no bucket holds.
+    /// </summary>
+    public List<(int Page, int Slot)>? KeyOrderUnlessHeapOrdered(
+        Heap heap, HeapColumn[] schema, Heap? lobStore, int[] ordinals, SqlType[] commons)
+    {
+        lock (this.gate)
+        {
+            var entry = this.ResolveEntry(heap, schema, lobStore, ordinals, commons, traced: false);
+            if (entry.HeapOrdered)
+                return null;
+            foreach (var ordinal in entry.Ordinals)
+            {
+                if (schema[ordinal].Nullable)
+                    return null;
+            }
+            var ordered = entry.OrderedCandidates(null, false, null, false);
+            return entry.NoteKeyOrderWalk(ordered) ? null : ordered;
+        }
+    }
+
+    /// <summary>
     /// True when some live row's <paramref name="ordinals"/> tuple equals
     /// <paramref name="probeKey"/>. The foreign-key parent-existence check: seek
     /// narrows the candidates, then each is verified against its live bytes so a
@@ -199,7 +226,9 @@ internal sealed class HeapSeekCache
     // from a scan when the request isn't covered or the delta can't be replayed.
     // A journal-fail rebuild keeps the entry's own (possibly wider) prefix, so a
     // widened entry never narrows back and starts thrashing. Caller holds the gate.
-    private CacheEntry ResolveEntry(Heap heap, HeapColumn[] schema, Heap? lobStore, int[] ordinals, SqlType[] commons)
+    // `traced` is false for the clustered-scan order check, which reads the
+    // cache without being a seek, so the seek diagnostics stay the seeks'.
+    private CacheEntry ResolveEntry(Heap heap, HeapColumn[] schema, Heap? lobStore, int[] ordinals, SqlType[] commons, bool traced = true)
     {
         var lead = ordinals[0];
         if (this.byLeadOrdinal.TryGetValue(lead, out var entry) && entry.Covers(ordinals, commons))
@@ -209,38 +238,55 @@ internal sealed class HeapSeekCache
                 var events = heap.SnapshotSeekJournalSince(entry.Generation, out var currentGen);
                 if (events is not null)
                 {
-                    IndexSeekDiagnostics.Sink?.Add("CacheReplay");
+                    if (traced)
+                        IndexSeekDiagnostics.Sink?.Add("CacheReplay");
                     entry.Apply(events, schema, lobStore, currentGen);
                 }
                 else
                 {
-                    entry = this.Rebuild(heap, schema, lobStore, entry.Ordinals, entry.Commons, lead);
+                    entry = this.Rebuild(heap, schema, lobStore, entry.Ordinals, entry.Commons, lead, traced);
                 }
             }
 
             return entry;
         }
 
-        return this.Rebuild(heap, schema, lobStore, ordinals, commons, lead);
+        return this.Rebuild(heap, schema, lobStore, ordinals, commons, lead, traced);
     }
 
-    private CacheEntry Rebuild(Heap heap, HeapColumn[] schema, Heap? lobStore, int[] ordinals, SqlType[] commons, int lead)
+    private CacheEntry Rebuild(Heap heap, HeapColumn[] schema, Heap? lobStore, int[] ordinals, SqlType[] commons, int lead, bool traced)
     {
         // Activate journaling and capture the build generation BEFORE scanning,
         // so any mutation that lands during the scan is journaled at a later
         // generation and replayed on the next seek — never silently missed.
         // (A write the scan happened to also see just replays as a harmless
         // re-add; the residual WHERE and the materializer's dedup absorb it.)
-        IndexSeekDiagnostics.Sink?.Add("CacheBuild");
+        if (traced)
+            IndexSeekDiagnostics.Sink?.Add("CacheBuild");
         var buildGen = heap.ActivateSeekJournal();
         var buckets = new Dictionary<SqlValueKey, List<(int Page, int Slot)>>();
+        var heapOrdered = true;
+        SqlValueKey? maxKey = null;
+        (int Page, int Slot) lastRid = (-1, -1);
         foreach (var (page, slot, bytes) in heap.EnumerateRowsWithAddress())
         {
             if (TryComputeKey(bytes, ordinals, commons, schema, lobStore, out var key))
+            {
                 AddRid(buckets, key, (page, slot));
+                if (maxKey is { } max && KeyTupleComparer.Instance.Compare(key, max) < 0)
+                    heapOrdered = false;
+                else
+                    maxKey = key;
+            }
+            else
+            {
+                heapOrdered = false;
+            }
+            lastRid = (page, slot);
         }
 
         var entry = new CacheEntry(buildGen, (int[])ordinals.Clone(), (SqlType[])commons.Clone(), buckets);
+        entry.StartHeapOrder(heapOrdered, lastRid, maxKey);
         this.byLeadOrdinal[lead] = entry;
         return entry;
     }
@@ -391,22 +437,80 @@ internal sealed class HeapSeekCache
                 {
                     case Heap.SeekJournalKind.Insert:
                         if (TryComputeKey(e.NewImage, this.Ordinals, this.Commons, schema, lobStore, out var insertKey))
+                        {
                             this.AddRid(insertKey, (e.Page, e.Slot));
+                            this.NoteInsert(insertKey, (e.Page, e.Slot));
+                        }
+                        else
+                        {
+                            this.HeapOrdered = false;
+                        }
                         break;
                     case Heap.SeekJournalKind.Delete:
                         if (TryComputeKey(e.OldImage, this.Ordinals, this.Commons, schema, lobStore, out var deleteKey))
                             this.RemoveRid(deleteKey, (e.Page, e.Slot));
                         break;
                     case Heap.SeekJournalKind.Update:
-                        if (TryComputeKey(e.OldImage, this.Ordinals, this.Commons, schema, lobStore, out var oldKey))
+                        var hadOldKey = TryComputeKey(e.OldImage, this.Ordinals, this.Commons, schema, lobStore, out var oldKey);
+                        if (hadOldKey)
                             this.RemoveRid(oldKey, (e.Page, e.Slot));
-                        if (TryComputeKey(e.NewImage, this.Ordinals, this.Commons, schema, lobStore, out var newKey))
+                        var hasNewKey = TryComputeKey(e.NewImage, this.Ordinals, this.Commons, schema, lobStore, out var newKey);
+                        if (hasNewKey)
                             this.AddRid(newKey, (e.Page, e.Slot));
+                        // A row keeps its address across an UPDATE, so only a
+                        // changed key can put it out of order.
+                        if (!hadOldKey || !hasNewKey || KeyTupleComparer.Instance.Compare(oldKey, newKey) != 0)
+                            this.HeapOrdered = false;
                         break;
                 }
             }
 
             this.Generation = currentGen;
+        }
+
+        // Whether ascending heap addresses read this entry's rows in ascending
+        // key order (ties aside), with the last live address and the highest
+        // key it has seen — the two bounds a new row has to clear to keep it
+        // so. A delete leaves both where they were, which can only make a
+        // later insert look out of order when it isn't: the flag errs toward
+        // false, costing the scan its fast path but never its order.
+        // NoteKeyOrderWalk restores it once an ordered walk finds the heap in
+        // order again.
+        public bool HeapOrdered;
+        private (int Page, int Slot) lastRid;
+        private SqlValueKey? maxKey;
+
+        public void StartHeapOrder(bool heapOrdered, (int Page, int Slot) lastRid, SqlValueKey? maxKey)
+        {
+            this.HeapOrdered = heapOrdered;
+            this.lastRid = lastRid;
+            this.maxKey = maxKey;
+        }
+
+        private void NoteInsert(SqlValueKey key, (int Page, int Slot) rid)
+        {
+            if (!this.HeapOrdered)
+                return;
+            if (rid.CompareTo(this.lastRid) <= 0 || (this.maxKey is { } max && KeyTupleComparer.Instance.Compare(key, max) < 0))
+            {
+                this.HeapOrdered = false;
+                return;
+            }
+            this.lastRid = rid;
+            this.maxKey = key;
+        }
+
+        // Called with a full ascending-key walk: when its addresses ascend too,
+        // the heap is back in key order and the flag comes back on.
+        public bool NoteKeyOrderWalk(List<(int Page, int Slot)> ordered)
+        {
+            for (var i = 1; i < ordered.Count; i++)
+            {
+                if (ordered[i].CompareTo(ordered[i - 1]) <= 0)
+                    return false;
+            }
+            this.StartHeapOrder(true, ordered.Count > 0 ? ordered[^1] : (-1, -1), this.sortedKeys is { Count: > 0 } sorted ? sorted.Max : null);
+            return true;
         }
 
         // Instance add that keeps the lazily-built sorted and narrow views in

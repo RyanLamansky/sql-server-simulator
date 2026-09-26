@@ -451,8 +451,8 @@ partial class Simulation
         // (positioned UPDATE leaves where null, so it keeps the full scan). The
         // loop re-runs WHERE below, so the seek only narrows the rows considered.
         var rowSource = where is not null
-            ? Selection.SeekMutationTarget(table, where, context.Batch) ?? table.Heap.EnumerateRowsWithAddress()
-            : table.Heap.EnumerateRowsWithAddress();
+            ? Selection.SeekMutationTarget(table, where, context.Batch) ?? ClusteredScan.RowsWithAddress(table)
+            : ClusteredScan.RowsWithAddress(table);
         // Skip mode commits nothing (CommitUpdate returns early), so the walk
         // is pure cost — and running WHERE / SET against live rows can raise a
         // runtime error (a division by zero, a conversion failure) on behalf of

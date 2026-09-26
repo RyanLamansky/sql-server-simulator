@@ -170,8 +170,8 @@ partial class Simulation
         // cursor already fixed one row). The loop re-runs WHERE below, so the
         // seek only narrows the rows considered.
         var rowSource = where is not null
-            ? Selection.SeekMutationTarget(table, where, context.Batch) ?? table.Heap.EnumerateRowsWithAddress()
-            : table.Heap.EnumerateRowsWithAddress();
+            ? Selection.SeekMutationTarget(table, where, context.Batch) ?? ClusteredScan.RowsWithAddress(table)
+            : ClusteredScan.RowsWithAddress(table);
         // Skip mode commits nothing (CommitDelete returns early) — same reason
         // the UPDATE path drops its row source, including the runtime errors a
         // never-run statement's WHERE would otherwise raise while a module body

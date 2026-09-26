@@ -216,9 +216,10 @@ public sealed class WindowTopNBoundTests
         // path picking by id rather than by arrival answers differently. The
         // partition is deliberately past the point where the full-sort path's
         // introsort stops being an insertion sort (and so stops being stable of
-        // its own accord).
+        // its own accord). The key is nonclustered so the scan keeps arrival
+        // order; a clustered one would read by id (3, 6, 9, 12, 15 on real).
         Exec(connection, """
-            create table tie (id int not null primary key, k int not null);
+            create table tie (id int not null primary key nonclustered, k int not null);
             declare @i int = 60;
             while @i >= 1 begin
                 insert tie values (@i, @i % 3);

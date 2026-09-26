@@ -1467,6 +1467,20 @@ internal sealed class BatchContext
         var snapshotXid = batch.ResolveSnapshotXidForRead(table);
         if (snapshotXid is null && !plan.NoLockReader && !plan.SkipBlockedRows)
             batch.AwaitUncommittedDeletes(table);
+        // A clustered table scans in its key's order (see ClusteredScan); a
+        // snapshot read sweeps the heap and its version chains as before.
+        if (snapshotXid is null && ClusteredScan.Order(table) is { } clusteredOrder)
+        {
+            var seen = new HashSet<(int, int)>();
+            foreach (var (pageIndex, slotIndex) in clusteredOrder)
+            {
+                if (!seen.Add((pageIndex, slotIndex)) || table.Heap.IsSlotTombstoned(pageIndex, slotIndex))
+                    continue;
+                if (batch.TouchRowForRead(table, pageIndex, slotIndex, plan) && table.Heap.ReadSlotBytes(pageIndex, slotIndex) is { } bytes)
+                    yield return bytes;
+            }
+            yield break;
+        }
         foreach (var (pageIndex, slotIndex, bytes) in table.Heap.EnumerateRowsWithAddress())
         {
             if (snapshotXid is { } sx)

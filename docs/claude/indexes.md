@@ -649,12 +649,20 @@ So it scans **once per statement** into a hash set of key tuples (`StatementCont
 Measured on AdventureWorks' 31 465-row `Sales.SalesOrderHeader`: inserting 10 rows and inserting 200 cost the same, where the per-row scan they replace would have been 20× apart.
 The UPDATE path builds the same set once per statement, excluding the rows it is itself rewriting, and compares those against each other separately; a row whose computed key stands still skips its own check exactly as a stored key does.
 
+## Clustered scan order
+
+A scan of a table with a clustered index reads its rows in key order, as real's clustered index scan does, so a query with no ORDER BY, the rows a `TOP` without one keeps (EF Core's `First()`), and the rows an UPDATE / DELETE walks follow the key rather than write order (probed 2026-09-26 against SQL Server 2025; `ClusteredScan`).
+The heap stays in write order, so a scan of a clustered table walks the seek cache's ordered view of the key instead — except when heap order already *is* key order, the common case of a key assigned in insertion order, which the cache entry tracks incrementally (`CacheEntry.HeapOrdered`: an append past the last address with a key no lower than any live one keeps it, anything else clears it, and a full ordered walk that finds the addresses ascending restores it), so those scans keep the sequential walk and its cost (measured: a full scan of WWI `Sales.OrderLines` doubled on the ordered walk and is unchanged with the flag).
+A key the ordered view can't serve — a nullable or a descending column — sorts every row's key once per heap generation instead, NULLs first under an ascending column and last under a descending one.
+A heap keeps write order, as real's allocation-order scan does, and a SNAPSHOT / RCSI read keeps the version sweep's order.
+
 ## Fidelity gaps
 
 - **`filter_definition` edge cases**: the column is rendered (see [Filtered-index `filter_definition`](#filtered-index-filter_definition)) and byte-matches SQL Server across the common filtered grammar, but two literal-typing corners diverge: an integer literal larger than `int` range renders `(5000000000)` where SQL Server types it as `numeric` and renders `(5000000000.)` (trailing dot), and a scale-0 decimal literal likewise omits the trailing dot.
   Both are rare in filtered predicates.
   A predicate the simulator accepts but can't render canonically (an `OR`, `NOT`, `BETWEEN`, or function call — all of which a real server *rejects* at CREATE for a filtered index) reports `filter_definition` NULL with `has_filter` still set.
-- **CLUSTERED keyword drives allocation, not storage**: `CREATE CLUSTERED INDEX` (and a clustered PK / `UNIQUE CLUSTERED` constraint) correctly reports `index_id = 1` / `type_desc = CLUSTERED` and suppresses the HEAP row (see [Index-id allocation](#index-id-allocation)), but there's no row-ordered storage behind it — clustering never changes scan/seek behavior.
+- **CLUSTERED keyword drives allocation and scan order, not storage**: `CREATE CLUSTERED INDEX` (and a clustered PK / `UNIQUE CLUSTERED` constraint) correctly reports `index_id = 1` / `type_desc = CLUSTERED` and suppresses the HEAP row (see [Index-id allocation](#index-id-allocation)), and a scan follows its key (see [Clustered scan order](#clustered-scan-order)), but the heap underneath stays in write order.
+  Real may instead scan a narrower nonclustered index that covers the query and so return that index's order (`SELECT a FROM t` over `UNIQUE (a)` on a heap), which isn't modeled.
 - *(the one-clustered-per-table rule now covers every path — see [One clustered index per table](#grammar). The constraint paths raise **Msg 1902 State 3** naming the existing clustered index, except an all-inline CREATE TABLE pair, which real gives its own **Msg 8112** since neither entry exists yet to name; the multiple-PRIMARY-KEY check (Msg 8110) outranks both.)*
 - **WITH options ignored**: `FILLFACTOR`, `IGNORE_DUP_KEY`, `ONLINE`, `MAXDOP`, etc. all parse but have no behavior.
   `IGNORE_DUP_KEY = ON` is the one with observable fallout: real skips the duplicate row and continues (probe-confirmed — the surviving rows insert, `@@ROWCOUNT` counts only those, and a severity-10 Msg 3604 `Duplicate key was ignored.` rides the info stream once per statement), while the simulator raises Msg 2601 and fails the INSERT.
