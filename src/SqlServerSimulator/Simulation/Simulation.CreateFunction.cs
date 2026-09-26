@@ -673,9 +673,20 @@ partial class Simulation
         var awaitingCtePrefixedQuery = context.Token is ReservedKeyword { Keyword: Keyword.With };
         var depth = openedParen ? 1 : 0;
         var lastBodyEnd = context.Token!.EndIndex;
+        var afterSetOperator = false;
         context.MoveNextOptional();
         while (context.Token is not null)
         {
+            // A SELECT after UNION [ALL] / EXCEPT / INTERSECT is the set
+            // operation's next branch, not a new statement (probed 2026-09-26
+            // against SQL Server 2025).
+            var continuesSetOperation = afterSetOperator;
+            afterSetOperator = context.Token switch
+            {
+                ReservedKeyword { Keyword: Keyword.Union or Keyword.Except or Keyword.Intersect } => true,
+                ReservedKeyword { Keyword: Keyword.All } => afterSetOperator,
+                _ => false,
+            };
             switch (context.Token)
             {
                 case Operator { Character: '(' }:
@@ -687,7 +698,7 @@ partial class Simulation
                     depth--;
                     break;
                 default:
-                    if (openedParen || depth != 0 || !IsStatementBoundary(context.Token))
+                    if (openedParen || depth != 0 || continuesSetOperation || !IsStatementBoundary(context.Token))
                         break;
                     // The query a CTE prefix scopes to is the one statement
                     // keyword that continues the body instead of ending it; a

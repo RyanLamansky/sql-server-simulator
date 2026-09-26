@@ -2389,7 +2389,7 @@ partial class Simulation
     /// </summary>
     internal static string FormatAutoConstraintName(string prefix, string tableName, string? optionalColumn, uint hash)
     {
-        var t8 = tableName.Length > 8 ? tableName[..8] : tableName;
+        var t8 = AutoNameTablePart(tableName);
         return optionalColumn is null
             ? $"{prefix}{t8}__{hash:X8}"
             : $"{prefix}{t8}__{(optionalColumn.Length > 8 ? optionalColumn[..8] : optionalColumn)}__{hash:X8}";
@@ -3190,8 +3190,20 @@ partial class Simulation
             h = (h ^ (byte)',') * fnvPrime;
         }
         var prefix = kind == KeyConstraintKind.PrimaryKey ? "PK__" : "UQ__";
-        var truncated = tableName.Length > 8 ? tableName[..8] : tableName;
-        return $"{prefix}{truncated}__{h:X16}";
+        return $"{prefix}{AutoNameTablePart(tableName)}__{h:X16}";
+    }
+
+    /// <summary>
+    /// The table's part of a system-generated constraint name: its first eight
+    /// characters, which for a local temp table come from its underscore-padded
+    /// tempdb name (<c>PK__#t______…</c>; probed 2026-09-26 against SQL Server
+    /// 2025).
+    /// </summary>
+    private static string AutoNameTablePart(string tableName)
+    {
+        if (BatchContext.IsLocalTempName(tableName))
+            tableName = tableName.PadRight(8, '_');
+        return tableName.Length > 8 ? tableName[..8] : tableName;
     }
 
     /// <summary>

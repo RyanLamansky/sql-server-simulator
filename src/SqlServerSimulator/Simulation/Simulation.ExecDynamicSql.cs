@@ -554,6 +554,7 @@ partial class Simulation
         // the same module scope (probe-confirmed: `EXEC('SET XACT_ABORT ON …')`
         // leaves the caller's @@OPTIONS bit clear).
         var enteredOptions = new SimulatedDbConnection.SessionOptionScope(connection);
+        var enteredTranCount = connection.CurrentTransaction?.TranCount ?? 0;
         List<SimulatedStatementOutcome> outcomes = [];
         SimulatedSqlException? batchError = null;
         var compiled = false;
@@ -616,6 +617,8 @@ partial class Simulation
         yield return new SimulatedProcScopeBoundary(isEnter: false);
         if (batchError is not null)
             ExceptionDispatchInfo.Throw(batchError);
+        if ((connection.CurrentTransaction?.TranCount ?? 0) is var exitTranCount && exitTranCount != enteredTranCount)
+            throw SimulatedSqlException.TransactionCountMismatch(enteredTranCount, exitTranCount, procedure: "");
     }
 
     /// <summary>

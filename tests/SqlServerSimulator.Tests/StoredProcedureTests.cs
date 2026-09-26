@@ -913,4 +913,52 @@ public sealed class StoredProcedureTests
         AreEqual("0x0102|abc|1.3|xy", simulation.ExecuteScalar("exec p 0x010203, 'abcdef', 1.26, N'xyz'"));
         AreEqual("ab|4", simulation.ExecuteScalar("exec sp_executesql N'select concat(@a, ''|'', datalength(@a))', N'@a nvarchar(2)', N'abcd'"));
     }
+
+    /// <summary>
+    /// A procedure or dynamic batch returning with <c>@@TRANCOUNT</c> other
+    /// than it entered with is Msg 266 against it at line 0, which the caller
+    /// can catch and then carries on past (probed 2026-09-26 against SQL
+    /// Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("create procedure p as begin tran", "exec p", "Previous count = 0, current count = 1.", "p")]
+    [DataRow("create procedure p as commit", "begin tran; exec p", "Previous count = 1, current count = 0.", "p")]
+    [DataRow("create procedure p as rollback", "begin tran; exec p", "Previous count = 1, current count = 0.", "p")]
+    [DataRow("create procedure p as select 1", "exec('begin tran')", "Previous count = 0, current count = 1.", "")]
+    public void AMismatchedTransactionCount_IsMsg266(string create, string call, string counts, string procedure)
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(create);
+        var error = sim.AssertSqlError(call, 266).Errors[0];
+        AreEqual($"Transaction count after EXECUTE indicates a mismatching number of BEGIN and COMMIT statements. {counts}", error.Message);
+        AreEqual(0, error.LineNumber);
+        AreEqual(procedure, error.Procedure);
+    }
+
+    [TestMethod]
+    public void Msg266_IsCatchable()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create procedure p as begin tran");
+        AreEqual("266:p:0", sim.ExecuteScalar("""
+            begin try exec p end try
+            begin catch select concat(error_number(), ':', error_procedure(), ':', error_line()) end catch
+            """));
+    }
+
+    /// <summary>
+    /// After EXEC, <c>@@ROWCOUNT</c> reads what the body's last statement set:
+    /// a block's closing leaves it, a DECLARE initializer sets 1 and RETURN
+    /// sets 0 (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("create procedure p as begin set nocount on; insert t values (1), (2); end", 2)]
+    [DataRow("create procedure p as begin insert t values (1), (2); declare @x int = 5; end", 1)]
+    [DataRow("create procedure p as begin insert t values (1), (2); return; end", 0)]
+    public void RowCountAfterExec_IsTheBodysLast(string create, int expected)
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create table t (a int)", create);
+        AreEqual(expected, sim.ExecuteScalar("exec p; select @@rowcount"));
+    }
 }

@@ -366,4 +366,16 @@ public sealed class InlineTvfTests
         AreEqual($"Could not use view or function '{written}' because of binding errors.", errors[1].Message);
         AreEqual(trailerLine, errors[1].LineNumber);
     }
+
+    /// <summary>
+    /// A bare <c>RETURN</c> body may be a set operation, its later branches
+    /// not read as new statements (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void ABareReturnBody_TakesASetOperation()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create function f (@x int) returns table as return select @x * 2 d union all select @x * 3 except select 0");
+        AreEqual(10, sim.ExecuteScalar("select sum(d) from dbo.f(2)"));
+    }
 }

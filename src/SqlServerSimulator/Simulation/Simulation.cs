@@ -2879,7 +2879,16 @@ public sealed partial class Simulation
                 break;
 
             case ReservedKeyword { Keyword: Keyword.Return }:
-                ParseReturnStatement(batch);
+                {
+                    // RETURN is a statement of its own for @@ROWCOUNT (probed
+                    // 2026-09-26 against SQL Server 2025); a function's body
+                    // returns into its caller's statement instead. Read the
+                    // skip state first: the RETURN itself starts skipping.
+                    var returnRuns = !batch.IsSkipping;
+                    ParseReturnStatement(batch);
+                    if (returnRuns && batch.UdfFrame is null && !batch.CalledFunctionBody)
+                        connection.LastStatementRowCount = 0;
+                }
                 break;
 
             case ReservedKeyword { Keyword: Keyword.Exec or Keyword.Execute }:
@@ -3009,10 +3018,10 @@ public sealed partial class Simulation
                                 connection.LastStatementRowCount = 0;
                             break;
                         default:
+                            // A block leaves @@ROWCOUNT as its last statement
+                            // set it (probed 2026-09-26 against SQL Server 2025).
                             foreach (var o in ParseBeginBlock(batch))
                                 yield return o;
-                            if (!batch.IsSkipping)
-                                connection.LastStatementRowCount = 0;
                             break;
                     }
                     break;
@@ -3305,7 +3314,7 @@ public sealed partial class Simulation
             return true;
 
         var tx = context.Connection.CurrentTransaction
-            ?? throw SimulatedSqlException.SyntaxErrorNear(context);
+            ?? throw SimulatedSqlException.SaveTransactionWithoutTransaction();
         // SAVE TRANSACTION writes a log record, so a doomed transaction
         // refuses it with Msg 3930 (probe-confirmed).
         RejectWriteInDoomedTransaction(context.Connection);

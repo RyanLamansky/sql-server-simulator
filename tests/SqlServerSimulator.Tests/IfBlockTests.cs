@@ -467,4 +467,9 @@ public sealed class IfBlockTests
                 select 'caught'
             end catch
             """));
+
+    /// <summary>A block leaves <c>@@ROWCOUNT</c> as its last statement set it (probed 2026-09-26 against SQL Server 2025).</summary>
+    [TestMethod]
+    public void ABlock_LeavesTheRowCountItsLastStatementSet()
+        => AreEqual(2, new Simulation().ExecuteScalar("create table t (a int); begin insert t values (1), (2) end; select @@rowcount"));
 }

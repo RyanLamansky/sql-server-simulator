@@ -231,6 +231,7 @@ partial class Simulation
         var procFrame = new ProcFrame(procedure.Name);
         List<SimulatedStatementOutcome> outcomes = [];
         SimulatedSqlException? bodyError = null;
+        var enteredTranCount = 0;
         BatchContext? innerBatch = null;
         if (string.IsNullOrEmpty(procedure.BodyText))
         {
@@ -282,6 +283,7 @@ partial class Simulation
             // the six ANSI toggles the body's own SET does take effect while it
             // runs (probe-confirmed for all three).
             var savedOptions = new SimulatedDbConnection.SessionOptionScope(connection);
+            enteredTranCount = connection.CurrentTransaction?.TranCount ?? 0;
             // Materialize outcomes to a list so the try/finally cleanup
             // (NestingLevel decrement, OUTPUT param writeback, return-code
             // assignment) runs even when the iterator is partially consumed.
@@ -370,6 +372,8 @@ partial class Simulation
             yield return outcome;
         if (bodyError is not null)
             ExceptionDispatchInfo.Throw(bodyError);
+        if ((connection.CurrentTransaction?.TranCount ?? 0) is var exitTranCount && exitTranCount != enteredTranCount)
+            throw SimulatedSqlException.TransactionCountMismatch(enteredTranCount, exitTranCount, attributionName);
     }
 
     /// <summary>

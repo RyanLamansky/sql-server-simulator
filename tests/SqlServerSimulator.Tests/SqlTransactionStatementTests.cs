@@ -395,4 +395,8 @@ public sealed class SqlTransactionStatementTests
     [DataRow("insert x values (1); select top 1 @@trancount from x", 0)]
     public void TranCount_InsideAWrite_CountsItsTransaction(string sql, int expected)
         => AreEqual(expected, new Simulation().ExecuteScalar($"create table x (n int); {sql}"));
+
+    [TestMethod]
+    public void SaveTransactionWithoutOne_IsMsg628()
+        => new Simulation().AssertSqlError("save tran x", 628, "Cannot issue SAVE TRANSACTION when there is no active transaction.");
 }

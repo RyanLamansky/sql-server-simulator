@@ -551,4 +551,13 @@ public sealed class TempTableTests
     [TestMethod]
     public void TempdbCatalog_ListsGlobalTempTables()
         => AreEqual(1, new Simulation().ExecuteScalar("create table ##g (a int); select count(*) from tempdb.sys.tables where name = '##g'"));
+
+    /// <summary>
+    /// A local temp table's system-named constraint takes the first eight
+    /// characters of its underscore-padded name (probed 2026-09-26 against SQL
+    /// Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void ASystemNamedConstraint_PadsTheTempTableName()
+        => StartsWith("PK__#t______", (string)new Simulation().ExecuteScalar("create table #t (id int primary key); select name from tempdb.sys.key_constraints")!);
 }

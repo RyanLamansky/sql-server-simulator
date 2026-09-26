@@ -507,6 +507,27 @@ partial class SimulatedSqlException
         new($"The {type.SqlServerName} data type cannot be selected as DISTINCT because it is not comparable.", 421, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 628: <c>SAVE TRANSACTION</c> with no
+    /// transaction open, state 0 (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException SaveTransactionWithoutTransaction() =>
+        new("Cannot issue SAVE TRANSACTION when there is no active transaction.", 628, 16, 0);
+
+    /// <summary>
+    /// Mimics SQL Server error 266: a procedure or dynamic batch returned
+    /// with <c>@@TRANCOUNT</c> other than it entered with. Real raises it at
+    /// line 0 against the module, where its caller can catch it (probed
+    /// 2026-09-26 against SQL Server 2025); <paramref name="procedure"/> is
+    /// empty for dynamic SQL.
+    /// </summary>
+    internal static SimulatedSqlException TransactionCountMismatch(int previous, int current, string procedure)
+    {
+        var error = new SimulatedSqlException($"Transaction count after EXECUTE indicates a mismatching number of BEGIN and COMMIT statements. Previous count = {previous}, current count = {current}.", 266, 16, 2);
+        error.PreserveDiagnostics(0, procedure);
+        return error;
+    }
+
+    /// <summary>
     /// Mimics SQL Server error 120: <c>INSERT … SELECT</c> whose source
     /// projects fewer columns than the destination's column list (explicit
     /// or implied). Distinct from Msg 121 (the "more items" variant).
