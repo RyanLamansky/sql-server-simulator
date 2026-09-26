@@ -228,7 +228,7 @@ Already listed elsewhere here and not repeated: parenthesized set-op branches.
 
 **Batch compilation** ships ([`control-flow.md`](control-flow.md#batch-compilation)); what the sweep found past it:
 
-- The compile's remaining gaps (the walk stopping at a deferred DML target, a deferred statement's bind error staying catchable, procedure bodies compiled only at `CREATE`, an `INSERT … EXEC` body stopping at its first error) are listed in [`control-flow.md`](control-flow.md#not-modeled-yet).
+- The compile's remaining gaps (the walk stopping at a deferred DML target, procedure bodies compiled only at `CREATE`, an `INSERT … EXEC` body stopping at its first error) are listed in [`control-flow.md`](control-flow.md#not-modeled-yet).
 - A syntax error real recovers from and reports a second one after — `(select 1 a) d NATURAL JOIN (select 1 a) e` adds Msg 102 near `e` — reports only the first here.
 
 **Wrong results**:
@@ -249,6 +249,12 @@ Already listed elsewhere here and not repeated: parenthesized set-op branches.
 
 - Real follows a table hint the grammar refuses (`INSERT t (c) WITH (TABLOCK) …`, `MERGE t AS a WITH (…)`) with Msg 319 after its Msg 156, and an empty `BEGIN TRY … END TRY` with a second Msg 102 near `catch`.
 - `CREATE FUNCTION` with a refused parameter type is followed by Msg 178 on real, since the body's `RETURN` then parses outside a function.
+
+**Name resolution** (probed 2026-09-26):
+
+- A three-part name with an omitted schema is reported with `dbo` filled in (`Invalid object name 'probe.dbo.t'`), where real names it as written (`'probe..t'`); `BatchContext.ParseObjectName` substitutes the default schema while parsing, so the written form is gone by the time the error is raised.
+- The schema part of a column's qualifier isn't checked against the source's, so `SELECT s.t.a FROM t` (a `dbo.t`) resolves here where real raises Msg 4104, and `SELECT s.t.* FROM t` expands where real raises Msg 107.
+- `COUNT(x.*)` is Msg 107 here, a syntax error near `*` on real.
 
 ### Result-set serialization: `FOR XML` / `FOR JSON`
 
