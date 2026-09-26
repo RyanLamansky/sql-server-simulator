@@ -41,6 +41,45 @@ internal static class DatePartKinds
         Resolve(keyword) ?? throw SimulatedSqlException.NotARecognizedDatepartOption(keyword, functionLowerName);
 
     /// <summary>
+    /// Reads the datepart a date function takes as its first argument, the
+    /// cursor on its first token and left on its last. It is a word, not an
+    /// expression: a string, a number, a variable or <c>NULL</c> there is Msg
+    /// 1023, a dotted name Msg 155 naming it whole, while a parenthesized word
+    /// is read through its parentheses (probed 2026-09-26 against SQL Server
+    /// 2025).
+    /// </summary>
+    public static DatePartKind Read(ParserContext context, string functionName, out string keywordText)
+    {
+        switch (context.Token)
+        {
+            case Tokens.Operator { Character: '(' }:
+                context.MoveNextRequired();
+                var inner = Read(context, functionName, out keywordText);
+                return context.GetNextRequired() is Tokens.Operator { Character: ')' }
+                    ? inner
+                    : throw SimulatedSqlException.SyntaxErrorNear(context);
+            case Tokens.Name name:
+                keywordText = name.Value;
+                var checkpoint = context.SaveCheckpoint();
+                if (context.MoveNext() && context.Token is Tokens.Operator { Character: '.' })
+                {
+                    var dotted = name.Value;
+                    while (context.Token is Tokens.Operator { Character: '.' } && context.MoveNext() && context.Token is Tokens.Name part)
+                    {
+                        dotted += "." + part.Value;
+                        if (!context.MoveNext())
+                            break;
+                    }
+                    throw SimulatedSqlException.NotARecognizedDatepartOption(dotted, functionName);
+                }
+                context.RestoreCheckpoint(checkpoint);
+                return ResolveOrThrow(keywordText, functionName);
+            default:
+                throw SimulatedSqlException.InvalidParameterSpecifiedFor(1, functionName);
+        }
+    }
+
+    /// <summary>
     /// Span-based keyword dispatch — matches the pattern used in
     /// <c>Parser/Expression.cs:ResolveBuiltIn</c> and
     /// <c>Storage/SqlType.cs:GetByName</c> so the parser stays

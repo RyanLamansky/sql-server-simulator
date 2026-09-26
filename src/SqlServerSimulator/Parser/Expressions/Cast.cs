@@ -37,9 +37,8 @@ internal sealed class Cast : Expression
     public Cast(ParserContext context, bool tryMode = false)
     {
         this.tryMode = tryMode;
-        this.source = Parse(context);
-        if (context.Token is not ReservedKeyword { Keyword: Keyword.As })
-            throw SimulatedSqlException.SyntaxErrorNear(context);
+        this.source = Parse(RequireSourceBeforeAs(context, tryMode ? "try_cast" : "cast"));
+        RequireAs(context, tryMode ? "try_cast" : "cast");
 
         context.MoveNextRequired();
         var typeName = TypeNameSynonyms.TryFoldMultiWordType(context)
@@ -50,6 +49,33 @@ internal sealed class Cast : Expression
 
         if (context.Token is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
+    }
+
+    /// <summary>
+    /// The cursor, unless it closes the list where the value belongs, which is
+    /// Msg 1035 naming <paramref name="functionLowerName"/>.
+    /// </summary>
+    internal static ParserContext RequireSourceBeforeAs(ParserContext context, string functionLowerName) =>
+        context.Token is Operator { Character: ')' }
+            ? throw SimulatedSqlException.ExpectedAsIn(functionLowerName)
+            : context;
+
+    /// <summary>
+    /// Requires the <c>AS</c> after a <c>CAST</c> / <c>PARSE</c> value: a list
+    /// that closes or reaches a comma there is Msg 1035, any other token the
+    /// ordinary Msg 102 near it.
+    /// </summary>
+    internal static void RequireAs(ParserContext context, string functionLowerName)
+    {
+        switch (context.Token)
+        {
+            case ReservedKeyword { Keyword: Keyword.As }:
+                return;
+            case Operator { Character: ')' or ',' }:
+                throw SimulatedSqlException.ExpectedAsIn(functionLowerName);
+            default:
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+        }
     }
 
     /// <summary>

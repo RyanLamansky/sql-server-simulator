@@ -24,10 +24,7 @@ internal sealed class DatePart : Expression
 
     public DatePart(ParserContext context)
     {
-        this.keywordText = context.Token is Name name
-            ? name.Value
-            : throw SimulatedSqlException.SyntaxErrorNear(context);
-        this.kind = DatePartKinds.ResolveOrThrow(this.keywordText, "datepart");
+        this.kind = DatePartKinds.Read(context, "datepart", out this.keywordText);
         if (context.GetNextRequired() is not Operator { Character: ',' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         this.source = Parse(context.MoveNextRequiredReturnSelf());

@@ -46,10 +46,7 @@ internal sealed class DateName : Expression
 
     public DateName(ParserContext context)
     {
-        this.keywordText = context.Token is Name name
-            ? name.Value
-            : throw SimulatedSqlException.SyntaxErrorNear(context);
-        this.kind = DatePartKinds.ResolveOrThrow(this.keywordText, "datename");
+        this.kind = DatePartKinds.Read(context, "datename", out this.keywordText);
         if (context.GetNextRequired() is not Operator { Character: ',' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         this.source = Parse(context.MoveNextRequiredReturnSelf());

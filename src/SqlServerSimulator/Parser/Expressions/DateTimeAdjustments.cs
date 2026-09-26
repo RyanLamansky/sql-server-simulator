@@ -21,10 +21,7 @@ internal sealed class DateTrunc : Expression
 
     public DateTrunc(ParserContext context)
     {
-        this.keywordText = context.Token is Name name
-            ? name.Value
-            : throw SimulatedSqlException.SyntaxErrorNear(context);
-        this.kind = DatePartKinds.ResolveOrThrow(this.keywordText, "datetrunc");
+        this.kind = DatePartKinds.Read(context, "datetrunc", out this.keywordText);
         if (context.GetNextRequired() is not Operator { Character: ',' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         this.source = Parse(context.MoveNextRequiredReturnSelf());

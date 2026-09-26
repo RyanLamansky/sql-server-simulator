@@ -18,10 +18,7 @@ internal sealed class DateAdd : Expression
 
     public DateAdd(ParserContext context)
     {
-        this.keywordText = context.Token is Name name
-            ? name.Value
-            : throw SimulatedSqlException.SyntaxErrorNear(context);
-        this.kind = DatePartKinds.ResolveOrThrow(this.keywordText, "dateadd");
+        this.kind = DatePartKinds.Read(context, "dateadd", out this.keywordText);
         if (context.GetNextRequired() is not Operator { Character: ',' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         this.number = Parse(context.MoveNextRequiredReturnSelf());

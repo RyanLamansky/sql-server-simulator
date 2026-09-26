@@ -3,9 +3,11 @@ using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 namespace SqlServerSimulator;
 
 /// <summary>
-/// A built-in called with the wrong number of arguments is refused by count
-/// before its arguments bind, in real's own wording and state. Every
-/// expectation probed 2026-09-26 against SQL Server 2025.
+/// A built-in call of the wrong shape — the wrong number of arguments, a
+/// window function missing its clause, a keyword argument written as an
+/// expression — is refused while parsing, before its arguments bind, in
+/// real's own wording and state. Every expectation probed 2026-09-26 against
+/// SQL Server 2025.
 /// </summary>
 [TestClass]
 public sealed class BuiltInArityTests
@@ -82,4 +84,22 @@ public sealed class BuiltInArityTests
         AreEqual(message, ex.Errors[0].Message);
         AreEqual((byte)state, ex.State);
     }
+
+    [TestMethod]
+    [DataRow("select dateadd('day', 1, getdate())", 1023, "Invalid parameter 1 specified for dateadd.")]
+    [DataRow("declare @p varchar(5) = 'day'; select datediff(@p, 0, 1)", 1023, "Invalid parameter 1 specified for datediff.")]
+    [DataRow("select datepart(null, getdate())", 1023, "Invalid parameter 1 specified for datepart.")]
+    [DataRow("select date_bucket(1, 1, getdate())", 1023, "Invalid parameter 1 specified for Date_Bucket.")]
+    [DataRow("select date_bucket(xyz, 1, getdate())", 155, "'xyz' is not a recognized Date_Bucket option.")]
+    [DataRow("select datename(day.x, getdate())", 155, "'day.x' is not a recognized datename option.")]
+    [DataRow("select cast(1)", 1035, "Incorrect syntax near 'cast', expected 'AS'.")]
+    [DataRow("select try_cast(1, int)", 1035, "Incorrect syntax near 'try_cast', expected 'AS'.")]
+    [DataRow("select parse()", 1035, "Incorrect syntax near 'parse', expected 'AS'.")]
+    [DataRow("select cast(1 int)", 102, "Incorrect syntax near 'int'.")]
+    public void KeywordArgument_WrittenAsAnythingElse_IsRefused(string sql, int number, string message)
+        => new Simulation().AssertSqlError(sql, number, message);
+
+    [TestMethod]
+    public void ParenthesizedDatepart_IsRead()
+        => AreEqual(2, new Simulation().ExecuteScalar("select datepart((month), '2020-02-03')"));
 }

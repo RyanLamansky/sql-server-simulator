@@ -54,7 +54,8 @@ The integer arm truncates toward zero, `money` comes back at its own scale of 4,
   Equivalent to `CAST(SYSDATETIME() AS DATE)` — uses the same per-statement freeze.
 
 ## Date scalar functions: `DATEPART` / `DATEADD` / `DATEDIFF` / `DATEDIFF_BIG`
-All take a bare datepart keyword.
+All take a bare datepart keyword, read by one helper (`DatePartKinds.Read`) for every function with a datepart slot.
+The slot is a word, not an expression: `DATEADD('day', …)`, a variable or `NULL` there is refused while parsing rather than evaluated, a dotted name is refused naming it whole, and a parenthesized word — `DATEPART((month), d)` — is read through its parentheses (probed 2026-09-26 against SQL Server 2025).
 Result types: `DATEPART` → int; `DATEADD` preserves input type; `DATEDIFF` → int; `DATEDIFF_BIG` → bigint.
 
 `DATEPART`/`DATEADD` enforce per-type keyword compatibility: `date` accepts only date parts; `time(N)` only time parts; `datetime`/`smalldatetime`/`datetime2(N)` accept both; `datetimeoffset(N)` adds `tzoffset`.

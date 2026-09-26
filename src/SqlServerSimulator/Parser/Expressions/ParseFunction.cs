@@ -28,12 +28,11 @@ internal sealed class ParseFunction : Expression
     public ParseFunction(ParserContext context, bool tryMode)
     {
         this.tryMode = tryMode;
-        this.source = Parse(context);
+        this.source = Parse(Cast.RequireSourceBeforeAs(context, tryMode ? "try_parse" : "parse"));
         // A bare NULL has no type to accept (Msg 8116, probed 2026-09-24).
         if (IsUntypedNullLiteral(this.source))
             throw SimulatedSqlException.InvalidArgumentDataType("NULL", 1, "parse");
-        if (context.Token is not Tokens.ReservedKeyword { Keyword: Keyword.As })
-            throw SimulatedSqlException.SyntaxErrorNear(context);
+        Cast.RequireAs(context, tryMode ? "try_parse" : "parse");
         var typeName = context.GetNextRequired<Tokens.Name>();
         (this.targetType, _) = Cast.ParseTargetTypeSpec(context, typeName);
         // Optional USING 'culture'

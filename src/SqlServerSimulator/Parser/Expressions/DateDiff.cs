@@ -28,10 +28,7 @@ internal abstract class DateDiff : Expression
     {
         this.functionLowerName = functionLowerName;
         this.resultType = resultType;
-        this.keywordText = context.Token is Name name
-            ? name.Value
-            : throw SimulatedSqlException.SyntaxErrorNear(context);
-        this.kind = DatePartKinds.ResolveOrThrow(this.keywordText, functionLowerName);
+        this.kind = DatePartKinds.Read(context, functionLowerName, out this.keywordText);
         if (context.GetNextRequired() is not Operator { Character: ',' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         this.start = Parse(context.MoveNextRequiredReturnSelf());

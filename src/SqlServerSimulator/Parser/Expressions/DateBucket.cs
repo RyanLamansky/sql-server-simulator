@@ -30,10 +30,7 @@ internal sealed class DateBucket : Expression
 
     public DateBucket(ParserContext context)
     {
-        this.keywordText = context.Token is Name name
-            ? name.Value
-            : throw SimulatedSqlException.SyntaxErrorNear(context);
-        this.kind = DatePartKinds.ResolveOrThrow(this.keywordText, "date_bucket");
+        this.kind = DatePartKinds.Read(context, "Date_Bucket", out this.keywordText);
         if (context.GetNextRequired() is not Operator { Character: ',' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         this.bucketWidth = Parse(context.MoveNextRequiredReturnSelf());
