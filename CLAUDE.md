@@ -319,6 +319,8 @@ Where an entry carries a second clause it is because that fact changes what you'
 - **Locking, MVCC, SNAPSHOT / RCSI, deadlock and timeout, the lock DMVs, key-range locks, application-lock siblings**.
   Every shared structure names a session by its one-way `SessionToken`, which is what lets an abandoned connection be collected and torn down → [`locking.md`](docs/claude/locking.md).
 - **Application locks** — `sp_getapplock` / `sp_releaseapplock` / `APPLOCK_MODE` / `APPLOCK_TEST`, and EF's `__EFMigrationsLock` → [`app-locks.md`](docs/claude/app-locks.md).
+- **`vector`** — `vector(n)` storage, the JSON text form in both directions, the string-only conversions, the non-comparable refusals, `VECTOR_DISTANCE` / `VECTOR_NORM` / `VECTOR_NORMALIZE` / `VECTORPROPERTY` and the catalog surfaces.
+  The functions are bit-exact to real's SIMD kernels, whose summation order is reverse-engineered, and clients read the text form over a down-level `varchar(max)` → [`vector.md`](docs/claude/vector.md).
 - **`hierarchyid`** — OrdPath storage, byte-identical CAST / wire / DATALENGTH, and the full sixteen-tier ordinal domain (wider than `int`, so labels are `long`) → [`hierarchyid.md`](docs/claude/hierarchyid.md).
 - **`GRANT` / `REVOKE` / `DENY`** — securable resolution, the covering scope walk, role closure, ownership chaining, `EXECUTE AS`, application roles, login and server-scope DDL, and a gate on every modeled CREATE / ALTER / DROP.
   A cross-database reference resolves the login's user in the **target**, and dbo bypasses every check → [`permissions.md`](docs/claude/permissions.md).

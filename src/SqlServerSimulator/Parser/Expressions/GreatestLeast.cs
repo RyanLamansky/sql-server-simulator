@@ -58,7 +58,7 @@ internal sealed class GreatestLeast : Expression
             // The types real can't compare are refused as arguments before any
             // pair is unified — Msg 8116 naming the first such argument
             // (probe-confirmed against SQL Server 2025, 2026-09-23).
-            if (type.IsLob)
+            if (type.IsIncomparable)
                 throw SimulatedSqlException.InvalidArgumentDataType(type.SqlServerName, i + 1, this.isLeast ? "least" : "greatest", state: 4);
             branches[count++] = (type, IntegerLiteralDigits(this.arguments[i]), this.arguments[i]);
         }

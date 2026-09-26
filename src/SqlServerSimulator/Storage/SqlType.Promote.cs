@@ -83,6 +83,14 @@ internal abstract partial class SqlType
 
     private static SqlType PromoteUnifiable(SqlType a, SqlType b)
     {
+        // A vector meeting a character string unifies as that string widened
+        // to the vector's storage length, as a varbinary of that length would
+        // — so COALESCE(<vector(3)>, '[1,2,3]') is varchar(20) and its text
+        // form can't fit (probed 2026-09-26 against SQL Server 2025).
+        if (a is VectorSqlType vectorA)
+            a = VarbinarySqlType.Get(vectorA.ByteLength);
+        if (b is VectorSqlType vectorB)
+            b = VarbinarySqlType.Get(vectorB.ByteLength);
         return a is SqlVariantSqlType || b is SqlVariantSqlType ? SqlVariant
             : IsNumericPairClass(a) && IsNumericPairClass(b) ? PromoteNumericPair(a, b)
             : a.Category == SqlTypeCategory.DateTime && b.Category == SqlTypeCategory.DateTime ? PromoteDateTime(a, b)
@@ -157,7 +165,10 @@ internal abstract partial class SqlType
         }
         foreach (var branch in branches)
         {
-            if (OperandPairError(TypePairOperation.Unify, new TypePairOperand(branch.Type, branch.Source), new TypePairOperand(target.Type, target.Source), "") is { } error)
+            // Two vector arms of different lengths name the settled arm's
+            // dimension count first (probed 2026-09-26 against SQL Server 2025).
+            var (first, second) = branch.Type is VectorSqlType && target.Type is VectorSqlType ? (target, branch) : (branch, target);
+            if (OperandPairError(TypePairOperation.Unify, new TypePairOperand(first.Type, first.Source), new TypePairOperand(second.Type, second.Source), "") is { } error)
                 return error;
         }
         return null;

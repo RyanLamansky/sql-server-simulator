@@ -335,13 +335,13 @@ internal sealed class AggregateExpression : Expression
         var accepted = this.Kind switch
         {
             AggregateKind.ChecksumAgg => operandType == SqlType.Int32,
-            AggregateKind.ApproxCountDistinct => !operandType.IsLob && operandType is not (SqlVariantSqlType or HierarchyIdSqlType),
+            AggregateKind.ApproxCountDistinct => !operandType.IsIncomparable && operandType is not (SqlVariantSqlType or HierarchyIdSqlType),
             _ => operandType.Category is SqlTypeCategory.Integer or SqlTypeCategory.Decimal or SqlTypeCategory.Money or SqlTypeCategory.Approximate
                 && operandType != SqlType.Bit,
         };
         return accepted
             ? resultType
-            : throw SimulatedSqlException.OperandDataTypeInvalid(SqlType.OperandName(operandType, this.Operand), this.LowerName, (this.Distinct || this.Kind == AggregateKind.ApproxCountDistinct) && operandType.IsLob ? (byte)2 : (byte)1);
+            : throw SimulatedSqlException.OperandDataTypeInvalid(SqlType.OperandName(operandType, this.Operand), this.LowerName, (this.Distinct || this.Kind == AggregateKind.ApproxCountDistinct) && operandType.IsIncomparable ? (byte)2 : (byte)1);
     }
 
     /// <summary>
@@ -349,7 +349,7 @@ internal sealed class AggregateExpression : Expression
     /// same Msg 8117 the type itself earns, at state 2 (probed 2026-09-25).
     /// </summary>
     private SqlType RejectDistinctLob(SqlType operandType) =>
-        this.Distinct && operandType.IsLob
+        this.Distinct && operandType.IsIncomparable
             ? throw SimulatedSqlException.OperandDataTypeInvalid(operandType, this.LowerName, 2)
             : operandType;
 
@@ -369,6 +369,14 @@ internal sealed class AggregateExpression : Expression
     private SqlType BindStringAggArguments(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
         var operandType = StringScalars.BindArgument(this.Operand!, batch, resolveColumnType, "string_agg");
+        // Real refuses a vector value twice over, at state 1 and again at 6
+        // (probed 2026-09-26 against SQL Server 2025).
+        if (operandType is VectorSqlType)
+        {
+            throw SimulatedSqlException.Aggregate([
+                SimulatedSqlException.InvalidArgumentDataType(operandType.SqlServerName, 1, "string_agg"),
+                SimulatedSqlException.InvalidArgumentDataType(operandType.SqlServerName, 1, "string_agg", 6)]);
+        }
         var separatorType = StringScalars.BindArgument(this.Separator!, batch, resolveColumnType, "string_agg", argumentIndex: 2);
         // The value is judged before the separator (probed 2026-09-26 against
         // SQL Server 2025: a binary in both is argument 1's Msg 8116 first).

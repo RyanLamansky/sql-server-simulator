@@ -7,10 +7,10 @@ namespace SqlServerSimulator;
 public class SystypesTests
 {
     [TestMethod]
-    public void Returns34Rows()
+    public void Returns35Rows()
     {
         using var connection = new Simulation().CreateOpenConnection();
-        AreEqual(34, connection.CreateCommand("select name from systypes").ExecuteReader().EnumerateRecords().Count());
+        AreEqual(35, connection.CreateCommand("select name from systypes").ExecuteReader().EnumerateRecords().Count());
     }
 
     [TestMethod]

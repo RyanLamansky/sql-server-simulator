@@ -451,6 +451,10 @@ partial class Simulation
             var col = table.Columns[fullOrdinals[i]];
             if (col.IsLob)
                 throw SimulatedSqlException.KeyColumnInvalidType(col.Name, table.Name);
+            // A vector key is refused with the constraint's own Msg 1750 after it
+            // (probed 2026-09-26 against SQL Server 2025).
+            if (col.Type is VectorSqlType)
+                throw SimulatedSqlException.FollowedByConstraintNotCreated(SimulatedSqlException.KeyColumnInvalidType(col.Name, table.Name), state: 0);
             // A non-persisted computed column is a legal UNIQUE key — its value
             // is evaluated per row by the enforcement paths — subject to the
             // determinism / precision gate CREATE INDEX applies. PRIMARY KEY on
@@ -541,6 +545,8 @@ partial class Simulation
         }
         if (targetColumn is null)
             throw SimulatedSqlException.DefaultColumnInvalid(columnName, table.Name);
+        if (targetColumn.Type is VectorSqlType)
+            throw SimulatedSqlException.FollowedByConstraintNotCreated(SimulatedSqlException.DefaultColumnInvalid(targetColumn.Name, table.Name, 1), state: 0);
         if (targetColumn.Default is not null)
             throw SimulatedSqlException.ColumnAlreadyHasDefault();
 

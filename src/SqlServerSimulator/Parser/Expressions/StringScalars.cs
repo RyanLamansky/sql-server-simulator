@@ -115,6 +115,9 @@ internal static class StringScalars
     public static SqlType BindArgument(Expression argument, BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType, string functionLowerName, int argumentIndex = 1, bool allowAnsiText = false, bool propagatesUnresolvedCollation = false)
     {
         var type = argument.GetSqlType(batch, resolveColumnType);
+        // A vector converts to no string implicitly (probed 2026-09-26 against
+        // SQL Server 2025, LEN / LEFT / CHARINDEX).
+        VectorArguments.RejectVector(type, functionLowerName, argumentIndex, 1);
         RejectLegacyLobType(type, functionLowerName, argumentIndex, allowAnsiText);
         if (!propagatesUnresolvedCollation)
             RequireSettledCollation(type, functionLowerName);

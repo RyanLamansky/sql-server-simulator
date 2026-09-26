@@ -371,9 +371,9 @@ internal static partial class BuiltInResources
             // Probe-confirmed constants (SQL Server 2025, 2026-07-15) that SMO's
             // SSMS Object-Explorer column / index / key sub-node queries read
             // off sys.all_columns: no XML documents, column sets, dropped ledger
-            // columns, or vector columns are modeled, so is_xml_document /
-            // is_column_set / is_dropped_ledger_column are 0 and the vector_*
-            // pair is NULL. xml_collection_id carries the bound schema
+            // columns are modeled, so is_xml_document / is_column_set /
+            // is_dropped_ledger_column are 0; the vector_* columns describe a
+            // vector column and are NULL for any other. xml_collection_id carries the bound schema
             // collection's id for a typed-xml column (0 when untyped / non-xml).
             new("is_xml_document", SqlType.Bit, null, false),
             new("xml_collection_id", SqlType.Int32, null, false),
@@ -418,7 +418,7 @@ internal static partial class BuiltInResources
             // encryption_type_desc / column_encryption_key_database_name are
             // Always-Encrypted metadata (unmodeled, NULL); graph_type_desc is
             // the graph node/edge column-kind text (unmodeled, NULL);
-            // vector_base_type the VECTOR element type id (unmodeled, NULL).
+            // vector_base_type the vector element type id (0 for float32).
             new("generated_always_type_desc", nvarchar60Catalog, 60, true),
             new("encryption_type_desc", NVarcharSqlType.Get(64, Collation.Catalog, Coercibility.Implicit), 64, true),
             new("column_encryption_key_database_name", SqlType.SystemName, 128, true),
@@ -557,6 +557,9 @@ internal static partial class BuiltInResources
         var nullEncryptionTypeDesc = SqlValue.Null(NVarcharSqlType.Get(64, Collation.Catalog, Coercibility.Implicit));
         var nullGraphTypeDesc = SqlValue.Null(nvarchar60Catalog);
         var nullVectorBaseTypeId = SqlValue.Null(SqlType.TinyInt);
+        // A vector column's element type: float32, id 0 (probed 2026-09-26).
+        var float32Desc = SqlValue.FromString(NVarcharSqlType.Get(10, Collation.Catalog, Coercibility.Implicit), "float32");
+        var float32Id = SqlValue.FromByte(0);
         // generated_always_type_desc mirrors generated_always_type's enum text;
         // ordinary (non-temporal) columns report NOT_APPLICABLE.
         SqlValue GeneratedAlwaysDescFor(HeapColumn c) =>
@@ -624,8 +627,8 @@ internal static partial class BuiltInResources
                 declared ? XmlCollectionIdFor(col) : zeroInt,
                 falseBit,
                 falseBit,
-                nullInt,
-                nullVectorBaseType,
+                col.Type is VectorSqlType dimensioned ? SqlValue.FromInt32(dimensioned.dimensions) : nullInt,
+                col.Type is VectorSqlType ? float32Desc : nullVectorBaseType,
                 nullInt,
                 nullLedgerViewColumnTypeDesc,
                 AnsiPaddedFor(col),
@@ -649,7 +652,7 @@ internal static partial class BuiltInResources
                 nullSysName,
                 nullGraphTypeDesc,
                 falseBit,
-                nullVectorBaseTypeId,
+                col.Type is VectorSqlType ? float32Id : nullVectorBaseTypeId,
             ];
         }
 
@@ -821,6 +824,9 @@ internal static partial class BuiltInResources
             HierarchyIdSqlType => (892, 0, 0),
             // sql_variant: its 8016-byte maximum (probed 2026-09-25).
             SqlVariantSqlType => (8016, 0, 0),
+            // vector(n): its storage length, the 8-byte header plus four bytes
+            // an element (probed 2026-09-26).
+            VectorSqlType vector => ((short)vector.ByteLength, 0, 0),
             _ => throw new NotSupportedException($"No sys.columns metadata for {t}."),
         };
     }

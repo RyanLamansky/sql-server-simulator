@@ -75,6 +75,7 @@ internal sealed class HashBytes : Expression
     {
         _ = StringScalars.RequireStringArgument(this.algorithmArg, this.algorithmArg.GetSqlType(batch, resolveColumnType), "hashbytes", 1, acceptsLegacyLob: false);
         var inputType = this.inputArg.GetSqlType(batch, resolveColumnType);
+        VectorArguments.RejectVector(inputType, "hashbytes", 2, 6);
         if (inputType is not (VarbinarySqlType or BinarySqlType or ImageSqlType or NVarcharSqlType or NCharSqlType or NTextSqlType or SystemNameSqlType or VarcharSqlType or CharSqlType or TextSqlType))
             throw SimulatedSqlException.InvalidArgumentDataType(SqlType.OperandName(inputType, this.inputArg), 2, "hashbytes");
         return ResultType;

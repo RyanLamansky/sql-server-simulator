@@ -200,6 +200,8 @@ partial class Simulation
         for (var i = 0; i < keyColumns.Count; i++)
         {
             var fullOrdinal = ResolveColumnOrdinal(context.Batch.CurrentDatabase.Collation, table, keyColumns[i].Name);
+            if (table.Columns[fullOrdinal].Type is VectorSqlType)
+                throw SimulatedSqlException.VectorKeyColumnInvalid(table.Columns[fullOrdinal].Name, table.Name);
             RejectComputedKeyColumnNotIndexable(context.Batch, table, table.Columns[fullOrdinal], indexName, viaConstraint: false);
             resolvedKeyColumns[i] = new IndexKeyColumn(table.StorageOrdinals[fullOrdinal], fullOrdinal, keyColumns[i].IsDescending);
         }

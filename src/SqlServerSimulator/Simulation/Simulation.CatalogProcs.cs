@@ -368,7 +368,10 @@ partial class Simulation
         for (var i = 0; i < columns.Length; i++)
         {
             var col = columns[i];
-            if (!Matches(columnPattern, col.Name))
+            // Real lists no row for a vector column: sp_datatype_info has no
+            // vector entry for the join to find (probed 2026-09-26 against
+            // SQL Server 2025).
+            if (!Matches(columnPattern, col.Name) || col.Type is VectorSqlType)
                 continue;
             var row = BuildSpColumnsRow(qualifier, owner, tableNameValue, col, i + 1, byName);
             rows.Add(classic ? ClassicSpColumnsRow(row, col) : row);

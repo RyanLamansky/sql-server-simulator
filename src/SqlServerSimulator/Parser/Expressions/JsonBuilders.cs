@@ -39,9 +39,11 @@ internal static class JsonValueRender
             _ = sb.Append(NullLiteral);
             return;
         }
-        if (embedRaw)
+        // A vector's text form is already a JSON array, and embeds as one
+        // (probed 2026-09-26 against SQL Server 2025).
+        if (embedRaw || value.Type is VectorSqlType)
         {
-            _ = sb.Append(value.CoerceTo(SqlType.NVarchar).AsString);
+            _ = sb.Append(value.CoerceTo(SqlType.NVarcharMax).AsString);
             return;
         }
 

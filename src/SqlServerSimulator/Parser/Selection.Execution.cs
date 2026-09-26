@@ -874,17 +874,18 @@ internal sealed partial class Selection
         source.BackingTable is { } table ? new ColumnReadTarget(table) : new ColumnReadTarget(source.BackingView!);
 
     /// <summary>
-    /// The sorting / grouping rejection for a type <see cref="SqlType.IsLob"/>
-    /// marks as non-comparable, dispatched to the number real gives that
-    /// family: <b>Msg 306</b> for the legacy <c>text</c> / <c>ntext</c> /
-    /// <c>image</c> trio, <b>Msg 305</b> for <c>xml</c>, and <b>Msg 249</b> —
-    /// the only one that names <paramref name="clause"/> — for the two spatial
-    /// types. DISTINCT and the deduping set operators make no such split; they
+    /// The sorting / grouping rejection for a type <see cref="SqlType.IsIncomparable"/>
+    /// marks, dispatched to the number real gives that family: <b>Msg 306</b>
+    /// for the legacy <c>text</c> / <c>ntext</c> / <c>image</c> trio,
+    /// <b>Msg 305</b> for <c>xml</c>, <b>Msg 42213</b> for <c>vector</c>, and
+    /// <b>Msg 249</b> — the only one that names <paramref name="clause"/> — for
+    /// the two spatial types. DISTINCT and the deduping set operators make no such split; they
     /// report one message across all three families.
     /// </summary>
     internal static SimulatedSqlException NotComparableInClause(SqlType type, string clause) =>
         type.IsLegacyLob ? SimulatedSqlException.LobTypesCannotBeComparedOrSorted()
         : type is XmlSqlType ? SimulatedSqlException.XmlCannotBeComparedOrSorted()
+        : type is VectorSqlType ? SimulatedSqlException.VectorCannotBeComparedOrSorted()
         : SimulatedSqlException.TypeNotComparableInClause(type, clause);
 
     /// <summary>
@@ -1204,7 +1205,7 @@ internal sealed partial class Selection
         {
             for (var i = 0; i < outputSchema.Length; i++)
             {
-                if (outputSchema[i].IsLob)
+                if (outputSchema[i].IsIncomparable)
                     throw SimulatedSqlException.TypeCannotBeSelectedAsDistinct(outputSchema[i]);
                 if (UnresolvedCollation.On(outputSchema[i]) is { } conflict)
                 {
@@ -1261,7 +1262,7 @@ internal sealed partial class Selection
                 throw SimulatedSqlException.Aggregate([unknown, SimulatedSqlException.OrderByItemNotInSelectListWithDistinct()]);
             }
 
-            if (keyType.IsLob)
+            if (keyType.IsIncomparable)
                 throw NotComparableInClause(keyType, "ORDER BY");
             RequireSettledOutputCollation(keyType, "ORDER BY", i + 1);
         }
@@ -1274,7 +1275,7 @@ internal sealed partial class Selection
         foreach (var groupingKey in fromClause.AllGroupingExpressions)
         {
             var groupingKeyType = groupingKey.GetSqlType(parseBatch, ResolveColumnType);
-            if (groupingKeyType.IsLob)
+            if (groupingKeyType.IsIncomparable)
                 throw NotComparableInClause(groupingKeyType, "GROUP BY");
         }
 

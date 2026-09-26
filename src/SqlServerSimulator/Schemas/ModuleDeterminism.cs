@@ -183,6 +183,10 @@ internal static partial class ModuleDeterminism
         "TYPE_NAME",
         "USER_ID",
         "USER_NAME",
+        "VECTORPROPERTY",
+        "VECTOR_DISTANCE",
+        "VECTOR_NORM",
+        "VECTOR_NORMALIZE",
         "XACT_STATE",
         "XML_SCHEMA_NAMESPACE",
     }.ToFrozenSet(StringComparer.OrdinalIgnoreCase);

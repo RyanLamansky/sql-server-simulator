@@ -92,6 +92,7 @@ internal sealed class SqlVariantProperty : Expression
         // to be settled here — a CASE / COALESCE argument converts the arm it
         // picks to its unified type only once that type is known.
         var argumentType = this.valueArg.GetSqlType(batch, resolveColumnType);
+        VectorArguments.RejectVector(argumentType, "sql_variant_property", 1, 6);
         // The argument converts implicitly to sql_variant, which can't hold a
         // MAX string or binary, xml, a legacy LOB, rowversion or a CLR type:
         // Msg 206 while compiling (probed 2026-09-25 against SQL Server 2025).

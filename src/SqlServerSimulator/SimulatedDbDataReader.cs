@@ -433,10 +433,13 @@ public sealed class SimulatedDbDataReader : DbDataReader
     /// through <see cref="SqlXml.Value"/>'s reader-to-writer round trip, the
     /// way SqlClient's own accessors read it, so an empty element comes back
     /// as <c>&lt;a /&gt;</c> and attributes are single-spaced (confirmed
-    /// 2026-09-25 against SqlClient 6.1 over SQL Server 2025).
+    /// 2026-09-25 against SqlClient 6.1 over SQL Server 2025). A vector reads
+    /// as its text form, as a client without vector support reads it.
     /// </summary>
     internal static string ClientString(SqlValue value)
     {
+        if (value.Type is VectorSqlType)
+            return VectorSqlType.Format(value.AsVectorBytes);
         if (value.Type is not XmlSqlType)
             return value.AsString;
         using var reader = System.Xml.XmlReader.Create(new StringReader(value.AsString), new System.Xml.XmlReaderSettings { ConformanceLevel = System.Xml.ConformanceLevel.Fragment });

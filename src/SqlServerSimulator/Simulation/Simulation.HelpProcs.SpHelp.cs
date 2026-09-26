@@ -329,10 +329,11 @@ partial class Simulation
             var showsPrecScale = HelpShowsPrecisionAndScale(type);
             // ANSI_PADDING is always on, so TrimTrailingBlanks reports 'no' for
             // the padded types and '(n/a)' where the property is undefined.
+            // A vector answers as the varbinary it shares a system type id with.
             var padded = type is CharSqlType or VarcharSqlType or BinarySqlType
-                or VarbinarySqlType or SqlVariantSqlType;
+                or VarbinarySqlType or SqlVariantSqlType or VectorSqlType;
             var fixedLenNullInSource = type is CharSqlType or VarcharSqlType
-                or BinarySqlType or VarbinarySqlType;
+                or BinarySqlType or VarbinarySqlType or VectorSqlType;
             rows.Add([
                 SqlValue.FromSystemName(column.Name),
                 SqlValue.FromSystemName(column.AliasType?.Name ?? (column.SpelledNumeric ? column.TypeName : HelpTypeName(type))),
@@ -573,6 +574,7 @@ partial class Simulation
             XmlSqlType => (-1, -1, null),
             HierarchyIdSqlType => (892, 892, null),
             SpatialSqlType => (-1, -1, null),
+            VectorSqlType vector => (vector.ByteLength, vector.ByteLength, null),
             _ => (0, 0, null),
         };
 

@@ -99,12 +99,21 @@ internal abstract partial class SqlType
     /// <see cref="MaxLengthSentinel"/>) but the <see cref="SqlType"/> instance
     /// itself isn't always-LOB; row-level decisions consult both signals via
     /// <c>HeapColumn.IsLob</c>.
-    /// <para>These are also exactly the types real refuses to compare, which is
-    /// what makes this the predicate behind the DISTINCT and set-operator
-    /// gates — see <see cref="IsLegacyLob"/> for the narrower split the
-    /// per-family sort and grouping errors need.</para>
+    /// <para>These are also types real refuses to compare — with
+    /// <c>vector</c>, the set <see cref="IsIncomparable"/> names for the
+    /// DISTINCT and set-operator gates; see <see cref="IsLegacyLob"/> for the
+    /// narrower split the per-family sort and grouping errors need.</para>
     /// </summary>
     public virtual bool IsLob => false;
+
+    /// <summary>
+    /// True for the types real can't compare, sort or group at all: the
+    /// always-LOB types <see cref="IsLob"/> marks, and <c>vector</c>, which
+    /// is stored in-row but has no ordering either. The DISTINCT, set-operator,
+    /// sort, grouping and hash-key gates read this rather than
+    /// <see cref="IsLob"/>.
+    /// </summary>
+    public bool IsIncomparable => this.IsLob || this is VectorSqlType;
 
     /// <summary>
     /// The three deprecated always-LOB types, which carry rejections the other
@@ -224,6 +233,7 @@ internal abstract partial class SqlType
         _ when this == SmallMoney => 122,
         _ when this == BigInt => 127,
         VarbinarySqlType => 165,
+        VectorSqlType => 165,
         VarcharSqlType => 167,
         BinarySqlType => 173,
         CharSqlType => 175,
@@ -242,12 +252,14 @@ internal abstract partial class SqlType
     /// Equal to <see cref="SystemTypeId"/> for every shipped type except
     /// <see cref="SystemName"/> (alias id <c>256</c>) and <see cref="HierarchyId"/>
     /// (well-known CLR-UDT alias id <c>128</c>, probe-confirmed against
-    /// SQL Server 2025 <c>sys.types</c>).
+    /// SQL Server 2025 <c>sys.types</c>), the spatial pair, and <c>vector</c>,
+    /// which shares <c>varbinary</c>'s system id 165 under user id 255.
     /// </summary>
     public int UserTypeId => this == SystemName ? 256
         : this == HierarchyId ? 128
         : this == Geometry ? 129
         : this == Geography ? 130
+        : this is VectorSqlType ? 255
         : this.SystemTypeId;
 
     /// <summary>True for SQL integer-family types (bit, tinyint, smallint, int, bigint).</summary>
@@ -796,6 +808,12 @@ internal abstract partial class SqlType
             return (GetDecimal(precision, scale), null);
         }
 
+        // vector(n [, float32]) — the dimension count is required, so a bare
+        // or MAX spec is an unknown type, as is an integer second argument no
+        // wider than the count (probed 2026-09-26 against SQL Server 2025).
+        if (resolvedName == 6 && upper.SequenceEqual("VECTOR"))
+            return (ResolveVector(name, declaredMaxLength, declaredScale, index, site, columnName), null);
+
         // Fixed-length char/nchar/binary parameterize on the declared length —
         // dispatched here ahead of the generic fixed/variable-length switch
         // because (a) IsFixedLength is true (so the generic "no width allowed"
@@ -906,6 +924,24 @@ internal abstract partial class SqlType
             };
         }
         return (ResolveVarFamilyForLength(resolved, declared), declared);
+    }
+
+    private static VectorSqlType ResolveVector(Name name, int? dimensions, int? baseType, int index, TypeSpecSite site, string? columnName)
+    {
+        if (baseType is not (null or VectorSqlType.Float32BaseType) && baseType > dimensions)
+            throw SimulatedSqlException.ScaleExceedsPrecision();
+        if (dimensions is null or MaxLengthSentinel || baseType is not (null or VectorSqlType.Float32BaseType))
+        {
+            throw columnName is not null
+                ? SimulatedSqlException.CannotFindDataType(name.Span, index)
+                : SimulatedSqlException.CannotFindDataTypeInCast(name.Span);
+        }
+        return dimensions switch
+        {
+            < 1 => throw SimulatedSqlException.LengthOrPrecisionSpecificationInvalid(dimensions.Value, name.LineNumber),
+            > VectorSqlType.MaxDimensions => throw SimulatedSqlException.VectorSizeExceedsMaximum(dimensions.Value, site == TypeSpecSite.Column ? columnName : null),
+            _ => VectorSqlType.Get(dimensions.Value),
+        };
     }
 
     /// <summary>

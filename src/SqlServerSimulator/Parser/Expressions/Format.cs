@@ -234,7 +234,7 @@ internal sealed class Format : Expression
             || type is BinarySqlType or VarbinarySqlType
             || type == SqlType.UniqueIdentifier
             || type == SqlType.RowVersion
-            || type is SqlVariantSqlType)
+            || type is SqlVariantSqlType or VectorSqlType)
         {
             throw SimulatedSqlException.InvalidArgumentDataType(type.SqlServerName, argumentIndex: 1, "format");
         }

@@ -213,7 +213,7 @@ internal sealed partial class Selection
             // one message rather than splitting by family the way the sorting
             // and grouping slots do. UNION ALL only concatenates and takes any
             // of them.
-            if (kind != SetOpKind.UnionAll && (effectiveLeft.IsLob || effectiveRight.IsLob))
+            if (kind != SetOpKind.UnionAll && (effectiveLeft.IsIncomparable || effectiveRight.IsIncomparable))
                 throw SimulatedSqlException.SetOpOperandNotComparable(combinedSchema[i]);
             if (effectiveLeft.Category == SqlTypeCategory.String && effectiveRight.Category == SqlTypeCategory.String)
             {

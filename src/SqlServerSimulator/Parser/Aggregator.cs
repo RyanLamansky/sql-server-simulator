@@ -105,10 +105,10 @@ internal abstract class Aggregator
             ? throw SimulatedSqlException.OperandDataTypeInvalid(operandType, "count_big", CountState(aggregate))
             : new CountAggregator(isStar: aggregate.Operand is null || aggregate.CountsRowsOnly, isBigCount: true, distinct: aggregate.Distinct),
         AggregateKind.ApproxCountDistinct => new CountAggregator(isStar: false, isBigCount: true, distinct: true),
-        AggregateKind.Max => operandType.IsLob || operandType is BitSqlType
+        AggregateKind.Max => operandType.IsIncomparable || operandType is BitSqlType
             ? throw MinMaxRejection(operandType, "max")
             : new MinMaxAggregator(resultType, isMax: true, removable),
-        AggregateKind.Min => operandType.IsLob || operandType is BitSqlType
+        AggregateKind.Min => operandType.IsIncomparable || operandType is BitSqlType
             ? throw MinMaxRejection(operandType, "min")
             : new MinMaxAggregator(resultType, isMax: false, removable),
         AggregateKind.Sum => SumAggregator.Create(resultType, aggregate.Distinct),
@@ -146,7 +146,7 @@ internal abstract class Aggregator
     /// </summary>
     private static bool CountsUncountable(AggregateExpression aggregate, SqlType operandType) =>
         aggregate.Operand is not null && !aggregate.CountsRowsOnly
-        && (operandType.IsLegacyLob || (aggregate.Distinct && operandType.IsLob));
+        && (operandType.IsLegacyLob || (aggregate.Distinct && operandType.IsIncomparable));
 
     /// <summary>
     /// Real reports <c>COUNT(DISTINCT &lt;legacy LOB&gt;)</c> at state 2 and the

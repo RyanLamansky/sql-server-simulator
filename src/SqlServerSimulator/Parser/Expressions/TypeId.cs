@@ -53,10 +53,12 @@ internal sealed class TypeId : Expression
             leafPart = StripBrackets(nameStr);
         }
 
-        // System types resolve by name, user-defined ones through the schema.
+        // System types resolve by name, user-defined ones through the schema —
+        // except that vector resolves only qualified by sys (probed 2026-09-26
+        // against SQL Server 2025).
         foreach (var row in BuiltInResources.SystypesRowData)
         {
-            if (BuiltInToken.Equals((string)row[0]!, leafPart))
+            if (BuiltInToken.Equals((string)row[0]!, leafPart) && (dotIndex >= 0 || (string)row[0]! != "vector"))
                 return SqlValue.FromInt32(Convert.ToInt32(row[3]!, System.Globalization.CultureInfo.InvariantCulture));
         }
 

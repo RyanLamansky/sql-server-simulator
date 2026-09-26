@@ -81,9 +81,14 @@ internal sealed class StringConcat : Expression
         var separatorWidth = 0;
         var collation = new CollationAccumulator();
         SqlType? unconvertible = null;
+        List<SimulatedSqlException>? vectorRefusals = null;
         for (var i = 0; i < this.arguments.Length; i++)
         {
             var type = this.arguments[i].GetSqlType(batch, resolveColumnType);
+            // Each vector argument is refused, all of them reported, at state 9
+            // (probed 2026-09-26 against SQL Server 2025).
+            if (type is VectorSqlType)
+                (vectorRefusals ??= []).Add(SimulatedSqlException.InvalidArgumentDataType(type.SqlServerName, i + 1, LowercaseName(this.kind), 9));
             if (type is XmlSqlType or SqlVariantSqlType or ImageSqlType)
                 unconvertible ??= type;
             anyNational |= SqlType.IsNationalStringCategory(type);
@@ -96,6 +101,8 @@ internal sealed class StringConcat : Expression
             else
                 width += Math.Max(0, argumentWidth);
         }
+        if (vectorRefusals is not null)
+            throw vectorRefusals.Count == 1 ? vectorRefusals[0] : SimulatedSqlException.Aggregate(vectorRefusals);
         // Every argument converts to the result's string family, and an xml,
         // sql_variant or image one can't (probed 2026-09-25 against SQL Server
         // 2025: Msg 257 naming varchar or nvarchar, Msg 206 for image).

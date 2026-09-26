@@ -150,7 +150,7 @@ partial class Simulation
             SqlValue.FromByte(precision),
             SqlValue.FromByte(scale),
             collation is null ? nullName : SqlValue.FromSystemName(collation.Name),
-            alias is null ? nullInt : SqlValue.FromInt32(alias.UserTypeId),
+            alias is not null ? SqlValue.FromInt32(alias.UserTypeId) : type is VectorSqlType ? SqlValue.FromInt32(type.UserTypeId) : nullInt,
             alias is null ? nullName : SqlValue.FromSystemName(alias.Schema.Database.Name),
             alias is null ? nullName : SqlValue.FromSystemName(alias.Schema.Name),
             alias is null ? nullName : SqlValue.FromSystemName(alias.Name),
@@ -192,7 +192,7 @@ partial class Simulation
     /// The TDS type token and length real reports for a column: the
     /// fixed-length token for a NOT NULL fixed-width type and the nullable
     /// variant otherwise (as COLMETADATA carries them), 17 for decimal, 65535
-    /// for a MAX type and 8100 for xml.
+    /// for a MAX type and 8100 for xml, and a vector's own 245.
     /// </summary>
     private static (int TypeId, int Length) DescribeTdsType(SqlType type, bool notNull, bool numeric, short maxLength) => type switch
     {
@@ -209,6 +209,9 @@ partial class Simulation
         DateTimeSqlType => (notNull ? 61 : 111, 8),
         DecimalSqlType => (numeric ? 108 : 106, 17),
         XmlSqlType => (241, 8100),
+        // A vector-aware client's own token for the type (probed 2026-09-26
+        // against SQL Server 2025).
+        VectorSqlType => (245, maxLength),
         _ => (type.SystemTypeId, maxLength < 0 ? 65535 : maxLength),
     };
 }

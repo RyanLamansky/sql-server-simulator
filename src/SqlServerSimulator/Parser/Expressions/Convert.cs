@@ -152,7 +152,7 @@ internal sealed class ConvertExpression : Expression
         }
         // A style the source type doesn't take is NULL too (Msg 281 / 9809;
         // probed 2026-09-26 against SQL Server 2025).
-        catch (SimulatedSqlException ex) when (this.tryMode && (Cast.IsConversionFailure(ex.Number) || ex.Number is 281 or 9809))
+        catch (SimulatedSqlException ex) when (this.tryMode && (Cast.IsConversionFailure(ex.Number) || Cast.IsVectorConversionFailure(ex.Number) || ex.Number is 281 or 9809))
         {
             coerced = SqlValue.Null(this.targetType);
         }

@@ -2091,10 +2091,11 @@ partial class SimulatedSqlException
     /// <summary>
     /// Mimics SQL Server error 1752: <c>ALTER TABLE … ADD CONSTRAINT …
     /// DEFAULT (…) FOR col</c> named a column that doesn't exist on the
-    /// target table.
+    /// target table, or — at state 1 — a DEFAULT of any kind named a vector
+    /// column (probed 2026-09-26 against SQL Server 2025).
     /// </summary>
-    internal static SimulatedSqlException DefaultColumnInvalid(string columnName, string tableName) =>
-        new($"Column '{columnName}' in table '{tableName}' is invalid for creating a default constraint.", 1752, 16, 0);
+    internal static SimulatedSqlException DefaultColumnInvalid(string columnName, string tableName, byte state = 0) =>
+        new($"Column '{columnName}' in table '{tableName}' is invalid for creating a default constraint.", 1752, 16, state);
 
     /// <summary>
     /// Mimics SQL Server error 1767: a <c>FOREIGN KEY</c> — declared by

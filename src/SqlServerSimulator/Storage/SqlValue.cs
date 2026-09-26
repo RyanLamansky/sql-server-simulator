@@ -738,6 +738,23 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
             : (SqlValue)this.reference!;
 
     /// <summary>
+    /// Non-NULL <c>vector(n)</c> value from its storage bytes (see
+    /// <see cref="VectorSqlType"/>), which the caller must not mutate.
+    /// </summary>
+    public static SqlValue FromVector(VectorSqlType type, byte[] bytes)
+    {
+        ArgumentNullException.ThrowIfNull(bytes);
+        return new(type, 0, bytes, isNull: false);
+    }
+
+    /// <summary>Returns the storage bytes backing a vector value (zero-copy). Throws if NULL or not a vector value.</summary>
+    public byte[] AsVectorBytes => this.IsNull
+        ? throw new InvalidOperationException("Value is NULL.")
+        : this.Type is not VectorSqlType
+            ? throw new InvalidOperationException($"Value is {this.Type}, not vector.")
+            : (byte[])this.reference!;
+
+    /// <summary>
     /// Returns the hierarchyid path decoded to segment-array form. Throws if
     /// NULL or not a hierarchyid value, and raises real's Msg 6522 (24000) when
     /// the stored bytes aren't a canonical OrdPath encoding — a CAST from
@@ -866,6 +883,9 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
         // untyped reader accessor hands back bool / int / string / … matching
         // the per-cell base type (the DacFx (bool)reader[…] unbox path).
         SqlVariantSqlType => this.AsVariantInner.ToObject(),
+        // A vector surfaces as its text form — what real sends a client that
+        // doesn't negotiate SQL Server 2025's vector support.
+        VectorSqlType => VectorSqlType.Format(this.AsVectorBytes),
         _ => throw new NotSupportedException($"No object representation for {this.Type}."),
     };
 
@@ -1154,6 +1174,7 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
         _ when this.Type == SqlType.Real => this.AsSingle.ToString("G7", CultureInfo.InvariantCulture),
         _ when this.Type == SqlType.Money || this.Type == SqlType.SmallMoney => this.AsMoneyDecimal38.ToString(),
         SqlVariantSqlType => this.AsVariantInner.AsCurrentType(),
+        VectorSqlType => $"'{VectorSqlType.Format(this.AsVectorBytes)}'",
         _ => "?",
     };
 }

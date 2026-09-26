@@ -56,6 +56,11 @@ internal readonly struct BuiltInArity(int min, int max, BuiltInArity.Refusal bel
     /// </summary>
     public static void Check(ReadOnlySpan<char> uppercaseName, ParserContext context)
     {
+        if (uppercaseName is "VECTOR_DISTANCE")
+        {
+            CheckVectorDistance(context);
+            return;
+        }
         if (For(uppercaseName) is not { } arity)
             return;
 
@@ -68,6 +73,30 @@ internal readonly struct BuiltInArity(int min, int max, BuiltInArity.Refusal bel
             throw arity.belowMin.ToException();
         if (count > arity.max)
             throw arity.aboveMax.ToException();
+    }
+
+    /// <summary>
+    /// <c>VECTOR_DISTANCE</c> refuses a wrong count with two errors whose
+    /// ranges disagree: Msg 174 at state 6 wants three arguments and Msg 189
+    /// allows a fourth. An empty list reports only the 189, a fourth argument
+    /// only the 174, and any other wrong count both (probed 2026-09-26 against
+    /// SQL Server 2025).
+    /// </summary>
+    private static void CheckVectorDistance(ParserContext context)
+    {
+        var checkpoint = context.SaveCheckpoint();
+        var count = CountArguments(context);
+        context.RestoreCheckpoint(checkpoint);
+        if (count is < 0 or 3)
+            return;
+        var exact = SimulatedSqlException.FunctionRequiresNArguments("vector_distance", 3, 6);
+        var range = SimulatedSqlException.FunctionArgumentCountRange("vector_distance", 3, 4, 1);
+        throw count switch
+        {
+            0 => range,
+            4 => exact,
+            _ => SimulatedSqlException.Aggregate([exact, range]),
+        };
     }
 
     /// <summary>
@@ -465,6 +494,9 @@ internal readonly struct BuiltInArity(int min, int max, BuiltInArity.Refusal bel
             "USER_NAME" => Between("user_name", 0, 1),
             "VAR" => Exactly("var", 1),
             "VARP" => Exactly("varp", 1),
+            "VECTORPROPERTY" => Exactly("vectorproperty", 2),
+            "VECTOR_NORM" => Exactly("vector_norm", 2),
+            "VECTOR_NORMALIZE" => Exactly("vector_normalize", 2),
             "XACT_STATE" => Exactly("xact_state", 0),
             "XML_SCHEMA_NAMESPACE" => Between("XML_SCHEMA_NAMESPACE", 2, 3),
             "YEAR" => Exactly("year", 1),

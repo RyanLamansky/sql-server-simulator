@@ -464,9 +464,8 @@ partial class Simulation
             switch (context.GetNextRequired())
             {
                 case Operator { Character: ',' }:
-                    if (context.GetNextRequired() is not Numeric { Value: { IsNull: false } scaleValue })
-                        throw SimulatedSqlException.SyntaxErrorNear(context);
-                    declaredScale = scaleValue.AsInt32;
+                    _ = context.GetNextRequired();
+                    declaredScale = TypeNameSynonyms.ReadSecondTypeArgument(context, typeName);
                     if (context.GetNextRequired() is not Operator { Character: ')' })
                         throw SimulatedSqlException.SyntaxErrorNear(context);
                     break;

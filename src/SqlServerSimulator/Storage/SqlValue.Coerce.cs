@@ -36,6 +36,8 @@ internal readonly partial struct SqlValue
             return this;
         if (this.IsNull)
             return Null(target);
+        if (target is VectorSqlType || this.Type is VectorSqlType)
+            return this.CoerceVector(target);
 
         // sql_variant wraps any base value (CAST(x AS sql_variant),
         // ISNULL(variant, x) coercing the fallback); coercing a variant to a
@@ -2195,5 +2197,40 @@ internal readonly partial struct SqlValue
         else
             nativeBytes.CopyTo(result.AsSpan(width - native));
         return result;
+    }
+
+    /// <summary>
+    /// A vector's conversions, which reach the character strings and nothing
+    /// else: text reads as a JSON array (<see cref="VectorSqlType.Parse"/>),
+    /// a vector writes its text form but refuses (Msg 42211) a bounded target
+    /// too narrow to hold all of it, and a vector re-typed to another
+    /// dimension count is Msg 42204 naming the source's count first.
+    /// </summary>
+    private SqlValue CoerceVector(SqlType target)
+    {
+        if (target is VectorSqlType targetVector)
+        {
+            return this.Type switch
+            {
+                VectorSqlType sourceVector => sourceVector.dimensions == targetVector.dimensions
+                    ? FromVector(targetVector, this.AsVectorBytes)
+                    : throw SimulatedSqlException.VectorDimensionsMismatch(sourceVector.dimensions, targetVector.dimensions, 1),
+                _ when SqlType.IsCollatedString(this.Type) && !this.Type.IsLegacyLob => FromVector(targetVector, VectorSqlType.Parse(this.AsString, targetVector.dimensions)),
+                _ => throw SimulatedSqlException.ExplicitConversionNotAllowed(this.Type, target),
+            };
+        }
+        if (!SqlType.IsCollatedString(target) || target.IsLegacyLob)
+            throw SimulatedSqlException.ExplicitConversionNotAllowed(this.Type, target);
+        var text = VectorSqlType.Format(this.AsVectorBytes);
+        var width = target switch
+        {
+            VarcharSqlType { length: > 0 } varchar => varchar.length,
+            NVarcharSqlType { length: > 0 } nvarchar => nvarchar.length,
+            CharSqlType fixedChar => fixedChar.length,
+            NCharSqlType fixedNChar => fixedNChar.length,
+            SystemNameSqlType => 128,
+            _ => int.MaxValue,
+        };
+        return text.Length > width ? throw SimulatedSqlException.VectorTruncation() : FromString(target, text);
     }
 }

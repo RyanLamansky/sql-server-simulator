@@ -601,7 +601,7 @@ internal sealed partial class Selection
         SqlType left, SqlType right, [NotNullWhen(true)] out SqlType? common)
     {
         common = null;
-        if (left.IsLob || right.IsLob)
+        if (left.IsIncomparable || right.IsIncomparable)
         {
             return false;
         }

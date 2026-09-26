@@ -438,6 +438,16 @@ internal static class TdsTypeCodec
                 writer.WriteByte(0xF1);
                 writer.WriteByte(0);
                 break;
+            case VectorSqlType:
+                // The endpoint acknowledges no vector feature extension, so a
+                // vector goes out as real sends it to a client without vector
+                // support: varchar(max) holding the text form, collated
+                // Latin1_General_100_BIN2_UTF8 (probed 2026-09-26 against SQL
+                // Server 2025 through SqlClient 5.1).
+                writer.WriteByte(0xA7);
+                writer.WriteUInt16(0xFFFF);
+                TdsCollationCodec.For(VectorWireCollation).Write(writer);
+                break;
             case SqlVariantSqlType:
                 // SSVARIANTTYPE: a LONGLEN type whose TYPE_INFO is the type
                 // byte plus a 4-byte max length (8009 = 8000 data bytes + the
@@ -684,6 +694,12 @@ internal static class TdsTypeCodec
                     writer.WriteUInt64(ulong.MaxValue);
                 else
                     WritePlpChunks(writer, SystemNameSqlType.Utf16LeBytes(value.AsString));
+                break;
+            case VectorSqlType:
+                if (value.IsNull)
+                    writer.WriteUInt64(ulong.MaxValue);
+                else
+                    WritePlpChunks(writer, System.Text.Encoding.UTF8.GetBytes(VectorSqlType.Format(value.AsVectorBytes)));
                 break;
             case SqlVariantSqlType:
                 WriteVariant(writer, value);
@@ -1208,6 +1224,9 @@ internal static class TdsTypeCodec
     /// <c>GetSqlBytes</c> / <c>GetBytes</c>. Version/token probe-matched to SQL
     /// Server 2025 (2026-07-16).
     /// </summary>
+    /// <summary>The collation of the <c>varchar(max)</c> a vector column travels as.</summary>
+    private static readonly Collation VectorWireCollation = Collation.Get("Latin1_General_100_BIN2_UTF8");
+
     internal const string HierarchyIdAssemblyQualifiedName =
         "Microsoft.SqlServer.Types.SqlHierarchyId, Microsoft.SqlServer.Types, Version=11.0.0.0, Culture=neutral, PublicKeyToken=89845dcd8080cc91";
 }

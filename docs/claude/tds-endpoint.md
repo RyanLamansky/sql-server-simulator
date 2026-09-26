@@ -409,6 +409,8 @@ Specifics:
   SqlClient surfaces it as `SqlDbType.Udt`; DacFx pulls raw bytes via `GetSqlBytes`/`GetBytes`.
   Removing it from the reject list unblocked DacFx export of AW's `OrganizationNode` / `DocumentNode`.
   Oracle: `HierarchyIdWireTests`.
+- **`vector`** (`0xA7` `varchar(max)`, collated `Latin1_General_100_BIN2_UTF8`): the endpoint acknowledges no vector feature extension, so a vector column travels as the text form real sends a client without vector support (probed 2026-09-26 through SqlClient 5.1); a vector-aware SqlClient reads a string where real would hand it `SqlVector<float>` — see [`vector.md`](vector.md).
+  Oracle: `VectorWireTests`.
 - **`text` / `ntext` / `image`** (legacy in-band textptr form) — see [Legacy text / ntext / image](#legacy-text--ntext--image-wire-forms) below.
 - Every modeled result-column type has a wire encoding; an unmodeled one would surface as `WriteTypeInfo`'s `NotSupportedException` → ERROR 50000.
 

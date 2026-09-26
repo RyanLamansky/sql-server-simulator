@@ -117,14 +117,22 @@ internal sealed class Checksum : Expression
     }
 
     /// <summary>
-    /// The types neither function can hash — the legacy LOBs, <c>xml</c> and
-    /// the spatial pair. <c>CHECKSUM</c> refuses each while compiling (Msg
-    /// 8116 state 4, a spatial type spelled <c>sys.geography</c>);
+    /// The types neither function can hash — the legacy LOBs, <c>xml</c>, the
+    /// spatial pair and <c>vector</c>. <c>CHECKSUM</c> refuses each while
+    /// compiling (Msg 8116 state 4, a spatial type spelled
+    /// <c>sys.geography</c> and a vector with its dimensions, <c>vector(2)</c>);
     /// <c>BINARY_CHECKSUM</c> passes over them and refuses only a call left
     /// with nothing to hash (Msg 8184). Probed 2026-09-25 against SQL Server
     /// 2025.
     /// </summary>
-    private static bool IsUnhashable(SqlType type) => type.IsLob;
+    private static bool IsUnhashable(SqlType type) => type.IsIncomparable;
+
+    private static string UnhashableName(SqlType type) => type switch
+    {
+        SpatialSqlType => $"sys.{type.SqlServerName}",
+        VectorSqlType => type.ToString()!,
+        _ => type.SqlServerName,
+    };
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
@@ -139,7 +147,7 @@ internal sealed class Checksum : Expression
                 continue;
             }
             if (!this.isBinary)
-                (errors ??= []).Add(SimulatedSqlException.InvalidArgumentDataType(type is SpatialSqlType ? $"sys.{type.SqlServerName}" : type.SqlServerName, i + 1, "checksum", 4));
+                (errors ??= []).Add(SimulatedSqlException.InvalidArgumentDataType(UnhashableName(type), i + 1, "checksum", 4));
         }
         if (errors is not null)
             throw SimulatedSqlException.Aggregate(errors);

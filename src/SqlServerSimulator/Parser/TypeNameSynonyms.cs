@@ -46,6 +46,24 @@ internal static class TypeNameSynonyms
     }
 
     /// <summary>
+    /// Reads the second argument of a type spec's parenthesized pair, with
+    /// the cursor on it: an integer (a <c>decimal</c>'s scale), or for
+    /// <c>vector</c> an unquoted base-type name, which reads as
+    /// <see cref="Storage.VectorSqlType.Float32BaseType"/> when it is
+    /// <c>float32</c> and raises real's Msg 195 when it names anything else.
+    /// A name after any other type is real's Msg 102 near the type's name.
+    /// </summary>
+    internal static int ReadSecondTypeArgument(ParserContext context, Name typeName) => context.Token switch
+    {
+        Numeric { Value: { IsNull: false } scale } => scale.AsInt32,
+        UnquotedString when !string.Equals(typeName.Value, "vector", StringComparison.OrdinalIgnoreCase) => throw SimulatedSqlException.SyntaxErrorNear(typeName),
+        UnquotedString baseType => string.Equals(baseType.Value, "float32", StringComparison.OrdinalIgnoreCase)
+            ? Storage.VectorSqlType.Float32BaseType
+            : throw SimulatedSqlException.VectorBaseTypeNotRecognized(baseType.Value),
+        _ => throw SimulatedSqlException.SyntaxErrorNear(context),
+    };
+
+    /// <summary>
     /// When the cursor is on the first token of a multi-word type synonym,
     /// consumes its constituent word tokens and returns the folded canonical
     /// leaf (cursor left on the last consumed word). Otherwise leaves the

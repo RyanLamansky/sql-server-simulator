@@ -1498,9 +1498,8 @@ partial class Simulation
                 switch (context.GetNextRequired())
                 {
                     case Operator { Character: ',' }:
-                        if (context.GetNextRequired() is not Numeric { Value: { IsNull: false } scaleValue })
-                            throw SimulatedSqlException.SyntaxErrorNear(context);
-                        declaredScale = scaleValue.AsInt32;
+                        _ = context.GetNextRequired();
+                        declaredScale = TypeNameSynonyms.ReadSecondTypeArgument(context, typeName);
                         if (context.GetNextRequired() is not Operator { Character: ')' })
                             throw SimulatedSqlException.SyntaxErrorNear(context);
                         break;
@@ -1837,6 +1836,8 @@ partial class Simulation
             actualNullable = false;
         }
 
+        if (columnCollation is not null && resolvedType is VectorSqlType)
+            throw SimulatedSqlException.CollateClauseRequiresString(resolvedType.SqlServerName, 1);
         if (resolvedType.Category == SqlTypeCategory.String)
         {
             // Pin the column's declared collation onto its SqlType so values
@@ -1862,7 +1863,13 @@ partial class Simulation
         // A DEFAULT takes its column's type as an assignment does (probed
         // 2026-09-24: a datetime DEFAULT on a decimal column is Msg 257).
         if (defaultExpression is not null)
+        {
+            // No DEFAULT may sit on a vector column, NULL included (probed
+            // 2026-09-26 against SQL Server 2025).
+            if (resolvedType is VectorSqlType)
+                throw SimulatedSqlException.FollowedByConstraintNotCreated(SimulatedSqlException.DefaultColumnInvalid(columnName.Value, tableName, 1), state: 0);
             AssignmentRules.RequireAssignable(defaultExpression, defaultExpression.GetSqlType(context.Batch, NoColumnTypeResolver), resolvedType);
+        }
         var newColumn = new HeapColumn(columnName.Value, resolvedType, maxLength, actualNullable, identity, defaultExpression, generatedAs: generatedAs, isHidden: isHidden, collation: columnCollation, isRowGuidCol: isRowGuidCol,
             spelledNumeric: SqlType.IsNumericSpelling(qualifiedTypeName, context.Batch.TryResolveAliasType(qualifiedTypeName, out var spellingAlias) ? spellingAlias : null));
         if (xmlSchemaCollection is not null)
@@ -2338,6 +2345,10 @@ partial class Simulation
                 {
                     if (column is { Computed: not null, IsPersisted: false } && collation.Equals(column.Name, name.Leaf))
                         throw SimulatedSqlException.CheckConstraintOnNonPersistedComputedColumn(column.Name, tableName);
+                    // No CHECK may read a vector column at all (probed
+                    // 2026-09-26 against SQL Server 2025).
+                    if (column is { Type: VectorSqlType } && collation.Equals(column.Name, name.Leaf))
+                        throw SimulatedSqlException.FollowedByConstraintNotCreated(SimulatedSqlException.CheckConstraintOnVectorColumn(), state: 0);
                 }
             }));
     }
@@ -2645,6 +2656,10 @@ partial class Simulation
                     throw SimulatedSqlException.ComputedColumnPkRequiresPersisted(column.Name, tableName);
                 if (column.IsLob)
                     throw SimulatedSqlException.KeyColumnInvalidType(column.Name, tableName);
+                // A vector key is refused with the constraint's own Msg 1750 after it
+                // (probed 2026-09-26 against SQL Server 2025).
+                if (column.Type is VectorSqlType)
+                    throw SimulatedSqlException.FollowedByConstraintNotCreated(SimulatedSqlException.KeyColumnInvalidType(column.Name, tableName), state: 0);
                 if (column.IsSparse)
                     throw SimulatedSqlException.FollowedByConstraintNotCreated(SimulatedSqlException.KeyColumnInvalidType(column.Name, tableName, state: 3));
                 if (pending.Kind == KeyConstraintKind.PrimaryKey && column.Nullable)

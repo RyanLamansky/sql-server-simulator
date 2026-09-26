@@ -127,6 +127,7 @@ internal sealed class ColLength : Expression
         NVarcharSqlType nv => nv.length == 0 ? (col.MaxLength ?? 1) * 2 : (nv.length == -1 ? -1 : nv.length * 2),
         VarbinarySqlType vb => vb.length == 0 ? (col.MaxLength ?? 1) : (vb.length == -1 ? -1 : vb.length),
         DecimalSqlType d => d.precision <= 9 ? 5 : d.precision <= 19 ? 9 : d.precision <= 28 ? 13 : 17,
+        VectorSqlType vector => vector.ByteLength,
         _ => -1,
     };
 

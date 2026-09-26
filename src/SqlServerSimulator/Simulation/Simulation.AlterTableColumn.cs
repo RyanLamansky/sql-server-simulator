@@ -686,9 +686,8 @@ partial class Simulation
             switch (context.GetNextRequired())
             {
                 case Operator { Character: ',' }:
-                    if (context.GetNextRequired() is not Numeric { Value: { IsNull: false } scaleValue })
-                        throw SimulatedSqlException.SyntaxErrorNear(context);
-                    declaredScale = scaleValue.AsInt32;
+                    _ = context.GetNextRequired();
+                    declaredScale = TypeNameSynonyms.ReadSecondTypeArgument(context, typeName);
                     if (context.GetNextRequired() is not Operator { Character: ')' })
                         throw SimulatedSqlException.SyntaxErrorNear(context);
                     break;
@@ -763,6 +762,15 @@ partial class Simulation
         var (newType, newMaxLength, aliasIsNullable, aliasType) = ResolveTypeReference(
             context.Batch, qualifiedTypeName, typeName, declaredMaxLength, declaredScale,
             index: ordinal + 1, TypeSpecSite.Column, columnName: columnName);
+        // A vector column converts only to and from the character strings and
+        // keeps its dimension count; the change is refused by the assignment
+        // grid before any row is read, rows or not (probed 2026-09-26 against
+        // SQL Server 2025).
+        if ((existingCol.Type is VectorSqlType || newType is VectorSqlType)
+            && SqlType.PairError(TypePairOperation.Assign, existingCol.Type, newType, "") is { } vectorError)
+        {
+            throw vectorError;
+        }
         // For ALTER COLUMN, the precedence is: explicit NULL/NOT NULL on the
         // ALTER clause wins; otherwise alias-default; otherwise preserve
         // existing column nullability. Matches column-on-CREATE-TABLE

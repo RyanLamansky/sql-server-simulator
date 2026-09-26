@@ -144,7 +144,7 @@ internal sealed partial class Selection
         // value slot: it can't be hashed or compared, and an IN over one raises
         // from the comparison anyway.
         var keyProjection = new List<Expression>(innerKeys);
-        if (expressions.Count == 1 && !plan.Schema[0].IsLob)
+        if (expressions.Count == 1 && !plan.Schema[0].IsIncomparable)
             keyProjection.Add(expressions[0]);
 
         var keyFromClause = new FromClause();

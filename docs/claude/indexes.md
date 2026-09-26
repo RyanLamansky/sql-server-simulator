@@ -667,7 +667,7 @@ The option rules follow the target, so an `ALTER INDEX` resolves its index befor
 
 ## Fidelity gaps
 
-- **Columnstore residue**: the row-group DMVs (`sys.column_store_row_groups`, `sys.dm_db_column_store_row_group_physical_stats` …) aren't modeled, nor are the `json` / `vector` column types whose columnstore eligibility real splits by index kind.
+- **Columnstore residue**: the row-group DMVs (`sys.column_store_row_groups`, `sys.dm_db_column_store_row_group_physical_stats` …) aren't modeled, nor is the `json` column type whose columnstore eligibility real splits by index kind (a `vector` column rides a clustered columnstore index as its other columns do, and is refused as a rowstore or statistics key — see [`vector.md`](vector.md)).
 
 - **`filter_definition` edge cases**: the column is rendered (see [Filtered-index `filter_definition`](#filtered-index-filter_definition)) and byte-matches SQL Server across the common filtered grammar, but two literal-typing corners diverge: an integer literal larger than `int` range renders `(5000000000)` where SQL Server types it as `numeric` and renders `(5000000000.)` (trailing dot), and a scale-0 decimal literal likewise omits the trailing dot.
   Both are rare in filtered predicates.

@@ -105,6 +105,9 @@ internal sealed class Replace : Expression
     /// </summary>
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
+        VectorArguments.RejectVector(input.GetSqlType(batch, resolveColumnType), "replace", 1, 6);
+        VectorArguments.RejectVector(oldValue.GetSqlType(batch, resolveColumnType), "replace", 2, 6);
+        VectorArguments.RejectVector(newValue.GetSqlType(batch, resolveColumnType), "replace", 3, 6);
         var inputType = StringScalars.BindArgument(input, batch, resolveColumnType, "replace");
         var oldType = StringScalars.BindArgument(oldValue, batch, resolveColumnType, "replace", argumentIndex: 2);
         var newType = StringScalars.BindArgument(newValue, batch, resolveColumnType, "replace", argumentIndex: 3);

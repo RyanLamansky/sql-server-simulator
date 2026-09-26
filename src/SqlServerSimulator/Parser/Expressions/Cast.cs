@@ -102,7 +102,7 @@ internal sealed class Cast : Expression
             RejectRoundingUnderRoundAbort(sourceValue, this.targetType, runtime.Batch);
             coerced = ApplyCoercion(sourceValue, this.targetType, this.targetMaxLength, ResultCollation(this.targetType, sourceValue.Type, dbCollation));
         }
-        catch (SimulatedSqlException ex) when (this.tryMode && IsConversionFailure(ex.Number))
+        catch (SimulatedSqlException ex) when (this.tryMode && (IsConversionFailure(ex.Number) || IsVectorConversionFailure(ex.Number)))
         {
             coerced = SqlValue.Null(this.targetType);
         }
@@ -312,9 +312,8 @@ internal sealed class Cast : Expression
             switch (context.GetNextRequired())
             {
                 case Operator { Character: ',' }:
-                    if (context.GetNextRequired() is not Numeric { Value: { IsNull: false } scaleValue })
-                        throw SimulatedSqlException.SyntaxErrorNear(context);
-                    declaredScale = scaleValue.AsInt32;
+                    _ = context.GetNextRequired();
+                    declaredScale = TypeNameSynonyms.ReadSecondTypeArgument(context, typeName);
                     if (context.GetNextRequired() is not Operator { Character: ')' })
                         throw SimulatedSqlException.SyntaxErrorNear(context);
                     break;
@@ -405,6 +404,8 @@ internal sealed class Cast : Expression
     /// <item>Every source but the ANSI string family refuses <c>image</c>, and
     /// every source but a string refuses <c>text</c> / <c>ntext</c> — the
     /// mirror of the legacy-LOB allow-lists above.</item>
+    /// <item>A <b><c>vector</c></b> converts to and from the character strings
+    /// and nothing else.</item>
     /// </list>
     /// Types outside that grid (<c>rowversion</c>, <c>hierarchyid</c>, the
     /// spatial pair, alias types) are not in the table and keep whatever the
@@ -421,6 +422,14 @@ internal sealed class Cast : Expression
         // explicitly (probed 2026-09-25 against SQL Server 2025).
         if (target is SqlVariantSqlType && source is VarcharSqlType { length: SqlType.MaxLengthSentinel } or NVarcharSqlType { length: SqlType.MaxLengthSentinel } or VarbinarySqlType { length: SqlType.MaxLengthSentinel })
             return true;
+
+        // A vector converts to and from the character strings alone — not a
+        // binary, not text / ntext, not sql_variant (probed 2026-09-26 against
+        // SQL Server 2025).
+        if (source is VectorSqlType)
+            return target is not VectorSqlType && !IsCharacterString(target);
+        if (target is VectorSqlType)
+            return !IsCharacterString(source);
 
         // A CLR type converts to and from a character string or a binary and
         // nothing else, another CLR type included (probed 2026-09-25 against
@@ -460,6 +469,9 @@ internal sealed class Cast : Expression
             return target is XmlSqlType;
         return source is BinarySqlType or VarbinarySqlType && (target == SqlType.Float || target == SqlType.Real);
     }
+
+    private static bool IsCharacterString(SqlType type) =>
+        type is VarcharSqlType or NVarcharSqlType or CharSqlType or NCharSqlType or SystemNameSqlType;
 
     private static bool IsCharacterOrBinary(SqlType type) =>
         type is VarcharSqlType or NVarcharSqlType or CharSqlType or NCharSqlType or SystemNameSqlType or VarbinarySqlType or BinarySqlType;
@@ -717,6 +729,15 @@ internal sealed class Cast : Expression
             ? throw SimulatedSqlException.StringOrBinaryWouldBeTruncatedLegacy(state: 17)
             : SqlValue.FromVarbinary(coerced.AsBytes[..max]);
     }
+
+    /// <summary>
+    /// The refusals of a conversion to or from <c>vector</c> that
+    /// <c>TRY_CAST</c> / <c>TRY_CONVERT</c> answer with NULL: malformed or
+    /// non-numeric JSON, the wrong dimension count, an element outside
+    /// float32, a text form too long for its target (probed 2026-09-26
+    /// against SQL Server 2025).
+    /// </summary>
+    internal static bool IsVectorConversionFailure(int number) => number is 13609 or 13670 or 42204 or 42211 or 42241;
 
     /// <summary>
     /// Set of <see cref="SimulatedSqlException.Number"/> values that

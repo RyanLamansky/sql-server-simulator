@@ -357,7 +357,7 @@ internal sealed class WindowExpression : Expression
     {
         foreach (var key in this.PartitionBy)
         {
-            if (key.GetSqlType(batch, resolveColumnType) is { IsLob: true } keyType)
+            if (key.GetSqlType(batch, resolveColumnType) is { IsIncomparable: true } keyType)
                 throw Selection.NotComparableInClause(keyType, "PARTITION BY");
         }
         foreach (var item in this.OrderBy)
@@ -373,7 +373,7 @@ internal sealed class WindowExpression : Expression
                     SqlType.OperandName(keyType, item.Expr),
                     "percentile_cont");
             }
-            if (keyType.IsLob)
+            if (keyType.IsIncomparable)
                 throw Selection.NotComparableInClause(keyType, "ORDER BY");
         }
         if (this.Kind == WindowKind.NTile && this.BucketCount is { } bucketCount

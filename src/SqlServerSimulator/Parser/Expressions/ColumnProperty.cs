@@ -236,7 +236,7 @@ internal sealed class ColumnProperty : Expression
             "SCALE" => Scale(column.Type),
             // The types ANSI_PADDING governs: the single-byte strings, the
             // binary pair and sql_variant.
-            "USESANSITRIM" => column.Type is CharSqlType or VarcharSqlType or BinarySqlType or VarbinarySqlType or SqlVariantSqlType ? 1 : null,
+            "USESANSITRIM" => column.Type is CharSqlType or VarcharSqlType or BinarySqlType or VarbinarySqlType or SqlVariantSqlType or VectorSqlType ? 1 : null,
             _ => null,
         };
     }
@@ -273,7 +273,7 @@ internal sealed class ColumnProperty : Expression
 
     /// <summary>
     /// A table column's <c>IsIndexable</c>: 0 for a MAX, LOB, xml or spatial
-    /// type, else 1 for a stored column and, for a computed one, 1 when it is
+    /// type or a vector, else 1 for a stored column and, for a computed one, 1 when it is
     /// deterministic and either persisted or precise (probed 2026-09-26 against
     /// SQL Server 2025 under the default SET options, which that answer also
     /// weighs on real).
@@ -281,7 +281,7 @@ internal sealed class ColumnProperty : Expression
     private static int IsIndexable(Database database, FoundColumn found)
     {
         var column = found.Column;
-        if (column.IsLob || column.Type is XmlSqlType or GeographySqlType or GeometrySqlType
+        if (column.IsLob || column.Type is XmlSqlType or GeographySqlType or GeometrySqlType or VectorSqlType
             || column.Type is VarcharSqlType { length: SqlType.MaxLengthSentinel } or NVarcharSqlType { length: SqlType.MaxLengthSentinel } or VarbinarySqlType { length: SqlType.MaxLengthSentinel })
         {
             return 0;
@@ -295,7 +295,8 @@ internal sealed class ColumnProperty : Expression
     /// <summary>
     /// <c>Precision</c>: a number's decimal precision (53 for float, 24 for
     /// real), a date / time type's character width, a string's or binary's
-    /// declared length (-1 for MAX), and each remaining type's fixed width.
+    /// declared length (-1 for MAX), a vector's storage length, and each
+    /// remaining type's fixed width.
     /// </summary>
     internal static int Precision(HeapColumn column) => column.Type switch
     {
@@ -312,6 +313,7 @@ internal sealed class ColumnProperty : Expression
         DateTimeOffsetSqlType offset => 26 + FractionWidth(offset.precision),
         UniqueIdentifierSqlType => 16,
         RowVersionSqlType => 8,
+        VectorSqlType vector => vector.ByteLength,
         _ => CharMaxLen(column) ?? 0,
     };
 

@@ -889,10 +889,10 @@ partial class SimulatedSqlException
     /// Mimics SQL Server error 447: an explicit <c>COLLATE</c> clause was
     /// attached to a non-string expression, named by its type's family or
     /// <c>NULL</c> for a bare one (probed 2026-09-26 against SQL Server 2025:
-    /// state 0).
+    /// state 0, and state 1 for a vector column's declaration).
     /// </summary>
-    internal static SimulatedSqlException CollateClauseRequiresString(string operandTypeName) =>
-        new($"Expression type {operandTypeName} is invalid for COLLATE clause.", 447, 16, 0);
+    internal static SimulatedSqlException CollateClauseRequiresString(string operandTypeName, byte state = 0) =>
+        new($"Expression type {operandTypeName} is invalid for COLLATE clause.", 447, 16, state);
 
     /// <summary>
     /// Mimics SQL Server error 448: an explicit <c>COLLATE</c> clause names
@@ -1140,7 +1140,7 @@ partial class SimulatedSqlException
         NVarcharSqlType { length: SqlType.MaxLengthSentinel } => "nvarchar(max)",
         VarbinarySqlType { length: SqlType.MaxLengthSentinel } => "varbinary(max)",
         VarcharSqlType or NVarcharSqlType or CharSqlType or NCharSqlType
-            or VarbinarySqlType or BinarySqlType or DecimalSqlType => type.SqlServerName,
+            or VarbinarySqlType or BinarySqlType or DecimalSqlType or VectorSqlType => type.SqlServerName,
         _ => type.ToString()!,
     };
 }

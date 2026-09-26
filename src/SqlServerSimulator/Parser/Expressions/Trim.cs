@@ -125,6 +125,7 @@ internal sealed class Trim : Expression
         if (this.trimChars is not null)
             _ = StringScalars.RequireStringArgument(this.trimChars, StringScalars.BindArgument(this.trimChars, batch, resolveColumnType, "Trim", argumentIndex: 1), "Trim", 1);
         var sourceIndex = this.trimChars is null ? 1 : 2;
+        VectorArguments.RejectVector(source.GetSqlType(batch, resolveColumnType), "Trim", sourceIndex, 6);
         var sourceType = StringScalars.RequireStringArgument(source, StringScalars.BindArgument(source, batch, resolveColumnType, "Trim", argumentIndex: sourceIndex), "Trim", sourceIndex, acceptsBinary: true);
         return StringScalars.ResolveResultType(sourceType, batch);
     }

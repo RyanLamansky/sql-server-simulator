@@ -1155,6 +1155,10 @@ internal abstract class BooleanExpression : ExpressionNode
     {
         if (!Expression.IsBareNullLiteral(left) && !Expression.IsBareNullLiteral(right))
             ThrowIfIncomparable(Expression.PairOperand(left, leftType, batch), Expression.PairOperand(right, rightType, batch), operatorName);
+        // A vector refuses even a bare NULL partner, naming itself (probed
+        // 2026-09-26 against SQL Server 2025).
+        else if (leftType is VectorSqlType || rightType is VectorSqlType)
+            throw SimulatedSqlException.OperandDataTypeInvalid(leftType is VectorSqlType ? leftType : rightType, operatorName);
         RequireResolvableCollation(leftType, rightType, operatorName);
     }
 
@@ -2971,6 +2975,9 @@ internal abstract class BooleanExpression : ExpressionNode
         {
             if ((type.IsLob && !type.IsLegacyLob) || type is SqlVariantSqlType)
                 throw SimulatedSqlException.InvalidArgumentDataType(type.SqlServerName, argumentIndex, "like");
+            // A vector is refused at state 6 (probed 2026-09-26 against SQL
+            // Server 2025).
+            Expressions.VectorArguments.RejectVector(type, "like", argumentIndex, 6);
         }
 
         internal override string DebugDisplay() => this.escape is null

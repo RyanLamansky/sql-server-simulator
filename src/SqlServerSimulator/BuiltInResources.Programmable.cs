@@ -121,9 +121,9 @@ internal static partial class BuiltInResources
             new("xml_collection_id", SqlType.Int32, null, false),
             new("is_readonly", SqlType.Bit, null, false),
             new("is_nullable", SqlType.Bit, null, true),
-            // Vector-typed parameters aren't modeled, so the pair is always
-            // NULL (mirroring sys.columns' vector pair). DacFx's parameter
-            // reverse-engineering reads both.
+            // A vector parameter's dimension count and element type, NULL
+            // for any other (mirroring sys.columns' vector pair). DacFx's
+            // parameter reverse-engineering reads both.
             new("vector_dimensions", SqlType.Int32, null, true),
             new("vector_base_type_desc", NVarcharSqlType.Get(10, Collation.Catalog, Coercibility.Implicit), 10, true),
         ];
@@ -1123,6 +1123,9 @@ internal static partial class BuiltInResources
         var nullDefault = SqlValue.Null(SqlType.SqlVariant);
         var nullVectorDims = SqlValue.Null(SqlType.Int32);
         var nullVectorDesc = SqlValue.Null(SqlType.NVarchar);
+        var float32Desc = SqlValue.FromString(NVarcharSqlType.Get(10, Collation.Catalog, Coercibility.Implicit), "float32");
+        SqlValue VectorDims(SqlType type) => type is VectorSqlType vector ? SqlValue.FromInt32(vector.dimensions) : nullVectorDims;
+        SqlValue VectorDesc(SqlType type) => type is VectorSqlType ? float32Desc : nullVectorDesc;
         foreach (var schema in database.Schemas.Values)
         {
             foreach (var proc in schema.Procedures.Values.OrderBy(p => p.ObjectId))
@@ -1158,8 +1161,8 @@ internal static partial class BuiltInResources
                         zeroInt,
                         SqlValue.FromBoolean(isTvp),
                         trueBit,
-                        nullVectorDims,
-                        nullVectorDesc,
+                        VectorDims(param.Type),
+                        VectorDesc(param.Type),
                     ];
                 }
             }
@@ -1191,8 +1194,8 @@ internal static partial class BuiltInResources
                         zeroInt,
                         falseBit,
                         trueBit,
-                        nullVectorDims,
-                        nullVectorDesc,
+                        VectorDims(scalarFn.ReturnType),
+                        VectorDesc(scalarFn.ReturnType),
                     ];
                 }
                 for (var i = 0; i < fn.Parameters.Length; i++)
@@ -1217,8 +1220,8 @@ internal static partial class BuiltInResources
                         zeroInt,
                         falseBit,
                         trueBit,
-                        nullVectorDims,
-                        nullVectorDesc,
+                        VectorDims(p.Type),
+                        VectorDesc(p.Type),
                     ];
                 }
             }
@@ -1447,6 +1450,7 @@ internal static partial class BuiltInResources
             XmlSqlType or SpatialSqlType => (-1, -1, null, null, null, null),
             HierarchyIdSqlType => (892, 892, null, null, null, null),
             SqlVariantSqlType => (0, 0, null, null, null, null),
+            VectorSqlType vector => (vector.ByteLength, vector.ByteLength, null, null, null, null),
             _ => throw new NotSupportedException($"No INFORMATION_SCHEMA.COLUMNS metadata for {t}."),
         };
     }

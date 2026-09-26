@@ -1897,6 +1897,7 @@ internal abstract class Expression : ExpressionNode
                 "SUSER_SNAME" => new SUserName(context, isSidVariant: true),
                 "SYSDATETIME" => new CurrentTimeFunction(context, CurrentTimeKind.SysDateTime),
                 "TRY_CONVERT" => new ConvertExpression(context, tryMode: true),
+                "VECTOR_NORM" => new VectorNorm(context, normalize: false),
                 _ => null
             },
             12 => uppercaseName switch
@@ -1949,6 +1950,7 @@ internal abstract class Expression : ExpressionNode
                 "SCOPE_IDENTITY" => new LastIdentityExpression(context),
                 "SERVERPROPERTY" => new ServerProperty(context),
                 "SYSUTCDATETIME" => new CurrentTimeFunction(context, CurrentTimeKind.SysUtcDateTime),
+                "VECTORPROPERTY" => new VectorProperty(context),
                 _ => null
             },
             15 => uppercaseName switch
@@ -1961,6 +1963,7 @@ internal abstract class Expression : ExpressionNode
                 "PERCENTILE_DISC" => WindowExpression.ParsePercentile(context, WindowKind.PercentileDisc),
                 "SESSIONPROPERTY" => new SessionProperty(context),
                 "SESSION_CONTEXT" => new SessionContext(context),
+                "VECTOR_DISTANCE" => new VectorDistance(context),
                 _ => null
             },
             16 => uppercaseName switch
@@ -1972,6 +1975,7 @@ internal abstract class Expression : ExpressionNode
                 "OBJECTPROPERTYEX" => new ObjectPropertyEx(context),
                 "ORIGINAL_DB_NAME" => new OriginalDbName(context),
                 "TODATETIMEOFFSET" => new ToDateTimeOffset(context),
+                "VECTOR_NORMALIZE" => new VectorNorm(context, normalize: true),
                 _ => null
             },
             17 => uppercaseName switch

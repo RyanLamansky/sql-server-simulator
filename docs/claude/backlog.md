@@ -287,7 +287,7 @@ Blocked on a larger unmodeled parent feature (shipping a function here implies t
   A broad surface — each proc is its own result-shape contract over the catalog views.
   Ships piecemeal by popularity, not as a bundle.
 
-- **SQL Server 2025's `vector` type** — `vector(n)` storage and its TDS type, `VECTOR_DISTANCE` / `VECTOR_NORM` / `VECTOR_NORMALIZE` / `VECTORPROPERTY`, vector indexes and `VECTOR_SEARCH` (all probed present on SQL Server 2025; unrecognized here, Msg 195 / 243).
+- **SQL Server 2025's vector search** — vector indexes (`CREATE VECTOR INDEX`), `VECTOR_SEARCH`, the `float16` base type, and the binary vector TDS type a vector-aware client negotiates (the `vector` type and its four functions ship — see [`vector.md`](vector.md)).
 - **SQL Server 2025's native `json` type** — the storage type and the functions that take only it (`JSON_CONTAINS` refuses a `varchar` document with Msg 8116), along with its catalog and TDS surface.
 
 Low priority / niche — simulatable (as placeholder constants or a small model) but rarely hit, so not worth attention yet:
