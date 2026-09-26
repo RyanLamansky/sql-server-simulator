@@ -457,6 +457,11 @@ internal sealed partial class Selection
                     continue;
                 }
 
+                // The percentile fraction is the statement's, read from the
+                // group's first row; the value flows through the generic Add.
+                if (state.Aggregators[i] is Aggregators.PercentileAggregator percentile)
+                    percentile.SetFraction(aggregate.Separator!.Run(rowRuntime));
+
                 // JSON_OBJECTAGG needs the per-row key set before the value
                 // is streamed; the value flows through the generic Add below.
                 if (aggregate.Kind == AggregateKind.JsonObjectAgg

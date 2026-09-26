@@ -119,6 +119,8 @@ internal abstract class Aggregator
         AggregateKind.JsonObjectAgg => new JsonObjectAggAggregator(resultType, aggregate.JsonNulls, JsonValueRender.ProducesJson(aggregate.Operand!)),
         AggregateKind.ChecksumAgg => new ChecksumAggAggregator(aggregate.Distinct),
         AggregateKind.Product => new ProductAggregator(resultType, aggregate.Distinct),
+        AggregateKind.ApproxPercentileCont or AggregateKind.ApproxPercentileDisc
+            => new PercentileAggregator(resultType, aggregate.Kind == AggregateKind.ApproxPercentileCont, aggregate.OrderBy![0].Descending),
         _ => throw new NotSupportedException($"Aggregator for {aggregate.Kind} not implemented yet."),
     };
 

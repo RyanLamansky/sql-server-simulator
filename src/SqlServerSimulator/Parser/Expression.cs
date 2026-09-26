@@ -1934,6 +1934,8 @@ internal abstract class Expression : ExpressionNode
             },
             22 => uppercaseName switch
             {
+                "APPROX_PERCENTILE_CONT" => AggregateExpression.ParseApproxPercentile(context, AggregateKind.ApproxPercentileCont),
+                "APPROX_PERCENTILE_DISC" => AggregateExpression.ParseApproxPercentile(context, AggregateKind.ApproxPercentileDisc),
                 "CURRENT_TRANSACTION_ID" => new CurrentTransactionId(context),
                 "SMALLDATETIMEFROMPARTS" => new DatePartsBuilder(context, DatePartsBuilderKind.SmallDateTimeFromParts),
                 _ => null

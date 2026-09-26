@@ -456,6 +456,7 @@ Sort keys decode only the ORDER BY columns off each row (`ComputeTopLevelOrderKe
 
 ## Aggregates
 `COUNT(*)` / `COUNT(expr)` / `COUNT(DISTINCT)` / `COUNT_BIG`, `SUM` / `AVG`, `MAX` / `MIN`, statistical (`STDEV` / `STDEVP` / `VAR` / `VARP`), `STRING_AGG`, `CHECKSUM_AGG`, `APPROX_COUNT_DISTINCT`, and SQL Server 2025's `PRODUCT` (SUM's result types, save a fractional decimal multiplying at scale 6; `ProductAggregator`).
+`APPROX_PERCENTILE_CONT` / `APPROX_PERCENTILE_DISC` compute the **exact** percentile (`PercentileAggregator`), which is what real's sketch answers over any set small enough to compare; over a large one real's approximation can drift from it — a divergence in the same spirit as `APPROX_COUNT_DISTINCT` counting exactly.
 `AVG(int)` truncates; `AVG(decimal(p,s))` widens to `decimal(38, max(s,6))`.
 `SUM` / `AVG` also widen `real` to `float` and `smallmoney` to `money`, where `MIN` / `MAX` keep the operand's type — see [`arithmetic.md`](arithmetic.md#the-approximate-family-float--real).
 

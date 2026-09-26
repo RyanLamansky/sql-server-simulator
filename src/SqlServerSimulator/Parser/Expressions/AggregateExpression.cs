@@ -24,6 +24,8 @@ internal enum AggregateKind
     JsonArrayAgg,
     JsonObjectAgg,
     Product,
+    ApproxPercentileCont,
+    ApproxPercentileDisc,
 }
 
 /// <summary>
@@ -165,6 +167,8 @@ internal sealed class AggregateExpression : Expression
         AggregateKind.JsonArrayAgg => "json_arrayagg",
         AggregateKind.JsonObjectAgg => "json_objectagg",
         AggregateKind.Product => "product",
+        AggregateKind.ApproxPercentileCont => "approx_percentile_cont",
+        AggregateKind.ApproxPercentileDisc => "approx_percentile_disc",
         _ => throw new InvalidOperationException($"Unknown aggregate kind {kind}."),
     };
 
@@ -312,6 +316,7 @@ internal sealed class AggregateExpression : Expression
         AggregateKind.Sum => DeriveSumResultType(this.RejectDistinctLob(this.Operand!.GetSqlType(batch, resolveColumnType))),
         AggregateKind.Avg => DeriveAvgResultType(this.RejectDistinctLob(this.Operand!.GetSqlType(batch, resolveColumnType))),
         AggregateKind.Product => DeriveProductResultType(this.RejectDistinctLob(this.Operand!.GetSqlType(batch, resolveColumnType))),
+        AggregateKind.ApproxPercentileCont or AggregateKind.ApproxPercentileDisc => this.BindApproxPercentile(batch, resolveColumnType),
         _ => throw new InvalidOperationException($"Unknown aggregate kind {this.Kind}."),
     };
 
@@ -409,6 +414,80 @@ internal sealed class AggregateExpression : Expression
     /// SQL Server 2025 — int does NOT auto-widen to bigint, so an overflowing
     /// sum raises Msg 8115.
     /// </summary>
+    /// <summary>
+    /// <c>APPROX_PERCENTILE_CONT</c> reads any number into <c>float</c>;
+    /// <c>APPROX_PERCENTILE_DISC</c> answers in its operand's type but takes
+    /// no <c>decimal</c> / <c>numeric</c>; anything else is Msg 402 against
+    /// <c>numeric</c>, and a constant fraction outside <c>[0, 1]</c> — NULL
+    /// included — is Msg 8727 (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    private SqlType BindApproxPercentile(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        var operandType = this.Operand!.GetSqlType(batch, resolveColumnType);
+        _ = this.Separator!.GetSqlType(batch, resolveColumnType);
+        if (this.Separator is Value { } constant)
+        {
+            var fraction = constant.Run(new RuntimeContext(static name => throw SimulatedSqlException.ColumnReferenceNotAllowed(name), batch));
+            if (fraction.IsNull || fraction.CoerceTo(SqlType.Float).AsDouble is < 0 or > 1)
+                throw SimulatedSqlException.PercentileInputOutOfRange();
+        }
+        var continuous = this.Kind == AggregateKind.ApproxPercentileCont;
+        var accepted = operandType.Category is SqlTypeCategory.Integer or SqlTypeCategory.Approximate or SqlTypeCategory.Money
+            || (continuous && operandType is DecimalSqlType);
+        return !accepted
+            ? throw SimulatedSqlException.IncompatibleDataTypesInOperator("numeric", operandType.SqlServerName, this.LowerName)
+            : continuous ? SqlType.Float : operandType;
+    }
+
+    /// <summary>
+    /// Parses <c>APPROX_PERCENTILE_CONT | _DISC (fraction) WITHIN GROUP (ORDER BY
+    /// value [ASC | DESC])</c>: the value is the operand, the fraction rides in
+    /// <see cref="Separator"/>'s slot, and the direction in <see cref="OrderBy"/>.
+    /// The ordering is mandatory and takes exactly one expression (Msg 10751).
+    /// Leaves the cursor on the WITHIN GROUP's closing <c>)</c>.
+    /// </summary>
+    internal static AggregateExpression ParseApproxPercentile(ParserContext context, AggregateKind kind)
+    {
+        var name = LowerNameOf(kind);
+        var fraction = Expression.Parse(context);
+        if (context.Token is not Operator { Character: ')' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        if (context.GetNextRequired() is not UnquotedString { ContextualKeyword: ContextualKeyword.Within })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Group })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        if (context.GetNextRequired() is not Operator { Character: '(' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Order })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.By })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        context.MoveNextRequired();
+        var aggregatesBefore = context.AggregatesParsed;
+        var subqueriesBefore = context.SubqueriesParsed;
+        var value = Expression.Parse(context);
+        ValidateOperand(context, kind, value, aggregatesBefore, subqueriesBefore);
+        var descending = false;
+        switch (context.Token)
+        {
+            case ReservedKeyword { Keyword: Keyword.Asc }:
+                context.MoveNextRequired();
+                break;
+            case ReservedKeyword { Keyword: Keyword.Desc }:
+                descending = true;
+                context.MoveNextRequired();
+                break;
+        }
+        if (context.Token is Operator { Character: ',' })
+            throw SimulatedSqlException.WithinGroupNeedsOneExpression(name);
+        if (context.Token is not Operator { Character: ')' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        return Register(context, new AggregateExpression(kind, value, distinct: false, separator: fraction)
+        {
+            OrderBy = [OrderBySpec.FromExpression(value, descending)],
+        });
+    }
+
     /// <summary>
     /// <c>PRODUCT</c>'s result type: SUM's, except that a decimal with any
     /// fractional digits multiplies at scale 6 whatever its own (probed
@@ -649,6 +728,8 @@ internal sealed class AggregateExpression : Expression
             AggregateKind.JsonArrayAgg => "JSON_ARRAYAGG",
             AggregateKind.JsonObjectAgg => "JSON_OBJECTAGG",
             AggregateKind.Product => "PRODUCT",
+            AggregateKind.ApproxPercentileCont => "APPROX_PERCENTILE_CONT",
+            AggregateKind.ApproxPercentileDisc => "APPROX_PERCENTILE_DISC",
             _ => this.Kind.ToString(),
         };
         if (this.Kind == AggregateKind.JsonObjectAgg)

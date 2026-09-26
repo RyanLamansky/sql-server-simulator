@@ -694,4 +694,26 @@ public sealed class AggregateTests
     [DataRow("select product(v) from (values (cast(1 as bit))) t (v)", 8117)]
     public void Product_RefusesAsRealDoes(string sql, int number)
         => new Simulation().AssertSqlError(sql, number);
+
+    /// <summary>
+    /// APPROX_PERCENTILE_CONT / _DISC answer the exact percentile over sets
+    /// this small, as real's sketch does; DESC reads the ascending values at
+    /// 1 - p (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("approx_percentile_cont(0.25) within group (order by v)", "1.75")]
+    [DataRow("approx_percentile_disc(0.25) within group (order by v)", "1")]
+    [DataRow("approx_percentile_cont(0.25) within group (order by v desc)", "3.25")]
+    [DataRow("approx_percentile_disc(0.25) within group (order by v desc)", "3")]
+    public void ApproxPercentile_AnswersAsRealDoes(string expression, string expected)
+        => AreEqual(expected, Convert.ToString(new Simulation().ExecuteScalar($"select {expression} from (values (1), (2), (3), (4), (null)) t (v)"), System.Globalization.CultureInfo.InvariantCulture));
+
+    [TestMethod]
+    [DataRow("select approx_percentile_disc(0.5) within group (order by v) from (values (cast(1 as decimal(5, 2)))) t (v)", 402)]
+    [DataRow("select approx_percentile_cont(0.5) within group (order by v) from (values ('a')) t (v)", 402)]
+    [DataRow("select approx_percentile_cont(1.5) within group (order by v) from (values (1)) t (v)", 8727)]
+    [DataRow("select approx_percentile_cont(0.5) within group (order by v) over () from (values (1)) t (v)", 4113)]
+    [DataRow("select approx_percentile_cont(0.5) within group (order by v, v) from (values (1)) t (v)", 10751)]
+    public void ApproxPercentile_RefusesAsRealDoes(string sql, int number)
+        => new Simulation().AssertSqlError(sql, number);
 }

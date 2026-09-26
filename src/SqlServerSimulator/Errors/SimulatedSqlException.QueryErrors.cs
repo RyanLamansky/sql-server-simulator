@@ -736,10 +736,19 @@ partial class SimulatedSqlException
 
     /// <summary>
     /// Mimics SQL Server's Msg 4113 — an aggregate that has no windowed form
-    /// (currently <c>STRING_AGG</c>) was used with <c>OVER</c>.
+    /// (<c>STRING_AGG</c> at state 4, the <c>APPROX_PERCENTILE</c> pair at
+    /// state 8) was used with <c>OVER</c>.
     /// </summary>
-    internal static SimulatedSqlException FunctionNotValidForOver(string functionLowerName) =>
-        new($"The function '{functionLowerName}' is not a valid windowing function, and cannot be used with the OVER clause.", 4113, 15, 4);
+    internal static SimulatedSqlException FunctionNotValidForOver(string functionLowerName, byte state = 4) =>
+        new($"The function '{functionLowerName}' is not a valid windowing function, and cannot be used with the OVER clause.", 4113, 15, state);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 10751 — an <c>APPROX_PERCENTILE</c> function's
+    /// <c>WITHIN GROUP</c> ordering named more than one expression (probed
+    /// 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException WithinGroupNeedsOneExpression(string functionLowerName) =>
+        new($"The ORDER BY in WITHIN GROUP clause of '{functionLowerName}' function must have exactly one expression.", 10751, 15, 2);
 
     /// <summary>
     /// Mimics SQL Server's Msg 4116 — <c>NTILE(N)</c> requires <c>N</c> to be a
