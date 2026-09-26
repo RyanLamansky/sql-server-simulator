@@ -206,8 +206,8 @@ partial class Simulation
 
         // Optional WITH-clause (SCHEMABINDING is captured for
         // sys.sql_modules / OBJECTPROPERTY; ENCRYPTION parse-and-discards).
-        var isSchemaBound = context.Token is ReservedKeyword { Keyword: Keyword.With }
-            && ParseInlineTvfOptions(context);
+        var options = ParseModuleOptions(context, ModuleOptionHost.TableFunction, functionName.Leaf);
+        var isSchemaBound = options.SchemaBinding;
 
         _ = ConsumeOptionalBodyAs(context);
 
@@ -306,6 +306,8 @@ partial class Simulation
             IsSchemaBound = isSchemaBound,
             UsesQuotedIdentifier = context.QuotedIdentifiers,
             UsesAnsiNulls = context.Batch.Connection.AnsiNulls,
+            ExecuteAsClause = options.ExecuteAs,
+            ExecuteAsPrincipalId = ResolveExecuteAsPrincipalId(context, options.ExecuteAs),
         };
         if (replaced is not null)
             function.ModifyDate = context.Batch.CurrentStatement.UtcNow;
@@ -330,65 +332,16 @@ partial class Simulation
         var returnType = ParseFunctionReturnType(context, ordinal: 0, out var returnAliasType);
         returnSpelledNumeric = returnAliasType?.SpelledNumeric ?? returnSpelledNumeric;
 
-        // Optional WITH option [, option …] clause. RETURNS NULL ON NULL INPUT
-        // is the only option that affects runtime semantics (NULL-propagation
-        // skips the body); SCHEMABINDING records on the function for the
-        // catalog surfaces without being enforced, and ENCRYPTION parse-and-
-        // discards. Multiple options separate by commas.
-        var returnsNullOnNullInput = false;
-        var isSchemaBound = false;
-        string? executeAsClause = null;
-        if (context.Token is ReservedKeyword { Keyword: Keyword.With })
-        {
-            context.MoveNextRequired();
-            while (true)
-            {
-                switch (context.Token)
-                {
-                    case UnquotedString { ContextualKeyword: ContextualKeyword.Returns }:
-                        if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Null })
-                            throw SimulatedSqlException.SyntaxErrorNear(context);
-                        if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.On })
-                            throw SimulatedSqlException.SyntaxErrorNear(context);
-                        if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Null })
-                            throw SimulatedSqlException.SyntaxErrorNear(context);
-                        if (context.GetNextRequired() is not UnquotedString { ContextualKeyword: ContextualKeyword.Input })
-                            throw SimulatedSqlException.SyntaxErrorNear(context);
-                        returnsNullOnNullInput = true;
-                        context.MoveNextRequired();
-                        break;
-                    case UnquotedString { ContextualKeyword: ContextualKeyword.SchemaBinding }:
-                        isSchemaBound = true;
-                        context.MoveNextRequired();
-                        break;
-                    case UnquotedString { ContextualKeyword: ContextualKeyword.Encryption }:
-                        context.MoveNextRequired();
-                        break;
-                    case ReservedKeyword { Keyword: Keyword.Execute }:
-                    case ReservedKeyword { Keyword: Keyword.Exec }:
-                        // EXECUTE AS <caller> — consume EXECUTE, AS, and capture
-                        // the following principal token (CALLER / SELF / OWNER /
-                        // a quoted name) for the invocation-time frame push.
-                        if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.As })
-                            throw SimulatedSqlException.SyntaxErrorNear(context);
-                        context.MoveNextRequired();
-                        executeAsClause = context.Token switch
-                        {
-                            Name principal => principal.Value,
-                            Literal { Value: { IsNull: false } quoted } => quoted.AsString,
-                            _ => throw SimulatedSqlException.SyntaxErrorNear(context),
-                        };
-                        context.MoveNextRequired();
-                        break;
-                    default:
-                        throw new NotSupportedException(
-                            "Scalar UDF WITH options accept RETURNS NULL ON NULL INPUT / SCHEMABINDING / ENCRYPTION / EXECUTE AS …; everything else is unmodeled.");
-                }
-                if (context.Token is not Operator { Character: ',' })
-                    break;
-                context.MoveNextRequired();
-            }
-        }
+        // Optional WITH clause. RETURNS NULL ON NULL INPUT is the only option
+        // that affects runtime semantics (NULL-propagation skips the body);
+        // SCHEMABINDING records on the function for the catalog surfaces
+        // without being enforced.
+        var options = ParseModuleOptions(context, ModuleOptionHost.ScalarFunction, functionName.Leaf);
+        if (options.NativeCompilation)
+            throw new NotSupportedException("A natively compiled scalar function isn't modeled.");
+        var returnsNullOnNullInput = options.ReturnsNullOnNullInput;
+        var isSchemaBound = options.SchemaBinding;
+        var executeAsClause = options.ExecuteAs;
 
         // AS EXTERNAL NAME assembly.[class].method → the body lives in a
         // registered CLR assembly rather than in T-SQL. The CLR form needs the
@@ -547,8 +500,7 @@ partial class Simulation
 
         // Optional WITH-clause: SCHEMABINDING is captured, ENCRYPTION
         // parse-and-discards. RETURNS NULL ON NULL INPUT here → Msg 487.
-        var isSchemaBound = context.Token is ReservedKeyword { Keyword: Keyword.With }
-            && ParseInlineTvfOptions(context);
+        var isSchemaBound = ParseModuleOptions(context, ModuleOptionHost.InlineFunction, functionName.Leaf).SchemaBinding;
 
         _ = ConsumeOptionalBodyAs(context);
         if (context.Token is not ReservedKeyword { Keyword: Keyword.Return })
@@ -621,40 +573,6 @@ partial class Simulation
             RebindExtendedProperties(context.Batch, replaced, function);
         RecordDdlEvent(context, replaced is null ? "CREATE_FUNCTION" : "ALTER_FUNCTION", schema.Name, functionName.Leaf, "FUNCTION");
         return true;
-    }
-
-    /// <summary>
-    /// Consumes a <c>WITH option [, option ...]</c> clause on an inline TVF.
-    /// Cursor on entry: the <c>WITH</c> keyword. Cursor on exit: the first
-    /// token after the option list (expected to be <c>AS</c>). Returns true
-    /// when <c>SCHEMABINDING</c> was among the options.
-    /// </summary>
-    private static bool ParseInlineTvfOptions(ParserContext context)
-    {
-        var isSchemaBound = false;
-        context.MoveNextRequired();
-        while (true)
-        {
-            switch (context.Token)
-            {
-                case UnquotedString { ContextualKeyword: ContextualKeyword.SchemaBinding }:
-                    isSchemaBound = true;
-                    context.MoveNextRequired();
-                    break;
-                case UnquotedString { ContextualKeyword: ContextualKeyword.Encryption }:
-                    context.MoveNextRequired();
-                    break;
-                case UnquotedString { ContextualKeyword: ContextualKeyword.Returns }:
-                    // WITH RETURNS NULL ON NULL INPUT on a TVF → Msg 487.
-                    throw SimulatedSqlException.InvalidOptionForCreateFunction();
-                default:
-                    throw SimulatedSqlException.SyntaxErrorNear(context);
-            }
-            if (context.Token is not Operator { Character: ',' })
-                break;
-            context.MoveNextRequired();
-        }
-        return isSchemaBound;
     }
 
     /// <summary>

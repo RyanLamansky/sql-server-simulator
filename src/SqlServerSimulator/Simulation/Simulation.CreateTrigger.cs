@@ -41,6 +41,7 @@ partial class Simulation
         if (context.Token is not Name)
             throw SimulatedSqlException.SyntaxErrorNear(context);
         var triggerName = BatchContext.ParseObjectName(context);
+        context.Batch.ErrorProcedureName = triggerName.Leaf;
         RejectQualifiedModuleName(triggerName, "TRIGGER");
         if (!context.Batch.TryResolveSchema(triggerName, out var triggerSchema))
             throw SimulatedSqlException.SpecifiedSchemaNameDoesNotExist(triggerName.ImmediateQualifier ?? Database.DefaultSchemaName);
@@ -66,39 +67,8 @@ partial class Simulation
 
         // Optional WITH option list, which precedes the timing in real SQL
         // Server's grammar (ON table [WITH options] { FOR | AFTER | INSTEAD OF }).
-        // ENCRYPTION parses-and-ignores; EXECUTE AS is captured for the per-fire
-        // frame push. Comma-separated; ends at the timing keyword.
-        string? executeAsClause = null;
-        if (context.Token is ReservedKeyword { Keyword: Keyword.With })
-        {
-            context.MoveNextRequired();
-            while (true)
-            {
-                switch (context.Token)
-                {
-                    case ReservedKeyword { Keyword: Keyword.Execute or Keyword.Exec }:
-                        if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.As })
-                            throw SimulatedSqlException.SyntaxErrorNear(context);
-                        context.MoveNextRequired();
-                        executeAsClause = context.Token switch
-                        {
-                            Name principal => principal.Value,
-                            Literal { Value: { IsNull: false } quoted } => quoted.AsString,
-                            _ => throw SimulatedSqlException.SyntaxErrorNear(context),
-                        };
-                        context.MoveNextRequired();
-                        break;
-                    case UnquotedString { ContextualKeyword: ContextualKeyword.Encryption }:
-                        context.MoveNextRequired();
-                        break;
-                    default:
-                        throw SimulatedSqlException.SyntaxErrorNear(context);
-                }
-                if (context.Token is not Operator { Character: ',' })
-                    break;
-                context.MoveNextRequired();
-            }
-        }
+        // EXECUTE AS is captured for the per-fire frame push.
+        var executeAsClause = ParseModuleOptions(context, ModuleOptionHost.Trigger, triggerName.Leaf).ExecuteAs;
 
         // Timing: AFTER (contextual) / FOR (reserved synonym) / INSTEAD OF
         // (contextual + reserved). INSTEAD OF replaces the DML on the
@@ -446,17 +416,9 @@ partial class Simulation
         // Cursor on DATABASE. Advance to the next significant token.
         context.MoveNextRequired();
 
-        // Optional WITH option list (parse-and-ignore — mirrors the DML
-        // trigger path; AW emits no WITH options on its DDL trigger).
-        if (context.Token is ReservedKeyword { Keyword: Keyword.With })
-        {
-            while (context.Token is not (null or
-                ReservedKeyword { Keyword: Keyword.For } or
-                UnquotedString { ContextualKeyword: ContextualKeyword.After }))
-            {
-                context.MoveNextRequired();
-            }
-        }
+        // Optional WITH option list, judged as the DML trigger's is; a DDL
+        // trigger runs as its caller whatever EXECUTE AS says.
+        _ = ParseModuleOptions(context, ModuleOptionHost.Trigger, triggerName.Leaf);
 
         if (context.Token is not (ReservedKeyword { Keyword: Keyword.For } or
             UnquotedString { ContextualKeyword: ContextualKeyword.After }))

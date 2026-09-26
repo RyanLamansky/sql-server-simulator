@@ -331,11 +331,14 @@ public sealed class ScalarFunctionTests
         AreEqual(7, simulation.ExecuteScalar("select dbo.safe_add(3, 4)"));
     }
 
-    /// <summary>Unknown WITH option still raises NotSupportedException — closed accept-list enforced.</summary>
+    /// <summary>A natively compiled function isn't modeled; one missing its SCHEMABINDING is real's Msg 10796.</summary>
     [TestMethod]
-    public void CreateFunction_UnknownWithOption_Rejected()
-        => Throws<NotSupportedException>(() => new Simulation().ExecuteNonQuery(
-            "create function dbo.bad(@v int) returns int with native_compilation as begin return @v end"));
+    public void CreateFunction_NativeCompilation()
+    {
+        _ = Throws<NotSupportedException>(() => new Simulation().ExecuteNonQuery(
+            "create function dbo.bad(@v int) returns int with native_compilation, schemabinding as begin return @v end"));
+        _ = new Simulation().AssertSqlError("create function dbo.bad(@v int) returns int with native_compilation as begin return @v end", 10796);
+    }
 
     // --- The body-introducing AS is optional for every function kind ---
 

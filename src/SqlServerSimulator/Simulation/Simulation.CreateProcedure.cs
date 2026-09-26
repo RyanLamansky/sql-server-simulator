@@ -140,13 +140,13 @@ partial class Simulation
             throw SimulatedSqlException.SyntaxErrorNear(context);
         }
 
-        // Optional WITH option-list before AS: RECOMPILE / ENCRYPTION / FOR
-        // REPLICATION are parse-and-ignore; EXECUTE AS is captured and applied
-        // as an impersonation frame around the body at invocation.
-        string? executeAsClause = null;
-        var nativelyCompiled = false;
-        if (context.Token is ReservedKeyword { Keyword: Keyword.With })
-            executeAsClause = ParseProcedureWithOptions(context, out nativelyCompiled);
+        // Optional WITH option-list before AS: EXECUTE AS is captured and
+        // applied as an impersonation frame around the body at invocation, and
+        // NATIVE_COMPILATION admits a BEGIN ATOMIC body, which runs as the
+        // regular BEGIN…END flow.
+        var options = ParseModuleOptions(context, ModuleOptionHost.Procedure, procName.Leaf);
+        var executeAsClause = options.ExecuteAs;
+        var nativelyCompiled = options.NativeCompilation;
 
         if (context.Token is not ReservedKeyword { Keyword: Keyword.As })
             throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -482,76 +482,5 @@ partial class Simulation
             context.Batch, qualifiedTypeName, typeName, declaredMaxLength, declaredScale,
             index: ordinal, TypeSpecSite.Scalar, columnName: null);
         return (resolvedType, declaredMaxLength, alias);
-    }
-
-    /// <summary>
-    /// Consumes the optional <c>WITH option [, option ...]</c> clause before
-    /// <c>AS</c>. <c>RECOMPILE</c> / <c>ENCRYPTION</c> / <c>SCHEMABINDING</c> /
-    /// <c>NATIVE_COMPILATION</c> / <c>FOR REPLICATION</c> parse-and-ignore;
-    /// <c>EXECUTE AS CALLER|SELF|OWNER|'name'</c> is captured and returned (the
-    /// invocation applies it as an impersonation frame), and
-    /// <paramref name="nativelyCompiled"/> reports <c>NATIVE_COMPILATION</c>,
-    /// which admits a <c>BEGIN ATOMIC</c> body. Cursor on entry: the
-    /// <c>WITH</c> keyword; cursor on exit: the <c>AS</c> keyword.
-    /// </summary>
-    private static string? ParseProcedureWithOptions(ParserContext context, out bool nativelyCompiled)
-    {
-        string? executeAsClause = null;
-        nativelyCompiled = false;
-        context.MoveNextRequired();
-        while (true)
-        {
-            switch (context.Token)
-            {
-                case UnquotedString { ContextualKeyword: ContextualKeyword.Native_Compilation }:
-                    // Native compilation has no code path of its own here; it
-                    // admits the BEGIN ATOMIC body block, which runs as the
-                    // regular BEGIN…END flow.
-                    nativelyCompiled = true;
-                    context.MoveNextRequired();
-                    break;
-                case UnquotedString { ContextualKeyword: ContextualKeyword.Recompile }:
-                case UnquotedString { ContextualKeyword: ContextualKeyword.Encryption }:
-                case UnquotedString { ContextualKeyword: ContextualKeyword.SchemaBinding }:
-                    // SCHEMABINDING parse-and-ignore: the simulator doesn't
-                    // model schema-binding enforcement for procedures.
-                    context.MoveNextRequired();
-                    break;
-                case ReservedKeyword { Keyword: Keyword.Execute }:
-                case ReservedKeyword { Keyword: Keyword.Exec }:
-                    // EXECUTE AS <caller> — consume EXECUTE, AS, and capture the
-                    // following principal token (CALLER / SELF / OWNER / a
-                    // quoted user name) for the invocation-time frame push.
-                    if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.As })
-                        throw SimulatedSqlException.SyntaxErrorNear(context);
-                    context.MoveNextRequired();
-                    executeAsClause = context.Token switch
-                    {
-                        Name principal => principal.Value,
-                        Literal { Value: { IsNull: false } quoted } => quoted.AsString,
-                        _ => throw SimulatedSqlException.SyntaxErrorNear(context),
-                    };
-                    context.MoveNextRequired();
-                    break;
-                case ReservedKeyword { Keyword: Keyword.For }:
-                    // REPLICATION lives in the reserved Keyword enum, so the
-                    // tokenizer surfaces it as ReservedKeyword — not as the
-                    // ContextualKeyword.Replication UnquotedString form. Accept
-                    // either to survive both classification paths.
-                    if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Replication }
-                        and not UnquotedString { ContextualKeyword: ContextualKeyword.Replication })
-                    {
-                        throw SimulatedSqlException.SyntaxErrorNear(context);
-                    }
-                    context.MoveNextRequired();
-                    break;
-                default:
-                    throw SimulatedSqlException.SyntaxErrorNear(context);
-            }
-            if (context.Token is not Operator { Character: ',' })
-                break;
-            context.MoveNextRequired();
-        }
-        return executeAsClause;
     }
 }

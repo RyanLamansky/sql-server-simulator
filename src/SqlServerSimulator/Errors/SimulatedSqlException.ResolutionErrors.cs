@@ -278,13 +278,32 @@ partial class SimulatedSqlException
         new("Must pass parameter number 2 and subsequent parameters as '@name = value'. After the form '@name = value' has been used, all subsequent parameters must be passed in the form '@name = value'.", 119, 15, 1);
 
     /// <summary>
-    /// Mimics SQL Server's Msg 487 — fired by <c>CREATE FUNCTION</c> when an
-    /// invalid option appears in the <c>WITH</c> clause (e.g. <c>WITH RETURNS
-    /// NULL ON NULL INPUT</c> on an inline TVF — that option is scalar-only).
+    /// Mimics SQL Server's Msg 487 — a module's <c>WITH</c> clause named an
+    /// option its grammar parses but the module kind doesn't take (e.g.
+    /// <c>WITH RETURNS NULL ON NULL INPUT</c> on an inline TVF, <c>WITH
+    /// RECOMPILE</c> on a view). <paramref name="statement"/> is
+    /// <c>FUNCTION</c> / <c>PROCEDURE</c> / <c>VIEW</c> / <c>TRIGGER</c>.
     /// Verbatim wording probe-confirmed.
     /// </summary>
-    internal static SimulatedSqlException InvalidOptionForCreateFunction() =>
-        new("An invalid option was specified for the statement \"CREATE/ALTER FUNCTION\".", 487, 16, 1);
+    internal static SimulatedSqlException InvalidOptionForCreateStatement(string statement, byte state) =>
+        new($"An invalid option was specified for the statement \"CREATE/ALTER {statement}\".", 487, 16, state);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 195 for a module's <c>WITH</c> clause naming an
+    /// option its grammar doesn't recognize, echoed as written (probed
+    /// 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException OptionNotRecognized(string option) =>
+        new($"'{option}' is not a recognized option.", 195, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 10796: <c>SCHEMABINDING</c> on a procedure or
+    /// trigger that isn't natively compiled, or <c>NATIVE_COMPILATION</c>
+    /// without it — state 1 for those, 2 for a function (probed 2026-09-26
+    /// against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException SchemaBindingRequiresNativeCompilation(byte state) =>
+        new("The SCHEMABINDING option is supported only for natively compiled modules, and is required for those modules.", 10796, 15, state);
 
     /// <summary>
     /// Mimics SQL Server's Msg 4514 — fired at <c>CREATE FUNCTION</c> when an

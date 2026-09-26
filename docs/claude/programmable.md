@@ -167,6 +167,13 @@ Probe-confirmed against SQL Server 2025.
 Hand-written functions do omit it, so a parser that required the keyword drops them on import.
 `ConsumeOptionalBodyAs` in `Simulation.CreateFunction.cs` is the single seam — the CLR form still needs the keyword, since `EXTERNAL` only follows it.
 
+## The `WITH` option clause
+
+Every module kind reads its option clause through one parser, `ParseModuleOptions`, over two grammars (probed 2026-09-26 against SQL Server 2025): a function's, which alone reads `RETURNS NULL ON NULL INPUT`, `CALLED ON NULL INPUT` and `INLINE = ON | OFF` as options, and every other module's, which alone recognizes `RECOMPILE` and `VIEW_METADATA`.
+Outside a function, the multi-word forms are therefore a syntax error on their second word.
+The clause is judged only once it has parsed and its host's next token is in place, so a syntax error after it wins; then, in written order, a repeat is Msg 1039, an unrecognized word Msg 195, and an option the host's grammar parses but the host refuses Msg 487 (`InvalidOptionState` is the grid).
+Last, `SCHEMABINDING` and `NATIVE_COMPILATION` must come together on a procedure or trigger, and `NATIVE_COMPILATION` needs `SCHEMABINDING` on a function, or it is Msg 10796 — which real reports at line 16 of the module whatever its length.
+
 ## Scalar user-defined functions
 `CREATE FUNCTION schema.name(@p type [= default], ...) RETURNS <type> [WITH RETURNS NULL ON NULL INPUT] [AS] BEGIN ... END`, called as `SELECT schema.fn(args)`.
 Body source captured between outer `BEGIN`/`END` (BEGIN TRAN/TRANSACTION/DISTRIBUTED skipped during nesting) and re-tokenized per call; parameters seed a child `BatchContext.Variables`, value-form RETURN lands in `BatchContext.UdfFrame.ReturnedValue`.
@@ -185,7 +192,7 @@ Probed against SQL Server 2025.
   `fn()` raises Msg 313 even when every parameter has a declared default — the `DEFAULT` keyword is the only legal omission (re-evaluated per call in the child batch).
 - **WITH RETURNS NULL ON NULL INPUT**: any non-DEFAULT NULL arg short-circuits the body and returns typed NULL.
 - **WITH SCHEMABINDING** records on `UserDefinedFunction.IsSchemaBound`, surfacing through `sys.sql_modules.is_schema_bound` / `OBJECTPROPERTY(id,'IsSchemaBound')`, gating `OBJECTPROPERTY(id,'IsDeterministic')` (see [`catalog-views.md`](catalog-views.md#isdeterministic)), and enrolling the body's references in the dependency gate — [Schema binding](#schema-binding-with-schemabinding).
-  `ENCRYPTION` parse-and-discards.
+  `ENCRYPTION` parse-and-discards; the rest of the clause is [The `WITH` option clause](#the-with-option-clause).
 - **Recursion cap: 32.**
   Tracked by `SimulatedDbConnection.NestingLevel`; exceeding → **Msg 217**.
   Shared with future stored procs / triggers / views.
@@ -217,7 +224,7 @@ Probed against SQL Server 2025.
   The body's stored span is measured by a token scan (`CaptureInlineTvfBody`) rather than by a parse, and the paren-less form's terminator — a statement keyword — counts only at the body's own nesting level, so a SELECT belonging to a derived table, a subquery or a CTE definition doesn't truncate the span.
   A body opening with `WITH` also spends one depth-0 statement keyword on the query the prefix scopes to.
 - **WITH-clause options**: `SCHEMABINDING` records on `UserDefinedFunction.IsSchemaBound` (same surfaces and same dependency gate as scalar UDFs — [Schema binding](#schema-binding-with-schemabinding)); `ENCRYPTION` parse-and-discards.
-  `RETURNS NULL ON NULL INPUT` → **Msg 487** (scalar-only).
+  The options a table-valued function refuses are in [The `WITH` option clause](#the-with-option-clause).
 - **CREATE-time validation**: body parses once with parameters seeded as typed variables; `OutputColumns` derives from the resulting projection.
   Unnamed column → **Msg 4514** (distinct from SELECT INTO's Msg 1038).
   Duplicate column name → **Msg 4506** (distinct from SELECT INTO's Msg 2705).
@@ -494,7 +501,7 @@ Probed against SQL Server 2025.
 - **Body capture**: from the first token after `AS` to end-of-batch, with empty bodies legal (`CREATE PROC p AS` with nothing after `AS` succeeds — probe-confirmed; the per-call invocation short-circuits when `BodyText` is empty so the parser doesn't reject empty `CommandText`).
   Separately, the handlers also capture the *full* original statement text into `SchemaObject.DefinitionText` (verb normalized to `CREATE`) for `OBJECT_DEFINITION` / `sys.sql_modules` / `INFORMATION_SCHEMA.ROUTINES.ROUTINE_DEFINITION` — see [`catalog-views.md`](catalog-views.md).
 - **Parens around parameter list optional**: `CREATE PROC p (@x int)` and `CREATE PROC p @x int` are equivalent.
-- **WITH options** (`RECOMPILE`, `ENCRYPTION`, `EXECUTE AS CALLER|SELF|OWNER|'name'`, `FOR REPLICATION`) parse-and-ignore — the simulator doesn't model query-planner / security / replication semantics.
+- **WITH options**: `EXECUTE AS CALLER|SELF|OWNER|'name'` is applied as an impersonation frame at invocation; `RECOMPILE`, `ENCRYPTION` and `FOR REPLICATION` parse and are ignored — see [The `WITH` option clause](#the-with-option-clause) for what the clause refuses.
 - **`NATIVE_COMPILATION`** admits a `BEGIN ATOMIC [WITH (…)]` body, which runs as a plain `BEGIN … END` block; real's in-memory OLTP prerequisites (Msg 41337 without a `MEMORY_OPTIMIZED_DATA` filegroup) aren't modeled.
   Anywhere else the block is refused as real refuses it (probed 2026-09-25): a procedure, function or trigger body without it is Msg 10782 as the module binds at `CREATE`, and a batch or dynamic-SQL string is Msg 102 at `ATOMIC`.
 - **`CREATE OR ALTER`** is an upsert: creates when missing, replaces when present — see [Replacing a module](#replacing-a-module--alter--create-or-alter) for what the replacement preserves.

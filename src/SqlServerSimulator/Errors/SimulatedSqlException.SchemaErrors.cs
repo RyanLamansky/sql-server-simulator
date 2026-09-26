@@ -2336,8 +2336,9 @@ partial class SimulatedSqlException
         new($"Conflicting UPDATE STATISTICS options \"{first}\" and \"{second}\".", 1052, 15, 1);
 
     /// <summary>
-    /// Mimics SQL Server error 1039: an <c>UPDATE STATISTICS</c> option written
-    /// twice (probed 2026-09-25).
+    /// Mimics SQL Server error 1039: an <c>UPDATE STATISTICS</c> option or a
+    /// module's <c>WITH</c> option written twice (probed 2026-09-25 and
+    /// 2026-09-26), named in capitals.
     /// </summary>
     internal static SimulatedSqlException OptionSpecifiedMoreThanOnce(string optionName) =>
         new($"Option '{optionName}' is specified more than once.", 1039, 15, 1);

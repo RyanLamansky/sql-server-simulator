@@ -111,11 +111,7 @@ partial class Simulation
         // SCHEMABINDING is captured (it gates CREATE INDEX on the view and
         // surfaces through sys.sql_modules.is_schema_bound / OBJECTPROPERTY);
         // the other two parse-and-ignore.
-        var isSchemaBound = false;
-        if (context.Token is ReservedKeyword { Keyword: Keyword.With })
-        {
-            isSchemaBound = ParseViewOptions(context);
-        }
+        var isSchemaBound = ParseModuleOptions(context, ModuleOptionHost.View, viewName.Leaf).SchemaBinding;
 
         if (context.Token is not ReservedKeyword { Keyword: Keyword.As })
             throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -301,33 +297,6 @@ partial class Simulation
                     trigger.Parent = replacement;
             }
         }
-    }
-
-    /// <summary>
-    /// Consumes a <c>WITH option [, option ...]</c> clause on a view's
-    /// header. Cursor on entry: the <c>WITH</c> keyword. Cursor on exit:
-    /// the first token after the option list (expected to be <c>AS</c>).
-    /// Returns true when <c>SCHEMABINDING</c> was among the options.
-    /// </summary>
-    private static bool ParseViewOptions(ParserContext context)
-    {
-        var isSchemaBound = false;
-        context.MoveNextRequired();
-        while (true)
-        {
-            if (context.Token is not UnquotedString opt
-                || opt.ContextualKeyword is not (ContextualKeyword.SchemaBinding or ContextualKeyword.Encryption or ContextualKeyword.View_Metadata))
-            {
-                throw SimulatedSqlException.SyntaxErrorNear(context);
-            }
-            if (opt.ContextualKeyword is ContextualKeyword.SchemaBinding)
-                isSchemaBound = true;
-            context.MoveNextRequired();
-            if (context.Token is not Operator { Character: ',' })
-                break;
-            context.MoveNextRequired();
-        }
-        return isSchemaBound;
     }
 
     /// <summary>
