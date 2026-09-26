@@ -209,10 +209,17 @@ partial class Simulation
             {
                 if (renamed is HeapTable table)
                     batch.AcquireStatementLock(table.SchemaLock, LockMode.SchemaModification);
+                var (oldName, oldModifyDate) = (renamed.Name, renamed.ModifyDate);
                 _ = objects.TryRemove(renamed.Name, out _);
                 renamed.Name = newName;
                 renamed.ModifyDate = batch.CurrentStatement.UtcNow;
                 objects[newName] = renamed;
+                RecordDdlUndo(batch, () =>
+                {
+                    _ = objects.TryRemove(newName, out _);
+                    (renamed.Name, renamed.ModifyDate) = (oldName, oldModifyDate);
+                    objects[oldName] = renamed;
+                });
                 return eventType;
             }
         }
@@ -262,6 +269,7 @@ partial class Simulation
                 throw SimulatedSqlException.RenameDuplicateName(newName, "object");
             database.RejectWriteWhenReadOnly();
             batch.AcquireStatementLock(table.SchemaLock, LockMode.SchemaModification);
+            RecordTableDdlUndo(batch, table);
             rename(batch.CurrentStatement.UtcNow);
             return eventType;
         }
@@ -305,6 +313,7 @@ partial class Simulation
         // old name.
         table.OwningDatabase?.RejectWriteWhenReadOnly();
         batch.AcquireStatementLock(table.SchemaLock, LockMode.SchemaModification);
+        RecordTableDdlUndo(batch, table);
         table.Columns[ordinal].Name = newName;
         BumpSchemaVersion();
     }
@@ -331,6 +340,7 @@ partial class Simulation
 
         table.OwningDatabase?.RejectWriteWhenReadOnly();
         batch.AcquireStatementLock(table.SchemaLock, LockMode.SchemaModification);
+        RecordTableDdlUndo(batch, table);
         target.Name = newName;
         BumpSchemaVersion();
     }

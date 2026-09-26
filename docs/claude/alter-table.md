@@ -383,9 +383,6 @@ The old `Heap` is replaced wholesale (via the mutable `HeapTable.Heap` field).
 - **Eager row rewrite vs metadata-only**: Real SQL Server 2012+ optimizes many ADD COLUMN cases (nullable adds, NOT NULL constant-default adds) to metadata-only — no physical row updates.
   The simulator always rewrites every row.
   Behavior is identical; performance differs (acceptable for simulator workload sizes).
-- **DROP COLUMN inside transaction**: Real SQL Server makes column-level DDL transactional.
-  The simulator's regular-DDL non-logging pattern (see existing CREATE/DROP TABLE quirk) extends here: ALTER TABLE ADD / DROP COLUMN doesn't participate in the undo log, so a `BEGIN TRAN` / `ROLLBACK` won't undo a column mutation.
-  Matches the existing CREATE/DROP TABLE asymmetry.
 - **Table variable column ops**: `DECLARE @t TABLE` then `ALTER TABLE @t ADD …` raises Msg 102 at parse — real SQL Server's grammar also doesn't allow ALTER on table variables.
 
 ## ALTER COLUMN
@@ -479,4 +476,3 @@ Storage cost is negligible at simulator workload sizes.
   Performance only; behavior matches.
 - **Index protection nuance**: Real SQL Server allows length widening AND length narrowing (when data fits) under an index — both pass with the same SqlType base.
   The simulator allows both only when the `SqlType` subclass matches; decimal precision narrowing under an index (same `DecimalSqlType` subclass) would pass in the simulator but is probably blocked in real SQL Server (not probed; EF Migrations drops indexes before significant type changes anyway, so the gap is application-unreachable through EF).
-- **Non-transactional column DDL**: Same as ADD / DROP COLUMN — ALTER COLUMN bypasses the undo log; `BEGIN TRAN` / `ROLLBACK` doesn't undo the type change.

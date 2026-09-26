@@ -453,16 +453,28 @@ partial class Simulation
             throw;
         }
 
-        // Temp-table DDL participates in transaction rollback: probe-confirmed
-        // that both CREATE TABLE #foo and CREATE TABLE ##foo inside BEGIN TRAN
-        // are undone by ROLLBACK on real SQL Server. Regular CREATE TABLE
-        // isn't logged — a known asymmetry documented as a quirk.
+        // CREATE TABLE participates in transaction rollback, temp tables
+        // included (probe-confirmed for #foo, ##foo and a permanent table).
         if (isTempTable && context.Connection.CurrentTransaction is { } tx)
         {
             if (isLocalTempTable)
                 tx.UndoLog.RecordLocalTempTableCreation(context.Connection, heapTable);
             else
                 tx.UndoLog.RecordTempTableCreation(destination, heapTable.Name);
+        }
+        else if (!isTempTable)
+        {
+            var createdHistory = existingHistory is null ? heapTable.SystemVersioning : null;
+            RecordDdlUndo(context, () =>
+            {
+                _ = destination.TryRemove(heapTable.Name, out _);
+                foreach (var fk in heapTable.OutgoingForeignKeys)
+                    _ = fk.ReferencedTable.IncomingForeignKeys.Remove(fk);
+                if (createdHistory is not null)
+                    _ = historyDestination!.TryRemove(createdHistory.Name, out _);
+                else if (existingHistory is { } adopted)
+                    adopted.IsHistoryTable = false;
+            });
         }
         // Real raises no DDL event for a temp table (tempdb owns it), only for
         // a permanent one in the current database.

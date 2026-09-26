@@ -317,8 +317,7 @@ For a statement whose body runs to end of batch (`CREATE VIEW` / `PROCEDURE` / `
 - **`ALTER SCHEMA … TRANSFER`'s `ObjectType`** reports `OBJECT` / `TYPE` — the transfer's own name class — where real reports the moved object's actual kind (`SYNONYM`, `TABLE`, …).
 - **`GRANT` / `DENY` / `REVOKE`** → `GRANT_DATABASE` / `DENY_DATABASE` / `REVOKE_DATABASE`, whose document carries a distinct `Grantor` / `Permissions` / `Grantees` / `GrantOption` block.
 - **A body `ROLLBACK` vetoing the DDL** — real undoes the DDL and raises **Msg 3609** (`The transaction ended in the trigger. The batch has been aborted.`), leaving `@@TRANCOUNT` 0 and skipping the rest of the batch.
-  The simulator's DDL isn't undoable (schema changes don't enter the undo log — the same asymmetry `CREATE TABLE` has under `ROLLBACK TRAN`), so a body error rolls back what the bodies wrote but leaves the DDL in place.
-  `@@TRANCOUNT` in a body reads 0 under auto-commit where real reads 1, for the same reason.
+  An auto-commit DDL statement runs with no transaction open here, so nothing logs it for undo: a body error rolls back what the bodies wrote but leaves the DDL in place, and `@@TRANCOUNT` in a body reads 0 where real reads 1.
 - **`sp_settriggerorder` for DDL triggers** — `@namespace` is accepted and ignored, and the name resolves against DML triggers only.
   Firing order across several DDL triggers is by `object_id` (creation order), which is what real ran them in unpinned.
 - **Server-scope triggers** (`ON ALL SERVER`, `sys.server_triggers`, `parent_class = 100`) — neither stored nor fired; only `ON DATABASE` scope exists.

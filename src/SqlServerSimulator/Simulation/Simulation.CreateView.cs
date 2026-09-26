@@ -234,6 +234,7 @@ partial class Simulation
             IsRowLimited = IsRowLimitedBody(bodySelection),
             IsWindowed = IsWindowedBody(bodySelection),
         };
+        var replacedBases = replaced?.ReferencedBaseTables;
         if (replaced is not null)
         {
             view.ModifyDate = context.Batch.CurrentStatement.UtcNow;
@@ -241,6 +242,18 @@ partial class Simulation
             ReseatTriggerParents(context.CurrentDatabase, replaced, view);
         }
         schema.Views[viewName.Leaf] = view;
+        var database = context.CurrentDatabase;
+        RecordDdlUndo(context, () =>
+        {
+            if (replaced is null)
+            {
+                _ = schema.Views.TryRemove(viewName.Leaf, out _);
+                return;
+            }
+            schema.Views[viewName.Leaf] = replaced;
+            ReattachIndexedViewDependencies(replaced, replacedBases!);
+            ReseatTriggerParents(database, view, replaced);
+        });
         RecordDdlEvent(context, replaced is null ? "CREATE_VIEW" : "ALTER_VIEW", schema.Name, viewName.Leaf, "VIEW");
         return true;
     }
@@ -258,6 +271,18 @@ partial class Simulation
         foreach (var table in view.ReferencedBaseTables)
             _ = table.DependentIndexedViews.Remove(view);
         view.ReferencedBaseTables = [];
+    }
+
+    /// <summary>
+    /// Reverses <see cref="DetachIndexedViewDependencies"/> when a rollback
+    /// restores <paramref name="view"/>, rewiring it to the base tables it
+    /// maintained.
+    /// </summary>
+    private static void ReattachIndexedViewDependencies(View view, HeapTable[] bases)
+    {
+        view.ReferencedBaseTables = bases;
+        foreach (var table in bases)
+            table.DependentIndexedViews.Add(view);
     }
 
     /// <summary>

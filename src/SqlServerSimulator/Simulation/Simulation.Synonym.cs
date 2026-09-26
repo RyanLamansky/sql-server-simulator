@@ -48,6 +48,7 @@ partial class Simulation
         var synonym = new Synonym(schema, leaf, context.CurrentDatabase.AllocateObjectId(), context.Batch.CurrentStatement.UtcNow, baseObject);
         if (schema.HasNameInSharedNamespace(leaf) || !schema.Synonyms.TryAdd(leaf, synonym))
             throw SimulatedSqlException.NameTakenEndingOnlyStatement(synonymName.ToString(), state: 8);
+        RecordSlotUndo<Synonym>(context, schema.Synonyms, leaf, null);
         // Real reports the base object as TargetObjectName with no type.
         RecordDdlEvent(context, "CREATE_SYNONYM", schema.Name, leaf, "SYNONYM", baseObject.Leaf);
         return true;
@@ -89,6 +90,7 @@ partial class Simulation
         }
         if (!schema.Synonyms.TryRemove(leaf, out var dropped))
             return ifExists ? true : throw SimulatedSqlException.CannotDropSynonymDoesNotExist(leaf);
+        RecordSlotUndo(context, schema.Synonyms, leaf, dropped);
         RecordDdlEvent(context, "DROP_SYNONYM", schema.Name, leaf, "SYNONYM", dropped.BaseObject.Leaf);
         return true;
     }

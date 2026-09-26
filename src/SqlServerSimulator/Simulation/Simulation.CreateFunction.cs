@@ -279,6 +279,7 @@ partial class Simulation
         if (replaced is not null)
             function.ModifyDate = context.Batch.CurrentStatement.UtcNow;
         schema.Functions[functionName.Leaf] = function;
+        RecordSlotUndo(context, schema.Functions, functionName.Leaf, replaced);
         RecordDdlEvent(context, replaced is null ? "CREATE_FUNCTION" : "ALTER_FUNCTION", schema.Name, functionName.Leaf, "FUNCTION");
         return true;
     }
@@ -464,6 +465,7 @@ partial class Simulation
         if (replaced is not null)
             function.ModifyDate = context.Batch.CurrentStatement.UtcNow;
         schema.Functions[functionName.Leaf] = function;
+        RecordSlotUndo(context, schema.Functions, functionName.Leaf, replaced);
         RecordDdlEvent(context, replaced is null ? "CREATE_FUNCTION" : "ALTER_FUNCTION", schema.Name, functionName.Leaf, "FUNCTION");
         return true;
     }
@@ -580,6 +582,7 @@ partial class Simulation
         if (replaced is not null)
             function.ModifyDate = context.Batch.CurrentStatement.UtcNow;
         schema.Functions[functionName.Leaf] = function;
+        RecordSlotUndo(context, schema.Functions, functionName.Leaf, replaced);
         RecordDdlEvent(context, replaced is null ? "CREATE_FUNCTION" : "ALTER_FUNCTION", schema.Name, functionName.Leaf, "FUNCTION");
         return true;
     }

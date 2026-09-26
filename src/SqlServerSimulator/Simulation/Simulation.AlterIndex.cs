@@ -154,6 +154,7 @@ partial class Simulation
         if (!context.Batch.TryResolveTable(tableName, out var table))
             throw SimulatedSqlException.CannotFindObjectForAlterIndex(tableName.ToString());
         table.OwningDatabase?.RejectWriteWhenReadOnly();
+        RecordTableDdlUndo(context, table);
         // ALTER INDEX is gated on ALTER of the parent table — the same Msg 1088
         // state 9 a missing table earns (probe-confirmed).
         if (!PermissionEnforcement.HasObjectAlter(context.Batch, context.Batch.DatabaseFor(table), table.ObjectId, table.SchemaId))

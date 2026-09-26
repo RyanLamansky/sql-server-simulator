@@ -1416,6 +1416,7 @@ partial class Simulation
                 throw SimulatedSqlException.AlterTablePermissionDenied(tableName.Leaf);
             }
             context.Batch.AcquireStatementLock(alterTarget.SchemaLock, LockMode.SchemaModification);
+            RecordTableDdlUndo(context, alterTarget);
         }
 
         // Cursor is on the last name segment; advance to the post-name token.

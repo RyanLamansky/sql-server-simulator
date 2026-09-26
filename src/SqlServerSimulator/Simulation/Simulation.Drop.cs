@@ -364,8 +364,10 @@ partial class Simulation
             throw SimulatedSqlException.DropObjectPermissionDenied("trigger", name.Leaf);
         }
         context.Batch.AcquireStatementLock(existing.SchemaLock, LockMode.SchemaModification);
-        if (!schema.Triggers.TryRemove(name.Leaf, out _) && !ifExists)
+        if (!schema.Triggers.TryRemove(name.Leaf, out var removed) && !ifExists)
             throw SimulatedSqlException.CannotDropTriggerDoesNotExist(name.ToString());
+        if (removed is not null)
+            RecordSlotUndo(context, schema.Triggers, name.Leaf, removed);
         RecordDdlEvent(
             context, "DROP_TRIGGER", schema.Name, name.Leaf, "TRIGGER",
             existing.Parent.Name,
@@ -396,8 +398,10 @@ partial class Simulation
         if (!PermissionEnforcement.HasDropAuthority(context.Batch, schema, existing.ObjectId))
             throw SimulatedSqlException.DropObjectPermissionDenied("sequence", name.Leaf);
         context.Batch.AcquireStatementLock(existing.SchemaLock, LockMode.SchemaModification);
-        if (!schema.Sequences.TryRemove(name.Leaf, out _) && !ifExists)
+        if (!schema.Sequences.TryRemove(name.Leaf, out var removed) && !ifExists)
             throw SimulatedSqlException.CannotDropSequenceDoesNotExist(name.ToString());
+        if (removed is not null)
+            RecordSlotUndo(context, schema.Sequences, name.Leaf, removed);
         RecordDdlEvent(context, "DROP_SEQUENCE", schema.Name, name.Leaf, "SEQUENCE");
     }
 
@@ -492,8 +496,10 @@ partial class Simulation
         if (!PermissionEnforcement.HasDropAuthority(context.Batch, schema, existing.ObjectId))
             throw SimulatedSqlException.DropObjectPermissionDenied("procedure", name.Leaf);
         context.Batch.AcquireStatementLock(existing.SchemaLock, LockMode.SchemaModification);
-        if (!schema.Procedures.TryRemove(name.Leaf, out _) && !ifExists)
+        if (!schema.Procedures.TryRemove(name.Leaf, out var removed) && !ifExists)
             throw SimulatedSqlException.CannotDropProcedureDoesNotExist(name.ToString());
+        if (removed is not null)
+            RecordSlotUndo(context, schema.Procedures, name.Leaf, removed);
         RecordDdlEvent(context, "DROP_PROCEDURE", schema.Name, name.Leaf, "PROCEDURE");
     }
 
@@ -528,8 +534,14 @@ partial class Simulation
                 return;
             throw SimulatedSqlException.CannotDropViewDoesNotExist(name.ToString());
         }
+        var formerBases = droppedView.ReferencedBaseTables;
         DetachIndexedViewDependencies(droppedView);
-        CascadeDropTriggers(context.CurrentDatabase, droppedView);
+        RecordDdlUndo(context, () =>
+        {
+            schema.Views[name.Leaf] = droppedView;
+            ReattachIndexedViewDependencies(droppedView, formerBases);
+        });
+        CascadeDropTriggers(context, droppedView);
         RecordDdlEvent(context, "DROP_VIEW", schema.Name, name.Leaf, "VIEW");
     }
 
@@ -561,8 +573,10 @@ partial class Simulation
             throw SimulatedSqlException.DropObjectPermissionDenied("function", name.Leaf);
         context.Batch.AcquireStatementLock(existing.SchemaLock, LockMode.SchemaModification);
         RejectDropOfSchemaBoundReferent(context.CurrentDatabase, existing, "DROP FUNCTION", name);
-        if (!schema.Functions.TryRemove(name.Leaf, out _) && !ifExists)
+        if (!schema.Functions.TryRemove(name.Leaf, out var removed) && !ifExists)
             throw SimulatedSqlException.CannotDropFunctionDoesNotExist(name.ToString());
+        if (removed is not null)
+            RecordSlotUndo(context, schema.Functions, name.Leaf, removed);
         RecordDdlEvent(context, "DROP_FUNCTION", schema.Name, name.Leaf, "FUNCTION");
     }
 
@@ -652,9 +666,8 @@ partial class Simulation
                 return;
             throw SimulatedSqlException.CannotDropTableDoesNotExist(name.ToString());
         }
-        // Temp-table DDL participates in transaction rollback (matching real
-        // SQL Server). Regular DROP TABLE isn't logged — same asymmetry
-        // documented for CREATE TABLE.
+        // DROP TABLE participates in transaction rollback, restoring the
+        // table with its rows (probe-confirmed).
         if (isTempTable && context.Connection.CurrentTransaction is { } tx)
         {
             if (isLocalTempTable)
@@ -670,7 +683,16 @@ partial class Simulation
             // guarantees this table had no incoming FKs.
             foreach (var fk in removedTable.OutgoingForeignKeys)
                 _ = fk.ReferencedTable.IncomingForeignKeys.RemoveAll(other => ReferenceEquals(other, fk));
-            CascadeDropTriggers(context.CurrentDatabase, removedTable);
+            RecordDdlUndo(context, () =>
+            {
+                destination[name.Leaf] = removedTable;
+                foreach (var fk in removedTable.OutgoingForeignKeys)
+                {
+                    if (!ReferenceEquals(fk.ReferencedTable, removedTable))
+                        fk.ReferencedTable.IncomingForeignKeys.Add(fk);
+                }
+            });
+            CascadeDropTriggers(context, removedTable);
             RecordDdlEvent(context, "DROP_TABLE", schema?.Name ?? Database.DefaultSchemaName, name.Leaf, "TABLE");
         }
     }
@@ -772,6 +794,8 @@ partial class Simulation
             throw SimulatedSqlException.CannotDropIndexDoesNotExist(tableName.ToString(), indexName, state: 6);
         }
 
+        RecordTableDdlUndo(context, table);
+
         // DROP INDEX is gated on ALTER of the parent table; real reports the
         // written table name plus the index leaf, at Msg 1088 state 9.
         if (!PermissionEnforcement.HasObjectAlter(context.Batch, context.Batch.DatabaseFor(table), table.ObjectId, table.SchemaId))
@@ -853,9 +877,9 @@ partial class Simulation
     /// invariant. Triggers don't participate in the undo log; this fires
     /// unconditionally on DROP outside transactional temp-table scope.
     /// </summary>
-    private static void CascadeDropTriggers(Database database, SchemaObject droppedParent)
+    private static void CascadeDropTriggers(ParserContext context, SchemaObject droppedParent)
     {
-        foreach (var schema in database.Schemas.Values)
+        foreach (var schema in context.CurrentDatabase.Schemas.Values)
         {
             string[]? names = null;
             foreach (var kv in schema.Triggers)
@@ -869,7 +893,10 @@ partial class Simulation
             }
             if (names is null) continue;
             foreach (var n in names)
-                _ = schema.Triggers.TryRemove(n, out _);
+            {
+                if (schema.Triggers.TryRemove(n, out var trigger))
+                    RecordSlotUndo(context, schema.Triggers, n, trigger);
+            }
         }
     }
 }

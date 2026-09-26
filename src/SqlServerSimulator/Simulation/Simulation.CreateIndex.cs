@@ -137,6 +137,8 @@ partial class Simulation
             throw SimulatedSqlException.CannotFindObjectForCreateIndex(targetTableName.ToString());
         }
 
+        RecordTableDdlUndo(context, table);
+
         // CREATE INDEX is gated on ALTER of the table it lands on — Msg 1088
         // state 12, naming the table as written (probe-confirmed; the DROP /
         // ALTER INDEX forms use state 9).

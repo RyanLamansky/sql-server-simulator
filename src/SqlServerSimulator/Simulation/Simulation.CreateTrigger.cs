@@ -309,6 +309,7 @@ partial class Simulation
         if (existed)
             trigger.ModifyDate = context.Batch.CurrentStatement.UtcNow;
         triggerSchema.Triggers[triggerName.Leaf] = trigger;
+        RecordSlotUndo(context, triggerSchema.Triggers, triggerName.Leaf, existed ? existing : null);
         RecordDdlEvent(
             context,
             existed ? "ALTER_TRIGGER" : "CREATE_TRIGGER",

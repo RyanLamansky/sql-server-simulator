@@ -229,6 +229,7 @@ partial class Simulation
         if (replaced is not null)
             clrFunction.ModifyDate = context.Batch.CurrentStatement.UtcNow;
         schema.Functions[functionName.Leaf] = clrFunction;
+        RecordSlotUndo(context, schema.Functions, functionName.Leaf, replaced);
         return true;
     }
 

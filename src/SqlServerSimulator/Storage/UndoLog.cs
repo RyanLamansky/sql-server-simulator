@@ -101,6 +101,15 @@ internal sealed class UndoLog
     /// (probed 2026-09-24 against SQL Server 2025) though a generated value
     /// never is.
     /// </summary>
+    /// <summary>
+    /// Records a catalog change to a permanent object — created, altered or
+    /// dropped — whose rollback runs <paramref name="undo"/> and then
+    /// invalidates every cached plan, since a plan compiled since may name the
+    /// object as it stood.
+    /// </summary>
+    public void RecordSchemaChange(Simulation simulation, Action undo) =>
+        this.entries.Add(new SchemaChange(simulation, undo));
+
     public void RecordIdentityReseed(IdentityState state, (long? HighWaterMark, long? ReseededStart) snapshot) =>
         this.entries.Add(new IdentityReseed(state, snapshot));
 
@@ -392,6 +401,18 @@ internal sealed class UndoLog
         public readonly HeapTable Table = table;
 
         public override void Undo() => this.Connection.ReinstateTempTable(this.Table);
+    }
+
+    private sealed class SchemaChange(Simulation simulation, Action undo) : UndoEntry
+    {
+        public readonly Simulation Simulation = simulation;
+        public readonly Action Reverse = undo;
+
+        public override void Undo()
+        {
+            this.Reverse();
+            this.Simulation.BumpSchemaVersion();
+        }
     }
 
     private sealed class TempTableRemoval(ConcurrentDictionary<string, HeapTable> owner, string name, HeapTable table) : UndoEntry

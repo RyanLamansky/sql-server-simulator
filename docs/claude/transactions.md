@@ -17,8 +17,10 @@ A fourth arrives over the network: TDS Transaction Manager requests map onto the
 - `@@TRANCOUNT` reads connection depth as int.
 - **Identity counters and the database-scoped rowversion counter bypass the log** — both advance through rollback.
   (A rolled-back INSERT's off-row LOB chain + heap bytes are reclaimed — rollback is terminal, so an uncommitted insert is invisible to every snapshot.)
-- **Temp-table CREATE/DROP participates in the log** via `TempTableCreation` / `TempTableRemoval` `UndoEntry` subtypes.
-  Regular CREATE/DROP TABLE is NOT logged — asymmetry in [`temp-tables.md`](temp-tables.md).
+- **DDL participates in the log** (probed 2026-09-25: real undoes a rolled-back `CREATE TABLE`, view, procedure, `ALTER TABLE … ADD`, `CREATE INDEX`, and restores a rolled-back `DROP TABLE` with its rows).
+  Temp tables ride their own `TempTableCreation` / `TempTableRemoval` entries; a permanent object's create, alter, drop or rename records a `SchemaChange` entry through `Simulation.RecordDdlUndo`, whose closure puts the catalog slot, foreign-key wiring and cascaded triggers back and then bumps `SchemaVersion` so no cached plan keeps the rolled-back shape.
+  The `ALTER TABLE` family, index DDL and column / index / constraint renames capture the table whole first (`HeapTableSnapshot`): those statements always swap in a fresh column array and `Heap` rather than rewriting in place, so keeping the old references restores the rows, and the flags and lists they do mutate are copied value by value.
+  Not logged yet: `CREATE` / `DROP SCHEMA`, `CREATE` / `DROP TYPE`, `ALTER SCHEMA … TRANSFER`, the principal and permission statements, extended properties, and an indexed view's own index.
 - Locking + MVCC: full 8-mode matrix, row-X writers + row-mode readers per hints/iso, RR/SER/UPDLOCK/XLOCK/TABLOCK/HOLDLOCK/REPEATABLEREAD/NOLOCK/READPAST hints, escalation at 5000 row-locks, Msg 1205 deadlock / Msg 1222 timeout, SNAPSHOT + RCSI (version chains + GC + DMVs).
   See [`locking.md`](locking.md).
 - Table-variable mutations use a statement-only undo log disjoint from the tx-scoped one, so `ROLLBACK TRAN` skips `@t` (the `CurrentTableVarUndoLog` / `CurrentUndoLog` split on `BatchContext`).
