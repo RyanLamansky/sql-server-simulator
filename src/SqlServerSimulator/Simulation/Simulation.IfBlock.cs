@@ -56,13 +56,20 @@ partial class Simulation
         // that failed to bind runs neither branch.
         var wasSkipModeFlag = batch.SkipModeFlag;
         var outerSkipping = batch.IsSkipping || bindError is not null;
-        var condResult = !outerSkipping
-            && cond.Run(new RuntimeContext(NoColumnResolver, batch)) == true;
+        SimulatedSqlException? conditionError = null;
+        var condResult = !outerSkipping && RunCondition(cond, batch, out conditionError);
         batch.QueueNullEliminatedWarning();
         // The condition is a statement of its own for @@ERROR: the branch it
         // chose reads 0 (probed 2026-09-24 against SQL Server 2025).
-        if (!outerSkipping)
+        if (conditionError is not null)
+        {
+            foreach (var o in ConditionErrorOutcomes(batch, conditionError))
+                yield return o;
+        }
+        else if (!outerSkipping)
+        {
             connection.LastErrorNumber = 0;
+        }
         var thenSkip = !condResult;
 
         var hadElse = false;
@@ -105,6 +112,46 @@ partial class Simulation
 
         if (bindError is not null)
             throw bindError;
+    }
+
+    /// <summary>
+    /// Runs an <c>IF</c> / <c>WHILE</c> condition. A run-time error the batch
+    /// would carry on past reads as a condition that isn't true — real
+    /// reports it, then takes the <c>ELSE</c> or leaves the loop (probed
+    /// 2026-09-26 against SQL Server 2025) — and lands on
+    /// <paramref name="reported"/> for the caller to emit; one a TRY frame
+    /// catches, or that ends the batch, propagates as the statement's own.
+    /// </summary>
+    private static bool RunCondition(BooleanExpression condition, BatchContext batch, out SimulatedSqlException? reported)
+    {
+        reported = null;
+        try
+        {
+            return condition.Run(new RuntimeContext(NoColumnResolver, batch)) == true;
+        }
+        catch (SimulatedSqlException ex)
+        {
+            ApplyXactAbortPromotion(batch.Connection, ex);
+            if (ex.Class == 13 || ex.AbortsTransaction || CaughtByTryFrame(batch, ex)
+                || !batch.ContinueOnError || EndsBatch(ex) || !IsStatementTerminating(ex))
+            {
+                throw;
+            }
+
+            if (!batch.SuppressDiagnosticsResolution)
+                ex.ResolveDiagnostics(batch.CurrentStatement.StartLine, batch.LineOffset, batch.ErrorProcedureName);
+            reported = ex;
+            return false;
+        }
+    }
+
+    /// <summary>What a condition's reported error puts in the stream, as a failed statement's would.</summary>
+    private static IEnumerable<SimulatedStatementOutcome> ConditionErrorOutcomes(BatchContext batch, SimulatedSqlException error)
+    {
+        batch.Connection.LastErrorNumber = error.Number;
+        yield return new SimulatedErrorOutcome(error);
+        if (IsStatementTerminationNoticed(batch, error))
+            yield return new SimulatedInfoOutcome(SimulatedSqlException.StatementTerminatedMessage(batch));
     }
 
     /// <summary>
@@ -245,10 +292,18 @@ partial class Simulation
                     }
 
                     context.RestoreCheckpoint(bodyStart);
-                    var condResult = cond.Run(new RuntimeContext(NoColumnResolver, batch)) == true;
+                    var condResult = RunCondition(cond, batch, out var conditionError);
                     batch.QueueNullEliminatedWarning();
                     // As for IF, the body reads @@ERROR 0 after its condition.
-                    connection.LastErrorNumber = 0;
+                    if (conditionError is not null)
+                    {
+                        foreach (var o in ConditionErrorOutcomes(batch, conditionError))
+                            yield return o;
+                    }
+                    else
+                    {
+                        connection.LastErrorNumber = 0;
+                    }
 
                     if (!condResult)
                     {

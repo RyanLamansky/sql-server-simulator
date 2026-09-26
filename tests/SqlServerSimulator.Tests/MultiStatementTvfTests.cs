@@ -325,4 +325,21 @@ public sealed class MultiStatementTvfTests
             "select string_agg(concat(index_id, ':', type_desc), ',') within group (order by index_id) from sys.indexes where object_id = object_id('dbo.f')"));
         AreEqual(0, simulation.ExecuteScalar("select count(*) from sys.tables where object_id = object_id('dbo.f')"));
     }
+
+    /// <summary>
+    /// A called function's body naming a missing object fails the calling
+    /// statement, not its batch, for a scalar function and a multi-statement
+    /// TVF alike (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("create function dbo.f() returns int as begin return (select count(*) from dbo.nope) end", "declare @x int = dbo.f()")]
+    [DataRow("create function dbo.f() returns int as begin return (select count(*) from dbo.nope) end", "insert t select dbo.f()")]
+    [DataRow("create function dbo.f() returns @r table (a int) as begin insert @r select count(*) from dbo.nope; return end", "insert t select a from dbo.f()")]
+    public void AFunctionBodysMissingObject_EndsOnlyTheCallingStatement(string function, string call)
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create table t (a int)", function);
+        _ = sim.AssertSqlError(call + "; insert t values (7)", 208);
+        AreEqual(7, sim.ExecuteScalar("select a from t"));
+    }
 }

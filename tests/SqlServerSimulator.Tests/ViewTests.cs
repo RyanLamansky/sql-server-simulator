@@ -680,4 +680,18 @@ public sealed class ViewTests
         Assert.AreEqual(1, sim.ExecuteScalar("select count(*) from v"));
         Assert.AreEqual(create, sim.ExecuteScalar("select definition from sys.sql_modules where object_id = object_id('v')"));
     }
+
+    /// <summary>
+    /// A view whose body no longer binds names itself as the body error's
+    /// procedure ahead of Msg 4413 (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void AViewThatNoLongerBinds_NamesItselfOnTheBodyError()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create table t (a int)", "create view v as select a from t", "drop table t");
+        var errors = sim.AssertSqlError("select * from v", 208).Errors;
+        Assert.AreEqual("v", errors[0].Procedure);
+        Assert.AreEqual(4413, errors[1].Number);
+    }
 }

@@ -270,4 +270,17 @@ public sealed class WhileLoopTests
             """));
         Contains("iteration cap exceeded", ex.Message, StringComparison.Ordinal);
     }
+
+    /// <summary>
+    /// A run-time error in the condition ends the loop, and the batch carries
+    /// on (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void AConditionError_EndsTheLoop()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (s varchar(10))");
+        _ = sim.AssertSqlError("declare @i int = 0; while 1/@i = 1 begin insert t values ('body'); break; end; insert t values ('after')", 8134);
+        AreEqual("after", sim.ExecuteScalar("select string_agg(s, ',') from t"));
+    }
 }

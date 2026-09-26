@@ -140,6 +140,13 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException FollowedByViewBindingFailure(SimulatedSqlException error, string viewName)
     {
         List<SimulatedError> entries = [.. error.Errors.Where(entry => entry.Number != 4413)];
+        // The body's own error names the view it bound in, the innermost one
+        // when views nest (probed 2026-09-26 against SQL Server 2025).
+        foreach (var entry in entries)
+        {
+            if (entry.Procedure.Length == 0)
+                entry.Procedure = viewName;
+        }
         return FollowedBy(FromErrors(entries), new($"Could not use view or function '{viewName}' because of binding errors.", 4413, 16, 1));
     }
 

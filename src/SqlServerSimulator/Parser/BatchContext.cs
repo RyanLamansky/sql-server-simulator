@@ -268,6 +268,16 @@ internal sealed class BatchContext
     public bool CreateTimeBinding;
 
     /// <summary>
+    /// Set on the batch a scalar function's or multi-statement TVF's body runs
+    /// in when called: like a procedure's, it is as far as a batch-aborting
+    /// name-resolution error reaches, so the calling statement fails and its
+    /// batch carries on (probed 2026-09-26 against SQL Server 2025). A view's
+    /// or inline function's body binds with the calling statement instead,
+    /// and its error ends that batch.
+    /// </summary>
+    public bool CalledFunctionBody;
+
+    /// <summary>
     /// Set while <c>CREATE VIEW</c> / <c>ALTER VIEW</c> parses its body on the
     /// statement's own batch — a module definition binding outside a
     /// <see cref="CreateTimeBinding"/> batch, which the line a missing object

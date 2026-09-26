@@ -438,4 +438,33 @@ public sealed class IfBlockTests
     public void SeparatorBeforeElseIf_ReachesTheLastArm()
         => AreEqual("other", new Simulation().ExecuteScalar(
             "declare @v int = 3; if @v = 1 select 'one'; else if @v = 2 select 'two'; else select 'other'"));
+
+    /// <summary>
+    /// A run-time error in the condition reads as a condition that isn't true:
+    /// the error is reported, the ELSE runs and the batch carries on (probed
+    /// 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("if 1/0 = 1 insert t values ('then') else insert t values ('else')", "after,else")]
+    [DataRow("if 1/0 = 1 insert t values ('then')", "after")]
+    [DataRow("if 1/0 = 1 begin insert t values ('then') end", "after")]
+    public void AConditionError_TakesTheElse(string statement, string ran)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (s varchar(10))");
+        _ = sim.AssertSqlError(statement + "; insert t values ('after')", 8134);
+        AreEqual(ran, sim.ExecuteScalar("select string_agg(s, ',') within group (order by s) from t"));
+    }
+
+    /// <summary>Inside TRY, the same error reaches the CATCH instead.</summary>
+    [TestMethod]
+    public void AConditionErrorInTry_IsCaught()
+        => AreEqual("caught", new Simulation().ExecuteScalar("""
+            begin try
+                if 1/0 = 1 select 'then' else select 'else'
+            end try
+            begin catch
+                select 'caught'
+            end catch
+            """));
 }

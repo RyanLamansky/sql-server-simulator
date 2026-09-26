@@ -2090,9 +2090,10 @@ public sealed partial class Simulation
                 }
                 else
                 {
-                    // A procedure's or dynamic SQL's batch is as far as a
-                    // batch-aborting name-resolution error reaches.
-                    if (batch.ProcFrame is not null && IsBatchAbortingNameResolution(ex))
+                    // A procedure's, dynamic SQL's or called function's batch
+                    // is as far as a batch-aborting name-resolution error
+                    // reaches.
+                    if ((batch.ProcFrame is not null || batch.CalledFunctionBody) && IsBatchAbortingNameResolution(ex))
                         ex.EndedCalledBatch = true;
                     propagated = ex;
                 }
