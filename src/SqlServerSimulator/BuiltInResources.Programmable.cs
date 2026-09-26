@@ -1268,8 +1268,10 @@ internal static partial class BuiltInResources
             var cs = !SqlType.IsCollatedString(col.Type) ? nullSysName
                 : SqlType.IsNationalStringCategory(col.Type) ? unicodeCs
                 : isoCs;
+            // A view's column carries its collation in its type rather than as
+            // a declared override.
             var collation = !SqlType.IsCollatedString(col.Type) ? nullSysName
-                : col.Collation is { } overrideName ? SqlValue.FromSystemName(overrideName)
+                : (col.Collation ?? col.Type.Collation?.Name) is { } collationName ? SqlValue.FromSystemName(collationName)
                 : dbDefaultCollation;
             return
             [

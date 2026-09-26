@@ -1591,4 +1591,13 @@ public sealed class CatalogViewTests
                 col_name((select type_table_object_id from sys.table_types where name = 'tt'), 1))
             """));
     }
+
+    /// <summary>A view column reports its own collation in INFORMATION_SCHEMA.COLUMNS (probed 2026-09-26 against SQL Server 2025).</summary>
+    [TestMethod]
+    public void InformationSchemaColumns_ViewColumnKeepsItsCollation()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches("create table p (code char(3) collate Latin1_General_BIN)", "create view v as select code from p");
+        AreEqual("Latin1_General_BIN", simulation.ExecuteScalar("select COLLATION_NAME from INFORMATION_SCHEMA.COLUMNS where TABLE_NAME = 'v'"));
+    }
 }
