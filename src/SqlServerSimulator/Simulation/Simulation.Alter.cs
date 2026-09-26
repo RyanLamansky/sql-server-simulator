@@ -282,7 +282,7 @@ partial class Simulation
             UnquotedString { ContextualKeyword: ContextualKeyword.Read_Only } => TryParseAlterDatabaseSetAccessMode(context, target, readOnly: true),
             UnquotedString { ContextualKeyword: ContextualKeyword.Read_Write } => TryParseAlterDatabaseSetAccessMode(context, target, readOnly: false),
             UnquotedString recovery when recovery.Value.Equals("RECOVERY", StringComparison.OrdinalIgnoreCase) => TryParseAlterDatabaseSetRecovery(context, target),
-            UnquotedString unquoted when RecognizedDatabaseOptions.TryGetValue(unquoted.Value, out var kind) => ConsumeDatabaseOptionTail(context, target, kind),
+            UnquotedString unquoted when RecognizedDatabaseOptions.TryGetValue(unquoted.Value, out var kind) => ConsumeDatabaseOptionTail(context, target, unquoted.Value, kind),
             _ => false,
         };
     }
@@ -483,6 +483,7 @@ partial class Simulation
     /// </summary>
     private static readonly FrozenDictionary<string, AlterDatabaseOptionKind> RecognizedDatabaseOptions = new Dictionary<string, AlterDatabaseOptionKind>
     {
+        ["ANSI_NULL_DEFAULT"] = AlterDatabaseOptionKind.OnOff,
         ["ANSI_NULLS"] = AlterDatabaseOptionKind.OnOff,
         ["ANSI_PADDING"] = AlterDatabaseOptionKind.OnOff,
         ["ANSI_WARNINGS"] = AlterDatabaseOptionKind.OnOff,
@@ -492,6 +493,14 @@ partial class Simulation
         ["QUOTED_IDENTIFIER"] = AlterDatabaseOptionKind.OnOff,
         ["TORN_PAGE_DETECTION"] = AlterDatabaseOptionKind.OnOff,
         ["TEMPORAL_HISTORY_RETENTION"] = AlterDatabaseOptionKind.OnOff,
+        ["AUTO_CLOSE"] = AlterDatabaseOptionKind.OnOff,
+        ["AUTO_SHRINK"] = AlterDatabaseOptionKind.OnOff,
+        ["AUTO_CREATE_STATISTICS"] = AlterDatabaseOptionKind.OnOff,
+        ["AUTO_UPDATE_STATISTICS"] = AlterDatabaseOptionKind.OnOff,
+        ["AUTO_UPDATE_STATISTICS_ASYNC"] = AlterDatabaseOptionKind.OnOff,
+        ["CURSOR_CLOSE_ON_COMMIT"] = AlterDatabaseOptionKind.OnOff,
+        ["DATE_CORRELATION_OPTIMIZATION"] = AlterDatabaseOptionKind.OnOff,
+        ["PARAMETERIZATION"] = AlterDatabaseOptionKind.EnumIdent,
         ["RECOVERY"] = AlterDatabaseOptionKind.EnumIdent,
         ["PAGE_VERIFY"] = AlterDatabaseOptionKind.EnumIdent,
         ["CURSOR_DEFAULT"] = AlterDatabaseOptionKind.EnumIdent,
@@ -518,18 +527,131 @@ partial class Simulation
     /// the simulator doesn't model the underlying behavior. QUERY_STORE is
     /// the exception — it retains what it parses, so its values are checked.
     /// </remarks>
-    private static bool ConsumeDatabaseOptionTail(ParserContext context, Database target, AlterDatabaseOptionKind kind) => kind switch
+    private static bool ConsumeDatabaseOptionTail(ParserContext context, Database target, string name, AlterDatabaseOptionKind kind)
     {
-        AlterDatabaseOptionKind.OnOff =>
-            context.GetNextRequired() is ReservedKeyword { Keyword: Keyword.On or Keyword.Off },
-        AlterDatabaseOptionKind.EqualsOnOff => ConsumeEqualsOnOff(context),
-        AlterDatabaseOptionKind.EnumIdent =>
-            context.GetNextRequired() is Name or ReservedKeyword,
-        AlterDatabaseOptionKind.IntegerWithUnit => ConsumeIntegerWithUnit(context),
-        AlterDatabaseOptionKind.QueryStore => ParseQueryStoreTail(context, target),
-        AlterDatabaseOptionKind.AccessMode => ConsumeTerminationClause(context),
-        _ => false,
-    };
+        switch (kind)
+        {
+            case AlterDatabaseOptionKind.OnOff:
+                if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.On or Keyword.Off } toggle)
+                    return false;
+                // AUTO_CREATE_STATISTICS ON takes an optional (INCREMENTAL = ON | OFF).
+                bool? incremental = null;
+                if (toggle.Keyword == Keyword.On && name.Equals("AUTO_CREATE_STATISTICS", StringComparison.OrdinalIgnoreCase))
+                {
+                    var afterToggle = context.SaveCheckpoint();
+                    if (context.GetNextOptional() is Operator { Character: '(' })
+                    {
+                        if (context.GetNextRequired() is not UnquotedString { Value: var option } || !option.Equals("INCREMENTAL", StringComparison.OrdinalIgnoreCase)
+                            || context.GetNextRequired() is not Operator { Character: '=' })
+                        {
+                            return false;
+                        }
+                        incremental = context.GetNextRequired() switch
+                        {
+                            ReservedKeyword { Keyword: Keyword.On } => true,
+                            ReservedKeyword { Keyword: Keyword.Off } => false,
+                            _ => null,
+                        };
+                        if (incremental is null || context.GetNextRequired() is not Operator { Character: ')' })
+                            return false;
+                    }
+                    else
+                    {
+                        context.RestoreCheckpoint(afterToggle);
+                    }
+                }
+                if (!context.Batch.IsSkipping)
+                    RecordDatabaseSwitch(target, name, toggle.Keyword == Keyword.On, incremental);
+                return true;
+            case AlterDatabaseOptionKind.EqualsOnOff:
+                return ConsumeEqualsOnOff(context);
+            case AlterDatabaseOptionKind.EnumIdent:
+                if (context.GetNextRequired() is not (Name or ReservedKeyword))
+                    return false;
+                if (!context.Batch.IsSkipping)
+                    RecordDatabaseEnumOption(target, name, context.Token!.Source.ToString());
+                return true;
+            case AlterDatabaseOptionKind.IntegerWithUnit:
+                return ConsumeIntegerWithUnit(context);
+            case AlterDatabaseOptionKind.QueryStore:
+                return ParseQueryStoreTail(context, target);
+            case AlterDatabaseOptionKind.AccessMode:
+                if (!ConsumeTerminationClause(context))
+                    return false;
+                if (!context.Batch.IsSkipping)
+                {
+                    target.UserAccess = BuiltInToken.Equals(name, "RESTRICTED_USER") ? (byte)2
+                        : BuiltInToken.Equals(name, "SINGLE_USER") ? (byte)1
+                        : (byte)0;
+                }
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    /// <summary>Records an ON / OFF option on <paramref name="target"/>'s <see cref="Database.Switches"/>.</summary>
+    private static void RecordDatabaseSwitch(Database target, string name, bool on, bool? incremental)
+    {
+        // TORN_PAGE_DETECTION is PAGE_VERIFY's legacy spelling.
+        if (BuiltInToken.Equals(name, "TORN_PAGE_DETECTION"))
+        {
+            target.PageVerify = on ? (byte)1 : (byte)0;
+            return;
+        }
+        Span<char> upper = stackalloc char[name.Length];
+        _ = name.AsSpan().ToUpperInvariant(upper);
+        var flag = upper switch
+        {
+            "ANSI_NULLS" => DatabaseSwitches.AnsiNulls,
+            "ANSI_NULL_DEFAULT" => DatabaseSwitches.AnsiNullDefault,
+            "ANSI_PADDING" => DatabaseSwitches.AnsiPadding,
+            "ANSI_WARNINGS" => DatabaseSwitches.AnsiWarnings,
+            "ARITHABORT" => DatabaseSwitches.ArithAbort,
+            "AUTO_CLOSE" => DatabaseSwitches.AutoClose,
+            "AUTO_CREATE_STATISTICS" => DatabaseSwitches.AutoCreateStatistics,
+            "AUTO_SHRINK" => DatabaseSwitches.AutoShrink,
+            "AUTO_UPDATE_STATISTICS" => DatabaseSwitches.AutoUpdateStatistics,
+            "AUTO_UPDATE_STATISTICS_ASYNC" => DatabaseSwitches.AutoUpdateStatisticsAsync,
+            "CONCAT_NULL_YIELDS_NULL" => DatabaseSwitches.ConcatNullYieldsNull,
+            "CURSOR_CLOSE_ON_COMMIT" => DatabaseSwitches.CursorCloseOnCommit,
+            "DATE_CORRELATION_OPTIMIZATION" => DatabaseSwitches.DateCorrelationOptimization,
+            "NUMERIC_ROUNDABORT" => DatabaseSwitches.NumericRoundAbort,
+            "QUOTED_IDENTIFIER" => DatabaseSwitches.QuotedIdentifier,
+            "TEMPORAL_HISTORY_RETENTION" => DatabaseSwitches.TemporalHistoryRetention,
+            _ => DatabaseSwitches.None,
+        };
+        target.Switches = on ? target.Switches | flag : target.Switches & ~flag;
+        // Turning automatic statistics creation off takes its incremental mode with it.
+        if (flag == DatabaseSwitches.AutoCreateStatistics && (!on || incremental is not null))
+        {
+            target.Switches = on && incremental == true
+                ? target.Switches | DatabaseSwitches.AutoCreateStatisticsIncremental
+                : target.Switches & ~DatabaseSwitches.AutoCreateStatisticsIncremental;
+        }
+    }
+
+    /// <summary>Records a PAGE_VERIFY / CURSOR_DEFAULT / PARAMETERIZATION value on <paramref name="target"/>.</summary>
+    private static void RecordDatabaseEnumOption(Database target, string name, string value)
+    {
+        if (BuiltInToken.Equals(name, "CURSOR_DEFAULT"))
+        {
+            SetSwitch(target, DatabaseSwitches.LocalCursorDefault, BuiltInToken.Equals(value, "LOCAL"));
+        }
+        else if (BuiltInToken.Equals(name, "PAGE_VERIFY"))
+        {
+            target.PageVerify = BuiltInToken.Equals(value, "CHECKSUM") ? (byte)2
+                : BuiltInToken.Equals(value, "TORN_PAGE_DETECTION") ? (byte)1
+                : (byte)0;
+        }
+        else if (BuiltInToken.Equals(name, "PARAMETERIZATION"))
+        {
+            SetSwitch(target, DatabaseSwitches.ParameterizationForced, BuiltInToken.Equals(value, "FORCED"));
+        }
+
+        static void SetSwitch(Database database, DatabaseSwitches flag, bool on) =>
+            database.Switches = on ? database.Switches | flag : database.Switches & ~flag;
+    }
 
     /// <summary>
     /// Cursor on an option's last token — an access-mode name (SINGLE_USER /

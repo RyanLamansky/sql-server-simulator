@@ -215,8 +215,8 @@ public sealed class CollationMetadataTests
             "SELECT DATABASEPROPERTYEX('simulated', 'Status')"));
 
     [TestMethod]
-    public void DatabasePropertyEx_Version_ReturnsZeroAsInt()
-        => AreEqual(0, new Simulation().ExecuteScalar(
+    public void DatabasePropertyEx_Version_ReturnsTheSqlServer2025DatabaseVersion()
+        => AreEqual(998, new Simulation().ExecuteScalar(
             "SELECT DATABASEPROPERTYEX('simulated', 'Version')"));
 
     [TestMethod]
@@ -277,9 +277,9 @@ public sealed class CollationMetadataTests
     {
         // The projection type is always sql_variant (no compile-time-constant
         // dependency), so a non-constant property name resolves its inner base
-        // type at runtime identically — Version's int inner unwraps to 0.
+        // type at runtime identically — Version's int inner unwraps to 998.
         var sim = new Simulation();
-        AreEqual(0, sim.ExecuteScalar(
+        AreEqual(998, sim.ExecuteScalar(
             "declare @p nvarchar(30) = 'Version'; SELECT DATABASEPROPERTYEX('simulated', @p)"));
     }
 

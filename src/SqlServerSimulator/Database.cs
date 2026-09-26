@@ -317,6 +317,25 @@ internal sealed class Database
     public RecoveryModel RecoveryModel = RecoveryModel.Full;
 
     /// <summary>
+    /// The <c>ALTER DATABASE … SET</c> switches recorded for the catalog; see
+    /// <see cref="DatabaseSwitches"/>.
+    /// </summary>
+    public DatabaseSwitches Switches = DatabaseSwitches.Defaults;
+
+    /// <summary>
+    /// <c>sys.databases.page_verify_option</c>: 0 NONE, 1 TORN_PAGE_DETECTION,
+    /// 2 CHECKSUM — recorded, with nothing to verify.
+    /// </summary>
+    public byte PageVerify = 2;
+
+    /// <summary>
+    /// <c>sys.databases.user_access</c>: 0 MULTI_USER, 1 SINGLE_USER,
+    /// 2 RESTRICTED_USER — recorded; the simulator never restricts a
+    /// connection by it.
+    /// </summary>
+    public byte UserAccess;
+
+    /// <summary>
     /// This database's Query Store configuration, set by
     /// <c>ALTER DATABASE … SET QUERY_STORE</c> and reported through
     /// <c>sys.database_query_store_options</c> and

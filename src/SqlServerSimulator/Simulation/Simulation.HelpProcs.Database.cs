@@ -160,20 +160,53 @@ partial class Simulation
         + " " + createDate.Year.ToString(CultureInfo.InvariantCulture);
 
     // Real's fixed clause order: the five always-present properties, then the
-    // two the SUSPECT check gates, then the boolean properties in declaration
-    // order. Only the flags DATABASEPROPERTYEX reports as 1 for a simulator
-    // database appear, so the string tracks live state rather than a canned
-    // list.
+    // two the SUSPECT check gates, then each boolean property DATABASEPROPERTYEX
+    // reports as 1, in real's order (probed 2026-09-26 against SQL Server 2025),
+    // so the string tracks live state rather than a canned list.
     private static string HelpDbOptionString(Database database)
     {
         var text = new StringBuilder()
-            .Append("Status=ONLINE, Updateability=READ_WRITE, UserAccess=MULTI_USER, Recovery=FULL, Version=0")
+            .Append("Status=ONLINE, Updateability=").Append(database.IsReadOnly ? "READ_ONLY" : "READ_WRITE")
+            .Append(", UserAccess=").Append(database.UserAccess switch
+            {
+                1 => "SINGLE_USER",
+                2 => "RESTRICTED_USER",
+                _ => "MULTI_USER",
+            })
+            .Append(", Recovery=").Append(database.RecoveryModel switch
+            {
+                RecoveryModel.Simple => "SIMPLE",
+                RecoveryModel.BulkLogged => "BULK_LOGGED",
+                _ => "FULL",
+            })
+            .Append(", Version=998")
             .Append(", Collation=").Append(database.CollationName)
             .Append(", SQLSortOrder=").Append(Collation.SqlServerSortOrders.TryGetValue(database.CollationName, out var sortOrder)
                 ? sortOrder.OrderNumber.ToString(CultureInfo.InvariantCulture)
                 : "0");
-        if (database.RecursiveTriggers)
-            _ = text.Append(", IsRecursiveTriggersEnabled");
+        var switches = database.Switches;
+        void Flag(bool on, string name)
+        {
+            if (on)
+                _ = text.Append(", ").Append(name);
+        }
+        Flag((switches & DatabaseSwitches.AutoClose) != 0, "IsAutoClose");
+        Flag((switches & DatabaseSwitches.AutoShrink) != 0, "IsAutoShrink");
+        Flag(database.PageVerify == 1, "IsTornPageDetectionEnabled");
+        Flag((switches & DatabaseSwitches.AnsiNullDefault) != 0, "IsAnsiNullDefault");
+        Flag((switches & DatabaseSwitches.AnsiNulls) != 0, "IsAnsiNullsEnabled");
+        Flag((switches & DatabaseSwitches.AnsiPadding) != 0, "IsAnsiPaddingEnabled");
+        Flag((switches & DatabaseSwitches.AnsiWarnings) != 0, "IsAnsiWarningsEnabled");
+        Flag((switches & DatabaseSwitches.ArithAbort) != 0, "IsArithmeticAbortEnabled");
+        Flag((switches & DatabaseSwitches.AutoCreateStatistics) != 0, "IsAutoCreateStatistics");
+        Flag((switches & DatabaseSwitches.AutoUpdateStatistics) != 0, "IsAutoUpdateStatistics");
+        Flag((switches & DatabaseSwitches.CursorCloseOnCommit) != 0, "IsCloseCursorsOnCommitEnabled");
+        Flag(true, "IsFullTextEnabled");
+        Flag((switches & DatabaseSwitches.LocalCursorDefault) != 0, "IsLocalCursorsDefault");
+        Flag((switches & DatabaseSwitches.ConcatNullYieldsNull) != 0, "IsNullConcat");
+        Flag((switches & DatabaseSwitches.NumericRoundAbort) != 0, "IsNumericRoundAbortEnabled");
+        Flag((switches & DatabaseSwitches.QuotedIdentifier) != 0, "IsQuotedIdentifiersEnabled");
+        Flag(database.RecursiveTriggers, "IsRecursiveTriggersEnabled");
         return text.ToString();
     }
 

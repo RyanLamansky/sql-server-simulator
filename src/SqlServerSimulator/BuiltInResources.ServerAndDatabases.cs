@@ -1142,10 +1142,12 @@ internal static partial class BuiltInResources
     /// projection: modeled columns read live <see cref="Database"/> state
     /// (name / database_id / compatibility_level / collation_name /
     /// snapshot-isolation trio / recovery_model / physical_database_name),
-    /// state is always <c>0 / ONLINE</c>, and the remaining option-flag
-    /// columns carry the stock defaults a freshly created user database
-    /// reports on SQL Server 2025 (user_access MULTI_USER, page_verify
-    /// CHECKSUM, containment NONE, log_reuse_wait NOTHING, delayed_durability
+    /// the <c>ALTER DATABASE … SET</c> switches read
+    /// <see cref="Database.Switches"/> / <see cref="Database.PageVerify"/> /
+    /// <see cref="Database.UserAccess"/>, state is always <c>0 / ONLINE</c>,
+    /// and the remaining option-flag columns carry the stock defaults a
+    /// freshly created user database reports on SQL Server 2025
+    /// (containment NONE, log_reuse_wait NOTHING, delayed_durability
     /// DISABLED, catalog_collation DATABASE_DEFAULT). recovery_model is
     /// SIMPLE for <c>master</c> / <c>tempdb</c> / <c>msdb</c> and FULL for
     /// <c>model</c> and every user database, which inherits the template's,
@@ -1161,9 +1163,7 @@ internal static partial class BuiltInResources
         var ownerSid = SqlValue.FromVarbinary([0x01]);
         var createDate = SqlValue.FromDateTime(SysDatabasesCreateDate);
         var brokerGuid = SqlValue.FromGuid(SysDatabasesBrokerGuid);
-        var multiUser = SqlValue.FromNVarchar("MULTI_USER");
         var online = SqlValue.FromNVarchar("ONLINE");
-        var checksum = SqlValue.FromNVarchar("CHECKSUM");
         var nothing = SqlValue.FromNVarchar("NOTHING");
         var none = SqlValue.FromNVarchar("NONE");
         var disabled = SqlValue.FromNVarchar("DISABLED");
@@ -1189,6 +1189,8 @@ internal static partial class BuiltInResources
             // flag alone.
             var isBrokerEnabled = !Collation.Baseline.Equals(db.Name, "master")
                 && !Collation.Baseline.Equals(db.Name, "model");
+            var switches = db.Switches;
+            SqlValue Switch(DatabaseSwitches flag) => (switches & flag) != 0 ? trueBit : falseBit;
             yield return [
                 SqlValue.FromSystemName(db.Name),
                 SqlValue.FromInt32(id),
@@ -1197,11 +1199,16 @@ internal static partial class BuiltInResources
                 createDate,
                 SqlValue.FromByte((byte)db.CompatibilityLevel),
                 SqlValue.FromSystemName(db.CollationName),
-                zeroByte,
-                multiUser,
+                SqlValue.FromByte(db.UserAccess),
+                SqlValue.FromNVarchar(db.UserAccess switch
+                {
+                    1 => "SINGLE_USER",
+                    2 => "RESTRICTED_USER",
+                    _ => "MULTI_USER",
+                }),
                 SqlValue.FromBoolean(db.IsReadOnly), // is_read_only
-                falseBit,
-                falseBit,
+                Switch(DatabaseSwitches.AutoClose),
+                Switch(DatabaseSwitches.AutoShrink),
                 zeroByte,
                 online,
                 falseBit,
@@ -1217,27 +1224,32 @@ internal static partial class BuiltInResources
                     RecoveryModel.BulkLogged => "BULK_LOGGED",
                     _ => "FULL",
                 }),
-                SqlValue.FromByte(2),
-                checksum,
-                trueBit,  // is_auto_create_stats_on
-                falseBit, // is_auto_create_stats_incremental_on
-                trueBit,  // is_auto_update_stats_on
-                falseBit, // is_auto_update_stats_async_on
-                falseBit, // is_ansi_null_default_on
-                falseBit, // is_ansi_nulls_on
-                falseBit, // is_ansi_padding_on
-                falseBit, // is_ansi_warnings_on
-                falseBit, // is_arithabort_on
-                falseBit, // is_concat_null_yields_null_on
-                falseBit, // is_numeric_roundabort_on
-                falseBit, // is_quoted_identifier_on
+                SqlValue.FromByte(db.PageVerify),
+                SqlValue.FromNVarchar(db.PageVerify switch
+                {
+                    0 => "NONE",
+                    1 => "TORN_PAGE_DETECTION",
+                    _ => "CHECKSUM",
+                }),
+                Switch(DatabaseSwitches.AutoCreateStatistics),
+                Switch(DatabaseSwitches.AutoCreateStatisticsIncremental),
+                Switch(DatabaseSwitches.AutoUpdateStatistics),
+                Switch(DatabaseSwitches.AutoUpdateStatisticsAsync),
+                Switch(DatabaseSwitches.AnsiNullDefault),
+                Switch(DatabaseSwitches.AnsiNulls),
+                Switch(DatabaseSwitches.AnsiPadding),
+                Switch(DatabaseSwitches.AnsiWarnings),
+                Switch(DatabaseSwitches.ArithAbort),
+                Switch(DatabaseSwitches.ConcatNullYieldsNull),
+                Switch(DatabaseSwitches.NumericRoundAbort),
+                Switch(DatabaseSwitches.QuotedIdentifier),
                 SqlValue.FromBoolean(db.RecursiveTriggers),
-                falseBit, // is_cursor_close_on_commit_on
-                falseBit, // is_local_cursor_default
+                Switch(DatabaseSwitches.CursorCloseOnCommit),
+                Switch(DatabaseSwitches.LocalCursorDefault),
                 trueBit,  // is_fulltext_enabled
                 SqlValue.FromBoolean(db.Trustworthy),
                 SqlValue.FromBoolean(db.CrossDatabaseChaining),
-                falseBit, // is_parameterization_forced
+                Switch(DatabaseSwitches.ParameterizationForced),
                 falseBit, // is_master_key_encrypted_by_server
                 // Any desired state but OFF reads on here, READ_ONLY included —
                 // the flag tracks desired_state, not actual_state.
@@ -1251,7 +1263,7 @@ internal static partial class BuiltInResources
                 SqlValue.FromBoolean(isBrokerEnabled),
                 zeroByte,
                 nothing,
-                falseBit,
+                Switch(DatabaseSwitches.DateCorrelationOptimization),
                 falseBit,
                 falseBit,
                 falseBit,
@@ -1274,7 +1286,7 @@ internal static partial class BuiltInResources
                 falseBit, // is_federation_member
                 falseBit, // is_remote_data_archive_enabled
                 falseBit, // is_mixed_page_allocation_on
-                trueBit,  // is_temporal_history_retention_enabled
+                Switch(DatabaseSwitches.TemporalHistoryRetention),
                 zeroInt,
                 databaseDefault,
                 SqlValue.FromNVarchar(db.Name),

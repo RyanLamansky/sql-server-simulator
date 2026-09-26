@@ -1,7 +1,7 @@
 # `ALTER DATABASE` SET-option surface
 
 Closed accept-list parser (`RecognizedDatabaseOptions` in `Simulation.Alter.cs`) covering every database-scope toggle SqlPackage emits from a bacpac's `SqlDatabaseOptions` element.
-Most options parse-and-discard; only the seven "load-bearing" toggles (`COMPATIBILITY_LEVEL`, `ALLOW_SNAPSHOT_ISOLATION`, `READ_COMMITTED_SNAPSHOT`, `RECURSIVE_TRIGGERS`, `TRUSTWORTHY`, `DB_CHAINING`, `READ_ONLY` / `READ_WRITE`) drive actual behavior.
+Most options are recorded without behavior — see [Recorded switches](#recorded-switches) — and only the seven "load-bearing" toggles (`COMPATIBILITY_LEVEL`, `ALLOW_SNAPSHOT_ISOLATION`, `READ_COMMITTED_SNAPSHOT`, `RECURSIVE_TRIGGERS`, `TRUSTWORTHY`, `DB_CHAINING`, `READ_ONLY` / `READ_WRITE`) drive actual behavior.
 `RECOVERY` is tracked without driving anything — the simulator has no transaction log, but `sys.databases.recovery_model` / `recovery_model_desc` report it, and a bacpac carries the source database's value, so an imported database describes itself the way the original did.
 Real ships `master` / `tempdb` / `msdb` SIMPLE and `model` FULL, which every new user database inherits (probe-confirmed).
 
@@ -17,12 +17,13 @@ The name also governs the `COLLATE` clause below.
 ## Recognized options by value shape
 
 **`OnOff`** (`SET <name> {ON | OFF}`):
-- `ANSI_NULLS` / `ANSI_PADDING` / `ANSI_WARNINGS` / `ARITHABORT` / `CONCAT_NULL_YIELDS_NULL` / `NUMERIC_ROUNDABORT` / `QUOTED_IDENTIFIER` / `TORN_PAGE_DETECTION` / `TEMPORAL_HISTORY_RETENTION`
+- `ANSI_NULL_DEFAULT` / `ANSI_NULLS` / `ANSI_PADDING` / `ANSI_WARNINGS` / `ARITHABORT` / `CONCAT_NULL_YIELDS_NULL` / `NUMERIC_ROUNDABORT` / `QUOTED_IDENTIFIER` / `TORN_PAGE_DETECTION` / `TEMPORAL_HISTORY_RETENTION` / `AUTO_CLOSE` / `AUTO_SHRINK` / `AUTO_CREATE_STATISTICS` (whose `ON` takes an optional `(INCREMENTAL = ON | OFF)`) / `AUTO_UPDATE_STATISTICS` / `AUTO_UPDATE_STATISTICS_ASYNC` / `CURSOR_CLOSE_ON_COMMIT` / `DATE_CORRELATION_OPTIMIZATION`
 
 **`EnumIdent`** (`SET <name> <bareIdent>`):
 - `RECOVERY`: `FULL` / `BULK_LOGGED` / `SIMPLE`
 - `PAGE_VERIFY`: `CHECKSUM` / `TORN_PAGE_DETECTION` / `NONE`
 - `CURSOR_DEFAULT`: `GLOBAL` / `LOCAL`
+- `PARAMETERIZATION`: `SIMPLE` / `FORCED`
 
 **`EqualsOnOff`** (`SET <name> = {ON | OFF}` — `=` required per probe):
 - `ACCELERATED_DATABASE_RECOVERY`
@@ -33,12 +34,18 @@ The name also governs the `COLLATE` clause below.
 
 **`AccessMode`** (bare state, no `=`, with an optional termination clause): `SET {SINGLE_USER | MULTI_USER | RESTRICTED_USER} [WITH ROLLBACK IMMEDIATE | WITH ROLLBACK AFTER n [SECONDS] | WITH NO_WAIT]`.
 `READ_ONLY` / `READ_WRITE` take the same shape and the same termination clause but are load-bearing — see [Read-only databases](#read-only-databases).
-The state and the termination clause are both parse-and-discarded — the simulator has no connection-count access model, so it never actually restricts, and `WITH ROLLBACK …` never evicts.
+The state is recorded for the catalog and the termination clause discarded — the simulator has no connection-count access model, so it never actually restricts, and `WITH ROLLBACK …` never evicts.
 Load-bearing for `DROP DATABASE`: every ORM/app test-teardown runs `SET SINGLE_USER WITH ROLLBACK IMMEDIATE` immediately before the drop (Django/mssql-django).
 Parsed explicitly (`ConsumeAccessModeTail`) rather than scanned to a boundary, because `ROLLBACK` is itself a statement-starting keyword — only `WITH`/`ROLLBACK` tokenize as keywords, `IMMEDIATE`/`AFTER`/`SECONDS`/`NO_WAIT` are matched by text.
 
 **`QueryStore`** is not in this list — it is load-bearing, and the only ALTER DATABASE option with a sub-grammar of its own.
 See [Query Store](#query-store).
+
+## Recorded switches
+
+The `OnOff` options, `PAGE_VERIFY` (and its legacy `TORN_PAGE_DETECTION` spelling), `CURSOR_DEFAULT`, `PARAMETERIZATION` and the access mode are recorded on the database (`Database.Switches` / `PageVerify` / `UserAccess`) without driving anything, and reported by `sys.databases`' option columns and `DATABASEPROPERTYEX` (probed 2026-09-26 against SQL Server 2025).
+Every database, system or user, starts from the same defaults: automatic statistics creation and update and temporal history retention on, page verification `CHECKSUM`, `MULTI_USER`, everything else off.
+Turning `AUTO_CREATE_STATISTICS` off takes its incremental mode with it.
 
 ## Load-bearing options (behavior wired)
 
