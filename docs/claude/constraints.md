@@ -66,6 +66,13 @@ All probe-confirmed against SQL Server 2025.
 `sys.check_constraints.is_system_named` is 1 for every server-generated name and 0 for a `CONSTRAINT name` one, on both declaration paths — CREATE TABLE (inline column tail and table-level list) and `ALTER TABLE … ADD` — matching real (probe-confirmed against SQL Server 2025, which reports the same split for `sys.default_constraints` and `sys.key_constraints`).
 The auto-name shapes themselves are in [`alter-table.md`](alter-table.md); they are deterministic but don't byte-match real's object-id-derived hex.
 
+## `NOT FOR REPLICATION`
+
+`CHECK NOT FOR REPLICATION (…)` — inline, table-level and through `ALTER TABLE … ADD` — and a foreign key's trailing `NOT FOR REPLICATION` (after its referential actions, never before them: Msg 156 on the `ON`) are kept on the constraint (probed 2026-09-26 against SQL Server 2025).
+With no replication agent, the flag changes nothing at run time: the constraint is still enforced, and adding one still validates the existing rows.
+What it does change is trust: such a constraint is born untrusted and stays untrusted through `WITH CHECK CHECK CONSTRAINT`, so `is_not_trusted`, `CnstIsNotTrusted` and `sp_helpconstraint`'s `Not_For_Replication` status all report it.
+A table variable's and table type's grammar has no such clause — Msg 102 on the `not`.
+
 ## PERSISTED needs a deterministic expression
 
 `PERSISTED` stores the expression's value once, so real refuses one whose expression it classifies nondeterministic: **Msg 4936**, `Computed column '<col>' in table '<table>' cannot be persisted because the column is non-deterministic.`, with the table named unqualified.

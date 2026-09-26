@@ -175,6 +175,7 @@ The explicit `NOT NULL` is required because the simulator's parser defaults a ba
 **ROWGUIDCOL and identity NOT FOR REPLICATION survive to the catalog.**
 `TranslateSimpleColumn` reads the `SqlSimpleColumn`'s `IsRowGuidColumn` property and appends a `ROWGUIDCOL` keyword after the type (round-trips through `sys.columns.is_rowguidcol`), and reads `IdentityIsNotForReplication` to append `NOT FOR REPLICATION` to the `IDENTITY(seed, increment)` clause (round-trips through `sys.identity_columns.is_not_for_replication`).
 Both are metadata-only — replication and the `$ROWGUID` pseudo-column aren't modeled — but DacFx reads the catalog columns on export, so without emitting the clauses the re-exported model dropped `IsRowGuidColumn=True` (29 AW columns) and `IdentityIsNotForReplication=True` (4 AW columns).
+A CHECK's or foreign key's `IsNotForReplication` property (the name DacFx 170 exports under, checked 2026-09-26) becomes the constraint's own `NOT FOR REPLICATION` clause.
 The extended-property `value` similarly round-trips as `sql_variant` (see [`extended-properties.md`](extended-properties.md)) so DacFx re-scripts the N-prefix — together these closed the AW property-diff tail.
 
 **Persisted computed columns are computed at load.**

@@ -1464,10 +1464,11 @@ internal static class ModelXmlReader
         var deleteClause = deleteAction is null ? "" : $" ON DELETE {deleteAction}";
         var updateClause = updateAction is null ? "" : $" ON UPDATE {updateAction}";
         var withClause = HasAnnotation(element, IsNotTrustedAnnotation) ? "WITH NOCHECK " : "";
+        var replicationClause = ReadBoolProperty(element, "IsNotForReplication", defaultValue: false) ? " NOT FOR REPLICATION" : "";
 
         using var command = connection.CreateCommand();
 #pragma warning disable CA2100 // bacpac content is caller-trusted; the loader is a translator, not an end-user input handler
-        command.CommandText = $"ALTER TABLE {definingTable} {withClause}ADD CONSTRAINT {Leaf(constraintName)} FOREIGN KEY ({childList}) REFERENCES {foreignTable} ({parentList}){deleteClause}{updateClause};";
+        command.CommandText = $"ALTER TABLE {definingTable} {withClause}ADD CONSTRAINT {Leaf(constraintName)} FOREIGN KEY ({childList}) REFERENCES {foreignTable} ({parentList}){deleteClause}{updateClause}{replicationClause};";
 #pragma warning restore CA2100
         _ = command.ExecuteNonQuery();
     }
@@ -1487,7 +1488,7 @@ internal static class ModelXmlReader
     };
 
     /// <summary>
-    /// Emits <c>ALTER TABLE table [WITH NOCHECK] ADD CONSTRAINT name CHECK (raw_expression)</c>.
+    /// Emits <c>ALTER TABLE table [WITH NOCHECK] ADD CONSTRAINT name CHECK [NOT FOR REPLICATION] (raw_expression)</c>.
     /// The CheckExpressionScript property body is raw T-SQL — feeds directly
     /// to the simulator's CHECK parser.
     /// </summary>
@@ -1500,10 +1501,11 @@ internal static class ModelXmlReader
         var script = ReadScriptProperty(element, "CheckExpressionScript")
             ?? throw new InvalidDataException($"bacpac: CHECK '{constraintName}' missing CheckExpressionScript.");
         var withClause = HasAnnotation(element, IsNotTrustedAnnotation) ? "WITH NOCHECK " : "";
+        var replicationClause = ReadBoolProperty(element, "IsNotForReplication", defaultValue: false) ? "NOT FOR REPLICATION " : "";
 
         using var command = connection.CreateCommand();
 #pragma warning disable CA2100 // bacpac content is caller-trusted; the loader is a translator, not an end-user input handler
-        command.CommandText = $"ALTER TABLE {definingTable} {withClause}ADD CONSTRAINT {Leaf(constraintName)} CHECK ({script});";
+        command.CommandText = $"ALTER TABLE {definingTable} {withClause}ADD CONSTRAINT {Leaf(constraintName)} CHECK {replicationClause}({script});";
 #pragma warning restore CA2100
         _ = command.ExecuteNonQuery();
     }

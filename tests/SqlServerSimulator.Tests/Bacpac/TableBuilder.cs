@@ -125,9 +125,9 @@ public sealed class TableBuilder
     /// Adds a named <c>CHECK (expression)</c> constraint. The expression
     /// is raw T-SQL — feeds directly to the simulator's CHECK parser.
     /// </summary>
-    public TableBuilder Check(string name, string expression)
+    public TableBuilder Check(string name, string expression, bool notForReplication = false)
     {
-        Constraints.Add(new CheckDef(name, expression));
+        Constraints.Add(new CheckDef(name, expression, notForReplication));
         return this;
     }
 
@@ -159,9 +159,10 @@ public sealed class TableBuilder
         string parentTable,
         string[] parentColumns,
         string? onDelete = null,
-        string? onUpdate = null)
+        string? onUpdate = null,
+        bool notForReplication = false)
     {
-        Constraints.Add(new ForeignKeyDef(name, childColumns, parentSchema, parentTable, parentColumns, onDelete, onUpdate));
+        Constraints.Add(new ForeignKeyDef(name, childColumns, parentSchema, parentTable, parentColumns, onDelete, onUpdate, notForReplication));
         return this;
     }
 
@@ -242,7 +243,7 @@ public sealed class TableBuilder
             {
                 PrimaryKeyDef pk => KeyConstraintElement(ns, "SqlPrimaryKeyConstraint", pk.Name, pk.Columns, isPrimary: true),
                 UniqueDef uq => KeyConstraintElement(ns, "SqlUniqueConstraint", uq.Name, uq.Columns, isPrimary: false),
-                CheckDef ck => CheckConstraintElement(ns, ck.Name, ck.Expression),
+                CheckDef ck => CheckConstraintElement(ns, ck),
                 DefaultDef df => DefaultConstraintElement(ns, df.Name, df.Column, df.Expression),
                 ForeignKeyDef fk => ForeignKeyConstraintElement(ns, fk, table),
                 _ => throw new InvalidOperationException($"Unknown constraint kind: {constraint.GetType().Name}"),
@@ -335,14 +336,15 @@ public sealed class TableBuilder
         return element;
     }
 
-    private XElement CheckConstraintElement(XNamespace ns, string name, string expression) =>
+    private XElement CheckConstraintElement(XNamespace ns, CheckDef ck) =>
         new(ns + "Element",
             new XAttribute("Type", "SqlCheckConstraint"),
-            new XAttribute("Name", $"[{SchemaName}].[{name}]"),
+            new XAttribute("Name", $"[{SchemaName}].[{ck.Name}]"),
             DefiningTableRelationship(ns),
+            ck.NotForReplication ? PropertyElement(ns, "IsNotForReplication", "True") : null,
             new XElement(ns + "Property",
                 new XAttribute("Name", "CheckExpressionScript"),
-                new XElement(ns + "Value", new XCData(expression))));
+                new XElement(ns + "Value", new XCData(ck.Expression))));
 
     private XElement DefaultConstraintElement(XNamespace ns, string name, string column, string expression) =>
         new(ns + "Element",
@@ -395,6 +397,8 @@ public sealed class TableBuilder
         var updateEnum = ReferentialActionEnum(fk.OnUpdate);
         if (updateEnum is not null)
             element.Add(PropertyElement(ns, "OnUpdateAction", updateEnum));
+        if (fk.NotForReplication)
+            element.Add(PropertyElement(ns, "IsNotForReplication", "True"));
         return element;
     }
 
@@ -594,7 +598,7 @@ internal abstract record ConstraintDef(string Name);
 
 internal sealed record PrimaryKeyDef(string Name, string[] Columns) : ConstraintDef(Name);
 internal sealed record UniqueDef(string Name, string[] Columns) : ConstraintDef(Name);
-internal sealed record CheckDef(string Name, string Expression) : ConstraintDef(Name);
+internal sealed record CheckDef(string Name, string Expression, bool NotForReplication) : ConstraintDef(Name);
 internal sealed record DefaultDef(string Name, string Column, string Expression) : ConstraintDef(Name);
 internal sealed record ForeignKeyDef(
     string Name,
@@ -603,7 +607,8 @@ internal sealed record ForeignKeyDef(
     string ParentTable,
     string[] ParentColumns,
     string? OnDelete,
-    string? OnUpdate) : ConstraintDef(Name);
+    string? OnUpdate,
+    bool NotForReplication) : ConstraintDef(Name);
 
 /// <summary>Index declaration accumulated via <see cref="TableBuilder.Index"/>.</summary>
 internal readonly record struct IndexDef(string Name, string[] KeyColumns, string[] IncludedColumns, bool Unique, bool Clustered);

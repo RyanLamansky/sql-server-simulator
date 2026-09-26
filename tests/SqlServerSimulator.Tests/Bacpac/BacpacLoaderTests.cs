@@ -1597,6 +1597,28 @@ public class BacpacLoaderTests
     }
 
     [TestMethod]
+    public void NotForReplicationConstraints_LoadWithClause_SetFlag()
+    {
+        // DacFx carries the clause as an IsNotForReplication property on the
+        // SqlCheckConstraint / SqlForeignKeyConstraint element.
+        using var bacpac = BacpacBuilder.Create()
+            .Table("dbo", "Par", t => t
+                .Column("Id", "int")
+                .PrimaryKey("PK_Par", "Id"))
+            .Table("dbo", "Child", t => t
+                .Column("ParId", "int", nullable: true)
+                .Check("CK_Child", "([ParId]>(0))", notForReplication: true)
+                .ForeignKey("FK_Child", ["ParId"], "dbo", "Par", ["Id"], notForReplication: true))
+            .Build();
+
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
+        IsEmpty(diag.Skipped);
+        AreEqual(2, sim.ExecuteScalar(
+            "SELECT (SELECT count(*) FROM sys.check_constraints WHERE is_not_for_replication = 1) + (SELECT count(*) FROM sys.foreign_keys WHERE is_not_for_replication = 1);"));
+    }
+
+    [TestMethod]
     public void ExtendedProperty_OnUnmodeledHostKind_LandsOnSkippedWithReason()
     {
         // An extended-property host kind the loader doesn't model (here a

@@ -11,7 +11,7 @@ Two equivalent declaration shapes accepted in `CREATE TABLE`:
 -- Inline (single-column FK on the column being declared):
 CREATE TABLE c (
   id      int NOT NULL PRIMARY KEY,
-  p_id    int NOT NULL [CONSTRAINT fk_c_to_p] [FOREIGN KEY] REFERENCES p (id) [ON DELETE action] [ON UPDATE action]
+  p_id    int NOT NULL [CONSTRAINT fk_c_to_p] [FOREIGN KEY] REFERENCES p (id) [ON DELETE action] [ON UPDATE action] [NOT FOR REPLICATION]
 );
 
 -- Table-level (single or multi-column FK):
@@ -19,7 +19,7 @@ CREATE TABLE c (
   id      int NOT NULL PRIMARY KEY,
   ra      int NOT NULL,
   rb      int NOT NULL,
-  [CONSTRAINT fk_c_to_p] FOREIGN KEY (ra, rb) REFERENCES p (a, b) [ON DELETE action] [ON UPDATE action]
+  [CONSTRAINT fk_c_to_p] FOREIGN KEY (ra, rb) REFERENCES p (a, b) [ON DELETE action] [ON UPDATE action] [NOT FOR REPLICATION]
 );
 ```
 
@@ -231,7 +231,7 @@ Each FK emits a `'F '` / `FOREIGN_KEY_CONSTRAINT` row interleaved after its chil
 | `is_ms_shipped` / `is_published` / `is_schema_published` | 0 |
 | `referenced_object_id` | parent table's object id |
 | `key_index_id` | the referenced table's index that backs the FK, resolved through `HeapTable.IndexIdentities()` |
-| `is_disabled` / `is_not_for_replication` / `is_not_trusted` | 0 |
+| `is_disabled` / `is_not_for_replication` / `is_not_trusted` | `ForeignKey.IsDisabled` / `.NotForReplication` / `.IsNotTrusted` — a `NOT FOR REPLICATION` key is never trusted ([`constraints.md`](constraints.md#not-for-replication)) |
 | `delete_referential_action` | 0/1/2/3 |
 | `delete_referential_action_desc` | `NO_ACTION` / `CASCADE` / `SET_NULL` / `SET_DEFAULT` |
 | `update_referential_action` | 0/1/2/3 |

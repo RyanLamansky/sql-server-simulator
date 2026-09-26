@@ -132,7 +132,7 @@ internal sealed class ObjectProperty : Expression
             "CNSTISDELETECASCADE" => Flag(foreignKey is { DeleteAction: ReferentialAction.Cascade }),
             "CNSTISDISABLED" => Flag(check is { IsDisabled: true } || foreignKey is { IsDisabled: true }),
             "CNSTISNONCLUSTKEY" => Flag(key is { IsClustered: false }),
-            "CNSTISNOTREPL" => 0,
+            "CNSTISNOTREPL" => Flag(check is { NotForReplication: true } || foreignKey is { NotForReplication: true }),
             "CNSTISNOTTRUSTED" => Flag(check is { IsNotTrusted: true } || foreignKey is { IsNotTrusted: true }),
             "CNSTISUPDATECASCADE" => Flag(foreignKey is { UpdateAction: ReferentialAction.Cascade }),
             "ISCHECKCNST" => Flag(typeCode == "C"),

@@ -619,7 +619,7 @@ partial class Simulation
             rows.Add((check.Name, false, Cells(
                 check.InlineColumn is { } column ? "CHECK on column " + column : "CHECK Table Level ",
                 check.Name, "(n/a)", "(n/a)",
-                check.IsDisabled ? "Disabled" : "Enabled", "Is_For_Replication",
+                check.IsDisabled ? "Disabled" : "Enabled", check.NotForReplication ? "Not_For_Replication" : "Is_For_Replication",
                 check.Definition ?? "")));
         }
 
@@ -662,7 +662,7 @@ partial class Simulation
             rows.Add((fk.Name, false, Cells(
                 "FOREIGN KEY", fk.Name,
                 HelpReferentialAction(fk.DeleteAction), HelpReferentialAction(fk.UpdateAction),
-                fk.IsDisabled ? "Disabled" : "Enabled", "Is_For_Replication",
+                fk.IsDisabled ? "Disabled" : "Enabled", fk.NotForReplication ? "Not_For_Replication" : "Is_For_Replication",
                 string.Join(", ", childColumns))));
             rows.Add((fk.Name, true, Cells(" ", " ", " ", " ", " ", " ",
                 $"REFERENCES {HelpTableReference(database, fk.ReferencedTable)} ({string.Join(", ", parentColumns)})")));

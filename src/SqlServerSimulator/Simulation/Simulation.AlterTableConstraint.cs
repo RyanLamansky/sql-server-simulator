@@ -227,10 +227,12 @@ partial class Simulation
         // Inline equivalent of ParseInlineCheckPredicate without the trailing
         // MoveNextRequired — ADD CHECK at end-of-batch has no follow-on
         // token, so the required advance would throw.
-        if (context.GetNextRequired() is not Operator { Character: '(' })
+        context.MoveNextRequired();
+        var notForReplication = TryConsumeNotForReplication(context);
+        if (context.Token is not Operator { Character: '(' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextRequired();
-        var predicateStart = context.Token!.StartIndex;
+        var predicateStart = context.Token.StartIndex;
         var savedRejection = context.EnterNextValueForScope(NextValueForScope.Nested);
         BooleanExpression predicate;
         try
@@ -261,7 +263,8 @@ partial class Simulation
         var constraint = new CheckConstraint(name, predicate, column, context.CurrentDatabase.AllocateObjectId(), context.Batch.CurrentStatement.UtcNow)
         {
             IsSystemNamed = explicitName is null,
-            IsNotTrusted = withNoCheck,
+            IsNotTrusted = withNoCheck || notForReplication,
+            NotForReplication = notForReplication,
             Definition = definition,
         };
         if (!withNoCheck)
@@ -315,7 +318,7 @@ partial class Simulation
                 throw SimulatedSqlException.SyntaxErrorNear(context);
             context.MoveNextOptional();
         }
-        var (delAction, updAction) = ParseOnDeleteOnUpdateActions(context);
+        var (delAction, updAction, notForReplication) = ParseOnDeleteOnUpdateActions(context);
 
         if (context.Batch.IsSkipping)
             return true;
@@ -352,12 +355,13 @@ partial class Simulation
             referencedTable,
             [.. referencedColumns],
             delAction,
-            updAction);
+            updAction,
+            notForReplication);
 
         var beforeCount = table.OutgoingForeignKeys.Count;
         ResolveForeignKeys(table, [pending], context);
         var newFk = table.OutgoingForeignKeys[beforeCount];
-        newFk.IsNotTrusted = withNoCheck;
+        newFk.IsNotTrusted |= withNoCheck;
         if (!withNoCheck)
             ValidateExistingRowsForForeignKey(context, table, newFk);
         return true;
@@ -938,7 +942,7 @@ partial class Simulation
                     // doesn't accidentally early-exit on the table's other
                     // disabled constraints (the helper only scans this FK).
                     ValidateExistingRowsForForeignKey(context, table, fk);
-                    fk.IsNotTrusted = false;
+                    fk.IsNotTrusted = fk.NotForReplication;
                 }
                 fk.IsDisabled = false;
             }
@@ -956,7 +960,7 @@ partial class Simulation
                 if (revalidate)
                 {
                     ValidateExistingRowsForCheckConstraint(context, table, ck);
-                    ck.IsNotTrusted = false;
+                    ck.IsNotTrusted = ck.NotForReplication;
                 }
                 ck.IsDisabled = false;
             }

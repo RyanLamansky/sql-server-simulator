@@ -68,6 +68,14 @@ internal sealed class CheckConstraint(string name, BooleanExpression predicate, 
     public bool IsNotTrusted;
 
     /// <summary>
+    /// True iff declared <c>CHECK NOT FOR REPLICATION</c>. Still enforced,
+    /// but never trusted — <c>WITH CHECK CHECK CONSTRAINT</c> leaves
+    /// <see cref="IsNotTrusted"/> set (probed 2026-09-26 against SQL Server
+    /// 2025).
+    /// </summary>
+    public bool NotForReplication;
+
+    /// <summary>
     /// True iff the CHECK was disabled via <c>ALTER TABLE … NOCHECK
     /// CONSTRAINT name</c>. While disabled, INSERT / UPDATE / MERGE skip
     /// predicate evaluation. Cleared by <c>ALTER TABLE … CHECK CONSTRAINT

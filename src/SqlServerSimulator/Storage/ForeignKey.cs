@@ -109,10 +109,18 @@ internal sealed class ForeignKey(
     /// either of which bypasses the existing-row validation pass. Cleared by
     /// <c>ALTER TABLE … WITH CHECK CHECK CONSTRAINT name</c> on successful
     /// re-validation. Surfaces in <c>sys.foreign_keys.is_not_trusted</c>.
-    /// False for FKs declared at <c>CREATE TABLE</c> (real SQL Server treats
-    /// CREATE-time FKs as trusted unconditionally).
+    /// Also true for a <see cref="NotForReplication"/> key; otherwise false
+    /// for FKs declared at <c>CREATE TABLE</c>.
     /// </summary>
     public bool IsNotTrusted;
+
+    /// <summary>
+    /// True iff declared <c>NOT FOR REPLICATION</c>. Still enforced, but
+    /// never trusted — <c>WITH CHECK CHECK CONSTRAINT</c> leaves
+    /// <see cref="IsNotTrusted"/> set (probed 2026-09-26 against SQL Server
+    /// 2025).
+    /// </summary>
+    public bool NotForReplication;
 
     /// <summary>
     /// True iff the FK was disabled via <c>ALTER TABLE … NOCHECK CONSTRAINT

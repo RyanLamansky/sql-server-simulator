@@ -27,7 +27,7 @@ partial class Simulation
         public readonly List<HeapColumn?> HeapColumns = [];
         public readonly List<bool> ExplicitNull = [];
         public readonly List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals, bool? Clustered, IndexOptions Options, bool[] Descending)> PendingKeys = [];
-        public readonly List<(string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition)> PendingChecks = [];
+        public readonly List<(string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition, bool NotForReplication)> PendingChecks = [];
         public readonly List<(int Index, string Name, Expression Expression, bool Persisted, bool Nullable, string Definition)> PendingComputed = [];
         public readonly List<PendingForeignKey> PendingForeignKeys = [];
         public readonly List<int> WithValuesColumns = [];

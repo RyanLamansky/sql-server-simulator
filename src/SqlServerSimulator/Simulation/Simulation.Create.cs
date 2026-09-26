@@ -104,7 +104,7 @@ partial class Simulation
         var heapColumns = new List<HeapColumn?>();
         var pendingComputed = new List<(int Index, string Name, Expression Expression, bool Persisted, bool Nullable, string Definition)>();
         var pendingKeys = new List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals, bool? Clustered, IndexOptions Options, bool[] Descending)>();
-        var pendingChecks = new List<(string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition)>();
+        var pendingChecks = new List<(string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition, bool NotForReplication)>();
         var pendingPeriod = new List<(string StartCol, string EndCol)>();
         var pendingForeignKeys = new List<PendingForeignKey>();
         var pendingIndexes = new List<PendingInlineIndex>();
@@ -1251,7 +1251,7 @@ partial class Simulation
         bool isTableType,
         List<HeapColumn?> heapColumns,
         List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals, bool? Clustered, IndexOptions Options, bool[] Descending)> pendingKeys,
-        List<(string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition)> pendingChecks,
+        List<(string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition, bool NotForReplication)> pendingChecks,
         List<(int Index, string Name, Expression Expression, bool Persisted, bool Nullable, string Definition)> pendingComputed,
         List<(string StartCol, string EndCol)>? pendingPeriod = null,
         List<PendingForeignKey>? pendingForeignKeys = null,
@@ -1425,7 +1425,7 @@ partial class Simulation
         List<HeapColumn?> heapColumns,
         List<bool> explicitNull,
         List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals, bool? Clustered, IndexOptions Options, bool[] Descending)> pendingKeys,
-        List<(string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition)> pendingChecks,
+        List<(string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition, bool NotForReplication)> pendingChecks,
         List<(int Index, string Name, Expression Expression, bool Persisted, bool Nullable, string Definition)> pendingComputed,
         List<(string StartCol, string EndCol)>? pendingPeriod,
         List<PendingForeignKey>? pendingForeignKeys,
@@ -1692,8 +1692,8 @@ partial class Simulation
                         case ReservedKeyword { Keyword: Keyword.Check }:
                             if (inlineCheckSeen)
                                 throw SimulatedSqlException.MultipleColumnConstraints("CHECK", columnName.Value, tableName);
-                            var namedCheck = ParseInlineCheckPredicate(context);
-                            pendingChecks.Add((namedConstraint.Value, namedCheck.Predicate, columnName.Value, namedCheck.Definition));
+                            var namedCheck = ParseInlineCheckPredicate(context, refusesNotForReplication: false);
+                            pendingChecks.Add((namedConstraint.Value, namedCheck.Predicate, columnName.Value, namedCheck.Definition, namedCheck.NotForReplication));
                             inlineCheckSeen = true;
                             continue;
                         case ReservedKeyword { Keyword: Keyword.Foreign or Keyword.References }:
@@ -1747,8 +1747,8 @@ partial class Simulation
                 case ReservedKeyword { Keyword: Keyword.Check }:
                     if (inlineCheckSeen)
                         throw SimulatedSqlException.MultipleColumnConstraints("CHECK", columnName.Value, tableName);
-                    var inlineCheck = ParseInlineCheckPredicate(context);
-                    pendingChecks.Add((null, inlineCheck.Predicate, columnName.Value, inlineCheck.Definition));
+                    var inlineCheck = ParseInlineCheckPredicate(context, isTableVariable || isTableType);
+                    pendingChecks.Add((null, inlineCheck.Predicate, columnName.Value, inlineCheck.Definition, inlineCheck.NotForReplication));
                     inlineCheckSeen = true;
                     continue;
                 // Real spells the refused keyword in capitals however it was
@@ -2020,7 +2020,7 @@ partial class Simulation
         int computedIndex,
         bool persisted,
         List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals, bool? Clustered, IndexOptions Options, bool[] Descending)> pendingKeys,
-        List<(string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition)> pendingChecks,
+        List<(string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition, bool NotForReplication)> pendingChecks,
         List<PendingForeignKey>? pendingForeignKeys)
     {
         var checkSeen = false;
@@ -2046,8 +2046,8 @@ partial class Simulation
                         throw SimulatedSqlException.ComputedColumnConstraintRequiresPersisted();
                     if (checkSeen)
                         throw SimulatedSqlException.MultipleColumnConstraints("CHECK", columnName, tableName);
-                    var inlineCheck = ParseInlineCheckPredicate(context);
-                    pendingChecks.Add((constraintName, inlineCheck.Predicate, columnName, inlineCheck.Definition));
+                    var inlineCheck = ParseInlineCheckPredicate(context, pendingForeignKeys is null);
+                    pendingChecks.Add((constraintName, inlineCheck.Predicate, columnName, inlineCheck.Definition, inlineCheck.NotForReplication));
                     checkSeen = true;
                     continue;
                 case ReservedKeyword { Keyword: Keyword.Foreign or Keyword.References }:
@@ -2110,14 +2110,21 @@ partial class Simulation
     /// the keyword, the opening <c>(</c>, the inner predicate via
     /// <see cref="BooleanExpression.Parse"/>, and the closing <c>)</c>. Leaves
     /// the token on the next un-consumed token (typically a comma or the
-    /// column-list's closing paren).
+    /// column-list's closing paren). A <c>NOT FOR REPLICATION</c> between the
+    /// keyword and the predicate is read and reported.
     /// </summary>
-    private static (BooleanExpression Predicate, string Definition) ParseInlineCheckPredicate(ParserContext context)
+    private static (BooleanExpression Predicate, string Definition, bool NotForReplication) ParseInlineCheckPredicate(ParserContext context, bool refusesNotForReplication)
     {
-        if (context.GetNextRequired() is not Operator { Character: '(' })
+        context.MoveNextRequired();
+        // A table variable's or table type's grammar has no NOT FOR
+        // REPLICATION: Msg 102 on the NOT (probed 2026-09-26).
+        if (refusesNotForReplication && context.Token is ReservedKeyword { Keyword: Keyword.Not })
+            throw SimulatedSqlException.SyntaxErrorNear(context.Token);
+        var notForReplication = TryConsumeNotForReplication(context);
+        if (context.Token is not Operator { Character: '(' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextRequired();
-        var predicateStart = context.Token!.StartIndex;
+        var predicateStart = context.Token.StartIndex;
         // A CHECK constraint is the first construct real's Msg 11719 names
         // (probe-confirmed 2026-08-05 for the inline column form).
         var savedRejection = context.EnterNextValueForScope(NextValueForScope.Nested);
@@ -2139,7 +2146,31 @@ partial class Simulation
         // a CHECK predicate; ALTER TABLE ADD COLUMN's inline CHECK may end
         // the statement.
         context.MoveNextOptional();
-        return (predicate, definition);
+        return (predicate, definition, notForReplication);
+    }
+
+    /// <summary>
+    /// Consumes <c>NOT FOR REPLICATION</c> at the cursor, leaving it on the
+    /// token after; answers whether the clause was there. A CHECK or foreign
+    /// key declared with it is still enforced, but never trusted (probed
+    /// 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    internal static bool TryConsumeNotForReplication(ParserContext context)
+    {
+        if (context.Token is not ReservedKeyword { Keyword: Keyword.Not })
+            return false;
+        var checkpoint = context.SaveCheckpoint();
+        if (context.GetNextOptional() is ReservedKeyword { Keyword: Keyword.For })
+        {
+            var replication = context.GetNextOptional();
+            if (replication is ReservedKeyword { Keyword: Keyword.Replication } or UnquotedString { ContextualKeyword: ContextualKeyword.Replication })
+            {
+                context.MoveNextOptional();
+                return true;
+            }
+        }
+        context.RestoreCheckpoint(checkpoint);
+        return false;
     }
 
     /// <summary>
@@ -2250,7 +2281,7 @@ partial class Simulation
         Collation collation,
         string tableName,
         List<HeapColumn?> columns,
-        List<(string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition)> pendingChecks)
+        List<(string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition, bool NotForReplication)> pendingChecks)
     {
         foreach (var pending in pendingChecks)
             RejectCheckOverNonPersistedComputedColumn(collation, tableName, columns, pending.Predicate);
@@ -2266,7 +2297,7 @@ partial class Simulation
     internal static void BindCheckConstraints(
         BatchContext batch,
         List<HeapColumn?> columns,
-        List<(string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition)> pendingChecks)
+        List<(string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition, bool NotForReplication)> pendingChecks)
     {
         foreach (var pending in pendingChecks)
             BindCheckConstraint(batch, columns, pending.Predicate);
@@ -2334,7 +2365,7 @@ partial class Simulation
 
     internal static CheckConstraint[] ResolveCheckConstraints(
         string tableName,
-        IReadOnlyList<(string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition)> pendingChecks,
+        IReadOnlyList<(string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition, bool NotForReplication)> pendingChecks,
         Database database,
         DateTime createDate)
     {
@@ -2351,6 +2382,8 @@ partial class Simulation
             {
                 Definition = pending.Definition,
                 IsSystemNamed = pending.Name is null,
+                NotForReplication = pending.NotForReplication,
+                IsNotTrusted = pending.NotForReplication,
             };
         }
         return resolved;
@@ -2471,7 +2504,7 @@ partial class Simulation
         ParserContext context,
         List<HeapColumn?> heapColumns,
         List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals, bool? Clustered, IndexOptions Options, bool[] Descending)> pendingKeys,
-        List<(string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition)> pendingChecks,
+        List<(string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition, bool NotForReplication)> pendingChecks,
         List<(int Index, string Name, Expression Expression, bool Persisted, bool Nullable, string Definition)> pendingComputed,
         List<PendingForeignKey>? pendingForeignKeys = null)
     {
@@ -2487,8 +2520,8 @@ partial class Simulation
         switch (context.Token)
         {
             case ReservedKeyword { Keyword: Keyword.Check }:
-                var tableCheck = ParseInlineCheckPredicate(context);
-                pendingChecks.Add((constraintName, tableCheck.Predicate, null, tableCheck.Definition));
+                var tableCheck = ParseInlineCheckPredicate(context, pendingForeignKeys is null);
+                pendingChecks.Add((constraintName, tableCheck.Predicate, null, tableCheck.Definition, tableCheck.NotForReplication));
                 return;
             case ReservedKeyword { Keyword: Keyword.Foreign }:
                 ParseTableLevelForeignKey(context, constraintName, heapColumns, pendingComputed, pendingForeignKeys);
@@ -2706,7 +2739,7 @@ partial class Simulation
                 throw SimulatedSqlException.SyntaxErrorNear(context);
             context.MoveNextRequired();
         }
-        var (delAction, updAction) = ParseOnDeleteOnUpdateActions(context);
+        var (delAction, updAction, notForReplication) = ParseOnDeleteOnUpdateActions(context);
         pendingForeignKeys.Add(new PendingForeignKey(
             inlineFkName,
             childColumnNames: [columnName],
@@ -2714,7 +2747,8 @@ partial class Simulation
             referencedTable: referencedTable,
             referencedColumnNames: [.. referencedColumns],
             deleteAction: delAction,
-            updateAction: updAction));
+            updateAction: updAction,
+            notForReplication: notForReplication));
     }
 
     /// <summary>
@@ -2819,7 +2853,7 @@ partial class Simulation
                 throw SimulatedSqlException.SyntaxErrorNear(context);
             context.MoveNextRequired();
         }
-        var (delAction, updAction) = ParseOnDeleteOnUpdateActions(context);
+        var (delAction, updAction, notForReplication) = ParseOnDeleteOnUpdateActions(context);
         pendingForeignKeys.Add(new PendingForeignKey(
             constraintName,
             childColumnNames: [.. childColumnNames],
@@ -2827,7 +2861,8 @@ partial class Simulation
             referencedTable: referencedTable,
             referencedColumnNames: [.. referencedColumns],
             deleteAction: delAction,
-            updateAction: updAction));
+            updateAction: updAction,
+            notForReplication: notForReplication));
     }
 
     /// <summary>
@@ -2837,7 +2872,7 @@ partial class Simulation
     /// matching SQL Server's default. Leaves the cursor on the first non-ON
     /// token.
     /// </summary>
-    private static (ReferentialAction Delete, ReferentialAction Update) ParseOnDeleteOnUpdateActions(ParserContext context)
+    private static (ReferentialAction Delete, ReferentialAction Update, bool NotForReplication) ParseOnDeleteOnUpdateActions(ParserContext context)
     {
         var delete = ReferentialAction.NoAction;
         var update = ReferentialAction.NoAction;
@@ -2865,7 +2900,7 @@ partial class Simulation
                     throw SimulatedSqlException.SyntaxErrorNear(context);
             }
         }
-        return (delete, update);
+        return (delete, update, TryConsumeNotForReplication(context));
     }
 
     /// <summary>
@@ -2920,7 +2955,8 @@ partial class Simulation
         MultiPartName referencedTable,
         string[] referencedColumnNames,
         ReferentialAction deleteAction,
-        ReferentialAction updateAction)
+        ReferentialAction updateAction,
+        bool notForReplication)
     {
         public readonly string? ConstraintName = constraintName;
         public readonly string[] ChildColumnNames = childColumnNames;
@@ -2929,6 +2965,7 @@ partial class Simulation
         public readonly string[] ReferencedColumnNames = referencedColumnNames;
         public readonly ReferentialAction DeleteAction = deleteAction;
         public readonly ReferentialAction UpdateAction = updateAction;
+        public readonly bool NotForReplication = notForReplication;
 
         /// <summary>
         /// A copy carrying <paramref name="ordinals"/> in place of
@@ -2938,7 +2975,7 @@ partial class Simulation
         /// </summary>
         public PendingForeignKey WithChildFullOrdinals(int[] ordinals) =>
             new(this.ConstraintName, this.ChildColumnNames, ordinals, this.ReferencedTable,
-                this.ReferencedColumnNames, this.DeleteAction, this.UpdateAction);
+                this.ReferencedColumnNames, this.DeleteAction, this.UpdateAction, this.NotForReplication);
     }
 
     /// <summary>
@@ -3166,7 +3203,7 @@ partial class Simulation
         string tableName,
         List<HeapColumn?> heapColumns,
         List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals, bool? Clustered, IndexOptions Options, bool[] Descending)> pendingKeys,
-        List<(string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition)> pendingChecks,
+        List<(string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition, bool NotForReplication)> pendingChecks,
         List<PendingForeignKey> pendingForeignKeys)
     {
         List<string> names = [];
@@ -3377,7 +3414,11 @@ partial class Simulation
                 pf.DeleteAction,
                 pf.UpdateAction,
                 isSystemNamed: pf.ConstraintName is null,
-                createDate: context.Batch.CurrentStatement.UtcNow);
+                createDate: context.Batch.CurrentStatement.UtcNow)
+            {
+                NotForReplication = pf.NotForReplication,
+                IsNotTrusted = pf.NotForReplication,
+            };
             resolved.Add(fk);
 
             // Cascade-cycle / multiple-cascade-paths check (Msg 1785).

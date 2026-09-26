@@ -398,8 +398,7 @@ internal static partial class BuiltInResources
     /// Rows for <c>sys.triggers</c>: one row per <see cref="Trigger"/> in
     /// every schema (<c>parent_class</c> 1) plus one per database DDL
     /// trigger (<c>parent_class</c> 0, parent_id 0);
-    /// <c>is_not_for_replication</c> is always 0 (the simulator
-    /// parse-and-ignores the WITH clause) and <c>is_ms_shipped</c> always 0
+    /// <c>is_ms_shipped</c> always 0
     /// (DacFx's DDL-trigger reverse-engineering filters on it). Probe-
     /// confirmed columns; modify date mirrors create date because
     /// <c>ALTER TRIGGER</c> replaces the instance wholesale.
@@ -630,7 +629,7 @@ internal static partial class BuiltInResources
                         SqlValue.FromInt32(fk.ReferencedTable.ObjectId),
                         SqlValue.FromInt32(ResolveForeignKeyIndexId(fk)),
                         fk.IsDisabled ? trueBit : falseBit,
-                        falseBit,
+                        fk.NotForReplication ? trueBit : falseBit,
                         fk.IsNotTrusted ? trueBit : falseBit,
                         SqlValue.FromByte((byte)fk.DeleteAction),
                         SqlValue.FromNVarchar(ReferentialActionDescription(fk.DeleteAction)),
@@ -784,7 +783,7 @@ internal static partial class BuiltInResources
                         falseBit,
                         falseBit,
                         ck.IsDisabled ? trueBit : falseBit,
-                        falseBit,
+                        ck.NotForReplication ? trueBit : falseBit,
                         ck.IsNotTrusted ? trueBit : falseBit,
                         SqlValue.FromInt32(parentColumnId),
                         ck.Definition is null ? SqlValue.Null(SqlType.NVarchar) : SqlValue.FromNVarchar(ck.Definition),

@@ -50,7 +50,7 @@ internal sealed class TableType(
     DateTime createDate,
     HeapColumn[] columns,
     (KeyConstraintKind Kind, string? Name, int[] FullOrdinals, bool? Clustered, IndexOptions Options, bool[] Descending)[] pendingKeys,
-    (string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition)[] pendingChecks,
+    (string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition, bool NotForReplication)[] pendingChecks,
     Simulation.PendingInlineIndex[] pendingIndexes)
     : SchemaObject(name, typeTableObjectId, schema.SchemaId, createDate)
 {
@@ -105,7 +105,7 @@ internal sealed class TableType(
     /// Pending CHECK specs captured at CREATE TYPE time. Resolved per clone
     /// (same rationale as <see cref="PendingKeys"/>).
     /// </summary>
-    public readonly (string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition)[] PendingChecks = pendingChecks;
+    public readonly (string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition, bool NotForReplication)[] PendingChecks = pendingChecks;
 
     /// <summary>
     /// Inline <c>INDEX</c> clauses captured at CREATE TYPE time, built afresh
