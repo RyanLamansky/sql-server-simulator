@@ -41,16 +41,21 @@ internal sealed class TriggerNestLevelFunction : Expression
         if (this.objectArg is null)
             return SqlValue.FromInt32(connection.TriggerNestLevel);
 
+        // The object id converts first, so a string that isn't a number
+        // outranks a bad type (probed 2026-09-26 against SQL Server 2025).
         var objectValue = this.objectArg.Run(runtime);
+        int? objectId = objectValue.IsNull ? null : objectValue.CoerceTo(SqlType.Int32).AsInt32;
         bool? after = null;
         bool? ddl = null;
         if (this.typeArg is not null)
         {
+            var typeValue = this.typeArg.Run(runtime);
+            if (typeValue.IsNull)
+                return SqlValue.Null(SqlType.Int32);
             if (this.categoryArg is null)
                 throw SimulatedSqlException.TriggerNestLevelParametersNotValid();
-            var typeValue = this.typeArg.Run(runtime);
             var categoryValue = this.categoryArg.Run(runtime);
-            if (typeValue.IsNull || categoryValue.IsNull)
+            if (categoryValue.IsNull)
                 return SqlValue.Null(SqlType.Int32);
             after = typeValue.CoerceTo(SqlType.NVarchar).AsString switch
             {
@@ -67,10 +72,9 @@ internal sealed class TriggerNestLevelFunction : Expression
             if (after == false && ddl == true)
                 throw SimulatedSqlException.TriggerNestLevelParametersNotValid();
         }
-        if (objectValue.IsNull)
+        if (objectId is null)
             return SqlValue.Null(SqlType.Int32);
 
-        var objectId = objectValue.CoerceTo(SqlType.Int32).AsInt32;
         var count = 0;
         foreach (var frame in connection.FiringTriggers)
         {

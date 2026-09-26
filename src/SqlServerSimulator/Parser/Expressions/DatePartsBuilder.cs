@@ -59,6 +59,12 @@ internal sealed class DatePartsBuilder : Expression
     private readonly int parsedPrecision;
     private readonly SqlType resultType;
 
+    // A scale refused while parsing, raised once the parts have been judged:
+    // real checks every part's type first (probed 2026-09-26 against SQL
+    // Server 2025 — a datetime in every slot is Msg 257, not the scale's
+    // Msg 10760).
+    private readonly SimulatedSqlException? scaleError;
+
     public DatePartsBuilder(ParserContext context, DatePartsBuilderKind kind)
     {
         this.kind = kind;
@@ -83,20 +89,23 @@ internal sealed class DatePartsBuilder : Expression
         // NULL or non-integer result → Msg 10760; out-of-[0,7] integer → Msg 1002.
         if (TryGetPrecisionSlot(kind, out var slotIndex))
         {
-            SqlValue precisionConstant;
+            var p = 7;
+            SqlValue? precisionConstant;
             try
             {
                 precisionConstant = this.arguments[slotIndex].Run(new RuntimeContext(_ => SqlValue.Null(SqlType.Int32), context.Batch));
             }
-            catch
+            catch (SimulatedSqlException)
             {
-                throw SimulatedSqlException.ScaleArgumentNotValid(TargetTypeName(kind));
+                precisionConstant = null;
             }
-            if (precisionConstant.IsNull || precisionConstant.Type.Category != SqlTypeCategory.Integer)
-                throw SimulatedSqlException.ScaleArgumentNotValid(TargetTypeName(kind));
-            var p = ScalarArguments.CoerceToInt(precisionConstant);
-            if (p is < 0 or > 7)
-                throw SimulatedSqlException.InvalidScale(p, line: 1);
+            // A bit is no integer constant here (Msg 10760).
+            if (precisionConstant is not { IsNull: false } constant || constant.Type.Category != SqlTypeCategory.Integer || constant.Type is BitSqlType)
+                this.scaleError = SimulatedSqlException.ScaleArgumentNotValid(TargetTypeName(kind));
+            else if (ScalarArguments.CoerceToInt(constant) is var written and (< 0 or > 7))
+                this.scaleError = SimulatedSqlException.InvalidScale(written, line: 1);
+            else
+                p = ScalarArguments.CoerceToInt(constant);
             this.parsedPrecision = p;
             this.resultType = kind switch
             {
@@ -125,11 +134,13 @@ internal sealed class DatePartsBuilder : Expression
         // 2026-09-25: a datetime part is Msg 257).
         foreach (var argument in this.arguments)
             _ = AssignmentRules.ArgumentType(argument, SqlType.Int32, batch, resolveColumnType);
-        return this.resultType;
+        return this.scaleError is null ? this.resultType : throw this.scaleError;
     }
 
     public override SqlValue Run(RuntimeContext runtime)
     {
+        if (this.scaleError is not null)
+            throw this.scaleError;
         var values = new SqlValue[this.arguments.Length];
         var precisionSlot = TryGetPrecisionSlot(this.kind, out var slot) ? slot : -1;
         for (var i = 0; i < this.arguments.Length; i++)

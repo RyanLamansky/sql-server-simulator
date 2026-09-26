@@ -365,4 +365,26 @@ public sealed class BuiltInArgumentTypeTests
     [TestMethod]
     public void CursorStatus_ReadsANumberAsItsDigits()
         => AreEqual((short)-3, new Simulation().ExecuteScalar("select cursor_status('global', 1)"));
+
+    [TestMethod]
+    [DataRow("object_definition(cast('2020-01-02' as datetime))", 257)]
+    [DataRow("object_definition(1, 'x')", 245)]
+    [DataRow("objectpropertyex(newid(), 'IsTable')", 206)]
+    [DataRow("permissions(cast('2020-01-02' as datetime))", 257)]
+    [DataRow("stats_date(1, newid())", 206)]
+    [DataRow("index_col('nosuch', 'x', 1)", 245)]
+    [DataRow("textvalid('t.c', 'x')", 257)]
+    [DataRow("datetime2fromparts(2020, 1, 1, 0, 0, 0, 0, cast(7 as bit))", 10760)]
+    [DataRow("timefromparts(cast('2020-01-02' as datetime), 0, 0, 0, 0)", 257)]
+    [DataRow("switchoffset(sysdatetimeoffset(), cast('2020-01-02' as datetime))", 257)]
+    [DataRow("todatetimeoffset('x', 'x')", 241)]
+    [DataRow("trigger_nestlevel('x', 'x')", 245)]
+    public void IdAndPartArguments_ConvertAsAssignments(string call, int number)
+        => new Simulation().AssertSqlError($"select {call}", number);
+
+    [TestMethod]
+    [DataRow("object_definition(object_id('nosuch'), 1)")]
+    [DataRow("trigger_nestlevel(1, null)")]
+    public void TolerantForms_AnswerNull(string call)
+        => AreEqual(DBNull.Value, new Simulation().ExecuteScalar($"select {call}"));
 }

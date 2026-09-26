@@ -52,7 +52,12 @@ internal sealed class StatsDate : Expression
             : SqlValue.FromDateTime(table.CreateDate);
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.DateTime;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        _ = AssignmentRules.ArgumentType(this.objectIdArg, SqlType.Int32, batch, resolveColumnType);
+        _ = AssignmentRules.ArgumentType(this.statsIdArg, SqlType.Int32, batch, resolveColumnType);
+        return SqlType.DateTime;
+    }
 
     internal override string DebugDisplay() =>
         $"STATS_DATE({this.objectIdArg.DebugDisplay()}, {this.statsIdArg.DebugDisplay()})";

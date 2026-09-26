@@ -58,7 +58,11 @@ internal sealed class TextValid : Expression
         return segments.Length < 2 ? null : segments[^1].Trim('[', ']', '"');
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        _ = AssignmentRules.ArgumentType(this.pointerArg, SqlType.Varbinary, batch, resolveColumnType);
+        return SqlType.Int32;
+    }
 
     internal override string DebugDisplay() => $"TEXTVALID({this.nameArg.DebugDisplay()}, {this.pointerArg.DebugDisplay()})";
 

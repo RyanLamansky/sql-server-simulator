@@ -23,9 +23,16 @@ internal sealed class ObjectDefinition : Expression
 {
     private readonly Expression idArg;
 
+    // Real takes a second integer argument it documents nowhere: it converts
+    // as an int and changes nothing observable (probed 2026-09-26 against SQL
+    // Server 2025).
+    private readonly Expression? secondArg;
+
     public ObjectDefinition(ParserContext context)
     {
         this.idArg = Parse(context);
+        if (context.Token is Tokens.Operator { Character: ',' })
+            this.secondArg = Parse(context.MoveNextRequiredReturnSelf());
         if (context.Token is not Tokens.Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
     }
@@ -33,6 +40,8 @@ internal sealed class ObjectDefinition : Expression
     public override SqlValue Run(RuntimeContext runtime)
     {
         var idValue = this.idArg.Run(runtime);
+        if (this.secondArg?.Run(runtime) is { IsNull: false } second)
+            _ = ScalarArguments.CoerceToInt(second);
         if (idValue.IsNull)
             return SqlValue.Null(SqlType.NVarcharMax);
         var id = ScalarArguments.CoerceToInt(idValue);
@@ -57,9 +66,15 @@ internal sealed class ObjectDefinition : Expression
     private static SqlValue Definition(string? text) =>
         text is null ? SqlValue.Null(SqlType.NVarcharMax) : SqlValue.FromNVarchar(SqlType.NVarcharMax, text);
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.NVarcharMax;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        _ = AssignmentRules.ArgumentType(this.idArg, SqlType.Int32, batch, resolveColumnType);
+        if (this.secondArg is not null)
+            _ = AssignmentRules.ArgumentType(this.secondArg, SqlType.Int32, batch, resolveColumnType);
+        return SqlType.NVarcharMax;
+    }
 
     internal override string DebugDisplay() => $"OBJECT_DEFINITION({this.idArg.DebugDisplay()})";
 
-    internal override void Describe(NodeShape shape) => shape.Child(this.idArg);
+    internal override void Describe(NodeShape shape) => shape.Child(this.idArg).Child(this.secondArg);
 }

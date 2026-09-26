@@ -45,6 +45,12 @@ internal sealed class IndexCol : Expression
         if (tableValue.IsNull || indexIdValue.IsNull || keyIdValue.IsNull)
             return SqlValue.Null(MetadataNameType(runtime.Batch));
 
+        // Both ids convert before the table is looked up, so a bad one raises
+        // even when the table doesn't exist (probed 2026-09-26 against SQL
+        // Server 2025).
+        var indexId = ScalarArguments.CoerceToInt(indexIdValue);
+        var keyId = ScalarArguments.CoerceToInt(keyIdValue);
+
         var tableName = tableValue.CoerceTo(SqlType.NVarchar).AsString;
         if (!ObjectId.TryParseObjectName(tableName, out var parsed)
             || !runtime.Batch.TryResolveTable(parsed, out var table))
@@ -52,11 +58,9 @@ internal sealed class IndexCol : Expression
             return SqlValue.Null(MetadataNameType(runtime.Batch));
         }
 
-        var indexId = ScalarArguments.CoerceToInt(indexIdValue);
         if (IndexLookup.ResolveByIndexId(table, indexId) is not { } resolved)
             return SqlValue.Null(MetadataNameType(runtime.Batch));
 
-        var keyId = ScalarArguments.CoerceToInt(keyIdValue);
         if (IndexLookup.GetKeyColumn(resolved.Constraint, resolved.Index, keyId) is not { } keyCol)
             return SqlValue.Null(MetadataNameType(runtime.Batch));
 
@@ -68,7 +72,13 @@ internal sealed class IndexCol : Expression
             : SqlValue.FromNVarchar(MetadataNameType(runtime.Batch), table.Columns[fullOrdinal].Name);
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => MetadataNameType(batch);
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        _ = AssignmentRules.ArgumentType(this.tableArg, SqlType.NVarchar, batch, resolveColumnType);
+        _ = AssignmentRules.ArgumentType(this.indexIdArg, SqlType.Int32, batch, resolveColumnType);
+        _ = AssignmentRules.ArgumentType(this.keyIdArg, SqlType.Int32, batch, resolveColumnType);
+        return MetadataNameType(batch);
+    }
 
     internal override string DebugDisplay() =>
         $"INDEX_COL({this.tableArg.DebugDisplay()}, {this.indexIdArg.DebugDisplay()}, {this.keyIdArg.DebugDisplay()})";

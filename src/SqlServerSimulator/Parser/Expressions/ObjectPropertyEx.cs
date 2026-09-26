@@ -235,7 +235,11 @@ internal sealed class ObjectPropertyEx : Expression
         _ => string.Empty,
     };
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SqlVariant;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        _ = AssignmentRules.ArgumentType(this.idArg, SqlType.Int32, batch, resolveColumnType);
+        return SqlType.SqlVariant;
+    }
 
     internal override string DebugDisplay() =>
         $"OBJECTPROPERTYEX({this.idArg.DebugDisplay()}, {this.propertyArg.DebugDisplay()})";

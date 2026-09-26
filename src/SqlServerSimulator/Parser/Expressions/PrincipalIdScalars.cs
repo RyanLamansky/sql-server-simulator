@@ -198,7 +198,12 @@ internal sealed class Permissions : Expression
         return false;
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        if (this.objectIdArg is not null)
+            _ = AssignmentRules.ArgumentType(this.objectIdArg, SqlType.Int32, batch, resolveColumnType);
+        return SqlType.Int32;
+    }
 
     internal override string DebugDisplay() => this.objectIdArg is null
         ? "PERMISSIONS()"

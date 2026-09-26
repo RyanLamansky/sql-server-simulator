@@ -163,14 +163,19 @@ internal sealed class SwitchOffset : Expression
             : count;
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
-        DateArgumentType(this.dtoArg, SqlType.GetDateTimeOffset(7), batch, resolveColumnType) is DateTimeOffsetSqlType t ? t : SqlType.GetDateTimeOffset(7);
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        var type = DateArgumentType(this.dtoArg, SqlType.GetDateTimeOffset(7), batch, resolveColumnType);
+        _ = AssignmentRules.ArgumentType(this.offsetArg, SqlType.SmallInt, batch, resolveColumnType);
+        return type is DateTimeOffsetSqlType t ? t : SqlType.GetDateTimeOffset(7);
+    }
 
     /// <summary>
     /// The type of <c>SWITCHOFFSET</c>'s or <c>TODATETIMEOFFSET</c>'s value,
     /// which converts to <paramref name="parameter"/> as an assignment would —
     /// a number, a binary or xml is refused while compiling, Msg 206 or 257 —
-    /// save that a legacy LOB is refused too, Msg 206 (probed 2026-09-26
+    /// save that a legacy LOB is refused too, Msg 206; the offset converts to
+    /// <c>smallint</c> the same way, a string passing (probed 2026-09-26
     /// against SQL Server 2025).
     /// </summary>
     internal static SqlType DateArgumentType(Expression argument, SqlType parameter, BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
@@ -215,21 +220,25 @@ internal sealed class ToDateTimeOffset : Expression
         var v = this.dtArg.Run(runtime);
         if (v.IsNull)
             return SqlValue.Null(ResultType);
-        var off = this.offsetArg.Run(runtime);
-        if (off.IsNull)
-            return SqlValue.Null(ResultType);
-        var offsetMinutes = SwitchOffset.ParseOffsetMinutes(off, "todatetimeoffset");
+        // The value converts before the offset is read, so a string that
+        // isn't a date outranks a bad offset (probed 2026-09-26 against SQL
+        // Server 2025).
         var dt = v.Type == SqlType.DateTime ? v.AsDateTime
             : v.Type == SqlType.SmallDateTime ? v.AsSmallDateTime
             : v.Type is DateTime2SqlType ? v.AsDateTime2
             : v.Type == SqlType.Date ? v.AsDate.ToDateTime(TimeOnly.MinValue)
             : v.CoerceTo(SqlType.GetDateTime2(7)).AsDateTime2;
+        var off = this.offsetArg.Run(runtime);
+        if (off.IsNull)
+            return SqlValue.Null(ResultType);
+        var offsetMinutes = SwitchOffset.ParseOffsetMinutes(off, "todatetimeoffset");
         return SqlValue.FromDateTimeOffset(ResultType, new DateTimeOffset(dt, TimeSpan.FromMinutes(offsetMinutes)));
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
         _ = SwitchOffset.DateArgumentType(this.dtArg, SqlType.GetDateTime2(7), batch, resolveColumnType);
+        _ = AssignmentRules.ArgumentType(this.offsetArg, SqlType.SmallInt, batch, resolveColumnType);
         return ResultType;
     }
 
