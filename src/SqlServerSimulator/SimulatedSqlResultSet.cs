@@ -133,6 +133,14 @@ internal sealed class SimulatedSqlResultSet : SimulatedQueryResult
     public bool EndedByError;
 
     /// <summary>
+    /// Set with <see cref="EndedByError"/> when a TRY frame caught that error,
+    /// so it never reaches the client: the result set ends with a count of 0
+    /// and whatever error comes next is a later statement's (probed 2026-09-26
+    /// against SQL Server 2025).
+    /// </summary>
+    public bool ErrorCaught;
+
+    /// <summary>
     /// The row count the statement reports when it isn't the rows returned —
     /// a streamed FOR JSON / FOR XML document counts the rows it serialized —
     /// else <c>-1</c>.

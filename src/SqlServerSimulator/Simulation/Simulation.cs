@@ -1420,6 +1420,7 @@ public sealed partial class Simulation
                         Browse = selection.Browse,
                     };
                     executed.EndedByError = true;
+                    executed.ErrorCaught = CaughtByTryFrame(batch, error);
                 }
                 connection.LastStatementRowCount = rowCount;
                 var replayed = selection.IsAssignmentOnly
@@ -2047,7 +2048,7 @@ public sealed partial class Simulation
                     if (ex.Number == 529)
                         batch.BatchAborted = true;
                 }
-                else if (batch.TryFrameDepth > 0 && !ex.AbortsTransaction && !batch.CreateTimeBinding)
+                else if (CaughtByTryFrame(batch, ex))
                 {
                     // Only a batch that runs raises into a TRY frame: an error
                     // met while the batch compiles — a syntax error in the TRY
@@ -2517,6 +2518,9 @@ public sealed partial class Simulation
     /// already contained, an uncaught <c>THROW</c>, or an error
     /// <c>SET XACT_ABORT ON</c> promoted.
     /// </summary>
+    private static bool CaughtByTryFrame(BatchContext batch, SimulatedSqlException ex) =>
+        batch.TryFrameDepth > 0 && !ex.AbortsTransaction && !batch.CreateTimeBinding;
+
     private static bool EndsBatch(SimulatedSqlException ex)
         => (IsBatchAbortingNameResolution(ex) && !ex.EndedCalledBatch) || ex.TerminatesBatch || ex.XactAbortPromoted;
 
@@ -2721,6 +2725,7 @@ public sealed partial class Simulation
                             Browse = selection.Browse,
                         };
                         executed.EndedByError = true;
+                        executed.ErrorCaught = CaughtByTryFrame(batch, error);
                     }
                     connection.LastStatementRowCount = rowCount;
                     outcome = selection.IsAssignmentOnly

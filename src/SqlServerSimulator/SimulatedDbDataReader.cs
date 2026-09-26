@@ -498,7 +498,7 @@ public sealed class SimulatedDbDataReader : DbDataReader
         // A result set its own statement's error cut short: real sends that
         // error before the result set ends, so the Read after its last row
         // throws it rather than a later NextResult.
-        if (this.currentResult is SimulatedSqlResultSet { EndedByError: true } && this.MoveToNextOutcome(out var next))
+        if (this.currentResult is SimulatedSqlResultSet { EndedByError: true, ErrorCaught: false } && this.MoveToNextOutcome(out var next))
         {
             if (next is SimulatedErrorOutcome cutShort)
             {

@@ -12,6 +12,26 @@ public sealed class TryCatchTests
 {
     // ---- basic TRY/CATCH ----
 
+    /// <summary>
+    /// A THROW ending the batch from a CATCH body is the one error: the parse
+    /// stops there rather than reading on for END CATCH, and the reader hands
+    /// out the caught SELECT's rows without raising its caught error (probed
+    /// 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("begin try select 10 / x from (values (1), (0)) v (x); end try begin catch throw; end catch;", 8134)]
+    [DataRow("begin try select 10 / x from (values (1), (0)) v (x); end try begin catch throw 50001, 'm', 1; end catch", 50001)]
+    public void ThrowInCatch_IsTheOneError(string sql, int number)
+    {
+        using var reader = new Simulation().ExecuteReader(sql);
+        IsTrue(reader.Read());
+        AreEqual(10, reader.GetInt32(0));
+        IsFalse(reader.Read());
+        var error = Throws<SimulatedSqlException>(() => reader.NextResult());
+        AreEqual(number, error.Number);
+        HasCount(1, error.Errors);
+    }
+
     [TestMethod]
     public void Try_NoError_ReturnsTryBody()
         => AreEqual(1, new Simulation().ExecuteScalar(

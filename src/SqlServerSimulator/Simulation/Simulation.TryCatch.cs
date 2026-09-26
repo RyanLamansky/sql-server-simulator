@@ -175,6 +175,12 @@ partial class Simulation
             }
         }
 
+        // An error that ended the batch inside the CATCH body — an uncaught
+        // THROW — left the cursor inside it, and the dispatch loop stops on
+        // the flag without reading on to END CATCH.
+        if (batch.BatchAborted)
+            yield break;
+
         // Restore outer error state. For nested TRY/CATCH: if we caught and
         // ran the CATCH, the inner is done — outer state takes over. If the
         // inner CATCH re-threw (via THROW;), that throw was caught at the

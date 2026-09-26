@@ -834,7 +834,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                 // A statement whose own error cut its rows short sends that
                 // error ahead of the result set's DONE, as real does.
                 var cutShort = false;
-                if (query is SimulatedSqlResultSet { EndedByError: true } && hasOutcome && outcomes.Current is SimulatedErrorOutcome cutShortError)
+                if (query is SimulatedSqlResultSet { EndedByError: true, ErrorCaught: false } && hasOutcome && outcomes.Current is SimulatedErrorOutcome cutShortError)
                 {
                     WriteErrors(writer, cutShortError.Exception);
                     hasOutcome = AdvancePastClosingMessages();
@@ -854,7 +854,11 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                 // drops the flag (keeping the count itself) under NOCOUNT.
                 else
                 {
-                    if (query is SimulatedSqlResultSet { ReportedRowCount: >= 0 and var reported })
+                    // A caught error's statement counts nothing either, but
+                    // still reports that count (probed 2026-09-26).
+                    if (query is SimulatedSqlResultSet { ErrorCaught: true })
+                        rows = 0;
+                    else if (query is SimulatedSqlResultSet { ReportedRowCount: >= 0 and var reported })
                         rows = reported;
                     if (query.CountSuppressed != true)
                         queryStatus |= Tds.DoneCount;
