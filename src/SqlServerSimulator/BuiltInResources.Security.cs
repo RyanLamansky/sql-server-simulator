@@ -481,10 +481,8 @@ internal static partial class BuiltInResources
     /// Rows for <c>sys.extended_properties</c>. Walks every entry in
     /// <see cref="Database.ExtendedProperties"/> (per-database flat dict)
     /// and projects the 6-column shape. The <c>class_desc</c> string is
-    /// derived from the class number per real SQL Server's enum (0 =
-    /// DATABASE, 1 = OBJECT_OR_COLUMN, 3 = SCHEMA — the only classes the
-    /// simulator currently emits; others fall through as the string form
-    /// of the class number for forward compat). Value is surfaced as a
+    /// derived from the class number per real SQL Server's enum. Value is
+    /// surfaced as a
     /// <c>sql_variant</c> wrapping the stored value's own type, so the value's
     /// base type (nvarchar vs varchar) survives to <c>SQL_VARIANT_PROPERTY</c>
     /// and the TDS wire — DacFx reads it to re-script the correct N-prefix.
@@ -494,17 +492,23 @@ internal static partial class BuiltInResources
         var hasMajorFilter = filter.TargetsInt("major_id", out var wantMajorId, out var majorMatchesNothing);
         if (hasMajorFilter && majorMatchesNothing)
             yield break;
+        var targets = new ExtendedPropertyTargets(database);
         foreach (var kvp in database.ExtendedProperties)
         {
             var key = kvp.Key;
-            if (hasMajorFilter && key.MajorId != wantMajorId)
+            if ((hasMajorFilter && key.MajorId != wantMajorId) || !targets.IsLive(key))
                 continue;
             var classDesc = key.Class switch
             {
                 0 => "DATABASE",
                 1 => "OBJECT_OR_COLUMN",
+                2 => "PARAMETER",
                 3 => "SCHEMA",
+                4 => "DATABASE_PRINCIPAL",
+                6 => "TYPE",
                 7 => "INDEX",
+                8 => "TYPE_COLUMN",
+                10 => "XML_SCHEMA_COLLECTION",
                 20 => "DATASPACE",
                 _ => key.Class.ToString(CultureInfo.InvariantCulture),
             };

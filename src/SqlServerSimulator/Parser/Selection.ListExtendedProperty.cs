@@ -108,10 +108,11 @@ partial class Selection
             yield break;
 
         var nvMax = NVarcharSqlType.Get(-1, batch.CurrentDatabase.Collation, Coercibility.CoercibleDefault);
+        var targets = new ExtendedPropertyTargets(batch.CurrentDatabase);
         foreach (var kvp in batch.CurrentDatabase.ExtendedProperties)
         {
             var key = kvp.Key;
-            if (!filter.Matches(key))
+            if (!filter.Matches(key) || !targets.IsLive(key))
                 continue;
 
             // Resolve objtype + objname from the key. objtype is the deepest
@@ -223,7 +224,7 @@ partial class Selection
                 {
                     if (BuiltInToken.Equals(table.Columns[i].Name, l2Name))
                     {
-                        f.MinorIdFilter = i + 1;
+                        f.MinorIdFilter = table.Columns[i].ColumnId;
                         return f;
                     }
                 }
@@ -267,11 +268,14 @@ partial class Selection
                                 objname = t.Name;
                                 return true;
                             }
-                            if (key.MinorId - 1 < t.Columns.Length)
+                            foreach (var column in t.Columns)
                             {
-                                objtype = "COLUMN";
-                                objname = t.Columns[key.MinorId - 1].Name;
-                                return true;
+                                if (column.ColumnId == key.MinorId)
+                                {
+                                    objtype = "COLUMN";
+                                    objname = column.Name;
+                                    return true;
+                                }
                             }
                             return false;
                         }

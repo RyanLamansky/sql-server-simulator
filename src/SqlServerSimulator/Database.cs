@@ -576,13 +576,12 @@ internal sealed class Database
 /// <summary>
 /// Identifies one entry in <see cref="Database.ExtendedProperties"/>.
 /// <see cref="Class"/> follows real SQL Server's <c>sys.extended_properties.class</c>:
-/// 0 = DATABASE, 1 = OBJECT_OR_COLUMN, 3 = SCHEMA (additional class numbers
-/// for PARAMETER, TYPE, INDEX, etc. exist in real SQL Server but aren't
-/// modeled in this bundle). <see cref="MajorId"/> identifies the target —
-/// schema_id for class 3, object_id for class 1, 0 for class 0
-/// (DATABASE-level uses no level args). <see cref="MinorId"/> is 0 for
-/// table / view / proc / func targets and the column ordinal (1-based) for
-/// column targets. <see cref="Name"/> is the user-supplied property name
+/// 0 = DATABASE, 1 = OBJECT_OR_COLUMN, 2 = PARAMETER, 3 = SCHEMA, 6 = TYPE,
+/// 7 = INDEX, 8 = TYPE_COLUMN, 10 = XML_SCHEMA_COLLECTION, 20 = DATASPACE.
+/// <see cref="MajorId"/> identifies the target — the object_id for classes
+/// 1 / 2 / 7, schema_id for 3, user_type_id for 6 / 8, the collection id for
+/// 10, data_space_id for 20, and 0 for class 0. <see cref="MinorId"/> is the
+/// 1-based column, parameter or index id beneath it, else 0. <see cref="Name"/> is the user-supplied property name
 /// (e.g. <c>MS_Description</c>) — compared case-insensitively per real
 /// SQL Server semantics.
 /// </summary>

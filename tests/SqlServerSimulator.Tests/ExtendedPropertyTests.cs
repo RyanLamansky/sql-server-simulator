@@ -418,16 +418,16 @@ public class ExtendedPropertyTests
     }
 
     [TestMethod]
-    public void AddOnIndex_MissingName_RaisesTargetMissing()
+    public void AddOnIndex_MissingName_RaisesInvalidParameter()
     {
         var sim = new Simulation();
         _ = sim.ExecuteNonQuery("CREATE TABLE dbo.t1 (id int);");
-        _ = sim.AssertSqlError("""
+        AreEqual(17, sim.AssertSqlError("""
             EXEC sp_addextendedproperty @name=N'MS_Description', @value=N'x',
                 @level0type=N'SCHEMA', @level0name=N'dbo',
                 @level1type=N'TABLE', @level1name=N't1',
                 @level2type=N'INDEX', @level2name=N'no_such_index';
-            """, 15135);
+            """, 15600).State);
     }
 
     /// <summary>

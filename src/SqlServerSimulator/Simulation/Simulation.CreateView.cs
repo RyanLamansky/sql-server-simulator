@@ -239,6 +239,8 @@ partial class Simulation
             ReseatTriggerParents(context.CurrentDatabase, replaced, view);
         }
         schema.Views[viewName.Leaf] = view;
+        if (replaced is not null)
+            RebindExtendedProperties(context.Batch, replaced, view);
         var database = context.CurrentDatabase;
         RecordDdlUndo(context, () =>
         {

@@ -238,6 +238,8 @@ partial class Simulation
             procedure.ModifyDate = context.Batch.CurrentStatement.UtcNow;
         schema.Procedures[procName.Leaf] = procedure;
         RecordSlotUndo(context, schema.Procedures, procName.Leaf, replaced);
+        if (replaced is not null)
+            RebindExtendedProperties(context.Batch, replaced, procedure);
         RecordDdlEvent(context, replaced is null ? "CREATE_PROCEDURE" : "ALTER_PROCEDURE", schema.Name, procName.Leaf, "PROCEDURE");
         return true;
     }

@@ -496,7 +496,7 @@ partial class Simulation
                 if (!enumerator.MoveNext())
                     yield break;
             }
-            catch (SimulatedSqlException exception) when (SystemProcedureErrorSite(systemProcName, exception.Number) is { } site)
+            catch (SimulatedSqlException exception) when (SystemProcedureErrorSite(systemProcName, exception) is { } site)
             {
                 exception.PreserveDiagnostics(site.Line, site.Procedure ?? calledName);
                 throw;
@@ -506,17 +506,24 @@ partial class Simulation
     }
 
     /// <summary>
-    /// Where real raises <paramref name="number"/> in
+    /// Where real raises <paramref name="exception"/> in
     /// <paramref name="systemProcName"/>: the line of its own source, and the
     /// procedure the error names when that isn't the one called — an inner
     /// procedure, or the empty name of a dynamic batch it runs (probed
     /// 2026-09-26 against SQL Server 2025). A missing parameter's Msg 201 is
     /// line 0 in any of them; null for an error the procedure doesn't raise
-    /// itself.
+    /// itself. The extended-property trio raises Msg 15600 at two lines: the
+    /// severity-15 argument check, and the severity-16 target resolution
+    /// that also raises everything else they raise.
     /// </summary>
-    private static (int Line, string? Procedure)? SystemProcedureErrorSite(string systemProcName, int number) => (systemProcName, number) switch
+    private static (int Line, string? Procedure)? SystemProcedureErrorSite(string systemProcName, SimulatedSqlException exception) => (systemProcName, exception.Number) switch
     {
         (_, 201) => (0, null),
+        ("sp_addextendedproperty" or "sp_updateextendedproperty", 15600) when exception.Class == 15 => (22, null),
+        ("sp_dropextendedproperty", 15600) when exception.Class == 15 => (14, null),
+        ("sp_addextendedproperty", 15096 or 15135 or 15233 or 15600) => (37, null),
+        ("sp_dropextendedproperty", 15096 or 15135 or 15217 or 15600) => (28, null),
+        ("sp_updateextendedproperty", 15096 or 15135 or 15217 or 15600) => (36, null),
         ("sp_addrolemember", 15151) => (1, ""),
         ("sp_addrolemember", 15410) => (35, null),
         ("sp_bindefault", 4185) => (223, null),

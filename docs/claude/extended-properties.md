@@ -9,6 +9,12 @@ The sproc trio, `sys.extended_properties` catalog view, and `fn_listextendedprop
 `ExtendedPropertyKey` is a readonly struct overriding `Equals` / `GetHashCode` so the name comparison routes through `Collation.Baseline` (case-insensitive).
 Per-DB flat dict mirrors `sys.extended_properties`'s catalog shape — not per-schema.
 
+Real removes a property along with whatever it describes — a table, column, index, constraint, trigger, parameter, type or user — on every drop path (probed 2026-09-26 against SQL Server 2025).
+The store never deletes on a drop; every reader filters entries through `ExtendedPropertyTargets` instead, which covers every drop path and a rolled-back drop at once, and relies on object, type, principal and column ids never being reused.
+A table column is keyed by its stable `column_id`, so an earlier column's drop doesn't shift it.
+
+An `ALTER VIEW` / `PROCEDURE` / `FUNCTION` carries the module's column and parameter properties **by name** (probed 2026-09-26): one whose column or parameter survives follows it to its new position, one whose name is gone goes with it (`RebindExtendedProperties`, undone with the transaction).
+
 ## Sproc trio
 
 `Simulation.ExtendedProperties.cs` (partial).
@@ -29,29 +35,27 @@ Both are terminal — later levels don't apply — and probe-confirmed against S
 `class_desc` for 20 is `DATASPACE`.
 These two land through the BACPAC loader (AW's `[SqlDatabaseDdlTrigger].[ddlDatabaseTriggerLog].[MS_Description]` + `[SqlFilegroup].[PRIMARY].[MS_Description]`); a filegroup EP is only reachable from public SQL after a bacpac registers a filegroup (no `CREATE FILEGROUP`), while a DDL-trigger EP is reachable directly (`CREATE TRIGGER … ON DATABASE` + the sproc).
 
-**Level 1:** `TABLE` / `VIEW` / `PROCEDURE` / `FUNCTION` / `TYPE`.
-**Level 2:** `COLUMN`.
-The level-2 resolver also handles `CONSTRAINT` (reuses class=1 OBJECT_OR_COLUMN with the constraint's own object_id as major_id; walks `HeapTable.KeyConstraints` / `CheckConstraints` / `OutgoingForeignKeys` / `Columns[].DefaultConstraint`) and `INDEX` (class=7, `(major_id=table.object_id, minor_id=index_id)` via `ComputeIndexId` mirroring `sys.indexes`'s enumeration: PK=1, others sequential in ObjectId order).
+**Level 0** may also be `USER` (class 4 DATABASE_PRINCIPAL, a database user — never a built-in principal or a role, and never with a level 1 beneath it).
 
-## Errors enforced verbatim
+**Level 1** under a schema: `TABLE` / `VIEW` / `PROCEDURE` / `FUNCTION` / `SEQUENCE` / `SYNONYM` / `RULE` / `DEFAULT` (class 1), `TYPE` (class 6 TYPE, major_id = `user_type_id`, alias and table types alike), and `XML SCHEMA COLLECTION` (class 10, major_id = `xml_collection_id`).
 
-Probe-confirmed against SQL Server 2025.
+**Level 2:** `COLUMN` of a table, view or table-valued function (class 1) or of a table type (class 8 TYPE_COLUMN); `PARAMETER` of a procedure or function (class 2, minor_id = `parameter_id`); a table's `CONSTRAINT` (class 1, the constraint's own object_id); a table's or view's `TRIGGER` (class 1, the trigger's object_id); and a table's or view's `INDEX` (class 7, minor_id = `index_id` from `IndexIdentities()`, XML and spatial ids included).
 
-| Msg | When |
-|---|---|
-| 15233 | Duplicate add: `"Property cannot be added. Property 'X' already exists for 'Y'."` |
-| 15217 | Update / drop on missing property, same target-label convention as 15233. |
-| 15135 | Missing target object: `"Object is invalid. Extended properties are not permitted on '<target>', or the object does not exist."` |
-| 201 | No `@name`, reported ahead of an unknown name. |
-| 8144 | An argument past the signature. |
-| 8145 | An unknown `@`-name — including `@value` on the drop. |
-| 15600 | An unknown level type. |
+## Errors
+
+Every refusal of a target carries the state real's resolution raises it with; the grid lives on `ResolveExtendedPropertyTarget` and in `ExtendedPropertyTargetTests` (probed 2026-09-26 against SQL Server 2025).
+Three things about it are not what the numbers suggest:
+
+- A missing **index** is Msg 15600 state 17, where every other missing level-2 name is Msg 15135.
+- The severity-15 Msg 15600 of a NULL `@name` is the T-SQL argument check (line 22, or 14 in the drop, whose message misspells it `sp_dropeextendedproperty`) and leaves the caller's batch running.
+  Everything the target resolution raises — Msg 15096 / 15135 / 15217 / 15233 and a severity-16 Msg 15600 — comes from inside the engine at one line per procedure (37 / 36 / 28), and ends the batch and rolls the transaction back as under `SET XACT_ABORT ON`.
+- A level-2 name beneath an **alias type** kills real's session (Msg 596, then a severe error); the simulator accepts it and records nothing.
 
 **Target-label convention** for Msg 15233 / 15217:
 - DB-level → `'object specified'`
 - Schema → `'<schema>'`
 - Table / view / proc / func → `'<schema>.<name>'`
-- Column → `'<schema>.<table>.<col>'`
+- Beneath an object or type → `'<schema>.<name>.<leaf>'` (a parameter keeps its `@`)
 
 ## `sys.extended_properties`
 
@@ -59,10 +63,9 @@ Probe-confirmed against SQL Server 2025.
 
 | Column | Notes |
 |---|---|
-| `class` (tinyint) | 0=DB, 1=OBJECT_OR_COLUMN, 3=SCHEMA, 7=INDEX, 20=DATASPACE |
-| `class_desc` (sysname) | `DATABASE` / `OBJECT_OR_COLUMN` / `SCHEMA` / `INDEX` / `DATASPACE` |
-| `major_id` (int) | DB=0, schema=schema_id, object=object_id |
-| `minor_id` (int) | 0 for tables/views/procs/funcs; 1-based column ordinal for columns; index_id for INDEX class |
+| `class` / `class_desc` | The classes the level grid above lands in |
+| `major_id` (int) | DB=0, schema=schema_id, object=object_id, type=user_type_id, … (see `ExtendedPropertyKey`) |
+| `minor_id` (int) | 0 for the object itself; the `column_id`, `parameter_id` or `index_id` beneath it |
 | `name` (sysname) | Property name |
 | `value` (sql_variant) | Wraps the stored value's own `SqlValue`, so its base type survives (nvarchar for an `N'…'` input, varchar for a plain literal) — probe-confirmed real behavior: `@value=N'…'` stores base type nvarchar, `@value='…'` stores varchar. DacFx reads the base type off the wire (via `SQL_VARIANT_PROPERTY` / the sql_variant TDS form) to re-script the value with the correct N-prefix, so a BACPAC round-trip preserves nvarchar. |
 
@@ -89,11 +92,10 @@ The `'default'` wildcard at any level-name slot fans out across every object of 
 Missing target returns zero rows (distinct from the sproc path's Msg 15135).
 Unknown level0/1/2 type raises **Msg 15600** (`An invalid parameter or option was specified for procedure 'sp_addextendedproperty'.`), the same error the sproc path gives for a bad argument.
 
-## Known gaps
+## Not modeled yet
 
-- **PARAMETER level type** — not modeled (raises Msg 15600).
-  AW doesn't exercise it.
-  (`TRIGGER` / `FILEGROUP` level-0 hosts ship — see [Recognized level types](#recognized-level-types).)
+- **`fn_listextendedproperty` beyond the schema / table / view / procedure / function / column shapes** — the sprocs' wider grid (parameters, triggers, indexes, types, users, XML schema collections) is stored and listed by `sys.extended_properties`, but the TVF raises `NotSupportedException` for those level types.
+- **Level-1 kinds real accepts beyond the modeled ones** (`AGGREGATE`, `QUEUE`, …) raise Msg 15600 state 5.
 - **`fn_listextendedproperty` value type** — surfaced as nvarchar(MAX) rather than sql_variant (the TVF's schema is fixed for parse/plan parity).
   `sys.extended_properties.value` is a genuine sql_variant preserving the input base type; only the TVF read-path is lossy.
   DacFx's export uses `sys.extended_properties`, so this doesn't affect BACPAC round-trip.

@@ -79,7 +79,11 @@ partial class Simulation
             switch (arg.Name ?? parameters[i])
             {
                 case var n when BuiltInToken.Equals(n, "name"):
-                    name = ExpectStringArg(arg.Value);
+                    // Real's drop procedure misspells its own name in this
+                    // one message (probed 2026-09-26).
+                    name = arg.Value.IsNull
+                        ? throw SimulatedSqlException.InvalidExtendedPropertyParameter(op == ExtendedPropertyOp.Drop ? "sp_dropeextendedproperty" : procLabel)
+                        : ExpectStringArgOrNull(arg.Value);
                     break;
                 case var n when op != ExtendedPropertyOp.Drop && BuiltInToken.Equals(n, "value"):
                     value = arg.Value;
@@ -113,12 +117,15 @@ partial class Simulation
         if (unknownParameter is not null)
             throw SimulatedSqlException.NotAParameterForProcedure(unknownParameter, procLabel);
 
-        var (key, targetLabel) = ResolveExtendedPropertyTarget(
+        if (ResolveExtendedPropertyTarget(
             batch, procLabel,
             level0Type, level0Name,
             level1Type, level1Name,
             level2Type, level2Name,
-            name);
+            name) is not var (key, targetLabel))
+        {
+            yield break;
+        }
 
         // The read-only refusal comes after the target resolves — an unknown
         // target in a read-only database still reports Msg 15135
@@ -135,12 +142,12 @@ partial class Simulation
                 break;
             case ExtendedPropertyOp.Update:
                 if (!props.ContainsKey(key))
-                    throw SimulatedSqlException.ExtendedPropertyDoesNotExist(name, targetLabel);
+                    throw SimulatedSqlException.ExtendedPropertyDoesNotExist(name, targetLabel, state: 2);
                 props[key] = value;
                 break;
             case ExtendedPropertyOp.Drop:
                 if (!props.TryRemove(key, out _))
-                    throw SimulatedSqlException.ExtendedPropertyDoesNotExist(name, targetLabel);
+                    throw SimulatedSqlException.ExtendedPropertyDoesNotExist(name, targetLabel, state: 1);
                 break;
         }
         RecordDdlUndo(batch, () =>
@@ -160,21 +167,28 @@ partial class Simulation
     /// DATABASE-level (class 0). The returned target-label string is the
     /// human-readable token that lands in the Msg 15233 / 15217 wording
     /// (probe-confirmed: <c>'object specified'</c> for DB-level,
-    /// <c>'&lt;schemaName&gt;'</c> for schema, <c>'&lt;schema&gt;.&lt;table&gt;'</c>
-    /// for table / view / proc / func, <c>'&lt;schema&gt;.&lt;table&gt;.&lt;col&gt;'</c>
-    /// for column).
+    /// <c>'&lt;schemaName&gt;'</c> for schema, <c>'&lt;schema&gt;.&lt;name&gt;'</c>
+    /// for a schema-scoped object or type, and
+    /// <c>'&lt;schema&gt;.&lt;name&gt;.&lt;leaf&gt;'</c> below that, each
+    /// name in its declared spelling).
     /// </summary>
     /// <remarks>
-    /// Closed accept-list for level types (probe-confirmed against AW's
-    /// <c>SqlExtendedProperty</c> Host relationships): level0 = <c>SCHEMA</c>
-    /// (schema-container hosts) or the terminal database-scoped hosts
-    /// <c>TRIGGER</c> (a DDL trigger) / <c>FILEGROUP</c>; level1 = <c>TABLE</c>
-    /// / <c>VIEW</c> / <c>PROCEDURE</c> / <c>FUNCTION</c> / <c>TYPE</c>; level2
-    /// = <c>COLUMN</c>. Anything outside this set →
-    /// Msg 15600 "invalid parameter". Missing target object → Msg 15135
-    /// "Extended properties are not permitted on '…'".
+    /// Level0 is <c>SCHEMA</c>, or one of the terminal database-scoped hosts
+    /// <c>TRIGGER</c> (a DDL trigger) / <c>FILEGROUP</c>. Level1 is a
+    /// schema-scoped object — <c>TABLE</c> / <c>VIEW</c> / <c>PROCEDURE</c>
+    /// / <c>FUNCTION</c> / <c>SEQUENCE</c> / <c>SYNONYM</c> / <c>RULE</c> /
+    /// <c>DEFAULT</c> (class 1) — a <c>TYPE</c> (class 6, by user type id) or
+    /// an <c>XML SCHEMA COLLECTION</c> (class 10). Level2 is a
+    /// <c>COLUMN</c> of a table, view, table-valued function or table type
+    /// (class 8 for the last), a <c>PARAMETER</c> of a procedure or function
+    /// (class 2), a table's <c>CONSTRAINT</c>, or a table's or view's
+    /// <c>INDEX</c> (class 7) or <c>TRIGGER</c>. Every refusal carries the
+    /// state real's own resolution raises it with (probed 2026-09-26 against
+    /// SQL Server 2025): Msg 15135 for a name that doesn't resolve, Msg 15600
+    /// for a level type that doesn't fit, and Msg 15096 for a missing
+    /// database-scoped host.
     /// </remarks>
-    private static (ExtendedPropertyKey Key, string TargetLabel) ResolveExtendedPropertyTarget(
+    private static (ExtendedPropertyKey Key, string TargetLabel)? ResolveExtendedPropertyTarget(
         BatchContext batch,
         string procLabel,
         string? level0Type, string? level0Name,
@@ -182,204 +196,286 @@ partial class Simulation
         string? level2Type, string? level2Name,
         string propertyName)
     {
+        var database = batch.CurrentDatabase;
+        var collation = database.Collation;
         if (level0Type is null)
         {
-            // All later levels must be null too (real SQL Server ignores
-            // them when level0 is null — the loader emits the database-level
-            // call with all 6 level args absent).
-            return (new ExtendedPropertyKey(0, 0, 0, propertyName), "object specified");
+            // Real ignores the later levels when level0 is null — the loader
+            // emits the database-level call with all 6 level args absent —
+            // but not a level0 name without its type.
+            return level0Name is null
+                ? (new ExtendedPropertyKey(0, 0, 0, propertyName), "object specified")
+                : throw SimulatedSqlException.InvalidExtendedPropertyLevel(procLabel, state: 2);
         }
-        // Database-scoped hosts addressed directly at level0 (no schema
-        // container): a DDL trigger via @level0type=N'TRIGGER' and a filegroup
-        // via @level0type=N'FILEGROUP'. Both are terminal — later levels don't
-        // apply — and are probe-confirmed against SQL Server 2025 (a DDL
-        // trigger EP lands class 1 / major_id = trigger object_id; a filegroup
-        // EP lands class 20 = DATASPACE / major_id = data_space_id).
+        // A level's name without its type, or its type without its name, is
+        // state 2 at every level.
+        if (level0Name is null || (level1Type is null && level1Name is not null) || (level2Type is null && level2Name is not null))
+            throw SimulatedSqlException.InvalidExtendedPropertyLevel(procLabel, state: 2);
+
+        // A DDL trigger lands class 1 / major_id = its object_id, a filegroup
+        // class 20 = DATASPACE / major_id = its data_space_id; both are
+        // terminal, so later levels don't apply.
         if (BuiltInToken.Equals(level0Type, "TRIGGER"))
         {
-            return level0Name is not null && batch.CurrentDatabase.DdlTriggers.TryGetValue(level0Name, out var ddlTrigger)
+            return database.DdlTriggers.TryGetValue(level0Name, out var ddlTrigger)
                 ? (new ExtendedPropertyKey(1, ddlTrigger.ObjectId, 0, propertyName), level0Name)
-                : throw (level0Name is null
-                    ? SimulatedSqlException.InvalidExtendedPropertyParameter(procLabel)
-                    : SimulatedSqlException.ExtendedPropertyTargetMissing(level0Name));
+                : throw SimulatedSqlException.ExtendedPropertyHostMissing(level0Name, state: 10);
         }
         if (BuiltInToken.Equals(level0Type, "FILEGROUP"))
         {
-            return level0Name is not null && batch.CurrentDatabase.Filegroups.TryGetValue(level0Name, out var dataSpaceId)
+            return database.Filegroups.TryGetValue(level0Name, out var dataSpaceId)
                 ? (new ExtendedPropertyKey(20, dataSpaceId, 0, propertyName), level0Name)
-                : throw (level0Name is null
-                    ? SimulatedSqlException.InvalidExtendedPropertyParameter(procLabel)
-                    : SimulatedSqlException.ExtendedPropertyTargetMissing(level0Name));
+                : throw SimulatedSqlException.ExtendedPropertyHostMissing(level0Name, state: 1);
         }
-
+        if (BuiltInToken.Equals(level0Type, "USER"))
+        {
+            // Class 4 = DATABASE_PRINCIPAL. The built-in principals and the
+            // roles are state 2, and a user hosts nothing beneath it (state
+            // 27) — the level1 slot is a pre-2005 owner's, not a schema's.
+            if (!database.Principals.TryGetValue(level0Name, out var user))
+                throw SimulatedSqlException.ExtendedPropertyTargetMissing(level0Name, state: 1);
+            if (user.PrincipalId < 5 || user.IsFixedRole || user.TypeCode == "R")
+                throw SimulatedSqlException.ExtendedPropertyTargetMissing(user.Name, state: 2);
+            return level1Type is null
+                ? (new ExtendedPropertyKey(4, user.PrincipalId, 0, propertyName), user.Name)
+                : throw SimulatedSqlException.ExtendedPropertyTargetMissing($"{user.Name}.{level1Name}", state: 27);
+        }
         if (!BuiltInToken.Equals(level0Type, "SCHEMA"))
-            throw SimulatedSqlException.InvalidExtendedPropertyParameter(procLabel);
-        if (level0Name is null)
-            throw SimulatedSqlException.InvalidExtendedPropertyParameter(procLabel);
-
-        if (!batch.CurrentDatabase.Schemas.TryGetValue(level0Name, out var schema))
-            throw SimulatedSqlException.ExtendedPropertyTargetMissing(level0Name);
+            throw SimulatedSqlException.InvalidExtendedPropertyLevel(procLabel, state: 3);
+        if (!database.Schemas.TryGetValue(level0Name, out var schema))
+            throw SimulatedSqlException.ExtendedPropertyTargetMissing(level0Name, state: 4);
 
         if (level1Type is null)
             return (new ExtendedPropertyKey(3, schema.SchemaId, 0, propertyName), schema.Name);
-
         if (level1Name is null)
-            throw SimulatedSqlException.InvalidExtendedPropertyParameter(procLabel);
+            throw SimulatedSqlException.InvalidExtendedPropertyLevel(procLabel, state: 2);
 
-        // Resolve the level1 object inside the schema. Closed accept-list of
-        // level1 kinds — anything else raises Msg 15600 (real SQL Server's
-        // grammar accepts more but AW only uses these five).
-        SchemaObject? obj = null;
-        if (BuiltInToken.Equals(level1Type, "TABLE"))
+        var level1Label = $"{schema.Name}.{level1Name}";
+        if (BuiltInToken.Equals(level1Type, "TYPE"))
         {
-            if (schema.HeapTables.TryGetValue(level1Name, out var t)) obj = t;
-        }
-        else if (BuiltInToken.Equals(level1Type, "VIEW"))
-        {
-            if (schema.Views.TryGetValue(level1Name, out var v)) obj = v;
-        }
-        else if (BuiltInToken.Equals(level1Type, "PROCEDURE"))
-        {
-            if (schema.Procedures.TryGetValue(level1Name, out var p)) obj = p;
-        }
-        else if (BuiltInToken.Equals(level1Type, "FUNCTION"))
-        {
-            if (schema.Functions.TryGetValue(level1Name, out var f)) obj = f;
-        }
-        else if (BuiltInToken.Equals(level1Type, "TYPE"))
-        {
-            // TYPE-level extended properties target alias or table types.
-            // The object_id is the table-type's, alias types don't carry one.
-            if (schema.TableTypes.TryGetValue(level1Name, out var tt))
-                obj = tt;
-        }
-        else
-        {
-            throw SimulatedSqlException.InvalidExtendedPropertyParameter(procLabel);
-        }
-
-        if (obj is null)
-            throw SimulatedSqlException.ExtendedPropertyTargetMissing($"{schema.Name}.{level1Name}");
-
-        if (level2Type is null)
-            return (new ExtendedPropertyKey(1, obj.ObjectId, 0, propertyName), $"{schema.Name}.{obj.Name}");
-
-        if (level2Name is null)
-            throw SimulatedSqlException.InvalidExtendedPropertyParameter(procLabel);
-
-        if (obj is not HeapTable table)
-            throw SimulatedSqlException.ExtendedPropertyTargetMissing($"{schema.Name}.{obj.Name}.{level2Name}");
-
-        if (BuiltInToken.Equals(level2Type, "COLUMN"))
-        {
-            // 1-based column ordinal (real SQL Server's minor_id convention).
-            for (var i = 0; i < table.Columns.Length; i++)
+            if (schema.TableTypes.TryGetValue(level1Name, out var tableType))
             {
-                if (batch.CurrentDatabase.Collation.Equals(table.Columns[i].Name, level2Name))
-                    return (new ExtendedPropertyKey(1, obj.ObjectId, i + 1, propertyName), $"{schema.Name}.{obj.Name}.{table.Columns[i].Name}");
+                if (level2Type is null)
+                    return (new ExtendedPropertyKey(6, tableType.UserTypeId, 0, propertyName), $"{schema.Name}.{tableType.Name}");
+                return ResolveColumnLevel(8, tableType.UserTypeId, tableType.Columns, $"{schema.Name}.{tableType.Name}");
             }
-            throw SimulatedSqlException.ExtendedPropertyTargetMissing($"{schema.Name}.{obj.Name}.{level2Name}");
+            if (schema.AliasTypes.TryGetValue(level1Name, out var aliasType))
+            {
+                // A level2 beneath an alias type is accepted and recorded
+                // nowhere (probed 2026-09-26).
+                return level2Type is null
+                    ? (new ExtendedPropertyKey(6, aliasType.UserTypeId, 0, propertyName), $"{schema.Name}.{aliasType.Name}")
+                    : null;
+            }
+            throw SimulatedSqlException.ExtendedPropertyTargetMissing(level1Label, state: 6);
+        }
+        if (BuiltInToken.Equals(level1Type, "XML SCHEMA COLLECTION"))
+        {
+            return schema.XmlSchemaCollections.TryGetValue(level1Name, out var collection) && level2Type is null
+                ? (new ExtendedPropertyKey(10, collection.Id, 0, propertyName), $"{schema.Name}.{collection.Name}")
+                : throw SimulatedSqlException.ExtendedPropertyTargetMissing(level1Label, state: 8);
         }
 
-        if (BuiltInToken.Equals(level2Type, "CONSTRAINT"))
+        Span<char> kind = stackalloc char[level1Type.Length];
+        _ = level1Type.AsSpan().ToUpperInvariant(kind);
+        SchemaObject? obj = kind switch
         {
-            // Constraints (PK / UQ / FK / CHECK / DEFAULT) all carry their own
-            // object_id and reuse class=1 (OBJECT_OR_COLUMN) like every other
-            // schema object — same wire shape real SQL Server uses.
+            "DEFAULT" => schema.Defaults.GetValueOrDefault(level1Name),
+            "FUNCTION" => schema.Functions.GetValueOrDefault(level1Name),
+            "PROCEDURE" => schema.Procedures.GetValueOrDefault(level1Name),
+            "RULE" => schema.Rules.GetValueOrDefault(level1Name),
+            "SEQUENCE" => schema.Sequences.GetValueOrDefault(level1Name),
+            "SYNONYM" => schema.Synonyms.GetValueOrDefault(level1Name),
+            "TABLE" => schema.HeapTables.GetValueOrDefault(level1Name),
+            "VIEW" => schema.Views.GetValueOrDefault(level1Name),
+            _ => throw SimulatedSqlException.InvalidExtendedPropertyLevel(procLabel, state: 5),
+        };
+        // A name held by an object of another kind is state 9, one held by
+        // nothing state 8.
+        if (obj is null)
+            throw SimulatedSqlException.ExtendedPropertyTargetMissing(level1Label, state: schema.TryFindInSharedNamespace(level1Name, out _) ? (byte)9 : (byte)8);
+
+        var objLabel = $"{schema.Name}.{obj.Name}";
+        if (level2Type is null)
+            return (new ExtendedPropertyKey(1, obj.ObjectId, 0, propertyName), objLabel);
+        if (level2Name is null)
+            throw SimulatedSqlException.InvalidExtendedPropertyLevel(procLabel, state: 2);
+
+        Span<char> level2Kind = stackalloc char[level2Type.Length];
+        _ = level2Type.AsSpan().ToUpperInvariant(level2Kind);
+        switch (level2Kind)
+        {
+            case "COLUMN":
+                return obj switch
+                {
+                    HeapTable table => ResolveColumnLevel(1, obj.ObjectId, table.Columns, objLabel, stableIds: true),
+                    View view => ResolveColumnLevel(1, obj.ObjectId, view.OutputColumns, objLabel),
+                    InlineTableValuedFunction inline => ResolveColumnLevel(1, obj.ObjectId, inline.OutputColumns, objLabel),
+                    MultiStatementTableValuedFunction multi => ResolveColumnLevel(1, obj.ObjectId, multi.OutputColumns, objLabel),
+                    UserDefinedFunction => throw SimulatedSqlException.ExtendedPropertyTargetMissing($"{objLabel}.{level2Name}", state: 14),
+                    _ => throw SimulatedSqlException.InvalidExtendedPropertyLevel(procLabel, state: 12),
+                };
+            case "CONSTRAINT":
+                return obj is HeapTable constrained
+                    ? ResolveConstraintLevel(constrained, objLabel)
+                    : throw SimulatedSqlException.InvalidExtendedPropertyLevel(procLabel, state: 12);
+            case "INDEX":
+                var identities = obj switch
+                {
+                    HeapTable indexedTable => indexedTable.IndexIdentities(),
+                    View indexedView => indexedView.IndexIdentities(),
+                    _ => throw SimulatedSqlException.InvalidExtendedPropertyLevel(procLabel, state: 12),
+                };
+                foreach (var identity in identities)
+                {
+                    if (identity.Name is { } indexName && collation.Equals(indexName, level2Name))
+                        return (new ExtendedPropertyKey(7, obj.ObjectId, identity.IndexId, propertyName), $"{objLabel}.{indexName}");
+                }
+                if (obj is HeapTable withXmlOrSpatial)
+                {
+                    foreach (var xmlIndex in withXmlOrSpatial.XmlIndexes)
+                    {
+                        if (collation.Equals(xmlIndex.Name, level2Name))
+                            return (new ExtendedPropertyKey(7, obj.ObjectId, xmlIndex.IndexId, propertyName), $"{objLabel}.{xmlIndex.Name}");
+                    }
+                    foreach (var spatialIndex in withXmlOrSpatial.SpatialIndexes)
+                    {
+                        if (collation.Equals(spatialIndex.Name, level2Name))
+                            return (new ExtendedPropertyKey(7, obj.ObjectId, spatialIndex.IndexId, propertyName), $"{objLabel}.{spatialIndex.Name}");
+                    }
+                }
+                // Real answers a missing index with Msg 15600, not Msg 15135.
+                throw SimulatedSqlException.InvalidExtendedPropertyLevel(procLabel, state: 17);
+            case "PARAMETER":
+                var parameterNames = obj switch
+                {
+                    Procedure procedure => Array.ConvertAll(procedure.Parameters, static parameter => parameter.Name),
+                    UserDefinedFunction function => Array.ConvertAll(function.Parameters, static parameter => parameter.Name),
+                    _ => throw SimulatedSqlException.InvalidExtendedPropertyLevel(procLabel, state: 12),
+                };
+                for (var i = 0; i < parameterNames.Length; i++)
+                {
+                    if (level2Name.StartsWith('@') && collation.Equals(parameterNames[i], level2Name[1..]))
+                        return (new ExtendedPropertyKey(2, obj.ObjectId, i + 1, propertyName), $"{objLabel}.@{parameterNames[i]}");
+                }
+                throw SimulatedSqlException.ExtendedPropertyTargetMissing($"{objLabel}.{level2Name}", state: 16);
+            case "TRIGGER":
+                if (obj is not (HeapTable or View))
+                    throw SimulatedSqlException.InvalidExtendedPropertyLevel(procLabel, state: 12);
+                return schema.Triggers.TryGetValue(level2Name, out var trigger) && ReferenceEquals(trigger.Parent, obj)
+                    ? (new ExtendedPropertyKey(1, trigger.ObjectId, 0, propertyName), $"{objLabel}.{trigger.Name}")
+                    : throw SimulatedSqlException.ExtendedPropertyTargetMissing($"{objLabel}.{level2Name}", state: 17);
+            default:
+                throw SimulatedSqlException.InvalidExtendedPropertyLevel(procLabel, state: 11);
+        }
+
+        // The minor_id is the column_id: a table's stable one, survives an
+        // earlier column's drop; anything else's is its 1-based position.
+        (ExtendedPropertyKey, string) ResolveColumnLevel(byte @class, int majorId, HeapColumn[] columns, string ownerLabel, bool stableIds = false)
+        {
+            for (var i = 0; i < columns.Length; i++)
+            {
+                if (collation.Equals(columns[i].Name, level2Name))
+                    return (new ExtendedPropertyKey(@class, majorId, stableIds ? columns[i].ColumnId : i + 1, propertyName), $"{ownerLabel}.{columns[i].Name}");
+            }
+            throw SimulatedSqlException.ExtendedPropertyTargetMissing($"{ownerLabel}.{level2Name}", state: 15);
+        }
+
+        // Constraints (PK / UQ / FK / CHECK / DEFAULT) all carry their own
+        // object_id and reuse class=1 (OBJECT_OR_COLUMN) like every other
+        // schema object — same wire shape real SQL Server uses.
+        (ExtendedPropertyKey, string) ResolveConstraintLevel(HeapTable table, string ownerLabel)
+        {
             foreach (var k in table.KeyConstraints)
             {
-                if (batch.CurrentDatabase.Collation.Equals(k.Name, level2Name))
-                    return (new ExtendedPropertyKey(1, k.ObjectId, 0, propertyName), $"{schema.Name}.{obj.Name}.{k.Name}");
+                if (collation.Equals(k.Name, level2Name))
+                    return (new ExtendedPropertyKey(1, k.ObjectId, 0, propertyName), $"{ownerLabel}.{k.Name}");
             }
             foreach (var c in table.CheckConstraints)
             {
-                if (batch.CurrentDatabase.Collation.Equals(c.Name, level2Name))
-                    return (new ExtendedPropertyKey(1, c.ObjectId, 0, propertyName), $"{schema.Name}.{obj.Name}.{c.Name}");
+                if (collation.Equals(c.Name, level2Name))
+                    return (new ExtendedPropertyKey(1, c.ObjectId, 0, propertyName), $"{ownerLabel}.{c.Name}");
             }
             foreach (var fk in table.OutgoingForeignKeys)
             {
-                if (batch.CurrentDatabase.Collation.Equals(fk.Name, level2Name))
-                    return (new ExtendedPropertyKey(1, fk.ObjectId, 0, propertyName), $"{schema.Name}.{obj.Name}.{fk.Name}");
+                if (collation.Equals(fk.Name, level2Name))
+                    return (new ExtendedPropertyKey(1, fk.ObjectId, 0, propertyName), $"{ownerLabel}.{fk.Name}");
             }
             foreach (var col in table.Columns)
             {
-                if (col.DefaultConstraint is { } dc && batch.CurrentDatabase.Collation.Equals(dc.Name, level2Name))
-                    return (new ExtendedPropertyKey(1, dc.ObjectId, 0, propertyName), $"{schema.Name}.{obj.Name}.{dc.Name}");
+                if (col.DefaultConstraint is { } dc && collation.Equals(dc.Name, level2Name))
+                    return (new ExtendedPropertyKey(1, dc.ObjectId, 0, propertyName), $"{ownerLabel}.{dc.Name}");
             }
-            throw SimulatedSqlException.ExtendedPropertyTargetMissing($"{schema.Name}.{obj.Name}.{level2Name}");
+            throw SimulatedSqlException.ExtendedPropertyTargetMissing($"{ownerLabel}.{level2Name}", state: 19);
         }
-
-        if (BuiltInToken.Equals(level2Type, "INDEX"))
-        {
-            // INDEX-level uses class=7. major_id=table.object_id, minor_id=
-            // index_id (matches real SQL Server's sys.extended_properties).
-            // The index_id is derived the same way as sys.indexes: PK gets 1
-            // (or HEAP-row 0 if no PK); other key constraints + indexes get
-            // sequential ids in ObjectId order starting at 2 (or 1 if no PK).
-            var indexId = ComputeIndexId(batch.CurrentDatabase.Collation, table, level2Name);
-            return indexId < 0
-                ? throw SimulatedSqlException.ExtendedPropertyTargetMissing($"{schema.Name}.{obj.Name}.{level2Name}")
-                : (new ExtendedPropertyKey(7, obj.ObjectId, indexId, propertyName), $"{schema.Name}.{obj.Name}.{level2Name}");
-        }
-
-        throw SimulatedSqlException.InvalidExtendedPropertyParameter(procLabel);
     }
 
     /// <summary>
-    /// Resolves an index name on a table to its <c>index_id</c> — the same
-    /// numbering <c>sys.indexes</c> exposes (PK = 1 / HEAP = 0; other keys +
-    /// <c>CREATE INDEX</c>-declared indexes get sequential ids in <c>ObjectId</c>
-    /// order starting at the next slot). Returns -1 when no index matches.
+    /// Carries a module's column and parameter extended properties across an
+    /// <c>ALTER</c> by name, as real does (probed 2026-09-26 against SQL Server
+    /// 2025): one whose column or parameter survives follows it to its new
+    /// position, and one whose name is gone goes with it. The object's own
+    /// properties stay, since the object id does.
     /// </summary>
-    private static int ComputeIndexId(Collation collation, HeapTable table, string indexName)
+    internal static void RebindExtendedProperties(BatchContext batch, SchemaObject replaced, SchemaObject replacement)
     {
-        KeyConstraint? primaryKey = null;
-        foreach (var k in table.KeyConstraints)
+        var database = batch.CurrentDatabase;
+        var props = database.ExtendedProperties;
+        var before = new List<KeyValuePair<ExtendedPropertyKey, SqlValue>>();
+        foreach (var entry in props)
         {
-            if (k.Kind == KeyConstraintKind.PrimaryKey)
+            if (entry.Key.MajorId == replaced.ObjectId && entry.Key.MinorId > 0 && entry.Key.Class is 1 or 2)
+                before.Add(entry);
+        }
+        if (before.Count == 0)
+            return;
+
+        // Every entry leaves before any returns, so one moving onto a slot
+        // another is vacating can't be swept up with it.
+        foreach (var (key, _) in before)
+            _ = props.TryRemove(key, out _);
+        foreach (var (key, value) in before)
+        {
+            var (oldNames, newNames) = key.Class == 1
+                ? (ColumnNamesOf(replaced), ColumnNamesOf(replacement))
+                : (ParameterNamesOf(replaced), ParameterNamesOf(replacement));
+            if (key.MinorId > oldNames.Length)
+                continue;
+            var moved = Array.FindIndex(newNames, name => database.Collation.Equals(name, oldNames[key.MinorId - 1]));
+            if (moved >= 0)
+                props[new ExtendedPropertyKey(key.Class, key.MajorId, moved + 1, key.Name)] = value;
+        }
+        RecordDdlUndo(batch, () =>
+        {
+            foreach (var entry in props)
             {
-                primaryKey = k;
-                break;
+                if (entry.Key.MajorId == replaced.ObjectId && entry.Key.MinorId > 0 && entry.Key.Class is 1 or 2)
+                    _ = props.TryRemove(entry.Key, out _);
             }
-        }
-        if (primaryKey is not null && collation.Equals(primaryKey.Name, indexName))
-            return 1;
+            foreach (var (key, value) in before)
+                props[key] = value;
+        });
 
-        var others = new List<(int ObjectId, string Name)>();
-        foreach (var k in table.KeyConstraints)
+        static string[] ColumnNamesOf(SchemaObject obj) => obj switch
         {
-            if (!ReferenceEquals(k, primaryKey))
-                others.Add((k.ObjectId, k.Name));
-        }
-        foreach (var ix in table.Indexes)
-            others.Add((ix.ObjectId, ix.Name));
-        others.Sort(static (a, b) => a.ObjectId.CompareTo(b.ObjectId));
+            View view => Array.ConvertAll(view.OutputColumns, static column => column.Name),
+            InlineTableValuedFunction inline => Array.ConvertAll(inline.OutputColumns, static column => column.Name),
+            MultiStatementTableValuedFunction multi => Array.ConvertAll(multi.OutputColumns, static column => column.Name),
+            _ => [],
+        };
 
-        var nextIndexId = primaryKey is null ? 1 : 2;
-        foreach (var (_, name) in others)
+        static string[] ParameterNamesOf(SchemaObject obj) => obj switch
         {
-            if (collation.Equals(name, indexName))
-                return nextIndexId;
-            nextIndexId++;
-        }
-        return -1;
+            Procedure procedure => Array.ConvertAll(procedure.Parameters, static parameter => parameter.Name),
+            UserDefinedFunction function => Array.ConvertAll(function.Parameters, static parameter => parameter.Name),
+            _ => [],
+        };
     }
 
     /// <summary>
-    /// Coerces a sproc argument to <see cref="string"/> for the
-    /// type/name/property-name parameter shapes. NULL raises the parameter-
-    /// validation error (the loader never passes null for these), matching
-    /// real SQL Server's Msg 15600 fall-through.
-    /// </summary>
-    private static string ExpectStringArg(SqlValue value) =>
-        value.IsNull
-            ? throw SimulatedSqlException.InvalidExtendedPropertyParameter("sp_addextendedproperty")
-            : value.CoerceTo(NVarcharSqlType.Get(-1, Collation.Baseline, Coercibility.CoercibleDefault)).AsString;
-
-    /// <summary>
-    /// Same as <see cref="ExpectStringArg"/> but returns null for a NULL
-    /// SqlValue input — used for the level0..2 type/name args, which may
-    /// legitimately be omitted (null climbs the target hierarchy).
+    /// Coerces a sproc argument to <see cref="string"/>, or null for NULL —
+    /// the level0..2 type/name args may legitimately be omitted (null climbs
+    /// the target hierarchy).
     /// </summary>
     private static string? ExpectStringArgOrNull(SqlValue value) =>
         value.IsNull ? null : value.CoerceTo(NVarcharSqlType.Get(-1, Collation.Baseline, Coercibility.CoercibleDefault)).AsString;

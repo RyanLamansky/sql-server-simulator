@@ -889,6 +889,12 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException CannotDropTypeBecauseReferenced(string typeFullName, string referencingObject) =>
         new($"Cannot drop type '{typeFullName}' because it is being referenced by object '{referencingObject}'. There may be other objects that reference this type.", 3732, 16, 1);
 
+    // The extended-property procedures raise their target-resolution errors
+    // (Msg 15096 / 15135 / 15217 / 15233 / severity-16 15600) from inside the
+    // engine, and each ends the batch and rolls the transaction back as under
+    // SET XACT_ABORT ON; the severity-15 argument check ahead of them leaves
+    // the caller's batch running (probed 2026-09-26 against SQL Server 2025).
+
     /// <summary>
     /// Mimics SQL Server error 15233: <c>sp_addextendedproperty</c> rejected
     /// a duplicate property name on the same target. Probe-confirmed verbatim
@@ -898,25 +904,44 @@ partial class SimulatedSqlException
     /// <c>'&lt;schema&gt;.&lt;table&gt;.&lt;col&gt;'</c> for column).
     /// </summary>
     internal static SimulatedSqlException ExtendedPropertyAlreadyExists(string propertyName, string targetLabel) =>
-        new($"Property cannot be added. Property '{propertyName}' already exists for '{targetLabel}'.", 15233, 16, 1);
+        new($"Property cannot be added. Property '{propertyName}' already exists for '{targetLabel}'.", 15233, 16, 1) { AbortsAsUnderXactAbort = true };
 
     /// <summary>
     /// Mimics SQL Server error 15217: <c>sp_updateextendedproperty</c> /
     /// <c>sp_dropextendedproperty</c> targeted a missing property. Same
     /// target-label convention as <see cref="ExtendedPropertyAlreadyExists"/>.
     /// </summary>
-    internal static SimulatedSqlException ExtendedPropertyDoesNotExist(string propertyName, string targetLabel) =>
-        new($"Property cannot be updated or deleted. Property '{propertyName}' does not exist for '{targetLabel}'.", 15217, 16, 1);
+    /// <remarks>State 2 from the update, 1 from the drop (probed 2026-09-26).</remarks>
+    internal static SimulatedSqlException ExtendedPropertyDoesNotExist(string propertyName, string targetLabel, byte state) =>
+        new($"Property cannot be updated or deleted. Property '{propertyName}' does not exist for '{targetLabel}'.", 15217, 16, state) { AbortsAsUnderXactAbort = true };
 
     /// <summary>
     /// Mimics SQL Server error 15135: an extended-property sproc named an
     /// object that doesn't exist. Probe-confirmed wording against SQL Server
     /// 2025 — the target token is the missing-name (e.g. <c>'no_such_schema'</c>
     /// for level0, <c>'dbo.no_such_table'</c> for level1, <c>'dbo.t1.no_such_col'</c>
-    /// for level2).
+    /// for level2). The state names the level that failed to resolve.
     /// </summary>
-    internal static SimulatedSqlException ExtendedPropertyTargetMissing(string targetLabel) =>
-        new($"Object is invalid. Extended properties are not permitted on '{targetLabel}', or the object does not exist.", 15135, 16, 1);
+    internal static SimulatedSqlException ExtendedPropertyTargetMissing(string targetLabel, byte state) =>
+        new($"Object is invalid. Extended properties are not permitted on '{targetLabel}', or the object does not exist.", 15135, 16, state) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>
+    /// Mimics SQL Server error 15096: an extended-property procedure named a
+    /// database-scoped host — a DDL trigger or a filegroup — that doesn't
+    /// exist. Real says "adding" from the update and drop procedures too
+    /// (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException ExtendedPropertyHostMissing(string name, byte state) =>
+        new($"Could not find object '{name}' or you do not have required permission or the object is not valid for adding extended property.", 15096, 16, state) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>
+    /// Msg 15600 as an extended-property procedure's target resolution raises
+    /// it — a level type that doesn't fit where it was given, a missing level
+    /// name, a missing index — at severity 16, where the argument check ahead
+    /// of it (<see cref="InvalidExtendedPropertyParameter"/>) is severity 15.
+    /// </summary>
+    internal static SimulatedSqlException InvalidExtendedPropertyLevel(string procLabel, byte state) =>
+        new($"An invalid parameter or option was specified for procedure '{procLabel}'.", 15600, 16, state) { AbortsAsUnderXactAbort = true };
 
     /// <summary>
     /// Mimics SQL Server error 15600: an extended-property sproc received an
@@ -925,7 +950,7 @@ partial class SimulatedSqlException
     /// Verbatim wording probed against SQL Server 2025.
     /// </summary>
     internal static SimulatedSqlException InvalidExtendedPropertyParameter(string procLabel) =>
-        new($"An invalid parameter or option was specified for procedure '{procLabel}'.", 15600, 15, 1);
+        new($"An invalid parameter or option was specified for procedure '{procLabel}'.", 15600, 15, 1) { EndedCalledBatch = true };
 
     /// <summary>
     /// Shares Msg 15600 wording with

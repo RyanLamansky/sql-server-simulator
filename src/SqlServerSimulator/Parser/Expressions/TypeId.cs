@@ -7,8 +7,9 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// system or user-defined type, or NULL when not found. The name argument
 /// is a runtime string parsed as a 1- or 2-part dotted identifier
 /// (<c>'dbo.MyType'</c> or <c>'MyType'</c>). System types resolve through
-/// <see cref="BuiltInResources.SystypesRowData"/>; user-defined table
-/// types resolve through <see cref="Schema.TableTypes"/>. Result type is
+/// <see cref="BuiltInResources.SystypesRowData"/>; user-defined table and
+/// alias types resolve through <see cref="Schema.TableTypes"/> /
+/// <see cref="Schema.AliasTypes"/>. Result type is
 /// always <see cref="SqlType.Int32"/>.
 /// </summary>
 /// <remarks>
@@ -52,18 +53,20 @@ internal sealed class TypeId : Expression
             leafPart = StripBrackets(nameStr);
         }
 
-        // System types resolve by name; user-defined table types resolve
-        // through the schema's TableTypes dict.
+        // System types resolve by name, user-defined ones through the schema.
         foreach (var row in BuiltInResources.SystypesRowData)
         {
             if (BuiltInToken.Equals((string)row[0]!, leafPart))
                 return SqlValue.FromInt32(Convert.ToInt32(row[3]!, System.Globalization.CultureInfo.InvariantCulture));
         }
 
-        return runtime.Batch.CurrentDatabase.Schemas.TryGetValue(schemaPart, out var schema)
-            && schema.TableTypes.TryGetValue(leafPart, out var tableType)
-                ? SqlValue.FromInt32(tableType.UserTypeId)
-                : SqlValue.Null(SqlType.Int32);
+        if (!runtime.Batch.CurrentDatabase.Schemas.TryGetValue(schemaPart, out var schema))
+            return SqlValue.Null(SqlType.Int32);
+        if (schema.TableTypes.TryGetValue(leafPart, out var tableType))
+            return SqlValue.FromInt32(tableType.UserTypeId);
+        return schema.AliasTypes.TryGetValue(leafPart, out var aliasType)
+            ? SqlValue.FromInt32(aliasType.UserTypeId)
+            : SqlValue.Null(SqlType.Int32);
     }
 
     private static string StripBrackets(string s) =>
