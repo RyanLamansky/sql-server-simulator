@@ -398,7 +398,7 @@ partial class Simulation
         // SSMS emits `ADD CONSTRAINT name UNIQUE NONCLUSTERED (cols) WITH
         // (PAD_INDEX = OFF, …) ON [PRIMARY]`. The filegroup trailer is a no-op
         // (no filegroup model); of the index options only IGNORE_DUP_KEY lands.
-        var indexOptions = ParseOptionalIndexWithClause(context);
+        var indexOptions = ParseOptionalIndexWithClause(context, IndexOptionStatement.AlterTable);
         SkipOptionalFilegroupClause(context);
 
         if (context.Batch.IsSkipping)

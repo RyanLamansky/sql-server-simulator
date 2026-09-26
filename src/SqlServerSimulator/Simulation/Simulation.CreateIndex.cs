@@ -103,7 +103,7 @@ partial class Simulation
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextOptional();
 
-        var (includeColumnNames, filter, filterDefinition, indexOptions) = ParseIndexTail(context, indexName, targetTableName.Leaf, acceptsInclude: true);
+        var (includeColumnNames, filter, filterDefinition, indexOptions) = ParseIndexTail(context, indexName, targetTableName.Leaf, acceptsInclude: true, IndexOptionStatement.CreateIndex);
         var ignoreDupKey = indexOptions.IgnoreDupKey;
 
         // Both statement-shape checks precede every name-resolution error,
@@ -493,7 +493,7 @@ partial class Simulation
     /// <c>IGNORE_DUP_KEY</c>, the one with a semantic here.
     /// </summary>
     private static (List<string> IncludeColumnNames, BooleanExpression? Filter, string? FilterDefinition, IndexOptions Options) ParseIndexTail(
-        ParserContext context, string indexName, string tableLeaf, bool acceptsInclude)
+        ParserContext context, string indexName, string tableLeaf, bool acceptsInclude, IndexOptionStatement statement = IndexOptionStatement.Unchecked)
     {
         var includeColumnNames = new List<string>();
         if (acceptsInclude && context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Include })
@@ -528,7 +528,7 @@ partial class Simulation
             filterDefinition = filter.RenderFilterDefinition(context.Batch);
         }
 
-        var options = ParseOptionalIndexWithClause(context);
+        var options = ParseOptionalIndexWithClause(context, statement);
         SkipOptionalFilegroupClause(context);
         return (includeColumnNames, filter, filterDefinition, options);
     }

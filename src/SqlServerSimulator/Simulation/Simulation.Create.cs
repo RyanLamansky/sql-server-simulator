@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Collections.Frozen;
 using System.Globalization;
 using SqlServerSimulator.Parser;
 using SqlServerSimulator.Parser.Tokens;
@@ -823,7 +824,7 @@ partial class Simulation
     /// No-op when the cursor isn't on <c>WITH</c>. Cursor on exit: first token
     /// past the closing <c>)</c>, or unchanged when no clause was present.
     /// </summary>
-    internal static IndexOptions ParseOptionalIndexWithClause(ParserContext context)
+    internal static IndexOptions ParseOptionalIndexWithClause(ParserContext context, IndexOptionStatement statement = IndexOptionStatement.Unchecked)
     {
         if (context.Token is not ReservedKeyword { Keyword: Keyword.With })
             return default;
@@ -851,9 +852,26 @@ partial class Simulation
         // ahead keeps the depth accounting correct even on malformed input.
         string? namedOption = null;
         var sawEquals = false;
+        var expectName = true;
+        var maxDuration = false;
+        var resumable = false;
         while (depth > 0)
         {
             context.MoveNextRequired();
+            if (expectName && statement != IndexOptionStatement.Unchecked && context.Token is StringToken or ReservedKeyword)
+            {
+                var name = context.Token.Source.ToString();
+                CheckIndexOptionName(name, statement);
+                maxDuration |= name.Equals("MAX_DURATION", StringComparison.OrdinalIgnoreCase);
+                if (name.Equals("RESUMABLE", StringComparison.OrdinalIgnoreCase))
+                {
+                    var checkpoint = context.SaveCheckpoint();
+                    resumable = context.MoveNext() && context.Token is Operator { Character: '=' }
+                        && context.MoveNext() && context.Token is ReservedKeyword { Keyword: Keyword.On };
+                    context.RestoreCheckpoint(checkpoint);
+                }
+            }
+            expectName = depth == 1 && context.Token is Operator { Character: ',' };
             switch (context.Token)
             {
                 case Operator { Character: '(' }:
@@ -895,8 +913,67 @@ partial class Simulation
             sawEquals = false;
         }
 
+        if (maxDuration && !resumable)
+            throw SimulatedSqlException.MaxDurationRequiresResumable();
         context.MoveNextOptional();
         return new IndexOptions(ignoreDupKey, fillFactor, padIndex, dropExisting);
+    }
+
+    /// <summary>
+    /// The relational index options real's <c>WITH</c> clause knows. Each
+    /// statement refuses a name outside them with Msg 155 naming itself, and
+    /// some refuse ones inside them too (probed 2026-09-26 against SQL Server
+    /// 2025).
+    /// </summary>
+    private static readonly FrozenSet<string> IndexOptionNames = new[]
+    {
+        "ALLOW_PAGE_LOCKS", "ALLOW_ROW_LOCKS", "COMPRESSION_DELAY", "DATA_COMPRESSION", "DROP_EXISTING", "FILLFACTOR",
+        "IGNORE_DUP_KEY", "MAX_DURATION", "MAXDOP", "ONLINE", "OPTIMIZE_FOR_SEQUENTIAL_KEY", "PAD_INDEX", "RESUMABLE",
+        "SORT_IN_TEMPDB", "STATISTICS_INCREMENTAL", "STATISTICS_NORECOMPUTE", "XML_COMPRESSION",
+    }.ToFrozenSet(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Refuses an option name <paramref name="statement"/> doesn't take: an
+    /// unknown one as that statement's option, a known one REBUILD or ALTER
+    /// TABLE can't take as theirs, and <c>COMPRESSION_DELAY</c> — a columnstore
+    /// option — with Msg 122 wherever it isn't refused by name.
+    /// </summary>
+    private static void CheckIndexOptionName(string name, IndexOptionStatement statement)
+    {
+        var known = IndexOptionNames.Contains(name);
+        switch (statement)
+        {
+            case IndexOptionStatement.CreateIndex:
+                if (!known)
+                    throw SimulatedSqlException.UnrecognizedIndexOption(name, "CREATE INDEX");
+                break;
+            case IndexOptionStatement.AlterIndexRebuild:
+                if (!known)
+                    throw SimulatedSqlException.UnrecognizedIndexOption(name, "ALTER INDEX");
+                if (name.Equals("DROP_EXISTING", StringComparison.OrdinalIgnoreCase)
+                    || name.Equals("OPTIMIZE_FOR_SEQUENTIAL_KEY", StringComparison.OrdinalIgnoreCase)
+                    || name.Equals("COMPRESSION_DELAY", StringComparison.OrdinalIgnoreCase))
+                {
+                    throw SimulatedSqlException.UnrecognizedIndexOption(name, "ALTER INDEX REBUILD");
+                }
+                break;
+            case IndexOptionStatement.AlterTable:
+                if (!known || name.Equals("DROP_EXISTING", StringComparison.OrdinalIgnoreCase))
+                    throw SimulatedSqlException.UnrecognizedIndexOption(name, "ALTER TABLE");
+                break;
+        }
+        if (name.Equals("COMPRESSION_DELAY", StringComparison.OrdinalIgnoreCase))
+            throw SimulatedSqlException.CompressionDelayRequiresColumnstore();
+    }
+
+    /// <summary>Which statement an index <c>WITH</c> clause belongs to, for the option names it validates.</summary>
+    internal enum IndexOptionStatement
+    {
+        /// <summary>A clause whose statement's option set isn't modeled: every name is accepted.</summary>
+        Unchecked,
+        CreateIndex,
+        AlterIndexRebuild,
+        AlterTable,
     }
 
     /// <summary>

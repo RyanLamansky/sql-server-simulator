@@ -163,7 +163,7 @@ partial class Simulation
                 // option block; neither describes anything a heap has.
                 context.MoveNextOptional();
                 namedPartition = ParseOptionalIndexPartitionClause(context);
-                rebuildOptions = ParseOptionalIndexWithClause(context);
+                rebuildOptions = ParseOptionalIndexWithClause(context, IndexOptionStatement.AlterIndexRebuild);
                 break;
         }
 

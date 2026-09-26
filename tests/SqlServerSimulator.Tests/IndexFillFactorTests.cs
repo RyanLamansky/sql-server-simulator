@@ -63,4 +63,30 @@ public sealed class IndexFillFactorTests
     [DataRow("create index ix on t (a); alter index ix on t set (nope = on)", 155, "'nope' is not a recognized ALTER INDEX option.")]
     public void Refusals_MatchReal(string sql, int number, string message)
         => new Simulation().AssertSqlError($"create table t (id int not null, a int); {sql}", number, message);
+
+    /// <summary>
+    /// Each statement refuses a WITH option name it doesn't take, naming itself
+    /// (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("create index ix on t (a) with (nope = on)", 155, "'nope' is not a recognized CREATE INDEX option.")]
+    [DataRow("create index ix on t (a); alter index ix on t rebuild with (nope = on)", 155, "'nope' is not a recognized ALTER INDEX option.")]
+    [DataRow("create index ix on t (a); alter index ix on t rebuild with (drop_existing = on)", 155, "'drop_existing' is not a recognized ALTER INDEX REBUILD option.")]
+    [DataRow("create index ix on t (a); alter index ix on t rebuild with (optimize_for_sequential_key = off)", 155, "'optimize_for_sequential_key' is not a recognized ALTER INDEX REBUILD option.")]
+    [DataRow("alter table t add constraint pk primary key (id) with (nope = on)", 155, "'nope' is not a recognized ALTER TABLE option.")]
+    [DataRow("alter table t add constraint pk primary key (id) with (drop_existing = off)", 155, "'drop_existing' is not a recognized ALTER TABLE option.")]
+    [DataRow("create index ix on t (a) with (compression_delay = 5)", 122, "The COMPRESSION_DELAY option is allowed only with CREATE or ALTER COLUMNSTORE INDEX syntax.")]
+    [DataRow("create index ix on t (a) with (max_duration = 1)", 11431, "The MAX_DURATION option is not permitted as the RESUMABLE option is not turned 'ON'.")]
+    public void UnknownOptions_AreRefused(string sql, int number, string message)
+        => new Simulation().AssertSqlError($"create table t (id int not null, a int); {sql}", number, message);
+
+    [TestMethod]
+    public void EveryKnownOption_IsAcceptedByCreateIndex()
+        => AreEqual(1, new Simulation().ExecuteScalar("""
+            create table t (id int not null, a int);
+            create index ix on t (a) with (pad_index = off, statistics_norecompute = off, sort_in_tempdb = off, drop_existing = off, online = off,
+                allow_row_locks = on, allow_page_locks = on, optimize_for_sequential_key = off, maxdop = 1, data_compression = none,
+                statistics_incremental = off, ignore_dup_key = off, fillfactor = 90, resumable = off, xml_compression = off);
+            select count(*) from sys.indexes where name = 'ix'
+            """));
 }

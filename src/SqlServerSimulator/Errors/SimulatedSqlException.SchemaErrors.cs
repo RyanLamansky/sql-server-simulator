@@ -2083,6 +2083,23 @@ partial class SimulatedSqlException
     // CREATE INDEX … WITH (DROP_EXISTING = ON)'s refusals, probed 2026-09-26
     // against SQL Server 2025.
 
+    /// <summary>
+    /// Msg 155 for an index <c>WITH</c> option name the statement doesn't take,
+    /// naming the statement as real does — <c>CREATE INDEX</c>, <c>ALTER
+    /// INDEX</c>, <c>ALTER INDEX REBUILD</c> or <c>ALTER TABLE</c> (probed
+    /// 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException UnrecognizedIndexOption(string optionName, string statement) =>
+        new($"'{optionName}' is not a recognized {statement} option.", 155, 15, 1);
+
+    /// <summary>Msg 122: <c>COMPRESSION_DELAY</c> on a rowstore index.</summary>
+    internal static SimulatedSqlException CompressionDelayRequiresColumnstore() =>
+        new("The COMPRESSION_DELAY option is allowed only with CREATE or ALTER COLUMNSTORE INDEX syntax.", 122, 15, 1);
+
+    /// <summary>Msg 11431: <c>MAX_DURATION</c> without <c>RESUMABLE = ON</c>.</summary>
+    internal static SimulatedSqlException MaxDurationRequiresResumable() =>
+        new("The MAX_DURATION option is not permitted as the RESUMABLE option is not turned 'ON'.", 11431, 15, 1);
+
     /// <summary>Msg 7999: no index of that name to replace.</summary>
     internal static SimulatedSqlException IndexNotFoundForDropExisting(string indexName, string tableName) =>
         new($"Could not find any index named '{indexName}' for table '{tableName}'.", 7999, 16, 9);
