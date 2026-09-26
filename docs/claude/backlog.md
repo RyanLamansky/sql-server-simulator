@@ -348,7 +348,6 @@ Real bugs / limitations against shipped behavior — fixes are concrete work, no
 
 - **Catalog content residue from a sys.* diff against real** (probed 2026-09-26 against SQL Server 2025).
   A view column that passes an identity column straight through reports `is_identity = 1` and appears in `sys.identity_columns` with NULL seed / increment / last value — through an alias, a derived table, `TOP`, `GROUP BY`, `DISTINCT`, `*`, `CROSS APPLY` or another view, but not through an expression, a join or a `UNION`; the simulator reports 0, since a view's output column carries no identity provenance.
-  A filtered index adds a class-7 `INDEX` row to `sys.sql_expression_dependencies` for each column its filter reads (`referencing_minor_id` the index id, schema-bound), which the dependency walk doesn't produce.
   See [`indexes.md`](indexes.md#fidelity-gaps) for the two index-option residues (option names in the column-level clauses, `COMPRESSION_DELAY` in `SET`).
 
 - **A typed `xml` edit's `with` value isn't typed against the schema** — real refuses one whose type doesn't match the target (Msg 2247) and computes a schema-typed operand in its **declared** type, where the evaluator works in `double`; the difference shows in the last digits of a long decimal chain.

@@ -20,7 +20,7 @@ partial class Simulation
     /// each naming the argument as passed (probed 2026-09-25 against SQL
     /// Server 2025).
     /// </summary>
-    private static IEnumerable<SimulatedStatementOutcome> InvokeSpRecompile(BatchContext batch)
+    private static IEnumerable<SimulatedStatementOutcome> InvokeSpRecompile(BatchContext batch, string procedureName)
     {
         var arguments = ParseExecArguments(batch.Parser, batch);
         if (batch.IsSkipping)
@@ -35,7 +35,7 @@ partial class Simulation
         {
             throw SimulatedSqlException.CouldNotFindObjectOrNoPermission(objectName);
         }
-        batch.Connection.PendingMessages.Enqueue(SimulatedSqlException.MarkedForRecompilationMessage(batch, objectName));
+        batch.Connection.PendingMessages.Enqueue(SimulatedSqlException.MarkedForRecompilationMessage(batch, procedureName, objectName));
     }
 
     /// <summary>
@@ -96,7 +96,9 @@ partial class Simulation
         connection.AnsiNulls = module.UsesAnsiNulls;
         try
         {
-            foreach (var outcome in this.ExecuteDynamicBatch(batch, "ALTER" + definition["CREATE".Length..], preDeclaredVariables: null))
+            var verbStart = ModuleVerbStart(definition);
+            var alter = definition[..verbStart] + "ALTER" + definition[(verbStart + "CREATE".Length)..];
+            foreach (var outcome in this.ExecuteDynamicBatch(batch, alter, preDeclaredVariables: null))
                 yield return outcome;
         }
         finally

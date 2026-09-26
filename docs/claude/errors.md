@@ -37,6 +37,7 @@ A `PRINT` or low-severity `RAISERROR` in a procedure body carries the procedure 
 
 A **system procedure's own error** names the procedure by the name it was called by (`sp_help` / `sys.sp_help`) at the line of real's source that raises it — a missing parameter's Msg 201 at line 0 — through `AttributedToSystemProcedure` and its probed `SystemProcedureErrorSite` table, some naming an inner procedure instead (`sys.sp_refreshsqlmodule_internal`, the application-lock procedures' `sys.xp_userlock`); an error in evaluating an argument stays the batch's (probed 2026-09-26).
 An error the table doesn't list keeps the batch's attribution.
+The informational messages a system procedure prints from its own body take the same attribution through `SimulatedSqlException.SystemProcedureMessage`, each at its probed line (`sp_help`'s section blanks, `sp_depends`' headings, `sp_configure`'s change note, `sp_recompile`'s confirmation).
 
 ## The message stream
 

@@ -712,7 +712,8 @@ Referencing kinds, all probe-confirmed to record:
 - the four module kinds (view, procedure, scalar UDF, inline TVF, multi-statement TVF) and DML triggers — `referencing_class` 1, `referencing_minor_id` 0;
 - database-scoped DDL triggers — `referencing_class` **12** / `DATABASE_DDL_TRIGGER`;
 - a **computed column** — under its *table's* object id with the column's own `column_id` as `referencing_minor_id`;
-- a **CHECK** or **DEFAULT** constraint — under the constraint's own object id.
+- a **CHECK** or **DEFAULT** constraint — under the constraint's own object id;
+- a **filtered index** — `referencing_class` **7** / `INDEX` under its table's object id with the `index_id` as `referencing_minor_id`, one schema-bound row per column its filter reads; only `sys.sql_expression_dependencies` lists it — the legacy views, the referencing-entities DMVs and `sp_depends` don't (probed 2026-09-26).
 
 Referenced kinds: tables, views, synonyms (recorded as the synonym, never the base behind it), sequences reached through `NEXT VALUE FOR`, functions, procedures reached through `EXEC`, and a procedure's **table-valued parameter** — the one `referenced_class` **6** / `TYPE` row, carrying the type's `user_type_id` and taken off the parameter declaration rather than the body.
 

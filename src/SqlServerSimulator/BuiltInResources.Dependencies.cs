@@ -55,14 +55,19 @@ internal static partial class BuiltInResources
         var ddlTriggerClass = SqlValue.FromByte(ModuleDependencies.DatabaseDdlTriggerClass);
         var ddlTriggerClassDesc = SqlValue.FromNVarchar(nvarchar60Catalog, "DATABASE_DDL_TRIGGER");
         var minorZero = SqlValue.FromInt32(0);
+        var indexClass = SqlValue.FromByte(ModuleDependencies.IndexClass);
+        var indexClassDesc = SqlValue.FromNVarchar(nvarchar60Catalog, "INDEX");
 
-        foreach (var entity in ModuleDependencies.Enumerate(database))
+        foreach (var entity in ModuleDependencies.Enumerate(database, includeIndexes: true))
         {
             var referencingId = SqlValue.FromInt32(entity.ReferencingId);
             var referencingMinor = SqlValue.FromInt32(entity.ReferencingMinorId);
-            var isDdlTrigger = entity.ReferencingClass == ModuleDependencies.DatabaseDdlTriggerClass;
-            var referencingClass = isDdlTrigger ? ddlTriggerClass : objectClass;
-            var referencingClassDesc = isDdlTrigger ? ddlTriggerClassDesc : objectClassDesc;
+            var (referencingClass, referencingClassDesc) = entity.ReferencingClass switch
+            {
+                ModuleDependencies.IndexClass => (indexClass, indexClassDesc),
+                ModuleDependencies.DatabaseDdlTriggerClass => (ddlTriggerClass, ddlTriggerClassDesc),
+                _ => (objectClass, objectClassDesc),
+            };
 
             foreach (var reference in entity.References)
             {

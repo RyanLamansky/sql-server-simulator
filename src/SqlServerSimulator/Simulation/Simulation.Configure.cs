@@ -95,7 +95,7 @@ partial class Simulation
     /// modeled.
     /// </para>
     /// </remarks>
-    private static IEnumerable<SimulatedStatementOutcome> InvokeSpConfigure(BatchContext batch)
+    private static IEnumerable<SimulatedStatementOutcome> InvokeSpConfigure(BatchContext batch, string procedureName)
     {
         var arguments = ParseExecArguments(batch.Parser, batch);
         if (batch.IsSkipping)
@@ -127,11 +127,8 @@ partial class Simulation
             option.Id,
             (requested, option.ValueInUse),
             (_, existing) => (requested, existing.InUse));
-        batch.AppendInfoError(
-            @class: 0,
-            state: 1,
-            number: 15457,
-            message: $"Configuration option '{option.Name}' changed from {previous} to {requested}. Run the RECONFIGURE statement to install.");
+        batch.Connection.PendingMessages.Enqueue(SimulatedSqlException.SystemProcedureMessage(batch, procedureName, 196, 15457,
+            $"Configuration option '{option.Name}' changed from {previous} to {requested}. Run the RECONFIGURE statement to install."));
     }
 
     /// <summary>

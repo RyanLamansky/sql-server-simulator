@@ -62,6 +62,9 @@ internal static class ModuleDependencies
     /// <summary><c>referenced_class</c> 6 — a table type named by a parameter declaration.</summary>
     internal const byte TypeClass = 6;
 
+    /// <summary><c>referencing_class</c> 7 — a filtered index, through the columns its filter reads.</summary>
+    internal const byte IndexClass = 7;
+
     /// <summary><c>referencing_class</c> 12 — a database-scoped DDL trigger.</summary>
     internal const byte DatabaseDdlTriggerClass = 12;
 
@@ -176,9 +179,13 @@ internal static class ModuleDependencies
     /// DML triggers contribute their bodies; DDL triggers theirs under
     /// <see cref="DatabaseDdlTriggerClass"/>; a table contributes one entity per
     /// computed column and one per CHECK / DEFAULT constraint, all schema bound
-    /// the way real records them.
+    /// the way real records them. On <paramref name="includeIndexes"/> a
+    /// filtered index contributes its filter under <see cref="IndexClass"/>,
+    /// which only <c>sys.sql_expression_dependencies</c> reports — the legacy
+    /// views, the referencing-entities DMVs and <c>sp_depends</c> don't list
+    /// it (probed 2026-09-26 against SQL Server 2025).
     /// </summary>
-    internal static List<Entity> Enumerate(Database database)
+    internal static List<Entity> Enumerate(Database database, bool includeIndexes = false)
     {
         List<Entity> entities = [];
         foreach (var schema in database.Schemas.Values)
@@ -196,7 +203,11 @@ internal static class ModuleDependencies
             foreach (var trigger in schema.Triggers.Values)
                 AddModule(database, entities, trigger, schema.Name, trigger.BodyText, isSchemaBound: false);
             foreach (var table in schema.HeapTables.Values)
+            {
                 AddTableExpressions(database, entities, schema, table);
+                if (includeIndexes)
+                    AddFilteredIndexes(database, entities, schema, table);
+            }
         }
 
         foreach (var ddlTrigger in database.DdlTriggers.Values)
@@ -306,6 +317,23 @@ internal static class ModuleDependencies
             var references = AnalyzeExpression(database, schema, table, definition);
             if (references.Count > 0)
                 entities.Add(new Entity(constraint.ObjectId, 0, ObjectOrColumnClass, schema.Name, constraint.Name, "D ", references));
+        }
+    }
+
+    /// <summary>
+    /// A filtered index's entity: the index id as the referencing minor id
+    /// under the table's own id, its filter's columns as schema-bound column
+    /// references on the table.
+    /// </summary>
+    private static void AddFilteredIndexes(Database database, List<Entity> entities, Schema schema, HeapTable table)
+    {
+        foreach (var identity in table.IndexIdentities())
+        {
+            if (identity.Index is not { FilterDefinition: { } filter })
+                continue;
+            var references = AnalyzeExpression(database, schema, table, filter);
+            if (references.Count > 0)
+                entities.Add(new Entity(table.ObjectId, identity.IndexId, IndexClass, schema.Name, table.Name, table.ObjectTypeCode, references));
         }
     }
 

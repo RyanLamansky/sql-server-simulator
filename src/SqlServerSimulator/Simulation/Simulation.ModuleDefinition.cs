@@ -226,4 +226,54 @@ public sealed partial class Simulation
             : raw;
         return commandText[..verbStart] + verb;
     }
+
+    /// <summary>
+    /// Where the <c>CREATE</c> verb of a stored module definition starts. The
+    /// definition keeps whatever preceded the statement in its batch, which —
+    /// a module leading its batch — is only whitespace and comments (nested
+    /// block comments included).
+    /// </summary>
+    private static int ModuleVerbStart(string definition)
+    {
+        var i = 0;
+        while (i < definition.Length)
+        {
+            if (char.IsWhiteSpace(definition[i]))
+            {
+                i++;
+            }
+            else if (definition.AsSpan(i).StartsWith("--"))
+            {
+                var end = definition.IndexOf('\n', i);
+                i = end < 0 ? definition.Length : end + 1;
+            }
+            else if (definition.AsSpan(i).StartsWith("/*"))
+            {
+                var depth = 0;
+                do
+                {
+                    if (definition.AsSpan(i).StartsWith("/*"))
+                    {
+                        depth++;
+                        i += 2;
+                    }
+                    else if (definition.AsSpan(i).StartsWith("*/"))
+                    {
+                        depth--;
+                        i += 2;
+                    }
+                    else
+                    {
+                        i++;
+                    }
+                }
+                while (depth > 0 && i < definition.Length);
+            }
+            else
+            {
+                break;
+            }
+        }
+        return i;
+    }
 }

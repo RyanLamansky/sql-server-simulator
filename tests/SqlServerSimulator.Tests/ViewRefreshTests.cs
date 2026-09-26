@@ -97,4 +97,14 @@ public sealed class ViewRefreshTests
         AreEqual(2, ex.Errors.Count);
         AreEqual($"Could not use view or function '{view}' because of binding errors.", ex.Errors[1].Message);
     }
+
+    /// <summary>A stored definition keeps the whitespace and comments ahead of its CREATE, which the refresh steps over.</summary>
+    [TestMethod]
+    public void Refresh_StepsOverLeadingCommentsAndWhitespace()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create table rt (a int)", "\n  -- lead\n /* block /* nested */ */\ncreate view rvv as select * from rt", "alter table rt add c int");
+        _ = sim.ExecuteNonQuery("exec sp_refreshview 'rvv'");
+        AreEqual("a,c", sim.ExecuteScalar("select string_agg(name, ',') within group (order by column_id) from sys.columns where object_id = object_id('rvv')"));
+    }
 }

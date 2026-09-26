@@ -597,4 +597,21 @@ public sealed class HelpProcTests
     [TestMethod]
     public void HelpProtect_NameThatIsNotAnIdentifier_IsMsg15253()
         => new Simulation().AssertSqlError("exec sp_helprotect 'a]b'", 15253, "Syntax error parsing SQL identifier 'a]b'.");
+
+    /// <summary>
+    /// sp_depends / sp_recompile / sp_configure attribute their messages to
+    /// themselves and to the line of real's source that prints each (probed
+    /// 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("exec sp_depends 'u'", "sp_depends:15461@83")]
+    [DataRow("exec sp_depends 'v'", "sp_depends:15459@39")]
+    [DataRow("exec sp_recompile 't'", "sp_recompile:15070@61")]
+    [DataRow("exec sp_configure 'show advanced options', 1", "sp_configure:15457@196")]
+    public void SystemProcedureMessages_NameTheirProcedureAndLine(string command, string expected)
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create table t (a int); create table u (a int)", "create view v as select a from t");
+        AreEqual(expected, RunHelp(sim, command).Errors.ConvertAll(e => $"{e.Procedure}:{e.Number}@{e.LineNumber}")[0]);
+    }
 }

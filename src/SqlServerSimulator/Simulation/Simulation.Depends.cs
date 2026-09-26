@@ -76,7 +76,7 @@ partial class Simulation
     /// procedure that both reads a table's column and calls a scalar UDF. The
     /// "referenced by" set is distinct on (schema-qualified name, type).
     /// </remarks>
-    private static IEnumerable<SimulatedStatementOutcome> InvokeSpDepends(BatchContext batch)
+    private static IEnumerable<SimulatedStatementOutcome> InvokeSpDepends(BatchContext batch, string procedureName)
     {
         var arguments = ParseExecArguments(batch.Parser, batch);
         if (batch.IsSkipping)
@@ -92,22 +92,22 @@ partial class Simulation
         var referencedBy = SpDependsReferencedByRows(database, entities, targetId);
         if (references.Count == 0 && referencedBy.Count == 0)
         {
-            batch.AppendInfoError(@class: 10, state: 1, number: 15461,
-                message: "Object does not reference any object, and no objects reference it.");
+            batch.Connection.PendingMessages.Enqueue(SimulatedSqlException.SystemProcedureMessage(batch, procedureName, 83, 15461,
+                "Object does not reference any object, and no objects reference it."));
             yield break;
         }
 
         if (references.Count > 0)
         {
-            batch.AppendInfoError(@class: 10, state: 1, number: 15459,
-                message: "In the current database, the specified object references the following:");
+            batch.Connection.PendingMessages.Enqueue(SimulatedSqlException.SystemProcedureMessage(batch, procedureName, 39, 15459,
+                "In the current database, the specified object references the following:"));
             yield return new SimulatedSqlResultSet(SpDependsReferencesSchema, SpDependsReferencesColumnNames, references);
         }
 
         if (referencedBy.Count > 0)
         {
-            batch.AppendInfoError(@class: 10, state: 1, number: 15460,
-                message: "In the current database, the specified object is referenced by the following:");
+            batch.Connection.PendingMessages.Enqueue(SimulatedSqlException.SystemProcedureMessage(batch, procedureName, 67, 15460,
+                "In the current database, the specified object is referenced by the following:"));
             yield return new SimulatedSqlResultSet(SpDependsReferencedBySchema, SpDependsReferencedByColumnNames, referencedBy);
         }
     }
