@@ -172,6 +172,8 @@ Hand-written functions do omit it, so a parser that required the keyword drops t
 Every module kind reads its option clause through one parser, `ParseModuleOptions`, over two grammars (probed 2026-09-26 against SQL Server 2025): a function's, which alone reads `RETURNS NULL ON NULL INPUT`, `CALLED ON NULL INPUT` and `INLINE = ON | OFF` as options, and every other module's, which alone recognizes `RECOMPILE` and `VIEW_METADATA`.
 Outside a function, the multi-word forms are therefore a syntax error on their second word.
 The clause is judged only once it has parsed and its host's next token is in place, so a syntax error after it wins; then, in written order, a repeat is Msg 1039, an unrecognized word Msg 195, and an option the host's grammar parses but the host refuses Msg 487 (`InvalidOptionState` is the grid).
+`ENCRYPTION` hides the definition: the module keeps no `DefinitionText`, so `sys.sql_modules`, `OBJECT_DEFINITION`, `INFORMATION_SCHEMA`'s definition columns and `sys.syscomments` read NULL, `OBJECTPROPERTY(…, 'IsEncrypted')` reads 1, and `sp_helptext` prints Msg 15471 — while the body, held apart as `BodyText`, runs and feeds the dependency surfaces unchanged (probed 2026-09-26 against SQL Server 2025).
+An `ALTER` without the option brings the text back.
 Last, `SCHEMABINDING` and `NATIVE_COMPILATION` must come together on a procedure or trigger, and `NATIVE_COMPILATION` needs `SCHEMABINDING` on a function, or it is Msg 10796 — which real reports at line 16 of the module whatever its length.
 
 ## Scalar user-defined functions
@@ -192,7 +194,7 @@ Probed against SQL Server 2025.
   `fn()` raises Msg 313 even when every parameter has a declared default — the `DEFAULT` keyword is the only legal omission (re-evaluated per call in the child batch).
 - **WITH RETURNS NULL ON NULL INPUT**: any non-DEFAULT NULL arg short-circuits the body and returns typed NULL.
 - **WITH SCHEMABINDING** records on `UserDefinedFunction.IsSchemaBound`, surfacing through `sys.sql_modules.is_schema_bound` / `OBJECTPROPERTY(id,'IsSchemaBound')`, gating `OBJECTPROPERTY(id,'IsDeterministic')` (see [`catalog-views.md`](catalog-views.md#isdeterministic)), and enrolling the body's references in the dependency gate — [Schema binding](#schema-binding-with-schemabinding).
-  `ENCRYPTION` parse-and-discards; the rest of the clause is [The `WITH` option clause](#the-with-option-clause).
+  `ENCRYPTION` and the rest of the clause are [The `WITH` option clause](#the-with-option-clause).
 - **Recursion cap: 32.**
   Tracked by `SimulatedDbConnection.NestingLevel`; exceeding → **Msg 217**.
   Shared with future stored procs / triggers / views.
@@ -223,7 +225,7 @@ Probed against SQL Server 2025.
   Multi-statement inside parens → Msg 102.
   The body's stored span is measured by a token scan (`CaptureInlineTvfBody`) rather than by a parse, and the paren-less form's terminator — a statement keyword — counts only at the body's own nesting level, so a SELECT belonging to a derived table, a subquery or a CTE definition doesn't truncate the span.
   A body opening with `WITH` also spends one depth-0 statement keyword on the query the prefix scopes to.
-- **WITH-clause options**: `SCHEMABINDING` records on `UserDefinedFunction.IsSchemaBound` (same surfaces and same dependency gate as scalar UDFs — [Schema binding](#schema-binding-with-schemabinding)); `ENCRYPTION` parse-and-discards.
+- **WITH-clause options**: `SCHEMABINDING` records on `UserDefinedFunction.IsSchemaBound` (same surfaces and same dependency gate as scalar UDFs — [Schema binding](#schema-binding-with-schemabinding)).
   The options a table-valued function refuses are in [The `WITH` option clause](#the-with-option-clause).
 - **CREATE-time validation**: body parses once with parameters seeded as typed variables; `OutputColumns` derives from the resulting projection.
   Unnamed column → **Msg 4514** (distinct from SELECT INTO's Msg 1038).
@@ -261,7 +263,7 @@ Probed against SQL Server 2025.
 - **RETURN handling**: bare `RETURN;` sets `BatchContext.ReturnSignaled` (the dispatch loop bails the same way procedure bodies do).
   Value-form `RETURN N` raises **Msg 178** at invoke time via the existing `ParseReturnStatement` check (both `UdfFrame` and `ProcFrame` are null).
   Real SQL Server enforces Msg 178 at CREATE time; the simulator defers — same convention scalar UDFs use for body validation.
-- **WITH-clause options**: `SCHEMABINDING` records on `UserDefinedFunction.IsSchemaBound` and enrolls the body in the dependency gate ([Schema binding](#schema-binding-with-schemabinding)); `ENCRYPTION` parse-and-discards (shared with inline TVF).
+- **WITH-clause options**: `SCHEMABINDING` records on `UserDefinedFunction.IsSchemaBound` and enrolls the body in the dependency gate ([Schema binding](#schema-binding-with-schemabinding)).
 - **CROSS APPLY / OUTER APPLY**: works through the same `ParseSingleFromSource` branch as inline TVF — both function kinds dispatch through `Selection.ForInlineTvf` / `Selection.ForMultiStatementTvf` returning a `FromSource.LateralPlan`.
   Arguments evaluate against the outer row scope per call.
 - **Catalog surface**: `sys.objects` `type='TF'` / `type_desc='SQL_TABLE_VALUED_FUNCTION'` (distinct from inline TVF's `'IF'`).
@@ -305,7 +307,7 @@ Probed against SQL Server 2025.
 - **`sp_refreshview` / `sp_refreshsqlmodule`** re-run the module's stored `CREATE` text as an `ALTER` under its captured `QUOTED_IDENTIFIER` / `ANSI_NULLS`, which is what re-records a drifted `SELECT *` view's names; a schema-bound module is left alone with the class-0 **Msg 2023**, an unresolvable name (or, for `sp_refreshview`, a non-view) is **Msg 15165**, and a body that no longer binds reports its binder error alone (probed 2026-09-24).
   Since the refresh *is* an ALTER, it also fires an `ALTER_VIEW` / `ALTER_PROCEDURE` DDL trigger and advances `modify_date`, which hasn't been checked against real.
 - **WITH-clause options**: `SCHEMABINDING` is captured on `View.IsSchemaBound` (it gates `CREATE INDEX` on the view, surfaces through `sys.sql_modules.is_schema_bound` / `OBJECTPROPERTY(id,'IsSchemaBound')`, is the precondition `OBJECTPROPERTY(id,'IsDeterministic')` reads — see [`catalog-views.md`](catalog-views.md#isdeterministic) — and enrolls the body's references in the dependency gate, [Schema binding](#schema-binding-with-schemabinding)).
-  `ENCRYPTION` / `VIEW_METADATA` parse-and-ignore.
+  `VIEW_METADATA` parses and is ignored.
   **`WITH CHECK OPTION`** (trailing the body) parses and records on `View.WithCheckOption`, enforced at DML time (Msg 550); it may follow any body end — a bare projection, a table name, a hint, an alias, a `GROUP BY` — since a `WITH` followed by `CHECK` ends the query rather than opening a CTE or a hint.
   The body may also sit in parentheses, to any depth, which the stored definition keeps along with the option (probed 2026-09-25).
   A schema-bound view can carry a unique clustered index — an **indexed view** — see [`indexes.md`](indexes.md).
@@ -324,7 +326,6 @@ Probed against SQL Server 2025.
   Keyless entities (`HasNoKey().ToView("name")`) project rows from CREATE VIEW-produced views; the simulator's per-call body re-parse handles correlated LINQ-emitted WHERE clauses against the view's projection.
 
 **Fidelity gaps**:
-- **`VIEW_DEFINITION` always surfaces body text** even for WITH ENCRYPTION views (real SQL Server returns NULL for ENCRYPTION views).
 
 ## Schema binding (`WITH SCHEMABINDING`)
 `WITH SCHEMABINDING` on a view, scalar function, inline TVF or multi-statement TVF pins everything the body names: the referenced objects can't be dropped, altered, renamed or moved while the module stands.
@@ -501,7 +502,7 @@ Probed against SQL Server 2025.
 - **Body capture**: from the first token after `AS` to end-of-batch, with empty bodies legal (`CREATE PROC p AS` with nothing after `AS` succeeds — probe-confirmed; the per-call invocation short-circuits when `BodyText` is empty so the parser doesn't reject empty `CommandText`).
   Separately, the handlers also capture the *full* original statement text into `SchemaObject.DefinitionText` (verb normalized to `CREATE`) for `OBJECT_DEFINITION` / `sys.sql_modules` / `INFORMATION_SCHEMA.ROUTINES.ROUTINE_DEFINITION` — see [`catalog-views.md`](catalog-views.md).
 - **Parens around parameter list optional**: `CREATE PROC p (@x int)` and `CREATE PROC p @x int` are equivalent.
-- **WITH options**: `EXECUTE AS CALLER|SELF|OWNER|'name'` is applied as an impersonation frame at invocation; `RECOMPILE`, `ENCRYPTION` and `FOR REPLICATION` parse and are ignored — see [The `WITH` option clause](#the-with-option-clause) for what the clause refuses.
+- **WITH options**: `EXECUTE AS CALLER|SELF|OWNER|'name'` is applied as an impersonation frame at invocation; `RECOMPILE` and `FOR REPLICATION` parse and are ignored — see [The `WITH` option clause](#the-with-option-clause) for what the clause refuses.
 - **`NATIVE_COMPILATION`** admits a `BEGIN ATOMIC [WITH (…)]` body, which runs as a plain `BEGIN … END` block; real's in-memory OLTP prerequisites (Msg 41337 without a `MEMORY_OPTIMIZED_DATA` filegroup) aren't modeled.
   Anywhere else the block is refused as real refuses it (probed 2026-09-25): a procedure, function or trigger body without it is Msg 10782 as the module binds at `CREATE`, and a batch or dynamic-SQL string is Msg 102 at `ATOMIC`.
 - **`CREATE OR ALTER`** is an upsert: creates when missing, replaces when present — see [Replacing a module](#replacing-a-module--alter--create-or-alter) for what the replacement preserves.

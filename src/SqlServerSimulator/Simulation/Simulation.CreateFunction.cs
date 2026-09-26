@@ -302,7 +302,7 @@ partial class Simulation
             bodyText,
             createDate: replaced?.CreateDate ?? context.Batch.CurrentStatement.UtcNow)
         {
-            DefinitionText = BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, isAlter, createOrAlter),
+            DefinitionText = options.Encryption ? null : BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, isAlter, createOrAlter),
             IsSchemaBound = isSchemaBound,
             UsesQuotedIdentifier = context.QuotedIdentifiers,
             UsesAnsiNulls = context.Batch.Connection.AnsiNulls,
@@ -440,7 +440,7 @@ partial class Simulation
             bodyText,
             createDate: replaced?.CreateDate ?? context.Batch.CurrentStatement.UtcNow)
         {
-            DefinitionText = BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, isAlter, createOrAlter),
+            DefinitionText = options.Encryption ? null : BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, isAlter, createOrAlter),
             ExecuteAsClause = executeAsClause,
             ExecuteAsPrincipalId = ResolveExecuteAsPrincipalId(context, executeAsClause),
             IsSchemaBound = isSchemaBound,
@@ -500,7 +500,8 @@ partial class Simulation
 
         // Optional WITH-clause: SCHEMABINDING is captured, ENCRYPTION
         // parse-and-discards. RETURNS NULL ON NULL INPUT here → Msg 487.
-        var isSchemaBound = ParseModuleOptions(context, ModuleOptionHost.InlineFunction, functionName.Leaf).SchemaBinding;
+        var options = ParseModuleOptions(context, ModuleOptionHost.InlineFunction, functionName.Leaf);
+        var isSchemaBound = options.SchemaBinding;
 
         _ = ConsumeOptionalBodyAs(context);
         if (context.Token is not ReservedKeyword { Keyword: Keyword.Return })
@@ -559,7 +560,7 @@ partial class Simulation
             bodyText,
             createDate: replaced?.CreateDate ?? context.Batch.CurrentStatement.UtcNow)
         {
-            DefinitionText = BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, isAlter, createOrAlter),
+            DefinitionText = options.Encryption ? null : BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, isAlter, createOrAlter),
             IsSchemaBound = isSchemaBound,
             UsesQuotedIdentifier = context.QuotedIdentifiers,
             UsesAnsiNulls = context.Batch.Connection.AnsiNulls,

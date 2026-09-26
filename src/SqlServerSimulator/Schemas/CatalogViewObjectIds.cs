@@ -199,6 +199,7 @@ internal static class CatalogViewObjectIds
         ["sys.views"] = -387,
         ["sys.xml_indexes"] = -398,
         ["sys.xml_schema_collections"] = -463,
+        ["syscomments"] = -129,
         ["sysconfigures"] = -196,
         ["sysdepends"] = -130,
         ["sysobjects"] = -105,

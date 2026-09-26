@@ -519,7 +519,7 @@ Probed *inlineable* despite looking otherwise, so deliberately not disqualifying
     A definition ending in CR+LF yields no trailing empty row.
     Modules (procedure / view / scalar / inline / multi-statement function / DML trigger) and CHECK / DEFAULT constraints carry text; a table, sequence, synonym, key constraint, foreign key or CLR routine raises **Msg 15197**.
     `@columnname` reports a computed column's definition and is gated in real's order: a non-table `@objname` → **Msg 15218**, an unknown column → **Msg 15645**, a non-computed column → **Msg 15646**.
-    A `WITH ENCRYPTION` module raises nothing — real emits the severity-10 **Msg 15471** and returns *no* result set (the branch ships; `WITH ENCRYPTION` itself is still parse-and-ignore, so no simulator module reaches it).
+    A `WITH ENCRYPTION` module raises nothing: it prints **Msg 15471** from the procedure's line 113 and returns *no* result set (probed 2026-09-26 against SQL Server 2025).
   - **`sp_helpindex @objname`** yields `index_name sysname` / `index_description varchar(210)` / `index_keys nvarchar(2126)`, one row per index of a table or indexed view, sorted by index name.
     `index_description` is real's clause phrase in its fixed order — clustered-ness, `, ignore duplicate keys`, `, unique`, `, primary key` | `, unique key`, then `located on PRIMARY`.
     `index_keys` lists **key columns only** (INCLUDE columns never appear) with `(-)` marking a descending key.
@@ -633,7 +633,7 @@ Probed *inlineable* despite looking otherwise, so deliberately not disqualifying
 - **`sp_xml_preparedocument` / `sp_xml_removedocument`** (`Simulation.OpenXml.cs`, dispatched like `sp_tables`): the session-scoped document store `OPENXML` reads, with an `@hdoc OUTPUT` handle bound the way `sp_setapprole`'s `@cookie` is — see [`xml.md`](xml.md#openxml).
 - **`SCHEMA_ID([name])`** scalar: no-arg returns `Database.DboSchemaId` (=1) — the simulator's "caller default schema" (no user model means dbo is universal).
   With an arg, returns the schema's id or NULL.
-- **Legacy SQL-Server-2000 compatibility views** (`BuiltInResources.LegacyCompat.cs`): `sysobjects` / `syscolumns` / `sysusers` and `sys.system_objects`, the surface SSMS's Database-Properties dialog reaches.
+- **Legacy SQL-Server-2000 compatibility views** (`BuiltInResources.LegacyCompat.cs`): `sysobjects` / `syscolumns` / `sysusers` / `syscomments` and `sys.system_objects`, the surface SSMS's Database-Properties dialog reaches.
   - **`sysobjects`** (25-column legacy shape) / **`sysusers`** (20-column) resolve **unqualified** — probe-confirmed against SQL Server 2025: bare `SELECT … FROM sysobjects` works while bare `objects` / `tables` raise Msg 208 (the modern catalog views require the `sys.` qualifier).
     Both live in the `sys` schema, so they're registered under **both** the bare leaf key (the 1-part path added to `BatchContext.TryResolveCatalogView`) and the `sys.<name>` key (2-part); every modern catalog view is keyed `sys.<name>` / `INFORMATION_SCHEMA.<name>`, so a bare user-table name never collides.
     They project **live metadata**: `sysobjects` emits one row per schema object (tables / views / procs / functions / triggers, `type` = the object's `ObjectTypeCode` — `'U '`/`'V '`/`'P '`/`'FN'`/`'IF'`/`'TR'`) plus one row per PK/UNIQUE (`'K '`), CHECK (`'C '`), and FK (`'F '`) constraint, with `id = object_id`, `uid = schema_id`; columns SSMS doesn't read surface as 0.

@@ -68,7 +68,8 @@ partial class Simulation
         // Optional WITH option list, which precedes the timing in real SQL
         // Server's grammar (ON table [WITH options] { FOR | AFTER | INSTEAD OF }).
         // EXECUTE AS is captured for the per-fire frame push.
-        var executeAsClause = ParseModuleOptions(context, ModuleOptionHost.Trigger, triggerName.Leaf).ExecuteAs;
+        var options = ParseModuleOptions(context, ModuleOptionHost.Trigger, triggerName.Leaf);
+        var executeAsClause = options.ExecuteAs;
 
         // Timing: AFTER (contextual) / FOR (reserved synonym) / INSTEAD OF
         // (contextual + reserved). INSTEAD OF replaces the DML on the
@@ -272,7 +273,7 @@ partial class Simulation
             createDate: existed ? existing!.CreateDate : context.Batch.CurrentStatement.UtcNow,
             bodyLineOffset: bodyLineOffset)
         {
-            DefinitionText = BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, isAlter, createOrAlter),
+            DefinitionText = options.Encryption ? null : BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, isAlter, createOrAlter),
             ExecuteAsClause = executeAsClause,
             ExecuteAsPrincipalId = ResolveExecuteAsPrincipalId(context, executeAsClause),
             UsesQuotedIdentifier = context.QuotedIdentifiers,
@@ -418,7 +419,7 @@ partial class Simulation
 
         // Optional WITH option list, judged as the DML trigger's is; a DDL
         // trigger runs as its caller whatever EXECUTE AS says.
-        _ = ParseModuleOptions(context, ModuleOptionHost.Trigger, triggerName.Leaf);
+        var options = ParseModuleOptions(context, ModuleOptionHost.Trigger, triggerName.Leaf);
 
         if (context.Token is not (ReservedKeyword { Keyword: Keyword.For } or
             UnquotedString { ContextualKeyword: ContextualKeyword.After }))
@@ -506,7 +507,7 @@ partial class Simulation
             createDate: existed ? existing!.CreateDate : context.Batch.CurrentStatement.UtcNow,
             bodyLineOffset: bodyLineOffset)
         {
-            DefinitionText = BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, isAlter, createOrAlter),
+            DefinitionText = options.Encryption ? null : BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, isAlter, createOrAlter),
             UsesQuotedIdentifier = context.QuotedIdentifiers,
             UsesAnsiNulls = context.Batch.Connection.AnsiNulls,
         };

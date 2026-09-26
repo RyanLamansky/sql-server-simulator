@@ -215,6 +215,97 @@ internal static partial class BuiltInResources
         RegisterSystemObjects(views);
         RegisterSptValues(views);
         RegisterSysconfigures(views);
+        RegisterSyscomments(views);
+    }
+
+    /// <summary>
+    /// Registers the legacy <c>syscomments</c> compatibility view: every SQL
+    /// module's, rule's, default's and CHECK / DEFAULT constraint's definition,
+    /// cut into 4000-character rows numbered by <c>colid</c>, with its UTF-16
+    /// bytes in <c>ctext</c>. A procedure's rows are <c>number</c> 1 and a
+    /// numbered procedure's its own number; everything else's 0. A module
+    /// created <c>WITH ENCRYPTION</c> keeps one row with NULL text,
+    /// <c>status</c> 1, <c>texttype</c> 6 and <c>encrypted</c> set (probed
+    /// 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    private static void RegisterSyscomments(Dictionary<string, CatalogView> views)
+    {
+        HeapColumn[] columns =
+        [
+            new("id", SqlType.Int32, null, false),
+            new("number", SqlType.SmallInt, null, true),
+            new("colid", SqlType.SmallInt, null, false),
+            new("status", SqlType.SmallInt, null, false),
+            new("ctext", SqlType.Varbinary, 8000, true),
+            new("texttype", SqlType.SmallInt, null, true),
+            new("language", SqlType.SmallInt, null, true),
+            new("encrypted", SqlType.Bit, null, false),
+            new("compressed", SqlType.Bit, null, false),
+            new("text", SqlType.NVarchar, 4000, true),
+        ];
+        var view = new CatalogView("syscomments", columns, static (_, database) => EnumerateSyscomments(database));
+        views["syscomments"] = view;
+        views["sys.syscomments"] = view;
+    }
+
+    private static IEnumerable<SqlValue[]> EnumerateSyscomments(Database database)
+    {
+        var entries = new List<(int Id, short Number, string? Text)>();
+        foreach (var schema in database.Schemas.Values)
+        {
+            foreach (var obj in schema.SchemaObjects())
+            {
+                switch (obj)
+                {
+                    case Procedure procedure:
+                        entries.Add((procedure.ObjectId, 1, procedure.DefinitionText));
+                        foreach (var (number, member) in procedure.Numbered ?? [])
+                            entries.Add((procedure.ObjectId, number, member.DefinitionText));
+                        break;
+                    case BindableObject:
+                    case var module when SchemaObject.IsSqlModule(module):
+                        entries.Add((obj.ObjectId, 0, obj.DefinitionText));
+                        break;
+                    case HeapTable table:
+                        foreach (var check in table.CheckConstraints)
+                            entries.Add((check.ObjectId, 0, check.Definition));
+                        foreach (var column in table.Columns)
+                        {
+                            if (column.DefaultConstraint is { } defaultConstraint)
+                                entries.Add((defaultConstraint.ObjectId, 0, defaultConstraint.Definition));
+                        }
+                        break;
+                }
+            }
+        }
+        foreach (var ddlTrigger in database.DdlTriggers.Values)
+            entries.Add((ddlTrigger.ObjectId, 0, ddlTrigger.DefinitionText));
+        entries.Sort(static (a, b) => a.Id != b.Id ? a.Id.CompareTo(b.Id) : a.Number.CompareTo(b.Number));
+
+        var falseBit = SqlValue.FromBoolean(false);
+        var zero = SqlValue.FromInt16(0);
+        foreach (var (id, number, text) in entries)
+        {
+            if (text is null)
+            {
+                yield return [
+                    SqlValue.FromInt32(id), SqlValue.FromInt16(number), SqlValue.FromInt16(1), SqlValue.FromInt16(1),
+                    SqlValue.Null(SqlType.Varbinary), SqlValue.FromInt16(6), zero, SqlValue.FromBoolean(true), falseBit,
+                    SqlValue.Null(SqlType.NVarchar),
+                ];
+                continue;
+            }
+            var colid = (short)1;
+            for (var start = 0; start < text.Length || colid == 1; start += 4000)
+            {
+                var chunk = text.Substring(start, Math.Min(4000, text.Length - start));
+                yield return [
+                    SqlValue.FromInt32(id), SqlValue.FromInt16(number), SqlValue.FromInt16(colid++), zero,
+                    SqlValue.FromVarbinary(System.Text.Encoding.Unicode.GetBytes(chunk)), SqlValue.FromInt16(2), zero, falseBit, falseBit,
+                    SqlValue.FromNVarchar(chunk),
+                ];
+            }
+        }
     }
 
     /// <summary>

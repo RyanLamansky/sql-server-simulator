@@ -195,7 +195,7 @@ partial class Simulation
             StoreNumberedProcedure(context, schema, procName, groupNumber, isAlter, createOrAlter, new Procedure(
                 schema, procName.Leaf, 0, [.. parameters], bodyText, context.Batch.CurrentStatement.UtcNow, bodyLineOffset)
             {
-                DefinitionText = BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, isAlter, createOrAlter),
+                DefinitionText = options.Encryption ? null : BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, isAlter, createOrAlter),
                 ExecuteAsClause = executeAsClause,
                 ExecuteAsPrincipalId = ResolveExecuteAsPrincipalId(context, executeAsClause),
                 UsesQuotedIdentifier = context.QuotedIdentifiers,
@@ -226,7 +226,7 @@ partial class Simulation
             createDate: replaced?.CreateDate ?? context.Batch.CurrentStatement.UtcNow,
             bodyLineOffset: bodyLineOffset)
         {
-            DefinitionText = BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, isAlter, createOrAlter),
+            DefinitionText = options.Encryption ? null : BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, isAlter, createOrAlter),
             ExecuteAsClause = executeAsClause,
             ExecuteAsPrincipalId = ResolveExecuteAsPrincipalId(context, executeAsClause),
             UsesQuotedIdentifier = context.QuotedIdentifiers,

@@ -111,7 +111,8 @@ partial class Simulation
         // SCHEMABINDING is captured (it gates CREATE INDEX on the view and
         // surfaces through sys.sql_modules.is_schema_bound / OBJECTPROPERTY);
         // the other two parse-and-ignore.
-        var isSchemaBound = ParseModuleOptions(context, ModuleOptionHost.View, viewName.Leaf).SchemaBinding;
+        var options = ParseModuleOptions(context, ModuleOptionHost.View, viewName.Leaf);
+        var isSchemaBound = options.SchemaBinding;
 
         if (context.Token is not ReservedKeyword { Keyword: Keyword.As })
             throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -218,7 +219,7 @@ partial class Simulation
             checkOptionCheck: checkOptionCheck,
             isJoinUpdatable: isJoinUpdatable)
         {
-            DefinitionText = BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, isAlter, createOrAlter),
+            DefinitionText = options.Encryption ? null : BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, isAlter, createOrAlter),
             UsesQuotedIdentifier = context.QuotedIdentifiers,
             UsesAnsiNulls = context.Batch.Connection.AnsiNulls,
             DerivedOutputColumns = baseTable is null && rejectionReason != ViewUpdatabilityRejection.MultipleSources

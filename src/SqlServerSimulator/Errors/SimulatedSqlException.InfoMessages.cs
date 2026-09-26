@@ -90,6 +90,10 @@ partial class SimulatedSqlException
     internal static SimulatedError HelpBlankLineMessage(BatchContext batch, string procedure, int line) =>
         SystemProcedureMessage(batch, procedure, line, 0, " ");
 
+    /// <summary>Msg 15471, <c>sp_helptext</c>'s answer for a module created <c>WITH ENCRYPTION</c>.</summary>
+    internal static SimulatedError TextIsEncryptedMessage(BatchContext batch, string procedure, int line, string objectName) =>
+        SystemProcedureMessage(batch, procedure, line, 15471, $"The text for object '{objectName}' is encrypted.");
+
     /// <summary>Msg 15469, in place of an empty constraint set.</summary>
     internal static SimulatedError NoConstraintsMessage(BatchContext batch, string procedure, int line, string objectName) =>
         SystemProcedureMessage(batch, procedure, line, 15469, $"No constraints are defined on object '{objectName}', or you do not have permissions.");

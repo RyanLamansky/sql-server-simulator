@@ -91,4 +91,65 @@ public sealed class ModuleOptionTests
         _ = sim.ExecuteNonQuery("create function f() returns @t table (a int) with execute as owner as begin return end");
         AreEqual(-2, sim.ExecuteScalar("select execute_as_principal_id from sys.sql_modules where object_id = object_id('f')"));
     }
+
+    /// <summary>ENCRYPTION hides the definition from every surface while the module still runs.</summary>
+    [TestMethod]
+    [DataRow("create procedure m with encryption as select 1 x")]
+    [DataRow("create view m with encryption as select 1 x")]
+    [DataRow("create function m() returns int with encryption as begin return 1 end")]
+    [DataRow("create function m() returns table with encryption as return select 1 x")]
+    public void Encryption_HidesTheDefinition(string create)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery(create);
+        AreEqual("1:1:1:1:1", sim.ExecuteScalar("""
+            select concat(
+                (select count(*) from sys.sql_modules where object_id = object_id('m') and definition is null), ':',
+                iif(object_definition(object_id('m')) is null, 1, 0), ':',
+                objectproperty(object_id('m'), 'IsEncrypted'), ':',
+                (select count(*) from sys.syscomments where id = object_id('m') and text is null and encrypted = 1 and status = 1 and texttype = 6), ':',
+                (select count(*) from information_schema.routines r full join information_schema.views v on 1 = 0
+                 where coalesce(r.routine_name, v.table_name) = 'm' and coalesce(r.routine_definition, v.view_definition) is null))
+            """));
+    }
+
+    [TestMethod]
+    public void Encryption_SpHelpTextPrintsMsg15471()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create procedure m with encryption as select 1 x");
+        using var connection = sim.CreateOpenConnection();
+        var messages = new List<SimulatedError>();
+        ((SimulatedDbConnection)connection).InfoMessage += (_, e) => messages.AddRange(e.Errors.Cast<SimulatedError>());
+        using var command = connection.CreateCommand();
+        command.CommandText = "exec sp_helptext 'm'";
+        using (var reader = command.ExecuteReader())
+            IsFalse(reader.Read());
+        var message = messages.Single();
+        AreEqual(15471, message.Number);
+        AreEqual(113, message.LineNumber);
+        AreEqual("sp_helptext", message.Procedure);
+        AreEqual(1, sim.ExecuteScalar("exec m"));
+    }
+
+    [TestMethod]
+    public void AnAlterWithoutEncryption_BringsTheTextBack()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create procedure m with encryption as select 1 x", "alter procedure m as select 2 x");
+        AreEqual(0, sim.ExecuteScalar("select objectproperty(object_id('m'), 'IsEncrypted')"));
+    }
+
+    /// <summary>syscomments cuts a definition into 4000-character rows, and numbers a procedure's from 1.</summary>
+    [TestMethod]
+    public void Syscomments_ChunksTheDefinition()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("declare @s nvarchar(max) = N'create procedure lp as select ''' + replicate(cast(N'x' as nvarchar(max)), 9000) + N''''; exec (@s)");
+        _ = sim.ExecuteNonQuery("create table t (a int constraint ck check (a > 0) constraint df default 5)");
+        AreEqual("1:1:4000:8000|1:2:4000:8000|1:3:1032:2064", sim.ExecuteScalar(
+            "select string_agg(concat(number, ':', colid, ':', len(text), ':', datalength(ctext)), '|') within group (order by colid) from sys.syscomments where id = object_id('lp')"));
+        AreEqual("([a]>(0))|((5))", sim.ExecuteScalar(
+            "select string_agg(text, '|') within group (order by object_name(id)) from syscomments where id in (object_id('ck'), object_id('df'))"));
+    }
 }

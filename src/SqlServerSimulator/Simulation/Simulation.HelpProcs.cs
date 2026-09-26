@@ -148,11 +148,10 @@ partial class Simulation
         else if (SchemaObject.IsSqlModule(target.Object))
         {
             // A module whose text is absent is one created WITH ENCRYPTION:
-            // severity-10 message, no result set, no error. Everything else
-            // (table / sequence / synonym / key constraint / CLR routine)
-            // stores no text at all.
-            batch.AppendInfoError(@class: 10, state: 1, number: 15471,
-                message: $"The text for object '{objectName}' is encrypted.");
+            // a message from the procedure, no result set, no error.
+            // Everything else (table / sequence / synonym / key constraint /
+            // CLR routine) stores no text at all.
+            yield return Printed(SimulatedSqlException.TextIsEncryptedMessage(batch, "sp_helptext", 113, objectName!));
         }
         else
         {

@@ -240,13 +240,12 @@ internal sealed class ObjectProperty : Expression
             "ISCHECKCNST" or "ISCONSTRAINT" or "ISDEFAULTCNST" or "ISFOREIGNKEY" or "ISPRIMARYKEY" or "ISUNIQUECNST" => 0,
             "ISDEFAULT" => Flag(obj is DefaultObject),
             "ISDETERMINISTIC" => ModuleDeterminism.Evaluate(database, obj),
-            // IsEncrypted is module-scoped: 0 for any SQL module (WITH
-            // ENCRYPTION isn't modeled), NULL for non-module objects —
-            // probe-confirmed (view → 0, table → NULL). DacFx enumerates
-            // encrypted procedures with `IsEncrypted = 1 OR IsEncrypted IS
-            // NULL`, so the NULL-for-unknown fallback enrolled every procedure
-            // as encrypted.
-            "ISENCRYPTED" => IsSqlModule(obj) || obj is BindableObject ? 0 : null,
+            // IsEncrypted is module-scoped: whether a SQL module was created
+            // WITH ENCRYPTION, NULL for non-module objects — probe-confirmed
+            // (view → 0, table → NULL). DacFx enumerates encrypted procedures
+            // with `IsEncrypted = 1 OR IsEncrypted IS NULL`, so the
+            // NULL-for-unknown fallback enrolled every procedure as encrypted.
+            "ISENCRYPTED" => IsSqlModule(obj) ? Flag(obj.DefinitionText is null) : obj is BindableObject ? 0 : null,
             "ISEXECUTED" => Flag(executes),
             // Never answered 1 by a modeled kind: an extended procedure, a
             // shipped object, a Service Broker queue, a replication procedure.
