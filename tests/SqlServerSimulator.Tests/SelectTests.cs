@@ -436,6 +436,28 @@ public class SelectTests
         simulation.AssertSqlError(query, 107, $"The column prefix '{prefix}' does not match with a table name or alias name used in the query.");
     }
 
+    /// <summary>
+    /// A qualified star is a projection element of its own: inside an
+    /// expression, an aggregate's or function's argument list included, it
+    /// is a syntax error near the <c>*</c>, and an operator after a whole
+    /// <c>t.*</c> element is one near the operator (probed 2026-09-26 against
+    /// SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select count(t.*) from t", "*")]
+    [DataRow("select count(x.*) from t", "*")]
+    [DataRow("select checksum(dbo.t.*) from t", "*")]
+    [DataRow("select count(distinct t.*) from t", "*")]
+    [DataRow("select (t.*) from t", "*")]
+    [DataRow("select count(*) from t where t.* = 1", "*")]
+    [DataRow("select t.* + 1 from t", "+")]
+    public void QualifiedStarInsideAnExpression_IsASyntaxError(string query, string near)
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table t (a int)");
+        simulation.AssertSqlError(query, 102, $"Incorrect syntax near '{near}'.");
+    }
+
     [TestMethod]
     [DataRow("select a from t order by nosuch.a", 4104)]
     [DataRow("select a from t group by a order by nosuch.a", 4104)]

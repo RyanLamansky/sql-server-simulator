@@ -1581,7 +1581,7 @@ internal sealed partial class Selection
                         else
                         {
                             context.RestoreCheckpoint(checkpoint);
-                            expressions.Add(Expression.Parse(context));
+                            expressions.Add(TryParseQualifiedStar(context) ?? Expression.Parse(context));
                         }
                     }
                     break;
@@ -4765,6 +4765,40 @@ internal sealed partial class Selection
             // (no column can appear without a source).
             ColumnNullability = ComputeColumnNullability(expressions, [], [], groupingSetsWritten: false, parseBatch, TypeResolver),
         };
+    }
+
+    /// <summary>
+    /// A qualified star (<c>t.*</c>, <c>dbo.t.*</c>) as a whole projection
+    /// element, the one place real accepts it: inside an expression, a
+    /// function's argument list included, it is a syntax error near the
+    /// <c>*</c>, and whatever follows the element is judged as what follows
+    /// any element (probed 2026-09-26 against SQL Server 2025). Leaves the
+    /// cursor past the <c>*</c>; null, with the cursor unmoved, for anything
+    /// else.
+    /// </summary>
+    private static StarProjection? TryParseQualifiedStar(ParserContext context)
+    {
+        if (context.Token is not Name first)
+            return null;
+        var checkpoint = context.SaveCheckpoint();
+        var name = new MultiPartName(first.Value);
+        while (context.GetNextOptional() is Operator { Character: '.' })
+        {
+            switch (context.GetNextOptional())
+            {
+                case Name part when name.Count < 4:
+                    name = name.WithAddedPart(part.Value);
+                    continue;
+                case Operator { Character: '*' }:
+                    context.MoveNextOptional();
+                    return new StarProjection(name.Leaf, name.ToString(), name);
+            }
+
+            break;
+        }
+
+        context.RestoreCheckpoint(checkpoint);
+        return null;
     }
 
     /// <summary>

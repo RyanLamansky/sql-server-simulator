@@ -351,17 +351,12 @@ internal abstract class Expression : ExpressionNode
                     {
                         var beforeAfterDot = context.SaveCheckpoint();
                         var afterDot = context.GetNextRequired();
+                        // A qualified star is a projection element of its own
+                        // (Selection.TryParseQualifiedStar); inside an
+                        // expression real reads it as a syntax error.
                         if (afterDot is Operator { Character: '*' })
                         {
-                            // <qualifier>.* — convert the Reference into a
-                            // StarProjection placeholder. Selection.ParseInner
-                            // expands it once the FROM sources are known; if
-                            // it survives into a non-projection context, the
-                            // placeholder's Run / GetSqlType raise the
-                            // surface-not-supported error.
-                            if (expression is not Reference starQualifier)
-                                throw SimulatedSqlException.SyntaxErrorNear(context);
-                            expression = new StarProjection(starQualifier.Name, starQualifier.ReferencedName.ToString(), starQualifier.ReferencedName);
+                            throw SimulatedSqlException.SyntaxErrorNear(context);
                         }
                         else if (afterDot is Name name)
                         {
