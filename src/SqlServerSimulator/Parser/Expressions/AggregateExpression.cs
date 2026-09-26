@@ -341,7 +341,7 @@ internal sealed class AggregateExpression : Expression
         };
         return accepted
             ? resultType
-            : throw SimulatedSqlException.OperandDataTypeInvalid(operandType, this.LowerName, (this.Distinct || this.Kind == AggregateKind.ApproxCountDistinct) && operandType.IsLob ? (byte)2 : (byte)1);
+            : throw SimulatedSqlException.OperandDataTypeInvalid(SqlType.OperandName(operandType, this.Operand), this.LowerName, (this.Distinct || this.Kind == AggregateKind.ApproxCountDistinct) && operandType.IsLob ? (byte)2 : (byte)1);
     }
 
     /// <summary>
@@ -370,8 +370,11 @@ internal sealed class AggregateExpression : Expression
     {
         var operandType = StringScalars.BindArgument(this.Operand!, batch, resolveColumnType, "string_agg");
         var separatorType = StringScalars.BindArgument(this.Separator!, batch, resolveColumnType, "string_agg", argumentIndex: 2);
+        // The value is judged before the separator (probed 2026-09-26 against
+        // SQL Server 2025: a binary in both is argument 1's Msg 8116 first).
+        var resultType = Aggregators.StringAggAggregator.ResultType(operandType, batch);
         RejectSeparator(this.Separator!, separatorType, operandType);
-        return Aggregators.StringAggAggregator.ResultType(operandType, batch);
+        return resultType;
     }
 
     /// <summary>
@@ -391,7 +394,7 @@ internal sealed class AggregateExpression : Expression
                 && operandType.Category == SqlTypeCategory.String
                 && !SqlType.IsNationalStringCategory(operandType)))
         {
-            throw SimulatedSqlException.InvalidArgumentDataType(SimulatedSqlException.FamilyRootName(separatorType), 2, "string_agg");
+            throw SimulatedSqlException.InvalidArgumentDataType(SqlType.OperandName(separatorType, separator), 2, "string_agg");
         }
 
         var bare = separator;

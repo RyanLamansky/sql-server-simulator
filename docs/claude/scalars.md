@@ -497,13 +497,13 @@ Probed 2026-09-26 against SQL Server 2025; none is gated on the compatibility le
 
 ## Bit manipulation: `BIT_COUNT` / `GET_BIT` / `SET_BIT` / `LEFT_SHIFT` / `RIGHT_SHIFT`
 
-Five integer scalars sharing one dispatch file (`Parser/Expressions/BitManipulation.cs`).
-All operate on `tinyint` / `smallint` / `int` / `bigint` input (bit-width 8 / 16 / 32 / 64) and either preserve the input type or return a fixed scalar.
+Five scalars sharing one dispatch file (`Parser/Expressions/BitManipulation.cs`).
+All operate on `tinyint` / `smallint` / `int` / `bigint` input (bit-width 8 / 16 / 32 / 64) or a `binary` / `varbinary`, read as one big-endian integer as wide as the value (bit 0 the last byte's low bit), and either preserve the input type — a binary's width included — or return a fixed scalar (probed 2026-09-26 against SQL Server 2025).
 Bit positions are 0-based from the LSB.
-Out-of-range bit position raises **Msg 8120** (`BitFunctionPositionOutOfRange` factory).
+Out-of-range bit position raises **Msg 9838** (`BitFunctionPositionOutOfRange` factory).
 Non-integer input raises **Msg 8116** (`ArgumentDataTypeInvalidForBitFunction`).
 
-- **`BIT_COUNT(num)`** — popcount, returns `int`.
+- **`BIT_COUNT(num)`** — popcount, returns `bigint`.
 - **`GET_BIT(num, index)`** — returns `bit` (0 / 1).
   NULL on either operand → NULL.
 - **`SET_BIT(num, index [, value])`** — returns the input type with the bit at `index` set to `value` (defaults to 1).

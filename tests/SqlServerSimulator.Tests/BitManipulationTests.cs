@@ -271,4 +271,35 @@ public sealed class BitManipulationTests
     public void Comparison_LessThan_StillParsesAsBoolean()
         => AreEqual(2, new Simulation().ExecuteScalar(
             "create table s (a int); insert s values (10),(20),(50); select count(*) from s where a < 30"));
+
+    /// <summary>
+    /// A binary value is one big-endian integer as wide as the value, bit 0
+    /// the last byte's low bit, and keeps its type and width (probed
+    /// 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("convert(varchar(10), left_shift(0x41, 1), 1)", "0x82")]
+    [DataRow("convert(varchar(10), left_shift(0x0080, 1), 1)", "0x0100")]
+    [DataRow("convert(varchar(10), right_shift(0x4100, 1), 1)", "0x2080")]
+    [DataRow("convert(varchar(10), left_shift(0x41, -1), 1)", "0x20")]
+    [DataRow("convert(varchar(10), right_shift(0x41, 100), 1)", "0x00")]
+    [DataRow("convert(varchar(10), left_shift(cast(0x41 as binary(2)), 1), 1)", "0x8200")]
+    [DataRow("convert(varchar(10), set_bit(0x41, 1), 1)", "0x43")]
+    [DataRow("convert(varchar(10), set_bit(0x00, 7), 1)", "0x80")]
+    [DataRow("convert(varchar(10), set_bit(0x41, 0, 0), 1)", "0x40")]
+    [DataRow("cast(get_bit(0x0102, 8) as varchar(1))", "1")]
+    [DataRow("cast(get_bit(0x41, 1) as varchar(1))", "0")]
+    public void BinaryOperand_IsOneBigEndianInteger(string expression, string expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar($"select {expression}"));
+
+    [TestMethod]
+    [DataRow("get_bit(0x41, 8)", 1, "Parameter 2 in function 'get_bit' is out of range 0 to 7.")]
+    [DataRow("set_bit(0x41, -1)", 3, "Parameter 2 in function 'set_bit' is out of range 0 to 7.")]
+    [DataRow("get_bit(0x, 0)", 1, "Parameter 2 in function 'get_bit' is out of range 0 to -1.")]
+    public void BinaryOperand_PositionPastTheValue_RaisesMsg9838(string expression, int state, string message)
+    {
+        var ex = new Simulation().AssertSqlError($"select {expression}", 9838);
+        AreEqual(message, ex.Errors[0].Message);
+        AreEqual((byte)state, ex.State);
+    }
 }

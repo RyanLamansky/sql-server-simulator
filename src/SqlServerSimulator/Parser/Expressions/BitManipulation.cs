@@ -48,6 +48,38 @@ internal static class BitOperandHelpers
     }
 
     /// <summary>
+    /// Whether bit <paramref name="position"/> of a binary value is set, the
+    /// bytes read as one big-endian integer as wide as the value: position 0
+    /// is the last byte's low bit (probed 2026-09-26 against SQL Server 2025:
+    /// <c>GET_BIT(0x0102, 8)</c> is 1).
+    /// </summary>
+    public static bool BinaryBit(byte[] bytes, long position) =>
+        ((bytes[bytes.Length - 1 - (int)(position / 8)] >> (int)(position % 8)) & 1) == 1;
+
+    /// <summary>
+    /// <paramref name="bytes"/> shifted <paramref name="distance"/> bits
+    /// toward the high end (or the low end), as one big-endian integer as
+    /// wide as the value: bits shifted past either end are lost and the
+    /// vacated ones are zero.
+    /// </summary>
+    public static byte[] ShiftBinary(byte[] bytes, int distance, bool towardHighBits)
+    {
+        var result = new byte[bytes.Length];
+        var width = bytes.Length * 8;
+        for (var target = 0; target < width; target++)
+        {
+            var source = towardHighBits ? target - distance : target + distance;
+            if (source >= 0 && source < width && BinaryBit(bytes, source))
+                result[bytes.Length - 1 - (target / 8)] |= (byte)(1 << (target % 8));
+        }
+        return result;
+    }
+
+    /// <summary>A binary result carrying the operand's own type and width.</summary>
+    public static SqlValue BinaryOfType(SqlType type, byte[] bytes) =>
+        type is BinarySqlType ? SqlValue.FromBinary(type, bytes) : SqlValue.FromVarbinary((VarbinarySqlType)type, bytes);
+
+    /// <summary>
     /// Reads a position / shift-distance / bit-value argument as a
     /// <c>bigint</c>. Real never narrows one to <c>int</c>: the argument has
     /// to be an integer type already (anything else — decimal, float, money,
@@ -173,7 +205,19 @@ internal sealed class GetBit : Expression
     {
         var v = this.numArg.Run(runtime);
         if (v.IsNull)
-            throw BitOperandHelpers.ArgInvalidForBitFunc("get_bit", "NULL", 1);
+        {
+            return v.Type is BinarySqlType or VarbinarySqlType
+                ? SqlValue.Null(SqlType.Bit)
+                : throw BitOperandHelpers.ArgInvalidForBitFunc("get_bit", "NULL", 1);
+        }
+        if (v.Type is BinarySqlType or VarbinarySqlType)
+        {
+            var bytes = v.AsBytes;
+            var position = BitOperandHelpers.IntegerArgument(this.positionArg.Run(runtime), "get_bit", 2, allowBit: false);
+            return position < 0 || position >= bytes.Length * 8L
+                ? throw SimulatedSqlException.BitFunctionPositionOutOfRange("get_bit", (bytes.Length * 8) - 1, state: 1)
+                : SqlValue.FromBoolean(BitOperandHelpers.BinaryBit(bytes, position));
+        }
         var width = BitOperandHelpers.IntegerBitWidth(v.Type);
         if (width < 0)
             throw BitOperandHelpers.ArgInvalidForBitFunc("get_bit", SimulatedSqlException.FamilyRootName(v.Type), 1);
@@ -186,7 +230,7 @@ internal sealed class GetBit : Expression
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
-        _ = BitOperandHelpers.RequireOperand(this.numArg, batch, resolveColumnType, "get_bit", acceptsBinary: false);
+        _ = BitOperandHelpers.RequireOperand(this.numArg, batch, resolveColumnType, "get_bit", acceptsBinary: true);
         ScalarArguments.RequireNumericSlot(this.positionArg, batch, resolveColumnType, "get_bit", 2, NumericSlot.Integer);
         return SqlType.Bit;
     }
@@ -225,6 +269,8 @@ internal sealed class SetBit : Expression
     public override SqlValue Run(RuntimeContext runtime)
     {
         var v = this.numArg.Run(runtime);
+        if (v.Type is BinarySqlType or VarbinarySqlType)
+            return this.SetBinaryBit(runtime, v);
         if (v.IsNull)
             throw BitOperandHelpers.ArgInvalidForBitFunc("set_bit", "NULL", 1);
         var width = BitOperandHelpers.IntegerBitWidth(v.Type);
@@ -241,9 +287,30 @@ internal sealed class SetBit : Expression
         return UnsignedBitsToTyped(bits, v.Type);
     }
 
+    /// <summary>
+    /// A binary value's bit set or cleared, the value keeping its type and
+    /// width; a position past the value is Msg 9838 at state 3, and a value
+    /// argument other than 0 sets the bit (probed 2026-09-26 against SQL
+    /// Server 2025).
+    /// </summary>
+    private SqlValue SetBinaryBit(RuntimeContext runtime, SqlValue v)
+    {
+        var position = BitOperandHelpers.IntegerArgument(this.positionArg.Run(runtime), "set_bit", 2, allowBit: false);
+        var setTo = this.valueArg is null ? 1L : BitOperandHelpers.IntegerArgument(this.valueArg.Run(runtime), "set_bit", 3, allowBit: true);
+        if (v.IsNull)
+            return v;
+        var bytes = (byte[])v.AsBytes.Clone();
+        if (position < 0 || position >= bytes.Length * 8L)
+            throw SimulatedSqlException.BitFunctionPositionOutOfRange("set_bit", (bytes.Length * 8) - 1, state: 3);
+        var index = bytes.Length - 1 - (int)(position / 8);
+        var mask = (byte)(1 << (int)(position % 8));
+        bytes[index] = setTo != 0 ? (byte)(bytes[index] | mask) : (byte)(bytes[index] & ~mask);
+        return BitOperandHelpers.BinaryOfType(v.Type, bytes);
+    }
+
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
-        var type = BitOperandHelpers.RequireOperand(this.numArg, batch, resolveColumnType, "set_bit", acceptsBinary: false);
+        var type = BitOperandHelpers.RequireOperand(this.numArg, batch, resolveColumnType, "set_bit", acceptsBinary: true);
         ScalarArguments.RequireNumericSlot(this.positionArg, batch, resolveColumnType, "set_bit", 2, NumericSlot.Integer);
         return type;
     }
@@ -313,6 +380,16 @@ internal sealed class BitShift : Expression
     public override SqlValue Run(RuntimeContext runtime)
     {
         var v = this.numArg.Run(runtime);
+        if (v.Type is BinarySqlType or VarbinarySqlType)
+        {
+            var binaryShift = BitOperandHelpers.IntegerArgument(this.shiftArg.Run(runtime), this.functionName, 2, allowBit: false);
+            if (v.IsNull)
+                return v;
+            var bytes = v.AsBytes;
+            var binaryWidth = bytes.Length * 8L;
+            var binaryDistance = binaryShift <= -binaryWidth || binaryShift >= binaryWidth ? binaryWidth : Math.Abs(binaryShift);
+            return BitOperandHelpers.BinaryOfType(v.Type, BitOperandHelpers.ShiftBinary(bytes, (int)binaryDistance, this.isLeftShift ^ (binaryShift < 0)));
+        }
         if (v.IsNull)
             throw BitOperandHelpers.ArgInvalidForBitFunc(this.functionName, "NULL", 1);
         var width = BitOperandHelpers.IntegerBitWidth(v.Type);
@@ -339,7 +416,7 @@ internal sealed class BitShift : Expression
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
-        var type = BitOperandHelpers.RequireOperand(this.numArg, batch, resolveColumnType, this.functionName, acceptsBinary: false);
+        var type = BitOperandHelpers.RequireOperand(this.numArg, batch, resolveColumnType, this.functionName, acceptsBinary: true);
         ScalarArguments.RequireNumericSlot(this.shiftArg, batch, resolveColumnType, this.functionName, 2, NumericSlot.Integer);
         return type;
     }
