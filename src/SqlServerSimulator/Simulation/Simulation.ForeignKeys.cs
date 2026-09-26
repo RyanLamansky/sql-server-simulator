@@ -35,7 +35,7 @@ partial class Simulation
             {
                 if (FkTupleHasNull(fk.ChildColumnOrdinals, newRow))
                     continue;
-                if (!ReferencedRowExists(fk, newRow))
+                if (!ReferencedRowExists(fk, newRow, context.Batch))
                     throw BuildChildSideViolation(fk, context, verb);
             }
         }
@@ -136,14 +136,24 @@ partial class Simulation
     /// Both of the seek's preconditions hold for every declarable foreign key,
     /// so it is the only path: a non-persisted computed column is the sole
     /// unstored kind and is refused as an FK column at declaration, and the
-    /// caller has already skipped a child tuple holding a NULL.
+    /// caller has already skipped a child tuple holding a NULL. Another
+    /// transaction's uncommitted write to the parent key is waited out first,
+    /// as real waits on that key's lock (probed 2026-09-26 against SQL Server
+    /// 2025) — a parent inserted and then rolled back would otherwise leave
+    /// the child orphaned.
     /// </summary>
-    private static bool ReferencedRowExists(ForeignKey fk, SqlValue[] childFull) =>
-        TryMapFkColumnsToStorage(fk.ReferencedTable, fk.ReferencedColumnOrdinals, out var refStorageOrdinals, out var commons)
-        && TryBuildSeekProbe(childFull, fk.ChildColumnOrdinals, commons, out var probe)
-            ? HeapSeekCache.For(fk.ReferencedTable.Heap)
-                .AnyRowMatches(fk.ReferencedTable.Heap, fk.ReferencedTable.StoredColumns, refStorageOrdinals, commons, probe)
-            : throw new InvalidOperationException($"FOREIGN KEY '{fk.Name}' has no seekable referenced-column tuple.");
+    private static bool ReferencedRowExists(ForeignKey fk, SqlValue[] childFull, BatchContext batch)
+    {
+        if (!TryMapFkColumnsToStorage(fk.ReferencedTable, fk.ReferencedColumnOrdinals, out var refStorageOrdinals, out var commons)
+            || !TryBuildSeekProbe(childFull, fk.ChildColumnOrdinals, commons, out var probe))
+        {
+            throw new InvalidOperationException($"FOREIGN KEY '{fk.Name}' has no seekable referenced-column tuple.");
+        }
+
+        AwaitUncommittedKeyWriters(batch, fk.ReferencedTable, refStorageOrdinals, commons, probe);
+        return HeapSeekCache.For(fk.ReferencedTable.Heap)
+            .AnyRowMatches(fk.ReferencedTable.Heap, fk.ReferencedTable.StoredColumns, refStorageOrdinals, commons, probe);
+    }
 
     // Maps a foreign key's full column ordinals to the heap's storage ordinals
     // and resolves the per-column key type (the stored column's type) the seek
@@ -224,6 +234,9 @@ partial class Simulation
         {
             if (!TryBuildSeekProbe(parentKeyRows[p], fk.ReferencedColumnOrdinals, commons, out var probe))
                 continue;
+            // A child another transaction is writing decides whether the
+            // parent key is still referenced only once that write settles.
+            AwaitUncommittedKeyWriters(batch, fk.ChildTable, childStorageOrdinals, commons, probe);
             foreach (var (page, slot, bytes) in cache.MatchingRows(fk.ChildTable.Heap, fk.ChildTable.StoredColumns, childStorageOrdinals, commons, probe))
             {
                 if (seen.Add((page, slot)))

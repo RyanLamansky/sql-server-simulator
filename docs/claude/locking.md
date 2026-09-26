@@ -448,6 +448,9 @@ Two sources feed the wait (`Simulation.AwaitUncommittedKeyWriters`, called once 
 
 A check whose key has a NULL component (the scan fallback) doesn't wait.
 
+Foreign keys take the same wait on both sides: the child-side parent-existence check waits on the parent key, and the parent-side check for referencing children (a DELETE, a key-changing UPDATE) on the child key — so a child can't slip in under an uncommitted parent insert that a rollback then removes, and a parent can't go while an uncommitted child delete that a rollback restores still points at it.
+Real's parent-side check scans an unindexed child table and so waits on *any* locked child row; the simulator waits only on children carrying the key.
+
 The same registry covers **locking reads over an uncommitted DELETE**: the heap walk never reaches a tombstoned slot, where real's scan meets the deleted row's X-locked key and waits on it, so a READ COMMITTED / REPEATABLE READ / SERIALIZABLE / `UPDLOCK` read used to report the delete before it committed.
 A scan (`BatchContext.AwaitUncommittedDeletes`) waits on every other session's tombstoned entry for its table up front — earlier within the statement than real's wait at the row's turn, with the same outcome — and an equality or range seek on those whose pre-image its probes or bounds reach, so a seek elsewhere in the key space proceeds as on real.
 NOLOCK / READ UNCOMMITTED, READPAST and the snapshot readers don't wait.

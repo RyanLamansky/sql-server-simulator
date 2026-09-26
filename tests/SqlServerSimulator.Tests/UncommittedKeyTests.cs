@@ -193,4 +193,58 @@ public sealed class UncommittedKeyTests
         IsNull(await BlockedUntil(holder, other, "select count(*) from t", "rollback"));
         AreEqual(3, other.CreateCommand("select count(*) from t").ExecuteScalar());
     }
+
+    private static Simulation ParentChild()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table p (id int primary key);
+            create table c (id int primary key, pid int references p (id));
+            insert p values (1), (7);
+            insert c values (1, 7)
+            """);
+        return sim;
+    }
+
+    /// <summary>
+    /// A foreign-key check against a parent or child row another open
+    /// transaction is writing waits for it — an uncommitted parent insert
+    /// would otherwise let a child in that its rollback orphans, and an
+    /// uncommitted child delete would let the parent go that its rollback
+    /// leaves the child pointing at.
+    /// </summary>
+    [TestMethod]
+    [DataRow("insert p values (2)", "insert c values (10, 2)")]
+    [DataRow("delete p where id = 1", "insert c values (10, 1)")]
+    [DataRow("update p set id = 5 where id = 1", "insert c values (10, 1)")]
+    [DataRow("insert c values (10, 1)", "delete p where id = 1")]
+    [DataRow("update c set pid = 1 where id = 1", "delete p where id = 1")]
+    [DataRow("delete c where id = 1", "delete p where id = 7")]
+    public void ForeignKeyCheckOverAnotherTransactionsWrite_Waits(string write, string contender)
+    {
+        var sim = ParentChild();
+        using var holder = sim.CreateOpenConnection();
+        using var other = sim.CreateOpenConnection();
+
+        _ = holder.CreateCommand("begin tran; " + write).ExecuteNonQuery();
+        _ = other.CreateCommand("set lock_timeout 0").ExecuteNonQuery();
+
+        AreEqual(1222, Throws<SimulatedSqlException>(() => other.CreateCommand(contender).ExecuteNonQuery()).Number);
+
+        _ = holder.CreateCommand("rollback").ExecuteNonQuery();
+    }
+
+    [TestMethod]
+    public async Task ChildOfAnUncommittedParent_FailsWhenTheParentRollsBack()
+    {
+        var sim = ParentChild();
+        using var holder = sim.CreateOpenConnection();
+        using var other = sim.CreateOpenConnection();
+
+        _ = holder.CreateCommand("begin tran; insert p values (2)").ExecuteNonQuery();
+        var outcome = await BlockedUntil(holder, other, "insert c values (10, 2)", "rollback");
+
+        AreEqual(547, IsInstanceOfType<SimulatedSqlException>(outcome).Number);
+        AreEqual(0, sim.ExecuteScalar("select count(*) from c where pid = 2"));
+    }
 }
