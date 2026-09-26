@@ -852,9 +852,12 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                 }
                 // Real reports a result set's row count under DONE_COUNT and
                 // drops the flag (keeping the count itself) under NOCOUNT.
-                else if (query.CountSuppressed != true)
+                else
                 {
-                    queryStatus |= Tds.DoneCount;
+                    if (query is SimulatedSqlResultSet { ReportedRowCount: >= 0 and var reported })
+                        rows = reported;
+                    if (query.CountSuppressed != true)
+                        queryStatus |= Tds.DoneCount;
                 }
                 if ((queryStatus & Tds.DoneMore) == 0)
                     this.WriteSessionEnvChangesIfAny(writer);

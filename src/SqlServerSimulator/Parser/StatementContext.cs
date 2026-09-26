@@ -59,6 +59,13 @@ internal sealed class StatementContext
     public Dictionary<object, HashSet<SqlValueKey>>? ComputedUniqueKeys;
 
     /// <summary>
+    /// How many rows the FOR JSON / FOR XML clause that finished last
+    /// serialized, which a SELECT statement streaming its document reports as
+    /// its row count (see <see cref="Selection.CountsForClauseSourceRows"/>).
+    /// </summary>
+    public int ForClauseSourceRows;
+
+    /// <summary>
     /// Fully-drained catalog-view rows, keyed by the view and the database it
     /// was scoped to (both by reference identity), so every later read of the
     /// same view within the statement is served from here rather than

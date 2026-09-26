@@ -647,13 +647,13 @@ DacFx's bacpac export calls this per user collection while scripting `sys.xml_sc
 Mirrors the FOR JSON shape: a trailing-clause parser + a `StringBuilder` serializer over `SqlValue` rows.
 The option list is order-free (`, TYPE, ROOT('r')` and `, ROOT('r'), TYPE` are the same clause) but each option may appear once — a repeated `TYPE` / `ROOT` / `ELEMENTS` / `BINARY BASE64` is **Msg 102** reported against the clause's own `XML` keyword rather than the repeated word, whatever the mode.
 A `('name')` row-tag argument belongs to RAW and PATH alone; `AUTO('x')` / `EXPLICIT('x')` is **Msg 6859** severity 15.
-Real chunks large XML across ~2033-char rows; the simulator returns the whole fragment in one row (documented approximation, shared with FOR JSON).
+A SELECT statement's own untyped `FOR XML` streams in 2033-unit rows and counts the rows it serialized, exactly as [FOR JSON's](json.md#for-json-result-serialization) does.
 
 ### The result column, and the `TYPE` option
 
 | | column name | column type | empty input rowset |
 |---|---|---|---|
-| without `TYPE` | `XML_F52E2B61-18A1-11d1-B105-00805F49916B` | `nvarchar(max)` | zero rows |
+| without `TYPE` | `XML_F52E2B61-18A1-11d1-B105-00805F49916B` | `ntext` as a SELECT statement's own result, else `nvarchar(max)` | zero rows |
 | with `TYPE` | `""` (unnamed) | `xml` | **one row, NULL** |
 
 Probe-confirmed against SQL Server 2025 through `GetSchemaTable` over SqlClient.
@@ -981,7 +981,7 @@ Escaping is position-dependent:
 
 The `XMLSCHEMA` directive raises `NotSupportedException` in RAW / AUTO / PATH (under a `WITH XMLNAMESPACES` prefix it raises real's own Msg 6868 first, and in EXPLICIT real's own Msg 3625).
 `XMLDATA` isn't parsed at all, so it falls to Msg 102 without the prefix.
-One-row chunking is the shared approximation noted above, and EXPLICIT's `idrefs` / `nmtokens` accept path is under [its divergences](#explicit--the-universal-table).
+EXPLICIT's `idrefs` / `nmtokens` accept path is under [its divergences](#explicit--the-universal-table).
 
 See [`backlog.md`](backlog.md).
 

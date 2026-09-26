@@ -31,7 +31,7 @@ partial class Selection
         var open = new List<ForXmlExplicitFrame>();
         var any = false;
 
-        foreach (var rowBytes in inner.Execute(batch, outerResolver).RowBytes)
+        foreach (var rowBytes in ForClauseSourceRows(inner, batch, outerResolver))
         {
             any = true;
             var tagValue = RowDecoder.DecodeColumn(innerSchema, rowBytes, 0);

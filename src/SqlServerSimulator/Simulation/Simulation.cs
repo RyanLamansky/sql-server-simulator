@@ -1304,7 +1304,7 @@ public sealed partial class Simulation
         context.BrowseStatement = browse;
         try
         {
-            return Selection.Parse(context, QueryScope.Statement);
+            return Selection.Parse(context, QueryScope.Statement).AsStatementResult();
         }
         finally
         {
@@ -1404,6 +1404,8 @@ public sealed partial class Simulation
                 {
                     executed = selection.Execute(batch).WithRowCountLimit(connection.RowCountLimit);
                     rowCount = executed.MaterializeRows();
+                    if (selection.CountsForClauseSourceRows)
+                        rowCount = executed.ReportedRowCount = batch.CurrentStatement.ForClauseSourceRows;
                 }
                 catch (SimulatedSqlException error) when (!selection.IsAssignmentOnly)
                 {
@@ -2571,7 +2573,7 @@ public sealed partial class Simulation
         {
             if (fmtKeyword == Keyword.Select)
             {
-                var metadataSelection = Selection.Parse(context, QueryScope.Statement);
+                var metadataSelection = Selection.Parse(context, QueryScope.Statement).AsStatementResult();
                 connection.LastStatementRowCount = 0;
                 if (metadataSelection.IntoTarget is null)
                 {
@@ -2703,6 +2705,8 @@ public sealed partial class Simulation
                     {
                         executed = selection.Execute(batch).WithRowCountLimit(connection.RowCountLimit);
                         rowCount = executed.MaterializeRows();
+                        if (selection.CountsForClauseSourceRows)
+                            rowCount = executed.ReportedRowCount = batch.CurrentStatement.ForClauseSourceRows;
                     }
                     catch (SimulatedSqlException error) when (!selection.IsAssignmentOnly)
                     {

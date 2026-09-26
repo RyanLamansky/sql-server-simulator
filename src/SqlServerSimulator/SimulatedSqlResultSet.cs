@@ -132,6 +132,13 @@ internal sealed class SimulatedSqlResultSet : SimulatedQueryResult
     /// </summary>
     public bool EndedByError;
 
+    /// <summary>
+    /// The row count the statement reports when it isn't the rows returned —
+    /// a streamed FOR JSON / FOR XML document counts the rows it serialized —
+    /// else <c>-1</c>.
+    /// </summary>
+    public int ReportedRowCount = -1;
+
     public override RowCursor CreateCursor() => this.rowValues is { } values
         ? new ValueArrayCursor(this.schema, values.GetEnumerator())
         : new SqlValueCursor(this.schema, this.rowBytes!.GetEnumerator());

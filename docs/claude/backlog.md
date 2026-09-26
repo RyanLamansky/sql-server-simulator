@@ -259,7 +259,6 @@ Already listed elsewhere here and not repeated: parenthesized set-op branches.
 Both clauses ship (see [`xml.md`](xml.md#for-xml-result-serialization), [`json.md`](json.md#for-json-result-serialization)); these are the parts that don't:
 - **`XMLSCHEMA` / `XMLDATA`** (inline schema emission).
   EXPLICIT + `XMLSCHEMA` reports real's own Msg 3625 instead.
-- **One-row chunking** — real chunks the string across ~2033-char rows; the simulator returns it whole (shared by both clauses).
 - **EXPLICIT's `idrefs` / `nmtokens` accept path** — real admits one where the column's expression is statically nullable and merges the per-row values into one space-joined attribute; the simulator has no expression-nullability model, so every such column reports real's Msg 6826 (which is what real gives the non-nullable shape).
 
 ### Built-in functions

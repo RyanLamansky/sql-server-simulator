@@ -110,9 +110,11 @@ partial class Selection
 
         RejectSerializationInWriteStatement(inner, scope, forJson: true);
 
-        return rootSpecified && withoutArrayWrapper
-            ? throw SimulatedSqlException.ForJsonRootWithoutWrapperConflict()
-            : WrapForJson(inner, new ForJsonOptions(mode, includeNulls, withoutArrayWrapper, rootSpecified ? rootName : null));
+        if (rootSpecified && withoutArrayWrapper)
+            throw SimulatedSqlException.ForJsonRootWithoutWrapperConflict();
+        var wrapped = WrapForJson(inner, new ForJsonOptions(mode, includeNulls, withoutArrayWrapper, rootSpecified ? rootName : null));
+        wrapped.streamedDocumentType = SqlType.NVarcharMax;
+        return wrapped;
     }
 
     private static Selection WrapForJson(Selection inner, ForJsonOptions options)
@@ -183,7 +185,7 @@ partial class Selection
     {
         var body = new StringBuilder();
         var any = false;
-        foreach (var rowBytes in inner.Execute(batch, outerResolver).RowBytes)
+        foreach (var rowBytes in ForClauseSourceRows(inner, batch, outerResolver))
         {
             if (any)
                 _ = body.Append(',');
@@ -302,7 +304,7 @@ partial class Selection
         var openDepth = 0;
         byte[]? previous = null;
 
-        foreach (var rowBytes in inner.Execute(batch, outerResolver).RowBytes)
+        foreach (var rowBytes in ForClauseSourceRows(inner, batch, outerResolver))
         {
             var depth = previous is null ? 0 : AutoRestartDepth(levels, innerSchema, previous, rowBytes);
             for (var i = openDepth - 1; i >= depth; i--)

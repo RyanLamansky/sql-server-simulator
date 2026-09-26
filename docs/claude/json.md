@@ -216,8 +216,9 @@ Parsed in `Selection.ParseOptionalForJson` (called from `ParseQueryExpression` i
 A non-JSON `FOR` clause (`FOR XML` / `FOR BROWSE`) is left in place, restoring the cursor for the `FOR XML` parser that runs next and, failing that, the downstream Msg 102.
 Not emitted by EF — reachable only via raw SQL.
 
-The wrapper replaces the result schema with a single `nvarchar(max)` column named `JSON_F52E2B61-18A1-11d1-B105-00805F49916B` and yields **one row** carrying the whole string.
-Real SQL Server chunks the string across multiple ~2033-char rows; the simulator returns it whole (consumers concatenate, and most read it whole) — a documented approximation.
+The wrapper replaces the result schema with a single `nvarchar(max)` column named `JSON_F52E2B61-18A1-11d1-B105-00805F49916B` and yields **one row** carrying the whole string — which is what a subquery, a view body or an inline function body reads.
+A SELECT statement's *own* FOR JSON or untyped FOR XML instead **streams** the document to the client, as real does (probed 2026-09-26 against SQL Server 2025): rows of exactly 2033 UTF-16 units, split with no regard for a surrogate pair, and a row count — the DONE token's and `@@ROWCOUNT` — of the rows the clause *serialized*, not the rows it sent.
+`Selection.AsStatementResult` wraps the parsed statement for that, applied by the SELECT dispatch and the FMTONLY path (so `sp_describe_first_result_set` too); the serializers record their input count in `StatementContext.ForClauseSourceRows` as they finish.
 An **empty input rowset yields zero output rows**, so a scalar subquery `(SELECT … FOR JSON …)` returns SQL NULL (probe-confirmed, matching real).
 A `FOR JSON` Selection is marked (`Selection.ForJson`) so an enclosing `FOR JSON` serializer embeds its result as **raw JSON**, not a re-escaped string — the same role `JSON_QUERY` plays for the JSON_* builders.
 The serializer is deterministic from the query, so it rides the plan cache.

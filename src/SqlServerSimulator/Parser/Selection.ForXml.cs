@@ -184,7 +184,10 @@ partial class Selection
         if (explicitPlan is not null)
             xsinil = explicitPlan.Xsinil;
 
-        return WrapForXml(inner, new ForXmlOptions(mode, rowElement, elements, xsinil, typed, binaryBase64, rootSpecified ? rootName : null, namespaces), explicitPlan);
+        var wrapped = WrapForXml(inner, new ForXmlOptions(mode, rowElement, elements, xsinil, typed, binaryBase64, rootSpecified ? rootName : null, namespaces), explicitPlan);
+        if (!typed)
+            wrapped.streamedDocumentType = SqlType.NText;
+        return wrapped;
     }
 
     /// <summary>
@@ -562,7 +565,7 @@ partial class Selection
 
         var any = false;
         var prevAtomic = false;
-        foreach (var rowBytes in inner.Execute(batch, outerResolver).RowBytes)
+        foreach (var rowBytes in ForClauseSourceRows(inner, batch, outerResolver))
         {
             any = true;
             if (rowElement.Name.Length == 0)
@@ -614,7 +617,7 @@ partial class Selection
         // level is absent whenever it self-closed.
         var open = new List<string>();
         byte[]? previous = null;
-        foreach (var rowBytes in inner.Execute(batch, outerResolver).RowBytes)
+        foreach (var rowBytes in ForClauseSourceRows(inner, batch, outerResolver))
         {
             var depth = previous is null ? 0 : AutoRestartDepth(levels, innerSchema, previous, rowBytes);
             for (var i = open.Count - 1; i >= depth; i--)

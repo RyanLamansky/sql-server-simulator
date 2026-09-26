@@ -670,11 +670,11 @@ public sealed class ForXmlTests
     }
 
     [TestMethod]
-    public void Untyped_ResultColumnIsNamedString()
+    public void Untyped_ResultColumnIsNamedNText()
     {
         using var reader = Seeded().CreateCommand("select id from t for xml path('p')").ExecuteReader();
         AreEqual("XML_F52E2B61-18A1-11d1-B105-00805F49916B", reader.GetName(0));
-        AreEqual("nvarchar", reader.GetDataTypeName(0));
+        AreEqual("ntext", reader.GetDataTypeName(0));
     }
 
     [TestMethod]
