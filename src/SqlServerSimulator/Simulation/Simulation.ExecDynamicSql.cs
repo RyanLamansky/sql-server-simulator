@@ -24,6 +24,30 @@ partial class Simulation
     /// the token after the closing <c>)</c>. Skip-mode evaluates the
     /// expression (cursor advance) but suppresses the dispatch.
     /// </remarks>
+    /// <summary>
+    /// Holds <c>EXEC ( … )</c>'s operand to real's grammar — string literals
+    /// and variables joined by <c>+</c>, nothing else: a function call, a
+    /// parenthesis, a binary literal, <c>NULL</c> or <c>COLLATE</c> is a syntax
+    /// error at that token (probed 2026-09-26 against SQL Server 2025). The
+    /// cursor is left where it was, for the expression parse that follows.
+    /// </summary>
+    private static void RejectNonStringExecOperands(ParserContext context)
+    {
+        var checkpoint = context.SaveCheckpoint();
+        while (true)
+        {
+            if (context.Token is not (AtPrefixedString or Literal { Value.Type.Category: SqlTypeCategory.String }))
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            context.MoveNextRequired();
+            if (context.Token is not Operator { Character: '+' })
+                break;
+            context.MoveNextRequired();
+        }
+        if (context.Token is not Operator { Character: ')' or ',' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        context.RestoreCheckpoint(checkpoint);
+    }
+
     private IEnumerable<SimulatedStatementOutcome> ParseExecDynamicSql(BatchContext batch, bool insertExecSource = false)
     {
         var context = batch.Parser;
@@ -31,6 +55,7 @@ partial class Simulation
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextRequired();
 
+        RejectNonStringExecOperands(context);
         var sqlExpression = Expression.Parse(context);
         if (context.Token is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -47,6 +72,8 @@ partial class Simulation
         var sqlValue = sqlExpression.Run(new RuntimeContext(
             name => throw SimulatedSqlException.MustDeclareScalarVariable(name.Leaf),
             batch));
+        if (sqlValue.Type is XmlSqlType)
+            throw SimulatedSqlException.ImplicitConversionNotAllowed("xml", "nvarchar");
         if (sqlValue.IsNull)
             yield break; // dynamic SQL of NULL → no-op (matches real SQL Server's lenient handling)
 

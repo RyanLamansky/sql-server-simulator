@@ -191,7 +191,7 @@ partial class Simulation
             createDate: replaced?.CreateDate ?? context.Batch.CurrentStatement.UtcNow,
             bodyLineOffset: bodyLineOffset)
         {
-            DefinitionText = BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, bodyEnd, isAlter, createOrAlter),
+            DefinitionText = BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, isAlter, createOrAlter),
             ExecuteAsClause = executeAsClause,
             ExecuteAsPrincipalId = ResolveExecuteAsPrincipalId(context, executeAsClause),
             UsesQuotedIdentifier = context.QuotedIdentifiers,

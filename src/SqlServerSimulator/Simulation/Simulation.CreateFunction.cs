@@ -226,7 +226,6 @@ partial class Simulation
         }
     bodyCaptured:
         var bodyEnd = context.Token.StartIndex;
-        var definitionEnd = context.Token.EndIndex; // include the trailing END keyword
         var bodyText = commandText[bodyStart..bodyEnd];
         context.MoveNextOptional(); // consume END
 
@@ -271,7 +270,7 @@ partial class Simulation
             bodyText,
             createDate: replaced?.CreateDate ?? context.Batch.CurrentStatement.UtcNow)
         {
-            DefinitionText = BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, definitionEnd, isAlter, createOrAlter),
+            DefinitionText = BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, isAlter, createOrAlter),
             IsSchemaBound = isSchemaBound,
             UsesQuotedIdentifier = context.QuotedIdentifiers,
             UsesAnsiNulls = context.Batch.Connection.AnsiNulls,
@@ -413,7 +412,6 @@ partial class Simulation
         }
     bodyCaptured:
         var bodyEnd = context.Token.StartIndex;
-        var definitionEnd = context.Token.EndIndex; // include the trailing END keyword
         var bodyText = commandText[bodyStart..bodyEnd];
         context.MoveNextOptional(); // consume END
 
@@ -454,7 +452,7 @@ partial class Simulation
             bodyText,
             createDate: replaced?.CreateDate ?? context.Batch.CurrentStatement.UtcNow)
         {
-            DefinitionText = BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, definitionEnd, isAlter, createOrAlter),
+            DefinitionText = BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, isAlter, createOrAlter),
             ExecuteAsClause = executeAsClause,
             ExecuteAsPrincipalId = ResolveExecuteAsPrincipalId(context, executeAsClause),
             IsSchemaBound = isSchemaBound,
@@ -531,9 +529,6 @@ partial class Simulation
             ?? throw SimulatedSqlException.SyntaxErrorNear(context);
         var bodyEnd = CaptureInlineTvfBody(context, openedParen);
         var bodyText = commandText[bodyStart..bodyEnd];
-        // For the parenthesized form the cursor sits on the matching `)`; the
-        // stored definition includes it. The bare RETURN form runs to bodyEnd.
-        var definitionEnd = openedParen ? context.Token.EndIndex : bodyEnd;
 
         if (openedParen)
         {
@@ -574,7 +569,7 @@ partial class Simulation
             bodyText,
             createDate: replaced?.CreateDate ?? context.Batch.CurrentStatement.UtcNow)
         {
-            DefinitionText = BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, definitionEnd, isAlter, createOrAlter),
+            DefinitionText = BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, isAlter, createOrAlter),
             IsSchemaBound = isSchemaBound,
             UsesQuotedIdentifier = context.QuotedIdentifiers,
             UsesAnsiNulls = context.Batch.Connection.AnsiNulls,

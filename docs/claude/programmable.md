@@ -93,7 +93,7 @@ The walk that binds the body gathers them into `FunctionBodyShape` (`Parser/Func
   State **2** when the query reads a rowset — a FROM clause at any depth, or a set operator — and **3** for a wholly-computed projection (`SELECT 1`, `SELECT @x`).
   An assignment-only `SELECT @v = …` is legal; `SELECT … INTO` is Msg 443 instead.
 - **Msg 443** class 16, *"Invalid use of a side-effecting operator '&lt;name&gt;' within a function."*
-  The name is real's own spelling, and the state groups the operator family: **15** for writing / state-changing statements — `INSERT` / `UPDATE` / `DELETE` / `MERGE`, `TRUNCATE TABLE`, `SELECT INTO`, `BEGIN TRANSACTION` / `COMMIT TRANSACTION` / `ROLLBACK TRANSACTION` / `SAVEPOINT`, and every `SET` form (`SET OPTION ON` / `SET OPTION OFF` for the boolean toggles, `SET TRANSACTION ISOLATION LEVEL`, `SET ROW COUNT`, `SET TEXTSIZE`, `SET STATISTICS ON` / `OFF`, `SET IDENTITY_INSERT ON` / `OFF`, and `SET COMMAND` for the remaining value-taking ones); **14** for `PRINT`, `RAISERROR`, `THROW`, `WAITFOR`, `EXECUTE STRING` (the `EXEC (…)` form) and the `BEGIN TRY` / `END TRY` / `BEGIN CATCH` / `END CATCH` delimiters; **1** for a side-effecting built-in, named the way the catalog spells it — `newid`, `newsequentialid`, `rand`.
+  The name is real's own spelling, and the state groups the operator family: **15** for writing / state-changing statements — `INSERT` / `UPDATE` / `DELETE` / `MERGE`, `TRUNCATE TABLE`, `SELECT INTO`, `BEGIN TRANSACTION` / `COMMIT TRANSACTION` / `ROLLBACK TRANSACTION` / `SAVEPOINT`, and every `SET` form (`SET OPTION ON` / `SET OPTION OFF` for the boolean toggles, `SET TRANSACTION ISOLATION LEVEL`, `SET ROW COUNT`, `SET TEXTSIZE`, `SET STATISTICS ON` / `OFF`, `SET IDENTITY_INSERT ON` / `OFF`, and `SET COMMAND` for the remaining value-taking ones); **14** for `PRINT`, `RAISERROR`, `THROW`, `WAITFOR`, `EXECUTE STRING` (the `EXEC (…)` form) and the `BEGIN TRY` / `END TRY` / `BEGIN CATCH` / `END CATCH` delimiters; **1** for a side-effecting built-in, named the way the catalog spells it — `newid`, `newsequentialid`, `rand`, `Crypt_Gen_Random`.
   A DML write whose target is a **table variable** is legal, in a scalar UDF's own `DECLARE @t TABLE` and a TVF's return table alike, so only a write reaching a persistent table is recorded.
   `EXEC <proc>` and `EXEC sp_executesql` stay creatable (the runtime Msg 557 is a separate story), as do the current-time readers.
 
@@ -677,8 +677,10 @@ That scoping is what lets `sp_MSforeachdb`'s `'USE [?]; …'` idiom run each com
 
 **`EXEC (<string-expr>)`**:
 - Operand evaluates in the outer batch's context (so `EXEC ('SELECT ' + @col + ' FROM t')` works), then the resulting string is dispatched as a fresh batch.
+- The operand is string literals and variables joined by `+` and nothing else — a function call, a parenthesis or a binary literal is Msg 102 at that token, `NULL` or `COLLATE` Msg 156, and an `xml` variable Msg 257 as it runs (probed 2026-09-26).
 - NULL string operand → silent no-op (matches real SQL Server's permissive handling).
 - The form takes no return-code variable: `EXEC @rc = ('...')` is Msg 102 near the `(`.
+- **Not modeled yet**: `EXEC ('…', args) AT linked_server` — a comma after the string is Msg 102 at the comma here, where real, reading it as that form's argument list, reports the closing parenthesis (state 3).
 
 **`EXEC sp_executesql N'sql', N'@p1 type [OUTPUT], ...', @p1 = value, @p2 = @callervar OUTPUT, ...`**:
 - First argument is the SQL text; second (optional) is a parameter-declaration string parsed by `ParseSpExecuteSqlParamDefinitions` (mini-parser: `@name type [OUTPUT]` entries, comma-separated).

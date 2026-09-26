@@ -139,14 +139,10 @@ partial class Simulation
         var bodySelection = ParseBodyQuery(context, rejectsNextValueFor: true, bodyParens > 0 ? QueryPosition.ParenthesizedModuleBody : QueryPosition.Statement);
         var bodyEnd = context.Token?.StartIndex ?? commandText.Length;
         var bodyText = commandText[bodyStart..bodyEnd];
-        // The stored definition runs to the last token the statement took —
-        // a closing parenthesis or WITH CHECK OPTION included.
-        var definitionEnd = bodyEnd;
         for (; bodyParens > 0; bodyParens--)
         {
             if (context.Token is not Operator { Character: ')' })
                 throw SimulatedSqlException.SyntaxErrorNear(context);
-            definitionEnd = context.Token.EndIndex;
             context.MoveNextOptional();
         }
 
@@ -168,10 +164,9 @@ partial class Simulation
             var checkpoint = context.SaveCheckpoint();
             context.MoveNextOptional();
             if (context.Token is ReservedKeyword { Keyword: Keyword.Check }
-                && context.GetNextOptional() is ReservedKeyword { Keyword: Keyword.Option } option)
+                && context.GetNextOptional() is ReservedKeyword { Keyword: Keyword.Option })
             {
                 withCheckOption = true;
-                definitionEnd = option.EndIndex;
                 context.MoveNextOptional();
             }
             else
@@ -225,7 +220,7 @@ partial class Simulation
             checkOptionCheck: checkOptionCheck,
             isJoinUpdatable: isJoinUpdatable)
         {
-            DefinitionText = BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, definitionEnd, isAlter, createOrAlter),
+            DefinitionText = BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, isAlter, createOrAlter),
             UsesQuotedIdentifier = context.QuotedIdentifiers,
             UsesAnsiNulls = context.Batch.Connection.AnsiNulls,
             DerivedOutputColumns = baseTable is null && rejectionReason != ViewUpdatabilityRejection.MultipleSources

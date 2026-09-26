@@ -6,9 +6,10 @@ namespace SqlServerSimulator;
 /// Tests for <c>OBJECT_DEFINITION(object_id)</c>, <c>sys.sql_modules</c>, and
 /// <c>INFORMATION_SCHEMA.ROUTINES.ROUTINE_DEFINITION</c> — the module
 /// source-text introspection surface. Behavior probed against SQL Server 2025
-/// (2026-05-27): the stored definition is the original CREATE statement
-/// verbatim, with the leading verb normalized to CREATE for ALTER /
-/// CREATE OR ALTER; NULL for non-modules and WITH ENCRYPTION.
+/// (2026-05-27, the batch-text boundaries 2026-09-26): the stored definition
+/// is the whole batch verbatim — leading comments and whitespace, trailing
+/// semicolons and comments — with the leading verb normalized to CREATE for
+/// ALTER / CREATE OR ALTER; NULL for non-modules and WITH ENCRYPTION.
 /// </summary>
 [TestClass]
 public sealed class ObjectDefinitionTests
@@ -30,6 +31,25 @@ public sealed class ObjectDefinitionTests
         var sim = new Simulation();
         sim.ExecuteBatches("create   proc dbo.p1 as /*body*/ select 1");
         AreEqual("create   proc dbo.p1 as /*body*/ select 1", Definition(sim, "dbo.p1"));
+    }
+
+    [TestMethod]
+    [DataRow("  -- lead\n  create view dbo.v as select 1 a  ;  -- trail\n")]
+    [DataRow("/* block */ create view dbo.v as select 1 a; ; ")]
+    [DataRow(";create view dbo.v as select 1 a")]
+    public void Definition_IsTheWholeBatch(string batch)
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(batch);
+        AreEqual(batch, Definition(sim, "dbo.v"));
+    }
+
+    [TestMethod]
+    public void AlterAfterALeadingComment_NormalizesTheVerbInPlace()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create view dbo.v as select 1 a", " /*c*/ alter view dbo.v as select 2 a ; ");
+        AreEqual(" /*c*/ CREATE view dbo.v as select 2 a ; ", Definition(sim, "dbo.v"));
     }
 
     [TestMethod]

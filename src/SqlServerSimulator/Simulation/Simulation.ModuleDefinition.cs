@@ -208,20 +208,22 @@ public sealed partial class Simulation
         new(@"^(CREATE\s+)OR(\s+)ALTER", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
     /// <summary>
-    /// Builds the verbatim module-definition text stored for
-    /// <c>OBJECT_DEFINITION</c> / <c>sys.sql_modules</c>, slicing the original
-    /// command text from the statement's leading verb keyword (<paramref name="verbStart"/>,
-    /// taken from <see cref="StatementContext.StartIndex"/>) through the end of
-    /// the body. The leading verb is normalized to <c>CREATE</c> to match SQL
-    /// Server, which stores <c>ALTER PROCEDURE …</c> as <c>CREATE PROCEDURE …</c>
-    /// and collapses <c>CREATE OR ALTER</c> to <c>CREATE</c> (probe-confirmed
-    /// against SQL Server 2025). A plain <c>CREATE</c> is captured verbatim.
+    /// Builds the module-definition text stored for <c>OBJECT_DEFINITION</c> /
+    /// <c>sys.sql_modules</c>: the whole batch, from its first character —
+    /// leading whitespace and comments included — to its last, trailing
+    /// semicolons and comments included, with the leading verb at
+    /// <paramref name="verbStart"/> (<see cref="StatementContext.StartIndex"/>)
+    /// normalized to <c>CREATE</c> in place: SQL Server stores
+    /// <c>ALTER PROCEDURE …</c> as <c>CREATE PROCEDURE …</c> and collapses
+    /// <c>CREATE OR ALTER</c> to <c>CREATE</c> (probed 2026-09-26 against SQL
+    /// Server 2025).
     /// </summary>
-    private static string BuildModuleDefinition(string commandText, int verbStart, int bodyEnd, bool isAlter, bool createOrAlter)
+    private static string BuildModuleDefinition(string commandText, int verbStart, bool isAlter, bool createOrAlter)
     {
-        var raw = commandText[verbStart..bodyEnd];
-        return createOrAlter ? CreateOrAlterVerb.Replace(raw, "$1$2")
+        var raw = commandText[verbStart..];
+        var verb = createOrAlter ? CreateOrAlterVerb.Replace(raw, "$1$2")
             : isAlter ? "CREATE" + raw["ALTER".Length..]
             : raw;
+        return commandText[..verbStart] + verb;
     }
 }
