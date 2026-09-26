@@ -144,4 +144,25 @@ public sealed class ServerPropertyTests
         AreEqual(Environment.ProcessId, sim.ExecuteScalar("select serverproperty('ProcessID')"));
         AreEqual("SIMULATED", sim.ExecuteScalar("select serverproperty('ComputerNamePhysicalNetBIOS')"));
     }
+
+    // Probed 2026-09-26 against SQL Server 2025.
+    [TestMethod]
+    [DataRow("PathSeparator", "/")]
+    [DataRow("InstanceDefaultDataPath", "/var/opt/mssql/data/")]
+    [DataRow("InstanceDefaultBackupPath", "/var/opt/mssql/data")]
+    [DataRow("FilestreamShareName", "MSSQLSERVER")]
+    [DataRow("LicenseType", "DISABLED")]
+    [DataRow("HadrManagerStatus", "1")]
+    [DataRow("IsExternalAuthenticationOnly", "0")]
+    [DataRow("SuspendedDatabaseCount", "0")]
+    [DataRow("ResourceLastUpdateDateTime", "2026-07-09 00:30:00.627")]
+    public void AProperty_AnswersAsTheReferenceBuildDoes(string property, string expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar(property == "ResourceLastUpdateDateTime"
+            ? $"select convert(varchar(30), cast(serverproperty('{property}') as datetime), 121)"
+            : $"select cast(serverproperty('{property}') as nvarchar(128))"));
+
+    /// <summary>A string property's inner type is nvarchar(128), whatever the value's length.</summary>
+    [TestMethod]
+    public void AStringProperty_IsDeclaredNVarchar128()
+        => AreEqual(256, new Simulation().ExecuteScalar("select cast(sql_variant_property(serverproperty('ProductVersion'), 'MaxLength') as int)"));
 }

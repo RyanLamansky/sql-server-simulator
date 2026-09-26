@@ -72,4 +72,11 @@ internal static class ReferenceBuild
     /// resource — not derivable, so bump it together with <see cref="Version"/>.
     /// </summary>
     public const string FileVersion = "2025.0170.4065.04 ((sql2025_rtm_qfe-cu7).260709-0512)";
+
+    /// <summary>
+    /// <c>SERVERPROPERTY('ResourceLastUpdateDateTime')</c>: when the reference
+    /// build's resource database was stamped — bump it together with
+    /// <see cref="Version"/>.
+    /// </summary>
+    public static readonly DateTime ResourceLastUpdate = new(2026, 7, 9, 0, 30, 0, 627, DateTimeKind.Unspecified);
 }

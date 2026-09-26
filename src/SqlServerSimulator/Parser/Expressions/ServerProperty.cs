@@ -49,28 +49,37 @@ internal sealed class ServerProperty : Expression
     {
         // Longer than any recognized property name; also bounds the stackalloc
         // against an adversarially long argument.
-        if (name.Length > 32)
+        if (name.Length > 64)
             return SqlValue.Null(SqlType.SqlVariant);
         Span<char> upper = stackalloc char[name.Length];
         _ = name.AsSpan().ToUpperInvariant(upper);
+        var hasMetrics = Collation.TryGetMetrics(runtime.Batch.Connection.Simulation.ServerCollationName, out var metrics);
         return upper switch
         {
-            "BUILDCLRVERSION" => SqlValue.FromNVarchar("v4.0.30319"),
-            "COLLATION" => SqlValue.FromNVarchar(runtime.Batch.Connection.Simulation.ServerCollationName),
-            "COLLATIONID" => SqlValue.FromInt32(872468488),
-            "COMPARISONSTYLE" => SqlValue.FromInt32(196609),
+            "BUILDCLRVERSION" => Text("v4.0.30319"),
+            "COLLATION" => Text(runtime.Batch.Connection.Simulation.ServerCollationName),
+            "COLLATIONID" => hasMetrics ? SqlValue.FromInt32(metrics.CollationId) : SqlValue.Null(SqlType.SqlVariant),
+            "COMPARISONSTYLE" => hasMetrics ? SqlValue.FromInt32(metrics.ComparisonStyle) : SqlValue.Null(SqlType.SqlVariant),
             // Must be non-NULL: SSMS Activity Monitor reads it at startup and
             // casts without a NULL check ("Object cannot be cast from DBNull
             // to other types").
-            "COMPUTERNAMEPHYSICALNETBIOS" => SqlValue.FromNVarchar("SIMULATED"),
-            "EDITION" => SqlValue.FromNVarchar("Enterprise Developer Edition (64-bit)"),
+            "COMPUTERNAMEPHYSICALNETBIOS" => Text("SIMULATED"),
+            "EDITION" => Text("Enterprise Developer Edition (64-bit)"),
             "EDITIONID" => SqlValue.FromInt32(-2117995310),
             "ENGINEEDITION" => SqlValue.FromInt32(3),
             "FILESTREAMCONFIGUREDLEVEL" => SqlValue.FromInt32(0),
             "FILESTREAMEFFECTIVELEVEL" => SqlValue.FromInt32(0),
-            "FILESTREAMSHARENAME" => SqlValue.Null(SqlType.NVarchar),
+            "FILESTREAMSHARENAME" => Text("MSSQLSERVER"),
+            // The Always On manager has started, though availability groups
+            // aren't enabled.
+            "HADRMANAGERSTATUS" => SqlValue.FromInt32(1),
+            // The engine's own Linux layout, which sys.master_files'
+            // physical names follow.
+            "INSTANCEDEFAULTBACKUPPATH" => Text("/var/opt/mssql/data"),
+            "INSTANCEDEFAULTDATAPATH" or "INSTANCEDEFAULTLOGPATH" => Text("/var/opt/mssql/data/"),
             "INSTANCENAME" => SqlValue.Null(SqlType.NVarchar),
-            "ISADVANCEDANALYTICSINSTALLED" => SqlValue.FromInt32(0),
+            "ISADVANCEDANALYTICSINSTALLED" or "ISBIGDATACLUSTER" or "ISEXTERNALAUTHENTICATIONONLY" or "ISEXTERNALGOVERNANCEENABLED"
+                or "ISSERVERSUSPENDEDFORSNAPSHOTBACKUP" or "SUSPENDEDDATABASECOUNT" => SqlValue.FromInt32(0),
             "ISCLUSTERED" => SqlValue.FromInt32(0),
             "ISFULLTEXTINSTALLED" => SqlValue.FromInt32(1),
             "ISHADRENABLED" => SqlValue.FromInt32(0),
@@ -80,35 +89,42 @@ internal sealed class ServerProperty : Expression
             "ISSINGLEUSER" => SqlValue.FromInt32(0),
             "ISTEMPDBMETADATAMEMORYOPTIMIZED" => SqlValue.FromInt32(0),
             "ISXTPSUPPORTED" => SqlValue.FromInt32(1),
-            "LCID" => SqlValue.FromInt32(1033),
-            "MACHINENAME" => SqlValue.FromNVarchar("SIMULATED"),
+            "LCID" => SqlValue.FromInt32(hasMetrics ? metrics.Lcid : 1033),
+            "LICENSETYPE" => Text("DISABLED"),
+            "MACHINENAME" => Text("SIMULATED"),
             // Real reports the engine's OS process id; the simulator's engine
             // process is the host process, so its id is the faithful value.
             // Must be non-NULL — Activity Monitor casts it like the NetBIOS
             // name above.
+            "PATHSEPARATOR" => Text("/"),
             "PROCESSID" => SqlValue.FromInt32(Environment.ProcessId),
-            "PRODUCTBUILD" => SqlValue.FromNVarchar(ReferenceBuild.ProductBuild),
+            "PRODUCTBUILD" => Text(ReferenceBuild.ProductBuild),
             // Real SQL Server reports NULL for ProductBuildType on a CU build
             // (it's non-null only for GDR/OD servicing branches).
             "PRODUCTBUILDTYPE" => SqlValue.Null(SqlType.NVarchar),
-            "PRODUCTLEVEL" => SqlValue.FromNVarchar("RTM"),
-            "PRODUCTMAJORVERSION" => SqlValue.FromNVarchar(ReferenceBuild.ProductMajorVersion),
-            "PRODUCTMINORVERSION" => SqlValue.FromNVarchar(ReferenceBuild.ProductMinorVersion),
-            "PRODUCTUPDATELEVEL" => SqlValue.FromNVarchar(ReferenceBuild.UpdateLevel),
-            "PRODUCTUPDATEREFERENCE" => SqlValue.FromNVarchar(ReferenceBuild.UpdateReference),
-            "PRODUCTVERSION" => SqlValue.FromNVarchar(ReferenceBuild.ProductVersion),
-            "RESOURCEVERSION" => SqlValue.FromNVarchar(ReferenceBuild.MajorMinorBuild),
-            "SERVERNAME" => SqlValue.FromNVarchar("SIMULATED"),
+            "PRODUCTLEVEL" => Text("RTM"),
+            "PRODUCTMAJORVERSION" => Text(ReferenceBuild.ProductMajorVersion),
+            "PRODUCTMINORVERSION" => Text(ReferenceBuild.ProductMinorVersion),
+            "PRODUCTUPDATELEVEL" => Text(ReferenceBuild.UpdateLevel),
+            "PRODUCTUPDATEREFERENCE" => Text(ReferenceBuild.UpdateReference),
+            "PRODUCTVERSION" => Text(ReferenceBuild.ProductVersion),
+            "RESOURCEVERSION" => Text(ReferenceBuild.MajorMinorBuild),
+            "RESOURCELASTUPDATEDATETIME" => SqlValue.FromDateTime(ReferenceBuild.ResourceLastUpdate),
+            "SERVERNAME" => Text("SIMULATED"),
             "SQLCHARSET" => SqlValue.FromByte(1),
-            "SQLCHARSETNAME" => SqlValue.FromNVarchar("iso_1"),
+            "SQLCHARSETNAME" => Text("iso_1"),
             "SQLSORTORDER" => SqlValue.FromByte(SortIdFor(runtime.Batch.Connection.Simulation.ServerCollationName)),
             // No sort-order name table ships in the repo; "nocase_iso" is the
             // name for the default collation's sortId (52). Other SQL sort
             // orders fall back to "BIN" rather than their true probed name.
-            "SQLSORTORDERNAME" => SqlValue.FromNVarchar(SortIdFor(runtime.Batch.Connection.Simulation.ServerCollationName) == 52 ? "nocase_iso" : "BIN"),
+            "SQLSORTORDERNAME" => Text(SortIdFor(runtime.Batch.Connection.Simulation.ServerCollationName) == 52 ? "nocase_iso" : "BIN"),
             _ => SqlValue.Null(SqlType.SqlVariant),
         };
     }
+
+    /// <summary>A string property, whose inner type real declares <c>nvarchar(128)</c> whatever the value's length.</summary>
+    private static SqlValue Text(string value) =>
+        SqlValue.FromNVarchar(NVarcharSqlType.Get(128, Collation.Baseline, Coercibility.CoercibleDefault), value);
 
     // Derive the SQL sort-order id from the collation name; real SQL Server
     // reports 0 for collations with no SQL_* sort order.
