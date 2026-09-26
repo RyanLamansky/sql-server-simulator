@@ -438,6 +438,8 @@ partial class Simulation
         }
 
         CheckUpdatePermissions(context, targetName, table, sourceView, rawAssignments, where);
+        if (positionedCursor is null)
+            Selection.SettleSerializableWriteFence(table, where, context.Batch);
 
         var affected = new List<(int PageIndex, int SlotIndex, SqlValue[] FullNew, SqlValue[]? FullOld)>();
         var storedColumns = table.StoredColumns;

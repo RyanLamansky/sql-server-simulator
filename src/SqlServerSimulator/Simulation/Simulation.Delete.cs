@@ -149,6 +149,9 @@ partial class Simulation
             PermissionEnforcement.CheckSchemaObject(context.Batch, "DELETE", securable);
         }
 
+        if (positionedCursor is null)
+            Selection.SettleSerializableWriteFence(table, where, context.Batch);
+
         var storedColumns = table.StoredColumns;
         var lobStore = table.Heap;
 

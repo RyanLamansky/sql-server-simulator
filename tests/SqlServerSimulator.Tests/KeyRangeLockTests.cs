@@ -709,4 +709,69 @@ public sealed class KeyRangeLockTests
         _ = reader.CreateCommand("select 1").ExecuteScalar();
         await AssertBlocksUntil(reader, writer, "insert t values (22, 9)", "rollback tran");
     }
+
+    /// <summary>
+    /// A SERIALIZABLE UPDATE / DELETE fences the interval its WHERE pins in
+    /// <c>RangeX-X</c>, so an insert into it — even where no row matched —
+    /// waits while one outside it goes through; the same statement under READ
+    /// COMMITTED fences nothing. Probed 2026-09-26 against SQL Server 2025.
+    /// </summary>
+    [TestMethod]
+    [DataRow("update t set v = v where k between 15 and 25")]
+    [DataRow("update t set v = v where k = 22")]
+    [DataRow("delete t where k > 15 and k < 25")]
+    public void SerializableWriter_FencesItsInterval(string write)
+    {
+        var sim = KeyedTable();
+        using var holder = sim.CreateOpenConnection();
+        using var writer = sim.CreateOpenConnection();
+
+        _ = holder.CreateCommand("set transaction isolation level serializable; begin tran; " + write).ExecuteNonQuery();
+        _ = writer.CreateCommand("set lock_timeout 0").ExecuteNonQuery();
+
+        AreEqual(1222, Throws<SimulatedSqlException>(() => writer.CreateCommand("insert t values (22, 9)").ExecuteNonQuery()).Number);
+        AreEqual(1, writer.CreateCommand("insert t values (40, 9)").ExecuteNonQuery());
+        AreEqual("RangeX-X", holder.CreateCommand(
+            "select request_mode from sys.dm_tran_locks where request_session_id = @@spid and resource_type = 'KEY'").ExecuteScalar());
+
+        _ = holder.CreateCommand("rollback").ExecuteNonQuery();
+    }
+
+    [TestMethod]
+    public void ReadCommittedWriter_FencesNothing()
+    {
+        var sim = KeyedTable();
+        using var holder = sim.CreateOpenConnection();
+        using var writer = sim.CreateOpenConnection();
+
+        _ = holder.CreateCommand("begin tran; update t set v = v where k between 15 and 25").ExecuteNonQuery();
+        _ = writer.CreateCommand("set lock_timeout 0").ExecuteNonQuery();
+
+        AreEqual(1, writer.CreateCommand("insert t values (22, 9)").ExecuteNonQuery());
+
+        _ = holder.CreateCommand("rollback").ExecuteNonQuery();
+    }
+
+    /// <summary>
+    /// With no interval to fence, a SERIALIZABLE writer over a keyed table
+    /// refuses every other writer while readers pass (real's <c>RangeS-U</c>
+    /// on every key), and over a keyless heap it takes the table X real does.
+    /// </summary>
+    [TestMethod]
+    public void SerializableWriter_WithoutAnInterval_FencesTheTable()
+    {
+        var sim = KeyedTable();
+        _ = sim.ExecuteNonQuery("create table h (k int, v int); insert h values (1, 1)");
+        using var holder = sim.CreateOpenConnection();
+        using var other = sim.CreateOpenConnection();
+
+        _ = holder.CreateCommand("set transaction isolation level serializable; begin tran; update t set v = v where v = 2; delete h where k = 5").ExecuteNonQuery();
+        _ = other.CreateCommand("set lock_timeout 0").ExecuteNonQuery();
+
+        AreEqual(1222, Throws<SimulatedSqlException>(() => other.CreateCommand("insert t values (40, 9)").ExecuteNonQuery()).Number);
+        AreEqual(1, other.CreateCommand("select count(*) from t where k = 10").ExecuteScalar());
+        AreEqual(1222, Throws<SimulatedSqlException>(() => other.CreateCommand("select count(*) from h").ExecuteScalar()).Number);
+
+        _ = holder.CreateCommand("rollback").ExecuteNonQuery();
+    }
 }

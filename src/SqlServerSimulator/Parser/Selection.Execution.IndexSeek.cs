@@ -2384,6 +2384,55 @@ internal sealed partial class Selection
     }
 
     /// <summary>
+    /// Settles a SERIALIZABLE UPDATE / DELETE's phantom fence over its target,
+    /// the writer's counterpart of <see cref="SettleSerializablePhantomFence"/>:
+    /// the interval the WHERE pins on a key or index in <c>RangeX-X</c>; else,
+    /// on a table with a key or index to walk, a table S — real takes
+    /// <c>RangeS-U</c> on every key and the infinity range there, which admits
+    /// the same readers and refuses the same writers; else, over a keyless
+    /// heap, a table X, as real takes an object X (probed 2026-09-26 against
+    /// SQL Server 2025). Under any other isolation level the writer takes no
+    /// fence.
+    /// </summary>
+    internal static void SettleSerializableWriteFence(HeapTable table, BooleanExpression? where, BatchContext batch)
+    {
+        if (batch.IsSkipping || batch.Connection.SessionIsolationLevel != System.Data.IsolationLevel.Serializable
+            || table.IsTableVariable || BatchContext.IsLocalTempName(table.Name) || Simulation.SystemHeapTables.Values.Contains(table)
+            || where?.IsNeverTrue == true)
+        {
+            return;
+        }
+
+        if (where is not null)
+        {
+            var source = BuildBaseTableSeekSource(table, table.Name);
+            var conjuncts = new List<BooleanExpression>();
+            where.CollectConjuncts(conjuncts);
+            var equalities = new Dictionary<int, Expression[]>();
+            foreach (var conjunct in conjuncts)
+            {
+                if (conjunct.TryGetEqualityOperands(out var left, out var right))
+                {
+                    _ = TryRecordColumnEquality(source, left, right, equalities, allowCorrelatedColumnValue: false)
+                        || TryRecordColumnEquality(source, right, left, equalities, allowCorrelatedColumnValue: false);
+                    continue;
+                }
+                if (conjunct.TryGetEqualityFamily(out var family))
+                    _ = TryRecordEqualityFamily(source, family, equalities, allowCorrelatedColumnValue: false);
+            }
+
+            var bounds = CollectRangeBounds(source, conjuncts, allowCorrelatedColumnValue: false);
+            if (ComputeSerializableKeyRange(source, table, batch, outerResolver: null, equalities, bounds) is { } range)
+            {
+                batch.AcquireKeyRangeLockTxScoped(table, range, LockMode.RangeExclusiveExclusive);
+                return;
+            }
+        }
+
+        batch.AcquireTransactionLock(table.TableDataLock, EnumerateKeyOrdinals(table).Any() ? LockMode.Shared : LockMode.Exclusive);
+    }
+
+    /// <summary>
     /// Seek-narrowed live <c>(page, slot, bytes)</c> rows for a single-table
     /// UPDATE / DELETE target whose WHERE carries an indexable equality (literal /
     /// variable / arithmetic value — never a correlated column, since a single-
