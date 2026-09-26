@@ -253,7 +253,7 @@ Already listed elsewhere here and not repeated: parenthesized set-op branches.
 **Name resolution** (probed 2026-09-26):
 
 - A three-part name with an omitted schema is reported with `dbo` filled in (`Invalid object name 'probe.dbo.t'`), where real names it as written (`'probe..t'`); `BatchContext.ParseObjectName` substitutes the default schema while parsing, so the written form is gone by the time the error is raised.
-- The schema part of a column's qualifier isn't checked against the source's, so `SELECT s.t.a FROM t` (a `dbo.t`) resolves here where real raises Msg 4104, and `SELECT s.t.* FROM t` expands where real raises Msg 107.
+- A GROUP BY term repeating an unbindable select-list name (`SELECT zz.a FROM t GROUP BY zz.a`) raises Msg 4104 once here; real reports it for both clauses.
 - `COUNT(x.*)` is Msg 107 here, a syntax error near `*` on real.
 
 **Built-in values** (probed 2026-09-26):

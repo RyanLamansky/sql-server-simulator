@@ -219,7 +219,8 @@ partial class Simulation
             storageOrdinals: original.StorageOrdinals,
             lobStore: null,
             rows: [RowEncoder.EncodeRow(table.StoredColumns, ProjectStoredValues(table, newValues))],
-            backingTable: original.BackingTable);
+            backingTable: original.BackingTable,
+            unaliasedName: original.UnaliasedName);
 
         byte[]?[] tuple = [];
         SqlValue resolveTuple(MultiPartName name) => ResolveAcrossMutationTuple(probeSources, tuple, name, batch);

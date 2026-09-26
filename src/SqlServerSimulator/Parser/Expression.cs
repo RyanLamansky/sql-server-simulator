@@ -313,15 +313,23 @@ internal abstract class Expression : ExpressionNode
     };
 
     /// <summary>
-    /// A name with an empty leading part — <c>.e1</c> — which real reads as a
-    /// multi-part identifier and reports as Msg 4104 when nothing binds it
-    /// (probed 2026-09-24). Null, with the cursor unmoved, when no name follows.
+    /// A name with empty leading parts — <c>.e1</c>, <c>..t.a</c> — which
+    /// real reads as a multi-part identifier, binding it where the empty parts
+    /// fit and reporting Msg 4104 where nothing does (probed 2026-09-24 and
+    /// 2026-09-26). Null, with the cursor unmoved, when no name follows.
     /// </summary>
     private static Reference? LeadingDotReference(ParserContext context)
     {
         var checkpoint = context.SaveCheckpoint();
-        if (context.GetNextOptional() is Name name)
-            return Counted(context, new Reference(string.Empty, name.Value));
+        var name = new MultiPartName(string.Empty);
+        var next = context.GetNextOptional();
+        while (next is Operator { Character: '.' } && name.Count < 3)
+        {
+            name = name.WithAddedPart(string.Empty);
+            next = context.GetNextOptional();
+        }
+        if (next is Name leaf)
+            return Counted(context, new Reference(name.WithAddedPart(leaf.Value)));
         context.RestoreCheckpoint(checkpoint);
         return null;
     }
@@ -341,6 +349,7 @@ internal abstract class Expression : ExpressionNode
             {
                 case Operator { Character: '.' }:
                     {
+                        var beforeAfterDot = context.SaveCheckpoint();
                         var afterDot = context.GetNextRequired();
                         if (afterDot is Operator { Character: '*' })
                         {
@@ -352,7 +361,7 @@ internal abstract class Expression : ExpressionNode
                             // surface-not-supported error.
                             if (expression is not Reference starQualifier)
                                 throw SimulatedSqlException.SyntaxErrorNear(context);
-                            expression = new StarProjection(starQualifier.Name, starQualifier.ReferencedName.ToString());
+                            expression = new StarProjection(starQualifier.Name, starQualifier.ReferencedName.ToString(), starQualifier.ReferencedName);
                         }
                         else if (afterDot is Name name)
                         {
@@ -447,6 +456,14 @@ internal abstract class Expression : ExpressionNode
                             if (expression is not Reference reference)
                                 throw SimulatedSqlException.SyntaxErrorNear(context);
                             reference.AddMultiPartComponent(name);
+                        }
+                        else if (afterDot is Operator { Character: '.' } && expression is Reference emptyPart)
+                        {
+                            // An empty middle part (`dbo..a`) is a part of the
+                            // name all the same; the second dot then leads
+                            // the next one.
+                            emptyPart.ReferencedName = emptyPart.ReferencedName.WithAddedPart(string.Empty);
+                            context.RestoreCheckpoint(beforeAfterDot);
                         }
                         else
                         {

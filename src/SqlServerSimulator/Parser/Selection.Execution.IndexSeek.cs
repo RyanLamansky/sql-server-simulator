@@ -451,7 +451,7 @@ internal sealed partial class Selection
         new FromSource(
             source.Qualifier, source.ColumnNames, source.Columns, source.StoredSchema,
             source.StorageOrdinals, source.LobStore, rows, source.LateralPlan,
-            source.BackingTable, source.BackingView),
+            source.BackingTable, source.BackingView, unaliasedName: source.UnaliasedName),
     ];
 
     // The lower / upper bound expressions collected for one column from range

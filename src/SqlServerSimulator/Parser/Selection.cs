@@ -3010,7 +3010,8 @@ internal sealed partial class Selection
                         materializeOnce: true,
                         backingCatalogView: catalogView,
                         backingCatalogDatabase: catalogTargetDb,
-                        writtenObjectName: objectName.ToString());
+                        writtenObjectName: objectName.ToString(),
+                        unaliasedName: catalogAlias is null ? FromSource.Resolved(objectName, context.Batch.CurrentDatabase) : null);
                 }
 
                 // View resolution: `FROM schema.view [alias]` or
@@ -3059,7 +3060,8 @@ internal sealed partial class Selection
                         backingView: resolvedView,
                         viaSynonym: viewSynonym,
                         autoElementName: viewAlias ?? objectName.ToString(),
-                        writtenObjectName: objectName.ToString());
+                        writtenObjectName: objectName.ToString(),
+                        unaliasedName: viewAlias is null ? FromSource.Resolved(objectName, context.Batch.CurrentDatabase) : null);
                 }
 
                 // TVF call from FROM clause: `FROM schema.fn(args) [alias]`.
@@ -3096,7 +3098,8 @@ internal sealed partial class Selection
                             storageOrdinals: null,
                             lobStore: null,
                             rows: [],
-                            lateralPlan: lateralPlan);
+                            lateralPlan: lateralPlan,
+                            unaliasedName: tvfAlias is null ? FromSource.Resolved(objectName, context.Batch.CurrentDatabase) : null);
                     }
                     context.RestoreCheckpoint(checkpoint);
                 }
@@ -3183,7 +3186,8 @@ internal sealed partial class Selection
                     heapPlan: temporalRowSource is null ? heapPlan : null,
                     viaSynonym: heapSynonym,
                     autoElementName: heapAlias ?? objectName.ToString(),
-                    writtenObjectName: objectName.ToString());
+                    writtenObjectName: objectName.ToString(),
+                    unaliasedName: heapAlias is null ? FromSource.Resolved(objectName, context.Batch.CurrentDatabase) : null);
 
             // Table-variable source: <c>FROM @t [alias]</c>. Routes through
             // BatchContext.TableVariables instead of the regular schema dict;
@@ -4790,7 +4794,8 @@ internal sealed partial class Selection
                 FromSource? matched = null;
                 foreach (var source in sources)
                 {
-                    if (source.Qualifier is { } q && collation.Equals(q, star.Qualifier))
+                    if (source.Qualifier is { } q && collation.Equals(q, star.Qualifier)
+                        && (star.Prefix is not { Count: >= 2 } prefix || source.AnswersPrefix(prefix, prefix.Count)))
                     {
                         matched = source;
                         break;

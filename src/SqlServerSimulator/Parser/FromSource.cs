@@ -46,7 +46,8 @@ internal sealed class FromSource(
     string? autoElementName = null,
     bool lateralIsQueryBody = false,
     string? writtenObjectName = null,
-    string? xmlReceiverName = null)
+    string? xmlReceiverName = null,
+    MultiPartName? unaliasedName = null)
 {
     public readonly string? Qualifier = qualifier;
 
@@ -63,6 +64,54 @@ internal sealed class FromSource(
     /// </para>
     /// </summary>
     public readonly string? WrittenObjectName = writtenObjectName;
+
+    /// <summary>
+    /// The object's database, schema and name — as FROM wrote them, the
+    /// current database and the default schema filling in what it left out —
+    /// when no alias hides it: the only case in which a column may be prefixed
+    /// by its schema (<c>dbo.t.a</c>) or database too, and then only by the
+    /// ones the name resolved in, a synonym's own rather than its target's.
+    /// An aliased source, even one aliased to its own name, and a source with
+    /// no object of its own (a derived table, a CTE, a table variable) answer
+    /// no such prefix (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    public readonly MultiPartName? UnaliasedName = unaliasedName;
+
+    /// <summary>
+    /// Whether the first <paramref name="prefixLength"/> parts of
+    /// <paramref name="name"/> — a schema-qualified prefix (<c>dbo.t</c>,
+    /// <c>db.dbo.t</c>) whose last part already matched <see cref="Qualifier"/>
+    /// — name this source.
+    /// </summary>
+    public bool AnswersPrefix(MultiPartName name, int prefixLength) =>
+        this.UnaliasedName is { } own && PrefixNames(own, name, prefixLength);
+
+    /// <summary>
+    /// <paramref name="written"/> as <see cref="UnaliasedName"/> holds it,
+    /// with the parts it leaves out filled in.
+    /// </summary>
+    public static MultiPartName Resolved(MultiPartName written, Database currentDatabase) =>
+        new MultiPartName(written.Count >= 3 ? written[written.Count - 3] : currentDatabase.Name)
+            .WithAddedPart(written.Count >= 2 ? written[written.Count - 2] : Database.DefaultSchemaName)
+            .WithAddedPart(written.Leaf);
+
+    /// <summary>
+    /// Whether the schema and database parts of a column prefix (the first
+    /// <paramref name="prefixLength"/> parts of <paramref name="name"/>) are
+    /// <paramref name="own"/>'s, a <see cref="Resolved"/> name. An empty part
+    /// matches anything.
+    /// </summary>
+    public static bool PrefixNames(MultiPartName own, MultiPartName name, int prefixLength)
+    {
+        for (var part = 2; part <= Math.Min(prefixLength, 3); part++)
+        {
+            var written = name[prefixLength - part];
+            if (written.Length != 0 && !BuiltInToken.Equals(written, own[3 - part]))
+                return false;
+        }
+
+        return true;
+    }
 
     /// <summary>
     /// What an XML method call on this source's column writes between the
@@ -254,7 +303,7 @@ internal sealed class FromSource(
             backingCatalogView: this.BackingCatalogView, backingCatalogDatabase: this.BackingCatalogDatabase,
             viaSynonym: this.ViaSynonym, autoElementName: this.AutoElementName,
             lateralIsQueryBody: this.LateralIsQueryBody, writtenObjectName: this.WrittenObjectName,
-            xmlReceiverName: this.XmlReceiverName);
+            xmlReceiverName: this.XmlReceiverName, unaliasedName: this.UnaliasedName);
 
     /// <summary>
     /// Returns a copy of this source reading <paramref name="rows"/> — the same
@@ -272,7 +321,7 @@ internal sealed class FromSource(
             backingCatalogView: this.BackingCatalogView, backingCatalogDatabase: this.BackingCatalogDatabase,
             viaSynonym: this.ViaSynonym, autoElementName: this.AutoElementName,
             lateralIsQueryBody: this.LateralIsQueryBody, writtenObjectName: this.WrittenObjectName,
-            xmlReceiverName: this.XmlReceiverName);
+            xmlReceiverName: this.XmlReceiverName, unaliasedName: this.UnaliasedName);
 
     /// <summary>
     /// Returns a copy of this source with its deferred <see cref="LateralPlan"/>
@@ -287,7 +336,7 @@ internal sealed class FromSource(
             lateralPlan: null, backingTable: this.BackingTable, backingView: this.BackingView,
             heapPlan: this.HeapPlan, materializeOnce: false, viaSynonym: this.ViaSynonym,
             autoElementName: this.AutoElementName, writtenObjectName: this.WrittenObjectName,
-            xmlReceiverName: this.XmlReceiverName);
+            xmlReceiverName: this.XmlReceiverName, unaliasedName: this.UnaliasedName);
 }
 
 /// <summary>

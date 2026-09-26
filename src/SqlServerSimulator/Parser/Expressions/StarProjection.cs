@@ -9,8 +9,11 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// the source columns are known. One that survives into typing had no FROM
 /// clause to expand against — see <see cref="Unexpandable"/>.
 /// </summary>
-internal sealed class StarProjection(string? qualifier, string? writtenQualifier = null) : Expression
+internal sealed class StarProjection(string? qualifier, string? writtenQualifier = null, MultiPartName? prefix = null) : Expression
 {
+    /// <summary>The whole prefix, whose schema and database parts a source must answer to as well.</summary>
+    public readonly MultiPartName? Prefix = prefix;
+
     /// <summary>The prefix's last part, which a source's exposed name is matched against.</summary>
     public readonly string? Qualifier = qualifier;
 

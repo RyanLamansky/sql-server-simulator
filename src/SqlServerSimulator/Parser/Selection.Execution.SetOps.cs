@@ -566,15 +566,16 @@ internal sealed partial class Selection
     }
 
     /// <summary>
-    /// Whether any FROM source answers to <paramref name="qualifier"/> — the
-    /// split between real's Msg 4104 (nothing in scope carries the prefix) and
-    /// Msg 207 (the prefix binds but the column doesn't).
+    /// Whether any FROM source answers to <paramref name="name"/>'s prefix,
+    /// schema and database parts included — the split between real's Msg 4104
+    /// (nothing in scope carries the prefix) and Msg 207 (the prefix binds but
+    /// the column doesn't).
     /// </summary>
-    private static bool QualifiesAnySource(FromSource[] sources, string qualifier)
+    private static bool QualifiesAnySource(FromSource[] sources, MultiPartName name)
     {
         foreach (var source in sources)
         {
-            if (BuiltInToken.Equals(source.Qualifier, qualifier))
+            if (BuiltInToken.Equals(source.Qualifier, name.ImmediateQualifier) && (name.Count < 3 || source.AnswersPrefix(name, name.Count - 1)))
                 return true;
         }
 

@@ -34,6 +34,8 @@ internal sealed partial class Selection
             {
                 if (sources[s].Qualifier is null || !BuiltInToken.Equals(sources[s].Qualifier, qualifier))
                     continue;
+                if (name.Count >= 3 && !sources[s].AnswersPrefix(name, name.Count - 1))
+                    return (-1, -1);
                 for (var c = 0; c < sources[s].ColumnNames.Length; c++)
                 {
                     if (BuiltInToken.Equals(sources[s].ColumnNames[c], name.Leaf))
@@ -371,7 +373,7 @@ internal sealed partial class Selection
             return SqlType.Int32;
         if (outerTypeResolver is null)
             throw UnresolvedNameError(sources, name);
-        if (name.ImmediateQualifier is not { } qualifier || !QualifiesAnySource(sources, qualifier))
+        if (name.ImmediateQualifier is null || !QualifiesAnySource(sources, name))
             return outerTypeResolver(name);
         try
         {
@@ -404,7 +406,7 @@ internal sealed partial class Selection
     /// arguments and an <c>INSERT … SELECT</c>.
     /// </summary>
     private static SimulatedSqlException UnresolvedNameError(FromSource[] sources, MultiPartName name) =>
-        name.ImmediateQualifier is { } qualifier && !QualifiesAnySource(sources, qualifier)
+        name.ImmediateQualifier is not null && !QualifiesAnySource(sources, name)
             ? SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(name.ToString())
             : SimulatedSqlException.InvalidColumnName(name);
 
@@ -452,14 +454,16 @@ internal sealed partial class Selection
     /// the single-table DML target <em>as written</em>. That is the only
     /// qualifier such a statement admits: <c>UPDATE dbo.t SET id = t.id</c>,
     /// <c>UPDATE t SET id = dbo.t.id</c> and <c>UPDATE v SET id = v.id</c> all
-    /// bind, while <c>UPDATE v SET id = t.id</c> does not — even though
+    /// bind — a schema or database part only when it is the target's own —
+    /// while <c>UPDATE v SET id = t.id</c> does not — even though
     /// <c>t</c> is the view's base table — and every other qualifier is
     /// Msg 4104 whether or not its leaf names a real column (probed against
     /// SQL Server 2025, 2026-08-05, for the SET list and the WHERE of both
     /// <c>UPDATE</c> and <c>DELETE</c>).
     /// </summary>
-    internal static bool QualifierIsDmlTarget(Collation collation, MultiPartName targetName, MultiPartName name) =>
-        name.ImmediateQualifier is not { } qualifier || collation.Equals(qualifier, targetName.Leaf);
+    internal static bool QualifierIsDmlTarget(Database database, MultiPartName targetName, MultiPartName name) =>
+        name.ImmediateQualifier is not { } qualifier
+            || (database.Collation.Equals(qualifier, targetName.Leaf) && FromSource.PrefixNames(FromSource.Resolved(targetName, database), name, name.Count - 1));
 
     /// <summary>
     /// The single-table DML counterpart: a compile-time resolver mirroring the
@@ -474,7 +478,7 @@ internal sealed partial class Selection
         name =>
         {
             var collation = batch.CurrentDatabase.Collation;
-            if (!QualifierIsDmlTarget(collation, targetName, name))
+            if (!QualifierIsDmlTarget(batch.CurrentDatabase, targetName, name))
                 throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(name.ToString());
             if (sourceView is not null)
             {
@@ -958,7 +962,8 @@ internal sealed partial class Selection
                 lateralPlan: ForCatalogView(pushSource.BackingCatalogView!, pushSource.BackingCatalogDatabase!, pushColumn, pushComparand),
                 materializeOnce: true,
                 backingCatalogView: pushSource.BackingCatalogView,
-                backingCatalogDatabase: pushSource.BackingCatalogDatabase);
+                backingCatalogDatabase: pushSource.BackingCatalogDatabase,
+                unaliasedName: pushSource.UnaliasedName);
         }
 
         var orderBy = fromClause.OrderBy;

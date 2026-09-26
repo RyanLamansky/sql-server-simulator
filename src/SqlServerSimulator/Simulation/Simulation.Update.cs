@@ -188,7 +188,7 @@ partial class Simulation
             // `UPDATE a SET t.id = 5 FROM t a`, `UPDATE a SET b.w = 1 FROM t a
             // JOIN u b …`, `UPDATE v SET t.id = 5` through a view, and
             // `MERGE t AS a … UPDATE SET t.v = 1`).
-            if (!Selection.QualifierIsDmlTarget(context.CurrentDatabase.Collation, leadingIdent, setTarget))
+            if (!Selection.QualifierIsDmlTarget(context.CurrentDatabase, leadingIdent, setTarget))
                 throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(setTarget.ToString());
 
             var lhsForCompound = new Reference(setTarget);
@@ -288,7 +288,7 @@ partial class Simulation
             }
             if (TryConsumeAssignmentOperator(context) is char columnOp)
             {
-                if (!Selection.QualifierIsDmlTarget(context.CurrentDatabase.Collation, leadingIdent, column))
+                if (!Selection.QualifierIsDmlTarget(context.CurrentDatabase, leadingIdent, column))
                     throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(column.ToString());
                 context.MoveNextRequired();
                 var value = Expression.Parse(context);
@@ -1163,7 +1163,7 @@ partial class Simulation
     /// </summary>
     private static SqlType ResolveUpdateTargetColumnType(BatchContext batch, MultiPartName targetName, HeapTable table, MultiPartName name, Func<MultiPartName, SqlType>? enclosing)
     {
-        var qualifierIsTarget = Selection.QualifierIsDmlTarget(batch.CurrentDatabase.Collation, targetName, name);
+        var qualifierIsTarget = Selection.QualifierIsDmlTarget(batch.CurrentDatabase, targetName, name);
         if (qualifierIsTarget)
         {
             foreach (var column in table.Columns)
@@ -1600,7 +1600,8 @@ partial class Simulation
                 : BatchContext.WrapWithRowConflictChecks(leadingTable, context.Batch, plan),
             backingTable: leadingTable,
             heapPlan: plan,
-            autoElementName: leadingIdent.ToString()));
+            autoElementName: leadingIdent.ToString(),
+            unaliasedName: FromSource.Resolved(leadingIdent, context.Batch.CurrentDatabase)));
         return sources.Count - 1;
     }
 
@@ -1640,7 +1641,8 @@ partial class Simulation
             storageOrdinals: original.StorageOrdinals,
             lobStore: original.LobStore,
             rows: RowsRecording(),
-            backingTable: original.BackingTable);
+            backingTable: original.BackingTable,
+            unaliasedName: original.UnaliasedName);
     }
 
     /// <summary>

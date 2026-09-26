@@ -35,6 +35,9 @@ A column reference that binds nowhere reports one of two errors, and SQL Server 
 So `SELECT zz.id FROM t` is 4104 while `SELECT t.nosuch FROM t` is 207, and an **alias shadows the table name** — `SELECT * FROM t x WHERE t.id = 1` is 4104 because `t` no longer qualifies anything.
 Probed against SQL Server 2025 (2026-08-05) across the select list, WHERE, GROUP BY, ORDER BY, a JOIN `ON`, a scalar / `IN` subquery, a FROM-less SELECT, an aggregate operand, an `INSERT … SELECT`, and both clauses of `UPDATE` / `DELETE`; the 4-part spelling is quoted whole (`dbo.t.Location.Lat`).
 
+A qualifier's **schema and database parts** count too: `dbo.t.a` binds only to an unaliased `t` whose name resolved in `dbo` (and the database, if one is written), so `SELECT s.t.a FROM t` and `SELECT dbo.t.a FROM t AS t` are 4104 and `s.t.*` is Msg 107.
+A synonym answers its own schema rather than its target's, and a derived table or CTE answers none (probed 2026-09-26 against SQL Server 2025); `FromSource.UnaliasedName` carries what a source answers to.
+
 `Selection.UnresolvedNameError(sources, name)` is the single decision, asking `QualifiesAnySource`.
 It is reached from the four places a scope chain bottoms out: `ResolveColumnTypeAcrossSources` (the compile-time walk), `ResolveAcrossTuple` (its per-row counterpart, which is what an `ORDER BY` term resolved per row goes through), `BuildSynthesizedSqlRow`'s type resolver (a FROM-less SELECT, which holds no sources at all, so every qualified miss there is 4104), and `RehomeAggregatesOverOuterScope` (a FROM-less aggregate operand).
 The compile-time walk also **downgrades**: a scope whose own sources expose the qualifier catches an outer scope's 4104 for that name and re-reports it as 207, since the outer scopes classified it without knowing about this one.
