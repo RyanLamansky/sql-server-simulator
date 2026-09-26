@@ -201,7 +201,18 @@ internal sealed class SidBinary : Expression
         return SqlValue.Null(SqlType.Varbinary);
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Varbinary;
+    /// <summary>
+    /// The name takes a string or a binary, but not a legacy LOB, a
+    /// <c>sql_variant</c> or a bare <c>NULL</c> (Msg 8116, probed 2026-09-26
+    /// against SQL Server 2025).
+    /// </summary>
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        if (IsUntypedNullLiteral(this.arg))
+            throw SimulatedSqlException.InvalidArgumentDataType("NULL", 1, "sid_binary");
+        _ = StringScalars.RequireStringArgument(this.arg, this.arg.GetSqlType(batch, resolveColumnType), "sid_binary", 1, acceptsBinary: true, acceptsLegacyLob: false);
+        return SqlType.Varbinary;
+    }
 
     internal override bool ResultIsNullable(NullabilityContext context) => true;
 

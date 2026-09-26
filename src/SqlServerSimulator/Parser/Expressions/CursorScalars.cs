@@ -76,14 +76,14 @@ internal sealed class CursorStatusFunction : Expression
         // 2026-09-26 against SQL Server 2025).
         if (scopeValue.IsNull)
             throw SimulatedSqlException.CursorStatusInvalidParameter("cursor_source", 40);
-        var scope = scopeValue.AsString.TrimEnd(' ');
+        var scope = scopeValue.CoerceTo(SqlType.NVarchar).AsString.TrimEnd(' ');
         var isVariable = string.Equals(scope, "variable", StringComparison.OrdinalIgnoreCase);
         var isLocal = string.Equals(scope, "local", StringComparison.OrdinalIgnoreCase);
         if (!isVariable && !isLocal && !string.Equals(scope, "global", StringComparison.OrdinalIgnoreCase))
             throw SimulatedSqlException.CursorStatusInvalidParameter("cursor_source", 42);
-        if (nameValue.IsNull || nameValue.AsString.Length == 0)
+        var name = nameValue.IsNull ? "" : nameValue.CoerceTo(SqlType.NVarchar).AsString;
+        if (name.Length == 0)
             throw SimulatedSqlException.CursorStatusInvalidParameter("cursor_identity", 43);
-        var name = nameValue.AsString;
 
         // 'variable' scope: @name is a cursor variable. -2 = declared but no
         // cursor allocated; -3 = not a declared cursor variable at all.
@@ -102,7 +102,18 @@ internal sealed class CursorStatusFunction : Expression
             : -3));
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SmallInt;
+    /// <summary>
+    /// Both arguments convert to <c>nvarchar</c> as an assignment would, so a
+    /// number reads as its digits — an unknown source, or a cursor that
+    /// isn't there — and an <c>xml</c> is refused (probed 2026-09-26 against
+    /// SQL Server 2025).
+    /// </summary>
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        _ = AssignmentRules.ArgumentType(this.scopeArg, SqlType.NVarchar, batch, resolveColumnType);
+        _ = AssignmentRules.ArgumentType(this.nameArg, SqlType.NVarchar, batch, resolveColumnType);
+        return SqlType.SmallInt;
+    }
 
     // Every return is a status code; an argument that would have answered
     // NULL raises instead.

@@ -86,11 +86,11 @@ internal sealed class Unistr : Expression
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
-        var inputType = StringScalars.BindArgument(this.input, batch, resolveColumnType, "unistr");
+        var inputType = StringScalars.RequireStringArgument(this.input, StringScalars.BindArgument(this.input, batch, resolveColumnType, "unistr"), "unistr", 1, acceptsLegacyLob: false);
         if (inputType is VarcharSqlType or CharSqlType && inputType.Collation?.AnsiCodePage != 65001)
             throw SimulatedSqlException.UnistrRequiresUtf8();
         if (this.escape is not null)
-            _ = StringScalars.BindArgument(this.escape, batch, resolveColumnType, "unistr");
+            _ = StringScalars.RequireStringArgument(this.escape, StringScalars.BindArgument(this.escape, batch, resolveColumnType, "unistr", argumentIndex: 2), "unistr", 2, acceptsLegacyLob: false);
         return ResultTypeFor(inputType);
     }
 

@@ -32,10 +32,12 @@ internal sealed class HashBytes : Expression
     public HashBytes(ParserContext context)
     {
         this.algorithmArg = Parse(context);
+        // A bare NULL has no type to accept (Msg 8116, probed 2026-09-24).
+        if (IsUntypedNullLiteral(this.algorithmArg))
+            throw SimulatedSqlException.InvalidArgumentDataType("NULL", 1, "hashbytes");
         if (context.Token is not Tokens.Operator { Character: ',' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         this.inputArg = Parse(context.MoveNextRequiredReturnSelf());
-        // A bare NULL has no type to accept (Msg 8116, probed 2026-09-24).
         if (IsUntypedNullLiteral(this.inputArg))
             throw SimulatedSqlException.InvalidArgumentDataType("NULL", 2, "hashbytes");
         if (context.Token is not Tokens.Operator { Character: ')' })
@@ -65,10 +67,13 @@ internal sealed class HashBytes : Expression
     /// <summary>
     /// The input's type is settled while compiling, named as real names it —
     /// <c>time</c>, <c>decimal</c>, a literal decimal <c>numeric</c> — rather
-    /// than with its length (probed 2026-09-25 against SQL Server 2025).
+    /// than with its length (probed 2026-09-25 against SQL Server 2025), after
+    /// the algorithm's, which takes a string and nothing else, not even a
+    /// legacy LOB (probed 2026-09-26).
     /// </summary>
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
+        _ = StringScalars.RequireStringArgument(this.algorithmArg, this.algorithmArg.GetSqlType(batch, resolveColumnType), "hashbytes", 1, acceptsLegacyLob: false);
         var inputType = this.inputArg.GetSqlType(batch, resolveColumnType);
         if (inputType is not (VarbinarySqlType or BinarySqlType or ImageSqlType or NVarcharSqlType or NCharSqlType or NTextSqlType or SystemNameSqlType or VarcharSqlType or CharSqlType or TextSqlType))
             throw SimulatedSqlException.InvalidArgumentDataType(SqlType.OperandName(inputType, this.inputArg), 2, "hashbytes");

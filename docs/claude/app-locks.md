@@ -46,6 +46,7 @@ The functions differ from the procs on the same inputs: invalid mode string → 
 - **`APPLOCK_MODE(principal, resource, owner)`** → `nvarchar(32)`: the calling session's given owner's strongest held mode as verbatim strings `NoLock` / `Shared` / `Update` / `IntentShared` / `IntentExclusive` / `Exclusive`.
   Owner-scoped: the same connection's lock under the *other* owner reads `NoLock`.
 - **`APPLOCK_TEST(principal, resource, mode, owner)`** → `smallint` 1/0: could the caller acquire now — a re-entrant grant over its own holds counts as 1.
+- **The two functions' refusals**: every argument is a string, checked while compiling; at run time real judges the owner first, then `APPLOCK_TEST`'s mode, then the principal, so an owner outside a transaction outranks an unknown principal (probed 2026-09-26 against SQL Server 2025).
 - **Resource names**: case-sensitive, trailing-space-significant, silently truncated to 255 characters (names sharing a 255-char prefix collide; no error at any length).
 - **Principals**: part of the lock identity — a lock under `dbo` neither conflicts with nor is visible to a same-named lock under `public`.
   Default `public`.

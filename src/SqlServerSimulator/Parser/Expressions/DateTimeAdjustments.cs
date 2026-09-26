@@ -167,7 +167,22 @@ internal sealed class SwitchOffset : Expression
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
-        this.dtoArg.GetSqlType(batch, resolveColumnType) is DateTimeOffsetSqlType t ? t : SqlType.GetDateTimeOffset(7);
+        DateArgumentType(this.dtoArg, SqlType.GetDateTimeOffset(7), batch, resolveColumnType) is DateTimeOffsetSqlType t ? t : SqlType.GetDateTimeOffset(7);
+
+    /// <summary>
+    /// The type of <c>SWITCHOFFSET</c>'s or <c>TODATETIMEOFFSET</c>'s value,
+    /// which converts to <paramref name="parameter"/> as an assignment would —
+    /// a number, a binary or xml is refused while compiling, Msg 206 or 257 —
+    /// save that a legacy LOB is refused too, Msg 206 (probed 2026-09-26
+    /// against SQL Server 2025).
+    /// </summary>
+    internal static SqlType DateArgumentType(Expression argument, SqlType parameter, BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        var type = AssignmentRules.ArgumentType(argument, parameter, batch, resolveColumnType);
+        return type is TextSqlType or NTextSqlType or ImageSqlType
+            ? throw SimulatedSqlException.OperandTypeClash(type, parameter)
+            : type;
+    }
 
     internal override string DebugDisplay() => $"SWITCHOFFSET({this.dtoArg.DebugDisplay()}, {this.offsetArg.DebugDisplay()})";
 
@@ -215,7 +230,11 @@ internal sealed class ToDateTimeOffset : Expression
         return SqlValue.FromDateTimeOffset(ResultType, new DateTimeOffset(dt, TimeSpan.FromMinutes(offsetMinutes)));
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => ResultType;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        _ = SwitchOffset.DateArgumentType(this.dtArg, SqlType.GetDateTime2(7), batch, resolveColumnType);
+        return ResultType;
+    }
 
     internal override string DebugDisplay() => $"TODATETIMEOFFSET({this.dtArg.DebugDisplay()}, {this.offsetArg.DebugDisplay()})";
 

@@ -26,14 +26,28 @@ internal sealed class SessionContext : Expression
     {
         var k = this.keyArg.Run(runtime);
         if (k.IsNull)
-            throw SimulatedSqlException.InvalidArgumentDataType("NULL", argumentIndex: 1, "session_context");
+            return SqlValue.Null(SqlType.SqlVariant);
         var key = k.CoerceTo(SqlType.NVarchar).AsString;
         return runtime.Batch.Connection.SessionContext.TryGetValue(key, out var entry) && !entry.Value.IsNull
             ? SqlValue.FromVariant(entry.Value)
             : SqlValue.Null(SqlType.SqlVariant);
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SqlVariant;
+    /// <summary>
+    /// The key is a <c>sysname</c> and takes an <c>nvarchar</c> and nothing
+    /// else — not an <c>nchar</c>, a <c>varchar</c> or a bare <c>NULL</c>,
+    /// each Msg 8116, while a typed NULL key reads NULL (probed 2026-09-26
+    /// against SQL Server 2025).
+    /// </summary>
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        if (IsUntypedNullLiteral(this.keyArg))
+            throw SimulatedSqlException.InvalidArgumentDataType("NULL", 1, "session_context");
+        var keyType = this.keyArg.GetSqlType(batch, resolveColumnType);
+        return keyType is NVarcharSqlType or SystemNameSqlType
+            ? SqlType.SqlVariant
+            : throw SimulatedSqlException.InvalidArgumentDataType(SqlType.OperandName(keyType, this.keyArg), 1, "session_context");
+    }
 
     internal override string DebugDisplay() => $"SESSION_CONTEXT({this.keyArg.DebugDisplay()})";
 

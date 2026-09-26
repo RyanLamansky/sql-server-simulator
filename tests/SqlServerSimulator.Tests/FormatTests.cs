@@ -67,8 +67,32 @@ public sealed class FormatTests
         => IsInstanceOfType<DBNull>(ExecuteScalar("select FORMAT(cast(42 as decimal(10,0)), 'D5')"));
 
     [TestMethod]
-    public void InvalidCulture_FallsBackToEnUS()
-        => AreEqual("1,234", ExecuteScalar("select FORMAT(1234, 'N0', 'qq-QQ')"));
+    [DataRow("qq-QQ")]
+    [DataRow("en_US")]
+    [DataRow("x-y")]
+    public void UnknownCulture_FallsBackToEnUS(string culture)
+        => AreEqual("1,234", ExecuteScalar($"select FORMAT(1234, 'N0', '{culture}')"));
+
+    [TestMethod]
+    [DataRow("'x'", "x")]
+    [DataRow("''", "")]
+    [DataRow("' en-US'", " en-US")]
+    [DataRow("'abc-DEFGH'", "abc-DEFGH")]
+    [DataRow("null", "NULL")]
+    [DataRow("cast(null as nvarchar(5))", "NULL")]
+    public void MalformedCulture_RaisesMsg9818(string culture, string named)
+        => new Simulation().AssertSqlError($"select FORMAT(cast(null as int), 'N', {culture})", 9818, $"The culture parameter '{named}' provided in the function call is not supported.");
+
+    [TestMethod]
+    [DataRow("FORMAT(1, 1)", "int", 2)]
+    [DataRow("FORMAT(1, cast('N' as text))", "text", 2)]
+    [DataRow("FORMAT(1, 'N', 0x01)", "varbinary", 3)]
+    public void FormatAndCulture_TakeOnlyAString(string call, string type, int argument)
+        => new Simulation().AssertSqlError($"select {call}", 8116, $"Argument data type {type} is invalid for argument {argument} of format function.");
+
+    [TestMethod]
+    public void TypedNullFormat_FormatsAsNoFormatWould()
+        => AreEqual("1", ExecuteScalar("select FORMAT(1, cast(null as nvarchar(5)))"));
 
     [TestMethod]
     public void DateTimeCustomFormat()

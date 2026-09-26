@@ -285,8 +285,8 @@ A scalar UDF that patindexes its own `varchar` parameter is the shape that meets
   Implementation routes through .NET's `IFormattable.ToString(format, culture)` on the underlying CLR value, matching SQL Server's CLR-passthrough shape.
   Accepted value types: numeric (integer / decimal / float / real / money / smallmoney) and date-time family (date / datetime / smalldatetime / datetime2 / datetimeoffset / time).
   Strings, bit, binary, uniqueidentifier, rowversion → Msg 8116 at runtime.
-  NULL value → NULL; NULL format → Msg 8116 (probed: ordering doesn't matter — the format-NULL check fires first).
-  Culture defaults to en-US; invalid culture name silently falls back to en-US.
+  NULL value → NULL; a bare NULL format → Msg 8116, while a typed NULL one formats as no format string would; the format and the culture take a string and nothing else, a legacy LOB included (Msg 8116 while compiling).
+  Culture defaults to en-US; a name Windows parses but doesn't know (`qq-QQ`, `en_US`, a private-use `x-…`) falls back to en-US, while one it can't parse — NULL, typed or not — is Msg 9818, judged before a NULL value answers NULL (probed 2026-09-26 against SQL Server 2025).
   .NET `FormatException` (e.g. `decimal.ToString("D5")`) → NULL; unrecognized custom-format tokens that .NET passes through (e.g. `int.ToString("qq qq")`) are echoed verbatim.
   An exact-numeric value **wider than a .NET `decimal`** lays its digits out directly (`Parser/Expressions/WideNumericFormat.cs`) instead of crossing to a narrower type, so real's full 38-digit rendering comes back: `FORMAT(CAST(12345678901234567890123456789012345678 AS decimal(38, 0)), 'N0')` groups every digit, `'N40'` of a `decimal(38, 38)` writes forty fractional ones, and `'#,##0.00'` / `'0.###'` / `'E4'` / `'C'` / `'G'` all answer.
   The culture's separators, group sizes and default digit counts come off its `NumberFormatInfo`, and the decoration around the digits — currency symbol, percent sign, the sign patterns — comes from asking .NET to format `1` and `-1` under the same specifier, so the wide path carries whatever the narrow path would have written around it.
@@ -719,7 +719,7 @@ These carry real per-session state on `SimulatedDbConnection` (not placeholder c
 - **`sp_set_session_context @key, @value [, @read_only]`** + **`SESSION_CONTEXT(N'key')`** — per-session key/value store (backs multi-tenant / row-level-security patterns).
   Named and positional argument forms both work.
   Keys are **case-sensitive** (ordinal — `TenantId` ≠ `tenantid`, matching SQL Server's binary key comparison regardless of database collation).
-  A missing key reads as NULL; a NULL key argument to `SESSION_CONTEXT` raises **Msg 8116** (`session_context` lowercase in the wording).
+  A missing key reads as NULL; the key is a `sysname` and takes an `nvarchar` alone — a bare NULL, an `nchar` or a `varchar` raises **Msg 8116** while compiling (`session_context` lowercase in the wording), and a typed NULL key reads NULL (probed 2026-09-26 against SQL Server 2025).
   `sp_set_session_context` with a NULL `@key` raises **Msg 225**; re-setting a key previously stored with `@read_only = 1` raises **Msg 15664**.
   Like real SQL Server, `SESSION_CONTEXT` returns **`sql_variant`** preserving the stored value's base type — an `int` stored round-trips as `int`, an `nvarchar` as `nvarchar`.
   The common `WHERE int_col = SESSION_CONTEXT(N'key')` shape works by the comparison path converting the column side up to `sql_variant` and matching within the exact-numeric family (the family rules below).

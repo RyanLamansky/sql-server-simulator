@@ -1038,6 +1038,13 @@ partial class SimulatedSqlException
         new($"The data type {type.SqlServerName} cannot be used as an operand to the UNION, INTERSECT or EXCEPT operators because it is not comparable.", 5335, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server's Msg 9818: a <c>FORMAT</c> culture that isn't a
+    /// culture name at all, NULL included (named <c>'NULL'</c>).
+    /// </summary>
+    internal static SimulatedSqlException CultureNotSupported(string culture) =>
+        new($"The culture parameter '{culture}' provided in the function call is not supported.", 9818, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server's Msg 8116 — the bit-manipulation family
     /// (<c>BIT_COUNT</c> / <c>GET_BIT</c> / <c>SET_BIT</c> / <c>LEFT_SHIFT</c> /
     /// <c>RIGHT_SHIFT</c>) raises this when argument 1 isn't an integer

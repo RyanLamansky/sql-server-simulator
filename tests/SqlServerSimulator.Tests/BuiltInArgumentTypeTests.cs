@@ -328,5 +328,41 @@ public sealed class BuiltInArgumentTypeTests
     [DataRow("translate('a', 'a', 1)", "int", 3)]
     public void TranslateCharacterLists_MustBeStrings(string expression, string type, int argument)
         => new Simulation().AssertSqlError($"select {expression}", 8116, $"Argument data type {type} is invalid for argument {argument} of translate function.");
-}
 
+    [TestMethod]
+    [DataRow("unistr(1)", "int", 1, "unistr")]
+    [DataRow("unistr(N'a', cast('x' as text))", "text", 2, "unistr")]
+    [DataRow("session_context('k')", "varchar", 1, "session_context")]
+    [DataRow("session_context(cast(N'k' as nchar(1)))", "nchar", 1, "session_context")]
+    [DataRow("sid_binary(null)", "NULL", 1, "sid_binary")]
+    [DataRow("sid_binary(1)", "int", 1, "sid_binary")]
+    [DataRow("hashbytes(1, 1)", "int", 1, "hashbytes")]
+    [DataRow("hashbytes(null, 'a')", "NULL", 1, "hashbytes")]
+    [DataRow("xml_schema_namespace(1, N'c')", "int", 1, "XML_SCHEMA_NAMESPACE")]
+    [DataRow("xml_schema_namespace(N'dbo', N'c', 1)", "int", 3, "XML_SCHEMA_NAMESPACE")]
+    public void StringOnlyArgument_RaisesMsg8116(string call, string type, int argument, string function)
+        => new Simulation().AssertSqlError($"select {call}", 8116, $"Argument data type {type} is invalid for argument {argument} of {function} function.");
+
+    [TestMethod]
+    public void SessionContext_TakesATypedNullKey()
+        => AreEqual(DBNull.Value, new Simulation().ExecuteScalar("select session_context(cast(null as nvarchar(5)))"));
+
+    [TestMethod]
+    [DataRow("sid_binary('x')")]
+    [DataRow("sid_binary(0x41)")]
+    public void SidBinary_TakesAStringOrABinary(string call)
+        => AreEqual(DBNull.Value, new Simulation().ExecuteScalar($"select {call}"));
+
+    [TestMethod]
+    [DataRow("cursor_status(1, 'c')", 16902)]
+    [DataRow("cursor_status('global', cast('<a/>' as xml))", 257)]
+    [DataRow("switchoffset(1, '+00:00')", 206)]
+    [DataRow("switchoffset(cast('x' as text), '+00:00')", 206)]
+    [DataRow("todatetimeoffset(0x01, '+00:00')", 257)]
+    public void AssignmentConvertedArgument_RaisesRealsError(string call, int number)
+        => new Simulation().AssertSqlError($"select {call}", number);
+
+    [TestMethod]
+    public void CursorStatus_ReadsANumberAsItsDigits()
+        => AreEqual((short)-3, new Simulation().ExecuteScalar("select cursor_status('global', 1)"));
+}

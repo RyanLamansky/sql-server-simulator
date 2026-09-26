@@ -15,8 +15,9 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// <list type="bullet">
 /// <item><description>Accepted value types: numeric (<c>int</c>, <c>bigint</c>, <c>decimal</c>, <c>float</c>, <c>real</c>, <c>money</c>, <c>smallmoney</c>) and date/time (<c>date</c>, <c>datetime</c>, <c>smalldatetime</c>, <c>datetime2</c>, <c>datetimeoffset</c>, <c>time</c>).</description></item>
 /// <item><description>Rejected types raise <strong>Msg 8116</strong>: <c>varchar</c>, <c>nvarchar</c>, <c>char</c>, <c>nchar</c>, <c>bit</c>, <c>binary</c>, etc.</description></item>
-/// <item><description>NULL value → NULL output. NULL format → Msg 8116.</description></item>
-/// <item><description>Culture defaults to <c>en-US</c>; an invalid culture also falls back to <c>en-US</c> (probe: <c>'qq-QQ'</c> didn't error).</description></item>
+/// <item><description>NULL value → NULL output. A bare NULL format → Msg 8116; a typed NULL one formats as no format string would.</description></item>
+/// <item><description>The format string and culture take a string and nothing else (Msg 8116, xml and the legacy LOB types included).</description></item>
+/// <item><description>Culture defaults to <c>en-US</c>. A culture name Windows can't parse — NULL included, and whatever the value — is Msg 9818; one it parses but doesn't know (<c>'qq-QQ'</c>) formats as <c>en-US</c> (probed 2026-09-26 against SQL Server 2025).</description></item>
 /// <item><description>Unrecognized .NET format token: passthrough (probe: <c>FORMAT(1234, 'qq qq')</c> → <c>'qq qq'</c>); .NET <see cref="FormatException"/> (e.g. <c>FORMAT(decimal, 'D5')</c>) → NULL.</description></item>
 /// </list>
 /// </remarks>
@@ -36,29 +37,23 @@ internal sealed class Format : Expression
         if (context.Token is not Tokens.Operator { Character: ',' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         this.format = Parse(context.MoveNextRequiredReturnSelf());
+        if (IsUntypedNullLiteral(this.format))
+            throw SimulatedSqlException.InvalidArgumentDataType("NULL", argumentIndex: 2, "format");
         if (context.Token is Tokens.Operator { Character: ',' })
             this.culture = Parse(context.MoveNextRequiredReturnSelf());
     }
 
     public override SqlValue Run(RuntimeContext runtime)
     {
-        // Argument-type validation runs eagerly on the format slot — probe
-        // shows that even a NULL value paired with an invalid format type
-        // still surfaces the value-side Msg 8116 first (probed in earlier
-        // bundles via the CONVERT style validator's analogous gate). For
-        // FORMAT specifically, NULL format → Msg 8116 fires regardless of
-        // the value side.
+        // The culture is judged before a NULL value answers NULL.
+        var culture = WithWindowsDecimalDigits(this.culture is null ? CultureInfo.GetCultureInfo("en-US") : ResolveCulture(this.culture.Run(runtime)));
         var formatValue = this.format.Run(runtime);
-        if (formatValue.IsNull)
-            throw SimulatedSqlException.InvalidArgumentDataType("NULL", argumentIndex: 2, "format");
-
         var valueValue = this.value.Run(runtime);
         RejectUnsupportedValueType(valueValue.Type);
         if (valueValue.IsNull)
             return SqlValue.Null(SqlType.NVarchar);
 
-        var culture = WithWindowsDecimalDigits(this.culture is null ? CultureInfo.GetCultureInfo("en-US") : ResolveCulture(this.culture.Run(runtime)));
-        var formatString = formatValue.AsString;
+        var formatString = formatValue.IsNull ? null : formatValue.AsString;
 
         try
         {
@@ -77,6 +72,9 @@ internal sealed class Format : Expression
         // even where the call is never evaluated (probed 2026-09-25 against
         // SQL Server 2025: COALESCE(1, FORMAT('x', 'N2')) is Msg 8116).
         RejectUnsupportedValueType(this.value.GetSqlType(batch, resolveColumnType));
+        _ = StringScalars.RequireStringArgument(this.format, this.format.GetSqlType(batch, resolveColumnType), "format", 2, acceptsLegacyLob: false);
+        if (this.culture is not null)
+            _ = StringScalars.RequireStringArgument(this.culture, this.culture.GetSqlType(batch, resolveColumnType), "format", 3, acceptsLegacyLob: false);
         return SqlType.NVarchar;
     }
 
@@ -135,16 +133,53 @@ internal sealed class Format : Expression
     /// </summary>
     private static CultureInfo ResolveCulture(SqlValue cultureValue)
     {
-        if (cultureValue.IsNull || !SqlType.IsStringCategory(cultureValue.Type))
+        var name = cultureValue.IsNull ? null : cultureValue.AsString;
+        if (name is null || !IsWellFormedCultureName(name))
+            throw SimulatedSqlException.CultureNotSupported(name ?? "NULL");
+        // A private-use tag names no culture ICU knows, and asking for one
+        // yields a culture whose number format is incomplete.
+        if (name[1] is '-' or '_')
             return CultureInfo.GetCultureInfo("en-US");
         try
         {
-            return CultureInfo.GetCultureInfo(cultureValue.AsString, predefinedOnly: true);
+            return CultureInfo.GetCultureInfo(name.Replace('_', '-'), predefinedOnly: true);
         }
         catch (CultureNotFoundException)
         {
             return CultureInfo.GetCultureInfo("en-US");
         }
+    }
+
+    /// <summary>
+    /// Whether Windows parses <paramref name="name"/> as a culture name at
+    /// all, known or not: a two- or three-letter language, then subtags of two
+    /// letters (a region), three digits or four letters (a script), joined by
+    /// <c>-</c> or <c>_</c>; or a private-use <c>x-</c> / <c>i-</c> tag. Read off
+    /// real's answers (probed 2026-09-26 against SQL Server 2025: <c>qq-QQ</c>,
+    /// <c>en_US</c>, <c>zh-Hans</c>, <c>x-y</c> pass; <c>x</c>, the empty string,
+    /// <c>' en-US'</c>, <c>abc-DEFGH</c> are Msg 9818) rather than from a
+    /// specification, so a tag outside those shapes may be judged otherwise.
+    /// </summary>
+    private static bool IsWellFormedCultureName(string name)
+    {
+        var parts = name.Split('-', '_');
+        if (parts[0].Length == 1 && parts[0][0] is 'x' or 'X' or 'i' or 'I')
+            return parts.Length > 1 && Array.TrueForAll(parts[1..], static part => part.Length is >= 1 and <= 8 && part.All(char.IsAsciiLetterOrDigit));
+        if (parts[0].Length is < 2 or > 3 || !parts[0].All(char.IsAsciiLetter))
+            return false;
+        for (var i = 1; i < parts.Length; i++)
+        {
+            var part = parts[i];
+            var wellFormed = part.Length switch
+            {
+                2 or 4 => part.All(char.IsAsciiLetter),
+                3 => part.All(char.IsAsciiDigit),
+                _ => false,
+            };
+            if (!wellFormed)
+                return false;
+        }
+        return true;
     }
 
     /// <summary>
@@ -155,14 +190,14 @@ internal sealed class Format : Expression
     /// flattens to <see cref="decimal"/>, and the various date/time families
     /// route to their CLR counterparts.
     /// </summary>
-    private static string FormatValue(SqlValue v, string format, CultureInfo culture) => v.Type switch
+    private static string FormatValue(SqlValue v, string? format, CultureInfo culture) => v.Type switch
     {
         TinyIntSqlType or SmallIntSqlType or Int32SqlType or BigIntSqlType => v.CoerceTo(SqlType.BigInt).AsInt64.ToString(format, culture),
         // A value a .NET decimal holds formats through .NET's own engine; a
         // wider one lays its digits out directly, which is what lets real's
         // full-38-digit rendering come back.
         DecimalSqlType when Decimal38.TryToDotNetDecimal(v.AsDecimal38, out var narrow) => narrow.ToString(format, culture),
-        DecimalSqlType => WideNumericFormat.Render(v.AsDecimal38, format, culture),
+        DecimalSqlType => WideNumericFormat.Render(v.AsDecimal38, format ?? "G", culture),
         MoneySqlType or SmallMoneySqlType => v.AsMoney.ToString(format, culture),
         FloatSqlType => WithoutNegativeZero(v.AsDouble).ToString(format, culture),
         RealSqlType => WithoutNegativeZero(v.AsSingle).ToString(format, culture),

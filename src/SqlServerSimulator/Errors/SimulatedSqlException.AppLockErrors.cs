@@ -36,8 +36,16 @@ partial class SimulatedSqlException
     /// is different — the proc returns -999 silently.) Probe-confirmed
     /// verbatim.
     /// </summary>
-    internal static SimulatedSqlException InvalidAppLockModeForTest() =>
-        new("An invalid application lock mode was passed to applock_test.", 1225, 16, 3);
+    internal static SimulatedSqlException InvalidAppLockModeForTest(byte state = 3) =>
+        new("An invalid application lock mode was passed to applock_test.", 1225, 16, state);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 1230: <c>APPLOCK_MODE</c> / <c>APPLOCK_TEST</c>
+    /// handed a typed NULL principal (a bare <c>NULL</c> is Msg 8116 while
+    /// compiling).
+    /// </summary>
+    internal static SimulatedSqlException InvalidAppLockPrincipalForFunction(string functionName) =>
+        new($"An invalid database principal was passed to {functionName}.", 1230, 16, 3);
 
     /// <summary>
     /// Mimics SQL Server error 1226: an unrecognized lock-owner string

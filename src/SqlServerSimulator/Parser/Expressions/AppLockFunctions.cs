@@ -34,8 +34,8 @@ internal sealed class AppLockMode : Expression
 
     public override SqlValue Run(RuntimeContext runtime)
     {
-        var (principalId, resourceName) = AppLockFunctionArguments.Resolve(runtime, this.principal, this.resource, "applock_mode");
         var ledger = AppLockFunctionArguments.ResolveOwnerLedger(runtime, this.owner, "applock_mode");
+        var (principalId, resourceName) = AppLockFunctionArguments.Resolve(runtime, this.principal, this.resource, "applock_mode");
 
         LockMode? strongest = null;
         foreach (var hold in ledger)
@@ -51,8 +51,11 @@ internal sealed class AppLockMode : Expression
         return SqlValue.FromNVarchar(strongest is { } mode ? AppLock.ModeDisplayName(mode) : "NoLock");
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
-        NVarcharSqlType.Get(32, batch.CurrentDatabase.Collation, Coercibility.CoercibleDefault);
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        AppLockFunctionArguments.RequireStrings(batch, resolveColumnType, "applock_mode", this.principal, this.resource, this.owner);
+        return NVarcharSqlType.Get(32, batch.CurrentDatabase.Collation, Coercibility.CoercibleDefault);
+    }
 
     internal override string DebugDisplay() =>
         $"APPLOCK_MODE({this.principal.DebugDisplay()}, {this.resource.DebugDisplay()}, {this.owner.DebugDisplay()})";
@@ -87,19 +90,19 @@ internal sealed class AppLockTest : Expression
 
     public override SqlValue Run(RuntimeContext runtime)
     {
-        var (principalId, resourceName) = AppLockFunctionArguments.Resolve(runtime, this.principal, this.resource, "applock_test");
-
-        var modeValue = this.mode.Run(runtime);
-        if (modeValue.IsNull)
-            throw SimulatedSqlException.InvalidArgumentDataType("NULL", 3, "applock_test");
-        if (!AppLock.TryParseMode(modeValue.CoerceTo(SqlType.NVarchar).AsString, out var probeMode))
-            throw SimulatedSqlException.InvalidAppLockModeForTest();
-
         // The owner argument gates the Msg 3918 transaction-context check
         // but doesn't change the answer: conflicts are computed against
         // OTHER connections' holds, and this connection's own holds are
         // compatible regardless of which owner carries them.
         _ = AppLockFunctionArguments.ResolveOwnerLedger(runtime, this.owner, "applock_test");
+
+        var modeValue = this.mode.Run(runtime);
+        if (modeValue.IsNull)
+            throw SimulatedSqlException.InvalidAppLockModeForTest(state: 2);
+        if (!AppLock.TryParseMode(modeValue.CoerceTo(SqlType.NVarchar).AsString, out var probeMode))
+            throw SimulatedSqlException.InvalidAppLockModeForTest();
+
+        var (principalId, resourceName) = AppLockFunctionArguments.Resolve(runtime, this.principal, this.resource, "applock_test");
 
         var connection = runtime.Batch.Connection;
         var database = runtime.Batch.CurrentDatabase;
@@ -114,7 +117,11 @@ internal sealed class AppLockTest : Expression
         return SqlValue.FromInt16((short)(wouldGrant ? 1 : 0));
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SmallInt;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        AppLockFunctionArguments.RequireStrings(batch, resolveColumnType, "applock_test", this.principal, this.resource, this.mode, this.owner);
+        return SqlType.SmallInt;
+    }
 
     // Every argument path either answers 1 / 0 or raises, so the NOT NULL real
     // projects here is reachable unconditionally — unlike APPLOCK_MODE, which
@@ -129,19 +136,35 @@ internal sealed class AppLockTest : Expression
 
 /// <summary>
 /// Shared argument resolution for <see cref="AppLockMode"/> /
-/// <see cref="AppLockTest"/>: the probe-confirmed NULL-argument Msg 8116
-/// texts (argument index 1 = principal, 2 = resource), Msg 1202 for an
-/// unknown principal, Msg 1226 for a bad owner string, and Msg 3918 when
-/// the (defaulted-to-)Transaction owner is evaluated outside a user
-/// transaction.
+/// <see cref="AppLockTest"/>. Every argument is a string, checked while
+/// compiling; at run time real judges the owner first (Msg 1226 for a bad
+/// one, Msg 3918 for the (defaulted-to-)Transaction owner outside a user
+/// transaction), then <c>APPLOCK_TEST</c>'s mode, then the principal (Msg
+/// 1230 for a typed NULL, Msg 1202 for an unknown one) — probed 2026-09-26
+/// against SQL Server 2025.
 /// </summary>
 internal static class AppLockFunctionArguments
 {
+    /// <summary>
+    /// Refuses a non-string argument, or a bare <c>NULL</c> in any slot but
+    /// the owner's, with Msg 8116 naming its position.
+    /// </summary>
+    public static void RequireStrings(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType, string functionName, params ReadOnlySpan<Expression> arguments)
+    {
+        for (var i = 0; i < arguments.Length; i++)
+        {
+            var argument = arguments[i];
+            if (i < arguments.Length - 1 && Expression.IsUntypedNullLiteral(argument))
+                throw SimulatedSqlException.InvalidArgumentDataType("NULL", i + 1, functionName);
+            _ = StringScalars.RequireStringArgument(argument, argument.GetSqlType(batch, resolveColumnType), functionName, i + 1, acceptsLegacyLob: false);
+        }
+    }
+
     public static (int PrincipalId, string ResourceName) Resolve(RuntimeContext runtime, Expression principal, Expression resource, string functionName)
     {
         var principalValue = principal.Run(runtime);
         if (principalValue.IsNull)
-            throw SimulatedSqlException.InvalidArgumentDataType("NULL", 1, functionName);
+            throw SimulatedSqlException.InvalidAppLockPrincipalForFunction(functionName);
         var resourceValue = resource.Run(runtime);
         if (resourceValue.IsNull)
             throw SimulatedSqlException.InvalidArgumentDataType("NULL", 2, functionName);

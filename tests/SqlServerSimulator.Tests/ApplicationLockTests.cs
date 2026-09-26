@@ -472,6 +472,21 @@ public class ApplicationLockTests
     }
 
     [TestMethod]
+    [DataRow("select applock_mode('nobody', N'res', 'Transaction')", 3918)]
+    [DataRow("select applock_mode('nobody', N'res', 'bogus')", 1226)]
+    [DataRow("select applock_mode(cast(null as sysname), N'res', 'Session')", 1230)]
+    [DataRow("select applock_test('nobody', N'res', 'Bogus', 'Session')", 1225)]
+    [DataRow("select applock_test('public', N'res', 'Bogus', 'Transaction')", 3918)]
+    [DataRow("select applock_test('public', N'res', cast(null as varchar(5)), 'Session')", 1225)]
+    [DataRow("select applock_mode(1, N'res', 'Session')", 8116)]
+    [DataRow("select applock_test('public', N'res', 1, 'Session')", 8116)]
+    public void AppLockFunctions_JudgeOwnerThenModeThenPrincipal(string sql, int number)
+    {
+        using var connection = new Simulation().CreateOpenConnection();
+        _ = AssertError(connection, sql, number);
+    }
+
+    [TestMethod]
     public void DmTranLocks_ProjectsApplicationRow()
     {
         using var connection = new Simulation().CreateOpenConnection();
