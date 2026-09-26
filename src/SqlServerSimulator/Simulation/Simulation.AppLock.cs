@@ -42,13 +42,8 @@ public partial class Simulation
             throw SimulatedSqlException.ProcedureExpectsParameter("sp_getapplock", "LockMode");
 
         var connection = batch.Connection;
-        if (!args.HasResource)
-        {
-            SetAppLockReturnCode(batch, returnCodeVariableName, -999);
-            yield break;
-        }
-        if (args.Resource.IsNull)
-            throw SimulatedSqlException.InvalidAppLockResource();
+        if (!args.HasResource || args.Resource.IsNull)
+            throw UserLockError(batch, returnCodeVariableName, SimulatedSqlException.InvalidAppLockResource());
 
         // NULL timeout falls back to the session default, like an omitted
         // parameter (probe-confirmed rc=0 with @LockTimeout=NULL).
@@ -56,23 +51,30 @@ public partial class Simulation
             ? ScalarArguments.CoerceProcedureParameter(args.Timeout, SqlType.Int32)
             : connection.LockTimeoutMillis;
         if (timeout < -1)
-            throw SimulatedSqlException.InvalidAppLockTimeout();
+            throw UserLockError(batch, returnCodeVariableName, SimulatedSqlException.InvalidAppLockTimeout());
 
         var (principalId, _) = ResolveAppLockPrincipal(batch, args);
 
-        if (!AppLock.TryParseMode(args.Mode.IsNull ? "" : args.Mode.CoerceTo(SqlType.NVarchar).AsString, out var mode)
-            || !TryResolveAppLockOwner(args, out var isTransaction))
+        var writtenMode = args.Mode.IsNull ? "" : args.Mode.CoerceTo(SqlType.NVarchar).AsString;
+        if (!AppLock.TryParseMode(writtenMode, out var mode))
         {
+            yield return UnrecognizedAppLockOption(batch, "sp_getapplock", 26, writtenMode, "LockMode");
+            SetAppLockReturnCode(batch, returnCodeVariableName, -999);
+            yield break;
+        }
+        if (!TryResolveAppLockOwner(args, out var isTransaction))
+        {
+            yield return UnrecognizedAppLockOption(batch, "sp_getapplock", 39, WrittenOwner(args), "LockOwner");
             SetAppLockReturnCode(batch, returnCodeVariableName, -999);
             yield break;
         }
 
-        // Transaction owner without an active transaction: silent -999
-        // (probe-confirmed — unlike APPLOCK_MODE / APPLOCK_TEST, which
-        // raise Msg 3918 for the same condition).
+        // Transaction owner without an active transaction: Msg 15626 and
+        // -999, where APPLOCK_MODE / APPLOCK_TEST raise Msg 3918.
         var transaction = connection.CurrentTransaction;
         if (isTransaction && transaction is null)
         {
+            yield return Printed(SimulatedSqlException.TransactionalAppLockWithoutTransactionMessage(batch));
             SetAppLockReturnCode(batch, returnCodeVariableName, -999);
             yield break;
         }
@@ -124,12 +126,13 @@ public partial class Simulation
             yield break;
 
         if (!args.HasResource || args.Resource.IsNull)
-            throw SimulatedSqlException.InvalidAppLockResource();
+            throw UserLockError(batch, returnCodeVariableName, SimulatedSqlException.InvalidAppLockResource());
 
         var (principalId, principalName) = ResolveAppLockPrincipal(batch, args);
 
         if (!TryResolveAppLockOwner(args, out var isTransaction))
         {
+            yield return UnrecognizedAppLockOption(batch, "sp_releaseapplock", 20, WrittenOwner(args), "LockOwner");
             SetAppLockReturnCode(batch, returnCodeVariableName, -999);
             yield break;
         }
@@ -137,10 +140,7 @@ public partial class Simulation
         var connection = batch.Connection;
         var transaction = connection.CurrentTransaction;
         if (isTransaction && transaction is null)
-        {
-            SetAppLockReturnCode(batch, returnCodeVariableName, -999);
-            yield break;
-        }
+            throw UserLockError(batch, returnCodeVariableName, SimulatedSqlException.MustExecuteInUserTransaction(state: 1));
 
         var resourceName = AppLock.NormalizeResource(args.Resource.CoerceTo(SqlType.NVarchar).AsString);
         var ledger = isTransaction ? transaction!.TransactionAppLocks : connection.SessionAppLocks;
@@ -160,7 +160,7 @@ public partial class Simulation
         }
 
         if (bestIndex < 0)
-            throw SimulatedSqlException.CannotReleaseAppLockNotHeld(principalName, resourceName);
+            throw UserLockError(batch, returnCodeVariableName, SimulatedSqlException.CannotReleaseAppLockNotHeld(principalName, resourceName));
 
         var hold = ledger[bestIndex];
         connection.Simulation.LockManager.Release(hold.LockResource, hold.Mode, connection.Session);
@@ -297,4 +297,25 @@ public partial class Simulation
         var slot = batch.GetVariableSlot(returnCodeVariableName);
         slot.Value = SqlValue.FromInt32(code).CoerceTo(slot.DeclaredType);
     }
+
+    /// <summary>
+    /// An error the application-lock procedures raise through
+    /// <c>sys.xp_userlock</c>, which real attributes to it at line 1 while the
+    /// procedure still answers -999 (probed 2026-09-26 against SQL Server
+    /// 2025).
+    /// </summary>
+    private static SimulatedSqlException UserLockError(BatchContext batch, string? returnCodeVariableName, SimulatedSqlException error)
+    {
+        SetAppLockReturnCode(batch, returnCodeVariableName, -999);
+        error.PreserveDiagnostics(1, "sys.xp_userlock");
+        return error;
+    }
+
+    // Msg 15625, which the procedure prints ahead of answering -999.
+    private static SimulatedInfoOutcome UnrecognizedAppLockOption(BatchContext batch, string procedure, int line, string written, string parameter) =>
+        Printed(SimulatedSqlException.AppLockOptionNotRecognizedMessage(batch, procedure, line, written, parameter));
+
+    // The owner string as the caller wrote it, for Msg 15625.
+    private static string WrittenOwner(in AppLockArguments args) =>
+        args.Owner.IsNull ? "" : args.Owner.CoerceTo(SqlType.NVarchar).AsString;
 }

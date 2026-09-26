@@ -61,4 +61,40 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedError SequenceCacheExceedsRangeMessage(BatchContext batch, string sequenceName) =>
         batch.InfoMessage(@class: 0, state: 1, number: 11729, $"The sequence object '{sequenceName}' cache size is greater than the number of available values.");
+
+    /// <summary>
+    /// A message a system procedure prints from its own body, attributed to
+    /// it by the name it was called by and to the line of real's source that
+    /// prints it (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedError SystemProcedureMessage(BatchContext batch, string procedure, int line, int number, string text) =>
+        new(@class: 0, lineNumber: line, message: text, number: number, procedure: procedure, server: batch.Connection.DataSource, source: "SqlServerSimulator", state: 1);
+
+    /// <summary>The blank line (<c>PRINT ''</c>, one space) the help procedures print between their sections.</summary>
+    internal static SimulatedError HelpBlankLineMessage(BatchContext batch, string procedure, int line) =>
+        SystemProcedureMessage(batch, procedure, line, 0, " ");
+
+    /// <summary>Msg 15469, in place of an empty constraint set.</summary>
+    internal static SimulatedError NoConstraintsMessage(BatchContext batch, string procedure, int line, string objectName) =>
+        SystemProcedureMessage(batch, procedure, line, 15469, $"No constraints are defined on object '{objectName}', or you do not have permissions.");
+
+    /// <summary>Msg 15470, in place of an empty referencing-foreign-key set.</summary>
+    internal static SimulatedError NoReferencingForeignKeysMessage(BatchContext batch, string procedure, int line, string objectName) =>
+        SystemProcedureMessage(batch, procedure, line, 15470, $"No foreign keys reference table '{objectName}', or you do not have permissions on referencing tables.");
+
+    /// <summary>Msg 15472, in place of an empty index set.</summary>
+    internal static SimulatedError NoIndexesMessage(BatchContext batch, string procedure, string objectName) =>
+        SystemProcedureMessage(batch, procedure, 64, 15472, $"The object '{objectName}' does not have any indexes, or you do not have permissions.");
+
+    /// <summary>Msg 15647, in place of an empty referencing-view set.</summary>
+    internal static SimulatedError NoReferencingViewsMessage(BatchContext batch, string procedure, string objectName) =>
+        SystemProcedureMessage(batch, procedure, 211, 15647, $"No views with schema binding reference table '{objectName}'.");
+
+    /// <summary>Msg 15625, an application-lock procedure's unrecognized <c>@LockMode</c> / <c>@LockOwner</c> string, ahead of its -999.</summary>
+    internal static SimulatedError AppLockOptionNotRecognizedMessage(BatchContext batch, string procedure, int line, string written, string parameter) =>
+        SystemProcedureMessage(batch, procedure, line, 15625, $"Option '{written}' not recognized for '@{parameter}' parameter.");
+
+    /// <summary>Msg 15626, <c>sp_getapplock</c>'s Transaction owner without a transaction, ahead of its -999.</summary>
+    internal static SimulatedError TransactionalAppLockWithoutTransactionMessage(BatchContext batch) =>
+        SystemProcedureMessage(batch, "sp_getapplock", 52, 15626, "You attempted to acquire a transactional application lock without an active transaction.");
 }

@@ -243,6 +243,11 @@ partial class Simulation
     {
         var database = context.CurrentDatabase;
         database.RejectWriteWhenReadOnly();
+        // sp_addrolemember looks the member up itself before its inner ALTER
+        // ROLE reads the role, so a missing member outranks a missing role
+        // there (probed 2026-09-26 against SQL Server 2025).
+        if (isAdd && viaProcedure && !database.Principals.ContainsKey(memberName))
+            throw SimulatedSqlException.UserOrRoleDoesNotExist(memberName);
         // Membership changes need ALTER ANY ROLE (or ALTER / CONTROL on the
         // role, which the covering walk folds in). db_ddladmin does NOT
         // carry it — probe-confirmed, which is why ALTER ANY ROLE isn't in

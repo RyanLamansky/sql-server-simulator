@@ -102,20 +102,17 @@ public class ApplicationLockTests
     public void GetAppLock_TransactionOwnerWithoutTransaction_ReturnsMinus999()
     {
         // Unlike APPLOCK_MODE / APPLOCK_TEST (which raise Msg 3918), the proc
-        // returns -999 silently when the Transaction owner has no active tx.
+        // returns -999, printing Msg 15626, when the Transaction owner has no active tx.
         using var connection = new Simulation().CreateOpenConnection();
         AreEqual(-999, GetAppLock(connection, "res", "Exclusive", owner: "Transaction"));
     }
 
     [TestMethod]
-    public void GetAppLock_MissingResource_ReturnsMinus999()
-    {
-        // A missing @Resource is -999 (silent); an explicit NULL @Resource is
-        // Msg 1224. Presence, not NULL-ness, distinguishes them.
-        using var connection = new Simulation().CreateOpenConnection();
-        AreEqual(-999, ReturnCode(connection,
-            "declare @r int; exec @r = sp_getapplock @LockMode = 'Exclusive', @LockOwner = 'Session'; select @r"));
-    }
+    public void GetAppLock_MissingResource_RaisesMsg1224()
+        // A missing @Resource is Msg 1224 as an explicit NULL one is (probed
+        // 2026-09-26 against SQL Server 2025).
+        => new Simulation().AssertSqlError(
+            "declare @r int; exec @r = sp_getapplock @LockMode = 'Exclusive', @LockOwner = 'Session'; select @r", 1224);
 
     [TestMethod]
     public void GetAppLock_NullResource_RaisesMsg1224()

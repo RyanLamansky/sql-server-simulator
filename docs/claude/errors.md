@@ -35,6 +35,9 @@ The wire ERROR/INFO token's server-name field carries `@@SERVERNAME` instead —
 `ERROR_PROCEDURE()` returns the same name as `SqlError.Procedure`; `ERROR_LINE()` returns the same line the exception carries.
 A `PRINT` or low-severity `RAISERROR` in a procedure body carries the procedure too.
 
+A **system procedure's own error** names the procedure by the name it was called by (`sp_help` / `sys.sp_help`) at the line of real's source that raises it — a missing parameter's Msg 201 at line 0 — through `AttributedToSystemProcedure` and its probed `SystemProcedureErrorSite` table, some naming an inner procedure instead (`sys.sp_refreshsqlmodule_internal`, the application-lock procedures' `sys.xp_userlock`); an error in evaluating an argument stays the batch's (probed 2026-09-26).
+An error the table doesn't list keeps the batch's attribution.
+
 ## The message stream
 
 Every informational message — `PRINT`, a severity-0-10 `RAISERROR`, and the engine's own (Msg 3621, 8153, 5701, 5703, 11729, the procedures' severity-10 texts) — is a `SimulatedInfoOutcome` in the outcome stream, placed where real sends its INFO token.

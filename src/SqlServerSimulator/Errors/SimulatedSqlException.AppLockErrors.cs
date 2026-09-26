@@ -58,10 +58,10 @@ partial class SimulatedSqlException
     /// <summary>
     /// Mimics SQL Server error 3918: <c>APPLOCK_MODE</c> / <c>APPLOCK_TEST</c>
     /// evaluated with the <c>Transaction</c> owner (explicit or defaulted via
-    /// NULL) outside a user transaction. (The <c>sp_getapplock</c> proc is
-    /// different — Transaction owner without a transaction returns -999
-    /// silently.) Probe-confirmed verbatim.
+    /// NULL) outside a user transaction, and <c>sp_releaseapplock</c>'s (at
+    /// state 1) for the same owner — where <c>sp_getapplock</c> prints Msg
+    /// 15626 instead. Probe-confirmed verbatim.
     /// </summary>
-    internal static SimulatedSqlException MustExecuteInUserTransaction() =>
-        new("The statement or function must be executed in the context of a user transaction.", 3918, 16, 2);
+    internal static SimulatedSqlException MustExecuteInUserTransaction(byte state = 2) =>
+        new("The statement or function must be executed in the context of a user transaction.", 3918, 16, state);
 }

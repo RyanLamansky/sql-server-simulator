@@ -37,6 +37,7 @@ partial class Simulation
         if (batch.IsSkipping)
             yield break;
 
+        RequireFirstParameter(arguments, "sp_tablecollations_100", "object");
         var rows = new List<SqlValue[]>();
         if (arguments.Count > 0
             && !arguments[0].Value.IsNull

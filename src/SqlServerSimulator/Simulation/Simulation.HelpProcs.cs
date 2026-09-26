@@ -253,7 +253,7 @@ partial class Simulation
         // failing to find it (probed 2026-09-26 against SQL Server 2025).
         if (objectName is not null && batch.TryResolveCatalogView(ParseHelpObjectName(batch.CurrentDatabase, objectName), out _, out _))
         {
-            yield return HelpMessage(batch, procedureName, 64, 15472, $"The object '{objectName}' does not have any indexes, or you do not have permissions.");
+            yield return Printed(SimulatedSqlException.NoIndexesMessage(batch, procedureName, objectName));
             yield break;
         }
         var target = ResolveHelpTarget(batch, "sp_helpindex", objectName);
@@ -278,7 +278,7 @@ partial class Simulation
 
         if (rows.Count == 0)
         {
-            yield return HelpMessage(batch, procedureName, 64, 15472, $"The object '{objectName}' does not have any indexes, or you do not have permissions.");
+            yield return Printed(SimulatedSqlException.NoIndexesMessage(batch, procedureName, objectName));
             yield break;
         }
 
@@ -465,17 +465,73 @@ partial class Simulation
             SpHelpReferencingFkSchema, SpHelpReferencingFkColumnNames, referencing);
     }
 
+    // A message a system procedure prints, in its place among its result sets;
+    // the texts and lines live with the other message factories.
+    private static SimulatedInfoOutcome Printed(SimulatedError message) => new(message);
+
     /// <summary>
-    /// A message the help procedures print, in its place among their result
-    /// sets and attributed as real attributes it: to the procedure by the name
-    /// it was called by (<c>sp_help</c> calls <c>sys.sp_helpindex</c> /
-    /// <c>sys.sp_helpconstraint</c>) and to the line of real's own source that
-    /// prints it (probed 2026-09-26 against SQL Server 2025). The
-    /// severity-10 texts arrive as class 0, as every INFO token does.
+    /// Passes a system procedure's outcomes through, attributing an error it
+    /// raises from its own body as real does: to the procedure by the name it
+    /// was called by, at the line of real's source that raises it
+    /// (<see cref="SystemProcedureErrorSite"/>). An error that isn't the
+    /// procedure's own — one in evaluating an argument — keeps the batch's
+    /// attribution.
     /// </summary>
-    private static SimulatedInfoOutcome HelpMessage(BatchContext batch, string procedureName, int line, int number, string text) =>
-        new(new SimulatedError(@class: 0, lineNumber: line, message: text, number: number, procedure: procedureName,
-            server: batch.Connection.DataSource, source: "SqlServerSimulator", state: 1));
+    private static IEnumerable<SimulatedStatementOutcome> AttributedToSystemProcedure(
+        IEnumerable<SimulatedStatementOutcome> outcomes, string systemProcName, string calledName)
+    {
+        using var enumerator = outcomes.GetEnumerator();
+        while (true)
+        {
+            try
+            {
+                if (!enumerator.MoveNext())
+                    yield break;
+            }
+            catch (SimulatedSqlException exception) when (SystemProcedureErrorSite(systemProcName, exception.Number) is { } site)
+            {
+                exception.PreserveDiagnostics(site.Line, site.Procedure ?? calledName);
+                throw;
+            }
+            yield return enumerator.Current;
+        }
+    }
+
+    /// <summary>
+    /// Where real raises <paramref name="number"/> in
+    /// <paramref name="systemProcName"/>: the line of its own source, and the
+    /// procedure the error names when that isn't the one called — an inner
+    /// procedure, or the empty name of a dynamic batch it runs (probed
+    /// 2026-09-26 against SQL Server 2025). A missing parameter's Msg 201 is
+    /// line 0 in any of them; null for an error the procedure doesn't raise
+    /// itself.
+    /// </summary>
+    private static (int Line, string? Procedure)? SystemProcedureErrorSite(string systemProcName, int number) => (systemProcName, number) switch
+    {
+        (_, 201) => (0, null),
+        ("sp_addrolemember", 15151) => (1, ""),
+        ("sp_addrolemember", 15410) => (35, null),
+        ("sp_configure", 15123) => (62, null),
+        ("sp_depends", 15009) => (25, null),
+        ("sp_fkeys", 15252) => (20, null),
+        ("sp_help", 15009) => (79, null),
+        ("sp_helpconstraint", 15009) => (47, null),
+        ("sp_helpdb", 15010) => (45, null),
+        ("sp_helpindex", 15009) => (41, null),
+        ("sp_helprotect", 15330) => (291, null),
+        ("sp_helpstats", 15009) => (31, null),
+        ("sp_helptext", 15009) => (54, null),
+        ("sp_helptext", 15197) => (107, null),
+        ("sp_helptrigger", 15009) => (23, null),
+        ("sp_helpuser", 15198) => (142, null),
+        ("sp_recompile", 15165) => (18, null),
+        ("sp_refreshsqlmodule" or "sp_refreshview", 15165) => (62, "sys.sp_refreshsqlmodule_internal"),
+        ("sp_rename", 15225) => (637, null),
+        ("sp_rename", 15248) => (269, null),
+        ("sp_settriggerorder", 15165) => (142, null),
+        ("sp_spaceused", 15009) => (153, null),
+        _ => null,
+    };
 
     // The name a system procedure's own messages carry: as it was called,
     // schema and all (probed 2026-09-26: sp_helpindex vs sys.sp_helpindex).
@@ -496,16 +552,16 @@ partial class Simulation
 
     // The PRINT '' real puts between its sections, which arrives as one space.
     private static SimulatedInfoOutcome HelpBlankLine(BatchContext batch, string procedureName, int line) =>
-        HelpMessage(batch, procedureName, line, 0, " ");
+        Printed(SimulatedSqlException.HelpBlankLineMessage(batch, procedureName, line));
 
     // The "nothing to report" messages real prints in place of an empty
     // result set; sp_help prints the constraint and foreign-key pair itself
     // for a view, at lines of its own.
     private static SimulatedInfoOutcome HelpNoConstraints(BatchContext batch, string procedureName, int line, string objectName) =>
-        HelpMessage(batch, procedureName, line, 15469, $"No constraints are defined on object '{objectName}', or you do not have permissions.");
+        Printed(SimulatedSqlException.NoConstraintsMessage(batch, procedureName, line, objectName));
 
     private static SimulatedInfoOutcome HelpNoReferencingForeignKeys(BatchContext batch, string procedureName, int line, string objectName) =>
-        HelpMessage(batch, procedureName, line, 15470, $"No foreign keys reference table '{objectName}', or you do not have permissions on referencing tables.");
+        Printed(SimulatedSqlException.NoReferencingForeignKeysMessage(batch, procedureName, line, objectName));
 
     // Row order for the single-column help sets: the one cell, ordinal
     // case-insensitive.

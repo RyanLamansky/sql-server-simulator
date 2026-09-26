@@ -24,16 +24,17 @@ This surface is what makes **EF Core 9/10's `Database.Migrate()` work end-to-end
 
 `sp_getapplock` **returns codes, never raises, for lock arbitration**: 0 granted immediately, 1 granted after a wait, -1 timeout, **-3 deadlock victim — no Msg 1205 exception** (unlike ordinary lock deadlocks; probe-confirmed the victim's connection sees only the return code).
 Because -3 is a return code rather than a rollback, the victim's *other* holds stay live — so the surviving side of the deadlock isn't granted; it keeps waiting and returns **-1** when its own timeout elapses (probe- and test-pinned: the pair of codes is exactly {-3, -1}).
--999 covers validation: unrecognized `@LockMode` / `@LockOwner` strings, Transaction owner with no active transaction, and a **missing** `@Resource`.
+-999 covers validation, each case announced by a severity-10 message the procedure prints first (probed 2026-09-26): an unrecognized `@LockMode` or `@LockOwner` string is Msg 15625 (`Option '<as written>' not recognized for '@<parameter>' parameter.`), and `sp_getapplock`'s Transaction owner with no active transaction Msg 15626.
 
-Raised errors are reserved for:
+Raised errors are reserved for the conditions below; each still leaves the return code at -999, and those raised through `sys.xp_userlock` name it as their procedure at line 1:
 
 | Condition | Error |
 |---|---|
-| explicit NULL `@Resource` (either proc) | Msg 1224 `An invalid application lock resource was passed to xp_userlock.` (State 5) |
+| missing or NULL `@Resource` (either proc) | Msg 1224 `An invalid application lock resource was passed to xp_userlock.` (State 5) |
 | `@LockTimeout < -1` | Msg 1227 (State 2) |
 | release of a not-held resource | Msg 1223 `Cannot release the application lock (Database Principal: '<p>', Resource: '<r>') because it is not currently held.` |
-| missing `@LockMode` | Msg 201 (binding-time, precedes the body's -999 checks) |
+| `sp_releaseapplock`'s Transaction owner with no active transaction | Msg 3918 (State 1) |
+| missing `@LockMode` | Msg 201 (binding-time, precedes the body's checks) |
 | unknown `@DbPrincipal` | Msg 1202 `The database-principal '<name>' does not exist or user is not a member.` |
 
 The functions differ from the procs on the same inputs: invalid mode string → Msg 1225 (`applock_test`), invalid owner string → Msg 1226 (function name interpolated), NULL principal/resource/mode → Msg 8116 with the argument index, Transaction owner (explicit or NULL-defaulted) outside a tx → Msg 3918.

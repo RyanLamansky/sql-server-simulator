@@ -227,7 +227,7 @@ partial class Simulation
         yield return HelpNoReferencingForeignKeys(batch, procedureName, 226, objectName);
         if (target is null)
         {
-            yield return HelpMessage(batch, "sys.sp_helpindex", 64, 15472, $"The object '{objectName}' does not have any indexes, or you do not have permissions.");
+            yield return Printed(SimulatedSqlException.NoIndexesMessage(batch, "sys.sp_helpindex", objectName));
             yield break;
         }
         foreach (var outcome in HelpIndexResultSets(batch, target, objectName, "sys.sp_helpindex"))
@@ -432,7 +432,7 @@ partial class Simulation
 
         if (rows.Count == 0)
         {
-            yield return HelpMessage(batch, procedureName, 211, 15647, $"No views with schema binding reference table '{objectName}'.");
+            yield return Printed(SimulatedSqlException.NoReferencingViewsMessage(batch, procedureName, objectName));
             yield break;
         }
 

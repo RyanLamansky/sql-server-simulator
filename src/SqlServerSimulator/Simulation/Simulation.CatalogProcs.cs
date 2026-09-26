@@ -307,6 +307,7 @@ partial class Simulation
         if (batch.IsSkipping)
             yield break;
 
+        RequireFirstParameter(arguments, classic ? "sp_columns" : "sp_columns_100", "table_name");
         var (tableName, tableOwner, tableQualifier, columnName, odbcVer) = ParseSpColumnsArgs(arguments, classic ? "sp_columns" : "sp_columns_100");
         var database = batch.CurrentDatabase;
         var qualifier = SqlValue.FromSystemName(database.Name);
@@ -690,6 +691,7 @@ partial class Simulation
         if (batch.IsSkipping)
             yield break;
 
+        RequireFirstParameter(arguments, "sp_pkeys", "table_name");
         var (tableName, tableOwner, tableQualifier) = ParseSpPkeysArgs(arguments);
         var database = batch.CurrentDatabase;
         var collation = database.Collation;
@@ -736,6 +738,22 @@ partial class Simulation
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// A catalog procedure's required first parameter, which real refuses
+    /// with Msg 201 when it is passed neither by position nor by name — an
+    /// explicit NULL is passing it (probed 2026-09-26 against SQL Server
+    /// 2025).
+    /// </summary>
+    private static void RequireFirstParameter(List<ProcArgument> arguments, string procedureName, string parameterName)
+    {
+        foreach (var argument in arguments)
+        {
+            if (argument.Name is null || BuiltInToken.Equals(argument.Name, parameterName))
+                return;
+        }
+        throw SimulatedSqlException.ProcedureExpectsParameter(procedureName, parameterName);
     }
 
     private static (string? Name, string? Owner, string? Qualifier) ParseSpPkeysArgs(List<ProcArgument> arguments)
@@ -794,6 +812,7 @@ partial class Simulation
         if (batch.IsSkipping)
             yield break;
 
+        RequireFirstParameter(arguments, procedureName, "table_name");
         var (tableName, tableOwner, tableQualifier, indexName, uniqueOnly) = ParseSpStatisticsArgs(arguments, procedureName);
         var database = batch.CurrentDatabase;
         var collation = database.Collation;

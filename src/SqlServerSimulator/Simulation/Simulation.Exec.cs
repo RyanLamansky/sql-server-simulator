@@ -222,7 +222,7 @@ partial class Simulation
         };
         if (systemProc is not null)
         {
-            foreach (var outcome in systemProc)
+            foreach (var outcome in AttributedToSystemProcedure(systemProc, systemProcName!, CalledName(procName)))
                 yield return outcome;
             // A system procedure that finishes answers 0 to `EXEC @rc = …`
             // (probed 2026-09-25 across sp_help, sp_who, sp_rename and the
