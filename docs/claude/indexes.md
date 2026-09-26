@@ -1,7 +1,7 @@
 # Indexes
 
 `CREATE [UNIQUE] [CLUSTERED | NONCLUSTERED] INDEX` + `DROP INDEX` ship, with full grammar coverage for column ordering (ASC / DESC), INCLUDE columns, WHERE filter, and the WITH (options) clause.
-The `sys.indexes` + `sys.index_columns` catalog views project rows for PRIMARY KEY constraints, UNIQUE constraints, and CREATE INDEX-declared entries.
+The `sys.indexes` + `sys.index_columns` catalog views project rows for PRIMARY KEY constraints, UNIQUE constraints, CREATE INDEX-declared entries, and XML and spatial indexes (at their own 256000 / 384000 index-id ranges, every option at its default — probed 2026-09-26 against SQL Server 2025).
 Probe-confirmed against SQL Server 2025.
 
 ## Grammar
@@ -32,7 +32,7 @@ One rendering divergence remains: real stores a CAST constant as `CONVERT([int],
 
 The simulator has no B-tree storage, so an index never constrains inserts (UNIQUE aside) and isn't a stored ordered structure.
 UNIQUE indexes participate in INSERT / UPDATE / MERGE enforcement alongside `KeyConstraint`.
-The `WITH (...)` clause (`Simulation.ParseOptionalIndexWithClause`) is scanned for `IGNORE_DUP_KEY` — the one option with a semantic, see [`constraints.md`](constraints.md#ignore_dup_key) — and for `FILLFACTOR` / `PAD_INDEX`, which `sys.indexes.fill_factor` / `is_padded` and `INDEXPROPERTY` report and an `ALTER INDEX … REBUILD WITH` may change; the legacy unparenthesized `WITH FILLFACTOR = n` is accepted, and a fill factor outside 1 to 100 is **Msg 129** (probed 2026-09-26 against SQL Server 2025).
+The `WITH (...)` clause (`Simulation.ParseOptionalIndexWithClause`) is scanned for `IGNORE_DUP_KEY` — the one option with a semantic, see [`constraints.md`](constraints.md#ignore_dup_key) — and for `FILLFACTOR` / `PAD_INDEX` / `ALLOW_ROW_LOCKS` / `ALLOW_PAGE_LOCKS` / `OPTIMIZE_FOR_SEQUENTIAL_KEY`, which `sys.indexes` and `INDEXPROPERTY` report (a columnstore index as allowing neither lock kind) and an `ALTER INDEX … REBUILD WITH` or, for the locking trio, `ALTER INDEX … SET` may change; the legacy unparenthesized `WITH FILLFACTOR = n` is accepted, and a fill factor outside 1 to 100 is **Msg 129** (probed 2026-09-26 against SQL Server 2025).
 `DROP_EXISTING = ON` replaces the index of that name in place, keeping its `index_id` (the replacement reuses the old object id, which is what index ids are allocated by); a missing one is **Msg 7999**, clustered-to-nonclustered **Msg 1925**, and a PRIMARY KEY / UNIQUE constraint's index may be recreated only as the index the constraint enforces — **Msg 1907** otherwise — so only its options change (probed 2026-09-26).
 The rest (`ONLINE` / `SORT_IN_TEMPDB` / …) are parsed parens-balanced and discarded, once the statement has checked the names against the options it takes — an unknown one is **Msg 155** naming the statement, `REBUILD` and `ALTER TABLE` refuse a few known ones the same way, `COMPRESSION_DELAY` is **Msg 122** and `MAX_DURATION` without `RESUMABLE = ON` **Msg 11431** (probed 2026-09-26).
 The trailing `ON <filegroup>` placement clause (e.g. `ON [PRIMARY]`) is also parsed and discarded — no filegroup model.
@@ -498,6 +498,7 @@ One row per (table, index), with ids allocated by the single authority described
 - **UNIQUE constraints** (nonclustered) at `index_id ≥ 2`, `type_desc = NONCLUSTERED`, `is_unique = 1`, `is_unique_constraint = 1`.
 - **CREATE UNIQUE INDEX** at `index_id ≥ 2`, `type_desc = NONCLUSTERED`, `is_unique = 1`, `is_unique_constraint = 0`.
 - **Non-UNIQUE CREATE INDEX** and a **NONCLUSTERED PRIMARY KEY** at `index_id ≥ 2`, `type_desc = NONCLUSTERED`.
+- **XML indexes** at `index_id` 256000 and up, `type = 3`, `type_desc = XML`; **spatial indexes** at 384000 and up, `type = 4`, `type_desc = SPATIAL` — each also listing its one column in `sys.index_columns`.
 
 ### Index-id allocation
 

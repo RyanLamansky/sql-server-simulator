@@ -944,9 +944,9 @@ Which sites a property concerns, NULL elsewhere:
 - `IsDeterministic`, `IsPrecise`, `IsSystemVerified` and the two data-access properties — a computed table column (judging the stored expression) or a view column (0, 0, 0 and 1, 1 for a view that isn't schema-bound).
 A catalog view's answers follow the simulator's declaration of it.
 
-**`INDEXPROPERTY(object_id, index_name, property)`** (`Parser/Expressions/IndexProperty.cs`): per-index metadata returning `int`.
-Index lookup unions `HeapTable.Indexes` (CREATE INDEX) and `HeapTable.KeyConstraints` (PK / UNIQUE — surface in `sys.indexes` by constraint name; the simulator auto-generates these as `PK__<table8>__<hex>`).
-Properties: `IsClustered` / `IsUnique` (from `Index.IsClustered` / `Index.IsUnique`, or true / Kind=PK for constraint-backed entries), `IndexFillFactor` / `IsPadIndex` (the index's recorded `FILLFACTOR` / `PAD_INDEX`), plus the always-0 properties `IsAutoStatistics`, `IndexDepth`, `IsHypothetical`, `IsStatistics`, `IsFulltextKey`, `IsOptimizedForSequentialKey` (no B-tree / no stats; matches probed behavior on freshly-created indexes — `IsFulltextKey` is 0 rather than NULL because SMO's index-scripting query reads it without an `ISNULL` wrapper).
+**`INDEXPROPERTY(object_id, index_name, property)`** (`Parser/Expressions/IndexProperty.cs`) answers every documented property as real does, returning `int` (probed 2026-09-26 against SQL Server 2025 over key-constraint, rowstore, filtered, disabled, columnstore, XML, spatial and indexed-view indexes and a user statistic).
+The name resolves against a table's key constraints, indexes, XML and spatial indexes and user statistics, or an indexed view's indexes.
+The option flags read what the declaration and later `ALTER INDEX` recorded — `FILLFACTOR`, `PAD_INDEX`, `ALLOW_ROW_LOCKS`, `ALLOW_PAGE_LOCKS`, `OPTIMIZE_FOR_SEQUENTIAL_KEY` — with a columnstore index disallowing both lock kinds; `IsFulltextKey` names the full-text index's key index; a statistic answers `IsStatistics` 1 and `IndexID` 0; an XML or spatial index answers NULL for `IndexDepth`, which is 0 for the rest, as are `IsAutoStatistics` and `IsHypothetical`.
 NULL on any arg / unknown index / unknown property / unknown table → NULL.
 
 **`INDEX_COL(table, index_id, key_id)`** (`Parser/Expressions/IndexCol.cs`): the `sysname` name of the key column at position `key_id` (1-based) of the index identified by `index_id` on `table`.

@@ -148,6 +148,21 @@ internal sealed class KeyConstraint(KeyConstraintKind kind, string name, int[] s
     public bool IsPadded = options.PadIndex ?? false;
 
     /// <summary>
+    /// <c>sys.indexes.allow_row_locks</c> / <c>allow_page_locks</c> /
+    /// <c>optimize_for_sequential_key</c>: the declaration's locking options,
+    /// which an <c>ALTER INDEX … REBUILD WITH</c> or <c>SET</c> may change. The
+    /// simulator's lock manager doesn't consult them; the catalog and
+    /// <c>INDEXPROPERTY</c> report them.
+    /// </summary>
+    public bool AllowRowLocks = options.AllowRowLocks ?? true;
+
+    /// <inheritdoc cref="AllowRowLocks"/>
+    public bool AllowPageLocks = options.AllowPageLocks ?? true;
+
+    /// <inheritdoc cref="AllowRowLocks"/>
+    public bool OptimizeForSequentialKey = options.OptimizeForSequentialKey ?? false;
+
+    /// <summary>
     /// Whether <c>ALTER INDEX … DISABLE</c> has taken the constraint's backing
     /// index out of service — real allows that on a constraint even though it
     /// refuses to change the constraint's IGNORE_DUP_KEY (Msg 1979). While

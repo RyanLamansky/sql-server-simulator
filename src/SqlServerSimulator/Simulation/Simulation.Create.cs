@@ -851,6 +851,9 @@ partial class Simulation
         var dropExisting = false;
         byte? fillFactor = null;
         bool? padIndex = null;
+        bool? allowRowLocks = null;
+        bool? allowPageLocks = null;
+        bool? optimizeForSequentialKey = null;
         var depth = 1;
         // Two-token lookbehind over the balanced skip: the option name, then its
         // '='. Only a name at the list's own depth counts — a nested group is
@@ -913,6 +916,12 @@ partial class Simulation
                         padIndex = on;
                     else if (namedOption == "DROP_EXISTING")
                         dropExisting = on;
+                    else if (namedOption == "ALLOW_ROW_LOCKS")
+                        allowRowLocks = on;
+                    else if (namedOption == "ALLOW_PAGE_LOCKS")
+                        allowPageLocks = on;
+                    else if (namedOption == "OPTIMIZE_FOR_SEQUENTIAL_KEY")
+                        optimizeForSequentialKey = on;
                     break;
                 case Numeric or Operator { Character: '-' } when sawEquals && namedOption == "FILLFACTOR":
                     fillFactor = ReadFillFactor(context);
@@ -964,6 +973,15 @@ partial class Simulation
                 case StringToken name when depth == 1 && name.Span.Equals("DROP_EXISTING", StringComparison.OrdinalIgnoreCase):
                     namedOption = "DROP_EXISTING";
                     continue;
+                case StringToken name when depth == 1 && name.Span.Equals("ALLOW_ROW_LOCKS", StringComparison.OrdinalIgnoreCase):
+                    namedOption = "ALLOW_ROW_LOCKS";
+                    continue;
+                case StringToken name when depth == 1 && name.Span.Equals("ALLOW_PAGE_LOCKS", StringComparison.OrdinalIgnoreCase):
+                    namedOption = "ALLOW_PAGE_LOCKS";
+                    continue;
+                case StringToken name when depth == 1 && name.Span.Equals("OPTIMIZE_FOR_SEQUENTIAL_KEY", StringComparison.OrdinalIgnoreCase):
+                    namedOption = "OPTIMIZE_FOR_SEQUENTIAL_KEY";
+                    continue;
             }
 
             namedOption = null;
@@ -982,7 +1000,7 @@ partial class Simulation
                 throw SimulatedSqlException.ColumnstoreResumable();
         }
         context.MoveNextOptional();
-        return new IndexOptions(ignoreDupKey, fillFactor, padIndex, dropExisting, compressionDelay, columnstoreArchive);
+        return new IndexOptions(ignoreDupKey, fillFactor, padIndex, dropExisting, compressionDelay, columnstoreArchive, allowRowLocks, allowPageLocks, optimizeForSequentialKey);
     }
 
     /// <summary>

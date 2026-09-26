@@ -10,9 +10,9 @@ partial class Simulation
     private const string IgnoreDupKeyOption = "IGNORE_DUP_KEY";
 
     /// <summary>
-    /// <c>ALTER INDEX … SET</c> options taking <c>ON</c> / <c>OFF</c>. Only
-    /// <c>IGNORE_DUP_KEY</c> is acted on; the others are recognized so their
-    /// names don't fall to Msg 155, then discarded.
+    /// <c>ALTER INDEX … SET</c> options taking <c>ON</c> / <c>OFF</c>.
+    /// <c>STATISTICS_NORECOMPUTE</c> is recognized only so its name doesn't
+    /// fall to Msg 155; the others are recorded.
     /// </summary>
     private static readonly FrozenSet<string> OnOffIndexOptions = new[]
     {
@@ -55,11 +55,11 @@ partial class Simulation
     /// <summary>
     /// Parses <c>ALTER INDEX { index_name | ALL } ON &lt;table&gt; SET ( option
     /// [, …] )</c>. Of the SET options only <c>IGNORE_DUP_KEY</c> carries a
-    /// semantic (see <c>docs/claude/constraints.md</c>); the rest —
-    /// <c>ALLOW_ROW_LOCKS</c> / <c>ALLOW_PAGE_LOCKS</c> /
-    /// <c>STATISTICS_NORECOMPUTE</c> / <c>OPTIMIZE_FOR_SEQUENTIAL_KEY</c> /
-    /// <c>COMPRESSION_DELAY</c> — are validated by name and discarded, since a
-    /// heap-only store has nothing for them to change.
+    /// semantic (see <c>docs/claude/constraints.md</c>); <c>ALLOW_ROW_LOCKS</c>
+    /// / <c>ALLOW_PAGE_LOCKS</c> / <c>OPTIMIZE_FOR_SEQUENTIAL_KEY</c> and a
+    /// columnstore index's <c>COMPRESSION_DELAY</c> are recorded for the
+    /// catalog, and <c>STATISTICS_NORECOMPUTE</c> is validated by name and
+    /// discarded, a heap-only store having nothing for it to change.
     /// </summary>
     /// <remarks>
     /// <para>
@@ -139,7 +139,7 @@ partial class Simulation
         switch (form)
         {
             case AlterIndexForm.Set:
-                (ignoreDupKey, compressionDelay) = ParseAlterIndexSetOptions(context, targetColumnstore);
+                (ignoreDupKey, compressionDelay, rebuildOptions) = ParseAlterIndexSetOptions(context, targetColumnstore);
                 break;
             case AlterIndexForm.Pause:
             case AlterIndexForm.Abort:
@@ -305,6 +305,8 @@ partial class Simulation
                 constraint.IsDisabled = false;
                 constraint.FillFactor = rebuildOptions.FillFactor ?? constraint.FillFactor;
                 constraint.IsPadded = rebuildOptions.PadIndex ?? constraint.IsPadded;
+                constraint.AllowRowLocks = rebuildOptions.AllowRowLocks ?? constraint.AllowRowLocks;
+                constraint.AllowPageLocks = rebuildOptions.AllowPageLocks ?? constraint.AllowPageLocks;
                 break;
             case AlterIndexForm.Reorganize:
                 // Nothing to compact in a flat page list, but a disabled index
@@ -317,6 +319,9 @@ partial class Simulation
                     throw SimulatedSqlException.OperationOnDisabledIndex(constraint.Name, table.Name);
                 if (ignoreDupKey is not null)
                     throw SimulatedSqlException.IgnoreDupKeyOnConstraintIndex(constraint.Name);
+                constraint.AllowRowLocks = rebuildOptions.AllowRowLocks ?? constraint.AllowRowLocks;
+                constraint.AllowPageLocks = rebuildOptions.AllowPageLocks ?? constraint.AllowPageLocks;
+                constraint.OptimizeForSequentialKey = rebuildOptions.OptimizeForSequentialKey ?? constraint.OptimizeForSequentialKey;
                 break;
         }
     }
@@ -344,6 +349,8 @@ partial class Simulation
                 // out (probed 2026-09-26 against SQL Server 2025).
                 index.FillFactor = rebuildOptions.FillFactor ?? index.FillFactor;
                 index.IsPadded = rebuildOptions.PadIndex ?? index.IsPadded;
+                index.AllowRowLocks = rebuildOptions.AllowRowLocks ?? index.AllowRowLocks;
+                index.AllowPageLocks = rebuildOptions.AllowPageLocks ?? index.AllowPageLocks;
                 index.ColumnstoreArchive = rebuildOptions.ColumnstoreArchive ?? index.ColumnstoreArchive;
                 break;
             case AlterIndexForm.Reorganize:
@@ -355,13 +362,17 @@ partial class Simulation
                     throw SimulatedSqlException.OperationOnDisabledIndex(index.Name, table.Name);
                 if (compressionDelay is int delay && index.IsColumnstore)
                     index.CompressionDelay = delay;
-                if (ignoreDupKey is not bool value)
-                    return;
-                if (!index.IsUnique)
-                    throw SimulatedSqlException.IgnoreDupKeyOnNonUniqueIndexAlter(index.Name);
-                if (index.Filter is not null)
-                    throw SimulatedSqlException.IgnoreDupKeyOnFilteredIndex("alter", index.Name, SchemaQualifyTableName(table, context.CurrentDatabase));
-                index.IgnoreDupKey = value;
+                if (ignoreDupKey is bool value)
+                {
+                    if (!index.IsUnique)
+                        throw SimulatedSqlException.IgnoreDupKeyOnNonUniqueIndexAlter(index.Name);
+                    if (index.Filter is not null)
+                        throw SimulatedSqlException.IgnoreDupKeyOnFilteredIndex("alter", index.Name, SchemaQualifyTableName(table, context.CurrentDatabase));
+                    index.IgnoreDupKey = value;
+                }
+                index.AllowRowLocks = rebuildOptions.AllowRowLocks ?? index.AllowRowLocks;
+                index.AllowPageLocks = rebuildOptions.AllowPageLocks ?? index.AllowPageLocks;
+                index.OptimizeForSequentialKey = rebuildOptions.OptimizeForSequentialKey ?? index.OptimizeForSequentialKey;
                 break;
         }
     }
@@ -371,12 +382,15 @@ partial class Simulation
     /// <c>IGNORE_DUP_KEY</c> setting when the list carried one and
     /// <see langword="null"/> when it didn't — the distinction matters, because
     /// only a list that mentions the option can raise the constraint / non-unique
-    /// / filtered rejections. Every other recognized option is discarded.
+    /// / filtered rejections — with the locking options it records and the
+    /// columnstore <c>COMPRESSION_DELAY</c>. Every other recognized option is
+    /// discarded.
     /// Cursor on entry: the <c>SET</c> keyword. On exit: first token past the
     /// closing <c>)</c>.
     /// </summary>
-    private static (bool? IgnoreDupKey, int? CompressionDelay) ParseAlterIndexSetOptions(ParserContext context, bool? targetColumnstore)
+    private static (bool? IgnoreDupKey, int? CompressionDelay, IndexOptions LockOptions) ParseAlterIndexSetOptions(ParserContext context, bool? targetColumnstore)
     {
+        bool? allowRowLocks = null, allowPageLocks = null, optimizeForSequentialKey = null;
         if (context.GetNextRequired() is not Operator { Character: '(' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
@@ -401,6 +415,18 @@ partial class Simulation
                 if (IgnoreDupKeyOption.Equals(optionName, StringComparison.OrdinalIgnoreCase))
                 {
                     ignoreDupKey = on;
+                }
+                else if (targetColumnstore != true && optionName.Equals("ALLOW_ROW_LOCKS", StringComparison.OrdinalIgnoreCase))
+                {
+                    allowRowLocks = on;
+                }
+                else if (targetColumnstore != true && optionName.Equals("ALLOW_PAGE_LOCKS", StringComparison.OrdinalIgnoreCase))
+                {
+                    allowPageLocks = on;
+                }
+                else if (targetColumnstore != true && optionName.Equals("OPTIMIZE_FOR_SEQUENTIAL_KEY", StringComparison.OrdinalIgnoreCase))
+                {
+                    optimizeForSequentialKey = on;
                 }
                 // A columnstore index refuses the locking and statistics
                 // options as its rebuild does (probed 2026-09-26 against SQL
@@ -433,7 +459,7 @@ partial class Simulation
         if (context.Token is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextOptional();
-        return (ignoreDupKey, compressionDelay);
+        return (ignoreDupKey, compressionDelay, new IndexOptions(false, null, null, allowRowLocks: allowRowLocks, allowPageLocks: allowPageLocks, optimizeForSequentialKey: optimizeForSequentialKey));
     }
 
     /// <summary>

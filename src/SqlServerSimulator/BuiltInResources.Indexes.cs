@@ -572,6 +572,8 @@ internal static partial class BuiltInResources
         var nonClusteredDesc = SqlValue.FromNVarchar("NONCLUSTERED");
         var clusteredColumnstoreDesc = SqlValue.FromNVarchar("CLUSTERED COLUMNSTORE");
         var nonClusteredColumnstoreDesc = SqlValue.FromNVarchar("NONCLUSTERED COLUMNSTORE");
+        var xmlDesc = SqlValue.FromNVarchar("XML");
+        var spatialDesc = SqlValue.FromNVarchar("SPATIAL");
         var primaryDataSpace = SqlValue.FromInt32(1);
         foreach (var schema in database.Schemas.Values)
         {
@@ -582,6 +584,13 @@ internal static partial class BuiltInResources
                 var tableObjectId = SqlValue.FromInt32(table.ObjectId);
                 foreach (var identity in table.IndexIdentities())
                     yield return RowForIdentity(tableObjectId, identity);
+                // XML and spatial indexes follow at their own index-id ranges,
+                // with every option at its default (probed 2026-09-26 against
+                // SQL Server 2025).
+                foreach (var xmlIndex in table.XmlIndexes.OrderBy(index => index.IndexId))
+                    yield return AuxiliaryRow(tableObjectId, xmlIndex.Name, xmlIndex.IndexId, 3, xmlDesc);
+                foreach (var spatialIndex in table.SpatialIndexes.OrderBy(index => index.IndexId))
+                    yield return AuxiliaryRow(tableObjectId, spatialIndex.Name, spatialIndex.IndexId, 4, spatialDesc);
             }
             // Indexed views: one row per index the view carries (no HEAP row —
             // an ordinary view contributes nothing, probe-confirmed). The
@@ -614,6 +623,7 @@ internal static partial class BuiltInResources
             SqlValue name, isUnique, isPrimaryKey, isUniqueConstraint, hasFilter, filterDefinition, ignoreDupKey, isDisabled;
             byte fillFactor = 0;
             var isPadded = false;
+            var (allowRowLocks, allowPageLocks, optimizeForSequentialKey) = (true, true, false);
             if (identity.Constraint is { } key)
             {
                 var isPk = key.Kind == KeyConstraintKind.PrimaryKey;
@@ -626,6 +636,7 @@ internal static partial class BuiltInResources
                 ignoreDupKey = key.IgnoreDupKey ? trueBit : falseBit;
                 isDisabled = key.IsDisabled ? trueBit : falseBit;
                 (fillFactor, isPadded) = (key.FillFactor, key.IsPadded);
+                (allowRowLocks, allowPageLocks, optimizeForSequentialKey) = (key.AllowRowLocks, key.AllowPageLocks, key.OptimizeForSequentialKey);
             }
             else if (identity.Index is { } index)
             {
@@ -638,6 +649,10 @@ internal static partial class BuiltInResources
                 ignoreDupKey = index.IgnoreDupKey ? trueBit : falseBit;
                 isDisabled = index.IsDisabled ? trueBit : falseBit;
                 (fillFactor, isPadded) = (index.FillFactor, index.IsPadded);
+                // A columnstore index takes neither row nor page locks.
+                (allowRowLocks, allowPageLocks, optimizeForSequentialKey) = index.IsColumnstore
+                    ? (false, false, false)
+                    : (index.AllowRowLocks, index.AllowPageLocks, index.OptimizeForSequentialKey);
             }
             else
             {
@@ -664,14 +679,33 @@ internal static partial class BuiltInResources
                 filterDefinition: filterDefinition,
                 ignoreDupKey: ignoreDupKey,
                 isDisabled: isDisabled,
-                isPadded ? trueBit : falseBit, trueBit, SqlValue.FromByte(fillFactor), compressionDelay);
+                isPadded ? trueBit : falseBit, allowRowLocks ? trueBit : falseBit, allowPageLocks ? trueBit : falseBit,
+                SqlValue.FromByte(fillFactor), compressionDelay, optimizeForSequentialKey ? trueBit : falseBit);
         }
+
+        SqlValue[] AuxiliaryRow(SqlValue objectId, string name, int indexId, byte type, SqlValue typeDesc) =>
+            BuildIndexRow(
+                name: SqlValue.FromSystemName(name),
+                objectId: objectId,
+                indexId: SqlValue.FromInt32(indexId),
+                type: SqlValue.FromByte(type),
+                typeDesc: typeDesc,
+                isUnique: falseBit,
+                dataSpaceId: primaryDataSpace,
+                isPrimaryKey: falseBit,
+                isUniqueConstraint: falseBit,
+                hasFilter: falseBit,
+                filterDefinition: nullFilter,
+                ignoreDupKey: falseBit,
+                isDisabled: falseBit,
+                falseBit, trueBit, trueBit, SqlValue.FromByte(0), nullCompressionDelay, falseBit);
 
         SqlValue[] BuildIndexRow(
             SqlValue name, SqlValue objectId, SqlValue indexId, SqlValue type, SqlValue typeDesc,
             SqlValue isUnique, SqlValue dataSpaceId, SqlValue isPrimaryKey, SqlValue isUniqueConstraint,
             SqlValue hasFilter, SqlValue filterDefinition, SqlValue ignoreDupKey, SqlValue isDisabled,
-            SqlValue isPadded, SqlValue allowLocks, SqlValue fillFactor, SqlValue compressionDelay) =>
+            SqlValue isPadded, SqlValue allowRowLocks, SqlValue allowPageLocks, SqlValue fillFactor, SqlValue compressionDelay,
+            SqlValue optimizeForSequentialKey) =>
             [
                 objectId,
                 name,
@@ -688,14 +722,14 @@ internal static partial class BuiltInResources
                 isDisabled,
                 falseBit, // is_hypothetical
                 falseBit, // is_ignored_in_optimization
-                allowLocks, // allow_row_locks
-                allowLocks, // allow_page_locks
+                allowRowLocks,
+                allowPageLocks,
                 hasFilter,
                 filterDefinition,
                 compressionDelay,
                 falseBit, // suppress_dup_key_messages
                 falseBit, // auto_created
-                falseBit, // optimize_for_sequential_key
+                optimizeForSequentialKey,
             ];
     }
 
@@ -1336,6 +1370,23 @@ internal static partial class BuiltInResources
                         SqlValue.FromInt32(xmlIndex.IndexId),
                         SqlValue.FromInt32(1),
                         SqlValue.FromInt32(FullOrdinalToColumnId(table, xmlIndex.ColumnOrdinal)),
+                        zeroByte,
+                        zeroByte,
+                        falseBit,
+                        falseBit,
+                        zeroByte,
+                        zeroByte,
+                    ];
+                }
+                // A spatial index lists its one column the same way (probed
+                // 2026-09-26 against SQL Server 2025).
+                foreach (var spatialIndex in table.SpatialIndexes)
+                {
+                    yield return [
+                        tableObjectId,
+                        SqlValue.FromInt32(spatialIndex.IndexId),
+                        SqlValue.FromInt32(1),
+                        SqlValue.FromInt32(FullOrdinalToColumnId(table, spatialIndex.ColumnOrdinal - 1)),
                         zeroByte,
                         zeroByte,
                         falseBit,

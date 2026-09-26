@@ -8,7 +8,16 @@ namespace SqlServerSimulator.Storage;
 /// when the clause didn't name them, so an <c>ALTER INDEX … REBUILD</c>
 /// keeps what it leaves out.
 /// </summary>
-internal readonly struct IndexOptions(bool ignoreDupKey, byte? fillFactor, bool? padIndex, bool dropExisting = false, int? compressionDelay = null, bool? columnstoreArchive = null)
+internal readonly struct IndexOptions(
+    bool ignoreDupKey,
+    byte? fillFactor,
+    bool? padIndex,
+    bool dropExisting = false,
+    int? compressionDelay = null,
+    bool? columnstoreArchive = null,
+    bool? allowRowLocks = null,
+    bool? allowPageLocks = null,
+    bool? optimizeForSequentialKey = null)
 {
     public readonly bool IgnoreDupKey = ignoreDupKey;
 
@@ -28,4 +37,13 @@ internal readonly struct IndexOptions(bool ignoreDupKey, byte? fillFactor, bool?
     /// <c>COLUMNSTORE_ARCHIVE</c>, false for <c>COLUMNSTORE</c>.
     /// </summary>
     public readonly bool? ColumnstoreArchive = columnstoreArchive;
+
+    /// <summary><c>ALLOW_ROW_LOCKS</c>, when given; only the catalog reports it.</summary>
+    public readonly bool? AllowRowLocks = allowRowLocks;
+
+    /// <summary><c>ALLOW_PAGE_LOCKS</c>, when given; only the catalog reports it.</summary>
+    public readonly bool? AllowPageLocks = allowPageLocks;
+
+    /// <summary><c>OPTIMIZE_FOR_SEQUENTIAL_KEY</c>, when given; only the catalog reports it.</summary>
+    public readonly bool? OptimizeForSequentialKey = optimizeForSequentialKey;
 }
