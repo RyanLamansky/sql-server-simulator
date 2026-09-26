@@ -48,6 +48,17 @@ internal sealed partial class Selection
     internal bool StartsConstants;
 
     /// <summary>
+    /// A FROM-less, subquery-free select list with no row limit and no WHERE
+    /// that doesn't fold to TRUE — or a set operation over nothing else. Real
+    /// folds a set operation whose every branch is one into a constant scan it
+    /// computes whole before sending a row, so <c>SELECT 1 UNION ALL SELECT
+    /// 1/0</c> raises with no row sent, where a branch carrying a FROM, a
+    /// subquery or any other WHERE — <c>WHERE 1 = 0</c> included — keeps the
+    /// chain streaming (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    internal bool IsBareConstantRow;
+
+    /// <summary>
     /// The FROM sources of the branch whose projections this plan's output
     /// columns come from — the leftmost branch of a set-op chain, since that's
     /// where the combined result takes its column names. A top-level ORDER BY
@@ -241,18 +252,25 @@ internal sealed partial class Selection
             }
         }
 
+        var isBareConstantRows = left.IsBareConstantRow && right.IsBareConstantRow;
         return new Selection(combinedSchema, combinedNames,
             hasOrderBy: false,
             hasTopOrOffsetOrFetch: left.HasTopOrOffsetOrFetch || right.HasTopOrOffsetOrFetch,
-            (batch, outerResolver) => kind switch
+            (batch, outerResolver) =>
         {
-            SetOpKind.UnionAll => ConcatBranchRows(left, right, combinedSchema, batch, outerResolver),
-            SetOpKind.Union => DedupeUnionRows(left, right, combinedSchema, batch, outerResolver),
-            SetOpKind.Intersect => IntersectRows(left, right, combinedSchema, batch, outerResolver),
-            SetOpKind.Except => ExceptRows(left, right, combinedSchema, batch, outerResolver),
-            _ => throw new InvalidOperationException($"Unknown SetOpKind {kind}."),
+            var rows = kind switch
+            {
+                SetOpKind.UnionAll => ConcatBranchRows(left, right, combinedSchema, batch, outerResolver),
+                SetOpKind.Union => DedupeUnionRows(left, right, combinedSchema, batch, outerResolver),
+                SetOpKind.Intersect => IntersectRows(left, right, combinedSchema, batch, outerResolver),
+                SetOpKind.Except => ExceptRows(left, right, combinedSchema, batch, outerResolver),
+                _ => throw new InvalidOperationException($"Unknown SetOpKind {kind}."),
+            };
+            // Computed whole before the first row goes out; see IsBareConstantRow.
+            return isBareConstantRows ? [.. rows] : rows;
         }, intoTarget: left.IntoTarget, destColumnSchema: combinedDestSchema)
         {
+            IsBareConstantRow = isBareConstantRows,
             // The combined result takes the first branch's output names, so it
             // takes that branch's projections — and the FROM scope they read —
             // too; a top-level ORDER BY resolves names against both (see

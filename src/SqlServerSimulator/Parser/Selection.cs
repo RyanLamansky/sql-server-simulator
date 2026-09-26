@@ -4627,6 +4627,8 @@ internal sealed partial class Selection
             : null)
         {
             ProjectionExpressions = [.. expressions],
+            IsBareConstantRow = !containsSubquery && topCount is null && offsetCount is null && fetchCount is null
+                && excluders.TrueForAll(excluder => ConstantFolding.TryFoldPredicate(excluder, parseBatch.Parser, out var folded) && folded == true),
             // An empty scope, not an unknown one: as the first branch of a
             // set-op chain this projects output aliases and nothing else, so a
             // trailing ORDER BY naming anything but one of them is Msg 207 on

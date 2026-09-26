@@ -409,6 +409,9 @@ And some plans never start the evaluation at all:
 - a FROM of constants alone (`VALUES`, no FROM), which real runs as a constant scan — `Selection.ReadsStorage` tells the two apart through derived tables;
 - a singleton lookup — every key column of a unique key pinned by an equality — which real answers without starting the rest of the plan, so `SELECT 1/0 FROM t WHERE pk = 99` returns nothing when no row matches, while `pk IN (98, 99)` raises.
 
+A set operation over FROM-less, subquery-free branches alone is one constant scan to real, computed whole before the first row goes out: `SELECT 1 UNION ALL SELECT 1/0` raises with no row sent.
+A branch with a `FROM`, a subquery or a `WHERE` that doesn't fold to TRUE — `WHERE 1 = 0` included — keeps the chain streaming, so `SELECT 1 UNION ALL SELECT 2 WHERE 1 = 0 UNION ALL SELECT 1/0` sends its 1 first (`Selection.IsBareConstantRow`).
+
 UPDATE, DELETE and `INSERT … SELECT` start the same way, and one more thing happens there: a statement-wide value written to a column — a literal, a variable or parameter, a computation over those — is converted to that column as the plan starts.
 So `UPDATE t SET v = 'toolong' WHERE id = 999`, the same through an over-long `@p` (a SqlClient parameter included), and `INSERT t (v) SELECT 'toolong' FROM t WHERE id = 999` raise Msg 2628 over no qualifying row (`RunUpdateStartupConstants`, `ExecuteSelectSource`).
 The same exemptions hold — a never-TRUE WHERE, `TOP (0)` (which reads no row at all), a unique-key singleton, `ANSI_WARNINGS OFF` for the truncation.

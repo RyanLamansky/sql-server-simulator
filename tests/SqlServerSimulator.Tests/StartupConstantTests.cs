@@ -164,4 +164,30 @@ public sealed class StartupConstantTests
         using var command = connection.CreateCommand("update t set v = @p0 where id = @p1", ("@p0", "abcdef"), ("@p1", 999));
         AreEqual(2628, Throws<SimulatedSqlException>(() => command.ExecuteNonQuery()).Number);
     }
+
+    /// <summary>The rows a reader hands out before the statement's error, and that error's number.</summary>
+    private static (int RowsBeforeError, int Number) RowsThenError(Simulation sim, string sql)
+    {
+        var rows = 0;
+        var error = Throws<SimulatedSqlException>(() =>
+        {
+            using var reader = sim.ExecuteReader(sql);
+            while (reader.Read())
+                rows++;
+        });
+        return (rows, error.Number);
+    }
+
+    [TestMethod]
+    [DataRow("select 1 union all select 1/0", 0, 8134)]
+    [DataRow("select 1 union all select 2 union all select cast('x' as int)", 0, 245)]
+    [DataRow("declare @x int = 0; select 1 union all select 1/@x", 0, 8134)]
+    [DataRow("select 1 union all select 2 where 1 = 1 union all select 1/0", 0, 8134)]
+    [DataRow("select 1 except select 1/0", 0, 8134)]
+    [DataRow("select 1 union all select 1 where 1/0 = 1", 1, 8134)]
+    [DataRow("select 1 union all select 2 where 1 = 0 union all select 1/0", 1, 8134)]
+    [DataRow("select 1 union all select (select 1/0)", 1, 8134)]
+    [DataRow("select id from pk union all select 1/0", 1, 8134)]
+    public void SetOperationOverConstantsAlone_ComputesWholeBeforeARow(string sql, int rowsBeforeError, int number) =>
+        AreEqual((rowsBeforeError, number), RowsThenError(OneRow(), sql));
 }
