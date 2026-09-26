@@ -145,7 +145,9 @@ internal sealed class ConvertExpression : Expression
                     coerced = coerced.CoerceTo(this.targetType);
             }
         }
-        catch (SimulatedSqlException ex) when (this.tryMode && Cast.IsConversionFailure(ex.Number))
+        // A style the source type doesn't take is NULL too (Msg 281; probed
+        // 2026-09-26 against SQL Server 2025).
+        catch (SimulatedSqlException ex) when (this.tryMode && (Cast.IsConversionFailure(ex.Number) || ex.Number == 281))
         {
             coerced = SqlValue.Null(this.targetType);
         }

@@ -767,4 +767,21 @@ public sealed class ConvertTests
     [TestMethod]
     public void TryConvert_String_ToVarbinary_BadHex_ReturnsNull() =>
         IsInstanceOfType<DBNull>(ExecuteScalar("select try_convert(varbinary(8), 'ABCXYZ', 2)"));
+
+    /// <summary>
+    /// Style renderings and parses probed 2026-09-26 against SQL Server 2025:
+    /// styles 6 / 106 zero-pad the day, smalldatetime's ISO form carries no
+    /// fraction, a fraction or colon milliseconds may lead AM / PM on the way
+    /// back in, and TRY_CONVERT answers NULL for a style the source can't take.
+    /// </summary>
+    [TestMethod]
+    [DataRow("convert(varchar(20), cast('2024-02-05' as date), 6)", "05 Feb 24")]
+    [DataRow("convert(varchar(20), cast('2024-02-05' as datetime), 106)", "05 Feb 2024")]
+    [DataRow("convert(varchar(30), cast('2024-02-05 17:08' as smalldatetime), 126)", "2024-02-05T17:08:00")]
+    [DataRow("convert(varchar(30), convert(datetime, 'Feb  5 2024  7:08:09:123AM', 109), 121)", "2024-02-05 07:08:09.123")]
+    [DataRow("convert(varchar(30), convert(datetime2(3), 'Feb 5 2024 5:08:09.123PM', 9), 121)", "2024-02-05 17:08:09.123")]
+    [DataRow("convert(varchar(30), convert(date, '02/05/24  7:08:09 AM', 22), 23)", "2024-02-05")]
+    [DataRow("isnull(try_convert(varchar(20), cast('2024-02-05' as date), 14), 'N')", "N")]
+    public void StyleEdges_MatchReal(string expression, string expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar($"select {expression}"));
 }

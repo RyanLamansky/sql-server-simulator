@@ -73,8 +73,9 @@ internal readonly partial struct SqlValue
         104 => date.ToString("dd.MM.yyyy", CultureInfo.InvariantCulture),
         5 => date.ToString("dd-MM-yy", CultureInfo.InvariantCulture),
         105 => date.ToString("dd-MM-yyyy", CultureInfo.InvariantCulture),
-        6 => $"{date.Day,2} {date:MMM yy}",
-        106 => $"{date.Day,2} {date:MMM yyyy}",
+        // The day is zero-padded (probed 2026-09-26 against SQL Server 2025).
+        6 => date.ToString("dd MMM yy", CultureInfo.InvariantCulture),
+        106 => date.ToString("dd MMM yyyy", CultureInfo.InvariantCulture),
         7 => date.ToString("MMM dd, yy", CultureInfo.InvariantCulture),
         107 => date.ToString("MMM dd, yyyy", CultureInfo.InvariantCulture),
         10 => date.ToString("MM-dd-yy", CultureInfo.InvariantCulture),
@@ -111,7 +112,9 @@ internal readonly partial struct SqlValue
             20 or 120 => $"{date:yyyy-MM-dd} {Format24HourTime(time, '.', "")}",
             21 or 25 or 121 => $"{date:yyyy-MM-dd} {Format24HourTime(time, '.', frac)}",
             22 => $"{date:MM/dd/yy} {FormatAmPm12HourTime(time, paddedHour: true, includeSeconds: true, '.', "", spaceBeforeAmPm: true)}",
-            126 or 127 => $"{date:yyyy-MM-dd}T{Format24HourTime(time, '.', frac)}",
+            // smalldatetime's ISO 8601 form carries no fraction (probed
+            // 2026-09-26 against SQL Server 2025).
+            126 or 127 => $"{date:yyyy-MM-dd}T{Format24HourTime(time, '.', sourceTypeWord == "smalldatetime" ? "" : frac)}",
             8 or 24 or 108 => Format24HourTime(time, '.', ""),
             14 or 114 => Format24HourTime(time, ':', frac),
             130 => $"{FormatHijriDateOnly(dt, withMonthName: true)} {FormatAmPm12HourTime(time, paddedHour: true, includeSeconds: true, ':', frac, spaceBeforeAmPm: false)}",

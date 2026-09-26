@@ -831,11 +831,17 @@ internal readonly partial struct SqlValue
             : new(order, !fourDigit && order != DatePartOrder.None, fourDigit, false, true, false, true, style is not (130 or 131));
     }
 
+    // A fraction or colon milliseconds may precede AM / PM, spaced or not —
+    // the shape styles 9 / 109 / 130 / 131 write (probed 2026-09-26 against SQL
+    // Server 2025).
     private static readonly string[] BareTimeFormats =
     [
         "H:mm", "H:mm:ss", "H:mm:ss.f", "H:mm:ss.ff", "H:mm:ss.fff", "H:mm:ss.ffff",
         "H:mm:ss.fffff", "H:mm:ss.ffffff", "H:mm:ss.fffffff", "H:mm:ss:fff",
         "h:mm tt", "h:mm:ss tt", "h:mmtt", "h:mm:sstt",
+        .. from fraction in (string[])[".f", ".ff", ".fff", ".ffff", ".fffff", ".ffffff", ".fffffff", ":fff"]
+           from meridiem in (string[])["tt", " tt"]
+           select $"h:mm:ss{fraction}{meridiem}",
     ];
 
     private static readonly string[] MonthNameFormats =
@@ -878,7 +884,7 @@ internal readonly partial struct SqlValue
             if (tail.Contains(':', StringComparison.Ordinal)
                 && DateTime.TryParseExact(tail, BareTimeFormats, UsCulture, DateTimeStyles.AllowWhiteSpaces, out _))
             {
-                return (input[..i], tail, ' ');
+                return (input[..i].TrimEnd(' '), tail, ' ');
             }
         }
         return (input, string.Empty, '\0');
