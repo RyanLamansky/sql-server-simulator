@@ -806,8 +806,15 @@ partial class SimulatedSqlException
     /// rather than reading as an argument list. Probe-confirmed verbatim,
     /// including real's own inconsistent capitalization of the second sentence.
     /// </summary>
-    internal static SimulatedSqlException IndexHintNeedsWithKeyword() =>
-        new("Incorrect syntax near 'INDEX'. If this is intended as a part of a table hint, A WITH keyword and parenthesis are now required. See SQL Server Books Online for proper syntax.", 1018, 15, 1);
+    internal static SimulatedSqlException IndexHintNeedsWithKeyword() => TableHintNeedsWithKeyword("INDEX");
+
+    /// <summary>
+    /// Msg 1018 naming the hint as written — also what a table variable's
+    /// legacy <c>(hint)</c> form raises for any recognized hint, since a table
+    /// variable takes none (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException TableHintNeedsWithKeyword(ReadOnlySpan<char> written) =>
+        new($"Incorrect syntax near '{written}'. If this is intended as a part of a table hint, A WITH keyword and parenthesis are now required. See SQL Server Books Online for proper syntax.", 1018, 15, 1);
 
     /// <summary>
     /// Mimics SQL Server's Msg 155 — a word sitting between a join type and

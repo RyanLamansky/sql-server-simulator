@@ -3126,7 +3126,7 @@ internal sealed partial class Selection
                 for (var ci = 0; ci < tvColumnNames.Length; ci++)
                     tvColumnNames[ci] = tvTable.Columns[ci].Name;
                 var tvAlias = ConsumeOptionalAlias(context);
-                _ = ParseOptionalTableHints(context);
+                RejectTableVariableHints(context);
                 return new FromSource(
                     qualifier: tvAlias ?? tvName.Leaf,
                     columnNames: tvColumnNames,

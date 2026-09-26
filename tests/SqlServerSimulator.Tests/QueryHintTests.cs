@@ -758,12 +758,29 @@ public sealed class QueryHintTests
     public void BareParen_VariableArgument_ReportsMsg215Alone()
         => AreEqual(1, new Simulation().AssertSqlError($"{SeekTable} declare @z int = 1; select * from t (@z)", 215).Errors.Count);
 
+    /// <summary>Msg 1018 names the hint as written (probed 2026-09-26).</summary>
     [TestMethod]
-    public void BareParen_IndexHint_ReportsMsg1018()
+    [DataRow("index")]
+    [DataRow("Index")]
+    public void BareParen_IndexHint_ReportsMsg1018(string written)
         => new Simulation().AssertSqlError(
-            $"{SeekTable} select * from t (index(ix_ab))",
+            $"{SeekTable} select * from t ({written}(ix_ab))",
             1018,
-            "Incorrect syntax near 'INDEX'. If this is intended as a part of a table hint, A WITH keyword and parenthesis are now required. See SQL Server Books Online for proper syntax.");
+            $"Incorrect syntax near '{written}'. If this is intended as a part of a table hint, A WITH keyword and parenthesis are now required. See SQL Server Books Online for proper syntax.");
+
+    /// <summary>
+    /// A table variable takes no table hint: WITH ends the statement (Msg 319)
+    /// and the legacy parenthesized form is Msg 1018 for a hint name, 102 for
+    /// anything else (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select * from @t with (nolock)", 319)]
+    [DataRow("select * from @t x with (nolock)", 319)]
+    [DataRow("select * from @t (nolock)", 1018)]
+    [DataRow("select * from @t x (tablock)", 1018)]
+    [DataRow("select * from @t (bogus)", 102)]
+    public void TableVariable_TakesNoHint(string sql, int number)
+        => new Simulation().AssertSqlError($"declare @t table (a int); {sql}", number);
 
     // --- FORCESEEK's nested form validates its index and its seek columns ---
 

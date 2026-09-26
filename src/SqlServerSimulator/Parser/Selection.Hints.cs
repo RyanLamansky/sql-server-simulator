@@ -410,6 +410,23 @@ internal sealed partial class Selection
     }
 
     /// <summary>
+    /// A table variable takes no table hint (probed 2026-09-26 against SQL
+    /// Server 2025): a <c>WITH</c> after it ends the statement, where the
+    /// dispatch loop's Msg 319 for a CTE without its semicolon answers it, and
+    /// the legacy <c>(hint)</c> form is Msg 1018 for a recognized hint name and
+    /// Msg 102 for anything else.
+    /// </summary>
+    internal static void RejectTableVariableHints(ParserContext context)
+    {
+        if (context.Token is not Operator { Character: '(' })
+            return;
+        var inside = context.GetNextRequired();
+        throw TableHintLookup.ContainsKey(inside.Source)
+            ? SimulatedSqlException.TableHintNeedsWithKeyword(inside.Source)
+            : SimulatedSqlException.SyntaxErrorNear(context);
+    }
+
+    /// <summary>
     /// Walks the comma-separated body of a table-hint list. Cursor on entry:
     /// the first hint-name token (immediately after the opening <c>(</c>).
     /// Cursor on exit: the next token after the closing <c>)</c>.
@@ -537,7 +554,7 @@ internal sealed partial class Selection
         // no-WITH form, wherever in the list it stands and whether or not an
         // alias preceded the parens (probe-confirmed).
         if (legacyForm && kind == TableHintKind.Index)
-            throw SimulatedSqlException.IndexHintNeedsWithKeyword();
+            throw SimulatedSqlException.TableHintNeedsWithKeyword(sourceSpan);
         // Recognize the phase-1b lock-affecting hints. NOLOCK / READUNCOMMITTED
         // skip S acquisition (dirty-read). HOLDLOCK / REPEATABLEREAD /
         // SERIALIZABLE retain row-S to transaction end (so re-read sees the

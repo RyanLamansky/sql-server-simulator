@@ -168,7 +168,8 @@ Every other recognized OPTION hint is a pure no-op.
   With an alias written, the parens are unambiguously a hint list and an unknown name is Msg 321.
   Without one they are an **argument list**: real binds them first, so each name inside reports its own **Msg 207** — the source is not in scope for its own arguments, so even a name the table carries is unresolvable — and the run closes with **Msg 215** (`Parameters supplied for object 't' which is not a function. If the parameters are intended as a table hint, a WITH keyword is required.`), all of it arriving as one multi-error exception the way a client sees it.
   A scalar argument (a literal, a variable) reports Msg 215 alone.
-  `INDEX` is the one name real refuses outright in that form, wherever in the list it stands and whether or not an alias preceded the parens: **Msg 1018**, carrying real's own inconsistent capitalization (`… A WITH keyword and parenthesis are now required.`).
+  `INDEX` is the one name real refuses outright in that form, wherever in the list it stands and whether or not an alias preceded the parens: **Msg 1018**, naming the hint as written and carrying real's own inconsistent capitalization (`… A WITH keyword and parenthesis are now required.`).
+  A table variable takes no hint at all: a `WITH` after it ends the statement (Msg 319), and the parenthesized form is Msg 1018 for any hint name, Msg 102 for anything else (probed 2026-09-26).
 
 ## Not enforced
 
