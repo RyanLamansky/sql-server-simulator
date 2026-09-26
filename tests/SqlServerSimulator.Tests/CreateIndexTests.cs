@@ -977,4 +977,41 @@ public sealed class CreateIndexTests
         AreEqual(2, sim.ExecuteScalar("declare @a dbo.tt, @b dbo.tt; insert @a values (1, 1); insert @b values (1, 1); select (select count(*) from @a) + (select count(*) from @b)"));
         _ = sim.AssertSqlError("declare @a dbo.tt; insert @a values (1, 1), (2, 1)", 2601);
     }
+
+    /// <summary>
+    /// <c>DROP_EXISTING = ON</c> replaces the named index, keeping its index_id;
+    /// a constraint's index may be recreated only as the index it enforces.
+    /// Probed 2026-09-26 against SQL Server 2025.
+    /// </summary>
+    [TestMethod]
+    [DataRow("create index ix on t (a, b) with (drop_existing = on)", "pk:1:1,ix:2:0:a|b,ux:3:1:b")]
+    [DataRow("create unique index ix on t (b) with (drop_existing = on)", "pk:1:1,ix:2:1:b,ux:3:1:b")]
+    [DataRow("create index ux on t (b) with (drop_existing = on)", "pk:1:1,ix:2:0:a,ux:3:0:b")]
+    [DataRow("create unique clustered index pk on t (id) with (drop_existing = on, fillfactor = 70)", "pk:1:1,ix:2:0:a,ux:3:1:b")]
+    public void DropExisting_ReplacesInPlace(string ddl, string expected)
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table t (id int not null constraint pk primary key, a int, b int); create index ix on t (a); create unique index ux on t (b)");
+        _ = simulation.ExecuteNonQuery(ddl);
+        AreEqual(expected, simulation.ExecuteScalar("""
+            select string_agg(concat(i.name, ':', i.index_id, ':', cast(i.is_unique as int), case when i.name = 'pk' then '' else ':' + c.cols end), ',') within group (order by i.index_id)
+            from sys.indexes i
+            cross apply (select string_agg(col_name(ic.object_id, ic.column_id), '|') within group (order by ic.key_ordinal) cols
+                from sys.index_columns ic where ic.object_id = i.object_id and ic.index_id = i.index_id) c
+            where i.object_id = object_id('t')
+            """));
+    }
+
+    [TestMethod]
+    [DataRow("create index nope on t (a) with (drop_existing = on)", 7999, 9)]
+    [DataRow("create index ix on t (a) with (drop_existing = off)", 1913, 1)]
+    [DataRow("create clustered index ix on t (a) with (drop_existing = on)", 1902, 3)]
+    [DataRow("create unique clustered index pk on t (id, a) with (drop_existing = on)", 1907, 2)]
+    [DataRow("create unique nonclustered index pk on t (id) with (drop_existing = on)", 1925, 2)]
+    public void DropExisting_RefusesAsRealDoes(string ddl, int number, int state)
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table t (id int not null constraint pk primary key, a int, b int); create index ix on t (a)");
+        AreEqual((byte)state, simulation.AssertSqlError(ddl, number).State);
+    }
 }

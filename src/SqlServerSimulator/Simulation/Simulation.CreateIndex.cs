@@ -158,25 +158,37 @@ partial class Simulation
         if (filter is not null)
             RejectComputedColumnInIndexFilter(context.Batch, table, indexName, qualifiedTableName, filter);
 
+        // DROP_EXISTING = ON replaces the index of that name, keeping its
+        // index_id; without it the name must be new (probed 2026-09-26
+        // against SQL Server 2025).
+        StoredIndex? replaced = null;
+        KeyConstraint? replacedConstraint = null;
         foreach (var existing in table.Indexes)
         {
             if (context.Batch.CurrentDatabase.Collation.Equals(existing.Name, indexName))
-                throw SimulatedSqlException.IndexAlreadyExists(indexName, targetTableName.ToString());
+                replaced = indexOptions.DropExisting ? existing : throw SimulatedSqlException.IndexAlreadyExists(indexName, targetTableName.ToString());
         }
         foreach (var kc in table.KeyConstraints)
         {
             if (context.Batch.CurrentDatabase.Collation.Equals(kc.Name, indexName))
-                throw SimulatedSqlException.IndexAlreadyExists(indexName, targetTableName.ToString());
+                replacedConstraint = indexOptions.DropExisting ? kc : throw SimulatedSqlException.IndexAlreadyExists(indexName, targetTableName.ToString());
+        }
+        if (indexOptions.DropExisting)
+        {
+            if (replaced is null && replacedConstraint is null)
+                throw SimulatedSqlException.IndexNotFoundForDropExisting(indexName, table.Name);
+            if ((replaced?.IsClustered ?? replacedConstraint!.IsClustered) && !isClustered)
+                throw SimulatedSqlException.DropExistingClusteredToNonclustered();
         }
 
         // A table can carry at most one clustered index — a clustered PK/UQ
         // constraint or a prior CREATE CLUSTERED INDEX. Msg 1902 names the
         // existing one (a default PK is clustered).
-        if (isClustered)
+        if (isClustered && replacedConstraint is null)
         {
             var existingClustered =
                 table.KeyConstraints.FirstOrDefault(k => k.IsClustered)?.Name
-                ?? table.Indexes.FirstOrDefault(ix => ix.IsClustered)?.Name;
+                ?? table.Indexes.FirstOrDefault(ix => ix.IsClustered && ix != replaced)?.Name;
             if (existingClustered is not null)
                 throw SimulatedSqlException.MoreThanOneClusteredIndex(table.Name, existingClustered);
         }
@@ -198,9 +210,26 @@ partial class Simulation
             resolvedIncludeOrdinals[i] = fullOrdinal;
         }
 
+        // Recreating a constraint's index keeps the constraint, so the new
+        // definition has to be the one it enforces — the same key, unique,
+        // unfiltered, nothing included — and only its options change.
+        if (replacedConstraint is { } constraint)
+        {
+            if (!isUnique || filter is not null || resolvedIncludeColumns.Length > 0
+                || resolvedKeyColumns.Length != constraint.StorageOrdinals.Length
+                || resolvedKeyColumns.Where((k, i) => k.StorageOrdinal != constraint.StorageOrdinals[i] || k.IsDescending != constraint.IsDescending(i)).Any())
+            {
+                throw SimulatedSqlException.DropExistingConstraintMismatch(constraint.Name);
+            }
+            constraint.FillFactor = indexOptions.FillFactor ?? 0;
+            constraint.IsPadded = indexOptions.PadIndex ?? false;
+            RecordDdlEvent(context, "CREATE_INDEX", EventSchemaName(targetTableName), indexName, "INDEX", table.Name, "TABLE");
+            return true;
+        }
+
         var index = new StoredIndex(
             indexName,
-            context.CurrentDatabase.AllocateObjectId(),
+            replaced?.ObjectId ?? context.CurrentDatabase.AllocateObjectId(),
             isUnique,
             isClustered,
             resolvedKeyColumns,
@@ -221,7 +250,10 @@ partial class Simulation
         if (isUnique)
             ValidateExistingRowsForUniqueIndex(table, index, context.Batch, qualifiedTableName);
 
-        table.Indexes.Add(index);
+        if (replaced is not null)
+            table.Indexes[table.Indexes.IndexOf(replaced)] = index;
+        else
+            table.Indexes.Add(index);
         RecordDdlEvent(context, "CREATE_INDEX", EventSchemaName(targetTableName), indexName, "INDEX", table.Name, "TABLE");
         return true;
     }

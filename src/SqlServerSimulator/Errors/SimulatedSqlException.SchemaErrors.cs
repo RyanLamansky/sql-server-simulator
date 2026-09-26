@@ -2080,6 +2080,21 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException FillFactorOutOfRange(int value) =>
         new($"Fillfactor {value} is not a valid percentage; fillfactor must be between 1 and 100.", 129, 15, 1);
 
+    // CREATE INDEX … WITH (DROP_EXISTING = ON)'s refusals, probed 2026-09-26
+    // against SQL Server 2025.
+
+    /// <summary>Msg 7999: no index of that name to replace.</summary>
+    internal static SimulatedSqlException IndexNotFoundForDropExisting(string indexName, string tableName) =>
+        new($"Could not find any index named '{indexName}' for table '{tableName}'.", 7999, 16, 9);
+
+    /// <summary>Msg 1925: replacing a clustered index with a nonclustered one.</summary>
+    internal static SimulatedSqlException DropExistingClusteredToNonclustered() =>
+        new("Cannot convert a clustered index to a nonclustered index by using the DROP_EXISTING option. To change the index type from clustered to nonclustered, delete the clustered index, and then create a nonclustered index by using two separate statements.", 1925, 16, 2);
+
+    /// <summary>Msg 1907: recreating a PRIMARY KEY / UNIQUE constraint's index as anything but the index the constraint enforces.</summary>
+    internal static SimulatedSqlException DropExistingConstraintMismatch(string indexName) =>
+        new($"Cannot recreate index '{indexName}'. The new index definition does not match the constraint being enforced by the existing index.", 1907, 16, 2);
+
     /// <summary>
     /// Mimics SQL Server error 1927: <c>CREATE STATISTICS</c> named something
     /// the table already carries. Statistics share the per-table name space

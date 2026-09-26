@@ -840,6 +840,7 @@ partial class Simulation
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
         var ignoreDupKey = false;
+        var dropExisting = false;
         byte? fillFactor = null;
         bool? padIndex = null;
         var depth = 1;
@@ -870,6 +871,8 @@ partial class Simulation
                         ignoreDupKey = on;
                     else if (namedOption == "PAD_INDEX")
                         padIndex = on;
+                    else if (namedOption == "DROP_EXISTING")
+                        dropExisting = on;
                     break;
                 case Numeric or Operator { Character: '-' } when sawEquals && namedOption == "FILLFACTOR":
                     fillFactor = ReadFillFactor(context);
@@ -883,6 +886,9 @@ partial class Simulation
                 case StringToken name when depth == 1 && name.Span.Equals("PAD_INDEX", StringComparison.OrdinalIgnoreCase):
                     namedOption = "PAD_INDEX";
                     continue;
+                case StringToken name when depth == 1 && name.Span.Equals("DROP_EXISTING", StringComparison.OrdinalIgnoreCase):
+                    namedOption = "DROP_EXISTING";
+                    continue;
             }
 
             namedOption = null;
@@ -890,7 +896,7 @@ partial class Simulation
         }
 
         context.MoveNextOptional();
-        return new IndexOptions(ignoreDupKey, fillFactor, padIndex);
+        return new IndexOptions(ignoreDupKey, fillFactor, padIndex, dropExisting);
     }
 
     /// <summary>

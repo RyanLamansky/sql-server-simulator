@@ -8,7 +8,7 @@ namespace SqlServerSimulator.Storage;
 /// when the clause didn't name them, so an <c>ALTER INDEX … REBUILD</c>
 /// keeps what it leaves out.
 /// </summary>
-internal readonly struct IndexOptions(bool ignoreDupKey, byte? fillFactor, bool? padIndex)
+internal readonly struct IndexOptions(bool ignoreDupKey, byte? fillFactor, bool? padIndex, bool dropExisting = false)
 {
     public readonly bool IgnoreDupKey = ignoreDupKey;
 
@@ -16,4 +16,7 @@ internal readonly struct IndexOptions(bool ignoreDupKey, byte? fillFactor, bool?
     public readonly byte? FillFactor = fillFactor;
 
     public readonly bool? PadIndex = padIndex;
+
+    /// <summary><c>DROP_EXISTING = ON</c>: a <c>CREATE INDEX</c> replaces the index of that name.</summary>
+    public readonly bool DropExisting = dropExisting;
 }
