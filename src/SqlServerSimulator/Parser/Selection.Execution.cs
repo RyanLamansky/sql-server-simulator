@@ -1335,7 +1335,9 @@ internal sealed partial class Selection
             || source.LateralPlan?.ReadsStorage == true);
         var startupConstants = new List<Expression>();
         var projectionStartupConstants = new List<Expression>();
-        if (readsStorage && !whereIsNeverTrue && !(sources.Length == 1 && PinsUniqueKey(sources[0], fromClause.Excluders)))
+        var startsConstants = readsStorage && !whereIsNeverTrue
+            && !(sources is [{ BackingTable: { } onlyTable } onlySource] && PinsUniqueKey(onlyTable, onlySource, fromClause.Excluders));
+        if (startsConstants)
         {
             foreach (var expression in expressions)
                 ConstantFolding.CollectStartupConstants(expression, parseBatch.Parser, projectionStartupConstants);
@@ -1448,6 +1450,7 @@ internal sealed partial class Selection
         selection.ColumnWireFlags = WireFlagsOf(expressions, sources, selection.AutoColumnSource, selection.AutoColumnOrdinal);
         selection.IsGrouped = isGrouped;
         selection.ReadsStorage = readsStorage;
+        selection.StartsConstants = startsConstants;
         selection.HasWindows = windows.Count > 0;
         // A plain SELECT-project-filter body can carry an enclosing statement's
         // WHERE conjunct: it applies its projection and its own WHERE to every
@@ -1505,7 +1508,7 @@ internal sealed partial class Selection
     /// error one of them raises; see
     /// <see cref="ConstantFolding.CollectStartupConstants"/>.
     /// </summary>
-    private static void RunStartupConstants(List<Expression> constants, BatchContext batch)
+    internal static void RunStartupConstants(List<Expression> constants, BatchContext batch)
     {
         if (constants.Count == 0)
             return;

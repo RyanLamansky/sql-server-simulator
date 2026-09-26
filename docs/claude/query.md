@@ -409,12 +409,15 @@ And some plans never start the evaluation at all:
 - a FROM of constants alone (`VALUES`, no FROM), which real runs as a constant scan — `Selection.ReadsStorage` tells the two apart through derived tables;
 - a singleton lookup — every key column of a unique key pinned by an equality — which real answers without starting the rest of the plan, so `SELECT 1/0 FROM t WHERE pk = 99` returns nothing when no row matches, while `pk IN (98, 99)` raises.
 
+UPDATE, DELETE and `INSERT … SELECT` start the same way, and one more thing happens there: a statement-wide value written to a column — a literal, a variable or parameter, a computation over those — is converted to that column as the plan starts.
+So `UPDATE t SET v = 'toolong' WHERE id = 999`, the same through an over-long `@p` (a SqlClient parameter included), and `INSERT t (v) SELECT 'toolong' FROM t WHERE id = 999` raise Msg 2628 over no qualifying row (`RunUpdateStartupConstants`, `ExecuteSelectSource`).
+The same exemptions hold — a never-TRUE WHERE, `TOP (0)` (which reads no row at all), a unique-key singleton, `ANSI_WARNINGS OFF` for the truncation.
+
 **Divergences**:
 
 - A one-row sort over constants evaluates its key: `SELECT 1 ORDER BY 1/0` and `SELECT x FROM (VALUES (1)) v(x) ORDER BY 1/0` raise Msg 8134 where real, knowing the row count, sorts nothing.
 - An uncorrelated subquery real also evaluates at plan start is left to the row: `SELECT id FROM empty WHERE id = (SELECT 1/0 FROM t WHERE id = 5)` raises there and returns nothing here.
 - A `WITHIN GROUP` key isn't collected, so `STRING_AGG(v, ',') WITHIN GROUP (ORDER BY 1/0)` over no qualifying row returns NULL where real raises.
-- DML statements (`UPDATE … SET v = 'toolong' WHERE id = 999`, `DELETE t WHERE id = 1/0`) evaluate per row, so they raise only when a row qualifies; real raises at plan start there too, including the truncation of a literal assigned to a narrower column.
 
 ### Top-level ORDER BY over a set operation
 

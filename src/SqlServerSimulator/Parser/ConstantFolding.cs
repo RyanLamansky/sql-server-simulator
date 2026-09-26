@@ -303,6 +303,16 @@ internal static class ConstantFolding
     }
 
     /// <summary>
+    /// Whether <paramref name="expression"/> has one value for the whole
+    /// statement that real computes as its plan starts — a written constant,
+    /// a variable or parameter, or a computation over those alone (see
+    /// <see cref="IsVariableComputation"/>) — so a DML write converts it to
+    /// its target column there, before any row.
+    /// </summary>
+    internal static bool IsStartupValue(Expression expression) =>
+        expression.IsWrittenConstant || expression is VariableReference || IsVariableComputation(expression);
+
+    /// <summary>
     /// Whether <paramref name="expression"/> computes over variables and
     /// literals alone through side-effect-free nodes, with no conditional
     /// branch — so evaluating it once up front runs exactly what real's plan

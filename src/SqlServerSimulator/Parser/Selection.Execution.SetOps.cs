@@ -39,6 +39,15 @@ internal sealed partial class Selection
     internal bool ReadsStorage;
 
     /// <summary>
+    /// Whether the plan evaluates its runtime constants as it starts (see
+    /// <see cref="ConstantFolding.CollectStartupConstants"/>) — it reads
+    /// storage, its WHERE isn't settled never-TRUE, and it isn't a unique-key
+    /// singleton lookup. An <c>INSERT … SELECT</c> reads it to convert a
+    /// projected literal to its target column at the same point.
+    /// </summary>
+    internal bool StartsConstants;
+
+    /// <summary>
     /// The FROM sources of the branch whose projections this plan's output
     /// columns come from — the leftmost branch of a set-op chain, since that's
     /// where the combined result takes its column names. A top-level ORDER BY

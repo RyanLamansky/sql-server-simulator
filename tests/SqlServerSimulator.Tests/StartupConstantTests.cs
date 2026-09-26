@@ -122,4 +122,46 @@ public sealed class StartupConstantTests
         HasCount(2, Rows(sim, "select id from t order by checksum(*)").Split('|'));
         HasCount(2, Rows(sim, "select id from t order by binary_checksum(*)").Split('|'));
     }
+
+    [TestMethod]
+    [DataRow("update t set v = 'abcdef' where id = 999", 2628)]
+    [DataRow("update t set v = N'abcdef' where id = 999", 2628)]
+    [DataRow("update t set id = 1/0 where id = 999", 8134)]
+    [DataRow("update t set id = 'x' where id = 999", 245)]
+    [DataRow("update t set id = 2 where id = 999 and 1/0 = 1", 8134)]
+    [DataRow("update a set v = 'abcdef' from t a join t b on a.id = b.id where a.id = 999", 2628)]
+    [DataRow("delete t where id = 1/0", 8134)]
+    [DataRow("delete a from t a join e b on a.id = b.id where a.id = 1/0", 8134)]
+    [DataRow("insert t (id, v) select id, 'abcdef' from t where id = 999", 2628)]
+    [DataRow("insert t (id, v) select 1/0, 'a' from t where id = 999", 8134)]
+    public void DmlRuntimeConstant_RaisesWithNoRowQualifying(string sql, int number) =>
+        OneRow().AssertSqlError(sql, number);
+
+    [TestMethod]
+    [DataRow("update t set v = 'abcdef' where 1 = 0")]
+    [DataRow("update top (0) t set v = 'abcdef'")]
+    [DataRow("delete top (0) t where id = 1/0")]
+    [DataRow("update pk set v = 1/0 where id = 99")]
+    [DataRow("delete pk where id = 99 and v = 1/0")]
+    [DataRow("set ansi_warnings off; update t set v = 'abcdef' where id = 999")]
+    public void DmlThatNeverStartsTheConstant_AffectsNothing(string sql) =>
+        AreEqual(0, OneRow().ExecuteNonQuery(sql));
+
+    [TestMethod]
+    public void OverLongVariable_IsConvertedAtPlanStart()
+    {
+        var sim = OneRow();
+        _ = sim.AssertSqlError("declare @p varchar(10) = 'abcdef'; update t set v = @p where id = 999", 2628);
+        _ = sim.AssertSqlError("declare @p int = 0; update t set id = 1 / @p where id = 999", 8134);
+        AreEqual(0, sim.ExecuteNonQuery("declare @p int = 0; update pk set v = 1 / @p where id = 99"));
+    }
+
+    [TestMethod]
+    public void OverLongParameter_IsConvertedAtPlanStart()
+    {
+        var sim = OneRow();
+        using var connection = sim.CreateOpenConnection();
+        using var command = connection.CreateCommand("update t set v = @p0 where id = @p1", ("@p0", "abcdef"), ("@p1", 999));
+        AreEqual(2628, Throws<SimulatedSqlException>(() => command.ExecuteNonQuery()).Number);
+    }
 }

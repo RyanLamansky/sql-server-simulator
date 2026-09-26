@@ -1743,7 +1743,8 @@ internal sealed partial class Selection
 
     /// <summary>
     /// Whether the WHERE conjuncts pin every key column of one of
-    /// <paramref name="source"/>'s unique keys to a single row-independent
+    /// <paramref name="table"/>'s unique keys, read through
+    /// <paramref name="source"/>, to a single row-independent
     /// value — the singleton lookup real answers without starting the rest
     /// of its plan, so a startup constant (see
     /// <see cref="ConstantFolding.CollectStartupConstants"/>) raises there
@@ -1751,11 +1752,8 @@ internal sealed partial class Selection
     /// 99</c> answers no rows where <c>pk IN (98, 99)</c> raises (probed
     /// 2026-09-26 against SQL Server 2025).
     /// </summary>
-    private static bool PinsUniqueKey(FromSource source, List<BooleanExpression> excluders)
+    private static bool PinsUniqueKey(HeapTable table, FromSource source, List<BooleanExpression> excluders)
     {
-        if (source.BackingTable is not { } table)
-            return false;
-
         var conjuncts = new List<BooleanExpression>();
         foreach (var excluder in excluders)
             excluder.CollectConjuncts(conjuncts);
@@ -1786,6 +1784,18 @@ internal sealed partial class Selection
 
         return false;
     }
+
+    /// <summary>
+    /// Whether a single-table UPDATE / DELETE over <paramref name="table"/>
+    /// starts its plan the way a table-reading SELECT does, evaluating its
+    /// runtime constants before any row: not under a WHERE settled
+    /// never-TRUE, and not for a unique-key singleton lookup (see
+    /// <see cref="PinsUniqueKey"/>) — probed 2026-09-26 against SQL Server
+    /// 2025, where <c>UPDATE t SET v = 1/0 WHERE pk = 99</c> affects nothing
+    /// and <c>… WHERE id = 99</c> over a heap raises.
+    /// </summary>
+    internal static bool MutationPlanStarts(HeapTable table, BooleanExpression? where) =>
+        where is null || (!where.IsNeverTrue && !PinsUniqueKey(table, BuildBaseTableSeekSource(table, table.Name), [where]));
 
     private static bool KeyColumnsCovered(int[] keyOrdinals, HashSet<int> available)
     {

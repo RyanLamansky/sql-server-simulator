@@ -171,8 +171,17 @@ partial class Simulation
         // the UPDATE path drops its row source, including the runtime errors a
         // never-run statement's WHERE would otherwise raise while a module body
         // binds at CREATE time.
-        if (context.Batch.IsSkipping)
+        if (context.Batch.IsSkipping || DmlTopIsZero(top, context.Batch))
+        {
+            // TOP (0) reads no row at all, so nothing per row can raise either.
             rowSource = [];
+        }
+        else if (where is not null && Selection.MutationPlanStarts(table, where))
+        {
+            // Real evaluates the WHERE's runtime constants as its plan starts,
+            // so `DELETE t WHERE id = 1/0` raises over an empty table.
+            RunUpdateStartupConstants(context, table, [where], []);
+        }
         var viewRows = MaterializeRowSelectiveViewRows(context, sourceView, table, positionedCursor is not null);
         foreach (var (pageIndex, slotIndex, rowBytes) in rowSource)
         {
@@ -312,6 +321,8 @@ partial class Simulation
         // run its sources, a NEXT VALUE FOR among them.
         if (context.Batch.IsSkipping)
             return new SimulatedNonQuery(0);
+        if (where?.IsNeverTrue != true && !DmlTopIsZero(top, context.Batch))
+            RunUpdateStartupConstants(context, table, JoinedPredicates(joins, where), []);
 
         sources = Selection.PrepareMutationJoinSources(sources, joins, where, targetIndex, context.Batch);
 

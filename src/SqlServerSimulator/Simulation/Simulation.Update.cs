@@ -456,8 +456,11 @@ partial class Simulation
         // binding, where it would refuse a body real accepts. Everything the
         // bind needs — the target, the SET column ordinals, the predicate — was
         // resolved above.
-        if (context.Batch.IsSkipping)
+        // TOP (0) reads no row at all, so nothing per row can raise either.
+        if (context.Batch.IsSkipping || DmlTopIsZero(top, context.Batch))
             rowSource = [];
+        else if (positionedCursor is null && Selection.MutationPlanStarts(table, where))
+            RunUpdateStartupConstants(context, table, where is null ? [] : [where], assignments);
         var viewRows = MaterializeRowSelectiveViewRows(context, sourceView, table, positionedCursor is not null);
         foreach (var (pageIndex, slotIndex, rowBytes) in rowSource)
         {
@@ -740,6 +743,8 @@ partial class Simulation
         // run its sources, a NEXT VALUE FOR among them.
         if (context.Batch.IsSkipping)
             return new SimulatedNonQuery(0);
+        if (where?.IsNeverTrue != true && !DmlTopIsZero(top, context.Batch))
+            RunUpdateStartupConstants(context, table, JoinedPredicates(joins, where), assignments);
 
         sources = Selection.PrepareMutationJoinSources(sources, joins, where, targetIndex, context.Batch);
 
@@ -1374,6 +1379,70 @@ partial class Simulation
                 : RowDecoder.DecodeColumn(storedColumns, rowBytes, ord, table.Heap);
         }
         return fullValues;
+    }
+
+    /// <summary>
+    /// Whether a DML statement's <c>TOP</c> caps it at no row, which leaves
+    /// real's plan nothing to start: <c>UPDATE TOP (0) t SET v = 'toolong'</c>
+    /// raises nothing there.
+    /// </summary>
+    private static bool DmlTopIsZero(Selection.DmlTopLimit? top, BatchContext batch) =>
+        top is { } limit && Selection.ResolveDmlTopCap(limit, int.MaxValue, batch) == 0;
+
+    /// <summary>A joined UPDATE / DELETE's predicates: every JOIN ON, then the WHERE.</summary>
+    private static List<BooleanExpression> JoinedPredicates(JoinSpec[] joins, BooleanExpression? where)
+    {
+        var predicates = new List<BooleanExpression>();
+        foreach (var join in joins)
+        {
+            if (join.OnPredicate is { } on)
+                predicates.Add(on);
+        }
+        if (where is not null)
+            predicates.Add(where);
+        return predicates;
+    }
+
+    /// <summary>
+    /// Evaluates what real's UPDATE / DELETE plan evaluates once as it starts,
+    /// before reading a row: the predicates' and SET values' runtime constants
+    /// (see <see cref="ConstantFolding.CollectStartupConstants"/>), and a
+    /// statement-wide value — a literal, a variable or parameter, a
+    /// computation over those — converted to the column it is assigned to, so
+    /// <c>UPDATE t SET v = 'toolong' WHERE id = 999</c> and the same through
+    /// an over-long <c>@p</c> raise Msg 2628 over no matching row as they do
+    /// there (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    private static void RunUpdateStartupConstants(
+        ParserContext context, HeapTable table, List<BooleanExpression> predicates, List<(int Ordinal, Expression Expr)> assignments)
+    {
+        var constants = new List<Expression>();
+        foreach (var predicate in predicates)
+            ConstantFolding.CollectStartupConstants(predicate, context, constants);
+        var startupValues = new List<(HeapColumn Column, Expression Value)>();
+        foreach (var (ordinal, expr) in assignments)
+        {
+            if (ordinal >= 0 && expr is not AssignmentExpression && ConstantFolding.IsStartupValue(expr))
+                startupValues.Add((table.Columns[ordinal], expr));
+            else
+                ConstantFolding.CollectStartupConstants(expr, context, constants);
+        }
+        Selection.RunStartupConstants(constants, context.Batch);
+        ConvertStartupValues(context, table, startupValues);
+    }
+
+    /// <summary>
+    /// Converts each statement-wide value to the column it is written to, for
+    /// the error real raises doing so as its plan starts (a truncation, a
+    /// failed conversion, an overflow) — see <see cref="ConstantFolding.IsStartupValue"/>.
+    /// </summary>
+    private static void ConvertStartupValues(ParserContext context, HeapTable table, List<(HeapColumn Column, Expression Value)> values)
+    {
+        if (values.Count == 0)
+            return;
+        var runtime = new RuntimeContext(static _ => throw new InvalidOperationException("A startup value reads no column."), context.Batch);
+        foreach (var (column, value) in values)
+            _ = CoerceForWrite(EnforceMaxLength(value.Run(runtime), column, table, context.Connection), column, context.Batch);
     }
 
     /// <summary>

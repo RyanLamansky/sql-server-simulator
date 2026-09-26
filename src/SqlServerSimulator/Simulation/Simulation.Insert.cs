@@ -1105,6 +1105,21 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return [];
 
+        // A projected statement-wide value meets its target column as the plan
+        // starts, so one too long for it raises Msg 2628 though no row
+        // qualifies (probed 2026-09-26 against SQL Server 2025).
+        if (destinationTable is not null && selection.StartsConstants && selection.ProjectionExpressions is { } projections)
+        {
+            var startupValues = new List<(HeapColumn Column, Expression Value)>();
+            for (var i = 0; i < expectedColumnCount; i++)
+            {
+                var projected = projections[i] is Parser.Expressions.NamedExpression named ? named.Inner : projections[i];
+                if (ConstantFolding.IsStartupValue(projected))
+                    startupValues.Add((destinationColumns[i], projected));
+            }
+            ConvertStartupValues(context, destinationTable, startupValues);
+        }
+
         var resultSet = selection.Execute(context.Batch);
         var rows = new List<SqlValue[]>();
         foreach (var rowBytes in resultSet.RowBytes)
