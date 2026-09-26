@@ -455,7 +455,7 @@ The **top-level ORDER BY after a set-op chain** (`ApplyTopLevelOrderBy`) is the 
 Sort keys decode only the ORDER BY columns off each row (`ComputeTopLevelOrderKeys`), not the full tuple.
 
 ## Aggregates
-`COUNT(*)` / `COUNT(expr)` / `COUNT(DISTINCT)` / `COUNT_BIG`, `SUM` / `AVG`, `MAX` / `MIN`, statistical (`STDEV` / `STDEVP` / `VAR` / `VARP`), `STRING_AGG`, `CHECKSUM_AGG`, `APPROX_COUNT_DISTINCT`.
+`COUNT(*)` / `COUNT(expr)` / `COUNT(DISTINCT)` / `COUNT_BIG`, `SUM` / `AVG`, `MAX` / `MIN`, statistical (`STDEV` / `STDEVP` / `VAR` / `VARP`), `STRING_AGG`, `CHECKSUM_AGG`, `APPROX_COUNT_DISTINCT`, and SQL Server 2025's `PRODUCT` (SUM's result types, save a fractional decimal multiplying at scale 6; `ProductAggregator`).
 `AVG(int)` truncates; `AVG(decimal(p,s))` widens to `decimal(38, max(s,6))`.
 `SUM` / `AVG` also widen `real` to `float` and `smallmoney` to `money`, where `MIN` / `MAX` keep the operand's type — see [`arithmetic.md`](arithmetic.md#the-approximate-family-float--real).
 
@@ -764,7 +764,7 @@ Cross-aggregate Msg 8711 isn't modeled (EF doesn't emit).
   `PERCENTILE_CONT` returns `float` and linearly interpolates at `rank = p·(n−1)` between the floor/ceil values; `PERCENTILE_DISC` returns the **sort expression's own type** and picks the smallest value whose CUME_DIST ≥ p (index `ceil(p·n) − 1`, clamped).
   The fraction `p` is evaluated once per query (constant, variable, or parameter); NULL or a value outside `[0, 1]` → Msg 8727 at runtime.
   `DESC` reverses the sort.
-- Aggregate windows: `SUM`/`AVG`/`COUNT`/`COUNT_BIG`/`MIN`/`MAX`/`STDEV*`/`VAR*`/`CHECKSUM_AGG`/`APPROX_COUNT_DISTINCT(expr) OVER ([PARTITION BY ...] [ORDER BY ...] [frame])`.
+- Aggregate windows: `SUM`/`AVG`/`COUNT`/`COUNT_BIG`/`MIN`/`MAX`/`STDEV*`/`VAR*`/`CHECKSUM_AGG`/`APPROX_COUNT_DISTINCT`/`PRODUCT(expr) OVER ([PARTITION BY ...] [ORDER BY ...] [frame])`.
   Default frame without ORDER BY = whole partition; with ORDER BY = `RANGE UNBOUNDED PRECEDING TO CURRENT ROW` (running total with peer-tie grouping).
 - Explicit frame specs: `ROWS BETWEEN <start> AND <end>` and `RANGE BETWEEN <start> AND <end>`, plus the single-bound shorthand `ROWS <start>` ≡ `ROWS BETWEEN <start> AND CURRENT ROW`.
   `ROWS` accepts the full bound family: `UNBOUNDED PRECEDING`, `N PRECEDING`, `CURRENT ROW`, `N FOLLOWING`, `UNBOUNDED FOLLOWING`.

@@ -1719,6 +1719,7 @@ internal abstract class Expression : ExpressionNode
                 "FILE_ID" => new FileId(context, extended: false),
                 "GETDATE" => new CurrentTimeFunction(context, CurrentTimeKind.GetDate),
                 "GET_BIT" => new GetBit(context),
+                "PRODUCT" => AggregateExpression.Parse(context, AggregateKind.Product),
                 "RADIANS" => new Radians(context),
                 "REPLACE" => new Replace(context),
                 "REVERSE" => new Reverse(context),

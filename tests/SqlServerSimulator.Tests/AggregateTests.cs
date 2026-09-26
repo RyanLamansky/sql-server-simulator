@@ -667,5 +667,31 @@ public sealed class AggregateTests
         AreEqual($"Operand data type {type} is invalid for {aggregate} operator.", error.Errors[0].Message);
         AreEqual((byte)state, error.Errors[0].State);
     }
-}
 
+    /// <summary>
+    /// SQL Server 2025's PRODUCT: SUM's result types, a fractional decimal at
+    /// decimal(38, 6), NULL over no values, DISTINCT and OVER alike, and an
+    /// overflow naming the result type (probed 2026-09-26 against SQL Server
+    /// 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select product(v) from (values (2), (3)) t (v)", "6")]
+    [DataRow("select sql_variant_property(product(v), 'BaseType') from (values (cast(2 as tinyint))) t (v)", "int")]
+    [DataRow("select product(v) from (values (cast(1.5 as decimal(5, 2))), (2.0)) t (v)", "3.000000")]
+    [DataRow("select product(v) from (values (cast(1.123456789 as decimal(20, 10))), (cast(1.5 as decimal(20, 10)))) t (v)", "1.685186")]
+    [DataRow("select product(v) from (values (cast(2 as money)), (3)) t (v)", "6.0000")]
+    [DataRow("select product(v) from (values (2e0), (3e0)) t (v)", "6")]
+    [DataRow("select product(distinct v) from (values (2), (2), (3)) t (v)", "6")]
+    [DataRow("select isnull(cast(product(v) as varchar), 'NULL') from (values (1)) t (v) where 1 = 0", "NULL")]
+    [DataRow("select string_agg(cast(p as varchar), ',') within group (order by v) from (select v, product(v) over (order by v) p from (values (1), (2), (3)) t (v)) x", "1,2,6")]
+    public void Product_AnswersAsRealDoes(string sql, string expected)
+        => AreEqual(expected, Convert.ToString(new Simulation().ExecuteScalar(sql), System.Globalization.CultureInfo.InvariantCulture));
+
+    [TestMethod]
+    [DataRow("select product(v) from (values (100000), (100000)) t (v)", 8115)]
+    [DataRow("select product(v) from (values (cast(9223372036854775807 as bigint)), (2)) t (v)", 8115)]
+    [DataRow("select product(v) from (values ('a')) t (v)", 8117)]
+    [DataRow("select product(v) from (values (cast(1 as bit))) t (v)", 8117)]
+    public void Product_RefusesAsRealDoes(string sql, int number)
+        => new Simulation().AssertSqlError(sql, number);
+}

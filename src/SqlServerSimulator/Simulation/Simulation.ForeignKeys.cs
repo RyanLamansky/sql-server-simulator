@@ -270,7 +270,7 @@ partial class Simulation
             ? fk.ChildTable.Columns[fk.ChildColumnOrdinals[0]].Name
             : null;
         return SimulatedSqlException.ForeignKeyConflictOnParent(
-            verb, fk.Name, DatabaseNameFor(fk.ChildTable), childSchema, fk.ChildTable.Name, childColumn);
+            verb, fk.Name, DatabaseNameFor(fk.ChildTable), childSchema, fk.ChildTable.Name, childColumn, fk.IsSelfReferencing);
     }
 
     private static string ResolveSchemaName(Database database, int schemaId)

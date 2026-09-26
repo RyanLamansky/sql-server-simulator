@@ -140,13 +140,16 @@ partial class SimulatedSqlException
     /// the constraint phrase is <c>REFERENCE constraint</c> rather than
     /// <c>FOREIGN KEY constraint</c>, and the table / column slot describes
     /// the child (referring) side, not the referenced side (probe-confirmed).
+    /// A self-referencing key reads <c>SAME TABLE REFERENCE</c>, as the child
+    /// side's reads <c>FOREIGN KEY SAME TABLE</c> (probed 2026-09-26).
     /// </summary>
     internal static SimulatedSqlException ForeignKeyConflictOnParent(
-        string verb, string constraintName, string databaseName, string childSchema, string childTable, string? childColumn)
+        string verb, string constraintName, string databaseName, string childSchema, string childTable, string? childColumn, bool isSelfReferencing)
     {
+        var keyKindWord = isSelfReferencing ? "SAME TABLE REFERENCE" : "REFERENCE";
         var columnSuffix = childColumn is null ? "" : $", column '{childColumn}'";
         return new(
-            $"The {verb} statement conflicted with the REFERENCE constraint \"{constraintName}\". The conflict occurred in database \"{databaseName}\", table \"{childSchema}.{childTable}\"{columnSuffix}.",
+            $"The {verb} statement conflicted with the {keyKindWord} constraint \"{constraintName}\". The conflict occurred in database \"{databaseName}\", table \"{childSchema}.{childTable}\"{columnSuffix}.",
             547, 16, 0);
     }
 

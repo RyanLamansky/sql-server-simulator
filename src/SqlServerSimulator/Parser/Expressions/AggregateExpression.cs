@@ -23,6 +23,7 @@ internal enum AggregateKind
     ApproxCountDistinct,
     JsonArrayAgg,
     JsonObjectAgg,
+    Product,
 }
 
 /// <summary>
@@ -163,6 +164,7 @@ internal sealed class AggregateExpression : Expression
         AggregateKind.ApproxCountDistinct => "approx_count_distinct",
         AggregateKind.JsonArrayAgg => "json_arrayagg",
         AggregateKind.JsonObjectAgg => "json_objectagg",
+        AggregateKind.Product => "product",
         _ => throw new InvalidOperationException($"Unknown aggregate kind {kind}."),
     };
 
@@ -309,6 +311,7 @@ internal sealed class AggregateExpression : Expression
         AggregateKind.JsonArrayAgg or AggregateKind.JsonObjectAgg => NVarcharMax,
         AggregateKind.Sum => DeriveSumResultType(this.RejectDistinctLob(this.Operand!.GetSqlType(batch, resolveColumnType))),
         AggregateKind.Avg => DeriveAvgResultType(this.RejectDistinctLob(this.Operand!.GetSqlType(batch, resolveColumnType))),
+        AggregateKind.Product => DeriveProductResultType(this.RejectDistinctLob(this.Operand!.GetSqlType(batch, resolveColumnType))),
         _ => throw new InvalidOperationException($"Unknown aggregate kind {this.Kind}."),
     };
 
@@ -406,6 +409,19 @@ internal sealed class AggregateExpression : Expression
     /// SQL Server 2025 — int does NOT auto-widen to bigint, so an overflowing
     /// sum raises Msg 8115.
     /// </summary>
+    /// <summary>
+    /// <c>PRODUCT</c>'s result type: SUM's, except that a decimal with any
+    /// fractional digits multiplies at scale 6 whatever its own (probed
+    /// 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    private static SqlType DeriveProductResultType(SqlType operandType) => operandType switch
+    {
+        DecimalSqlType d => SqlType.GetDecimal(38, d.scale == 0 ? 0 : 6),
+        _ when operandType.Category is SqlTypeCategory.Integer or SqlTypeCategory.Approximate or SqlTypeCategory.Money && operandType != SqlType.Bit
+            => DeriveSumResultType(operandType),
+        _ => throw SimulatedSqlException.OperandDataTypeInvalid(operandType, "product"),
+    };
+
     private static SqlType DeriveSumResultType(SqlType operandType) => operandType switch
     {
         var t when t == SqlType.TinyInt || t == SqlType.SmallInt => SqlType.Int32,
@@ -632,6 +648,7 @@ internal sealed class AggregateExpression : Expression
             AggregateKind.ApproxCountDistinct => "APPROX_COUNT_DISTINCT",
             AggregateKind.JsonArrayAgg => "JSON_ARRAYAGG",
             AggregateKind.JsonObjectAgg => "JSON_OBJECTAGG",
+            AggregateKind.Product => "PRODUCT",
             _ => this.Kind.ToString(),
         };
         if (this.Kind == AggregateKind.JsonObjectAgg)

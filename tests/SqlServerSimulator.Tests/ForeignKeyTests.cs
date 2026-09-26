@@ -424,6 +424,15 @@ public sealed class ForeignKeyTests
     }
 
     [TestMethod]
+    public void SelfReference_DeletingAReferencedRow_SaysSameTableReference()
+        // The parent side's wording (probed 2026-09-26 against SQL Server 2025).
+        => Assert.Contains("conflicted with the SAME TABLE REFERENCE constraint", new Simulation().AssertSqlError("""
+            create table t (id int not null primary key, parent_id int null references t(id));
+            insert t values (1, null), (2, 1);
+            delete t where id = 1
+            """, 547).Errors[0].Message);
+
+    [TestMethod]
     public void MultiRowInsert_OneFkViolation_RollsBackPriorRows()
     {
         // Multi-row VALUES with the second row violating FK — statement-atomic
