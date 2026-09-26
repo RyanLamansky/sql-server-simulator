@@ -296,9 +296,12 @@ partial class Simulation
     /// a procedure / function / trigger body and inside dynamic SQL (a non-null
     /// <see cref="BatchContext.ProcFrame"/> covers the dynamic-SQL sentinel too),
     /// so only a top-level <c>SET</c> persists to the session — matching how
-    /// real SQL Server scopes these options. Runs regardless of
-    /// <see cref="BatchContext.IsSkipping"/> (a SET in a never-taken IF branch
-    /// still applies, as with QUOTED_IDENTIFIER). Other recognized OnOff
+    /// real SQL Server scopes these options. Unlike QUOTED_IDENTIFIER these
+    /// apply when the SET runs, not while it parses: the batch's compile walk
+    /// and a never-taken IF branch leave them alone, so a statement ahead of the
+    /// SET in its batch still sees the old setting — its <c>NULL = NULL</c>,
+    /// its string <c>+</c>, <c>SESSIONPROPERTY</c> and <c>@@OPTIONS</c> alike
+    /// (probed 2026-09-26 against SQL Server 2025). Other recognized OnOff
     /// options fall through the default arm and no-op — including XACT_ABORT,
     /// whose write happens in the caller because it carries the opposite
     /// module scoping (it applies inside a body and reverts on return).
@@ -306,7 +309,7 @@ partial class Simulation
     private static void RecordSessionStateOption(ParserContext context, string optionName, bool on)
     {
         var batch = context.Batch;
-        if (batch.UdfFrame is not null || batch.TriggerFrame is not null || batch.ProcFrame is not null)
+        if (batch.IsSkipping || batch.UdfFrame is not null || batch.TriggerFrame is not null || batch.ProcFrame is not null)
             return;
         var connection = context.Connection;
         Span<char> upper = stackalloc char[optionName.Length];

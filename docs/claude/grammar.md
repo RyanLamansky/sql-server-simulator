@@ -117,6 +117,9 @@ The application is **parse-time and NOT gated on skip-mode**, matching SQL Serve
 - **Procedure / function / trigger bodies ignore the `SET` entirely** (SQL Server's "ignored in a stored procedure" rule) — neither the body's own reading nor the session changes.
   A body's reading comes from the module's creation-time capture instead — see below.
 
+The other session options — `ANSI_NULLS`, `ANSI_PADDING`, `ANSI_WARNINGS`, `ARITHABORT`, `CONCAT_NULL_YIELDS_NULL`, `NUMERIC_ROUNDABORT` — are **run-time**: they apply when their `SET` executes, so the batch's compile walk and a never-taken branch leave them alone, and a statement ahead of the `SET` in its batch still runs under the old setting — its `NULL = NULL`, its string `+`, `SESSIONPROPERTY` and `@@OPTIONS` alike (probed 2026-09-26 against SQL Server 2025).
+`@@OPTIONS` assembles its bits from those, `NOCOUNT` and `XACT_ABORT` as the session holds them, with `QUOTED_IDENTIFIER` at its parse position and `ANSI_NULL_DFLT_ON` constant.
+
 ## Per-object creation-time capture
 
 Every programmable module stamps the `QUOTED_IDENTIFIER` in effect at its `CREATE` onto `SchemaObject.UsesQuotedIdentifier`, and **its body parses under that capture rather than the invoking session's setting**.

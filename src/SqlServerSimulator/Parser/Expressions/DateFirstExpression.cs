@@ -62,23 +62,36 @@ internal sealed class LangIdExpression : Expression
 }
 
 /// <summary>
-/// Backs <c>@@OPTIONS</c>: SQL Server 2025's fresh-session default 5432
-/// (probe-confirmed 2026-05-22 — QUOTED_IDENTIFIER, ANSI_WARNINGS,
-/// ANSI_PADDING, ANSI_NULLS, ANSI_NULL_DFLT_ON, CONCAT_NULL_YIELDS_NULL), with
-/// the two bits the simulator's <c>SET</c> surface models tracking the session:
-/// QUOTED_IDENTIFIER (256) at the parse position, since that option is itself
-/// parse-time and the plan cache keys on it, and XACT_ABORT (16384) at run
-/// time, since a <c>SET XACT_ABORT</c> inside a procedure body binds and
-/// reverts around the read.
+/// Backs <c>@@OPTIONS</c>: the session's option bits as it holds them when the
+/// read runs — ANSI_WARNINGS 8, ANSI_PADDING 16, ANSI_NULLS 32, ARITHABORT 64,
+/// NOCOUNT 512, CONCAT_NULL_YIELDS_NULL 4096, NUMERIC_ROUNDABORT 8192 and
+/// XACT_ABORT 16384 — with QUOTED_IDENTIFIER (256) at the parse position, since
+/// that option is itself parse-time and the plan cache keys on it, and
+/// ANSI_NULL_DFLT_ON (1024) constant; a fresh session reads 5432 (probed
+/// 2026-09-26 against SQL Server 2025).
 /// </summary>
 internal sealed class OptionsExpression(ParserContext context) : Expression
 {
-    private const int FreshSessionOptions = 5432;
+    // ANSI_NULL_DFLT_ON, which SqlClient's login sets and the simulator doesn't
+    // otherwise track.
+    private const int AnsiNullDefaultOn = 1024;
 
-    private readonly int baseOptions = context.QuotedIdentifiers ? FreshSessionOptions : FreshSessionOptions & ~256;
+    // QUOTED_IDENTIFIER is settled while parsing, as the setting itself is.
+    private readonly int parsedOptions = AnsiNullDefaultOn | (context.QuotedIdentifiers ? 256 : 0);
 
-    public override SqlValue Run(RuntimeContext runtime) =>
-        SqlValue.FromInt32(runtime.Batch.Connection.XactAbort ? this.baseOptions | 16384 : this.baseOptions);
+    public override SqlValue Run(RuntimeContext runtime)
+    {
+        var connection = runtime.Batch.Connection;
+        return SqlValue.FromInt32(this.parsedOptions
+            | (connection.AnsiWarnings ? 8 : 0)
+            | (connection.AnsiPadding ? 16 : 0)
+            | (connection.AnsiNulls ? 32 : 0)
+            | (connection.Arithabort ? 64 : 0)
+            | (connection.NoCount ? 512 : 0)
+            | (connection.ConcatNullYieldsNull ? 4096 : 0)
+            | (connection.NumericRoundabort ? 8192 : 0)
+            | (connection.XactAbort ? 16384 : 0));
+    }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
 
@@ -86,5 +99,5 @@ internal sealed class OptionsExpression(ParserContext context) : Expression
 
     internal override string DebugDisplay() => "@@OPTIONS";
 
-    internal override void Describe(NodeShape shape) => shape.Local(this.baseOptions);
+    internal override void Describe(NodeShape shape) => shape.Local(this.parsedOptions);
 }

@@ -277,7 +277,7 @@ Remaining quirk: a decimal-declared sequence's inner reports BaseType `numeric` 
 They surface as `sys.sql_modules.uses_quoted_identifier` / `uses_ansi_nulls` and, for a table, `sys.tables.uses_ansi_nulls`, plus the `OBJECTPROPERTY` read-backs described [below](#objectproperty--objectpropertyex).
 The two differ in what a *table* records: `QUOTED_IDENTIFIER` is a constant 1 for any table (real answers 1 regardless of the creating session), while `ANSI_NULLS` genuinely captures — a table created under `SET ANSI_NULLS OFF` reports 0, and `SELECT … INTO` captures the same way (all probe-confirmed).
 The `QUOTED_IDENTIFIER` capture is behavioral as well as metadata — a module body parses under it (see [`grammar.md`](grammar.md#per-object-creation-time-capture)).
-The `ANSI_NULLS` capture is **metadata only**: real freezes a module's `= NULL` comparison semantics to the captured setting, but the simulator doesn't model `SET ANSI_NULLS OFF` comparison semantics at all (the SET parses and records, and every comparison stays ANSI), so nothing behavioral rides on this half.
+The `ANSI_NULLS` capture is behavioral too: a module invocation swaps it in for its body, whose `= NULL` comparisons read it (`SimulatedDbConnection.AnsiNulls`).
 
 ### `execute_as_principal_id`
 
