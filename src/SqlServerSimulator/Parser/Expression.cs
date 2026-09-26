@@ -1634,6 +1634,7 @@ internal abstract class Expression : ExpressionNode
         RecordSideEffectingBuiltIn(name, context);
         _ = name.ToUpperInvariant(uppercaseName);
         BuiltInArity.Check(uppercaseName, context);
+        BuiltInArity.CheckWindowClauses(uppercaseName, context);
         if (!ConstantFolding.IsFoldedBuiltIn(uppercaseName))
             return ResolveBuiltInCore(uppercaseName, name, context);
 

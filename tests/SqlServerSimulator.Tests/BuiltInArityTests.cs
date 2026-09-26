@@ -62,4 +62,24 @@ public sealed class BuiltInArityTests
     [TestMethod]
     public void NestedCommas_DoNotCount()
         => AreEqual(1.50m, new Simulation().ExecuteScalar("select convert(decimal(5, 2), left('1.5x', (select 3)))"));
+
+    [TestMethod]
+    [DataRow("select row_number()", 10753, 3, "The function 'row_number' must have an OVER clause.")]
+    [DataRow("select rank(1, 2)", 10753, 3, "The function 'rank' must have an OVER clause.")]
+    [DataRow("select 1 from (values (1)) v(a) where row_number() = 1", 10753, 3, "The function 'row_number' must have an OVER clause.")]
+    [DataRow("select rank(1) over (order by (select 1))", 4114, 1, "The function 'rank' takes exactly 0 argument(s).")]
+    [DataRow("select ntile() over (order by (select 1))", 4114, 1, "The function 'ntile' takes exactly 1 argument(s).")]
+    [DataRow("select lag() over (order by (select 1))", 10755, 1, "The function 'lag' takes between 1 and 3 arguments.")]
+    [DataRow("select lead(1)", 10753, 1, "The function 'lead' must have an OVER clause.")]
+    [DataRow("select first_value(1, 2)", 10753, 1, "The function 'first_value' must have an OVER clause.")]
+    [DataRow("select last_value() over (order by (select 1))", 174, 1, "The last_value function requires 1 argument(s).")]
+    [DataRow("select percentile_cont(0.5) within group (order by a) from (values (1)) v(a)", 10753, 3, "The function 'percentile_cont' must have an OVER clause.")]
+    [DataRow("select percentile_disc(0.5) over ()", 10754, 1, "The function 'percentile_disc' must have a WITHIN GROUP clause.")]
+    [DataRow("select approx_percentile_cont(0.5) from (values (1)) v(a)", 10754, 2, "The function 'approx_percentile_cont' must have a WITHIN GROUP clause.")]
+    public void WindowFunction_ClausesAndCount_AreJudgedInRealsOrder(string sql, int number, int state, string message)
+    {
+        var ex = new Simulation().AssertSqlError(sql, number);
+        AreEqual(message, ex.Errors[0].Message);
+        AreEqual((byte)state, ex.State);
+    }
 }

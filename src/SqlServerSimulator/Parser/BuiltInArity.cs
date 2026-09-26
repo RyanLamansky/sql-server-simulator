@@ -114,6 +114,136 @@ internal readonly struct BuiltInArity(int min, int max, BuiltInArity.Refusal bel
         return -1;
     }
 
+    private enum WindowShape
+    {
+        Ranking,
+        Offset,
+        Value,
+        Percentile,
+        ApproxPercentile,
+    }
+
+    /// <summary>
+    /// Refuses a window or ordered-set function whose clauses after the
+    /// argument list — <c>OVER</c>, <c>WITHIN GROUP</c> — don't fit it, in the
+    /// order real checks them against its count (probed 2026-09-26 against SQL
+    /// Server 2025): a ranking function is Msg 10753 without <c>OVER</c>
+    /// whatever its count and Msg 4114 for a wrong count with one;
+    /// <c>LAG</c> / <c>LEAD</c> are Msg 10755 for a wrong count and then Msg
+    /// 10753; <c>FIRST_VALUE</c> / <c>LAST_VALUE</c> Msg 10753 and then Msg
+    /// 174; the percentiles, counted already, Msg 10753 and then Msg 10754;
+    /// the approximate percentiles Msg 10754 alone. An <c>IGNORE NULLS</c> /
+    /// <c>RESPECT NULLS</c> between the list and the <c>OVER</c> is stepped
+    /// over. Leaves the cursor where it was.
+    /// </summary>
+    public static void CheckWindowClauses(ReadOnlySpan<char> uppercaseName, ParserContext context)
+    {
+        if (WindowShapeFor(uppercaseName) is not var (shape, name, arguments))
+            return;
+
+        var checkpoint = context.SaveCheckpoint();
+        var count = CountArguments(context);
+        var within = false;
+        var nullTreatment = false;
+        var over = false;
+        if (count >= 0 && context.MoveNext())
+        {
+            if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Within })
+            {
+                within = true;
+                SkipWithinGroup(context);
+            }
+            if (context.Token is UnquotedString { Value: var word }
+                && (word.Equals("IGNORE", StringComparison.OrdinalIgnoreCase) || word.Equals("RESPECT", StringComparison.OrdinalIgnoreCase))
+                && context.MoveNext() && context.Token is UnquotedString { Value: var nulls } && nulls.Equals("NULLS", StringComparison.OrdinalIgnoreCase))
+            {
+                nullTreatment = true;
+                _ = context.MoveNext();
+            }
+            over = context.Token is ReservedKeyword { Keyword: Keyword.Over };
+        }
+        context.RestoreCheckpoint(checkpoint);
+
+        // A null treatment demands the OVER that follows it, a syntax error
+        // the function's own parser reports.
+        if (count < 0 || (nullTreatment && !over))
+            return;
+
+        switch (shape)
+        {
+            case WindowShape.Ranking:
+                if (!over)
+                    throw SimulatedSqlException.FunctionMustHaveOverClause(name);
+                if (count != arguments)
+                    throw SimulatedSqlException.RankingFunctionArgumentCount(name, arguments);
+                break;
+            case WindowShape.Offset:
+                if (count is < 1 or > 3)
+                    throw SimulatedSqlException.OffsetFunctionArgumentCount(name);
+                if (!over)
+                    throw SimulatedSqlException.FunctionMustHaveOverClause(name, state: 1);
+                break;
+            case WindowShape.Value:
+                if (!over)
+                    throw SimulatedSqlException.FunctionMustHaveOverClause(name, state: 1);
+                if (count != arguments)
+                    throw SimulatedSqlException.FunctionRequiresNArguments(name, arguments);
+                break;
+            case WindowShape.Percentile:
+                if (!over)
+                    throw SimulatedSqlException.FunctionMustHaveOverClause(name);
+                if (!within)
+                    throw SimulatedSqlException.FunctionMustHaveWithinGroup(name, state: 1);
+                break;
+            case WindowShape.ApproxPercentile:
+                if (!within)
+                    throw SimulatedSqlException.FunctionMustHaveWithinGroup(name, state: 2);
+                break;
+        }
+    }
+
+    // From the WITHIN keyword past its parenthesized ORDER BY, leaving the
+    // cursor on the token after it (or where the clause ended malformed).
+    private static void SkipWithinGroup(ParserContext context)
+    {
+        if (!context.MoveNext() || !context.MoveNext() || context.Token is not Operator { Character: '(' })
+            return;
+        var depth = 0;
+        do
+        {
+            switch (context.Token)
+            {
+                case Operator { Character: '(' }:
+                    depth++;
+                    break;
+                case Operator { Character: ')' } when --depth == 0:
+                    _ = context.MoveNext();
+                    return;
+            }
+        }
+        while (context.MoveNext());
+    }
+
+    private static (WindowShape Shape, string Name, int Arguments)? WindowShapeFor(ReadOnlySpan<char> uppercaseName) =>
+        uppercaseName switch
+        {
+            "APPROX_PERCENTILE_CONT" => (WindowShape.ApproxPercentile, "approx_percentile_cont", 1),
+            "APPROX_PERCENTILE_DISC" => (WindowShape.ApproxPercentile, "approx_percentile_disc", 1),
+            "CUME_DIST" => (WindowShape.Ranking, "cume_dist", 0),
+            "DENSE_RANK" => (WindowShape.Ranking, "dense_rank", 0),
+            "FIRST_VALUE" => (WindowShape.Value, "first_value", 1),
+            "LAG" => (WindowShape.Offset, "lag", 0),
+            "LAST_VALUE" => (WindowShape.Value, "last_value", 1),
+            "LEAD" => (WindowShape.Offset, "lead", 0),
+            "NTILE" => (WindowShape.Ranking, "ntile", 1),
+            "PERCENTILE_CONT" => (WindowShape.Percentile, "percentile_cont", 1),
+            "PERCENTILE_DISC" => (WindowShape.Percentile, "percentile_disc", 1),
+            "PERCENT_RANK" => (WindowShape.Ranking, "percent_rank", 0),
+            "RANK" => (WindowShape.Ranking, "rank", 0),
+            "ROW_NUMBER" => (WindowShape.Ranking, "row_number", 0),
+            _ => null,
+        };
+
     private readonly int min = min;
     private readonly int max = max;
     private readonly Refusal belowMin = belowMin;

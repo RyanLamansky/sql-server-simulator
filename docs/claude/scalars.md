@@ -304,7 +304,8 @@ What the sweep found that a simpler rule would miss:
 - The list's own syntax error still comes first — an empty argument, an aggregate's `DISTINCT`, a top-level `FROM` — and the counter steps aside for those.
 - Too few and too many can be refused by different messages (`TRIM`, `OBJECT_DEFINITION`), and the state varies by function and side (`JSON_VALUE`'s 2 and 3).
 - A few built-ins refuse an empty list as a syntax error instead (`LEFT()`, `RIGHT()`).
-- A built-in with an argument grammar of its own — `CAST` / `PARSE`'s `AS`, `JSON_OBJECT` / `JSON_OBJECTAGG`'s key-value pairs, a datepart, a window function that requires `OVER` — has no row, since a comma count doesn't describe its call.
+- A built-in with an argument grammar of its own — `CAST` / `PARSE`'s `AS`, `JSON_OBJECT` / `JSON_OBJECTAGG`'s key-value pairs, a datepart — has no row, since a comma count doesn't describe its call.
+- A window or ordered-set function is judged by the clauses after its list too (`CheckWindowClauses`), and whether a missing `OVER` or a wrong count is reported first depends on the family: a ranking function's missing `OVER` outranks its count, `LAG` / `LEAD`'s count outranks their `OVER`.
 
 ### Divergences
 

@@ -831,8 +831,29 @@ partial class SimulatedSqlException
     /// required <c>OVER</c> clause. Probe-confirmed against SQL Server 2025
     /// (2026-05-27): Class 15, State 3.
     /// </summary>
-    internal static SimulatedSqlException FunctionMustHaveOverClause(string functionLowerName) =>
-        new($"The function '{functionLowerName}' must have an OVER clause.", 10753, 15, 3);
+    internal static SimulatedSqlException FunctionMustHaveOverClause(string functionLowerName, byte state = 3) =>
+        new($"The function '{functionLowerName}' must have an OVER clause.", 10753, 15, state);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 10754: an ordered-set function written without
+    /// its <c>WITHIN GROUP</c> clause.
+    /// </summary>
+    internal static SimulatedSqlException FunctionMustHaveWithinGroup(string functionLowerName, byte state) =>
+        new($"The function '{functionLowerName}' must have a WITHIN GROUP clause.", 10754, 15, state);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 10755: <c>LAG</c> / <c>LEAD</c> handed other
+    /// than one to three arguments.
+    /// </summary>
+    internal static SimulatedSqlException OffsetFunctionArgumentCount(string functionLowerName) =>
+        new($"The function '{functionLowerName}' takes between 1 and 3 arguments.", 10755, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 4114: a ranking window function, written with
+    /// its <c>OVER</c> clause, handed the wrong number of arguments.
+    /// </summary>
+    internal static SimulatedSqlException RankingFunctionArgumentCount(string functionLowerName, int count) =>
+        new($"The function '{functionLowerName}' takes exactly {count} argument(s).", 4114, 15, 1);
 
     /// <summary>
     /// Mimics SQL Server's Msg 10758 — an ordered-set analytic function
