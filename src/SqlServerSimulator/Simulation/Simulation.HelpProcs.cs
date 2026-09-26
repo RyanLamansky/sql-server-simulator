@@ -482,8 +482,9 @@ partial class Simulation
     private static string CalledName(MultiPartName name) =>
         name.Count > 1 && name.ImmediateQualifier is { Length: > 0 } schema ? $"{schema}.{name.Leaf}" : name.Leaf;
 
-    // The help procedures run under SET NOCOUNT ON, so their result sets
-    // report no row count (probed 2026-09-26 against SQL Server 2025).
+    // Most system procedures run under SET NOCOUNT ON, so their result sets
+    // report no row count; the dispatch wraps each that does (probed
+    // 2026-09-26 against SQL Server 2025, procedure by procedure).
     private static IEnumerable<SimulatedStatementOutcome> Uncounted(IEnumerable<SimulatedStatementOutcome> outcomes)
     {
         foreach (var outcome in outcomes)
