@@ -495,10 +495,85 @@ internal sealed partial class Selection
         }
 
         candidateCount = candidates.Count;
+        if (snapshotXid is null && !plan.NoLockReader && !plan.SkipBlockedRows)
+            AwaitUncommittedDeletesInRange(table, batch, outerResolver, bounds);
         seekRows = snapshotXid is { } sx
             ? MaterializeSnapshotCandidates(table, batch, sx, candidates)
             : MaterializeWithLockChecks(table, batch, plan, candidates);
         return true;
+    }
+
+    // The range seek's counterpart of AwaitUncommittedDeletesMatching: waits
+    // out another session's uncommitted delete of a row whose pre-image lies
+    // inside every bounded column's range.
+    private static void AwaitUncommittedDeletesInRange(
+        HeapTable table, BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver, Dictionary<int, RangeBoundExprs> bounds)
+    {
+        if (OtherSessionsDeletedRows(table, batch) is not { } deleted)
+            return;
+
+        var evaluated = new List<(int Ordinal, bool HasLower, SqlValue Lower, bool LowerInclusive, bool HasUpper, SqlValue Upper, bool UpperInclusive)>();
+        foreach (var (ordinal, bound) in bounds)
+        {
+            if (EvaluateRangeBounds(bound, table.StoredColumns[ordinal].Type, batch, outerResolver,
+                out _, out var hasLower, out var lower, out var hasUpper, out var upper) == BoundEval.Value)
+            {
+                evaluated.Add((ordinal, hasLower, lower, bound.LowerInclusive, hasUpper, upper, bound.UpperInclusive));
+            }
+        }
+
+        foreach (var (image, resource) in deleted)
+        {
+            var inside = true;
+            foreach (var (ordinal, hasLower, lower, lowerInclusive, hasUpper, upper, upperInclusive) in evaluated)
+            {
+                var stored = RowDecoder.DecodeColumn(table.StoredColumns, image, ordinal, table.Heap);
+                if (stored.IsNull
+                    || (hasLower && ProbeCompare(stored, lower) is var low && (low < 0 || (low == 0 && !lowerInclusive)))
+                    || (hasUpper && ProbeCompare(stored, upper) is var high && (high > 0 || (high == 0 && !upperInclusive))))
+                {
+                    inside = false;
+                    break;
+                }
+            }
+            if (inside)
+                batch.AwaitRowWritersOf(table, resource);
+        }
+    }
+
+    // Another session's uncommitted deletes on the table, as (pre-image, row
+    // lock) pairs, or null when there are none.
+    private static List<(byte[] Image, LockResource Lock)>? OtherSessionsDeletedRows(HeapTable table, BatchContext batch)
+    {
+        if (table.SupersededKeyImages.IsEmpty)
+            return null;
+        var session = batch.Connection.Session;
+        List<(byte[] Image, LockResource Lock)>? deleted = null;
+        foreach (var (owner, images) in table.SupersededKeyImages)
+        {
+            if (ReferenceEquals(owner, session))
+                continue;
+            foreach (var (address, entry) in images)
+            {
+                if (table.Heap.IsSlotTombstoned(address.PageIndex, address.SlotIndex))
+                    (deleted ??= []).Add(entry);
+            }
+        }
+        return deleted;
+    }
+
+    // Orders a stored value against a probe; a pair that doesn't compare
+    // cleanly reads as equal, so the wait errs toward waiting.
+    private static int ProbeCompare(SqlValue stored, SqlValue probe)
+    {
+        try
+        {
+            return stored.CompareTo(probe);
+        }
+        catch (Exception e) when (e is SimulatedSqlException or InvalidOperationException or InvalidCastException)
+        {
+            return 0;
+        }
     }
 
     /// <summary>
@@ -1938,21 +2013,7 @@ internal sealed partial class Selection
     private static void AwaitUncommittedDeletesMatching(
         HeapTable table, BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver, Dictionary<int, Expression[]> equalities)
     {
-        if (table.SupersededKeyImages.IsEmpty)
-            return;
-        var session = batch.Connection.Session;
-        List<(byte[] Image, LockResource Lock)>? deleted = null;
-        foreach (var (owner, images) in table.SupersededKeyImages)
-        {
-            if (ReferenceEquals(owner, session))
-                continue;
-            foreach (var (address, entry) in images)
-            {
-                if (table.Heap.IsSlotTombstoned(address.PageIndex, address.SlotIndex))
-                    (deleted ??= []).Add(entry);
-            }
-        }
-        if (deleted is null)
+        if (OtherSessionsDeletedRows(table, batch) is not { } deleted)
             return;
 
         var runtime = new RuntimeContext(name => outerResolver is not null ? outerResolver(name) : throw SimulatedSqlException.InvalidColumnName(name), batch);
@@ -1977,21 +2038,8 @@ internal sealed partial class Selection
         }
     }
 
-    // A probe the seek could use against a stored value; a pair that doesn't
-    // compare cleanly counts as a match, so the wait errs toward waiting.
-    private static bool ProbeEquals(SqlValue probe, SqlValue stored)
-    {
-        if (probe.IsNull || stored.IsNull)
-            return false;
-        try
-        {
-            return probe.CompareTo(stored) == 0;
-        }
-        catch (Exception e) when (e is SimulatedSqlException or InvalidOperationException or InvalidCastException)
-        {
-            return true;
-        }
-    }
+    private static bool ProbeEquals(SqlValue probe, SqlValue stored) =>
+        !probe.IsNull && !stored.IsNull && ProbeCompare(stored, probe) == 0;
 
     // Computes the seek-narrowed (page, slot) candidate addresses for the longest
     // usable equality prefix across this table's keys / indexes — the address-only

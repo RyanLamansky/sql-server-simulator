@@ -159,6 +159,9 @@ public sealed class UncommittedKeyTests
     [DataRow("select count(*) from h", true)]
     [DataRow("select v from h where k = 20", true)]
     [DataRow("select v from t where k = 20", false)]
+    [DataRow("select count(*) from t where k between 5 and 15", true)]
+    [DataRow("select count(*) from t where k between 15 and 25", false)]
+    [DataRow("select count(*) from t where k > 15", false)]
     [DataRow("select count(*) from t with (nolock)", false)]
     [DataRow("select count(*) from t with (readpast)", false)]
     public void ReadOverAnUncommittedDelete_Waits(string read, bool waits)
