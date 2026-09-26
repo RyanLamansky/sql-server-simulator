@@ -1061,6 +1061,18 @@ partial class Simulation
                         negativeOne, negativeOne, negativeOne, nullRemarks, procedureType,
                     ]);
                 }
+                // Functions list too, numbered ;0 but typed as procedures
+                // (probed 2026-09-26 against SQL Server 2025).
+                foreach (var function in schema.Functions.Values)
+                {
+                    if (!Matches(namePattern, function.Name))
+                        continue;
+                    rows.Add([
+                        qualifier, owner,
+                        SqlValue.FromString(CatalogNVarchar134, function.Name + ";0"),
+                        negativeOne, negativeOne, negativeOne, nullRemarks, procedureType,
+                    ]);
+                }
             }
         }
 

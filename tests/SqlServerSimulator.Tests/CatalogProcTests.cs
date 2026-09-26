@@ -655,4 +655,77 @@ public sealed class CatalogProcTests
         AreEqual("phone", Run(sim, "exec sp_columns 'p', @column_name = 'ph'").Single()["TYPE_NAME"]);
         AreEqual("int identity", Run(sim, "exec sp_columns 'v'").Single()["TYPE_NAME"]);
     }
+
+    [TestMethod]
+    public void SpStoredProcedures_ListsFunctionsAsVersionZero()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create function fs () returns int as begin return 1 end", "create procedure pp as select 1");
+        AreEqual("fs;0,pp;1", string.Join(",", Run(sim, "exec sp_stored_procedures").Select(r => r["PROCEDURE_NAME"])));
+    }
+
+    private static Simulation SpecialColumnsFixture()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table p (id int identity not null constraint pk_p primary key, code char(3) not null constraint uq_p unique, n int, ts rowversion);
+            create table k2 (b varchar(5) not null, a int not null, constraint pk2 primary key (b, a));
+            create table u (a int null, b int not null, c int not null, constraint u1 unique (a), constraint u2 unique (b), constraint u3 unique (c));
+            create table w (k varbinary(8) not null, a int, d date not null);
+            create unique index iw on w (k) include (d);
+            create table nk (a int)
+            """);
+        return sim;
+    }
+
+    private static string SpecialColumns(List<Dictionary<string, object?>> rows)
+        => string.Join(",", rows.Select(r => $"{r["SCOPE"]}/{r["COLUMN_NAME"]}/{r["DATA_TYPE"]}/{r["TYPE_NAME"]}/{r["PRECISION"]}/{r["LENGTH"]}/{r["SCALE"]}/{r["PSEUDO_COLUMN"]}"));
+
+    [TestMethod]
+    [DataRow("exec sp_special_columns 'p'", "1/id/4/int identity/10/4/0/1")]
+    [DataRow("exec sp_special_columns 'p', @scope = 'C'", "0/id/4/int identity/10/4/0/1")]
+    [DataRow("exec sp_special_columns 'p', @col_type = 'V'", "/ts/-2/timestamp/8/8//1")]
+    [DataRow("exec sp_special_columns 'k2'", "1/b/12/varchar/5/5//1,1/a/4/int/10/4/0/1")]
+    [DataRow("exec sp_special_columns 'u'", "1/c/4/int/10/4/0/1")]
+    [DataRow("exec sp_special_columns 'u', @nullable = 'O'", "1/b/4/int/10/4/0/1")]
+    [DataRow("exec sp_special_columns 'p', @nullable = 'O'", "1/code/1/char/3/3//1")]
+    [DataRow("exec sp_special_columns 'w'", "1/k/-3/varbinary/8/8//1,1/d/-9/date/10/20//1")]
+    [DataRow("exec sp_special_columns_100 'w'", "1/k/-3/varbinary/8/8//1")]
+    [DataRow("exec sp_special_columns_100 'w', @ODBCVer = 3", "1/k/-3/varbinary/8/8//1,1/k/-156/vector/8/8//1")]
+    [DataRow("exec sp_special_columns 'nk'", "")]
+    [DataRow("exec sp_special_columns 'p', ''", "")]
+    [DataRow("exec sp_special_columns 'missing'", "")]
+    public void SpSpecialColumns_FollowsRealsProcedure(string sql, string expected)
+        => AreEqual(expected, SpecialColumns(Run(SpecialColumnsFixture(), sql)));
+
+    [TestMethod]
+    [DataRow("exec sp_special_columns 'p', @col_type = 'x'", 15251, 21, "Invalid 'col_type' specified. It must be 'R' or 'V'.")]
+    [DataRow("exec sp_special_columns_100 'p', @scope = null", 15251, 31, "Invalid 'scope' specified. It must be 'C' or 'T'.")]
+    [DataRow("exec sp_special_columns 'p', @nullable = 'x'", 15251, 37, "Invalid 'nullable' specified. It must be 'U' or 'O'.")]
+    [DataRow("exec sp_special_columns 'p', null, 'elsewhere'", 15250, 45, "The database name component of the object qualifier must be the name of the current database.")]
+    public void SpSpecialColumns_RefusesAsRealsProcedureDoes(string sql, int number, int line, string message)
+    {
+        var error = new Simulation().AssertSqlError(sql, number).Errors[0];
+        AreEqual(message, error.Message);
+        AreEqual(line, error.LineNumber);
+        StartsWith("sp_special_columns", error.Procedure);
+    }
+
+    [TestMethod]
+    public void SpTablePrivileges_ListsOwnerAndGrants()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (a int, b int);
+            create user u without login;
+            grant select on t to u with grant option;
+            grant update (b) on t to u
+            """);
+        AreEqual(
+            "dbo>dbo:DELETE:YES,dbo>dbo:INSERT:YES,dbo>dbo:REFERENCES:YES,dbo>dbo:SELECT:YES,dbo>u:SELECT:YES,dbo>dbo:UPDATE:YES,dbo>u:UPDATE:NO",
+            string.Join(",", Run(sim, "exec sp_table_privileges 't'").Select(r => $"{r["GRANTOR"]}>{r["GRANTEE"]}:{r["PRIVILEGE"]}:{r["IS_GRANTABLE"]}")));
+        AreEqual(
+            "a:INSERT:dbo,a:REFERENCES:dbo,a:SELECT:dbo,a:SELECT:u,a:UPDATE:dbo,b:INSERT:dbo,b:REFERENCES:dbo,b:SELECT:dbo,b:SELECT:u,b:UPDATE:dbo,b:UPDATE:u",
+            string.Join(",", Run(sim, "exec sp_column_privileges 't'").Select(r => $"{r["COLUMN_NAME"]}:{r["PRIVILEGE"]}:{r["GRANTEE"]}")));
+    }
 }

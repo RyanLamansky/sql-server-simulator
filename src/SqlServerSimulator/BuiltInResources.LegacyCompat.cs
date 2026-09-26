@@ -120,6 +120,12 @@ internal static partial class BuiltInResources
         // parameters.
         "sp_sproc_columns",
         "sp_sproc_columns_100",
+        // SQLTablePrivileges / SQLColumnPrivileges.
+        "sp_table_privileges",
+        "sp_column_privileges",
+        // SQLSpecialColumns.
+        "sp_special_columns",
+        "sp_special_columns_100",
         // The sp_help family — the formatted-metadata procs interactive
         // sessions and SSMS's scripting fall back on. sp_help delegates to
         // sp_helpindex / sp_helpconstraint for its per-table detail sets;

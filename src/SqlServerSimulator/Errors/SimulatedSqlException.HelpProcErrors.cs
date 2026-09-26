@@ -25,6 +25,14 @@ partial class SimulatedSqlException
         new("The database name component of the object qualifier must be the name of the current database.", 15250, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server's Msg 15251 — a catalog procedure's option argument
+    /// outside its accepted values, naming the option and the values it takes
+    /// (<c>sp_special_columns</c>' <c>@col_type</c> must be <c>'R' or 'V'</c>).
+    /// </summary>
+    internal static SimulatedSqlException InvalidProcedureOption(string option, string accepted) =>
+        new($"Invalid '{option}' specified. It must be {accepted}.", 15251, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server's Msg 15252 — <c>sp_fkeys</c> given neither a
     /// primary-key nor a foreign-key table name. The message carries no
     /// substitution.
