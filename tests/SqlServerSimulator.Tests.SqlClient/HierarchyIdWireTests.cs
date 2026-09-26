@@ -43,7 +43,9 @@ public sealed class HierarchyIdWireTests
         await using var command = new SqlCommand("select node from Org order by id", connection);
         await using var reader = await command.ExecuteReaderAsync(TestContext.CancellationToken);
 
-        IsTrue(reader.GetDataTypeName(0).EndsWith("sys.hierarchyid", StringComparison.Ordinal));
+        // The UDT's database part is the session's current database, as
+        // real's is (captured 2026-09-26).
+        AreEqual("simulated.sys.hierarchyid", reader.GetDataTypeName(0));
 
         IsTrue(await reader.ReadAsync(TestContext.CancellationToken));
         AreEqual(RootHex, ReadUdtHex(reader, 0));

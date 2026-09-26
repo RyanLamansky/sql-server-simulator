@@ -221,7 +221,7 @@ internal sealed partial class TdsSession
         if (handleReturn is { } handleValue)
             TdsTypeCodec.WriteReturnValue(writer, 0, handleValue.Name, DbType.Int32, handleValue.Handle);
 
-        WriteOutputReturnValues(writer, outputs);
+        WriteOutputReturnValues(writer, outputs, this.connection!.CurrentDatabase.Name);
 
         if (!moreRequests)
             this.WriteSessionEnvChangesIfAny(writer);
@@ -257,7 +257,7 @@ internal sealed partial class TdsSession
             return;
 
         writer.WriteReturnStatus(returnParameter.Value is int returnCode ? returnCode : 0);
-        WriteOutputReturnValues(writer, outputs);
+        WriteOutputReturnValues(writer, outputs, this.connection!.CurrentDatabase.Name);
 
         if (!moreRequests)
             this.WriteSessionEnvChangesIfAny(writer);
@@ -296,12 +296,12 @@ internal sealed partial class TdsSession
     /// end-of-batch write-back, falling back to echoing the decoded input
     /// value when the batch never reached write-back.
     /// </summary>
-    private static void WriteOutputReturnValues(TdsTokenWriter writer, List<(int Ordinal, TdsRpcParameter Wire, SimulatedDbParameter Bound)> outputs)
+    private static void WriteOutputReturnValues(TdsTokenWriter writer, List<(int Ordinal, TdsRpcParameter Wire, SimulatedDbParameter Bound)> outputs, string databaseName)
     {
         foreach (var (ordinal, wire, bound) in outputs)
         {
             if (wire.DbType == DbType.Object)
-                TdsTypeCodec.WriteReturnValue(writer, checked((ushort)ordinal), wire.Name, bound.OutputSqlValue ?? (SqlValue)wire.Value!);
+                TdsTypeCodec.WriteReturnValue(writer, checked((ushort)ordinal), wire.Name, bound.OutputSqlValue ?? (SqlValue)wire.Value!, databaseName);
             else
                 TdsTypeCodec.WriteReturnValue(writer, checked((ushort)ordinal), wire.Name, wire.DbType, bound.Value);
         }

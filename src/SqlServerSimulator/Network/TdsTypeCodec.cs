@@ -43,7 +43,7 @@ internal static class TdsTypeCodec
     /// trailing <c>ROWSTAT</c> that way, with COLMETADATA flags of zero
     /// (captured against SQL Server 2025, 2026-09-25).
     /// </summary>
-    public static void WriteColMetadata(TdsTokenWriter writer, SqlType[] schema, string[] columnNames, bool[]? columnNullability, bool[]? columnReportsNumeric = null, int hiddenColumnCount = 0, byte[]? columnWireFlags = null)
+    public static void WriteColMetadata(TdsTokenWriter writer, SqlType[] schema, string[] columnNames, bool[]? columnNullability, bool[]? columnReportsNumeric = null, int hiddenColumnCount = 0, byte[]? columnWireFlags = null, string databaseName = "")
     {
         var firstHidden = schema.Length - hiddenColumnCount;
         writer.EnterComposite();
@@ -59,7 +59,7 @@ internal static class TdsTypeCodec
             writer.WriteByte((byte)(character | (notNull ? 0 : 1)));
             writer.WriteByte(0);
             var reportsNumeric = columnReportsNumeric is not null && columnReportsNumeric[i];
-            WriteTypeInfo(writer, type, notNull, reportsNumeric);
+            WriteTypeInfo(writer, type, notNull, reportsNumeric, databaseName);
             writer.WriteBVarchar(columnNames[i]);
         }
 
@@ -234,10 +234,10 @@ internal static class TdsTypeCodec
     /// TYPE_INFO and value bytes are the same forms the matching result
     /// columns carry, so the column writers are reused as-is.
     /// </summary>
-    public static void WriteReturnValue(TdsTokenWriter writer, ushort ordinal, string name, SqlValue value)
-        => WriteReturnValue(writer, ordinal, name, value.Type, value);
+    public static void WriteReturnValue(TdsTokenWriter writer, ushort ordinal, string name, SqlValue value, string databaseName = "")
+        => WriteReturnValue(writer, ordinal, name, value.Type, value, databaseName);
 
-    private static void WriteReturnValue(TdsTokenWriter writer, ushort ordinal, string name, SqlType wireType, SqlValue sqlValue)
+    private static void WriteReturnValue(TdsTokenWriter writer, ushort ordinal, string name, SqlType wireType, SqlValue sqlValue, string databaseName = "")
     {
         writer.EnterComposite();
         writer.WriteByte(Tds.TokenReturnValue);
@@ -250,12 +250,12 @@ internal static class TdsTypeCodec
 
         // Output parameters are nullable — real sends the N-variant token in a
         // RETURNVALUE regardless of the value, so the fixed-token path is off.
-        WriteTypeInfo(writer, wireType, notNull: false);
+        WriteTypeInfo(writer, wireType, notNull: false, databaseName: databaseName);
         WriteValue(writer, wireType, sqlValue);
         writer.LeaveComposite();
     }
 
-    private static void WriteTypeInfo(TdsTokenWriter writer, SqlType type, bool notNull, bool reportsNumeric = false)
+    private static void WriteTypeInfo(TdsTokenWriter writer, SqlType type, bool notNull, bool reportsNumeric = false, string databaseName = "")
     {
         // A NOT NULL fixed-width column carries the FIXEDLENTYPE token (single
         // byte, no max-length byte), matching real — the N-variant token below
@@ -399,13 +399,12 @@ internal static class TdsTypeCodec
                 // UDTTYPE (MS-TDS 2.2.5.5.2): a PLP type whose TYPE_INFO is a
                 // ushort max-byte-size (0xFFFF = max) then the three B_VARCHAR
                 // names (db / schema / type) and the US_VARCHAR assembly-
-                // qualified type name. The db name is unavailable in this static
-                // codec (its call site can't thread it), so it goes empty; the
-                // schema/type/AQN carry the functional identity SqlClient and
-                // DacFx read. Probe-confirmed against SQL Server 2025 (2026-07-16).
+                // qualified type name — the db being the session's current one
+                // (captured against SQL Server 2025, 2026-09-26). Probe-confirmed
+                // against SQL Server 2025 (2026-07-16).
                 writer.WriteByte(0xF0);
                 writer.WriteUInt16(0xFFFF);
-                writer.WriteBVarchar(string.Empty);
+                writer.WriteBVarchar(databaseName);
                 writer.WriteBVarchar("sys");
                 writer.WriteBVarchar(spatial.SqlServerName);
                 writer.WriteUsVarchar(SpatialAssemblyQualifiedName(spatial));
@@ -416,10 +415,10 @@ internal static class TdsTypeCodec
                 // 0xFFFF max sentinel) and the SqlHierarchyId assembly-qualified
                 // name. Probe-confirmed against SQL Server 2025 (2026-07-16:
                 // GetSchemaTable ColumnSize = 892, UdtAssemblyQualifiedName as
-                // below). The db name goes empty for the same static-codec reason.
+                // below), with the same session-database db name.
                 writer.WriteByte(0xF0);
                 writer.WriteUInt16(892);
-                writer.WriteBVarchar(string.Empty);
+                writer.WriteBVarchar(databaseName);
                 writer.WriteBVarchar("sys");
                 writer.WriteBVarchar("hierarchyid");
                 writer.WriteUsVarchar(HierarchyIdAssemblyQualifiedName);
