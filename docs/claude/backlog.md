@@ -346,6 +346,11 @@ Entries are verified against the simulator, so one that no longer reproduces is 
 
 Real bugs / limitations against shipped behavior — fixes are concrete work, not design decisions.
 
+- **Catalog content residue from a sys.* diff against real** (probed 2026-09-26 against SQL Server 2025).
+  A view column that passes an identity column straight through reports `is_identity = 1` and appears in `sys.identity_columns` with NULL seed / increment / last value — through an alias, a derived table, `TOP`, `GROUP BY`, `DISTINCT`, `*`, `CROSS APPLY` or another view, but not through an expression, a join or a `UNION`; the simulator reports 0, since a view's output column carries no identity provenance.
+  A filtered index adds a class-7 `INDEX` row to `sys.sql_expression_dependencies` for each column its filter reads (`referencing_minor_id` the index id, schema-bound), which the dependency walk doesn't produce.
+  See [`indexes.md`](indexes.md#fidelity-gaps) for the three index-option residues (unknown `WITH` names, `DROP_EXISTING`, `COMPRESSION_DELAY`).
+
 - **A typed `xml` edit's `with` value isn't typed against the schema** — real refuses one whose type doesn't match the target (Msg 2247) and computes a schema-typed operand in its **declared** type, where the evaluator works in `double`; the difference shows in the last digits of a long decimal chain.
   The typing walk this needs now exists (a typed write validates and canonicalizes through it), so the work is reaching the target element's declared type from `XmlDmlParser` and evaluating the `with` expression under it.
   See [`xml.md`](xml.md#typed-writes--validation-and-canonical-form).

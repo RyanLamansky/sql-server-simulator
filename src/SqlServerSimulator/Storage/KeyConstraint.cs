@@ -19,7 +19,7 @@ internal enum KeyConstraintKind
 /// declaration ordinals) so the enforcement loop can decode key columns
 /// directly from row bytes via <see cref="RowDecoder"/>.
 /// </summary>
-internal sealed class KeyConstraint(KeyConstraintKind kind, string name, int[] storageOrdinals, int[] fullOrdinals, int objectId, bool isClustered, bool ignoreDupKey, DateTime createDate, bool[]? descending = null)
+internal sealed class KeyConstraint(KeyConstraintKind kind, string name, int[] storageOrdinals, int[] fullOrdinals, int objectId, bool isClustered, IndexOptions options, DateTime createDate, bool[]? descending = null)
 {
     public readonly KeyConstraintKind Kind = kind;
 
@@ -135,7 +135,17 @@ internal sealed class KeyConstraint(KeyConstraintKind kind, string name, int[] s
     /// index raises Msg 1979 — even though it accepts the option at declaration.
     /// See <c>docs/claude/constraints.md</c>.
     /// </summary>
-    public readonly bool IgnoreDupKey = ignoreDupKey;
+    public readonly bool IgnoreDupKey = options.IgnoreDupKey;
+
+    /// <summary>
+    /// <c>sys.indexes.fill_factor</c> / <c>is_padded</c> for the constraint's
+    /// index: the declaration's <c>FILLFACTOR</c> / <c>PAD_INDEX</c>, which an
+    /// <c>ALTER INDEX … REBUILD WITH</c> may change.
+    /// </summary>
+    public byte FillFactor = options.FillFactor ?? 0;
+
+    /// <inheritdoc cref="FillFactor"/>
+    public bool IsPadded = options.PadIndex ?? false;
 
     /// <summary>
     /// Whether <c>ALTER INDEX … DISABLE</c> has taken the constraint's backing

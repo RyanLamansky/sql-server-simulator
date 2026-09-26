@@ -26,7 +26,7 @@ partial class Simulation
         public readonly HeapTable Table;
         public readonly List<HeapColumn?> HeapColumns = [];
         public readonly List<bool> ExplicitNull = [];
-        public readonly List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals, bool? Clustered, bool IgnoreDupKey, bool[] Descending)> PendingKeys = [];
+        public readonly List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals, bool? Clustered, IndexOptions Options, bool[] Descending)> PendingKeys = [];
         public readonly List<(string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition)> PendingChecks = [];
         public readonly List<(int Index, string Name, Expression Expression, bool Persisted, bool Nullable, string Definition)> PendingComputed = [];
         public readonly List<PendingForeignKey> PendingForeignKeys = [];
@@ -162,13 +162,13 @@ partial class Simulation
         }
 
         // Shift PK / UQ FullOrdinals to the combined-column index space.
-        var shiftedKeys = new List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals, bool? Clustered, bool IgnoreDupKey, bool[] Descending)>();
+        var shiftedKeys = new List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals, bool? Clustered, IndexOptions Options, bool[] Descending)>();
         foreach (var k in added.PendingKeys)
         {
             var shifted = new int[k.FullOrdinals.Length];
             for (var i = 0; i < k.FullOrdinals.Length; i++)
                 shifted[i] = k.FullOrdinals[i] + existingCount;
-            shiftedKeys.Add((k.Kind, k.Name, shifted, k.Clustered, k.IgnoreDupKey, k.Descending));
+            shiftedKeys.Add((k.Kind, k.Name, shifted, k.Clustered, k.Options, k.Descending));
         }
 
         var undo = new AddedColumnsUndo(table);

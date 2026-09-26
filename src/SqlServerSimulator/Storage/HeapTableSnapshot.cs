@@ -33,14 +33,14 @@ internal sealed class HeapTableSnapshot
     private readonly HistoryRetentionUnit historyRetentionUnit;
     private readonly FullTextIndex? fullTextIndex;
     private readonly KeyConstraint[] keyConstraints;
-    private readonly (string Name, bool IsDisabled)[] keyState;
+    private readonly (string Name, bool IsDisabled, byte FillFactor, bool IsPadded)[] keyState;
     private readonly CheckConstraint[] checkConstraints;
     private readonly (string Name, bool IsNotTrusted, bool IsDisabled, string? Definition, bool IsSystemNamed)[] checkState;
     private readonly ForeignKey[] outgoingForeignKeys;
     private readonly ForeignKey[] incomingForeignKeys;
     private readonly (ForeignKey Key, string Name, bool IsNotTrusted, bool IsDisabled)[] foreignKeyState;
     private readonly Index[] indexes;
-    private readonly (string Name, bool IgnoreDupKey, bool IsDisabled)[] indexState;
+    private readonly (string Name, bool IgnoreDupKey, bool IsDisabled, byte FillFactor, bool IsPadded)[] indexState;
     private readonly UserStatistic[] userStatistics;
     private readonly XmlIndex[] xmlIndexes;
     private readonly SpatialIndex[] spatialIndexes;
@@ -65,7 +65,7 @@ internal sealed class HeapTableSnapshot
         this.historyRetentionUnit = table.HistoryRetentionUnit;
         this.fullTextIndex = table.FullTextIndex;
         this.keyConstraints = [.. table.KeyConstraints];
-        this.keyState = Array.ConvertAll(this.keyConstraints, key => (key.Name, key.IsDisabled));
+        this.keyState = Array.ConvertAll(this.keyConstraints, key => (key.Name, key.IsDisabled, key.FillFactor, key.IsPadded));
         this.checkConstraints = [.. table.CheckConstraints];
         this.checkState = Array.ConvertAll(this.checkConstraints, check => (check.Name, check.IsNotTrusted, check.IsDisabled, check.Definition, check.IsSystemNamed));
         this.outgoingForeignKeys = [.. table.OutgoingForeignKeys];
@@ -73,7 +73,7 @@ internal sealed class HeapTableSnapshot
         this.foreignKeyState = [.. this.outgoingForeignKeys.Concat(this.incomingForeignKeys).Distinct()
             .Select(key => (key, key.Name, key.IsNotTrusted, key.IsDisabled))];
         this.indexes = [.. table.Indexes];
-        this.indexState = Array.ConvertAll(this.indexes, index => (index.Name, index.IgnoreDupKey, index.IsDisabled));
+        this.indexState = Array.ConvertAll(this.indexes, index => (index.Name, index.IgnoreDupKey, index.IsDisabled, index.FillFactor, index.IsPadded));
         this.userStatistics = [.. table.UserStatistics];
         this.xmlIndexes = [.. table.XmlIndexes];
         this.spatialIndexes = [.. table.SpatialIndexes];
@@ -117,7 +117,7 @@ internal sealed class HeapTableSnapshot
 
         Refill(table.KeyConstraints, this.keyConstraints);
         for (var i = 0; i < this.keyConstraints.Length; i++)
-            (this.keyConstraints[i].Name, this.keyConstraints[i].IsDisabled) = this.keyState[i];
+            (this.keyConstraints[i].Name, this.keyConstraints[i].IsDisabled, this.keyConstraints[i].FillFactor, this.keyConstraints[i].IsPadded) = this.keyState[i];
         Refill(table.CheckConstraints, this.checkConstraints);
         for (var i = 0; i < this.checkConstraints.Length; i++)
         {
@@ -147,7 +147,7 @@ internal sealed class HeapTableSnapshot
 
         Refill(table.Indexes, this.indexes);
         for (var i = 0; i < this.indexes.Length; i++)
-            (this.indexes[i].Name, this.indexes[i].IgnoreDupKey, this.indexes[i].IsDisabled) = this.indexState[i];
+            (this.indexes[i].Name, this.indexes[i].IgnoreDupKey, this.indexes[i].IsDisabled, this.indexes[i].FillFactor, this.indexes[i].IsPadded) = this.indexState[i];
         Refill(table.UserStatistics, this.userStatistics);
         Refill(table.XmlIndexes, this.xmlIndexes);
         Refill(table.SpatialIndexes, this.spatialIndexes);

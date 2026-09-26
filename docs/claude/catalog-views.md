@@ -936,7 +936,7 @@ NULL on any arg / unknown column / unknown property / unknown object → NULL.
 
 **`INDEXPROPERTY(object_id, index_name, property)`** (`Parser/Expressions/IndexProperty.cs`): per-index metadata returning `int`.
 Index lookup unions `HeapTable.Indexes` (CREATE INDEX) and `HeapTable.KeyConstraints` (PK / UNIQUE — surface in `sys.indexes` by constraint name; the simulator auto-generates these as `PK__<table8>__<hex>`).
-Properties: `IsClustered` / `IsUnique` (from `Index.IsClustered` / `Index.IsUnique`, or true / Kind=PK for constraint-backed entries), plus the always-0 properties `IsAutoStatistics`, `IndexDepth`, `IndexFillFactor`, `IsHypothetical`, `IsPadIndex`, `IsStatistics`, `IsFulltextKey`, `IsOptimizedForSequentialKey` (no B-tree / no stats; matches probed behavior on freshly-created indexes — `IsFulltextKey` is 0 rather than NULL because SMO's index-scripting query reads it without an `ISNULL` wrapper).
+Properties: `IsClustered` / `IsUnique` (from `Index.IsClustered` / `Index.IsUnique`, or true / Kind=PK for constraint-backed entries), `IndexFillFactor` / `IsPadIndex` (the index's recorded `FILLFACTOR` / `PAD_INDEX`), plus the always-0 properties `IsAutoStatistics`, `IndexDepth`, `IsHypothetical`, `IsStatistics`, `IsFulltextKey`, `IsOptimizedForSequentialKey` (no B-tree / no stats; matches probed behavior on freshly-created indexes — `IsFulltextKey` is 0 rather than NULL because SMO's index-scripting query reads it without an `ISNULL` wrapper).
 NULL on any arg / unknown index / unknown property / unknown table → NULL.
 
 **`INDEX_COL(table, index_id, key_id)`** (`Parser/Expressions/IndexCol.cs`): the `sysname` name of the key column at position `key_id` (1-based) of the index identified by `index_id` on `table`.

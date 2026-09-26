@@ -96,7 +96,7 @@ partial class Simulation
 
         var heapColumns = new List<HeapColumn?>();
         var pendingComputed = new List<(int Index, string Name, Expression Expression, bool Persisted, bool Nullable, string Definition)>();
-        var pendingKeys = new List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals, bool? Clustered, bool IgnoreDupKey, bool[] Descending)>();
+        var pendingKeys = new List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals, bool? Clustered, IndexOptions Options, bool[] Descending)>();
         var pendingChecks = new List<(string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition)>();
         var pendingPeriod = new List<(string StartCol, string EndCol)>();
         var pendingForeignKeys = new List<PendingForeignKey>();
@@ -811,31 +811,44 @@ partial class Simulation
     /// <summary>
     /// Consumes a trailing <c>WITH (option = value, …)</c> index-options clause
     /// (the SSMS-emitted <c>PAD_INDEX</c> / <c>STATISTICS_NORECOMPUTE</c> /
-    /// <c>ALLOW_ROW_LOCKS</c> / <c>ALLOW_PAGE_LOCKS</c> / etc. block) when the
-    /// cursor is sitting on a <c>WITH</c> keyword, and reports whether it set
-    /// <c>IGNORE_DUP_KEY = ON</c> — the one option here with a semantic (see
-    /// <c>docs/claude/constraints.md</c>). Every other option is skipped
-    /// parens-balanced without inspection, since none of them means anything in
-    /// a heap-only store; that tolerance is deliberate, because this clause
-    /// rides along on most scripted DDL.
+    /// <c>ALLOW_ROW_LOCKS</c> / <c>ALLOW_PAGE_LOCKS</c> / etc. block), or the
+    /// legacy unparenthesized <c>WITH FILLFACTOR = n</c>, when the cursor is
+    /// sitting on a <c>WITH</c> keyword. It reports <c>IGNORE_DUP_KEY = ON</c>
+    /// — the one option here with a semantic (see
+    /// <c>docs/claude/constraints.md</c>) — and the <c>FILLFACTOR</c> /
+    /// <c>PAD_INDEX</c> pair the catalog reports, a fill factor outside 1 to
+    /// 100 being real's Msg 129 (probed 2026-09-26 against SQL Server 2025).
+    /// Every other option is skipped parens-balanced without inspection, since
+    /// none of them means anything in a heap-only store.
     /// No-op when the cursor isn't on <c>WITH</c>. Cursor on exit: first token
     /// past the closing <c>)</c>, or unchanged when no clause was present.
     /// </summary>
-    internal static bool ParseOptionalIndexWithClause(ParserContext context)
+    internal static IndexOptions ParseOptionalIndexWithClause(ParserContext context)
     {
         if (context.Token is not ReservedKeyword { Keyword: Keyword.With })
-            return false;
-        if (context.GetNextRequired() is not Operator { Character: '(' })
+            return default;
+        if (context.GetNextRequired() is ReservedKeyword { Keyword: Keyword.FillFactor })
+        {
+            if (context.GetNextRequired() is not Operator { Character: '=' })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            context.MoveNextRequired();
+            var legacyFillFactor = ReadFillFactor(context);
+            context.MoveNextOptional();
+            return new IndexOptions(false, legacyFillFactor, null);
+        }
+        if (context.Token is not Operator { Character: '(' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
         var ignoreDupKey = false;
+        byte? fillFactor = null;
+        bool? padIndex = null;
         var depth = 1;
         // Two-token lookbehind over the balanced skip: the option name, then its
         // '='. Only a name at the list's own depth counts — a nested group is
         // another option's value list (`DATA_COMPRESSION = PAGE ON PARTITIONS
         // (1)`), never an option itself. Tracking state rather than consuming
         // ahead keeps the depth accounting correct even on malformed input.
-        var namedIgnoreDupKey = false;
+        string? namedOption = null;
         var sawEquals = false;
         while (depth > 0)
         {
@@ -848,23 +861,54 @@ partial class Simulation
                 case Operator { Character: ')' }:
                     depth--;
                     break;
-                case Operator { Character: '=' } when namedIgnoreDupKey:
+                case Operator { Character: '=' } when namedOption is not null:
                     sawEquals = true;
                     continue;
-                case ReservedKeyword { Keyword: Keyword.On } when sawEquals:
-                    ignoreDupKey = true;
+                case ReservedKeyword { Keyword: Keyword.On or Keyword.Off } toggle when sawEquals:
+                    var on = toggle.Keyword == Keyword.On;
+                    if (namedOption == "IGNORE_DUP_KEY")
+                        ignoreDupKey = on;
+                    else if (namedOption == "PAD_INDEX")
+                        padIndex = on;
                     break;
+                case Numeric or Operator { Character: '-' } when sawEquals && namedOption == "FILLFACTOR":
+                    fillFactor = ReadFillFactor(context);
+                    break;
+                case ReservedKeyword { Keyword: Keyword.FillFactor } when depth == 1:
+                    namedOption = "FILLFACTOR";
+                    continue;
                 case StringToken name when depth == 1 && name.Span.Equals("IGNORE_DUP_KEY", StringComparison.OrdinalIgnoreCase):
-                    namedIgnoreDupKey = true;
+                    namedOption = "IGNORE_DUP_KEY";
+                    continue;
+                case StringToken name when depth == 1 && name.Span.Equals("PAD_INDEX", StringComparison.OrdinalIgnoreCase):
+                    namedOption = "PAD_INDEX";
                     continue;
             }
 
-            namedIgnoreDupKey = false;
+            namedOption = null;
             sawEquals = false;
         }
 
         context.MoveNextOptional();
-        return ignoreDupKey;
+        return new IndexOptions(ignoreDupKey, fillFactor, padIndex);
+    }
+
+    /// <summary>
+    /// Reads a <c>FILLFACTOR</c> value at the cursor (a number, or a minus
+    /// sign and one), leaving the cursor on its last token; real refuses
+    /// anything outside 1 to 100 with Msg 129.
+    /// </summary>
+    private static byte ReadFillFactor(ParserContext context)
+    {
+        var negative = context.Token is Operator { Character: '-' };
+        if (negative)
+            context.MoveNextRequired();
+        if (context.Token is not Numeric { Value: { IsNull: false } number })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        var value = negative ? -number.AsInt32 : number.AsInt32;
+        return value is < 1 or > 100
+            ? throw SimulatedSqlException.FillFactorOutOfRange(value)
+            : (byte)value;
     }
 
     /// <summary>
@@ -961,7 +1005,7 @@ partial class Simulation
             [],
             filter: null,
             filterDefinition: null,
-            ignoreDupKey: false));
+            options: default));
         return history;
     }
 
@@ -1007,7 +1051,7 @@ partial class Simulation
         bool isTableVariable,
         bool isTableType,
         List<HeapColumn?> heapColumns,
-        List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals, bool? Clustered, bool IgnoreDupKey, bool[] Descending)> pendingKeys,
+        List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals, bool? Clustered, IndexOptions Options, bool[] Descending)> pendingKeys,
         List<(string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition)> pendingChecks,
         List<(int Index, string Name, Expression Expression, bool Persisted, bool Nullable, string Definition)> pendingComputed,
         List<(string StartCol, string EndCol)>? pendingPeriod = null,
@@ -1179,7 +1223,7 @@ partial class Simulation
         bool isTableType,
         List<HeapColumn?> heapColumns,
         List<bool> explicitNull,
-        List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals, bool? Clustered, bool IgnoreDupKey, bool[] Descending)> pendingKeys,
+        List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals, bool? Clustered, IndexOptions Options, bool[] Descending)> pendingKeys,
         List<(string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition)> pendingChecks,
         List<(int Index, string Name, Expression Expression, bool Persisted, bool Nullable, string Definition)> pendingComputed,
         List<(string StartCol, string EndCol)>? pendingPeriod,
@@ -1293,7 +1337,7 @@ partial class Simulation
         string? columnCollation = null;
         var inlineKeyKind = (KeyConstraintKind?)null;
         var inlineKeyClustered = (bool?)null;
-        var inlineKeyIgnoreDupKey = false;
+        var inlineKeyOptions = default(IndexOptions);
         string? inlineKeyName = null;
         string? inlineFkName = null;
         string? inlineDefaultName = null;
@@ -1465,7 +1509,7 @@ partial class Simulation
                             throw SimulatedSqlException.BothPrimaryKeyAndUniqueOnColumn(columnName.Value, tableName);
                         case ReservedKeyword { Keyword: Keyword.Primary or Keyword.Unique }:
                             inlineKeyName = namedConstraint.Value;
-                            (inlineKeyKind, inlineKeyClustered, inlineKeyIgnoreDupKey) = ParseInlineKeyKindAndModifiers(context);
+                            (inlineKeyKind, inlineKeyClustered, inlineKeyOptions) = ParseInlineKeyKindAndModifiers(context);
                             continue;
                         default:
                             throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -1480,7 +1524,7 @@ partial class Simulation
                     pendingIndexes.Add(ParseInlineIndexBody(context, indexNameToken.Value, tableName, columnLevelKey: columnName.Value));
                     continue;
                 case ReservedKeyword { Keyword: Keyword.Primary or Keyword.Unique } when inlineKeyKind is null:
-                    (inlineKeyKind, inlineKeyClustered, inlineKeyIgnoreDupKey) = ParseInlineKeyKindAndModifiers(context);
+                    (inlineKeyKind, inlineKeyClustered, inlineKeyOptions) = ParseInlineKeyKindAndModifiers(context);
                     // The inline column-level form takes no direction — only
                     // the table-level column list does. Real raises Msg 156
                     // near the keyword for `a int PRIMARY KEY DESC`
@@ -1545,7 +1589,7 @@ partial class Simulation
         var actualNullable = nullable ?? (identitySpec is null);
 
         if (inlineKeyKind is KeyConstraintKind kind)
-            pendingKeys.Add((kind, inlineKeyName, [heapColumns.Count], inlineKeyClustered, inlineKeyIgnoreDupKey, []));
+            pendingKeys.Add((kind, inlineKeyName, [heapColumns.Count], inlineKeyClustered, inlineKeyOptions, []));
 
         IdentityState? identity = null;
         if (identitySpec is { } spec)
@@ -1766,7 +1810,7 @@ partial class Simulation
         string columnName,
         int computedIndex,
         bool persisted,
-        List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals, bool? Clustered, bool IgnoreDupKey, bool[] Descending)> pendingKeys,
+        List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals, bool? Clustered, IndexOptions Options, bool[] Descending)> pendingKeys,
         List<(string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition)> pendingChecks,
         List<PendingForeignKey>? pendingForeignKeys)
     {
@@ -1785,8 +1829,8 @@ partial class Simulation
             switch (context.Token)
             {
                 case ReservedKeyword { Keyword: Keyword.Primary or Keyword.Unique }:
-                    var (inlineKind, inlineClustered, inlineIgnoreDupKey) = ParseInlineKeyKindAndModifiers(context);
-                    pendingKeys.Add((inlineKind, constraintName, [computedIndex], inlineClustered, inlineIgnoreDupKey, []));
+                    var (inlineKind, inlineClustered, inlineOptions) = ParseInlineKeyKindAndModifiers(context);
+                    pendingKeys.Add((inlineKind, constraintName, [computedIndex], inlineClustered, inlineOptions, []));
                     continue;
                 case ReservedKeyword { Keyword: Keyword.Check }:
                     if (!persisted)
@@ -1964,7 +2008,7 @@ partial class Simulation
     /// one, from the inline and the table-level form alike (probe-confirmed).
     /// </summary>
     internal static bool IsPendingPrimaryKeyOrdinal(
-        List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals, bool? Clustered, bool IgnoreDupKey, bool[] Descending)> pendingKeys,
+        List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals, bool? Clustered, IndexOptions Options, bool[] Descending)> pendingKeys,
         int ordinal)
     {
         foreach (var pending in pendingKeys)
@@ -2183,7 +2227,7 @@ partial class Simulation
     /// UNIQUE</c> puts the clause at the end of the batch where CREATE TABLE's
     /// closing paren always follows it.
     /// </summary>
-    private static (KeyConstraintKind Kind, bool? Clustered, bool IgnoreDupKey) ParseInlineKeyKindAndModifiers(ParserContext context)
+    private static (KeyConstraintKind Kind, bool? Clustered, IndexOptions Options) ParseInlineKeyKindAndModifiers(ParserContext context)
     {
         KeyConstraintKind kind;
         if (context.Token is ReservedKeyword { Keyword: Keyword.Primary })
@@ -2217,7 +2261,7 @@ partial class Simulation
     private static void ParseTableLevelConstraint(
         ParserContext context,
         List<HeapColumn?> heapColumns,
-        List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals, bool? Clustered, bool IgnoreDupKey, bool[] Descending)> pendingKeys,
+        List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals, bool? Clustered, IndexOptions Options, bool[] Descending)> pendingKeys,
         List<(string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition)> pendingChecks,
         List<(int Index, string Name, Expression Expression, bool Persisted, bool Nullable, string Definition)> pendingComputed,
         List<PendingForeignKey>? pendingForeignKeys = null)
@@ -2286,10 +2330,10 @@ partial class Simulation
         // trailers are no-ops in the simulator (no B-tree storage, no
         // filegroup model) but the parser must consume them so the
         // column-list do-while sees a comma or closing paren next.
-        var ignoreDupKey = ParseOptionalIndexWithClause(context);
+        var indexOptions = ParseOptionalIndexWithClause(context);
         SkipOptionalFilegroupClause(context);
 
-        pendingKeys.Add((kind, constraintName, [.. ordinals], clustered, ignoreDupKey, [.. descending]));
+        pendingKeys.Add((kind, constraintName, [.. ordinals], clustered, indexOptions, [.. descending]));
     }
 
     /// <summary>
@@ -2318,7 +2362,7 @@ partial class Simulation
     internal static KeyConstraint[] ResolveKeyConstraints(
         string tableName,
         IReadOnlyList<HeapColumn> heapColumns,
-        IReadOnlyList<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals, bool? Clustered, bool IgnoreDupKey, bool[] Descending)> pendingKeys,
+        IReadOnlyList<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals, bool? Clustered, IndexOptions Options, bool[] Descending)> pendingKeys,
         Database database,
         DateTime createDate)
     {
@@ -2403,7 +2447,7 @@ partial class Simulation
             var (name, storageOrdinals, isClustered) = prepared[c];
             return new KeyConstraint(
                 pendingKeys[c].Kind, name, storageOrdinals, pendingKeys[c].FullOrdinals, database.AllocateObjectId(),
-                isClustered, pendingKeys[c].IgnoreDupKey, createDate, pendingKeys[c].Descending);
+                isClustered, pendingKeys[c].Options, createDate, pendingKeys[c].Descending);
         }
     }
 
@@ -2706,7 +2750,7 @@ partial class Simulation
         List<string> includeColumnNames,
         BooleanExpression? filter,
         string? filterDefinition,
-        bool ignoreDupKey)
+        IndexOptions options)
     {
         public readonly string Name = name;
         public readonly bool IsUnique = isUnique;
@@ -2715,7 +2759,7 @@ partial class Simulation
         public readonly List<string> IncludeColumnNames = includeColumnNames;
         public readonly BooleanExpression? Filter = filter;
         public readonly string? FilterDefinition = filterDefinition;
-        public readonly bool IgnoreDupKey = ignoreDupKey;
+        public readonly IndexOptions Options = options;
     }
 
     /// <summary>
@@ -2765,14 +2809,14 @@ partial class Simulation
             columns = [.. keyList];
         }
 
-        var (includeColumnNames, filter, filterDefinition, ignoreDupKey) = ParseIndexTail(context, indexName, tableName, acceptsInclude: columnLevelKey is null);
+        var (includeColumnNames, filter, filterDefinition, options) = ParseIndexTail(context, indexName, tableName, acceptsInclude: columnLevelKey is null);
         if (isClustered && includeColumnNames.Count > 0)
             throw SimulatedSqlException.IncludedColumnsOnClusteredIndex(inline: true);
-        if (ignoreDupKey && !isUnique)
+        if (options.IgnoreDupKey && !isUnique)
             throw SimulatedSqlException.FollowedByConstraintNotCreated(SimulatedSqlException.IgnoreDupKeyOnNonUniqueIndex(), state: 0);
-        if (ignoreDupKey && filter is not null)
+        if (options.IgnoreDupKey && filter is not null)
             throw SimulatedSqlException.FollowedByConstraintNotCreated(SimulatedSqlException.IgnoreDupKeyOnFilteredIndex("create", indexName, tableName), state: 0);
-        return new PendingInlineIndex(indexName, isUnique, isClustered, columns, includeColumnNames, filter, filterDefinition, ignoreDupKey);
+        return new PendingInlineIndex(indexName, isUnique, isClustered, columns, includeColumnNames, filter, filterDefinition, options);
     }
 
     /// <summary>
@@ -2813,7 +2857,7 @@ partial class Simulation
         Schema? schema,
         string tableName,
         List<HeapColumn?> heapColumns,
-        List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals, bool? Clustered, bool IgnoreDupKey, bool[] Descending)> pendingKeys,
+        List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals, bool? Clustered, IndexOptions Options, bool[] Descending)> pendingKeys,
         List<(string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition)> pendingChecks,
         List<PendingForeignKey> pendingForeignKeys)
     {

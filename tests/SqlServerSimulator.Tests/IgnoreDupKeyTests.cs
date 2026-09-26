@@ -357,12 +357,10 @@ public sealed class IgnoreDupKeyTests
 
     [TestMethod]
     public void AlterIndexSet_MultipleOptions_ReadsOnlyTheOneThatMatters()
-        // FILLFACTOR is a reserved keyword where the other option names are
-        // ordinary identifiers, so the list has to read names off raw source.
         => IsTrue((bool)new Simulation().ExecuteScalar("""
             create table t (id int not null, u int not null);
             create unique index ux on t(u);
-            alter index ux on t set (allow_row_locks = on, ignore_dup_key = on, statistics_norecompute = off, fillfactor = 70);
+            alter index ux on t set (allow_row_locks = on, ignore_dup_key = on, statistics_norecompute = off, optimize_for_sequential_key = off);
             select ignore_dup_key from sys.indexes where name = 'ux'
             """)!);
 

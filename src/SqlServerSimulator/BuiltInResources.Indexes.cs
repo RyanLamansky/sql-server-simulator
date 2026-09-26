@@ -562,7 +562,6 @@ internal static partial class BuiltInResources
             yield break;
         var trueBit = SqlValue.FromBoolean(true);
         var falseBit = SqlValue.FromBoolean(false);
-        var zeroByte = SqlValue.FromByte(0);
         // compression_delay is NULL for every rowstore index (probe-confirmed);
         // it carries a minute-delay only for columnstore, which isn't modeled.
         var nullCompressionDelay = SqlValue.Null(SqlType.Int32);
@@ -601,6 +600,8 @@ internal static partial class BuiltInResources
         {
             var typeDesc = identity.Type switch { 0 => heapDesc, 1 => clusteredDesc, _ => nonClusteredDesc };
             SqlValue name, isUnique, isPrimaryKey, isUniqueConstraint, hasFilter, filterDefinition, ignoreDupKey, isDisabled;
+            byte fillFactor = 0;
+            var isPadded = false;
             if (identity.Constraint is { } key)
             {
                 var isPk = key.Kind == KeyConstraintKind.PrimaryKey;
@@ -612,6 +613,7 @@ internal static partial class BuiltInResources
                 filterDefinition = nullFilter;
                 ignoreDupKey = key.IgnoreDupKey ? trueBit : falseBit;
                 isDisabled = key.IsDisabled ? trueBit : falseBit;
+                (fillFactor, isPadded) = (key.FillFactor, key.IsPadded);
             }
             else if (identity.Index is { } index)
             {
@@ -623,6 +625,7 @@ internal static partial class BuiltInResources
                 filterDefinition = index.FilterDefinition is { } def ? SqlValue.FromNVarchar(def) : nullFilter;
                 ignoreDupKey = index.IgnoreDupKey ? trueBit : falseBit;
                 isDisabled = index.IsDisabled ? trueBit : falseBit;
+                (fillFactor, isPadded) = (index.FillFactor, index.IsPadded);
             }
             else
             {
@@ -649,7 +652,7 @@ internal static partial class BuiltInResources
                 filterDefinition: filterDefinition,
                 ignoreDupKey: ignoreDupKey,
                 isDisabled: isDisabled,
-                falseBit, trueBit, zeroByte);
+                isPadded ? trueBit : falseBit, trueBit, SqlValue.FromByte(fillFactor));
         }
 
         SqlValue[] BuildIndexRow(

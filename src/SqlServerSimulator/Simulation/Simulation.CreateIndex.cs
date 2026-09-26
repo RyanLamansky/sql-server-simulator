@@ -103,7 +103,8 @@ partial class Simulation
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextOptional();
 
-        var (includeColumnNames, filter, filterDefinition, ignoreDupKey) = ParseIndexTail(context, indexName, targetTableName.Leaf, acceptsInclude: true);
+        var (includeColumnNames, filter, filterDefinition, indexOptions) = ParseIndexTail(context, indexName, targetTableName.Leaf, acceptsInclude: true);
+        var ignoreDupKey = indexOptions.IgnoreDupKey;
 
         // Both statement-shape checks precede every name-resolution error,
         // including a missing table, so they fire here rather than after the
@@ -130,7 +131,7 @@ partial class Simulation
                     throw SimulatedSqlException.CannotFindObjectForCreateIndex(targetTableName.ToString());
                 if (ignoreDupKey)
                     throw SimulatedSqlException.IgnoreDupKeyOnViewIndex();
-                context.Batch.Connection.Simulation.CreateIndexOnView(context, view, indexName, isUnique, isClustered, keyColumns, includeColumnNames, filter, filterDefinition);
+                context.Batch.Connection.Simulation.CreateIndexOnView(context, view, indexName, isUnique, isClustered, keyColumns, includeColumnNames, filter, filterDefinition, indexOptions);
                 RecordDdlEvent(context, "CREATE_INDEX", EventSchemaName(targetTableName), indexName, "INDEX", view.Name, "VIEW");
                 return true;
             }
@@ -207,7 +208,7 @@ partial class Simulation
             resolvedIncludeOrdinals,
             filter,
             filterDefinition,
-            ignoreDupKey);
+            indexOptions);
 
         // A filtered index or one over a computed column stores the value of
         // an expression, so real refuses to build it from a session whose SET
@@ -320,7 +321,7 @@ partial class Simulation
                 includeOrdinals,
                 pending.Filter,
                 pending.FilterDefinition,
-                pending.IgnoreDupKey));
+                pending.Options));
         }
     }
 
@@ -459,7 +460,7 @@ partial class Simulation
     /// filegroup model) and so is every index option except
     /// <c>IGNORE_DUP_KEY</c>, the one with a semantic here.
     /// </summary>
-    private static (List<string> IncludeColumnNames, BooleanExpression? Filter, string? FilterDefinition, bool IgnoreDupKey) ParseIndexTail(
+    private static (List<string> IncludeColumnNames, BooleanExpression? Filter, string? FilterDefinition, IndexOptions Options) ParseIndexTail(
         ParserContext context, string indexName, string tableLeaf, bool acceptsInclude)
     {
         var includeColumnNames = new List<string>();
@@ -495,9 +496,9 @@ partial class Simulation
             filterDefinition = filter.RenderFilterDefinition(context.Batch);
         }
 
-        var ignoreDupKey = ParseOptionalIndexWithClause(context);
+        var options = ParseOptionalIndexWithClause(context);
         SkipOptionalFilegroupClause(context);
-        return (includeColumnNames, filter, filterDefinition, ignoreDupKey);
+        return (includeColumnNames, filter, filterDefinition, options);
     }
 
     /// <summary>

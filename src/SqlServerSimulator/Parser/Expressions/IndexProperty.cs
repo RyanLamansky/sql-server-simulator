@@ -69,23 +69,26 @@ internal sealed class IndexProperty : Expression
         // Resolve as either a CREATE INDEX-declared index or a PK / UNIQUE
         // constraint-backed index. KeyConstraint also surfaces in sys.indexes
         // under the constraint's auto-generated name (e.g. PK__<table8>__<hex>).
-        bool isUnique, isClustered;
+        bool isUnique, isClustered, isPadded;
+        byte fillFactor;
         if (FindIndex(table, indexName) is Index idx)
         {
             isUnique = idx.IsUnique;
             isClustered = idx.IsClustered;
+            (fillFactor, isPadded) = (idx.FillFactor, idx.IsPadded);
         }
         else if (FindKeyConstraint(table, indexName) is KeyConstraint kc)
         {
             isUnique = true;
             isClustered = kc.IsClustered;
+            (fillFactor, isPadded) = (kc.FillFactor, kc.IsPadded);
         }
         else
         {
             return SqlValue.Null(SqlType.Int32);
         }
 
-        return EvaluateIndexProperty(isUnique, isClustered, prop) is int result
+        return EvaluateIndexProperty(isUnique, isClustered, fillFactor, isPadded, prop) is int result
             ? SqlValue.FromInt32(result)
             : SqlValue.Null(SqlType.Int32);
     }
@@ -110,7 +113,7 @@ internal sealed class IndexProperty : Expression
         return null;
     }
 
-    private static int? EvaluateIndexProperty(bool isUnique, bool isClustered, string property)
+    private static int? EvaluateIndexProperty(bool isUnique, bool isClustered, byte fillFactor, bool isPadded, string property)
     {
         Span<char> upper = stackalloc char[property.Length];
         return property.AsSpan().ToUpperInvariant(upper) switch
@@ -119,7 +122,7 @@ internal sealed class IndexProperty : Expression
             10 => upper switch
             {
                 "INDEXDEPTH" => 0,
-                "ISPADINDEX" => 0,
+                "ISPADINDEX" => isPadded ? 1 : 0,
                 _ => null,
             },
             11 => upper switch
@@ -147,7 +150,7 @@ internal sealed class IndexProperty : Expression
             },
             15 => upper switch
             {
-                "INDEXFILLFACTOR" => 0,
+                "INDEXFILLFACTOR" => fillFactor,
                 _ => null,
             },
             16 => upper switch

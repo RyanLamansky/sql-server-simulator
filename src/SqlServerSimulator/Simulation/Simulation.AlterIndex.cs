@@ -25,12 +25,31 @@ partial class Simulation
 
     /// <summary>
     /// <c>ALTER INDEX … SET</c> options taking a numeric value. Recognized and
-    /// discarded — there is no B-tree for either to describe.
+    /// discarded — there is no B-tree for it to describe.
     /// </summary>
     private static readonly FrozenSet<string> NumericIndexOptions = new[]
     {
         "COMPRESSION_DELAY",
+    }.ToFrozenSet(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Index options <c>ALTER INDEX … SET</c> can't change, which real names
+    /// "ALTER INDEX SET" options in its Msg 155 (probed 2026-09-26 against SQL
+    /// Server 2025).
+    /// </summary>
+    private static readonly FrozenSet<string> NonSettableIndexOptions = new[]
+    {
+        "DATA_COMPRESSION",
+        "DROP_EXISTING",
         "FILLFACTOR",
+        "MAX_DURATION",
+        "MAXDOP",
+        "ONLINE",
+        "PAD_INDEX",
+        "RESUMABLE",
+        "SORT_IN_TEMPDB",
+        "STATISTICS_INCREMENTAL",
+        "XML_COMPRESSION",
     }.ToFrozenSet(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
@@ -44,12 +63,11 @@ partial class Simulation
     /// </summary>
     /// <remarks>
     /// <para>
-    /// The option list is validated strictly here, unlike CREATE INDEX's
-    /// <c>WITH (…)</c> clause, which skips unrecognized options so that scripted
-    /// DDL keeps flowing. That asymmetry follows real: an unknown name raises
-    /// <b>Msg 155</b> at ALTER INDEX, and its <c>= value</c> must be
-    /// <c>ON</c> / <c>OFF</c> (a numeric for <c>COMPRESSION_DELAY</c> /
-    /// <c>FILLFACTOR</c>) or the statement is a syntax error.
+    /// The option list is validated strictly: an unknown name raises
+    /// <b>Msg 155</b>, and its <c>= value</c> must be <c>ON</c> / <c>OFF</c>
+    /// (a numeric for <c>COMPRESSION_DELAY</c>) or the statement is a syntax
+    /// error. The <c>WITH (…)</c> clause of CREATE INDEX and REBUILD skips a
+    /// name it doesn't know, where real's refuses it with its own Msg 155.
     /// </para>
     /// <para>
     /// Setting <c>IGNORE_DUP_KEY</c> is narrower than declaring it, and each
@@ -114,6 +132,7 @@ partial class Simulation
         };
 
         bool? ignoreDupKey = null;
+        var rebuildOptions = default(IndexOptions);
         var namedPartition = false;
         switch (form)
         {
@@ -144,7 +163,7 @@ partial class Simulation
                 // option block; neither describes anything a heap has.
                 context.MoveNextOptional();
                 namedPartition = ParseOptionalIndexPartitionClause(context);
-                _ = ParseOptionalIndexWithClause(context);
+                rebuildOptions = ParseOptionalIndexWithClause(context);
                 break;
         }
 
@@ -171,7 +190,7 @@ partial class Simulation
                 if (collation.Equals(constraint.Name, indexName))
                 {
                     RejectNamedIndexTarget(form, namedPartition, constraint.Name, table.Name);
-                    ApplyToConstraint(table, constraint, form, ignoreDupKey, context.Batch);
+                    ApplyToConstraint(table, constraint, form, ignoreDupKey, rebuildOptions, context.Batch);
                     RecordDdlEvent(context, "ALTER_INDEX", EventSchemaName(tableName), indexName!, "INDEX", table.Name, "TABLE");
                     return true;
                 }
@@ -182,7 +201,7 @@ partial class Simulation
                 if (collation.Equals(index.Name, indexName))
                 {
                     RejectNamedIndexTarget(form, namedPartition, index.Name, table.Name);
-                    ApplyToIndex(context, table, index, form, ignoreDupKey);
+                    ApplyToIndex(context, table, index, form, ignoreDupKey, rebuildOptions);
                     RecordDdlEvent(context, "ALTER_INDEX", EventSchemaName(tableName), indexName!, "INDEX", table.Name, "TABLE");
                     return true;
                 }
@@ -217,13 +236,13 @@ partial class Simulation
             // would be Msg 1973 (probe-confirmed).
             if (form == AlterIndexForm.Reorganize && constraint.IsDisabled)
                 continue;
-            ApplyToConstraint(table, constraint, form, ignoreDupKey, context.Batch);
+            ApplyToConstraint(table, constraint, form, ignoreDupKey, rebuildOptions, context.Batch);
         }
         foreach (var index in table.Indexes)
         {
             if (form == AlterIndexForm.Reorganize && index.IsDisabled)
                 continue;
-            ApplyToIndex(context, table, index, form, ignoreDupKey);
+            ApplyToIndex(context, table, index, form, ignoreDupKey, rebuildOptions);
         }
         RecordDdlEvent(context, "ALTER_INDEX", EventSchemaName(tableName), table.Name, "INDEX", table.Name, "TABLE");
         return true;
@@ -270,7 +289,7 @@ partial class Simulation
     /// succeeds on a table carrying a PRIMARY KEY.
     /// </summary>
     private static void ApplyToConstraint(
-        HeapTable table, KeyConstraint constraint, AlterIndexForm form, bool? ignoreDupKey, BatchContext batch)
+        HeapTable table, KeyConstraint constraint, AlterIndexForm form, bool? ignoreDupKey, IndexOptions rebuildOptions, BatchContext batch)
     {
         switch (form)
         {
@@ -281,6 +300,8 @@ partial class Simulation
                 if (constraint.IsDisabled)
                     ValidateExistingRowsForKeyConstraint(table, constraint, batch);
                 constraint.IsDisabled = false;
+                constraint.FillFactor = rebuildOptions.FillFactor ?? constraint.FillFactor;
+                constraint.IsPadded = rebuildOptions.PadIndex ?? constraint.IsPadded;
                 break;
             case AlterIndexForm.Reorganize:
                 // Nothing to compact in a flat page list, but a disabled index
@@ -298,7 +319,7 @@ partial class Simulation
     }
 
     private static void ApplyToIndex(
-        ParserContext context, HeapTable table, Storage.Index index, AlterIndexForm form, bool? ignoreDupKey)
+        ParserContext context, HeapTable table, Storage.Index index, AlterIndexForm form, bool? ignoreDupKey, IndexOptions rebuildOptions)
     {
         switch (form)
         {
@@ -316,6 +337,10 @@ partial class Simulation
                         table, index, context.Batch, $"{Database.DefaultSchemaName}.{table.Name}");
                 }
                 index.IsDisabled = false;
+                // A rebuild keeps the FILLFACTOR / PAD_INDEX its WITH leaves
+                // out (probed 2026-09-26 against SQL Server 2025).
+                index.FillFactor = rebuildOptions.FillFactor ?? index.FillFactor;
+                index.IsPadded = rebuildOptions.PadIndex ?? index.IsPadded;
                 break;
             case AlterIndexForm.Reorganize:
                 if (index.IsDisabled)
@@ -376,7 +401,7 @@ partial class Simulation
             }
             else
             {
-                throw SimulatedSqlException.UnrecognizedAlterIndexOption(optionName);
+                throw SimulatedSqlException.UnrecognizedAlterIndexOption(optionName, NonSettableIndexOptions.Contains(optionName));
             }
 
             if (context.GetNextRequired() is not Operator { Character: ',' })

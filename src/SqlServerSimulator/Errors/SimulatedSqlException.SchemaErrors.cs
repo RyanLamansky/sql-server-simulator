@@ -2074,6 +2074,13 @@ partial class SimulatedSqlException
         new($"Column name '{columnName}' does not exist in the target table, index or view.", 1911, 16, state);
 
     /// <summary>
+    /// Mimics SQL Server error 129: an index's <c>FILLFACTOR</c> outside 1 to
+    /// 100 (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException FillFactorOutOfRange(int value) =>
+        new($"Fillfactor {value} is not a valid percentage; fillfactor must be between 1 and 100.", 129, 15, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 1927: <c>CREATE STATISTICS</c> named something
     /// the table already carries. Statistics share the per-table name space
     /// with indexes and key constraints, so an index's name collides here too
@@ -2227,10 +2234,13 @@ partial class SimulatedSqlException
 
     /// <summary>
     /// Mimics SQL Server error 155: an unrecognized option name inside
-    /// <c>ALTER INDEX … SET (…)</c>. Probe-confirmed verbatim.
+    /// <c>ALTER INDEX … SET (…)</c> — "ALTER INDEX SET option" for an index
+    /// option <c>SET</c> can't change (<c>FILLFACTOR</c>, <c>ONLINE</c> …),
+    /// "ALTER INDEX option" for any other name (probed 2026-09-26 against SQL
+    /// Server 2025).
     /// </summary>
-    internal static SimulatedSqlException UnrecognizedAlterIndexOption(string optionName) =>
-        new($"'{optionName}' is not a recognized ALTER INDEX option.", 155, 15, 1);
+    internal static SimulatedSqlException UnrecognizedAlterIndexOption(string optionName, bool indexOption = false) =>
+        new($"'{optionName}' is not a recognized ALTER INDEX{(indexOption ? " SET" : "")} option.", 155, 15, 1);
 
     /// <summary>
     /// Mimics SQL Server error 155 for an <c>UPDATE STATISTICS</c> option,

@@ -32,7 +32,8 @@ One rendering divergence remains: real stores a CAST constant as `CONVERT([int],
 
 The simulator has no B-tree storage, so an index never constrains inserts (UNIQUE aside) and isn't a stored ordered structure.
 UNIQUE indexes participate in INSERT / UPDATE / MERGE enforcement alongside `KeyConstraint`.
-The `WITH (...)` clause is scanned for `IGNORE_DUP_KEY` — the one option with a semantic, see [`constraints.md`](constraints.md#ignore_dup_key) — and otherwise parsed parens-balanced and discarded: none of `FILLFACTOR` / `PAD_INDEX` / `ONLINE` / `SORT_IN_TEMPDB` / etc. alter behavior.
+The `WITH (...)` clause (`Simulation.ParseOptionalIndexWithClause`) is scanned for `IGNORE_DUP_KEY` — the one option with a semantic, see [`constraints.md`](constraints.md#ignore_dup_key) — and for `FILLFACTOR` / `PAD_INDEX`, which `sys.indexes.fill_factor` / `is_padded` and `INDEXPROPERTY` report and an `ALTER INDEX … REBUILD WITH` may change; the legacy unparenthesized `WITH FILLFACTOR = n` is accepted, and a fill factor outside 1 to 100 is **Msg 129** (probed 2026-09-26 against SQL Server 2025).
+The rest (`ONLINE` / `SORT_IN_TEMPDB` / …) are parsed parens-balanced and discarded.
 The trailing `ON <filegroup>` placement clause (e.g. `ON [PRIMARY]`) is also parsed and discarded — no filegroup model.
 The same two trailers are accepted on inline `CONSTRAINT … PRIMARY KEY | UNIQUE` clauses inside CREATE TABLE and on `ALTER TABLE … ADD CONSTRAINT … PRIMARY KEY | UNIQUE (cols)`, plus `) ON [PRIMARY] [TEXTIMAGE_ON [PRIMARY]]` at the end of CREATE TABLE — the full SSMS-scripting verbosity surface.
 
@@ -664,10 +665,9 @@ A heap keeps write order, as real's allocation-order scan does, and a SNAPSHOT /
 - **CLUSTERED keyword drives allocation and scan order, not storage**: `CREATE CLUSTERED INDEX` (and a clustered PK / `UNIQUE CLUSTERED` constraint) correctly reports `index_id = 1` / `type_desc = CLUSTERED` and suppresses the HEAP row (see [Index-id allocation](#index-id-allocation)), and a scan follows its key (see [Clustered scan order](#clustered-scan-order)), but the heap underneath stays in write order.
   Real may instead scan a narrower nonclustered index that covers the query and so return that index's order (`SELECT a FROM t` over `UNIQUE (a)` on a heap), which isn't modeled.
 - *(the one-clustered-per-table rule now covers every path — see [One clustered index per table](#grammar). The constraint paths raise **Msg 1902 State 3** naming the existing clustered index, except an all-inline CREATE TABLE pair, which real gives its own **Msg 8112** since neither entry exists yet to name; the multiple-PRIMARY-KEY check (Msg 8110) outranks both.)*
-- **WITH options ignored**: `FILLFACTOR`, `IGNORE_DUP_KEY`, `ONLINE`, `MAXDOP`, etc. all parse but have no behavior.
-  `IGNORE_DUP_KEY = ON` is the one with observable fallout: real skips the duplicate row and continues (probe-confirmed — the surviving rows insert, `@@ROWCOUNT` counts only those, and a severity-10 Msg 3604 `Duplicate key was ignored.` rides the info stream once per statement), while the simulator raises Msg 2601 and fails the INSERT.
-  The flag isn't stored either, so `sys.indexes.ignore_dup_key` reports 0 for a declared-ON index.
-  Tracked in [`backlog.md`](backlog.md).
+- **An unknown `WITH` option name** — real refuses one in `CREATE INDEX` / `REBUILD` with its own **Msg 155** ("not a recognized CREATE INDEX option"), where the simulator skips it (probed 2026-09-26).
+- **`DROP_EXISTING = ON`** — real replaces the named index in place; the simulator raises Msg 1913 as for a duplicate name.
+- **`COMPRESSION_DELAY`** in `ALTER INDEX … SET` — real's **Msg 35364** (columnstore only) on a rowstore index; the simulator accepts and discards it.
 - **No partition-aware index storage**: `partition_ordinal` always 0, `data_space_id` always 1 (PRIMARY).
 - **DROP INDEX comma list not atomic**: each entry resolves independently.
   Real SQL Server rolls back all on any failure.

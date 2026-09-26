@@ -398,7 +398,7 @@ partial class Simulation
         // SSMS emits `ADD CONSTRAINT name UNIQUE NONCLUSTERED (cols) WITH
         // (PAD_INDEX = OFF, …) ON [PRIMARY]`. The filegroup trailer is a no-op
         // (no filegroup model); of the index options only IGNORE_DUP_KEY lands.
-        var ignoreDupKey = ParseOptionalIndexWithClause(context);
+        var indexOptions = ParseOptionalIndexWithClause(context);
         SkipOptionalFilegroupClause(context);
 
         if (context.Batch.IsSkipping)
@@ -474,7 +474,7 @@ partial class Simulation
                 throw SimulatedSqlException.MoreThanOneClusteredIndex(table.Name, existingClustered);
         }
 
-        var constraint = new KeyConstraint(kind, name, storageOrdinals, fullOrdinals, context.CurrentDatabase.AllocateObjectId(), isClustered, ignoreDupKey, context.Batch.CurrentStatement.UtcNow, [.. descending]);
+        var constraint = new KeyConstraint(kind, name, storageOrdinals, fullOrdinals, context.CurrentDatabase.AllocateObjectId(), isClustered, indexOptions, context.Batch.CurrentStatement.UtcNow, [.. descending]);
         ValidateExistingRowsForKeyConstraint(table, constraint, context.Batch);
         table.KeyConstraints.Add(constraint);
         return true;

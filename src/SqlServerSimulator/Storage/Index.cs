@@ -45,7 +45,7 @@ internal sealed class Index(
     int[] includedColumnOrdinals,
     BooleanExpression? filter,
     string? filterDefinition,
-    bool ignoreDupKey)
+    IndexOptions options)
 {
     // Mutable: EXEC sp_rename (INDEX rename) reassigns the name in place; the
     // index keeps its identity and surfaces the new name through sys.indexes.
@@ -153,7 +153,17 @@ internal sealed class Index(
     /// Surfaces as <c>sys.indexes.ignore_dup_key</c>.
     /// See <c>docs/claude/constraints.md</c>.
     /// </summary>
-    public bool IgnoreDupKey = ignoreDupKey;
+    public bool IgnoreDupKey = options.IgnoreDupKey;
+
+    /// <summary>
+    /// <c>sys.indexes.fill_factor</c> / <c>is_padded</c>: the declaration's
+    /// <c>FILLFACTOR</c> / <c>PAD_INDEX</c>, which an <c>ALTER INDEX …
+    /// REBUILD WITH</c> may change.
+    /// </summary>
+    public byte FillFactor = options.FillFactor ?? 0;
+
+    /// <inheritdoc cref="FillFactor"/>
+    public bool IsPadded = options.PadIndex ?? false;
 
     /// <summary>
     /// Whether <c>ALTER INDEX … DISABLE</c> has taken this index out of service.

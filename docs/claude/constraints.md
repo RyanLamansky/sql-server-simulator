@@ -142,13 +142,14 @@ Because filtered unique indexes reject the option outright, there is no filtered
 ### `ALTER INDEX … SET`
 
 `Simulation.AlterIndex.cs` implements `ALTER INDEX { name | ALL } ON <table> SET ( option [, …] )`.
-`IGNORE_DUP_KEY` is honored; `ALLOW_ROW_LOCKS` / `ALLOW_PAGE_LOCKS` / `OPTIMIZE_FOR_SEQUENTIAL_KEY` / `STATISTICS_NORECOMPUTE` / `COMPRESSION_DELAY` / `FILLFACTOR` are recognized by name and discarded.
-The list is validated **strictly** here, unlike CREATE INDEX's tolerant `WITH (…)`, because real is strict too: an unknown name raises **Msg 155**, and a value that isn't `ON` / `OFF` (or a numeric where one belongs) is **Msg 102**, as is an empty list.
+`IGNORE_DUP_KEY` is honored; `ALLOW_ROW_LOCKS` / `ALLOW_PAGE_LOCKS` / `OPTIMIZE_FOR_SEQUENTIAL_KEY` / `STATISTICS_NORECOMPUTE` / `COMPRESSION_DELAY` are recognized by name and discarded.
+An index option `SET` can't change (`FILLFACTOR`, `PAD_INDEX`, `ONLINE` …) is Msg 155 naming an "ALTER INDEX SET option", any other name Msg 155 naming an "ALTER INDEX option" (probed 2026-09-26 against SQL Server 2025).
+The list is validated **strictly**: an unknown name raises **Msg 155**, and a value that isn't `ON` / `OFF` (or a numeric where one belongs) is **Msg 102**, as is an empty list.
 A named target resolves against the table's indexes *and* its key constraints — that's what makes Msg 1979 reachable.
 `ALL` fans out over every index and aborts on the first refusal, so a table carrying any key constraint can't have the option set table-wide; a SET that never mentions `IGNORE_DUP_KEY` has nothing to refuse and sweeps cleanly.
 Missing index → **Msg 2727** (Level 11); missing table → **Msg 1088** (State 9, the object name in double quotes).
 
-`FILLFACTOR` is a reserved keyword where every other option name is an ordinary identifier, so the option name is read off `Token.Source` rather than as an identifier token.
+`FILLFACTOR` is a reserved keyword where every other option name is an ordinary identifier, so the option name is read off `Token.Source` rather than as an identifier token, which is what lets its refusal name it.
 
 The `DISABLE` / `REBUILD` forms ship too — see [`indexes.md`](indexes.md#disabled-indexes); `REORGANIZE` / `RESUME` / `PAUSE` / `ABORT` raise `NotSupportedException`.
 A disabled index isn't enforced at all, so an `ALTER INDEX … DISABLE` earlier in a script silently stops later duplicate checks — worth knowing when reading probe transcripts, since it is exactly what made one of this feature's own probes look like a divergence.

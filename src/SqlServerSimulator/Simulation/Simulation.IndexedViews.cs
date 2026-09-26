@@ -32,7 +32,7 @@ partial class Simulation
     private void CreateIndexOnView(
         ParserContext context, View view, string indexName, bool isUnique, bool isClustered,
         List<(string Name, bool IsDescending)> keyColumns, List<string> includeColumnNames,
-        BooleanExpression? filter, string? filterDefinition)
+        BooleanExpression? filter, string? filterDefinition, IndexOptions options)
     {
         var collation = context.Batch.CurrentDatabase.Collation;
         var qualifiedViewName = $"{view.Schema.Name}.{view.Name}";
@@ -100,9 +100,9 @@ partial class Simulation
             resolvedIncludeOrdinals,
             filter,
             filterDefinition,
-            // Unreachable with the option set: an index over a view carrying
-            // IGNORE_DUP_KEY is rejected with Msg 1990 before this point.
-            ignoreDupKey: false);
+            // IGNORE_DUP_KEY is unreachable here: an index over a view
+            // carrying it is rejected with Msg 1990 before this point.
+            options);
 
         if (isUnique)
         {
