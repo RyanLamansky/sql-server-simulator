@@ -131,23 +131,29 @@ partial class SimulatedSqlException
         new("Must specify the table name and index name for the DROP INDEX statement.", 159, 15, 1);
 
     /// <summary>
-    /// Pairs a view body's binder error — a missing object (Msg 208), column
-    /// (Msg 207) or qualifier (Msg 4104) — with the Msg 4413 real sends after
+    /// Pairs a view's or inline function's body binder error — a missing
+    /// object (Msg 208), column (Msg 207) or qualifier (Msg 4104) — with the
+    /// Msg 4413 real sends after
     /// it, naming only the outermost view a nested reference passed through,
     /// so an inner view's trailer is replaced rather than repeated (probed
     /// 2026-09-24 against SQL Server 2025).
     /// </summary>
-    internal static SimulatedSqlException FollowedByViewBindingFailure(SimulatedSqlException error, string viewName)
+    internal static SimulatedSqlException FollowedByViewBindingFailure(SimulatedSqlException error, Parser.MultiPartName writtenName, string moduleName)
     {
         List<SimulatedError> entries = [.. error.Errors.Where(entry => entry.Number != 4413)];
-        // The body's own error names the view it bound in, the innermost one
-        // when views nest (probed 2026-09-26 against SQL Server 2025).
+        // The body's own error names the module it bound in, the innermost
+        // one when they nest; the trailer names the reference as written, and
+        // a schema-qualified one at line 12 (probed 2026-09-26 against SQL
+        // Server 2025).
         foreach (var entry in entries)
         {
             if (entry.Procedure.Length == 0)
-                entry.Procedure = viewName;
+                entry.Procedure = moduleName;
         }
-        return FollowedBy(FromErrors(entries), new($"Could not use view or function '{viewName}' because of binding errors.", 4413, 16, 1));
+        var trailer = new SimulatedSqlException($"Could not use view or function '{writtenName.Written}' because of binding errors.", 4413, 16, 1);
+        if (writtenName.Count >= 2)
+            trailer.Errors[0].LineNumber = 12;
+        return FollowedBy(FromErrors(entries), trailer);
     }
 
     /// <summary>
@@ -2578,6 +2584,15 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException DropColumnDoesNotExist(string columnName, string tableName) =>
         new($"ALTER TABLE DROP COLUMN failed because column '{columnName}' does not exist in table '{tableName}'.", 4924, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 4923: <c>ALTER TABLE DROP COLUMN</c> would
+    /// leave the table no data column — a computed column isn't one — naming
+    /// the column whose drop would, after every name and dependency check
+    /// passed (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException DropColumnLeavesNoDataColumn(string columnName, string tableName) =>
+        new($"ALTER TABLE DROP COLUMN failed because '{columnName}' is the only data column in table '{tableName}'. A table must have at least one data column.", 4923, 16, 1);
 
     /// <summary>
     /// Mimics SQL Server's Msg 264 — an UPDATE's SET list or an INSERT's column

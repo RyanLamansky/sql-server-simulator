@@ -1064,4 +1064,29 @@ public sealed class AlterTableColumnTests
         var ex = simulation.AssertSqlError("alter table cn alter column d decimal(5,2)", 8115);
         AreEqual((byte)8, ex.State);
     }
+
+    /// <summary>
+    /// A drop that would leave no data column — a computed one doesn't count —
+    /// is Msg 4923 naming the column that would, and each later name may repeat
+    /// the COLUMN keyword (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("create table t (a int)", "alter table t drop column a", "a")]
+    [DataRow("create table t (a int, b int)", "alter table t drop column b, a", "a")]
+    [DataRow("create table t (a int, b int)", "alter table t drop column a, column b", "b")]
+    [DataRow("create table t (a int, b as 1)", "alter table t drop column a", "a")]
+    public void DroppingTheLastDataColumn_IsMsg4923(string create, string alter, string column)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery(create);
+        sim.AssertSqlError(alter, 4923, $"ALTER TABLE DROP COLUMN failed because '{column}' is the only data column in table 't'. A table must have at least one data column.");
+    }
+
+    [TestMethod]
+    public void RepeatedColumnKeyword_DropsEach()
+        => AreEqual(1, new Simulation().ExecuteScalar("""
+            create table t (a int, b int, c int);
+            alter table t drop column a, column b;
+            select count(*) from sys.columns where object_id = object_id('t')
+            """));
 }

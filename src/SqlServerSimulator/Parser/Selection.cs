@@ -2624,8 +2624,7 @@ internal sealed partial class Selection
             }
 
             var resolvedIsTvf = IsSysRowsetFunction(resolvedName)
-                || (context.Batch.TryResolveFunction(resolvedName, out var resolvedFn)
-                    && resolvedFn is InlineTableValuedFunction or MultiStatementTableValuedFunction);
+                || context.Batch.TryResolveTableValuedFunction(resolvedName, out _);
             // A '(' after the name marks a function-call shape (TVF invocation).
             // ParseObjectName leaves the cursor on the leaf; peek one past it.
             var isFunctionCallShape = context.MoveNext() && context.Token is Operator { Character: '(' };
@@ -3025,7 +3024,7 @@ internal sealed partial class Selection
                 // the caller's parser cursor.
                 if (context.Batch.TryResolveView(objectName, out var resolvedView))
                 {
-                    var viewColumns = context.Batch.Connection.Simulation.BindViewColumns(context.Batch, resolvedView);
+                    var viewColumns = context.Batch.Connection.Simulation.BindViewColumns(context.Batch, resolvedView, objectName);
                     var viewColumnNames = new string[viewColumns.Length];
                     for (var ci = 0; ci < viewColumnNames.Length; ci++)
                         viewColumnNames[ci] = viewColumns[ci].Name;
@@ -3072,8 +3071,7 @@ internal sealed partial class Selection
                 // table-lookup branch and surfaces Msg 208 (probe-confirmed:
                 // real SQL Server treats `FROM dbo.scalar_fn(...)` as a
                 // missing-object error, not a kind-mismatch).
-                if (context.Batch.TryResolveFunction(objectName, out var function)
-                    && function is InlineTableValuedFunction or MultiStatementTableValuedFunction)
+                if (context.Batch.TryResolveTableValuedFunction(objectName, out var function))
                 {
                     var checkpoint = context.SaveCheckpoint();
                     context.MoveNextOptional();
@@ -3088,7 +3086,7 @@ internal sealed partial class Selection
                             : ((MultiStatementTableValuedFunction)function).OutputColumns;
                         _ = RecordSecurableRead(context, function, objectName);
                         var lateralPlan = function is InlineTableValuedFunction inlineTvf
-                            ? Selection.ForInlineTvf(inlineTvf, tvfArgs)
+                            ? Selection.ForInlineTvf(inlineTvf, tvfArgs, objectName)
                             : Selection.ForMultiStatementTvf((MultiStatementTableValuedFunction)function, tvfArgs);
                         return new FromSource(
                             qualifier: tvfAlias ?? function.Name,

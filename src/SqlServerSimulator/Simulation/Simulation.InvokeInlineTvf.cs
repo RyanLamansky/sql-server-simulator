@@ -38,7 +38,8 @@ partial class Simulation
         BatchContext outerBatch,
         Func<MultiPartName, SqlValue>? outerResolver,
         InlineTableValuedFunction function,
-        Expression?[] arguments)
+        Expression?[] arguments,
+        MultiPartName writtenName)
     {
         var connection = outerBatch.Connection;
         if (connection.NestingLevel >= SimulatedDbConnection.MaxNestingLevel)
@@ -67,14 +68,15 @@ partial class Simulation
             }
         }
 
-        return InvokeInlineTvfCore(outerBatch, function, argValues, isDefault);
+        return InvokeInlineTvfCore(outerBatch, function, argValues, isDefault, writtenName);
     }
 
     private IEnumerable<byte[]> InvokeInlineTvfCore(
         BatchContext outerBatch,
         InlineTableValuedFunction function,
         SqlValue[] argValues,
-        bool[] isDefault)
+        bool[] isDefault,
+        MultiPartName writtenName)
     {
         var connection = outerBatch.Connection;
         using var bodyCommand = new SimulatedDbCommand(this, connection);
@@ -119,7 +121,7 @@ partial class Simulation
         {
             var parser = innerBatch.Parser;
             parser.MoveNextRequired();
-            var bodySelection = ParseBodyQuery(parser, position: QueryPosition.Inlined);
+            var bodySelection = ParseInlineTvfBody(parser, function, writtenName);
             // Inlined like a view body, so the same chain-break applies: reads
             // into another database answer to the caller's rights there.
             PermissionEnforcement.CheckCrossDatabaseReads(outerBatch, function.Schema.Database, bodySelection.ReferencedSecurables);
@@ -135,6 +137,24 @@ partial class Simulation
             // As in the view body: the Sch-S / IS the body took are recorded
             // against this inner batch, which the dispatch loop never sees.
             innerBatch.ReleaseStatementSchemaLocks();
+        }
+    }
+
+    /// <summary>
+    /// Parses an inline function's body where it is called. A body that no
+    /// longer binds — a missing object, column or qualifier — is that binder
+    /// error, attributed to the function, followed by Msg 4413, as a view's is
+    /// (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    private static Selection ParseInlineTvfBody(ParserContext parser, InlineTableValuedFunction function, MultiPartName writtenName)
+    {
+        try
+        {
+            return ParseBodyQuery(parser, position: QueryPosition.Inlined);
+        }
+        catch (SimulatedSqlException error) when (error.Number is 207 or 208 or 4104)
+        {
+            throw SimulatedSqlException.FollowedByViewBindingFailure(error, writtenName, function.Name);
         }
     }
 }

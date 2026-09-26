@@ -34,7 +34,7 @@ partial class Selection
     /// kinds.
     /// </para>
     /// </remarks>
-    internal static Selection ForInlineTvf(InlineTableValuedFunction function, Expression?[] arguments)
+    internal static Selection ForInlineTvf(InlineTableValuedFunction function, Expression?[] arguments, MultiPartName writtenName)
     {
         var schema = new SqlType[function.OutputColumns.Length];
         var columnNames = new string[function.OutputColumns.Length];
@@ -49,6 +49,6 @@ partial class Selection
             hasOrderBy: false,
             hasTopOrOffsetOrFetch: false,
             rowSource: (outerBatch, outerResolver) =>
-                outerBatch.Connection.Simulation.InvokeInlineTvf(outerBatch, outerResolver, function, arguments));
+                outerBatch.Connection.Simulation.InvokeInlineTvf(outerBatch, outerResolver, function, arguments, writtenName));
     }
 }

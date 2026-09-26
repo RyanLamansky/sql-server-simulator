@@ -332,4 +332,38 @@ public sealed class InlineTvfTests
             values.Add(reader.GetInt32(0));
         AreEqual(expected, string.Join(",", values));
     }
+
+    /// <summary>
+    /// A one-part name reaches a table-valued function in FROM and APPLY
+    /// through the default schema (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("create function f() returns table as return select 1 a", "select a from f()")]
+    [DataRow("create function f() returns @r table (a int) as begin insert @r values (1); return end", "select a from f()")]
+    [DataRow("create function f(@x int) returns table as return select @x a", "select x.a from (values (1)) v(n) cross apply f(v.n) x")]
+    public void AOnePartName_ReachesATableValuedFunction(string function, string query)
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(function);
+        AreEqual(1, sim.ExecuteScalar(query));
+    }
+
+    /// <summary>
+    /// An inline function whose body no longer binds reports the body's error,
+    /// attributed to the function, then Msg 4413 naming the reference as
+    /// written — at line 12 when it is schema-qualified (probed 2026-09-26
+    /// against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select * from f()", "f", 1)]
+    [DataRow("select * from dbo.f()", "dbo.f", 12)]
+    public void AnInlineFunctionThatNoLongerBinds_IsFollowedByMsg4413(string query, string written, int trailerLine)
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create table t (a int)", "create function f() returns table as return select a from t", "drop table t");
+        var errors = sim.AssertSqlError(query, 208).Errors;
+        AreEqual("f", errors[0].Procedure);
+        AreEqual($"Could not use view or function '{written}' because of binding errors.", errors[1].Message);
+        AreEqual(trailerLine, errors[1].LineNumber);
+    }
 }

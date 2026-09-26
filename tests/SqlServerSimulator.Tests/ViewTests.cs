@@ -693,5 +693,9 @@ public sealed class ViewTests
         var errors = sim.AssertSqlError("select * from v", 208).Errors;
         Assert.AreEqual("v", errors[0].Procedure);
         Assert.AreEqual(4413, errors[1].Number);
+        // A schema-qualified reference is named as written, at line 12.
+        var qualified = sim.AssertSqlError("select * from dbo.v", 208).Errors[1];
+        Assert.AreEqual("Could not use view or function 'dbo.v' because of binding errors.", qualified.Message);
+        Assert.AreEqual(12, qualified.LineNumber);
     }
 }

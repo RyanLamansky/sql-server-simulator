@@ -2467,6 +2467,17 @@ internal sealed class BatchContext
     }
 
     /// <summary>
+    /// <see cref="TryResolveFunction"/> for a FROM or APPLY source, which
+    /// answers only a table-valued function and which a one-part name reaches
+    /// through the default schema, where a scalar call's never does (probed
+    /// 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    public bool TryResolveTableValuedFunction(MultiPartName name, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out UserDefinedFunction? function) =>
+        (this.TryResolveFunction(name, out function)
+            || (name.Count == 1 && this.TryResolveFunction(new MultiPartName(Database.DefaultSchemaName).WithAddedPart(name.Leaf), out function)))
+        && function is InlineTableValuedFunction or MultiStatementTableValuedFunction;
+
+    /// <summary>
     /// Resolves <paramref name="name"/> to a registered <see cref="View"/>.
     /// Unlike scalar UDFs, views accept 1-part names too (probe-confirmed:
     /// <c>FROM v1</c> works the same as <c>FROM dbo.v1</c>) — the lookup

@@ -465,7 +465,11 @@ partial class Simulation
         context.MoveNextOptional();
         while (context.Token is Operator { Character: ',' })
         {
-            if (context.GetNextRequired() is not Name next)
+            // Each later name may repeat the COLUMN keyword (probed
+            // 2026-09-26 against SQL Server 2025).
+            if (context.GetNextRequired() is ReservedKeyword { Keyword: Keyword.Column })
+                context.MoveNextRequired();
+            if (context.Token is not Name next)
                 throw SimulatedSqlException.SyntaxErrorNear(context);
             names.Add(next.Value);
             context.MoveNextOptional();
@@ -510,6 +514,13 @@ partial class Simulation
             var blockers = CollectColumnBlockers(context.Batch.CurrentDatabase, table, ordinal, col, includeCheckAndDefault: true, includeIndexes: true);
             if (blockers.Count > 0)
                 throw SimulatedSqlException.ColumnHasDependencies("DROP COLUMN", col.Name, blockers);
+        }
+
+        var dataColumns = table.Columns.Count(column => column.Computed is null);
+        foreach (var ordinal in toDropOrdinals)
+        {
+            if (table.Columns[ordinal].Computed is null && --dataColumns == 0)
+                throw SimulatedSqlException.DropColumnLeavesNoDataColumn(table.Columns[ordinal].Name, table.Name);
         }
 
         // Apply phase. Build full-ordinal and storage-ordinal mappings

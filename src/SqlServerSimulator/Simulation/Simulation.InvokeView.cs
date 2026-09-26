@@ -57,7 +57,7 @@ partial class Simulation
     /// statement compiles; any other failure returns the recorded columns
     /// unchanged, so the body's own error surfaces at execution.
     /// </remarks>
-    internal HeapColumn[] BindViewColumns(BatchContext outerBatch, View view)
+    internal HeapColumn[] BindViewColumns(BatchContext outerBatch, View view, MultiPartName writtenName)
     {
         Selection plan;
         try
@@ -66,7 +66,7 @@ partial class Simulation
         }
         catch (SimulatedSqlException error) when (error.Number is 207 or 208 or 4104)
         {
-            throw SimulatedSqlException.FollowedByViewBindingFailure(error, view.Name);
+            throw SimulatedSqlException.FollowedByViewBindingFailure(error, writtenName, view.Name);
         }
         catch (Exception error) when (error is SimulatedSqlException or NotSupportedException)
         {
