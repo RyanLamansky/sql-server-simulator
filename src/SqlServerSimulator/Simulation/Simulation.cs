@@ -1388,7 +1388,7 @@ public sealed partial class Simulation
                 batch.CurrentStatement.CatalogViewRows = null;
                 batch.CurrentStatement.ComputedUniqueKeys = null;
                 batch.CurrentStatement.NullEliminated = false;
-                batch.CurrentStatement.FirstArithmeticNotice = batch.CurrentStatement.SecondArithmeticNotice = 0;
+                batch.CurrentStatement.OwesOverflowNotice = batch.CurrentStatement.OwesDivideByZeroNotice = false;
                 batch.RcsiStatementSnapshotXid = null;
                 batch.BumpRowStamp();
                 // The cached plan is shared across principals; re-run the
@@ -1859,7 +1859,7 @@ public sealed partial class Simulation
         batch.CurrentStatement.ReportedIgnoredDuplicate = false;
         batch.CurrentStatement.ReportedNoiseWords = false;
         batch.CurrentStatement.NullEliminated = false;
-        batch.CurrentStatement.FirstArithmeticNotice = batch.CurrentStatement.SecondArithmeticNotice = 0;
+        batch.CurrentStatement.OwesOverflowNotice = batch.CurrentStatement.OwesDivideByZeroNotice = false;
         batch.CurrentStatement.WritesRows = false;
         batch.CurrentStatement.BindsDeferredSource = false;
         batch.CurrentStatement.PendingDdlEvents = null;
@@ -2280,19 +2280,14 @@ public sealed partial class Simulation
     private static IEnumerable<SimulatedInfoOutcome> ArithmeticNotices(BatchContext batch)
     {
         var statement = batch.CurrentStatement;
-        var first = statement.FirstArithmeticNotice;
-        var second = statement.SecondArithmeticNotice;
-        statement.FirstArithmeticNotice = statement.SecondArithmeticNotice = 0;
-        if (first != 0)
-            yield return ArithmeticNotice(batch, first);
-        if (second != 0)
-            yield return ArithmeticNotice(batch, second);
+        var overflow = statement.OwesOverflowNotice;
+        var divideByZero = statement.OwesDivideByZeroNotice;
+        statement.OwesOverflowNotice = statement.OwesDivideByZeroNotice = false;
+        if (overflow)
+            yield return new SimulatedInfoOutcome(SimulatedSqlException.ArithmeticOverflowOccurredMessage(batch), followsRows: true);
+        if (divideByZero)
+            yield return new SimulatedInfoOutcome(SimulatedSqlException.DivisionByZeroOccurredMessage(batch), followsRows: true);
     }
-
-    private static SimulatedInfoOutcome ArithmeticNotice(BatchContext batch, int number) =>
-        new(number == 3607
-            ? SimulatedSqlException.DivisionByZeroOccurredMessage(batch)
-            : SimulatedSqlException.ArithmeticOverflowOccurredMessage(batch), followsRows: true);
 
     /// <summary>
     /// What a statement produced, in the order real sends it: the messages it

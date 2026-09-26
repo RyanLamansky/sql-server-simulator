@@ -308,9 +308,24 @@ public sealed class MessageStreamTests
         using var command = connection.CreateCommand();
         command.CommandText = "set ansi_warnings off; insert w values ('a', 300), ('b', 1/0), ('c', 256), ('d', 2/0); select count(*) from w where t is null";
         AreEqual(4, command.ExecuteScalar());
-        // Real sends them in the order the rows met them, 3606 first; a
-        // multi-row VALUES evaluates every cell before converting any here.
-        CollectionAssert.AreEquivalent(new[] { "event 3606: Arithmetic overflow occurred.", "event 3607: Division by zero occurred." }, log);
+        CollectionAssert.AreEqual(new[] { "event 3606: Arithmetic overflow occurred.", "event 3607: Division by zero occurred." }, log);
+    }
+
+    /// <summary>
+    /// A statement that met both faults sends Msg 3606 ahead of 3607 whichever
+    /// came first (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select 1/0, cast(300 as tinyint)")]
+    [DataRow("select cast(300 as tinyint), 1/0")]
+    [DataRow("select a/0, cast(a * 300 as tinyint) from (values (1)) v (a)")]
+    public void BothArithmeticFaults_NoticeOverflowFirst(string sql)
+    {
+        var (connection, log) = Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "set ansi_warnings off; " + sql;
+        _ = command.ExecuteScalar();
+        CollectionAssert.AreEqual(new[] { "event 3606: Arithmetic overflow occurred.", "event 3607: Division by zero occurred." }, log);
     }
 
     /// <summary>

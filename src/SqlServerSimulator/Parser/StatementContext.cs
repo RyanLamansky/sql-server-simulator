@@ -167,11 +167,12 @@ internal sealed class StatementContext
 
     /// <summary>
     /// The class-0 notices an absorbed arithmetic fault owes this statement
-    /// (<see cref="BatchContext.AbsorbsArithmeticFault"/>) — Msg 3606 and / or
-    /// 3607, each once, in the order they first occurred; zero when unused.
-    /// Real sends them after the statement's rows, as it does Msg 8153.
+    /// (<see cref="BatchContext.AbsorbsArithmeticFault"/>) — Msg 3606 for an
+    /// overflow, 3607 for a division by zero, each once. Real sends them after
+    /// the statement's rows, as it does Msg 8153, and always 3606 first
+    /// whichever fault came first (probed 2026-09-26 against SQL Server 2025).
     /// </summary>
-    public int FirstArithmeticNotice, SecondArithmeticNotice;
+    public bool OwesOverflowNotice, OwesDivideByZeroNotice;
 
     /// <summary>
     /// Set by a statement that writes rows — <c>INSERT</c>, <c>UPDATE</c>,

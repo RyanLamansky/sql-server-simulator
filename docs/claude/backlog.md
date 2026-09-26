@@ -231,10 +231,6 @@ Already listed elsewhere here and not repeated: parenthesized set-op branches.
 - The compile's remaining gaps (the walk stopping at a deferred DML target, a deferred statement's bind error staying catchable, procedure bodies compiled only at `CREATE`, a `#temp` created twice in one batch, an `INSERT … EXEC` body stopping at its first error) are listed in [`control-flow.md`](control-flow.md#not-modeled-yet).
 - A syntax error real recovers from and reports a second one after — `(select 1 a) d NATURAL JOIN (select 1 a) e` adds Msg 102 near `e` — reports only the first here.
 
-**Session options with no effect**:
-
-- `SET ANSI_WARNINGS OFF` (with `ARITHABORT OFF`, a fresh session's default) answers a divide by zero or an overflow with NULL and Msg 3607 / 3606 ([`errors.md`](errors.md)), but a multi-row `VALUES` sends the two notices in evaluation order rather than row order (probed 2026-09-25).
-
 **Wrong results**:
 
 - `STRING_AGG(s, CAST(',' AS varchar(2)))` over a table is Msg 8733 on real and aggregates here; over a `VALUES` source real accepts it too, so what separates the two isn't settled (probed 2026-09-24).

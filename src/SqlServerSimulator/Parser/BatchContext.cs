@@ -192,20 +192,17 @@ internal sealed class BatchContext
     {
         if (this.Connection.Arithabort || this.Connection.AnsiWarnings || error.IsIdentityOverflow)
             return false;
-        var notice = error.Number switch
+        switch (error.Number)
         {
-            8134 => 3607,
-            220 or 232 or 8115 => 3606,
-            _ => 0,
-        };
-        if (notice == 0)
-            return false;
-        var statement = this.CurrentStatement;
-        if (statement.FirstArithmeticNotice == 0)
-            statement.FirstArithmeticNotice = notice;
-        else if (statement.FirstArithmeticNotice != notice)
-            statement.SecondArithmeticNotice = notice;
-        return true;
+            case 220 or 232 or 8115:
+                this.CurrentStatement.OwesOverflowNotice = true;
+                return true;
+            case 8134:
+                this.CurrentStatement.OwesDivideByZeroNotice = true;
+                return true;
+            default:
+                return false;
+        }
     }
 
     /// <summary>
