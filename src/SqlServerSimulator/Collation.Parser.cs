@@ -95,13 +95,14 @@ internal abstract partial class Collation
     /// <c>SQL_Latin1_General_CP1_CI_AS</c> → (1252, 1033, 196609, 0),
     /// <c>Latin1_General_100_CI_AS</c> → (1252, 1033, 196609, 2).
     /// </summary>
-    internal readonly struct CollationMetrics(int codePage, int lcid, int comparisonStyle, int version, string name)
+    internal readonly struct CollationMetrics(int codePage, int lcid, int comparisonStyle, int version, string name, int collationId)
     {
         public readonly int CodePage = codePage;
         public readonly int Lcid = lcid;
         public readonly int ComparisonStyle = comparisonStyle;
         public readonly int Version = version;
         public readonly string Name = name;
+        public readonly int CollationId = collationId;
     }
 
     /// <summary>
@@ -146,8 +147,14 @@ internal abstract partial class Collation
         var versionOrdinal = version switch { 90 => 1, 100 => 2, 140 => 3, 160 => 4, _ => 0 };
 
         var lcid = LcidAndCodePageByPrefix.TryGetValue(prefix, out var registered) ? registered.Lcid : 0x0409;
+        // Probe anomaly: the two SQL_Latin1_General_CP1254_* collations report
+        // the Turkish LCID while every sibling reports 0x0409.
+        if (codePage == 1254 && name.StartsWith("SQL_", StringComparison.OrdinalIgnoreCase))
+            lcid = 0x041F;
 
-        metrics = new CollationMetrics(ResolveAnsiCodePage(prefix, codePage, flags), lcid, comparisonStyle, versionOrdinal, collation.Name);
+        metrics = new CollationMetrics(
+            ResolveAnsiCodePage(prefix, codePage, flags), lcid, comparisonStyle, versionOrdinal, collation.Name,
+            CollationIdFor(collation.Name, prefix, flags, versionOrdinal, lcid));
         return true;
     }
 

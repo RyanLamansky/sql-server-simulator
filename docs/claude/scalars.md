@@ -729,7 +729,7 @@ These carry real per-session state on `SimulatedDbConnection` (not placeholder c
 
 `Parser/Expressions/CollationProperty.cs`: metadata for a collation.
 SSMS's Object-Explorer per-database follow-up runs `COLLATIONPROPERTY((select collation_name from sys.databases where name = …), 'CodePage')`.
-Like real SQL Server the result is **`sql_variant`** carrying a per-property inner base type — `CodePage` / `LCID` / `ComparisonStyle` as `int`, **`Version` as `tinyint`** (probe-confirmed against SQL Server 2025), `Name` as `nvarchar`.
+Like real SQL Server the result is **`sql_variant`** carrying a per-property inner base type — `CodePage` / `LCID` / `ComparisonStyle` / `CollationId` as `int`, **`Version` as `tinyint`** (probe-confirmed against SQL Server 2025), `Name` as `nvarchar`, `TDSCollation` as `binary(5)`.
 An **unrecognized collation name** or an **unknown property** returns a NULL `sql_variant` (matches the reference).
 Property names are case-insensitive.
 
@@ -741,8 +741,12 @@ Probe-confirmed against SQL Server 2025: `SQL_Latin1_General_CP1_CI_AS` → Code
   The same `ResolveAnsiCodePage` that pins `Collation.StorageEncoding`, so the reported page and the stored bytes can't disagree; verified equal to the reference server across all 5540 `sys.fn_helpcollations()` names.
   Twelve Windows prefixes report 0 (Unicode-only) rather than falling back to 1252 — see [`collations.md`](collations.md#unicode-only-collations--msg-459).
 - **LCID** — from the probe-built prefix registry (`SQL_Latin1_General` / `Latin1_General` → 0x0409 = 1033, `Japanese` → 0x0411 = 1041); defaults to 0x0409 for a recognized prefix that isn't tabulated.
-  *Known minor divergences: sort-variant prefixes with a distinct sort-order LCID and the CP1254 SQL_Latin1 members fall back to the base-prefix LCID.*
+  The two CP1254 SQL_Latin1 members report the Turkish 0x041F as real does.
+  *Known minor divergence: sort-variant prefixes with a distinct sort-order LCID fall back to the base-prefix LCID.*
 - **ComparisonStyle** — derived from the suffix flags: binary (`_BIN` / `_BIN2`) → 0, else `ignore-case (0x1 when CI) + ignore-accent (0x2 when AI) + ignore-kana (0x10000 unless KS) + ignore-width (0x20000 unless WS)` (CI_AS → 196609, CI_AI → 196611, CS_AS → 196608, CI_AS_KS_WS → 1).
+- **CollationId** — packs a family index (bits 0–6, `Collation.FamilyIndexByPrefix`, a SQL_\* name taking the lowest index among its LCID's Windows prefixes), `_UTF8` (bit 7), `_SC` (bit 8), `_BIN2` (bit 11), the ignore-case / -accent / -kana / -width flags (bits 12–15), `_BIN` (bit 16), the version ordinal (bits 17 up) and a SQL_\* collation's sort order (bits 24–31); a version-140 name sets `_SC` implicitly and bit 9 unless it is `_VSS`.
+- **TDSCollation** — the five-byte collation structure, but not byte-for-byte the wire's: it swaps the ignore-width and ignore-kana bits, keeps `_BIN2` under `_UTF8`, and gives the two EBCDIC sort variants their base sort id (see [`tds-endpoint.md`](tds-endpoint.md#collation-wire-structure)).
+  Both this and `CollationId` agree with real across all 5540 names (probed 2026-09-26).
 - **Version** — the version ordinal from the numeric name token: unversioned / SQL_\* → 0, 90 → 1, 100 → 2, 140 → 3, 160 → 4.
 - **Name** — the collation's canonical name.
 

@@ -468,6 +468,7 @@ Derived generatively per collation (cached by interned reference), validated aga
 - LCID + ANSI code page per name-prefix from the core-layer `Collation.LcidAndCodePageByPrefix` (probe-derived, one entry per `KnownPrefixes` key); SQL_* code page comes from the CPnnn token (CP1→1252).
   Anomaly: `SQL_Latin1_General_CP1254_*` reports the Turkish LCID 0x041F (special-cased).
 - Baseline `SQL_Latin1_General_CP1_CI_AS` derives to the canonical `09 04 D0 00 34` (sortId 52).
+- `COLLATIONPROPERTY(name, 'TDSCollation')` is **not** this structure byte for byte: real's property swaps the width and kana bits, keeps `_BIN2` under `_UTF8`, and reports the two EBCDIC sort variants with their base sort id (probed 2026-09-26), so `TdsCollationCodec.PropertyBytes` derives it from the wire form rather than the reverse.
 
 ## Login response shape
 

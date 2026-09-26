@@ -370,6 +370,35 @@ public sealed class CollationMetadataTests
         => AreEqual("SQL_Latin1_General_CP1_CI_AS", new Simulation().ExecuteScalar(
             "SELECT COLLATIONPROPERTY('SQL_Latin1_General_CP1_CI_AS', 'Name')"));
 
+    /// <summary>
+    /// <c>CollationId</c> packs the family index, the flags, the version and a
+    /// SQL_* collation's sort order; <c>TDSCollation</c> is the five-byte wire
+    /// collation. Both agree with real over all 5540 collations (probed
+    /// 2026-09-26 against SQL Server 2025); these rows cover each rule.
+    /// </summary>
+    [TestMethod]
+    [DataRow("SQL_Latin1_General_CP1_CI_AS", 872468488, "0x0904D00034")]
+    [DataRow("SQL_Latin1_General_CP1254_CI_AS", -2113875942, "0x1F04D00082")]
+    [DataRow("SQL_EBCDIC1141_CP1_CS_AS", -620707799, "0x0704C100D3")]
+    [DataRow("Latin1_General_CI_AS", 53256, "0x0904D00000")]
+    [DataRow("Latin1_General_CS_AS_KS_WS", 8, "0x0904000000")]
+    [DataRow("Latin1_General_CI_AI_KS", 45064, "0x0904B00000")]
+    [DataRow("Latin1_General_BIN", 65544, "0x0904000100")]
+    [DataRow("Latin1_General_100_BIN2_UTF8", 264328, "0x0904002600")]
+    [DataRow("Latin1_General_100_CI_AS_SC_UTF8", 315784, "0x0904D02400")]
+    [DataRow("Chinese_PRC_90_CI_AS", 184369, "0x0408D01000")]
+    [DataRow("Japanese_XJIS_140_CI_AS", 447304, "0x1104D03000")]
+    [DataRow("Japanese_XJIS_140_CI_AS_VSS", 446792, "0x1104D03000")]
+    public void CollationProperty_CollationIdAndTdsCollation(string name, int collationId, string tds)
+    {
+        AreEqual(collationId, new Simulation().ExecuteScalar($"select collationproperty('{name}', 'CollationId')"));
+        AreEqual(tds, new Simulation().ExecuteScalar($"select convert(varchar(12), cast(collationproperty('{name}', 'TDSCollation') as binary(5)), 1)"));
+    }
+
+    [TestMethod]
+    public void CollationProperty_Lcid_Cp1254SqlCollation_IsTurkish()
+        => AreEqual(1055, new Simulation().ExecuteScalar("select collationproperty('SQL_Latin1_General_CP1254_CI_AS', 'LCID')"));
+
     // The result projects as sql_variant; CodePage carries an int inner, Version
     // a tinyint inner (probe-confirmed against SQL Server 2025).
     [TestMethod]

@@ -42,6 +42,26 @@ internal sealed class TdsCollationCodec
         writer.WriteByte(this.SortId);
     }
 
+    /// <summary>
+    /// <c>COLLATIONPROPERTY(name, 'TDSCollation')</c>, which is not quite the
+    /// wire structure: it swaps the ignore-width and ignore-kana bits, keeps
+    /// the binary-sort bit a <c>_BIN2_UTF8</c> collation's wire form drops,
+    /// and gives the two EBCDIC sort variants their base collation's sort id
+    /// (probed 2026-09-26 against SQL Server 2025, all 5540 collations).
+    /// </summary>
+    public byte[] PropertyBytes(bool binary2)
+    {
+        var info = this.Info & ~(IgnoreWidth | IgnoreKana);
+        if ((this.Info & IgnoreWidth) != 0)
+            info |= IgnoreKana;
+        if ((this.Info & IgnoreKana) != 0)
+            info |= IgnoreWidth;
+        if (binary2 && (info & Utf8) != 0)
+            info |= Binary2;
+        var sortId = this.SortId switch { 218 => (byte)212, 219 => (byte)211, var own => own };
+        return [(byte)info, (byte)(info >> 8), (byte)(info >> 16), (byte)(info >> 24), sortId];
+    }
+
     private TdsCollationCodec(Collation collation)
     {
         var name = collation.Name;
