@@ -352,7 +352,7 @@ internal abstract class Expression : ExpressionNode
                             // surface-not-supported error.
                             if (expression is not Reference starQualifier)
                                 throw SimulatedSqlException.SyntaxErrorNear(context);
-                            expression = new StarProjection(starQualifier.Name);
+                            expression = new StarProjection(starQualifier.Name, starQualifier.ReferencedName.ToString());
                         }
                         else if (afterDot is Name name)
                         {

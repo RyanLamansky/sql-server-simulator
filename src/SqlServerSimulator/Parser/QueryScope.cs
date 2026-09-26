@@ -123,6 +123,13 @@ internal readonly struct QueryScope(QueryPosition position, Func<MultiPartName, 
     public bool OrderingIgnoredUnderFullTop => this.Position is QueryPosition.Inlined or QueryPosition.Derived or QueryPosition.Subquery or QueryPosition.Exists;
 
     /// <summary>
+    /// Whether an <c>ORDER BY</c> here without a <c>TOP</c>, <c>OFFSET</c> or
+    /// <c>FOR XML</c> is Msg 1033, which real raises ahead of binding the
+    /// clause's terms: a derived table's or subquery's.
+    /// </summary>
+    public bool RefusesUnboundedOrderBy => this.Position is QueryPosition.Derived or QueryPosition.Subquery or QueryPosition.Exists;
+
+    /// <summary>
     /// Whether this query may not carry its own <c>ORDER BY</c> or
     /// <c>FOR XML</c> / <c>FOR JSON</c> clause, which real refuses in a
     /// parenthesized <c>INSERT</c> source as Msg 156 on the keyword even with

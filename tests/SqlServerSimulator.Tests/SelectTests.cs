@@ -425,12 +425,36 @@ public class SelectTests
     }
 
     [TestMethod]
-    public void SelectQualifiedStar_UnboundQualifier_RaisesMsg4104()
+    [DataRow("select notbound.* from t", "notbound")]
+    [DataRow("select dbo.notbound.* from t", "dbo.notbound")]
+    [DataRow("select t.* from t x", "t")]
+    [DataRow("select a from t where exists (select notbound.* from t)", "notbound")]
+    public void SelectQualifiedStar_UnboundQualifier_RaisesMsg107(string query, string prefix)
     {
-        using var connection = new Simulation().CreateOpenConnection();
-        _ = connection.CreateCommand("create table t (a int)").ExecuteNonQuery();
-        var ex = Throws<SimulatedSqlException>(() => connection.CreateCommand("select notbound.* from t").ExecuteReader().Read());
-        AreEqual("The multi-part identifier \"notbound.*\" could not be bound.", ex.Message);
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table t (a int)");
+        simulation.AssertSqlError(query, 107, $"The column prefix '{prefix}' does not match with a table name or alias name used in the query.");
+    }
+
+    [TestMethod]
+    [DataRow("select a from t order by nosuch.a", 4104)]
+    [DataRow("select a from t group by a order by nosuch.a", 4104)]
+    [DataRow("select a as b from t order by x.b", 4104)]
+    [DataRow("select a from t where a in (select a from t order by nosuch.a)", 1033)]
+    public void OrderByQualifiedTerm_BindsWhileCompiling(string query, int number)
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table t (a int)");
+        _ = simulation.AssertSqlError(query, number);
+    }
+
+    [TestMethod]
+    public void DistinctOrderByUnboundTerm_IsFollowedByMsg145()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table t (a int)");
+        var ex = simulation.AssertSqlError("select distinct a from t order by nosuch.a", 4104);
+        AreEqual(145, ex.Errors[1].Number);
     }
 
     [TestMethod]

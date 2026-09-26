@@ -1212,11 +1212,14 @@ internal sealed partial class Selection
         // source columns), matching SQL Server and the runtime ComputeOrderKeys
         // — so `ORDER BY <select-alias>` and `ORDER BY <aggregate/expression>`
         // type-check here instead of failing as an unknown source column.
-        // Only a bare term may name an alias (OrderBySpec.MayNameAlias).
+        // Only a bare, unqualified term may name an alias
+        // (OrderBySpec.MayNameAlias) — `ORDER BY x.a` never matches an output
+        // column `a`, whatever x is (probed 2026-09-26 against SQL Server
+        // 2025: an unknown x is Msg 4104 over an empty table too).
         var orderTermMayNameAlias = false;
         SqlType ResolveOrderByType(MultiPartName name)
         {
-            if (orderTermMayNameAlias)
+            if (orderTermMayNameAlias && name.ImmediateQualifier is null)
             {
                 for (var j = 0; j < outputColumnNames.Length; j++)
                 {
@@ -1228,7 +1231,11 @@ internal sealed partial class Selection
             return ResolveColumnType(name);
         }
 
-        for (var i = 0; i < orderBy.Count; i++)
+        // A nested query's unbounded ORDER BY is refused once the query has
+        // parsed (Msg 1033), ahead of any of its terms' bind errors; a FOR XML
+        // one, which that check lets through, binds its terms per row instead.
+        var orderByBinds = !scope.RefusesUnboundedOrderBy || topExpression is not null || fromClause.OffsetExpression is not null;
+        for (var i = 0; orderByBinds && i < orderBy.Count; i++)
         {
             // A written constant reaching here is one whose fold raised (the
             // rest are Msg 408 while parsing) — under DISTINCT it is simply
@@ -1243,7 +1250,7 @@ internal sealed partial class Selection
                     ? outputSchema[orderBy[i].Ordinal - 1]
                     : orderBy[i].Expr!.GetSqlType(parseBatch, ResolveOrderByType);
             }
-            catch (SimulatedSqlException unknown) when (distinct && unknown.Number == 207)
+            catch (SimulatedSqlException unknown) when (distinct && unknown.Number is 207 or 4104)
             {
                 // Real follows the unknown name with DISTINCT's own complaint.
                 throw SimulatedSqlException.Aggregate([unknown, SimulatedSqlException.OrderByItemNotInSelectListWithDistinct()]);

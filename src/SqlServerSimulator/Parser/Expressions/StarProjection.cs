@@ -9,9 +9,13 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// the source columns are known. One that survives into typing had no FROM
 /// clause to expand against — see <see cref="Unexpandable"/>.
 /// </summary>
-internal sealed class StarProjection(string? qualifier) : Expression
+internal sealed class StarProjection(string? qualifier, string? writtenQualifier = null) : Expression
 {
+    /// <summary>The prefix's last part, which a source's exposed name is matched against.</summary>
     public readonly string? Qualifier = qualifier;
+
+    /// <summary>The whole prefix as written (<c>dbo.t</c>), which Msg 107 names.</summary>
+    public readonly string? WrittenQualifier = writtenQualifier ?? qualifier;
 
     public override SqlValue Run(RuntimeContext runtime) => throw this.Unexpandable();
 
@@ -23,7 +27,7 @@ internal sealed class StarProjection(string? qualifier) : Expression
     /// SQL Server 2025).
     /// </summary>
     internal SimulatedSqlException Unexpandable() =>
-        this.Qualifier is { } qualifier
+        this.WrittenQualifier is { } qualifier
             ? SimulatedSqlException.ColumnPrefixDoesNotMatch(qualifier)
             : SimulatedSqlException.MustSpecifyTableToSelectFrom();
 

@@ -4783,8 +4783,10 @@ internal sealed partial class Selection
                         break;
                     }
                 }
+                // Real names the prefix as written (probed 2026-09-26 against
+                // SQL Server 2025: `dbo.nosuch.*` is Msg 107 on 'dbo.nosuch').
                 if (matched is null)
-                    throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound($"{star.Qualifier}.*");
+                    throw SimulatedSqlException.ColumnPrefixDoesNotMatch(star.WrittenQualifier!);
                 AppendSourceColumns(expanded, matched);
             }
 

@@ -329,6 +329,7 @@ Only a **bare** term (parentheses aside) may name an output alias.
 A name inside any larger expression — `x + 1`, `-x`, `x COLLATE …`, a CASE — binds to the FROM sources alone, so it is **Msg 207** while compiling when only an alias carries it, followed by Msg 145 under DISTINCT, and it reads the source column when both do: `SELECT b AS a FROM t ORDER BY a + 0` sorts by `t.a` (probed 2026-09-24).
 The same holds for a grouped query's `ORDER BY s + 1` over `SUM(b) AS s`.
 A **qualified** term (`alias.col`) is a *source-column reference* and never matches an output alias: real orders `SELECT val AS id FROM ob t ORDER BY t.id` by `t`'s id column even though an output alias `id` exists (probe-confirmed).
+That holds while compiling as well as per row, so an unknown qualifier is Msg 4104 over an empty table too, and in a derived table or subquery whose `ORDER BY` has no `TOP` / `OFFSET` the terms don't bind at all, real's Msg 1033 outranking them (probed 2026-09-26 against SQL Server 2025).
 Matching on the leaf alone silently sorted by the wrong column whenever a join brought a same-named column into scope — `ORDER BY child.id` bound to the projected `parent.id`, which is the shape an ORM emits when ordering by a related model's field.
 
 `DISTINCT` keeps its own rule: the term must appear in the select list, and a miss is Msg 145 rather than a source fallback.
