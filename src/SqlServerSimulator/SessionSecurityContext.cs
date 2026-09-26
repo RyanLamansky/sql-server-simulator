@@ -60,9 +60,14 @@ internal sealed class SessionSecurityContext(SecurityPrincipalFrame baseFrame, s
     /// <summary>The session's original login, before any impersonation — the value <c>ORIGINAL_LOGIN()</c> reports.</summary>
     public readonly string OriginalLoginName = originalLoginName;
 
-    /// <summary>The dbo-everywhere identity for an unauthenticated in-process connection.</summary>
+    /// <summary>
+    /// The dbo-everywhere identity for an unauthenticated in-process
+    /// connection: the <c>sa</c> login, which is what a default connection to
+    /// a real server runs as and what <c>SUSER_SNAME()</c> /
+    /// <c>SYSTEM_USER</c> / <c>ORIGINAL_LOGIN()</c> then report.
+    /// </summary>
     public static SessionSecurityContext CreateDefault() =>
-        new(new SecurityPrincipalFrame(Database.DboPrincipalId, "dbo", "dbo"), "dbo");
+        new(new SecurityPrincipalFrame(Database.DboPrincipalId, "dbo", "sa"), "sa");
 
     /// <summary>The frame every statement runs as: the top impersonation frame, or the base identity.</summary>
     public SecurityPrincipalFrame Effective =>

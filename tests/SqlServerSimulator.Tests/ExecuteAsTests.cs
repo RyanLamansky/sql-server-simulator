@@ -19,7 +19,7 @@ public sealed class ExecuteAsTests
 
     [TestMethod]
     public void DefaultSession_IsDboEverywhere()
-        => AreEqual("dbo|dbo|dbo", new Simulation().ExecuteScalar(
+        => AreEqual("dbo|sa|sa", new Simulation().ExecuteScalar(
             "select current_user + '|' + system_user + '|' + original_login()"));
 
     [TestMethod]
@@ -33,7 +33,7 @@ public sealed class ExecuteAsTests
         var parts = value.Split('|');
         AreEqual("u", parts[0]);
         StartsWith("S-1-9-3-", parts[1]);
-        AreEqual("dbo", parts[2]);
+        AreEqual("sa", parts[2]);
     }
 
     [TestMethod]
@@ -155,7 +155,7 @@ public sealed class ExecuteAsTests
 
     [TestMethod]
     public void ExecuteAsLogin_MapsToDatabaseUser()
-        => AreEqual("u|app|dbo", new Simulation().ExecuteScalar("""
+        => AreEqual("u|app|sa", new Simulation().ExecuteScalar("""
             create login app with password = 'S3cret!Pass';
             create user u for login app;
             execute as login = 'app';

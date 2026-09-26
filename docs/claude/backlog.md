@@ -253,7 +253,6 @@ Already listed elsewhere here and not repeated: parenthesized set-op branches.
 **Smaller divergences found alongside** (probed 2026-09-24):
 
 - A stored `sql_variant` doesn't keep a decimal value's `decimal` / `numeric` name, so `SQL_VARIANT_PROPERTY(<variant>, 'BaseType')` reads `numeric` for a variant holding `CAST(… AS decimal)`, where real reads `decimal`; a direct argument reports its own spelling.
-- `SUSER_SNAME()` is `dbo` for the in-process default session and `IS_SRVROLEMEMBER('sysadmin')` 0, where a real `sa` connection reports `sa` and 1.
 
 **Same error, different number, state or class** (probed 2026-09-24):
 

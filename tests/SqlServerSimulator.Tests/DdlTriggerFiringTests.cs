@@ -51,7 +51,7 @@ public sealed class DdlTriggerFiringTests
         var document = (string)sim.ExecuteScalar("select doc from ddl_log")!;
         Assert.Contains("<EVENT_INSTANCE><EventType>CREATE_TABLE</EventType>", document);
         Assert.Contains("<ServerName>SIMULATED</ServerName>", document);
-        Assert.Contains("<LoginName>dbo</LoginName><UserName>dbo</UserName>", document);
+        Assert.Contains("<LoginName>sa</LoginName><UserName>dbo</UserName>", document);
         Assert.Contains("<DatabaseName>simulated</DatabaseName>", document);
         Assert.Contains("<SchemaName>dbo</SchemaName><ObjectName>t1</ObjectName><ObjectType>TABLE</ObjectType>", document);
         Assert.Contains("<CommandText>create table dbo.t1 (a int)</CommandText>", document);

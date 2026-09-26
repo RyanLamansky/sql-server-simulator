@@ -107,8 +107,8 @@ public sealed class ApplicationRoleTests
         AreEqual("app1", sim.ExecuteScalar("exec sp_setapprole 'app1', 'App!Pass123'; select user_name()"));
         AreEqual("app1", sim.ExecuteScalar("exec sp_setapprole 'app1', 'App!Pass123'; select current_user"));
         // SYSTEM_USER / ORIGINAL_LOGIN() keep reporting the login (probe-confirmed).
-        AreEqual("dbo", sim.ExecuteScalar("exec sp_setapprole 'app1', 'App!Pass123'; select suser_name()"));
-        AreEqual("dbo", sim.ExecuteScalar("exec sp_setapprole 'app1', 'App!Pass123'; select original_login()"));
+        AreEqual("sa", sim.ExecuteScalar("exec sp_setapprole 'app1', 'App!Pass123'; select suser_name()"));
+        AreEqual("sa", sim.ExecuteScalar("exec sp_setapprole 'app1', 'App!Pass123'; select original_login()"));
     }
 
     [TestMethod]

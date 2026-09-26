@@ -38,8 +38,8 @@ public sealed class PrincipalScalarTests
         => AreEqual(DBNull.Value, new Simulation().ExecuteScalar("select user_name(null)"));
 
     [TestMethod]
-    public void SuserName_NoArg_ReturnsDbo()
-        => AreEqual("dbo", new Simulation().ExecuteScalar("select suser_name()"));
+    public void SuserName_NoArg_ReturnsSa()
+        => AreEqual("sa", new Simulation().ExecuteScalar("select suser_name()"));
 
     [TestMethod]
     public void SuserName_OfAnId_NamesThatServerPrincipal()
@@ -50,12 +50,12 @@ public sealed class PrincipalScalarTests
         => AreEqual(DBNull.Value, new Simulation().ExecuteScalar("select suser_name(null)"));
 
     [TestMethod]
-    public void SuserSname_NoArg_ReturnsDbo()
-        => AreEqual("dbo", new Simulation().ExecuteScalar("select suser_sname()"));
+    public void SuserSname_NoArg_ReturnsSa()
+        => AreEqual("sa", new Simulation().ExecuteScalar("select suser_sname()"));
 
     [TestMethod]
-    public void OriginalLogin_NoArg_ReturnsDbo()
-        => AreEqual("dbo", new Simulation().ExecuteScalar("select original_login()"));
+    public void OriginalLogin_NoArg_ReturnsSa()
+        => AreEqual("sa", new Simulation().ExecuteScalar("select original_login()"));
 
     [TestMethod]
     public void HostName_ReturnsEmptyString()
@@ -74,17 +74,17 @@ public sealed class PrincipalScalarTests
         => AreEqual("dbo", new Simulation().ExecuteScalar("select session_user"));
 
     [TestMethod]
-    public void SystemUser_ReturnsDbo()
-        => AreEqual("dbo", new Simulation().ExecuteScalar("select system_user"));
+    public void SystemUser_ReturnsSa()
+        => AreEqual("sa", new Simulation().ExecuteScalar("select system_user"));
 
     [TestMethod]
     public void User_ReturnsDbo()
         => AreEqual("dbo", new Simulation().ExecuteScalar("select user"));
 
     [TestMethod]
-    public void Combined_AllConverge_ReturnDbo()
+    public void Combined_UsersAndLoginsEachConverge()
         => AreEqual(1, new Simulation().ExecuteScalar("""
-            select iif(current_user = user_name() and user_name() = original_login() and user = current_user, 1, 0)
+            select iif(current_user = user_name() and user = current_user and original_login() = system_user and system_user = suser_sname(), 1, 0)
             """));
 
     // === SUSER_SID / SID_BINARY ===

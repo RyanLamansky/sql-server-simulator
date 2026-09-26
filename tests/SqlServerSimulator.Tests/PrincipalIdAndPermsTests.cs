@@ -89,8 +89,8 @@ public sealed class PrincipalIdAndPermsTests
         => AreEqual(1, new Simulation().ExecuteScalar("select is_srvrolemember('public')"));
 
     [TestMethod]
-    public void IsSrvRoleMember_Sysadmin_Returns0()
-        => AreEqual(0, new Simulation().ExecuteScalar("select is_srvrolemember('sysadmin')"));
+    public void IsSrvRoleMember_Sysadmin_Returns1ForTheDefaultSaSession()
+        => AreEqual(1, new Simulation().ExecuteScalar("select is_srvrolemember('sysadmin')"));
 
     [TestMethod]
     public void IsSrvRoleMember_DatabaseRole_ReturnsNull()

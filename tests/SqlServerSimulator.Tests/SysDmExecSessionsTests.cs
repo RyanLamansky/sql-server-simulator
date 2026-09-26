@@ -89,7 +89,7 @@ public sealed class SysDmExecSessionsTests
     /// per-login bytes rather than a shared literal.
     /// </summary>
     [TestMethod]
-    public void LoginName_DefaultSession_ReportsDbo()
+    public void LoginName_DefaultSession_ReportsSa()
     {
         using var connection = new Simulation().CreateOpenConnection();
         using var reader = connection.CreateCommand("""
@@ -97,8 +97,8 @@ public sealed class SysDmExecSessionsTests
             from sys.dm_exec_sessions where session_id = @@spid
             """).ExecuteReader();
         IsTrue(reader.Read());
-        AreEqual("dbo", reader.GetString(0));
-        AreEqual("dbo", reader.GetString(1));
+        AreEqual("sa", reader.GetString(0));
+        AreEqual("sa", reader.GetString(1));
         AreEqual(16, reader.GetInt32(2));
         AreEqual(16, reader.GetInt32(3));
     }
@@ -124,7 +124,7 @@ public sealed class SysDmExecSessionsTests
             """).ExecuteReader();
         IsTrue(reader.Read());
         AreEqual("app", reader.GetString(0));
-        AreEqual("dbo", reader.GetString(1));
+        AreEqual("sa", reader.GetString(1));
         AreEqual(0, reader.GetInt32(2));
     }
 

@@ -244,7 +244,7 @@ public sealed class SystemInfoProcTests
         AreEqual((short)51, row[0]);
         AreEqual((short)0, row[1]);
         AreEqual("runnable", ((string)row[2]!).TrimEnd());
-        AreEqual("dbo", row[3]);
+        AreEqual("sa", row[3]);
         AreEqual("0", ((string)row[5]!).TrimEnd());
         AreEqual("simulated", row[6]);
         AreEqual("SELECT", ((string)row[7]!).TrimEnd());
@@ -298,7 +298,7 @@ public sealed class SystemInfoProcTests
 
     [TestMethod]
     public void Who_KnownLogin_Filters()
-        => HasCount(1, Sets(new Simulation(), "exec sp_who 'dbo'")[0].Rows);
+        => HasCount(1, Sets(new Simulation(), "exec sp_who 'sa'")[0].Rows);
 
     [TestMethod]
     public void Who_UnknownLogin_Raises15007()
