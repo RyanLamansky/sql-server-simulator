@@ -93,7 +93,7 @@ It is the one member of the family that never raises — see [Msg 13609](#msg-13
 `ISJSON(expression)` returns `int` (1 / 0 / NULL).
 NULL input → NULL; a well-formed JSON object or array with nothing but whitespace around it → 1; anything else → 0, root-level scalars (`'1'`, `'"abc"'`, `'true'`) and trailing text (`'{"a":1}extra'`) included.
 It shares [the document scan](#msg-13609--the-document-isnt-json-text) with the rest of the family and reports what that scan objects to as 0 rather than raising.
-The 2-arg shape (`VALUE | ARRAY | OBJECT | SCALAR` modifier) isn't modeled — DACFx-emitted CHECK constraints (`isjson([col])<>0`) only use the 1-arg form.
+The second argument narrows or widens the kind asked for: `VALUE` takes any JSON value, `SCALAR` a string or number but none of `true` / `false` / `null`, `ARRAY` / `OBJECT` their container; another word is Msg 155 and a non-word (`'scalar'`) Msg 1023 (probed 2026-09-26 against SQL Server 2025, `JsonText.RootKind`).
 
 
 ## Argument types

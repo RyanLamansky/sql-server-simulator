@@ -108,6 +108,28 @@ internal static class JsonText
     }
 
     /// <summary>
+    /// What <paramref name="text"/> holds as a single JSON value with nothing
+    /// but whitespace around it: <c>'{'</c> an object, <c>'['</c> an array,
+    /// <c>'"'</c> a string or a number, <c>'l'</c> one of the literals
+    /// <c>true</c> / <c>false</c> / <c>null</c>, or <c>'\0'</c> when it is no
+    /// JSON value.
+    /// </summary>
+    public static char RootKind(string text)
+    {
+        var i = 0;
+        SkipWhitespace(text, ref i);
+        if (i >= text.Length)
+            return '\0';
+        var first = text[i];
+        if (first is '{' or '[')
+            return Scan(text).HasError ? '\0' : first;
+        if (!TryReadScalar(text, ref i))
+            return '\0';
+        SkipWhitespace(text, ref i);
+        return i < text.Length ? '\0' : first is '"' or '-' || char.IsAsciiDigit(first) ? '"' : 'l';
+    }
+
+    /// <summary>
     /// Reads the leading root value out of <paramref name="text"/>. See
     /// <see cref="JsonScan"/> for how the result reads.
     /// </summary>

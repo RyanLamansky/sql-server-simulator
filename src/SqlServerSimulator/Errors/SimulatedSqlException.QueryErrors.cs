@@ -351,10 +351,19 @@ partial class SimulatedSqlException
     /// message embeds the calling function's name verbatim
     /// (<c>"... is not a recognized datepart option."</c> for <c>DATEPART</c>,
     /// <c>"... datediff_big option."</c> for <c>DATEDIFF_BIG</c>, etc.) —
-    /// probed against SQL Server 2025 (2026-05-08).
+    /// probed against SQL Server 2025 (2026-05-08). <c>ISJSON</c>'s type
+    /// constraint word raises the same (<c>isjson option</c>, 2026-09-26).
     /// </summary>
     internal static SimulatedSqlException NotARecognizedDatepartOption(string keyword, string functionLowerName) =>
         new($"'{keyword}' is not a recognized {functionLowerName} option.", 155, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 1023 — a function's keyword-only argument
+    /// written as something else, such as <c>ISJSON(x, 'scalar')</c> (probed
+    /// 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException InvalidParameterSpecifiedFor(int position, string functionLowerName) =>
+        new($"Invalid parameter {position} specified for {functionLowerName}.", 1023, 15, 1);
 
     /// <summary>
     /// Mimics SQL Server error 9810: a datepart keyword is incompatible with

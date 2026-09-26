@@ -321,6 +321,33 @@ public sealed class JsonMalformedTextTests
         => AreEqual(expected, new Simulation().ExecuteScalar($"select {expression}"));
 
     /// <summary>
+    /// ISJSON's type constraint: VALUE takes any JSON value, SCALAR a string or
+    /// number but no literal, ARRAY / OBJECT their container (probed
+    /// 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("isjson('1', scalar)", 1)]
+    [DataRow("isjson(' \"a\" ', scalar)", 1)]
+    [DataRow("isjson('true', scalar)", 0)]
+    [DataRow("isjson('null', scalar)", 0)]
+    [DataRow("isjson('[1]', scalar)", 0)]
+    [DataRow("isjson('null', value)", 1)]
+    [DataRow("isjson('{}', value)", 1)]
+    [DataRow("isjson('1 2', value)", 0)]
+    [DataRow("isjson('[1]', array)", 1)]
+    [DataRow("isjson('{}', array)", 0)]
+    [DataRow("isjson('{}', OBJECT)", 1)]
+    public void IsJson_TypeConstraint(string expression, int expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar($"select {expression}"));
+
+    [TestMethod]
+    public void IsJson_TypeConstraint_Refusals()
+    {
+        _ = new Simulation().AssertSqlError("select isjson('1', bogus)", 155);
+        new Simulation().AssertSqlError("select isjson('1', 'scalar')", 1023, "Invalid parameter 2 specified for isjson.");
+    }
+
+    /// <summary>
     /// OPENJSON reports State 4 when the reader was inside the value it was
     /// after — always so for the one-argument form, whose value is the whole
     /// document — and State 3 when it was still looking for it.
