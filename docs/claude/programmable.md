@@ -554,7 +554,7 @@ Each `DbParameter` binds to a proc parameter by name (the `@` prefix is stripped
 - `sys.procedures` (load-bearing subset): `object_id`, `name`, `schema_id`, `type`, `type_desc`, `create_date`, `modify_date`, `is_ms_shipped`.
 - `sys.parameters` emits one row per declared parameter (parameter_id 1+); no `parameter_id=0` row (distinct from scalar UDFs — proc has no return-type slot in this view).
   `is_output` reflects the `OUTPUT`/`OUT` declaration.
-- `INFORMATION_SCHEMA.ROUTINES` (5-col subset): `ROUTINE_TYPE='PROCEDURE'`, `DATA_TYPE=NULL` for procs.
+- `INFORMATION_SCHEMA.ROUTINES`: `ROUTINE_TYPE='PROCEDURE'`, `DATA_TYPE=NULL` for procs.
 - `INFORMATION_SCHEMA.PARAMETERS` (8-col subset): `PARAMETER_MODE='IN'`/`'INOUT'` (no `'OUT'`-only — procedures always reflect OUTPUT as INOUT, probe-confirmed).
 - `OBJECT_ID(name, 'P')` resolves procedures only; no-filter form tries function → view → procedure → table in order.
 

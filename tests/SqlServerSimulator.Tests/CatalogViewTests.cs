@@ -1455,4 +1455,33 @@ public sealed class CatalogViewTests
         _ = simulation.ExecuteNonQuery("create table t (id int identity(5, 2), a varchar(10), c as a + 'x')");
         AreEqual(expected, Convert.ToString(simulation.ExecuteScalar(query), System.Globalization.CultureInfo.InvariantCulture));
     }
+
+    /// <summary>
+    /// INFORMATION_SCHEMA.ROUTINES carries real's 51 columns, describing a
+    /// scalar function's return type as PARAMETERS does. Probed 2026-09-26
+    /// against SQL Server 2025.
+    /// </summary>
+    [TestMethod]
+    [DataRow("fv", "select concat(DATA_TYPE, CHARACTER_MAXIMUM_LENGTH, CHARACTER_SET_NAME, IS_DETERMINISTIC, SQL_DATA_ACCESS, IS_NULL_CALL, MAX_DYNAMIC_RESULT_SETS)", "varchar10iso_1NOREADSNO0")]
+    [DataRow("fd", "select concat(DATA_TYPE, NUMERIC_PRECISION, NUMERIC_PRECISION_RADIX, NUMERIC_SCALE, IS_DETERMINISTIC)", "decimal5102YES")]
+    [DataRow("fi", "select concat(DATA_TYPE, ROUTINE_BODY, SCHEMA_LEVEL_ROUTINE)", "TABLESQLYES")]
+    [DataRow("p", "select concat(ROUTINE_TYPE, '|', DATA_TYPE, SQL_DATA_ACCESS, IS_NULL_CALL, MAX_DYNAMIC_RESULT_SETS, IS_USER_DEFINED_CAST)", "PROCEDURE|MODIFIES-1NO")]
+    public void InformationSchemaRoutines_TakesRealsShape(string routine, string select, string expected)
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            "create procedure p as select 1",
+            "create function fv(@a int) returns varchar(10) as begin return 'x' end",
+            "create function fd() returns decimal(5, 2) with schemabinding as begin return 1 end",
+            "create function fi() returns table as return select 1 a");
+        AreEqual(expected, Convert.ToString(simulation.ExecuteScalar($"{select} from INFORMATION_SCHEMA.ROUTINES where ROUTINE_NAME = '{routine}'"), System.Globalization.CultureInfo.InvariantCulture));
+    }
+
+    [TestMethod]
+    public void InformationSchemaRoutines_HasRealsColumnCount()
+    {
+        using var reader = new Simulation().ExecuteReader("select * from INFORMATION_SCHEMA.ROUTINES");
+        AreEqual(51, reader.FieldCount);
+        AreEqual("LAST_ALTERED", reader.GetName(50));
+    }
 }

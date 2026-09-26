@@ -236,9 +236,6 @@ internal static partial class BuiltInResources
         // is 'TABLE'. ROUTINE_DEFINITION carries the module source text
         // (nvarchar(4000), truncated like SQL Server). Real SQL Server ships
         // dozens of further columns (CREATED, LAST_ALTERED, etc.) not modeled.
-        var procedureRoutineType = SqlValue.FromNVarchar("PROCEDURE");
-        var functionRoutineType = SqlValue.FromNVarchar("FUNCTION");
-        var tableDataType = SqlValue.FromSystemName("TABLE");
         Iso("ROUTINES",
         [
             // SPECIFIC_* lead the ISO shape and mirror ROUTINE_* for T-SQL
@@ -252,10 +249,51 @@ internal static partial class BuiltInResources
             new("ROUTINE_SCHEMA", nvarchar128Baseline, 128, true),
             new("ROUTINE_NAME", SqlType.SystemName, 128, false),
             new("ROUTINE_TYPE", SqlType.NVarchar, 20, true),
+            new("MODULE_CATALOG", SqlType.SystemName, 128, true),
+            new("MODULE_SCHEMA", SqlType.SystemName, 128, true),
+            new("MODULE_NAME", SqlType.SystemName, 128, true),
+            new("UDT_CATALOG", SqlType.SystemName, 128, true),
+            new("UDT_SCHEMA", SqlType.SystemName, 128, true),
+            new("UDT_NAME", SqlType.SystemName, 128, true),
             new("DATA_TYPE", SqlType.SystemName, 128, true),
+            new("CHARACTER_MAXIMUM_LENGTH", SqlType.Int32, null, true),
+            new("CHARACTER_OCTET_LENGTH", SqlType.Int32, null, true),
+            new("COLLATION_CATALOG", SqlType.SystemName, 128, true),
+            new("COLLATION_SCHEMA", SqlType.SystemName, 128, true),
+            new("COLLATION_NAME", SqlType.SystemName, 128, true),
+            new("CHARACTER_SET_CATALOG", SqlType.SystemName, 128, true),
+            new("CHARACTER_SET_SCHEMA", SqlType.SystemName, 128, true),
+            new("CHARACTER_SET_NAME", SqlType.SystemName, 128, true),
+            new("NUMERIC_PRECISION", SqlType.TinyInt, null, true),
+            new("NUMERIC_PRECISION_RADIX", SqlType.SmallInt, null, true),
+            new("NUMERIC_SCALE", SqlType.Int32, null, true),
+            new("DATETIME_PRECISION", SqlType.SmallInt, null, true),
+            new("INTERVAL_TYPE", SqlType.NVarchar, 30, true),
+            new("INTERVAL_PRECISION", SqlType.SmallInt, null, true),
+            new("TYPE_UDT_CATALOG", SqlType.SystemName, 128, true),
+            new("TYPE_UDT_SCHEMA", SqlType.SystemName, 128, true),
+            new("TYPE_UDT_NAME", SqlType.SystemName, 128, true),
+            new("SCOPE_CATALOG", SqlType.SystemName, 128, true),
+            new("SCOPE_SCHEMA", SqlType.SystemName, 128, true),
+            new("SCOPE_NAME", SqlType.SystemName, 128, true),
+            new("MAXIMUM_CARDINALITY", SqlType.BigInt, null, true),
+            new("DTD_IDENTIFIER", SqlType.SystemName, 128, true),
+            new("ROUTINE_BODY", SqlType.NVarchar, 30, true),
             new("ROUTINE_DEFINITION", SqlType.NVarchar, 4000, true),
-        ], (batch, database) =>
-            EnumerateInformationSchemaRoutines(batch, database, procedureRoutineType, functionRoutineType, tableDataType));
+            new("EXTERNAL_NAME", SqlType.SystemName, 128, true),
+            new("EXTERNAL_LANGUAGE", SqlType.NVarchar, 30, true),
+            new("PARAMETER_STYLE", SqlType.NVarchar, 30, true),
+            new("IS_DETERMINISTIC", SqlType.NVarchar, 10, true),
+            new("SQL_DATA_ACCESS", SqlType.NVarchar, 30, true),
+            new("IS_NULL_CALL", SqlType.NVarchar, 10, true),
+            new("SQL_PATH", SqlType.SystemName, 128, true),
+            new("SCHEMA_LEVEL_ROUTINE", SqlType.NVarchar, 10, true),
+            new("MAX_DYNAMIC_RESULT_SETS", SqlType.SmallInt, null, true),
+            new("IS_USER_DEFINED_CAST", SqlType.NVarchar, 10, true),
+            new("IS_IMPLICITLY_INVOCABLE", SqlType.NVarchar, 10, true),
+            new("CREATED", SqlType.DateTime, null, false),
+            new("LAST_ALTERED", SqlType.DateTime, null, false),
+        ], EnumerateInformationSchemaRoutines);
 
         // INFORMATION_SCHEMA.PARAMETERS: ISO-shape view listing parameters
         // for procedures and functions. PARAMETER_MODE is 'IN' / 'OUT' /
@@ -1360,51 +1398,83 @@ internal static partial class BuiltInResources
     /// the return-type family for scalar UDFs, 'TABLE' for inline TVFs, NULL
     /// for procedures.
     /// </summary>
-    private static IEnumerable<SqlValue[]> EnumerateInformationSchemaRoutines(
-        Parser.BatchContext batch,
-        Database database,
-        SqlValue procedureRoutineType,
-        SqlValue functionRoutineType,
-        SqlValue tableDataType)
+    /// <summary>
+    /// Rows for <c>INFORMATION_SCHEMA.ROUTINES</c>, one per procedure and
+    /// function, in real's 51 columns (probed 2026-09-26 against SQL Server
+    /// 2025): a scalar function's return type described as
+    /// <c>INFORMATION_SCHEMA.PARAMETERS</c> describes it, a table-valued one's
+    /// DATA_TYPE <c>TABLE</c>; ROUTINE_BODY <c>SQL</c> (<c>EXTERNAL</c> for a
+    /// CLR function); a procedure <c>MODIFIES</c> SQL data with any number of
+    /// result sets, a function <c>READS</c> with none; IS_DETERMINISTIC as
+    /// <c>OBJECTPROPERTY(…, 'IsDeterministic')</c> answers it; CREATED /
+    /// LAST_ALTERED the module's own dates.
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateInformationSchemaRoutines(Parser.BatchContext batch, Database database)
     {
         _ = batch;
-        var catalog = SqlValue.FromSystemName(database.Name);
-        var nullDataType = SqlValue.Null(SqlType.SystemName);
+        var catalog = SqlValue.FromNVarchar(database.Name);
+        var nullSysName = SqlValue.Null(SqlType.SystemName);
+        var nullInt32 = SqlValue.Null(SqlType.Int32);
+        var nullInt16 = SqlValue.Null(SqlType.SmallInt);
+        var nullByte = SqlValue.Null(SqlType.TinyInt);
+        var nullNVarchar = SqlValue.Null(SqlType.NVarchar);
+        var yes = SqlValue.FromNVarchar("YES");
+        var no = SqlValue.FromNVarchar("NO");
+        var databaseCollation = SqlValue.FromSystemName(database.CollationName);
+
+        SqlValue[] Row(SqlValue schemaName, SchemaObject routine, bool isProcedure, SqlType? returnType, bool spelledNumeric, string? definition)
+        {
+            var name = SqlValue.FromSystemName(routine.Name);
+            var (charLength, octetLength, numericPrecision, numericRadix, numericScale, dateTimePrecision) = returnType is null
+                ? (null, null, null, null, null, null)
+                : GetInformationSchemaColumnMetadata(new HeapColumn(string.Empty, returnType, null, nullable: true));
+            var isString = returnType is not null && SqlType.IsCollatedString(returnType);
+            return
+            [
+                catalog, schemaName, name, catalog, schemaName, name,
+                SqlValue.FromNVarchar(isProcedure ? "PROCEDURE" : "FUNCTION"),
+                nullSysName, nullSysName, nullSysName, nullSysName, nullSysName, nullSysName,
+                isProcedure ? nullSysName : returnType is null ? SqlValue.FromSystemName("TABLE") : IsoDataTypeName(returnType, spelledNumeric),
+                charLength is int cl ? SqlValue.FromInt32(cl) : nullInt32,
+                octetLength is int ol ? SqlValue.FromInt32(ol) : nullInt32,
+                nullSysName, nullSysName,
+                isString ? databaseCollation : nullSysName,
+                nullSysName, nullSysName,
+                !isString ? nullSysName : SqlValue.FromSystemName(SqlType.IsNationalStringCategory(returnType!) ? "UNICODE" : "iso_1"),
+                numericPrecision is byte np ? SqlValue.FromByte(np) : nullByte,
+                numericRadix is int radix ? SqlValue.FromInt16((short)radix) : nullInt16,
+                numericScale is int ns ? SqlValue.FromInt32(ns) : nullInt32,
+                dateTimePrecision is short dp ? SqlValue.FromInt16(dp) : nullInt16,
+                nullNVarchar, nullInt16,
+                nullSysName, nullSysName, nullSysName,
+                nullSysName, nullSysName, nullSysName,
+                SqlValue.Null(SqlType.BigInt),
+                nullSysName,
+                SqlValue.FromNVarchar(routine is ClrScalarFunction ? "EXTERNAL" : "SQL"),
+                RoutineDefinition(definition),
+                nullSysName, nullNVarchar, nullNVarchar,
+                ModuleDeterminism.Evaluate(database, routine) == 1 ? yes : no,
+                SqlValue.FromNVarchar(isProcedure ? "MODIFIES" : "READS"),
+                isProcedure ? nullNVarchar : routine is ScalarFunction { ReturnsNullOnNullInput: true } ? yes : no,
+                nullSysName,
+                yes,
+                SqlValue.FromInt16(isProcedure ? (short)-1 : (short)0),
+                no, no,
+                SqlValue.FromDateTime(routine.CreateDate),
+                SqlValue.FromDateTime(routine.ModifyDate),
+            ];
+        }
+
         foreach (var schema in database.Schemas.Values)
         {
-            var schemaName = SqlValue.FromSystemName(schema.Name);
+            var schemaName = SqlValue.FromNVarchar(schema.Name);
             foreach (var proc in schema.Procedures.Values.OrderBy(p => p.ObjectId))
-            {
-                var name = SqlValue.FromSystemName(proc.Name);
-                yield return [
-                    catalog,
-                    schemaName,
-                    name,
-                    catalog,
-                    schemaName,
-                    name,
-                    procedureRoutineType,
-                    nullDataType,
-                    RoutineDefinition(proc.DefinitionText),
-                ];
-            }
+                yield return Row(schemaName, proc, isProcedure: true, null, false, proc.DefinitionText);
             foreach (var fn in schema.Functions.Values.OrderBy(f => f.ObjectId))
             {
-                var dataType = fn is ScalarFunction scalarFn
-                    ? IsoDataTypeName(scalarFn.ReturnType, scalarFn.ReturnSpelledNumeric)
-                    : tableDataType;
-                var name = SqlValue.FromSystemName(fn.Name);
-                yield return [
-                    catalog,
-                    schemaName,
-                    name,
-                    catalog,
-                    schemaName,
-                    name,
-                    functionRoutineType,
-                    dataType,
-                    RoutineDefinition(fn.DefinitionText),
-                ];
+                yield return fn is ScalarFunction scalar
+                    ? Row(schemaName, fn, isProcedure: false, scalar.ReturnType, scalar.ReturnSpelledNumeric, fn.DefinitionText)
+                    : Row(schemaName, fn, isProcedure: false, null, false, fn.DefinitionText);
             }
         }
     }
