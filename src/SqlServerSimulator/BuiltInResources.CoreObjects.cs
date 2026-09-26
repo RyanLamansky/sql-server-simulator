@@ -434,9 +434,20 @@ internal static partial class BuiltInResources
         // Server 2025).
         SysP("all_columns", ColumnsShape(), ["object_id"], (batch, database, filter) =>
             EnumerateColumns(batch, database, defaultCollation, nullCollation, filter, userColumns: true, systemColumns: true));
-        SysP("system_columns", ColumnsShape(), ["object_id"], (batch, database, filter) =>
+        // sys.system_columns declares its flag columns NOT NULL where
+        // sys.columns doesn't (probed 2026-09-26 against SQL Server 2025).
+        SysP("system_columns", NotNullable(ColumnsShape(), "is_computed", "is_sparse", "is_column_set", "is_dropped_ledger_column", "is_hidden", "is_replicated", "is_non_sql_subscribed", "is_merge_published", "is_dts_replicated", "is_data_deletion_filter_column"), ["object_id"], (batch, database, filter) =>
             EnumerateColumns(batch, database, defaultCollation, nullCollation, filter, userColumns: false, systemColumns: true));
     }
+
+    /// <summary>
+    /// <paramref name="shape"/> with the named columns declared NOT NULL — for
+    /// a catalog view whose column list matches another's but for that.
+    /// </summary>
+    private static HeapColumn[] NotNullable(HeapColumn[] shape, params string[] names) =>
+        Array.ConvertAll(shape, column => Array.IndexOf(names, column.Name) >= 0
+            ? new HeapColumn(column.Name, column.Type, column.MaxLength, nullable: false)
+            : column);
 
     private static IEnumerable<SqlValue[]> EnumerateColumns(
         Parser.BatchContext batch,

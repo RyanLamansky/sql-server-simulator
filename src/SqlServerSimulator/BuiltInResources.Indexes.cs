@@ -247,7 +247,7 @@ internal static partial class BuiltInResources
         Sys("stats",
         [
             new("object_id", SqlType.Int32, null, false),
-            new("name", SqlType.SystemName, 128, true),
+            new("name", nvarchar128Baseline, 128, true),
             new("stats_id", SqlType.Int32, null, false),
             new("auto_created", SqlType.Bit, null, true),
             new("user_created", SqlType.Bit, null, true),
@@ -366,7 +366,7 @@ internal static partial class BuiltInResources
         [
             new("object_id", SqlType.Int32, null, false),
             new("index_id", SqlType.Int32, null, false),
-            new("name", SqlType.SystemName, 128, false),
+            new("name", nvarchar128Baseline, 128, false),
             new("sql_text", NVarcharSqlType.Get(-1, Collation.Baseline, Coercibility.CoercibleDefault), SqlType.MaxLengthSentinel, true),
             new("last_max_dop_used", SqlType.SmallInt, null, false),
             new("partition_number", SqlType.Int32, null, true),
@@ -384,7 +384,7 @@ internal static partial class BuiltInResources
             new("index_id", SqlType.Int32, null, false),
             new("path_id", SqlType.Int32, null, true),
             new("path", NVarcharSqlType.Get(4000, Collation.Get("Latin1_General_BIN2"), Coercibility.Implicit), 4000, true),
-            new("name", SqlType.SystemName, 128, true),
+            new("name", nvarchar128Baseline, 128, true),
             new("path_type", SqlType.TinyInt, null, true),
             new("path_type_desc", NVarcharSqlType.Get(128, Collation.Baseline, Coercibility.Implicit), 128, true),
             new("xml_component_id", SqlType.Int32, null, true),
@@ -398,7 +398,7 @@ internal static partial class BuiltInResources
             new("max_length", SqlType.SmallInt, null, true),
             new("precision", SqlType.TinyInt, null, true),
             new("scale", SqlType.TinyInt, null, true),
-            new("collation_name", SqlType.NVarchar, 128, true),
+            new("collation_name", SqlType.SystemName, 128, true),
             new("is_singleton", SqlType.Bit, null, true),
         ], static (_, _) => EmptyCatalogRows);
         Sys("filetable_system_defined_objects",

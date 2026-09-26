@@ -157,8 +157,8 @@ internal static partial class BuiltInResources
         var tableTypeDataType = SqlValue.FromNVarchar("table type");
         Iso("DOMAINS",
         [
-            new("DOMAIN_CATALOG", SqlType.SystemName, 128, true),
-            new("DOMAIN_SCHEMA", SqlType.SystemName, 128, true),
+            new("DOMAIN_CATALOG", nvarchar128Baseline, 128, true),
+            new("DOMAIN_SCHEMA", nvarchar128Baseline, 128, true),
             new("DOMAIN_NAME", SqlType.SystemName, 128, false),
             new("DATA_TYPE", SqlType.NVarchar, 128, true),
         ], (batch, database) =>
@@ -173,11 +173,11 @@ internal static partial class BuiltInResources
         // object's schema. SQLAlchemy's get_pk_constraint reads it.
         Iso("TABLE_CONSTRAINTS",
         [
-            new("CONSTRAINT_CATALOG", SqlType.SystemName, 128, true),
-            new("CONSTRAINT_SCHEMA", SqlType.SystemName, 128, true),
+            new("CONSTRAINT_CATALOG", nvarchar128Baseline, 128, true),
+            new("CONSTRAINT_SCHEMA", nvarchar128Baseline, 128, true),
             new("CONSTRAINT_NAME", SqlType.SystemName, 128, false),
-            new("TABLE_CATALOG", SqlType.SystemName, 128, true),
-            new("TABLE_SCHEMA", SqlType.SystemName, 128, true),
+            new("TABLE_CATALOG", nvarchar128Baseline, 128, true),
+            new("TABLE_SCHEMA", nvarchar128Baseline, 128, true),
             new("TABLE_NAME", SqlType.SystemName, 128, true),
             new("CONSTRAINT_TYPE", SqlType.Varchar, 11, true),
             new("IS_DEFERRABLE", SqlType.Varchar, 2, false),
@@ -193,13 +193,13 @@ internal static partial class BuiltInResources
         // get_pk_constraint / get_foreign_keys read it.
         Iso("KEY_COLUMN_USAGE",
         [
-            new("CONSTRAINT_CATALOG", SqlType.SystemName, 128, true),
-            new("CONSTRAINT_SCHEMA", SqlType.SystemName, 128, true),
+            new("CONSTRAINT_CATALOG", nvarchar128Baseline, 128, true),
+            new("CONSTRAINT_SCHEMA", nvarchar128Baseline, 128, true),
             new("CONSTRAINT_NAME", SqlType.SystemName, 128, false),
-            new("TABLE_CATALOG", SqlType.SystemName, 128, true),
-            new("TABLE_SCHEMA", SqlType.SystemName, 128, true),
+            new("TABLE_CATALOG", nvarchar128Baseline, 128, true),
+            new("TABLE_SCHEMA", nvarchar128Baseline, 128, true),
             new("TABLE_NAME", SqlType.SystemName, 128, false),
-            new("COLUMN_NAME", SqlType.SystemName, 128, true),
+            new("COLUMN_NAME", nvarchar128Baseline, 128, true),
             new("ORDINAL_POSITION", SqlType.Int32, null, false),
         ], EnumerateInformationSchemaKeyColumnUsage);
 
@@ -212,11 +212,11 @@ internal static partial class BuiltInResources
         // get_foreign_keys reads it.
         Iso("REFERENTIAL_CONSTRAINTS",
         [
-            new("CONSTRAINT_CATALOG", SqlType.SystemName, 128, true),
-            new("CONSTRAINT_SCHEMA", SqlType.SystemName, 128, true),
+            new("CONSTRAINT_CATALOG", nvarchar128Baseline, 128, true),
+            new("CONSTRAINT_SCHEMA", nvarchar128Baseline, 128, true),
             new("CONSTRAINT_NAME", SqlType.SystemName, 128, false),
-            new("UNIQUE_CONSTRAINT_CATALOG", SqlType.SystemName, 128, true),
-            new("UNIQUE_CONSTRAINT_SCHEMA", SqlType.SystemName, 128, true),
+            new("UNIQUE_CONSTRAINT_CATALOG", nvarchar128Baseline, 128, true),
+            new("UNIQUE_CONSTRAINT_SCHEMA", nvarchar128Baseline, 128, true),
             new("UNIQUE_CONSTRAINT_NAME", SqlType.SystemName, 128, true),
             new("MATCH_OPTION", SqlType.Varchar, 7, true),
             new("UPDATE_RULE", SqlType.Varchar, 11, true),
@@ -232,12 +232,12 @@ internal static partial class BuiltInResources
         // key's child and referenced columns.
         Iso("CONSTRAINT_COLUMN_USAGE",
         [
-            new("TABLE_CATALOG", SqlType.SystemName, 128, true),
-            new("TABLE_SCHEMA", SqlType.SystemName, 128, true),
+            new("TABLE_CATALOG", nvarchar128Baseline, 128, true),
+            new("TABLE_SCHEMA", nvarchar128Baseline, 128, true),
             new("TABLE_NAME", SqlType.SystemName, 128, false),
-            new("COLUMN_NAME", SqlType.SystemName, 128, true),
-            new("CONSTRAINT_CATALOG", SqlType.SystemName, 128, true),
-            new("CONSTRAINT_SCHEMA", SqlType.SystemName, 128, true),
+            new("COLUMN_NAME", nvarchar128Baseline, 128, true),
+            new("CONSTRAINT_CATALOG", nvarchar128Baseline, 128, true),
+            new("CONSTRAINT_SCHEMA", nvarchar128Baseline, 128, true),
             new("CONSTRAINT_NAME", SqlType.SystemName, 128, false),
         ], EnumerateInformationSchemaConstraintColumnUsage);
 
@@ -246,11 +246,11 @@ internal static partial class BuiltInResources
         // same as CONSTRAINT_COLUMN_USAGE without COLUMN_NAME.
         Iso("CONSTRAINT_TABLE_USAGE",
         [
-            new("TABLE_CATALOG", SqlType.SystemName, 128, true),
-            new("TABLE_SCHEMA", SqlType.SystemName, 128, true),
+            new("TABLE_CATALOG", nvarchar128Baseline, 128, true),
+            new("TABLE_SCHEMA", nvarchar128Baseline, 128, true),
             new("TABLE_NAME", SqlType.SystemName, 128, false),
-            new("CONSTRAINT_CATALOG", SqlType.SystemName, 128, true),
-            new("CONSTRAINT_SCHEMA", SqlType.SystemName, 128, true),
+            new("CONSTRAINT_CATALOG", nvarchar128Baseline, 128, true),
+            new("CONSTRAINT_SCHEMA", nvarchar128Baseline, 128, true),
             new("CONSTRAINT_NAME", SqlType.SystemName, 128, false),
         ], EnumerateInformationSchemaConstraintTableUsage);
 

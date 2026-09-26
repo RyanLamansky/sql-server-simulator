@@ -22,7 +22,7 @@ internal static partial class BuiltInResources
         var viewTableType = SqlValue.FromVarchar("VIEW");
         Iso("TABLES",
         [
-            new("TABLE_CATALOG", SqlType.SystemName, 128, true),
+            new("TABLE_CATALOG", nvarchar128Baseline, 128, true),
             new("TABLE_SCHEMA", SqlType.SystemName, 128, true),
             new("TABLE_NAME", SqlType.SystemName, 128, false),
             new("TABLE_TYPE", SqlType.Varchar, 10, true),
@@ -42,14 +42,14 @@ internal static partial class BuiltInResources
         var radix2 = SqlValue.FromInt16(2);
         Iso("COLUMNS",
         [
-            new("TABLE_CATALOG", SqlType.SystemName, 128, true),
-            new("TABLE_SCHEMA", SqlType.SystemName, 128, true),
+            new("TABLE_CATALOG", nvarchar128Baseline, 128, true),
+            new("TABLE_SCHEMA", nvarchar128Baseline, 128, true),
             new("TABLE_NAME", SqlType.SystemName, 128, false),
             new("COLUMN_NAME", SqlType.SystemName, 128, true),
             new("ORDINAL_POSITION", SqlType.Int32, null, true),
             new("COLUMN_DEFAULT", SqlType.NVarchar, 4000, true),
             new("IS_NULLABLE", SqlType.Varchar, 3, true),
-            new("DATA_TYPE", SqlType.SystemName, 128, true),
+            new("DATA_TYPE", nvarchar128Baseline, 128, true),
             new("CHARACTER_MAXIMUM_LENGTH", SqlType.Int32, null, true),
             new("CHARACTER_OCTET_LENGTH", SqlType.Int32, null, true),
             new("NUMERIC_PRECISION", SqlType.TinyInt, null, true),
@@ -78,9 +78,9 @@ internal static partial class BuiltInResources
         var nullSysName = SqlValue.Null(SqlType.SystemName);
         Iso("SCHEMATA",
         [
-            new("CATALOG_NAME", SqlType.SystemName, 128, true),
+            new("CATALOG_NAME", nvarchar128Baseline, 128, true),
             new("SCHEMA_NAME", SqlType.SystemName, 128, false),
-            new("SCHEMA_OWNER", SqlType.SystemName, 128, true),
+            new("SCHEMA_OWNER", nvarchar128Baseline, 128, true),
             new("DEFAULT_CHARACTER_SET_CATALOG", SqlType.SystemName, 128, true),
             new("DEFAULT_CHARACTER_SET_SCHEMA", SqlType.SystemName, 128, true),
             new("DEFAULT_CHARACTER_SET_NAME", SqlType.SystemName, 128, true),
@@ -198,11 +198,11 @@ internal static partial class BuiltInResources
             new("create_date", SqlType.DateTime, null, false),
             new("modify_date", SqlType.DateTime, null, false),
             new("is_ms_shipped", SqlType.Bit, null, true),
-            new("with_check_option", SqlType.Bit, null, true),
-            new("is_date_correlation_view", SqlType.Bit, null, true),
+            new("with_check_option", SqlType.Bit, null, false),
+            new("is_date_correlation_view", SqlType.Bit, null, false),
             new("ledger_view_type", SqlType.TinyInt, null, true),
-            new("has_opaque_metadata", SqlType.Bit, null, true),
-            new("is_dropped_ledger_view", SqlType.Bit, null, true),
+            new("has_opaque_metadata", SqlType.Bit, null, false),
+            new("is_dropped_ledger_view", SqlType.Bit, null, false),
         ], (_, _) => EnumerateSystemViews());
 
         // sys.procedures: per-procedure rows. Shipped column subset matches
@@ -245,11 +245,11 @@ internal static partial class BuiltInResources
             // routines (no overloading, so the specific name equals the routine
             // name). SSMS's aggregate-function enumeration joins
             // sysobjects.name = INFORMATION_SCHEMA.ROUTINES.SPECIFIC_NAME.
-            new("SPECIFIC_CATALOG", SqlType.SystemName, 128, true),
-            new("SPECIFIC_SCHEMA", SqlType.SystemName, 128, true),
+            new("SPECIFIC_CATALOG", nvarchar128Baseline, 128, true),
+            new("SPECIFIC_SCHEMA", nvarchar128Baseline, 128, true),
             new("SPECIFIC_NAME", SqlType.SystemName, 128, false),
-            new("ROUTINE_CATALOG", SqlType.SystemName, 128, true),
-            new("ROUTINE_SCHEMA", SqlType.SystemName, 128, true),
+            new("ROUTINE_CATALOG", nvarchar128Baseline, 128, true),
+            new("ROUTINE_SCHEMA", nvarchar128Baseline, 128, true),
             new("ROUTINE_NAME", SqlType.SystemName, 128, false),
             new("ROUTINE_TYPE", SqlType.NVarchar, 20, true),
             new("DATA_TYPE", SqlType.SystemName, 128, true),
@@ -268,15 +268,15 @@ internal static partial class BuiltInResources
         var modeOut = SqlValue.FromNVarchar("OUT");
         Iso("PARAMETERS",
         [
-            new("SPECIFIC_CATALOG", SqlType.SystemName, 128, true),
-            new("SPECIFIC_SCHEMA", SqlType.SystemName, 128, true),
+            new("SPECIFIC_CATALOG", nvarchar128Baseline, 128, true),
+            new("SPECIFIC_SCHEMA", nvarchar128Baseline, 128, true),
             new("SPECIFIC_NAME", SqlType.SystemName, 128, false),
             new("ORDINAL_POSITION", SqlType.Int32, null, false),
             new("PARAMETER_MODE", SqlType.NVarchar, 10, true),
             new("IS_RESULT", SqlType.NVarchar, 10, true),
             new("AS_LOCATOR", SqlType.NVarchar, 10, true),
             new("PARAMETER_NAME", SqlType.SystemName, 128, true),
-            new("DATA_TYPE", SqlType.SystemName, 128, true),
+            new("DATA_TYPE", nvarchar128Baseline, 128, false),
             new("CHARACTER_MAXIMUM_LENGTH", SqlType.Int32, null, true),
             new("CHARACTER_OCTET_LENGTH", SqlType.Int32, null, true),
             new("COLLATION_CATALOG", SqlType.SystemName, 128, true),
@@ -311,8 +311,8 @@ internal static partial class BuiltInResources
         var isUpdatableNo = SqlValue.FromVarchar("NO");
         Iso("VIEWS",
         [
-            new("TABLE_CATALOG", SqlType.SystemName, 128, true),
-            new("TABLE_SCHEMA", SqlType.SystemName, 128, true),
+            new("TABLE_CATALOG", nvarchar128Baseline, 128, true),
+            new("TABLE_SCHEMA", nvarchar128Baseline, 128, true),
             new("TABLE_NAME", SqlType.SystemName, 128, false),
             new("VIEW_DEFINITION", SqlType.NVarchar, 4000, true),
             new("CHECK_OPTION", SqlType.Varchar, 7, true),

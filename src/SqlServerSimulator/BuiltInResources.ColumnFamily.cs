@@ -196,10 +196,10 @@ internal static partial class BuiltInResources
             new("database_id", SqlType.Int32, null, false),
             new("database_guid", SqlType.UniqueIdentifier, null, true),
             new("family_guid", SqlType.UniqueIdentifier, null, true),
-            new("last_log_backup_lsn", SqlType.GetDecimal(25, 0), null, true),
+            new("last_log_backup_lsn", SqlType.GetDecimal(25, 0), null, true, spelledNumeric: true),
             new("recovery_fork_guid", SqlType.UniqueIdentifier, null, true),
             new("first_recovery_fork_guid", SqlType.UniqueIdentifier, null, true),
-            new("fork_point_lsn", SqlType.GetDecimal(25, 0), null, true),
+            new("fork_point_lsn", SqlType.GetDecimal(25, 0), null, true, spelledNumeric: true),
         ], static (batch, database) => []);
 
         Sys("change_tracking_databases",
@@ -226,7 +226,7 @@ internal static partial class BuiltInResources
         Sys("external_data_sources",
         [
             new("data_source_id", SqlType.Int32, null, false),
-            new("name", SqlType.SystemName, 128, false),
+            new("name", nvarchar128Baseline, 128, false),
             new("location", SqlType.NVarchar, 4000, false),
             new("type_desc", SqlType.NVarchar, 255, true),
             new("type", SqlType.TinyInt, null, false),
@@ -244,7 +244,7 @@ internal static partial class BuiltInResources
         Sys("external_file_formats",
         [
             new("file_format_id", SqlType.Int32, null, false),
-            new("name", SqlType.SystemName, 128, false),
+            new("name", nvarchar128Baseline, 128, false),
             new("format_type", SqlType.NVarchar, 100, false),
             new("field_terminator", SqlType.NVarchar, 10, true),
             new("string_delimiter", SqlType.NVarchar, 10, true),

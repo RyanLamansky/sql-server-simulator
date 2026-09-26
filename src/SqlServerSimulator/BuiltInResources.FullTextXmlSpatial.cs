@@ -130,7 +130,7 @@ internal static partial class BuiltInResources
         Sys("fulltext_languages",
         [
             new("lcid", SqlType.Int32, null, false),
-            new("name", SqlType.SystemName, 128, false),
+            new("name", nvarchar128Baseline, 128, false),
         ], static (batch, database) =>
         {
             _ = (batch, database);

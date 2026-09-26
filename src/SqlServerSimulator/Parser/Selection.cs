@@ -342,7 +342,7 @@ internal sealed partial class Selection
                 CatalogPushdownDiagnostics.Sink?.Add($"Scan({view.Name})");
                 var gated = BuiltInResources.ApplyDmvGate(view, batch, view.RowGenerator(batch, targetDatabase));
                 var rows = BuiltInResources.ApplyMetadataFilter(view, batch, targetDatabase, gated);
-                var encoded = rows.Select(values => RowEncoder.EncodeRow(view.Columns, values));
+                var encoded = rows.Select(values => RowEncoder.EncodeRow(view.Columns, view.Conform(values)));
                 return view.StableWithinStatement ? RememberWhenFullyDrained(statement, key, encoded) : encoded;
             });
     }
@@ -407,7 +407,7 @@ internal sealed partial class Selection
                 var filter = new CatalogFilter(pushdownColumn, value);
                 var gated = BuiltInResources.ApplyDmvGate(view, batch, filteredGenerator(batch, targetDatabase, filter));
                 var rows = BuiltInResources.ApplyMetadataFilter(view, batch, targetDatabase, gated);
-                return rows.Select(values => RowEncoder.EncodeRow(view.Columns, values));
+                return rows.Select(values => RowEncoder.EncodeRow(view.Columns, view.Conform(values)));
             });
     }
 

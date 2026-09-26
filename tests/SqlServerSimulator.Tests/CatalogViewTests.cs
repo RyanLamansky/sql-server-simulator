@@ -1398,4 +1398,24 @@ public sealed class CatalogViewTests
         IsTrue(reader.Read());
         AreEqual("name", reader.GetString(3));
     }
+
+    /// <summary>
+    /// Each catalog view declares its columns' types as real does — a name
+    /// column sysname or nvarchar, an LSN numeric — checked against SQL
+    /// Server 2025's sys.all_columns (probed 2026-09-26), and the rows read
+    /// back in the declared type.
+    /// </summary>
+    [TestMethod]
+    [DataRow("INFORMATION_SCHEMA.TABLES", "TABLE_CATALOG", "nvarchar")]
+    [DataRow("INFORMATION_SCHEMA.TABLES", "TABLE_SCHEMA", "sysname")]
+    [DataRow("sys.stats", "name", "nvarchar")]
+    [DataRow("sys.servers", "product", "sysname")]
+    [DataRow("sys.master_files", "create_lsn", "numeric")]
+    [DataRow("sys.sql_expression_dependencies", "referenced_entity_name", "nvarchar")]
+    public void CatalogViewColumn_DeclaresRealsType(string view, string column, string type)
+    {
+        var simulation = new Simulation();
+        AreEqual(type, simulation.ExecuteScalar($"select type_name(user_type_id) from sys.all_columns where object_id = object_id('{view}') and name = '{column}'"));
+        _ = simulation.ExecuteScalar($"create table t (a int); create statistics s on t (a); select count(*) from (select {column} c from {view}) d");
+    }
 }

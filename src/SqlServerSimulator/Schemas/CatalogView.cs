@@ -68,6 +68,38 @@ internal sealed class CatalogView(
     public readonly HeapColumn[] Columns = Array.ConvertAll(columns, SizedColumn);
 
     /// <summary>
+    /// The ordinals declared <c>sysname</c> or another <c>nvarchar</c>, whose
+    /// generators may produce either: real types each view's name columns
+    /// one way or the other (probed 2026-09-26 against SQL Server 2025), and
+    /// <see cref="Conform"/> settles the value on the declaration.
+    /// </summary>
+    private int[]? nameOrdinals;
+
+    /// <summary>
+    /// <paramref name="values"/> with every name column's value carrying its
+    /// declared type — a <c>sysname</c> value in a column declared
+    /// <c>nvarchar</c>, or the reverse, re-typed in place — so the row encoder,
+    /// which refuses a type mismatch, takes it.
+    /// </summary>
+    public SqlValue[] Conform(SqlValue[] values)
+    {
+        this.nameOrdinals ??= [.. Enumerable.Range(0, this.Columns.Length)
+            .Where(i => this.Columns[i].Type is SystemNameSqlType or NVarcharSqlType)];
+        foreach (var ordinal in this.nameOrdinals)
+        {
+            var declared = this.Columns[ordinal].Type;
+            if (ordinal < values.Length
+                && !ReferenceEquals(values[ordinal].Type, declared)
+                && values[ordinal].Type is SystemNameSqlType or NVarcharSqlType
+                && (values[ordinal].Type is SystemNameSqlType) != (declared is SystemNameSqlType))
+            {
+                values[ordinal] = values[ordinal].WithType(declared);
+            }
+        }
+        return values;
+    }
+
+    /// <summary>
     /// Row generator. The <see cref="Database"/> parameter is the database
     /// the view was scoped to — for an unqualified or 2-part reference
     /// (<c>sys.tables</c>) it's the connection's

@@ -145,8 +145,8 @@ internal static partial class BuiltInResources
         [
             new("server_id", SqlType.Int32, null, false),
             new("name", SqlType.SystemName, 128, false),
-            new("product", SqlType.NVarchar, 128, false),
-            new("provider", SqlType.NVarchar, 128, false),
+            new("product", SqlType.SystemName, 128, false),
+            new("provider", SqlType.SystemName, 128, false),
             new("data_source", SqlType.NVarchar, 4000, true),
             new("is_linked", SqlType.Bit, null, false),
         ], EnumerateSysServers);
@@ -523,12 +523,12 @@ internal static partial class BuiltInResources
             new("mirroring_witness_name", SqlType.NVarchar, 128, true),
             new("mirroring_witness_state", SqlType.TinyInt, null, true),
             new("mirroring_witness_state_desc", nvarchar60Catalog, 60, true),
-            new("mirroring_failover_lsn", lsnNumeric, null, true),
+            new("mirroring_failover_lsn", lsnNumeric, null, true, spelledNumeric: true),
             new("mirroring_connection_timeout", SqlType.Int32, null, true),
             new("mirroring_redo_queue", SqlType.Int32, null, true),
             new("mirroring_redo_queue_type", nvarchar60Catalog, 60, true),
-            new("mirroring_end_of_log_lsn", lsnNumeric, null, true),
-            new("mirroring_replication_lsn", lsnNumeric, null, true),
+            new("mirroring_end_of_log_lsn", lsnNumeric, null, true, spelledNumeric: true),
+            new("mirroring_replication_lsn", lsnNumeric, null, true, spelledNumeric: true),
         ], EnumerateSysDatabaseMirroring);
 
         // sys.endpoints: server-scope endpoint catalog. The simulator's TDS
@@ -592,7 +592,7 @@ internal static partial class BuiltInResources
         Sys("availability_groups",
         [
             new("group_id", SqlType.UniqueIdentifier, null, false),
-            new("name", SqlType.NVarchar, 128, true),
+            new("name", SqlType.SystemName, 128, true),
             new("resource_id", SqlType.NVarchar, 40, true),
             new("resource_group_id", SqlType.NVarchar, 40, true),
             new("failure_condition_level", SqlType.Int32, null, true),
@@ -652,27 +652,27 @@ internal static partial class BuiltInResources
             new("is_suspended", SqlType.Bit, null, true),
             new("suspend_reason", SqlType.TinyInt, null, true),
             new("suspend_reason_desc", NVarcharSqlType.Get(60, Collation.Baseline, Coercibility.Implicit), 60, true),
-            new("recovery_lsn", lsnNumeric, null, true),
-            new("truncation_lsn", lsnNumeric, null, true),
-            new("last_sent_lsn", lsnNumeric, null, true),
+            new("recovery_lsn", lsnNumeric, null, true, spelledNumeric: true),
+            new("truncation_lsn", lsnNumeric, null, true, spelledNumeric: true),
+            new("last_sent_lsn", lsnNumeric, null, true, spelledNumeric: true),
             new("last_sent_time", SqlType.DateTime, null, true),
-            new("last_received_lsn", lsnNumeric, null, true),
+            new("last_received_lsn", lsnNumeric, null, true, spelledNumeric: true),
             new("last_received_time", SqlType.DateTime, null, true),
-            new("last_hardened_lsn", lsnNumeric, null, true),
+            new("last_hardened_lsn", lsnNumeric, null, true, spelledNumeric: true),
             new("last_hardened_time", SqlType.DateTime, null, true),
-            new("last_redone_lsn", lsnNumeric, null, true),
+            new("last_redone_lsn", lsnNumeric, null, true, spelledNumeric: true),
             new("last_redone_time", SqlType.DateTime, null, true),
             new("log_send_queue_size", SqlType.BigInt, null, true),
             new("log_send_rate", SqlType.BigInt, null, true),
             new("redo_queue_size", SqlType.BigInt, null, true),
             new("redo_rate", SqlType.BigInt, null, true),
             new("filestream_send_rate", SqlType.BigInt, null, true),
-            new("end_of_log_lsn", lsnNumeric, null, true),
-            new("last_commit_lsn", lsnNumeric, null, true),
+            new("end_of_log_lsn", lsnNumeric, null, true, spelledNumeric: true),
+            new("last_commit_lsn", lsnNumeric, null, true, spelledNumeric: true),
             new("last_commit_time", SqlType.DateTime, null, true),
             new("low_water_mark_for_ghosts", SqlType.BigInt, null, true),
             new("secondary_lag_seconds", SqlType.BigInt, null, true),
-            new("quorum_commit_lsn", lsnNumeric, null, true),
+            new("quorum_commit_lsn", lsnNumeric, null, true, spelledNumeric: true),
             new("quorum_commit_time", SqlType.DateTime, null, true),
             new("is_internal", SqlType.Bit, null, true),
         ], static (_, _) => EmptyCatalogRows);
@@ -707,18 +707,18 @@ internal static partial class BuiltInResources
             new("is_percent_growth", SqlType.Bit, null, false),
             new("is_name_reserved", SqlType.Bit, null, false),
             new("is_persistent_log_buffer", SqlType.Bit, null, false),
-            new("create_lsn", lsnNumeric, null, true),
-            new("drop_lsn", lsnNumeric, null, true),
-            new("read_only_lsn", lsnNumeric, null, true),
-            new("read_write_lsn", lsnNumeric, null, true),
-            new("differential_base_lsn", lsnNumeric, null, true),
+            new("create_lsn", lsnNumeric, null, true, spelledNumeric: true),
+            new("drop_lsn", lsnNumeric, null, true, spelledNumeric: true),
+            new("read_only_lsn", lsnNumeric, null, true, spelledNumeric: true),
+            new("read_write_lsn", lsnNumeric, null, true, spelledNumeric: true),
+            new("differential_base_lsn", lsnNumeric, null, true, spelledNumeric: true),
             new("differential_base_guid", SqlType.UniqueIdentifier, null, true),
             new("differential_base_time", SqlType.DateTime, null, true),
-            new("redo_start_lsn", lsnNumeric, null, true),
+            new("redo_start_lsn", lsnNumeric, null, true, spelledNumeric: true),
             new("redo_start_fork_guid", SqlType.UniqueIdentifier, null, true),
-            new("redo_target_lsn", lsnNumeric, null, true),
+            new("redo_target_lsn", lsnNumeric, null, true, spelledNumeric: true),
             new("redo_target_fork_guid", SqlType.UniqueIdentifier, null, true),
-            new("backup_lsn", lsnNumeric, null, true),
+            new("backup_lsn", lsnNumeric, null, true, spelledNumeric: true),
             new("credential_id", SqlType.Int32, null, true),
         ], EnumerateSysMasterFiles);
 
@@ -753,7 +753,7 @@ internal static partial class BuiltInResources
             // one). SSMS's FileGroup→Files enumeration filters on
             // `df.drop_lsn is null`, so the column must resolve — sys.master_files
             // already carries it; database_files was the missing sibling.
-            new("drop_lsn", lsnNumeric, null, true),
+            new("drop_lsn", lsnNumeric, null, true, spelledNumeric: true),
         ], EnumerateSysDatabaseFiles);
     }
 

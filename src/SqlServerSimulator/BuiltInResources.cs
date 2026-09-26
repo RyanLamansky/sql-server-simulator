@@ -16,6 +16,10 @@ internal static partial class BuiltInResources
     private static readonly NVarcharSqlType nvarchar60Catalog = NVarcharSqlType.Get(60, Collation.Catalog, Coercibility.Implicit);
     private static readonly NVarcharSqlType nvarchar128Catalog = NVarcharSqlType.Get(128, Collation.Catalog, Coercibility.Implicit);
 
+    // A catalog view's nvarchar(128) name column that real declares nvarchar
+    // rather than sysname, in the default collation a sysname carries.
+    private static readonly NVarcharSqlType nvarchar128Baseline = NVarcharSqlType.Get(128, Collation.Baseline, Coercibility.Implicit);
+
     // numeric(25, 0) — the log-sequence-number (LSN) storage shape shared
     // by the mirroring / replica-state / master-files views. Always surfaced
     // NULL here (the simulator has no physical log), so precision matters
