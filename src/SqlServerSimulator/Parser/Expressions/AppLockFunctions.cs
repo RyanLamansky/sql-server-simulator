@@ -16,13 +16,17 @@ internal sealed class AppLockMode : Expression
 {
     private readonly Expression principal;
     private readonly Expression resource;
-    private readonly Expression owner;
+
+    // Omitted, the owner is the transaction's (probed 2026-09-26 against SQL
+    // Server 2025: Msg 3918 outside one).
+    private readonly Expression? owner;
 
     public AppLockMode(ParserContext context)
     {
         this.principal = Parse(context);
         this.resource = ParseAfterComma(context);
-        this.owner = ParseAfterComma(context);
+        if (context.Token is Tokens.Operator { Character: ',' })
+            this.owner = ParseAfterComma(context);
         if (context.Token is not Tokens.Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
     }
@@ -53,12 +57,12 @@ internal sealed class AppLockMode : Expression
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
-        AppLockFunctionArguments.RequireStrings(batch, resolveColumnType, "applock_mode", this.principal, this.resource, this.owner);
+        AppLockFunctionArguments.RequireStrings(batch, resolveColumnType, "applock_mode", this.owner is null ? [this.principal, this.resource] : [this.principal, this.resource, this.owner], ownerWritten: this.owner is not null);
         return NVarcharSqlType.Get(32, batch.CurrentDatabase.Collation, Coercibility.CoercibleDefault);
     }
 
     internal override string DebugDisplay() =>
-        $"APPLOCK_MODE({this.principal.DebugDisplay()}, {this.resource.DebugDisplay()}, {this.owner.DebugDisplay()})";
+        $"APPLOCK_MODE({this.principal.DebugDisplay()}, {this.resource.DebugDisplay()}, {this.owner?.DebugDisplay()})";
 
     internal override void Describe(NodeShape shape) => shape.Child(this.principal).Child(this.resource).Child(this.owner);
 }
@@ -76,14 +80,17 @@ internal sealed class AppLockTest : Expression
     private readonly Expression principal;
     private readonly Expression resource;
     private readonly Expression mode;
-    private readonly Expression owner;
+
+    // Omitted, the owner is the transaction's, as APPLOCK_MODE's is.
+    private readonly Expression? owner;
 
     public AppLockTest(ParserContext context)
     {
         this.principal = Parse(context);
         this.resource = AppLockMode.ParseAfterComma(context);
         this.mode = AppLockMode.ParseAfterComma(context);
-        this.owner = AppLockMode.ParseAfterComma(context);
+        if (context.Token is Tokens.Operator { Character: ',' })
+            this.owner = AppLockMode.ParseAfterComma(context);
         if (context.Token is not Tokens.Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
     }
@@ -119,7 +126,7 @@ internal sealed class AppLockTest : Expression
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
-        AppLockFunctionArguments.RequireStrings(batch, resolveColumnType, "applock_test", this.principal, this.resource, this.mode, this.owner);
+        AppLockFunctionArguments.RequireStrings(batch, resolveColumnType, "applock_test", this.owner is null ? [this.principal, this.resource, this.mode] : [this.principal, this.resource, this.mode, this.owner], ownerWritten: this.owner is not null);
         return SqlType.SmallInt;
     }
 
@@ -129,7 +136,7 @@ internal sealed class AppLockTest : Expression
     internal override bool ResultIsNullable(NullabilityContext context) => false;
 
     internal override string DebugDisplay() =>
-        $"APPLOCK_TEST({this.principal.DebugDisplay()}, {this.resource.DebugDisplay()}, {this.mode.DebugDisplay()}, {this.owner.DebugDisplay()})";
+        $"APPLOCK_TEST({this.principal.DebugDisplay()}, {this.resource.DebugDisplay()}, {this.mode.DebugDisplay()}, {this.owner?.DebugDisplay()})";
 
     internal override void Describe(NodeShape shape) => shape.Child(this.principal).Child(this.resource).Child(this.mode).Child(this.owner);
 }
@@ -149,12 +156,12 @@ internal static class AppLockFunctionArguments
     /// Refuses a non-string argument, or a bare <c>NULL</c> in any slot but
     /// the owner's, with Msg 8116 naming its position.
     /// </summary>
-    public static void RequireStrings(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType, string functionName, params ReadOnlySpan<Expression> arguments)
+    public static void RequireStrings(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType, string functionName, ReadOnlySpan<Expression> arguments, bool ownerWritten)
     {
         for (var i = 0; i < arguments.Length; i++)
         {
             var argument = arguments[i];
-            if (i < arguments.Length - 1 && Expression.IsUntypedNullLiteral(argument))
+            if ((i < arguments.Length - 1 || !ownerWritten) && Expression.IsUntypedNullLiteral(argument))
                 throw SimulatedSqlException.InvalidArgumentDataType("NULL", i + 1, functionName);
             _ = StringScalars.RequireStringArgument(argument, argument.GetSqlType(batch, resolveColumnType), functionName, i + 1, acceptsLegacyLob: false);
         }
@@ -181,11 +188,11 @@ internal static class AppLockFunctionArguments
     /// the same as an explicit <c>'Transaction'</c>); an unrecognized
     /// string raises Msg 1226 with the function's name interpolated.
     /// </summary>
-    public static List<AppLockHold> ResolveOwnerLedger(RuntimeContext runtime, Expression owner, string functionName)
+    public static List<AppLockHold> ResolveOwnerLedger(RuntimeContext runtime, Expression? owner, string functionName)
     {
-        var ownerValue = owner.Run(runtime);
+        var ownerValue = owner?.Run(runtime);
         var isTransaction = true;
-        if (!ownerValue.IsNull && !AppLock.TryParseOwner(ownerValue.CoerceTo(SqlType.NVarchar).AsString, out isTransaction))
+        if (ownerValue is { IsNull: false } written && !AppLock.TryParseOwner(written.CoerceTo(SqlType.NVarchar).AsString, out isTransaction))
             throw SimulatedSqlException.InvalidAppLockOwnerForFunction(functionName);
 
         var connection = runtime.Batch.Connection;

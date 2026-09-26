@@ -261,7 +261,7 @@ A JSON property name is a quoted string, so an alias no XML name could carry (`[
 
 ### Value formatting (probed verbatim against SQL Server 2025)
 
-FOR JSON's own formatter (`AppendForJsonValue`) — it diverges from the JSON_* builders' `JsonValueRender` in three probed ways, so it is **not** shared:
+FOR JSON's formatter (`AppendForJsonValue`); the JSON_* builders' `JsonValueRender` writes every row the same way, sharing the date/time renderers:
 
 | type | JSON |
 |---|---|
@@ -273,13 +273,13 @@ FOR JSON's own formatter (`AppendForJsonValue`) — it diverges from the JSON_* 
 | bit | `true` / `false` |
 | date | `"yyyy-MM-dd"` |
 | datetime / smalldatetime | `"yyyy-MM-ddTHH:mm:ss[.fff]"` |
-| datetime2 / time / datetimeoffset | ISO at declared precision, `datetimeoffset` keeps `+HH:mm` |
+| datetime2 / time / datetimeoffset | ISO at declared precision, `datetimeoffset` keeps `+HH:mm`, or `Z` for a zero offset |
 | uniqueidentifier | uppercase, quoted |
 | binary / varbinary | base64, quoted (`0x0102FF` → `"AQL/"`) |
 | sql_variant | formats its inner value |
 | char / nchar / varchar / nvarchar / text / xml / other | quoted, JSON-escaped |
 
-The date/time types **drop an all-zero fractional second** (`…T00:00:00`, not `…T00:00:00.000`) while keeping the interior/trailing zeros of a non-zero fraction (`.100`, not `.1`).
+The date/time types **drop an all-zero fractional second** (`…T00:00:00`, not `…T00:00:00.000`) while keeping the interior/trailing zeros of a non-zero fraction (`.100`, not `.1`), in FOR JSON and the builders alike (probed 2026-09-26 against SQL Server 2025).
 FOR JSON and the JSON_* builders share one renderer and match real's scientific notation exactly.
 
 String escaping: `"` → `\"`, `\` → `\\`, **`/` → `\/`**, `\b` `\t` `\n` `\f` `\r`, other control chars < 0x20 → lowercase `\uXXXX`; chars ≥ 0x20 including non-ASCII stay verbatim — the same set the JSON_* builders write.

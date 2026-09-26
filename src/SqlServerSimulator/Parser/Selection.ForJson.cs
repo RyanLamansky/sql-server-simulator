@@ -408,12 +408,9 @@ partial class Selection
     };
 
     /// <summary>
-    /// Appends a non-NULL <see cref="SqlValue"/> as a FOR JSON fragment. FOR
-    /// JSON's formatting diverges from the JSON_* builders in three probed
-    /// ways: <c>float</c> / <c>real</c> use SQL Server's scientific notation
-    /// (15 / 7 fraction digits, signed 3-digit exponent), the date/time types
-    /// drop an all-zero fractional second, and the string escaper additionally
-    /// escapes <c>/</c> as <c>\/</c>.
+    /// Appends a non-NULL <see cref="SqlValue"/> as a FOR JSON fragment. The
+    /// date/time types render as the JSON_* builders render them
+    /// (<see cref="AppendJsonDateTime"/> and its siblings, shared).
     /// </summary>
     private static void AppendForJsonValue(StringBuilder sb, SqlValue value, bool raw)
     {
@@ -485,6 +482,28 @@ partial class Selection
         }
     }
 
+    /// <summary>
+    /// The ISO form every JSON producer — FOR JSON and the JSON_* builders
+    /// alike — writes a date and time in: a <c>T</c> between them, the
+    /// fraction only when it isn't zero, and for a <c>datetimeoffset</c> the
+    /// offset joined on with <c>Z</c> for UTC (probed 2026-09-26 against SQL
+    /// Server 2025).
+    /// </summary>
+    internal static void AppendJsonDateTime(StringBuilder sb, DateTime value, int precision) =>
+        AppendForJsonDateTime(sb, value, precision);
+
+    /// <summary>A <c>time</c>, quoted, in the form <see cref="AppendJsonDateTime"/> describes.</summary>
+    internal static void AppendJsonTime(StringBuilder sb, TimeSpan value, int precision)
+    {
+        _ = sb.Append('"');
+        AppendForJsonTime(sb, value, precision);
+        _ = sb.Append('"');
+    }
+
+    /// <summary>A <c>datetimeoffset</c> in the form <see cref="AppendJsonDateTime"/> describes.</summary>
+    internal static void AppendJsonDateTimeOffset(StringBuilder sb, DateTimeOffset value, int precision) =>
+        AppendForJsonDateTimeOffset(sb, value, precision);
+
     private static void AppendForJsonDateTime(StringBuilder sb, DateTime value, int precision)
     {
         _ = sb.Append('"').Append(value.ToString("yyyy-MM-ddTHH:mm:ss", CultureInfo.InvariantCulture));
@@ -502,7 +521,7 @@ partial class Selection
     {
         _ = sb.Append('"').Append(value.ToString("yyyy-MM-ddTHH:mm:ss", CultureInfo.InvariantCulture));
         AppendForJsonFraction(sb, value.Ticks % TimeSpan.TicksPerSecond, precision);
-        _ = sb.Append(value.ToString("zzz", CultureInfo.InvariantCulture)).Append('"');
+        _ = (value.Offset == TimeSpan.Zero ? sb.Append('Z') : sb.Append(value.ToString("zzz", CultureInfo.InvariantCulture))).Append('"');
     }
 
     /// <summary>

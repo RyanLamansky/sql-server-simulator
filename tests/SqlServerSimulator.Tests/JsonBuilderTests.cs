@@ -232,4 +232,14 @@ public class JsonBuilderTests
         IsTrue(reader.Read());
         AreEqual(typeof(string), reader.GetFieldType(0));
     }
+
+    [TestMethod]
+    [DataRow("json_array(cast('2020-01-02' as datetime))", "[\"2020-01-02T00:00:00\"]")]
+    [DataRow("json_array(cast('2020-01-02' as datetime2))", "[\"2020-01-02T00:00:00\"]")]
+    [DataRow("json_object('a': cast('03:04:05' as time))", "{\"a\":\"03:04:05\"}")]
+    [DataRow("json_array(cast('2020-01-02 03:04:05' as datetimeoffset(0)))", "[\"2020-01-02T03:04:05Z\"]")]
+    [DataRow("json_object('a': cast('2020-01-02 03:04:05.5 -05:30' as datetimeoffset(2)))", "{\"a\":\"2020-01-02T03:04:05.50-05:30\"}")]
+    [DataRow("(select cast('2020-01-02 03:04:05' as datetimeoffset(0)) a for json path)", "[{\"a\":\"2020-01-02T03:04:05Z\"}]")]
+    public void DateTimes_RenderAsForJsonDoes(string expression, string expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar($"select {expression}"));
 }

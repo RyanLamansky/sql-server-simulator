@@ -479,6 +479,8 @@ public class ApplicationLockTests
     [DataRow("select applock_test('public', N'res', 'Bogus', 'Transaction')", 3918)]
     [DataRow("select applock_test('public', N'res', cast(null as varchar(5)), 'Session')", 1225)]
     [DataRow("select applock_mode(1, N'res', 'Session')", 8116)]
+    [DataRow("select applock_mode('public', N'res')", 3918)]
+    [DataRow("select applock_test('public', N'res', 'Shared')", 3918)]
     [DataRow("select applock_test('public', N'res', 1, 'Session')", 8116)]
     public void AppLockFunctions_JudgeOwnerThenModeThenPrincipal(string sql, int number)
     {

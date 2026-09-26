@@ -78,20 +78,23 @@ internal static class JsonValueRender
             _ = sb.Append('"').Append(Convert.ToBase64String(value.AsBytes)).Append('"');
             return;
         }
-        if (type is DateTime2SqlType dt2)
+        switch (type)
         {
-            AppendIsoDateTime(sb, value.AsDateTime2, dt2.precision);
-            return;
-        }
-        if (type == SqlType.DateTime)
-        {
-            AppendIsoDateTime(sb, value.AsDateTime, 3);
-            return;
-        }
-        if (type == SqlType.SmallDateTime)
-        {
-            AppendIsoDateTime(sb, value.AsSmallDateTime, 0);
-            return;
+            case DateTime2SqlType dt2:
+                Selection.AppendJsonDateTime(sb, value.AsDateTime2, dt2.precision);
+                return;
+            case var _ when type == SqlType.DateTime:
+                Selection.AppendJsonDateTime(sb, value.AsDateTime, 3);
+                return;
+            case var _ when type == SqlType.SmallDateTime:
+                Selection.AppendJsonDateTime(sb, value.AsSmallDateTime, 0);
+                return;
+            case TimeSqlType time:
+                Selection.AppendJsonTime(sb, value.AsTime, time.precision);
+                return;
+            case DateTimeOffsetSqlType dto:
+                Selection.AppendJsonDateTimeOffset(sb, value.AsDateTimeOffset, dto.precision);
+                return;
         }
 
         // Date / Time / Uniqueidentifier / string types / sql_variant /
@@ -112,14 +115,6 @@ internal static class JsonValueRender
         if (keyValue.IsNull)
             throw SimulatedSqlException.JsonObjectNullKey();
         AppendJsonString(sb, keyValue.CoerceTo(SqlType.NVarchar).AsString, escapeSolidus: true);
-    }
-
-    private static void AppendIsoDateTime(StringBuilder sb, DateTime dt, int precision)
-    {
-        var format = precision == 0
-            ? "yyyy-MM-ddTHH:mm:ss"
-            : "yyyy-MM-ddTHH:mm:ss." + new string('f', precision);
-        _ = sb.Append('"').Append(dt.ToString(format, CultureInfo.InvariantCulture)).Append('"');
     }
 
     private static string IntegerAsString(SqlType type, SqlValue value)
