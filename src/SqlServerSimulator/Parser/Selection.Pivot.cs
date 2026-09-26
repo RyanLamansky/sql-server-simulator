@@ -171,17 +171,25 @@ internal sealed partial class Selection
         // The unpivoted columns fold into one value column, so they must all
         // share a type (Msg 8167 otherwise — SQL Server doesn't promote, e.g.
         // int + bigint conflicts). The first column's type is the value type.
+        // An untyped NULL column (`SELECT NULL AS x`) has no type to share, so
+        // it conflicts with every typed one (probed 2026-09-26).
         SqlType? valueType = null;
+        var valueIsUntypedNull = false;
         foreach (var col in unpivotColumns)
         {
             var (s, c) = FindSourceColumn([source], new MultiPartName(col));
             if (s == -1)
                 throw SimulatedSqlException.InvalidColumnName(col);
-            var colType = source.Columns[c].Type;
+            var column = source.Columns[c];
             if (valueType is null)
-                valueType = colType;
-            else if (!valueType.Equals(colType))
+            {
+                valueType = column.Type;
+                valueIsUntypedNull = column.IsUntypedNull;
+            }
+            else if (!valueType.Equals(column.Type) || valueIsUntypedNull != column.IsUntypedNull)
+            {
                 throw SimulatedSqlException.UnpivotColumnTypeConflict(col);
+            }
         }
 
         // Passthrough columns = inner columns not folded by the IN list.

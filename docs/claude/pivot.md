@@ -56,6 +56,7 @@ An unfold, not an aggregation — built as a `Selection` with a custom row-produ
   The name column is `nvarchar(128)` holding the source column names.
 - The `IN` columns fold into one value column, so they **must all share a type**.
   SQL Server doesn't promote here: `int` + `bigint` conflicts → Msg 8167 (`The type of column "X" conflicts with the type of other columns specified in the UNPIVOT list.`).
+  An untyped NULL column (`SELECT NULL AS x`, an all-NULL `VALUES` column) conflicts with every typed one the same way, while two of them agree (probed 2026-09-26).
   Missing alias → Msg 102; unknown `IN` column → Msg 207.
 
 ### Divergence — UNPIVOT length unification

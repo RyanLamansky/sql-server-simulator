@@ -217,6 +217,24 @@ public sealed class PivotTests
         AreEqual("Quarter", reader.GetName(2));
     }
 
+    /// <summary>
+    /// An untyped NULL column has no type to share with a typed one, so it
+    /// conflicts in the UNPIVOT list, reported at the later column; two
+    /// untyped NULLs agree (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select * from (values (1, null, 3)) v (id, x, y) unpivot (val for col in (x, y)) u")]
+    [DataRow("select * from (values (1, 3, null)) v (id, x, y) unpivot (val for col in (x, y)) u")]
+    [DataRow("select * from (select 1 id, null x, 3 y) v unpivot (val for col in (x, y)) u")]
+    public void Unpivot_UntypedNullBesideATypedColumn_RaisesMsg8167(string sql)
+        => new Simulation().AssertSqlError(sql, 8167, "The type of column \"y\" conflicts with the type of other columns specified in the UNPIVOT list.");
+
+    [TestMethod]
+    [DataRow("select count(*) from (values (1, null, null)) v (id, x, y) unpivot (val for col in (x, y)) u", 0)]
+    [DataRow("select count(*) from (select 1 id, cast(null as int) x, 3 y) v unpivot (val for col in (x, y)) u", 1)]
+    public void Unpivot_UntypedNullsTogetherOrATypedNull_Unfold(string sql, int rows)
+        => AreEqual(rows, new Simulation().ExecuteScalar(sql));
+
     [TestMethod]
     public void Unpivot_TypeConflict_Msg8167()
     {
