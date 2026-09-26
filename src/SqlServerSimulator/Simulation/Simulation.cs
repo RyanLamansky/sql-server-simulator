@@ -2525,7 +2525,7 @@ public sealed partial class Simulation
     private static bool IsDeferredCompileError(SimulatedSqlException ex)
         => IsBatchAbortingNameResolution(ex)
             || ex.Number is 107 or 108 or 130 or 145 or 147 or 164 or 174 or 205 or 206 or 213 or 243 or 264 or 321 or 447 or 448 or 529
-                or 1011 or 1013 or 4108 or 4115 or 8117 or 8120 or 8121 or 8155;
+                or 1011 or 1012 or 1013 or 4108 or 4115 or 5318 or 8117 or 8120 or 8121 or 8155;
 
     /// <summary>
     /// Whether a TRY frame catches <paramref name="ex"/> where it is raised:

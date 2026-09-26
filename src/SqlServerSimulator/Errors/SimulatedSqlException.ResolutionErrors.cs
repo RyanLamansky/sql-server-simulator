@@ -30,6 +30,35 @@ partial class SimulatedSqlException
         name.Count > 1 ? MultiPartIdentifierCouldNotBeBound(name.ToString()) : InvalidColumnName(name.Leaf);
 
     /// <summary>
+    /// Mimics SQL Server's Msg 1011: two FROM sources whose aliases (or a CTE's
+    /// own name) are the same, naming the later spelling.
+    /// </summary>
+    internal static SimulatedSqlException CorrelationNameRepeated(string alias) =>
+        new($"The correlation name '{alias}' is specified multiple times in a FROM clause.", 1011, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 1012: an alias that is the same as an unaliased
+    /// table's name in the same FROM clause, whichever is written first.
+    /// </summary>
+    internal static SimulatedSqlException CorrelationNameMatchesTable(string alias, string table) =>
+        new($"The correlation name '{alias}' has the same exposed name as table '{table}'.", 1012, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 1013: two unaliased objects in one FROM clause
+    /// whose names end alike (<c>t</c>, <c>dbo.t</c>, <c>s.t</c>), naming the
+    /// later as written and then the earlier.
+    /// </summary>
+    internal static SimulatedSqlException SameExposedNames(string later, string earlier) =>
+        new($"The objects \"{later}\" and \"{earlier}\" in the FROM clause have the same exposed names. Use correlation names to distinguish them.", 1013, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 5318: a MERGE whose source exposes the same name
+    /// or alias as its target.
+    /// </summary>
+    internal static SimulatedSqlException MergeSourceAndTargetShareAName() =>
+        new("In a MERGE statement, the source and target cannot have the same name or alias. Use different aliases for the source and target to ensure that they have unique names in the MERGE statement.", 5318, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server's Msg 209 — fired when an unqualified column
     /// reference matches columns in more than one source after a JOIN.
     /// The fix is to add a qualifier (table or alias prefix) disambiguating

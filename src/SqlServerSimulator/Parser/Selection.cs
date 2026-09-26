@@ -2084,6 +2084,53 @@ internal sealed partial class Selection
         RejectSiblingReferences(siblingCandidates, sources, scope.OuterTypeResolver);
     }
 
+    /// <summary>
+    /// Appends <paramref name="added"/> to the FROM clause's sources, refusing
+    /// it first when its exposed name repeats an earlier source's — an
+    /// unaliased table exposes its name's last part, whatever schema or
+    /// database the name carries; an alias, or a CTE's own name, is a
+    /// correlation name; a source with neither (an unaliased rowset function)
+    /// exposes nothing. Checked as each source joins, so it outranks an error
+    /// in that source's own ON predicate (probed 2026-09-26 against SQL Server
+    /// 2025).
+    /// </summary>
+    private static void AddSource(ParserContext context, List<FromSource> sources, FromSource added)
+    {
+        if (added.Qualifier is { } exposed)
+        {
+            var collation = context.Batch.CurrentDatabase.Collation;
+            var addedTable = ExposedTableName(collation, added);
+            foreach (var earlier in sources)
+            {
+                if (earlier.Qualifier is null || !collation.Equals(earlier.Qualifier, exposed))
+                    continue;
+                var earlierTable = ExposedTableName(collation, earlier);
+                throw (addedTable, earlierTable) switch
+                {
+                    (null, null) => SimulatedSqlException.CorrelationNameRepeated(exposed),
+                    (null, { } table) => SimulatedSqlException.CorrelationNameMatchesTable(exposed, table),
+                    ({ } table, null) => SimulatedSqlException.CorrelationNameMatchesTable(earlier.Qualifier, table),
+                    ({ } later, { } first) => SimulatedSqlException.SameExposedNames(later, first),
+                };
+            }
+        }
+        sources.Add(added);
+    }
+
+    /// <summary>
+    /// The object name, as written, that <paramref name="source"/> exposes
+    /// because it carries no alias; null for an aliased source or a CTE
+    /// reference. An alias spelled as the object's own last part reads as no
+    /// alias.
+    /// </summary>
+    private static string? ExposedTableName(Collation collation, FromSource source)
+    {
+        if (source is { BackingTable: null, BackingView: null, BackingCatalogView: null } || source.WrittenObjectName is not { } written)
+            return null;
+        var lastDot = written.LastIndexOf('.');
+        return collation.Equals(written[(lastDot + 1)..], source.Qualifier) ? written : null;
+    }
+
     private static void ParseExplicitJoinChain(
         ParserContext context,
         QueryScope scope,
@@ -2103,7 +2150,7 @@ internal sealed partial class Selection
         if (NextSourceIsJoinGroup(context))
             ParseJoinGroup(context, scope, sources, joins, siblingCandidates);
         else
-            sources.Add(ParseSourceCollectingColumnReads(context, scope, sources, siblingCandidates));
+            AddSource(context, sources, ParseSourceCollectingColumnReads(context, scope, sources, siblingCandidates));
 
         ParseJoinClauses(context, scope, sources, joins, siblingCandidates, scopeStart, nested: false);
     }
@@ -2132,7 +2179,7 @@ internal sealed partial class Selection
         {
             if (kind is JoinKind.CrossApply or JoinKind.OuterApply)
             {
-                sources.Add(ParseLateralFromSource(context, scope, sources));
+                AddSource(context, sources, ParseLateralFromSource(context, scope, sources));
                 joins.Add(new JoinSpec(kind, onPredicate: null));
                 if (context.Token is ReservedKeyword { Keyword: Keyword.On } onToken)
                 {
@@ -2201,7 +2248,7 @@ internal sealed partial class Selection
             // resolving against a wrong scope.
             var rightStart = sources.Count;
             var joinIndex = joins.Count;
-            sources.Add(ParseSourceCollectingColumnReads(context, scope, sources, siblingCandidates));
+            AddSource(context, sources, ParseSourceCollectingColumnReads(context, scope, sources, siblingCandidates));
             BooleanExpression? on = null;
             if (kind == JoinKind.Cross)
             {

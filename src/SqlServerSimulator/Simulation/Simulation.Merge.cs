@@ -131,6 +131,8 @@ partial class Simulation
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
         var (materializeSource, sourceAlias, sourceColumnNames, sourceSchema) = ParseMergeSource(context);
+        if (context.Batch.CurrentDatabase.Collation.Equals(sourceAlias, targetAlias))
+            throw SimulatedSqlException.MergeSourceAndTargetShareAName();
 
         // ON predicate — resolves target via targetAlias/destinationName, source via sourceAlias.
         if (context.Token is not ReservedKeyword { Keyword: Keyword.On })

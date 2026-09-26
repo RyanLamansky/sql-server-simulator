@@ -26,6 +26,18 @@ The post-WHERE result is therefore provably unchanged regardless of outer joins 
 Only equi-keys are pulled; a non-equi WHERE term (`b.id > 10`) stays a post-join filter, so the synthesized ON's residual count is 0.
 A derived-table right side after a comma keeps its `LateralPlan` at parse time, so it's skipped and its level stays `Cross` — the execution-time materialization below still collapses its re-execution, but the level nested-loops over the materialized list rather than hashing.
 
+## Exposed names
+
+Two sources in one FROM clause may not share an exposed name (`AddSource` in `Selection.cs`, probed 2026-09-26 against SQL Server 2025).
+An unaliased table, view or catalog view exposes the last part of its name, so `t`, `dbo.t` and `s.t` all collide; an alias, and a CTE referenced without one, is a correlation name; an unaliased rowset function (`OPENJSON`) exposes nothing.
+Which of the three messages real raises depends on whether each side is a correlation name, and a MERGE whose source shares its target's exposed name raises its own.
+The check runs as each source joins the list, across parenthesized groups and APPLY alike, so the first collision in written order is the one reported.
+
+### Divergences
+
+- An alias spelled as its own table's last part (`FROM t t`) reads as no alias, so a collision with it is reported as the table's rather than the correlation name's.
+- Real reports an earlier join's `ON` binder error *and* the collision (`FROM t JOIN u ON nosuch = 1 JOIN u ON 1 = 1` gives Msg 207 then Msg 1013); here the collision alone, since a statement reports one binder error.
+
 ## Parenthesized join groups
 
 `FROM A LEFT JOIN (B JOIN C ON c1) ON c2` — a **parenthesized join expression as a join operand**.
