@@ -35,6 +35,12 @@ internal sealed class Numeric : Token
     /// </summary>
     public readonly int IntegerLiteralDigitCount;
 
+    /// <summary>
+    /// A scientific literal too small for a normal float, read as 0 — the
+    /// expression parser raises real's Msg 337 warning for it.
+    /// </summary>
+    public readonly bool Underflowed;
+
     public Numeric(string command, int index, int length) : base(command, index, length)
     {
         var number = base.Source;
@@ -43,10 +49,18 @@ internal sealed class Numeric : Token
         if (hasExponent)
         {
             // An exponent written without digits (1e, 1e+) is zero.
-            this.Value = SqlValue.FromDouble(double.Parse(
+            var parsed = double.Parse(
                 char.IsAsciiDigit(number[^1]) ? number : $"{number}0",
                 NumberStyles.Float,
-                CultureInfo.InvariantCulture));
+                CultureInfo.InvariantCulture);
+            // A value below the smallest normal float reads as 0, with a
+            // warning (probed 2026-09-26 against SQL Server 2025).
+            if (parsed != 0 && Math.Abs(parsed) < 2.2250738585072014E-308)
+            {
+                this.Underflowed = true;
+                parsed = 0;
+            }
+            this.Value = SqlValue.FromDouble(parsed);
             return;
         }
 

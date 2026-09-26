@@ -624,9 +624,8 @@ internal readonly partial struct SqlValue
     /// fractional digits (<c>1234567.89</c>); style <c>1</c> adds comma
     /// thousands separators (<c>1,234,567.89</c>); style <c>2</c> drops the
     /// thousands separators and uses 4 fractional digits (<c>1234567.8910</c>).
-    /// Probe-confirmed verbatim against SQL Server 2025 (2026-05-13).
-    /// Any other style raises Msg 281 with <c>"money"</c> as the source
-    /// family wording.
+    /// Probe-confirmed verbatim against SQL Server 2025 (2026-05-13); every
+    /// other style formats as style 1 (probed 2026-09-26).
     /// </summary>
     internal SqlValue CoerceMoneyToStringWithStyle(SqlType target, int style)
     {
@@ -634,13 +633,23 @@ internal readonly partial struct SqlValue
         var formatted = style switch
         {
             0 => value.ToString("F2", CultureInfo.InvariantCulture),
-            1 => value.ToString("N2", CultureInfo.InvariantCulture),
             2 or 126 => value.ToString("F4", CultureInfo.InvariantCulture),
-            // Any other style formats as style 0 (probed 2026-09-25).
-            _ => value.ToString("F2", CultureInfo.InvariantCulture),
+            _ => value.ToString("N2", CultureInfo.InvariantCulture),
         };
-        return FromString(target, formatted);
+        return FromString(target, RightJustifiedInFixedLength(target, formatted));
     }
+
+    /// <summary>
+    /// A money value's text in a fixed-length <c>char</c> / <c>nchar</c> is
+    /// right-justified, padded on the left where every other type pads on the
+    /// right (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    private static string RightJustifiedInFixedLength(SqlType target, string text) => target switch
+    {
+        CharSqlType { length: var length } when text.Length < length => text.PadLeft(length),
+        NCharSqlType { length: var length } when text.Length < length => text.PadLeft(length),
+        _ => text,
+    };
 
     /// <summary>
     /// String → date-like coercion with a CONVERT style hint. Every style
@@ -1187,7 +1196,7 @@ internal readonly partial struct SqlValue
         // Server 2025: <c>$5.95 → '5.95'</c>, <c>$0 → '0.00'</c>,
         // money max → <c>'922337203685477.58'</c>).
         if (SqlType.IsStringCategory(target))
-            return FromString(target, m.ToString("F2", System.Globalization.CultureInfo.InvariantCulture));
+            return FromString(target, RightJustifiedInFixedLength(target, m.ToString("F2", System.Globalization.CultureInfo.InvariantCulture)));
         if (target is DecimalSqlType targetDecimal)
             return FromDecimal(targetDecimal, RescaleOrOverflow(this.AsMoneyDecimal38, targetDecimal, this.Type));
         if (SqlType.IsMoneyCategory(target))

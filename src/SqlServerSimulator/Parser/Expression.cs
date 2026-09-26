@@ -254,7 +254,7 @@ internal abstract class Expression : ExpressionNode
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static Expression ParseLeadingAtom(ParserContext context) => context.Token switch
     {
-        Numeric number => new Value(number.Value, number.IntegerLiteralDigitCount),
+        Numeric number => NumericLiteral(context, number),
         Literal literal => new Value(literal.Value),
         AtPrefixedString atPrefixed => new VariableReference(atPrefixed, context),
         DoubleAtPrefixedString doubleAtPrefixedString => doubleAtPrefixedString.Parse() switch
@@ -311,6 +311,17 @@ internal abstract class Expression : ExpressionNode
         ReservedKeyword reservedAtom => throw SimulatedSqlException.SyntaxErrorNearKeyword(reservedAtom),
         _ => throw SimulatedSqlException.SyntaxErrorNear(context)
     };
+
+    /// <summary>
+    /// A numeric literal's value, warning with Msg 337 when a float literal
+    /// underflowed to 0.
+    /// </summary>
+    private static Value NumericLiteral(ParserContext context, Numeric number)
+    {
+        if (number.Underflowed && !context.Batch.IsSkipping)
+            context.Connection.PendingMessages.Enqueue(SimulatedSqlException.FloatLiteralTooSmallMessage(context.Batch, number.Source.ToString()));
+        return new Value(number.Value, number.IntegerLiteralDigitCount);
+    }
 
     /// <summary>
     /// A name with empty leading parts — <c>.e1</c>, <c>..t.a</c> — which

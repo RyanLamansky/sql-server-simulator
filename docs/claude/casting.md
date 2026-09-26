@@ -390,10 +390,13 @@ Every other style formats as style 0 (probed 2026-09-25 against SQL Server 2025)
 | 2 | 16 | always scientific | for `real`, value is promoted to float precision first (showing precision artifacts like `1.234567875000000e+006`) |
 | 3 | 17 | always scientific | SQL 2016+ round-trippable form |
 | 126 | source precision (16 for float, 8 for real) | always scientific | distinct from style 2: doesn't promote real to float — keeps source-precision digits |
+| 128 | 15 for float, 7 for real | plain while the decimal exponent is in `[-6, 5]`, else `d.dddE±n` | trailing zeros stripped; a bare exponent and at least one fraction digit (`1.0E7`); zero is `0.0E0` |
+| 129 | 7 | as 128 | |
 
 Exponent is always 3 digits with explicit sign and lowercase `e`.
 `-0` preserves the negative sign.
-Every other style formats as style 0 (probed 2026-09-25 against SQL Server 2025), save 128 and 129, which have renderings of their own (`1.2345675E6`) that aren't modeled yet and raise Msg 281.
+The two compact styles are probed 2026-09-26 against SQL Server 2025; every other style formats as style 0 (probed 2026-09-25).
+**Money → string** takes 0 (two decimals), 2 / 126 (four) and formats every other style as 1, with commas (probed 2026-09-26); into a fixed-length `char` / `nchar` money alone is right-justified, padded on the left.
 **Binary → string** takes styles 0 / 1 / 2 and refuses the rest with Msg 9809 naming the target's family.
 
 **A styleless conversion is style 0**, and that is what every ordinary string surface takes: `CAST(<float> AS varchar)`, `CONVERT` with no style, `+` concatenation, `CONCAT` / `CONCAT_WS`, assignment to a string variable or column, `sql_variant` unwrapping, and the Msg 2627 duplicate-key rendering.

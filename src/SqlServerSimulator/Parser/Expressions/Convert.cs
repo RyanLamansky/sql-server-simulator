@@ -115,6 +115,11 @@ internal sealed class ConvertExpression : Expression
                         => sourceValue.CoerceMoneyToStringWithStyle(renderTarget, sc),
                     ({ Category: SqlTypeCategory.Approximate }, { Category: SqlTypeCategory.String })
                         => sourceValue.CoerceFloatToStringWithStyle(renderTarget, sc),
+                    // Style 128 drops a decimal's trailing fraction zeros, but
+                    // only into a national string type (probed 2026-09-26
+                    // against SQL Server 2025).
+                    (DecimalSqlType, NVarcharSqlType or NCharSqlType) when sc == 128
+                        => SqlValue.FromString(renderTarget, WithoutTrailingFractionZeros(sourceValue.CoerceTo(SqlType.NVarchar).AsString)),
                     (_, XmlSqlType) => CoerceToXmlWithStyle(sourceValue, sc),
                     (VarbinarySqlType or BinarySqlType or ImageSqlType, { Category: SqlTypeCategory.String })
                         => sourceValue.CoerceBinaryToStringWithStyle(renderTarget, sc),
@@ -142,12 +147,12 @@ internal sealed class ConvertExpression : Expression
                 }
                 coerced = Cast.EnforceTargetMaxLength(coerced, renderTarget, renderLength, sourceValue, budgetCollation);
                 if (renderTarget != this.targetType)
-                    coerced = coerced.CoerceTo(this.targetType);
+                    coerced = Cast.RightJustifiedMoney(coerced, sourceValue, renderLength ?? 0).CoerceTo(this.targetType);
             }
         }
-        // A style the source type doesn't take is NULL too (Msg 281; probed
-        // 2026-09-26 against SQL Server 2025).
-        catch (SimulatedSqlException ex) when (this.tryMode && (Cast.IsConversionFailure(ex.Number) || ex.Number == 281))
+        // A style the source type doesn't take is NULL too (Msg 281 / 9809;
+        // probed 2026-09-26 against SQL Server 2025).
+        catch (SimulatedSqlException ex) when (this.tryMode && (Cast.IsConversionFailure(ex.Number) || ex.Number is 281 or 9809))
         {
             coerced = SqlValue.Null(this.targetType);
         }
@@ -202,4 +207,7 @@ internal sealed class ConvertExpression : Expression
     internal override Expression? PureConversionOperand => this.source;
 
     private protected override bool IsStructuralConstant => this.source.IsWrittenConstant;
+
+    private static string WithoutTrailingFractionZeros(string text) =>
+        text.Contains('.', StringComparison.Ordinal) ? text.TrimEnd('0').TrimEnd('.') : text;
 }

@@ -511,6 +511,16 @@ internal sealed class Cast : Expression
         _ => null,
     };
 
+    /// <summary>
+    /// A money value rendered for a fixed-length <c>char</c> / <c>nchar</c> of
+    /// <paramref name="length"/>, padded on the left: real right-justifies
+    /// money there, and only money (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    internal static SqlValue RightJustifiedMoney(SqlValue rendered, SqlValue source, int length) =>
+        source.Type.Category == SqlTypeCategory.Money && !rendered.IsNull && rendered.AsString.Length < length
+            ? SqlValue.FromString(rendered.Type, rendered.AsString.PadLeft(length))
+            : rendered;
+
     internal static SqlValue ApplyCoercion(SqlValue value, SqlType targetType, int? targetMaxLength, Collation? budgetCollation = null)
     {
         if (IsRejectedLegacyLobConversion(value.Type, targetType))
@@ -545,7 +555,7 @@ internal sealed class Cast : Expression
             && value.Type.Category is SqlTypeCategory.Integer or SqlTypeCategory.Decimal or SqlTypeCategory.Money or SqlTypeCategory.Approximate
             && VarFormOfFixedString(targetType) is var (varTarget, length))
         {
-            return ApplyCoercion(value, varTarget, length, budgetCollation).CoerceTo(targetType);
+            return RightJustifiedMoney(ApplyCoercion(value, varTarget, length, budgetCollation), value, length).CoerceTo(targetType);
         }
 
         var sourceType = value.Type;

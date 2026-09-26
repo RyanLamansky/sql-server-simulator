@@ -784,4 +784,47 @@ public sealed class ConvertTests
     [DataRow("isnull(try_convert(varchar(20), cast('2024-02-05' as date), 14), 'N')", "N")]
     public void StyleEdges_MatchReal(string expression, string expected)
         => AreEqual(expected, new Simulation().ExecuteScalar($"select {expression}"));
+
+    /// <summary>
+    /// Numeric renderings probed 2026-09-26 against SQL Server 2025: float
+    /// styles 128 / 129 (15 or 7 significant digits, plain inside a decimal
+    /// exponent of -6 to 5), money under any style but 0 / 2 / 126 taking
+    /// commas, money right-justified in a fixed-length string, a decimal's
+    /// trailing zeros dropped under 128 into a national type only, and
+    /// TRY_CONVERT's NULL for a style varbinary can't take.
+    /// </summary>
+    [TestMethod]
+    [DataRow("convert(varchar(30), cast(1234567.891 as float), 128)", "1.234567891E6")]
+    [DataRow("convert(varchar(30), cast(1234567.891 as float), 129)", "1.234568E6")]
+    [DataRow("convert(varchar(30), cast(123456789012345678 as float), 128)", "1.23456789012346E17")]
+    [DataRow("convert(varchar(30), cast(0.000001 as float), 128)", "0.000001")]
+    [DataRow("convert(varchar(30), cast(1e-7 as float), 128)", "1.0E-7")]
+    [DataRow("convert(varchar(30), cast(0 as float), 129)", "0.0E0")]
+    [DataRow("convert(varchar(30), cast(999999.96 as real), 128)", "999999.9")]
+    [DataRow("convert(varchar(30), cast(1234567.891 as money), 3)", "1,234,567.89")]
+    [DataRow("'[' + cast(cast(1234.5 as money) as char(12)) + ']'", "[     1234.50]")]
+    [DataRow("'[' + convert(nchar(10), cast(-5 as smallmoney), 1) + ']'", "[     -5.00]")]
+    [DataRow("convert(nvarchar(20), cast(123.4500 as decimal(9,4)), 128)", "123.45")]
+    [DataRow("convert(varchar(20), cast(123.4500 as decimal(9,4)), 128)", "123.4500")]
+    [DataRow("isnull(try_convert(varchar(20), 0x0A1B, 3), 'N')", "N")]
+    public void NumericStyleEdges_MatchReal(string expression, string expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar($"select {expression}"));
+
+    [TestMethod]
+    public void MoneyAssignedToACharColumn_IsRightJustified()
+        => AreEqual("[     1234.50]", new Simulation().ExecuteScalar("declare @t table (c char(12)); insert @t values (cast(1234.5 as money)); select '[' + c + ']' from @t"));
+
+    /// <summary>A float literal below the smallest normal value reads as 0 with Msg 337 (probed 2026-09-26 against SQL Server 2025).</summary>
+    [TestMethod]
+    public void AnUnderflowingFloatLiteral_IsZeroWithAWarning()
+    {
+        var sim = new Simulation();
+        using var connection = (SimulatedDbConnection)sim.CreateOpenConnection();
+        var messages = new List<string>();
+        connection.InfoMessage += (_, e) => messages.Add(e.Message);
+        using var command = connection.CreateCommand();
+        command.CommandText = "select cast(5e-324 as float)";
+        AreEqual(0.0, command.ExecuteScalar());
+        AreEqual("Warning: the floating point value '5e-324' is too small. It will be interpreted as 0.", messages.Single());
+    }
 }

@@ -348,11 +348,41 @@ internal readonly partial struct SqlValue
             2 => FormatFloatScientific(value, totalSignificantDigits: 16),
             3 => FormatFloatScientific(value, totalSignificantDigits: 17),
             126 => FormatFloatScientific(value, totalSignificantDigits: isReal ? 8 : 16),
-            // 128 and 129 have renderings of their own that aren't modeled;
-            // every other style formats as style 0 (probed 2026-09-25).
-            128 or 129 => throw SimulatedSqlException.InvalidStyleForCharacterString(style, isReal ? "real" : "float"),
+            128 => FormatFloatCompact(value, isReal ? 7 : 15),
+            129 => FormatFloatCompact(value, 7),
+            // Every other style formats as style 0 (probed 2026-09-25).
             _ => FormatFloatStyle0(value),
         };
+    }
+
+    /// <summary>
+    /// CONVERT styles 128 / 129: <paramref name="significantDigits"/> digits
+    /// (15 for a float under 128, 7 otherwise) with trailing zeros dropped,
+    /// written plainly while the decimal exponent is in <c>[-6, 5]</c> and
+    /// as <c>d.dddE±n</c> — at least one fraction digit, a bare exponent —
+    /// outside it; zero is <c>0.0E0</c> (probed 2026-09-26 against SQL Server
+    /// 2025).
+    /// </summary>
+    private static string FormatFloatCompact(double value, int significantDigits)
+    {
+        if (double.IsNaN(value) || double.IsInfinity(value))
+            return value.ToString("R", CultureInfo.InvariantCulture);
+        if (value == 0.0)
+            return "0.0E0";
+        var scientific = Math.Abs(value).ToString("E" + (significantDigits - 1).ToString(CultureInfo.InvariantCulture), CultureInfo.InvariantCulture);
+        var e = scientific.IndexOf('E', StringComparison.Ordinal);
+        var exponent = int.Parse(scientific.AsSpan(e + 1), NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture);
+        var digits = scientific[..e].Replace(".", "", StringComparison.Ordinal).TrimEnd('0');
+        if (digits.Length == 0)
+            digits = "0";
+        var sign = value < 0 ? "-" : "";
+        if (exponent is < -6 or > 5)
+            return $"{sign}{digits[0]}.{(digits.Length > 1 ? digits[1..] : "0")}E{exponent.ToString(CultureInfo.InvariantCulture)}";
+        if (exponent < 0)
+            return $"{sign}0.{new string('0', -exponent - 1)}{digits}";
+        var whole = digits.Length > exponent + 1 ? digits[..(exponent + 1)] : digits.PadRight(exponent + 1, '0');
+        var fraction = digits.Length > exponent + 1 ? digits[(exponent + 1)..] : "";
+        return fraction.Length == 0 ? sign + whole : $"{sign}{whole}.{fraction}";
     }
 
     /// <summary>

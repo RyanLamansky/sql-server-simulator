@@ -14,6 +14,13 @@ partial class SimulatedSqlException
     /// raises no <c>InfoMessage</c> for it when it trails a result set under
     /// <c>ExecuteReader</c> or <c>ExecuteScalar</c>, though real sends it.
     /// </summary>
+    /// <summary>
+    /// Msg 337, class 0: a float literal below the smallest normal value,
+    /// which reads as 0; <paramref name="literal"/> is its written text.
+    /// </summary>
+    internal static SimulatedError FloatLiteralTooSmallMessage(BatchContext batch, string literal) =>
+        batch.InfoMessage(@class: 0, state: 1, number: 337, $"Warning: the floating point value '{literal}' is too small. It will be interpreted as 0.");
+
     internal static SimulatedError NullReturnStatusMessage(BatchContext batch, string procedureName) =>
         batch.InfoMessage(@class: 0, state: 1, number: 282, $"The '{procedureName}' procedure attempted to return a status of NULL, which is not allowed. A status of 0 will be returned instead.");
 
