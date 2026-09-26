@@ -446,4 +446,20 @@ public sealed class IdentityTests
     [DataRow("create table cid (id tinyint identity(1, 1)); dbcc checkident ('cid', reseed, 300) with no_infomsgs", 2560, "Parameter 3 is incorrect for this DBCC statement.")]
     public void CheckIdent_Refusals(string sql, int number, string message)
         => new Simulation().AssertSqlError(sql, number, message);
+
+    [TestMethod]
+    public void IdentFunctions_ReadTheirArgumentPerRow()
+        => AreEqual("t:5/2/3", new Simulation().ExecuteScalar("""
+            create table t (id int identity(2, 3), v int); insert t values (1), (2);
+            create table u (v int);
+            select string_agg(concat(table_name, ':', ident_current(table_name), '/', ident_seed(table_name), '/', ident_incr(table_name)), ',')
+            from information_schema.tables where ident_current(table_name) is not null
+            """));
+
+    [TestMethod]
+    [DataRow("select ident_current(null)")]
+    [DataRow("select ident_seed(cast(null as varchar(5)))")]
+    [DataRow("select ident_incr(null)")]
+    public void IdentFunctions_OfNull_AreNull(string sql)
+        => AreEqual(DBNull.Value, new Simulation().ExecuteScalar(sql));
 }

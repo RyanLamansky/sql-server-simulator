@@ -43,8 +43,9 @@ internal static class DatePartKinds
     /// <summary>
     /// Reads the datepart a date function takes as its first argument, the
     /// cursor on its first token and left on its last. It is a word, not an
-    /// expression: a string, a number, a variable or <c>NULL</c> there is Msg
-    /// 1023, a dotted name Msg 155 naming it whole, while a parenthesized word
+    /// expression: a string, a number, a variable, a function call or
+    /// <c>NULL</c> there is Msg 1023, a dotted name Msg 155 naming it whole,
+    /// while a parenthesized word
     /// is read through its parentheses (probed 2026-09-26 against SQL Server
     /// 2025).
     /// </summary>
@@ -61,7 +62,9 @@ internal static class DatePartKinds
             case Tokens.Name name:
                 keywordText = name.Value;
                 var checkpoint = context.SaveCheckpoint();
-                if (context.MoveNext() && context.Token is Tokens.Operator { Character: '.' })
+                if (context.MoveNext() && context.Token is Tokens.Operator { Character: '(' })
+                    throw SimulatedSqlException.InvalidParameterSpecifiedFor(1, functionName);
+                if (context.Token is Tokens.Operator { Character: '.' })
                 {
                     var dotted = name.Value;
                     while (context.Token is Tokens.Operator { Character: '.' } && context.MoveNext() && context.Token is Tokens.Name part)

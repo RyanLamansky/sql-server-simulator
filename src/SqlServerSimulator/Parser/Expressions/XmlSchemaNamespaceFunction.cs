@@ -40,10 +40,14 @@ internal sealed class XmlSchemaNamespaceFunction : Expression
     {
         var schemaName = RequireName(this.schemaArg.Run(runtime), 1);
         var collectionName = RequireName(this.nameArg.Run(runtime), 2);
-        return runtime.Batch.CurrentDatabase.Schemas.TryGetValue(schemaName, out var schema)
-            && schema.XmlSchemaCollections.TryGetValue(collectionName, out var collection)
+        if (!runtime.Batch.CurrentDatabase.Schemas.TryGetValue(schemaName, out var schema)
+            || !schema.XmlSchemaCollections.TryGetValue(collectionName, out var collection))
+        {
+            throw SimulatedSqlException.XmlSchemaCollectionNotInMetadata(collectionName);
+        }
+        return this.namespaceArg is null
             ? SqlValue.FromXml(collection.XsdText)
-            : throw SimulatedSqlException.XmlSchemaCollectionNotInMetadata(collectionName);
+            : throw new NotSupportedException("The three-argument XML_SCHEMA_NAMESPACE(schema, collection, namespace) form is not modeled; use the two-argument form.");
     }
 
     private static string RequireName(SqlValue value, int argumentIndex)
@@ -53,14 +57,18 @@ internal sealed class XmlSchemaNamespaceFunction : Expression
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
-        _ = StringScalars.RequireStringArgument(this.schemaArg, this.schemaArg.GetSqlType(batch, resolveColumnType), "XML_SCHEMA_NAMESPACE", 1, acceptsLegacyLob: false);
-        _ = StringScalars.RequireStringArgument(this.nameArg, this.nameArg.GetSqlType(batch, resolveColumnType), "XML_SCHEMA_NAMESPACE", 2, acceptsLegacyLob: false);
+        RequireName(this.schemaArg, 1);
+        RequireName(this.nameArg, 2);
         if (this.namespaceArg is not null)
-        {
-            _ = StringScalars.RequireStringArgument(this.namespaceArg, this.namespaceArg.GetSqlType(batch, resolveColumnType), "XML_SCHEMA_NAMESPACE", 3, acceptsLegacyLob: false);
-            throw new NotSupportedException("The three-argument XML_SCHEMA_NAMESPACE(schema, collection, namespace) form is not modeled; use the two-argument form.");
-        }
+            RequireName(this.namespaceArg, 3);
         return SqlType.Xml;
+
+        void RequireName(Expression argument, int argumentIndex)
+        {
+            if (IsUntypedNullLiteral(argument))
+                throw SimulatedSqlException.InvalidArgumentDataType("NULL", argumentIndex, "XML_SCHEMA_NAMESPACE");
+            _ = StringScalars.RequireStringArgument(argument, argument.GetSqlType(batch, resolveColumnType), "XML_SCHEMA_NAMESPACE", argumentIndex, acceptsLegacyLob: false);
+        }
     }
 
     internal override string DebugDisplay() => "XML_SCHEMA_NAMESPACE(...)";

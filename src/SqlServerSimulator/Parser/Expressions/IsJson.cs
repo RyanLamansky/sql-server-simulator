@@ -32,12 +32,16 @@ internal sealed class IsJson : Expression
         this.operand = Parse(context);
         if (context.Token is not Operator { Character: ',' })
             return;
-        this.acceptedKinds = context.GetNextRequired() switch
+        // A word followed by a parenthesis is a function call, which is no
+        // word at all (probed 2026-09-26 against SQL Server 2025: Msg 1023).
+        var token = context.GetNextRequired();
+        context.MoveNextRequired();
+        this.acceptedKinds = token switch
         {
+            UnquotedString when context.Token is Operator { Character: '(' } => throw SimulatedSqlException.InvalidParameterSpecifiedFor(2, "isjson"),
             UnquotedString word => ConstraintKinds(word.Value) ?? throw SimulatedSqlException.NotARecognizedDatepartOption(word.Value, "isjson"),
             _ => throw SimulatedSqlException.InvalidParameterSpecifiedFor(2, "isjson"),
         };
-        context.MoveNextRequired();
     }
 
     private static string? ConstraintKinds(string word)

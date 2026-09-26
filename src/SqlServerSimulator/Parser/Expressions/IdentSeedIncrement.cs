@@ -15,38 +15,28 @@ internal sealed class IdentSeedIncrement : Expression
     private static readonly SqlType ResultType = SqlType.GetDecimal(38, 0);
 
     private readonly bool isSeed;
-    private readonly string tableName;
+    private readonly Expression tableName;
 
     public IdentSeedIncrement(ParserContext context, bool isSeed)
     {
         this.isSeed = isSeed;
-        var argument = Parse(context);
+        this.tableName = Parse(context);
         if (context.Token is not Tokens.Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
-        this.tableName = argument
-            .Run(new RuntimeContext(name => throw SimulatedSqlException.InvalidColumnName(name), context.Batch))
-            .CoerceTo(SqlType.NVarchar)
-            .AsString;
     }
 
-    public override SqlValue Run(RuntimeContext runtime)
+    public override SqlValue Run(RuntimeContext runtime) =>
+        IdentCurrent.IdentityOf(runtime, this.tableName) is { } identity
+            ? SqlValue.FromDecimal(ResultType, this.isSeed ? identity.Seed : identity.Increment)
+            : SqlValue.Null(ResultType);
+
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
-        var parts = this.tableName.Split('.');
-        var multiPart = new MultiPartName(parts[0]);
-        for (var i = 1; i < parts.Length; i++)
-            multiPart = multiPart.WithAddedPart(parts[i]);
-        if (!runtime.Batch.TryResolveTable(multiPart, out var table))
-            return SqlValue.Null(ResultType);
-        var identityOrdinal = table.IdentityOrdinal;
-        if (identityOrdinal < 0)
-            return SqlValue.Null(ResultType);
-        var identity = table.Columns[identityOrdinal].Identity!;
-        return SqlValue.FromDecimal(ResultType, this.isSeed ? identity.Seed : identity.Increment);
+        _ = this.tableName.GetSqlType(batch, resolveColumnType);
+        return ResultType;
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => ResultType;
+    internal override string DebugDisplay() => $"{(this.isSeed ? "IDENT_SEED" : "IDENT_INCR")}({this.tableName.DebugDisplay()})";
 
-    internal override string DebugDisplay() => $"{(this.isSeed ? "IDENT_SEED" : "IDENT_INCR")}('{this.tableName}')";
-
-    internal override void Describe(NodeShape shape) => shape.Local(this.isSeed).Local(this.tableName);
+    internal override void Describe(NodeShape shape) => shape.Local(this.isSeed).Child(this.tableName);
 }

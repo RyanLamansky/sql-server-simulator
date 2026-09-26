@@ -96,6 +96,9 @@ public sealed class BuiltInArityTests
     [DataRow("select try_cast(1, int)", 1035, "Incorrect syntax near 'try_cast', expected 'AS'.")]
     [DataRow("select parse()", 1035, "Incorrect syntax near 'parse', expected 'AS'.")]
     [DataRow("select cast(1 int)", 102, "Incorrect syntax near 'int'.")]
+    [DataRow("select dateadd(cast('2020-01-02' as datetime), 1, 0)", 1023, "Invalid parameter 1 specified for dateadd.")]
+    [DataRow("select isjson('1', cast(1 as bit))", 1023, "Invalid parameter 2 specified for isjson.")]
+    [DataRow("select xml_schema_namespace(N'dbo', N'nosuch', N'urn:x')", 6314, "Collection specified does not exist in metadata : 'nosuch'")]
     public void KeywordArgument_WrittenAsAnythingElse_IsRefused(string sql, int number, string message)
         => new Simulation().AssertSqlError(sql, number, message);
 
