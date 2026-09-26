@@ -191,10 +191,9 @@ partial class Simulation
             }
         }
 
-        // Required trailing ; — but the dispatch loop may have already
-        // consumed it (statement separators are flexible). If the cursor
-        // sits on either ; or end-of-batch, accept; otherwise raise Msg 10713.
-        if (context.Token is not (null or Operator { Character: ';' }))
+        // Required trailing ; — end-of-batch included, which real refuses as
+        // it compiles, so a MERGE without one never runs (probed 2026-09-26).
+        if (context.Token is not Operator { Character: ';' })
             throw SimulatedSqlException.MergeMustBeTerminated();
         if (!context.Batch.IsSkipping)
             CheckMergePermissions(context.Batch, destinationName, (SchemaObject?)sourceView ?? destinationTable, whenClauses);

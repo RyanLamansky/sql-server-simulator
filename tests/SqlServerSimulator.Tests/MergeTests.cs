@@ -289,6 +289,19 @@ public sealed class MergeTests
             select 1
             """, 10713);
 
+    /// <summary>
+    /// End-of-batch is no terminator either, and the MERGE doesn't run: real
+    /// refuses it while compiling (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void MissingSemicolonAtEndOfBatch_RaisesMsg10713AndWritesNothing()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table t (id int)");
+        _ = simulation.AssertSqlError("merge t using (values (1)) s (id) on t.id = s.id when not matched then insert values (s.id)", 10713);
+        AreEqual(0, simulation.ExecuteScalar("select count(*) from t"));
+    }
+
     [TestMethod]
     public void SourceSubquery_FlowsRowsToWhenClauses()
     {
