@@ -140,6 +140,13 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     public bool BrowseStatement;
 
     /// <summary>
+    /// Set when a statement's query ends in <c>FOR BROWSE</c>, so the SELECT
+    /// dispatch can read the statement again as a browse statement — the
+    /// clause arrives after the projection it decides.
+    /// </summary>
+    public bool ForBrowseSeen;
+
+    /// <summary>
     /// SQL Server's fixed <c>CASE</c> / <c>IIF</c> lexical-nesting cap: ten
     /// levels succeed, an eleventh raises Msg 125 ("Case expressions may only
     /// be nested to level 10.").

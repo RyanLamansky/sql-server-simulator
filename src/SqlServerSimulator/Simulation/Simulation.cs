@@ -1298,6 +1298,20 @@ public sealed partial class Simulation
     /// inference (e.g. result column types when the SELECT projects a
     /// parameter) and so demand a separate cached plan.
     /// </summary>
+    // Parses a SELECT statement's query, as a browse statement when asked.
+    private static Selection ParseSelectStatement(ParserContext context, bool browse)
+    {
+        context.BrowseStatement = browse;
+        try
+        {
+            return Selection.Parse(context, QueryScope.Statement);
+        }
+        finally
+        {
+            context.BrowseStatement = false;
+        }
+    }
+
     private static PlanCacheKey? TryBuildPlanCacheKey(SimulatedDbCommand command)
         => string.IsNullOrEmpty(command.CommandText)
             ? null
@@ -2611,18 +2625,21 @@ public sealed partial class Simulation
         {
             case ReservedKeyword { Keyword: Keyword.Select }:
                 {
-                    context.BrowseStatement = connection.NoBrowseTable;
-                    Selection selection;
-                    try
+                    var statementStart = context.SaveCheckpoint();
+                    context.ForBrowseSeen = false;
+                    var selection = ParseSelectStatement(context, browse: connection.NoBrowseTable);
+                    // A trailing FOR BROWSE puts the one statement in browse
+                    // mode, which decides its projection, so the statement is
+                    // read again as a browse statement (probed 2026-09-26).
+                    if (context.ForBrowseSeen && !connection.NoBrowseTable)
                     {
-                        selection = Selection.Parse(context, QueryScope.Statement);
+                        context.RestoreCheckpoint(statementStart);
+                        selection = ParseSelectStatement(context, browse: true);
                     }
-                    finally
+                    else if (connection.NoBrowseTable && selection.IsSetOperationResult)
                     {
-                        context.BrowseStatement = false;
-                    }
-                    if (connection.NoBrowseTable && selection.IsSetOperationResult)
                         selection.Browse = Selection.SetOperationBrowseInfo(selection.Schema.Length);
+                    }
                     // A value literal or a name left dangling after a complete
                     // SELECT is always unconsumed trailing input — real SQL
                     // Server raises Msg 102 rather than silently ignoring it

@@ -583,6 +583,27 @@ internal sealed partial class Selection
         if (!ReferenceEquals(combined, beforeForClauses))
             bareProjectionStatement = false;
 
+        // FOR BROWSE — the statement's own query in browse mode, which the
+        // SELECT dispatch answers by reading the statement again as a browse
+        // statement (see ParserContext.ForBrowseSeen); refused over a set
+        // operation (Msg 198, probed 2026-09-26).
+        if (scope.Position == QueryPosition.Statement && context.Token is ReservedKeyword { Keyword: Keyword.For })
+        {
+            var atFor = context.SaveCheckpoint();
+            if (context.GetNextOptional() is ReservedKeyword { Keyword: Keyword.Browse })
+            {
+                if (combined.IsSetOperationResult)
+                    throw SimulatedSqlException.BrowseModeWithSetOperator();
+                context.MoveNextOptional();
+                context.ForBrowseSeen = true;
+                bareProjectionStatement = false;
+            }
+            else
+            {
+                context.RestoreCheckpoint(atFor);
+            }
+        }
+
         // OPTION (hint [, …]) — statement-level hint clause. Parsed as a
         // closed-list per Selection.Hints.cs; MAXRECURSION applies to in-
         // scope recursive CTEs, everything else recognized is discarded

@@ -419,8 +419,9 @@ While it is on, the SELECT statement's own query (`Parser/Selection.Browse.cs`) 
 SqlClient turns those into `GetSchemaTable`'s `BaseTableName` / `BaseColumnName` / `BaseSchemaName` / `IsKey` / `IsHidden` / `IsExpression` / `IsAliased`, which `DataAdapter.FillSchema` and `SqlCommandBuilder` read.
 A grouped or DISTINCT query is described without hidden columns, a set operation's columns all read as expressions, and a keyless table contributes only its rowversion (all probed 2026-09-26 against SQL Server 2025).
 A plan parsed under the option is never cached, since what it projects depends on it.
+A trailing `FOR BROWSE` puts its one statement in browse mode without the option — the clause arrives after the projection it decides, so the SELECT dispatch reads the statement again as a browse statement when `ParserContext.ForBrowseSeen` says it met one — and over a set operation it is Msg 198.
 
-**Not modeled yet**: real flattens a derived table (and presumably a view) into its base tables — `SELECT name FROM (SELECT name, id FROM w1) d` names `w1.name` and still appends `id` and `rv` — where the simulator reports such a column with no base table and appends nothing for it; the `FOR BROWSE` clause, which the simulator refuses with Msg 156; and the in-process reader's `GetSchemaTable`, which has no base-column metadata to offer.
+**Not modeled yet**: real flattens a derived table (and presumably a view) into its base tables — `SELECT name FROM (SELECT name, id FROM w1) d` names `w1.name` and still appends `id` and `rv` — where the simulator reports such a column with no base table and appends nothing for it; and the in-process reader's `GetSchemaTable`, which has no base-column metadata to offer.
 
 ## Legacy text / ntext / image wire forms
 

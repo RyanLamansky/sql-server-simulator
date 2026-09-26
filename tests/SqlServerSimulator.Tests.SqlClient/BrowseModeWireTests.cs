@@ -35,12 +35,12 @@ public sealed class BrowseModeWireTests
     }
 
     // "name base key hidden expr alias" per schema row, plus the visible count.
-    private async Task<string> KeyInfoSchema(string sql)
+    private async Task<string> KeyInfoSchema(string sql, CommandBehavior behavior = CommandBehavior.KeyInfo)
     {
         await using var listener = await Seeded().ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
         await using var command = new SqlCommand(sql, connection);
-        await using var reader = await command.ExecuteReaderAsync(CommandBehavior.KeyInfo, TestContext.CancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(behavior, TestContext.CancellationToken);
         var rows = new List<string>();
         foreach (DataRow row in reader.GetSchemaTable().Rows)
         {
@@ -71,6 +71,27 @@ public sealed class BrowseModeWireTests
     [DataRow("select name from w1 union select name from w1", "name:..name:e visible=1")]
     public async Task KeyInfo_DescribesBaseColumnsAndCarriesHiddenKeys(string sql, string expected) =>
         AreEqual(expected, await this.KeyInfoSchema(sql));
+
+    /// <summary>
+    /// <c>FOR BROWSE</c> puts its one statement in browse mode without the
+    /// session option, an <c>OPTION</c> clause may follow it, and a set
+    /// operation refuses it with Msg 198.
+    /// </summary>
+    [TestMethod]
+    [DataRow("select name from w1 for browse", "name:.w1.name: id:.w1.id:kh rv:.w1.rv:h visible=1")]
+    [DataRow("select name from w1 order by amt for browse option (maxdop 1)", "name:.w1.name: id:.w1.id:kh rv:.w1.rv:h visible=1")]
+    [DataRow("select b from u1 for browse", "b:.u1.b: a:.u1.a:kh visible=1")]
+    public async Task ForBrowse_DescribesItsOneStatement(string sql, string expected) =>
+        AreEqual(expected, await this.KeyInfoSchema(sql, CommandBehavior.Default));
+
+    [TestMethod]
+    public async Task ForBrowse_OverASetOperation_IsMsg198()
+    {
+        await using var listener = await Seeded().ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+        await using var command = new SqlCommand("select name from w1 union select name from w1 for browse", connection);
+        AreEqual(198, (await ThrowsAsync<SqlException>(() => command.ExecuteReaderAsync(TestContext.CancellationToken))).Number);
+    }
 
     [TestMethod]
     public async Task HiddenColumns_RideEveryRowButStayOutOfGetValues()
