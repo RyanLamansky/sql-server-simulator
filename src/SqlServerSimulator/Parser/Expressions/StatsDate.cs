@@ -40,11 +40,13 @@ internal sealed class StatsDate : Expression
         if (objectIdValue.IsNull || statsIdValue.IsNull)
             return SqlValue.Null(SqlType.DateTime);
 
+        // Both ids convert before the object is looked up (probed 2026-09-26
+        // against SQL Server 2025).
         var objectId = ScalarArguments.CoerceToInt(objectIdValue);
+        var statsId = ScalarArguments.CoerceToInt(statsIdValue);
         if (ObjectProperty.FindObject(runtime.Batch.CurrentDatabase, objectId) is not HeapTable table)
             return SqlValue.Null(SqlType.DateTime);
 
-        var statsId = ScalarArguments.CoerceToInt(statsIdValue);
         // Use the same resolver as INDEX_COL / INDEXKEY_PROPERTY so the
         // stats_id and sys.indexes.index_id agree. Unknown id → NULL.
         return IndexLookup.ResolveByIndexId(table, statsId) is null

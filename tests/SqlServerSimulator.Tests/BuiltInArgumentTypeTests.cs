@@ -424,4 +424,25 @@ public sealed class BuiltInArgumentTypeTests
     [DataRow("getansinull(null)", (short)1)]
     public void GetAnsiNull_LooksUpTheDatabase(string call, short? expected)
         => AreEqual(expected is { } value ? value : DBNull.Value, new Simulation().ExecuteScalar($"select {call}"));
+
+    [TestMethod]
+    [DataRow("formatmessage(1, 1e0)", 2748)]
+    [DataRow("formatmessage(1, getdate())", 2748)]
+    [DataRow("formatmessage('%s', cast('<a/>' as xml))", 2748)]
+    [DataRow("indexkey_property(1, 'x', 1, 'ColumnId')", 245)]
+    [DataRow("indexkey_property(1, 1, newid(), 'ColumnId')", 206)]
+    [DataRow("stats_date(1, 'x')", 245)]
+    public void MoreSlotArguments_RefuseAsRealDoes(string call, int number)
+        => new Simulation().AssertSqlError($"select {call}", number);
+
+    [TestMethod]
+    [DataRow("formatmessage(1, 1.5)", null)]
+    [DataRow("has_perms_by_name('x', null, 'SELECT')", null)]
+    [DataRow("has_perms_by_name(null, null, 'VIEW SERVER STATE')", 1)]
+    public void MoreSlotArguments_AnswerAsRealDoes(string call, int? expected)
+        => AreEqual(expected is { } value ? value : DBNull.Value, new Simulation().ExecuteScalar($"select {call}"));
+
+    [TestMethod]
+    public void FormatMessage_ADecimalParameter_FormatsAsTheTerseDiagnostic()
+        => StartsWith("Error: 50000, Severity: -1", (string)new Simulation().ExecuteScalar("select formatmessage('%s', 1.5)")!);
 }

@@ -256,6 +256,12 @@ Already listed elsewhere here and not repeated: parenthesized set-op branches.
 - The schema part of a column's qualifier isn't checked against the source's, so `SELECT s.t.a FROM t` (a `dbo.t`) resolves here where real raises Msg 4104, and `SELECT s.t.* FROM t` expands where real raises Msg 107.
 - `COUNT(x.*)` is Msg 107 here, a syntax error near `*` on real.
 
+**Built-in values** (probed 2026-09-26):
+
+- `DIFFERENCE` scores from a code of its own rather than the two `SOUNDEX` results — `'xc'` and `'x'` share `X000` yet score differently against `'abcd'` — and is asymmetric (`DIFFERENCE('x', '1')` is 0, `DIFFERENCE('1', 'x')` 3); here it compares the codes position by position, which matches real on most pairs but not all.
+  A substring search of the second code in the first, with a first letter that doesn't suppress the next code, fits 342 of 400 random pairs; the rest weren't explained.
+- `REGEXP_COUNT` / `REGEXP_INSTR` / `REGEXP_SUBSTR` with a `datetime` pattern or start position kill the session on real (severity 21); here they are Msg 8116, which is the answer kept.
+
 ### Result-set serialization: `FOR XML` / `FOR JSON`
 
 Both clauses ship (see [`xml.md`](xml.md#for-xml-result-serialization), [`json.md`](json.md#for-json-result-serialization)); these are the parts that don't:

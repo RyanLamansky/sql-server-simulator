@@ -53,18 +53,21 @@ internal sealed class IndexKeyProperty : Expression
         if (objectIdValue.IsNull || indexIdValue.IsNull || keyIdValue.IsNull || propValue.IsNull)
             return SqlValue.Null(SqlType.Int32);
 
+        // Every id converts before anything is looked up, so a bad one raises
+        // even for an object that isn't there (probed 2026-09-26 against SQL
+        // Server 2025).
         var objectId = ScalarArguments.CoerceToInt(objectIdValue);
+        var indexId = ScalarArguments.CoerceToInt(indexIdValue);
+        var keyId = ScalarArguments.CoerceToSmallInt(keyIdValue);
         if (ObjectProperty.FindObject(runtime.Batch.CurrentDatabase, objectId) is not HeapTable table)
             return SqlValue.Null(SqlType.Int32);
 
-        var indexId = ScalarArguments.CoerceToInt(indexIdValue);
         if (IndexLookup.ResolveByIndexId(table, indexId) is not { } resolved)
             return SqlValue.Null(SqlType.Int32);
 
         // Only the key ordinal is declared smallint here; the object and
         // index ids are int (probe-confirmed 2026-07-31 by the target type
         // each overflow names).
-        var keyId = ScalarArguments.CoerceToSmallInt(keyIdValue);
         if (IndexLookup.GetKeyColumn(resolved.Constraint, resolved.Index, keyId) is not { } keyCol)
             return SqlValue.Null(SqlType.Int32);
 
@@ -86,7 +89,12 @@ internal sealed class IndexKeyProperty : Expression
         };
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        _ = AssignmentRules.ArgumentType(this.indexIdArg, SqlType.Int32, batch, resolveColumnType);
+        _ = AssignmentRules.ArgumentType(this.keyIdArg, SqlType.SmallInt, batch, resolveColumnType);
+        return SqlType.Int32;
+    }
 
     internal override string DebugDisplay() =>
         $"INDEXKEY_PROPERTY({this.objectIdArg.DebugDisplay()}, {this.indexIdArg.DebugDisplay()}, {this.keyIdArg.DebugDisplay()}, {this.propertyArg.DebugDisplay()})";

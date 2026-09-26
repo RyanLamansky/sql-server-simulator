@@ -103,9 +103,15 @@ internal sealed class FormatMessage : Expression
             return SqlValue.Null(SqlType.NVarchar);
 
         // Numeric first argument → the msg_id overload. sys.messages isn't
-        // modeled, so every id resolves as "unknown" → NULL.
+        // modeled, so every id resolves as "unknown" → NULL — but every
+        // parameter's type is judged first, consumed or not (probed
+        // 2026-09-26 against SQL Server 2025: FORMATMESSAGE(1, 1e0) is Msg 2748).
         if (formatValue.Type.Category == SqlTypeCategory.Integer)
+        {
+            for (var i = 0; i < this.substitutionArgs.Length; i++)
+                RejectDisallowedType(this.substitutionArgs[i].Run(runtime), i + 1);
             return SqlValue.Null(SqlType.NVarchar);
+        }
 
         var format = formatValue.CoerceTo(SqlType.NVarchar).AsString;
 
@@ -390,13 +396,20 @@ internal sealed class FormatMessage : Expression
         return true;
     }
 
+    /// <summary>
+    /// Refuses a substitution parameter of a type real won't take (Msg 2748):
+    /// anything but a non-bit integer, a string (not xml), a binary or a
+    /// decimal — which passes the check, though formatting one gives the
+    /// terse diagnostic (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
     private static void RejectDisallowedType(SqlValue arg, int oneBasedIndex)
     {
         if (arg.IsNull)
             return;
         var type = arg.Type;
         var allowed = (type.Category == SqlTypeCategory.Integer && type is not BitSqlType)
-            || type.Category == SqlTypeCategory.String
+            || (type.Category == SqlTypeCategory.String && type is not XmlSqlType)
+            || type.Category == SqlTypeCategory.Decimal
             || type is VarbinarySqlType or BinarySqlType or ImageSqlType;
         if (!allowed)
             throw SimulatedSqlException.SubstitutionParameterTypeNotAllowed(type.SqlServerName, oneBasedIndex);

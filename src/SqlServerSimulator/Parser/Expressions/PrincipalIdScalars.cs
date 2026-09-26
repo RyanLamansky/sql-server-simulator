@@ -309,8 +309,9 @@ internal sealed class HasPermsByName : Expression
     private SqlValue DboAnswer(RuntimeContext runtime, SqlValue securableVal, SqlValue classVal)
     {
         var batch = runtime.Batch;
+        // A NULL class means the server, which only a NULL securable names.
         if (classVal.IsNull)
-            return SqlValue.FromInt32(1);
+            return securableVal.IsNull ? SqlValue.FromInt32(1) : SqlValue.Null(SqlType.Int32);
         var className = classVal.CoerceTo(SqlType.NVarchar).AsString.Trim();
         if (!IsSecurableClass(className))
             return SqlValue.Null(SqlType.Int32);
