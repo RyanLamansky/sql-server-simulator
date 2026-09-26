@@ -554,4 +554,16 @@ public sealed class SchemaBindingDependencyTests
             "truncate table dbo.t");
         AreEqual(0, sim.ExecuteScalar("select count(*) from dbo.v"));
     }
+
+    /// <summary>
+    /// Schema binding defers nothing: a two-part name that doesn't resolve is
+    /// Msg 208 at CREATE, a scalar function's body included (probed 2026-09-26
+    /// against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("create function f() returns int with schemabinding as begin return (select count(*) from dbo.p) end")]
+    [DataRow("create function f() returns table with schemabinding as return select a from dbo.nope")]
+    [DataRow("create view v with schemabinding as select id from dbo.p")]
+    public void SchemaBoundModule_OverMissingObject_RaisesMsg208(string ddl)
+        => new Simulation().AssertSqlError(ddl, 208);
 }

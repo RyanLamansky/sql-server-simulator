@@ -122,7 +122,8 @@ internal static class SchemaBinding
 
     /// <summary>
     /// Applies the rules real puts on a schema-bound body's own references:
-    /// <strong>Msg 4512</strong> when a FROM-clause name isn't two-part, and
+    /// <strong>Msg 4512</strong> when a FROM-clause name isn't two-part,
+    /// <strong>Msg 208</strong> when a two-part one doesn't resolve, and
     /// <strong>Msg 4513</strong> when a referenced view or function isn't
     /// itself schema bound. <paramref name="moduleKind"/> is the word real
     /// echoes (<c>view</c> / <c>function</c>).
@@ -152,6 +153,12 @@ internal static class SchemaBinding
             {
                 throw SimulatedSqlException.CannotSchemaBindInvalidName(moduleKind, qualifiedModuleName, name.Text);
             }
+            // Schema binding defers nothing: a two-part name that doesn't
+            // resolve is Msg 208 at CREATE, even in a scalar function's body
+            // whose unbound names otherwise defer (probed 2026-09-26 against
+            // SQL Server 2025).
+            if (name.InSourcePosition && !name.IsCall && name.SegmentCount == 2 && resolved is null)
+                throw SimulatedSqlException.InvalidObjectName(new Parser.MultiPartName(name.Qualifier!).WithAddedPart(name.Leaf));
             switch (resolved)
             {
                 case View { IsSchemaBound: false } view:

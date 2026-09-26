@@ -350,7 +350,6 @@ Real bugs / limitations against shipped behavior — fixes are concrete work, no
   Binding a view or function at CREATE / ALTER, real reports a missing *schema-qualified* object (`dbo.p`, `s.nope`) as Msg 208 at **line 12** whatever the definition's layout, and an unqualified one at the line of the name within the definition; the simulator uses the statement's start line for both.
   Invoking a non-schema-bound scalar UDF whose body names a missing object raises Msg 208 **twice** — first attributed to the function (line 12 or the name's line, `Procedure` the function), then at the calling statement's line — where the simulator raises only the second; a multi-statement TVF raises only the caller's.
   Missing columns (Msg 207), unbound multi-part identifiers (4104), ambiguity (209) and missing functions (4121) already match.
-  A schema-bound scalar UDF naming a missing table is accepted by the simulator where real refuses it with that Msg 208 at CREATE.
 - **Index-option residues** — option names in the column-level clauses and `COMPRESSION_DELAY` in `ALTER INDEX … SET`; see [`indexes.md`](indexes.md#fidelity-gaps).
 
 - **A typed `xml` edit's `with` value isn't typed against the schema** — real refuses one whose type doesn't match the target (Msg 2247) and computes a schema-typed operand in its **declared** type, where the evaluator works in `double`; the difference shows in the last digits of a long decimal chain.

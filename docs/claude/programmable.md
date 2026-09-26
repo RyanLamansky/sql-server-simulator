@@ -349,6 +349,7 @@ Both checks run at CREATE / ALTER of the schema-bound module, off the same extra
 
 - A FROM-clause source named with anything other than a two-part name → **Msg 4512** state 3 (`Cannot schema bind view 'dbo.v' because name 't' is invalid for schema binding. Names must be in two-part format and an object cannot reference itself.`), for the one-part (`FROM t`) and three-part (`FROM other.dbo.t`) forms alike.
 - A referenced view or function that isn't itself schema bound → **Msg 4513** state 2 (`Cannot schema bind view 'dbo.v'. 'dbo.plain' is not schema bound.`) — the rule that keeps the dependency graph closed under schema binding.
+- A two-part name that doesn't resolve → **Msg 208** at CREATE, even in a scalar function's body, whose unbound names otherwise defer — schema binding defers nothing (probed 2026-09-26).
 
 **Divergences**:
 - **Column dependency is name-based.** Real tracks the exact columns a body binds; column references here resolve per row through a name-keyed resolver, so there is no parse-time (table, ordinal) binding to consult.
