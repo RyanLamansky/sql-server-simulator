@@ -218,24 +218,33 @@ partial class Simulation
                     continue;
                 var owner = SqlValue.FromSystemName(schema.Name);
                 foreach (var table in schema.HeapTables.Values)
-                    AddTableRow(rows, table.Name, "TABLE");
+                    AddTableRow(rows, owner, table.Name, "TABLE");
                 foreach (var view in schema.Views.Values)
-                    AddTableRow(rows, view.Name, "VIEW");
-
-                void AddTableRow(List<SqlValue[]> into, string name, string type)
-                {
-                    if (!Matches(namePattern, name)
-                        || (tableTypeFilter is not null && !tableTypeFilter.Contains(type)))
-                    {
-                        return;
-                    }
-
-                    into.Add([
-                        qualifier, owner, SqlValue.FromSystemName(name),
-                        SqlValue.FromString(CatalogVarchar32, type), nullRemarks,
-                    ]);
-                }
+                    AddTableRow(rows, owner, view.Name, "VIEW");
             }
+
+            // The catalog views list too, as views of their own schemas
+            // (probed 2026-09-26 against SQL Server 2025).
+            foreach (var (view, schemaId) in BuiltInResources.SystemViews.Value)
+            {
+                var schemaName = schemaId == Database.InformationSchemaId ? "INFORMATION_SCHEMA" : "sys";
+                if (Matches(ownerPattern, schemaName))
+                    AddTableRow(rows, SqlValue.FromSystemName(schemaName), view.Name, "VIEW");
+            }
+        }
+
+        void AddTableRow(List<SqlValue[]> into, SqlValue owner, string name, string type)
+        {
+            if (!Matches(namePattern, name)
+                || (tableTypeFilter is not null && !tableTypeFilter.Contains(type)))
+            {
+                return;
+            }
+
+            into.Add([
+                qualifier, owner, SqlValue.FromSystemName(name),
+                SqlValue.FromString(CatalogVarchar32, type), nullRemarks,
+            ]);
         }
 
         rows.Sort(CompareSpTablesRows);
@@ -334,6 +343,14 @@ partial class Simulation
                 {
                     if (Matches(namePattern, view.Name))
                         AppendColumnRows(rows, qualifier, owner, view.Name, view.OutputColumns, byName, columnPattern, classic);
+                }
+
+                // The schema's catalog views list their columns too (probed
+                // 2026-09-26 against SQL Server 2025).
+                foreach (var (systemView, schemaId) in BuiltInResources.SystemViews.Value.OrderBy(v => v.View.Name, StringComparer.OrdinalIgnoreCase))
+                {
+                    if (schemaId == schema.SchemaId && Matches(namePattern, systemView.Name))
+                        AppendColumnRows(rows, qualifier, owner, systemView.Name, systemView.Columns, byName, columnPattern, classic);
                 }
             }
         }

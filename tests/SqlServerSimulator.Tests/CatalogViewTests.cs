@@ -1381,4 +1381,21 @@ public sealed class CatalogViewTests
     [DataRow("select count(*) from sys.views where name = 'objects'")]
     public void UserCatalogs_ListNoSystemViews(string sql)
         => AreEqual(0, new Simulation().ExecuteScalar(sql));
+
+    [TestMethod]
+    public void SpTables_ListsTheCatalogViews()
+    {
+        using var reader = new Simulation().ExecuteReader("exec sp_tables @table_name = 'objects', @table_owner = 'sys'");
+        IsTrue(reader.Read());
+        AreEqual("sys", reader.GetString(1));
+        AreEqual("VIEW", reader.GetString(3));
+    }
+
+    [TestMethod]
+    public void SpColumns_ListsACatalogViewsColumns()
+    {
+        using var reader = new Simulation().ExecuteReader("exec sp_columns @table_name = 'objects', @table_owner = 'sys'");
+        IsTrue(reader.Read());
+        AreEqual("name", reader.GetString(3));
+    }
 }

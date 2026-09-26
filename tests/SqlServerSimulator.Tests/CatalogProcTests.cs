@@ -72,7 +72,7 @@ public sealed class CatalogProcTests
     {
         // @table_type is the ODBC quoted comma-list; the value string here is
         // literally 'VIEW' (embedded single quotes), which the proc strips.
-        var rows = Run(NewFixture(), "exec sp_tables @table_type=N'''VIEW'''");
+        var rows = Run(NewFixture(), "exec sp_tables @table_owner='dbo', @table_type=N'''VIEW'''");
         HasCount(1, rows);
         AreEqual("vfixt", rows[0]["TABLE_NAME"]);
         AreEqual("VIEW", rows[0]["TABLE_TYPE"]);
@@ -81,7 +81,7 @@ public sealed class CatalogProcTests
     [TestMethod]
     public void SpTables_NameLikePattern()
     {
-        var rows = Run(NewFixture(), "exec sp_tables @table_name='fi%'");
+        var rows = Run(NewFixture(), "exec sp_tables @table_name='fi%', @table_owner='dbo'");
         HasCount(1, rows);
         AreEqual("fixt", rows[0]["TABLE_NAME"]);
     }
