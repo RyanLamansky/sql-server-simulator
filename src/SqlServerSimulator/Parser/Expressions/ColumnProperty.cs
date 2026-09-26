@@ -88,7 +88,7 @@ internal sealed class ColumnProperty : Expression
             ? SqlValue.Null(SqlType.Int32)
             : EvaluateColumnProperty(column, ordinal, prop) is int result
                 ? SqlValue.FromInt32(result)
-                : EvaluateComputedColumnProperty(database, scope, column, prop) is int computed
+                : EvaluateIndexingProperty(database, ObjectProperty.FindObject(database, id) as HeapTable, scope, column, prop) is int computed
                     ? SqlValue.FromInt32(computed)
                     : SqlValue.Null(SqlType.Int32);
     }
@@ -202,13 +202,19 @@ internal sealed class ColumnProperty : Expression
         };
     }
 
-    // The properties that read the column's expression, when it has one.
-    private static int? EvaluateComputedColumnProperty(Database database, HeapColumn[] scope, HeapColumn column, string property)
+    // The indexing properties: full-text membership, XML-index eligibility and those
+    // reading a computed column's expression.
+    private static int? EvaluateIndexingProperty(Database database, HeapTable? table, HeapColumn[] scope, HeapColumn column, string property)
     {
         Span<char> upper = stackalloc char[property.Length];
         var name = upper[..property.AsSpan().ToUpperInvariant(upper)];
-        if (name is "ISFULLTEXTINDEXED" or "ISXMLINDEXABLE")
-            return 0;
+        switch (name)
+        {
+            case "ISFULLTEXTINDEXED":
+                return table?.FullTextIndex?.Columns.Exists(entry => entry.ColumnId == column.ColumnId) is true ? 1 : 0;
+            case "ISXMLINDEXABLE":
+                return table is null ? null : column.Type is XmlSqlType ? 1 : 0;
+        }
         if (column.Computed is null || column.ComputedDefinition is not { } definition)
             return name is "ISINDEXABLE" ? (column.IsLob ? 0 : 1) : null;
         return name switch

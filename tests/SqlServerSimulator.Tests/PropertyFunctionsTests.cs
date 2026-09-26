@@ -70,6 +70,20 @@ public sealed class PropertyFunctionsTests
             """));
 
     [TestMethod]
+    public void ColumnProperty_IsFulltextIndexedAndIsXmlIndexable()
+        => AreEqual("0|1|0|0|0|0|1|-", new Simulation().ExecuteBatchesScalar(
+            "create table t (id int not null constraint pk primary key, body nvarchar(200), other nvarchar(20), x xml)",
+            "create fulltext catalog c",
+            "create fulltext index on t (body) key index pk on c",
+            "create view v as select x from t",
+            """
+            select concat_ws('|', columnproperty(object_id('t'), 'id', 'IsFulltextIndexed'), columnproperty(object_id('t'), 'body', 'IsFulltextIndexed'),
+                columnproperty(object_id('t'), 'other', 'IsFulltextIndexed'), columnproperty(object_id('v'), 'x', 'IsFulltextIndexed'),
+                columnproperty(object_id('t'), 'id', 'IsXmlIndexable'), columnproperty(object_id('t'), 'body', 'IsXmlIndexable'),
+                columnproperty(object_id('t'), 'x', 'IsXmlIndexable'), isnull(str(columnproperty(object_id('v'), 'x', 'IsXmlIndexable'), 1), '-'))
+            """));
+
+    [TestMethod]
     public void ColumnProperty_AllowsNull_NullableCol_Returns1()
         => AreEqual(1, new Simulation().ExecuteScalar(
             "create table t (id int not null, name varchar(50) null); " +
