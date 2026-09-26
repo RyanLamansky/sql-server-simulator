@@ -225,8 +225,9 @@ partial class Simulation
     /// </para>
     /// <para>
     /// Probe-confirmed: a table variable must already be declared (Msg 1087
-    /// otherwise); regular table targets surface Msg 208; the column-list
-    /// count must match the projection count (Msg 213); columns named in
+    /// otherwise); regular table targets surface Msg 208; the projection count
+    /// must match a column list's — Msg 121 when it has more items, Msg 120
+    /// when fewer (probed 2026-09-26 against SQL Server 2025); columns named in
     /// the list must exist in the target (Msg 207). Target columns not
     /// covered by the projection receive their column-level
     /// <c>DEFAULT</c> (or NULL when none is declared) — see
@@ -277,8 +278,10 @@ partial class Simulation
             if (context.Token is not Operator { Character: ')' })
                 throw SimulatedSqlException.SyntaxErrorNear(context);
             context.MoveNextOptional();
-            if (ordinals.Count != projectionColumnCount)
-                throw SimulatedSqlException.ColumnCountDoesNotMatchTableDefinition();
+            if (projectionColumnCount > ordinals.Count)
+                throw SimulatedSqlException.InsertSelectListMoreThanInsertList();
+            if (projectionColumnCount < ordinals.Count)
+                throw SimulatedSqlException.InsertSelectListFewerThanInsertList();
             // An explicit list may not name the target's identity column, and
             // SET IDENTITY_INSERT on the target does not unlock it (probed).
             // The arity check above runs first, matching real's ordering.

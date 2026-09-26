@@ -2322,6 +2322,28 @@ internal sealed partial class Selection
     /// tbl.object_id)</c> inside an ON, which needs the outer <c>tbl</c> in
     /// scope for the inner query to bind.
     /// </summary>
+    /// <summary>
+    /// Parses a FROM source's argument list with the source's scope as the
+    /// outer scope of any subquery inside it, so a subquery argument under
+    /// <c>APPLY</c> correlates to the left side as a bare column argument
+    /// does (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    private static T InArgumentScope<T>(ParserContext context, QueryScope scope, Func<T> parse)
+    {
+        if (scope.OuterTypeResolver is null)
+            return parse();
+        var saved = context.OuterTypeResolver;
+        context.OuterTypeResolver = scope.OuterTypeResolver;
+        try
+        {
+            return parse();
+        }
+        finally
+        {
+            context.OuterTypeResolver = saved;
+        }
+    }
+
     private static BooleanExpression ParseOnPredicateWithScope(ParserContext context, List<FromSource> sources, int scopeStart, Func<MultiPartName, SqlType>? outerTypeResolver)
     {
         var scope = sources.GetRange(scopeStart, sources.Count - scopeStart).ToArray();
@@ -2784,23 +2806,23 @@ internal sealed partial class Selection
                 // Server's grammar, so dispatch fires before ParseObjectName
                 // / cursor advance.
                 if (string.Equals(tableName.Value, "OPENJSON", StringComparison.OrdinalIgnoreCase))
-                    return BuiltInRowsetSource(context, ParseOpenJson(context, scope.OuterTypeResolver));
+                    return BuiltInRowsetSource(context, InArgumentScope(context, scope, () => ParseOpenJson(context, scope.OuterTypeResolver)));
 
                 if (string.Equals(tableName.Value, "STRING_SPLIT", StringComparison.OrdinalIgnoreCase))
-                    return BuiltInRowsetSource(context, ParseStringSplit(context, scope.OuterTypeResolver));
+                    return BuiltInRowsetSource(context, InArgumentScope(context, scope, () => ParseStringSplit(context, scope.OuterTypeResolver)));
 
                 // GENERATE_SERIES: single-column (`value`) plan, SQL Server 2022+.
                 if (string.Equals(tableName.Value, "GENERATE_SERIES", StringComparison.OrdinalIgnoreCase))
-                    return BuiltInRowsetSource(context, ParseGenerateSeries(context, scope.OuterTypeResolver));
+                    return BuiltInRowsetSource(context, InArgumentScope(context, scope, () => ParseGenerateSeries(context, scope.OuterTypeResolver)));
 
                 // The two REGEXP rowset members ship only at compatibility
                 // level 170; below it the name falls through to the ordinary
                 // object-name path, which raises the Msg 208 real raises.
                 if (IsRegexpRowsetName(tableName.Value, context))
                 {
-                    return BuiltInRowsetSource(context, string.Equals(tableName.Value, "REGEXP_MATCHES", StringComparison.OrdinalIgnoreCase)
+                    return BuiltInRowsetSource(context, InArgumentScope(context, scope, () => string.Equals(tableName.Value, "REGEXP_MATCHES", StringComparison.OrdinalIgnoreCase)
                         ? ParseRegexpMatches(context, scope.OuterTypeResolver)
-                        : ParseRegexpSplitToTable(context, scope.OuterTypeResolver));
+                        : ParseRegexpSplitToTable(context, scope.OuterTypeResolver)));
                 }
 
                 // fn_listextendedproperty: 7-arg system TVF projecting the
@@ -3078,7 +3100,7 @@ internal sealed partial class Selection
                     if (context.Token is Operator { Character: '(' })
                     {
                         context.MoveNextRequired();
-                        var tvfArgs = Expressions.UserFunctionCall.ParseFunctionArguments(function, context);
+                        var tvfArgs = InArgumentScope(context, scope, () => Expressions.UserFunctionCall.ParseFunctionArguments(function, context));
                         // ParseFunctionArguments leaves the cursor on the closing `)`.
                         var tvfAlias = ConsumeOptionalAlias(context);
                         var outputColumns = function is InlineTableValuedFunction inline

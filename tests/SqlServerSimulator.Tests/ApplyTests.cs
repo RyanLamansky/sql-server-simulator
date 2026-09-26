@@ -187,4 +187,16 @@ public sealed class ApplyTests
             _ = connection.CreateCommand(
                 "select 1 from blogs as b outer join posts as p on b.id = p.blog_id").ExecuteScalar());
     }
+
+    /// <summary>
+    /// A subquery in a rowset function's or TVF's argument list under APPLY
+    /// correlates to the left side, as a bare column argument does (probed
+    /// 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select j.value from t cross apply openjson((select t.n for json path)) j", "{\"n\":\"x,y\"}")]
+    [DataRow("select string_agg(s.value, '|') from t cross apply string_split((select n from t t2 where t2.id = t.id), ',') s", "x|y")]
+    [DataRow("select g.value from t cross apply generate_series((select t.id), 1) g", "1")]
+    public void ASubqueryArgument_CorrelatesToTheLeftSide(string query, string expected)
+        => Assert.AreEqual(expected, Convert.ToString(new Simulation().ExecuteScalar("create table t (id int, n varchar(5)); insert t values (1, 'x,y'); " + query), System.Globalization.CultureInfo.InvariantCulture));
 }

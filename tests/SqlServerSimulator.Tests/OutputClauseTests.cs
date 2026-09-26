@@ -514,4 +514,15 @@ public class OutputClauseTests
             select id from @o
             """));
     }
+
+    /// <summary>
+    /// OUTPUT INTO a column list measures the projection against it the way
+    /// INSERT … SELECT does: Msg 121 for more items, Msg 120 for fewer (probed
+    /// 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("insert t (v) output inserted.id, inserted.v into u (a) values (1)", 121)]
+    [DataRow("insert t (v) output inserted.v into u (a, b) values (1)", 120)]
+    public void OutputIntoAColumnList_MeasuresTheProjectionAgainstIt(string statement, int number)
+        => new Simulation().AssertSqlError("create table t (id int identity, v int); create table u (a int, b int); " + statement, number);
 }
