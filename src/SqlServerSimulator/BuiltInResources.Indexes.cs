@@ -993,10 +993,14 @@ internal static partial class BuiltInResources
         var primaryRole = SqlValue.FromByte(1);
         var primaryRoleDesc = SqlValue.FromString(NVarcharSqlType.Get(60, Collation.Catalog, Coercibility.Implicit), "PRIMARY");
         var nullName = SqlValue.Null(SqlType.SystemName);
+        var trueBit = SqlValue.FromBoolean(true);
         foreach (var (table, indexId, name, isHeap) in EnumerateTableIndexIdentities(database, batch))
         {
             if (isHeap)
                 continue;
+            // A filtered index's statistics carry its filter (probed 2026-09-26
+            // against SQL Server 2025).
+            var filtered = table.Indexes.Find(index => index.Filter is not null && string.Equals(index.Name, name, StringComparison.Ordinal));
             yield return
             [
                 SqlValue.FromInt32(table.ObjectId),
@@ -1005,8 +1009,8 @@ internal static partial class BuiltInResources
                 falseBit, // auto_created
                 falseBit, // user_created
                 falseBit, // no_recompute
-                falseBit, // has_filter
-                nullFilter,
+                filtered is null ? falseBit : trueBit, // has_filter
+                filtered?.FilterDefinition is { } filter ? SqlValue.FromNVarchar(filter) : nullFilter,
                 falseBit, // is_temporary
                 falseBit, // is_incremental
                 falseBit, // has_persisted_sample
@@ -1020,7 +1024,6 @@ internal static partial class BuiltInResources
         }
         // CREATE STATISTICS-declared standalone statistics: user_created = 1,
         // stats_id drawn from the same per-table sequence the index ids use.
-        var trueBit = SqlValue.FromBoolean(true);
         foreach (var schema in database.Schemas.Values)
         {
             foreach (var table in CatalogTables(schema, batch))
@@ -1264,7 +1267,6 @@ internal static partial class BuiltInResources
         var falseBit = SqlValue.FromBoolean(false);
         var trueBit = SqlValue.FromBoolean(true);
         var zeroByte = SqlValue.FromByte(0);
-        var nullByte = SqlValue.Null(SqlType.TinyInt);
         foreach (var schema in database.Schemas.Values)
         {
             foreach (var table in ConstraintHosts(schema, batch))
@@ -1279,7 +1281,7 @@ internal static partial class BuiltInResources
                     var indexIdValue = SqlValue.FromInt32(identity.IndexId);
                     if (identity.Constraint is { } key)
                     {
-                        foreach (var row in EmitKeyConstraintColumns(tableObjectId, indexIdValue, key, table, identity.Type == 1, falseBit, trueBit, zeroByte, nullByte))
+                        foreach (var row in EmitKeyConstraintColumns(tableObjectId, indexIdValue, key, table, identity.Type == 1, falseBit, trueBit, zeroByte))
                             yield return row;
                     }
                     else
@@ -1303,8 +1305,8 @@ internal static partial class BuiltInResources
                         zeroByte,
                         falseBit,
                         falseBit,
-                        nullByte,
-                        nullByte,
+                        zeroByte,
+                        zeroByte,
                     ];
                 }
             }
@@ -1343,8 +1345,8 @@ internal static partial class BuiltInResources
                     zeroByte,
                     keyCol.IsDescending ? trueBit : falseBit,
                     falseBit,
-                    nullByte,
-                    nullByte,
+                    zeroByte,
+                    zeroByte,
                 ];
             }
             for (var i = 0; i < index.IncludedColumnOrdinals.Length; i++)
@@ -1358,8 +1360,8 @@ internal static partial class BuiltInResources
                     zeroByte,
                     falseBit,
                     trueBit,
-                    nullByte,
-                    nullByte,
+                    zeroByte,
+                    zeroByte,
                 ];
             }
         }
@@ -1372,7 +1374,7 @@ internal static partial class BuiltInResources
     /// </summary>
     private static IEnumerable<SqlValue[]> EmitKeyConstraintColumns(
         SqlValue tableObjectId, SqlValue indexIdValue, KeyConstraint constraint, HeapTable table, bool isClustered,
-        SqlValue falseBit, SqlValue trueBit, SqlValue zeroByte, SqlValue nullByte)
+        SqlValue falseBit, SqlValue trueBit, SqlValue zeroByte)
     {
         var columnIds = new int[constraint.StorageOrdinals.Length];
         for (var i = 0; i < columnIds.Length; i++)
@@ -1389,8 +1391,8 @@ internal static partial class BuiltInResources
                 zeroByte,
                 constraint.IsDescending(i) ? trueBit : falseBit,
                 falseBit,
-                nullByte,
-                nullByte,
+                zeroByte,
+                zeroByte,
             ];
         }
     }

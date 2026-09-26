@@ -1503,4 +1503,36 @@ public sealed class CatalogViewTests
             """);
         AreEqual(expected, simulation.ExecuteScalar(query));
     }
+
+    /// <summary>
+    /// The INFORMATION_SCHEMA views real defines as queries over sys.*, and
+    /// the catalog cells a content diff against real turned up (probed
+    /// 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select concat(CONSTRAINT_NAME, '|', CHECK_CLAUSE) from INFORMATION_SCHEMA.CHECK_CONSTRAINTS", "ck_amt|([amt]>=(0))")]
+    [DataRow("select concat(VIEW_NAME, '|', TABLE_NAME, '|', count(*) over ()) from INFORMATION_SCHEMA.VIEW_TABLE_USAGE", "v|p|1")]
+    [DataRow("select string_agg(COLUMN_NAME, ',') within group (order by COLUMN_NAME) from INFORMATION_SCHEMA.VIEW_COLUMN_USAGE", "code,id")]
+    [DataRow("select concat(TABLE_NAME, '|', COLUMN_NAME, '|', ORDINAL_POSITION, '|', DATA_TYPE, NUMERIC_PRECISION, ',', NUMERIC_SCALE) from INFORMATION_SCHEMA.ROUTINE_COLUMNS", "fn|x|1|decimal5,1")]
+    [DataRow("select concat(SEQUENCE_NAME, '|', DATA_TYPE, NUMERIC_PRECISION, '|', cast(START_VALUE as bigint), '|', cast(INCREMENT as bigint), '|', DECLARED_DATA_TYPE) from INFORMATION_SCHEMA.SEQUENCES", "sq|bigint19|5|3|bigint")]
+    [DataRow("select concat(DOMAIN_NAME, '|', TABLE_NAME, '|', COLUMN_NAME) from INFORMATION_SCHEMA.COLUMN_DOMAIN_USAGE", "flag|p|f")]
+    [DataRow("select VIEW_DEFINITION from INFORMATION_SCHEMA.VIEWS", "create view v with schemabinding as select id, code from dbo.p")]
+    [DataRow("select concat(uses_database_collation, is_schema_bound) from sys.sql_modules where object_id = object_id('v')", "11")]
+    [DataRow("select concat(has_filter, filter_definition) from sys.stats where name = 'ix_c'", "1([note] IS NOT NULL)")]
+    [DataRow("select count(*) from sys.index_columns where object_id = object_id('c') and column_store_order_ordinal = 0 and data_clustering_ordinal = 0", "3")]
+    public void CatalogContents_MatchReal(string query, string expected)
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            "create type flag from bit",
+            """
+            create table p (id int identity(10, 5) not null constraint pk_p primary key, code char(3) not null, amt decimal(9,2) null constraint ck_amt check (amt >= 0), f flag);
+            create table c (id int not null, pid int not null, note nvarchar(200), constraint pk_c primary key (id, pid));
+            create unique index ix_c on c (note) where note is not null;
+            create sequence sq as bigint start with 5 increment by 3;
+            """,
+            "create view v with schemabinding as select id, code from dbo.p",
+            "create function fn (@x decimal(5,1)) returns table as return select @x as x");
+        AreEqual(expected, Convert.ToString(simulation.ExecuteScalar(query), System.Globalization.CultureInfo.InvariantCulture));
+    }
 }

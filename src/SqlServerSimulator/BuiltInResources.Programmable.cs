@@ -40,33 +40,39 @@ internal static partial class BuiltInResources
         var isoCs = SqlValue.FromSystemName("iso_1");
         var radix10 = SqlValue.FromInt16(10);
         var radix2 = SqlValue.FromInt16(2);
-        Iso("COLUMNS",
-        [
-            new("TABLE_CATALOG", nvarchar128Baseline, 128, true),
-            new("TABLE_SCHEMA", nvarchar128Baseline, 128, true),
-            new("TABLE_NAME", SqlType.SystemName, 128, false),
-            new("COLUMN_NAME", SqlType.SystemName, 128, true),
-            new("ORDINAL_POSITION", SqlType.Int32, null, true),
-            new("COLUMN_DEFAULT", SqlType.NVarchar, 4000, true),
-            new("IS_NULLABLE", SqlType.Varchar, 3, true),
-            new("DATA_TYPE", nvarchar128Baseline, 128, true),
-            new("CHARACTER_MAXIMUM_LENGTH", SqlType.Int32, null, true),
-            new("CHARACTER_OCTET_LENGTH", SqlType.Int32, null, true),
-            new("NUMERIC_PRECISION", SqlType.TinyInt, null, true),
-            new("NUMERIC_PRECISION_RADIX", SqlType.SmallInt, null, true),
-            new("NUMERIC_SCALE", SqlType.Int32, null, true),
-            new("DATETIME_PRECISION", SqlType.SmallInt, null, true),
-            new("CHARACTER_SET_CATALOG", SqlType.SystemName, 128, true),
-            new("CHARACTER_SET_SCHEMA", SqlType.SystemName, 128, true),
-            new("CHARACTER_SET_NAME", SqlType.SystemName, 128, true),
-            new("COLLATION_CATALOG", SqlType.SystemName, 128, true),
-            new("COLLATION_SCHEMA", SqlType.SystemName, 128, true),
-            new("COLLATION_NAME", SqlType.SystemName, 128, true),
-            new("DOMAIN_CATALOG", SqlType.SystemName, 128, true),
-            new("DOMAIN_SCHEMA", SqlType.SystemName, 128, true),
-            new("DOMAIN_NAME", SqlType.SystemName, 128, true),
-        ], (batch, database) =>
-            EnumerateInformationSchemaColumns(batch, database, defaultCollation, unicodeCs, isoCs, radix10, radix2));
+        // INFORMATION_SCHEMA.ROUTINE_COLUMNS takes the same 23 columns over
+        // the columns a table-valued function returns, its ORDINAL_POSITION
+        // the column_id and NOT NULL (probed 2026-09-26 against SQL Server 2025).
+        HeapColumn[] ColumnsShape(bool ordinalNullable) =>
+            [
+                new("TABLE_CATALOG", nvarchar128Baseline, 128, true),
+                new("TABLE_SCHEMA", nvarchar128Baseline, 128, true),
+                new("TABLE_NAME", SqlType.SystemName, 128, false),
+                new("COLUMN_NAME", SqlType.SystemName, 128, true),
+                new("ORDINAL_POSITION", SqlType.Int32, null, ordinalNullable),
+                new("COLUMN_DEFAULT", SqlType.NVarchar, 4000, true),
+                new("IS_NULLABLE", SqlType.Varchar, 3, true),
+                new("DATA_TYPE", nvarchar128Baseline, 128, true),
+                new("CHARACTER_MAXIMUM_LENGTH", SqlType.Int32, null, true),
+                new("CHARACTER_OCTET_LENGTH", SqlType.Int32, null, true),
+                new("NUMERIC_PRECISION", SqlType.TinyInt, null, true),
+                new("NUMERIC_PRECISION_RADIX", SqlType.SmallInt, null, true),
+                new("NUMERIC_SCALE", SqlType.Int32, null, true),
+                new("DATETIME_PRECISION", SqlType.SmallInt, null, true),
+                new("CHARACTER_SET_CATALOG", SqlType.SystemName, 128, true),
+                new("CHARACTER_SET_SCHEMA", SqlType.SystemName, 128, true),
+                new("CHARACTER_SET_NAME", SqlType.SystemName, 128, true),
+                new("COLLATION_CATALOG", SqlType.SystemName, 128, true),
+                new("COLLATION_SCHEMA", SqlType.SystemName, 128, true),
+                new("COLLATION_NAME", SqlType.SystemName, 128, true),
+                new("DOMAIN_CATALOG", SqlType.SystemName, 128, true),
+                new("DOMAIN_SCHEMA", SqlType.SystemName, 128, true),
+                new("DOMAIN_NAME", SqlType.SystemName, 128, true),
+            ];
+        Iso("COLUMNS", ColumnsShape(ordinalNullable: true), (batch, database) =>
+            EnumerateInformationSchemaColumns(batch, database, defaultCollation, unicodeCs, isoCs, radix10, radix2, routineColumns: false));
+        Iso("ROUTINE_COLUMNS", ColumnsShape(ordinalNullable: false), (batch, database) =>
+            EnumerateInformationSchemaColumns(batch, database, defaultCollation, unicodeCs, isoCs, radix10, radix2, routineColumns: true));
 
         // INFORMATION_SCHEMA.SCHEMATA: ISO-standard 6-column shape. Rows cover
         // the materialized schemas plus the catalog-only fixed ones (guest and
@@ -338,10 +344,7 @@ internal static partial class BuiltInResources
         ], (batch, database) =>
             EnumerateInformationSchemaParameters(batch, database, modeIn, modeInOut, modeOut, unicodeCs, isoCs, radix10, radix2));
 
-        // INFORMATION_SCHEMA.VIEWS: ISO-standard 6-column shape. Probe-
-        // confirmed: VIEW_DEFINITION is NULL only for WITH ENCRYPTION views
-        // (the simulator parses ENCRYPTION but doesn't track it — minor
-        // fidelity gap, the body text always surfaces). IS_UPDATABLE is
+        // INFORMATION_SCHEMA.VIEWS: ISO-standard 6-column shape. IS_UPDATABLE is
         // probe-confirmed to always report 'NO' in real SQL Server even for
         // views that are actually updatable — matching that by hardcoding.
         var checkOptionNone = SqlValue.FromVarchar("NONE");
@@ -1242,7 +1245,8 @@ internal static partial class BuiltInResources
         SqlValue unicodeCs,
         SqlValue isoCs,
         SqlValue radix10,
-        SqlValue radix2)
+        SqlValue radix2,
+        bool routineColumns)
     {
         _ = batch;
         var catalog = SqlValue.FromSystemName(database.Name);
@@ -1298,6 +1302,22 @@ internal static partial class BuiltInResources
         foreach (var schema in database.Schemas.Values)
         {
             var schemaName = SqlValue.FromSystemName(schema.Name);
+            if (routineColumns)
+            {
+                foreach (var fn in schema.Functions.Values.OrderBy(f => f.ObjectId))
+                {
+                    var outputColumns = fn switch
+                    {
+                        InlineTableValuedFunction inline => inline.OutputColumns,
+                        MultiStatementTableValuedFunction multiStatement => multiStatement.OutputColumns,
+                        _ => [],
+                    };
+                    var functionName = SqlValue.FromSystemName(fn.Name);
+                    for (var i = 0; i < outputColumns.Length; i++)
+                        yield return Row(schemaName, functionName, outputColumns[i], i + 1);
+                }
+                continue;
+            }
             foreach (var t in CatalogTables(schema, batch).OrderBy(t => t.ObjectId))
             {
                 var tableName = SqlValue.FromSystemName(t.Name);
@@ -1621,9 +1641,10 @@ internal static partial class BuiltInResources
 
     /// <summary>
     /// Rows for <c>INFORMATION_SCHEMA.VIEWS</c>: per-view ISO-shape entries.
-    /// VIEW_DEFINITION surfaces the stored body text (real SQL Server
-    /// returns NULL for WITH ENCRYPTION views; the simulator currently
-    /// always surfaces it — minor fidelity gap). CHECK_OPTION is 'CASCADE'
+    /// VIEW_DEFINITION is the whole module text <c>OBJECT_DEFINITION</c>
+    /// reports, cut to 4000 characters and NULL under <c>WITH ENCRYPTION</c>,
+    /// as ROUTINE_DEFINITION is (probed 2026-09-26 against SQL Server 2025).
+    /// CHECK_OPTION is 'CASCADE'
     /// when WITH CHECK OPTION was specified, 'NONE' otherwise. IS_UPDATABLE
     /// is hardcoded 'NO' (probe-confirmed: real SQL Server reports 'NO'
     /// even for actually-updatable views).
@@ -1646,7 +1667,7 @@ internal static partial class BuiltInResources
                     catalog,
                     schemaName,
                     SqlValue.FromSystemName(view.Name),
-                    SqlValue.FromNVarchar(view.BodyText),
+                    RoutineDefinition(view.DefinitionText),
                     view.WithCheckOption ? checkOptionCascade : checkOptionNone,
                     isUpdatableNo,
                 ];

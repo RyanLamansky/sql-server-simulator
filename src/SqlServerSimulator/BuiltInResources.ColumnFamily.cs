@@ -315,7 +315,9 @@ internal static partial class BuiltInResources
                 obj.UsesAnsiNulls ? on : off, // uses_ansi_nulls
                 obj.UsesQuotedIdentifier ? on : off, // uses_quoted_identifier
                 obj is View { IsSchemaBound: true } or UserDefinedFunction { IsSchemaBound: true } ? on : off, // is_schema_bound
-                off, // uses_database_collation
+                // Real reports every schema-bound module as depending on the
+                // database collation, whatever it reads (probed 2026-09-26).
+                obj is View { IsSchemaBound: true } or UserDefinedFunction { IsSchemaBound: true } ? on : off, // uses_database_collation
                 off, // is_recompiled
                 obj is ScalarFunction { ReturnsNullOnNullInput: true } ? on : off, // null_on_null_input
                 obj.ExecuteAsPrincipalId is { } principalId ? SqlValue.FromInt32(principalId) : nullPrincipal,

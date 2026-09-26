@@ -157,7 +157,7 @@ internal static partial class BuiltInResources
         var nonSchemaBoundDesc = SqlValue.FromNVarchar(nvarchar60Catalog, "OBJECT_OR_COLUMN_REFERENCE_NON_SCHEMA_BOUND");
         var schemaBoundDesc = SqlValue.FromNVarchar(nvarchar60Catalog, "OBJECT_OR_COLUMN_REFERENCE_SCHEMA_BOUND");
 
-        foreach (var (entity, reference, referencedId, minorId, selected, updated, selectAll) in EnumerateLegacyDependencies(database))
+        foreach (var (entity, reference, referencedId, minorId, selected, updated, selectAll, _) in EnumerateLegacyDependencies(database))
         {
             var isSchemaBound = reference.IsSchemaBound;
             yield return
@@ -178,7 +178,7 @@ internal static partial class BuiltInResources
     private static IEnumerable<SqlValue[]> EnumerateSysdepends(Database database)
     {
         var zero = SqlValue.FromInt16(0);
-        foreach (var (entity, reference, referencedId, minorId, selected, updated, selectAll) in EnumerateLegacyDependencies(database))
+        foreach (var (entity, reference, referencedId, minorId, selected, updated, selectAll, _) in EnumerateLegacyDependencies(database))
         {
             // status packs the same three flags the trailing bit columns carry
             // one apiece, probe-confirmed: 2 = selall, 4 = resultobj, 8 =
@@ -235,7 +235,7 @@ internal static partial class BuiltInResources
     /// and nothing else.
     /// </para>
     /// </summary>
-    private static IEnumerable<(ModuleDependencies.Entity Entity, ModuleDependencies.Reference Reference, int ReferencedId, int MinorId, bool Selected, bool Updated, bool SelectAll)>
+    private static IEnumerable<(ModuleDependencies.Entity Entity, ModuleDependencies.Reference Reference, int ReferencedId, int MinorId, bool Selected, bool Updated, bool SelectAll, SchemaObject Referenced)>
         EnumerateLegacyDependencies(Database database)
     {
         foreach (var entity in ModuleDependencies.Enumerate(database))
@@ -273,9 +273,9 @@ internal static partial class BuiltInResources
 
                 var referencedId = resolvedObject.ObjectId;
                 if (reference.HasObjectReference && (columnRows.Count == 0 || reference.IsSchemaBound))
-                    yield return (entity, reference, referencedId, 0, reference.IsSelected, reference.IsUpdated, reference.IsSelectAll);
+                    yield return (entity, reference, referencedId, 0, reference.IsSelected, reference.IsUpdated, reference.IsSelectAll, resolvedObject);
                 foreach (var (columnId, use) in columnRows)
-                    yield return (entity, reference, referencedId, columnId, use.Selected, use.Updated, use.SelectAll);
+                    yield return (entity, reference, referencedId, columnId, use.Selected, use.Updated, use.SelectAll, resolvedObject);
             }
         }
     }

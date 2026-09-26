@@ -67,6 +67,7 @@ internal static partial class BuiltInResources
         RegisterProgrammable(views);
         RegisterConstraintsAndTriggers(views);
         RegisterDependencies(views);
+        RegisterInformationSchemaUsage(views);
         RegisterIndexes(views);
         RegisterSecurity(views);
         RegisterFullTextXmlSpatial(views);
