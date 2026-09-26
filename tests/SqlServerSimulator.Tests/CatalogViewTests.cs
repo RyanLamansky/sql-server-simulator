@@ -1418,4 +1418,23 @@ public sealed class CatalogViewTests
         AreEqual(type, simulation.ExecuteScalar($"select type_name(user_type_id) from sys.all_columns where object_id = object_id('{view}') and name = '{column}'"));
         _ = simulation.ExecuteScalar($"create table t (a int); create statistics s on t (a); select count(*) from (select {column} c from {view}) d");
     }
+
+    /// <summary>
+    /// The columns real lists that answer alike for everything the simulator
+    /// holds — replication, CDC and ledger flags, retention, encryption — are
+    /// declared, so selecting one isn't a Msg 207 (probed 2026-09-26 against
+    /// SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select concat(parent_object_id, ':', data_retention_period, ':', data_retention_period_unit_desc, ':', ledger_type_desc) from sys.tables", "0:-1:INFINITE:NON_LEDGER_TABLE")]
+    [DataRow("select concat(cast(is_published as int), ':', ledger_view_type_desc) from sys.views", "0:NON_LEDGER_VIEW")]
+    [DataRow("select concat(rtrim(type), ':', type_desc) from sys.sequences", "SO:SEQUENCE_OBJECT")]
+    [DataRow("select concat(isnull(principal_id, -1), ':', cast(is_execution_replicated as int)) from sys.procedures", "-1:0")]
+    [DataRow("select ledger_view_type_desc from sys.system_views where name = 'objects'", "NON_LEDGER_VIEW")]
+    public void ConstantCatalogColumns_AreDeclared(string query, string expected)
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches("create table t (a int)", "create view v as select a from t", "create procedure p as select 1", "create sequence sq");
+        AreEqual(expected, simulation.ExecuteScalar(query));
+    }
 }

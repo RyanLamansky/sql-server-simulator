@@ -172,6 +172,26 @@ internal sealed class CatalogView(
     public readonly bool StableWithinStatement = !name.StartsWith("dm_", StringComparison.Ordinal);
 
     /// <summary>
+    /// This view with <paramref name="extras"/> declared after its own
+    /// columns, each carrying the same value on every row — the columns real
+    /// lists that answer alike for every object the simulator can hold.
+    /// </summary>
+    public CatalogView WithConstantColumns((HeapColumn Column, SqlValue Value)[] extras)
+    {
+        HeapColumn[] columns = [.. this.Columns, .. extras.Select(extra => extra.Column)];
+        var values = Array.ConvertAll(extras, extra => extra.Value);
+        var generator = this.RowGenerator;
+        var filtered = this.FilteredRowGenerator;
+        return new CatalogView(
+            this.Name,
+            columns,
+            (batch, database) => generator(batch, database).Select(row => (SqlValue[])[.. row, .. values]),
+            this.MasterScoped,
+            filtered is null ? null : (batch, database, filter) => filtered(batch, database, filter).Select(row => (SqlValue[])[.. row, .. values]),
+            this.PushdownColumns);
+    }
+
+    /// <summary>
     /// This view with its columns presented in <paramref name="order"/>, each
     /// generated row permuted to match; a column the order doesn't name keeps
     /// its relative place after the named ones. Raises when the order names a
