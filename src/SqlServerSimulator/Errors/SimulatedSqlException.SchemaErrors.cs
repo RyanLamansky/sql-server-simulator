@@ -2003,7 +2003,8 @@ partial class SimulatedSqlException
     /// <summary>
     /// Mimics SQL Server's Msg 4712 — <c>TRUNCATE TABLE</c> targeted a table
     /// another table's FOREIGN KEY references, enabled or not, raised when the
-    /// statement runs. Probe-confirmed against SQL Server 2025 (2026-09-24).
+    /// statement runs and naming the table as written (probed 2026-09-24 and
+    /// 2026-09-26 against SQL Server 2025).
     /// </summary>
     internal static SimulatedSqlException CannotTruncateTableReferencedByForeignKey(string tableName) =>
         new($"Cannot truncate table '{tableName}' because it is being referenced by a FOREIGN KEY constraint.", 4712, 16, 1);

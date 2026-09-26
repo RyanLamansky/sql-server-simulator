@@ -889,6 +889,16 @@ partial class Simulation
         _ = batch.AwaitLiveKeyHolders(table, storageOrdinals, commons, probe);
     }
 
+    /// <summary>
+    /// The table a duplicate-key message names: schema-qualified, a temp
+    /// table or table variable under <c>dbo</c> (probed 2026-09-26 against SQL
+    /// Server 2025: a key on <c>s.p</c> names <c>s.p</c>).
+    /// </summary>
+    private static string QualifiedForViolation(HeapTable table) =>
+        table.OwningDatabase is { } database && SchemaQualifyTableName(table, database) is var qualified && qualified.Contains('.', StringComparison.Ordinal)
+            ? qualified
+            : $"{Database.DefaultSchemaName}.{table.Name}";
+
     /// <summary>Msg 2627 for <paramref name="constraint"/>, rendering the
     /// offending key tuple the way SQL Server does. Shared by the INSERT and
     /// UPDATE enforcement paths.</summary>
@@ -901,7 +911,7 @@ partial class Simulation
                 _ = sb.Append(", ");
             _ = sb.Append(FormatKeyValue(storedValues[constraint.StorageOrdinals[i]]));
         }
-        return SimulatedSqlException.ViolationOfKeyConstraint(constraint.ViolationKindWord, constraint.Name, table.Name, sb.ToString());
+        return SimulatedSqlException.ViolationOfKeyConstraint(constraint.ViolationKindWord, constraint.Name, QualifiedForViolation(table), sb.ToString());
     }
 
     /// <summary>
@@ -918,7 +928,7 @@ partial class Simulation
                 _ = sb.Append(", ");
             _ = sb.Append(FormatKeyValue(fullRow[constraint.FullOrdinals[i]]));
         }
-        return SimulatedSqlException.ViolationOfKeyConstraint(constraint.ViolationKindWord, constraint.Name, table.Name, sb.ToString());
+        return SimulatedSqlException.ViolationOfKeyConstraint(constraint.ViolationKindWord, constraint.Name, QualifiedForViolation(table), sb.ToString());
     }
 
     /// <inheritdoc cref="KeyConstraintViolationOnComputedKey"/>
@@ -966,7 +976,7 @@ partial class Simulation
         var storedColumns = destinationTable.StoredColumns;
         var lobStore = destinationTable.Heap;
         SqlValue[]? existingRowValues = null;
-        var qualifiedTableName = $"{Database.DefaultSchemaName}.{destinationTable.Name}";
+        var qualifiedTableName = QualifiedForViolation(destinationTable);
 
         foreach (var index in destinationTable.Indexes)
         {

@@ -83,7 +83,7 @@ partial class Simulation
         // disabled; only a self-reference is let through (probe-confirmed
         // against SQL Server 2025).
         if (table.IncomingForeignKeys.Exists(fk => fk.ChildTable != table))
-            throw SimulatedSqlException.CannotTruncateTableReferencedByForeignKey(name.Leaf);
+            throw SimulatedSqlException.CannotTruncateTableReferencedByForeignKey(name.Written);
 
         // Sch-M on the target for the duration of the statement — waits for
         // any concurrent Sch-S holders to drain before the destructive page-

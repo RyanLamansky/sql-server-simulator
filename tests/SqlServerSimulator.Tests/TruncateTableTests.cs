@@ -192,4 +192,15 @@ public sealed class TruncateTableTests
         // Msg 4701.
         _ = new Simulation().ExecuteNonQuery("if 1=0 truncate table does_not_exist");
     }
+
+    /// <summary>Msg 4712 names the table as written (probed 2026-09-26 against SQL Server 2025).</summary>
+    [TestMethod]
+    [DataRow("truncate table s.p", "s.p")]
+    [DataRow("truncate table [s].[p]", "s.p")]
+    public void AReferencedTable_IsNamedAsWritten(string truncate, string written)
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create schema s", "create table s.p (id int primary key); create table s.c (pid int references s.p(id))");
+        sim.AssertSqlError(truncate, 4712, $"Cannot truncate table '{written}' because it is being referenced by a FOREIGN KEY constraint.");
+    }
 }

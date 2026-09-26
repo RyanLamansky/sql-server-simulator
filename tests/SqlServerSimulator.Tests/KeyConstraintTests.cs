@@ -678,4 +678,15 @@ public sealed class KeyConstraintTests
             2627);
         Assert.Contains($"The duplicate key value is ({expected}).", ex.Message);
     }
+
+    /// <summary>A duplicate key names its table under the table's own schema (probed 2026-09-26 against SQL Server 2025).</summary>
+    [TestMethod]
+    [DataRow("insert s.p values (1, 'z')", "Violation of PRIMARY KEY constraint 'pk_p'. Cannot insert duplicate key in object 's.p'. The duplicate key value is (1).")]
+    [DataRow("insert s.p values (2, 'a')", "Violation of UNIQUE KEY constraint 'uq_code'. Cannot insert duplicate key in object 's.p'. The duplicate key value is (a).")]
+    public void ADuplicateKey_NamesTheTablesSchema(string insert, string message)
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create schema s", "create table s.p (id int constraint pk_p primary key, code varchar(5) constraint uq_code unique); insert s.p values (1, 'a')");
+        sim.AssertSqlError(insert, 2627, message);
+    }
 }

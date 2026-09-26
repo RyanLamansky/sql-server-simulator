@@ -98,8 +98,8 @@ partial class SimulatedSqlException
     /// <c>"UNIQUE KEY"</c>; <paramref name="formattedKeyValues"/> is the
     /// rendered tuple text without enclosing parens (e.g. <c>"1, &lt;NULL&gt;"</c>).
     /// </summary>
-    internal static SimulatedSqlException ViolationOfKeyConstraint(string kindWord, string constraintName, string tableName, string formattedKeyValues) =>
-        new($"Violation of {kindWord} constraint '{constraintName}'. Cannot insert duplicate key in object 'dbo.{tableName}'. The duplicate key value is ({formattedKeyValues}).", 2627, 14, 1);
+    internal static SimulatedSqlException ViolationOfKeyConstraint(string kindWord, string constraintName, string qualifiedTableName, string formattedKeyValues) =>
+        new($"Violation of {kindWord} constraint '{constraintName}'. Cannot insert duplicate key in object '{qualifiedTableName}'. The duplicate key value is ({formattedKeyValues}).", 2627, 14, 1);
 
     /// <summary>
     /// Mimics SQL Server error 2601: an INSERT or UPDATE produced a row
