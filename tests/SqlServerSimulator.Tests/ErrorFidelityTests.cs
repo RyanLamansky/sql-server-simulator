@@ -110,6 +110,29 @@ public sealed class ErrorFidelityTests
         AreEqual(3621, ex.Errors[^1].Number);
     }
 
+    [TestMethod]
+    [DataRow("insert t2 values (1, 2)", 213)]
+    [DataRow("select a, count(*) from t2", 8120)]
+    [DataRow("select * from (select a + 1 from t2) d", 8155)]
+    [DataRow("select a from t2 with (nosuchhint)", 321)]
+    [DataRow("select a from t2 where a = cast(0x01 as xml)", 206)]
+    public void DeferredCompileError_EndsTheBatchPastItsOwnTry(string statement, int number)
+    {
+        var simulation = new Simulation();
+        var ex = simulation.AssertSqlError($"create table t2 (a int); begin try {statement} end try begin catch print 'caught' end catch; create table u (a int)", number);
+        AreEqual(1, ex.Errors.Count);
+        AreEqual(DBNull.Value, simulation.ExecuteScalar("select object_id('u')"));
+    }
+
+    [TestMethod]
+    public void RunTimeSeverity15_EndsTheBatch_ButATryCatchesIt()
+    {
+        var simulation = new Simulation();
+        _ = simulation.AssertSqlError("declare @n int = -1; select top (@n) 1; create table u (a int)", 127);
+        AreEqual(DBNull.Value, simulation.ExecuteScalar("select object_id('u')"));
+        AreEqual("caught", simulation.ExecuteScalar("declare @n int = -1; begin try select top (@n) 1 end try begin catch select 'caught' end catch"));
+    }
+
     // ---- window functions ----
 
     [TestMethod]

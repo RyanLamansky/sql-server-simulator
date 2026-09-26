@@ -253,7 +253,6 @@ An error that ends a procedure's or dynamic SQL's batch — a compile error, or 
 
 - **The walk stops at a deferred DML target** (`INSERT INTO <missing>`), since the recovery scan can't tell where that statement ends; real keeps compiling the statements after it, so an error past one surfaces here only when its statement runs — after the statements ahead of it have run.
   A syntax error (Msg 102 / 156) surfacing that way at least ends the batch (`EndsBatch`), as real's refusal would have, rather than the dispatch resuming inside the broken statement's tail.
-- **A deferred statement's bind error at run time** escapes a TRY in its own scope and ends the batch only for the name-resolution set (`CaughtByTryFrame`, probed 2026-09-26; one a called procedure or dynamic batch raises is caught); real's recompile errors do that whatever their number (`CREATE TABLE t2 (a int); INSERT t2 VALUES (1, 2); PRINT 'after'` never prints on real).
 - **A procedure body compiles only at `CREATE`**; real compiles it again as a whole at its first execution, so a body statement naming a table created after the procedure fails there before the body's first statement runs.
 - **An `INSERT … EXEC` body stops at its first error**, since the statement collects the body's rows rather than forwarding its outcomes; real runs that body on too, inserting what its later statements return (probed 2026-09-24).
 
@@ -276,6 +275,9 @@ This path deliberately does **not** touch `InFlightError` / `ErrorSignaled` — 
 Two kinds:
 - **Bind-class name-resolution misses** (`IsBatchAbortingNameResolution`: Msg 208 invalid object, 207 invalid column, 209 ambiguous column, 4104 unbindable multi-part identifier, 4121 unfound column/function, 195 unrecognized function), which reach run time from a statement [batch compilation](#batch-compilation) deferred.
   Real SQL Server aborts the remaining batch (probe-confirmed: `SELECT 1; SELECT * FROM missing; SELECT 2` streams `1`, surfaces one Msg 208, never runs `SELECT 2` — contrast Msg 3701 / 8134 / a severity-16 RAISERROR, which continue).
+- **Any other compile error of a deferred statement** (`IsDeferredCompileError`) — a type check, a grouping rule, a table hint, a derived table's column names — which real meets recompiling the statement once its table exists (`CREATE TABLE t2 (a int); INSERT t2 VALUES (1, 2); PRINT 'after'` never prints; probed 2026-09-26 against SQL Server 2025).
+  Like the name-resolution set, a `TRY` in the same scope doesn't catch it, while one raised by a called procedure or dynamic batch is caught (`CaughtByTryFrame`).
+- **A run-time severity-15 error** such as a negative `TOP`'s Msg 127 or Msg 10742 ends the batch too, but a `TRY` catches it, and a writing statement still earns its Msg 3621 (probed 2026-09-26).
 - **An uncaught `THROW`** (`SimulatedSqlException.TerminatesBatch`, set by the THROW factories).
   Real SQL Server's `THROW` terminates the batch even though it shares class 16 with a *continuing* `RAISERROR` — probe-confirmed (`… RAISERROR('x',16,1); INSERT; THROW 50001,'y',1; INSERT` runs two inserts, aggregates Msg 50000 + 50001, and skips the third).
   The flag on the exception is what distinguishes the two.

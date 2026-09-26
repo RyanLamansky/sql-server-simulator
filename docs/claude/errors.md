@@ -72,7 +72,7 @@ Real compiles a whole batch before running any of it, so an error the binder rai
 Probe-confirmed for the collation-conflict pair (**Msg 468** / **457**) and for the legacy-LOB argument gate (**Msg 8116**), each raised over an empty rowset inside a `BEGIN TRY`: the batch dies with the error and the CATCH block's `PRINT` never runs.
 The simulator compiles the batch first too ([`control-flow.md`](control-flow.md#batch-compilation)), so those match.
 
-A statement naming an object that doesn't exist when the batch compiles binds only when it runs, on real and here alike, and there the two part: real's error from that late bind is still uncatchable in its own scope and ends the batch, while here it is an ordinary run-time error a `TRY` catches (`BEGIN TRY SELECT * FROM nope END TRY …` reaches its CATCH here).
+A statement naming an object that doesn't exist when the batch compiles binds only when it runs, on real and here alike, and its errors from that late bind are still uncatchable in their own scope and end the batch ([`control-flow.md`](control-flow.md#statement-terminating-vs-batch-aborting-errors-unified-continue-on-error)).
 Coverage locking the compiled case: `PredicateCompileTimeBindTests.BindError_IsNotCatchable`.
 
 ## Capture design

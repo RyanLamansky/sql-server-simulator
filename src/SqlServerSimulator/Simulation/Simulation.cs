@@ -2345,12 +2345,15 @@ public sealed partial class Simulation
     /// probed 2026-09-24: an error that escaped a trigger body ends the firing
     /// statement first, so it says so even when the batch ends with it, and a
     /// unique index that finds duplicate keys (Msg 1505) earns it whether
-    /// <c>CREATE INDEX</c> or a constraint built it, though it ends the batch.
+    /// <c>CREATE INDEX</c> or a constraint built it, though it ends the batch,
+    /// and a negative <c>TOP</c>'s Msg 127, which ends the batch as every
+    /// run-time severity-15 error does, still ends a writing statement first
+    /// (probed 2026-09-26).
     /// </summary>
     private static bool IsStatementTerminationNoticed(BatchContext batch, SimulatedSqlException error) =>
         error.Number == 1505
         || error.EndedColumnRewrite
-        || ((!batch.BatchAborted || error.EndedTriggerBody)
+        || ((!batch.BatchAborted || error.EndedTriggerBody || error.Number == 127)
             && batch.CurrentStatement.WritesRows
             && error.Number is 127 or 220 or 232 or 515 or 547 or 550 or 2601 or 2627 or 2628 or 8115 or 8134 or 8152 or 16947);
 
@@ -2511,6 +2514,20 @@ public sealed partial class Simulation
         => ex.Number is 195 or 207 or 208 or 209 or 4104 or 4121 or 4403 or 4405 or 4406;
 
     /// <summary>
+    /// Whether <paramref name="ex"/> is one real raises compiling a statement —
+    /// a name-resolution miss, or a binder or type-check refusal — which,
+    /// raised where the batch's compile deferred the statement, ends the batch
+    /// uncatchable by the same scope's TRY as a name-resolution miss does
+    /// (probed 2026-09-26 against SQL Server 2025, each after a CREATE TABLE
+    /// deferred its statement). An error not listed keeps a run-time error's
+    /// handling.
+    /// </summary>
+    private static bool IsDeferredCompileError(SimulatedSqlException ex)
+        => IsBatchAbortingNameResolution(ex)
+            || ex.Number is 107 or 108 or 130 or 145 or 147 or 164 or 174 or 205 or 206 or 213 or 243 or 264 or 321 or 447 or 448 or 529
+                or 1011 or 1013 or 4108 or 4115 or 8117 or 8120 or 8121 or 8155;
+
+    /// <summary>
     /// Whether a TRY frame catches <paramref name="ex"/> where it is raised:
     /// any error but the transaction-aborting class, once the batch runs — and
     /// but a name-resolution miss of the batch's own, which real meets
@@ -2520,21 +2537,22 @@ public sealed partial class Simulation
     /// </summary>
     private static bool CaughtByTryFrame(BatchContext batch, SimulatedSqlException ex) =>
         batch.TryFrameDepth > 0 && !ex.AbortsTransaction && !batch.CreateTimeBinding
-        && !(IsBatchAbortingNameResolution(ex) && !ex.EndedCalledBatch);
+        && !(IsDeferredCompileError(ex) && !ex.EndedCalledBatch);
 
     /// <summary>
     /// True for an error that ends the whole batch rather than its statement:
-    /// a name-resolution miss or a syntax error (Msg 102 / 156) the procedure
-    /// or dynamic SQL it ended hasn't already contained, an uncaught
-    /// <c>THROW</c>, or an error <c>SET XACT_ABORT ON</c> promoted. A syntax
-    /// error reaches run time only where the batch's compile walk stopped short
-    /// of it; real would have refused the whole batch, so none of what follows
-    /// it runs, where resuming at the next boundary keyword would read the
-    /// broken statement's tail as statements of its own. (Other severity-15
-    /// errors are not all the parse phase's: Msg 127 is raised at run time.)
+    /// a compile error of a statement the batch's compile deferred
+    /// (<see cref="IsDeferredCompileError"/>) or any severity-15 error — a
+    /// syntax error the compile walk stopped short of, or a run-time one such
+    /// as a negative TOP's Msg 127 — the procedure or dynamic SQL it ended
+    /// hasn't already contained, an uncaught <c>THROW</c>, or an error
+    /// <c>SET XACT_ABORT ON</c> promoted (probed 2026-09-26 against SQL Server
+    /// 2025). After a syntax error none of the batch runs on, where resuming
+    /// at the next boundary keyword would read the broken statement's tail as
+    /// statements of its own.
     /// </summary>
     private static bool EndsBatch(SimulatedSqlException ex)
-        => ((IsBatchAbortingNameResolution(ex) || ex.Number is 102 or 156) && !ex.EndedCalledBatch) || ex.TerminatesBatch || ex.XactAbortPromoted;
+        => ((IsDeferredCompileError(ex) || ex.Class == 15) && !ex.EndedCalledBatch) || ex.TerminatesBatch || ex.XactAbortPromoted;
 
     private IEnumerable<SimulatedStatementOutcome> DispatchOneStatementCore(BatchContext batch, bool requireSemicolonBeforeCte, bool atBatchStart)
     {
