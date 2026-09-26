@@ -325,6 +325,43 @@ public sealed class HelpProcTests
         Contains(15469, errors.ConvertAll(e => e.Number));
     }
 
+    /// <summary>
+    /// sp_help's messages arrive among its result sets as real sends them:
+    /// a blank PRINT ahead of each section at its own source line, the index
+    /// and constraint messages attributed to the sys. procedures sp_help calls,
+    /// and no row count on any set (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void SpHelp_Table_InterleavesItsMessagesWithItsResultSets()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create table dbo.t (a int)");
+        using var connection = sim.CreateDbConnection();
+        connection.Open();
+        var stream = new List<string>();
+        connection.InfoMessage += (_, e) =>
+        {
+            foreach (var error in e.Errors)
+                stream.Add($"{error.Number}@{error.Procedure}:{error.LineNumber}");
+        };
+        using var command = connection.CreateCommand();
+        command.CommandText = "exec sp_help 't'";
+        using var reader = command.ExecuteReader();
+        do
+        {
+            stream.Add("RS");
+            while (reader.Read())
+            {
+            }
+        }
+        while (reader.NextResult());
+        AreEqual(-1, reader.RecordsAffected);
+        AreEqual(
+            "RS 0@sp_help:122 0@sp_help:135 RS 0@sp_help:164 RS 0@sp_help:173 RS 0@sp_help:202 RS 0@sp_help:204 15472@sys.sp_helpindex:64 "
+            + "0@sp_help:206 15469@sys.sp_helpconstraint:340 0@sys.sp_helpconstraint:342 15470@sys.sp_helpconstraint:353 15647@sp_help:211",
+            string.Join(' ', stream));
+    }
+
     [TestMethod]
     public void SpHelp_CatalogView_DescribesItAsASysView()
     {
@@ -334,7 +371,11 @@ public sealed class HelpProcTests
         CollectionAssert.AreEqual(
             new object?[] { "type", "char", "no", 2, "     ", "     ", "yes", "no", "yes", "Latin1_General_CI_AS_KS_WS" },
             sets[1].Rows[5]);
-        CollectionAssert.AreEqual(new[] { 15469, 15470, 15472 }, errors.ConvertAll(e => e.Number));
+        // Real's blank PRINTs sit between the sections, each at its own
+        // source line (probed 2026-09-26 against SQL Server 2025).
+        CollectionAssert.AreEqual(
+            new[] { "0@122", "0@135", "0@164", "0@173", "0@223", "15469@224", "0@225", "15470@226", "15472@64" },
+            errors.ConvertAll(e => $"{e.Number}@{e.LineNumber}"));
     }
 
     [TestMethod]
@@ -539,11 +580,10 @@ public sealed class HelpProcTests
         sim.ExecuteBatches("create table dbo.t (a int)");
         var (sets, errors) = RunHelp(sim, "exec sp_helpconstraint 't', 'nomsg'");
         IsEmpty(sets);
-        HasCount(2, errors);
-        AreEqual(15469, errors[0].Number);
+        CollectionAssert.AreEqual(new[] { "15469@340", "0@342", "15470@353" }, errors.ConvertAll(e => $"{e.Number}@{e.LineNumber}"));
         Assert.Contains("No constraints are defined on object 't'", errors[0].Message);
-        AreEqual(15470, errors[1].Number);
-        Assert.Contains("No foreign keys reference table 't'", errors[1].Message);
+        AreEqual("sp_helpconstraint", errors[0].Procedure);
+        Assert.Contains("No foreign keys reference table 't'", errors[2].Message);
     }
 
     [TestMethod]

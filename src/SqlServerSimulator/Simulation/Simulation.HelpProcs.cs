@@ -242,20 +242,27 @@ partial class Simulation
     /// object with no indexes emits the severity-10 Msg 15472 and no result
     /// set.
     /// </summary>
-    private static IEnumerable<SimulatedStatementOutcome> InvokeSpHelpIndex(BatchContext batch)
+    private static IEnumerable<SimulatedStatementOutcome> InvokeSpHelpIndex(BatchContext batch, string procedureName)
     {
         var arguments = ParseExecArguments(batch.Parser, batch);
         if (batch.IsSkipping)
             yield break;
 
         var (objectName, _) = ParseHelpArgs(arguments, "sp_helpindex");
+        // A catalog view has no indexes to list, which real says rather than
+        // failing to find it (probed 2026-09-26 against SQL Server 2025).
+        if (objectName is not null && batch.TryResolveCatalogView(ParseHelpObjectName(batch.CurrentDatabase, objectName), out _, out _))
+        {
+            yield return HelpMessage(batch, procedureName, 64, 15472, $"The object '{objectName}' does not have any indexes, or you do not have permissions.");
+            yield break;
+        }
         var target = ResolveHelpTarget(batch, "sp_helpindex", objectName);
-        foreach (var outcome in HelpIndexResultSets(batch, target, objectName!))
+        foreach (var outcome in HelpIndexResultSets(batch, target, objectName!, procedureName))
             yield return outcome;
     }
 
     private static IEnumerable<SimulatedStatementOutcome> HelpIndexResultSets(
-        BatchContext batch, HelpTarget target, string objectName)
+        BatchContext batch, HelpTarget target, string objectName, string procedureName)
     {
         var rows = new List<SqlValue[]>();
         foreach (var identity in target.IndexIdentities())
@@ -271,7 +278,7 @@ partial class Simulation
 
         if (rows.Count == 0)
         {
-            HelpNoIndexes(batch, objectName);
+            yield return HelpMessage(batch, procedureName, 64, 15472, $"The object '{objectName}' does not have any indexes, or you do not have permissions.");
             yield break;
         }
 
@@ -406,7 +413,7 @@ partial class Simulation
     /// severity-10 Msg 15469 in place of an empty constraint set and Msg 15470
     /// in place of an empty referencing set.
     /// </summary>
-    private static IEnumerable<SimulatedStatementOutcome> InvokeSpHelpConstraint(BatchContext batch)
+    private static IEnumerable<SimulatedStatementOutcome> InvokeSpHelpConstraint(BatchContext batch, string procedureName)
     {
         var arguments = ParseExecArguments(batch.Parser, batch);
         if (batch.IsSkipping)
@@ -420,25 +427,22 @@ partial class Simulation
             List<SqlValue[]> echo = [[SqlValue.FromString(HelpObjectNameType, objectName!)]];
             yield return new SimulatedSqlResultSet(
                 SpHelpConstraintNameSchema, SpHelpConstraintNameColumnNames, echo);
+            yield return HelpBlankLine(batch, procedureName, 287);
         }
 
-        foreach (var outcome in HelpConstraintResultSets(batch, target, objectName!))
+        foreach (var outcome in HelpConstraintResultSets(batch, target, objectName!, procedureName))
             yield return outcome;
     }
 
     private static IEnumerable<SimulatedStatementOutcome> HelpConstraintResultSets(
-        BatchContext batch, HelpTarget target, string objectName)
+        BatchContext batch, HelpTarget target, string objectName, string procedureName)
     {
         var database = batch.CurrentDatabase;
         var rows = target.Table is { } table ? BuildHelpConstraintRows(database, table) : [];
-        if (rows.Count == 0)
-        {
-            HelpNoConstraints(batch, objectName);
-        }
-        else
-        {
-            yield return new SimulatedSqlResultSet(SpHelpConstraintSchema, SpHelpConstraintColumnNames, rows);
-        }
+        yield return rows.Count == 0
+            ? HelpNoConstraints(batch, procedureName, 340, objectName)
+            : new SimulatedSqlResultSet(SpHelpConstraintSchema, SpHelpConstraintColumnNames, rows);
+        yield return HelpBlankLine(batch, procedureName, 342);
 
         var referencing = new List<SqlValue[]>();
         if (target.Table is { } referenced)
@@ -452,7 +456,7 @@ partial class Simulation
 
         if (referencing.Count == 0)
         {
-            HelpNoReferencingForeignKeys(batch, objectName);
+            yield return HelpNoReferencingForeignKeys(batch, procedureName, 353, objectName);
             yield break;
         }
 
@@ -461,25 +465,46 @@ partial class Simulation
             SpHelpReferencingFkSchema, SpHelpReferencingFkColumnNames, referencing);
     }
 
-    // The severity-10 "nothing to report" messages real prints in place of an
-    // empty result set. One home each, since sp_help emits the constraint and
-    // foreign-key pair itself for a view rather than routing through
-    // sp_helpconstraint.
-    private static void HelpNoConstraints(BatchContext batch, string objectName) =>
-        batch.AppendInfoError(@class: 10, state: 1, number: 15469,
-            message: $"No constraints are defined on object '{objectName}', or you do not have permissions.");
+    /// <summary>
+    /// A message the help procedures print, in its place among their result
+    /// sets and attributed as real attributes it: to the procedure by the name
+    /// it was called by (<c>sp_help</c> calls <c>sys.sp_helpindex</c> /
+    /// <c>sys.sp_helpconstraint</c>) and to the line of real's own source that
+    /// prints it (probed 2026-09-26 against SQL Server 2025). The
+    /// severity-10 texts arrive as class 0, as every INFO token does.
+    /// </summary>
+    private static SimulatedInfoOutcome HelpMessage(BatchContext batch, string procedureName, int line, int number, string text) =>
+        new(new SimulatedError(@class: 0, lineNumber: line, message: text, number: number, procedure: procedureName,
+            server: batch.Connection.DataSource, source: "SqlServerSimulator", state: 1));
 
-    private static void HelpNoReferencingForeignKeys(BatchContext batch, string objectName) =>
-        batch.AppendInfoError(@class: 10, state: 1, number: 15470,
-            message: $"No foreign keys reference table '{objectName}', or you do not have permissions on referencing tables.");
+    // The name a system procedure's own messages carry: as it was called,
+    // schema and all (probed 2026-09-26: sp_helpindex vs sys.sp_helpindex).
+    private static string CalledName(MultiPartName name) =>
+        name.Count > 1 && name.ImmediateQualifier is { Length: > 0 } schema ? $"{schema}.{name.Leaf}" : name.Leaf;
 
-    private static void HelpNoIndexes(BatchContext batch, string objectName) =>
-        batch.AppendInfoError(@class: 10, state: 1, number: 15472,
-            message: $"The object '{objectName}' does not have any indexes, or you do not have permissions.");
+    // The help procedures run under SET NOCOUNT ON, so their result sets
+    // report no row count (probed 2026-09-26 against SQL Server 2025).
+    private static IEnumerable<SimulatedStatementOutcome> Uncounted(IEnumerable<SimulatedStatementOutcome> outcomes)
+    {
+        foreach (var outcome in outcomes)
+        {
+            outcome.CountSuppressed = true;
+            yield return outcome;
+        }
+    }
 
-    private static void HelpNoReferencingViews(BatchContext batch, string objectName) =>
-        batch.AppendInfoError(@class: 10, state: 1, number: 15647,
-            message: $"No views with schema binding reference table '{objectName}'.");
+    // The PRINT '' real puts between its sections, which arrives as one space.
+    private static SimulatedInfoOutcome HelpBlankLine(BatchContext batch, string procedureName, int line) =>
+        HelpMessage(batch, procedureName, line, 0, " ");
+
+    // The "nothing to report" messages real prints in place of an empty
+    // result set; sp_help prints the constraint and foreign-key pair itself
+    // for a view, at lines of its own.
+    private static SimulatedInfoOutcome HelpNoConstraints(BatchContext batch, string procedureName, int line, string objectName) =>
+        HelpMessage(batch, procedureName, line, 15469, $"No constraints are defined on object '{objectName}', or you do not have permissions.");
+
+    private static SimulatedInfoOutcome HelpNoReferencingForeignKeys(BatchContext batch, string procedureName, int line, string objectName) =>
+        HelpMessage(batch, procedureName, line, 15470, $"No foreign keys reference table '{objectName}', or you do not have permissions on referencing tables.");
 
     // Row order for the single-column help sets: the one cell, ordinal
     // case-insensitive.

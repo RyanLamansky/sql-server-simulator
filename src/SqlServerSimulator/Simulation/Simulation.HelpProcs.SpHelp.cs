@@ -119,7 +119,7 @@ partial class Simulation
     /// 15469 / 15470 pair and its index set.
     /// </para>
     /// </summary>
-    private static IEnumerable<SimulatedStatementOutcome> InvokeSpHelp(BatchContext batch)
+    private static IEnumerable<SimulatedStatementOutcome> InvokeSpHelp(BatchContext batch, string procedureName)
     {
         var arguments = ParseExecArguments(batch.Parser, batch);
         if (batch.IsSkipping)
@@ -130,6 +130,7 @@ partial class Simulation
         if (objectName is null)
         {
             yield return HelpObjectListResultSet(database);
+            yield return HelpBlankLine(batch, procedureName, 35);
             yield return new SimulatedSqlResultSet(
                 SpHelpTypeSchema, SpHelpUserTypeColumnNames, HelpUserTypes(database));
             yield break;
@@ -142,7 +143,7 @@ partial class Simulation
             var parsedName = ParseHelpObjectName(database, objectName);
             if (batch.TryResolveCatalogView(parsedName, out var catalogView, out _))
             {
-                foreach (var outcome in HelpCatalogView(batch, catalogView, parsedName, objectName))
+                foreach (var outcome in HelpCatalogView(batch, catalogView, parsedName, objectName, procedureName))
                     yield return outcome;
                 yield break;
             }
@@ -164,9 +165,13 @@ partial class Simulation
             ],
         ];
         yield return new SimulatedSqlResultSet(SpHelpObjectSchema, SpHelpObjectColumnNames, objectInfo);
+        // Each section follows a blank line real prints at a fixed line of
+        // its own source; see HelpMessage.
+        yield return HelpBlankLine(batch, procedureName, 122);
 
         if (target.Columns is { Length: > 0 } columns)
         {
+            yield return HelpBlankLine(batch, procedureName, 135);
             yield return HelpColumnResultSet(database, columns);
 
             // The identity / rowguidcol pair is emitted for tables, views and
@@ -174,36 +179,59 @@ partial class Simulation
             // table-valued function (real gates on type in ('S ','U ','V ','TF')).
             if (target.Object is HeapTable or View or MultiStatementTableValuedFunction)
             {
+                yield return HelpBlankLine(batch, procedureName, 164);
                 yield return HelpIdentityResultSet(columns);
+                yield return HelpBlankLine(batch, procedureName, 173);
                 yield return HelpRowGuidColResultSet(columns);
             }
         }
 
         if (HelpParameterRows(batch, target) is { Count: > 0 } parameters)
+        {
+            yield return HelpBlankLine(batch, procedureName, 184);
             yield return new SimulatedSqlResultSet(SpHelpParameterSchema, SpHelpParameterColumnNames, parameters);
+        }
 
         if (target.Object is HeapTable)
         {
             List<SqlValue[]> filegroup = [[SqlValue.FromSystemName(HelpFilegroupName)]];
+            yield return HelpBlankLine(batch, procedureName, 202);
             yield return new SimulatedSqlResultSet(
                 SingleSystemNameColumn, SpHelpFilegroupColumnNames, filegroup);
-            foreach (var outcome in HelpIndexResultSets(batch, target, objectName))
+            yield return HelpBlankLine(batch, procedureName, 204);
+            foreach (var outcome in HelpIndexResultSets(batch, target, objectName, "sys.sp_helpindex"))
                 yield return outcome;
-            foreach (var outcome in HelpConstraintResultSets(batch, target, objectName))
+            yield return HelpBlankLine(batch, procedureName, 206);
+            foreach (var outcome in HelpConstraintResultSets(batch, target, objectName, "sys.sp_helpconstraint"))
                 yield return outcome;
-            foreach (var outcome in HelpReferencingViewResultSets(batch, target, objectName))
+            foreach (var outcome in HelpReferencingViewResultSets(batch, target, objectName, procedureName))
                 yield return outcome;
         }
         else if (target.Object is View)
         {
-            // Real prints the "no constraints" / "no foreign keys" pair for a
-            // view unconditionally (views can carry neither) before listing
-            // the view's own indexes.
-            HelpNoConstraints(batch, objectName);
-            HelpNoReferencingForeignKeys(batch, objectName);
-            foreach (var outcome in HelpIndexResultSets(batch, target, objectName))
+            foreach (var outcome in HelpViewTail(batch, target, objectName, procedureName))
                 yield return outcome;
         }
+    }
+
+    /// <summary>
+    /// What follows a view's rowguidcol set: the "no constraints" / "no
+    /// foreign keys" pair real prints for any view itself, then the view's
+    /// indexes through <c>sys.sp_helpindex</c>.
+    /// </summary>
+    private static IEnumerable<SimulatedStatementOutcome> HelpViewTail(BatchContext batch, HelpTarget? target, string objectName, string procedureName)
+    {
+        yield return HelpBlankLine(batch, procedureName, 223);
+        yield return HelpNoConstraints(batch, procedureName, 224, objectName);
+        yield return HelpBlankLine(batch, procedureName, 225);
+        yield return HelpNoReferencingForeignKeys(batch, procedureName, 226, objectName);
+        if (target is null)
+        {
+            yield return HelpMessage(batch, "sys.sp_helpindex", 64, 15472, $"The object '{objectName}' does not have any indexes, or you do not have permissions.");
+            yield break;
+        }
+        foreach (var outcome in HelpIndexResultSets(batch, target, objectName, "sys.sp_helpindex"))
+            yield return outcome;
     }
 
     /// <summary>
@@ -213,7 +241,7 @@ partial class Simulation
     /// 2026-09-25 against SQL Server 2025 with <c>sys.objects</c>).
     /// </summary>
     private static IEnumerable<SimulatedStatementOutcome> HelpCatalogView(
-        BatchContext batch, CatalogView view, MultiPartName name, string objectName)
+        BatchContext batch, CatalogView view, MultiPartName name, string objectName, string procedureName)
     {
         var owner = name.ImmediateQualifier switch
         {
@@ -231,12 +259,15 @@ partial class Simulation
             ],
         ];
         yield return new SimulatedSqlResultSet(SpHelpObjectSchema, SpHelpObjectColumnNames, objectInfo);
+        yield return HelpBlankLine(batch, procedureName, 122);
+        yield return HelpBlankLine(batch, procedureName, 135);
         yield return HelpColumnResultSet(batch.CurrentDatabase, view.Columns);
+        yield return HelpBlankLine(batch, procedureName, 164);
         yield return HelpIdentityResultSet(view.Columns);
+        yield return HelpBlankLine(batch, procedureName, 173);
         yield return HelpRowGuidColResultSet(view.Columns);
-        HelpNoConstraints(batch, objectName);
-        HelpNoReferencingForeignKeys(batch, objectName);
-        HelpNoIndexes(batch, objectName);
+        foreach (var outcome in HelpViewTail(batch, null, objectName, procedureName))
+            yield return outcome;
     }
 
     // sp_help's own resolution, which must not raise when the name is a type
@@ -393,15 +424,15 @@ partial class Simulation
     }
 
     private static IEnumerable<SimulatedStatementOutcome> HelpReferencingViewResultSets(
-        BatchContext batch, HelpTarget target, string objectName)
+        BatchContext batch, HelpTarget target, string objectName, string procedureName)
     {
         var rows = new List<SqlValue[]>();
-        foreach (var view in target.Table!.DependentIndexedViews)
+        foreach (var view in SchemaBinding.ReferencingViews(batch.CurrentDatabase, target.Table!))
             rows.Add([SqlValue.FromSystemName(view.Name)]);
 
         if (rows.Count == 0)
         {
-            HelpNoReferencingViews(batch, objectName);
+            yield return HelpMessage(batch, procedureName, 211, 15647, $"No views with schema binding reference table '{objectName}'.");
             yield break;
         }
 

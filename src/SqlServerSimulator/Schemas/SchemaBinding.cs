@@ -89,6 +89,22 @@ internal static class SchemaBinding
     }
 
     /// <summary>
+    /// Every schema-bound view that references <paramref name="table"/> —
+    /// indexed or not — which <c>sp_help</c> lists as the views referencing
+    /// it (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    internal static List<View> ReferencingViews(Database database, HeapTable table)
+    {
+        var views = new List<View>();
+        foreach (var module in ReferencingModules(database, table, columnName: null))
+        {
+            if (module is View view)
+                views.Add(view);
+        }
+        return views;
+    }
+
+    /// <summary>
     /// Leaf names and object ids of every schema-bound module that references
     /// <paramref name="table"/> and mentions <paramref name="columnName"/>,
     /// ordered by object id — the Msg 5074 blockers <c>ALTER TABLE DROP
