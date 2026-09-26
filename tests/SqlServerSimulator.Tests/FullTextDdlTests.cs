@@ -298,4 +298,11 @@ public sealed class FullTextDdlTests
         _ = sim.ExecuteNonQuery("create fulltext catalog mycat");
         AreEqual(DBNull.Value, sim.ExecuteScalar("select fulltextcatalogproperty('mycat', 'NotAProperty')"));
     }
+
+    /// <summary>Probed 2026-09-26 against SQL Server 2025.</summary>
+    [TestMethod]
+    [DataRow("VerifySignature", 1)]
+    [DataRow("DataTimeout", 0)]
+    public void FullTextServiceProperty_AnswersTheServiceSettings(string property, int expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar($"select fulltextserviceproperty('{property}')"));
 }

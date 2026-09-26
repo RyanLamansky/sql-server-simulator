@@ -103,4 +103,12 @@ public sealed class SessionContextTests
     [TestMethod]
     public void CurrentRequestId_IsZero()
         => AreEqual(0, ExecuteScalar("select current_request_id()"));
+
+    /// <summary>A string property carries its sys.dm_exec_connections column's declared type (probed 2026-09-26 against SQL Server 2025).</summary>
+    [TestMethod]
+    [DataRow("net_transport", 80)]
+    [DataRow("auth_scheme", 40)]
+    [DataRow("client_net_address", 48)]
+    public void ConnectionProperty_StringsCarryTheirDeclaredLength(string property, int maxLength)
+        => AreEqual(maxLength, ExecuteScalar($"select cast(sql_variant_property(connectionproperty('{property}'), 'MaxLength') as int)"));
 }

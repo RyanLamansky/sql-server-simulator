@@ -119,12 +119,16 @@ internal sealed class ConnectionProperty : Expression
         var transport = runtime.Batch.Connection.Transport;
         return upper switch
         {
-            "AUTH_SCHEME" => SqlValue.FromVariant(SqlValue.FromNVarchar("SQL")),
-            "CLIENT_NET_ADDRESS" => SqlValue.FromVariant(SqlValue.FromVarchar(transport.Client is { } client ? client.Address.ToString() : "<local machine>")),
-            "LOCAL_NET_ADDRESS" when transport.Local is { } local => SqlValue.FromVariant(SqlValue.FromNVarchar(local.Address.ToString())),
+            // Each string property carries its sys.dm_exec_connections column's
+            // declared type, whatever the value's length (probed 2026-09-26).
+            "AUTH_SCHEME" => SqlValue.FromVariant(Text(20, "SQL")),
+            "CLIENT_NET_ADDRESS" => SqlValue.FromVariant(SqlValue.FromVarchar(
+                VarcharSqlType.Get(48, Collation.Baseline, Coercibility.CoercibleDefault),
+                transport.Client is { } client ? client.Address.ToString() : "<local machine>")),
+            "LOCAL_NET_ADDRESS" when transport.Local is { } local => SqlValue.FromVariant(Text(48, local.Address.ToString())),
             "LOCAL_TCP_PORT" when transport.Local is { } local => SqlValue.FromVariant(SqlValue.FromInt16(unchecked((short)local.Port))),
-            "NET_TRANSPORT" or "PHYSICAL_NET_TRANSPORT" => SqlValue.FromVariant(SqlValue.FromNVarchar(transport.Client is null ? "Shared memory" : "TCP")),
-            "PROTOCOL_TYPE" => SqlValue.FromVariant(SqlValue.FromNVarchar("TSQL")),
+            "NET_TRANSPORT" or "PHYSICAL_NET_TRANSPORT" => SqlValue.FromVariant(Text(40, transport.Client is null ? "Shared memory" : "TCP")),
+            "PROTOCOL_TYPE" => SqlValue.FromVariant(Text(40, "TSQL")),
             _ => SqlValue.Null(SqlType.SqlVariant),
         };
     }
@@ -134,6 +138,9 @@ internal sealed class ConnectionProperty : Expression
         _ = AssignmentRules.ArgumentType(this.nameArg, SqlType.Varchar, batch, resolveColumnType);
         return SqlType.SqlVariant;
     }
+
+    private static SqlValue Text(int length, string value) =>
+        SqlValue.FromNVarchar(NVarcharSqlType.Get(length, Collation.Baseline, Coercibility.CoercibleDefault), value);
 
     internal override string DebugDisplay() => $"CONNECTIONPROPERTY({this.nameArg.DebugDisplay()})";
 

@@ -41,13 +41,15 @@ internal sealed class FullTextServiceProperty : Expression
         _ = name.AsSpan().ToUpperInvariant(upper);
         return upper switch
         {
-            "CONNECTTIMEOUT" => SqlValue.FromInt32(0),
+            "CONNECTTIMEOUT" or "DATATIMEOUT" => SqlValue.FromInt32(0),
             "ISFULLTEXTINSTALLED" => SqlValue.FromInt32(1),
             "LOADOSRESOURCES" => SqlValue.FromInt32(0),
             "RESOURCEUSAGE" => SqlValue.FromInt32(0),
             // Real answers NULL for this one even with Full-Text installed;
             // the other three resource-tuning properties read 0.
             "VERIFYRESOURCEUSAGE" => SqlValue.Null(SqlType.Int32),
+            // Filter binaries are signature-checked (probed 2026-09-26).
+            "VERIFYSIGNATURE" => SqlValue.FromInt32(1),
             _ => SqlValue.Null(SqlType.Int32),
         };
     }
