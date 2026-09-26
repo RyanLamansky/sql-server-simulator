@@ -72,30 +72,20 @@ Three things about it are not what the numbers suggest:
 ### Value base-type fidelity
 
 The dict holds the raw `SqlValue` the sproc stored (`sp_addextendedproperty` assigns `arg.Value` verbatim — no coercion), so an `N'…'` literal keeps its `NVarcharSqlType` and a plain `'…'` literal its `VarcharSqlType`.
-`sys.extended_properties.value` wraps that value in a `sql_variant` at enumeration time (`SqlValue.FromVariant`), matching real SQL Server's `sql_variant` column.
-`fn_listextendedproperty.value` still surfaces as `nvarchar(MAX)` (its TVF schema is a fixed shape; DacFx's export reads `sys.extended_properties`, not the TVF).
+`sys.extended_properties.value` and `fn_listextendedproperty.value` both wrap that value in a `sql_variant` (`SqlValue.FromVariant`), matching real SQL Server's column.
 
 ## `fn_listextendedproperty`
 
-`Selection.ListExtendedProperty.cs` is a built-in system TVF dispatched alongside `OPENJSON` / `STRING_SPLIT` in `ParseSingleFromSource`.
+`Selection.ListExtendedProperty.cs` is a built-in system TVF dispatched alongside `OPENJSON` / `STRING_SPLIT` in `ParseSingleFromSource`, with real's shape: `objtype varchar(128)`, `objname` / `name` `nvarchar(128)` in `Latin1_General_CI_AI`, `value sql_variant`.
 
-```sql
-fn_listextendedproperty(@name, @level0type, @level0name,
-                                @level1type, @level1name,
-                                @level2type, @level2name)
-```
+Each live entry is described back to its `(level type, name)` chain (`ExtendedPropertyTargets.TryDescribe`) and matched against the arguments, so the TVF lists exactly what the procedures can address.
+The rules, which are not the ones the argument names suggest (probed 2026-09-26 against SQL Server 2025):
 
-Each arg may be NULL; returns 4 columns: `objtype`, `objname`, `name`, `value`.
-Pipeline: parse each arg expression → eval to nullable string → build `ExtendedPropertyListFilter` from the resolved target → walk `Database.ExtendedProperties` → project matches.
-
-The `'default'` wildcard at any level-name slot fans out across every object of that level-type under the parent (probe-confirmed).
-Missing target returns zero rows (distinct from the sproc path's Msg 15135).
-Unknown level0/1/2 type raises **Msg 15600** (`An invalid parameter or option was specified for procedure 'sp_addextendedproperty'.`), the same error the sproc path gives for a bad argument.
+- The level types given from level 0 down fix the listing's depth; `objtype` / `objname` are the deepest level's, and NULL for the database's own properties.
+- Every name above the deepest must be given; the deepest's may be NULL — or the `DEFAULT` keyword, which is NULL — for all of that kind.
+- Anything else lists nothing rather than raising: a NULL name above the deepest, a name or type past it, an unknown level type, a missing target, and the string `'default'`, which is a name like any other.
+- Too few arguments is Msg 313.
 
 ## Not modeled yet
 
-- **`fn_listextendedproperty` beyond the schema / table / view / procedure / function / column shapes** — the sprocs' wider grid (parameters, triggers, indexes, types, users, XML schema collections) is stored and listed by `sys.extended_properties`, but the TVF raises `NotSupportedException` for those level types.
 - **Level-1 kinds real accepts beyond the modeled ones** (`AGGREGATE`, `QUEUE`, …) raise Msg 15600 state 5.
-- **`fn_listextendedproperty` value type** — surfaced as nvarchar(MAX) rather than sql_variant (the TVF's schema is fixed for parse/plan parity).
-  `sys.extended_properties.value` is a genuine sql_variant preserving the input base type; only the TVF read-path is lossy.
-  DacFx's export uses `sys.extended_properties`, so this doesn't affect BACPAC round-trip.

@@ -1,5 +1,4 @@
 using SqlServerSimulator.Parser.Tokens;
-using SqlServerSimulator.Schemas;
 using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator.Parser;
@@ -7,337 +6,126 @@ namespace SqlServerSimulator.Parser;
 partial class Selection
 {
     /// <summary>
-    /// Built-in system TVF <c>fn_listextendedproperty</c>. Seven args, all
-    /// nullable; returns <c>(objtype sysname, objname sysname, name sysname,
-    /// value sql_variant)</c> rows filtered against
-    /// <see cref="Database.ExtendedProperties"/>. Probe-confirmed shape
-    /// against SQL Server 2025 (2026-05-14).
+    /// Built-in system TVF <c>fn_listextendedproperty</c>: seven arguments —
+    /// the property name, then three <c>(type, name)</c> level pairs — each
+    /// a value or the <c>DEFAULT</c> keyword, which is NULL. Returns
+    /// <c>(objtype varchar(128), objname sysname, name sysname, value
+    /// sql_variant)</c>, one row per live extended property at the addressed
+    /// level (probed 2026-09-26 against SQL Server 2025).
     /// </summary>
     /// <remarks>
-    /// <para>
-    /// The simulator's filter pipeline supports the common-case combinations
-    /// — all-null (DATABASE-level), <c>(SCHEMA, name)</c>, <c>(SCHEMA, dbo,
-    /// TABLE/VIEW/PROC/FUNC, name)</c>, <c>(SCHEMA, dbo, TABLE, name, COLUMN,
-    /// col)</c>, plus the <c>'default'</c> wildcard at any level-name slot
-    /// (expands to all objects of that level-type under the parent). Other
-    /// shapes (PARAMETER / INDEX / TRIGGER / CONSTRAINT level types) raise
-    /// <see cref="NotSupportedException"/> — extensions for those level types
-    /// land when an application needs them.
-    /// </para>
-    /// <para>
-    /// <c>value</c> is surfaced as <c>nvarchar(MAX)</c> since the simulator
-    /// doesn't model <c>sql_variant</c>; AW's properties are all nvarchar
-    /// so this is lossless for the bacpac use case.
-    /// </para>
+    /// The level types given, from level 0 down, fix how deep the listing
+    /// reaches; every name above the deepest must be given, and the deepest's
+    /// name may be NULL for all of that kind beneath the rest. A name or type
+    /// past that depth, a missing name above it, a level type the procedures
+    /// don't know, or a target that doesn't exist all list nothing rather than
+    /// raise — and the string <c>'default'</c> is a name like any other.
+    /// With no level types at all, the listing is the database's own
+    /// properties, whose <c>objtype</c> and <c>objname</c> are NULL.
     /// </remarks>
     public static Selection ParseListExtendedProperty(ParserContext context)
     {
         if (context.GetNextRequired() is not Operator { Character: '(' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
-        // 7 args, each evaluated parse-time-constant (the same restriction
-        // STRING_SPLIT's enable_ordinal carries). Real SQL Server's TVF
-        // signature constrains them similarly.
+        var arguments = new Expression?[7];
         context.MoveNextRequired();
-        var nameArg = ParseListExtendedPropertyArg(context);
-        var l0TypeArg = ConsumeCommaAndParse(context);
-        var l0NameArg = ConsumeCommaAndParse(context);
-        var l1TypeArg = ConsumeCommaAndParse(context);
-        var l1NameArg = ConsumeCommaAndParse(context);
-        var l2TypeArg = ConsumeCommaAndParse(context);
-        var l2NameArg = ConsumeCommaAndParse(context);
-
+        for (var i = 0; i < arguments.Length; i++)
+        {
+            if (i > 0)
+            {
+                if (context.Token is Operator { Character: ')' })
+                    throw SimulatedSqlException.InsufficientArgumentsToFunction("fn_listextendedproperty", state: 3);
+                if (context.Token is not Operator { Character: ',' })
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                context.MoveNextRequired();
+            }
+            if (context.Token is ReservedKeyword { Keyword: Keyword.Default })
+                context.MoveNextRequired();
+            else
+                arguments[i] = Expression.Parse(context);
+        }
+        if (context.Token is Operator { Character: ',' })
+            throw SimulatedSqlException.TooManyArgumentsToFunction("fn_listextendedproperty");
         if (context.Token is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextOptional();
 
-        // Schema's 4th column (`value`) carries the active database's
-        // collation. Parse-time schema is materialized with the parse-time
-        // batch's collation; the runtime path re-derives the same shape
-        // from its own batch so a connection that swapped databases between
-        // parse and execute still gets matching schema + values. The
-        // parse-time form is what surfaces in the consumer-visible
-        // SqlServerDataReader schema.
-        var ucNVarchar = NVarcharSqlType.Get(-1, context.Batch.CurrentDatabase.Collation, Coercibility.CoercibleDefault);
-        SqlType[] schema = [SqlType.SystemName, SqlType.SystemName, SqlType.SystemName, ucNVarchar];
+        var catalogCollation = Collation.Get("Latin1_General_CI_AI");
+        SqlType[] schema =
+        [
+            VarcharSqlType.Get(128, catalogCollation, Coercibility.Implicit),
+            NVarcharSqlType.Get(128, catalogCollation, Coercibility.Implicit),
+            NVarcharSqlType.Get(128, catalogCollation, Coercibility.Implicit),
+            SqlType.SqlVariant,
+        ];
         string[] columnNames = ["objtype", "objname", "name", "value"];
 
         return new Selection(schema, columnNames,
             hasOrderBy: false,
             hasTopOrOffsetOrFetch: false,
-            (batch, outerResolver) => EnumerateListExtendedPropertyRows(
-                schema, nameArg, l0TypeArg, l0NameArg, l1TypeArg, l1NameArg, l2TypeArg, l2NameArg,
-                batch, outerResolver));
+            (batch, outerResolver) => EnumerateListExtendedPropertyRows(schema, arguments, batch, outerResolver))
+        {
+            ColumnNullability = [true, true, false, true],
+        };
     }
-
-    private static Expression ConsumeCommaAndParse(ParserContext context)
-    {
-        if (context.Token is not Operator { Character: ',' })
-            throw SimulatedSqlException.SyntaxErrorNear(context);
-        context.MoveNextRequired();
-        return ParseListExtendedPropertyArg(context);
-    }
-
-    private static Expression ParseListExtendedPropertyArg(ParserContext context) => Expression.Parse(context);
 
     private static IEnumerable<byte[]> EnumerateListExtendedPropertyRows(
         SqlType[] schema,
-        Expression nameExpr,
-        Expression l0TypeExpr, Expression l0NameExpr,
-        Expression l1TypeExpr, Expression l1NameExpr,
-        Expression l2TypeExpr, Expression l2NameExpr,
+        Expression?[] arguments,
         BatchContext batch,
         Func<MultiPartName, SqlValue>? outerResolver)
     {
         var resolver = outerResolver ?? (n => throw SimulatedSqlException.InvalidColumnName(n));
         var runtime = new RuntimeContext(resolver, batch);
-        var filter = ResolveListExtendedPropertyFilter(
-            batch,
-            EvalNullableString(nameExpr, runtime),
-            EvalNullableString(l0TypeExpr, runtime),
-            EvalNullableString(l0NameExpr, runtime),
-            EvalNullableString(l1TypeExpr, runtime),
-            EvalNullableString(l1NameExpr, runtime),
-            EvalNullableString(l2TypeExpr, runtime),
-            EvalNullableString(l2NameExpr, runtime));
-
-        // No-match: a level-name miss (the target doesn't exist) returns
-        // zero rows from fn_listextendedproperty (NOT an error — distinct
-        // from the sp_addextendedproperty path's Msg 15135).
-        if (filter is null)
-            yield break;
-
-        var nvMax = NVarcharSqlType.Get(-1, batch.CurrentDatabase.Collation, Coercibility.CoercibleDefault);
-        var targets = new ExtendedPropertyTargets(batch.CurrentDatabase);
-        foreach (var kvp in batch.CurrentDatabase.ExtendedProperties)
+        var values = new string?[arguments.Length];
+        for (var i = 0; i < arguments.Length; i++)
         {
-            var key = kvp.Key;
-            if (!filter.Matches(key) || !targets.IsLive(key))
+            if (arguments[i]?.Run(runtime) is { IsNull: false } value)
+                values[i] = value.CoerceTo(SqlType.NVarchar).AsString;
+        }
+
+        // The listing's depth is the run of level types given from level 0;
+        // every name above the deepest must be given, and nothing may follow.
+        var depth = 0;
+        while (depth < 3 && values[1 + (depth * 2)] is not null)
+            depth++;
+        for (var level = 0; level < 3; level++)
+        {
+            var type = values[1 + (level * 2)];
+            var name = values[2 + (level * 2)];
+            if (level >= depth ? type is not null || name is not null : level < depth - 1 && name is null)
+                yield break;
+        }
+
+        var database = batch.CurrentDatabase;
+        var targets = new ExtendedPropertyTargets(database);
+        var nameFilter = values[0];
+        foreach (var (key, value) in database.ExtendedProperties)
+        {
+            if ((nameFilter is not null && !BuiltInToken.Equals(key.Name, nameFilter))
+                || !targets.TryDescribe(key, out var chain)
+                || chain.Length != depth)
+            {
+                continue;
+            }
+
+            var matches = true;
+            for (var level = 0; level < depth && matches; level++)
+            {
+                var name = values[2 + (level * 2)];
+                matches = BuiltInToken.Equals(chain[level].Type, values[1 + (level * 2)])
+                    && (name is null || database.Collation.Equals(chain[level].Name, name));
+            }
+            if (!matches)
                 continue;
 
-            // Resolve objtype + objname from the key. objtype is the deepest
-            // level type the key carries (SCHEMA / TABLE / VIEW / PROC / FUNC
-            // / COLUMN). objname is the leaf name at that level.
-            if (!TryResolveListExtendedPropertyDisplayLabels(batch, key, out var objtype, out var objname))
-                continue;
-
-            var valueAsNVarchar = kvp.Value.IsNull
-                ? SqlValue.Null(nvMax)
-                : kvp.Value.CoerceTo(nvMax);
             yield return RowEncoder.EncodeRow(schema, [
-                SqlValue.FromSystemName(objtype),
-                SqlValue.FromSystemName(objname),
-                SqlValue.FromSystemName(key.Name),
-                valueAsNVarchar,
+                depth == 0 ? SqlValue.Null(schema[0]) : SqlValue.FromVarchar((VarcharSqlType)schema[0], chain[depth - 1].Type),
+                depth == 0 ? SqlValue.Null(schema[1]) : SqlValue.FromNVarchar((NVarcharSqlType)schema[1], chain[depth - 1].Name),
+                SqlValue.FromNVarchar((NVarcharSqlType)schema[2], key.Name),
+                value.IsNull ? SqlValue.Null(SqlType.SqlVariant) : SqlValue.FromVariant(value),
             ]);
         }
-    }
-
-    private static string? EvalNullableString(Expression expr, RuntimeContext runtime)
-    {
-        var value = expr.Run(runtime);
-        return value.IsNull ? null : value.CoerceTo(NVarcharSqlType.Get(-1, runtime.Batch.CurrentDatabase.Collation, Coercibility.CoercibleDefault)).AsString;
-    }
-
-    /// <summary>
-    /// Resolves the 7-arg filter spec to a target-matching predicate.
-    /// Returns null when the level0/1/2 chain names an object that doesn't
-    /// exist (probe-confirmed: <c>fn_listextendedproperty</c> returns zero
-    /// rows on a missing target instead of raising — distinct from the
-    /// sp_addextendedproperty's Msg 15135).
-    /// </summary>
-    private static ExtendedPropertyListFilter? ResolveListExtendedPropertyFilter(
-        BatchContext batch,
-        string? nameFilter,
-        string? l0Type, string? l0Name,
-        string? l1Type, string? l1Name,
-        string? l2Type, string? l2Name)
-    {
-        var f = new ExtendedPropertyListFilter { NameFilter = nameFilter };
-
-        if (l0Type is null)
-        {
-            f.ClassFilter = 0;
-            return f;
-        }
-        if (!BuiltInToken.Equals(l0Type, "SCHEMA"))
-            throw new NotSupportedException($"fn_listextendedproperty level0type '{l0Type}' isn't modeled (only SCHEMA / NULL).");
-        if (l0Name is null)
-            return null;
-        if (!batch.CurrentDatabase.Schemas.TryGetValue(l0Name, out var schema)
-            && !BuiltInToken.Equals(l0Name, "default"))
-        {
-            return null;
-        }
-
-        if (l1Type is null)
-        {
-            f.ClassFilter = 3;
-            f.MajorIdFilter = schema?.SchemaId;
-            return f;
-        }
-        if (l1Name is null)
-            return null;
-
-        // Level1 = TABLE / VIEW / PROCEDURE / FUNCTION / TYPE.
-        // Resolve the target object if a concrete name was passed; the
-        // 'default' wildcard fans out across every object of that kind in
-        // the parent schema.
-        SchemaObject? l1Obj = null;
-        if (schema is not null && !BuiltInToken.Equals(l1Name, "default"))
-        {
-            Span<char> l1Kind = stackalloc char[l1Type.Length];
-            _ = l1Type.ToUpperInvariant(l1Kind);
-            l1Obj = l1Kind switch
-            {
-                "FUNCTION" => schema.Functions.TryGetValue(l1Name, out var fn) ? fn : null,
-                "PROCEDURE" => schema.Procedures.TryGetValue(l1Name, out var p) ? p : null,
-                "TABLE" => schema.HeapTables.TryGetValue(l1Name, out var t) ? t : null,
-                "TYPE" => schema.TableTypes.TryGetValue(l1Name, out var tt) ? tt : null,
-                "VIEW" => schema.Views.TryGetValue(l1Name, out var v) ? v : null,
-                _ => throw new NotSupportedException($"fn_listextendedproperty level1type '{l1Type}' isn't modeled (only TABLE / VIEW / PROCEDURE / FUNCTION / TYPE)."),
-            };
-            if (l1Obj is null)
-                return null;
-        }
-
-        if (l2Type is null)
-        {
-            f.ClassFilter = 1;
-            f.MinorIdFilter = 0;
-            if (l1Obj is not null)
-                f.MajorIdFilter = l1Obj.ObjectId;
-            return f;
-        }
-        if (l2Name is null)
-            return null;
-        if (!BuiltInToken.Equals(l2Type, "COLUMN"))
-            throw new NotSupportedException($"fn_listextendedproperty level2type '{l2Type}' isn't modeled (only COLUMN).");
-
-        f.ClassFilter = 1;
-        if (l1Obj is HeapTable table)
-        {
-            f.MajorIdFilter = table.ObjectId;
-            if (!BuiltInToken.Equals(l2Name, "default"))
-            {
-                for (var i = 0; i < table.Columns.Length; i++)
-                {
-                    if (BuiltInToken.Equals(table.Columns[i].Name, l2Name))
-                    {
-                        f.MinorIdFilter = table.Columns[i].ColumnId;
-                        return f;
-                    }
-                }
-                return null;
-            }
-            f.MinorIdMustBeNonZero = true;
-            return f;
-        }
-        // l1Obj null + l2Name 'default' = all columns of all tables in the schema.
-        f.MinorIdMustBeNonZero = true;
-        return f;
-    }
-
-    /// <summary>
-    /// Reverse-resolves an <see cref="ExtendedPropertyKey"/> into the
-    /// (objtype, objname) display pair for the TVF's row projection.
-    /// Returns false when the key references an object that no longer
-    /// exists (the dict can outlive a CREATE/DROP TABLE since extended
-    /// properties don't participate in the undo log).
-    /// </summary>
-    private static bool TryResolveListExtendedPropertyDisplayLabels(BatchContext batch, ExtendedPropertyKey key, out string objtype, out string objname)
-    {
-        objtype = "";
-        objname = "";
-        switch (key.Class)
-        {
-            case 0:
-                objtype = "DATABASE";
-                objname = Database.DefaultSchemaName;
-                return true;
-            case 1:
-                foreach (var s in batch.CurrentDatabase.Schemas.Values)
-                {
-                    foreach (var t in s.HeapTables.Values)
-                    {
-                        if (t.ObjectId == key.MajorId)
-                        {
-                            if (key.MinorId == 0)
-                            {
-                                objtype = "TABLE";
-                                objname = t.Name;
-                                return true;
-                            }
-                            foreach (var column in t.Columns)
-                            {
-                                if (column.ColumnId == key.MinorId)
-                                {
-                                    objtype = "COLUMN";
-                                    objname = column.Name;
-                                    return true;
-                                }
-                            }
-                            return false;
-                        }
-                    }
-                    foreach (var v in s.Views.Values)
-                    {
-                        if (v.ObjectId == key.MajorId)
-                        {
-                            objtype = "VIEW";
-                            objname = v.Name;
-                            return true;
-                        }
-                    }
-                    foreach (var p in s.Procedures.Values)
-                    {
-                        if (p.ObjectId == key.MajorId)
-                        {
-                            objtype = "PROCEDURE";
-                            objname = p.Name;
-                            return true;
-                        }
-                    }
-                    foreach (var fn in s.Functions.Values)
-                    {
-                        if (fn.ObjectId == key.MajorId)
-                        {
-                            objtype = "FUNCTION";
-                            objname = fn.Name;
-                            return true;
-                        }
-                    }
-                }
-                return false;
-            case 3:
-                foreach (var s in batch.CurrentDatabase.Schemas.Values)
-                {
-                    if (s.SchemaId == key.MajorId)
-                    {
-                        objtype = "SCHEMA";
-                        objname = s.Name;
-                        return true;
-                    }
-                }
-                return false;
-            default:
-                return false;
-        }
-    }
-
-    private sealed class ExtendedPropertyListFilter
-    {
-        public string? NameFilter;
-        public byte? ClassFilter;
-        public int? MajorIdFilter;
-        public int? MinorIdFilter;
-        public bool MinorIdMustBeNonZero;
-
-        public bool Matches(ExtendedPropertyKey key) =>
-            (this.NameFilter is not { } n || BuiltInToken.Equals(key.Name, n))
-            && (this.ClassFilter is not { } c || key.Class == c)
-            && (this.MajorIdFilter is not { } m || key.MajorId == m)
-            && (this.MinorIdFilter is not { } mi || key.MinorId == mi)
-            && !(this.MinorIdMustBeNonZero && key.MinorId == 0);
     }
 }

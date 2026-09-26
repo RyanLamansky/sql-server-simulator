@@ -194,6 +194,48 @@ public sealed class ExtendedPropertyTargetTests
     }
 
     [TestMethod]
+    [DataRow("'schema', 'dbo', 'procedure', 'p', 'parameter', default", "PARAMETER:@x|PARAMETER:@y")]
+    [DataRow("'schema', 'dbo', 'view', 'v', 'column', null", "COLUMN:b")]
+    [DataRow("'schema', 'dbo', 'table', 't', 'index', null", "INDEX:ix")]
+    [DataRow("'schema', 'dbo', 'table', 't', 'trigger', 'TR'", "TRIGGER:tr")]
+    [DataRow("'schema', 'dbo', 'type', null, null, null", "TYPE:at|TYPE:tt")]
+    [DataRow("'schema', 'dbo', 'type', 'tt', 'column', null", "COLUMN:k")]
+    [DataRow("'schema', 'dbo', 'xml schema collection', null, null, null", "XML SCHEMA COLLECTION:xc")]
+    [DataRow("'user', null, null, null, null, null", "USER:u")]
+    [DataRow("'schema', 'dbo', 'table', null, 'column', null", "")]
+    [DataRow("'schema', 'dbo', null, 't', null, null", "")]
+    [DataRow("'schema', 'dbo', 'bogus', null, null, null", "")]
+    [DataRow("'schema', 'dbo', 'table', 't', 'parameter', null", "")]
+    public void FnListExtendedProperty_ListsTheAddressedLevel(string levels, string expected)
+    {
+        var sim = Seeded();
+        _ = sim.ExecuteNonQuery(string.Join("; ",
+            Add("'schema', 'dbo', 'view', 'v', 'column', 'b'"),
+            Add("'schema', 'dbo', 'table', 't', 'index', 'ix'"),
+            Add("'schema', 'dbo', 'table', 't', 'trigger', 'tr'"),
+            Add("'schema', 'dbo', 'procedure', 'p', 'parameter', '@y'"),
+            Add("'schema', 'dbo', 'procedure', 'p', 'parameter', '@x'"),
+            Add("'schema', 'dbo', 'type', 'at'"),
+            Add("'schema', 'dbo', 'type', 'tt'"),
+            Add("'schema', 'dbo', 'type', 'tt', 'column', 'k'"),
+            Add("'schema', 'dbo', 'xml schema collection', 'xc'"),
+            Add("'user', 'u'")));
+        AreEqual(expected, sim.ExecuteScalar($"select isnull(string_agg(concat(objtype, ':', objname), '|') within group (order by objname), '') from fn_listextendedproperty(null, {levels})"));
+    }
+
+    [TestMethod]
+    public void FnListExtendedProperty_DatabaseLevel_HasNoObject()
+        => AreEqual("1:1:varchar", new Simulation().ExecuteScalar("""
+            exec sp_addextendedproperty 'd', 'db';
+            select concat(count(*), ':', count(name), ':', max(cast(sql_variant_property(value, 'BaseType') as sysname)))
+            from fn_listextendedproperty(default, default, default, default, default, default, default) where objtype is null and objname is null
+            """));
+
+    [TestMethod]
+    public void FnListExtendedProperty_TooFewArguments_IsMsg313()
+        => _ = new Simulation().AssertSqlError("select * from fn_listextendedproperty(null, 'schema', 'dbo')", 313);
+
+    [TestMethod]
     public void TypeId_ResolvesAnAliasType()
         => AreEqual("at", new Simulation().ExecuteScalar("create type at from int; select type_name(type_id('dbo.at'))"));
 }

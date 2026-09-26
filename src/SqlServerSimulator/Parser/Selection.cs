@@ -3425,7 +3425,7 @@ internal sealed partial class Selection
     {
         var columns = new HeapColumn[plan.Schema.Length];
         for (var ci = 0; ci < columns.Length; ci++)
-            columns[ci] = new HeapColumn(plan.ColumnNames[ci], plan.Schema[ci], maxLength: null, nullable: true);
+            columns[ci] = new HeapColumn(plan.ColumnNames[ci], plan.Schema[ci], maxLength: null, nullable: plan.ColumnNullability?[ci] ?? true);
         return new FromSource(
             qualifier: ConsumeOptionalAliasInPlace(context),
             columnNames: plan.ColumnNames,

@@ -300,8 +300,13 @@ public class ExtendedPropertyTests
         => AreEqual(0, new Simulation().ExecuteScalar(
             "SELECT COUNT(*) FROM fn_listextendedproperty(NULL, 'SCHEMA', 'dbo', 'TABLE', 'no_such_table', NULL, NULL)"));
 
+    /// <summary>
+    /// A NULL — or the <c>DEFAULT</c> keyword — at the deepest level's name
+    /// lists every object of that kind; the string <c>'default'</c> is a name
+    /// like any other (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
     [TestMethod]
-    public void FnListExtendedProperty_DefaultWildcard_FansOutAcrossSchemaTables()
+    public void FnListExtendedProperty_NullAtTheDeepestName_FansOutAcrossSchemaTables()
     {
         var sim = new Simulation();
         _ = sim.ExecuteNonQuery("""
@@ -310,9 +315,12 @@ public class ExtendedPropertyTests
             EXEC sp_addextendedproperty @name=N'Desc', @value=N't1', @level0type=N'SCHEMA', @level0name=N'dbo', @level1type=N'TABLE', @level1name=N't1';
             EXEC sp_addextendedproperty @name=N'Desc', @value=N't2', @level0type=N'SCHEMA', @level0name=N'dbo', @level1type=N'TABLE', @level1name=N't2';
             """);
-        // 'default' wildcard at level1name expands to every table in the schema.
-        AreEqual(2, sim.ExecuteScalar(
-            "SELECT COUNT(*) FROM fn_listextendedproperty(NULL, 'SCHEMA', 'dbo', 'TABLE', 'default', NULL, NULL)"));
+        AreEqual("2:2:0", sim.ExecuteScalar("""
+            SELECT CONCAT(
+                (SELECT COUNT(*) FROM fn_listextendedproperty(NULL, 'SCHEMA', 'dbo', 'TABLE', NULL, NULL, NULL)), ':',
+                (SELECT COUNT(*) FROM fn_listextendedproperty(DEFAULT, 'SCHEMA', 'dbo', 'TABLE', DEFAULT, DEFAULT, DEFAULT)), ':',
+                (SELECT COUNT(*) FROM fn_listextendedproperty(NULL, 'SCHEMA', 'dbo', 'TABLE', 'default', NULL, NULL)))
+            """));
     }
 
     [TestMethod]
