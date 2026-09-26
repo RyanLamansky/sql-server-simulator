@@ -738,6 +738,24 @@ public sealed class KeyRangeLockTests
     }
 
     [TestMethod]
+    [DataRow("update t with (holdlock) set v = v where k between 15 and 25")]
+    [DataRow("delete t with (serializable) where k > 15 and k < 25")]
+    public void HoldlockHintedWriter_FencesItsIntervalUnderReadCommitted(string write)
+    {
+        var sim = KeyedTable();
+        using var holder = sim.CreateOpenConnection();
+        using var writer = sim.CreateOpenConnection();
+
+        _ = holder.CreateCommand("begin tran; " + write).ExecuteNonQuery();
+        _ = writer.CreateCommand("set lock_timeout 0").ExecuteNonQuery();
+
+        AreEqual(1222, Throws<SimulatedSqlException>(() => writer.CreateCommand("insert t values (22, 9)").ExecuteNonQuery()).Number);
+        AreEqual(1, writer.CreateCommand("insert t values (40, 9)").ExecuteNonQuery());
+
+        _ = holder.CreateCommand("rollback").ExecuteNonQuery();
+    }
+
+    [TestMethod]
     public void ReadCommittedWriter_FencesNothing()
     {
         var sim = KeyedTable();

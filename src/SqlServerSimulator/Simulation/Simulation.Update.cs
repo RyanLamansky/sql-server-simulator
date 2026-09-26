@@ -93,7 +93,8 @@ partial class Simulation
         }
 
         context.MoveNextRequired();
-        Selection.ValidateDmlTargetHints(Selection.ParseOptionalTableHints(context, allowLegacyParenForm: false));
+        var targetHints = Selection.ParseOptionalTableHints(context, allowLegacyParenForm: false);
+        Selection.ValidateDmlTargetHints(targetHints);
         // Phase 1a: when the leading identifier resolved to a concrete table
         // (the simple `UPDATE t SET …` case), acquire X on it. Tx-scoped via
         // AcquireDataLockIfApplicable when an explicit BEGIN TRAN is active.
@@ -244,7 +245,7 @@ partial class Simulation
         if (table.IsTableValuedParameter)
             throw SimulatedSqlException.TableValuedParameterIsReadOnly(leadingIdent.Leaf);
         FunctionBodyShape.NoteTableWrite(context.Batch, "UPDATE", table);
-        return ExecuteUpdateAgainstTable(context, leadingIdent, table, rawAssignments, output, top, leadingView);
+        return ExecuteUpdateAgainstTable(context, leadingIdent, table, rawAssignments, output, top, targetHints.Serializable, leadingView);
     }
 
     /// <summary>
@@ -413,6 +414,7 @@ partial class Simulation
         List<(string? ColumnName, Expression Expr)> rawAssignments,
         OutputProjection? output,
         Selection.DmlTopLimit? top,
+        bool serializableHint,
         View? sourceView = null)
     {
         BindDeferredXmlMutators(context, table, rawAssignments, targetName.ToString());
@@ -439,7 +441,7 @@ partial class Simulation
 
         CheckUpdatePermissions(context, targetName, table, sourceView, rawAssignments, where);
         if (positionedCursor is null)
-            Selection.SettleSerializableWriteFence(table, where, context.Batch);
+            Selection.SettleSerializableWriteFence(table, where, serializableHint, context.Batch);
 
         var affected = new List<(int PageIndex, int SlotIndex, SqlValue[] FullNew, SqlValue[]? FullOld)>();
         var storedColumns = table.StoredColumns;

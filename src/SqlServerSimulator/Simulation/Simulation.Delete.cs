@@ -56,7 +56,8 @@ partial class Simulation
             _ = context.Batch.TryResolveTable(leadingIdent, out leadingTable);
         }
         context.MoveNextOptional();
-        Selection.ValidateDmlTargetHints(Selection.ParseOptionalTableHints(context, allowLegacyParenForm: false));
+        var targetHints = Selection.ParseOptionalTableHints(context, allowLegacyParenForm: false);
+        Selection.ValidateDmlTargetHints(targetHints);
         // Phase 1a: acquire X on the resolved DELETE target. Tx-scoped when
         // BEGIN TRAN is active. Skipped when leadingTable is null (multi-
         // source alias form — target determined post-FROM, deferred to 1b).
@@ -98,7 +99,7 @@ partial class Simulation
         if (table.IsTableValuedParameter)
             throw SimulatedSqlException.TableValuedParameterIsReadOnly(leadingIdent.Leaf);
         FunctionBodyShape.NoteTableWrite(context.Batch, "DELETE", table);
-        return ExecuteDeleteAgainstTable(context, leadingIdent, table, output, top, leadingView);
+        return ExecuteDeleteAgainstTable(context, leadingIdent, table, output, top, targetHints.Serializable, leadingView);
     }
 
     /// <summary>
@@ -111,6 +112,7 @@ partial class Simulation
         HeapTable table,
         OutputProjection? output,
         Selection.DmlTopLimit? top,
+        bool serializableHint,
         View? sourceView = null)
     {
         BooleanExpression? where = null;
@@ -150,7 +152,7 @@ partial class Simulation
         }
 
         if (positionedCursor is null)
-            Selection.SettleSerializableWriteFence(table, where, context.Batch);
+            Selection.SettleSerializableWriteFence(table, where, serializableHint, context.Batch);
 
         var storedColumns = table.StoredColumns;
         var lobStore = table.Heap;

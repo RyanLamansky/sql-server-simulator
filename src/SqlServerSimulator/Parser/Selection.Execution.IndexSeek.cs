@@ -2391,12 +2391,13 @@ internal sealed partial class Selection
     /// <c>RangeS-U</c> on every key and the infinity range there, which admits
     /// the same readers and refuses the same writers; else, over a keyless
     /// heap, a table X, as real takes an object X (probed 2026-09-26 against
-    /// SQL Server 2025). Under any other isolation level the writer takes no
-    /// fence.
+    /// SQL Server 2025). A <c>HOLDLOCK</c> / <c>SERIALIZABLE</c> hint on the
+    /// target does the same under any isolation level; otherwise the writer
+    /// takes no fence.
     /// </summary>
-    internal static void SettleSerializableWriteFence(HeapTable table, BooleanExpression? where, BatchContext batch)
+    internal static void SettleSerializableWriteFence(HeapTable table, BooleanExpression? where, bool serializableHint, BatchContext batch)
     {
-        if (batch.IsSkipping || batch.Connection.SessionIsolationLevel != System.Data.IsolationLevel.Serializable
+        if (batch.IsSkipping || !(serializableHint || batch.Connection.SessionIsolationLevel == System.Data.IsolationLevel.Serializable)
             || table.IsTableVariable || BatchContext.IsLocalTempName(table.Name) || Simulation.SystemHeapTables.Values.Contains(table)
             || where?.IsNeverTrue == true)
         {
