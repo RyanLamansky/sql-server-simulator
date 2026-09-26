@@ -133,6 +133,13 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     public bool FoldableArguments;
 
     /// <summary>
+    /// Set by the SELECT statement's dispatch while <c>SET NO_BROWSETABLE</c>
+    /// is on, and consumed by the statement's own query specification, which
+    /// then takes on its browse-mode hidden columns and metadata.
+    /// </summary>
+    public bool BrowseStatement;
+
+    /// <summary>
     /// SQL Server's fixed <c>CASE</c> / <c>IIF</c> lexical-nesting cap: ten
     /// levels succeed, an eleventh raises Msg 125 ("Case expressions may only
     /// be nested to level 10.").

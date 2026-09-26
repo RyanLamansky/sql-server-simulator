@@ -1303,6 +1303,7 @@ public sealed partial class Simulation
             ? null
             : command.Connection is { CurrentDatabase: { } currentDb } connection
                 && connection.SessionIsolationLevel == System.Data.IsolationLevel.ReadCommitted
+                && !connection.NoBrowseTable
                 && BuildPlanCacheParameterSignature(command) is { } sig
                     ? new PlanCacheKey(command.CommandText, currentDb.Name, sig, connection.QuotedIdentifiers, connection.DateFormat, connection.AnsiNulls, connection.ConcatNullYieldsNull)
                     : null;
@@ -1399,6 +1400,8 @@ public sealed partial class Simulation
                         ColumnNullability = selection.ColumnNullability,
                         ColumnReportsNumeric = selection.ColumnReportsNumeric,
                         ColumnWireFlags = selection.ColumnWireFlags,
+                        HiddenColumnCount = selection.HiddenColumnCount,
+                        Browse = selection.Browse,
                     };
                     executed.EndedByError = true;
                 }
@@ -2608,7 +2611,18 @@ public sealed partial class Simulation
         {
             case ReservedKeyword { Keyword: Keyword.Select }:
                 {
-                    var selection = Selection.Parse(context, QueryScope.Statement);
+                    context.BrowseStatement = connection.NoBrowseTable;
+                    Selection selection;
+                    try
+                    {
+                        selection = Selection.Parse(context, QueryScope.Statement);
+                    }
+                    finally
+                    {
+                        context.BrowseStatement = false;
+                    }
+                    if (connection.NoBrowseTable && selection.IsSetOperationResult)
+                        selection.Browse = Selection.SetOperationBrowseInfo(selection.Schema.Length);
                     // A value literal or a name left dangling after a complete
                     // SELECT is always unconsumed trailing input — real SQL
                     // Server raises Msg 102 rather than silently ignoring it
@@ -2682,6 +2696,8 @@ public sealed partial class Simulation
                             ColumnNullability = selection.ColumnNullability,
                             ColumnReportsNumeric = selection.ColumnReportsNumeric,
                             ColumnWireFlags = selection.ColumnWireFlags,
+                            HiddenColumnCount = selection.HiddenColumnCount,
+                            Browse = selection.Browse,
                         };
                         executed.EndedByError = true;
                     }

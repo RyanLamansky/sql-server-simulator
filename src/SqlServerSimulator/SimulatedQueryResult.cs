@@ -80,6 +80,13 @@ internal abstract class SimulatedQueryResult : SimulatedStatementOutcome
     public int HiddenColumnCount;
 
     /// <summary>
+    /// Browse-mode metadata — set on a statement's result while
+    /// <c>SET NO_BROWSETABLE</c> is on — which the TDS endpoint sends as the
+    /// TABNAME and COLINFO tokens after COLMETADATA; null otherwise.
+    /// </summary>
+    internal BrowseInfo? Browse;
+
+    /// <summary>
     /// Per column, the base-table column it reads directly, or null for an
     /// expression — set only by the <c>SET FMTONLY</c> metadata path, which
     /// is what <c>sp_describe_first_result_set</c> describes through.
@@ -141,4 +148,18 @@ internal abstract class SimulatedQueryResult : SimulatedStatementOutcome
         var cursor = this.CreateCursor();
         return this.ClientTextSize < 0 ? cursor : new TextSizeCursor(cursor, this.Schema, this.ClientTextSize);
     }
+}
+
+/// <summary>
+/// What a browse-mode result tells a client about each column's origin, the
+/// TDS TABNAME and COLINFO tokens' content: the base tables as the query
+/// spelled them, and per column its 1-based table number (0 for none), its
+/// status — EXPRESSION <c>0x04</c>, KEY <c>0x08</c>, HIDDEN <c>0x10</c>,
+/// DIFFERENT_NAME <c>0x20</c> — and, for a renamed column, the base name.
+/// </summary>
+internal sealed class BrowseInfo(string[][] tables, (byte Table, byte Status, string? BaseName)[] columns)
+{
+    public readonly string[][] Tables = tables;
+
+    public readonly (byte Table, byte Status, string? BaseName)[] Columns = columns;
 }

@@ -328,6 +328,9 @@ partial class Simulation
             case "CONCAT_NULL_YIELDS_NULL":
                 connection.ConcatNullYieldsNull = on;
                 break;
+            case "NO_BROWSETABLE":
+                connection.NoBrowseTable = on;
+                break;
             case "NUMERIC_ROUNDABORT":
                 connection.NumericRoundabort = on;
                 break;

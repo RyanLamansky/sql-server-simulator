@@ -58,6 +58,12 @@ internal sealed partial class Selection
     /// </summary>
     internal bool IsBareConstantRow;
 
+    /// <summary>The browse-mode metadata the statement's result carries; see <see cref="SimulatedQueryResult.Browse"/>.</summary>
+    internal BrowseInfo? Browse;
+
+    /// <summary>How many trailing columns are browse mode's hidden key and rowversion columns.</summary>
+    internal int HiddenColumnCount;
+
     /// <summary>
     /// The FROM sources of the branch whose projections this plan's output
     /// columns come from — the leftmost branch of a set-op chain, since that's

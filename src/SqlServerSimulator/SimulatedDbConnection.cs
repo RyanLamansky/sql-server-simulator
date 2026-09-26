@@ -238,6 +238,15 @@ public sealed class SimulatedDbConnection : DbConnection
     internal bool NumericRoundabort;
 
     /// <summary>
+    /// Session-scoped <c>SET NO_BROWSETABLE</c> (default off), which SqlClient
+    /// wraps a <c>CommandBehavior.KeyInfo</c> command in: while on, a SELECT
+    /// statement's result carries its base tables' key and rowversion columns
+    /// as hidden trailing columns plus the browse metadata (see
+    /// <c>Selection.BrowseInfoFor</c>). A plan parsed under it is never cached.
+    /// </summary>
+    internal bool NoBrowseTable;
+
+    /// <summary>
     /// Session-scoped <c>XACT_ABORT</c> setting (default
     /// <see langword="false"/>, surfaced as <c>@@OPTIONS &amp; 16384</c>).
     /// While on, a run-time error that would otherwise terminate only its own

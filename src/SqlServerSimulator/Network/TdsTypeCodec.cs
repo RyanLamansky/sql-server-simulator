@@ -43,7 +43,7 @@ internal static class TdsTypeCodec
     /// trailing <c>ROWSTAT</c> that way, with COLMETADATA flags of zero
     /// (captured against SQL Server 2025, 2026-09-25).
     /// </summary>
-    public static void WriteColMetadata(TdsTokenWriter writer, SqlType[] schema, string[] columnNames, bool[]? columnNullability, bool[]? columnReportsNumeric = null, int hiddenColumnCount = 0, byte[]? columnWireFlags = null, string databaseName = "")
+    public static void WriteColMetadata(TdsTokenWriter writer, SqlType[] schema, string[] columnNames, bool[]? columnNullability, bool[]? columnReportsNumeric = null, int hiddenColumnCount = 0, byte[]? columnWireFlags = null, string databaseName = "", BrowseInfo? browse = null)
     {
         var firstHidden = schema.Length - hiddenColumnCount;
         writer.EnterComposite();
@@ -54,7 +54,9 @@ internal static class TdsTypeCodec
             var type = schema[i];
             writer.WriteUInt32(type is RowVersionSqlType ? 0x50u : 0u);
             var notNull = columnNullability is not null && !columnNullability[i];
-            var hidden = i >= firstHidden;
+            // A cursor fetch's hidden ROWSTAT is read-only; browse mode's
+            // hidden key and rowversion columns keep their own character.
+            var hidden = i >= firstHidden && browse is null;
             var character = hidden ? (byte)0x00 : columnWireFlags is { } flags ? flags[i] : (byte)0x08;
             writer.WriteByte((byte)(character | (notNull ? 0 : 1)));
             writer.WriteByte(0);
@@ -63,7 +65,11 @@ internal static class TdsTypeCodec
             writer.WriteBVarchar(columnNames[i]);
         }
 
-        if (hiddenColumnCount > 0)
+        if (browse is not null)
+        {
+            WriteBrowseTokens(writer, browse);
+        }
+        else if (hiddenColumnCount > 0)
         {
             // COLINFO: per column its 1-based number, table number (0, no
             // TABNAME) and status — a hidden column's is HIDDEN | EXPRESSION.
@@ -78,6 +84,50 @@ internal static class TdsTypeCodec
         }
 
         writer.LeaveComposite();
+    }
+
+    // Browse mode's TABNAME — each base table as a count of name parts, each
+    // a US_VARCHAR — then COLINFO: per column its number, table number and
+    // status, with the base name as a B_VARCHAR when the column is renamed
+    // (captured from SQL Server 2025, 2026-09-26).
+    private static void WriteBrowseTokens(TdsTokenWriter writer, BrowseInfo browse)
+    {
+        var tabNameLength = 0;
+        foreach (var parts in browse.Tables)
+        {
+            tabNameLength++;
+            foreach (var part in parts)
+                tabNameLength += 2 + (part.Length * 2);
+        }
+        writer.WriteByte(Tds.TokenTabName);
+        writer.WriteUInt16(checked((ushort)tabNameLength));
+        foreach (var parts in browse.Tables)
+        {
+            writer.WriteByte(checked((byte)parts.Length));
+            foreach (var part in parts)
+            {
+                writer.WriteUInt16(checked((ushort)part.Length));
+                writer.WriteBytes(System.Text.Encoding.Unicode.GetBytes(part));
+            }
+        }
+
+        var colInfoLength = 0;
+        foreach (var (_, _, baseName) in browse.Columns)
+            colInfoLength += 3 + (baseName is null ? 0 : 1 + (baseName.Length * 2));
+        writer.WriteByte(Tds.TokenColInfo);
+        writer.WriteUInt16(checked((ushort)colInfoLength));
+        for (var i = 0; i < browse.Columns.Length; i++)
+        {
+            var (table, status, baseName) = browse.Columns[i];
+            writer.WriteByte(checked((byte)(i + 1)));
+            writer.WriteByte(table);
+            writer.WriteByte(status);
+            if (baseName is not null)
+            {
+                writer.WriteByte(checked((byte)baseName.Length));
+                writer.WriteBytes(System.Text.Encoding.Unicode.GetBytes(baseName));
+            }
+        }
     }
 
     public static void WriteRow(TdsTokenWriter writer, SqlType[] schema, RowCursor cursor, bool[]? columnNullability)

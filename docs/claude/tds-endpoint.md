@@ -412,6 +412,16 @@ Specifics:
 - **`text` / `ntext` / `image`** (legacy in-band textptr form) — see [Legacy text / ntext / image](#legacy-text--ntext--image-wire-forms) below.
 - Every modeled result-column type has a wire encoding; an unmodeled one would surface as `WriteTypeInfo`'s `NotSupportedException` → ERROR 50000.
 
+### Browse mode (`CommandBehavior.KeyInfo`)
+
+SqlClient sends a `KeyInfo` command as ` SET FMTONLY OFF; SET NO_BROWSETABLE ON;<query> SET NO_BROWSETABLE OFF;`, and `SET NO_BROWSETABLE` is session state here (`SimulatedDbConnection.NoBrowseTable`) rather than a discarded option.
+While it is on, the SELECT statement's own query (`Parser/Selection.Browse.cs`) appends, per base table in FROM order, its key columns (the PRIMARY KEY, else a UNIQUE constraint, else an unfiltered unique index) and then its rowversion column that the select list doesn't already read, as hidden trailing columns riding every row; and the result carries `BrowseInfo`, which the endpoint sends after COLMETADATA as **TABNAME** (`0xA4` — each base table as its written name parts) and **COLINFO** (`0xA5` — per column its table number and a status of EXPRESSION `0x04`, KEY `0x08`, HIDDEN `0x10`, DIFFERENT_NAME `0x20` plus the base name).
+SqlClient turns those into `GetSchemaTable`'s `BaseTableName` / `BaseColumnName` / `BaseSchemaName` / `IsKey` / `IsHidden` / `IsExpression` / `IsAliased`, which `DataAdapter.FillSchema` and `SqlCommandBuilder` read.
+A grouped or DISTINCT query is described without hidden columns, a set operation's columns all read as expressions, and a keyless table contributes only its rowversion (all probed 2026-09-26 against SQL Server 2025).
+A plan parsed under the option is never cached, since what it projects depends on it.
+
+**Not modeled yet**: real flattens a derived table (and presumably a view) into its base tables — `SELECT name FROM (SELECT name, id FROM w1) d` names `w1.name` and still appends `id` and `rv` — where the simulator reports such a column with no base table and appends nothing for it; the `FOR BROWSE` clause, which the simulator refuses with Msg 156; and the in-process reader's `GetSchemaTable`, which has no base-column metadata to offer.
+
 ## Legacy text / ntext / image wire forms
 
 The three deprecated large-object types stream over the wire in their pre-PLP in-band form.

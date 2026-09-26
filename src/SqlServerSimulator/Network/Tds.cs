@@ -47,6 +47,7 @@ internal static class Tds
     // Token identifiers (server to client).
     public const byte TokenReturnStatus = 0x79;
     public const byte TokenColMetadata = 0x81;
+    public const byte TokenTabName = 0xA4;
     public const byte TokenColInfo = 0xA5;
     public const byte TokenError = 0xAA;
     public const byte TokenInfo = 0xAB;

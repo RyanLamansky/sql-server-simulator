@@ -951,6 +951,10 @@ internal sealed partial class Selection
         var orderBy = fromClause.OrderBy;
         if (topWithTies && orderBy.Count == 0)
             throw SimulatedSqlException.TopWithTiesRequiresOrderBy();
+        var browse = TakeBrowseStatement(parseBatch, scope, intoTarget, isAssignmentOnly);
+        var browseHidden = browse && !distinct && aggregates.Count == 0 && fromClause.GroupingSets.Count == 0 && fromClause.Having is null
+            ? AppendBrowseHiddenColumns(sources, expressions)
+            : 0;
         var outputSchema = new SqlType[expressions.Count];
         var outputColumnNames = new string[expressions.Count];
 
@@ -1450,6 +1454,11 @@ internal sealed partial class Selection
         selection.ColumnWireFlags = WireFlagsOf(expressions, sources, selection.AutoColumnSource, selection.AutoColumnOrdinal);
         selection.IsGrouped = isGrouped;
         selection.ReadsStorage = readsStorage;
+        if (browse)
+        {
+            selection.Browse = BrowseInfoFor(sources, expressions, outputColumnNames, browseHidden);
+            selection.HiddenColumnCount = browseHidden;
+        }
         selection.StartsConstants = startsConstants;
         selection.HasWindows = windows.Count > 0;
         // A plain SELECT-project-filter body can carry an enclosing statement's
