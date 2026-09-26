@@ -194,6 +194,7 @@ internal static partial class BuiltInResources
     private static void RegisterLegacyCompat(Dictionary<string, CatalogView> views)
     {
         RegisterSysobjects(views);
+        RegisterSyscolumns(views);
         RegisterSysusers(views);
         RegisterSystemObjects(views);
         RegisterSptValues(views);
