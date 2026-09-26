@@ -1511,6 +1511,7 @@ partial class Simulation
             var raw = expr.Run(new RuntimeContext(name => resolveCombined(targetValues, sourceValues, name), context.Batch));
             raw = EnforceMaxLength(raw, destinationTable.Columns[ord], destinationTable, context.Connection);
             newValues[ord] = CoerceForWrite(raw, destinationTable.Columns[ord], context.Batch);
+            EnforceRule(destinationTable, newValues, ord, context.Batch);
         }
 
         for (var ci = 0; ci < destinationTable.Columns.Length; ci++)
@@ -1586,7 +1587,7 @@ partial class Simulation
             }
             if (listed) continue;
             var defaultValue = column.Default.Run(new RuntimeContext(name => throw SimulatedSqlException.InvalidColumnName(name), context.Batch));
-            rowValues[i] = CoerceForInsert(defaultValue, column);
+            rowValues[i] = CoerceForInsert(EnforceMaxLength(defaultValue, column, destinationTable, context.Connection), column);
         }
 
         for (var i = 0; i < clause.InsertColumns.Length; i++)

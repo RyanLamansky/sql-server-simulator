@@ -295,6 +295,14 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     public Expressions.Reference? ScalarOnlyColumnReference;
 
     /// <summary>
+    /// Non-null while a <c>CREATE RULE</c> predicate is parsed: each variable
+    /// the predicate names is recorded here and parsed as a reference the
+    /// enforcing site answers with the bound column's value, and a
+    /// schema-qualified function call is refused (Msg 4105).
+    /// </summary>
+    public List<string>? RuleVariables;
+
+    /// <summary>
     /// When non-null, every <see cref="Expressions.WindowExpression"/>
     /// constructor registers itself here. Scoped by Selection.Parse around
     /// projection parsing — the executor needs the list to detect the

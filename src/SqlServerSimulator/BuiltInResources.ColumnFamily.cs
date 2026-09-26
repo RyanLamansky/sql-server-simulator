@@ -334,7 +334,7 @@ internal static partial class BuiltInResources
                 // A CLR routine has no T-SQL body, so real SQL Server gives it
                 // no sys.sql_modules row (probe-confirmed) — it appears only in
                 // sys.assembly_modules.
-                if (SchemaObject.IsSqlModule(obj))
+                if (SchemaObject.IsSqlModule(obj) || obj is BindableObject)
                     yield return Row(obj);
             }
         }

@@ -573,8 +573,12 @@ internal static partial class BuiltInResources
         // CREATE-scripting column query reads it as [AnsiPaddingStatus].
         SqlValue AnsiPaddedFor(HeapColumn c) =>
             c.Type.SystemTypeId is 165 or 167 or 173 or 175 or 231 or 239 ? trueBit : falseBit;
+        // A column's default is its DEFAULT constraint or the CREATE DEFAULT
+        // object bound to it; the two exclude each other.
         SqlValue DefaultObjectIdFor(HeapColumn c) =>
-            c.DefaultConstraint is { } df ? SqlValue.FromInt32(df.ObjectId) : zeroInt;
+            c.DefaultConstraint is { } df ? SqlValue.FromInt32(df.ObjectId)
+            : c.BoundDefault is { } bound ? SqlValue.FromInt32(bound.ObjectId)
+            : zeroInt;
         // xml_collection_id is the id of the schema collection a typed-xml
         // column binds (0 for untyped xml and every non-xml column — real SQL
         // Server's non-nullable-int convention for this column). The binding
@@ -635,7 +639,7 @@ internal static partial class BuiltInResources
                 SqlValue.FromBoolean(col.IsHidden),
                 falseBit,
                 SqlValue.FromBoolean(col.IsRowGuidCol),
-                zeroInt,
+                col.BoundRule is { } rule ? SqlValue.FromInt32(rule.ObjectId) : zeroInt,
                 falseBit,
                 falseBit,
                 falseBit,

@@ -299,6 +299,7 @@ Where an entry carries a second clause it is because that fact changes what you'
 - **`DECLARE @t TABLE`, table-variable DML, `OUTPUT … INTO`** — the column features ship; real's own `DECLARE` grammar refuses named constraints and FKs → [`table-variables.md`](docs/claude/table-variables.md).
 - **`CREATE TYPE … AS TABLE`, TVP params + `READONLY`, ADO.NET TVP** → [`table-valued-parameters.md`](docs/claude/table-valued-parameters.md).
 - **`CREATE TYPE … FROM <builtin>` (scalar alias types / UDDTs), multi-part type references** → [`alias-types.md`](docs/claude/alias-types.md).
+- **`CREATE DEFAULT` / `CREATE RULE`, `sp_bindefault` / `sp_bindrule` and their unbind pair, Msg 513** — a binding sets the column's ordinary default expression, and a rule judges only the columns a write sets → [`rules-and-defaults.md`](docs/claude/rules-and-defaults.md).
 - **`sp_addextendedproperty` / `fn_listextendedproperty` / `sys.extended_properties`** → [`extended-properties.md`](docs/claude/extended-properties.md).
 - **`CREATE/ALTER/DROP SEQUENCE`, `NEXT VALUE FOR`, `sys.sequences`** — a reference is refused in nine distinct contexts, all settled at parse, so the sequence never advances → [`sequences.md`](docs/claude/sequences.md).
 - **DML + DDL triggers** — `CREATE TRIGGER`, `INSERTED` / `DELETED`, `EVENTDATA()`, `UPDATE(col)` / `COLUMNS_UPDATED()`, firing order, the two nesting options.

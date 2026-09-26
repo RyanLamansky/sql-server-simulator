@@ -228,6 +228,22 @@ internal sealed class HeapColumn(string name, SqlType type, int? maxLength, bool
     public Schemas.AliasType? AliasType;
 
     /// <summary>
+    /// The <c>CREATE DEFAULT</c> object bound to this column by
+    /// <c>sp_bindefault</c> — directly, or through its <see cref="AliasType"/>.
+    /// Binding also sets <see cref="Default"/> to the object's expression,
+    /// which every insert path already reads, while
+    /// <see cref="DefaultConstraint"/> stays null; the two kinds of default
+    /// exclude each other on a column.
+    /// </summary>
+    public Schemas.DefaultObject? BoundDefault;
+
+    /// <summary>
+    /// The <c>CREATE RULE</c> object bound to this column by <c>sp_bindrule</c>
+    /// — directly, or through its <see cref="AliasType"/>.
+    /// </summary>
+    public Schemas.RuleObject? BoundRule;
+
+    /// <summary>
     /// The identity a view's (or a derived source's) column passes straight
     /// through from the base column it reads; see
     /// <c>Selection.ColumnIdentitySources</c>. Real reports the column as

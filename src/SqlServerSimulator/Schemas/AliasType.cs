@@ -102,6 +102,18 @@ internal sealed class AliasType(
     /// <summary>Declared over <c>numeric</c> rather than <c>decimal</c>; see <see cref="HeapColumn.SpelledNumeric"/>.</summary>
     public readonly bool SpelledNumeric = spelledNumeric;
 
+    /// <summary>
+    /// The <c>CREATE DEFAULT</c> object <c>sp_bindefault</c> bound to this type,
+    /// which a column declared with the type afterwards takes as its own.
+    /// </summary>
+    public DefaultObject? BoundDefault;
+
+    /// <summary>
+    /// The <c>CREATE RULE</c> object <c>sp_bindrule</c> bound to this type,
+    /// which a column declared with the type afterwards takes as its own.
+    /// </summary>
+    public RuleObject? BoundRule;
+
     /// <summary>The base type's <c>system_type_id</c>, <c>numeric</c>'s where the alias spelled it.</summary>
     public byte SystemTypeId => this.SpelledNumeric && this.UnderlyingType is DecimalSqlType ? HeapColumn.NumericTypeId : this.UnderlyingType.SystemTypeId;
 }

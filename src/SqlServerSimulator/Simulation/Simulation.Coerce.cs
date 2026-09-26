@@ -409,6 +409,13 @@ partial class Simulation
     /// </summary>
     private static void EnforceCheckConstraints(HeapTable destinationTable, SqlValue[] rowValues, BatchContext batch, string verb = "INSERT")
     {
+        // An INSERT writes every column, so every bound rule judges its value;
+        // an UPDATE's rules judge only the columns it sets, at the assignment.
+        if (verb == "INSERT")
+        {
+            for (var ordinal = 0; ordinal < destinationTable.Columns.Length; ordinal++)
+                EnforceRule(destinationTable, rowValues, ordinal, batch);
+        }
         if (destinationTable.CheckConstraints.Count == 0)
             return;
 

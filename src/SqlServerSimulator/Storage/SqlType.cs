@@ -967,6 +967,20 @@ internal abstract partial class SqlType
     }
 
     /// <summary>
+    /// True when <paramref name="name"/> spells a built-in type's keyword name
+    /// (<c>int</c>, <c>varchar</c>, <c>datetime</c> …), the names the binding
+    /// procedures refuse as a system type.
+    /// </summary>
+    internal static bool IsSystemTypeName(string name)
+    {
+        if (name.Length is 0 or > 32)
+            return false;
+        Span<char> upper = stackalloc char[name.Length];
+        _ = name.AsSpan().ToUpperInvariant(upper);
+        return ResolveSimpleKeyword(name.Length, upper) is not null;
+    }
+
+    /// <summary>
     /// Length-then-name dispatch for the simple keyword-named singletons
     /// (no parameter parsing; the parameterized types like <c>varchar(N)</c>
     /// and <c>decimal(p, s)</c> are handled in <see cref="GetByName"/>'s

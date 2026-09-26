@@ -78,6 +78,12 @@ internal static partial class BuiltInResources
         // sp_settriggerorder: pins a trigger first / last among the AFTER
         // triggers an action runs; see docs/claude/triggers.md.
         "sp_settriggerorder",
+        // sp_bindefault / sp_bindrule and their unbind pair: attach a CREATE
+        // DEFAULT / CREATE RULE object to a column or an alias type.
+        "sp_bindefault",
+        "sp_bindrule",
+        "sp_unbindefault",
+        "sp_unbindrule",
         // xp_msver returns a version/host-info table (SSMS calls it on connect);
         // xp_qv is the AlwaysOn-availability probe; xp_instance_regread reads
         // instance registry defaults.

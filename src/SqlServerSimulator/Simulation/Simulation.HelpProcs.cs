@@ -516,6 +516,18 @@ partial class Simulation
         (_, 201) => (0, null),
         ("sp_addrolemember", 15151) => (1, ""),
         ("sp_addrolemember", 15410) => (35, null),
+        ("sp_bindefault", 4185) => (223, null),
+        ("sp_bindefault", 15016) => (102, null),
+        ("sp_bindefault", 15100) => (80, null),
+        ("sp_bindefault", 15101) => (165, null),
+        ("sp_bindefault", 15102) => (173, null),
+        ("sp_bindefault", 15103) => (185, null),
+        ("sp_bindefault", 15148) => (230, null),
+        ("sp_bindrule", 4185) => (218, null),
+        ("sp_bindrule", 15017) => (104, null),
+        ("sp_bindrule", 15106) => (81, null),
+        ("sp_bindrule", 15107) => (162, null),
+        ("sp_bindrule", 15148) => (225, null),
         ("sp_configure", 15123) => (62, null),
         ("sp_depends", 15009) => (25, null),
         ("sp_fkeys", 15252) => (20, null),
@@ -535,6 +547,12 @@ partial class Simulation
         ("sp_rename", 15248) => (269, null),
         ("sp_settriggerorder", 15165) => (142, null),
         ("sp_spaceused", 15009) => (153, null),
+        ("sp_unbindefault", 15148) => (149, null),
+        ("sp_unbindefault", 15236) => (73, null),
+        ("sp_unbindefault", 15237) => (156, null),
+        ("sp_unbindrule", 15148) => (137, null),
+        ("sp_unbindrule", 15238) => (79, null),
+        ("sp_unbindrule", 15239) => (144, null),
         _ => null,
     };
 
@@ -604,11 +622,26 @@ partial class Simulation
 
         foreach (var column in table.Columns)
         {
-            if (column.DefaultConstraint is not { } def)
-                continue;
-            rows.Add((def.Name, false, Cells(
-                "DEFAULT on column " + column.Name, def.Name,
-                "(n/a)", "(n/a)", "(n/a)", "(n/a)", def.Definition ?? "")));
+            if (column.DefaultConstraint is { } def)
+            {
+                rows.Add((def.Name, false, Cells(
+                    "DEFAULT on column " + column.Name, def.Name,
+                    "(n/a)", "(n/a)", "(n/a)", "(n/a)", def.Definition ?? "")));
+            }
+            // A bound CREATE DEFAULT / CREATE RULE object lists with its whole
+            // definition as its keys (probed 2026-09-26 against SQL Server 2025).
+            if (column.BoundDefault is { } boundDefault)
+            {
+                rows.Add((boundDefault.Name, false, Cells(
+                    $"DEFAULT on column {column.Name} (bound with sp_bindefault)", boundDefault.Name,
+                    "(n/a)", "(n/a)", "(n/a)", "(n/a)", boundDefault.DefinitionText ?? "")));
+            }
+            if (column.BoundRule is { } boundRule)
+            {
+                rows.Add((boundRule.Name, false, Cells(
+                    $"RULE on column {column.Name} (bound with sp_bindrule)", boundRule.Name,
+                    "(n/a)", "(n/a)", "(n/a)", "(n/a)", boundRule.DefinitionText ?? "")));
+            }
         }
 
         foreach (var key in table.KeyConstraints)

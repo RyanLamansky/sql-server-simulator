@@ -916,8 +916,8 @@ internal static partial class BuiltInResources
     /// table type in <c>user_type_id</c> order, an alias type's base type
     /// described as <c>INFORMATION_SCHEMA.COLUMNS</c> describes a column of it
     /// and a table type's DATA_TYPE <c>table type</c> with no facets (probed
-    /// 2026-09-26 against SQL Server 2025). DOMAIN_DEFAULT names a default
-    /// bound with <c>sp_bindefault</c>, which isn't modeled, so it is NULL.
+    /// 2026-09-26 against SQL Server 2025). DOMAIN_DEFAULT is the whole
+    /// definition of the <c>CREATE DEFAULT</c> object bound to an alias type.
     /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateInformationSchemaDomains(Parser.BatchContext batch, Database database)
     {
@@ -962,7 +962,7 @@ internal static partial class BuiltInResources
                 numericRadix is int radix ? SqlValue.FromInt16((short)radix) : nullInt16,
                 numericScale is int ns ? SqlValue.FromInt32(ns) : nullInt32,
                 dateTimePrecision is short dp ? SqlValue.FromInt16(dp) : nullInt16,
-                SqlValue.Null(SqlType.NVarchar),
+                alias.BoundDefault?.DefinitionText is { } boundDefault ? SqlValue.FromNVarchar(boundDefault) : SqlValue.Null(SqlType.NVarchar),
             ];
         }
     }

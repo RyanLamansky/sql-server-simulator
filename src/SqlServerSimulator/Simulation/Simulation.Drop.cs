@@ -80,6 +80,8 @@ partial class Simulation
             ReservedKeyword { Keyword: Keyword.Schema } => DropTargetKind.Schema,
             UnquotedString { ContextualKeyword: ContextualKeyword.Type } => DropTargetKind.Type,
             UnquotedString { ContextualKeyword: ContextualKeyword.Sequence } => DropTargetKind.Sequence,
+            ReservedKeyword { Keyword: Keyword.Default } => DropTargetKind.Default,
+            ReservedKeyword { Keyword: Keyword.Rule } => DropTargetKind.Rule,
             _ => DropTargetKind.None,
         };
         if (targetKind == DropTargetKind.None)
@@ -121,6 +123,10 @@ partial class Simulation
                 case DropTargetKind.Schema:
                     DropOneSchema(context, name, ifExists);
                     break;
+                case DropTargetKind.Default:
+                case DropTargetKind.Rule:
+                    DropOneBindable(context, name, ifExists, isRule: targetKind == DropTargetKind.Rule);
+                    break;
                 default:
                     DropOneTable(context, name, ifExists);
                     break;
@@ -137,7 +143,7 @@ partial class Simulation
         return true;
     }
 
-    private enum DropTargetKind { None, Table, Function, View, Procedure, Type, Sequence, Trigger, Schema }
+    private enum DropTargetKind { None, Table, Function, View, Procedure, Type, Sequence, Trigger, Schema, Default, Rule }
 
     /// <summary>
     /// Parses <c>DROP DATABASE [IF EXISTS] name[, name...]</c>. Each name is a

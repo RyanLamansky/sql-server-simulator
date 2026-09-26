@@ -38,8 +38,8 @@ internal sealed class ObjectProperty : Expression
         var database = runtime.Batch.CurrentDatabase;
         var result = FindObject(database, id) is { } obj
             ? EvaluateProperty(database, obj, prop)
-            : TryFindConstraint(database, id, out var parsesAnExpression)
-                ? EvaluateConstraintProperty(parsesAnExpression, prop)
+            : TryFindConstraint(database, id, out var constraintTypeCode)
+                ? EvaluateConstraintProperty(constraintTypeCode, prop)
                 : BuiltInResources.TryResolveSystemObject(id, out var system)
                     ? EvaluateSystemObjectProperty(system, prop)
                     : null;
@@ -84,6 +84,10 @@ internal sealed class ObjectProperty : Expression
                 if (s.ObjectId == id) return s;
             foreach (var sn in schema.Synonyms.Values)
                 if (sn.ObjectId == id) return sn;
+            foreach (var d in schema.Defaults.Values)
+                if (d.ObjectId == id) return d;
+            foreach (var r in schema.Rules.Values)
+                if (r.ObjectId == id) return r;
         }
         return null;
     }
@@ -94,18 +98,17 @@ internal sealed class ObjectProperty : Expression
     /// <c>PK</c> / <c>UQ</c> / <c>F</c> rows, none of which is a
     /// <see cref="SchemaObject"/> so <see cref="FindObject(Database, int)"/>
     /// can't reach them.
-    /// <paramref name="parsesAnExpression"/> is set for the two families whose
-    /// declaration carries an expression (CHECK and DEFAULT), which is the one
-    /// property answer that splits the five apart.
+    /// <paramref name="typeCode"/> is the constraint's <c>sys.objects.type</c>,
+    /// trimmed.
     /// </summary>
-    internal static bool TryFindConstraint(Database database, int id, out bool parsesAnExpression)
+    internal static bool TryFindConstraint(Database database, int id, out string typeCode)
     {
         if (!ConstraintLookup.TryResolveById(database, id, out var constraint))
         {
-            parsesAnExpression = false;
+            typeCode = "";
             return false;
         }
-        parsesAnExpression = constraint.TypeCode is "C" or "D";
+        typeCode = constraint.TypeCode;
         return true;
     }
 
@@ -121,19 +124,36 @@ internal sealed class ObjectProperty : Expression
     /// setting, which is 0 even for one created with <c>QUOTED_IDENTIFIER</c>
     /// ON (probe-confirmed both ways, and uniformly 0 across msdb's 229
     /// shipped constraints) — while a key or foreign-key constraint answers
-    /// NULL. <c>IsAnsiNullsOn</c> is NULL for all five.
+    /// NULL. <c>IsAnsiNullsOn</c> is NULL for all five. <c>IsConstraint</c> is
+    /// 1 and <c>IsDefaultCnst</c> 1 for a DEFAULT constraint, while
+    /// <c>IsDefault</c> and <c>IsRule</c>, which name the legacy
+    /// <c>CREATE DEFAULT</c> / <c>CREATE RULE</c> objects, are 0 (probed
+    /// 2026-09-26).
     /// </para>
     /// </summary>
-    internal static int? EvaluateConstraintProperty(bool parsesAnExpression, string property)
+    internal static int? EvaluateConstraintProperty(string typeCode, string property)
     {
+        // CHECK and DEFAULT carry an expression, the one property answer that
+        // splits the five families apart.
+        var parsesAnExpression = typeCode is "C" or "D";
         // SSS003: switch on the Span<char> overload rather than allocating an
         // uppercased temp, the same shape EvaluateProperty uses.
         Span<char> upper = stackalloc char[property.Length];
         return property.AsSpan().ToUpperInvariant(upper) switch
         {
-            6 => upper switch { "ISVIEW" => 0, _ => null },
+            6 => upper switch
+            {
+                "ISRULE" => 0,
+                "ISVIEW" => 0,
+                _ => null,
+            },
             7 => upper switch { "ISTABLE" => 0, _ => null },
-            9 => upper switch { "ISTRIGGER" => 0, _ => null },
+            9 => upper switch
+            {
+                "ISDEFAULT" => 0,
+                "ISTRIGGER" => 0,
+                _ => null,
+            },
             11 => upper switch
             {
                 "ISENCRYPTED" => 0,
@@ -142,7 +162,13 @@ internal sealed class ObjectProperty : Expression
                 "ISUSERTABLE" => 0,
                 _ => null,
             },
-            13 => upper switch { "ISSYSTEMTABLE" => 0, _ => null },
+            12 => upper switch { "ISCONSTRAINT" => 1, _ => null },
+            13 => upper switch
+            {
+                "ISDEFAULTCNST" => typeCode == "D" ? 1 : 0,
+                "ISSYSTEMTABLE" => 0,
+                _ => null,
+            },
             15 => upper switch
             {
                 "ISQUOTEDIDENTON" => parsesAnExpression ? 0 : null,
@@ -200,10 +226,16 @@ internal sealed class ObjectProperty : Expression
         Span<char> upper = stackalloc char[property.Length];
         return property.AsSpan().ToUpperInvariant(upper) switch
         {
-            6 => upper switch { "ISVIEW" => obj is View ? 1 : 0, _ => null },
+            6 => upper switch
+            {
+                "ISRULE" => obj is RuleObject ? 1 : 0,
+                "ISVIEW" => obj is View ? 1 : 0,
+                _ => null,
+            },
             7 => upper switch { "ISTABLE" => obj is HeapTable ? 1 : 0, _ => null },
             9 => upper switch
             {
+                "ISDEFAULT" => obj is DefaultObject ? 1 : 0,
                 "ISTRIGGER" => obj is Trigger ? 1 : 0,
                 _ => null,
             },
@@ -215,12 +247,13 @@ internal sealed class ObjectProperty : Expression
                 // encrypted procedures with `IsEncrypted = 1 OR IsEncrypted
                 // IS NULL`, so the NULL-for-unknown fallback enrolled every
                 // procedure as encrypted.
-                "ISENCRYPTED" => IsSqlModule(obj) ? 0 : null,
+                "ISENCRYPTED" => IsSqlModule(obj) || obj is BindableObject ? 0 : null,
                 "ISMSSHIPPED" => 0,
                 "ISPROCEDURE" => obj is Procedure ? 1 : 0,
                 "ISUSERTABLE" => obj is HeapTable ? 1 : 0,
                 _ => null,
             },
+            12 => upper switch { "ISCONSTRAINT" => 0, _ => null },
             13 => upper switch
             {
                 // The creation-time ANSI_NULLS capture, under the spelling
@@ -229,6 +262,9 @@ internal sealed class ObjectProperty : Expression
                 // constraint (probe-confirmed). Unlike QUOTED_IDENTIFIER a
                 // table's answer is the captured value, not a constant 1.
                 "ISANSINULLSON" => obj is HeapTable || IsSqlModule(obj) ? (obj.UsesAnsiNulls ? 1 : 0) : null,
+                // A table, a CREATE DEFAULT / CREATE RULE object and every
+                // other kind modeled here is not a constraint.
+                "ISDEFAULTCNST" => 0,
                 "ISSCHEMABOUND" => ModuleDeterminism.EvaluateSchemaBound(obj),
                 // 0 for every resolvable object — probe-confirmed even for
                 // catalog views (real's legacy system-table sense never
@@ -248,7 +284,10 @@ internal sealed class ObjectProperty : Expression
                 // sequence / synonym / key constraint (probe-confirmed), which
                 // the UsesQuotedIdentifier default and the kind filter here
                 // reproduce; the ExecIs… spelling below is module-only.
-                "ISQUOTEDIDENTON" => obj is HeapTable || IsSqlModule(obj) ? (obj.UsesQuotedIdentifier ? 1 : 0) : null,
+                // A CREATE DEFAULT / CREATE RULE object answers a constant 0,
+                // as a CHECK or DEFAULT constraint does (probed 2026-09-26).
+                "ISQUOTEDIDENTON" => obj is BindableObject ? 0
+                    : obj is HeapTable || IsSqlModule(obj) ? (obj.UsesQuotedIdentifier ? 1 : 0) : null,
                 "ISTABLEFUNCTION" => obj is InlineTableValuedFunction or MultiStatementTableValuedFunction ? 1 : 0,
                 _ => null,
             },

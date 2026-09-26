@@ -66,6 +66,8 @@ internal sealed class Schema
         this.Sequences = new(collation);
         this.Triggers = new(collation);
         this.Synonyms = new(collation);
+        this.Defaults = new(collation);
+        this.Rules = new(collation);
     }
 
     public readonly ConcurrentDictionary<string, HeapTable> HeapTables;
@@ -166,9 +168,21 @@ internal sealed class Schema
     public readonly ConcurrentDictionary<string, Synonym> Synonyms;
 
     /// <summary>
+    /// <c>CREATE DEFAULT</c> objects hosted by this schema, bound to columns and
+    /// alias types with <c>sp_bindefault</c> (see <see cref="DefaultObject"/>).
+    /// </summary>
+    public readonly ConcurrentDictionary<string, DefaultObject> Defaults;
+
+    /// <summary>
+    /// <c>CREATE RULE</c> objects hosted by this schema, bound to columns and
+    /// alias types with <c>sp_bindrule</c> (see <see cref="RuleObject"/>).
+    /// </summary>
+    public readonly ConcurrentDictionary<string, RuleObject> Rules;
+
+    /// <summary>
     /// Yields every <see cref="SchemaObject"/> in this schema's
     /// object-name namespace (heap tables, views, UDFs, procedures,
-    /// sequences, triggers, synonyms) — the set whose leaf names must be
+    /// sequences, triggers, synonyms, defaults, rules) — the set whose leaf names must be
     /// unique (Msg 2714 on CREATE collision). <see cref="TableTypes"/> are
     /// deliberately omitted: probe-confirmed that table-type names occupy
     /// a separate namespace from this set. Used by sys.objects projection
@@ -183,6 +197,8 @@ internal sealed class Schema
         foreach (var s in this.Sequences.Values) yield return s;
         foreach (var tr in this.Triggers.Values) yield return tr;
         foreach (var sn in this.Synonyms.Values) yield return sn;
+        foreach (var d in this.Defaults.Values) yield return d;
+        foreach (var r in this.Rules.Values) yield return r;
     }
 
     /// <summary>

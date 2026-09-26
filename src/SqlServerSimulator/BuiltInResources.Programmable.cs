@@ -394,15 +394,15 @@ internal static partial class BuiltInResources
             // types (char/varchar/nchar/nvarchar/text/ntext/sysname and alias
             // types over them — probe-confirmed real reports the database
             // collation there), NULL for everything else. principal_id /
-            // default_object_id: NULL / 0 (no per-type ownership or
-            // sp_bindefault model). DacFx's UDDT scripting reads all three.
+            // default_object_id: NULL, and the CREATE DEFAULT object
+            // sp_bindefault bound to an alias type (else 0). DacFx's UDDT
+            // scripting reads all three.
             new("collation_name", SqlType.SystemName, 128, true),
             new("principal_id", SqlType.Int32, null, true),
             new("default_object_id", SqlType.Int32, null, false),
-            // rule_object_id: object_id of a bound legacy CREATE RULE object
-            // (sp_bindrule). Rules aren't modeled, so this is always 0 —
-            // probe-confirmed real reports 0 for unbound types. DacFx's UDDT
-            // reverse-engineering query joins sys.objects ON rule_object_id.
+            // rule_object_id: object_id of the CREATE RULE object sp_bindrule
+            // bound to an alias type, else 0. DacFx's UDDT reverse-engineering
+            // query joins sys.objects ON rule_object_id.
             new("rule_object_id", SqlType.Int32, null, false),
         ], EnumerateSysTypes);
 
@@ -816,8 +816,8 @@ internal static partial class BuiltInResources
                     SqlValue.FromByte(scale),
                     alias.UnderlyingType.Collation is not null ? databaseCollation : nullCollation,
                     nullPrincipal,
-                    zeroDefaultObject,
-                    zeroDefaultObject,
+                    alias.BoundDefault is { } boundDefault ? SqlValue.FromInt32(boundDefault.ObjectId) : zeroDefaultObject,
+                    alias.BoundRule is { } boundRule ? SqlValue.FromInt32(boundRule.ObjectId) : zeroDefaultObject,
                 ];
             }
         }
@@ -1280,7 +1280,7 @@ internal static partial class BuiltInResources
                 tableName,
                 SqlValue.FromSystemName(col.Name),
                 SqlValue.FromInt32(position),
-                col.DefaultConstraint?.Definition is { } defaultText ? SqlValue.FromNVarchar(defaultText) : nullString,
+                (col.DefaultConstraint?.Definition ?? col.BoundDefault?.DefinitionText) is { } defaultText ? SqlValue.FromNVarchar(defaultText) : nullString,
                 col.Nullable ? yesNullable : noNullable,
                 IsoDataTypeName(col.Type, col.SpelledNumeric),
                 charLength is int cl ? SqlValue.FromInt32(cl) : nullInt32,

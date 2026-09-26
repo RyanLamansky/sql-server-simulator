@@ -246,6 +246,17 @@ internal sealed class ObjectId : Expression
                 return GateAs(runtime.Batch.DatabaseFor(constraint.Table), constraint.ObjectId, constraint.Table.ObjectId, constraint.Table.SchemaId);
             }
         }
+
+        // A CREATE DEFAULT object answers 'D' as a DEFAULT constraint does, and
+        // a CREATE RULE object 'R'.
+        if (filter is ObjectTypeFilter.Any or ObjectTypeFilter.Default or ObjectTypeFilter.Rule
+            && runtime.Batch.TryResolveSchema(parsed, out var bindableSchema))
+        {
+            if (filter != ObjectTypeFilter.Rule && bindableSchema.Defaults.TryGetValue(parsed.Leaf, out var bindableDefault))
+                return Gate(bindableDefault);
+            if (filter != ObjectTypeFilter.Default && bindableSchema.Rules.TryGetValue(parsed.Leaf, out var rule))
+                return Gate(rule);
+        }
         return SqlValue.Null(SqlType.Int32);
     }
 
@@ -287,6 +298,7 @@ internal sealed class ObjectId : Expression
         InlineTableValuedFunction,
         PrimaryKey,
         Procedure,
+        Rule,
         ScalarFunction,
         Synonym,
         Table,
@@ -321,6 +333,7 @@ internal sealed class ObjectId : Expression
         _ when BuiltInToken.Equals(code, "C") => ObjectTypeFilter.Check,
         _ when BuiltInToken.Equals(code, "D") => ObjectTypeFilter.Default,
         _ when BuiltInToken.Equals(code, "F") => ObjectTypeFilter.ForeignKey,
+        _ when BuiltInToken.Equals(code, "R") => ObjectTypeFilter.Rule,
         _ => ObjectTypeFilter.Unrecognized,
     };
 

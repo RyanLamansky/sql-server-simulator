@@ -209,6 +209,8 @@ partial class Simulation
                 Sequence sequence => Move(schema.Sequences, sequence, "SEQUENCE"),
                 Synonym synonym => Move(schema.Synonyms, synonym, "SYNONYM"),
                 Trigger trigger => Move(schema.Triggers, trigger, "TRIGGER"),
+                DefaultObject bindableDefault => Move(schema.Defaults, bindableDefault, "DEFAULT"),
+                RuleObject rule => Move(schema.Rules, rule, "RULE"),
                 _ => throw NotFound(),
             };
             BumpSchemaVersion();

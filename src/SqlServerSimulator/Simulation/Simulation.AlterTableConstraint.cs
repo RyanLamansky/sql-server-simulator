@@ -1200,6 +1200,8 @@ partial class Simulation
             spelledNumeric: column.SpelledNumeric)
         {
             DefaultConstraint = column.DefaultConstraint,
+            BoundDefault = column.BoundDefault,
+            BoundRule = column.BoundRule,
             ColumnId = column.ColumnId,
             IsSparse = column.IsSparse,
         };
@@ -1266,6 +1268,8 @@ partial class Simulation
             spelledNumeric: column.SpelledNumeric)
         {
             DefaultConstraint = column.DefaultConstraint,
+            BoundDefault = column.BoundDefault,
+            BoundRule = column.BoundRule,
             ColumnId = column.ColumnId,
             IsSparse = column.IsSparse,
         };

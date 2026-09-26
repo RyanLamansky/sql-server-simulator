@@ -256,6 +256,7 @@ internal abstract class Expression : ExpressionNode
     {
         Numeric number => NumericLiteral(context, number),
         Literal literal => new Value(literal.Value),
+        AtPrefixedString atPrefixed when context.RuleVariables is { } ruleVariables => RuleVariable(ruleVariables, atPrefixed),
         AtPrefixedString atPrefixed => new VariableReference(atPrefixed, context),
         DoubleAtPrefixedString doubleAtPrefixedString => doubleAtPrefixedString.Parse() switch
         {
@@ -639,6 +640,8 @@ internal abstract class Expression : ExpressionNode
         {
             if (reference.ReferencedName.Count >= 2)
             {
+                if (context.RuleVariables is not null)
+                    throw SimulatedSqlException.UserFunctionNotAllowedInThisContext();
                 if (VarbinaryToHex.TryResolve(reference.ReferencedName, context) is { } systemFunction)
                     return systemFunction;
                 if (context.Batch.TryResolveFunction(reference.ReferencedName, out var function))
@@ -964,6 +967,18 @@ internal abstract class Expression : ExpressionNode
                 return arm;
         }
         return null;
+    }
+
+    /// <summary>
+    /// A <c>CREATE RULE</c> predicate's variable, recorded for the one-variable
+    /// check and read as a reference: the enforcing site's resolver answers
+    /// every reference with the value being written.
+    /// </summary>
+    private static Reference RuleVariable(List<string> ruleVariables, AtPrefixedString variable)
+    {
+        if (!ruleVariables.Exists(seen => string.Equals(seen, variable.Value, StringComparison.OrdinalIgnoreCase)))
+            ruleVariables.Add(variable.Value);
+        return new Reference(variable.Value);
     }
 
     /// <summary>

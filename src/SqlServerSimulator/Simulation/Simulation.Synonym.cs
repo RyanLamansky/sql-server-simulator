@@ -132,6 +132,8 @@ partial class Simulation
         Sequence => ("sequence", "SEQUENCE"),
         Trigger => ("trigger", "TRIGGER"),
         Synonym => ("synonym", "SYNONYM"),
+        DefaultObject => ("default", "DEFAULT"),
+        RuleObject => ("rule", "RULE"),
         _ => throw new InvalidOperationException($"No DROP wording is mapped for schema-object kind {obj.GetType().Name}."),
     };
 }

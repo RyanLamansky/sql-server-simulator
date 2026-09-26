@@ -488,7 +488,7 @@ partial class Simulation
                 }
                 if (listed) continue;
                 var defaultValue = column.Default.Run(new RuntimeContext(name => throw SimulatedSqlException.InvalidColumnName(name), context.Batch));
-                rowValues[i] = CoerceForInsert(defaultValue, column);
+                rowValues[i] = CoerceForInsert(EnforceMaxLength(defaultValue, column, destinationTable, context.Connection), column);
             }
 
             for (var i = 0; i < destinationColumns.Length; i++)
@@ -512,7 +512,7 @@ partial class Simulation
                 if (valueTuples is not null && i < valueTuples[rowIndex].Length && valueTuples[rowIndex][i] is Parser.Expressions.DefaultValueExpression)
                 {
                     rowValues[ordinal] = targetColumn.Default is { } columnDefault
-                        ? CoerceForInsert(columnDefault.Run(new RuntimeContext(name => throw SimulatedSqlException.InvalidColumnName(name), context.Batch)), targetColumn)
+                        ? CoerceForInsert(EnforceMaxLength(columnDefault.Run(new RuntimeContext(name => throw SimulatedSqlException.InvalidColumnName(name), context.Batch)), targetColumn, destinationTable, context.Connection), targetColumn)
                         : SqlValue.Null(targetColumn.Type);
                     continue;
                 }

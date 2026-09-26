@@ -75,10 +75,11 @@ Two places refuse an alias outright: a `#temp` table's column is **Msg 2715** (i
 Real treats the alias as part of an expression's type, so a projection carries it wherever the value passes through unchanged (`Expression.ResultAliasType`, probed 2026-09-26): a reference to an alias-typed column, variable or function return, `ISNULL`'s checked operand, CASE / IIF / GREATEST arms that agree, `MAX` / `MIN` / `SUM`, the value window functions and a scalar subquery's column — while arithmetic, CAST, a string function, COLLATE, `COALESCE`, `NULLIF` and `CHOOSE` drop it.
 `Selection.ColumnAliasTypes` records it per column, so a view, derived table, CTE, UNION whose branches agree, and `SELECT … INTO` column keeps it, as does `sp_describe_first_result_set`'s `user_type_*` quartet; a `SELECT … INTO #temp` column doesn't, `tempdb` having no such type.
 
+A `CREATE DEFAULT` / `CREATE RULE` object bound to the type flows to its columns — see [`rules-and-defaults.md`](rules-and-defaults.md).
+
 ## Known gaps
 
 - **Alias-type `max_length` not emitted in `sys.types`** — gap from the catalog view's shipped subset.
 - **`vector`'s own argument check** — real validates `vector(n, base)`'s arguments before refusing the alias (`float16` is Msg 195); the simulator refuses by name first.
-- **`DOMAIN_DEFAULT`** in `INFORMATION_SCHEMA.DOMAINS` is always NULL: it names a default bound with `sp_bindefault`, and `CREATE DEFAULT` / `sp_bindefault` aren't built yet.
 
 See [`table-valued-parameters.md`](table-valued-parameters.md) for the parallel `CREATE TYPE … AS TABLE` shape (table types share the namespace + collision check).

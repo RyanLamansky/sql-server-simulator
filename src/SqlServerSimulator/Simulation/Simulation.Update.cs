@@ -1492,6 +1492,7 @@ partial class Simulation
             var raw = expr is AssignmentExpression { Slot: var assigned } ? assigned.Value : expr.Run(runtime);
             raw = EnforceMaxLength(raw, table.Columns[ordinal], table, context.Connection);
             newValues[ordinal] = CoerceForWrite(raw, table.Columns[ordinal], context.Batch);
+            EnforceRule(table, newValues, ordinal, context.Batch);
         }
 
         for (var ci = 0; ci < table.Columns.Length; ci++)

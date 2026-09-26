@@ -887,6 +887,12 @@ partial class Simulation
 
         if (includeCheckAndDefault && col.DefaultConstraint is { } df)
             blockers.Add((df.Name, objectKind, 0, df.ObjectId));
+        // A bound CREATE DEFAULT / CREATE RULE object blocks as a DEFAULT
+        // constraint does (probed 2026-09-26 against SQL Server 2025).
+        if (includeCheckAndDefault && col.BoundDefault is { } boundDefault)
+            blockers.Add((boundDefault.Name, objectKind, 0, boundDefault.ObjectId));
+        if (includeCheckAndDefault && col.BoundRule is { } boundRule)
+            blockers.Add((boundRule.Name, objectKind, 0, boundRule.ObjectId));
         for (var i = 0; i < table.Columns.Length; i++)
         {
             if (table.Columns[i].Computed is { } expr && ComputedReferencesColumn(collation, expr, col.Name))

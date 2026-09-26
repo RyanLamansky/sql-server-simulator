@@ -78,6 +78,10 @@ partial class Simulation
                     ReservedKeyword { Keyword: Keyword.View } => Simulation.TryParseCreateView(context, isAlter: false, createOrAlter: true),
                     _ => throw SimulatedSqlException.SyntaxErrorNear(context),
                 };
+            case ReservedKeyword { Keyword: Keyword.Default }:
+                return TryParseCreateDefaultOrRule(context, isRule: false);
+            case ReservedKeyword { Keyword: Keyword.Rule }:
+                return TryParseCreateDefaultOrRule(context, isRule: true);
             case ReservedKeyword { Keyword: Keyword.Table }:
                 break;
             default:
@@ -1847,6 +1851,12 @@ partial class Simulation
             newColumn.XmlSchemaCollection = xmlSchemaCollection;
         newColumn.AliasType = aliasType;
         newColumn.IsSparse = isSparse;
+        if (aliasType is { BoundRule: not null } or { BoundDefault: not null })
+        {
+            if (isTableVariable || isTableType)
+                throw SimulatedSqlException.BoundAliasTypeInTableVariable(aliasType.Name, aliasType.BoundRule is not null);
+            InheritAliasTypeBindings(newColumn);
+        }
         if (defaultExpression is not null)
         {
             // Inline DEFAULT (with or without an explicit CONSTRAINT name)
@@ -3751,6 +3761,8 @@ partial class Simulation
         {
             IsSparse = column.IsSparse,
             DefaultConstraint = column.DefaultConstraint,
+            BoundDefault = column.BoundDefault,
+            BoundRule = column.BoundRule,
             XmlSchemaCollection = column.XmlSchemaCollection,
             AliasType = column.AliasType,
         };
