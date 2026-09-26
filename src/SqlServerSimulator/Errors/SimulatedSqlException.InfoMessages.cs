@@ -25,8 +25,17 @@ partial class SimulatedSqlException
         batch.InfoMessage(@class: 0, state: 1, number: 282, $"The '{procedureName}' procedure attempted to return a status of NULL, which is not allowed. A status of 0 will be returned instead.");
 
     /// <summary>Msg 3621, after an execution error ends a statement that writes rows.</summary>
-    internal static SimulatedError StatementTerminatedMessage(BatchContext batch) =>
-        batch.InfoMessage(@class: 0, state: 0, number: 3621, "The statement has been terminated.");
+    internal static SimulatedError StatementTerminatedMessage(BatchContext batch, SimulatedSqlException? error = null)
+    {
+        var message = batch.InfoMessage(@class: 0, state: 0, number: 3621, "The statement has been terminated.");
+        // After a unique index's build finds a duplicate (Msg 1505), or a
+        // column rewrite a value it can't convert, the notice reports line 1,
+        // whatever line the statement was on (probed 2026-09-26 against SQL
+        // Server 2025).
+        if (error is { Number: 1505 } or { EndedColumnRewrite: true })
+            message.LineNumber = 1;
+        return message;
+    }
 
     /// <summary>
     /// Msg 3606, in place of Msg 3621 after an identity overflow ends a write,

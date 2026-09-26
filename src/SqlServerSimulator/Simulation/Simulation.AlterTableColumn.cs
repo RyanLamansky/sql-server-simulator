@@ -998,7 +998,7 @@ partial class Simulation
         // stored-vs-computed shape from the old (we reject computed columns
         // up front, and IsStored is true for everything else).
 
-        var qualifiedTableName = $"{Database.DefaultSchemaName}.{table.Name}";
+        var qualifiedTableName = QualifiedForViolation(table);
 
         var oldHeap = table.Heap;
         var newHeap = new Heap();
@@ -1039,10 +1039,12 @@ partial class Simulation
                             // a bigint source the generic Msg 8115 naming the
                             // target, and a non-integer narrowing (decimal
                             // precision change) Msg 8115's numeric wording.
-                            throw SimulatedSqlException.TryConversionOverflow(decoded, newCol.Type)
+                            var overflow = SimulatedSqlException.TryConversionOverflow(decoded, newCol.Type)
                                 ?? (SqlType.IsIntegerCategory(decoded.Type)
                                     ? SimulatedSqlException.ArithmeticOverflow(newCol.Type.ToString()!)
                                     : SimulatedSqlException.ArithmeticOverflowToNumeric());
+                            overflow.EndedColumnRewrite = true;
+                            throw overflow;
                         }
                         // Bounded-length validation for narrowing varchar /
                         // nvarchar / varbinary. The CoerceTo path itself is

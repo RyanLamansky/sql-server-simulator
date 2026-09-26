@@ -337,7 +337,7 @@ partial class Simulation
                 if (index.IsDisabled && index.IsUnique)
                 {
                     ValidateExistingRowsForUniqueIndex(
-                        table, index, context.Batch, $"{Database.DefaultSchemaName}.{table.Name}");
+                        table, index, context.Batch, QualifiedForViolation(table));
                 }
                 index.IsDisabled = false;
                 // A rebuild keeps the FILLFACTOR / PAD_INDEX its WITH leaves

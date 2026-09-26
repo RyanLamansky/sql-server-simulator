@@ -1867,6 +1867,7 @@ public sealed partial class Simulation
         batch.CurrentStatement.BindsDeferredSource = false;
         batch.CurrentStatement.PendingDdlEvents = null;
         batch.CurrentStatement.DdlTriggerCreatedThisStatement = null;
+        batch.CurrentStatement.ChangesTableStructure = ChangesTableStructure(batch.Parser);
         batch.CurrentStatement.StatementVerb = batch.Parser.Token switch
         {
             ReservedKeyword { Keyword: Keyword.Insert } => "INSERT",
@@ -2000,7 +2001,7 @@ public sealed partial class Simulation
                 // the doomed state rather than a rollback. Applied at the
                 // innermost frame and marked, so an outer frame re-raising the
                 // same exception doesn't ask twice.
-                ApplyXactAbortPromotion(connection, ex);
+                ApplyXactAbortPromotion(connection, ex, batch.CurrentStatement.ChangesTableStructure);
                 // Deferred name resolution: real SQL Server binds object /
                 // column names lazily, so an un-taken IF / WHILE branch (or a
                 // block skipped after BREAK / CONTINUE / RETURN) that names a
@@ -2167,7 +2168,7 @@ public sealed partial class Simulation
             {
                 yield return new SimulatedInfoOutcome(continuedError.IsIdentityOverflow
                     ? SimulatedSqlException.ArithmeticOverflowOccurredMessage(batch)
-                    : SimulatedSqlException.StatementTerminatedMessage(batch));
+                    : SimulatedSqlException.StatementTerminatedMessage(batch, continuedError));
             }
             yield break;
         }
@@ -2430,9 +2431,15 @@ public sealed partial class Simulation
     /// marked <see cref="SimulatedSqlException.AbortsAsUnderXactAbort"/> takes
     /// this path with the option off too.
     /// </summary>
-    private static void ApplyXactAbortPromotion(SimulatedDbConnection connection, SimulatedSqlException ex)
+    private static void ApplyXactAbortPromotion(SimulatedDbConnection connection, SimulatedSqlException ex, bool changesTableStructure = false)
     {
-        if (!(connection.XactAbort || ex.AbortsAsUnderXactAbort)
+        // A structure-changing statement's own failure takes the same path,
+        // save the two it raises while compiling (Msg 4902 / 2705), which end
+        // the batch alone (probed 2026-09-26 against SQL Server 2025).
+        // ALTER INDEX's missing index (Msg 2727) does too, though its class is
+        // 11.
+        var structuralFailure = changesTableStructure && (ex.Class == 16 || ex.Number == 2727) && ex.Number is not (4902 or 2705);
+        if (!(connection.XactAbort || ex.AbortsAsUnderXactAbort || structuralFailure)
             || ex.XactAbortPromoted
             || ex.AbortsTransaction
             || ex.Class is not ((>= 11 and <= 14) or 16)
@@ -2525,7 +2532,7 @@ public sealed partial class Simulation
     /// handling.
     /// </summary>
     private static bool IsDeferredCompileError(SimulatedSqlException ex)
-        => IsBatchAbortingNameResolution(ex)
+        => IsBatchAbortingNameResolution(ex) || ex.Number is 4902 or 2705
             || ex.Number is 107 or 108 or 130 or 145 or 147 or 164 or 174 or 205 or 206 or 213 or 243 or 264 or 321 or 447 or 448 or 529
                 or 1011 or 1012 or 1013 or 4108 or 4115 or 5318 or 8117 or 8120 or 8121 or 8155;
 
@@ -2553,6 +2560,42 @@ public sealed partial class Simulation
     /// at the next boundary keyword would read the broken statement's tail as
     /// statements of its own.
     /// </summary>
+    /// <summary>
+    /// Whether the statement at <paramref name="parser"/>'s cursor changes a
+    /// table's or index's structure (see
+    /// <see cref="StatementContext.ChangesTableStructure"/>); peeks without
+    /// moving the cursor.
+    /// </summary>
+    private static bool ChangesTableStructure(ParserContext parser)
+    {
+        if (parser.Token is not ReservedKeyword { Keyword: Keyword.Alter or Keyword.Create or Keyword.Drop or Keyword.Truncate or Keyword.Update } lead)
+            return false;
+        var checkpoint = parser.SaveCheckpoint();
+        try
+        {
+            while (parser.MoveNext())
+            {
+                switch (parser.Token)
+                {
+                    case ReservedKeyword { Keyword: Keyword.Table } when lead.Keyword is Keyword.Alter or Keyword.Drop or Keyword.Truncate:
+                    case ReservedKeyword { Keyword: Keyword.Index } when lead.Keyword is Keyword.Alter or Keyword.Create:
+                    case ReservedKeyword { Keyword: Keyword.Statistics } when lead.Keyword is Keyword.Create or Keyword.Update:
+                        return true;
+                    // CREATE's index modifiers precede the INDEX keyword.
+                    case ReservedKeyword { Keyword: Keyword.Unique or Keyword.Clustered or Keyword.NonClustered } when lead.Keyword == Keyword.Create:
+                    case UnquotedString { Span: var modifier } when lead.Keyword == Keyword.Create && modifier.Equals("COLUMNSTORE", StringComparison.OrdinalIgnoreCase):
+                        continue;
+                }
+                return false;
+            }
+            return false;
+        }
+        finally
+        {
+            parser.RestoreCheckpoint(checkpoint);
+        }
+    }
+
     private static bool EndsBatch(SimulatedSqlException ex)
         => ((IsDeferredCompileError(ex) || ex.Class == 15) && !ex.EndedCalledBatch) || ex.TerminatesBatch || ex.XactAbortPromoted;
 

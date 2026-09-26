@@ -1798,7 +1798,7 @@ partial class Simulation
         var storedColumns = table.StoredColumns;
         var lobStore = table.Heap;
         SqlValue[]? existingRowValues = null;
-        var qualifiedTableName = $"{Database.DefaultSchemaName}.{table.Name}";
+        var qualifiedTableName = QualifiedForViolation(table);
         var affectedKeys = new AffectedKeyIndex?[table.Indexes.Count];
         var existingComputedKeys = new HashSet<SqlValueKey>?[table.Indexes.Count];
 

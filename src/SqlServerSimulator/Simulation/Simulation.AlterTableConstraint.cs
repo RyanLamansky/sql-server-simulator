@@ -609,7 +609,7 @@ partial class Simulation
             }
 
             if (!seen.Add(new SqlValueKey(key)))
-                throw SimulatedSqlException.FollowedByConstraintNotCreated(SimulatedSqlException.DuplicateKeyOnCreate("dbo." + table.Name, constraint.Name, FormatIndexKeyValues(key)));
+                throw SimulatedSqlException.FollowedByConstraintNotCreated(SimulatedSqlException.DuplicateKeyOnCreate(QualifiedForViolation(table), constraint.Name, FormatIndexKeyValues(key)));
         }
     }
 
@@ -722,7 +722,7 @@ partial class Simulation
 
     private static (string Parent, string? ColumnPhrase) FormatForeignKeyTarget(ForeignKey fk, Database database)
     {
-        var parentName = QualifyTableName(fk.ReferencedTable, database);
+        var parentName = SchemaQualifyTableName(fk.ReferencedTable, database);
         if (fk.ReferencedColumnOrdinals.Length == 1)
         {
             var col = fk.ReferencedTable.Columns[fk.ReferencedColumnOrdinals[0]].Name;
