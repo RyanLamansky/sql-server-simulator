@@ -720,6 +720,8 @@ public sealed class KeyRangeLockTests
     [DataRow("update t set v = v where k between 15 and 25")]
     [DataRow("update t set v = v where k = 22")]
     [DataRow("delete t where k > 15 and k < 25")]
+    [DataRow("update a set v = a.v from t a join t b on a.k = b.k where a.k between 15 and 25")]
+    [DataRow("delete a from t a join t b on a.k = b.k where a.k > 15 and a.k < 25")]
     public void SerializableWriter_FencesItsInterval(string write)
     {
         var sim = KeyedTable();
@@ -731,8 +733,8 @@ public sealed class KeyRangeLockTests
 
         AreEqual(1222, Throws<SimulatedSqlException>(() => writer.CreateCommand("insert t values (22, 9)").ExecuteNonQuery()).Number);
         AreEqual(1, writer.CreateCommand("insert t values (40, 9)").ExecuteNonQuery());
-        AreEqual("RangeX-X", holder.CreateCommand(
-            "select request_mode from sys.dm_tran_locks where request_session_id = @@spid and resource_type = 'KEY'").ExecuteScalar());
+        AreEqual(1, holder.CreateCommand(
+            "select count(*) from sys.dm_tran_locks where request_session_id = @@spid and resource_type = 'KEY' and request_mode = 'RangeX-X'").ExecuteScalar());
 
         _ = holder.CreateCommand("rollback").ExecuteNonQuery();
     }

@@ -2395,7 +2395,7 @@ internal sealed partial class Selection
     /// target does the same under any isolation level; otherwise the writer
     /// takes no fence.
     /// </summary>
-    internal static void SettleSerializableWriteFence(HeapTable table, BooleanExpression? where, bool serializableHint, BatchContext batch)
+    internal static void SettleSerializableWriteFence(HeapTable table, BooleanExpression? where, bool serializableHint, BatchContext batch, string? qualifier = null)
     {
         if (batch.IsSkipping || !(serializableHint || batch.Connection.SessionIsolationLevel == System.Data.IsolationLevel.Serializable)
             || table.IsTableVariable || BatchContext.IsLocalTempName(table.Name) || Simulation.SystemHeapTables.Values.Contains(table)
@@ -2406,7 +2406,7 @@ internal sealed partial class Selection
 
         if (where is not null)
         {
-            var source = BuildBaseTableSeekSource(table, table.Name);
+            var source = BuildBaseTableSeekSource(table, qualifier ?? table.Name);
             var conjuncts = new List<BooleanExpression>();
             where.CollectConjuncts(conjuncts);
             var equalities = new Dictionary<int, Expression[]>();

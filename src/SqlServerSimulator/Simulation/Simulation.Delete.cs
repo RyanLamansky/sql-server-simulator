@@ -329,6 +329,7 @@ partial class Simulation
         if (where?.IsNeverTrue != true && !DmlTopIsZero(top, context.Batch))
             RunUpdateStartupConstants(context, table, JoinedPredicates(joins, where), []);
 
+        Selection.SettleSerializableWriteFence(table, where, serializableHint: false, context.Batch, sources[targetIndex].Qualifier);
         sources = Selection.PrepareMutationJoinSources(sources, joins, where, targetIndex, context.Batch);
 
         var targetAddresses = new Dictionary<byte[], (int Page, int Slot)>(ReferenceEqualityComparer.Instance);
