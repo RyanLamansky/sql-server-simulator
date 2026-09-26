@@ -26,6 +26,8 @@ partial class Simulation
         // FROM-clause alias, so the name alone settles it.
         if (!BatchContext.IsTableVariableName(destinationName.Leaf))
             FunctionBodyShape.NoteSideEffect(context.Batch, "INSERT", FunctionBodyShape.StatementOperatorState);
+        else
+            context.Batch.CurrentStatement.TransactedWrite = false;
 
         // Advance past the target name so the optional WITH (hint …) clause
         // has a token to peek at. INSERT accepts the WITH form only — the

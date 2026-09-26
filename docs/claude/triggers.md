@@ -173,7 +173,7 @@ A `SELECT` in a trigger body **is** the firing statement's result set — real h
 
 The body runs inside the DML executor, which returns a single outcome, so the sets can't be yielded in place.
 `RunTriggerBodies` buffers them on `BatchContext.PendingTriggerOutcomes`, with the body's messages and the errors it ran past, in the order the body sent them, and `DispatchOneStatement` drains that ahead of the statement's own outcome.
-The body's rows-affected counts stay discarded, because forwarding them would inflate the total the firing statement reports — the number an ORM reads back from `SaveChanges`.
+The body's row counts travel the same way, ahead of the firing statement's own: real sends each body statement's count, so `ExecuteNonQuery` over an `INSERT` of two rows whose trigger writes two more returns 4 and raises `StatementCompleted` for both, unless the body (or the session, which it inherits) sets `NOCOUNT` — EF Core's trigger-safe shape does (probed 2026-09-26 against SQL Server 2025).
 
 Order across several triggers isn't asserted anywhere: SQL Server leaves it unspecified without `sp_settriggerorder`, which isn't modeled.
 
@@ -192,6 +192,13 @@ A nested fire re-publishes the same log it already joined, so the save/restore n
 
 Only the auto-commit path needed this: under an explicit transaction every statement already shares `SimulatedDbTransaction.UndoLog`, and the firing statement's marker covers the trigger's writes.
 That path was already correct and is locked down by `TriggerAtomicScopeTests` alongside the rest.
+
+### A body `ROLLBACK` — Msg 3609
+
+A DML trigger body fired by an auto-commit statement runs inside that statement's own transaction, so `@@TRANCOUNT` reads 1 there (probed 2026-09-26 against SQL Server 2025).
+A `ROLLBACK` in the body ends it — the user's transaction when there is one, else that auto-commit unit, undoing the firing statement's writes and the body's so far — and `@@TRANCOUNT` reads 0 after it.
+The body runs on, what it writes afterwards commits on its own (a body `INSERT` after the `ROLLBACK` survives), and its `RAISERROR`s reach the client; when it returns, **Msg 3609** (`The transaction ended in the trigger. The batch has been aborted.`) ends the batch, attributed to the firing statement.
+`SimulatedDbConnection.TriggerTransactionEnded` carries the fact from the `ROLLBACK` to the body's return.
 
 ### Msg 3616 — the body's own TRY / CATCH doesn't rescue it
 

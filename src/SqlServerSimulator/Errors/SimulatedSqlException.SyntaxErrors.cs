@@ -263,6 +263,16 @@ partial class SimulatedSqlException
         new("The COMMIT TRANSACTION request has no corresponding BEGIN TRANSACTION.", 3902, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 3609: a trigger body's <c>ROLLBACK</c> ended the
+    /// transaction — the user's, or the firing statement's own auto-commit
+    /// one — so the batch ends when the body returns, attributed to the firing
+    /// statement rather than the trigger (probed 2026-09-26 against SQL Server
+    /// 2025).
+    /// </summary>
+    internal static SimulatedSqlException TransactionEndedInTrigger() =>
+        new("The transaction ended in the trigger. The batch has been aborted.", 3609, 16, 1) { TerminatesBatch = true };
+
+    /// <summary>
     /// Mimics SQL Server error 3903: a <c>ROLLBACK</c> was issued with no
     /// active transaction. Probe-confirmed against SQL Server 2025
     /// (2026-05-08): Class 16, State 1, exact wording verbatim.

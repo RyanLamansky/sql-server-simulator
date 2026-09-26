@@ -331,6 +331,7 @@ partial class Simulation
 
         var savedImpersonationDepth = connection.Security.ImpersonationDepth;
         var savedBodyErrorRaised = connection.TriggerBodyErrorRaised;
+        var savedTransactionEnded = connection.TriggerTransactionEnded;
         // The body resolves names in the trigger's own database — the session's
         // unless the firing statement wrote through a three-part name. Not a
         // USE: the switch is invisible to the firing batch, which resumes in
@@ -370,6 +371,7 @@ partial class Simulation
             connection.TriggerNestLevel++;
             connection.FiringTriggers.Add((objectId, countsAsAfterFrame));
             connection.TriggerBodyErrorRaised = false;
+            connection.TriggerTransactionEnded = false;
             // Module WITH EXECUTE AS: run the body as the impersonated
             // principal (OWNER / SELF → dbo, CALLER → no-op, named user →
             // that principal); unwound in the finally below.
@@ -394,19 +396,22 @@ partial class Simulation
                 parser.MoveNextOptional();
                 foreach (var bodyOutcome in DispatchStatementsUntil(innerBatch, endKeyword: null))
                 {
-                    // A body's result sets, messages and continued-past errors
-                    // are the firing statement's on real, so buffer them in
+                    // A body's result sets, messages, continued-past errors and
+                    // row counts all reach the client ahead of the firing
+                    // statement's own on real — so an INSERT whose trigger
+                    // writes two rows reports four to ExecuteNonQuery unless the
+                    // body sets NOCOUNT (probed 2026-09-26) — so buffer them in
                     // order for the dispatcher to yield when the statement
-                    // completes. Rows-affected outcomes stay discarded — the
-                    // body's counts are not the statement's.
-                    if (bodyOutcome is SimulatedQueryResult or SimulatedInfoOutcome or SimulatedErrorOutcome)
-                        (outerBatch.PendingTriggerOutcomes ??= []).Add(bodyOutcome);
+                    // completes.
+                    (outerBatch.PendingTriggerOutcomes ??= []).Add(bodyOutcome);
                 }
                 // Real aborts the batch when any error of severity >= 11
                 // was raised while the body ran, even one the body's own
                 // TRY / CATCH swallowed — the swallow doesn't save it.
                 if (connection.TriggerBodyErrorRaised)
                     throw SimulatedSqlException.ErrorRaisedDuringTriggerExecution();
+                if (connection.TriggerTransactionEnded)
+                    throw SimulatedSqlException.TransactionEndedInTrigger();
             }
         }
         catch (SimulatedSqlException ex)
@@ -430,6 +435,7 @@ partial class Simulation
             innerBatch?.DropScopedTempTables();
             connection.Security.RevertTo(savedImpersonationDepth);
             connection.TriggerBodyErrorRaised = savedBodyErrorRaised;
+            connection.TriggerTransactionEnded = savedTransactionEnded;
         }
     }
 

@@ -795,6 +795,15 @@ public sealed class SimulatedDbConnection : DbConnection
     internal Storage.UndoLog? TriggerStatementUndoLog;
 
     /// <summary>
+    /// Set when a <c>ROLLBACK</c> inside the running trigger body ended the
+    /// transaction — the user's, or the firing statement's own auto-commit
+    /// unit, which reads as <c>@@TRANCOUNT</c> 1 in the body. The body runs
+    /// on, and real then aborts the batch with Msg 3609 when it returns
+    /// (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    internal bool TriggerTransactionEnded;
+
+    /// <summary>
     /// The pending-version list of the statement that fired the currently
     /// running trigger, paired with <see cref="TriggerStatementUndoLog"/> so
     /// MVCC row versions created underneath a trigger are finalized or

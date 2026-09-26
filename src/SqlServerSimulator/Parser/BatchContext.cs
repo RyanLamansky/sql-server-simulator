@@ -168,7 +168,10 @@ internal sealed class BatchContext
     internal SimulatedError InfoMessage(byte @class, byte state, int number, string message) =>
         new(
             @class: @class == 10 ? (byte)0 : @class,
-            lineNumber: this.CurrentStatement.StartLine,
+            // A module body's lines count from its CREATE batch, as its errors'
+            // do (probed 2026-09-26: a PRINT on a body's first line under a
+            // CREATE two lines into its batch reports line 3).
+            lineNumber: this.CurrentStatement.StartLine + this.LineOffset,
             message: message,
             number: number,
             procedure: this.ErrorProcedureName,

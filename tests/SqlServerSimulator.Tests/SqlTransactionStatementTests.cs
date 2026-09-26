@@ -379,4 +379,20 @@ public sealed class SqlTransactionStatementTests
             """));
         AreEqual("190a|40|7600", simulation.ExecuteScalar("select concat((select concat(len(v), left(v, 1)) from fw where id = 5), '|', count(*), '|', sum(len(v))) from fw"));
     }
+
+    /// <summary>
+    /// A statement writing a table reads @@TRANCOUNT one higher, counting the
+    /// transaction real opens for it — auto-commit's included — while a table
+    /// variable write and a plain read don't (probed 2026-09-26 against SQL
+    /// Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("insert x values (@@trancount); select n from x", 2)]
+    [DataRow("insert x select @@trancount; select n from x", 2)]
+    [DataRow("begin tran; insert x values (@@trancount); commit; select n from x", 2)]
+    [DataRow("begin tran; begin tran; insert x values (@@trancount); commit; commit; select n from x", 3)]
+    [DataRow("declare @t table (n int); insert @t values (@@trancount); select n from @t", 0)]
+    [DataRow("insert x values (1); select top 1 @@trancount from x", 0)]
+    public void TranCount_InsideAWrite_CountsItsTransaction(string sql, int expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar($"create table x (n int); {sql}"));
 }

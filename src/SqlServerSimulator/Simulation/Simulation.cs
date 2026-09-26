@@ -1861,6 +1861,7 @@ public sealed partial class Simulation
         batch.CurrentStatement.NullEliminated = false;
         batch.CurrentStatement.OwesOverflowNotice = batch.CurrentStatement.OwesDivideByZeroNotice = false;
         batch.CurrentStatement.WritesRows = false;
+        batch.CurrentStatement.TransactedWrite = false;
         batch.CurrentStatement.BindsDeferredSource = false;
         batch.CurrentStatement.PendingDdlEvents = null;
         batch.CurrentStatement.DdlTriggerCreatedThisStatement = null;
@@ -3482,16 +3483,34 @@ public sealed partial class Simulation
             return true;
 
         // Bare ROLLBACK (or ROLLBACK TRAN / ROLLBACK WORK with no name) →
-        // full rollback regardless of TRANCOUNT.
-        var activeTx = context.Connection.CurrentTransaction
+        // full rollback regardless of TRANCOUNT. In a trigger body fired by an
+        // auto-commit statement it ends that statement's own transaction: the
+        // firing statement's writes and the body's so far are undone, and what
+        // the body writes afterwards commits on its own.
+        var connection = context.Connection;
+        if (connection.CurrentTransaction is { } activeTx)
+        {
+            activeTx.Rollback();
+            if (connection.TriggerNestLevel > 0)
+            {
+                connection.TriggerStatementUndoLog = null;
+                connection.TriggerTransactionEnded = true;
+            }
+            return true;
+        }
+        var triggerUnit = connection.TriggerStatementUndoLog
             ?? throw SimulatedSqlException.NoCorrespondingBeginRollback();
-        activeTx.Rollback();
+        triggerUnit.Rollback();
+        connection.TriggerStatementUndoLog = null;
+        connection.TriggerTransactionEnded = true;
         return true;
     }
 
     private static SimulatedStatementOutcome RunMutation(ParserContext context, Func<ParserContext, SimulatedStatementOutcome> body)
     {
         context.Batch.CurrentStatement.WritesRows = true;
+        // A table-variable target takes no transaction; its parser clears this.
+        context.Batch.CurrentStatement.TransactedWrite = true;
         if (!context.Batch.IsSkipping)
             RejectWriteInDoomedTransaction(context.Connection);
         var tx = context.Connection.CurrentTransaction;

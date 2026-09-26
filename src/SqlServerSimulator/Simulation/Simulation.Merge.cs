@@ -86,7 +86,11 @@ partial class Simulation
         // variable targets reject hints — skip the parser for `@t`.
         context.MoveNextRequired();
         var serializableHint = false;
-        if (!BatchContext.IsTableVariableName(destinationName.Leaf))
+        if (BatchContext.IsTableVariableName(destinationName.Leaf))
+        {
+            context.Batch.CurrentStatement.TransactedWrite = false;
+        }
+        else
         {
             var targetHints = Selection.ParseOptionalTableHints(context, allowLegacyParenForm: false);
             Selection.ValidateDmlTargetHints(targetHints);

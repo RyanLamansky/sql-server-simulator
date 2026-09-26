@@ -111,16 +111,20 @@ public sealed class TriggerTests
     }
 
     /// <summary>
-    /// The body's own DML contributes no result set and — importantly — no
-    /// rows-affected: forwarding those would inflate the firing statement's
-    /// reported total, which is what an ORM reads back.
+    /// The body's own DML contributes no result set, but its row count does
+    /// count: real sends it ahead of the firing statement's, so the total an
+    /// ExecuteNonQuery returns includes it — unless the body sets NOCOUNT, as
+    /// EF Core's trigger-safe shape does (probed 2026-09-26 against SQL Server
+    /// 2025).
     /// </summary>
     [TestMethod]
-    public void BodyDml_ContributesNoResultSetAndNoRowCount()
+    [DataRow("", 2)]
+    [DataRow("set nocount on; ", 1)]
+    public void BodyDml_CountsTowardTheTotal(string bodyPrefix, int total)
     {
         using var connection = Seeded();
-        _ = connection.CreateCommand("create trigger tr on t_target after insert as begin insert audit_log values ('ins', 1, null, null); end").ExecuteNonQuery();
-        AreEqual(1, connection.CreateCommand("insert t_target values (1, 10)").ExecuteNonQuery());
+        _ = connection.CreateCommand($"create trigger tr on t_target after insert as begin {bodyPrefix}insert audit_log values ('ins', 1, null, null); end").ExecuteNonQuery();
+        AreEqual(total, connection.CreateCommand("insert t_target values (1, 10)").ExecuteNonQuery());
         HasCount(1, ReadAuditLog(connection));
     }
 
@@ -1126,5 +1130,29 @@ public sealed class TriggerTests
         sim.AssertSqlError("alter table t disable trigger tr, nosuch", 4920, "ALTER TABLE failed because trigger 'nosuch' on table 't' does not exist.");
         IsFalse((bool)sim.ExecuteScalar("select is_disabled from sys.triggers where name = 'tr'")!);
     }
-}
 
+    /// <summary>
+    /// A body ROLLBACK ends the firing statement's own transaction (or the
+    /// user's): the statement's rows are undone, what the body writes after it
+    /// stands, and the batch ends with Msg 3609 when the body returns (probed
+    /// 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("")]
+    [DataRow("begin tran; ")]
+    public void BodyRollback_EndsTheTransactionAndTheBatch(string prefix)
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            "create table rt (a int); create table note (n int)",
+            "create trigger rttr on rt after insert as begin insert note values (@@trancount); rollback; insert note values (@@trancount); end");
+        var error = simulation.AssertSqlError($"{prefix}insert rt values (1); insert note values (7)", 3609);
+        AreEqual("The transaction ended in the trigger. The batch has been aborted.", error.Errors[^1].Message);
+        AreEqual(0, simulation.ExecuteScalar("select count(*) from rt"));
+        // The note written before the ROLLBACK is undone with the unit; the one
+        // after it stands, reading 2 — an INSERT's own transaction on top of
+        // none, as it does outside any trigger.
+        AreEqual("2", simulation.ExecuteScalar("select string_agg(cast(n as varchar), ',') from note"));
+        AreEqual(0, simulation.ExecuteScalar("select @@trancount"));
+    }
+}

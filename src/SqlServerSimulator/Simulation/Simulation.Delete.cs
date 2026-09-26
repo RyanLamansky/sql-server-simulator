@@ -96,6 +96,8 @@ partial class Simulation
         var table = leadingTable ?? throw (BatchContext.IsTableVariableName(leadingIdent.Leaf)
             ? SimulatedSqlException.MustDeclareTableVariable(leadingIdent.Leaf)
             : context.Batch.UnresolvableObjectName(leadingIdent));
+        if (BatchContext.IsTableVariableName(leadingIdent.Leaf))
+            context.Batch.CurrentStatement.TransactedWrite = false;
         if (table.IsTableValuedParameter)
             throw SimulatedSqlException.TableValuedParameterIsReadOnly(leadingIdent.Leaf);
         FunctionBodyShape.NoteTableWrite(context.Batch, "DELETE", table);

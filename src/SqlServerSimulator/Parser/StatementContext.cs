@@ -184,6 +184,15 @@ internal sealed class StatementContext
     public bool WritesRows;
 
     /// <summary>
+    /// Set while a statement writing a table (not a table variable) runs,
+    /// inside the transaction real opens for it: <c>@@TRANCOUNT</c> read
+    /// there counts that one too, so an auto-commit <c>INSERT … VALUES
+    /// (@@TRANCOUNT)</c> stores 2 and one under a single <c>BEGIN TRAN</c>
+    /// stores 2 as well (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    public bool TransactedWrite;
+
+    /// <summary>
     /// Set in skip mode when a FROM source names an object that doesn't exist,
     /// so the statement parsed over a placeholder. Real binds none of such a
     /// statement until it runs, so a binder error it raises defers with it.
