@@ -841,12 +841,21 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                     cutShort = true;
                 }
                 var queryStatus = this.OutcomeDoneStatus(hasOutcome, trailingTokensFollow);
+                // A statement its own error cut short reports no count at all,
+                // not even for the rows it sent first — DONE_ERROR with a zero
+                // count (captured from SQL Server 2025, 2026-09-26) — so
+                // SqlClient raises no StatementCompleted for it.
                 if (cutShort)
+                {
                     queryStatus |= Tds.DoneError;
+                    rows = 0;
+                }
                 // Real reports a result set's row count under DONE_COUNT and
                 // drops the flag (keeping the count itself) under NOCOUNT.
-                if (query.CountSuppressed != true)
+                else if (query.CountSuppressed != true)
+                {
                     queryStatus |= Tds.DoneCount;
+                }
                 if ((queryStatus & Tds.DoneMore) == 0)
                     this.WriteSessionEnvChangesIfAny(writer);
                 // CurCmd tells the client whether that count is rows returned
