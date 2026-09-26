@@ -47,7 +47,7 @@ partial class Simulation
         {
             throw BatchContext.IsTableVariableName(destinationName.Leaf)
                 ? SimulatedSqlException.MustDeclareTableVariable(destinationName.Leaf)
-                : context.Batch.UnresolvableObjectName(destinationName);
+                : context.Batch.UnresolvableObjectName(destinationName.WithoutOmittedLeading());
         }
         if (destinationTable.IsTableValuedParameter)
             throw SimulatedSqlException.TableValuedParameterIsReadOnly(destinationName.Leaf);

@@ -37,6 +37,12 @@ internal readonly struct MultiPartName
     /// <summary>Number of populated segments (1–<c>MaxParts</c>).</summary>
     public readonly int Count;
 
+    /// <summary>How many empty leading parts were written ahead of the first (<c>..t</c> is 2).</summary>
+    private readonly byte omittedLeading;
+
+    /// <summary>Whether the schema part was written empty (<c>db..t</c>) and filled in with the default.</summary>
+    private readonly bool schemaOmitted;
+
     public MultiPartName(string singlePart)
     {
         ArgumentNullException.ThrowIfNull(singlePart);
@@ -44,14 +50,46 @@ internal readonly struct MultiPartName
         this.Count = 1;
     }
 
-    private MultiPartName(string p1, string p2, string? p3, string? p4, int count)
+    private MultiPartName(string p1, string p2, string? p3, string? p4, int count, byte omittedLeading = 0, bool schemaOmitted = false)
     {
         this.p1 = p1;
         this.p2 = p2;
         this.p3 = p3;
         this.p4 = p4;
         this.Count = count;
+        this.omittedLeading = omittedLeading;
+        this.schemaOmitted = schemaOmitted;
     }
+
+    /// <summary>
+    /// This name, remembering the parts its writer left empty — the leading
+    /// ones dropped and a middle schema filled with the default — so
+    /// <see cref="Written"/> can echo it as real's messages do. Resolution
+    /// reads the filled-in parts and never sees the difference.
+    /// </summary>
+    public MultiPartName WithOmissions(int leading, bool schema) =>
+        leading == 0 && !schema
+            ? this
+            : new(this.p1, this.p2!, this.p3, this.p4, this.Count, (byte)leading, schema);
+
+    /// <summary>
+    /// The name as written: empty leading parts as leading dots, an omitted
+    /// schema empty (<c>db..t</c>, <c>..t</c>), which is how real names an
+    /// object it can't find (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    public string Written =>
+        new string('.', this.omittedLeading)
+            + (this.schemaOmitted && this.Count == 3 ? $"{this.p1}..{this.p3}"
+                : this.schemaOmitted && this.Count == 4 ? $"{this.p1}.{this.p2}..{this.p4}"
+                : this.ToString());
+
+    /// <summary>
+    /// This name without its empty leading parts, which is how <c>INSERT</c>
+    /// and <c>EXEC</c> name what they can't find (probed 2026-09-26 against
+    /// SQL Server 2025).
+    /// </summary>
+    public MultiPartName WithoutOmittedLeading() =>
+        new(this.p1, this.p2!, this.p3, this.p4, this.Count, 0, this.schemaOmitted);
 
     /// <summary>
     /// Returns a new <see cref="MultiPartName"/> with <paramref name="next"/>

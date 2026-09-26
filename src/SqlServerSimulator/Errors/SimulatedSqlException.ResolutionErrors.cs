@@ -67,7 +67,7 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException AmbiguousColumnName(string name) =>
         new($"Ambiguous column name '{name}'.", 209, 16, 1);
 
-    internal static SimulatedSqlException InvalidObjectName(MultiPartName name, byte state = 1) => new($"Invalid object name '{name}'.", 208, 16, state);
+    internal static SimulatedSqlException InvalidObjectName(MultiPartName name, byte state = 1) => new($"Invalid object name '{name.Written}'.", 208, 16, state);
 
     internal static SimulatedSqlException MustDeclareScalarVariable(string name) => new($"Must declare the scalar variable \"@{name}\".", 137, 15, 2);
 

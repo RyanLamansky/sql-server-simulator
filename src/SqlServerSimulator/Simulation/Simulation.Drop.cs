@@ -657,7 +657,7 @@ partial class Simulation
                 RejectDropOfOtherKind(schema, name, "TABLE");
             if (ifExists)
                 return;
-            throw SimulatedSqlException.CannotDropTableDoesNotExist(name.ToString());
+            throw SimulatedSqlException.CannotDropTableDoesNotExist(name.Written);
         }
         // A read-only database refuses the drop, once the table is known to
         // exist. Temp tables live in tempdb and are exempt however the session's
@@ -708,7 +708,7 @@ partial class Simulation
         {
             if (ifExists)
                 return;
-            throw SimulatedSqlException.CannotDropTableDoesNotExist(name.ToString());
+            throw SimulatedSqlException.CannotDropTableDoesNotExist(name.Written);
         }
         // DROP TABLE participates in transaction rollback, restoring the
         // table with its rows (probe-confirmed).

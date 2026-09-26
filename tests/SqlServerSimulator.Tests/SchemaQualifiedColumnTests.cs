@@ -6,8 +6,9 @@ namespace SqlServerSimulator;
 /// A column prefixed by its object's schema (<c>dbo.t.a</c>) or database too
 /// binds only to an unaliased source whose name resolved in that schema and
 /// database; anything else is Msg 4104 on the whole name, and a star is
-/// Msg 107. Empty parts (<c>..t.a</c>) match anything. Every expectation
-/// probed 2026-09-26 against SQL Server 2025.
+/// Msg 107. Empty parts (<c>..t.a</c>) match anything, and a missing object
+/// written with them is named with them. Every expectation probed 2026-09-26
+/// against SQL Server 2025.
 /// </summary>
 [TestClass]
 public sealed class SchemaQualifiedColumnTests
@@ -56,4 +57,21 @@ public sealed class SchemaQualifiedColumnTests
     [DataRow("select dbo.t.* from t as t", "dbo.t")]
     public void AStarPrefix_IsMsg107(string query, string prefix)
         => Fixture().AssertSqlError(query, 107, $"The column prefix '{prefix}' does not match with a table name or alias name used in the query.");
+
+    /// <summary>
+    /// An object that can't be found is named as written, empty parts
+    /// included, except that INSERT and EXEC drop the leading ones.
+    /// </summary>
+    [TestMethod]
+    [DataRow("select * from simulated..nosuch", 208, "Invalid object name 'simulated..nosuch'.")]
+    [DataRow("select * from ..nosuch", 208, "Invalid object name '..nosuch'.")]
+    [DataRow("select * from .dbo.nosuch", 208, "Invalid object name '.dbo.nosuch'.")]
+    [DataRow("delete simulated..nosuch", 208, "Invalid object name 'simulated..nosuch'.")]
+    [DataRow("insert simulated..nosuch values (1)", 208, "Invalid object name 'simulated..nosuch'.")]
+    [DataRow("insert ..nosuch values (1)", 208, "Invalid object name 'nosuch'.")]
+    [DataRow("drop table simulated..nosuch", 3701, "Cannot drop the table 'simulated..nosuch', because it does not exist or you do not have permission.")]
+    [DataRow("exec simulated..nosuch", 2812, "Could not find stored procedure 'simulated..nosuch'.")]
+    [DataRow("exec ..nosuch", 2812, "Could not find stored procedure 'nosuch'.")]
+    public void AMissingObject_IsNamedAsWritten(string statement, int number, string message)
+        => new Simulation().AssertSqlError(statement, number, message);
 }

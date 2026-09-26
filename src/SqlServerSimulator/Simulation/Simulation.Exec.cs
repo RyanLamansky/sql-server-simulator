@@ -259,7 +259,7 @@ partial class Simulation
         var writtenName = procName.ToString();
         procName = batch.ExpandSynonym(procName);
         if (!batch.TryResolveProcedure(procName, out var procedure))
-            throw SimulatedSqlException.CouldNotFindStoredProcedure(procName.ToString());
+            throw SimulatedSqlException.CouldNotFindStoredProcedure(procName.WithoutOmittedLeading().Written);
 
         var invocation = this.InvokeProcedure(
             batch, procedure, arguments, returnCodeVar, execSynonym is null ? writtenName : $"{procedure.Schema.Name}.{procedure.Name}", execSynonym);
