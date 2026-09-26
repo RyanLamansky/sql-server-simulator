@@ -30,7 +30,11 @@ internal sealed class Degrees(ParserContext context) : Expression
         {
             SqlTypeCategory.Integer => DegreesRadians.IntegerArm(MathScalars.AsLong(v), DegreesRadians.RadiansToDegreesDouble, resultType),
             SqlTypeCategory.Decimal or SqlTypeCategory.Money => DegreesRadians.ExactNumericArm(MathScalars.AsDecimal38OrMoney(v), DegreesRadians.RadiansToDegreesDouble, resultType),
-            SqlTypeCategory.Approximate => SqlValue.FromDouble(MathScalars.AsDouble(v) * DegreesRadians.RadiansToDegreesDouble),
+            // A float past its range is Msg 8115 (probed 2026-09-26 against
+            // SQL Server 2025).
+            SqlTypeCategory.Approximate => SqlValue.FromDouble(MathScalars.AsDouble(v) * DegreesRadians.RadiansToDegreesDouble is var degrees && double.IsInfinity(degrees)
+                ? throw SimulatedSqlException.ArithmeticOverflow("float")
+                : degrees),
             _ => throw new NotSupportedException($"DEGREES doesn't support {v.Type}.")
         };
     }

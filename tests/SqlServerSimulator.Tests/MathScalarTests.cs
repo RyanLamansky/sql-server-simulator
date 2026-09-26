@@ -270,4 +270,17 @@ public sealed class MathScalarTests
         AreEqual("float", ExecuteScalar("select sql_variant_property(cast(power(cast(2 as float), 10) as sql_variant), 'BaseType')"));
         AreEqual("money", ExecuteScalar("select sql_variant_property(cast(power(cast(2 as money), 10) as sql_variant), 'BaseType')"));
     }
+
+    /// <summary>
+    /// A float's range edge (probed 2026-09-26 against SQL Server 2025):
+    /// ROUND leaves a value already whole at its scale as it is, and DEGREES
+    /// past float's range is Msg 8115.
+    /// </summary>
+    [TestMethod]
+    public void RoundAtTheFloatRangeEdge_LeavesTheValue()
+        => AreEqual(1e308, new Simulation().ExecuteScalar("select round(1e308, 1)"));
+
+    [TestMethod]
+    public void DegreesPastTheFloatRange_IsMsg8115()
+        => new Simulation().AssertSqlError("select degrees(1e308)", 8115, "Arithmetic overflow error converting expression to data type float.");
 }

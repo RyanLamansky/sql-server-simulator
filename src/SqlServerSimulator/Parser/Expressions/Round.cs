@@ -131,7 +131,14 @@ internal sealed class Round : Expression
         if (length >= 0)
         {
             var p = Math.Pow(10, length);
-            return truncate ? Math.Truncate(value * p) / p : Math.Round(value * p, MidpointRounding.AwayFromZero) / p;
+            // Past 2^52 the scaled value is already whole, so rounding leaves
+            // the value as it is — where scaling it could overflow to
+            // infinity (probed 2026-09-26 against SQL Server 2025:
+            // ROUND(1e308, 1) is 1e308).
+            var scaledUp = value * p;
+            if (double.IsInfinity(scaledUp) || Math.Abs(scaledUp) >= 4503599627370496.0)
+                return value;
+            return truncate ? Math.Truncate(scaledUp) / p : Math.Round(scaledUp, MidpointRounding.AwayFromZero) / p;
         }
         var scale = Math.Pow(10, -length);
         var scaled = value / scale;
