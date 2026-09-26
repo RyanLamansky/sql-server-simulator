@@ -1437,4 +1437,20 @@ public sealed class CatalogViewTests
         simulation.ExecuteBatches("create table t (a int)", "create view v as select a from t", "create procedure p as select 1", "create sequence sq");
         AreEqual(expected, simulation.ExecuteScalar(query));
     }
+
+    /// <summary>
+    /// The column-family views carry sys.columns' row (the vector columns
+    /// aside) ahead of their own columns, as real's do (probed 2026-09-26
+    /// against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select concat(type_name(system_type_id), ':', max_length, ':', cast(is_identity as int), ':', cast(seed_value as int)) from sys.identity_columns where object_id = object_id('t')", "int:4:1:5")]
+    [DataRow("select concat(type_name(user_type_id), ':', collation_name, ':', cast(is_computed as int), ':', definition) from sys.computed_columns where object_id = object_id('t') and name = 'c'", "varchar:SQL_Latin1_General_CP1_CI_AS:1:([a]+'x')")]
+    [DataRow("select count(*) from sys.all_columns where object_id = object_id('sys.identity_columns')", "44")]
+    public void ColumnFamilyViews_CarryTheColumnsRow(string query, string expected)
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table t (id int identity(5, 2), a varchar(10), c as a + 'x')");
+        AreEqual(expected, Convert.ToString(simulation.ExecuteScalar(query), System.Globalization.CultureInfo.InvariantCulture));
+    }
 }

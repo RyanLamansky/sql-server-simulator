@@ -216,7 +216,7 @@ public sealed class SsmsScriptTableCatalogTests
     [DataRow("sys.filetables", 5)]
     [DataRow("sys.external_data_sources", 11)]
     [DataRow("sys.external_file_formats", 13)]
-    [DataRow("sys.masked_columns", 5)]
+    [DataRow("sys.masked_columns", 44)]
     [DataRow("sys.column_encryption_keys", 4)]
     [DataRow("sys.sensitivity_classifications", 10)]
     [DataRow("sys.fulltext_stoplists", 5)]

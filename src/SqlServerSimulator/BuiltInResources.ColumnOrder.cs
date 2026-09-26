@@ -62,8 +62,14 @@ internal static partial class BuiltInResources
         ],
         ["sys.identity_columns"] =
         [
-            "object_id", "name", "column_id", "is_identity", "seed_value", "increment_value",
-            "last_value", "is_not_for_replication",
+            "object_id", "name", "column_id", "system_type_id", "user_type_id", "max_length",
+            "precision", "scale", "collation_name", "is_nullable", "is_ansi_padded", "is_rowguidcol",
+            "is_identity", "is_filestream", "is_replicated", "is_non_sql_subscribed", "is_merge_published", "is_dts_replicated",
+            "is_xml_document", "xml_collection_id", "default_object_id", "rule_object_id", "seed_value", "increment_value",
+            "last_value", "is_not_for_replication", "is_computed", "is_sparse", "is_column_set", "generated_always_type",
+            "generated_always_type_desc", "encryption_type", "encryption_type_desc", "encryption_algorithm_name", "column_encryption_key_id", "column_encryption_key_database_name",
+            "is_hidden", "is_masked", "graph_type", "graph_type_desc", "is_data_deletion_filter_column", "ledger_view_column_type",
+            "ledger_view_column_type_desc", "is_dropped_ledger_column",
         ],
         ["sys.objects"] =
         [
@@ -170,6 +176,28 @@ internal static partial class BuiltInResources
             "column_encryption_key_id", "column_encryption_key_database_name", "is_hidden", "is_masked", "graph_type", "graph_type_desc",
             "is_data_deletion_filter_column", "ledger_view_column_type", "ledger_view_column_type_desc", "is_dropped_ledger_column", "vector_dimensions", "vector_base_type",
             "vector_base_type_desc",
+        ],
+        ["sys.computed_columns"] =
+        [
+            "object_id", "name", "column_id", "system_type_id", "user_type_id", "max_length",
+            "precision", "scale", "collation_name", "is_nullable", "is_ansi_padded", "is_rowguidcol",
+            "is_identity", "is_filestream", "is_replicated", "is_non_sql_subscribed", "is_merge_published", "is_dts_replicated",
+            "is_xml_document", "xml_collection_id", "default_object_id", "rule_object_id", "definition", "uses_database_collation",
+            "is_persisted", "is_computed", "is_sparse", "is_column_set", "generated_always_type", "generated_always_type_desc",
+            "encryption_type", "encryption_type_desc", "encryption_algorithm_name", "column_encryption_key_id", "column_encryption_key_database_name", "is_hidden",
+            "is_masked", "graph_type", "graph_type_desc", "is_data_deletion_filter_column", "ledger_view_column_type", "ledger_view_column_type_desc",
+            "is_dropped_ledger_column", "is_index_column_expression",
+        ],
+        ["sys.masked_columns"] =
+        [
+            "object_id", "name", "column_id", "system_type_id", "user_type_id", "max_length",
+            "precision", "scale", "collation_name", "is_nullable", "is_ansi_padded", "is_rowguidcol",
+            "is_identity", "is_filestream", "is_replicated", "is_non_sql_subscribed", "is_merge_published", "is_dts_replicated",
+            "is_xml_document", "xml_collection_id", "default_object_id", "rule_object_id", "definition", "uses_database_collation",
+            "is_persisted", "is_computed", "is_sparse", "is_column_set", "generated_always_type", "generated_always_type_desc",
+            "encryption_type", "encryption_type_desc", "encryption_algorithm_name", "column_encryption_key_id", "column_encryption_key_database_name", "is_hidden",
+            "is_masked", "masking_function", "graph_type", "graph_type_desc", "is_data_deletion_filter_column", "ledger_view_column_type",
+            "ledger_view_column_type_desc", "is_dropped_ledger_column",
         ],
     }.ToFrozenDictionary(BuiltInToken.Comparer);
 

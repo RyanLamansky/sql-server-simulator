@@ -438,6 +438,60 @@ internal static partial class BuiltInResources
         // sys.columns doesn't (probed 2026-09-26 against SQL Server 2025).
         SysP("system_columns", NotNullable(ColumnsShape(), "is_computed", "is_sparse", "is_column_set", "is_dropped_ledger_column", "is_hidden", "is_replicated", "is_non_sql_subscribed", "is_merge_published", "is_dts_replicated", "is_data_deletion_filter_column"), ["object_id"], (batch, database, filter) =>
             EnumerateColumns(batch, database, defaultCollation, nullCollation, filter, userColumns: false, systemColumns: true));
+
+        // sys.identity_columns / sys.computed_columns / sys.masked_columns:
+        // sys.columns' row (the vector columns aside) for each column the view
+        // lists, then the view's own columns (probed 2026-09-26 against SQL
+        // Server 2025). The identity values are sql_variant carrying the
+        // column's declared type; last_value is NULL before the first insert
+        // and always for a table type, whose template is never inserted into.
+        // A return table's computed column reads no definition. Dynamic Data
+        // Masking isn't modeled, so sys.masked_columns is empty.
+        var familyOrdinals = Enumerable.Range(0, ColumnsShape().Length)
+            .Where(i => !ColumnsShape()[i].Name.StartsWith("vector_", StringComparison.Ordinal))
+            .ToArray();
+        HeapColumn[] FamilyShape(params HeapColumn[] own) => [.. familyOrdinals.Select(i => ColumnsShape()[i]), .. own];
+        IEnumerable<(SqlValue[] Row, HeapColumn Column, ColumnHost Host)> UserColumnRows(Parser.BatchContext batch, Database database) =>
+            EnumerateColumnRows(batch, database, defaultCollation, nullCollation, CatalogFilter.None, userColumns: true, systemColumns: false);
+        Sys("identity_columns", NotNullable(FamilyShape(
+            new("seed_value", SqlType.SqlVariant, null, true),
+            new("increment_value", SqlType.SqlVariant, null, true),
+            new("last_value", SqlType.SqlVariant, null, true),
+            new("is_not_for_replication", SqlType.Bit, null, true)), "is_computed", "is_sparse", "is_column_set", "is_hidden"),
+            (batch, database) => UserColumnRows(batch, database)
+                .Where(static entry => entry.Host is ColumnHost.Table or ColumnHost.ReturnTable or ColumnHost.TableType && entry.Column.Identity is not null)
+                .Select(entry =>
+                {
+                    var identity = entry.Column.Identity!;
+                    return (SqlValue[])[
+                        .. familyOrdinals.Select(i => entry.Row[i]),
+                        IdentityVariant(identity.Seed, entry.Column.Type),
+                        IdentityVariant(identity.Increment, entry.Column.Type),
+                        entry.Host != ColumnHost.TableType && identity.Snapshot() is { } last ? IdentityVariant(last, entry.Column.Type) : SqlValue.Null(SqlType.SqlVariant),
+                        SqlValue.FromBoolean(entry.Host != ColumnHost.TableType && identity.NotForReplication),
+                    ];
+                }));
+        Sys("computed_columns", NotNullable(FamilyShape(
+            new("definition", SqlType.NVarchar, SqlType.MaxLengthSentinel, true),
+            new("uses_database_collation", SqlType.Bit, null, false),
+            new("is_persisted", SqlType.Bit, null, false),
+            new("is_index_column_expression", SqlType.Bit, null, true)), "is_sparse", "is_column_set"),
+            (batch, database) => UserColumnRows(batch, database)
+                .Where(static entry => entry.Host is ColumnHost.Table or ColumnHost.ReturnTable && entry.Column.Computed is not null)
+                .Select(entry => (SqlValue[])[
+                    .. familyOrdinals.Select(i => entry.Row[i]),
+                    entry.Host == ColumnHost.Table && entry.Column.ComputedDefinition is { } definition ? SqlValue.FromNVarchar(definition) : SqlValue.Null(SqlType.NVarchar),
+                    SqlValue.FromBoolean(true),
+                    SqlValue.FromBoolean(entry.Column.IsPersisted),
+                    SqlValue.FromBoolean(false),
+                ]));
+        Sys("masked_columns", Array.ConvertAll(NotNullable(FamilyShape(
+            new("definition", SqlType.NVarchar, SqlType.MaxLengthSentinel, true),
+            new("uses_database_collation", SqlType.Bit, null, false),
+            new("is_persisted", SqlType.Bit, null, false),
+            new("masking_function", NVarcharSqlType.Get(4000, Collation.Catalog, Coercibility.Implicit), 4000, true)), "is_computed", "is_sparse", "is_column_set", "is_hidden"),
+                static column => column.Name == "is_masked" ? new HeapColumn(column.Name, column.Type, column.MaxLength, nullable: true) : column),
+            static (batch, database) => []);
     }
 
     /// <summary>
@@ -449,7 +503,27 @@ internal static partial class BuiltInResources
             ? new HeapColumn(column.Name, column.Type, column.MaxLength, nullable: false)
             : column);
 
+    /// <summary>What holds a column <see cref="EnumerateColumnRows"/> lists, which the column-family views filter on.</summary>
+    private enum ColumnHost
+    {
+        Table,
+        ReturnTable,
+        TableType,
+        Projection,
+        System,
+    }
+
     private static IEnumerable<SqlValue[]> EnumerateColumns(
+        Parser.BatchContext batch,
+        Database database,
+        SqlValue defaultCollation,
+        SqlValue nullCollation,
+        CatalogFilter filter,
+        bool userColumns,
+        bool systemColumns) =>
+        EnumerateColumnRows(batch, database, defaultCollation, nullCollation, filter, userColumns, systemColumns).Select(static entry => entry.Row);
+
+    private static IEnumerable<(SqlValue[] Row, HeapColumn Column, ColumnHost Host)> EnumerateColumnRows(
         Parser.BatchContext batch,
         Database database,
         SqlValue defaultCollation,
@@ -584,7 +658,7 @@ internal static partial class BuiltInResources
                     row[11] = SqlType.IsCollatedString(column.Type) && column.Type.Collation is { } typeCollation
                         ? SqlValue.FromSystemName(typeCollation.Name)
                         : nullCollation;
-                    yield return row;
+                    yield return (row, column, ColumnHost.System);
                 }
             }
         }
@@ -599,7 +673,7 @@ internal static partial class BuiltInResources
                     continue;
                 var objectId = SqlValue.FromInt32(t.ObjectId);
                 foreach (var col in t.Columns)
-                    yield return Row(objectId, col, col.ColumnId, declared: true);
+                    yield return (Row(objectId, col, col.ColumnId, declared: true), col, ColumnHost.Table);
             }
             foreach (var fn in schema.Functions.Values.OrderBy(f => f.ObjectId))
             {
@@ -613,7 +687,7 @@ internal static partial class BuiltInResources
                 };
                 var fnObjectId = SqlValue.FromInt32(fn.ObjectId);
                 for (var i = 0; i < outputColumns.Length; i++)
-                    yield return Row(fnObjectId, outputColumns[i], i + 1, declared);
+                    yield return (Row(fnObjectId, outputColumns[i], i + 1, declared), outputColumns[i], declared ? ColumnHost.ReturnTable : ColumnHost.Projection);
             }
             foreach (var view in schema.Views.Values.OrderBy(v => v.ObjectId))
             {
@@ -621,7 +695,7 @@ internal static partial class BuiltInResources
                     continue;
                 var viewObjectId = SqlValue.FromInt32(view.ObjectId);
                 for (var i = 0; i < view.OutputColumns.Length; i++)
-                    yield return Row(viewObjectId, view.OutputColumns[i], i + 1, declared: false);
+                    yield return (Row(viewObjectId, view.OutputColumns[i], i + 1, declared: false), view.OutputColumns[i], ColumnHost.Projection);
             }
             // Table types surface their columns keyed by type_table_object_id
             // (probe G3).
@@ -631,7 +705,7 @@ internal static partial class BuiltInResources
                     continue;
                 var typeObjectId = SqlValue.FromInt32(tt.ObjectId);
                 for (var i = 0; i < tt.Columns.Length; i++)
-                    yield return Row(typeObjectId, tt.Columns[i], i + 1, declared: true);
+                    yield return (Row(typeObjectId, tt.Columns[i], i + 1, declared: true), tt.Columns[i], ColumnHost.TableType);
             }
         }
     }
