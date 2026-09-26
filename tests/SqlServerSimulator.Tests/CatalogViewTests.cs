@@ -1360,4 +1360,9 @@ public sealed class CatalogViewTests
             select (select top 1 cast(sql_variant_property(delayed_durability_desc, 'Collation') as sysname) from sys.databases)
                 + '|' + (select top 1 cast(sql_variant_property(assembly_class, 'Collation') as sysname) from sys.assembly_types where assembly_class is not null)
             """));
+
+    [TestMethod]
+    public void GroupByDiagnostic_NamesTheCatalogViewAsWritten()
+        => AssertSqlError("select o.name, count(*) from sys.objects o", 8120,
+            "Column 'sys.objects.name' is invalid in the select list because it is not contained in either an aggregate function or the GROUP BY clause.");
 }

@@ -2908,7 +2908,8 @@ internal sealed partial class Selection
                         lateralPlan: Selection.ForCatalogView(catalogView, catalogTargetDb),
                         materializeOnce: true,
                         backingCatalogView: catalogView,
-                        backingCatalogDatabase: catalogTargetDb);
+                        backingCatalogDatabase: catalogTargetDb,
+                        writtenObjectName: objectName.ToString());
                 }
 
                 // View resolution: `FROM schema.view [alias]` or
