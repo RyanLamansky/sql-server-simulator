@@ -51,7 +51,7 @@ internal sealed class ObjectProperty : Expression
     /// (possibly extended) procedure, never a table; anything else is NULL
     /// (probed 2026-09-24 for sys.tables and sys.sp_help).
     /// </summary>
-    private static int? EvaluateSystemObjectProperty(BuiltInResources.SystemObject system, string property)
+    internal static int? EvaluateSystemObjectProperty(BuiltInResources.SystemObject system, string property)
     {
         Span<char> upper = stackalloc char[Math.Min(property.Length, 32)];
         _ = property.AsSpan(0, upper.Length).ToUpperInvariant(upper);

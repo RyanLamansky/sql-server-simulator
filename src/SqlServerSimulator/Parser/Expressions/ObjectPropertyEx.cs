@@ -23,17 +23,15 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// <list type="bullet">
 /// <item><description>All <c>Is*</c> booleans from <see cref="ObjectProperty"/>
 /// (delegates to the shared <c>ObjectProperty.EvaluateProperty</c> helper).</description></item>
-/// <item><description><c>BaseType</c> — <c>'U '</c> for user table, <c>'V '</c>
-/// for view, <c>'P '</c> for procedure, <c>'FN'</c> / <c>'IF'</c> / <c>'TF'</c>
-/// for function variants, <c>'TR'</c> for trigger, <c>'SO'</c> for sequence.</description></item>
+/// <item><description><c>BaseType</c> — the object's <c>sys.objects.type</c>
+/// for every kind, a constraint and a system object included, and the
+/// target's for a synonym.</description></item>
 /// <item><description><c>SchemaId</c> — owning schema's <see cref="Schema.SchemaId"/>.</description></item>
 /// <item><description><c>Cardinality</c> — table row count
-/// (<see cref="Heap.RowCount"/>); NULL for non-tables.</description></item>
-/// <item><description><c>TableHasIdentity</c> / <c>TableHasPrimaryKey</c> /
-/// <c>TableHasClustIndex</c> / <c>TableHasIndex</c> /
-/// <c>TableHasUniqueCnst</c> / <c>TableHasCheckCnst</c> /
-/// <c>TableHasForeignKey</c> / <c>TableHasForeignRef</c> /
-/// <c>TableHasRowGuidCol</c> — 1 / 0 per table feature, NULL for non-tables.</description></item>
+/// (<see cref="Heap.RowCount"/>), 0 for a multi-statement function's return
+/// table; NULL for other kinds.</description></item>
+/// <item><description>The whole <c>Table*</c> family, shared with
+/// <see cref="ObjectProperty"/>.</description></item>
 /// </list>
 /// </para>
 /// </remarks>
@@ -61,21 +59,41 @@ internal sealed class ObjectPropertyEx : Expression
         var id = ScalarArguments.CoerceToInt(idValue);
         var prop = propValue.CoerceTo(SqlType.NVarchar).AsString;
 
-        var obj = ObjectProperty.FindObject(runtime.Batch.CurrentDatabase, id);
+        var database = runtime.Batch.CurrentDatabase;
+        var obj = ObjectProperty.FindObject(database, id);
         // Boolean Is-X props share OBJECTPROPERTY's dispatch verbatim; real
         // carries them as an int inner base type inside the sql_variant. A
-        // constraint id resolves through the same constraint answers (real
-        // agrees between the two functions, probe-confirmed); the EX-only
-        // properties have no constraint answer here.
-        return obj is null
-            ? ObjectProperty.TryFindConstraint(runtime.Batch.CurrentDatabase, id, out var constraint)
-                && ObjectProperty.EvaluateConstraintProperty(constraint, prop) is int constraintResult
-                    ? SqlValue.FromVariant(SqlValue.FromInt32(constraintResult))
-                    : SqlValue.Null(SqlType.SqlVariant)
-            : ObjectProperty.EvaluateProperty(runtime.Batch.CurrentDatabase, obj, prop) is int booleanResult
+        // constraint id and a system object resolve through the same answers
+        // (real agrees between the two functions, probe-confirmed), each also
+        // answering BaseType with its own type code.
+        if (obj is not null)
+        {
+            return ObjectProperty.EvaluateProperty(database, obj, prop) is int booleanResult
                 ? SqlValue.FromVariant(SqlValue.FromInt32(booleanResult))
                 : EvaluateExtendedProperty(obj, prop, runtime.Batch);
+        }
+        if (ObjectProperty.TryFindConstraint(database, id, out var constraint))
+        {
+            return IsBaseType(prop) ? TypeCodeVariant(constraint.TypeCode, database)
+                : ObjectProperty.EvaluateConstraintProperty(constraint, prop) is int constraintResult
+                    ? SqlValue.FromVariant(SqlValue.FromInt32(constraintResult))
+                    : SqlValue.Null(SqlType.SqlVariant);
+        }
+        if (BuiltInResources.TryResolveSystemObject(id, out var system))
+        {
+            return IsBaseType(prop) ? TypeCodeVariant(system.Type, database)
+                : ObjectProperty.EvaluateSystemObjectProperty(system, prop) is int systemResult
+                    ? SqlValue.FromVariant(SqlValue.FromInt32(systemResult))
+                    : SqlValue.Null(SqlType.SqlVariant);
+        }
+        return SqlValue.Null(SqlType.SqlVariant);
     }
+
+    private static bool IsBaseType(string property) => BuiltInToken.Equals(property, "BaseType");
+
+    /// <summary><c>BaseType</c>'s <c>char(2)</c> in the database collation, space-padded as <c>sys.objects.type</c> is.</summary>
+    private static SqlValue TypeCodeVariant(string typeCode, Database database) =>
+        SqlValue.FromVariant(SqlValue.FromChar(CharSqlType.Get(2, database.Collation, Coercibility.Implicit), typeCode.PadRight(2)));
 
     private static SqlValue EvaluateExtendedProperty(SchemaObject obj, string property, BatchContext batch)
     {
@@ -96,10 +114,14 @@ internal sealed class ObjectPropertyEx : Expression
             },
             11 => upper[..len] switch
             {
-                // Cardinality's inner type is bigint (probe-confirmed).
-                "CARDINALITY" => obj is HeapTable table
-                    ? SqlValue.FromVariant(SqlValue.FromInt64(table.Heap.RowCount))
-                    : SqlValue.Null(SqlType.SqlVariant),
+                // Cardinality's inner type is bigint (probe-confirmed); a
+                // multi-statement function's return table counts 0.
+                "CARDINALITY" => obj switch
+                {
+                    HeapTable table => SqlValue.FromVariant(SqlValue.FromInt64(table.Heap.RowCount)),
+                    MultiStatementTableValuedFunction => SqlValue.FromVariant(SqlValue.FromInt64(0)),
+                    _ => SqlValue.Null(SqlType.SqlVariant),
+                },
                 _ => SqlValue.Null(SqlType.SqlVariant),
             },
             // The TableHas* family — shared verbatim with the non-EX
@@ -219,21 +241,8 @@ internal sealed class ObjectPropertyEx : Expression
                 return SqlValue.Null(SqlType.SqlVariant);
             reported = target;
         }
-        return SqlValue.FromVariant(SqlValue.FromChar(CharSqlType.Get(2, database.Collation, Coercibility.Implicit), BaseTypeFor(reported)));
+        return TypeCodeVariant(reported.ObjectTypeCode, database);
     }
-
-    private static string BaseTypeFor(SchemaObject obj) => obj switch
-    {
-        HeapTable => "U ",
-        View => "V ",
-        Procedure => "P ",
-        ScalarFunction => "FN",
-        InlineTableValuedFunction => "IF",
-        MultiStatementTableValuedFunction => "TF",
-        Trigger => "TR",
-        Sequence => "SO",
-        _ => string.Empty,
-    };
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {

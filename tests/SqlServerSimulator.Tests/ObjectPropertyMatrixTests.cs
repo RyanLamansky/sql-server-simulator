@@ -113,6 +113,19 @@ public sealed class ObjectPropertyMatrixTests
             ? $"select iif(object_id('{name}') is null, 0, 1)"
             : $"select iif(object_id('{name}', '{type}') is null, 0, 1)"));
 
+    /// <summary>OBJECTPROPERTYEX's BaseType answers every kind's own type code, a constraint's and a system object's included.</summary>
+    [TestMethod]
+    [DataRow("ck_t", "C ")]
+    [DataRow("pk_t", "PK")]
+    [DataRow("fk_t", "F ")]
+    [DataRow("mtf", "TF")]
+    [DataRow("s", "SO")]
+    [DataRow("sn", "U ")]
+    [DataRow("sys.objects", "V ")]
+    [DataRow("sp_help", "P ")]
+    public void BaseType_AnswersEveryKind(string name, string expected)
+        => Assert.AreEqual(expected, Objects.ExecuteScalar($"select cast(objectpropertyex(object_id('{name}'), 'BaseType') as char(2))"));
+
     [TestMethod]
     public void TheExForm_Agrees()
         => Assert.AreEqual(1, Objects.ExecuteScalar("select cast(objectpropertyex(object_id('ck_t'), 'IsConstraint') as int)"));
