@@ -39,6 +39,7 @@ partial class Simulation
         if (context.CurrentDatabase.Principals.ContainsKey(name))
             throw SimulatedSqlException.PrincipalAlreadyExists(name);
         var id = context.CurrentDatabase.AllocatePrincipalId();
+        RecordSecurityUndo(context, context.CurrentDatabase);
         context.CurrentDatabase.Principals[name] = new DatabasePrincipal(
             id, name, "S", "SQL_USER", isFixedRole: false, context.Batch.CurrentStatement.UtcNow,
             loginName: loginLink,
@@ -153,6 +154,7 @@ partial class Simulation
         {
             throw SimulatedSqlException.CannotAlterUser(userName);
         }
+        RecordSecurityUndo(context, database);
         if (newName is not null)
             RenamePrincipal(database, user, newName);
         if (defaultSchema is not null)
@@ -221,6 +223,7 @@ partial class Simulation
         if (context.CurrentDatabase.Principals.ContainsKey(name))
             throw SimulatedSqlException.PrincipalAlreadyExists(name);
         var id = context.CurrentDatabase.AllocatePrincipalId();
+        RecordSecurityUndo(context, context.CurrentDatabase);
         context.CurrentDatabase.Principals[name] = new DatabasePrincipal(
             id, name, "R", "DATABASE_ROLE", isFixedRole: false, context.Batch.CurrentStatement.UtcNow);
         RecordDdlEvent(context, "CREATE_ROLE", null, name, "ROLE");
@@ -263,6 +266,7 @@ partial class Simulation
             throw SimulatedSqlException.CannotUseSpecialPrincipal(member.Name);
         if (isAdd && member.PrincipalId == role.PrincipalId)
             throw SimulatedSqlException.RoleMemberOfItself();
+        RecordSecurityUndo(context, database);
         if (isAdd)
         {
             if (!database.RoleMembers.Contains((role.PrincipalId, member.PrincipalId)))
@@ -373,6 +377,7 @@ partial class Simulation
             {
                 throw SimulatedSqlException.CannotAlterRole(roleName);
             }
+            RecordSecurityUndo(context, context.CurrentDatabase);
             RenamePrincipal(context.CurrentDatabase, renamed, newName);
             RecordDdlEvent(context, "ALTER_ROLE", null, newName, "ROLE");
             return true;
@@ -431,6 +436,7 @@ partial class Simulation
         // SQL Server 2025); a user in roles can, its memberships going with it.
         if (isRole && context.CurrentDatabase.RoleMembers.Exists(rm => rm.RoleId == removed.PrincipalId))
             throw SimulatedSqlException.RoleHasMembers();
+        RecordSecurityUndo(context, context.CurrentDatabase);
         _ = context.CurrentDatabase.Principals.TryRemove(name, out _);
         // Cascade: drop role memberships that reference the removed principal.
         _ = context.CurrentDatabase.RoleMembers.RemoveAll(rm =>

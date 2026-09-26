@@ -330,6 +330,7 @@ partial class Simulation
             }
         }
 
+        RecordSecurityUndo(context, database);
         foreach (var granteeName in granteeNames)
         {
             if (!database.Principals.TryGetValue(granteeName, out var grantee))

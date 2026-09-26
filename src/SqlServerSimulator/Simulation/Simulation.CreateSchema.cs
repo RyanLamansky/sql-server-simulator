@@ -142,6 +142,10 @@ partial class Simulation
             throw;
         }
 
+        // Logged after the elements, so a rollback removes them first and
+        // the schema last.
+        RecordSlotUndo<Schema>(context, context.CurrentDatabase.Schemas, schemaName, null);
+
         // Real reports the new schema as both SchemaName and ObjectName.
         RecordDdlEvent(context, "CREATE_SCHEMA", schemaName, schemaName, "SCHEMA");
         return true;

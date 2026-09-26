@@ -92,4 +92,35 @@ public sealed class TransactionalDdlTests
             commit;
             select concat(case when object_id('first') is null then 0 else 1 end, '|', object_id('second'))
             """));
+
+    [TestMethod]
+    public void RolledBackSchemasTypesAndTransfers_Revert()
+        => AreEqual("|||dbo|0", new Simulation().ExecuteScalar("""
+            create table t (a int);
+            begin tran;
+            exec ('create schema s');
+            create type ty from int;
+            create type tt as table (a int);
+            alter schema s transfer dbo.t;
+            exec sp_addextendedproperty 'MS_Description', 'x', 'SCHEMA', 'dbo';
+            rollback;
+            select concat(schema_id('s'), '|', type_id('ty'), '|', type_id('tt'), '|', object_schema_name(object_id('dbo.t')), '|',
+                (select count(*) from fn_listextendedproperty(null, 'SCHEMA', 'dbo', null, null, null, null)))
+            """));
+
+    [TestMethod]
+    public void RolledBackSecurityStatements_Revert()
+        => AreEqual("||0|", new Simulation().ExecuteScalar("""
+            create table t (a int);
+            begin tran;
+            create role r;
+            create user u without login;
+            alter role r add member u;
+            grant select on t to r;
+            deny insert on t to u;
+            create login l with password = 'Xx12345678!x';
+            rollback;
+            select concat(user_id('r'), '|', user_id('u'), '|',
+                (select count(*) from sys.database_permissions where major_id = object_id('t')), '|', suser_id('l'))
+            """));
 }

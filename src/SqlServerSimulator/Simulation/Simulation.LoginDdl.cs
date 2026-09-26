@@ -32,6 +32,7 @@ partial class Simulation
         ConsumeToStatementBoundary(context);
         if (context.Batch.IsSkipping)
             return true;
+        RecordServerSecurityUndo(context.Batch);
 
         // Login DDL is server-scope: a restricted session needs ALTER ANY
         // LOGIN. CREATE reports Msg 15247 (probe-confirmed); ALTER / DROP
@@ -75,6 +76,7 @@ partial class Simulation
         ConsumeToStatementBoundary(context);
         if (context.Batch.IsSkipping)
             return true;
+        RecordServerSecurityUndo(context.Batch);
 
         var simulation = context.Batch.Connection.Simulation;
         if (!HoldsLoginDdlPermission(context, name))
@@ -125,11 +127,14 @@ partial class Simulation
         context.MoveNextRequired();
         var name = ParseLoginName(context);
         context.MoveNextOptional();
-        return context.Batch.IsSkipping
-            || (HoldsLoginDdlPermission(context, name)
-                && context.Batch.Connection.Simulation.Logins.TryRemove(name, out _)
-                ? true
-                : throw SimulatedSqlException.CannotAlterOrDropLogin("drop", name));
+        if (context.Batch.IsSkipping)
+            return true;
+        if (!HoldsLoginDdlPermission(context, name))
+            throw SimulatedSqlException.CannotAlterOrDropLogin("drop", name);
+        RecordServerSecurityUndo(context.Batch);
+        return context.Batch.Connection.Simulation.Logins.TryRemove(name, out _)
+            ? true
+            : throw SimulatedSqlException.CannotAlterOrDropLogin("drop", name);
     }
 
     /// <summary>

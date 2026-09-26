@@ -42,6 +42,7 @@ partial class Simulation
         if (password!.Length > PasswordHash.MaxClearTextChars)
             throw SimulatedSqlException.PasswordEncryptionInvalidValue();
 
+        RecordSecurityUndo(context, database);
         database.Principals[name] = new DatabasePrincipal(
             database.AllocatePrincipalId(), name, ApplicationRoleTypeCode, "APPLICATION_ROLE",
             isFixedRole: false, context.Batch.CurrentStatement.UtcNow)
@@ -72,6 +73,7 @@ partial class Simulation
         var database = context.CurrentDatabase;
         if (!TryGetApplicationRole(database, name, out var role))
             throw SimulatedSqlException.CannotFindPrincipal(name);
+        RecordSecurityUndo(context, database);
         if (password is not null)
         {
             if (password.Length > PasswordHash.MaxClearTextChars)
@@ -115,6 +117,7 @@ partial class Simulation
         var database = context.CurrentDatabase;
         if (!TryGetApplicationRole(database, name, out var role))
             throw SimulatedSqlException.CannotFindPrincipal(name);
+        RecordSecurityUndo(context, database);
         _ = database.Principals.TryRemove(name, out _);
         lock (database.RoleMembers)
             _ = database.RoleMembers.RemoveAll(m => m.RoleId == role.PrincipalId || m.MemberId == role.PrincipalId);

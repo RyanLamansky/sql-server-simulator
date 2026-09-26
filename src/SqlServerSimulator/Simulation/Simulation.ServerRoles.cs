@@ -336,6 +336,7 @@ partial class Simulation
             ConsumeToStatementBoundary(context);
         if (context.Batch.IsSkipping)
             return true;
+        RecordServerSecurityUndo(context.Batch);
         var simulation = context.Batch.Connection.Simulation;
         if (simulation.TryResolveServerPrincipalId(name, out _))
             throw SimulatedSqlException.ServerPrincipalAlreadyExists(name);
@@ -375,6 +376,7 @@ partial class Simulation
 
         if (context.Batch.IsSkipping)
             return true;
+        RecordServerSecurityUndo(context.Batch);
         var simulation = context.Batch.Connection.Simulation;
         if (!simulation.TryResolveServerRole(roleName, out var roleId, out _))
             throw SimulatedSqlException.CannotAlterServerRole(roleName);
@@ -420,6 +422,7 @@ partial class Simulation
         context.MoveNextOptional();
         if (context.Batch.IsSkipping)
             return true;
+        RecordServerSecurityUndo(context.Batch);
         var simulation = context.Batch.Connection.Simulation;
         if (FixedServerRoleIds.ContainsKey(name))
             throw SimulatedSqlException.CannotDropFixedServerRole(name);
@@ -480,6 +483,7 @@ partial class Simulation
                 throw SimulatedSqlException.CannotFindLogin(granteeName);
             grantee.Add(id);
         }
+        RecordServerSecurityUndo(context.Batch);
         lock (simulation.ServerPermissions)
         {
             foreach (var granteeId in grantee)

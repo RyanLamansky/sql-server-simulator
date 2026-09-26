@@ -171,6 +171,7 @@ partial class Simulation
             keyConstraintObjectIds: [.. pendingKeys.Select(_ => context.CurrentDatabase.AllocateObjectId())],
             pendingIndexes: [.. pendingIndexes]);
         schema.TableTypes[typeName.Leaf] = tableType;
+        RecordSlotUndo<TableType>(context, schema.TableTypes, typeName.Leaf, null);
         RecordDdlEvent(context, "CREATE_TYPE", schema.Name, typeName.Leaf, "TYPE");
         return true;
     }
@@ -294,6 +295,7 @@ partial class Simulation
             isNullable: isNullable,
             userTypeId: context.CurrentDatabase.AllocateUserTypeId(),
             createDate: context.Batch.CurrentStatement.UtcNow);
+        RecordSlotUndo<AliasType>(context, schema.AliasTypes, typeName.Leaf, null);
         RecordDdlEvent(context, "CREATE_TYPE", schema.Name, typeName.Leaf, "TYPE");
         return true;
     }

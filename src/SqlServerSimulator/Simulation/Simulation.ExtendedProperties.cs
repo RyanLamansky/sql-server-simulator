@@ -126,6 +126,7 @@ partial class Simulation
         batch.CurrentDatabase.RejectWriteWhenReadOnly();
 
         var props = batch.CurrentDatabase.ExtendedProperties;
+        var hadPrevious = props.TryGetValue(key, out var previous);
         switch (op)
         {
             case ExtendedPropertyOp.Add:
@@ -142,6 +143,13 @@ partial class Simulation
                     throw SimulatedSqlException.ExtendedPropertyDoesNotExist(name, targetLabel);
                 break;
         }
+        RecordDdlUndo(batch, () =>
+        {
+            if (hadPrevious)
+                props[key] = previous;
+            else
+                _ = props.TryRemove(key, out _);
+        });
         yield break;
     }
 

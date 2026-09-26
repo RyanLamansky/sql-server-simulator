@@ -1241,6 +1241,13 @@ partial class Simulation
         destSchema.TableTypes[leafName] = tableType;
         tableType.Schema = destSchema;
         tableType.SchemaId = destSchema.SchemaId;
+        RecordDdlUndo(batch, () =>
+        {
+            _ = destSchema.TableTypes.TryRemove(leafName, out _);
+            sourceSchema.TableTypes[leafName] = tableType;
+            tableType.Schema = sourceSchema;
+            tableType.SchemaId = sourceSchema.SchemaId;
+        });
     }
 
     /// <summary>
@@ -1272,6 +1279,14 @@ partial class Simulation
             heap.SchemaId = destSchema.SchemaId;
             heap.OwningDatabase = destSchema.Database;
             ReseatAttachedTriggers(sourceSchema, destSchema, heap);
+            RecordDdlUndo(batch, () =>
+            {
+                _ = destSchema.HeapTables.TryRemove(leafName, out _);
+                sourceSchema.HeapTables[leafName] = heap;
+                heap.SchemaId = sourceSchema.SchemaId;
+                heap.OwningDatabase = sourceSchema.Database;
+                ReseatAttachedTriggers(destSchema, sourceSchema, heap);
+            });
             return;
         }
         if (sourceSchema.Views.TryGetValue(leafName, out var view))
@@ -1286,6 +1301,14 @@ partial class Simulation
             view.Schema = destSchema;
             view.SchemaId = destSchema.SchemaId;
             ReseatAttachedTriggers(sourceSchema, destSchema, view);
+            RecordDdlUndo(batch, () =>
+            {
+                _ = destSchema.Views.TryRemove(leafName, out _);
+                sourceSchema.Views[leafName] = view;
+                view.Schema = sourceSchema;
+                view.SchemaId = sourceSchema.SchemaId;
+                ReseatAttachedTriggers(destSchema, sourceSchema, view);
+            });
             return;
         }
         if (sourceSchema.Functions.TryGetValue(leafName, out var fn))
@@ -1299,6 +1322,13 @@ partial class Simulation
             destSchema.Functions[leafName] = fn;
             fn.Schema = destSchema;
             fn.SchemaId = destSchema.SchemaId;
+            RecordDdlUndo(batch, () =>
+            {
+                _ = destSchema.Functions.TryRemove(leafName, out _);
+                sourceSchema.Functions[leafName] = fn;
+                fn.Schema = sourceSchema;
+                fn.SchemaId = sourceSchema.SchemaId;
+            });
             return;
         }
         if (sourceSchema.Procedures.TryGetValue(leafName, out var proc))
@@ -1311,6 +1341,13 @@ partial class Simulation
             destSchema.Procedures[leafName] = proc;
             proc.Schema = destSchema;
             proc.SchemaId = destSchema.SchemaId;
+            RecordDdlUndo(batch, () =>
+            {
+                _ = destSchema.Procedures.TryRemove(leafName, out _);
+                sourceSchema.Procedures[leafName] = proc;
+                proc.Schema = sourceSchema;
+                proc.SchemaId = sourceSchema.SchemaId;
+            });
             return;
         }
         if (sourceSchema.Sequences.TryGetValue(leafName, out var seq))
@@ -1323,6 +1360,13 @@ partial class Simulation
             destSchema.Sequences[leafName] = seq;
             seq.Schema = destSchema;
             seq.SchemaId = destSchema.SchemaId;
+            RecordDdlUndo(batch, () =>
+            {
+                _ = destSchema.Sequences.TryRemove(leafName, out _);
+                sourceSchema.Sequences[leafName] = seq;
+                seq.Schema = sourceSchema;
+                seq.SchemaId = sourceSchema.SchemaId;
+            });
             return;
         }
         // A synonym moves as a plain name indirection: its stored base name is
@@ -1338,6 +1382,13 @@ partial class Simulation
             destSchema.Synonyms[leafName] = synonym;
             synonym.Schema = destSchema;
             synonym.SchemaId = destSchema.SchemaId;
+            RecordDdlUndo(batch, () =>
+            {
+                _ = destSchema.Synonyms.TryRemove(leafName, out _);
+                sourceSchema.Synonyms[leafName] = synonym;
+                synonym.Schema = sourceSchema;
+                synonym.SchemaId = sourceSchema.SchemaId;
+            });
             return;
         }
 

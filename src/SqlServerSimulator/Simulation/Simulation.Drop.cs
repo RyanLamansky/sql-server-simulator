@@ -250,7 +250,8 @@ partial class Simulation
         var blocker = FirstSchemaResident(schema);
         if (blocker is not null)
             throw SimulatedSqlException.CannotDropSchemaBecauseNotEmpty(schemaName, blocker);
-        _ = context.CurrentDatabase.Schemas.TryRemove(schemaName, out _);
+        if (context.CurrentDatabase.Schemas.TryRemove(schemaName, out var droppedSchema))
+            RecordSlotUndo(context, context.CurrentDatabase.Schemas, schemaName, droppedSchema);
         RecordDdlEvent(context, "DROP_SCHEMA", schemaName, schemaName, "SCHEMA");
     }
 
@@ -434,7 +435,8 @@ partial class Simulation
         {
             schema.Database.RejectWriteWhenReadOnly();
             RejectUnauthorizedTypeDrop(context, schema, name);
-            _ = schema.AliasTypes.TryRemove(name.Leaf, out _);
+            if (schema.AliasTypes.TryRemove(name.Leaf, out var droppedAlias))
+                RecordSlotUndo(context, schema.AliasTypes, name.Leaf, droppedAlias);
             RecordDdlEvent(context, "DROP_TYPE", schema.Name, name.Leaf, "TYPE");
             return;
         }
@@ -466,7 +468,8 @@ partial class Simulation
                 }
             }
         }
-        _ = schema.TableTypes.TryRemove(name.Leaf, out _);
+        if (schema.TableTypes.TryRemove(name.Leaf, out var droppedTableType))
+            RecordSlotUndo(context, schema.TableTypes, name.Leaf, droppedTableType);
         RecordDdlEvent(context, "DROP_TYPE", schema.Name, name.Leaf, "TYPE");
     }
 
