@@ -77,4 +77,21 @@ public sealed class WideDecimalWireTests
         AreEqual(1m, value);
         AreEqual(28, value.Scale);
     }
+
+    [TestMethod]
+    public async Task EveryDecimal_DeclaresTheFullWidth()
+    {
+        // Real's COLMETADATA declares 17 bytes for any precision, which
+        // SqlClient reports as ColumnSize; the value itself still travels in
+        // its precision's own width (captured 2026-09-26).
+        var simulation = new Simulation();
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+        await using var command = new SqlCommand("select cast(1.5 as decimal(9, 2)) as d", connection);
+        await using var reader = await command.ExecuteReaderAsync(TestContext.CancellationToken);
+
+        AreEqual(17, reader.GetColumnSchema()[0].ColumnSize);
+        IsTrue(await reader.ReadAsync(TestContext.CancellationToken));
+        AreEqual(1.50m, reader.GetDecimal(0));
+    }
 }

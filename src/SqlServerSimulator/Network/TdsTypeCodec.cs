@@ -311,7 +311,11 @@ internal static class TdsTypeCodec
                 // getColumnTypeName). A numeric-named projection column emits
                 // NUMERICN; both store identically. RETURNVALUE keeps DECIMALN.
                 writer.WriteByte(reportsNumeric ? (byte)0x6C : (byte)0x6A);
-                writer.WriteByte((byte)(MagnitudeBytes(d.precision) + 1));
+                // The declared maximum is always the 38-digit width, 17, what
+                // SqlClient reports as ColumnSize; each value still carries
+                // its precision's own length (captured against SQL Server
+                // 2025, 2026-09-26).
+                writer.WriteByte(17);
                 writer.WriteByte(d.precision);
                 writer.WriteByte(d.scale);
                 break;
