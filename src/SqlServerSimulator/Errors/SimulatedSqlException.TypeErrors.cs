@@ -591,18 +591,14 @@ partial class SimulatedSqlException
         new("The text, ntext, and image data types are invalid for local variables.", 2739, 16, 1);
 
     /// <summary>
-    /// Mimics SQL Server error 8116: an argument to a function has the wrong
-    /// data type (e.g. <c>CONVERT</c>'s style argument when it isn't an
-    /// integer). The state is the function's own: 1 for most, 4 for
-    /// <c>GREATEST</c> / <c>LEAST</c> refusing a type it can't compare
-    /// (probe-confirmed 2026-09-23).
-    /// </summary>
-    /// <summary>
     /// Mimics SQL Server error 9803 from <c>BASE64_DECODE</c> over text that
-    /// isn't Base64 (probed 2026-09-26 against SQL Server 2025).
+    /// isn't Base64, its state telling what was wrong: 20 a character outside
+    /// both alphabets, 21 a data length of one more than a multiple of four,
+    /// 22 data after the padding, 23 more padding than the data needs (probed
+    /// 2026-09-26 against SQL Server 2025).
     /// </summary>
-    internal static SimulatedSqlException InvalidBase64Data() =>
-        new("Invalid data for type \"Base64Decode\".", 9803, 16, 20);
+    internal static SimulatedSqlException InvalidBase64Data(byte state) =>
+        new("Invalid data for type \"Base64Decode\".", 9803, 16, state);
 
     /// <summary>
     /// Mimics SQL Server error 9841 from <c>UNISTR</c>: a malformed escape
@@ -627,6 +623,20 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException UnistrRequiresUtf8() =>
         new("The char/varchar input type uses an unsupported collation. Only a UTF8 collation is supported with char/varchar input type in UNISTR function.", 9844, 16, 4);
 
+    /// <summary>
+    /// Mimics SQL Server's Msg 13622: <c>STRING_ESCAPE</c> handed a type other
+    /// than <c>json</c> (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException InvalidValueForArgument(int argumentIndex) =>
+        new($"An invalid value was specified for argument {argumentIndex}.", 13622, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 8116: an argument to a function has the wrong
+    /// data type (e.g. <c>CONVERT</c>'s style argument when it isn't an
+    /// integer). The state is the function's own: 1 for most, 4 for
+    /// <c>GREATEST</c> / <c>LEAST</c> refusing a type it can't compare
+    /// (probe-confirmed 2026-09-23).
+    /// </summary>
     internal static SimulatedSqlException InvalidArgumentDataType(string sourceTypeWord, int argumentIndex, string functionName, byte state = 1) =>
         new($"Argument data type {sourceTypeWord} is invalid for argument {argumentIndex} of {functionName} function.", 8116, 16, state);
 

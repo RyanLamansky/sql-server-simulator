@@ -25,7 +25,7 @@ internal sealed class Power : Expression
 
     public Power(ParserContext context)
     {
-        this.baseExpr = Parse(context);
+        this.baseExpr = MathScalars.FloatForBareNull(Parse(context));
         if (context.Token is not Tokens.Operator { Character: ',' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         this.exponent = Parse(context.MoveNextRequiredReturnSelf());

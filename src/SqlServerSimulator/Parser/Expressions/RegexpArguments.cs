@@ -51,7 +51,7 @@ internal static class RegexpArguments
         return (SqlType.IsStringCategory(value.Type) && value.Type is not (TextSqlType or NTextSqlType))
             || Expression.IsUntypedNullLiteral(expression)
             ? value
-            : throw SimulatedSqlException.InvalidArgumentDataType(value.Type.SqlServerName, argumentIndex, functionLowerName);
+            : throw SimulatedSqlException.InvalidArgumentDataType(SqlType.OperandName(value.Type, expression), argumentIndex, functionLowerName);
     }
 
     /// <summary>

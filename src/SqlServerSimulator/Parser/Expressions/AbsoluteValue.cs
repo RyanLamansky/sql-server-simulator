@@ -26,7 +26,7 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// </remarks>
 internal sealed class AbsoluteValue(ParserContext context) : Expression
 {
-    private readonly Expression source = Parse(context);
+    private readonly Expression source = MathScalars.FloatForBareNull(Parse(context));
 
     internal override bool ParallelSafe => this.source.ParallelSafe;
 

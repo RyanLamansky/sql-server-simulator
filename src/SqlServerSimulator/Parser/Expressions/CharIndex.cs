@@ -73,11 +73,16 @@ internal sealed class CharIndex : Expression
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
-        _ = StringScalars.RequireStringArgument(needle, StringScalars.BindArgument(needle, batch, resolveColumnType, "charindex"), "charindex", 1, acceptsBinary: true);
+        var needleType = StringScalars.RequireStringArgument(needle, StringScalars.BindArgument(needle, batch, resolveColumnType, "charindex"), "charindex", 1, acceptsBinary: true);
         // The haystack is searched rather than transformed, so it takes no
         // legacy-LOB rejection — but the search still needs a definite
         // collation, so an unresolved one reports from either operand.
         var haystackType = haystack.GetSqlType(batch, resolveColumnType);
+        // A binary needle searches bytes, and a string haystack has no
+        // implicit conversion to them (probed 2026-09-26 against SQL Server
+        // 2025: Msg 257 naming the haystack's type).
+        if (needleType is BinarySqlType or VarbinarySqlType && SqlType.IsStringCategory(haystackType))
+            throw SimulatedSqlException.ImplicitConversionNotAllowed(SimulatedSqlException.FamilyRootName(haystackType), "varbinary");
         StringScalars.RejectLegacyLobInCoercion(haystackType, "charindex", argumentIndex: 2, allowLegacyLob: true);
         StringScalars.RequireSettledCollation(haystackType, "charindex");
         if (start is not null)

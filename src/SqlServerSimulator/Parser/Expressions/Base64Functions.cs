@@ -28,10 +28,12 @@ internal sealed class Base64Encode : Expression
         var value = this.input.Run(runtime);
         var resultType = ResultTypeFor(value.Type, runtime.Batch);
         var flag = this.urlSafe?.Run(runtime);
-        if (value.IsNull || flag is { IsNull: true })
+        if (value.IsNull)
             return SqlValue.Null(resultType);
         var encoded = Convert.ToBase64String(value.AsBytes);
-        if (flag is { } urlSafeFlag && urlSafeFlag.CoerceTo(SqlType.BigInt).AsInt64 != 0)
+        // A NULL flag means the standard alphabet (probed 2026-09-26 against
+        // SQL Server 2025).
+        if (flag is { IsNull: false } urlSafeFlag && urlSafeFlag.CoerceTo(SqlType.BigInt).AsInt64 != 0)
             encoded = encoded.TrimEnd('=').Replace('+', '-').Replace('/', '_');
         return SqlValue.FromString(resultType, encoded);
     }
@@ -40,8 +42,15 @@ internal sealed class Base64Encode : Expression
     {
         var inputType = this.input.GetSqlType(batch, resolveColumnType);
         if (inputType is not (VarbinarySqlType or BinarySqlType) && !IsUntypedNullLiteral(this.input))
-            throw SimulatedSqlException.InvalidArgumentDataType(inputType.SqlServerName, 1, "base64_encode");
-        _ = this.urlSafe?.GetSqlType(batch, resolveColumnType);
+            throw SimulatedSqlException.InvalidArgumentDataType(SqlType.OperandName(inputType, this.input), 1, "base64_encode");
+        // The URL-safe flag is an integer or a bit and nothing else.
+        if (this.urlSafe is not null
+            && this.urlSafe.GetSqlType(batch, resolveColumnType) is var flagType
+            && flagType.Category != SqlTypeCategory.Integer
+            && !IsUntypedNullLiteral(this.urlSafe))
+        {
+            throw SimulatedSqlException.InvalidArgumentDataType(SqlType.OperandName(flagType, this.urlSafe), 2, "base64_encode");
+        }
         return ResultTypeFor(inputType, batch);
     }
 
@@ -84,22 +93,52 @@ internal sealed class Base64Decode : Expression
         var resultType = ResultTypeFor(value.Type);
         if (value.IsNull)
             return SqlValue.Null(resultType);
-        var text = value.AsString.Replace('-', '+').Replace('_', '/');
-        if (text.Length % 4 == 1)
-            throw SimulatedSqlException.InvalidBase64Data();
-        text = text.PadRight(text.Length + ((4 - (text.Length % 4)) % 4), '=');
-        var bytes = new byte[text.Length / 4 * 3];
-        return Convert.TryFromBase64String(text, bytes, out var written)
-            ? SqlValue.FromVarbinary(resultType, bytes.AsSpan(0, written).ToArray())
-            : throw SimulatedSqlException.InvalidBase64Data();
+        return SqlValue.FromVarbinary(resultType, Decode(value.AsString));
+    }
+
+    /// <summary>
+    /// Decodes either alphabet, padded or not, skipping whitespace, and
+    /// refuses anything else with the Msg 9803 state real gives for what was
+    /// wrong (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    private static byte[] Decode(string text)
+    {
+        var data = new System.Text.StringBuilder(text.Length);
+        var padding = 0;
+        foreach (var c in text)
+        {
+            if (char.IsWhiteSpace(c))
+                continue;
+            if (c == '=')
+            {
+                padding++;
+                continue;
+            }
+            if (padding > 0)
+                throw SimulatedSqlException.InvalidBase64Data(22);
+            _ = data.Append(c switch
+            {
+                '-' => '+',
+                '_' => '/',
+                _ when char.IsAsciiLetterOrDigit(c) || c is '+' or '/' => c,
+                _ => throw SimulatedSqlException.InvalidBase64Data(20),
+            });
+        }
+        if (data.Length % 4 == 1)
+            throw SimulatedSqlException.InvalidBase64Data(21);
+        var needed = (4 - (data.Length % 4)) % 4;
+        if (padding > needed)
+            throw SimulatedSqlException.InvalidBase64Data(23);
+        _ = data.Append('=', needed);
+        return Convert.FromBase64String(data.ToString());
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
         var inputType = this.input.GetSqlType(batch, resolveColumnType);
-        return inputType is VarcharSqlType or CharSqlType
+        return inputType is VarcharSqlType or CharSqlType || IsUntypedNullLiteral(this.input)
             ? ResultTypeFor(inputType)
-            : throw SimulatedSqlException.InvalidArgumentDataType(inputType.SqlServerName, 1, "base64_decode");
+            : throw SimulatedSqlException.InvalidArgumentDataType(SqlType.OperandName(inputType, this.input), 1, "base64_decode");
     }
 
     private static VarbinarySqlType ResultTypeFor(SqlType inputType) =>

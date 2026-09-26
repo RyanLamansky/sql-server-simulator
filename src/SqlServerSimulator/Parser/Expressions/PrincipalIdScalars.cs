@@ -10,7 +10,9 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// <c>INFORMATION_SCHEMA</c>=3, <c>sys</c>=4) drive USER_ID and
 /// DATABASE_PRINCIPAL_ID; SUSER_ID reads <c>sys.server_principals</c>, and
 /// with no argument answers the session's login.
-/// NULL argument or unknown name returns NULL.
+/// NULL argument or unknown name returns NULL. <c>USER_ID</c> answers
+/// <c>smallint</c>, the other two <c>int</c> (probed 2026-09-26 against SQL
+/// Server 2025).
 /// </summary>
 internal sealed class PrincipalIdLookup : Expression
 {
@@ -28,6 +30,14 @@ internal sealed class PrincipalIdLookup : Expression
     }
 
     public override SqlValue Run(RuntimeContext runtime)
+    {
+        var id = this.RunAsInt(runtime);
+        return this.kind != PrincipalIdKind.UserId ? id
+            : id.IsNull ? SqlValue.Null(SqlType.SmallInt)
+            : SqlValue.FromInt16((short)id.AsInt32);
+    }
+
+    private SqlValue RunAsInt(RuntimeContext runtime)
     {
         if (this.nameArg is null)
         {
@@ -70,7 +80,7 @@ internal sealed class PrincipalIdLookup : Expression
     {
         if (this.nameArg is not null)
             _ = AssignmentRules.ArgumentType(this.nameArg, SqlType.NVarchar, batch, resolveColumnType);
-        return SqlType.Int32;
+        return this.kind == PrincipalIdKind.UserId ? SqlType.SmallInt : SqlType.Int32;
     }
 
     internal override string DebugDisplay() => this.kind switch
@@ -179,7 +189,7 @@ internal sealed class Permissions : Expression
         return false;
     }
 
-    private static bool TableColumnExists(Database database, int objectId, string columnName)
+    internal static bool TableColumnExists(Database database, int objectId, string columnName)
     {
         foreach (var schema in database.Schemas.Values)
         {
@@ -248,10 +258,13 @@ internal sealed class HasPermsByName : Expression
             return SqlValue.Null(SqlType.Int32);
 
         var connection = runtime.Batch.Connection;
-        // dbo keeps seeing 1 everywhere — preserves the DacFx bacpac-export
-        // gate (HAS_PERMS_BY_NAME(NULL, N'DATABASE', N'VIEW DEFINITION') = 1).
+        // dbo holds every permission on whatever exists — DacFx's bacpac-export
+        // gate (HAS_PERMS_BY_NAME(NULL, N'DATABASE', N'VIEW DEFINITION')) reads 1
+        // — but real still answers NULL for a class it doesn't know or a
+        // NULL object, and 0 for an object or column that isn't there (probed
+        // 2026-09-26 against SQL Server 2025).
         if (connection.Security.EffectiveIsDbo)
-            return SqlValue.FromInt32(1);
+            return this.DboAnswer(runtime, securableVal, classVal);
 
         // A NULL securable_class is an ambiguous "current server or database"
         // request the simulator can't disambiguate — return NULL (matches the
@@ -291,6 +304,74 @@ internal sealed class HasPermsByName : Expression
 
         return SqlValue.FromInt32(
             PermissionChecker.IsGranted(database, principalId, Permission.Resolve(permission), securableClass, majorId, schemaId) ? 1 : 0);
+    }
+
+    private SqlValue DboAnswer(RuntimeContext runtime, SqlValue securableVal, SqlValue classVal)
+    {
+        var batch = runtime.Batch;
+        if (classVal.IsNull)
+            return SqlValue.FromInt32(1);
+        var className = classVal.CoerceTo(SqlType.NVarchar).AsString.Trim();
+        if (!IsSecurableClass(className))
+            return SqlValue.Null(SqlType.Int32);
+        var isObject = string.Equals(className, "OBJECT", StringComparison.OrdinalIgnoreCase);
+        if (!isObject && !string.Equals(className, "SCHEMA", StringComparison.OrdinalIgnoreCase))
+            return SqlValue.FromInt32(1);
+        if (securableVal.IsNull)
+            return SqlValue.Null(SqlType.Int32);
+        var name = securableVal.CoerceTo(SqlType.NVarchar).AsString;
+        var database = batch.CurrentDatabase;
+        if (!isObject)
+            return SqlValue.FromInt32(TryResolveSchemaByName(database, name, out _) ? 1 : 0);
+
+        string? column = null;
+        if (this.args.Length >= 5 && this.args[3].Run(runtime) is { IsNull: false } sub)
+            column = sub.CoerceTo(SqlType.NVarchar).AsString;
+        if (TryResolveObjectByName(database, name, out var objectId, out _))
+            return SqlValue.FromInt32(column is null || !IsTable(database, objectId) || Permissions.TableColumnExists(database, objectId, column) ? 1 : 0);
+        if (ObjectId.TryParseObjectName(name, out var parsed) && batch.TryResolveCatalogView(parsed, out var catalogView, out _))
+        {
+            if (column is null)
+                return SqlValue.FromInt32(1);
+            foreach (var catalogColumn in catalogView.Columns)
+            {
+                if (BuiltInToken.Comparer.Equals(catalogColumn.Name, column))
+                    return SqlValue.FromInt32(1);
+            }
+        }
+        return SqlValue.FromInt32(0);
+    }
+
+    private static bool IsTable(Database database, int objectId)
+    {
+        foreach (var schema in database.Schemas.Values)
+        {
+            foreach (var table in schema.HeapTables.Values)
+            {
+                if (table.ObjectId == objectId)
+                    return true;
+            }
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Whether real's <c>HAS_PERMS_BY_NAME</c> knows <paramref name="className"/>
+    /// as a securable class; any other name answers NULL.
+    /// </summary>
+    private static bool IsSecurableClass(string className)
+    {
+        Span<char> upper = stackalloc char[className.Length];
+        _ = className.AsSpan().ToUpperInvariant(upper);
+        return upper switch
+        {
+            "APPLICATION ROLE" or "ASSEMBLY" or "ASYMMETRIC KEY" or "AVAILABILITY GROUP" or "CERTIFICATE" or "CONTRACT"
+                or "DATABASE" or "DATABASE SCOPED CREDENTIAL" or "ENDPOINT" or "FULLTEXT CATALOG" or "FULLTEXT STOPLIST"
+                or "LOGIN" or "MESSAGE TYPE" or "OBJECT" or "REMOTE SERVICE BINDING" or "ROLE" or "ROUTE" or "SCHEMA"
+                or "SEARCH PROPERTY LIST" or "SERVER" or "SERVER ROLE" or "SERVICE" or "SYMMETRIC KEY" or "TYPE"
+                or "USER" or "XML SCHEMA COLLECTION" => true,
+            _ => false,
+        };
     }
 
     private static bool TryResolveSchemaByName(Database database, string name, out int schemaId)

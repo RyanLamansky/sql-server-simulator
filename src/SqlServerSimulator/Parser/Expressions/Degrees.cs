@@ -49,7 +49,7 @@ internal sealed class Degrees(ParserContext context) : Expression
     {
         if (context.Token is Tokens.Operator { Character: ')' })
             throw SimulatedSqlException.FunctionRequiresNArguments(lowerName, 1);
-        var arg = Parse(context);
+        var arg = MathScalars.FloatForBareNull(Parse(context));
         return context.Token is Tokens.Operator { Character: ')' }
             ? arg
             : throw SimulatedSqlException.FunctionRequiresNArguments(lowerName, 1);

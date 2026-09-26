@@ -54,6 +54,25 @@ public sealed class Sql2025StringFunctionTests
     [DataRow("base64_decode('###')", 9803)]
     [DataRow("base64_encode('abc')", 8116)]
     [DataRow("base64_decode(N'AQI=')", 8116)]
+    [DataRow("base64_encode(0x41, 'x')", 8116)]
+    [DataRow("base64_encode(0x41, 1.5)", 8116)]
     public void Base64_RefusesAsRealDoes(string expression, int number)
         => new Simulation().AssertSqlError($"select {expression}", number);
+
+    [TestMethod]
+    [DataRow("'ab#d'", 20)]
+    [DataRow("'x'", 21)]
+    [DataRow("'a==='", 21)]
+    [DataRow("'ab=c'", 22)]
+    [DataRow("'abc=='", 23)]
+    public void Base64Decode_StateTellsWhatWasWrong(string input, int state)
+        => AreEqual((byte)state, new Simulation().AssertSqlError($"select base64_decode({input})", 9803).State);
+
+    [TestMethod]
+    [DataRow("convert(varchar(10), base64_decode(' QQ== '), 1)", "0x41")]
+    [DataRow("base64_encode(0x41, null)", "QQ==")]
+    [DataRow("base64_encode(0x41, cast(1 as bit))", "QQ")]
+    [DataRow("isnull(convert(varchar(10), base64_decode(null), 1), 'N')", "N")]
+    public void Base64_Edges(string expression, string expected)
+        => AreEqual(expected, Text(expression));
 }

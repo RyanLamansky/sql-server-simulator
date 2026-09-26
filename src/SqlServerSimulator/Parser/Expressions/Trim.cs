@@ -96,7 +96,11 @@ internal sealed class Trim : Expression
         var value = source.Run(runtime);
         StringScalars.RejectLegacyLob(value, "Trim", sourceIndex);
         if (value.IsNull)
-            return SqlValue.Null(value.Type);
+            return SqlValue.Null(StringScalars.ResolveResultType(value.Type, runtime.Batch));
+        // A binary source reads as the varchar it converts to (probed
+        // 2026-09-26 against SQL Server 2025: TRIM(0x41) is 'A').
+        if (value.Type is BinarySqlType or VarbinarySqlType)
+            value = StringScalars.CoerceToVarchar(value, runtime.Batch, "Trim");
         if (!SqlType.IsStringCategory(value.Type))
             throw SimulatedSqlException.InvalidArgumentDataType(value.Type.SqlServerName, sourceIndex, "Trim");
 
@@ -121,7 +125,8 @@ internal sealed class Trim : Expression
         if (this.trimChars is not null)
             _ = StringScalars.RequireStringArgument(this.trimChars, StringScalars.BindArgument(this.trimChars, batch, resolveColumnType, "Trim", argumentIndex: 1), "Trim", 1);
         var sourceIndex = this.trimChars is null ? 1 : 2;
-        return StringScalars.RequireStringArgument(source, StringScalars.BindArgument(source, batch, resolveColumnType, "Trim", argumentIndex: sourceIndex), "Trim", sourceIndex);
+        var sourceType = StringScalars.RequireStringArgument(source, StringScalars.BindArgument(source, batch, resolveColumnType, "Trim", argumentIndex: sourceIndex), "Trim", sourceIndex, acceptsBinary: true);
+        return StringScalars.ResolveResultType(sourceType, batch);
     }
 
     private static bool TryParseSide(ReadOnlySpan<char> span, out TrimSide side)

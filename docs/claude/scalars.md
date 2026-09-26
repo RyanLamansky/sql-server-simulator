@@ -454,7 +454,8 @@ Probed 2026-09-26 against SQL Server 2025; none is gated on the compatibility le
 - **`SUBSTRING(x, start)`** reads from `start` to the end, keeping the input's type and width as the three-argument form does without a constant length; a start at or below 1 reads the whole string.
 - **`UNISTR(x [, escape])`** replaces `\XXXX` (a UTF-16 code unit — a lone surrogate passes through), `\+XXXXXX` (a code point) and a doubled escape character, in the input's own family: a char-family input needs a UTF-8 collation (Msg 9844 otherwise) and stays `varchar`.
   The escape character must be one printable ASCII character (Msg 9843) and not `+`, a quote, a space or a hexit (Msg 9842, which SqlClient reads at state 0); a malformed sequence is Msg 9841, at state 3 when the escape character ends the input.
-- **`BASE64_ENCODE(varbinary [, url_safe])`** gives the padded standard alphabet, or with a non-zero `url_safe` the `-` / `_` alphabet unpadded, as `varchar(8000)` (`varchar(max)` over a MAX input); **`BASE64_DECODE(varchar)`** reads either alphabet with or without padding as `varbinary(8000)` / `varbinary(max)`, and text that isn't Base64 is Msg 9803 state 20.
+- **`BASE64_ENCODE(varbinary [, url_safe])`** gives the padded standard alphabet, or with a non-zero `url_safe` the `-` / `_` alphabet unpadded, as `varchar(8000)` (`varchar(max)` over a MAX input); **`BASE64_DECODE(varchar)`** reads either alphabet with or without padding as `varbinary(8000)` / `varbinary(max)`, skipping whitespace, and text that isn't Base64 is Msg 9803 with a state per fault (probed 2026-09-26 against SQL Server 2025).
+  A NULL `url_safe` means the standard alphabet, and the flag takes an integer or a bit alone.
   Each refuses the other's operand family with Msg 8116.
 
 ## SOUNDEX-family + STR + TRANSLATE + STRING_ESCAPE
@@ -481,6 +482,7 @@ Probed 2026-09-26 against SQL Server 2025; none is gated on the compatibility le
   Result is the length family of `input`: a MAX-form input (`varchar(max)` / `nvarchar(max)` / `text` / `ntext`) projects `SqlType.NVarcharMax` so a large result streams as PLP; a bounded input keeps the length-0 `nvarchar` shape.
   (The simulator coerces every input to nvarchar before processing — a minor family divergence from real, which keeps the varchar family for varchar input.)
 - **`STRING_ESCAPE(text, 'json')`** — JSON-string escape pass on `text` (escapes `"` `\` `\b` `\f` `\n` `\r` `\t`, `/`, control chars as `\uXXXX`).
+  The type is `json` in any case; another string is Msg 13622 and a non-string or bare NULL Msg 8116 (probed 2026-09-26 against SQL Server 2025).
   Documentation says only `'json'` is a valid mode; the simulator accepts any string for the mode and treats it as `'json'` (real SQL Server raises Msg 9806 on unknown mode — minor divergence).
   NULL `text` → NULL.
   Result `nvarchar(max)` (`SqlType.NVarcharMax`, probe-confirmed against SQL Server 2025) — escaping can more than double the input, so the result must stream as PLP.

@@ -115,7 +115,7 @@ public sealed class ApplicationRoleTests
     {
         var sim = Seeded();
         var roleId = sim.ExecuteScalar("select principal_id from sys.database_principals where name = 'app1'");
-        AreEqual(roleId, sim.ExecuteScalar("exec sp_setapprole 'app1', 'App!Pass123'; select user_id()"));
+        AreEqual(roleId, sim.ExecuteScalar("exec sp_setapprole 'app1', 'App!Pass123'; select cast(user_id() as int)"));
     }
 
     [TestMethod]

@@ -659,7 +659,8 @@ The current-principal / id scalars read the session's effective principal; `HAS_
 - `DATABASE_PRINCIPAL_ID([name])` — alias of `USER_ID` with the same lookup behavior; real SQL Server exposes both names against the same backing lookup.
 
 **Permission-check placeholders**:
-- `HAS_PERMS_BY_NAME(securable, securable_class, permission [, …])` returns NULL for a NULL `permission`, `1` everywhere for a dbo session (preserving the DacFx bacpac-export gate `HAS_PERMS_BY_NAME(NULL, N'DATABASE', N'VIEW DEFINITION')` = 1), and otherwise the real checker result (1/0) for a `DATABASE` / `OBJECT` / `SCHEMA` securable_class.
+- `HAS_PERMS_BY_NAME(securable, securable_class, permission [, …])` returns NULL for a NULL `permission`, `1` for a dbo session on whatever exists (preserving the DacFx bacpac-export gate `HAS_PERMS_BY_NAME(NULL, N'DATABASE', N'VIEW DEFINITION')` = 1), and otherwise the real checker result (1/0) for a `DATABASE` / `OBJECT` / `SCHEMA` securable_class.
+  Even for dbo, real answers 0 for an object, schema or column that isn't there and NULL for a class it doesn't know or a NULL object (probed 2026-09-26 against SQL Server 2025); an unknown permission name is NULL on real but still 1 here, since the permission catalog covers only the modeled names.
   A NULL securable_class is the ambiguous "current server or database" request the simulator returns NULL for; an unresolvable OBJECT / SCHEMA securable or an unrecognized class returns NULL.
 - `IS_MEMBER(group_or_role)` — `public` → 1; the effective principal's transitive membership (nested roles + fixed roles via the checker's role closure) → 1/0; dbo → 1 for `db_owner`; any non-role / unknown name → NULL.
 - `IS_ROLEMEMBER(role [, principal])` — same shape as `IS_MEMBER`; a named principal is resolved first (a missing one is NULL even for `public`), counts as a member of itself, and follows nested roles (probed 2026-09-25).

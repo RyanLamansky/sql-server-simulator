@@ -175,13 +175,18 @@ internal sealed class GetAnsiNull : Expression
             throw SimulatedSqlException.SyntaxErrorNear(context);
     }
 
+    /// <summary>
+    /// 1 for the named database, or the current one when the argument is
+    /// omitted or NULL; NULL for a name no database has (probed 2026-09-26
+    /// against SQL Server 2025).
+    /// </summary>
     public override SqlValue Run(RuntimeContext runtime)
     {
-        // NULL argument propagates per general SQL conventions, though
-        // GETANSINULL doesn't get hit with NULL often in real code.
-        return this.dbArg is not null && this.dbArg.Run(runtime).IsNull
-            ? SqlValue.Null(SqlType.SmallInt)
-            : SqlValue.FromInt16(1);
+        if (this.dbArg?.Run(runtime) is not { IsNull: false } name)
+            return SqlValue.FromInt16(1);
+        return runtime.Batch.Connection.Simulation.Databases.ContainsKey(name.CoerceTo(SqlType.NVarchar).AsString)
+            ? SqlValue.FromInt16(1)
+            : SqlValue.Null(SqlType.SmallInt);
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SmallInt;

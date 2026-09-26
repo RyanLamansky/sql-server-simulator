@@ -420,7 +420,22 @@ internal sealed class FormatMessage : Expression
             : body.PadLeft(width);
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.NVarchar;
+    /// <summary>
+    /// The first argument is a message number or a format string: an
+    /// integer or a string, not a bit, a decimal, a date or a binary (Msg
+    /// 8116, probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        var formatType = this.formatArg.GetSqlType(batch, resolveColumnType);
+        if (!IsUntypedNullLiteral(this.formatArg)
+            && !SqlType.IsStringCategory(formatType)
+            && (formatType.Category != SqlTypeCategory.Integer || formatType is BitSqlType))
+        {
+            throw SimulatedSqlException.InvalidArgumentDataType(SqlType.OperandName(formatType, this.formatArg), 1, "formatmessage");
+        }
+        return SqlType.NVarchar;
+    }
 
     internal override string DebugDisplay() => $"FORMATMESSAGE({this.formatArg.DebugDisplay()}, ...)";
 

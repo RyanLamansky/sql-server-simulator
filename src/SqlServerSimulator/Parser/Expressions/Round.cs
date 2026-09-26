@@ -25,7 +25,7 @@ internal sealed class Round : Expression
 
     public Round(ParserContext context)
     {
-        this.value = Parse(context);
+        this.value = MathScalars.FloatForBareNull(Parse(context));
         if (context.Token is not Tokens.Operator { Character: ',' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         this.length = Parse(context.MoveNextRequiredReturnSelf());
@@ -50,9 +50,10 @@ internal sealed class Round : Expression
         var truncate = false;
         if (this.function is not null)
         {
+            // A NULL function rounds as 0 does rather than answering NULL
+            // (probed 2026-09-26 against SQL Server 2025).
             var fv = this.function.Run(runtime);
-            if (fv.IsNull) return SqlValue.Null(resultType);
-            truncate = ScalarArguments.CoerceToInt(fv) != 0;
+            truncate = !fv.IsNull && ScalarArguments.CoerceToInt(fv) != 0;
         }
 
         return resultType.Category switch
@@ -66,11 +67,13 @@ internal sealed class Round : Expression
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
-        var valueType = AssignmentRules.ArgumentType(this.value, SqlType.Float, batch, resolveColumnType);
+        // The length and function slots are judged before the value converts
+        // (probed 2026-09-26 against SQL Server 2025: ROUND(0x41, 0x41) is the
+        // length's Msg 8116, not the value's Msg 206).
         ScalarArguments.RequireNumericSlot(this.length, batch, resolveColumnType, "round", 2, NumericSlot.AnyNumber);
         if (this.function is not null)
             ScalarArguments.RequireNumericSlot(this.function, batch, resolveColumnType, "round", 3, NumericSlot.AnyNumber);
-        return MathScalars.WidenForResult(valueType);
+        return MathScalars.WidenForResult(AssignmentRules.ArgumentType(this.value, SqlType.Float, batch, resolveColumnType));
     }
 
     internal override bool ResultReportsNumeric => this.value.ResultReportsNumeric;

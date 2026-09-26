@@ -34,10 +34,11 @@ internal sealed class StringEscape : Expression
         StringScalars.RejectLegacyLob(v, "string_escape");
         if (v.IsNull)
             return SqlValue.Null(SqlType.NVarcharMax);
-        // Mode is validated for shape; only 'json' is documented. The
-        // simulator accepts any string value and treats it as json (real
-        // SQL Server raises Msg 9806 on unknown mode — minor divergence).
-        _ = this.modeArg.Run(runtime);
+        // The type is 'json', the one real knows; anything else is Msg 13622
+        // (probed 2026-09-26 against SQL Server 2025).
+        var mode = this.modeArg.Run(runtime);
+        if (mode.IsNull || !string.Equals(mode.CoerceTo(SqlType.NVarchar).AsString, "json", StringComparison.OrdinalIgnoreCase))
+            throw SimulatedSqlException.InvalidValueForArgument(2);
         var input = v.CoerceTo(SqlType.NVarchar).AsString;
         var sb = new StringBuilder(input.Length + 8);
         foreach (var c in input)
@@ -65,6 +66,9 @@ internal sealed class StringEscape : Expression
         // STRING_ESCAPE rewrites characters without comparing any, so an
         // unresolved collation rides through to the result (probe-confirmed).
         var textType = StringScalars.RequireStringArgument(this.textArg, StringScalars.BindArgument(this.textArg, batch, resolveColumnType, "string_escape", propagatesUnresolvedCollation: true), "string_escape", 1);
+        if (IsUntypedNullLiteral(this.modeArg))
+            throw SimulatedSqlException.InvalidArgumentDataType("NULL", 2, "string_escape");
+        _ = StringScalars.RequireStringArgument(this.modeArg, this.modeArg.GetSqlType(batch, resolveColumnType), "string_escape", 2, acceptsLegacyLob: false);
         return UnresolvedCollation.On(textType) is { } conflict ? conflict.Mark(SqlType.NVarcharMax) : SqlType.NVarcharMax;
     }
 

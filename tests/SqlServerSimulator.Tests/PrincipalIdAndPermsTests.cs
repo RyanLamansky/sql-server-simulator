@@ -15,15 +15,15 @@ public sealed class PrincipalIdAndPermsTests
 {
     [TestMethod]
     public void UserId_NoArg_ReturnsOne()
-        => AreEqual(1, new Simulation().ExecuteScalar("select user_id()"));
+        => AreEqual((short)1, new Simulation().ExecuteScalar("select user_id()"));
 
     [TestMethod]
     public void UserId_Dbo_ReturnsOne()
-        => AreEqual(1, new Simulation().ExecuteScalar("select user_id('dbo')"));
+        => AreEqual((short)1, new Simulation().ExecuteScalar("select user_id('dbo')"));
 
     [TestMethod]
     public void UserId_Public_ReturnsZero()
-        => AreEqual(0, new Simulation().ExecuteScalar("select user_id('public')"));
+        => AreEqual((short)0, new Simulation().ExecuteScalar("select user_id('public')"));
 
     [TestMethod]
     public void UserId_Unknown_ReturnsNull()
@@ -39,7 +39,22 @@ public sealed class PrincipalIdAndPermsTests
 
     [TestMethod]
     public void HasPermsByName_AnyValidInputs_Returns1()
-        => AreEqual(1, new Simulation().ExecuteScalar("select has_perms_by_name('dbo.t', 'OBJECT', 'SELECT')"));
+        => AreEqual(1, new Simulation().ExecuteScalar("create table t (a int); select has_perms_by_name('dbo.t', 'OBJECT', 'SELECT')"));
+
+    /// <summary>
+    /// dbo holds every permission on what exists, but real still answers 0
+    /// for an object or column that doesn't and NULL for a class it doesn't
+    /// know or a NULL object (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select has_perms_by_name('nosuch', 'OBJECT', 'SELECT')", 0)]
+    [DataRow("select has_perms_by_name('sys.objects', 'OBJECT', 'SELECT')", 1)]
+    [DataRow("select has_perms_by_name('sys.objects', 'OBJECT', 'SELECT', 'name', 'COLUMN')", 1)]
+    [DataRow("select has_perms_by_name('sys.objects', 'OBJECT', 'SELECT', 'nosuch', 'COLUMN')", 0)]
+    [DataRow("select has_perms_by_name(null, 'OBJECT', 'SELECT')", null)]
+    [DataRow("select has_perms_by_name('sys.objects', 'NOSUCH', 'SELECT')", null)]
+    public void HasPermsByName_ForDbo_JudgesTheSecurable(string sql, int? expected)
+        => AreEqual(expected is { } value ? value : DBNull.Value, new Simulation().ExecuteScalar(sql));
 
     [TestMethod]
     public void HasPermsByName_NullSecurable_Returns1()

@@ -321,11 +321,13 @@ internal sealed class Str : Expression
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
-        _ = AssignmentRules.ArgumentType(this.numArg, SqlType.Float, batch, resolveColumnType);
+        // The length and decimals slots are judged before the value converts,
+        // as ROUND's are (probed 2026-09-26 against SQL Server 2025).
         if (this.lengthArg is not null)
             ScalarArguments.RequireNumericSlot(this.lengthArg, batch, resolveColumnType, "str", 2, NumericSlot.Integer);
         if (this.decimalsArg is not null)
             ScalarArguments.RequireNumericSlot(this.decimalsArg, batch, resolveColumnType, "str", 3, NumericSlot.Integer);
+        _ = AssignmentRules.ArgumentType(this.numArg, SqlType.Float, batch, resolveColumnType);
         return StringScalars.SizedResultType(SqlType.Varchar, this.projectedLength, batch);
     }
 

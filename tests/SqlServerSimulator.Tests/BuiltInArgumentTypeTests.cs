@@ -387,4 +387,41 @@ public sealed class BuiltInArgumentTypeTests
     [DataRow("trigger_nestlevel(1, null)")]
     public void TolerantForms_AnswerNull(string call)
         => AreEqual(DBNull.Value, new Simulation().ExecuteScalar($"select {call}"));
+
+    [TestMethod]
+    [DataRow("string_escape('x', 'xml')", 13622)]
+    [DataRow("string_escape('x', null)", 8116)]
+    [DataRow("string_escape('x', 1)", 8116)]
+    [DataRow("charindex(0x41, 'abc')", 257)]
+    [DataRow("formatmessage(1.5, 1)", 8116)]
+    [DataRow("formatmessage(cast(1 as bit))", 8116)]
+    [DataRow("round(0x41, 0x41)", 8116)]
+    [DataRow("str(0x41, 5, 0x41)", 8116)]
+    public void SlotArguments_RefuseAsRealDoes(string call, int number)
+        => new Simulation().AssertSqlError($"select {call}", number);
+
+    [TestMethod]
+    [DataRow("trim(0x41)", "A")]
+    [DataRow("string_escape('\"', 'JSON')", "\\\"")]
+    [DataRow("cast(round(1.25, 1, null) as varchar(10))", "1.30")]
+    public void SlotArguments_AcceptAsRealDoes(string call, string? expected)
+        => AreEqual(expected is null ? DBNull.Value : expected, new Simulation().ExecuteScalar($"select {call}"));
+
+    [TestMethod]
+    [DataRow("abs(null)")]
+    [DataRow("ceiling(null)")]
+    [DataRow("power(null, 2)")]
+    [DataRow("round(null, 1)")]
+    public void MathFunctionOverBareNull_IsAFloat(string call)
+    {
+        using var reader = new Simulation().ExecuteReader($"select {call}");
+        AreEqual(typeof(double), reader.GetFieldType(0));
+    }
+
+    [TestMethod]
+    [DataRow("getansinull('nosuch')", null)]
+    [DataRow("getansinull('master')", (short)1)]
+    [DataRow("getansinull(null)", (short)1)]
+    public void GetAnsiNull_LooksUpTheDatabase(string call, short? expected)
+        => AreEqual(expected is { } value ? value : DBNull.Value, new Simulation().ExecuteScalar($"select {call}"));
 }

@@ -9,7 +9,7 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// </summary>
 internal sealed class Ceiling(ParserContext context) : Expression
 {
-    private readonly Expression source = Parse(context);
+    private readonly Expression source = MathScalars.FloatForBareNull(Parse(context));
 
     internal override bool ParallelSafe => this.source.ParallelSafe;
 
