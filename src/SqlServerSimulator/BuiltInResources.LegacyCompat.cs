@@ -116,6 +116,10 @@ internal static partial class BuiltInResources
         "sp_server_info",
         "sp_databases",
         "sp_stored_procedures",
+        // SQLProcedureColumns — a procedure's or function's return value and
+        // parameters.
+        "sp_sproc_columns",
+        "sp_sproc_columns_100",
         // The sp_help family — the formatted-metadata procs interactive
         // sessions and SSMS's scripting fall back on. sp_help delegates to
         // sp_helpindex / sp_helpconstraint for its per-table detail sets;

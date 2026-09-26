@@ -205,6 +205,8 @@ partial class Simulation
             "sp_server_info" => InvokeSpServerInfo(batch),
             "sp_set_session_context" => InvokeSpSetSessionContext(batch),
             "sp_spaceused" => Uncounted(InvokeSpSpaceUsed(batch)),
+            "sp_sproc_columns" => InvokeSpSprocColumns(batch, classic: true),
+            "sp_sproc_columns_100" => InvokeSpSprocColumns(batch, classic: false),
             "sp_statistics" or "sp_statistics_100" => Uncounted(InvokeSpStatistics(batch, systemProcName)),
             "sp_stored_procedures" => InvokeSpStoredProcedures(batch),
             "sp_tablecollations_100" => InvokeSpTableCollations(batch),

@@ -248,8 +248,9 @@ public sealed class CatalogProcTests
         CollectionAssert.AreEqual(
             new[] { "id", "name" },
             rows.Select(r => (string?)r["COLUMN_NAME"]).ToArray());
-        // A view column is never identity / computed.
-        AreEqual((short)0, rows[0]["SS_IS_IDENTITY"]);
+        // A view column passing its table's identity straight through reads as
+        // identity (probed 2026-09-26 against SQL Server 2025).
+        AreEqual((short)1, rows[0]["SS_IS_IDENTITY"]);
     }
 
     [TestMethod]
@@ -608,5 +609,50 @@ public sealed class CatalogProcTests
         AreEqual("-4:image:2147483647:2147483647:-:2147483647", Summary("bm"));
         AreEqual("-4:geography:2147483647:2147483647:-:2147483647", Summary("g"));
         AreEqual("-4:hierarchyid:892:892:-:892", Summary("h"));
+    }
+
+    /// <summary>
+    /// sp_sproc_columns / sp_sproc_columns_100 — ODBC's SQLProcedureColumns
+    /// (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    private static Simulation RoutineFixture()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create type tvt as table (k int)",
+            "create procedure pr @a int = 5, @b nvarchar(10) output, @dt datetime2(3), @t tvt readonly as select @a",
+            "create function fs (@x decimal(5,1)) returns varchar(20) as begin return 'a' end",
+            "create function ft (@x int) returns table as return select 1 a");
+        return sim;
+    }
+
+    private static string Describe(List<Dictionary<string, object?>> rows)
+        => string.Join(",", rows.Select(r => $"{r["PROCEDURE_NAME"]}/{r["COLUMN_NAME"]}/{r["COLUMN_TYPE"]}/{r["DATA_TYPE"]}/{r["TYPE_NAME"]}/{r["LENGTH"]}/{r["SCALE"]}/{r["NULLABLE"]}/{r["ORDINAL_POSITION"]}"));
+
+    [TestMethod]
+    [DataRow("exec sp_sproc_columns 'pr'", "pr;1/@RETURN_VALUE/5/4/int/4/0/0/0,pr;1/@a/1/4/int/4/0/1/1,pr;1/@b/2/-9/nvarchar/20//1/2,pr;1/@dt/1/-9/datetime2/46/3/1/3,pr;1/@t/1/-153/tvt/2147483647//1/4")]
+    [DataRow("exec sp_sproc_columns 'fs'", "fs;0/@RETURN_VALUE/5/12/varchar/20//1/0,fs;0/@x/1/3/decimal/7/1/1/1")]
+    [DataRow("exec sp_sproc_columns 'ft'", "ft;0/@TABLE_RETURN_VALUE/3//table/0/0/0/0,ft;0/@x/1/4/int/4/0/1/1")]
+    [DataRow("exec sp_sproc_columns 'pr', @column_name = '@b'", "pr;1/@b/2/-9/nvarchar/20//1/2")]
+    [DataRow("exec sp_sproc_columns 'p%', @fUsePattern = 0", "")]
+    public void SpSprocColumns_DescribesReturnValueAndParameters(string sql, string expected)
+        => AreEqual(expected, Describe(Run(RoutineFixture(), sql)));
+
+    [TestMethod]
+    public void SpSprocColumns100_UsesTheNativeTypes()
+    {
+        var row = Run(RoutineFixture(), "exec sp_sproc_columns_100 'pr', @column_name = '@dt'").Single();
+        AreEqual((short)11, row["DATA_TYPE"]);
+        AreEqual(16, row["LENGTH"]);
+        IsTrue(row.ContainsKey("SS_TYPE_CATALOG_NAME"));
+    }
+
+    [TestMethod]
+    public void SpColumns_NamesAliasTypesAndViewIdentity()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create type phone from varchar(20)", "create table p (id int identity primary key, ph phone)", "create view v as select id from p");
+        AreEqual("phone", Run(sim, "exec sp_columns 'p', @column_name = 'ph'").Single()["TYPE_NAME"]);
+        AreEqual("int identity", Run(sim, "exec sp_columns 'v'").Single()["TYPE_NAME"]);
     }
 }

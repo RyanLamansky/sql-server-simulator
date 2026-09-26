@@ -444,8 +444,12 @@ partial class Simulation
             : [baseName, -151, null, null, null, null, null, null, null, null, null, null, null, null, null, -151, null, null, null, null];
         var (typePrecision, length, scale, charOctetLength) = SpColumnGeometry(col);
         var precision = typePrecision ?? (int)row[2]!;
-        var isIdentity = col.Identity is not null;
+        // A view's column passing an identity through reads as one too, and an
+        // alias-typed column names its alias (probed 2026-09-26 against SQL
+        // Server 2025).
+        var isIdentity = (col.Identity ?? col.IdentitySource) is not null;
         var isComputed = col.Computed is not null;
+        var shownName = col.AliasType?.Name ?? baseName;
 
         SqlValue Smallint(object? cell) =>
             cell is null ? SqlValue.Null(SqlType.SmallInt) : SqlValue.FromInt16((short)(int)cell);
@@ -460,7 +464,7 @@ partial class Simulation
             tableName,
             SqlValue.FromSystemName(col.Name),
             SqlValue.FromInt16((short)(int)row[1]!),                              // DATA_TYPE
-            SqlValue.FromSystemName(isIdentity ? baseName + " identity" : baseName), // TYPE_NAME
+            SqlValue.FromSystemName(isIdentity ? shownName + " identity" : shownName), // TYPE_NAME
             SqlValue.FromInt32(precision),                                       // PRECISION
             SqlValue.FromInt32(length),                                          // LENGTH
             scale is { } s ? SqlValue.FromInt16((short)s) : SqlValue.Null(SqlType.SmallInt), // SCALE

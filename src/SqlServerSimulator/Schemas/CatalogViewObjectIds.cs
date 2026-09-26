@@ -254,6 +254,8 @@ internal static class CatalogViewObjectIds
         ["sp_setapprole"] = -307614281,
         ["sp_settriggerorder"] = -394757827,
         ["sp_spaceused"] = -48860199,
+        ["sp_sproc_columns"] = -22614129,
+        ["sp_sproc_columns_100"] = -778358742,
         ["sp_statistics"] = -273041825,
         ["sp_statistics_100"] = -563591455,
         ["sp_stored_procedures"] = -482685215,
