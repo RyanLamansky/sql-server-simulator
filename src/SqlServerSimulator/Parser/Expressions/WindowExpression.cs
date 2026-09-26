@@ -657,7 +657,8 @@ internal sealed class WindowExpression : Expression
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextRequired();
         var sortExpr = Expression.Parse(context);
-        ConstantFolding.RejectConstantWindowOrderByTerm(sortExpr, context);
+        // The sort key is the aggregated value here, so it keeps its own term.
+        _ = ConstantFolding.RejectConstantWindowOrderByTerm(sortExpr, context);
         var descending = false;
         switch (context.Token)
         {
@@ -978,7 +979,10 @@ internal sealed class WindowExpression : Expression
         var saved = context.EnterNextValueForScope(NextValueForScope.Clause);
         try
         {
-            return ParseExpressionList(context);
+            var keys = ParseExpressionList(context);
+            for (var i = 0; i < keys.Length; i++)
+                keys[i] = ConstantFolding.SettleWindowPartitionTerm(keys[i], context);
+            return keys;
         }
         finally
         {
@@ -1204,8 +1208,7 @@ internal sealed class WindowExpression : Expression
         while (true)
         {
             context.MoveNextRequired();
-            var expr = Expression.Parse(context);
-            ConstantFolding.RejectConstantWindowOrderByTerm(expr, context);
+            var expr = ConstantFolding.RejectConstantWindowOrderByTerm(Expression.Parse(context), context);
             var descending = false;
             switch (context.Token)
             {

@@ -713,7 +713,9 @@ internal abstract class Expression : ExpressionNode
         {
             context.MoveNextRequired();
             var expr = Expression.Parse(context);
-            ConstantFolding.RejectConstantWindowOrderByTerm(expr, context);
+            // The key orders the aggregated values, so real evaluates it and
+            // it keeps its own term.
+            _ = ConstantFolding.RejectConstantWindowOrderByTerm(expr, context);
 
             var descending = false;
             switch (context.Token)

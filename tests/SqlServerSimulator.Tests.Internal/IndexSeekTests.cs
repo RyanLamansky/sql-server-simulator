@@ -448,12 +448,10 @@ public sealed class IndexSeekTests
     [TestMethod]
     public void InList_AllNull_Declines()
     {
-        // When every IN-list element is NULL there's no usable probe; the
-        // column drops out of the prefix and the seek can't anchor — falls
-        // through to scan.
+        // When every IN-list element is NULL the predicate can never be
+        // TRUE, which settles while compiling: the statement reads nothing.
         var (trace, rows) = Run(TableT, "select val from t where id in (null, null)");
-        Contains("Scan(t)", trace);
-        DoesNotContain("Seek(t)", trace);
+        IsEmpty(trace);
         IsEmpty(rows);
     }
 

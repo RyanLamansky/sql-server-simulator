@@ -359,7 +359,11 @@ A column, variable or subquery anywhere inside likewise stops it — `IIF(1 = 1,
 
 Detection is `Expression.IsWrittenConstant` = a parse-time mark (set by the built-in dispatcher and the CASE parser when every argument parsed inside came back constant) OR a conservative structural walk over the literal-bearing node types, default false — so a shape neither half recognizes sorts rather than raising.
 
-**Divergences** on this path: where real reports every ORDER BY error it finds, the simulator raises the first, so `ORDER BY nosuch, 'x'` is Msg 408 (position 2) rather than real's leading Msg 207; and a term whose *fold itself raises* reports Msg 408 here where real reports the folding error (`ORDER BY 1/0` → real Msg 8134, `ORDER BY CAST('a' AS int)` → real Msg 245, `ORDER BY POWER(CAST(2 AS int), 40)` → real Msg 232).
+A term whose *fold itself raises* is no constant to real: `ORDER BY 1/0`, `ORDER BY CAST('a' AS int)` and `ORDER BY POWER(CAST(2 AS int), 40)` stand as sort keys, and the error surfaces when the plan starts — see [runtime constants at plan start](#runtime-constants-at-plan-start).
+Under `DISTINCT` such a term is Msg 145 and after a set operation Msg 104, both while compiling, as for any term missing from the select list.
+`CHECKSUM(*)` / `BINARY_CHECKSUM(*)` hash the row, so they are no constant either.
+
+**Divergences** on this path: where real reports every ORDER BY error it finds, the simulator raises the first, so `ORDER BY nosuch, 'x'` is Msg 408 (position 2) rather than real's leading Msg 207.
 
 #### Inside `OVER` / `WITHIN GROUP` (Msg 5308 and 5309)
 
@@ -375,14 +379,42 @@ Both are Class 15, State 1.
 Real applies **no range check** against the select list: `OVER (ORDER BY 100)` over a one-column SELECT is Msg 5308, not Msg 108.
 `PARTITION BY` has no such rule — `OVER (PARTITION BY 'x' ORDER BY col)` and `PARTITION BY 1 + 1` sort (probe-confirmed) — and a bare variable is accepted here, so **Msg 1008 has no counterpart in this position** (`OVER (ORDER BY @v)` ranks the rows).
 
-Deciding 5308 vs 5309 needs the folded *value*, so the gate evaluates the term at parse time; **a fold that raises leaves the term standing**, matching real (`OVER (ORDER BY 1/0)`, `OVER (ORDER BY CAST('a' AS int))` and `OVER (ORDER BY POWER(CAST(2 AS int), 40))` are all accepted — the opposite of the statement-level path, which reports the folding error).
+Deciding 5308 vs 5309 needs the folded *value*, so the gate evaluates the term at parse time; **a fold that raises is no rejection**, and in an `OVER` clause real never evaluates that key at all: `OVER (ORDER BY 1/0)`, `OVER (ORDER BY CAST('a' AS int))` and `OVER (PARTITION BY 1/0 …)` return their rows unraised (probed 2026-09-26), so the parser swaps such a key for a constant the sort reads instead.
+A `WITHIN GROUP` key orders the aggregated values and real does evaluate it — `STRING_AGG(v, ',') WITHIN GROUP (ORDER BY 1/0)` raises — so that position keeps its term.
 
 **Divergences** on the window path:
 
-- A term whose fold raises is accepted at parse time as real does, but the simulator then evaluates it per row and raises the folding error at execution (`OVER (ORDER BY 1/0)` → Msg 8134) where real returns rows.
 - An `int`-typed NULL a `TRY_` conversion produced is Msg 5308 on real — its index test is a "not less than one" comparison, which NULL answers UNKNOWN — while the simulator reports 5309 for every NULL, matching real only for the written `NULL` and `CAST(NULL AS int)` spellings.
 - Two cells land on the wrong side of the 5308 / 5309 split for type-modeling reasons unrelated to the gate: `NULLIF(1, 2)` is `tinyint` on real (small integer literals are typed by magnitude) but `int` here, and `JSON_PATH_EXISTS` returns `int` on real but `bit` here.
 - `ROW_NUMBER() OVER w` — a named-window reference from a *non-aggregate* window function — isn't parsed at all (Msg 102); the aggregate form (`SUM(v) OVER w`) is, and carries the gate.
+
+### Runtime constants at plan start
+
+Real evaluates a query's runtime constants once, as its plan starts and before it reads a row, so an error in one raises over an empty table and under a WHERE that excludes every row alike (probed 2026-09-26 against SQL Server 2025): `SELECT 1/0 FROM t WHERE id = 999`, `SELECT id FROM t WHERE id = 999 AND id IN (1, 1/0)`, `SELECT id FROM empty ORDER BY 1/0` and `DECLARE @x int = 0; SELECT … WHERE id = 1/@x` all raise.
+`ConstantFolding.CollectStartupConstants` gathers them while `BuildSqlProjection` compiles — from the projection, WHERE, JOIN ON and ORDER BY — and the plan runs them before enumerating.
+Two kinds qualify, and only where evaluating one can raise: a written constant whose fold raises (a fold that succeeds can't raise later), and a side-effect-free computation over variables and literals (`@x / 0`), whose value is only known per execution.
+
+What real leaves to the row, the walk leaves too:
+
+- a branch real may not take — `CASE`, `IIF`, `COALESCE`, `NULLIF` and `CHOOSE` are not entered;
+- an aggregate's or window function's operand — `SUM(1/0)` over no rows is NULL;
+- a subquery, which starts its own plan — `WHERE EXISTS (SELECT 1/0 FROM t)` ignores the projection;
+- HAVING, which filters groups rather than starting the plan;
+- a scalar aggregate's ORDER BY, whose one-row sort real never runs — `SELECT COUNT(*) FROM t ORDER BY MAX(a) / 0` returns its row, so the simulator drops that sort outright.
+
+And some plans never start the evaluation at all:
+
+- a WHERE settled never-TRUE while compiling (`WHERE 1 = 0`), which on an ungrouped statement also skips every source, so a derived table's `1/0` under it doesn't raise;
+- `TOP 0`;
+- a FROM of constants alone (`VALUES`, no FROM), which real runs as a constant scan — `Selection.ReadsStorage` tells the two apart through derived tables;
+- a singleton lookup — every key column of a unique key pinned by an equality — which real answers without starting the rest of the plan, so `SELECT 1/0 FROM t WHERE pk = 99` returns nothing when no row matches, while `pk IN (98, 99)` raises.
+
+**Divergences**:
+
+- A one-row sort over constants evaluates its key: `SELECT 1 ORDER BY 1/0` and `SELECT x FROM (VALUES (1)) v(x) ORDER BY 1/0` raise Msg 8134 where real, knowing the row count, sorts nothing.
+- An uncorrelated subquery real also evaluates at plan start is left to the row: `SELECT id FROM empty WHERE id = (SELECT 1/0 FROM t WHERE id = 5)` raises there and returns nothing here.
+- A `WITHIN GROUP` key isn't collected, so `STRING_AGG(v, ',') WITHIN GROUP (ORDER BY 1/0)` over no qualifying row returns NULL where real raises.
+- DML statements (`UPDATE … SET v = 'toolong' WHERE id = 999`, `DELETE t WHERE id = 1/0`) evaluate per row, so they raise only when a row qualifies; real raises at plan start there too, including the truncation of a literal assigned to a narrower column.
 
 ### Top-level ORDER BY over a set operation
 

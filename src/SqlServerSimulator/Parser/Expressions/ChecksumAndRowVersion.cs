@@ -77,6 +77,9 @@ internal sealed class Checksum : Expression
                     columns.Add(source.Qualifier is { } qualifier ? new Reference(qualifier, column) : new Reference(column));
             }
             this.args = [.. columns];
+            // The expanded columns never parse as arguments, so the fold
+            // bookkeeping has to hear from them here: a row hash is no constant.
+            context.FoldableArguments = false;
             return;
         }
         var list = new List<Expression> { Parse(context) };

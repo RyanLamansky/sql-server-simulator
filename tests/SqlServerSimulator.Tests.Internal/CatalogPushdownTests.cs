@@ -245,8 +245,10 @@ public sealed class CatalogPushdownTests
     [TestMethod]
     public void ExplicitNullComparand_SeeksEmpty()
     {
+        // `= NULL` is never TRUE, which settles while compiling, so the
+        // catalog view isn't generated at all.
         var (trace, rows) = Run("select name from sys.columns where object_id = null");
-        Contains("SeekEmpty(columns.object_id)", trace);
+        IsEmpty(trace);
         IsEmpty(rows);
     }
 

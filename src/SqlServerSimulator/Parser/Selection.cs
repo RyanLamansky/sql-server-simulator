@@ -4388,8 +4388,12 @@ internal sealed partial class Selection
             }
 
             // Position is the 1-based index in the ORDER BY list, counted
-            // before the term is added.
-            if (expr.IsWrittenConstant)
+            // before the term is added. A constant whose fold raises is no
+            // constant to real: it stands as a sort key, and the error
+            // surfaces when the plan starts (probed 2026-09-26 — `ORDER BY
+            // 1/0` is Msg 8134 even over an empty table, `ORDER BY 1/1` Msg
+            // 408).
+            if (expr.IsWrittenConstant && !ConstantFolding.FoldRaises(expr, context))
                 throw SimulatedSqlException.ConstantExpressionInOrderBy(orderBy.Count + 1);
 
             // A variable reachable through pure conversions only is real's

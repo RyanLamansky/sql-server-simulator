@@ -29,6 +29,16 @@ internal sealed partial class Selection
     internal bool HasWindows;
 
     /// <summary>
+    /// Whether the plan reads stored rows — a table, a view, a catalog view, or
+    /// a derived source that itself does — rather than only constants. Real
+    /// runs a query over constants alone as a constant scan, which evaluates
+    /// nothing up front, so the startup constants (see
+    /// <see cref="ConstantFolding.CollectStartupConstants"/>) only raise over
+    /// a plan this reads true on. False on plan shapes that don't record it.
+    /// </summary>
+    internal bool ReadsStorage;
+
+    /// <summary>
     /// The FROM sources of the branch whose projections this plan's output
     /// columns come from — the leftmost branch of a set-op chain, since that's
     /// where the combined result takes its column names. A top-level ORDER BY

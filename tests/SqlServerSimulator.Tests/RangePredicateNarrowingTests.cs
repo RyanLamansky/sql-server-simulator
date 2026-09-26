@@ -399,17 +399,17 @@ public sealed class RangePredicateNarrowingTests
     }
 
     [TestMethod]
-    public void ErrorInThePushedBound_RaisesOnlyWhenTheJoinProducesRows()
+    public void ErrorInThePushedBound_RaisesAtPlanStart()
     {
-        // Evaluating the bound on the scan must not raise for a row the join
-        // would never have produced a tuple from: the prefilter keeps a row
-        // whose bound threw and lets the residual decide.
+        // A bound over variables alone is a runtime constant real evaluates as
+        // its plan starts, so it raises whether or not the join produces a
+        // row (probed 2026-09-26 against SQL Server 2025).
         var sim = Joined();
         _ = sim.ExecuteNonQuery("delete l");
-        AreEqual(0, sim.ExecuteScalar("""
+        _ = sim.AssertSqlError("""
             declare @a int = 1, @b int = 0;
             select count(*) from h join l on l.id = h.id where h.tag > @a / @b
-            """));
+            """, 8134);
 
         var populated = Joined();
         _ = populated.AssertSqlError("""

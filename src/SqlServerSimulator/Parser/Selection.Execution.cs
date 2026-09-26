@@ -1208,6 +1208,11 @@ internal sealed partial class Selection
 
         for (var i = 0; i < orderBy.Count; i++)
         {
+            // A written constant reaching here is one whose fold raised (the
+            // rest are Msg 408 while parsing) — under DISTINCT it is simply
+            // not in the select list, which real reports while compiling.
+            if (distinct && orderBy[i].Expr is { IsWrittenConstant: true })
+                throw SimulatedSqlException.OrderByItemNotInSelectListWithDistinct();
             orderTermMayNameAlias = orderBy[i].MayNameAlias;
             SqlType keyType;
             try
@@ -1309,6 +1314,48 @@ internal sealed partial class Selection
         // real; only the row work is skipped.
         var resultIsProvablyEmpty = fromClause.Having?.IsNeverTrue == true;
 
+        // A WHERE settled never-true while compiling leaves real a constant
+        // scan: an ungrouped statement then runs none of its sources, so a
+        // derived table's `1/0` under `WHERE 1 = 0` doesn't raise there.
+        var isGrouped = aggregates.Count > 0 || fromClause.GroupingSets.Count > 0 || fromClause.Having is not null;
+        var whereIsNeverTrue = fromClause.Excluders.Exists(static excluder => excluder.IsNeverTrue);
+        if (whereIsNeverTrue && !isGrouped)
+            resultIsProvablyEmpty = true;
+
+        // Without GROUP BY an aggregate answers one row at most, whose sort
+        // real never runs: `SELECT COUNT(*) FROM t ORDER BY MAX(a) / 0`
+        // returns its row there (probed 2026-09-26), so no key is evaluated.
+        var aggregateOrderBy = fromClause.GroupingSets.Count == 0 ? [] : orderBy;
+
+        // What real evaluates once as its plan starts, raising before any row
+        // is read (see ConstantFolding.CollectStartupConstants). A scalar
+        // aggregate's ORDER BY keys are never evaluated at all.
+        var readsStorage = sources.Any(static source =>
+            source.BackingTable is not null || source.BackingView is not null || source.BackingCatalogView is not null
+            || source.LateralPlan?.ReadsStorage == true);
+        var startupConstants = new List<Expression>();
+        var projectionStartupConstants = new List<Expression>();
+        if (readsStorage && !whereIsNeverTrue && !(sources.Length == 1 && PinsUniqueKey(sources[0], fromClause.Excluders)))
+        {
+            foreach (var expression in expressions)
+                ConstantFolding.CollectStartupConstants(expression, parseBatch.Parser, projectionStartupConstants);
+            foreach (var excluder in fromClause.Excluders)
+                ConstantFolding.CollectStartupConstants(excluder, parseBatch.Parser, startupConstants);
+            foreach (var join in joins)
+            {
+                if (join.OnPredicate is { } on)
+                    ConstantFolding.CollectStartupConstants(on, parseBatch.Parser, startupConstants);
+            }
+            if (!(isGrouped && fromClause.GroupingSets.Count == 0))
+            {
+                foreach (var term in orderBy)
+                {
+                    if (term.Expr is { } sortKey)
+                        ConstantFolding.CollectStartupConstants(sortKey, parseBatch.Parser, startupConstants);
+                }
+            }
+        }
+
         // The plan the closure below belongs to, for recognizing an emptiness
         // probe of it (see HasAnyRow); assigned once the plan exists.
         Selection? self = null;
@@ -1330,6 +1377,14 @@ internal sealed partial class Selection
                         : new TopSpec(ResolveRowCountLimit(topExpression, RowLimitKind.Top, batch), null, topWithTies);
                 var offsetCount = ResolveRowCountLimit(offsetExpression, RowLimitKind.Offset, batch);
                 var fetchCount = ResolveRowCountLimit(fetchExpression, RowLimitKind.Fetch, batch);
+                // TOP 0 is a plan with nothing to start, and an emptiness
+                // probe of an EXISTS reads no projection.
+                if (top.Count != 0)
+                {
+                    RunStartupConstants(startupConstants, batch);
+                    if (!ReferenceEquals(batch.ExistenceProbe, self))
+                        RunStartupConstants(projectionStartupConstants, batch);
+                }
                 // Push the WHERE conjuncts a deferred source's own body can
                 // apply into that body first, so the filter reaches its base
                 // scan (and the index seek there) instead of running only after
@@ -1360,7 +1415,7 @@ internal sealed partial class Selection
                 // reads the projection.
                 var projection = orderBy.Count == 0 && ReferenceEquals(batch.ExistenceProbe, self) ? [] : expressions;
                 return aggregates.Count > 0 || fromClause.GroupingSets.Count > 0 || fromClause.Having is not null
-                    ? BuildAggregateProjectionRows(execSources, joins, ResolveColumnType, projection, fromClause, outputColumnNames, orderBy, aggregates, windows, windowOperandTypes, windowResultTypes, top, offsetCount, fetchCount, distinct, batch, outerResolver)
+                    ? BuildAggregateProjectionRows(execSources, joins, ResolveColumnType, projection, fromClause, outputColumnNames, aggregateOrderBy, aggregates, windows, windowOperandTypes, windowResultTypes, top, offsetCount, fetchCount, distinct, batch, outerResolver)
                     : windows.Count > 0
                         ? ProjectWindowedRows(execSources, joins, projection, fromClause.Excluders, outputColumnNames, orderBy, distinct, top, offsetCount, fetchCount, windows, windowOperandTypes, windowResultTypes, batch, outerResolver)
                         : ProjectSqlRows(execSources, joins, projection, fromClause.Excluders, outputColumnNames, orderBy, distinct, top, offsetCount, fetchCount, batch, outerResolver);
@@ -1391,7 +1446,8 @@ internal sealed partial class Selection
         selection.AutoSourceNames = AutoSourceNamesOf(sources);
         (selection.AutoColumnSource, selection.AutoColumnOrdinal) = AutoColumnBindingOf(expressions, sources);
         selection.ColumnWireFlags = WireFlagsOf(expressions, sources, selection.AutoColumnSource, selection.AutoColumnOrdinal);
-        selection.IsGrouped = aggregates.Count > 0 || fromClause.GroupingSets.Count > 0 || fromClause.Having is not null;
+        selection.IsGrouped = isGrouped;
+        selection.ReadsStorage = readsStorage;
         selection.HasWindows = windows.Count > 0;
         // A plain SELECT-project-filter body can carry an enclosing statement's
         // WHERE conjunct: it applies its projection and its own WHERE to every
@@ -1442,6 +1498,20 @@ internal sealed partial class Selection
         }
 
         return selection;
+    }
+
+    /// <summary>
+    /// Evaluates the expressions real runs once as its plan starts, for the
+    /// error one of them raises; see
+    /// <see cref="ConstantFolding.CollectStartupConstants"/>.
+    /// </summary>
+    private static void RunStartupConstants(List<Expression> constants, BatchContext batch)
+    {
+        if (constants.Count == 0)
+            return;
+        var runtime = new RuntimeContext(static _ => throw new InvalidOperationException("A startup constant reads no column."), batch);
+        foreach (var constant in constants)
+            _ = constant.Run(runtime);
     }
 
     /// <summary>

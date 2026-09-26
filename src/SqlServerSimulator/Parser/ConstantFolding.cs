@@ -1,3 +1,4 @@
+using SqlServerSimulator.Parser.Expressions;
 using SqlServerSimulator.Storage;
 using System.Collections.Frozen;
 
@@ -242,6 +243,99 @@ internal static class ConstantFolding
     }
 
     /// <summary>
+    /// Adds to <paramref name="sink"/> the subexpressions of
+    /// <paramref name="root"/> that SQL Server evaluates once when the plan
+    /// starts rather than per row, and that can raise there: a written
+    /// constant whose fold raises (<c>1/0</c>, <c>CAST('x' AS int)</c>,
+    /// <c>POWER(2, 40)</c>), and a computation over variables and literals
+    /// alone (<c>@x / 0</c>). Real raises such an error before reading a row,
+    /// so it surfaces over an empty table and under a WHERE that excludes
+    /// every row alike — probed 2026-09-26 against SQL Server 2025.
+    /// </summary>
+    /// <remarks>
+    /// A branch real may never take stays per-row: the walk doesn't enter
+    /// <c>CASE</c>, <c>IIF</c>, <c>COALESCE</c>, <c>NULLIF</c> or
+    /// <c>CHOOSE</c>, nor an aggregate's or window function's operands
+    /// (<c>SUM(1/0)</c> over no rows is NULL there), nor a subquery, which
+    /// starts its own plan. A fold that succeeds can't raise at startup, so it
+    /// isn't collected; a variable computation is, since its value is only
+    /// known per execution. Only nodes known free of side effects qualify
+    /// (<see cref="Expression.ParallelSafe"/>), so <c>RAND()</c>,
+    /// <c>NEXT VALUE FOR</c> and a UDF call never run an extra time.
+    /// </remarks>
+    internal static void CollectStartupConstants(ExpressionNode root, ParserContext context, List<Expression> sink) =>
+        root.Walk((node, _) =>
+        {
+            switch (node)
+            {
+                case CaseExpression or Iif or Coalesce or NullIf or Choose or AggregateExpression or WindowExpression:
+                    return false;
+                case Expression expression when expression.IsWrittenConstant:
+                    if (FoldRaises(expression, context))
+                        sink.Add(expression);
+                    return false;
+                case Expression expression when IsVariableComputation(expression):
+                    sink.Add(expression);
+                    return false;
+                default:
+                    return true;
+            }
+        });
+
+    /// <summary>
+    /// Whether evaluating the written constant <paramref name="expression"/>
+    /// raises — which real, attempting the same fold while compiling, takes
+    /// as "not a constant" and leaves for the plan to raise at runtime.
+    /// </summary>
+    internal static bool FoldRaises(Expression expression, ParserContext context)
+    {
+        try
+        {
+            // A written constant reaches no column, so the resolver is
+            // unreachable rather than merely unused.
+            _ = expression.Run(new RuntimeContext(static _ => throw new NotSupportedException(), context.Batch));
+            return false;
+        }
+        catch (SimulatedSqlException)
+        {
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// Whether <paramref name="expression"/> computes over variables and
+    /// literals alone through side-effect-free nodes, with no conditional
+    /// branch — so evaluating it once up front runs exactly what real's plan
+    /// start runs. A bare variable or literal is excluded: it can't raise.
+    /// </summary>
+    private static bool IsVariableComputation(Expression expression)
+    {
+        if (expression is VariableReference or Value || !expression.ParallelSafe)
+            return false;
+
+        var readsVariable = false;
+        var qualifies = true;
+        expression.Walk((node, shape) =>
+        {
+            switch (node)
+            {
+                case CaseExpression or Iif or Coalesce or NullIf or Choose:
+                    qualifies = false;
+                    break;
+                case VariableReference:
+                    readsVariable = true;
+                    break;
+                default:
+                    if (shape.Column is not null)
+                        qualifies = false;
+                    break;
+            }
+            return qualifies;
+        });
+        return qualifies && readsVariable;
+    }
+
+    /// <summary>
     /// Applies real's Msg 5308 / 5309 gate to one ORDER BY term inside an
     /// <c>OVER (…)</c>, a named <c>WINDOW</c> definition or a
     /// <c>WITHIN GROUP (…)</c> — the positions that carry no ordinal
@@ -260,17 +354,20 @@ internal static class ConstantFolding
     /// a one-column select is Msg 5308 all the same (probe-confirmed).
     /// </para>
     /// <para>
-    /// A fold that raises leaves the term standing: real sorts
+    /// A fold that raises is no rejection: real accepts
     /// <c>OVER (ORDER BY 1/0)</c>, <c>OVER (ORDER BY CAST('a' AS int))</c> and
-    /// <c>OVER (ORDER BY POWER(CAST(2 AS int), 40))</c> rather than reporting
-    /// the folding error (probe-confirmed — the statement-level ORDER BY does
-    /// the opposite and reports Msg 8134 / 245 / 232).
+    /// <c>OVER (ORDER BY POWER(CAST(2 AS int), 40))</c>, and in an <c>OVER</c>
+    /// clause never evaluates the key at all — it returns the rows unraised,
+    /// as it does for <c>PARTITION BY 1/0</c> (probed 2026-09-26) — so the
+    /// returned term is a stand-in constant the sort reads instead. A
+    /// <c>WITHIN GROUP</c> key is the aggregated value's order and real does
+    /// evaluate it there, so that caller keeps its own term.
     /// </para>
     /// </remarks>
-    internal static void RejectConstantWindowOrderByTerm(Expression term, ParserContext context)
+    internal static Expression RejectConstantWindowOrderByTerm(Expression term, ParserContext context)
     {
         if (!term.IsWrittenConstant)
-            return;
+            return term;
 
         SqlValue folded;
         try
@@ -281,7 +378,7 @@ internal static class ConstantFolding
         }
         catch (SimulatedSqlException)
         {
-            return;
+            return NeverEvaluatedKey();
         }
 
         // A NULL is never index-shaped here, matching real for a written
@@ -294,4 +391,21 @@ internal static class ConstantFolding
             ? SimulatedSqlException.IntegerIndexNotAllowedInOrderedAggregate()
             : SimulatedSqlException.ConstantNotAllowedInOrderedAggregate();
     }
+
+    /// <summary>
+    /// A window key standing in for one whose fold raises: a constant, so it
+    /// leaves the order as it was, and evaluated with no error, as real
+    /// leaves such a key unevaluated. Fresh per call, since a node belongs to
+    /// one tree.
+    /// </summary>
+    internal static Expression NeverEvaluatedKey() => Value.NonLiteral(SqlValue.Null(SqlType.Int32));
+
+    /// <summary>
+    /// The window-clause <c>PARTITION BY</c> counterpart of
+    /// <see cref="RejectConstantWindowOrderByTerm"/>: a constant partition key
+    /// is legal, and one whose fold raises is left unevaluated as real leaves
+    /// it (see <see cref="NeverEvaluatedKey"/>).
+    /// </summary>
+    internal static Expression SettleWindowPartitionTerm(Expression term, ParserContext context) =>
+        term.IsWrittenConstant && FoldRaises(term, context) ? NeverEvaluatedKey() : term;
 }

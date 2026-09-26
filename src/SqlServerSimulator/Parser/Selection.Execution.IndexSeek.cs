@@ -1741,6 +1741,52 @@ internal sealed partial class Selection
         return false;
     }
 
+    /// <summary>
+    /// Whether the WHERE conjuncts pin every key column of one of
+    /// <paramref name="source"/>'s unique keys to a single row-independent
+    /// value — the singleton lookup real answers without starting the rest
+    /// of its plan, so a startup constant (see
+    /// <see cref="ConstantFolding.CollectStartupConstants"/>) raises there
+    /// only once the lookup finds its row: <c>SELECT 1/0 FROM t WHERE pk =
+    /// 99</c> answers no rows where <c>pk IN (98, 99)</c> raises (probed
+    /// 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    private static bool PinsUniqueKey(FromSource source, List<BooleanExpression> excluders)
+    {
+        if (source.BackingTable is not { } table)
+            return false;
+
+        var conjuncts = new List<BooleanExpression>();
+        foreach (var excluder in excluders)
+            excluder.CollectConjuncts(conjuncts);
+        var ordinals = new HashSet<int>();
+        foreach (var excluder in conjuncts)
+        {
+            if (excluder.TryGetEqualityOperands(out var left, out var right)
+                && (TryExtractColumnAndValue(source, left, right, allowCorrelatedColumnValue: false, planSources: null, out var ordinal, out _)
+                    || TryExtractColumnAndValue(source, right, left, allowCorrelatedColumnValue: false, planSources: null, out ordinal, out _)))
+            {
+                _ = ordinals.Add(ordinal);
+            }
+        }
+
+        if (ordinals.Count == 0)
+            return false;
+        foreach (var key in table.KeyConstraints)
+        {
+            if (KeyColumnsCovered(key.StorageOrdinals, ordinals))
+                return true;
+        }
+
+        foreach (var index in table.Indexes)
+        {
+            if (index.IsUnique && !index.IsDisabled && index.Filter is null && KeyColumnsCovered(index.KeyStorageOrdinals, ordinals))
+                return true;
+        }
+
+        return false;
+    }
+
     private static bool KeyColumnsCovered(int[] keyOrdinals, HashSet<int> available)
     {
         if (keyOrdinals.Length == 0)
