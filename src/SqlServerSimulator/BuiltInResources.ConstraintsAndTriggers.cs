@@ -439,7 +439,7 @@ internal static partial class BuiltInResources
                     falseBit,
                     trigger.IsDisabled ? trueBit : falseBit,
                     trigger.Timing == TriggerTiming.InsteadOf ? trueBit : falseBit,
-                    falseBit,
+                    trigger.NotForReplication ? trueBit : falseBit,
                 ];
             }
         }

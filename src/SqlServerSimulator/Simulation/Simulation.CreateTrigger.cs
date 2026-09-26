@@ -137,9 +137,11 @@ partial class Simulation
             context.MoveNextRequired();
         }
 
-        // NOT FOR REPLICATION before AS is also valid (parse-and-ignore).
+        // NOT FOR REPLICATION before AS is also valid, and only recorded.
+        var notForReplication = false;
         if (context.Token is ReservedKeyword { Keyword: Keyword.Not })
         {
+            notForReplication = true;
             if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.For })
                 throw SimulatedSqlException.SyntaxErrorNear(context);
             // REPLICATION lives in the reserved Keyword enum, so the tokenizer
@@ -305,6 +307,7 @@ partial class Simulation
             ExecuteAsPrincipalId = ResolveExecuteAsPrincipalId(context, executeAsClause),
             UsesQuotedIdentifier = context.QuotedIdentifiers,
             UsesAnsiNulls = context.Batch.Connection.AnsiNulls,
+            NotForReplication = notForReplication,
         };
         if (existed)
             trigger.ModifyDate = context.Batch.CurrentStatement.UtcNow;

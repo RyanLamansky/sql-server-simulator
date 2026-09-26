@@ -113,8 +113,6 @@ internal sealed class ObjectId : Expression
         // has to be matched with, which a single OBJECT_ID call would
         // otherwise do a dozen times over.
         var filter = ClassifyTypeFilter(typeFilter);
-        if (filter == ObjectTypeFilter.Unrecognized)
-            return SqlValue.Null(SqlType.Int32);
 
         var nameStr = nameValue.CoerceTo(SqlType.NVarchar).AsString;
         if (!TryParseObjectName(nameStr, out var parsed))
@@ -247,15 +245,16 @@ internal sealed class ObjectId : Expression
             }
         }
 
-        // A CREATE DEFAULT object answers 'D' as a DEFAULT constraint does, and
-        // a CREATE RULE object 'R'.
-        if (filter is ObjectTypeFilter.Any or ObjectTypeFilter.Default or ObjectTypeFilter.Rule
-            && runtime.Batch.TryResolveSchema(parsed, out var bindableSchema))
+        // Every other schema-scoped kind — a sequence, a multi-statement or CLR
+        // function under its own code, a CREATE DEFAULT / CREATE RULE object —
+        // answers when the filter is absent or names its sys.objects type
+        // (probed 2026-09-26 against SQL Server 2025).
+        if (filter is ObjectTypeFilter.Any or ObjectTypeFilter.Default or ObjectTypeFilter.Unrecognized
+            && runtime.Batch.TryResolveSchema(parsed, out var ownerSchema)
+            && ownerSchema.TryFindInSharedNamespace(parsed.Leaf, out var other)
+            && (typeFilter is null || BuiltInToken.Equals(other.ObjectTypeCode.TrimEnd(), typeFilter)))
         {
-            if (filter != ObjectTypeFilter.Rule && bindableSchema.Defaults.TryGetValue(parsed.Leaf, out var bindableDefault))
-                return Gate(bindableDefault);
-            if (filter != ObjectTypeFilter.Default && bindableSchema.Rules.TryGetValue(parsed.Leaf, out var rule))
-                return Gate(rule);
+            return Gate(other);
         }
         return SqlValue.Null(SqlType.Int32);
     }
@@ -281,13 +280,14 @@ internal sealed class ObjectId : Expression
     /// models: <c>'U'</c> (user table), <c>'FN'</c> (scalar UDF), <c>'IF'</c>
     /// (inline table-valued function), <c>'V'</c> (view), <c>'P'</c> (stored
     /// procedure), <c>'TR'</c> (DML trigger), <c>'SN'</c> (synonym), and the
-    /// five constraint families. Other documented codes (<c>'TF'</c> / …)
-    /// classify as <see cref="Unrecognized"/> and answer NULL pending those
-    /// features.
+    /// five constraint families. Every other code classifies as
+    /// <see cref="Unrecognized"/> and matches the resolved object's own
+    /// <c>sys.objects</c> type (<c>'SO'</c>, <c>'TF'</c>, <c>'FS'</c>,
+    /// <c>'R'</c> …).
     /// </summary>
     private enum ObjectTypeFilter
     {
-        /// <summary>A code outside the modeled set — the caller answers NULL.</summary>
+        /// <summary>A code outside the dedicated set, matched against the resolved object's own type code.</summary>
         Unrecognized,
 
         /// <summary>No second argument was written, so every kind answers.</summary>
@@ -298,7 +298,6 @@ internal sealed class ObjectId : Expression
         InlineTableValuedFunction,
         PrimaryKey,
         Procedure,
-        Rule,
         ScalarFunction,
         Synonym,
         Table,
@@ -333,7 +332,6 @@ internal sealed class ObjectId : Expression
         _ when BuiltInToken.Equals(code, "C") => ObjectTypeFilter.Check,
         _ when BuiltInToken.Equals(code, "D") => ObjectTypeFilter.Default,
         _ when BuiltInToken.Equals(code, "F") => ObjectTypeFilter.ForeignKey,
-        _ when BuiltInToken.Equals(code, "R") => ObjectTypeFilter.Rule,
         _ => ObjectTypeFilter.Unrecognized,
     };
 

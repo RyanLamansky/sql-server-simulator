@@ -906,22 +906,22 @@ Single argument only — no `database_id` form (unlike `OBJECT_NAME`).
 **One documented divergence**: leading whitespace / comment trivia *before* the `CREATE` keyword isn't captured (the tokenizer skips it before `StartIndex` is recorded), so a definition SQL Server stores with a leading `\n` comes back without it.
 The canonical `OBJECT_DEFINITION(OBJECT_ID('trg'))` idiom works because `OBJECT_ID` resolves DML triggers (`'TR'`) via `BatchContext.TryResolveTrigger`.
 
-**`OBJECTPROPERTY(object_id, property)`** (`Parser/Expressions/ObjectProperty.cs`): 10-property switch returning `int` (1 / 0 / NULL).
-Recognized property names (case-insensitive, length-bucketed `Span<char>` switch per SSS003): `IsTable`, `IsView`, `IsProcedure`, `IsTrigger`, `IsScalarFunction`, `IsTableFunction`, `IsInlineFunction`, `IsMSShipped`, `IsDeterministic`, `IsSchemaBound`.
-Unknown property → NULL (matches real SQL Server's silent-fall-through).
-NULL `object_id` → NULL.
-The lookup walks `Database.Schemas` for the matching object (same path as `OBJECT_NAME`).
-`IsMSShipped` always returns 0 (the simulator owns no MS-shipped objects).
-`IsSchemaBound` returns 1 for a `WITH SCHEMABINDING` view, scalar function, inline TVF or multi-statement TVF (read from `View.IsSchemaBound` / `UserDefinedFunction.IsSchemaBound`), 0 for a non-schema-bound one and for a procedure (a module that can never carry the option), and NULL for a non-module object — probe-confirmed that a table, trigger, sequence and synonym all answer NULL.
+**`OBJECTPROPERTY(object_id, property)`** (`Parser/Expressions/ObjectProperty.cs`) answers every documented property as real does over every modeled object kind (probed 2026-09-26 against SQL Server 2025, the full property × kind grid), returning `int`, and NULL for an unknown property or a NULL argument.
+The grid's shape is what a property concerns, each answering NULL outside it:
+- the `Is*` kind flags, `IsExecuted`, `OwnerId` and `SchemaId` — every object;
+- the `Exec*` family — whatever executes (a procedure, function, trigger or view), the trigger-specific members 0 for all but a trigger;
+- `Has*Trigger`, `IsIndexable`, `IsIndexed` — a table or view (a view is indexable when schema-bound);
+- the `Table*` family — a table or table-valued function, every flag off for the latter save a multi-statement function's `TableIsFake`, with the full-text members also answering (off) for an indexed view;
+- the `Cnst*` family — a constraint.
+
+Some members read less obviously: a `Table*TriggerCount` counts only AFTER triggers, disabled ones included, while `Table*Trigger` returns the trigger `sp_settriggerorder` made first or else the lowest id of any timing; `TableHasTextImage` means the legacy LOB types only, not a MAX type or `xml`; `TableHasDefaultCnst` ignores a bound `CREATE DEFAULT` object; `CnstIsColumn` is 1 for a DEFAULT and for a CHECK or foreign key over one column however declared, and 0 for a key even over one; `IsSystemVerified` follows `IsSchemaBound` for a view or function.
+`TableFulltextPopulateStatus` is always 0 where real reports 1 while a population runs, the simulator's full-text searches reading live rows.
 `IsDeterministic` walks the module's body and its references — see [its own section](#isdeterministic) below.
 **`IsQuotedIdentOn` / `ExecIsQuotedIdentOn`** and **`IsAnsiNullsOn` / `ExecIsAnsiNullsOn`** each read the object's [creation-time SET-option capture](#creation-time-set-option-capture) and agree on every module; within a pair they diverge on a **table**, which the shorter spelling answers for while the module-only `ExecIs…` form answers NULL.
-A table's `IsQuotedIdentOn` is 1 regardless of the creating session, while its `IsAnsiNullsOn` is the captured value.
-A sequence, synonym or key constraint answers NULL to all four.
+A table's `IsQuotedIdentOn` is 1 regardless of the creating session, while its `IsAnsiNullsOn` is the captured value; a CHECK or DEFAULT constraint and a `CREATE DEFAULT` / `CREATE RULE` object answer a constant 0.
 Capture semantics — including that a module's *body* runs under the captured `QUOTED_IDENTIFIER` — are in [`grammar.md`](grammar.md#per-object-creation-time-capture).
 
 **Constraint object ids resolve too**, through `ObjectProperty.TryFindConstraint` → the shared `ConstraintLookup` — a `CheckConstraint` / `DefaultConstraint` / `KeyConstraint` / `ForeignKey` is not a `SchemaObject`, so the object walk above can't reach one.
-A CHECK or DEFAULT constraint answers `IsQuotedIdentOn` = **0** (a constant, not the creating session's setting — probe-confirmed under ON as well as OFF, and uniformly 0 across msdb's shipped constraints) while the key and foreign-key families answer NULL; `IsAnsiNullsOn` is NULL for all five.
-Every object-kind discriminator plus `IsEncrypted` / `IsMSShipped` / `IsSystemTable` answers 0, and the module- and table-scoped names answer NULL.
 `OBJECTPROPERTYEX` gives the same answers.
 `OBJECT_ID('<constraint name>')` reaches the same ids through the same lookup, so the property read composes the way it does for a table.
 

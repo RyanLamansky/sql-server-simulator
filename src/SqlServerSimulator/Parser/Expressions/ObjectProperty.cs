@@ -38,8 +38,8 @@ internal sealed class ObjectProperty : Expression
         var database = runtime.Batch.CurrentDatabase;
         var result = FindObject(database, id) is { } obj
             ? EvaluateProperty(database, obj, prop)
-            : TryFindConstraint(database, id, out var constraintTypeCode)
-                ? EvaluateConstraintProperty(constraintTypeCode, prop)
+            : TryFindConstraint(database, id, out var constraint)
+                ? EvaluateConstraintProperty(constraint, prop)
                 : BuiltInResources.TryResolveSystemObject(id, out var system)
                     ? EvaluateSystemObjectProperty(system, prop)
                     : null;
@@ -98,89 +98,56 @@ internal sealed class ObjectProperty : Expression
     /// <c>PK</c> / <c>UQ</c> / <c>F</c> rows, none of which is a
     /// <see cref="SchemaObject"/> so <see cref="FindObject(Database, int)"/>
     /// can't reach them.
-    /// <paramref name="typeCode"/> is the constraint's <c>sys.objects.type</c>,
-    /// trimmed.
     /// </summary>
-    internal static bool TryFindConstraint(Database database, int id, out string typeCode)
-    {
-        if (!ConstraintLookup.TryResolveById(database, id, out var constraint))
-        {
-            typeCode = "";
-            return false;
-        }
-        typeCode = constraint.TypeCode;
-        return true;
-    }
+    internal static bool TryFindConstraint(Database database, int id, out ConstraintLookup.ConstraintReference constraint) =>
+        ConstraintLookup.TryResolveById(database, id, out constraint);
 
     /// <summary>
-    /// OBJECTPROPERTY's answers for a constraint object id. Probe-confirmed
-    /// against SQL Server 2025: every object-kind discriminator answers 0 (a
-    /// constraint is resolvable, just none of those kinds), <c>IsEncrypted</c>
-    /// and <c>IsMSShipped</c> and <c>IsSystemTable</c> answer 0, and the
-    /// module-scoped names answer NULL.
+    /// OBJECTPROPERTY's answers for a constraint object id (probed 2026-09-26
+    /// against SQL Server 2025): every object-kind discriminator answers 0 but
+    /// the constraint's own kind and <c>IsConstraint</c>, the <c>Cnst*</c>
+    /// family answers from the constraint, the module-scoped names answer
+    /// NULL, and so does <c>IsEncrypted</c> for a key or foreign key.
     /// <para>
-    /// <c>IsQuotedIdentOn</c> is the interesting one: a CHECK or DEFAULT
-    /// constraint answers a constant <b>0</b> — not the creating session's
-    /// setting, which is 0 even for one created with <c>QUOTED_IDENTIFIER</c>
-    /// ON (probe-confirmed both ways, and uniformly 0 across msdb's 229
-    /// shipped constraints) — while a key or foreign-key constraint answers
-    /// NULL. <c>IsAnsiNullsOn</c> is NULL for all five. <c>IsConstraint</c> is
-    /// 1 and <c>IsDefaultCnst</c> 1 for a DEFAULT constraint, while
-    /// <c>IsDefault</c> and <c>IsRule</c>, which name the legacy
-    /// <c>CREATE DEFAULT</c> / <c>CREATE RULE</c> objects, are 0 (probed
-    /// 2026-09-26).
+    /// <c>CnstIsColumn</c> is 1 for a DEFAULT and for a CHECK or foreign key
+    /// over one column, however it was declared, and 0 for a key even over
+    /// one. <c>IsQuotedIdentOn</c> is the other interesting one: a CHECK or
+    /// DEFAULT constraint answers a constant <b>0</b> — not the creating
+    /// session's setting — while a key or foreign-key constraint answers
+    /// NULL. <c>IsAnsiNullsOn</c> is NULL for all five.
     /// </para>
     /// </summary>
-    internal static int? EvaluateConstraintProperty(string typeCode, string property)
+    internal static int? EvaluateConstraintProperty(ConstraintLookup.ConstraintReference constraint, string property)
     {
-        // CHECK and DEFAULT carry an expression, the one property answer that
-        // splits the five families apart.
-        var parsesAnExpression = typeCode is "C" or "D";
-        // SSS003: switch on the Span<char> overload rather than allocating an
-        // uppercased temp, the same shape EvaluateProperty uses.
+        var typeCode = constraint.TypeCode;
+        var table = constraint.Table;
+        var key = typeCode is "PK" or "UQ" ? table.KeyConstraints.Find(candidate => candidate.ObjectId == constraint.ObjectId) : null;
+        var foreignKey = typeCode == "F" ? table.OutgoingForeignKeys.Find(candidate => candidate.ObjectId == constraint.ObjectId) : null;
+        var check = typeCode == "C" ? table.CheckConstraints.Find(candidate => candidate.ObjectId == constraint.ObjectId) : null;
         Span<char> upper = stackalloc char[property.Length];
-        return property.AsSpan().ToUpperInvariant(upper) switch
+        return upper[..property.AsSpan().ToUpperInvariant(upper)] switch
         {
-            6 => upper switch
-            {
-                "ISRULE" => 0,
-                "ISVIEW" => 0,
-                _ => null,
-            },
-            7 => upper switch { "ISTABLE" => 0, _ => null },
-            9 => upper switch
-            {
-                "ISDEFAULT" => 0,
-                "ISTRIGGER" => 0,
-                _ => null,
-            },
-            11 => upper switch
-            {
-                "ISENCRYPTED" => 0,
-                "ISMSSHIPPED" => 0,
-                "ISPROCEDURE" => 0,
-                "ISUSERTABLE" => 0,
-                _ => null,
-            },
-            12 => upper switch { "ISCONSTRAINT" => 1, _ => null },
-            13 => upper switch
-            {
-                "ISDEFAULTCNST" => typeCode == "D" ? 1 : 0,
-                "ISSYSTEMTABLE" => 0,
-                _ => null,
-            },
-            15 => upper switch
-            {
-                "ISQUOTEDIDENTON" => parsesAnExpression ? 0 : null,
-                "ISTABLEFUNCTION" => 0,
-                _ => null,
-            },
-            16 => upper switch
-            {
-                "ISINLINEFUNCTION" => 0,
-                "ISSCALARFUNCTION" => 0,
-                _ => null,
-            },
+            "CNSTISCLUSTKEY" => Flag(key is { IsClustered: true }),
+            "CNSTISCOLUMN" => Flag(typeCode == "D" || check is { InlineColumn: not null } || foreignKey is { ChildColumnOrdinals.Length: 1 }),
+            "CNSTISDELETECASCADE" => Flag(foreignKey is { DeleteAction: ReferentialAction.Cascade }),
+            "CNSTISDISABLED" => Flag(check is { IsDisabled: true } || foreignKey is { IsDisabled: true }),
+            "CNSTISNONCLUSTKEY" => Flag(key is { IsClustered: false }),
+            "CNSTISNOTREPL" => 0,
+            "CNSTISNOTTRUSTED" => Flag(check is { IsNotTrusted: true } || foreignKey is { IsNotTrusted: true }),
+            "CNSTISUPDATECASCADE" => Flag(foreignKey is { UpdateAction: ReferentialAction.Cascade }),
+            "ISCHECKCNST" => Flag(typeCode == "C"),
+            "ISCONSTRAINT" => 1,
+            "ISDEFAULTCNST" => Flag(typeCode == "D"),
+            "ISENCRYPTED" => typeCode is "C" or "D" ? 0 : null,
+            "ISFOREIGNKEY" => Flag(typeCode == "F"),
+            "ISPRIMARYKEY" => Flag(typeCode == "PK"),
+            "ISQUOTEDIDENTON" => typeCode is "C" or "D" ? 0 : null,
+            "ISUNIQUECNST" => Flag(typeCode == "UQ"),
+            "ISDEFAULT" or "ISEXECUTED" or "ISEXTENDEDPROC" or "ISINLINEFUNCTION" or "ISMSSHIPPED" or "ISPROCEDURE" or "ISQUEUE"
+                or "ISREPLPROC" or "ISRULE" or "ISSCALARFUNCTION" or "ISSYSTEMTABLE" or "ISTABLE" or "ISTABLEFUNCTION" or "ISTRIGGER"
+                or "ISUSERTABLE" or "ISVIEW" => 0,
+            "OWNERID" => constraint.Schema.PrincipalId,
+            "SCHEMAID" => constraint.Schema.SchemaId,
             _ => null,
         };
     }
@@ -201,7 +168,9 @@ internal sealed class ObjectProperty : Expression
                 || schema.Functions.Values.Contains(obj)
                 || schema.Triggers.Values.Contains(obj)
                 || schema.Sequences.Values.Contains(obj)
-                || schema.Synonyms.Values.Contains(obj))
+                || schema.Synonyms.Values.Contains(obj)
+                || schema.Defaults.Values.Contains(obj)
+                || schema.Rules.Values.Contains(obj))
             {
                 return schema;
             }
@@ -219,126 +188,188 @@ internal sealed class ObjectProperty : Expression
     /// </summary>
     internal static int? EvaluateProperty(Database database, SchemaObject obj, string property)
     {
-        // Boolean Is-X checks based on concrete type. Returns 1 if true,
-        // 0 if false, NULL for unknown property names (matching real
-        // SQL Server's convention). SSS003: use the Span<char> overload
-        // to avoid the temp-string alloc in the switch.
+        // Real answers each property for the object kinds it concerns and NULL
+        // for the rest (probed 2026-09-26 against SQL Server 2025, every
+        // documented property over every modeled kind): the Is* kind flags for
+        // every object, the Exec* family for everything that executes (a
+        // procedure, function, trigger or view), the Has*Trigger family for a
+        // table or view, and the Table* family for a table or table-valued
+        // function — the full-text members also for an indexed view.
+        // SSS003: the Span<char> case-fold avoids the temp-string alloc.
         Span<char> upper = stackalloc char[property.Length];
-        return property.AsSpan().ToUpperInvariant(upper) switch
+        var name = upper[..property.AsSpan().ToUpperInvariant(upper)];
+        var executes = obj is Procedure or View or Trigger or UserDefinedFunction;
+        var trigger = obj as Trigger;
+        return name switch
         {
-            6 => upper switch
-            {
-                "ISRULE" => obj is RuleObject ? 1 : 0,
-                "ISVIEW" => obj is View ? 1 : 0,
-                _ => null,
-            },
-            7 => upper switch { "ISTABLE" => obj is HeapTable ? 1 : 0, _ => null },
-            9 => upper switch
-            {
-                "ISDEFAULT" => obj is DefaultObject ? 1 : 0,
-                "ISTRIGGER" => obj is Trigger ? 1 : 0,
-                _ => null,
-            },
-            11 => upper switch
-            {
-                // IsEncrypted is module-scoped: 0 for any SQL module (WITH
-                // ENCRYPTION isn't modeled), NULL for non-module objects —
-                // probe-confirmed (view → 0, table → NULL). DacFx enumerates
-                // encrypted procedures with `IsEncrypted = 1 OR IsEncrypted
-                // IS NULL`, so the NULL-for-unknown fallback enrolled every
-                // procedure as encrypted.
-                "ISENCRYPTED" => IsSqlModule(obj) || obj is BindableObject ? 0 : null,
-                "ISMSSHIPPED" => 0,
-                "ISPROCEDURE" => obj is Procedure ? 1 : 0,
-                "ISUSERTABLE" => obj is HeapTable ? 1 : 0,
-                _ => null,
-            },
-            12 => upper switch { "ISCONSTRAINT" => 0, _ => null },
-            13 => upper switch
-            {
-                // The creation-time ANSI_NULLS capture, under the spelling
-                // that also answers for a table — same kind filter as
-                // IsQuotedIdentOn, and NULL for a sequence / synonym /
-                // constraint (probe-confirmed). Unlike QUOTED_IDENTIFIER a
-                // table's answer is the captured value, not a constant 1.
-                "ISANSINULLSON" => obj is HeapTable || IsSqlModule(obj) ? (obj.UsesAnsiNulls ? 1 : 0) : null,
-                // A table, a CREATE DEFAULT / CREATE RULE object and every
-                // other kind modeled here is not a constraint.
-                "ISDEFAULTCNST" => 0,
-                "ISSCHEMABOUND" => ModuleDeterminism.EvaluateSchemaBound(obj),
-                // 0 for every resolvable object — probe-confirmed even for
-                // catalog views (real's legacy system-table sense never
-                // applies to modeled objects). DacFx's default-constraint
-                // populator filters on `= 0`, so a NULL here silently drops
-                // every DEFAULT constraint from a bacpac export.
-                "ISSYSTEMTABLE" => 0,
-                "TABLEHASINDEX" => TableFlag(obj, upper),
-                _ => null,
-            },
-            15 => upper switch
-            {
-                "ISDETERMINISTIC" => ModuleDeterminism.Evaluate(database, obj),
-                // The creation-time QUOTED_IDENTIFIER capture, under the
-                // spelling that also answers for a table. Real reports 1 for
-                // any table regardless of the creating session and NULL for a
-                // sequence / synonym / key constraint (probe-confirmed), which
-                // the UsesQuotedIdentifier default and the kind filter here
-                // reproduce; the ExecIs… spelling below is module-only.
-                // A CREATE DEFAULT / CREATE RULE object answers a constant 0,
-                // as a CHECK or DEFAULT constraint does (probed 2026-09-26).
-                "ISQUOTEDIDENTON" => obj is BindableObject ? 0
-                    : obj is HeapTable || IsSqlModule(obj) ? (obj.UsesQuotedIdentifier ? 1 : 0) : null,
-                "ISTABLEFUNCTION" => obj is InlineTableValuedFunction or MultiStatementTableValuedFunction ? 1 : 0,
-                _ => null,
-            },
-            16 => upper switch
-            {
-                "ISINLINEFUNCTION" => obj is InlineTableValuedFunction ? 1 : 0,
-                "ISSCALARFUNCTION" => obj is ScalarFunction ? 1 : 0,
-                "TABLEHASIDENTITY" => TableFlag(obj, upper),
-                _ => null,
-            },
+            "EXECISAFTERTRIGGER" => executes ? Flag(trigger is { Timing: TriggerTiming.After }) : null,
             // The module SET-option snapshot pair, both reading the
             // creation-time capture. Both return NULL for a non-module object
             // — including a table, which the shorter IsAnsiNullsOn /
             // IsQuotedIdentOn spellings answer for (probe-confirmed: the two
             // spellings agree on modules and diverge on tables).
-            17 => upper switch
+            "EXECISANSINULLSON" => IsSqlModule(obj) ? (obj.UsesAnsiNulls ? 1 : 0) : null,
+            "EXECISDELETETRIGGER" => executes ? Flag(trigger is not null && (trigger.Actions & TriggerActions.Delete) != 0) : null,
+            // The sp_settriggerorder read-backs.
+            "EXECISFIRSTDELETETRIGGER" => executes ? TriggerOrderFlag(obj, TriggerActions.Delete, first: true) ?? 0 : null,
+            "EXECISFIRSTINSERTTRIGGER" => executes ? TriggerOrderFlag(obj, TriggerActions.Insert, first: true) ?? 0 : null,
+            "EXECISFIRSTUPDATETRIGGER" => executes ? TriggerOrderFlag(obj, TriggerActions.Update, first: true) ?? 0 : null,
+            "EXECISINSERTTRIGGER" => executes ? Flag(trigger is not null && (trigger.Actions & TriggerActions.Insert) != 0) : null,
+            "EXECISINSTEADOFTRIGGER" => executes ? Flag(trigger is { Timing: TriggerTiming.InsteadOf }) : null,
+            "EXECISLASTDELETETRIGGER" => executes ? TriggerOrderFlag(obj, TriggerActions.Delete, first: false) ?? 0 : null,
+            "EXECISLASTINSERTTRIGGER" => executes ? TriggerOrderFlag(obj, TriggerActions.Insert, first: false) ?? 0 : null,
+            "EXECISLASTUPDATETRIGGER" => executes ? TriggerOrderFlag(obj, TriggerActions.Update, first: false) ?? 0 : null,
+            "EXECISQUOTEDIDENTON" => IsSqlModule(obj) ? (obj.UsesQuotedIdentifier ? 1 : 0) : null,
+            "EXECISSTARTUP" or "EXECISWITHNATIVECOMPILATION" => executes ? 0 : null,
+            "EXECISTRIGGERDISABLED" => executes ? Flag(trigger is { IsDisabled: true }) : null,
+            "EXECISTRIGGERNOTFORREPL" => executes ? Flag(trigger is { NotForReplication: true }) : null,
+            "EXECISUPDATETRIGGER" => executes ? Flag(trigger is not null && (trigger.Actions & TriggerActions.Update) != 0) : null,
+            "HASAFTERTRIGGER" => TriggerPresence(database, obj, TriggerActions.Insert | TriggerActions.Update | TriggerActions.Delete, TriggerTiming.After),
+            "HASDELETETRIGGER" => TriggerPresence(database, obj, TriggerActions.Delete, timing: null),
+            "HASINSERTTRIGGER" => TriggerPresence(database, obj, TriggerActions.Insert, timing: null),
+            "HASINSTEADOFTRIGGER" => TriggerPresence(database, obj, TriggerActions.Insert | TriggerActions.Update | TriggerActions.Delete, TriggerTiming.InsteadOf),
+            "HASUPDATETRIGGER" => TriggerPresence(database, obj, TriggerActions.Update, timing: null),
+            // The creation-time ANSI_NULLS capture, under the spelling that
+            // also answers for a table — same kind filter as IsQuotedIdentOn,
+            // and NULL for a sequence / synonym / constraint (probe-confirmed).
+            // Unlike QUOTED_IDENTIFIER a table's answer is the captured value,
+            // not a constant 1.
+            "ISANSINULLSON" => obj is HeapTable || IsSqlModule(obj) ? (obj.UsesAnsiNulls ? 1 : 0) : null,
+            // Only a constraint id answers 1 to the constraint kinds; see
+            // EvaluateConstraintProperty.
+            "ISCHECKCNST" or "ISCONSTRAINT" or "ISDEFAULTCNST" or "ISFOREIGNKEY" or "ISPRIMARYKEY" or "ISUNIQUECNST" => 0,
+            "ISDEFAULT" => Flag(obj is DefaultObject),
+            "ISDETERMINISTIC" => ModuleDeterminism.Evaluate(database, obj),
+            // IsEncrypted is module-scoped: 0 for any SQL module (WITH
+            // ENCRYPTION isn't modeled), NULL for non-module objects —
+            // probe-confirmed (view → 0, table → NULL). DacFx enumerates
+            // encrypted procedures with `IsEncrypted = 1 OR IsEncrypted IS
+            // NULL`, so the NULL-for-unknown fallback enrolled every procedure
+            // as encrypted.
+            "ISENCRYPTED" => IsSqlModule(obj) || obj is BindableObject ? 0 : null,
+            "ISEXECUTED" => Flag(executes),
+            // Never answered 1 by a modeled kind: an extended procedure, a
+            // shipped object, a Service Broker queue, a replication procedure.
+            // IsSystemTable is 0 even for a catalog view; DacFx's
+            // default-constraint populator filters on `= 0`, so a NULL here
+            // silently drops every DEFAULT constraint from a bacpac export.
+            "ISEXTENDEDPROC" or "ISMSSHIPPED" or "ISQUEUE" or "ISREPLPROC" or "ISSYSTEMTABLE" => 0,
+            "ISINDEXABLE" => obj switch
             {
-                "EXECISANSINULLSON" => IsSqlModule(obj) ? (obj.UsesAnsiNulls ? 1 : 0) : null,
-                "TABLEHASCHECKCNST" => TableFlag(obj, upper),
+                HeapTable => 1,
+                View view => Flag(view.IsSchemaBound),
                 _ => null,
             },
-            // The rest of the TableHas* family, all 18 characters. Real
-            // answers every one of these from the plain OBJECTPROPERTY as
-            // well as the EX form (probe-confirmed); only BaseType and
-            // Cardinality are genuinely EX-only.
-            18 => TableFlag(obj, upper),
-            19 => upper switch
+            "ISINDEXED" => obj switch
             {
-                "EXECISQUOTEDIDENTON" => IsSqlModule(obj) ? (obj.UsesQuotedIdentifier ? 1 : 0) : null,
+                HeapTable table => Flag(table.Indexes.Count > 0 || table.KeyConstraints.Count > 0),
+                View view => Flag(view.Indexes.Count > 0),
                 _ => null,
             },
-            // The sp_settriggerorder read-backs, split by name length: the
-            // Last… spellings are one character shorter than the First… ones.
-            // NULL for a non-trigger, matching real (probe-confirmed against a
-            // table's object_id).
-            23 => upper switch
-            {
-                "EXECISLASTDELETETRIGGER" => TriggerOrderFlag(obj, TriggerActions.Delete, first: false),
-                "EXECISLASTINSERTTRIGGER" => TriggerOrderFlag(obj, TriggerActions.Insert, first: false),
-                "EXECISLASTUPDATETRIGGER" => TriggerOrderFlag(obj, TriggerActions.Update, first: false),
-                _ => null,
-            },
-            24 => upper switch
-            {
-                "EXECISFIRSTDELETETRIGGER" => TriggerOrderFlag(obj, TriggerActions.Delete, first: true),
-                "EXECISFIRSTINSERTTRIGGER" => TriggerOrderFlag(obj, TriggerActions.Insert, first: true),
-                "EXECISFIRSTUPDATETRIGGER" => TriggerOrderFlag(obj, TriggerActions.Update, first: true),
-                _ => null,
-            },
-            _ => null,
+            "ISINLINEFUNCTION" => Flag(obj is InlineTableValuedFunction),
+            "ISPROCEDURE" => Flag(obj is Procedure),
+            // The creation-time QUOTED_IDENTIFIER capture, under the spelling
+            // that also answers for a table. Real reports 1 for any table
+            // regardless of the creating session and NULL for a sequence /
+            // synonym / key constraint (probe-confirmed), which the
+            // UsesQuotedIdentifier default and the kind filter here reproduce.
+            // A CREATE DEFAULT / CREATE RULE object answers a constant 0, as a
+            // CHECK or DEFAULT constraint does.
+            "ISQUOTEDIDENTON" => obj is BindableObject ? 0
+                : obj is HeapTable || IsSqlModule(obj) ? (obj.UsesQuotedIdentifier ? 1 : 0) : null,
+            "ISRULE" => Flag(obj is RuleObject),
+            "ISSCALARFUNCTION" => Flag(obj is ScalarFunction or ClrScalarFunction),
+            "ISSCHEMABOUND" => ModuleDeterminism.EvaluateSchemaBound(obj),
+            // Real can verify a view's or a function's precision and
+            // determinism exactly when it is schema-bound.
+            "ISSYSTEMVERIFIED" => obj is View or UserDefinedFunction ? ModuleDeterminism.EvaluateSchemaBound(obj) : null,
+            "ISTABLE" or "ISUSERTABLE" => Flag(obj is HeapTable),
+            "ISTABLEFUNCTION" => Flag(obj is InlineTableValuedFunction or MultiStatementTableValuedFunction),
+            "ISTRIGGER" => Flag(obj is Trigger),
+            "ISVIEW" => Flag(obj is View),
+            "OWNERID" => FindOwningSchema(database, obj)?.PrincipalId,
+            "SCHEMAID" => FindOwningSchema(database, obj)?.SchemaId,
+            "TABLEDELETETRIGGER" => FirstTriggerFor(database, obj, TriggerActions.Delete),
+            "TABLEDELETETRIGGERCOUNT" => TableTriggerCount(database, obj, TriggerActions.Delete),
+            "TABLEINSERTTRIGGER" => FirstTriggerFor(database, obj, TriggerActions.Insert),
+            "TABLEINSERTTRIGGERCOUNT" => TableTriggerCount(database, obj, TriggerActions.Insert),
+            "TABLEUPDATETRIGGER" => FirstTriggerFor(database, obj, TriggerActions.Update),
+            "TABLEUPDATETRIGGERCOUNT" => TableTriggerCount(database, obj, TriggerActions.Update),
+            _ => TableFlag(database, obj, name),
         };
+    }
+
+    private static int Flag(bool value) => value ? 1 : 0;
+
+    /// <summary>
+    /// <c>Has*Trigger</c>: whether a trigger with one of
+    /// <paramref name="actions"/> (and <paramref name="timing"/>, when given)
+    /// sits on the table or view; NULL for any other kind.
+    /// </summary>
+    private static int? TriggerPresence(Database database, SchemaObject obj, TriggerActions actions, TriggerTiming? timing)
+    {
+        if (obj is not (HeapTable or View))
+            return null;
+        foreach (var trigger in TriggersOn(database, obj))
+        {
+            if ((trigger.Actions & actions) != 0 && (timing is null || trigger.Timing == timing))
+                return 1;
+        }
+        return 0;
+    }
+
+    /// <summary>
+    /// <c>Table*TriggerCount</c>: the table's AFTER triggers for
+    /// <paramref name="action"/>, disabled ones included; 0 for a table-valued
+    /// function, NULL for any other kind.
+    /// </summary>
+    private static int? TableTriggerCount(Database database, SchemaObject obj, TriggerActions action)
+    {
+        if (obj is InlineTableValuedFunction or MultiStatementTableValuedFunction)
+            return 0;
+        if (obj is not HeapTable)
+            return null;
+        var count = 0;
+        foreach (var trigger in TriggersOn(database, obj))
+        {
+            if ((trigger.Actions & action) != 0 && trigger.Timing == TriggerTiming.After)
+                count++;
+        }
+        return count;
+    }
+
+    /// <summary>
+    /// <c>Table*Trigger</c>: the object id of the table's trigger for
+    /// <paramref name="action"/> — the one <c>sp_settriggerorder</c> made
+    /// first, else the lowest id of any timing — or NULL when it has none.
+    /// </summary>
+    private static int? FirstTriggerFor(Database database, SchemaObject obj, TriggerActions action)
+    {
+        if (obj is not HeapTable)
+            return null;
+        Trigger? first = null;
+        foreach (var trigger in TriggersOn(database, obj))
+        {
+            if ((trigger.Actions & action) == 0)
+                continue;
+            if ((trigger.FirstForActions & action) != 0)
+                return trigger.ObjectId;
+            if (first is null || trigger.ObjectId < first.ObjectId)
+                first = trigger;
+        }
+        return first?.ObjectId;
+    }
+
+    private static IEnumerable<Trigger> TriggersOn(Database database, SchemaObject parent)
+    {
+        foreach (var schema in database.Schemas.Values)
+        {
+            foreach (var trigger in schema.Triggers.Values)
+            {
+                if (ReferenceEquals(trigger.Parent, parent))
+                    yield return trigger;
+            }
+        }
     }
 
     /// <summary>
@@ -373,13 +404,77 @@ internal sealed class ObjectProperty : Expression
     /// from the plain <c>OBJECTPROPERTY</c> as well as the EX form
     /// (probe-confirmed), so both route through the one mapping.
     /// </summary>
-    private static int? TableFlag(SchemaObject obj, ReadOnlySpan<char> upperName) =>
-        ObjectPropertyEx.TableFlagByName(obj, upperName) switch
+    /// <summary>
+    /// The rest of the <c>Table*</c> family, answered for a table and a
+    /// table-valued function (off across the board for the latter, save a
+    /// multi-statement function's <c>TableIsFake</c>) — the full-text members
+    /// also for an indexed view — and NULL for any other kind or name.
+    /// </summary>
+    private static int? TableFlag(Database database, SchemaObject obj, ReadOnlySpan<char> upperName)
+    {
+        var table = obj as HeapTable;
+        var fullText = table?.FullTextIndex;
+        if (table is null && obj is not (InlineTableValuedFunction or MultiStatementTableValuedFunction))
         {
-            true => 1,
-            false => 0,
-            null => null,
+            // An indexed view answers the full-text members, all off.
+            return obj is View { Indexes.Count: > 0 } && upperName is "TABLEFULLTEXTBACKGROUNDUPDATEINDEXON" or "TABLEFULLTEXTCATALOGID"
+                or "TABLEFULLTEXTCHANGETRACKINGON" or "TABLEFULLTEXTKEYCOLUMN" or "TABLEFULLTEXTPOPULATESTATUS" or "TABLEHASACTIVEFULLTEXTINDEX"
+                ? 0
+                : null;
+        }
+        return upperName switch
+        {
+            "TABLEFULLTEXTBACKGROUNDUPDATEINDEXON" or "TABLEFULLTEXTCHANGETRACKINGON" => Flag(fullText is { ChangeTracking: FullTextChangeTracking.Auto }),
+            "TABLEFULLTEXTCATALOGID" => fullText?.CatalogId ?? 0,
+            "TABLEFULLTEXTKEYCOLUMN" => FullTextKeyColumnId(table, fullText),
+            // Real answers 1 while a population runs; the simulator's full-text
+            // searches read live rows, so none ever does.
+            "TABLEFULLTEXTPOPULATESTATUS" => 0,
+            "TABLEHASACTIVEFULLTEXTINDEX" => Flag(fullText is { IsEnabled: true }),
+            "TABLEHASCHECKCNST" => Flag(table is { CheckConstraints.Count: > 0 }),
+            "TABLEHASCLUSTINDEX" => Flag(table is not null && ObjectPropertyEx.HasClusteredIndex(table)),
+            // Legacy and unmodeled storage options, off on every table.
+            "TABLEHASCOLUMNSET" or "TABLEHASVARDECIMALSTORAGEFORMAT" or "TABLEISLOCKEDONBULKLOAD"
+                or "TABLEISMEMORYOPTIMIZED" or "TABLEISPINNED" or "TABLETEXTINROWLIMIT" => 0,
+            "TABLEHASDEFAULTCNST" => Flag(table is not null && Array.Exists(table.Columns, column => column.DefaultConstraint is not null)),
+            "TABLEHASDELETETRIGGER" => Flag(table is not null && TableTriggerCount(database, table, TriggerActions.Delete) > 0),
+            "TABLEHASFOREIGNKEY" => Flag(table is { OutgoingForeignKeys.Count: > 0 }),
+            "TABLEHASFOREIGNREF" => Flag(table is { IncomingForeignKeys.Count: > 0 }),
+            "TABLEHASIDENTITY" => Flag(table is not null && Array.Exists(table.Columns, column => column.Identity is not null)),
+            "TABLEHASINDEX" => Flag(table is not null && (table.Indexes.Count > 0 || table.KeyConstraints.Count > 0)),
+            "TABLEHASINSERTTRIGGER" => Flag(table is not null && TableTriggerCount(database, table, TriggerActions.Insert) > 0),
+            "TABLEHASNONCLUSTINDEX" => Flag(table is not null
+                && (table.Indexes.Exists(index => !index.IsClustered) || table.KeyConstraints.Exists(key => !key.IsClustered))),
+            "TABLEHASPRIMARYKEY" => Flag(table is not null && table.KeyConstraints.Exists(key => key.Kind == KeyConstraintKind.PrimaryKey)),
+            "TABLEHASROWGUIDCOL" => Flag(table is not null && Array.Exists(table.Columns, column => column.IsRowGuidCol)),
+            // The legacy LOB types only; a MAX type or xml doesn't count.
+            "TABLEHASTEXTIMAGE" => Flag(table is not null && Array.Exists(table.Columns, column => column.Type is TextSqlType or NTextSqlType or ImageSqlType)),
+            "TABLEHASTIMESTAMP" => Flag(table is not null && Array.Exists(table.Columns, column => column.Type is RowVersionSqlType)),
+            "TABLEHASUNIQUECNST" => Flag(table is not null && table.KeyConstraints.Exists(key => key.Kind == KeyConstraintKind.Unique)),
+            "TABLEHASUPDATETRIGGER" => Flag(table is not null && TableTriggerCount(database, table, TriggerActions.Update) > 0),
+            // A multi-statement function's return table is real's "fake" table.
+            "TABLEISFAKE" => Flag(obj is MultiStatementTableValuedFunction),
+            "TABLETEMPORALTYPE" => table is null ? 0 : table.IsHistoryTable ? 1 : table.SystemVersioning is not null ? 2 : 0,
+            _ => null,
         };
+    }
+
+    private static int FullTextKeyColumnId(HeapTable? table, FullTextIndex? index)
+    {
+        if (table is null || index is null)
+            return 0;
+        foreach (var key in table.KeyConstraints)
+        {
+            if (Collation.Baseline.Equals(key.Name, index.KeyIndexName) && key.FullOrdinals.Length > 0)
+                return table.Columns[key.FullOrdinals[0]].ColumnId;
+        }
+        foreach (var candidate in table.Indexes)
+        {
+            if (Collation.Baseline.Equals(candidate.Name, index.KeyIndexName) && candidate.KeyFullOrdinals.Length > 0)
+                return table.Columns[candidate.KeyFullOrdinals[0]].ColumnId;
+        }
+        return 0;
+    }
 
     internal override string DebugDisplay() => $"OBJECTPROPERTY({this.idArg.DebugDisplay()}, {this.propertyArg.DebugDisplay()})";
 

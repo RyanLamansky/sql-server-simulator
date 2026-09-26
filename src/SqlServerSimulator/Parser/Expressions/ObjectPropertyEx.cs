@@ -68,8 +68,8 @@ internal sealed class ObjectPropertyEx : Expression
         // agrees between the two functions, probe-confirmed); the EX-only
         // properties have no constraint answer here.
         return obj is null
-            ? ObjectProperty.TryFindConstraint(runtime.Batch.CurrentDatabase, id, out var constraintTypeCode)
-                && ObjectProperty.EvaluateConstraintProperty(constraintTypeCode, prop) is int constraintResult
+            ? ObjectProperty.TryFindConstraint(runtime.Batch.CurrentDatabase, id, out var constraint)
+                && ObjectProperty.EvaluateConstraintProperty(constraint, prop) is int constraintResult
                     ? SqlValue.FromVariant(SqlValue.FromInt32(constraintResult))
                     : SqlValue.Null(SqlType.SqlVariant)
             : ObjectProperty.EvaluateProperty(runtime.Batch.CurrentDatabase, obj, prop) is int booleanResult
@@ -191,7 +191,7 @@ internal sealed class ObjectPropertyEx : Expression
         return false;
     }
 
-    private static bool HasClusteredIndex(HeapTable table)
+    internal static bool HasClusteredIndex(HeapTable table)
     {
         // Real SQL Server returns 1 when a clustered index exists. The
         // simulator's PK constraint creates a clustered index by default

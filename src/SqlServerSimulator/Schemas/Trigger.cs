@@ -128,6 +128,14 @@ internal sealed class Trigger(
     public bool IsDisabled;
 
     /// <summary>
+    /// True for a trigger declared <c>NOT FOR REPLICATION</c>. The simulator
+    /// runs no replication agent, so the marker changes nothing it fires on;
+    /// it surfaces in <c>sys.triggers.is_not_for_replication</c> and
+    /// <c>OBJECTPROPERTY(id, 'ExecIsTriggerNotForRepl')</c>.
+    /// </summary>
+    public bool NotForReplication;
+
+    /// <summary>
     /// Actions this trigger was made the <c>First</c> trigger for via
     /// <c>sp_settriggerorder</c>, and likewise <see cref="LastForActions"/>.
     /// Ordering is per action and independent — making a multi-action trigger
