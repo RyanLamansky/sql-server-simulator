@@ -1,4 +1,5 @@
 using SqlServerSimulator.Parser;
+using SqlServerSimulator.Parser.Expressions;
 using SqlServerSimulator.Parser.Tokens;
 using SqlServerSimulator.Schemas;
 using SqlServerSimulator.Storage;
@@ -882,7 +883,10 @@ partial class Simulation
                 }
 
                 context.MoveNextRequired();
-                var rhs = Expression.Parse(context);
+                var setsDefault = context.Token is ReservedKeyword { Keyword: Keyword.Default };
+                var rhs = setsDefault ? ColumnDefaultValue.Unbound : Expression.Parse(context);
+                if (setsDefault)
+                    context.MoveNextOptional();
 
                 // Resolve user-facing column name into the base-table ordinal
                 // that the WHEN executor will mutate. View paths translate
@@ -928,6 +932,8 @@ partial class Simulation
                     throw SimulatedSqlException.ColumnCannotBeModified(targetColumn.Name);
                 if (targetColumn.Type == SqlType.RowVersion)
                     throw SimulatedSqlException.CannotUpdateTimestampColumn();
+                if (setsDefault)
+                    rhs = ColumnDefaultValue.Bind(targetColumn);
                 AssignmentRules.RequireAssignable(rhs, rhs.GetSqlType(context.Batch, resolveType), targetColumn.Type);
                 if (assignments.Exists(assignment => assignment.Ordinal == ordinal))
                     throw SimulatedSqlException.ColumnAssignedMoreThanOnce(sourceView is null ? targetColumn.Name : columnName);

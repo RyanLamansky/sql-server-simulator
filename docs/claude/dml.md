@@ -196,6 +196,9 @@ The VALUES source is parsed **before** identity diagnostics run (`Simulation.Ins
 
 Django's `db_default` field option emits this shape, which is what motivated it.
 
+`UPDATE … SET col = DEFAULT` and a `MERGE` update action's `SET col = DEFAULT` take the same default, or NULL where there is none, one evaluation per row (`ColumnDefaultValue`, probed 2026-09-26 against SQL Server 2025).
+The keyword stands alone: `DEFAULT + 1` and `(DEFAULT)` are syntax errors, a variable target is Msg 156, and a compound operator is Msg 10708; the column's own refusals (identity, computed, rowversion) and the write's (NULL into NOT NULL, truncation) apply as to any value.
+
 ## `INSERT INTO t DEFAULT VALUES`
 Inserts a single row with every column defaulted.
 `ProcessHeapInsert` clears the destination-column list and feeds one empty source tuple, so every column flows through the default / identity-allocation / implicit-NULL path — a NOT NULL column with no default hits the same constraint error an explicit all-defaults insert would (probe-confirmed).

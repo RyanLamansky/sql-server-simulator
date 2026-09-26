@@ -225,6 +225,14 @@ partial class SimulatedSqlException
         });
 
     /// <summary>
+    /// Mimics SQL Server's Msg 10708 — <c>SET col += DEFAULT</c> and the other
+    /// compound assignments, which take no <c>DEFAULT</c> (probed 2026-09-26
+    /// against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException DefaultOnCompoundAssignment(char op) =>
+        new($"DEFAULT is not allowed on the right hand side of \"{op}=\"", 10708, 15, 1);
+
+    /// <summary>
     /// Mimics SQL Server's Msg 1035: <c>CAST</c> / <c>TRY_CAST</c> /
     /// <c>PARSE</c> / <c>TRY_PARSE</c> whose argument list closes, or reaches
     /// a comma, where its <c>AS</c> belongs — named by the function's own

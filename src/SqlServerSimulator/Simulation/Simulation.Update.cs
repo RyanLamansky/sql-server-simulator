@@ -194,6 +194,16 @@ partial class Simulation
             var lhsForCompound = new Reference(setTarget);
 
             context.MoveNextRequired();
+            if (context.Token is ReservedKeyword { Keyword: Keyword.Default })
+            {
+                if (assignOp != '=')
+                    throw SimulatedSqlException.DefaultOnCompoundAssignment(assignOp);
+                context.MoveNextOptional();
+                rawAssignments.Add((columnName, ColumnDefaultValue.Unbound));
+                if (context.Token is Operator { Character: ',' })
+                    continue;
+                break;
+            }
             var rhs = Expression.Parse(context);
             var finalExpr = assignOp == '=' ? rhs : TwoSidedExpression.FromCompoundOp(assignOp, lhsForCompound, rhs, context);
             rawAssignments.Add((columnName, finalExpr));
@@ -1235,6 +1245,11 @@ partial class Simulation
                     : colName);
             }
             RejectUnmodifiableSetTarget(table, columnOrdinal, database);
+            if (ReferenceEquals(expr, ColumnDefaultValue.Unbound))
+            {
+                assignments.Add((columnOrdinal, ColumnDefaultValue.Bind(table.Columns[columnOrdinal])));
+                continue;
+            }
             if (expr is AssignmentExpression { Slot.DeclaredType: var variableType } && variableType.SqlServerName != table.Columns[columnOrdinal].Type.SqlServerName)
                 throw SimulatedSqlException.ReceivingVariableTypeMismatch(variableType.SqlServerName, table.Columns[columnOrdinal].Type.SqlServerName, colName);
             assignments.Add((columnOrdinal, expr));
@@ -1357,6 +1372,9 @@ partial class Simulation
         }
         foreach (var (_, expr) in rawAssignments)
         {
+            // A column's default reads no column.
+            if (ReferenceEquals(expr, ColumnDefaultValue.Unbound))
+                continue;
             try
             {
                 _ = expr.GetSqlType(batch, Resolve);
