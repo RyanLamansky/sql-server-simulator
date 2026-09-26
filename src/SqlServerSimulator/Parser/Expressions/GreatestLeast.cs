@@ -71,6 +71,8 @@ internal sealed class GreatestLeast : Expression
 
     internal override bool ResultReportsNumeric => this.namingArm?.ResultReportsNumeric ?? false;
 
+    internal override Schemas.AliasType? ResultAliasType => SharedAliasType(this.arguments);
+
     internal override bool ParallelSafe => AllParallelSafe(this.arguments);
 
     public override SqlValue Run(RuntimeContext runtime)

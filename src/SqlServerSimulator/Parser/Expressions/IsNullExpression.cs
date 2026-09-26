@@ -87,4 +87,7 @@ internal sealed class IsNullExpression : Expression
 
     // Named by the check when it is decimal-family, as the result type is.
     internal override bool ResultReportsNumeric => this.namingArm?.ResultReportsNumeric ?? this.replacement.ResultReportsNumeric;
+
+    // The result is the checked operand's type, alias and all.
+    internal override Schemas.AliasType? ResultAliasType => this.check.ResultAliasType;
 }

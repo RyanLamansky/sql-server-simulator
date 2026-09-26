@@ -373,4 +373,46 @@ public class AliasTypeTests
         AreEqual(message, exception.Errors[0].Message);
         AreEqual((byte)state, exception.State);
     }
+
+    /// <summary>
+    /// A projection keeps an alias it passes through unchanged — a view, a
+    /// derived table, a CTE, a UNION, SELECT … INTO — and drops it once it
+    /// computes anything; a #temp target has no alias types to keep it
+    /// (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void Projections_CarryTheAliasTheyPassThrough()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create type dbo.phone from varchar(20) null",
+            "create table t (p phone, q int)",
+            "create view v1 as select p, p + '' r, (select max(p) from t) m from t",
+            "create view v2 as with c as (select p from v1) select d.p from (select p from c) d union all select p from t",
+            "select p, p + '' r into t2 from t",
+            "select top 0 p into #t from t");
+        AreEqual("t2.p:phone,t2.r:varchar,v1.p:phone,v1.r:varchar,v1.m:phone,v2.p:phone", sim.ExecuteScalar("""
+            select string_agg(concat(object_name(object_id), '.', name, ':', type_name(user_type_id)), ',') within group (order by object_name(object_id), column_id)
+            from sys.columns where object_id in (object_id('v1'), object_id('v2'), object_id('t2'))
+            """));
+    }
+
+    [TestMethod]
+    [DataRow("p", "phone")]
+    [DataRow("isnull(p, '')", "phone")]
+    [DataRow("case when 1 = 1 then p end", "phone")]
+    [DataRow("sum(c)", "code")]
+    [DataRow("lag(p) over (order by c)", "phone")]
+    [DataRow("@v", "phone")]
+    [DataRow("coalesce(p, '')", "-")]
+    [DataRow("c + 0", "-")]
+    [DataRow("cast(p as varchar(20))", "-")]
+    public void Describe_NamesTheUserType(string expression, string expected)
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create type dbo.phone from varchar(20) null", "create type dbo.code from int not null", "create table t (p phone, c code)");
+        AreEqual(expected, sim.ExecuteScalar($"""
+            select isnull(user_type_name, '-') from sys.dm_exec_describe_first_result_set(N'declare @v phone; select {expression.Replace("'", "''", StringComparison.Ordinal)} from t', null, 0)
+            """));
+    }
 }

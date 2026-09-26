@@ -1062,6 +1062,11 @@ internal sealed partial class Selection
                 var (s, c) = FindSourceColumn(sources, name);
                 return s >= 0 && sources[s].Columns[c].SpelledNumeric;
             });
+            Reference.MarkAliasTyped(expression, name =>
+            {
+                var (s, c) = FindSourceColumn(sources, name);
+                return s >= 0 ? sources[s].Columns[c].AliasType : null;
+            });
         }
 
         // A column a derived source filled only with bare NULLs has no type
@@ -1468,6 +1473,7 @@ internal sealed partial class Selection
         selection.ColumnIntegerLiteralDigits = LiteralDigitsOf(expressions);
         selection.ColumnIsUntypedNull = UntypedNullsOf(expressions, sources);
         selection.ColumnReportsNumeric = ColumnReportsNumericOf(expressions, outputSchema);
+        selection.ColumnAliasTypes = ColumnAliasTypesOf(expressions);
         selection.BranchFromSources = sources;
         selection.AutoSourceNames = AutoSourceNamesOf(sources);
         (selection.AutoColumnSource, selection.AutoColumnOrdinal) = AutoColumnBindingOf(expressions, sources);
@@ -1879,6 +1885,17 @@ internal sealed partial class Selection
             return false;
         var (s, c) = FindSourceColumn(sources, reference.ReferencedName);
         return s >= 0 && sources[s].Columns[c].IsUntypedNull;
+    }
+
+    private static Schemas.AliasType?[]? ColumnAliasTypesOf(List<Expression> expressions)
+    {
+        Schemas.AliasType?[]? aliases = null;
+        for (var i = 0; i < expressions.Count; i++)
+        {
+            if (expressions[i].ResultAliasType is { } alias)
+                (aliases ??= new Schemas.AliasType?[expressions.Count])[i] = alias;
+        }
+        return aliases;
     }
 
     private static bool[]? ColumnReportsNumericOf(List<Expression> expressions, SqlType[] schema)

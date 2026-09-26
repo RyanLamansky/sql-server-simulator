@@ -137,6 +137,7 @@ partial class Simulation
         var nullBit = SqlValue.Null(SqlType.Bit);
         var nullSmall = SqlValue.Null(SqlType.SmallInt);
         var nullInt = SqlValue.Null(SqlType.Int32);
+        var alias = result.ColumnAliasTypes?[index];
         return
         [
             SqlValue.FromBoolean(false),
@@ -149,7 +150,11 @@ partial class Simulation
             SqlValue.FromByte(precision),
             SqlValue.FromByte(scale),
             collation is null ? nullName : SqlValue.FromSystemName(collation.Name),
-            nullInt, nullName, nullName, nullName, SqlValue.Null(NVarcharSqlType.Get(4000, Collation.Baseline, Coercibility.Implicit)),
+            alias is null ? nullInt : SqlValue.FromInt32(alias.UserTypeId),
+            alias is null ? nullName : SqlValue.FromSystemName(alias.Schema.Database.Name),
+            alias is null ? nullName : SqlValue.FromSystemName(alias.Schema.Name),
+            alias is null ? nullName : SqlValue.FromSystemName(alias.Name),
+            SqlValue.Null(NVarcharSqlType.Get(4000, Collation.Baseline, Coercibility.Implicit)),
             nullInt, nullName, nullName, nullName,
             SqlValue.FromBoolean(false),
             SqlValue.FromBoolean(type is XmlSqlType || (collation is not null && collation.Name.Contains("_CS", StringComparison.OrdinalIgnoreCase))),

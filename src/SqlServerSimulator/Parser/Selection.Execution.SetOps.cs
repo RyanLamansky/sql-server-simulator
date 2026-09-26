@@ -151,8 +151,22 @@ internal sealed partial class Selection
         int[]? combinedDigits = null;
         bool[]? combinedUntypedNulls = null;
         bool[]? combinedReportsNumeric = null;
+        Schemas.AliasType?[]? combinedAliasTypes = null;
         for (var i = 0; i < combinedSchema.Length; i++)
         {
+            // Branches that agree on an alias keep it; a bare NULL branch
+            // column defers to the other (probed 2026-09-26).
+            var leftAlias = left.ColumnAliasTypes?[i];
+            var rightAlias = right.ColumnAliasTypes?[i];
+            var leftIsNull = left.ColumnIsUntypedNull is { } leftNullColumns && leftNullColumns[i];
+            var rightIsNull = right.ColumnIsUntypedNull is { } rightNullColumns && rightNullColumns[i];
+            var sharedAlias = leftIsNull ? rightAlias
+                : rightIsNull ? leftAlias
+                : ReferenceEquals(leftAlias, rightAlias) ? leftAlias
+                : null;
+            if (sharedAlias is not null)
+                (combinedAliasTypes ??= new Schemas.AliasType?[combinedSchema.Length])[i] = sharedAlias;
+
             var leftDigit = leftDigits is null ? 0 : leftDigits[i];
             var rightDigit = rightDigits is null ? 0 : rightDigits[i];
             var leftType = left.Schema[i];
@@ -297,6 +311,7 @@ internal sealed partial class Selection
             ColumnIntegerLiteralDigits = combinedDigits,
             ColumnIsUntypedNull = combinedUntypedNulls,
             ColumnReportsNumeric = combinedReportsNumeric,
+            ColumnAliasTypes = combinedAliasTypes,
             ColumnNullability = CombinedNullability(left.ColumnNullability, right.ColumnNullability, kind, combinedSchema.Length),
             // A set operation's columns read as neither updatable nor computed
             // (captured 2026-09-26).

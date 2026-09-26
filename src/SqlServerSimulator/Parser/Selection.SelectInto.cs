@@ -110,7 +110,12 @@ partial class Selection
                 collation: outputSchema[i] is VarcharSqlType or NVarcharSqlType or CharSqlType or NCharSqlType
                     ? outputSchema[i].Collation?.Name
                     : null,
-                spelledNumeric: projections[i].ResultReportsNumeric);
+                spelledNumeric: projections[i].ResultReportsNumeric)
+            {
+                // A #temp table's types resolve in tempdb, which has no
+                // user alias types (probed 2026-09-26).
+                AliasType = targetName.Leaf.StartsWith('#') ? null : projections[i].ResultAliasType,
+            };
         }
 
         return identityFunctions > 0 && inheritedIdentity is not null

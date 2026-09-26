@@ -264,6 +264,14 @@ internal sealed partial class Selection
     /// </summary>
     internal bool[]? ColumnReportsNumeric;
 
+    /// <summary>
+    /// Per-column user alias type a projection column carries (see
+    /// <c>Expression.ResultAliasType</c>); null when no column carries one.
+    /// A view, derived table, CTE or <c>SELECT … INTO</c> column built from
+    /// this query keeps it.
+    /// </summary>
+    internal Schemas.AliasType?[]? ColumnAliasTypes;
+
     private readonly Func<BatchContext, Func<MultiPartName, SqlValue>?, IEnumerable<byte[]>>? rowSource;
 
     /// <summary>
@@ -461,8 +469,8 @@ internal sealed partial class Selection
     /// </summary>
     public SimulatedSqlResultSet Execute(BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver = null) =>
         this.valueRowSource is { } values
-            ? new SimulatedSqlResultSet(this.Schema, this.ColumnNames, values(batch, outerResolver)) { ColumnNullability = this.ColumnNullability, ColumnReportsNumeric = this.ColumnReportsNumeric, ColumnWireFlags = this.ColumnWireFlags, HiddenColumnCount = this.HiddenColumnCount, Browse = this.Browse }
-            : new SimulatedSqlResultSet(this.Schema, this.ColumnNames, this.rowSource!(batch, outerResolver)) { ColumnNullability = this.ColumnNullability, ColumnReportsNumeric = this.ColumnReportsNumeric, ColumnWireFlags = this.ColumnWireFlags, HiddenColumnCount = this.HiddenColumnCount, Browse = this.Browse };
+            ? new SimulatedSqlResultSet(this.Schema, this.ColumnNames, values(batch, outerResolver)) { ColumnNullability = this.ColumnNullability, ColumnReportsNumeric = this.ColumnReportsNumeric, ColumnAliasTypes = this.ColumnAliasTypes, ColumnWireFlags = this.ColumnWireFlags, HiddenColumnCount = this.HiddenColumnCount, Browse = this.Browse }
+            : new SimulatedSqlResultSet(this.Schema, this.ColumnNames, this.rowSource!(batch, outerResolver)) { ColumnNullability = this.ColumnNullability, ColumnReportsNumeric = this.ColumnReportsNumeric, ColumnAliasTypes = this.ColumnAliasTypes, ColumnWireFlags = this.ColumnWireFlags, HiddenColumnCount = this.HiddenColumnCount, Browse = this.Browse };
 
     /// <summary>
     /// Whether the plan yields a row — the question an emptiness probe asks,
@@ -2601,7 +2609,7 @@ internal sealed partial class Selection
         var columnNames = lateralPlan.ColumnNames;
         var lateralColumns = new HeapColumn[schema.Length];
         for (var ci = 0; ci < lateralColumns.Length; ci++)
-            lateralColumns[ci] = new HeapColumn(string.Empty, schema[ci], maxLength: null, nullable: true);
+            lateralColumns[ci] = new HeapColumn(string.Empty, schema[ci], maxLength: null, nullable: true) { AliasType = lateralPlan.ColumnAliasTypes?[ci] };
 
         var alias = ConsumeOptionalAlias(context);
         columnNames = ResolveDerivedTableColumnNames(context, columnNames, alias);
@@ -2861,6 +2869,7 @@ internal sealed partial class Selection
                         cteColumns[ci] = new HeapColumn(string.Empty, cteBinding.Plan.Schema[ci], maxLength: null, nullable: cteBinding.Plan.ColumnNullability?[ci] ?? true, spelledNumeric: cteBinding.Plan.ColumnReportsNumeric is { } cteNumeric && cteNumeric[ci])
                         {
                             IsUntypedNull = cteBinding.Plan.ColumnIsUntypedNull is { } cteNulls && cteNulls[ci],
+                            AliasType = cteBinding.Plan.ColumnAliasTypes?[ci],
                         };
                     }
 
@@ -3201,6 +3210,7 @@ internal sealed partial class Selection
                     derivedColumns[ci] = new HeapColumn(string.Empty, derivedSelection.Schema[ci], maxLength: null, nullable: derivedSelection.ColumnNullability?[ci] ?? true, spelledNumeric: derivedSelection.ColumnReportsNumeric is { } derivedNumeric && derivedNumeric[ci])
                     {
                         IsUntypedNull = derivedSelection.ColumnIsUntypedNull is { } derivedNulls && derivedNulls[ci],
+                        AliasType = derivedSelection.ColumnAliasTypes?[ci],
                     };
                 }
 
@@ -4683,6 +4693,7 @@ internal sealed partial class Selection
             ColumnIntegerLiteralDigits = LiteralDigitsOf(expressions),
             ColumnIsUntypedNull = UntypedNullsOf(expressions),
             ColumnReportsNumeric = ColumnReportsNumericOf(expressions, schema),
+            ColumnAliasTypes = ColumnAliasTypesOf(expressions),
             // A FROM-less projection has no sources, so column nullability is
             // the per-expression rule alone (literals NOT NULL, other
             // expressions nullable) — matching real's result metadata

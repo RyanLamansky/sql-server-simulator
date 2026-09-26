@@ -21,6 +21,8 @@ internal sealed class NamedExpression(Expression expression, string name) : Expr
 
     internal override bool ParallelSafe => this.Inner.ParallelSafe;
 
+    internal override Schemas.AliasType? ResultAliasType => this.Inner.ResultAliasType;
+
     public override Storage.SqlValue Run(RuntimeContext runtime) => this.Inner.Run(runtime);
 
     public override Storage.SqlType GetSqlType(BatchContext batch, Func<MultiPartName, Storage.SqlType> resolveColumnType) => this.Inner.GetSqlType(batch, resolveColumnType);

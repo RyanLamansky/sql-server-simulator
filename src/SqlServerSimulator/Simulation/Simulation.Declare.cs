@@ -107,6 +107,7 @@ partial class Simulation
             SqlType declaredType;
             int? declaredMaxLength;
             XmlSchemaCollection? xmlSchemaCollection;
+            AliasType? aliasType = null;
             var spelledNumeric = false;
             try
             {
@@ -117,7 +118,7 @@ partial class Simulation
                 }
 
                 spelledNumeric = IsNumericTypeWord(context.Token);
-                (declaredType, declaredMaxLength, xmlSchemaCollection) = ParseDeclareTypeSpec(context, variableName);
+                (declaredType, declaredMaxLength, xmlSchemaCollection) = ParseDeclareTypeSpec(context, variableName, out aliasType);
             }
             catch (SimulatedSqlException missingType) when (missingType.Number is 2715 or 2717 or 2750 && context.Batch.CreateTimeBindErrors is { } bindErrors)
             {
@@ -160,6 +161,7 @@ partial class Simulation
                         context.Batch.Variables[variableName] = new VariableSlot(declaredType, declaredMaxLength, SqlValue.Null(declaredType), parameter: null)
                         {
                             XmlSchemaCollection = xmlSchemaCollection,
+                            AliasType = aliasType,
                             SpelledNumeric = spelledNumeric,
                         };
                         throw;
@@ -186,6 +188,7 @@ partial class Simulation
                 var slot = new VariableSlot(declaredType, declaredMaxLength, SqlValue.Null(declaredType), parameter: null)
                 {
                     XmlSchemaCollection = xmlSchemaCollection,
+                    AliasType = aliasType,
                     SpelledNumeric = spelledNumeric,
                 };
                 // Through Assign rather than the constructor so an initializer
@@ -209,7 +212,7 @@ partial class Simulation
     /// max-length) is captured by length-bearing singleton variants of the
     /// type itself when applicable.
     /// </summary>
-    private static (SqlType Type, int? MaxLength, XmlSchemaCollection? XmlSchemaCollection) ParseDeclareTypeSpec(ParserContext context, string variableName)
+    private static (SqlType Type, int? MaxLength, XmlSchemaCollection? XmlSchemaCollection) ParseDeclareTypeSpec(ParserContext context, string variableName, out AliasType? aliasType)
     {
         var (qualifiedTypeName, typeName) = TypeNameSynonyms.ReadTypeName(context);
 
@@ -220,6 +223,7 @@ partial class Simulation
         int? declaredMaxLength = null;
         int? declaredScale = null;
         XmlSchemaCollection? xmlSchemaCollection = null;
+        aliasType = null;
         if (context.Token is Operator { Character: '(' })
         {
             // `DECLARE @x xml(<collection>)` — the parens hold a name, not a
@@ -261,7 +265,7 @@ partial class Simulation
             context.MoveNextOptional();
         }
 
-        var (resolved, maxLength, _, _) = ResolveTypeReference(
+        (var resolved, var maxLength, _, aliasType) = ResolveTypeReference(
             context.Batch, qualifiedTypeName, typeName, declaredMaxLength, declaredScale,
             // Real numbers a variable among every one the batch declares.
             context.Batch.Variables.Count + 1, TypeSpecSite.Scalar, variableName);

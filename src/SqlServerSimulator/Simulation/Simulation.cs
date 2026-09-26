@@ -1415,6 +1415,7 @@ public sealed partial class Simulation
                     {
                         ColumnNullability = selection.ColumnNullability,
                         ColumnReportsNumeric = selection.ColumnReportsNumeric,
+                        ColumnAliasTypes = selection.ColumnAliasTypes,
                         ColumnWireFlags = selection.ColumnWireFlags,
                         HiddenColumnCount = selection.HiddenColumnCount,
                         Browse = selection.Browse,
@@ -2596,6 +2597,7 @@ public sealed partial class Simulation
                     {
                         ColumnNullability = metadataSelection.ColumnNullability,
                         ColumnReportsNumeric = metadataSelection.ColumnReportsNumeric,
+                        ColumnAliasTypes = metadataSelection.ColumnAliasTypes,
                         ColumnWireFlags = metadataSelection.ColumnWireFlags,
                         ColumnOrigins = Selection.BaseColumnOrigins(metadataSelection),
                         ColumnIsComputed = Selection.ComputedColumnsOf(metadataSelection),
@@ -2736,6 +2738,7 @@ public sealed partial class Simulation
                         {
                             ColumnNullability = selection.ColumnNullability,
                             ColumnReportsNumeric = selection.ColumnReportsNumeric,
+                            ColumnAliasTypes = selection.ColumnAliasTypes,
                             ColumnWireFlags = selection.ColumnWireFlags,
                             HiddenColumnCount = selection.HiddenColumnCount,
                             Browse = selection.Browse,

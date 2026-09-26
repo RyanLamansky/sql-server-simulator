@@ -14,6 +14,8 @@ internal sealed class Parenthesized(Expression wrapped) : Expression
 
     internal override bool ParallelSafe => this.Wrapped.ParallelSafe;
 
+    internal override Schemas.AliasType? ResultAliasType => this.Wrapped.ResultAliasType;
+
     public override Storage.SqlValue Run(RuntimeContext runtime) => this.Wrapped.Run(runtime);
 
     public override Storage.SqlType GetSqlType(BatchContext batch, Func<MultiPartName, Storage.SqlType> resolveColumnType) => this.Wrapped.GetSqlType(batch, resolveColumnType);

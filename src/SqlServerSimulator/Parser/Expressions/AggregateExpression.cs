@@ -405,6 +405,9 @@ internal sealed class AggregateExpression : Expression
     // kinds have non-decimal results the projection-time gate filters out.
     internal override bool ResultReportsNumeric => this.Operand?.ResultReportsNumeric ?? false;
 
+    internal override Schemas.AliasType? ResultAliasType =>
+        this.Kind is AggregateKind.Max or AggregateKind.Min or AggregateKind.Sum ? this.Operand?.ResultAliasType : null;
+
     /// <summary>
     /// Maps <c>SUM</c>'s operand type to its result type per SQL Server's
     /// rules: integer family widens to <see cref="SqlType.Int32"/> for

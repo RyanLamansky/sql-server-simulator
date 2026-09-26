@@ -38,11 +38,16 @@ internal sealed class VariableReference : Expression
         var slot = context.Batch.GetVariableSlot(raw);
         this.DeclaredType = slot.DeclaredType;
         this.spelledNumeric = slot.SpelledNumeric;
+        this.aliasType = slot.AliasType;
     }
 
     private readonly bool spelledNumeric;
 
     internal override bool ResultReportsNumeric => this.spelledNumeric;
+
+    private readonly Schemas.AliasType? aliasType;
+
+    internal override Schemas.AliasType? ResultAliasType => this.aliasType;
 
     internal override bool ParallelSafe => true;
 

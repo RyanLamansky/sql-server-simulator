@@ -121,6 +121,8 @@ internal sealed class Iif : Expression
 
     internal override bool ResultReportsNumeric => this.namingArm?.ResultReportsNumeric ?? false;
 
+    internal override Schemas.AliasType? ResultAliasType => SharedAliasType(this.trueValue, this.falseValue);
+
     internal override string DebugDisplay() => $"IIF(..., {this.trueValue.DebugDisplay()}, {this.falseValue.DebugDisplay()})";
 
     internal override void Describe(NodeShape shape) => shape.Child(this.condition).Child(this.trueValue).Child(this.falseValue);

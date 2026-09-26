@@ -25,6 +25,24 @@ internal sealed class Reference : Expression
 
     internal override bool ResultReportsNumeric => this.readsNumericColumn;
 
+    /// <summary>The alias type of the column this reference binds to; set by <see cref="MarkAliasTyped"/>.</summary>
+    private Schemas.AliasType? aliasType;
+
+    internal override Schemas.AliasType? ResultAliasType => this.aliasType;
+
+    /// <summary>
+    /// Records on every reference in <paramref name="root"/> the alias type
+    /// <paramref name="aliasOf"/> reports for the column it binds to. A
+    /// subquery binds in its own scope and isn't entered.
+    /// </summary>
+    internal static void MarkAliasTyped(ExpressionNode root, Func<MultiPartName, Schemas.AliasType?> aliasOf) =>
+        root.Walk((node, _) =>
+        {
+            if (node is Reference reference)
+                reference.aliasType = aliasOf(reference.ReferencedName);
+            return true;
+        });
+
     /// <summary>
     /// Marks every reference in <paramref name="root"/> whose column
     /// <paramref name="isNumericColumn"/> says is numeric-spelled (probed

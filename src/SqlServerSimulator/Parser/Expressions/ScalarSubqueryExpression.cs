@@ -67,6 +67,8 @@ internal sealed class ScalarSubqueryExpression(Selection inner) : Expression
     // The inner query's one column names the value, numeric spelling included.
     internal override bool ResultReportsNumeric => this.Inner.ColumnReportsNumeric is { } numeric && numeric[0];
 
+    internal override Schemas.AliasType? ResultAliasType => this.Inner.ColumnAliasTypes?[0];
+
     internal override string DebugDisplay() => "(SELECT ...)";
 
     internal override void Describe(NodeShape shape) => shape.Local(this.Inner);

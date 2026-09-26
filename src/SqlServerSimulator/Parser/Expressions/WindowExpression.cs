@@ -1238,6 +1238,13 @@ internal sealed class WindowExpression : Expression
         _ => false,
     };
 
+    internal override Schemas.AliasType? ResultAliasType => this.Kind switch
+    {
+        WindowKind.Aggregate => this.AggregateInfo!.ResultAliasType,
+        WindowKind.Lag or WindowKind.Lead or WindowKind.FirstValue or WindowKind.LastValue => this.Operand!.ResultAliasType,
+        _ => null,
+    };
+
     internal override string DebugDisplay()
     {
         var name = this.Kind switch

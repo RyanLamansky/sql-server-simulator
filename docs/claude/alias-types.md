@@ -68,10 +68,11 @@ The catalog then reports it as real does (probed 2026-09-26 against SQL Server 2
 
 Two places refuse an alias outright: a `#temp` table's column is **Msg 2715** (its types resolve in `tempdb`, where the database's aliases don't exist; a table variable's resolve here), and `CAST` / `CONVERT` to one is **Msg 243** at state 2 — state 1 for a name that isn't a type at all, which a qualified name reports whole.
 
+Real treats the alias as part of an expression's type, so a projection carries it wherever the value passes through unchanged (`Expression.ResultAliasType`, probed 2026-09-26): a reference to an alias-typed column, variable or function return, `ISNULL`'s checked operand, CASE / IIF / GREATEST arms that agree, `MAX` / `MIN` / `SUM`, the value window functions and a scalar subquery's column — while arithmetic, CAST, a string function, COLLATE, `COALESCE`, `NULLIF` and `CHOOSE` drop it.
+`Selection.ColumnAliasTypes` records it per column, so a view, derived table, CTE, UNION whose branches agree, and `SELECT … INTO` column keeps it, as does `sp_describe_first_result_set`'s `user_type_*` quartet; a `SELECT … INTO #temp` column doesn't, `tempdb` having no such type.
+
 ## Known gaps
 
-- **A projection doesn't carry its source column's alias.**
-  Real keeps the alias on a view column, a `SELECT … INTO` column and `sp_describe_first_result_set`'s `user_type_name` when the projection is a bare reference to an alias-typed column; here those report the underlying type.
 - **Alias-type `max_length` not emitted in `sys.types`** — gap from the catalog view's shipped subset.
 - **Alias-of-alias not modeled** — `CREATE TYPE T2 FROM T1` where T1 is an alias raises Msg 222 (matches probe behavior).
 

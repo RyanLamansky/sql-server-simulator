@@ -43,6 +43,9 @@ internal sealed class VariableSlot(SqlType declaredType, int? declaredMaxLength,
     /// </summary>
     public bool SpelledNumeric;
 
+    /// <summary>The user alias type the variable was declared with; see <c>HeapColumn.AliasType</c>.</summary>
+    public Schemas.AliasType? AliasType;
+
     /// <summary>
     /// Stores <paramref name="value"/>, validating and canonicalizing it first
     /// when this slot carries an <c>xml(&lt;collection&gt;)</c> binding — real

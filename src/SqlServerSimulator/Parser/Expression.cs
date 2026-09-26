@@ -893,6 +893,39 @@ internal abstract class Expression : ExpressionNode
     internal virtual bool ResultReportsNumeric => false;
 
     /// <summary>
+    /// The user alias type the result carries, which real reports as the
+    /// column's user type (<c>sys.columns.user_type_id</c>, describe's
+    /// <c>user_type_name</c>): a reference to an alias-typed column, variable
+    /// or function return, and what passes one through unchanged — ISNULL's
+    /// checked operand, arms that all agree, MAX / MIN / SUM and the value
+    /// window functions, a scalar subquery's column. Computing anything
+    /// (arithmetic, CAST, a string function, COLLATE, COALESCE, NULLIF,
+    /// CHOOSE) drops it (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    internal virtual Schemas.AliasType? ResultAliasType => null;
+
+    /// <summary>
+    /// The alias every typed arm of <paramref name="arms"/> carries, if they
+    /// agree; a bare NULL arm doesn't count.
+    /// </summary>
+    internal static Schemas.AliasType? SharedAliasType(params ReadOnlySpan<Expression?> arms)
+    {
+        Schemas.AliasType? shared = null;
+        var typedArms = 0;
+        for (var i = 0; i < arms.Length; i++)
+        {
+            var arm = arms[i];
+            if (arm is null || IsUntypedNullLiteral(arm))
+                continue;
+            var alias = arm.ResultAliasType;
+            if (alias is null || (typedArms++ > 0 && !ReferenceEquals(shared, alias)))
+                return null;
+            shared = alias;
+        }
+        return shared;
+    }
+
+    /// <summary>
     /// The arm a value-selecting form (<c>CASE</c>, <c>COALESCE</c>, <c>IIF</c>,
     /// <c>ISNULL</c>, <c>CHOOSE</c>, <c>GREATEST</c> / <c>LEAST</c>) takes its
     /// numeric-or-decimal name from: the first one of decimal family, so

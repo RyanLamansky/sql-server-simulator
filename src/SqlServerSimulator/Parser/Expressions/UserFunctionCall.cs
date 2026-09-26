@@ -39,6 +39,8 @@ internal sealed class UserFunctionCall(ScalarFunction function, Expression?[] ar
     // A return type written numeric names the call's value numeric.
     internal override bool ResultReportsNumeric => this.function.ReturnSpelledNumeric;
 
+    internal override Schemas.AliasType? ResultAliasType => this.function.ReturnAliasType;
+
     /// <summary>
     /// One per declared parameter. Each entry is either an explicit
     /// <see cref="Expression"/> argument supplied by the caller, or

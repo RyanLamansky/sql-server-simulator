@@ -59,6 +59,13 @@ internal abstract class SimulatedQueryResult : SimulatedStatementOutcome
     public bool[]? ColumnReportsNumeric;
 
     /// <summary>
+    /// Per column, the user alias type the column carries (see
+    /// <c>Selection.ColumnAliasTypes</c>), which
+    /// <c>sp_describe_first_result_set</c> reports as its user type.
+    /// </summary>
+    internal Schemas.AliasType?[]? ColumnAliasTypes;
+
+    /// <summary>
     /// Per column, the COLMETADATA flag bits a column carries besides
     /// fNullable, as SQL Server 2025 sets them (captured 2026-09-26): a column
     /// read from a table — through views, joins and derived tables alike —
