@@ -79,7 +79,7 @@ internal sealed class FullTextCatalogProperty : Expression
     /// <summary>
     /// Distinct terms across everything the catalog indexes — real's
     /// <c>UniqueKeyCount</c>. Stopwords are excluded because they never enter
-    /// the index.
+    /// an index that applies the stoplist.
     /// </summary>
     private static int CountDistinctTerms(RuntimeContext runtime, Schemas.FullTextCatalog catalog)
     {
@@ -99,7 +99,7 @@ internal sealed class FullTextCatalogProperty : Expression
                         continue;
                     foreach (var term in FullText.FullTextWordBreaker.Break(text, catalog.IsAccentSensitive))
                     {
-                        if (!FullText.FullTextLexicon.IsStopword(term.Text))
+                        if (index.StoplistOff || !FullText.FullTextLexicon.IsStopword(term.Text))
                             _ = terms.Add(term.Text);
                     }
                 }

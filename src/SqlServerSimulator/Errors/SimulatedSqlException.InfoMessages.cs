@@ -97,4 +97,43 @@ partial class SimulatedSqlException
     /// <summary>Msg 15626, <c>sp_getapplock</c>'s Transaction owner without a transaction, ahead of its -999.</summary>
     internal static SimulatedError TransactionalAppLockWithoutTransactionMessage(BatchContext batch) =>
         SystemProcedureMessage(batch, "sp_getapplock", 52, 15626, "You attempted to acquire a transactional application lock without an active transaction.");
+
+    // ALTER FULLTEXT INDEX's warnings, probed 2026-09-26 against SQL Server
+    // 2025 on an index whose population had completed.
+
+    /// <summary>Msg 7638, turning change tracking off.</summary>
+    internal static SimulatedError FullTextChangesDeletedMessage(BatchContext batch, string tableName) =>
+        batch.InfoMessage(@class: 0, state: 1, number: 7638, $"Warning: Request to stop change tracking has deleted all changes tracked on table or indexed view '{tableName}'.");
+
+    /// <summary>Msg 7673, turning off change tracking that is already off.</summary>
+    internal static SimulatedError FullTextChangeTrackingAlreadyOffMessage(BatchContext batch, string tableName) =>
+        batch.InfoMessage(@class: 0, state: 1, number: 7673, $"Warning: Full-text change tracking is currently disabled for table or indexed view '{tableName}'.");
+
+    /// <summary>Msg 7661, setting manual change tracking already in force.</summary>
+    internal static SimulatedError FullTextChangeTrackingAlreadyOnMessage(BatchContext batch, string tableName) =>
+        batch.InfoMessage(@class: 0, state: 1, number: 7661, $"Warning: Full-text change tracking is currently enabled for table or indexed view '{tableName}'.");
+
+    /// <summary>Msg 7662, setting automatic change tracking already in force.</summary>
+    internal static SimulatedError FullTextAutoPropagationAlreadyOnMessage(BatchContext batch, string tableName) =>
+        batch.InfoMessage(@class: 0, state: 1, number: 7662, $"Warning: Full-text auto propagation is currently enabled for table or indexed view '{tableName}'.");
+
+    /// <summary>Msg 7636, a full or incremental population started under automatic change tracking.</summary>
+    internal static SimulatedError FullTextPopulationActiveMessage(BatchContext batch, string tableName) =>
+        batch.InfoMessage(@class: 0, state: 2, number: 7636, $"Warning: Request to start a full-text index population on table or indexed view '{tableName}' is ignored because a population is currently active for this table or indexed view.");
+
+    /// <summary>Msg 7676, <c>STOP POPULATION</c> under automatic change tracking.</summary>
+    internal static SimulatedError FullTextStopIgnoredMessage(BatchContext batch) =>
+        batch.InfoMessage(@class: 0, state: 1, number: 7676, "Warning: Full-text auto propagation is on. Stop crawl request is ignored.");
+
+    /// <summary>Msg 9974, <c>PAUSE POPULATION</c> with no full population running — state 1 under automatic change tracking, 2 otherwise.</summary>
+    internal static SimulatedError FullTextPauseIgnoredMessage(BatchContext batch, byte state) =>
+        batch.InfoMessage(@class: 0, state: state, number: 9974, "Warning: Only running full population can be paused. The command is ignored. Other type of population can just be stopped and it will continue when your start the same type of crawl again.");
+
+    /// <summary>Msg 9975, <c>RESUME POPULATION</c> with nothing paused, outside automatic change tracking.</summary>
+    internal static SimulatedError FullTextResumeIgnoredMessage(BatchContext batch) =>
+        batch.InfoMessage(@class: 0, state: 1, number: 9975, "Warning: Only paused full population can be resumed. The command is ignored.");
+
+    /// <summary>Msg 30022, changing the stoplist <c>WITH NO POPULATION</c>.</summary>
+    internal static SimulatedError FullTextStoplistNoPopulationMessage(BatchContext batch) =>
+        batch.InfoMessage(@class: 0, state: 1, number: 30022, "Warning: The configuration of a full-text stoplist was modified using the WITH NO POPULATION clause. This put the full-text index into an inconsistent state. To bring the full-text index into a consistent state, start a full population. The basic Transact-SQL syntax for this is: ALTER FULLTEXT INDEX ON table_name START FULL POPULATION.");
 }

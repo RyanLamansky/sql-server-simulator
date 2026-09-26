@@ -31,6 +31,13 @@ internal sealed class FullTextBinding(HeapTable table, int[] columnOrdinals, Mul
     public readonly bool AccentSensitive = accentSensitive;
 
     /// <summary>
+    /// Whether the index drops the system stoplist's words, read when the
+    /// search runs so an <c>ALTER FULLTEXT INDEX … SET STOPLIST</c> reaches a
+    /// cached plan.
+    /// </summary>
+    public bool UsesStoplist => this.Table.FullTextIndex is not { StoplistOff: true };
+
+    /// <summary>
     /// Builds a document from one row by word-breaking each searched column in
     /// index order.
     /// </summary>

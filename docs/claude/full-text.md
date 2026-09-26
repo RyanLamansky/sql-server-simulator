@@ -35,21 +35,43 @@ CREATE FULLTEXT INDEX ON table (col
         [, …])
     [KEY INDEX name]
     [ON catalog [, FILEGROUP fg] | ON (catalog [, FILEGROUP fg])]
-    [WITH (option [, …]) | WITH CHANGE_TRACKING {MANUAL | AUTO | OFF} [, NO POPULATION]]
+    [WITH [(] option [, …] [)]]
+
+ALTER FULLTEXT CATALOG name {REBUILD [WITH ACCENT_SENSITIVITY = {ON | OFF}] | REORGANIZE | AS DEFAULT}
+ALTER FULLTEXT INDEX ON table {ENABLE | DISABLE
+    | SET CHANGE_TRACKING [=] {MANUAL | AUTO | OFF}
+    | SET STOPLIST [=] {OFF | SYSTEM | name} [WITH NO POPULATION]
+    | SET SEARCH PROPERTY LIST [=] {OFF | name} [WITH NO POPULATION]
+    | ADD (col [TYPE COLUMN typeCol] [LANGUAGE n] [STATISTICAL_SEMANTICS] [, …]) [WITH NO POPULATION]
+    | DROP (col [, …]) [WITH NO POPULATION]
+    | ALTER COLUMN col {ADD | DROP} STATISTICAL_SEMANTICS [WITH NO POPULATION]
+    | START {FULL | INCREMENTAL | UPDATE} POPULATION
+    | {STOP | PAUSE | RESUME} POPULATION}
 
 DROP FULLTEXT CATALOG name
 DROP FULLTEXT INDEX ON table
 ```
+
+`ALTER FULLTEXT INDEX` lives in `Simulation/Simulation.AlterFullText.cs`.
 
 - Filesystem-placement trailers (`ON FILEGROUP` / `IN PATH`) parse-and-discard.
 - `AS DEFAULT` demotes any prior default before promoting the new catalog.
 - `AUTHORIZATION owner` resolves against `Database.Principals` (default `dbo`).
 - Multi-column lists supported; the `TYPE COLUMN` nested reference handles AW's `[Production].[Document]` shape (varbinary doc + extension-column pairing).
 - `LANGUAGE` accepts an integer LCID literal; language-name literal parse-and-discards.
-- `STATISTICAL_SEMANTICS` flag parse-and-discards.
 - Both paren and bare `ON catalog` forms work.
-- Trailing `WITH` options parse-and-discard in both spellings real accepts: the parenthesized list via `SkipBalancedParens`, and the bare `WITH CHANGE_TRACKING {MANUAL | AUTO | OFF} [, NO POPULATION]` most scripts write.
-  The tracking mode carries no behavior — the simulator searches the live rows rather than a crawled index (see [the query pipeline](#no-index--the-rows-are-read-not-crawled)).
+- `WITH` takes `CHANGE_TRACKING [=] {MANUAL | AUTO | OFF [, NO POPULATION]}`, `STOPLIST [=] {OFF | SYSTEM | name}` and `SEARCH PROPERTY LIST [=] name`, parenthesized or bare.
+  The tracking mode, `is_enabled` and the stoplist are kept on the `FullTextIndex` and reported by `sys.fulltext_indexes`; the tracking mode carries no search behavior — the simulator searches the live rows rather than a crawled index (see [the query pipeline](#no-index--the-rows-are-read-not-crawled)).
+  `STOPLIST OFF` does: a search then treats the system stoplist's words as ordinary terms (probed 2026-09-26 against SQL Server 2025: `CONTAINS(s, 'the')` matched), and `FULLTEXTCATALOGPROPERTY`'s `UniqueKeyCount` counts them.
+  The binding reads the stoplist setting when the search runs, so an `ALTER` reaches a cached plan; an accent-sensitivity change bumps the schema version instead, since the fold binds at compile.
+- Every full-text DDL statement refuses to run inside a user transaction (Msg 574, naming the statement), and a column list is checked column by column as real does — missing, not a text or document type, a document type without `TYPE COLUMN`, named twice, `STATISTICAL_SEMANTICS` — see `ResolveFullTextColumns` (probed 2026-09-26).
+- Only the system stoplist exists here, and no search property list, so naming one is Msg 30023 / 30025.
+
+### `ALTER FULLTEXT INDEX` against a settled index
+
+Real populates asynchronously, so several `ALTER` verbs answer differently while a crawl is running, warning that a population is currently active or will not be stopped.
+The simulator has no crawl and answers as real does once population has completed (probed 2026-09-26 against SQL Server 2025), which depends on the tracking mode: under `AUTO` a `START FULL | INCREMENTAL POPULATION` still warns 7636, `STOP` warns 7676 and `RESUME` is silent, while under `MANUAL` / `OFF` `RESUME` warns 9975; `START UPDATE POPULATION` with tracking `OFF` is Msg 7664.
+Dropping the last column disables the index and adding one back re-enables it; a disabled index keeps answering searches, as real's does from what it crawled.
 
 Statement dispatch: `Fulltext` is added to the `ContextualKeyword` enum; CREATE / DROP routes match `UnquotedString { ContextualKeyword: ContextualKeyword.Fulltext }`.
 DROP is routed through `TryParseDropFullText` ahead of the generic DROP-target switch.
@@ -207,7 +229,7 @@ Everything here is the word breaker's or the stemmer's lexicon, which is a data 
 
 **`sys.fulltext_catalogs`** (9-col): `fulltext_catalog_id` / `name` / `path` (NULL — no on-disk storage) / `is_default` / `is_accent_sensitivity_on` / `data_space_id` (NULL) / `file_id` (NULL) / `principal_id` / `is_importing` (always false).
 
-**`sys.fulltext_indexes`** (14-col): `object_id` / `unique_index_id` / `fulltext_catalog_id` / `is_enabled` (true) / `change_tracking_state` (`A`) / `change_tracking_state_desc` (`AUTO`) / `has_crawl_completed` (true) / `crawl_type` (`F`) / `crawl_type_desc` (`FULL`) / `crawl_start_date` (NULL) / `crawl_end_date` (NULL) / `stoplist_id` (**0** = system stoplist) / `data_space_id` (**1** = PRIMARY) / `property_list_id` (NULL).
+**`sys.fulltext_indexes`**: real's 16 columns; `is_enabled`, the change-tracking pair and `stoplist_id` (**0** = system stoplist, NULL for `STOPLIST OFF`) follow the DDL, `index_version` is 2 and `incremental_timestamp` NULL whatever the population history (probed 2026-09-26), `has_crawl_completed` is true, `crawl_type` / `crawl_type_desc` are `F` / `FULL_CRAWL`, the crawl dates NULL, `data_space_id` **1** = PRIMARY and `property_list_id` NULL.
 `stoplist_id` and `data_space_id` are **non-NULL by design** (probe-confirmed against the reference's AW database): DacFx's `SqlFullTextIndex` reverse-engineering INNER JOINs `sys.data_spaces` on `data_space_id` (a NULL drops the parent index element, orphaning its column specifiers → client-side NRE in `SqlFullTextIndexColumnSpecifierPopulator`) and reads `stoplist_id` to choose `DoUseSystemStopList` (0 = system) vs `IsStopListOff` (NULL = disabled) — a NULL there scripts the wrong stoplist mode.
 
 **`sys.fulltext_index_columns`** (5-col, full row): `object_id` / `column_id` / `type_column_id` / `language_id` / `statistical_semantics` (always false).
@@ -239,10 +261,9 @@ An unknown catalog name or unrecognized property returns NULL; property names ar
 
 ## Not modeled yet
 
-- **The `SEMANTIC*` rowsets** (`SEMANTICKEYPHRASETABLE`, `SEMANTICSIMILARITYTABLE`, `SEMANTICSIMILARITYDETAILSTABLE`) — `NotSupportedException` at parse, naming the function. `STATISTICAL_SEMANTICS` on a column parses and is discarded.
-- **`ALTER FULLTEXT CATALOG` / `INDEX`** (REORGANIZE / REBUILD / START/STOP POPULATION / ADD/DROP column) — no parser at all, so the statement is Msg 102 at the `FULLTEXT` token rather than a named rejection.
+- **The `SEMANTIC*` rowsets** (`SEMANTICKEYPHRASETABLE`, `SEMANTICSIMILARITYTABLE`, `SEMANTICSIMILARITYDETAILSTABLE`) — `NotSupportedException` at parse, naming the function. `STATISTICAL_SEMANTICS` on a column is real's Msg 41209, as no semantic language statistics database is ever registered.
 - **Filesystem-placement semantics** (`ON FILEGROUP` / `IN PATH`) — parse-and-discard.
-- **`sys.fulltext_document_types` / `sys.fulltext_stoplists`** — shipped empty (the stoplist registry is inert since only the system stoplist is modeled), and a custom `STOPLIST` isn't read.
+- **Custom stoplists and search property lists** (`CREATE FULLTEXT STOPLIST`, `CREATE SEARCH PROPERTY LIST`) — `sys.fulltext_stoplists` ships empty, so naming a stoplist or property list is refused as a missing one; `sys.fulltext_document_types` ships empty too.
 - **`sys.dm_fts_parser`** — real's word-breaker inspection DMV, the probe instrument behind the [word breaking](#word-breaking) rules above.
 - **`TYPE COLUMN` document extraction** — a `varbinary` column paired with an extension column is stored and projected through the catalog views, but its bytes are not filtered into text, so a search over one matches nothing. `xml` columns *are* indexed, by content — see [word breaking](#word-breaking).
 - The linguistic residue — real's word-breaker token list, the thesaurus, and languages other than English — is in [Divergences](#divergences) and [`backlog.md`](backlog.md).

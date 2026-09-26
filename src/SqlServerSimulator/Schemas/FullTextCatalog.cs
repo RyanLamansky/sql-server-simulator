@@ -32,9 +32,10 @@ internal sealed class FullTextCatalog(
     public bool IsDefault = isDefault;
 
     /// <summary>Real SQL Server's <c>sys.fulltext_catalogs.is_accent_sensitivity_on</c>
-    /// column; defaults to true (matches probe). The simulator preserves the
-    /// value but has no semantics that observe it.</summary>
-    public readonly bool IsAccentSensitive = isAccentSensitive;
+    /// column; defaults to true (matches probe). The word breaker folds
+    /// diacritics on both sides of a search when it's off; <c>ALTER FULLTEXT
+    /// CATALOG … REBUILD WITH ACCENT_SENSITIVITY</c> changes it.</summary>
+    public bool IsAccentSensitive = isAccentSensitive;
 
     /// <summary>Owning principal id — <c>sys.fulltext_catalogs.principal_id</c>.
     /// Defaults to <c>dbo</c> (principal_id = 1) unless an explicit

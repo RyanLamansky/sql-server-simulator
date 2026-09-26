@@ -349,18 +349,23 @@ internal static partial class BuiltInResources
 
     /// <summary>
     /// Rows for <c>sys.fulltext_indexes</c>. One row per table that has a
-    /// <see cref="HeapTable.FullTextIndex"/> populated. <c>is_enabled</c> /
-    /// <c>has_crawl_completed</c> default to true (no crawl is performed
-    /// but the FT index is "ready" from the catalog's POV);
-    /// <c>change_tracking_state</c> = 'A' (AUTO) / 'AUTO';
-    /// <c>crawl_type</c> = 'F' / 'FULL_CRAWL'.
+    /// <see cref="HeapTable.FullTextIndex"/> populated. <c>is_enabled</c>,
+    /// the change-tracking pair and <c>stoplist_id</c> follow the index's DDL;
+    /// <c>has_crawl_completed</c> is true (no crawl is performed but the FT
+    /// index is "ready" from the catalog's POV); <c>crawl_type</c> = 'F' /
+    /// 'FULL_CRAWL'.
     /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateSysFullTextIndexes(Parser.BatchContext batch, Database database)
     {
         var charOneType = CharSqlType.Get(1, Collation.Catalog, Coercibility.Implicit);
         var trueBit = SqlValue.FromBoolean(true);
-        var autoCode = SqlValue.FromChar(charOneType, "A");
-        var autoDesc = SqlValue.FromNVarchar("AUTO");
+        var falseBit = SqlValue.FromBoolean(false);
+        (SqlValue Code, SqlValue Desc)[] tracking =
+        [
+            (SqlValue.FromChar(charOneType, "A"), SqlValue.FromNVarchar("AUTO")),
+            (SqlValue.FromChar(charOneType, "M"), SqlValue.FromNVarchar("MANUAL")),
+            (SqlValue.FromChar(charOneType, "O"), SqlValue.FromNVarchar("OFF")),
+        ];
         var fullCode = SqlValue.FromChar(charOneType, "F");
         var fullDesc = SqlValue.FromNVarchar("FULL_CRAWL");
         var nullDate = SqlValue.Null(SqlType.DateTime);
@@ -380,7 +385,7 @@ internal static partial class BuiltInResources
         var systemStoplistId = SqlValue.FromInt32(0);
         foreach (var schema in database.Schemas.Values)
         {
-            foreach (var table in CatalogTables(schema, batch))
+            foreach (var table in CatalogTables(schema, batch).OrderBy(t => t.ObjectId))
             {
                 if (table.FullTextIndex is not { } fti)
                     continue;
@@ -388,15 +393,15 @@ internal static partial class BuiltInResources
                     SqlValue.FromInt32(table.ObjectId),
                     SqlValue.FromInt32(fti.UniqueIndexId),
                     SqlValue.FromInt32(fti.CatalogId),
-                    trueBit,
-                    autoCode,
-                    autoDesc,
+                    fti.IsEnabled ? trueBit : falseBit,
+                    tracking[(int)fti.ChangeTracking].Code,
+                    tracking[(int)fti.ChangeTracking].Desc,
                     trueBit,
                     fullCode,
                     fullDesc,
                     nullDate,
                     nullDate,
-                    systemStoplistId,
+                    fti.StoplistOff ? nullInt : systemStoplistId,
                     primaryDataSpaceId,
                     nullInt,
                 ];

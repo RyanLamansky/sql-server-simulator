@@ -63,22 +63,26 @@ internal sealed class FullTextTermNode : FullTextNode
     private readonly bool[] prefixes;
     private readonly bool inflectional;
 
-    private FullTextTermNode(string[] elements, bool[] prefixes, bool inflectional)
+    /// <summary>Whether the index applies the system stoplist; see <see cref="Schemas.FullTextIndex.StoplistOff"/>.</summary>
+    private readonly bool stoplist;
+
+    private FullTextTermNode(string[] elements, bool[] prefixes, bool inflectional, bool stoplist)
     {
         this.elements = elements;
         this.prefixes = prefixes;
         this.inflectional = inflectional;
+        this.stoplist = stoplist;
     }
 
-    public static FullTextTermNode Create(string[] elements, bool[] prefixes, bool inflectional) =>
-        new(elements, prefixes, inflectional);
+    public static FullTextTermNode Create(string[] elements, bool[] prefixes, bool inflectional, bool stoplist) =>
+        new(elements, prefixes, inflectional, stoplist);
 
     /// <summary>
     /// Builds a single-word leaf that already carries its inflectional flag —
     /// the shape <c>FREETEXT</c> produces for each surviving word.
     /// </summary>
-    public static FullTextTermNode Word(string term, bool inflectional) =>
-        new([term], [false], inflectional);
+    public static FullTextTermNode Word(string term, bool inflectional, bool stoplist) =>
+        new([term], [false], inflectional, stoplist);
 
     public override bool Matches(FullTextDocument document) => StartPositions(document).Count > 0;
 
@@ -93,7 +97,7 @@ internal sealed class FullTextTermNode : FullTextNode
         {
             for (var i = 0; i < this.elements.Length; i++)
             {
-                if (this.prefixes[i] || !FullTextLexicon.IsStopword(this.elements[i]))
+                if (this.prefixes[i] || !this.stoplist || !FullTextLexicon.IsStopword(this.elements[i]))
                     return false;
             }
             return true;
@@ -137,7 +141,7 @@ internal sealed class FullTextTermNode : FullTextNode
     /// stopword the engine dropped, unless the writer asked for a prefix there.
     /// </summary>
     private bool IsWildcardElement(int elementIndex) =>
-        !this.prefixes[elementIndex] && FullTextLexicon.IsStopword(this.elements[elementIndex]);
+        !this.prefixes[elementIndex] && this.stoplist && FullTextLexicon.IsStopword(this.elements[elementIndex]);
 
     private bool MatchesFrom(FullTextDocument document, int start)
     {

@@ -62,9 +62,9 @@ internal sealed class FullTextSearchCondition(FullTextNode root, bool sawStopwor
     /// comes from the catalog backing the table's index, so the condition's own
     /// terms fold exactly the way the indexed content did.
     /// </summary>
-    public static FullTextSearchCondition ParseContains(string condition, bool accentSensitive)
+    public static FullTextSearchCondition ParseContains(string condition, bool accentSensitive, bool stoplist)
     {
-        var parser = new ConditionParser(condition, accentSensitive);
+        var parser = new ConditionParser(condition, accentSensitive, stoplist);
         var root = parser.ParseOr();
         parser.ExpectEnd();
         return new FullTextSearchCondition(root, parser.SawStopword);
@@ -78,18 +78,18 @@ internal sealed class FullTextSearchCondition(FullTextNode root, bool sawStopwor
     /// holding <c>mice</c>). Punctuation and quotes carry no operator meaning
     /// here; they are break characters like any other.
     /// </summary>
-    public static FullTextSearchCondition ParseFreeText(string condition, bool accentSensitive)
+    public static FullTextSearchCondition ParseFreeText(string condition, bool accentSensitive, bool stoplist)
     {
         var sawStopword = false;
         List<FullTextNode> alternatives = [];
         foreach (var term in FullTextWordBreaker.Break(condition, accentSensitive))
         {
-            if (FullTextLexicon.IsStopword(term.Text))
+            if (stoplist && FullTextLexicon.IsStopword(term.Text))
             {
                 sawStopword = true;
                 continue;
             }
-            alternatives.Add(FullTextTermNode.Word(term.Text, inflectional: true));
+            alternatives.Add(FullTextTermNode.Word(term.Text, inflectional: true, stoplist));
         }
         var root = alternatives.Count switch
         {
@@ -105,7 +105,7 @@ internal sealed class FullTextSearchCondition(FullTextNode root, bool sawStopwor
     /// the accent fold; every error it raises carries the whole original
     /// condition, matching real's message.
     /// </summary>
-    private sealed class ConditionParser(string condition, bool accentSensitive)
+    private sealed class ConditionParser(string condition, bool accentSensitive, bool stoplist)
     {
         private readonly string text = condition;
         private int index;
@@ -295,12 +295,12 @@ internal sealed class FullTextSearchCondition(FullTextNode root, bool sawStopwor
 
             foreach (var element in elements)
             {
-                if (FullTextLexicon.IsStopword(element))
+                if (stoplist && FullTextLexicon.IsStopword(element))
                     this.SawStopword = true;
             }
             return elements.Count == 0
                 ? FullTextNode.NeverMatches
-                : FullTextTermNode.Create([.. elements], [.. prefixes], inflectional);
+                : FullTextTermNode.Create([.. elements], [.. prefixes], inflectional, stoplist);
         }
 
         private FullTextNode ParseFormsOf()

@@ -2070,8 +2070,8 @@ partial class SimulatedSqlException
     /// Server uses this same Msg for any "index-or-key referenced a missing
     /// column" path.
     /// </summary>
-    internal static SimulatedSqlException IndexColumnMissing(string columnName) =>
-        new($"Column name '{columnName}' does not exist in the target table, index or view.", 1911, 16, 1);
+    internal static SimulatedSqlException IndexColumnMissing(string columnName, byte state = 1) =>
+        new($"Column name '{columnName}' does not exist in the target table, index or view.", 1911, 16, state);
 
     /// <summary>
     /// Mimics SQL Server error 1927: <c>CREATE STATISTICS</c> named something

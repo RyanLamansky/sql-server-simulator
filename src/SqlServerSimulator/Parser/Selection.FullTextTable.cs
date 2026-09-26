@@ -153,8 +153,8 @@ internal sealed partial class Selection
             throw SimulatedSqlException.FullTextNullOrEmptyPredicate();
 
         var compiled = freeText
-            ? FullTextSearchCondition.ParseFreeText(conditionText, binding.AccentSensitive)
-            : FullTextSearchCondition.ParseContains(conditionText, binding.AccentSensitive);
+            ? FullTextSearchCondition.ParseFreeText(conditionText, binding.AccentSensitive, binding.UsesStoplist)
+            : FullTextSearchCondition.ParseContains(conditionText, binding.AccentSensitive, binding.UsesStoplist);
         if (compiled.SawStopword)
             batch.AppendFullTextNoiseWordMessage();
 

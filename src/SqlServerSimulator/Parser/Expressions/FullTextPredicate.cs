@@ -120,8 +120,8 @@ internal sealed class FullTextPredicate : BooleanExpression
             throw SimulatedSqlException.FullTextNullOrEmptyPredicate();
         var text = value.AsString;
         return freeText
-            ? FullTextSearchCondition.ParseFreeText(text, binding.AccentSensitive)
-            : FullTextSearchCondition.ParseContains(text, binding.AccentSensitive);
+            ? FullTextSearchCondition.ParseFreeText(text, binding.AccentSensitive, binding.UsesStoplist)
+            : FullTextSearchCondition.ParseContains(text, binding.AccentSensitive, binding.UsesStoplist);
     }
 
     public override bool? Run(RuntimeContext runtime)

@@ -53,6 +53,8 @@ partial class Simulation
                 return TryParseAlterServerRole(context);
             case Name appWord when appWord.Value.Equals("APPLICATION", StringComparison.OrdinalIgnoreCase):
                 return TryParseAlterApplicationRole(context);
+            case UnquotedString { ContextualKeyword: ContextualKeyword.FullText }:
+                return TryParseAlterFullText(context);
             case ReservedKeyword { Keyword: Keyword.Database }:
                 break;
             default:

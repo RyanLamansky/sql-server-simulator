@@ -292,12 +292,12 @@ public sealed partial class SimulatedSqlException
         new("User does not have permission to perform this action.", 7666, 16, 2);
 
     /// <summary>
-    /// Mimics SQL Server error 7641 for a <c>DROP FULLTEXT CATALOG</c> denied by
-    /// a missing database-scope ALTER. Severity 16, state 5, probe-confirmed
-    /// wording.
+    /// Mimics SQL Server error 7641 for a <c>DROP FULLTEXT CATALOG</c> (state
+    /// 5) or <c>ALTER FULLTEXT CATALOG</c> (state 2) of a catalog that's
+    /// missing or denied. Probe-confirmed wording.
     /// </summary>
-    internal static SimulatedSqlException FullTextCatalogNotFoundOrDenied(string catalogName, string databaseName) =>
-        new($"Full-Text catalog '{catalogName}' does not exist in database '{databaseName}' or user does not have permission to perform this action.", 7641, 16, 5);
+    internal static SimulatedSqlException FullTextCatalogNotFoundOrDenied(string catalogName, string databaseName, byte state = 5) =>
+        new($"Full-Text catalog '{catalogName}' does not exist in database '{databaseName}' or user does not have permission to perform this action.", 7641, 16, state);
 
     /// <summary>
     /// Mimics SQL Server error 15151 for a <c>DROP USER</c> denied to a principal

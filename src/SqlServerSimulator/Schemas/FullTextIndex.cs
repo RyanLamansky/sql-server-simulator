@@ -39,6 +39,32 @@ internal sealed class FullTextIndex(
     public readonly int UniqueIndexId = uniqueIndexId;
 
     public readonly List<FullTextIndexColumn> Columns = columns;
+
+    /// <summary>
+    /// <c>sys.fulltext_indexes.is_enabled</c>: <c>ALTER FULLTEXT INDEX …
+    /// DISABLE</c> clears it, and so does dropping the last column. A disabled
+    /// index still answers searches, as real's keeps answering from what it
+    /// crawled (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    public bool IsEnabled = true;
+
+    /// <summary>The <c>CHANGE_TRACKING</c> mode, <c>AUTO</c> unless the DDL says otherwise.</summary>
+    public FullTextChangeTracking ChangeTracking = FullTextChangeTracking.Auto;
+
+    /// <summary>
+    /// <c>STOPLIST OFF</c>: a search treats the system stoplist's words as
+    /// ordinary terms rather than dropping them, and
+    /// <c>sys.fulltext_indexes.stoplist_id</c> is NULL.
+    /// </summary>
+    public bool StoplistOff;
+}
+
+/// <summary>A full-text index's <c>CHANGE_TRACKING</c> mode.</summary>
+internal enum FullTextChangeTracking
+{
+    Auto,
+    Manual,
+    Off,
 }
 
 /// <summary>

@@ -3,13 +3,10 @@ using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 namespace SqlServerSimulator;
 
 /// <summary>
-/// Behavioral tests for the parse-and-store-but-no-search full-text surface
-/// (<c>CREATE/DROP FULLTEXT CATALOG</c> + <c>CREATE/DROP FULLTEXT INDEX</c>
-/// + <c>sys.fulltext_catalogs</c> / <c>sys.fulltext_indexes</c> /
-/// <c>sys.fulltext_index_columns</c>). The simulator stores full-text
-/// metadata for AW model.xml round-trip but does not execute text search;
-/// CONTAINS / FREETEXT / CONTAINSTABLE / FREETEXTTABLE raise
-/// <see cref="NotSupportedException"/>.
+/// Behavioral tests for the full-text DDL surface (<c>CREATE/DROP FULLTEXT
+/// CATALOG</c> + <c>CREATE/DROP FULLTEXT INDEX</c>) and the catalog views
+/// that report it (<c>sys.fulltext_catalogs</c> / <c>sys.fulltext_indexes</c>
+/// / <c>sys.fulltext_index_columns</c>).
 /// </summary>
 [TestClass]
 public sealed class FullTextDdlTests
@@ -157,12 +154,12 @@ public sealed class FullTextDdlTests
     }
 
     [TestMethod]
-    public void CreateFullTextIndex_UnknownColumn_Raises207()
+    public void CreateFullTextIndex_UnknownColumn_Raises1911()
     {
         var sim = BuildSimWithDoc();
-        _ = sim.AssertSqlError(
+        AreEqual((byte)4, sim.AssertSqlError(
             "create fulltext index on dbo.doc (no_such_col language 1033) key index pk_doc",
-            207);
+            1911).State);
     }
 
     [TestMethod]

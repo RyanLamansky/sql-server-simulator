@@ -142,6 +142,7 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return true;
 
+        RejectFullTextDdlInTransaction(context, "CREATE FULLTEXT CATALOG");
         context.CurrentDatabase.RejectFullTextWriteWhenReadOnly(state: 100);
 
         // Database-scope CREATE FULLTEXT CATALOG gate — real reports its own
@@ -185,73 +186,7 @@ partial class Simulation
         var tableName = BatchContext.ParseObjectName(context);
         context.MoveNextRequired();
 
-        if (context.Token is not Operator { Character: '(' })
-            throw SimulatedSqlException.SyntaxErrorNear(context);
-        context.MoveNextRequired();
-
-        var columnSpecs = new List<(string ColumnName, string? TypeColumnName, int LanguageId)>();
-        while (true)
-        {
-            if (context.Token is not Name columnToken)
-                throw SimulatedSqlException.SyntaxErrorNear(context);
-            var columnName = columnToken.Value;
-            string? typeColumnName = null;
-            var languageId = 0;
-            context.MoveNextRequired();
-
-            // Optional TYPE COLUMN typeCol
-            if (context.Token is UnquotedString { Value: var typeWord }
-                && typeWord.Equals("TYPE", StringComparison.OrdinalIgnoreCase))
-            {
-                context.MoveNextRequired();
-                if (context.Token is not ReservedKeyword { Keyword: Keyword.Column })
-                    throw SimulatedSqlException.SyntaxErrorNear(context);
-                context.MoveNextRequired();
-                if (context.Token is not Name typeColToken)
-                    throw SimulatedSqlException.SyntaxErrorNear(context);
-                typeColumnName = typeColToken.Value;
-                context.MoveNextRequired();
-            }
-
-            // Optional LANGUAGE <lcid or name>
-            if (context.Token is UnquotedString { Value: var langWord }
-                && langWord.Equals("LANGUAGE", StringComparison.OrdinalIgnoreCase))
-            {
-                context.MoveNextRequired();
-                switch (context.Token)
-                {
-                    case Numeric n:
-                        languageId = n.Value.AsInt32;
-                        break;
-                    case Literal:
-                        // Language by name — parse-and-discard, leave LCID at
-                        // 0 (matches the column's stored shape if AW emits a
-                        // literal name in some other model).
-                        break;
-                    default:
-                        throw SimulatedSqlException.SyntaxErrorNear(context);
-                }
-                context.MoveNextRequired();
-            }
-
-            // Optional STATISTICAL_SEMANTICS (parse-and-discard).
-            if (context.Token is UnquotedString { Value: var statWord }
-                && statWord.Equals("STATISTICAL_SEMANTICS", StringComparison.OrdinalIgnoreCase))
-            {
-                context.MoveNextRequired();
-            }
-
-            columnSpecs.Add((columnName, typeColumnName, languageId));
-
-            if (context.Token is Operator { Character: ')' })
-            {
-                context.MoveNextOptional();
-                break;
-            }
-            if (context.Token is not Operator { Character: ',' })
-                throw SimulatedSqlException.SyntaxErrorNear(context);
-            context.MoveNextRequired();
-        }
+        var columnSpecs = ParseFullTextColumnList(context);
 
         // Optional KEY INDEX <name>. Real SQL Server requires this clause on
         // CREATE FULLTEXT INDEX; AW's emit always includes it. The simulator
@@ -315,26 +250,14 @@ partial class Simulation
             }
         }
 
-        // Optional WITH clause — parse-and-discard. Real accepts both the
-        // parenthesized option list and the bare `WITH CHANGE_TRACKING
-        // {MANUAL | AUTO | OFF [, NO POPULATION]}` spelling, which is the form
-        // most scripts write.
-        if (context.Token is ReservedKeyword { Keyword: Keyword.With })
-        {
-            context.MoveNextRequired();
-            if (context.Token is Operator { Character: '(' })
-            {
-                SkipBalancedParens(context);
-            }
-            else
-            {
-                SkipChangeTrackingClause(context);
-            }
-        }
+        var options = context.Token is ReservedKeyword { Keyword: Keyword.With }
+            ? ParseFullTextIndexOptions(context)
+            : default;
 
         if (context.Batch.IsSkipping)
             return true;
 
+        RejectFullTextDdlInTransaction(context, "CREATE FULLTEXT INDEX");
         context.CurrentDatabase.RejectFullTextWriteWhenReadOnly(state: 103);
 
         if (!context.Batch.TryResolveTable(tableName, out var table)
@@ -395,55 +318,287 @@ partial class Simulation
                 throw SimulatedSqlException.InvalidObjectName(new MultiPartName(keyIndexName));
         }
 
-        // Resolve each column ordinal against the table's storage schema.
-        var columns = new List<FullTextIndexColumn>(columnSpecs.Count);
-        foreach (var (colName, typeColName, languageId) in columnSpecs)
-        {
-            var ordinal = ResolveColumnOrdinalForFullText(context.Batch.CurrentDatabase.Collation, table, colName);
-            int? typeColumnId = null;
-            if (typeColName is not null)
-                typeColumnId = ResolveColumnOrdinalForFullText(context.Batch.CurrentDatabase.Collation, table, typeColName);
-            columns.Add(new FullTextIndexColumn(ordinal, languageId, typeColumnId));
-        }
+        var columns = ResolveFullTextColumns(context, table, columnSpecs, [], missingState: 4);
+        if (options.StoplistName is { } stoplistName)
+            throw SimulatedSqlException.FullTextStoplistNotFound(stoplistName, state: 1);
+        if (options.PropertyListName is { } propertyListName)
+            throw SimulatedSqlException.SearchPropertyListNotFound(propertyListName, state: 1);
 
-        table.FullTextIndex = new FullTextIndex(catalog.Id, keyIndexName ?? string.Empty, uniqueIndexId, columns);
+        table.FullTextIndex = new FullTextIndex(catalog.Id, keyIndexName ?? string.Empty, uniqueIndexId, columns)
+        {
+            ChangeTracking = options.ChangeTracking,
+            StoplistOff = options.StoplistOff,
+        };
         return true;
     }
 
-    /// <summary>
-    /// Consumes the paren-less <c>WITH CHANGE_TRACKING {MANUAL | AUTO | OFF}
-    /// [, NO POPULATION]</c> trailer. The simulator searches the live rows
-    /// rather than a crawled index, so the mode carries no behavior; the
-    /// grammar still has to accept what real accepts.
-    /// </summary>
-    private static void SkipChangeTrackingClause(ParserContext context)
+    /// <summary>One entry of a full-text column list, as written.</summary>
+    private readonly struct FullTextColumnSpec(string columnName, string? typeColumnName, int languageId, bool statisticalSemantics)
     {
-        var collation = context.Batch.CurrentDatabase.Collation;
-        if (context.Token is not Name trackingToken || !collation.Equals(trackingToken.Value, "CHANGE_TRACKING"))
-            throw SimulatedSqlException.SyntaxErrorNear(context);
-        if (context.GetNextRequired() is not Name modeToken
-            || !(collation.Equals(modeToken.Value, "MANUAL") || collation.Equals(modeToken.Value, "AUTO") || collation.Equals(modeToken.Value, "OFF")))
-        {
-            throw SimulatedSqlException.SyntaxErrorNear(context);
-        }
-        context.MoveNextOptional();
-        if (context.Token is not Operator { Character: ',' })
-            return;
-        if (context.GetNextRequired() is not Name noToken || !collation.Equals(noToken.Value, "NO"))
-            throw SimulatedSqlException.SyntaxErrorNear(context);
-        if (context.GetNextRequired() is not Name populationToken || !collation.Equals(populationToken.Value, "POPULATION"))
-            throw SimulatedSqlException.SyntaxErrorNear(context);
-        context.MoveNextOptional();
+        public readonly string ColumnName = columnName;
+        public readonly string? TypeColumnName = typeColumnName;
+        public readonly int LanguageId = languageId;
+        public readonly bool StatisticalSemantics = statisticalSemantics;
     }
 
-    private static int ResolveColumnOrdinalForFullText(Collation collation, HeapTable table, string columnName)
+    /// <summary>
+    /// Parses <c>(col [TYPE COLUMN typecol] [LANGUAGE n] [STATISTICAL_SEMANTICS] [, …])</c>,
+    /// shared by <c>CREATE FULLTEXT INDEX</c> and <c>ALTER FULLTEXT INDEX … ADD</c>.
+    /// Cursor enters on <c>(</c> and leaves after <c>)</c>.
+    /// </summary>
+    private static List<FullTextColumnSpec> ParseFullTextColumnList(ParserContext context)
+    {
+        if (context.Token is not Operator { Character: '(' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        context.MoveNextRequired();
+
+        var columnSpecs = new List<FullTextColumnSpec>();
+        while (true)
+        {
+            if (context.Token is not Name columnToken)
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            var columnName = columnToken.Value;
+            string? typeColumnName = null;
+            var languageId = 0;
+            context.MoveNextRequired();
+
+            // Optional TYPE COLUMN typeCol
+            if (context.Token is UnquotedString { Value: var typeWord }
+                && typeWord.Equals("TYPE", StringComparison.OrdinalIgnoreCase))
+            {
+                context.MoveNextRequired();
+                if (context.Token is not ReservedKeyword { Keyword: Keyword.Column })
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                context.MoveNextRequired();
+                if (context.Token is not Name typeColToken)
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                typeColumnName = typeColToken.Value;
+                context.MoveNextRequired();
+            }
+
+            // Optional LANGUAGE <lcid or name>
+            if (context.Token is UnquotedString { Value: var langWord }
+                && langWord.Equals("LANGUAGE", StringComparison.OrdinalIgnoreCase))
+            {
+                context.MoveNextRequired();
+                switch (context.Token)
+                {
+                    case Numeric n:
+                        languageId = n.Value.AsInt32;
+                        break;
+                    case Literal:
+                        // Language by name — parse-and-discard, leave LCID at
+                        // 0 (matches the column's stored shape if AW emits a
+                        // literal name in some other model).
+                        break;
+                    default:
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                }
+                context.MoveNextRequired();
+            }
+
+            var statisticalSemantics = false;
+            if (context.Token is UnquotedString { Value: var statWord }
+                && statWord.Equals("STATISTICAL_SEMANTICS", StringComparison.OrdinalIgnoreCase))
+            {
+                statisticalSemantics = true;
+                context.MoveNextRequired();
+            }
+
+            columnSpecs.Add(new(columnName, typeColumnName, languageId, statisticalSemantics));
+
+            if (context.Token is Operator { Character: ')' })
+            {
+                context.MoveNextOptional();
+                return columnSpecs;
+            }
+            if (context.Token is not Operator { Character: ',' })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            context.MoveNextRequired();
+        }
+    }
+
+    /// <summary>
+    /// Resolves a column list against <paramref name="table"/> with real's
+    /// refusals, column by column (probed 2026-09-26 against SQL Server 2025):
+    /// a missing column is Msg 1911 at <paramref name="missingState"/>, one
+    /// that isn't character, <c>xml</c>, <c>image</c> or <c>varbinary(max)</c>
+    /// Msg 7670, an <c>image</c> / <c>varbinary(max)</c> one without a
+    /// <c>TYPE COLUMN</c> Msg 7655, a column named twice or already in
+    /// <paramref name="existing"/> Msg 7672, and <c>STATISTICAL_SEMANTICS</c>
+    /// Msg 41209.
+    /// </summary>
+    private static List<FullTextIndexColumn> ResolveFullTextColumns(ParserContext context, HeapTable table, List<FullTextColumnSpec> specs, List<FullTextIndexColumn> existing, byte missingState)
+    {
+        var collation = context.Batch.CurrentDatabase.Collation;
+        var columns = new List<FullTextIndexColumn>(specs.Count);
+        foreach (var spec in specs)
+        {
+            var ordinal = ResolveColumnOrdinalForFullText(collation, table, spec.ColumnName, missingState);
+            var column = table.Columns[ordinal - 1];
+            var type = column.Type;
+            var isDocument = type is ImageSqlType || (type is VarbinarySqlType && column.MaxLength == SqlType.MaxLengthSentinel);
+            if (!isDocument && !(SqlType.IsCollatedString(type) || type is XmlSqlType))
+                throw SimulatedSqlException.FullTextColumnTypeInvalid(column.Name);
+            if (isDocument && spec.TypeColumnName is null)
+                throw SimulatedSqlException.FullTextTypeColumnRequired();
+            if (columns.Exists(c => c.ColumnId == ordinal) || existing.Exists(c => c.ColumnId == ordinal))
+                throw SimulatedSqlException.FullTextDuplicateColumn(column.Name);
+            if (spec.StatisticalSemantics)
+                throw SimulatedSqlException.SemanticDatabaseNotRegistered();
+            int? typeColumnId = spec.TypeColumnName is null ? null : ResolveColumnOrdinalForFullText(collation, table, spec.TypeColumnName, missingState);
+            columns.Add(new FullTextIndexColumn(ordinal, spec.LanguageId, typeColumnId));
+        }
+        return columns;
+    }
+
+    private static int ResolveColumnOrdinalForFullText(Collation collation, HeapTable table, string columnName, byte missingState)
     {
         for (var i = 0; i < table.Columns.Length; i++)
         {
             if (collation.Equals(table.Columns[i].Name, columnName))
                 return i + 1;
         }
-        throw SimulatedSqlException.InvalidColumnName(columnName);
+        throw SimulatedSqlException.IndexColumnMissing(columnName, missingState);
+    }
+
+    /// <summary>What a <c>CREATE FULLTEXT INDEX … WITH</c> clause asked for.</summary>
+    private struct FullTextIndexOptions
+    {
+        public FullTextChangeTracking ChangeTracking;
+        public bool StoplistOff;
+        public string? StoplistName;
+        public string? PropertyListName;
+    }
+
+    /// <summary>
+    /// Parses <c>WITH [(] option [, …] [)]</c>, whose options are
+    /// <c>CHANGE_TRACKING [=] {MANUAL | AUTO | OFF [, NO POPULATION]}</c>,
+    /// <c>STOPLIST [=] {OFF | SYSTEM | name}</c> and <c>SEARCH PROPERTY LIST
+    /// [=] name</c>. Cursor enters on <c>WITH</c>.
+    /// </summary>
+    private static FullTextIndexOptions ParseFullTextIndexOptions(ParserContext context)
+    {
+        var options = default(FullTextIndexOptions);
+        var parenthesized = context.GetNextRequired() is Operator { Character: '(' };
+        if (parenthesized)
+            context.MoveNextRequired();
+        while (true)
+        {
+            if (IsFullTextWord(context.Token, "CHANGE_TRACKING"))
+            {
+                options.ChangeTracking = ParseChangeTrackingOption(context, allowNoPopulation: true);
+            }
+            else if (IsFullTextWord(context.Token, "STOPLIST"))
+            {
+                (options.StoplistOff, options.StoplistName) = ParseStoplistValue(context);
+            }
+            else if (IsFullTextWord(context.Token, "SEARCH"))
+            {
+                options.PropertyListName = ParseSearchPropertyListValue(context);
+            }
+            else
+            {
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            }
+
+            if (parenthesized && context.Token is Operator { Character: ')' })
+            {
+                context.MoveNextOptional();
+                return options;
+            }
+            if (context.Token is not Operator { Character: ',' })
+            {
+                return parenthesized ? throw SimulatedSqlException.SyntaxErrorNear(context) : options;
+            }
+            context.MoveNextRequired();
+        }
+    }
+
+    /// <summary>
+    /// Parses <c>CHANGE_TRACKING [=] {MANUAL | AUTO | OFF}</c>, and on
+    /// <paramref name="allowNoPopulation"/> the <c>, NO POPULATION</c> an
+    /// <c>OFF</c> may carry. Cursor enters on <c>CHANGE_TRACKING</c> and
+    /// leaves on the token after the clause.
+    /// </summary>
+    private static FullTextChangeTracking ParseChangeTrackingOption(ParserContext context, bool allowNoPopulation)
+    {
+        if (!IsFullTextWord(context.Token, "CHANGE_TRACKING"))
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        if (context.GetNextRequired() is Operator { Character: '=' })
+            context.MoveNextRequired();
+        FullTextChangeTracking mode;
+        if (context.Token is ReservedKeyword { Keyword: Keyword.Off })
+            mode = FullTextChangeTracking.Off;
+        else if (IsFullTextWord(context.Token, "MANUAL"))
+            mode = FullTextChangeTracking.Manual;
+        else if (IsFullTextWord(context.Token, "AUTO"))
+            mode = FullTextChangeTracking.Auto;
+        else
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        context.MoveNextOptional();
+
+        if (!allowNoPopulation || context.Token is not Operator { Character: ',' })
+            return mode;
+        var beforeComma = context.SaveCheckpoint();
+        if (context.MoveNext() && IsFullTextWord(context.Token, "NO"))
+        {
+            if (context.GetNextRequired() is not Name populationToken || !IsFullTextWord(populationToken, "POPULATION"))
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            context.MoveNextOptional();
+            return mode;
+        }
+        context.RestoreCheckpoint(beforeComma);
+        return mode;
+    }
+
+    /// <summary>
+    /// Parses <c>STOPLIST [=] {OFF | SYSTEM | name}</c>, cursor entering on
+    /// <c>STOPLIST</c>: the pair is <c>(off, named)</c>, where only the
+    /// system stoplist exists here, so a name is one real would reject.
+    /// </summary>
+    private static (bool Off, string? Name) ParseStoplistValue(ParserContext context)
+    {
+        if (context.GetNextRequired() is Operator { Character: '=' })
+            context.MoveNextRequired();
+        var off = context.Token is ReservedKeyword { Keyword: Keyword.Off };
+        if (!off && context.Token is not Name)
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        var name = off || IsFullTextWord(context.Token, "SYSTEM") ? null : ((Name)context.Token!).Value;
+        context.MoveNextOptional();
+        return (off, name);
+    }
+
+    /// <summary>
+    /// Parses <c>SEARCH PROPERTY LIST [=] {OFF | name}</c>, cursor entering on
+    /// <c>SEARCH</c>; returns the name, which no search property list here can
+    /// answer, or null for <c>OFF</c>.
+    /// </summary>
+    private static string? ParseSearchPropertyListValue(ParserContext context)
+    {
+        if (!IsFullTextWord(context.GetNextRequired(), "PROPERTY") || !IsFullTextWord(context.GetNextRequired(), "LIST"))
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        if (context.GetNextRequired() is Operator { Character: '=' })
+            context.MoveNextRequired();
+        if (context.Token is ReservedKeyword { Keyword: Keyword.Off })
+        {
+            context.MoveNextOptional();
+            return null;
+        }
+        if (context.Token is not Name listName)
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        context.MoveNextOptional();
+        return listName.Value;
+    }
+
+    private static bool IsFullTextWord(Token? token, string word) =>
+        token is Name name && name.Value.Equals(word, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>Real refuses full-text DDL inside a user transaction (Msg 574).</summary>
+    private static void RejectFullTextDdlInTransaction(ParserContext context, string statement)
+    {
+        if (context.Connection.CurrentTransaction is not null)
+            throw SimulatedSqlException.StatementInsideUserTransaction(statement);
     }
 
     private static bool ParseDropFullTextCatalog(ParserContext context)
@@ -456,6 +611,7 @@ partial class Simulation
 
         if (context.Batch.IsSkipping)
             return true;
+        RejectFullTextDdlInTransaction(context, "DROP FULLTEXT CATALOG");
         context.CurrentDatabase.RejectFullTextWriteWhenReadOnly(state: 102);
         // Real gates the drop on ALTER ANY FULLTEXT CATALOG (or CONTROL on the
         // catalog, a securable class the simulator's GRANT surface doesn't
@@ -483,12 +639,13 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return true;
 
+        RejectFullTextDdlInTransaction(context, "DROP FULLTEXT INDEX");
         context.CurrentDatabase.RejectFullTextWriteWhenReadOnly(state: 105);
 
         if (!context.Batch.TryResolveTable(tableName, out var table))
             throw SimulatedSqlException.InvalidObjectName(tableName);
         if (table.FullTextIndex is null)
-            throw SimulatedSqlException.InvalidObjectName(tableName);
+            throw SimulatedSqlException.FullTextIndexMissing(tableName.Leaf, state: 5);
         table.FullTextIndex = null;
         return true;
     }
