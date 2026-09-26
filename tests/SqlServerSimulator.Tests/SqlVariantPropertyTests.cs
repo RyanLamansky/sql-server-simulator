@@ -71,6 +71,17 @@ public sealed class SqlVariantPropertyTests
         => AreEqual(2, Scalar("select sql_variant_property(1.25, 'Scale')"));
 
     [TestMethod]
+    [DataRow("0.", 1, 1)]
+    [DataRow("00.", 1, 1)]
+    [DataRow("12.", 2, 0)]
+    [DataRow("0.50", 2, 2)]
+    public void DecimalLiteral_PrecisionFloorFallsOnTheFractionalSide(string literal, int precision, int scale)
+    {
+        AreEqual(precision, Scalar($"select sql_variant_property({literal}, 'Precision')"));
+        AreEqual(scale, Scalar($"select sql_variant_property({literal}, 'Scale')"));
+    }
+
+    [TestMethod]
     public void Precision_Int_ReturnsTen()
         => AreEqual(10, Scalar("select sql_variant_property(1, 'Precision')"));
 

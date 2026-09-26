@@ -70,7 +70,10 @@ internal sealed class Numeric : Token
             // rather than letting it reach the type factory.
             if (precision > 38)
                 throw SimulatedSqlException.NumberOutOfRangeForNumeric(number.ToString());
-            var scale = fractionalPart;
+            // The digit the precision floor adds falls on the fractional side:
+            // `0.` and `00.` are numeric(1, 1) where `1.` is numeric(1, 0)
+            // (probed 2026-09-26 against SQL Server 2025).
+            var scale = precision - integerPart;
             _ = Decimal38.TryParse(number, precision, scale, out var parsed);
             this.Value = SqlValue.FromDecimal(SqlType.GetDecimal(precision, scale), parsed);
             return;

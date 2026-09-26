@@ -93,6 +93,9 @@ public sealed class DateTimeStringTests
     [DataRow("Jan-05-2024", "smalldatetime", 242)]
     [DataRow("Sept 5 2024", "datetime", 241)]
     [DataRow("2024-12-31T23:59", "datetime", 241)]
+    [DataRow("2024-12-31T24:00", "datetime", 242)]
+    [DataRow("2024-12-31T23:60", "smalldatetime", 242)]
+    [DataRow("2024-12-31T24:00", "datetime2", 241)]
     [DataRow("Sept 5 2024", "smalldatetime", 295)]
     [DataRow("2024-13-01", "datetime2", 241)]
     public void LegacyTypesSplitUnreadableFromOutOfRange(string text, string type, int number)

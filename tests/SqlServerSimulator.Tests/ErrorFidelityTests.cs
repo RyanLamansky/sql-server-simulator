@@ -264,6 +264,10 @@ public sealed class ErrorFidelityTests
     }
 
     [TestMethod]
-    public void TranslateLengthMismatch_RaisesMsg9828State3()
-        => AreEqual(3, new Simulation().AssertSqlError("select translate('abc', 'ab', 'x')", 9828).State);
+    [DataRow("select translate('abc', 'ab', 'x')", 1)]
+    [DataRow("select translate(N'abc', N'ab', N'x')", 3)]
+    [DataRow("select translate('abc' collate Latin1_General_100_CI_AS_SC_UTF8, 'ab', 'x')", 1)]
+    [DataRow("select translate(N'abc' collate Latin1_General_100_CI_AS_SC, N'ab', N'x')", 3)]
+    public void TranslateLengthMismatch_RaisesMsg9828_StateByStringFamily(string sql, int state)
+        => AreEqual(state, new Simulation().AssertSqlError(sql, 9828).State);
 }

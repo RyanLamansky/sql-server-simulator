@@ -615,8 +615,10 @@ internal readonly struct DateTimeText(DateOnly? date, long timeTicks, TimeSpan? 
                 this.Position = afterHour;
             }
 
+            // The legacy pair weighs an ISO T time's values before its missing
+            // seconds: T24:00 is out of range, T23:59 unreadable.
             if (requireSeconds && !hasSecond)
-                return DateTimeTextError.Syntax;
+                return legacy && hasMinute && (hour > 23 || minute > 59) ? DateTimeTextError.Range : DateTimeTextError.Syntax;
 
             var meridiemStart = this.Position;
             _ = this.SkipSpaces();

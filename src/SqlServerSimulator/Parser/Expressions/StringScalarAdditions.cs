@@ -121,10 +121,11 @@ internal sealed class Translate : Expression
         var transStr = translations.CoerceTo(SqlType.NVarchar).AsString;
         var inputStr = input.CoerceTo(SqlType.NVarchar).AsString;
         var collation = StringScalars.CollationFor(runtime.Batch, input.Type, chars.Type, translations.Type);
+        var national = SqlType.IsNationalStringCategory(resultType);
         if (collation.IsSupplementaryCharacterAware)
-            return SqlValue.FromString(resultType, TranslateByCodePoint(inputStr, charsStr, transStr, collation));
+            return SqlValue.FromString(resultType, TranslateByCodePoint(inputStr, charsStr, transStr, collation, national));
         if (charsStr.Length != transStr.Length)
-            throw SimulatedSqlException.TranslateUnequalChars();
+            throw SimulatedSqlException.TranslateUnequalChars(national);
         // Each input character is looked up in the character list under the
         // collation the three arguments resolve to, and the substitution is
         // taken from the *position* the lookup reports — probe-confirmed
@@ -150,12 +151,12 @@ internal sealed class Translate : Expression
     /// The first position a character appears at in the list wins, as it does
     /// by code unit.
     /// </summary>
-    private static string TranslateByCodePoint(string input, string chars, string translations, Collation collation)
+    private static string TranslateByCodePoint(string input, string chars, string translations, Collation collation, bool national)
     {
         var charStarts = ElementStarts(chars);
         var translationStarts = ElementStarts(translations);
         if (charStarts.Count != translationStarts.Count)
-            throw SimulatedSqlException.TranslateUnequalChars();
+            throw SimulatedSqlException.TranslateUnequalChars(national);
         translationStarts.Add(translations.Length);
         var matcher = new Collation.ElementMatcher(collation, chars);
         var sb = new StringBuilder(input.Length);
