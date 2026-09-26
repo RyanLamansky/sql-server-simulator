@@ -38,8 +38,14 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// <item><description><c>UsesAnsiTrim</c> — 1 for character types (the
 /// simulator's ANSI-trim behavior is always on), 0 otherwise.</description></item>
 /// </list>
-/// Unsupported / physical-storage properties (<c>IsDeterministic</c>,
-/// <c>IsIndexable</c>, <c>IsPrecise</c>, <c>StatisticalSemantics</c>,
+/// <c>IsDeterministic</c> / <c>IsPrecise</c> answer 1 or 0 for a computed
+/// column and NULL otherwise, as do <c>IsSystemVerified</c> (1) and the two
+/// data-access properties (0); <c>IsIndexable</c> is 0 for a MAX or LOB
+/// type, else 1 for a stored column and, for a computed one, 1 when it is
+/// deterministic and either persisted or precise (probed 2026-09-26 against
+/// SQL Server 2025 under the default SET options, which that answer also
+/// weighs on real). <c>IsFulltextIndexed</c> / <c>IsXmlIndexable</c> are 0.
+/// Unsupported / physical-storage properties (<c>StatisticalSemantics</c>,
 /// <c>GeneratedAlwaysType</c>) return NULL —
 /// callers reading them on a real server with no stats / column-set also get
 /// NULL, so this matches the common case.
@@ -76,12 +82,15 @@ internal sealed class ColumnProperty : Expression
         var columnName = columnValue.CoerceTo(SqlType.NVarchar).AsString;
         var prop = propValue.CoerceTo(SqlType.NVarchar).AsString;
 
-        var (column, ordinal) = FindColumn(runtime.Batch.CurrentDatabase, id, columnName);
+        var database = runtime.Batch.CurrentDatabase;
+        var (column, ordinal, scope) = FindColumn(database, id, columnName);
         return column is null
             ? SqlValue.Null(SqlType.Int32)
             : EvaluateColumnProperty(column, ordinal, prop) is int result
                 ? SqlValue.FromInt32(result)
-                : SqlValue.Null(SqlType.Int32);
+                : EvaluateComputedColumnProperty(database, scope, column, prop) is int computed
+                    ? SqlValue.FromInt32(computed)
+                    : SqlValue.Null(SqlType.Int32);
     }
 
     /// <summary>
@@ -92,7 +101,7 @@ internal sealed class ColumnProperty : Expression
     /// whose id is its position and which always allows NULL (probed
     /// 2026-09-25 against SQL Server 2025).
     /// </summary>
-    private static (HeapColumn? Column, int Ordinal) FindColumn(Database database, int id, string name)
+    private static (HeapColumn? Column, int Ordinal, HeapColumn[] Scope) FindColumn(Database database, int id, string name)
     {
         if (name.StartsWith('@'))
         {
@@ -104,7 +113,7 @@ internal sealed class ColumnProperty : Expression
                     {
                         var parameter = procedure.Parameters[i];
                         if (Collation.Baseline.Equals(parameter.Name, parameterName))
-                            return (new HeapColumn(name, parameter.Type, parameter.DeclaredMaxLength, nullable: true), i + 1);
+                            return (new HeapColumn(name, parameter.Type, parameter.DeclaredMaxLength, nullable: true), i + 1, []);
                     }
                     break;
                 case UserDefinedFunction function:
@@ -112,11 +121,11 @@ internal sealed class ColumnProperty : Expression
                     {
                         var parameter = function.Parameters[i];
                         if (Collation.Baseline.Equals(parameter.Name, parameterName))
-                            return (new HeapColumn(name, parameter.Type, maxLength: null, nullable: true), i + 1);
+                            return (new HeapColumn(name, parameter.Type, maxLength: null, nullable: true), i + 1, []);
                     }
                     break;
             }
-            return (null, 0);
+            return (null, 0, []);
         }
 
         var columns = ObjectProperty.FindObject(database, id) switch
@@ -132,9 +141,9 @@ internal sealed class ColumnProperty : Expression
         {
             var column = columns[i];
             if (Collation.Baseline.Equals(column.Name, name))
-                return (column, column.ColumnId == 0 ? i + 1 : column.ColumnId);
+                return (column, column.ColumnId == 0 ? i + 1 : column.ColumnId, columns);
         }
-        return (null, 0);
+        return (null, 0, []);
     }
 
     private static HeapColumn[]? CatalogViewColumns(int id)
@@ -189,6 +198,29 @@ internal sealed class ColumnProperty : Expression
                 "ISIDNOTFORREPL" => column.Identity is { NotForReplication: true } ? 1 : 0,
                 _ => null,
             },
+            _ => null,
+        };
+    }
+
+    // The properties that read the column's expression, when it has one.
+    private static int? EvaluateComputedColumnProperty(Database database, HeapColumn[] scope, HeapColumn column, string property)
+    {
+        Span<char> upper = stackalloc char[property.Length];
+        var name = upper[..property.AsSpan().ToUpperInvariant(upper)];
+        if (name is "ISFULLTEXTINDEXED" or "ISXMLINDEXABLE")
+            return 0;
+        if (column.Computed is null || column.ComputedDefinition is not { } definition)
+            return name is "ISINDEXABLE" ? (column.IsLob ? 0 : 1) : null;
+        return name switch
+        {
+            "ISDETERMINISTIC" => Schemas.ModuleDeterminism.IsComputedColumnDeterministic(database, scope, definition) ? 1 : 0,
+            "ISINDEXABLE" => !column.IsLob
+                && column.Type is not (VarcharSqlType { length: SqlType.MaxLengthSentinel } or NVarcharSqlType { length: SqlType.MaxLengthSentinel } or VarbinarySqlType { length: SqlType.MaxLengthSentinel })
+                && Schemas.ModuleDeterminism.IsComputedColumnDeterministic(database, scope, definition)
+                && (column.IsPersisted || Schemas.ComputedColumnPrecision.IsPrecise(scope, column.Type, definition)) ? 1 : 0,
+            "ISPRECISE" => Schemas.ComputedColumnPrecision.IsPrecise(scope, column.Type, definition) ? 1 : 0,
+            "ISSYSTEMVERIFIED" => 1,
+            "SYSTEMDATAACCESS" or "USERDATAACCESS" => 0,
             _ => null,
         };
     }

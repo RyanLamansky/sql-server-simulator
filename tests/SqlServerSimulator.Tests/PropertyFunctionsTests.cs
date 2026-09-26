@@ -46,6 +46,29 @@ public sealed class PropertyFunctionsTests
                 isnull(str(columnproperty(object_id('p'), 'a', 'ColumnId')), '-'))
             """));
 
+    /// <summary>
+    /// The computed-column properties, probed 2026-09-26 against SQL Server
+    /// 2025: NULL on a plain column except IsIndexable (0 for a LOB), and on a
+    /// computed one the expression's determinism and precision, indexable when
+    /// deterministic, persisted or precise, and not a LOB.
+    /// </summary>
+    [TestMethod]
+    [DataRow("a", "-|-|1|-|-|0")]
+    [DataRow("v", "-|-|0|-|-|0")]
+    [DataRow("b", "1|1|1|1|0|0")]
+    [DataRow("c", "0|1|0|1|0|0")]
+    [DataRow("e", "1|0|0|1|0|0")]
+    [DataRow("p", "1|0|1|1|0|0")]
+    [DataRow("u", "1|1|0|1|0|0")]
+    public void ColumnProperty_ComputedColumnProperties(string column, string expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar($"""
+            create table t (a int, v varchar(max), b as a + 1, c as getdate(), d float, e as d * 2, p as d * 2 persisted, u as upper(v));
+            select concat_ws('|', isnull(str(columnproperty(object_id('t'), '{column}', 'IsDeterministic'), 1), '-'),
+                isnull(str(columnproperty(object_id('t'), '{column}', 'IsPrecise'), 1), '-'), columnproperty(object_id('t'), '{column}', 'IsIndexable'),
+                isnull(str(columnproperty(object_id('t'), '{column}', 'IsSystemVerified'), 1), '-'),
+                isnull(str(columnproperty(object_id('t'), '{column}', 'UserDataAccess'), 1), '-'), columnproperty(object_id('t'), '{column}', 'IsFulltextIndexed'))
+            """));
+
     [TestMethod]
     public void ColumnProperty_AllowsNull_NullableCol_Returns1()
         => AreEqual(1, new Simulation().ExecuteScalar(
