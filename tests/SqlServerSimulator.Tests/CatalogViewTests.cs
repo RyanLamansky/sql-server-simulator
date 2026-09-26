@@ -32,8 +32,7 @@ public sealed class CatalogViewTests
 
     [TestMethod]
     public void SchemaId_FirstUserSchema_Returns5()
-        => AreEqual(5, new Simulation().ExecuteScalar("""
-            create schema audit;
+        => AreEqual(5, new Simulation().WithSchemas("audit").ExecuteScalar("""
             select schema_id('audit')
             """));
 
@@ -92,8 +91,7 @@ public sealed class CatalogViewTests
 
     [TestMethod]
     public void SysSchemas_IncludesUserSchemas()
-        => AreEqual(5, new Simulation().ExecuteScalar("""
-            create schema audit;
+        => AreEqual(5, new Simulation().WithSchemas("audit").ExecuteScalar("""
             select schema_id from sys.schemas where name = 'audit'
             """));
 
@@ -101,8 +99,7 @@ public sealed class CatalogViewTests
     public void SysSchemas_UserSchemaOwnedByDbo()
         // A user schema (schema_id 5) is owned by dbo (principal_id 1),
         // probe-confirmed against SQL Server 2025.
-        => AreEqual(1, new Simulation().ExecuteScalar("""
-            create schema audit;
+        => AreEqual(1, new Simulation().WithSchemas("audit").ExecuteScalar("""
             select principal_id from sys.schemas where name = 'audit'
             """));
 
@@ -131,8 +128,7 @@ public sealed class CatalogViewTests
     [TestMethod]
     public void SysTables_SchemaIdMatchesSchemaIdFunction()
     {
-        using var reader = new Simulation().ExecuteReader("""
-            create schema audit;
+        using var reader = new Simulation().WithSchemas("audit").ExecuteReader("""
             create table audit.bar (id int);
             select t.schema_id, schema_id('audit') as fn from sys.tables t where t.name = 'bar'
             """);

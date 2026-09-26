@@ -499,8 +499,7 @@ public sealed class MergeTests
     public void UsingBareTable_SchemaQualified_Works()
     {
         var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("""
-            create schema au;
+        _ = simulation.WithSchemas("au").ExecuteNonQuery("""
             create table tgt (id int primary key, v int);
             create table au.src (id int primary key, v int);
             insert au.src values (5, 500);

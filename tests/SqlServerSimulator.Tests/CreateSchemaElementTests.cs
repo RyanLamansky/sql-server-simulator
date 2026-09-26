@@ -17,8 +17,7 @@ public sealed class CreateSchemaElementTests
 
     [TestMethod]
     public void NoAuthorization_IsOwnedByDbo()
-        => AreEqual(1, new Simulation().ExecuteScalar("""
-            create schema s1;
+        => AreEqual(1, new Simulation().WithSchemas("s1").ExecuteScalar("""
             select principal_id from sys.schemas where name = 's1'
             """));
 
@@ -96,40 +95,60 @@ public sealed class CreateSchemaElementTests
 
     // --- the element list: unqualified names land in the new schema ---
 
+    /// <summary>
+    /// <c>CREATE SCHEMA</c> is its batch's only statement: a <c>;</c> ends the
+    /// element list, and whatever follows fails the whole batch at its first
+    /// token with no Msg 2759, as a syntax error inside the list does too
+    /// (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("create schema s1; select 1", 156, "Incorrect syntax near the keyword 'select'.")]
+    [DataRow("create schema s1; create table t (a int)", 156, "Incorrect syntax near the keyword 'create'.")]
+    [DataRow("create schema s1 create table t (a int); create table t2 (a int)", 156, "Incorrect syntax near the keyword 'create'.")]
+    [DataRow("create schema s1\nselect 1", 156, "Incorrect syntax near the keyword 'select'.")]
+    [DataRow("create schema s1 create schema s2", 156, "Incorrect syntax near the keyword 'schema'.")]
+    public void AnythingAfterTheElementList_FailsTheBatch(string sql, int number, string message)
+    {
+        var simulation = new Simulation();
+        var exception = simulation.AssertSqlError(sql.Replace("\\n", "\n", StringComparison.Ordinal), number);
+        AreEqual(message, exception.Errors[0].Message);
+        HasCount(1, exception.Errors);
+        AreEqual(0, simulation.ExecuteScalar("select count(*) from sys.schemas where name like 's_'"));
+    }
+
+    [TestMethod]
+    public void TrailingSemicolons_AreNotStatements()
+        => AreEqual(1, new Simulation().ExecuteBatchesScalar("create schema s1;;", "select count(*) from sys.schemas where name = 's1'"));
+
     [TestMethod]
     public void CreateTableElement_LandsInTheNewSchema()
-        => AreEqual("s1", new Simulation().ExecuteScalar("""
-            create schema s1 create table t (a int, b int);
-            select schema_name(schema_id) from sys.tables where name = 't'
-            """));
+        => AreEqual("s1", new Simulation().ExecuteBatchesScalar(
+            "create schema s1 create table t (a int, b int)",
+            "select schema_name(schema_id) from sys.tables where name = 't'"));
 
     [TestMethod]
     public void CreateTableElement_IsNotVisibleAsDbo()
-        => AreEqual(0, new Simulation().ExecuteScalar("""
-            create schema s1 create table t (a int);
-            select count(*) from sys.tables where schema_id = schema_id('dbo') and name = 't'
-            """));
+        => AreEqual(0, new Simulation().ExecuteBatchesScalar(
+            "create schema s1 create table t (a int)",
+            "select count(*) from sys.tables where schema_id = schema_id('dbo') and name = 't'"));
 
     [TestMethod]
     public void SeveralCreateTableElements_AllLandInTheNewSchema()
-        => AreEqual(2, new Simulation().ExecuteScalar("""
-            create schema s1 create table t1 (a int) create table t2 (b int);
-            select count(*) from sys.tables where schema_id = schema_id('s1')
-            """));
+        => AreEqual(2, new Simulation().ExecuteBatchesScalar(
+            "create schema s1 create table t1 (a int) create table t2 (b int)",
+            "select count(*) from sys.tables where schema_id = schema_id('s1')"));
 
     [TestMethod]
     public void ElementForeignKey_ResolvesToASiblingElement()
-        => AreEqual(1, new Simulation().ExecuteScalar("""
-            create schema s1 create table p (a int not null primary key) create table c (a int references p(a));
-            select count(*) from sys.foreign_keys where schema_id = schema_id('s1')
-            """));
+        => AreEqual(1, new Simulation().ExecuteBatchesScalar(
+            "create schema s1 create table p (a int not null primary key) create table c (a int references p(a))",
+            "select count(*) from sys.foreign_keys where schema_id = schema_id('s1')"));
 
     [TestMethod]
     public void AQualifiedElementNameStillWins()
-        => AreEqual("dbo", new Simulation().ExecuteScalar("""
-            create schema s1 create table dbo.qq (a int);
-            select schema_name(schema_id) from sys.tables where name = 'qq'
-            """));
+        => AreEqual("dbo", new Simulation().ExecuteBatchesScalar(
+            "create schema s1 create table dbo.qq (a int)",
+            "select schema_name(schema_id) from sys.tables where name = 'qq'"));
 
     [TestMethod]
     public void CreateViewElement_LandsInTheNewSchemaAndResolvesItsBodyThere()

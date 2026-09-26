@@ -14,8 +14,7 @@ public sealed class CreateSchemaTests
 {
     [TestMethod]
     public void CreateSchema_BareForm_Succeeds()
-        => AreEqual(1, new Simulation().ExecuteScalar("""
-            create schema audit;
+        => AreEqual(1, new Simulation().WithSchemas("audit").ExecuteScalar("""
             create table audit.t (id int);
             insert audit.t values (1);
             select count(*) from audit.t
@@ -64,17 +63,16 @@ public sealed class CreateSchemaTests
     /// </summary>
     [TestMethod]
     public void CreateSchema_FollowedByCreateTable_BindsTheTableAsAnElement()
-        => AreEqual(1, new Simulation().ExecuteScalar("""
+        => AreEqual(1, new Simulation().ExecuteBatchesScalar(
+            """
             create schema audit
             create table audit.t (id int)
-            insert audit.t values (1);
-            select count(*) from audit.t
-            """));
+            """,
+            "insert audit.t values (1); select count(*) from audit.t"));
 
     [TestMethod]
     public void TwoPartName_Select_Works()
-        => AreEqual(42, new Simulation().ExecuteScalar("""
-            create schema audit;
+        => AreEqual(42, new Simulation().WithSchemas("audit").ExecuteScalar("""
             create table audit.t (id int);
             insert audit.t values (42);
             select id from audit.t
@@ -82,8 +80,7 @@ public sealed class CreateSchemaTests
 
     [TestMethod]
     public void TwoPartName_Insert_Works()
-        => AreEqual(2, new Simulation().ExecuteScalar("""
-            create schema audit;
+        => AreEqual(2, new Simulation().WithSchemas("audit").ExecuteScalar("""
             create table audit.t (id int);
             insert audit.t values (1);
             insert into audit.t values (2);
@@ -92,8 +89,7 @@ public sealed class CreateSchemaTests
 
     [TestMethod]
     public void TwoPartName_Update_Works()
-        => AreEqual(99, new Simulation().ExecuteScalar("""
-            create schema audit;
+        => AreEqual(99, new Simulation().WithSchemas("audit").ExecuteScalar("""
             create table audit.t (id int);
             insert audit.t values (1);
             update audit.t set id = 99;
@@ -102,8 +98,7 @@ public sealed class CreateSchemaTests
 
     [TestMethod]
     public void TwoPartName_Delete_Works()
-        => AreEqual(0, new Simulation().ExecuteScalar("""
-            create schema audit;
+        => AreEqual(0, new Simulation().WithSchemas("audit").ExecuteScalar("""
             create table audit.t (id int);
             insert audit.t values (1), (2), (3);
             delete from audit.t;
@@ -113,11 +108,10 @@ public sealed class CreateSchemaTests
     [TestMethod]
     public void TwoPartName_DropTable_Works()
     {
-        using var conn = new Simulation().CreateDbConnection();
+        using var conn = new Simulation().WithSchemas("audit").CreateDbConnection();
         conn.Open();
         using var cmd = conn.CreateCommand();
         cmd.CommandText = """
-            create schema audit;
             create table audit.t (id int);
             drop table audit.t
             """;
@@ -128,8 +122,7 @@ public sealed class CreateSchemaTests
 
     [TestMethod]
     public void TwoPartName_Truncate_Works()
-        => AreEqual(0, new Simulation().ExecuteScalar("""
-            create schema audit;
+        => AreEqual(0, new Simulation().WithSchemas("audit").ExecuteScalar("""
             create table audit.t (id int);
             insert audit.t values (1), (2);
             truncate table audit.t;
@@ -138,8 +131,7 @@ public sealed class CreateSchemaTests
 
     [TestMethod]
     public void TwoPartName_SelectInto_Works()
-        => AreEqual(3, new Simulation().ExecuteScalar("""
-            create schema staging;
+        => AreEqual(3, new Simulation().WithSchemas("staging").ExecuteScalar("""
             create table dbo.src (id int);
             insert dbo.src values (1), (2), (3);
             select * into staging.dest from dbo.src;
@@ -148,8 +140,7 @@ public sealed class CreateSchemaTests
 
     [TestMethod]
     public void ThreePartName_CorrectDatabase_Works()
-        => AreEqual(7, new Simulation().ExecuteScalar("""
-            create schema audit;
+        => AreEqual(7, new Simulation().WithSchemas("audit").ExecuteScalar("""
             create table audit.t (id int);
             insert audit.t values (7);
             select id from simulated.audit.t
@@ -157,8 +148,7 @@ public sealed class CreateSchemaTests
 
     [TestMethod]
     public void ThreePartName_WrongDatabase_Msg208()
-        => new Simulation().AssertSqlError("""
-            create schema audit;
+        => new Simulation().WithSchemas("audit").AssertSqlError("""
             create table audit.t (id int);
             select * from baddb.audit.t
             """, 208);
@@ -207,8 +197,7 @@ public sealed class CreateSchemaTests
 
     [TestMethod]
     public void SchemaExistsTableDoesNot_Select_Msg208()
-        => new Simulation().AssertSqlError("""
-            create schema audit;
+        => new Simulation().WithSchemas("audit").AssertSqlError("""
             select * from audit.nope
             """, 208, "Invalid object name 'audit.nope'.");
 
@@ -234,8 +223,7 @@ public sealed class CreateSchemaTests
 
     [TestMethod]
     public void UnqualifiedReference_ResolvesToDbo()
-        => AreEqual(5, new Simulation().ExecuteScalar("""
-            create schema audit;
+        => AreEqual(5, new Simulation().WithSchemas("audit").ExecuteScalar("""
             create table dbo.t (id int);
             create table audit.t (id int);
             insert dbo.t values (5);
@@ -253,8 +241,7 @@ public sealed class CreateSchemaTests
 
     [TestMethod]
     public void CrossSchemaJoin_Works()
-        => AreEqual(2, new Simulation().ExecuteScalar("""
-            create schema audit;
+        => AreEqual(2, new Simulation().WithSchemas("audit").ExecuteScalar("""
             create table dbo.users (id int, name nvarchar(50));
             create table audit.entries (user_id int, action nvarchar(50));
             insert dbo.users values (1, 'alice'), (2, 'bob');
@@ -277,10 +264,10 @@ public sealed class CreateSchemaTests
     [TestMethod]
     public void DropSchema_Empty_Succeeds()
     {
-        using var conn = new Simulation().CreateDbConnection();
+        using var conn = new Simulation().WithSchemas("audit").CreateDbConnection();
         conn.Open();
         using var cmd = conn.CreateCommand();
-        cmd.CommandText = "create schema audit; drop schema audit; select schema_id('audit')";
+        cmd.CommandText = "drop schema audit; select schema_id('audit')";
         AreEqual(DBNull.Value, cmd.ExecuteScalar());
     }
 
@@ -317,8 +304,8 @@ public sealed class CreateSchemaTests
     [TestMethod]
     public void DropSchema_NotEmpty_Msg3729()
     {
-        var ex = new Simulation().AssertSqlError(
-            "create schema audit; create table audit.t (id int); drop schema audit",
+        var ex = new Simulation().WithSchemas("audit").AssertSqlError(
+            "create table audit.t (id int); drop schema audit",
             3729);
         IsTrue(ex.Message.StartsWith("Cannot drop schema 'audit' because it is being referenced by object", StringComparison.Ordinal));
     }

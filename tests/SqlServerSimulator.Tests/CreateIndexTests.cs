@@ -615,8 +615,7 @@ public sealed class CreateIndexTests
 
     [TestMethod]
     public void AppDictSchema_RealCreateTableAndDefault_BothAccepted()
-        => AreEqual(0, new Simulation().ExecuteScalar("""
-            create schema appdict;
+        => AreEqual(0, new Simulation().WithSchemas("appdict").ExecuteScalar("""
             create table [appdict].[adminactionconfiguration](
                 [id] [uniqueidentifier] not null,
                 [formname] [nvarchar](256) not null,

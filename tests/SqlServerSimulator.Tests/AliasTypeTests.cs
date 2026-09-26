@@ -226,10 +226,7 @@ public class AliasTypeTests
     [TestMethod]
     public void CrossSchema_Alias_Resolves()
     {
-        var sim = new Simulation();
-        _ = sim.ExecuteNonQuery("""
-            CREATE SCHEMA HR;
-            """);
+        var sim = new Simulation().WithSchemas("HR");
         _ = sim.ExecuteNonQuery("CREATE TYPE HR.EmployeeId FROM int NOT NULL");
         _ = sim.ExecuteNonQuery("""
             CREATE TABLE HR.Employee (Id HR.EmployeeId);

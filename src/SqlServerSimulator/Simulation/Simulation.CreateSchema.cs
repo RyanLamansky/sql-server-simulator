@@ -85,12 +85,27 @@ partial class Simulation
 
         try
         {
-            return this.CreateSchemaBody(context, schemaName, ownerName);
+            _ = this.CreateSchemaBody(context, schemaName, ownerName);
         }
-        catch (SimulatedSqlException exception)
+        catch (SimulatedSqlException exception) when (!context.Batch.IsSkipping)
         {
+            // A syntax error the batch's parse walk meets stands alone.
             throw SimulatedSqlException.Aggregate([exception, SimulatedSqlException.CreateSchemaFailed()]);
         }
+
+        // CREATE SCHEMA is its batch's only statement: a `;` ends the element
+        // list, and whatever follows is a syntax error at its first token —
+        // raised on the batch's parse walk, so nothing runs and no Msg 2759
+        // follows (probed 2026-09-26 against SQL Server 2025).
+        while (context.Token is Operator { Character: ';' })
+            context.MoveNextOptional();
+        if (context.Token is { } trailing)
+        {
+            throw trailing is ReservedKeyword keyword
+                ? SimulatedSqlException.SyntaxErrorNearKeyword(keyword)
+                : SimulatedSqlException.SyntaxErrorNear(trailing);
+        }
+        return true;
     }
 
     /// <summary>
@@ -175,8 +190,8 @@ partial class Simulation
                 };
                 if (!parsed)
                     throw SimulatedSqlException.SyntaxErrorNear(context);
-                while (context.Token is Operator { Character: ';' })
-                    context.MoveNextOptional();
+                if (context.Token is Operator { Character: ';' })
+                    break;
             }
         }
         finally
@@ -200,7 +215,7 @@ partial class Simulation
         return kind switch
         {
             ReservedKeyword { Keyword: Keyword.Table or Keyword.View } => this.TryParseCreate(context),
-            ReservedKeyword { Keyword: Keyword.Index } => throw SimulatedSqlException.IndexHintNeedsWithKeyword(),
+            ReservedKeyword { Keyword: Keyword.Index } index => throw SimulatedSqlException.TableHintNeedsWithKeyword(index.Source),
             ReservedKeyword keyword => throw SimulatedSqlException.SyntaxErrorNearKeyword(keyword),
             _ => throw SimulatedSqlException.SyntaxErrorNear(kind),
         };

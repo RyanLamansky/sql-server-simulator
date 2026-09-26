@@ -49,9 +49,9 @@ static class Extensions
     /// Runs each <paramref name="batches"/> entry as its own ADO.NET command
     /// on a shared open connection. The split exists because CREATE/ALTER
     /// PROCEDURE / FUNCTION / VIEW / TRIGGER / SCHEMA must be the first
-    /// statement in a query batch (Msg 111) — and a VIEW or FUNCTION must be
-    /// its batch's <em>only</em> statement, since its body runs to the end of
-    /// the batch (Msg 156 / 102 at whatever follows). Passing several such
+    /// statement in a query batch (Msg 111) — and a VIEW, FUNCTION or SCHEMA
+    /// must be its batch's <em>only</em> statement (Msg 156 / 102 at
+    /// whatever follows). Passing several such
     /// statements, or a trailing query, through a single CommandText fails
     /// fast, so tests use this helper to give each one its own batch.
     /// </summary>
@@ -63,6 +63,18 @@ static class Extensions
             using var command = connection.CreateCommand(commandText);
             _ = command.ExecuteNonQuery();
         }
+    }
+
+    /// <summary>
+    /// Creates each schema in <paramref name="names"/> in a batch of its own —
+    /// <c>CREATE SCHEMA</c> must be its batch's only statement — and returns
+    /// <paramref name="simulation"/>, so the test goes on in one batch.
+    /// </summary>
+    public static Simulation WithSchemas(this Simulation simulation, params ReadOnlySpan<string> names)
+    {
+        foreach (var name in names)
+            _ = simulation.ExecuteNonQuery($"create schema {name}");
+        return simulation;
     }
 
     /// <summary>

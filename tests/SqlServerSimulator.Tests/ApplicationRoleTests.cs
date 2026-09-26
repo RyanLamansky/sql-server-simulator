@@ -42,8 +42,7 @@ public sealed class ApplicationRoleTests
 
     [TestMethod]
     public void CreateApplicationRole_DefaultSchemaOption()
-        => AreEqual("aps", new Simulation().ExecuteScalar("""
-            create schema aps;
+        => AreEqual("aps", new Simulation().WithSchemas("aps").ExecuteScalar("""
             create application role app2 with password = 'App!Pass123', default_schema = aps;
             select default_schema_name from sys.database_principals where name = 'app2'
             """));
@@ -66,7 +65,7 @@ public sealed class ApplicationRoleTests
     {
         var sim = Seeded();
         var id = sim.ExecuteScalar("select principal_id from sys.database_principals where name = 'app1'");
-        _ = sim.ExecuteNonQuery("create schema aps; alter application role app1 with name = app1b, default_schema = aps");
+        _ = sim.WithSchemas("aps").ExecuteNonQuery("alter application role app1 with name = app1b, default_schema = aps");
         AreEqual("aps", sim.ExecuteScalar("select default_schema_name from sys.database_principals where name = 'app1b'"));
         // The principal_id survives the rename, so grants follow the role.
         AreEqual(id, sim.ExecuteScalar("select principal_id from sys.database_principals where name = 'app1b'"));

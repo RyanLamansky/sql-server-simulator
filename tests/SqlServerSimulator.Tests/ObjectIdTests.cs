@@ -131,8 +131,7 @@ public sealed class ObjectIdTests
 
     [TestMethod]
     public void ObjectId_TwoPartName_Works()
-        => IsFalseDbNull(new Simulation().ExecuteReader("""
-            create schema audit;
+        => IsFalseDbNull(new Simulation().WithSchemas("audit").ExecuteReader("""
             create table audit.bar (id int);
             select object_id('audit.bar', 'U') as id
             """));

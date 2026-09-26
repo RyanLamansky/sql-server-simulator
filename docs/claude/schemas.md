@@ -191,7 +191,11 @@ Any database principal will do, roles included.
 A principal the database doesn't carry is **Msg 15151**'s *user* variant (`Cannot find the user 'nobody', …`, distinct from the object variant a `GRANT` element reports), and a principal that owns a schema cannot be dropped — `DROP USER` / `DROP ROLE` is **Msg 15138** (`The database principal owns a schema in the database, and cannot be dropped.`).
 Written without a schema name the clause supplies one: `CREATE SCHEMA AUTHORIZATION dbo` claims the name `dbo`, which is then the ordinary reserved-name Msg 2760.
 
-**Every failure inside the statement carries a trailing Msg 2759** (`CREATE SCHEMA failed due to previous errors.`) — the duplicate-name Msg 2714, the owner's Msg 15151 and an element's own error alike — and the statement is **atomic**: an element that raises leaves neither the schema nor its earlier elements behind.
+**Every failure the statement meets as it runs carries a trailing Msg 2759** (`CREATE SCHEMA failed due to previous errors.`) — the duplicate-name Msg 2714, the owner's Msg 15151 and an element's own error alike — and the statement is **atomic**: an element that raises leaves neither the schema nor its earlier elements behind.
+A syntax error inside the element list is the batch's parse failing instead, and stands alone (probed 2026-09-26).
+
+**`CREATE SCHEMA` is its batch's only statement**, not merely its first: a `;` ends the element list, and anything after it — a `SELECT`, a `CREATE TABLE`, a second `CREATE SCHEMA` — is Msg 156 (Msg 102 at a non-keyword) at its first token, failing the whole batch so the schema isn't created either (probed 2026-09-26).
+Trailing `;` separators and comments are not statements.
 
 **The element list is part of the statement**, and its point is the name scope: *an unqualified name inside an element resolves to the schema being created*.
 `CREATE SCHEMA s CREATE TABLE t (…) GRANT SELECT ON t TO u` creates `s.t` and grants on `s.t`, a sibling element's `REFERENCES p(a)` finds `s.p`, and a view element's body resolves there too; an explicit qualifier still wins (`CREATE TABLE dbo.qq` lands in `dbo`).

@@ -237,8 +237,7 @@ public sealed class QueryHintTests
     public void Select_IndexHint_SchemaQualified_ErrorEmbedsQualifier()
     {
         var sim = new Simulation();
-        _ = sim.ExecuteNonQuery("""
-            create schema au;
+        _ = sim.WithSchemas("au").ExecuteNonQuery("""
             create table au.t (id int primary key);
             """);
         sim.AssertSqlError(

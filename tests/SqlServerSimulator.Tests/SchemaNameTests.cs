@@ -29,7 +29,7 @@ public sealed class SchemaNameTests
 
     [TestMethod]
     public void SchemaName_UserSchema_RoundTripsThroughSchemaId()
-        => AreEqual("audit", new Simulation().ExecuteScalar("create schema audit; select schema_name(schema_id('audit'))"));
+        => AreEqual("audit", new Simulation().WithSchemas("audit").ExecuteScalar("select schema_name(schema_id('audit'))"));
 
     [TestMethod]
     public void SchemaName_NoArg_ReturnsDbo()
@@ -81,7 +81,7 @@ public sealed class SchemaNameTests
 
     [TestMethod]
     public void ObjectSchemaName_QualifiedSchemaTable_ReturnsSchema()
-        => AreEqual("audit", new Simulation().ExecuteScalar("create schema audit; create table audit.t (id int); select object_schema_name(object_id('audit.t'))"));
+        => AreEqual("audit", new Simulation().WithSchemas("audit").ExecuteScalar("create table audit.t (id int); select object_schema_name(object_id('audit.t'))"));
 
     [TestMethod]
     public void ObjectSchemaName_NullArg_ReturnsNull()

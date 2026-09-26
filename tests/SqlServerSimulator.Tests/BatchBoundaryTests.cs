@@ -16,7 +16,7 @@ namespace SqlServerSimulator;
 public class BatchBoundaryTests
 {
     [TestMethod]
-    [DataRow("create schema audit", "create schema staging", "CREATE SCHEMA")]
+    [DataRow("create table t (id int)", "create schema staging", "CREATE SCHEMA")]
     [DataRow("create table t (id int)", "create view v as select 1 as x", "CREATE VIEW")]
     [DataRow("create table t (id int)", "create function fn() returns int as begin return 1 end", "CREATE FUNCTION")]
     [DataRow("create table t (id int)", "create proc p as select 1", "CREATE/ALTER PROCEDURE")]
@@ -75,7 +75,7 @@ public class BatchBoundaryTests
     [DataRow("create table t (id int); create function fn() returns int as begin return 1 end", (byte)4)]
     [DataRow("create table t (id int); create trigger tr on t after insert as select 1", (byte)6)]
     [DataRow("create table t (id int); create view v as select 1 as x", (byte)9)]
-    [DataRow("create schema audit; create schema staging", (byte)14)]
+    [DataRow("create table t (id int); create schema staging", (byte)14)]
     public void Msg111_CarriesPerKindState(string sql, byte expectedState)
         => AreEqual(expectedState, new Simulation().AssertSqlError(sql, 111).State);
 

@@ -42,7 +42,7 @@ public sealed class IdentSeedIncrementTests
 
     [TestMethod]
     public void IdentSeed_SchemaQualified_Works()
-        => AreEqual(50m, new Simulation().ExecuteScalar("create schema audit; create table audit.events (id int identity(50, 10) primary key); select ident_seed('audit.events')"));
+        => AreEqual(50m, new Simulation().WithSchemas("audit").ExecuteScalar("create table audit.events (id int identity(50, 10) primary key); select ident_seed('audit.events')"));
 
     [TestMethod]
     public void IdentSeed_NegativeIncrement_PreservesSign()

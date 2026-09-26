@@ -230,8 +230,7 @@ public sealed class InformationSchemaTests
     [TestMethod]
     public void IsTables_UserSchemaSurfaces()
     {
-        using var reader = new Simulation().ExecuteReader("""
-            create schema audit;
+        using var reader = new Simulation().WithSchemas("audit").ExecuteReader("""
             create table audit.events (id int);
             select TABLE_SCHEMA, TABLE_NAME from INFORMATION_SCHEMA.TABLES where TABLE_NAME = 'events'
             """);

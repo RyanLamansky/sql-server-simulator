@@ -671,7 +671,7 @@ public sealed class TemporalTableTests
         // — probe-confirmed shape (the id itself is the simulator's, so the
         // name matches real's structure, not its value).
         var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery($"create schema app; {CreateAutoNamedCustomers.Replace("table Customers", "table app.Customers", StringComparison.Ordinal)}");
+        _ = simulation.WithSchemas("app").ExecuteNonQuery($"{CreateAutoNamedCustomers.Replace("table Customers", "table app.Customers", StringComparison.Ordinal)}");
         AreEqual(1, simulation.ExecuteScalar("""
             select count(*) from sys.tables t join sys.schemas s on s.schema_id = t.schema_id
             where t.temporal_type = 1 and s.name = 'app'
