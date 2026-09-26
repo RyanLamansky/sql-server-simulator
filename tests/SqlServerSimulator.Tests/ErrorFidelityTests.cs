@@ -172,6 +172,19 @@ public sealed class ErrorFidelityTests
     public void StatementPositionEndAndEndOfInput_KeepMsg102(string sql, string message)
         => AssertError(sql, 102, 1, message);
 
+    /// <summary>
+    /// An empty BEGIN … END is refused at the token after its END — a keyword
+    /// there as Msg 156 — and at the END itself only where the batch ends
+    /// (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("if 1 = 1 begin end;", 102, "Incorrect syntax near ';'.")]
+    [DataRow("begin ; end;", 102, "Incorrect syntax near ';'.")]
+    [DataRow("begin end select 1", 156, "Incorrect syntax near the keyword 'select'.")]
+    [DataRow("if 1 = 1 begin end else begin end", 156, "Incorrect syntax near the keyword 'else'.")]
+    public void EmptyBlock_IsRefusedAtTheTokenAfterItsEnd(string sql, int number, string message)
+        => AssertError(sql, number, 1, message);
+
     [TestMethod]
     public void CaseEnd_IsNamedAsAKeyword()
         => AssertError("select case end", 156, 1, "Incorrect syntax near the keyword 'end'.");

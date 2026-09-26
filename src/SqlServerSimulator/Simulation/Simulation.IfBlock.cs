@@ -448,8 +448,9 @@ partial class Simulation
     /// Parses and runs a <c>BEGIN … END</c> compound-statement block. Dispatches
     /// each contained statement through <see cref="DispatchStatementsUntil"/>
     /// until the matching <c>END</c>. Empty blocks (<c>BEGIN END</c> or
-    /// <c>BEGIN ; END</c> with nothing but separators inside) raise Msg 102
-    /// near <c>'end'</c> — probe-confirmed against SQL Server 2025.
+    /// <c>BEGIN ; END</c> with nothing but separators inside) raise a syntax
+    /// error near the token after <c>END</c> — probe-confirmed against SQL
+    /// Server 2025.
     /// </summary>
     /// <remarks>
     /// <para>
@@ -477,10 +478,16 @@ partial class Simulation
         // a non-empty body.
         while (context.Token is Operator { Character: ';' })
             context.MoveNextOptional();
-        // A statement-position END is named as a plain token (Msg 102),
-        // not as a keyword (probed 2026-09-24 against SQL Server 2025).
-        if (context.Token is ReservedKeyword { Keyword: Keyword.End })
-            throw SimulatedSqlException.SyntaxErrorNear(context.Token);
+        // Real reads past the END before refusing the empty block, so it
+        // names the token after it — a keyword as Msg 156 — and the END
+        // itself, as a plain token, only where the batch ends there (probed
+        // 2026-09-24 and 2026-09-26 against SQL Server 2025: `BEGIN END;` is
+        // near ';', `BEGIN END SELECT 1` near the keyword 'select').
+        if (context.Token is ReservedKeyword { Keyword: Keyword.End } end)
+        {
+            context.MoveNextOptional();
+            throw context.Token is null ? SimulatedSqlException.SyntaxErrorNear(end) : SimulatedSqlException.SyntaxErrorNear(context);
+        }
 
         foreach (var o in DispatchStatementsUntil(batch, endKeyword: Keyword.End))
             yield return o;
