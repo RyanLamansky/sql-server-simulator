@@ -692,7 +692,7 @@ partial class Simulation
         AssignmentRules.RequireAssignable(assignedExpr, assignedType, slot.DeclaredType);
         var rhsValue = assignedExpr.Run(new RuntimeContext(NoColumnResolver, context.Batch));
         Cast.RejectRoundingUnderRoundAbort(rhsValue, slot.DeclaredType, context.Batch);
-        slot.Assign(Cast.ApplyCoercion(rhsValue, slot.DeclaredType, slot.DeclaredMaxLength));
+        slot.Assign(DataMasking.ForAssignment(context.Batch, assignedExpr, rhsValue, Cast.ApplyCoercion(rhsValue, slot.DeclaredType, slot.DeclaredMaxLength), slot.DeclaredType));
         return true;
     }
 

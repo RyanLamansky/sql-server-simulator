@@ -1489,6 +1489,7 @@ internal sealed partial class Selection
         selection.ColumnIsUntypedNull = UntypedNullsOf(expressions, sources);
         selection.ColumnReportsNumeric = ColumnReportsNumericOf(expressions, outputSchema);
         selection.ColumnAliasTypes = ColumnAliasTypesOf(expressions);
+        selection.ColumnMasks = DataMask.OfProjection(parseBatch, expressions, name => SourceColumnMask(sources, name), expression => expression.GetSqlType(parseBatch, ResolveColumnType));
         selection.ColumnIdentitySources = ColumnIdentitySourcesOf(expressions, sources, joins);
         selection.BranchFromSources = sources;
         selection.AutoSourceNames = AutoSourceNamesOf(sources);
@@ -1906,6 +1907,26 @@ internal sealed partial class Selection
             return false;
         var (s, c) = FindSourceColumn(sources, reference.ReferencedName);
         return s >= 0 && sources[s].Columns[c].IsUntypedNull;
+    }
+
+    /// <summary>
+    /// The Dynamic Data Masking mask a reference to <paramref name="name"/>
+    /// reads through: a table column's own, or the one a derived source's
+    /// column passes on; null for an unmasked or outer-scope column.
+    /// </summary>
+    internal static DataMask? SourceColumnMask(FromSource[] sources, MultiPartName name)
+    {
+        var (s, c) = FindSourceColumn(sources, name);
+        if (s < 0)
+            return null;
+        var source = sources[s];
+        var column = source.Columns[c];
+        if (column.DerivedMask is { } derived)
+            return derived;
+        if (source.BackingTable is not { } table)
+            return null;
+        var index = ReferenceEquals(source.Columns, table.Columns) ? c : Array.IndexOf(table.Columns, column);
+        return index < 0 ? null : DataMask.ForTableColumn(table, index);
     }
 
     private static Schemas.AliasType?[]? ColumnAliasTypesOf(List<Expression> expressions)

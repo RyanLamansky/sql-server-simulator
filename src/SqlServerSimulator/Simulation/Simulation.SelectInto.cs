@@ -111,13 +111,16 @@ partial class Simulation
         // is handed is IDENTITY()'s placeholder, which takes the next value in
         // the rows' order — an inherited identity reads a NOT NULL column.
         var resultSet = selection.Execute(batch).WithRowCountLimit(batch.Connection.RowCountLimit);
+        // A principal without UNMASK copies what it would read: the new table
+        // holds the masked values, and no mask of its own (probed 2026-09-27).
+        var masking = DataMasking.Applying(batch, selection.ColumnMasks);
         var rowCount = 0;
         var undoLog = batch.Connection.CurrentTransaction?.UndoLog;
         // One encoded-row buffer for the whole copy — Insert copies into the page.
         byte[]? encoded = null;
         foreach (var row in resultSet.RowValues)
         {
-            var sourceValues = row;
+            var sourceValues = masking is null ? row : DataMasking.MaskRowForStorage(row, masking, resultSet.Schema);
             for (var i = 0; i < destColumns.Length; i++)
             {
                 if (destColumns[i].Identity is not { } identity)

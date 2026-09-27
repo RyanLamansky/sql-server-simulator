@@ -330,6 +330,8 @@ Where an entry carries a second clause it is because that fact changes what you'
 - **`hierarchyid`** — OrdPath storage, byte-identical CAST / wire / DATALENGTH, and the full sixteen-tier ordinal domain (wider than `int`, so labels are `long`) → [`hierarchyid.md`](docs/claude/hierarchyid.md).
 - **`GRANT` / `REVOKE` / `DENY`** — securable resolution, the covering scope walk, role closure, ownership chaining, `EXECUTE AS`, application roles, login and server-scope DDL, and a gate on every modeled CREATE / ALTER / DROP.
   A cross-database reference resolves the login's user in the **target**, and dbo bypasses every check → [`permissions.md`](docs/claude/permissions.md).
+- **Dynamic Data Masking** — `MASKED WITH`, `ALTER COLUMN … ADD | DROP MASKED`, `sys.masked_columns`, `UNMASK` at every scope, and what a principal without it reads and writes.
+  Each output column's mask compiles onto the plan and applies only at the statement's output sinks, so predicates, joins and ordering read stored values → [`data-masking.md`](docs/claude/data-masking.md).
 - **Full-text search** — the catalogs and indexes, `CONTAINS` / `FREETEXT`, the two rowset functions, the whole `contains_search_condition` grammar, the word breaker, stoplist and stemmer.
   Searches read live rows rather than a crawled index, so a write is searchable immediately where real's lags → [`full-text.md`](docs/claude/full-text.md).
 - **`xml` type and XML schema collections** — typed writes and canonical form, the XQuery-subset evaluator behind `.value()` / `.nodes()` / `.query()` / `.exist()`, `.modify()` XML-DML, XML indexes, `FOR XML` in all four modes, and `OPENXML`.
@@ -363,7 +365,7 @@ The feature docs' own **Not modeled yet** sections hold the smaller gaps.
 - **Heap allocation tracking** (a flat page list, no IAM/PFS) → [`heap-storage.md`](docs/claude/heap-storage.md).
 - **`ALTER AUTHORIZATION`**, in every form → [`schemas.md`](docs/claude/schemas.md#create-schemas-owner-and-its-element-list).
 - **Programmable-object gaps**: CLR procedures / TVFs / aggregates / UDTs, logon triggers, INSTEAD OF UPDATE/DELETE on non-updatable views, a join view over a join view, MERGE into or OUTPUT through views, `WITH RESULT SETS`' shorthand forms, and one binder error per statement → [`programmable.md`](docs/claude/programmable.md), [`clr-assemblies.md`](docs/claude/clr-assemblies.md), [`triggers.md`](docs/claude/triggers.md).
-- **`ALTER COLUMN … ADD | DROP {PERSISTED | MASKED}`** → [`alter-table.md`](docs/claude/alter-table.md).
+- **`ALTER COLUMN … ADD | DROP PERSISTED`** → [`alter-table.md`](docs/claude/alter-table.md).
 - **Filegroup placement** — a table or index `ON [fg]` isn't recorded (only a partition scheme's placement is) → [`partitioning.md`](docs/claude/partitioning.md#not-modeled-yet).
 - **`FORCESEEK`'s plan-infeasibility refusal** (Msg 8622) → [`query-hints.md`](docs/claude/query-hints.md#not-enforced).
 

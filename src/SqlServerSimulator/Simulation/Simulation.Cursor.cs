@@ -392,6 +392,10 @@ partial class Simulation
             throw SimulatedSqlException.CursorFetchVariableCountMismatch();
 
         var (status, values) = cursor.Fetch(batch, direction, offset);
+        // A principal without UNMASK fetches masked values, as its SELECT
+        // would read them (probed 2026-09-27 against SQL Server 2025).
+        if (values is not null && status == 0 && DataMasking.Applying(batch, cursor.Selection.ColumnMasks) is { } masking)
+            values = DataMasking.MaskRowForStorage(values, masking, cursor.Selection.Schema);
         connection.LastFetchStatus = status;
         connection.LastStatementRowCount = status == 0 ? 1 : 0;
         if (status == -2)

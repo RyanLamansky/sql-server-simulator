@@ -168,6 +168,11 @@ internal sealed class CaseExpression : Expression
 
     internal override string DebugDisplay() => "CASE ...";
 
+    /// <summary>The value arms — every THEN and the ELSE — which a masked column reaches the result through.</summary>
+    internal Expression?[] ValueArms => [.. this.thens, this.elseBranch];
+
+    internal override ExpressionNode?[]? MaskValueChildren => this.ValueArms;
+
     internal override void Describe(NodeShape shape)
     {
         _ = shape.Child(this.input).Local(this.thens.Length);

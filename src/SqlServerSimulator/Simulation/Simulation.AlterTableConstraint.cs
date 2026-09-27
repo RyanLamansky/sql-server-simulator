@@ -1227,6 +1227,7 @@ partial class Simulation
             BoundRule = column.BoundRule,
             ColumnId = column.ColumnId,
             IsSparse = column.IsSparse,
+            MaskingFunction = column.MaskingFunction,
         };
 
     /// <summary>
@@ -1295,5 +1296,6 @@ partial class Simulation
             BoundRule = column.BoundRule,
             ColumnId = column.ColumnId,
             IsSparse = column.IsSparse,
+            MaskingFunction = column.MaskingFunction,
         };
 }

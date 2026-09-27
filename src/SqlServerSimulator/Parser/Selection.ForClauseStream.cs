@@ -59,16 +59,41 @@ internal sealed partial class Selection
 
     /// <summary>
     /// The rows a FOR JSON / FOR XML clause serializes, recording their count
-    /// for the statement once they run out.
+    /// for the statement once they run out. A principal without <c>UNMASK</c>
+    /// serializes the masked values (probed 2026-09-27 against SQL Server 2025).
     /// </summary>
     private static IEnumerable<byte[]> ForClauseSourceRows(Selection inner, BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver)
     {
         var count = 0;
+        var masking = DataMasking.Applying(batch, inner.ColumnMasks);
         foreach (var row in inner.Execute(batch, outerResolver).RowBytes)
         {
             count++;
-            yield return row;
+            yield return masking is null
+                ? row
+                : RowEncoder.EncodeRow(inner.Schema, DataMasking.MaskRowForStorage(RowDecoder.DecodeRow(inner.Schema, row), masking, inner.Schema));
         }
         batch.CurrentStatement.ForClauseSourceRows = count;
+    }
+
+    /// <summary>
+    /// A FOR JSON / FOR XML document's own mask, read where the document is a
+    /// value — a scalar subquery's column reads as <c>default()</c> when the
+    /// query it serializes reads a masked column (probed 2026-09-27: a masked
+    /// <c>(SELECT … FOR JSON PATH)</c> reads <c>xxxx</c>). A SELECT statement's
+    /// own streamed document doesn't carry it (<see cref="AsStatementResult"/>).
+    /// </summary>
+    private static DataMask?[]? ForClauseDocumentMasks(Selection inner)
+    {
+        DataMask? merged = null;
+        if (inner.ColumnMasks is { } masks)
+        {
+            foreach (var mask in masks)
+            {
+                if (mask is not null)
+                    merged = new DataMask(MaskingFunction.Default, [.. merged?.Sources ?? [], .. mask.Sources]);
+            }
+        }
+        return merged is null ? null : [merged];
     }
 }

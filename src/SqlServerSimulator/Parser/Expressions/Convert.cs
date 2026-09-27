@@ -206,6 +206,8 @@ internal sealed class ConvertExpression : Expression
     // constant / variable and never row-varying.
     internal override Expression? PureConversionOperand => this.source;
 
+    internal override SqlType? ConversionTarget => this.style is null ? this.targetType : null;
+
     private protected override bool IsStructuralConstant => this.source.IsWrittenConstant;
 
     private static string WithoutTrailingFractionZeros(string text) =>

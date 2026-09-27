@@ -125,5 +125,8 @@ internal sealed class Iif : Expression
 
     internal override string DebugDisplay() => $"IIF(..., {this.trueValue.DebugDisplay()}, {this.falseValue.DebugDisplay()})";
 
+    /// <summary>The two value arms, which a masked column reaches the result through.</summary>
+    internal Expression?[] ValueArms => [this.trueValue, this.falseValue];
+
     internal override void Describe(NodeShape shape) => shape.Child(this.condition).Child(this.trueValue).Child(this.falseValue);
 }

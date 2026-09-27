@@ -146,6 +146,8 @@ Wiring:
   **UPDATE / DELETE read-implies-SELECT** (probe M1/M2): the target's SELECT is also required *when the statement reads it* — a WHERE clause, or a SET expression that references a target column (`SET v = v + 'x'`, detected via a static column-reference probe). A constant-SET UPDATE / bare DELETE with no WHERE reads nothing and needs only the write permission. The SELECT check runs *first*, so with neither SELECT nor the write granted the SELECT denial surfaces (real raises both records; the simulator raises the SELECT-first single error). A joined UPDATE / DELETE (`… FROM t JOIN u …`) SELECT-checks every backing-table source — the non-target sources first, then the target (matching real's ordering).
   On a **single target** (the no-FROM UPDATE / DELETE path) both the read-implies-SELECT and the UPDATE are **column-grain**, against a base table or a view alike (SELECT per WHERE / SET-RHS column, UPDATE per assigned column); the joined form, and any target reached through a synonym, stay object-grain. See [Column-level grants](#column-level-grants).
 - **EXEC proc** / **scalar UDF invocation** — EXECUTE on the module at the call site (the Msg 229 for EXEC carries the proc's schema-qualified name as its Procedure attribution; a call through a synonym checks the synonym and carries none). The scalar-UDF check fires at the invocation seam (`PermissionEnforcement.CheckScalarFunctionExecute`, memoized once-per-statement) so SET / IF operand invocations are covered too.
+- **Table variables and temp tables** are no securables: every session that can name one may write it, so the write check skips them (probed 2026-09-27 against SQL Server 2025 — a restricted user inserts into its own `@t` and `#t`).
+- **UNMASK** is no gate but a value filter: a principal without it reads masked values rather than being refused, and ownership chaining doesn't lift it — see [`data-masking.md`](data-masking.md#unmask).
 - **TRUNCATE** — ALTER on the object → Msg 1088 (state 7).
 - **DDL gates** — see [DDL statement gates](#ddl-statement-gates) for the per-statement matrix.
 - **Ownership chaining** — inside a proc / view / TVF / scalar-UDF / trigger body (`BatchContext.EnforcesPermissions` is false there) all checks are suppressed; dynamic SQL (`EXEC('…')` / `sp_executesql`, whose `ProcFrame.IsDynamicSql` is set) re-enables them.
@@ -210,7 +212,7 @@ The gates route through the same `PermissionEnforcement` seam as the DML checks,
 
 ### Column-level grants
 
-`GRANT` / `DENY SELECT | UPDATE | REFERENCES (col, …)` store one `DatabasePermission` row per column at `minor_id` = the column's 1-based ordinal (`sys.columns.column_id`); `sys.database_permissions` surfaces the `minor_id`, and `COL_NAME(major_id, minor_id)` resolves it.
+`GRANT` / `DENY SELECT | UPDATE | REFERENCES | UNMASK (col, …)` store one `DatabasePermission` row per column at `minor_id` = the column's 1-based ordinal (`sys.columns.column_id`); `sys.database_permissions` surfaces the `minor_id`, and `COL_NAME(major_id, minor_id)` resolves it.
 Enforcement is probe-confirmed against SQL Server 2025.
 
 The column list has two accepted placements (both probe-confirmed): after the permission (`GRANT SELECT (a, b) ON t TO u`) or after the object name (`GRANT SELECT ON t (a, b) TO u`), the latter applying its columns to every permission in the statement.

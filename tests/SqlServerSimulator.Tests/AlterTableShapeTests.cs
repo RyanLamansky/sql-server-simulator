@@ -176,10 +176,6 @@ public sealed class AlterTableShapeTests
     public void AlterColumnAddPersisted_IsNotModeledYet()
         => Throws<NotSupportedException>(() => ExecuteScalar("create table t (a int, b as a + 1); alter table t alter column b add persisted"));
 
-    [TestMethod]
-    public void AlterColumnAddMasked_IsNotModeledYet()
-        => Throws<NotSupportedException>(() => ExecuteScalar("create table t (a int, n varchar(50)); alter table t alter column n add masked with (function = 'default()')"));
-
     // --- multi-element ADD ---
 
     [TestMethod]

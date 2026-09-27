@@ -483,6 +483,10 @@ partial class Simulation
     {
         BindDeferredXmlMutators(context, table, rawAssignments, targetName.ToString());
         var assignments = ResolveSetAssignments(rawAssignments, table, context.CurrentDatabase, sourceView);
+        var setMasks = UpdateSetMasks(context.Batch, assignments, sourceView is not null ? static _ => null : name =>
+            Array.FindIndex(table.Columns, column => context.Batch.CurrentDatabase.Collation.Equals(column.Name, name.Leaf)) is var k and >= 0
+                ? DataMask.ForTableColumn(table, k)
+                : null);
 
         // Compile-time bind of the predicate and the SET values, matching
         // real's compiling binder — a cross-collation comparison, a legacy-LOB
@@ -580,7 +584,7 @@ partial class Simulation
 
             // Per-row stamp bump for NEXT VALUE FOR in the SET-list expressions.
             context.Batch.BumpRowStamp();
-            var newValues = ComputeUpdatedRow(context, table, fullValues, assignments, ResolveOriginal);
+            var newValues = ComputeUpdatedRow(context, table, fullValues, assignments, ResolveOriginal, setMasks);
 
             // WITH CHECK OPTION: the post-update row must satisfy every
             // CHECK OPTION-bearing WHERE in the chain. Fires before
@@ -794,6 +798,7 @@ partial class Simulation
 
         BindDeferredXmlMutators(context, table, rawAssignments, WrittenNameOf(sources[targetIndex], table));
         var assignments = ResolveSetAssignments(rawAssignments, table, context.CurrentDatabase);
+        var setMasks = UpdateSetMasks(context.Batch, assignments, name => Selection.SourceColumnMask(sources, name));
 
         // Compile-time bind of the predicate and the SET values — see
         // ExecuteUpdateAgainstTable for why.
@@ -849,7 +854,7 @@ partial class Simulation
 
             // Per-row stamp bump for NEXT VALUE FOR in the SET-list.
             context.Batch.BumpRowStamp();
-            var newValues = ComputeUpdatedRow(context, table, fullValues, assignments, ResolveTuple);
+            var newValues = ComputeUpdatedRow(context, table, fullValues, assignments, ResolveTuple, setMasks);
             var oldSnapshotNeeded = output is not null
                 || HasAfterTrigger(context.Batch, table, TriggerActions.Update)
                 || HasInsteadOfTrigger(context.Batch, table, TriggerActions.Update)
@@ -1533,19 +1538,39 @@ partial class Simulation
     }
 
     /// <summary>
+    /// Per SET assignment, the mask its value reads through for the executing
+    /// principal, or null when none applies: a principal without
+    /// <c>UNMASK</c> writes what it would read (probed 2026-09-27 against SQL
+    /// Server 2025 — <c>SET plain = LEFT(masked, 10)</c> stores <c>xxxx</c>,
+    /// and <c>SET s = s + '!'</c> overwrites the column with its own mask).
+    /// Settled once per statement.
+    /// </summary>
+    private static MaskingFunction?[]? UpdateSetMasks(BatchContext batch, List<(int Ordinal, Expression Expr)> assignments, Func<MultiPartName, DataMask?> columnMask)
+    {
+        if (!batch.Connection.Simulation.DeclaresDataMasks)
+            return null;
+        var masks = new DataMask?[assignments.Count];
+        for (var i = 0; i < assignments.Count; i++)
+            masks[i] = assignments[i].Expr is AssignmentExpression ? null : DataMask.Of(assignments[i].Expr, columnMask, typeOf: null);
+        return DataMasking.Applying(batch, masks);
+    }
+
+    /// <summary>
     /// Computes the post-SET row from the pre-update <paramref name="fullValues"/>
     /// snapshot: every SET RHS evaluates against the same snapshot (matching
     /// SQL Server: <c>UPDATE t SET a = 100, b = a + 1</c> over a row with
     /// <c>(a=10, b=20)</c> yields <c>(a=100, b=11)</c>); rowversion auto-bumps;
     /// computed columns recompute against the new values; NOT NULL and CHECK
     /// fire here (per-row constraint validation); PK / UNIQUE wait for phase 2.
+    /// A non-null <paramref name="setMasks"/> entry masks that assignment's value.
     /// </summary>
     private static SqlValue[] ComputeUpdatedRow(
         ParserContext context,
         HeapTable table,
         SqlValue[] fullValues,
         List<(int Ordinal, Expression Expr)> assignments,
-        Func<MultiPartName, SqlValue> resolver)
+        Func<MultiPartName, SqlValue> resolver,
+        MaskingFunction?[]? setMasks = null)
     {
         var newValues = new SqlValue[table.Columns.Length];
         Array.Copy(fullValues, newValues, fullValues.Length);
@@ -1562,11 +1587,14 @@ partial class Simulation
                 _ = variableAssignment.Run(runtime);
         }
 
-        foreach (var (ordinal, expr) in assignments)
+        for (var i = 0; i < assignments.Count; i++)
         {
+            var (ordinal, expr) = assignments[i];
             if (ordinal < 0)
                 continue;
             var raw = expr is AssignmentExpression { Slot: var assigned } ? assigned.Value : expr.Run(runtime);
+            if (setMasks?[i] is { } mask)
+                raw = DataMasking.ForStorage(mask.Apply(raw, raw.Type));
             raw = EnforceMaxLength(raw, table.Columns[ordinal], table, context.Connection);
             newValues[ordinal] = CoerceForWrite(raw, table.Columns[ordinal], context.Batch);
             EnforceRule(table, newValues, ordinal, context.Batch);

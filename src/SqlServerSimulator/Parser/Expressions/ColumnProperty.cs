@@ -228,6 +228,7 @@ internal sealed class ColumnProperty : Expression
                 ColumnSite.View => 0,
                 _ => null,
             },
+            "ISMASKED" => isColumn ? Flag(column.MaskingFunction is not null) : null,
             "ISOUTPARAM" => Flag(found.IsOutput),
             "ISROWGUIDCOL" => isColumn ? Flag(column.IsRowGuidCol) : null,
             "ISSPARSE" => isColumn ? Flag(column.IsSparse) : null,

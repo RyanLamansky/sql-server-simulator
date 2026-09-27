@@ -258,6 +258,8 @@ internal sealed class Cast : Expression
 
     internal override Expression? PureConversionOperand => this.source;
 
+    internal override SqlType? ConversionTarget => this.targetType;
+
     internal override bool IsRowIndependent => this.source.IsRowIndependent;
 
     private protected override bool IsStructuralConstant => this.source.IsWrittenConstant;

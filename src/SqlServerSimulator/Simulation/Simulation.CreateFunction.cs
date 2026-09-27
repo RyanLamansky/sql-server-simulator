@@ -728,6 +728,10 @@ partial class Simulation
                     spelledNumeric: selection.ColumnReportsNumeric is { } numeric && numeric[i])
                 {
                     AliasType = selection.ColumnAliasTypes?[i],
+                    // Settled as the body binds at CREATE: a mask the base
+                    // table gains or loses later reaches the function's
+                    // columns only when it is re-created or altered.
+                    DerivedMask = selection.ColumnMasks?[i],
                 };
             }
             wireFlags = selection.ColumnWireFlags;

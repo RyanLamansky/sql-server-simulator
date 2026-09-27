@@ -1265,6 +1265,15 @@ internal sealed class WindowExpression : Expression
         return $"{name} OVER({partitionPart}{separator}{orderPart})";
     }
 
+    /// <summary>
+    /// The operands the window's value is computed from; its PARTITION BY and
+    /// OVER ordering only arrange rows, except a percentile's WITHIN GROUP
+    /// ordering, which is the value it reads.
+    /// </summary>
+    internal override ExpressionNode?[]? MaskValueChildren => this.Kind is WindowKind.PercentileCont or WindowKind.PercentileDisc
+        ? [this.AggregateInfo, this.Operand, this.DefaultArg, .. this.OrderBy.Select(static item => item.Expr)]
+        : [this.AggregateInfo, this.Operand, this.DefaultArg];
+
     internal override void Describe(NodeShape shape)
     {
         _ = shape.Local(this.Kind).Child(this.AggregateInfo).Child(this.Operand).Child(this.OffsetArg).Child(this.DefaultArg).Child(this.BucketCount).Child(this.PercentileArg);

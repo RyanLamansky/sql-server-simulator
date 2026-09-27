@@ -446,8 +446,10 @@ internal static partial class BuiltInResources
         // Server 2025). The identity values are sql_variant carrying the
         // column's declared type; last_value is NULL before the first insert
         // and always for a table type, whose template is never inserted into.
-        // A return table's computed column reads no definition. Dynamic Data
-        // Masking isn't modeled, so sys.masked_columns is empty.
+        // A return table's computed column reads no definition. A masked
+        // column lists with its function as sys.masked_columns reports it — a
+        // table's or a table type's; a view's column is never masked itself
+        // (probed 2026-09-27 against SQL Server 2025).
         var familyOrdinals = Enumerable.Range(0, ColumnsShape().Length)
             .Where(i => !ColumnsShape()[i].Name.StartsWith("vector_", StringComparison.Ordinal))
             .ToArray();
@@ -499,7 +501,15 @@ internal static partial class BuiltInResources
             new("is_persisted", SqlType.Bit, null, false),
             new("masking_function", NVarcharSqlType.Get(4000, Collation.Catalog, Coercibility.Implicit), 4000, true)), "is_computed", "is_sparse", "is_column_set", "is_hidden"),
                 static column => column.Name == "is_masked" ? new HeapColumn(column.Name, column.Type, column.MaxLength, nullable: true) : column),
-            static (batch, database) => []);
+            (batch, database) => UserColumnRows(batch, database)
+                .Where(static entry => entry.Host is ColumnHost.Table or ColumnHost.TableType && entry.Column.MaskingFunction is not null)
+                .Select(entry => (SqlValue[])[
+                    .. familyOrdinals.Select(i => entry.Row[i]),
+                    SqlValue.Null(SqlType.NVarchar),
+                    SqlValue.FromBoolean(false),
+                    SqlValue.FromBoolean(false),
+                    SqlValue.FromString(NVarcharSqlType.Get(4000, Collation.Catalog, Coercibility.Implicit), entry.Column.MaskingFunction!.Definition),
+                ]));
     }
 
     /// <summary>
@@ -641,7 +651,7 @@ internal static partial class BuiltInResources
                 nullInt,
                 falseBit,
                 SqlValue.FromBoolean(col.IsHidden),
-                falseBit,
+                SqlValue.FromBoolean(declared && col.MaskingFunction is not null),
                 SqlValue.FromBoolean(col.IsRowGuidCol),
                 col.BoundRule is { } rule ? SqlValue.FromInt32(rule.ObjectId) : zeroInt,
                 falseBit,

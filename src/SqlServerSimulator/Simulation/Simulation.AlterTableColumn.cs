@@ -720,6 +720,13 @@ partial class Simulation
             context.MoveNextOptional();
         }
 
+        // A MASKED WITH clause sits between COLLATE and the nullability; a type
+        // change without one drops the column's mask, even to the same type
+        // (probed 2026-09-27 against SQL Server 2025).
+        var maskingFunctionText = context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Masked }
+            ? ParseMaskedWithClause(context)
+            : null;
+
         bool? nullable = null;
         switch (context.Token)
         {
@@ -734,6 +741,8 @@ partial class Simulation
                 context.MoveNextOptional();
                 break;
         }
+        if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Masked })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
 
         if (context.Batch.IsSkipping)
             return true;
@@ -833,6 +842,7 @@ partial class Simulation
             includeIndexes: isTypeChange || newNullable != existingCol.Nullable);
         if (blockers.Count > 0)
             throw SimulatedSqlException.ColumnHasDependencies("ALTER COLUMN", columnName, blockers);
+        var maskingFunction = maskingFunctionText is null ? null : MaskingFunction.Parse(maskingFunctionText, columnName, newType);
 
         var newColumn = new HeapColumn(
             existingCol.Name,
@@ -852,7 +862,10 @@ partial class Simulation
             // column's catalog identity — real keeps column_id across a type
             // change (probe-confirmed), as it does across sp_rename.
             ColumnId = existingCol.ColumnId,
+            MaskingFunction = maskingFunction,
         };
+        if (maskingFunction is not null)
+            context.Batch.Connection.Simulation.DeclaresDataMasks = true;
 
         // Validate + rewrite. Even when the encoded bytes don't change (e.g.
         // varchar(50)→varchar(100)), the per-column SqlType reference does, so
@@ -1190,13 +1203,16 @@ partial class Simulation
             UnquotedString { ContextualKeyword: ContextualKeyword.Sparse } => ColumnAttribute.Sparse,
             UnquotedString { ContextualKeyword: ContextualKeyword.Persisted } =>
                 throw new NotSupportedException("ALTER TABLE ALTER COLUMN ADD / DROP PERSISTED isn't modeled."),
-            UnquotedString { ContextualKeyword: ContextualKeyword.Masked } =>
-                throw new NotSupportedException("ALTER TABLE ALTER COLUMN ADD / DROP MASKED isn't modeled."),
+            UnquotedString { ContextualKeyword: ContextualKeyword.Masked } => ColumnAttribute.Masked,
             _ => throw SimulatedSqlException.SyntaxErrorNear(context),
         };
-        context.MoveNextOptional();
-        // MASKED carries a `WITH (FUNCTION = '…')` clause; the two modeled
-        // attributes take nothing.
+        // ADD MASKED carries a `WITH (FUNCTION = '…')` clause; the others take
+        // nothing.
+        string? maskingFunctionText = null;
+        if (attribute == ColumnAttribute.Masked && adding)
+            maskingFunctionText = ParseMaskedWithClause(context);
+        else
+            context.MoveNextOptional();
         if (context.Batch.IsSkipping)
             return true;
 
@@ -1214,6 +1230,12 @@ partial class Simulation
             }
         }
         var target = found ?? throw SimulatedSqlException.AlterColumnDoesNotExist(columnName, table.Name);
+
+        if (attribute == ColumnAttribute.Masked)
+        {
+            AlterColumnMask(context, table, target, maskingFunctionText);
+            return true;
+        }
 
         if (attribute == ColumnAttribute.RowGuidCol)
         {
@@ -1250,6 +1272,7 @@ partial class Simulation
     {
         RowGuidCol,
         Sparse,
+        Masked,
     }
 
     private static HeapColumn? FindRowGuidColumn(HeapTable table)

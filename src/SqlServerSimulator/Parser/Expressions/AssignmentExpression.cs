@@ -25,11 +25,19 @@ internal sealed class AssignmentExpression(VariableSlot slot, Expression source)
 
     public readonly Expression Source = source;
 
+    /// <summary>
+    /// The mask the assigned value reads through, set with the projection's
+    /// <see cref="Selection.ColumnMasks"/>; see <see cref="DataMasking.ForAssignment(BatchContext, DataMask, SqlValue, SqlValue, SqlType)"/>.
+    /// </summary>
+    internal DataMask? Mask;
+
     public override SqlValue Run(RuntimeContext runtime)
     {
         var value = this.Source.Run(runtime);
         Cast.RejectRoundingUnderRoundAbort(value, this.Slot.DeclaredType, runtime.Batch);
         var coerced = Cast.ApplyCoercion(value, this.Slot.DeclaredType, this.Slot.DeclaredMaxLength);
+        if (this.Mask is { } mask)
+            coerced = DataMasking.ForAssignment(runtime.Batch, mask, value, coerced, this.Slot.DeclaredType);
         this.Slot.Assign(coerced);
         return coerced;
     }

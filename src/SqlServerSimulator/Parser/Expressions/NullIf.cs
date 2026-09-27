@@ -17,7 +17,8 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// </summary>
 internal sealed class NullIf : Expression
 {
-    private readonly Expression a;
+    /// <summary>The operand whose value NULLIF returns, which passes a masked column's function through.</summary>
+    internal readonly Expression First;
     private readonly Expression b;
 
     /// <summary>
@@ -42,14 +43,14 @@ internal sealed class NullIf : Expression
 
     public NullIf(ParserContext context)
     {
-        this.a = Parse(context);
-        if (IsUntypedNullLiteral(this.a))
+        this.First = Parse(context);
+        if (IsUntypedNullLiteral(this.First))
             throw SimulatedSqlException.NullIfFirstArgumentIsNull();
         if (context.Token is not Tokens.Operator { Character: ',' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         this.b = Parse(context.MoveNextRequiredReturnSelf());
-        this.narrowedLiteralType = NarrowedLiteralType(this.a);
-        this.constantNullFirst = ConstantFolding.FoldsToNull(this.a, context);
+        this.narrowedLiteralType = NarrowedLiteralType(this.First);
+        this.constantNullFirst = ConstantFolding.FoldsToNull(this.First, context);
     }
 
     /// <summary>
@@ -85,11 +86,11 @@ internal sealed class NullIf : Expression
         _ => null,
     };
 
-    internal override bool ParallelSafe => this.a.ParallelSafe && this.b.ParallelSafe;
+    internal override bool ParallelSafe => this.First.ParallelSafe && this.b.ParallelSafe;
 
     public override SqlValue Run(RuntimeContext runtime)
     {
-        var av = this.a.Run(runtime);
+        var av = this.First.Run(runtime);
         // A compile-time NULL on the left can equal nothing, so the second
         // argument never runs and the first comes back as the ELSE arm's value.
         if (this.constantNullFirst)
@@ -107,15 +108,15 @@ internal sealed class NullIf : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
         // NULLIF is an implicit `a = b`, so the pair has to be comparable.
-        var aType = this.a.GetSqlType(batch, resolveColumnType);
-        BooleanExpression.RequireComparable(this.a, aType, this.b, this.b.GetSqlType(batch, resolveColumnType), batch, "equal to");
+        var aType = this.First.GetSqlType(batch, resolveColumnType);
+        BooleanExpression.RequireComparable(this.First, aType, this.b, this.b.GetSqlType(batch, resolveColumnType), batch, "equal to");
         var t = this.narrowedLiteralType ?? aType;
         this.cachedResultType = t;
         return t;
     }
 
     // NULLIF(a, b) returns a (or NULL), so the result carries a's name.
-    internal override bool ResultReportsNumeric => this.a.ResultReportsNumeric;
+    internal override bool ResultReportsNumeric => this.First.ResultReportsNumeric;
 
     // The NULL arm of the CASE this desugars to survives unless real folds the
     // whole call, so `NULLIF(1, 2)` projects NOT NULL (the arms differ, leaving
@@ -132,9 +133,9 @@ internal sealed class NullIf : Expression
             _ = foldedAway.Add(this.b);
     }
 
-    internal override string DebugDisplay() => $"NULLIF({this.a.DebugDisplay()}, {this.b.DebugDisplay()})";
+    internal override string DebugDisplay() => $"NULLIF({this.First.DebugDisplay()}, {this.b.DebugDisplay()})";
 
-    internal override void Describe(NodeShape shape) => shape.Child(this.a).Child(this.b);
+    internal override void Describe(NodeShape shape) => shape.Child(this.First).Child(this.b);
 
     /// <summary>
     /// Whether real's GROUP BY containment pass reads this node as the NULL it
@@ -152,7 +153,7 @@ internal sealed class NullIf : Expression
             if (!this.constantNullFirst)
                 return false;
             var aggregated = false;
-            this.a.Walk((node, _) =>
+            this.First.Walk((node, _) =>
             {
                 aggregated |= node is AggregateExpression;
                 return !aggregated;

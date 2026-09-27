@@ -831,6 +831,14 @@ public sealed partial class Simulation
     internal long SchemaVersion;
 
     /// <summary>
+    /// Set once any column in the simulation is declared or altered
+    /// <c>MASKED</c>, and never cleared: until then a query's compile skips the
+    /// Dynamic Data Masking walk over its projection outright
+    /// (<see cref="Parser.DataMask.OfProjection"/>).
+    /// </summary>
+    internal volatile bool DeclaresDataMasks;
+
+    /// <summary>
     /// Per-instance parse-result cache for single-SELECT command batches
     /// (the EF-query shape). Keyed by (<see cref="DbCommand.CommandText"/>,
     /// current database name, parameter type signature); the entry records
@@ -1406,7 +1414,7 @@ public sealed partial class Simulation
                 int rowCount;
                 try
                 {
-                    executed = selection.Execute(batch).WithRowCountLimit(connection.RowCountLimit);
+                    executed = DataMasking.ForClient(selection.Execute(batch), selection.ColumnMasks, batch).WithRowCountLimit(connection.RowCountLimit);
                     rowCount = executed.MaterializeRows();
                     if (selection.CountsForClauseSourceRows)
                         rowCount = executed.ReportedRowCount = batch.CurrentStatement.ForClauseSourceRows;
@@ -2845,7 +2853,7 @@ public sealed partial class Simulation
                     int rowCount;
                     try
                     {
-                        executed = selection.Execute(batch).WithRowCountLimit(connection.RowCountLimit);
+                        executed = DataMasking.ForClient(selection.Execute(batch), selection.ColumnMasks, batch).WithRowCountLimit(connection.RowCountLimit);
                         rowCount = executed.MaterializeRows();
                         if (selection.CountsForClauseSourceRows)
                             rowCount = executed.ReportedRowCount = batch.CurrentStatement.ForClauseSourceRows;

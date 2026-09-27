@@ -185,6 +185,7 @@ partial class Selection
             xsinil = explicitPlan.Xsinil;
 
         var wrapped = WrapForXml(inner, new ForXmlOptions(mode, rowElement, elements, xsinil, typed, binaryBase64, rootSpecified ? rootName : null, namespaces), explicitPlan);
+        wrapped.ColumnMasks = ForClauseDocumentMasks(inner);
         if (!typed)
             wrapped.streamedDocumentType = SqlType.NText;
         return wrapped;

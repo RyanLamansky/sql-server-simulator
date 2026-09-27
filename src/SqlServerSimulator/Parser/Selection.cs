@@ -283,6 +283,15 @@ internal sealed partial class Selection
     /// </summary>
     internal IdentityState?[]? ColumnIdentitySources;
 
+    /// <summary>
+    /// Per output column, how Dynamic Data Masking masks it for a principal
+    /// without <c>UNMASK</c> (see <see cref="DataMask"/>); null when no column
+    /// reads a masked one, which is every query while no mask exists. Settled
+    /// at compile, so it rides the cached plan; whether it applies is asked of
+    /// the executing principal at the statement's output.
+    /// </summary>
+    internal DataMask?[]? ColumnMasks;
+
     private readonly Func<BatchContext, Func<MultiPartName, SqlValue>?, IEnumerable<byte[]>>? rowSource;
 
     /// <summary>
@@ -2689,7 +2698,7 @@ internal sealed partial class Selection
         var columnNames = lateralPlan.ColumnNames;
         var lateralColumns = new HeapColumn[schema.Length];
         for (var ci = 0; ci < lateralColumns.Length; ci++)
-            lateralColumns[ci] = new HeapColumn(string.Empty, schema[ci], maxLength: null, nullable: true) { AliasType = lateralPlan.ColumnAliasTypes?[ci], IdentitySource = lateralPlan.ColumnIdentitySources?[ci] };
+            lateralColumns[ci] = new HeapColumn(string.Empty, schema[ci], maxLength: null, nullable: true) { AliasType = lateralPlan.ColumnAliasTypes?[ci], IdentitySource = lateralPlan.ColumnIdentitySources?[ci], DerivedMask = lateralPlan.ColumnMasks?[ci] };
 
         var alias = ConsumeOptionalAlias(context);
         columnNames = ResolveDerivedTableColumnNames(context, columnNames, alias);
@@ -2954,6 +2963,7 @@ internal sealed partial class Selection
                             IsUntypedNull = cteBinding.Plan.ColumnIsUntypedNull is { } cteNulls && cteNulls[ci],
                             AliasType = cteBinding.Plan.ColumnAliasTypes?[ci],
                             IdentitySource = cteBinding.Plan.ColumnIdentitySources?[ci],
+                            DerivedMask = cteBinding.Plan.ColumnMasks?[ci],
                         };
                     }
 
@@ -3299,6 +3309,7 @@ internal sealed partial class Selection
                         IsUntypedNull = derivedSelection.ColumnIsUntypedNull is { } derivedNulls && derivedNulls[ci],
                         AliasType = derivedSelection.ColumnAliasTypes?[ci],
                         IdentitySource = derivedSelection.ColumnIdentitySources?[ci],
+                        DerivedMask = derivedSelection.ColumnMasks?[ci],
                     };
                 }
 
@@ -4782,6 +4793,7 @@ internal sealed partial class Selection
             ColumnIsUntypedNull = UntypedNullsOf(expressions),
             ColumnReportsNumeric = ColumnReportsNumericOf(expressions, schema),
             ColumnAliasTypes = ColumnAliasTypesOf(expressions),
+            ColumnMasks = DataMask.OfProjection(parseBatch, expressions, static _ => null, expression => expression.GetSqlType(parseBatch, TypeResolver)),
             // A FROM-less projection has no sources, so column nullability is
             // the per-expression rule alone (literals NOT NULL, other
             // expressions nullable) — matching real's result metadata

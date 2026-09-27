@@ -465,6 +465,11 @@ internal static class PermissionEnforcement
     /// <summary>Checks a permission on a resolved securable — a table, view, synonym or module; no-op when checks don't apply.</summary>
     internal static void CheckSchemaObject(BatchContext batch, string permission, Schemas.SchemaObject securable, string procedure = "")
     {
+        // A table variable or temp table is no securable: every session that
+        // can name one may write it (probed 2026-09-27 against SQL Server
+        // 2025 — a restricted user inserts into its own @t and #t).
+        if (securable is Storage.HeapTable { IsTableVariable: true } or Storage.HeapTable { Name: ['#', ..] })
+            return;
         var database = batch.DatabaseFor(securable);
         CheckObject(batch, database, permission, securable.ObjectId, securable.SchemaId, securable.Name, SchemaNameFor(database, securable.SchemaId), procedure);
     }

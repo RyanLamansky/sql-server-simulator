@@ -312,11 +312,29 @@ internal sealed partial class Selection
             ColumnIsUntypedNull = combinedUntypedNulls,
             ColumnReportsNumeric = combinedReportsNumeric,
             ColumnAliasTypes = combinedAliasTypes,
+            ColumnMasks = CombinedMasks(left.ColumnMasks, right.ColumnMasks, combinedSchema.Length),
             ColumnNullability = CombinedNullability(left.ColumnNullability, right.ColumnNullability, kind, combinedSchema.Length),
             // A set operation's columns read as neither updatable nor computed
             // (captured 2026-09-26).
             ColumnWireFlags = new byte[combinedSchema.Length],
         };
+    }
+
+    /// <summary>
+    /// A set operation's column masks: a column masked in either branch is
+    /// masked in the result, every row of it, through the function the masked
+    /// branches agree on — <c>SELECT plain … UNION ALL SELECT email_col …</c>
+    /// shows the plain rows as masked addresses (probed 2026-09-27 against SQL
+    /// Server 2025).
+    /// </summary>
+    private static DataMask?[]? CombinedMasks(DataMask?[]? left, DataMask?[]? right, int length)
+    {
+        if (left is null && right is null)
+            return null;
+        var combined = new DataMask?[length];
+        for (var i = 0; i < length; i++)
+            combined[i] = DataMask.Merge(left?[i], right?[i]);
+        return combined;
     }
 
     // The expression a branch projects in column `ordinal`, alias peeled, when
@@ -659,6 +677,7 @@ internal sealed partial class Selection
             AutoSourceNames = inner.AutoSourceNames,
             AutoColumnSource = inner.AutoColumnSource,
             AutoColumnOrdinal = inner.AutoColumnOrdinal,
+            ColumnMasks = inner.ColumnMasks,
         };
     }
 }

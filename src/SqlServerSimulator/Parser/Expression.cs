@@ -1290,6 +1290,23 @@ internal abstract class Expression : ExpressionNode
     internal virtual Expression? PureConversionOperand => null;
 
     /// <summary>
+    /// The type a <c>CAST</c> / <c>CONVERT</c> without a style converts its
+    /// <see cref="PureConversionOperand"/> to; null for every other node. A
+    /// conversion to the operand's own type passes a masked column's function
+    /// through where any other takes <c>default()</c> (see <see cref="DataMask"/>).
+    /// </summary>
+    internal virtual SqlType? ConversionTarget => null;
+
+    /// <summary>
+    /// The children whose values this node's value is computed from, when that
+    /// is not all of them — a <c>CASE</c>'s arms without its input and compare
+    /// values, a window function's operands without its ordering. Null means
+    /// every child counts. Read by <see cref="DataMask"/>, since a masked
+    /// column read only to compare or order leaves the result unmasked.
+    /// </summary>
+    internal virtual ExpressionNode?[]? MaskValueChildren => null;
+
+    /// <summary>
     /// True when this expression's value is fixed across a single table scan —
     /// it reads no column, so it evaluates to the same result for every row.
     /// Literals, variables, and parameters qualify; column references and

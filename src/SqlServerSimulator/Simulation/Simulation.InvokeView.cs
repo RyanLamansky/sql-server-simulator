@@ -79,17 +79,22 @@ partial class Simulation
             throw SimulatedSqlException.ViewHasMoreColumnNamesThanColumns(view.Name);
 
         var nullability = plan.ColumnNullability;
+        // A column over a masked one masks as the body projects it, which
+        // follows the base table as it stands now rather than at CREATE.
+        var masks = plan.ColumnMasks;
         HeapColumn[]? rebound = null;
         for (var i = 0; i < recorded.Length; i++)
         {
-            if (ReferenceEquals(bound[i], recorded[i].Type))
+            var mask = masks?[i];
+            if (ReferenceEquals(bound[i], recorded[i].Type) && mask is null)
                 continue;
             rebound ??= [.. recorded];
-            var nullable = nullability is null || i >= nullability.Length || nullability[i];
-            rebound[i] = new HeapColumn(recorded[i].Name, bound[i], maxLength: null, nullable: nullable, spelledNumeric: recorded[i].SpelledNumeric)
+            var nullable = ReferenceEquals(bound[i], recorded[i].Type) ? recorded[i].Nullable : nullability is null || i >= nullability.Length || nullability[i];
+            rebound[i] = new HeapColumn(recorded[i].Name, bound[i], maxLength: ReferenceEquals(bound[i], recorded[i].Type) ? recorded[i].MaxLength : null, nullable: nullable, spelledNumeric: recorded[i].SpelledNumeric)
             {
                 AliasType = recorded[i].AliasType,
                 IdentitySource = recorded[i].IdentitySource,
+                DerivedMask = mask,
             };
         }
         return rebound ?? recorded;

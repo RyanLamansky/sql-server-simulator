@@ -114,6 +114,7 @@ partial class Selection
             throw SimulatedSqlException.ForJsonRootWithoutWrapperConflict();
         var wrapped = WrapForJson(inner, new ForJsonOptions(mode, includeNulls, withoutArrayWrapper, rootSpecified ? rootName : null));
         wrapped.streamedDocumentType = SqlType.NVarcharMax;
+        wrapped.ColumnMasks = ForClauseDocumentMasks(inner);
         return wrapped;
     }
 

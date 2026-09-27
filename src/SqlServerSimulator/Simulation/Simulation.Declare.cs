@@ -152,7 +152,7 @@ partial class Simulation
                     {
                         var initSource = initExpression.Run(new RuntimeContext(NoColumnResolver, context.Batch));
                         Parser.Expressions.Cast.RejectRoundingUnderRoundAbort(initSource, declaredType, context.Batch);
-                        initialValue = Parser.Expressions.Cast.ApplyCoercion(initSource, declaredType, declaredMaxLength);
+                        initialValue = DataMasking.ForAssignment(context.Batch, initExpression, initSource, Parser.Expressions.Cast.ApplyCoercion(initSource, declaredType, declaredMaxLength), declaredType);
                     }
                     catch (SimulatedSqlException) when (!reExecution)
                     {

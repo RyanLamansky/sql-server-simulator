@@ -235,6 +235,28 @@ internal sealed partial class Selection
             (batch, outerResolver) => UnpivotRows(
                 source, capturedPassthrough, capturedUnpivot, schema, capturedValueType, nameColType, batch, outerResolver));
 
+        // A passthrough column masks as it reads. Folding a masked column
+        // masks both the value and the name column as default() — even the
+        // unmasked columns' rows (probed 2026-09-27 against SQL Server 2025).
+        DataMask?[]? masks = null;
+        for (var i = 0; i < capturedPassthrough.Length; i++)
+        {
+            if (SourceColumnMask([source], new MultiPartName(capturedPassthrough[i])) is { } passthroughMask)
+                (masks ??= new DataMask?[schema.Length])[i] = passthroughMask;
+        }
+        List<MaskSource>? foldedSources = null;
+        foreach (var col in capturedUnpivot)
+        {
+            if (SourceColumnMask([source], new MultiPartName(col)) is { } foldedMask)
+                (foldedSources ??= []).AddRange(foldedMask.Sources);
+        }
+        if (foldedSources is not null)
+        {
+            masks ??= new DataMask?[schema.Length];
+            masks[^2] = masks[^1] = new DataMask(MaskingFunction.Default, [.. foldedSources]);
+        }
+        plan.ColumnMasks = masks;
+
         return WrapRotatedPlan(alias, plan);
     }
 
@@ -310,7 +332,7 @@ internal sealed partial class Selection
     {
         var columns = new HeapColumn[plan.Schema.Length];
         for (var i = 0; i < columns.Length; i++)
-            columns[i] = new HeapColumn(string.Empty, plan.Schema[i], maxLength: null, nullable: true);
+            columns[i] = new HeapColumn(string.Empty, plan.Schema[i], maxLength: null, nullable: true) { DerivedMask = plan.ColumnMasks?[i] };
 
         return new FromSource(
             qualifier: alias,

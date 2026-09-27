@@ -798,6 +798,7 @@ partial class Simulation
         var rows = new List<SqlValue[]>(tuples.Count);
         tupleStamps = new long[tuples.Count];
         var tupleIndex = 0;
+        var declaresMasks = batch.Connection.Simulation.DeclaresDataMasks;
         foreach (var tuple in tuples)
         {
             // Per-row stamp bump so NEXT VALUE FOR advances on the next
@@ -815,6 +816,17 @@ partial class Simulation
                 values[i] = tuple[i] is Parser.Expressions.DefaultValueExpression
                     ? SqlValue.Null(SqlType.Int32)
                     : tuple[i].Run(runtime);
+                // A subquery reading a masked column inserts default() of the
+                // value's type, whatever the column's own function (probed
+                // 2026-09-27 against SQL Server 2025: a masked email column
+                // inserts xxxx); a VALUES tuple has no other way to reach one.
+                if (declaresMasks
+                    && !values[i].IsNull
+                    && DataMask.Of(tuple[i], static _ => null, typeOf: null) is { } mask
+                    && DataMasking.Applies(batch, mask))
+                {
+                    values[i] = DataMasking.ForStorage(MaskingFunction.Default.Apply(values[i], values[i].Type));
+                }
             }
             rows.Add(values);
         }
@@ -1127,9 +1139,15 @@ partial class Simulation
         }
 
         var resultSet = selection.Execute(context.Batch);
+        // A principal without UNMASK writes what it would read (probed
+        // 2026-09-27 against SQL Server 2025).
+        var masking = DataMasking.Applying(context.Batch, selection.ColumnMasks);
         var rows = new List<SqlValue[]>();
         foreach (var rowBytes in resultSet.RowBytes)
-            rows.Add(RowDecoder.DecodeRow(resultSet.Schema, rowBytes));
+        {
+            var row = RowDecoder.DecodeRow(resultSet.Schema, rowBytes);
+            rows.Add(masking is null ? row : DataMasking.MaskRowForStorage(row, masking, resultSet.Schema));
+        }
         return rows;
     }
 

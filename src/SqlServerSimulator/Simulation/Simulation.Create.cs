@@ -1521,11 +1521,23 @@ partial class Simulation
         // One column definition admits at most one inline CHECK (Msg 8148);
         // a table-level CHECK over the same column is unrestricted.
         var inlineCheckSeen = false;
+        // MASKED WITH follows the type, COLLATE and SPARSE and precedes every
+        // other clause (probed 2026-09-27 against SQL Server 2025).
+        string? maskingFunctionText = null;
+        var foreignKeysBefore = pendingForeignKeys?.Count ?? 0;
+        var indexesBefore = pendingIndexes?.Count ?? 0;
+        bool NothingButCollateOrSparseYet() =>
+            maskingFunctionText is null && identitySpec is null && !nullable.HasValue && defaultExpression is null
+            && generatedAs == GeneratedAlwaysAsRow.None && !isRowGuidCol && inlineKeyKind is null && !inlineCheckSeen
+            && inlineFkName is null && (pendingForeignKeys?.Count ?? 0) == foreignKeysBefore && (pendingIndexes?.Count ?? 0) == indexesBefore;
         while (true)
         {
             switch (context.Token)
             {
-                case ReservedKeyword { Keyword: Keyword.Collate } when columnCollation is null:
+                case UnquotedString { ContextualKeyword: ContextualKeyword.Masked } when NothingButCollateOrSparseYet():
+                    maskingFunctionText = ParseMaskedWithClause(context);
+                    continue;
+                case ReservedKeyword { Keyword: Keyword.Collate } when columnCollation is null && maskingFunctionText is null:
                     // Column-level COLLATE clause. Validated against the
                     // recognized whitelist; the parsed name is stored as
                     // metadata on the HeapColumn for catalog-view round-trip
@@ -1614,7 +1626,7 @@ partial class Simulation
                 // SPARSE: a storage marker the row encoder has nothing to buy
                 // from (it already omits a NULL), validated once the type
                 // resolves. After IDENTITY it's Msg 102, as on real.
-                case UnquotedString { ContextualKeyword: ContextualKeyword.Sparse } when !isSparse && identitySpec is null:
+                case UnquotedString { ContextualKeyword: ContextualKeyword.Sparse } when !isSparse && identitySpec is null && maskingFunctionText is null:
                     isSparse = true;
                     context.MoveNextOptional();
                     continue;
@@ -1847,12 +1859,18 @@ partial class Simulation
                 throw SimulatedSqlException.FollowedByConstraintNotCreated(SimulatedSqlException.DefaultColumnInvalid(columnName.Value, tableName, 1), state: 0);
             AssignmentRules.RequireAssignable(defaultExpression, defaultExpression.GetSqlType(context.Batch, NoColumnTypeResolver), resolvedType);
         }
+        var maskingFunction = maskingFunctionText is null ? null : MaskingFunction.Parse(maskingFunctionText, columnName.Value, resolvedType);
         var newColumn = new HeapColumn(columnName.Value, resolvedType, maxLength, actualNullable, identity, defaultExpression, generatedAs: generatedAs, isHidden: isHidden, collation: columnCollation, isRowGuidCol: isRowGuidCol,
             spelledNumeric: SqlType.IsNumericSpelling(qualifiedTypeName, context.Batch.TryResolveAliasType(qualifiedTypeName, out var spellingAlias) ? spellingAlias : null));
         if (xmlSchemaCollection is not null)
             newColumn.XmlSchemaCollection = xmlSchemaCollection;
         newColumn.AliasType = aliasType;
         newColumn.IsSparse = isSparse;
+        if (maskingFunction is not null)
+        {
+            newColumn.MaskingFunction = maskingFunction;
+            context.Batch.Connection.Simulation.DeclaresDataMasks = true;
+        }
         if (aliasType is { BoundRule: not null } or { BoundDefault: not null })
         {
             if (isTableVariable || isTableType)
@@ -3815,5 +3833,6 @@ partial class Simulation
             BoundRule = column.BoundRule,
             XmlSchemaCollection = column.XmlSchemaCollection,
             AliasType = column.AliasType,
+            MaskingFunction = column.MaskingFunction,
         };
 }

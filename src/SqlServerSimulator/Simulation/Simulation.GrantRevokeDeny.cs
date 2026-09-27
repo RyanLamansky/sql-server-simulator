@@ -242,10 +242,11 @@ partial class Simulation
                 permissions[i] = (permissions[i].Name, objectColumns);
         }
 
-        // The three object permissions with a column form. Every other
-        // permission is entity-level, so a column list on it is Msg 1020.
+        // The object permissions with a column form — UNMASK's names the masked
+        // columns it reveals (probed 2026-09-27). Every other permission is
+        // entity-level, so a column list on it is Msg 1020.
         static bool PermissionAcceptsColumnList(string name) =>
-            BuiltInToken.EqualsAny(name.Trim(), "SELECT", "UPDATE", "REFERENCES");
+            BuiltInToken.EqualsAny(name.Trim(), "SELECT", "UPDATE", "REFERENCES", "UNMASK");
 
         // A parenthesized column list is legal only on an object-scope grant,
         // and then only for the three permissions that have a column form.
@@ -610,6 +611,10 @@ partial class Simulation
             throw SimulatedSqlException.PermissionIncompatibleWithObject(permName.ToUpperInvariant());
         if (isExecute && !kindIsExecutable)
             throw SimulatedSqlException.PermissionIncompatibleWithObject(permName.ToUpperInvariant());
+        // UNMASK reaches a table's own columns only; a view reads through its
+        // base table's grant (probed 2026-09-27 against SQL Server 2025).
+        if (permName.Equals("UNMASK", StringComparison.OrdinalIgnoreCase) && objectTypeCode != "U ")
+            throw SimulatedSqlException.PermissionIncompatibleWithObject("UNMASK");
     }
 
     /// <summary>

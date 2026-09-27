@@ -519,6 +519,27 @@ partial class Simulation
         private readonly BatchContext batch = batch;
 
         /// <summary>
+        /// Per OUTPUT column, how it masks for a principal without
+        /// <c>UNMASK</c>: <c>INSERTED</c> / <c>DELETED</c> read the target's
+        /// masked columns as a SELECT would (probed 2026-09-27 against SQL
+        /// Server 2025), both to the client and into an <c>INTO</c> target.
+        /// </summary>
+        private readonly DataMask?[]? masks = DataMask.OfProjection(
+            batch,
+            [.. expressions],
+            name => BuiltInToken.Equals(name.ImmediateQualifier, "INSERTED") || BuiltInToken.Equals(name.ImmediateQualifier, "DELETED")
+                ? Array.FindIndex(destinationTable.Columns, column => batch.CurrentDatabase.Collation.Equals(column.Name, name.Leaf)) is var ordinal and >= 0
+                    ? DataMask.ForTableColumn(destinationTable, ordinal)
+                    : null
+                : null,
+            typeOf: null);
+
+        // Which masks apply is the executing principal's to answer, once per
+        // statement: the identity can't change while its rows project.
+        private MaskingFunction?[]? applyingMasks;
+        private bool masksResolved;
+
+        /// <summary>
         /// True when this OUTPUT clause includes an <c>INTO</c> target.
         /// The dispatching caller suppresses the per-row result-set yield in
         /// this case and surfaces the statement as a non-query (matches real
@@ -599,6 +620,17 @@ partial class Simulation
                 projected[i] = action is not null && IsMergeActionRef(expressions[i])
                     ? SqlValue.FromNVarchar(action)
                     : expressions[i].Run(new RuntimeContext(Resolve, this.batch));
+            }
+
+            if (this.masks is not null)
+            {
+                if (!this.masksResolved)
+                {
+                    this.applyingMasks = DataMasking.Applying(this.batch, this.masks);
+                    this.masksResolved = true;
+                }
+                if (this.applyingMasks is { } applying)
+                    projected = DataMasking.MaskRowForStorage(projected, applying, this.Schema);
             }
 
             if (outputTarget is null)

@@ -96,6 +96,20 @@ internal sealed class SimulatedSqlResultSet : SimulatedQueryResult
         return this;
     }
 
+    /// <summary>
+    /// Replaces each masked column's values as the rows stream out (see
+    /// <c>DataMasking</c>). The rows switch to the <see cref="SqlValue"/>[]
+    /// form, since a masked fixed-length value is sent shorter than its type.
+    /// </summary>
+    internal SimulatedSqlResultSet WithMaskedColumns(MaskingFunction?[] functions)
+    {
+        var schema = this.schema;
+        var rows = this.rowValues ?? this.rowBytes!.Select(bytes => RowDecoder.DecodeRow(schema, bytes));
+        this.rowValues = rows.Select(row => Parser.DataMasking.MaskRow(row, functions, schema));
+        this.rowBytes = null;
+        return this;
+    }
+
     /// <remarks>
     /// A row that raises leaves the rows before it in place, so a statement
     /// its own error cut short can still send them (see <see cref="EndedByError"/>).

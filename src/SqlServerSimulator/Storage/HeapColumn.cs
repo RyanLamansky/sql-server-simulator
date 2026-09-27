@@ -253,5 +253,24 @@ internal sealed class HeapColumn(string name, SqlType type, int? maxLength, bool
     /// </summary>
     public IdentityState? IdentitySource;
 
+    /// <summary>
+    /// The Dynamic Data Masking function the column was declared or altered
+    /// <c>MASKED WITH</c>; null when unmasked. Catalog truth
+    /// (<c>sys.masked_columns</c>, <c>sys.columns.is_masked</c>) and, for a
+    /// table's column, what a principal without <c>UNMASK</c> reads through.
+    /// </summary>
+    /// <remarks>
+    /// Mutable because <c>ALTER TABLE … ALTER COLUMN &lt;c&gt; ADD | DROP
+    /// MASKED</c> sets and clears it without touching storage.
+    /// </remarks>
+    public MaskingFunction? MaskingFunction;
+
+    /// <summary>
+    /// The mask a derived source's, CTE's or view's column passes through from
+    /// the query that fills it (see <c>Selection.ColumnMasks</c>); null for a
+    /// table's own column, whose mask comes from <see cref="MaskingFunction"/>.
+    /// </summary>
+    public DataMask? DerivedMask;
+
     internal string DebugDisplay() => $"{this.Name} {this.Type}{(this.MaxLength is int n ? $"({n})" : "")}";
 }
