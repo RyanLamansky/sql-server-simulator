@@ -378,4 +378,265 @@ public sealed class JsonTypeTests
         AreEqual("i", columns["COLUMN_NAME"]);
         IsFalse(columns.Read());
     }
+
+    [TestMethod]
+    [DataRow("'$.a' returning int", 42)]
+    [DataRow("'$.a' returning bigint", 42L)]
+    [DataRow("'$.a' returning smallint", (short)42)]
+    [DataRow("'$.f' returning int", 1)]
+    [DataRow("'$.b' returning int", 1)]
+    [DataRow("'$.b' returning bit", true)]
+    [DataRow("'$.t' returning bit", true)]
+    [DataRow("'$.one' returning bit", true)]
+    [DataRow("'$.two' returning bit", true)]
+    [DataRow("'$.f' returning float", 1.5)]
+    [DataRow("'$.f' returning real", 1.5f)]
+    [DataRow("'$.f' returning varchar(10)", "1.50")]
+    [DataRow("'$.e' returning nvarchar(30)", "100.0000000000")]
+    [DataRow("'$.b' returning nvarchar(10)", "true")]
+    [DataRow("'$.s' returning char(5)", "abc  ")]
+    [DataRow("'$.s' returning varchar(max)", "abc")]
+    [DataRow("'$.sp' returning int", 12)]
+    [DataRow("'$.sf' returning float", 1.5)]
+    public void JsonValueReturning(string pathAndClause, object expected) =>
+        AreEqual(expected, new Simulation().ExecuteScalar($$"""declare @j json = '{"a":42,"f":1.50,"b":true,"t":"true","one":"1","two":2,"e":1e2,"s":"abc","sp":"  12 ","sf":"1.5"}'; select json_value(@j, {{pathAndClause}})"""));
+
+    [TestMethod]
+    public void JsonValueReturningDecimal() =>
+        AreEqual(1.23m, new Simulation().ExecuteScalar("""declare @j json = '{"a":1.23456}'; select json_value(@j, '$.a' returning decimal(4, 2))"""));
+
+    [TestMethod]
+    public void JsonValueReturningDate() =>
+        AreEqual(new DateTime(2020, 1, 2), new Simulation().ExecuteScalar("""declare @j json = '{"d":"2020-01-02"}'; select json_value(@j, '$.d' returning date)"""));
+
+    [TestMethod]
+    [DataRow("'$.s' returning int")]
+    [DataRow("'$.big' returning int")]
+    [DataRow("'$.big' returning tinyint")]
+    [DataRow("'$.s' returning varchar(2)")]
+    [DataRow("'$.b' returning varchar(3)")]
+    [DataRow("'$.x' returning date")]
+    [DataRow("'$.sf' returning int")]
+    [DataRow("'$.n' returning int")]
+    [DataRow("'$.o' returning int")]
+    [DataRow("'$.z' returning int")]
+    public void JsonValueReturningLaxFailureIsNull(string pathAndClause) =>
+        IsInstanceOfType<DBNull>(new Simulation().ExecuteScalar($$"""declare @j json = '{"s":"abc","big":12345678901,"b":true,"x":"2020-13-45","sf":"1.5","n":null,"o":[1]}'; select json_value(@j, {{pathAndClause}})"""));
+
+    [TestMethod]
+    [DataRow("'strict $.s' returning int", 245, (byte)1, "Conversion failed when converting the varchar value 'abc' to data type int.")]
+    [DataRow("'strict $.s' returning nvarchar(2)", 8152, (byte)34, "String or binary data would be truncated.")]
+    [DataRow("'strict $.b' returning varchar(2)", 8152, (byte)34, "String or binary data would be truncated.")]
+    [DataRow("'strict $.big' returning int", 8115, (byte)2, "Arithmetic overflow error converting expression to data type int.")]
+    [DataRow("'strict $.x' returning date", 241, (byte)1, "Conversion failed when converting date and/or time from character string.")]
+    [DataRow("'strict $.o' returning int", 13623, (byte)2, "Scalar value cannot be found in the specified JSON path.")]
+    [DataRow("'strict $.z' returning int", 13608, (byte)5, "Property cannot be found on the specified JSON path.")]
+    [DataRow("'$.i' returning date", 529, (byte)1, "Explicit conversion from data type int to date is not allowed.")]
+    [DataRow("'strict $.b' returning date", 529, (byte)1, "Explicit conversion from data type bit to date is not allowed.")]
+    public void JsonValueReturningStrictFailure(string pathAndClause, int number, byte state, string message) =>
+        AssertError($$"""declare @j json = '{"s":"abc","big":12345678901,"b":true,"x":"zz","o":[1],"i":5}'; select json_value(@j, {{pathAndClause}})""", number, state, message);
+
+    [TestMethod]
+    public void JsonValueReturningStrictNullIsNull() =>
+        IsInstanceOfType<DBNull>(new Simulation().ExecuteScalar("""declare @j json = '{"a":null}'; select json_value(@j, 'strict $.a' returning int)"""));
+
+    [TestMethod]
+    public void JsonValueReturningReadsStringsThroughTheCodePage() =>
+        AreEqual("?|?", new Simulation().ExecuteScalar("""declare @j json = '{"a":"ア"}'; select json_value(@j, '$.a' returning varchar(10)) + '|' + json_value(@j, '$.a' returning nvarchar(10))"""));
+
+    [TestMethod]
+    public void JsonValueReturningTypesTheResult() =>
+        AreEqual("int:4:NULL|nvarchar:40:SQL_Latin1_General_CP1_CI_AS|varchar:-1:SQL_Latin1_General_CP1_CI_AS", new Simulation().ExecuteScalar("""
+            declare @j json = '{"a":1}';
+            select json_value(@j, '$.a' returning int) c, json_value(@j, '$.a' returning nvarchar(20)) d, json_value(@j, '$.a' returning varchar(max)) e into #t;
+            select string_agg(concat(type_name(system_type_id), ':', max_length, ':', isnull(collation_name, 'NULL')), '|') within group (order by column_id)
+            from tempdb.sys.columns where object_id = object_id('tempdb..#t')
+            """));
+
+    [TestMethod]
+    [DataRow("datetime", "datetime")]
+    [DataRow("smalldatetime", "smalldatetime")]
+    [DataRow("money", "money")]
+    [DataRow("uniqueidentifier", "uniqueidentifier")]
+    [DataRow("varbinary(10)", "varbinary")]
+    [DataRow("binary(2)", "binary")]
+    [DataRow("xml", "xml")]
+    [DataRow("sql_variant", "sql_variant")]
+    [DataRow("text", "text")]
+    [DataRow("ntext", "ntext")]
+    [DataRow("json", "json")]
+    [DataRow("vector(1)", "sys.vector")]
+    [DataRow("hierarchyid", "hierarchyid")]
+    [DataRow("geography", "geography")]
+    [DataRow("dbo.foo", "dbo.foo")]
+    public void JsonValueReturningRefusedType(string type, string near) =>
+        AssertError($$"""declare @j json = '{"a":1}'; select json_value(@j, '$.a' returning {{type}})""", 102, 29, $"Incorrect syntax near '{near}'.");
+
+    [TestMethod]
+    public void JsonValueReturningRefusesAnAliasType() =>
+        AreEqual(29, new Simulation().AssertSqlError("create type myint from int; declare @j json = '{\"a\":1}'; select json_value(@j, '$.a' returning myint)", 102).Errors[0].State);
+
+    [TestMethod]
+    [DataRow("declare @j json = '{\"a\":1}'; select json_value(@j, '$.a' returning nvarchar)")]
+    [DataRow("select json_value('{\"a\":42}', '$.a' returning int)")]
+    public void JsonValueReturningNearReturning(string commandText) =>
+        AssertError(commandText, 102, 1, "Incorrect syntax near 'RETURNING'.");
+
+    [TestMethod]
+    [DataRow("$.p[*].n", """["J","K","L"]""")]
+    [DataRow("$.p[0 to 1].n", """["J","K"]""")]
+    [DataRow("$.p[last].n", """["L"]""")]
+    [DataRow("$.p[0, 2].n", """["J","L"]""")]
+    [DataRow("$.p[last, 0].n", """["L","J"]""")]
+    [DataRow("$.q[*]", """[1,"x",true,null,{"a":1},[2]]""")]
+    [DataRow("$.q[0]", "[1]")]
+    [DataRow("$.e[*]", "[]")]
+    [DataRow("$.*", """[[{"n":"J"},{"n":"K"},{"n":"L"}],[1,"x",true,null,{"a":1},[2]],[],"a/b"]""")]
+    [DataRow("strict $.q[0]", "[1]")]
+    public void JsonQueryWithArrayWrapper(string path, string expected) =>
+        AreEqual(expected, new Simulation().ExecuteScalar($$"""declare @j json = '{"p":[{"n":"J"},{"n":"K"},{"n":"L"}],"q":[1,"x",true,null,{"a":1},[2]],"e":[],"s":"a/b"}'; select cast(json_query(@j, '{{path}}' with array wrapper) as nvarchar(max))"""));
+
+    [TestMethod]
+    public void JsonQueryWithArrayWrapperWholeDocument() =>
+        AreEqual("""[{"p":1}]""", new Simulation().ExecuteScalar("""declare @j json = '{"p":1}'; select cast(json_query(@j with ARRAY Wrapper) as nvarchar(max))"""));
+
+    [TestMethod]
+    [DataRow("$.z")]
+    [DataRow("$.e[3]")]
+    public void JsonQueryWithArrayWrapperFindingNothingIsNull(string path) =>
+        IsInstanceOfType<DBNull>(new Simulation().ExecuteScalar($$"""declare @j json = '{"e":[]}'; select json_query(@j, '{{path}}' with array wrapper)"""));
+
+    [TestMethod]
+    [DataRow("declare @j json = '{\"p\":[1]}'; select json_query(@j, 'strict $.p[0 to 5]' with array wrapper)", (byte)5)]
+    [DataRow("declare @j json = '{\"p\":[1]}'; select json_query(@j, 'strict $.z[*]' with array wrapper)", (byte)5)]
+    [DataRow("declare @j nvarchar(max) = N'{\"p\":[1]}'; select json_query(@j, 'strict $.z' with array wrapper)", (byte)2)]
+    public void JsonQueryWithArrayWrapperStrictMiss(string commandText, byte state) =>
+        AssertError(commandText, 13608, state, "Property cannot be found on the specified JSON path.");
+
+    [TestMethod]
+    [DataRow("$.p[*]", """[{"n" : "J", "n": 2},3,"a\/b","é",1e2]""")]
+    [DataRow("$.p", """[[ {"n" : "J", "n": 2} , 3, "a\/b", "\u00e9", 1e2 ]]""")]
+    public void JsonQueryWithArrayWrapperOverText(string path, string expected) =>
+        AreEqual(expected, new Simulation().ExecuteScalar($$"""declare @j nvarchar(max) = N'{"p": [ {"n" : "J", "n": 2} , 3, "a\/b", "\u00e9", 1e2 ] }'; select json_query(@j, '{{path}}' with array wrapper)"""));
+
+    [TestMethod]
+    public void JsonQueryWithArrayWrapperOverTextReadsWhatItNeeds() =>
+        AreEqual("[1,2]", new Simulation().ExecuteScalar("""declare @j nvarchar(max) = N'{"p":[1,2]'; select json_query(@j, '$.p[*]' with array wrapper)"""));
+
+    [TestMethod]
+    [DataRow("json", "json")]
+    [DataRow("nvarchar(max)", "nvarchar")]
+    public void JsonQueryWithArrayWrapperResultType(string documentType, string expected) =>
+        AreEqual(expected, new Simulation().ExecuteScalar($$"""declare @j {{documentType}} = '{"p":[1]}'; select json_query(@j, '$.p[*]' with array wrapper) c into #t; select type_name(system_type_id) from tempdb.sys.columns where object_id = object_id('tempdb..#t')"""));
+
+    [TestMethod]
+    [DataRow("with conditional array wrapper", "conditional")]
+    [DataRow("with unconditional array wrapper", "unconditional")]
+    [DataRow("without array wrapper", "without")]
+    [DataRow("with wrapper", ")")]
+    public void JsonQueryWrapperForms(string clause, string near) =>
+        new Simulation().ValidateSyntaxError($$"""declare @j json = '{"p":[1]}'; select json_query(@j, '$.p[*]' {{clause}})""", near);
+
+    [TestMethod]
+    public void ModifyMethodUpdatesAColumn() =>
+        AreEqual("""{"a":14859,"b":"def","c":true,"e":[1,2],"d":{"q":1}}""", new Simulation().ExecuteScalar("""
+            create table t (id int primary key, d json);
+            insert t values (1, '{"a":1, "b":"abc", "c":true, "e":[1]}');
+            update t set d.modify('$.a', 14859) where id = 1;
+            update t set d.MODIFY('$.b', 'def');
+            update t set d .modify ('$.d', cast('{"q":1}' as json));
+            update t set d.modify('append $.e', 2);
+            select cast(d as nvarchar(max)) from t
+            """));
+
+    [TestMethod]
+    public void ModifyMethodRemovesAMemberForNull() =>
+        AreEqual("""{"b":2}""", new Simulation().ExecuteScalar("""
+            create table t (d json); insert t values ('{"a":1,"b":2}');
+            update t set d.modify('$.a', null);
+            select cast(d as nvarchar(max)) from t
+            """));
+
+    [TestMethod]
+    public void ModifyMethodUpdatesAVariable() =>
+        AreEqual("""{"a":"a/b","b":2}""", new Simulation().ExecuteScalar("""
+            declare @j json = '{"a":1}', @p nvarchar(10) = '$.a';
+            set @j.modify(@p, 'a/b'); set @j.modify('$.b', 2);
+            select cast(@j as nvarchar(max))
+            """));
+
+    [TestMethod]
+    public void ModifyMethodSitsBesideOtherAssignmentsAndOutput()
+    {
+        using var reader = new Simulation().ExecuteReader("""
+            create table t (id int, d json); insert t values (1, '{"a":1}');
+            update t set d.modify('$.a', json_object('x':1)), id = 2 output inserted.id, cast(inserted.d as nvarchar(max)), cast(deleted.d as nvarchar(max))
+            """);
+        IsTrue(reader.Read());
+        AreEqual(2, reader.GetInt32(0));
+        AreEqual("""{"a":{"x":1}}""", reader.GetString(1));
+        AreEqual("""{"a":1}""", reader.GetString(2));
+    }
+
+    [TestMethod]
+    public void ModifyMethodThroughMergeAndTableVariable() =>
+        AreEqual("""{"a":8}|{"a":9}""", new Simulation().ExecuteScalar("""
+            create table t (id int, d json); insert t values (1, '{"a":1}');
+            merge t using (select 1 as id) s on t.id = s.id when matched then update set d.modify('$.a', 8);
+            declare @t table (d json); insert @t values ('{"a":1}'); update @t set d.modify('$.a', 9);
+            select cast((select d from t) as nvarchar(max)) + '|' + cast((select d from @t) as nvarchar(max))
+            """));
+
+    [TestMethod]
+    [DataRow("update t set d.modify('$.a', 2), d.modify('$.b', 3)", 264)]
+    [DataRow("update t set d = '{}', d.modify('$.b', 3)", 264)]
+    [DataRow("update t set d.modify('$.a')", 313)]
+    [DataRow("update t set d.modify('$.a', 1, 2)", 8144)]
+    [DataRow("update t set d.modify(1, 5)", 8116)]
+    [DataRow("update t set d.modify(null, 5)", 8116)]
+    [DataRow("update t set d.modify('$.a', getdate())", 8116)]
+    [DataRow("update t set d.modify('$', 5)", 13619)]
+    [DataRow("update t set d.modify('$.a[*]', 5)", 13660)]
+    [DataRow("update t set d.modify('strict $.b', 2)", 13608)]
+    [DataRow("update t set t.d.modify('$.a', 5)", 102)]
+    [DataRow("update t set d.modify('$.a', 5) + 1", 102)]
+    [DataRow("update t set n.modify('$.a', 5)", 258)]
+    [DataRow("update t set d.modify('$.a', 5) where d.modify('$.a', 5) is not null", 4121)]
+    [DataRow("select d.modify('$.a', 2) from t", 4121)]
+    [DataRow("declare @j json = '{}'; select @j.modify('$.a', 1)", 258)]
+    [DataRow("declare @j json = '{}'; select @j.value('$.a')", 258)]
+    public void ModifyMethodRefusals(string statement, int number) =>
+        new Simulation().AssertSqlError($$"""create table t (id int, d json, n nvarchar(max)); insert t values (1, '{"a":1}', null); {{statement}}""", number);
+
+    [TestMethod]
+    [DataRow("update t set d.modify('$.a', getdate())", 8116, "Argument data type datetime is invalid for argument 3 of modify function.")]
+    [DataRow("update t set d.modify(1, 5)", 8116, "Argument data type int is invalid for argument 2 of modify function.")]
+    [DataRow("update t set d.modify('$.a')", 313, "An insufficient number of arguments were supplied for the procedure or function modify.")]
+    [DataRow("update t set t.d.modify('$.a', 5)", 102, "Incorrect syntax near 'modify'.")]
+    [DataRow("update t set n.modify('$.a', 5)", 258, "Cannot call methods on nvarchar(max).")]
+    [DataRow("select d.modify('$.a', 2) from t", 4121, "Cannot find either column \"d\" or the user-defined function or aggregate \"d.modify\", or the name is ambiguous.")]
+    [DataRow("declare @j json = '{}'; select @j.modify('$.a', 1)", 258, "Cannot call methods on json.")]
+    public void ModifyMethodRefusalWording(string statement, int number, string message) =>
+        new Simulation().AssertSqlError($"create table t (id int, d json, n nvarchar(max)); insert t values (1, '{{}}', null); {statement}", number, message);
+
+    [TestMethod]
+    public void ModifyMethodOnNullEndsTheBatchAndRollsBack()
+    {
+        var sim = new Simulation();
+        using var connection = sim.CreateOpenConnection();
+        var ex = Throws<SimulatedSqlException>(() => connection.CreateCommand("""
+            set xact_abort off; begin tran; declare @j json; set @j.modify('$.a', 1); select 'after'
+            """).ExecuteNonQuery());
+        AreEqual(5302, ex.Number);
+        AreEqual("Mutator 'modify()' on '@j' cannot be called on a null value.", ex.Errors[0].Message);
+        AreEqual(0, connection.CreateCommand("select @@trancount").ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void ModifyMethodOnNullColumn() =>
+        AreEqual("Mutator 'modify()' on 'd' cannot be called on a null value.", new Simulation().AssertSqlError("create table t (d json); insert t values (null); update t set d.modify('$.b', 3)", 5302).Errors[0].Message);
+
+    [TestMethod]
+    public void ModifyMethodNoOpStillCountsTheRow() =>
+        AreEqual(1, new Simulation().ExecuteScalar("create table t (d json); insert t values ('{\"a\":1}'); update t set d.modify('$.zz', null); select @@rowcount"));
 }

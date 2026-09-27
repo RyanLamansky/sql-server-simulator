@@ -1,7 +1,7 @@
 # Indexes
 
 `CREATE [UNIQUE] [CLUSTERED | NONCLUSTERED] INDEX` + `DROP INDEX` ship, with full grammar coverage for column ordering (ASC / DESC), INCLUDE columns, WHERE filter, and the WITH (options) clause.
-The `sys.indexes` + `sys.index_columns` catalog views project rows for PRIMARY KEY constraints, UNIQUE constraints, CREATE INDEX-declared entries, and XML and spatial indexes (at their own 256000 / 384000 index-id ranges, every option at its default — probed 2026-09-26 against SQL Server 2025).
+The `sys.indexes` + `sys.index_columns` catalog views project rows for PRIMARY KEY constraints, UNIQUE constraints, CREATE INDEX-declared entries, and XML and spatial indexes (at their own 256000 / 384000 index-id ranges, every option at its default — probed 2026-09-26 against SQL Server 2025) and JSON indexes (at 1216000 — see [`json-type.md`](json-type.md#json-indexes)).
 Probe-confirmed against SQL Server 2025.
 
 ## Grammar

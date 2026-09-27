@@ -114,6 +114,11 @@ internal sealed class IndexProperty : Expression
             if (Collation.Baseline.Equals(spatialIndex.Name, name))
                 return Auxiliary(spatialIndex.IndexId);
         }
+        foreach (var jsonIndex in table.JsonIndexes)
+        {
+            if (Collation.Baseline.Equals(jsonIndex.Name, name))
+                return Auxiliary(jsonIndex.IndexId);
+        }
         foreach (var statistic in table.UserStatistics)
         {
             if (Collation.Baseline.Equals(statistic.Name, name))

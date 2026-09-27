@@ -397,6 +397,23 @@ internal abstract class Expression : ExpressionNode
                             // methods can be stored verbatim; runtime
                             // evaluation throws NotSupportedException (see
                             // XmlMethodCall.Run).
+                            // The json type has one method, the mutator
+                            // `.modify`, which only an UPDATE's or a SET's
+                            // assignment reaches. Elsewhere real refuses a
+                            // json variable's method call as Msg 258 and a
+                            // json column's as Msg 4121 (probed 2026-09-27
+                            // against SQL Server 2025).
+                            if (XmlMethodCall.IsKnownMethodName(name.Value) && JsonModify.IsJsonReceiver(expression, context))
+                            {
+                                var checkpoint = context.SaveCheckpoint();
+                                if (context.GetNextOptional() is Operator { Character: '(' })
+                                {
+                                    throw expression is Reference column
+                                        ? SimulatedSqlException.CannotFindUserDefinedFunction(column.ReferencedName.WithAddedPart(name.Value))
+                                        : SimulatedSqlException.CannotCallMethodsOn("json");
+                                }
+                                context.RestoreCheckpoint(checkpoint);
+                            }
                             if (XmlMethodCall.IsKnownMethodName(name.Value))
                             {
                                 var checkpoint = context.SaveCheckpoint();
@@ -1931,6 +1948,7 @@ internal abstract class Expression : ExpressionNode
                 "INDEXPROPERTY" => new IndexProperty(context),
                 "IS_ROLEMEMBER" => new RoleMemberCheck(context, serverScope: false),
                 "JSON_ARRAYAGG" => AggregateExpression.Parse(context, AggregateKind.JsonArrayAgg),
+                "JSON_CONTAINS" => new JsonContains(context),
                 "LOGINPROPERTY" => new LoginProperty(context),
                 "REGEXP_SUBSTR" => RegexpScalar.ParseCall(context, RegexpScalarKind.Substr),
                 "STRING_ESCAPE" => new StringEscape(context),

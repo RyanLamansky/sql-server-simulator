@@ -34,6 +34,7 @@ internal sealed class JsonPathExists : Expression
         if (jv.IsNull)
             return SqlValue.Null(SqlType.Int32);
         var path = JsonPath.Parse(pv.AsString);
+        JsonText.RejectTextAccessors(path, jv.Type);
 
         // JSON_PATH_EXISTS is the one member of the family that never raises:
         // a document the scan objects to is 0, and so is a strict-mode miss
@@ -45,7 +46,15 @@ internal sealed class JsonPathExists : Expression
             return SqlValue.FromInt32(0);
 
         using var doc = JsonText.Parse(scan.Text!);
-        return SqlValue.FromInt32(path.Walk(doc.RootElement, scan, out _) == JsonWalkResult.Resolved ? 1 : 0);
+        if (!path.IsAdvanced)
+            return SqlValue.FromInt32(path.Walk(doc.RootElement, scan, out _) == JsonWalkResult.Resolved ? 1 : 0);
+
+        // An advanced path exists where it selects at all — a wildcard over an
+        // empty array included, a range reaching past the end not excluded —
+        // and a strict one only where it misses nowhere (probed 2026-09-27
+        // against SQL Server 2025).
+        var found = path.Select(doc.RootElement, [], out var partial);
+        return SqlValue.FromInt32(found && !(partial && path.Mode == JsonPathMode.Strict) ? 1 : 0);
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)

@@ -56,6 +56,46 @@ internal static class JsonText
         path.IsNull ? throw SimulatedSqlException.InvalidArgumentDataType("NULL", 2, upperFunctionName, state: 8) : path;
 
     /// <summary>
+    /// Over a text document real's reader refuses two of the advanced array
+    /// accessors outright — <c>last</c> as Msg 13660 state 2, a list as state
+    /// 5 — in every function that reads a path (probed 2026-09-27 against SQL
+    /// Server 2025). A <c>json</c> document takes both.
+    /// </summary>
+    internal static void RejectTextAccessors(in JsonPath path, SqlType documentType)
+    {
+        if (documentType is JsonSqlType || !path.IsAdvanced)
+            return;
+        if (path.HasLast)
+            throw SimulatedSqlException.JsonAdvancedAccessorNotSupported("Last operator", 2);
+        if (path.HasComma)
+            throw SimulatedSqlException.JsonAdvancedAccessorNotSupported("Comma operator", 5);
+    }
+
+    /// <summary>
+    /// Selects <paramref name="path"/> over <paramref name="text"/> for the
+    /// readers of SQL Server 2025's advanced accessors, returning the parsed
+    /// document the selected elements live in. Over a document that stops
+    /// making sense partway the selection runs on what read cleanly, and
+    /// Msg 13609 is raised only when it found nothing there — an
+    /// approximation of the reader stopping early, which the plain paths model
+    /// exactly through <see cref="JsonPath.Walk(JsonElement, in JsonScan, out JsonElement)"/>.
+    /// </summary>
+    internal static JsonDocument SelectAdvanced(string text, in JsonPath path, List<JsonElement> nodes, out bool found, out bool partial)
+    {
+        var scan = Scan(text);
+        if (scan.Text is null)
+            throw SimulatedSqlException.JsonInvalidText(scan.BadCharacter, scan.BadPosition);
+        var doc = Parse(scan.Text);
+        found = path.Select(doc.RootElement, nodes, out partial);
+        if (scan.HasError && (!found || nodes.Count == 0))
+        {
+            doc.Dispose();
+            throw SimulatedSqlException.JsonInvalidText(scan.BadCharacter, scan.BadPosition);
+        }
+        return doc;
+    }
+
+    /// <summary>
     /// The character SQL Server names in Msg 13609 when the reader ran off the
     /// end of the text rather than hitting an unexpected character.
     /// </summary>

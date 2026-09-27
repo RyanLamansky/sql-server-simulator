@@ -390,6 +390,7 @@ internal readonly struct BuiltInArity(int min, int max, BuiltInArity.Refusal bel
             "IS_ROLEMEMBER" => Between("is_rolemember", 1, 2),
             "IS_SRVROLEMEMBER" => Between("is_srvrolemember", 1, 2),
             "JSON_ARRAYAGG" => new(1, 1, new(174, "json_arrayagg", 1, 0, 1), new(174, "json_arrayagg", 1, 0, 3)),
+            "JSON_CONTAINS" => Between("json_contains", 2, 4),
             "JSON_MODIFY" => Exactly("json_modify", 3),
             "JSON_PATH_EXISTS" => Exactly("json_path_exists", 2),
             "JSON_QUERY" => new(1, 2, new(189, "json_query", 1, 2, 2), new(189, "json_query", 1, 2, 3)),

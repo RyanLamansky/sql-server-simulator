@@ -361,7 +361,7 @@ internal static partial class BuiltInResources
             new("filter_definition", NVarcharSqlType.Get(-1, Collation.Baseline, Coercibility.CoercibleDefault), SqlType.MaxLengthSentinel, true),
             new("auto_created", SqlType.Bit, null, true),
             new("optimize_for_array_search", SqlType.Bit, null, true),
-        ], static (_, _) => EmptyCatalogRows);
+        ], EnumerateSysJsonIndexes);
         Sys("index_resumable_operations",
         [
             new("object_id", SqlType.Int32, null, false),
@@ -407,10 +407,11 @@ internal static partial class BuiltInResources
             new("parent_object_id", SqlType.Int32, null, false),
         ], static (_, _) => EmptyCatalogRows);
 
-        // sys.json_index_paths / sys.selective_xml_index_namespaces /
-        // sys.vector_indexes: index-feature views for capabilities the
-        // simulator doesn't model (JSON indexes, selective XML index
-        // namespaces, DiskANN vector indexes). Each ships the full
+        // sys.json_index_paths lists each JSON index's paths as written; its
+        // siblings sys.selective_xml_index_namespaces and sys.vector_indexes
+        // are index-feature views for capabilities the simulator doesn't
+        // model (selective XML index namespaces, DiskANN vector indexes). Each
+        // ships the full
         // probe-confirmed shape (SQL Server 2025, 2026-07-16) with zero
         // rows via the shared EmptyCatalogRows — DacFx's bacpac-export
         // reverse-engineering references them and must resolve to an empty
@@ -419,8 +420,8 @@ internal static partial class BuiltInResources
         [
             new("object_id", SqlType.Int32, null, false),
             new("index_id", SqlType.Int32, null, false),
-            new("path", VarcharSqlType.Get(8000, Collation.Get("Latin1_General_100_BIN2_UTF8"), Coercibility.Implicit), 8000, true),
-        ], static (_, _) => EmptyCatalogRows);
+            new("path", JsonIndexPathType, 8000, true),
+        ], EnumerateSysJsonIndexPaths);
         Sys("selective_xml_index_namespaces",
         [
             new("object_id", SqlType.Int32, null, false),
@@ -591,6 +592,8 @@ internal static partial class BuiltInResources
                     yield return AuxiliaryRow(tableObjectId, xmlIndex.Name, xmlIndex.IndexId, 3, xmlDesc);
                 foreach (var spatialIndex in table.SpatialIndexes.OrderBy(index => index.IndexId))
                     yield return AuxiliaryRow(tableObjectId, spatialIndex.Name, spatialIndex.IndexId, 4, spatialDesc);
+                foreach (var jsonIndex in table.JsonIndexes.OrderBy(index => index.IndexId))
+                    yield return JsonIndexRow(tableObjectId, jsonIndex, trueBit, falseBit);
             }
             // Indexed views: one row per index the view carries (no HEAP row —
             // an ordinary view contributes nothing, probe-confirmed). The
@@ -1379,6 +1382,23 @@ internal static partial class BuiltInResources
                         zeroByte,
                     ];
                 }
+                // A JSON index lists its one column the same way (probed
+                // 2026-09-27 against SQL Server 2025).
+                foreach (var jsonIndex in table.JsonIndexes)
+                {
+                    yield return [
+                        tableObjectId,
+                        SqlValue.FromInt32(jsonIndex.IndexId),
+                        SqlValue.FromInt32(1),
+                        SqlValue.FromInt32(FullOrdinalToColumnId(table, jsonIndex.ColumnOrdinal)),
+                        zeroByte,
+                        zeroByte,
+                        falseBit,
+                        falseBit,
+                        zeroByte,
+                        zeroByte,
+                    ];
+                }
                 // A spatial index lists its one column the same way (probed
                 // 2026-09-26 against SQL Server 2025).
                 foreach (var spatialIndex in table.SpatialIndexes)
@@ -1570,4 +1590,87 @@ internal static partial class BuiltInResources
         table is not null && (uint)fullOrdinal < (uint)table.Columns.Length
             ? table.Columns[fullOrdinal].ColumnId
             : fullOrdinal + 1;
+
+    /// <summary>The type of <c>sys.json_index_paths.path</c>.</summary>
+    private static readonly VarcharSqlType JsonIndexPathType = VarcharSqlType.Get(8000, Collation.Get("Latin1_General_100_BIN2_UTF8"), Coercibility.Implicit);
+
+    /// <summary>
+    /// A JSON index's row in the shape <c>sys.indexes</c> and
+    /// <c>sys.json_indexes</c> share up to <c>auto_created</c>: type 9
+    /// <c>JSON</c>, its fill factor, padding and lock options as created
+    /// (probed 2026-09-27 against SQL Server 2025). <c>sys.indexes</c> carries
+    /// <c>compression_delay</c>, <c>suppress_dup_key_messages</c> and
+    /// <c>optimize_for_sequential_key</c> where <c>sys.json_indexes</c> ends on
+    /// <c>optimize_for_array_search</c>.
+    /// </summary>
+    private static SqlValue[] JsonIndexRow(SqlValue objectId, JsonIndex index, SqlValue trueBit, SqlValue falseBit, bool jsonIndexesShape = false)
+    {
+        var common = new List<SqlValue>
+        {
+            objectId,
+            SqlValue.FromSystemName(index.Name),
+            SqlValue.FromInt32(index.IndexId),
+            SqlValue.FromByte(9),
+            SqlValue.FromNVarchar("JSON"),
+            falseBit, // is_unique
+            SqlValue.FromInt32(1), // data_space_id
+            falseBit, // ignore_dup_key
+            falseBit, // is_primary_key
+            falseBit, // is_unique_constraint
+            SqlValue.FromByte(index.FillFactor),
+            index.IsPadded ? trueBit : falseBit,
+            index.IsDisabled ? trueBit : falseBit,
+            falseBit, // is_hypothetical
+            falseBit, // is_ignored_in_optimization
+            index.AllowRowLocks ? trueBit : falseBit,
+            index.AllowPageLocks ? trueBit : falseBit,
+            falseBit, // has_filter
+            SqlValue.Null(NVarcharSqlType.Get(-1, Collation.Baseline, Coercibility.CoercibleDefault)),
+        };
+        if (jsonIndexesShape)
+        {
+            common.Add(falseBit); // auto_created
+            common.Add(index.OptimizeForArraySearch ? trueBit : falseBit);
+        }
+        else
+        {
+            common.Add(SqlValue.Null(SqlType.Int32)); // compression_delay
+            common.Add(falseBit); // suppress_dup_key_messages
+            common.Add(falseBit); // auto_created
+            common.Add(falseBit); // optimize_for_sequential_key
+        }
+        return [.. common];
+    }
+
+    private static IEnumerable<SqlValue[]> EnumerateSysJsonIndexes(Parser.BatchContext batch, Database database)
+    {
+        var trueBit = SqlValue.FromBoolean(true);
+        var falseBit = SqlValue.FromBoolean(false);
+        foreach (var schema in database.Schemas.Values)
+        {
+            foreach (var table in CatalogTables(schema, batch))
+            {
+                var objectId = SqlValue.FromInt32(table.ObjectId);
+                foreach (var index in table.JsonIndexes.OrderBy(static index => index.IndexId))
+                    yield return JsonIndexRow(objectId, index, trueBit, falseBit, jsonIndexesShape: true);
+            }
+        }
+    }
+
+    private static IEnumerable<SqlValue[]> EnumerateSysJsonIndexPaths(Parser.BatchContext batch, Database database)
+    {
+        foreach (var schema in database.Schemas.Values)
+        {
+            foreach (var table in CatalogTables(schema, batch))
+            {
+                var objectId = SqlValue.FromInt32(table.ObjectId);
+                foreach (var index in table.JsonIndexes.OrderBy(static index => index.IndexId))
+                {
+                    var indexId = SqlValue.FromInt32(index.IndexId);
+                    foreach (var path in index.Paths)
+                        yield return [objectId, indexId, SqlValue.FromVarchar(JsonIndexPathType, path)];
+                }
+            }
+        }
+    }
 }

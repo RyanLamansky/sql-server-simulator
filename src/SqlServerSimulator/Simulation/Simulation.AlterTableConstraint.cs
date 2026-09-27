@@ -820,6 +820,8 @@ partial class Simulation
                 throw SimulatedSqlException.ConstraintReferencedByForeignKey(action.Key!.Name, refTable, refFkName);
             if (action.Key is { Kind: KeyConstraintKind.PrimaryKey } && (table.XmlIndexes.Count > 0 || table.SpatialIndexes.Count > 0))
                 throw SimulatedSqlException.PrimaryKeyDropBlockedByXmlOrSpatialIndex(action.Key.Name);
+            if (action.Key is { Kind: KeyConstraintKind.PrimaryKey } && table.JsonIndexes.Count > 0)
+                throw SimulatedSqlException.PrimaryKeyDropBlockedByJsonIndex(action.Key.Name);
             if (withOptions && action.Family == DropConstraintFamily.Key && !action.Key!.IsClustered)
                 throw SimulatedSqlException.DropNonClusteredWithClusteredClause(action.Key.Name);
             planned.Add(action);

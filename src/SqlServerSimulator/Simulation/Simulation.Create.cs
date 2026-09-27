@@ -55,6 +55,8 @@ partial class Simulation
                 return Simulation.TryParseCreateFullText(context);
             case UnquotedString { ContextualKeyword: ContextualKeyword.Xml }:
                 return Simulation.TryParseCreateXml(context);
+            case Name jsonWord when jsonWord.Value.Equals("JSON", StringComparison.OrdinalIgnoreCase):
+                return Simulation.TryParseCreateJsonIndex(context);
             case ReservedKeyword { Keyword: Keyword.Primary }:
                 return Simulation.TryParseCreatePrimaryXml(context);
             case UnquotedString { ContextualKeyword: ContextualKeyword.Spatial }:

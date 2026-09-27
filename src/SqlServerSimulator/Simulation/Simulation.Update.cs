@@ -168,6 +168,20 @@ partial class Simulation
             // column name carries it: real answers Msg 102 for
             // `t.col.modify(…)`, which falls out of the assignment-operator
             // check below since the three-part shape lands here instead.
+            // A mutator on a qualified column is a syntax error at the method's
+            // name (probed 2026-09-27 against SQL Server 2025).
+            if (setTarget.Count > 2 && context.Token is Operator { Character: '(' } && Collation.Baseline.Equals(columnName, "modify"))
+                throw SimulatedSqlException.SyntaxErrorNearText(columnName);
+
+            if (setTarget.Count == 2 && context.Token is Operator { Character: '(' }
+                && Collation.Baseline.Equals(columnName, "modify") && IsJsonMutatorTarget(context, leadingTable, setTarget[0]))
+            {
+                rawAssignments.Add((setTarget[0], JsonModify.ParseMethod(context, new Reference(leadingIdent.WithAddedPart(setTarget[0])), setTarget[0])));
+                if (context.Token is Operator { Character: ',' })
+                    continue;
+                break;
+            }
+
             if (setTarget.Count == 2 && XmlMethodCall.IsKnownMethodName(columnName) && context.Token is Operator { Character: '(' })
             {
                 rawAssignments.Add(ParseXmlMutatorSetClause(context, leadingIdent, leadingTable, setTarget[0], columnName));
@@ -400,6 +414,44 @@ partial class Simulation
     /// untyped — or when the statement is the alias form, whose target the FROM
     /// clause only names after the SET list has parsed.
     /// </summary>
+    /// <summary>
+    /// Whether <c>col.modify(…)</c> is the <c>json</c> type's mutator rather
+    /// than xml's: the column's own type says so where the target is known.
+    /// The alias form names its target only in the FROM clause, which parses
+    /// after the SET list, so there the argument count decides — the json
+    /// method takes a path and a value where xml's takes one XML-DML string.
+    /// The cursor stays on the <c>(</c>.
+    /// </summary>
+    private static bool IsJsonMutatorTarget(ParserContext context, HeapTable? targetTable, string columnName)
+    {
+        if (targetTable is not null)
+        {
+            var collation = context.CurrentDatabase.Collation;
+            foreach (var column in targetTable.Columns)
+            {
+                if (collation.Equals(column.Name, columnName))
+                {
+                    // A column of neither type has no mutator, which real
+                    // reports ahead of reading the arguments.
+                    return column.Type switch
+                    {
+                        JsonSqlType => true,
+                        XmlSqlType => false,
+                        _ => throw SimulatedSqlException.CannotCallMethodsOn(SimulatedSqlException.FamilyRootName(column.Type)),
+                    };
+                }
+            }
+            return false;
+        }
+
+        var checkpoint = context.SaveCheckpoint();
+        context.MoveNextRequired();
+        _ = Expression.Parse(context);
+        var twoArguments = context.Token is Operator { Character: ',' };
+        context.RestoreCheckpoint(checkpoint);
+        return twoArguments;
+    }
+
     private static Schemas.XmlSchemaCollection? XmlSchemaCollectionOf(ParserContext context, HeapTable? targetTable, string columnName)
     {
         if (targetTable is null)

@@ -1,4 +1,5 @@
 using System.Text;
+using SqlServerSimulator.Parser.Tokens;
 using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator.Parser.Expressions;
@@ -53,6 +54,86 @@ internal sealed class JsonModify : Expression
     /// </summary>
     private readonly bool newValueIsJson;
 
+    /// <summary>
+    /// The receiver as written when this is the <c>json</c> type's
+    /// <c>.modify(path, value)</c> method rather than the function — which
+    /// takes a <c>json</c> value, refuses a NULL receiver with Msg 5302, and
+    /// names itself <c>modify</c> in Msg 8116 (probed 2026-09-27 against SQL
+    /// Server 2025).
+    /// </summary>
+    private readonly string? methodReceiver;
+
+    /// <summary>The <c>json</c> type's <c>.modify(path, value)</c> over <paramref name="instance"/>.</summary>
+    public JsonModify(Expression instance, string instanceName, Expression path, Expression newValue)
+    {
+        this.jsonInput = instance;
+        this.pathInput = path;
+        this.newValueInput = newValue;
+        this.methodReceiver = instanceName;
+        this.newValueIsJson = JsonValueRender.ProducesJson(newValue);
+    }
+
+    /// <summary>
+    /// Parses the <c>(path, value)</c> of a <c>json</c> receiver's
+    /// <c>.modify</c> from its <c>(</c>, leaving the cursor past the <c>)</c>.
+    /// Any other count of arguments is Msg 313 or 8144 at state 101.
+    /// </summary>
+    public static JsonModify ParseMethod(ParserContext context, Expression instance, string instanceName)
+    {
+        var arguments = new List<Expression>();
+        if (context.GetNextRequired() is not Operator { Character: ')' })
+        {
+            arguments.Add(Parse(context));
+            while (context.Token is Operator { Character: ',' })
+                arguments.Add(Parse(context.MoveNextRequiredReturnSelf()));
+        }
+        if (context.Token is not Operator { Character: ')' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        context.MoveNextOptional();
+        return arguments.Count switch
+        {
+            < 2 => throw SimulatedSqlException.InsufficientArgumentsToFunction("modify", 101),
+            > 2 => throw SimulatedSqlException.TooManyArgumentsToFunction("modify", 101),
+            _ => new JsonModify(instance, instanceName, arguments[0], arguments[1]),
+        };
+    }
+
+    /// <summary>
+    /// Whether <paramref name="receiver"/> is a <c>json</c> variable, or a
+    /// column the query scope binds to a <c>json</c> one.
+    /// </summary>
+    public static bool IsJsonReceiver(Expression receiver, ParserContext context)
+    {
+        switch (receiver)
+        {
+            case VariableReference { DeclaredType: JsonSqlType }:
+                return true;
+            case Reference reference when context.ScopeSources is { Length: > 0 } sources && reference.ReferencedName.Count <= 2:
+                try
+                {
+                    var (source, column) = Selection.FindSourceColumn(sources, reference.ReferencedName);
+                    return source >= 0 && sources[source].Columns[column].Type is JsonSqlType;
+                }
+                catch (SimulatedSqlException)
+                {
+                    return false;
+                }
+            case Reference reference when context.OuterTypeResolver is { } resolveType:
+                // An UPDATE's own clauses see the write target through the
+                // resolver rather than a FROM scope.
+                try
+                {
+                    return resolveType(reference.ReferencedName) is JsonSqlType;
+                }
+                catch (SimulatedSqlException)
+                {
+                    return false;
+                }
+            default:
+                return false;
+        }
+    }
+
     public JsonModify(ParserContext context)
     {
         this.jsonInput = Parse(context);
@@ -73,6 +154,8 @@ internal sealed class JsonModify : Expression
     public override SqlValue Run(RuntimeContext runtime)
     {
         var jsonInputValue = this.jsonInput.Run(runtime);
+        if (this.methodReceiver is not null && jsonInputValue.IsNull)
+            throw SimulatedSqlException.JsonMutatorOnNullValue(this.methodReceiver);
         if (jsonInputValue.Type is not JsonSqlType)
             return this.Edit(runtime, jsonInputValue, StrictNotFoundState);
         var edited = this.Edit(runtime, jsonInputValue, JsonTypeStrictNotFoundState);
@@ -83,7 +166,7 @@ internal sealed class JsonModify : Expression
     {
         var pathValue = JsonText.RequirePathValue(this.pathInput.Run(runtime), "JSON_MODIFY");
         var newSqlValue = this.newValueInput.Run(runtime);
-        RequireWritableValueType(newSqlValue.Type);
+        this.RequireWritableValueType(newSqlValue.Type);
         if (jsonInputValue.IsNull)
             return SqlValue.Null(SqlType.NVarcharMax);
 
@@ -97,6 +180,12 @@ internal sealed class JsonModify : Expression
             throw SimulatedSqlException.JsonUnsupportedModifyPath();
 
         var document = jsonInputValue.AsString;
+        if (path.IsAdvanced)
+        {
+            if (ResolveAdvanced(document, path, jsonInputValue.Type, strictState) is not { } resolved)
+                return Unchanged(document);
+            path = resolved;
+        }
 
         // JSON_MODIFY reproduces the whole document, so once it has an edit to
         // make it reads the lot and anything the scan objects to — trailing
@@ -124,6 +213,37 @@ internal sealed class JsonModify : Expression
                 ? throw SimulatedSqlException.JsonStrictPathNotFound(strictState)
                 : Unchanged(document),
         };
+    }
+
+    /// <summary>
+    /// Settles a path with SQL Server 2025's advanced accessors to the plain
+    /// one it names, or null for a lax path that names nothing to edit
+    /// (probed 2026-09-27 against SQL Server 2025). Over text real edits
+    /// through none of them: <c>last</c> and a list report as every reader
+    /// does, anything else as Msg 13660 state 4. Over <c>json</c> a wildcard
+    /// or a range with two different ends is state 5; a list of several
+    /// items, an empty array's <c>last</c> or a step into a missing value
+    /// leave the document alone, or are Msg 13608 under <c>strict</c>.
+    /// </summary>
+    private static JsonPath? ResolveAdvanced(string document, in JsonPath path, SqlType documentType, byte strictState)
+    {
+        if (documentType is not JsonSqlType)
+        {
+            JsonText.RejectTextAccessors(path, documentType);
+            throw SimulatedSqlException.JsonAdvancedAccessorNotSupported("JsonModify", 4);
+        }
+        if (path.HasWildcard || path.HasWideRange)
+            throw SimulatedSqlException.JsonAdvancedAccessorNotSupported("JsonModify", 5);
+
+        JsonPath? resolved = null;
+        if (!path.HasComma)
+        {
+            using var doc = JsonText.Parse(document);
+            resolved = path.ResolveForModify(doc.RootElement);
+        }
+        return resolved is null && path.Mode == JsonPathMode.Strict
+            ? throw SimulatedSqlException.JsonStrictPathNotFound(strictState)
+            : resolved;
     }
 
     /// <summary>
@@ -224,9 +344,10 @@ internal sealed class JsonModify : Expression
     /// An untyped <c>NULL</c> literal types as <c>int</c> and so passes,
     /// which is what leaves the delete-a-member form open.
     /// </summary>
-    private static void RequireWritableValueType(SqlType type)
+    private void RequireWritableValueType(SqlType type)
     {
         if (SqlType.IsIntegerCategory(type)
+            || (type is JsonSqlType && this.methodReceiver is not null)
             || type is DecimalSqlType
             || type == SqlType.Float
             || type == SqlType.Real
@@ -237,7 +358,7 @@ internal sealed class JsonModify : Expression
         {
             return;
         }
-        throw SimulatedSqlException.InvalidArgumentDataType(type.SqlServerName, argumentIndex: 3, "json_modify");
+        throw SimulatedSqlException.InvalidArgumentDataType(type.SqlServerName, argumentIndex: 3, this.methodReceiver is null ? "json_modify" : "modify");
     }
 
     /// <summary>
@@ -247,12 +368,25 @@ internal sealed class JsonModify : Expression
     /// </summary>
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
-        JsonText.RequireDocumentAndPath(this.jsonInput, this.pathInput, batch, resolveColumnType, "json_modify");
-        RequireWritableValueType(this.newValueInput.GetSqlType(batch, resolveColumnType));
+        if (this.methodReceiver is null)
+        {
+            JsonText.RequireDocumentAndPath(this.jsonInput, this.pathInput, batch, resolveColumnType, "json_modify");
+        }
+        else
+        {
+            if (this.jsonInput.GetSqlType(batch, resolveColumnType) is not JsonSqlType and var receiverType)
+                throw SimulatedSqlException.CannotCallMethodsOn(SimulatedSqlException.FamilyRootName(receiverType));
+            if (IsUntypedNullLiteral(this.pathInput))
+                throw SimulatedSqlException.InvalidArgumentDataType("NULL", 2, "modify");
+            _ = StringScalars.RequireStringArgument(this.pathInput, this.pathInput.GetSqlType(batch, resolveColumnType), "modify", 2, acceptsLegacyLob: false);
+        }
+        this.RequireWritableValueType(this.newValueInput.GetSqlType(batch, resolveColumnType));
         return this.jsonInput.GetSqlType(batch, resolveColumnType) is JsonSqlType ? SqlType.Json : SqlType.NVarcharMax;
     }
 
-    internal override string DebugDisplay() => $"JSON_MODIFY({this.jsonInput.DebugDisplay()}, {this.pathInput.DebugDisplay()}, {this.newValueInput.DebugDisplay()})";
+    internal override string DebugDisplay() => this.methodReceiver is not null
+        ? $"{this.methodReceiver}.modify({this.pathInput.DebugDisplay()}, {this.newValueInput.DebugDisplay()})"
+        : $"JSON_MODIFY({this.jsonInput.DebugDisplay()}, {this.pathInput.DebugDisplay()}, {this.newValueInput.DebugDisplay()})";
 
-    internal override void Describe(NodeShape shape) => shape.Child(this.jsonInput).Child(this.pathInput).Child(this.newValueInput);
+    internal override void Describe(NodeShape shape) => shape.Local(this.methodReceiver).Child(this.jsonInput).Child(this.pathInput).Child(this.newValueInput);
 }

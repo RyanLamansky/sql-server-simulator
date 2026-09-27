@@ -1,8 +1,8 @@
 # `json` data type
 
-SQL Server 2025's native `json`: declaration, the canonical text real hands back, the length of its binary form, the refusals of text that isn't a document, conversions, the refusals of a type with no ordering, how the JSON functions read and return it, and the catalog and wire surfaces.
-The JSON functions themselves live in [`json.md`](json.md); this file owns only what the type changes.
-Everything here was probed 2026-09-26 against SQL Server 2025; `JsonTypeTests` (Tests) and `JsonWireTests` (Tests.SqlClient) are the contract.
+SQL Server 2025's native `json`: declaration, the canonical text real hands back, the length of its binary form, the refusals of text that isn't a document, conversions, the refusals of a type with no ordering, how the JSON functions read and return it, the surfaces that take only it — `JSON_CONTAINS`, `JSON_VALUE … RETURNING`, the `modify` method and JSON indexes — and the catalog and wire surfaces.
+The JSON functions themselves, and the advanced array accessors every reader shares, live in [`json.md`](json.md); this file owns only what the type changes.
+Everything here was probed 2026-09-26 against SQL Server 2025, and the four json-only surfaces 2026-09-27; `JsonTypeTests`, `JsonContainsTests` and `JsonIndexTests` (Tests) and `JsonWireTests` (Tests.SqlClient) are the contract.
 
 ## Type and storage
 
@@ -54,6 +54,40 @@ Each function reads the canonical text as it reads any document, so what differs
   A `json` value embeds as the document it is, in the builders and in `FOR JSON`; `FOR XML` writes its text.
 - `OPENJSON … WITH` accepts `AS JSON` on a `json` column; a `json` column without it reads NULL from a `json` document and converts the scalar's text from any other.
 
+## `JSON_CONTAINS`
+
+`JSON_CONTAINS(json, value [, path [, mode]])` (`Parser/Expressions/JsonContains.cs`) is `int`: 1 when a scalar the path selects equals the value, 0 when the path selects values and none does, NULL when the document is NULL or the path finds nothing.
+The path takes the [advanced array accessors](json.md#advanced-array-accessors), and without one it is `$[*]` — the root array's elements, NULL over a root object; `strict` changes nothing.
+Only a scalar can match, and the value's SQL type decides which: a number equals a JSON number of the same value (`1.0` matches `1`, and `1e2` stored as `100.0000000000` matches `100`), `bit` only `true` / `false`, a string only a JSON string — never across (`'1'` against `1`, `1` against `true`).
+A JSON string is read as `varchar` in the database's collation, so a character its code page lacks becomes its best fit or `?` whatever the value's type (`N'ア'` fails to match `"ア"` where `N'?'` matches), and is compared under the value's collation with `=`'s trailing-space padding.
+Mode 0 (and NULL) is `=`; mode 1 is `LIKE`, which only a string value reads, with no trailing-space slack; any other mode is Msg 13692, checked per row once the document is non-NULL.
+A NULL value is 0, never a match for JSON `null`.
+
+Every argument's type binds while compiling (Msg 8116): the document must be `json` (a bare `NULL` passes); the value an integer, `decimal` / `numeric`, `bit` or a non-LOB character string — `float` and `real`, money, the date/time types, binaries, `json` itself and a bare `NULL` are refused; the path a character string, a bare or evaluated NULL reporting "argument 2 of JSON_CONTAINS" at State 8 as the sibling path functions do; the mode `int` exactly.
+Two to four arguments, else Msg 189.
+
+## `JSON_VALUE … RETURNING`
+
+Over a `json` document `JSON_VALUE(json, path RETURNING type)` returns the named type — the integer types, `bit`, `decimal` / `numeric`, `float` / `real`, the four character types with a length (in the database's collation), `date`, `time`, `datetime2`, `datetimeoffset`.
+Any other type is Msg 102 State 29 near its name (`sys.vector` for `vector`, an alias type included), a character type without a length and any `RETURNING` over a text document Msg 102 near `RETURNING`.
+The scalar converts as real's does: a string read as `varchar` in the database's collation (so `"ア"` is `?` even into `nvarchar`), a whole number as `int` or `bigint` and any other as `decimal`, `true` / `false` as `bit` — or as their own text into a character type.
+Under lax a failed conversion, an overflow or a string longer than a bounded character target is NULL; under `strict` it is the conversion's own error, and the length Msg 8152 State 34; a conversion real never allows (a number or `bit` into `date`) is Msg 529 either way.
+
+## The `modify` method
+
+`UPDATE … SET col.modify(path, value)`, the same clause in a `MERGE`'s `UPDATE`, and `SET @var.modify(path, value)` rewrite the column or variable through `JSON_MODIFY`'s edit (`JsonModify.ParseMethod`), so every path rule, `append` and the advanced-accessor refusals carry over.
+What differs: the method name matches without case and takes a `json` value (embedded as the document it is), a NULL receiver is Msg 5302 — which, unlike xml's, ends the batch and rolls the transaction back as under `SET XACT_ABORT ON` — and its refusals name `modify` (Msg 313 / 8144 State 101 for the argument count, 8116 for a type).
+It is the whole assignment: a second assignment to the column is Msg 264, a qualified `t.col.modify` or an operator after it Msg 102, and outside an assignment a json variable's method call is Msg 258 and a json column's Msg 4121.
+A method call on a column of any other type but `xml` is Msg 258 naming the type.
+
+## JSON indexes
+
+`CREATE JSON INDEX name ON table (col) [FOR ('path' [, …])] [WITH (…)]` (`Simulation/Simulation.JsonIndex.cs`, stored as `Schemas/JsonIndex`) needs a clustered primary key of fewer than 32 columns (Msg 13672) and a `json` column (Msg 13680), refuses a temp table (Msg 13675) and a second JSON index on the column (Msg 13681), and takes ids from 1216000, one past the table's highest.
+The paths are string literals kept as written (`$` without `FOR`), each well-formed (Msg 13607); a path using `[*]` is Msg 13683 State 2, any other advanced accessor State 3, and two paths where one is the other or leads to it — names compared without case, the mode keyword ignored — State 1.
+`WITH` takes `FILLFACTOR` (Msg 129 outside 1-100), `PAD_INDEX`, `ALLOW_ROW_LOCKS`, `ALLOW_PAGE_LOCKS`, `OPTIMIZE_FOR_ARRAY_SEARCH`, `DATA_COMPRESSION`, `MAXDOP` and `DROP_EXISTING` (Msg 13685 when no JSON index of that name is on the column); another index option is Msg 153 State 35 and an unknown one Msg 155 then 153.
+`sys.indexes` lists it as type 9 `JSON`, `sys.index_columns`, `INDEXPROPERTY` and `INDEX_COL` see its column, and `sys.json_indexes` / `sys.json_index_paths` carry its options and paths.
+`ALTER INDEX … DISABLE` / `REBUILD`, `sp_rename` and `DROP INDEX … ON` work, the `table.index` form of the drop is Msg 3766; the index blocks `DROP COLUMN` / `ALTER COLUMN` (Msg 5074, ahead of the type grid) and dropping the primary key (Msg 3767); a name shared with any other index on the table is Msg 1913.
+
 ## Catalog surfaces
 
 `sys.types` / `systypes` carry the json row; `sys.columns` / `sys.parameters` report 244 / 244 / -1 / 0 / 0 with no collation; `TYPE_ID('json')` and `TYPE_NAME(244)` resolve unqualified; `COL_LENGTH` and `COLUMNPROPERTY` Precision are -1; `INFORMATION_SCHEMA.COLUMNS` reports `json` / -1 / -1; `sp_help` reports Length -1 (a parameter's Prec 0); `sp_columns` lists no row for a json column; the describe surfaces report `json`, 244, max length -1.
@@ -68,13 +102,14 @@ The TDS endpoint acknowledges no json feature extension and sends a json column 
 - **A json-aware client reads text.**
   Real sends SqlClient 6+ the native json type; the endpoint sends every client the down-level `varchar(max)`.
 - **The describe surfaces always answer `json`**, as real does to a json-aware client.
-- **Real refuses an `append` path beside another `JSON_MODIFY` over json in one select list** with Msg 13656 (`JSON data type cannot be used when its feature switch is off.`), though either call alone works; the simulator runs both.
+- **Real refuses an `append` path beside another `JSON_MODIFY` over json in one select list** with Msg 13656 (`JSON data type cannot be used when its feature switch is off.`), though either call alone works, and the same Msg 13656 (State 8) meets a `SET @j.modify('append …', …)` that follows a `SELECT @j = …` in its batch (probed 2026-09-27); the simulator runs them.
 - **The size model is fitted, not derived**: documents shaped unlike any probed one (very long property names, objects past 64 KB) may report a different `DATALENGTH`.
+- **A JSON index accelerates nothing**: it is catalog metadata, and reads never consult it.
+- **A deferred statement's Msg 8116 / 313 / 8144 from the `modify` method ends only its statement**, where real ends the batch.
 
 ## Not modeled yet
 
-- `JSON_CONTAINS` (real takes only a `json` document, refusing `varchar` / `nvarchar` with Msg 8116) and the `[*]` wildcard path it reads.
-- The json `modify` method (`UPDATE t SET j.modify('$.a', 1)`), `CREATE JSON INDEX` and `sys.json_index_paths` rows.
-- `JSON_VALUE … RETURNING <type>`.
+- A JSON index's internal table (`json_index_<object_id>_<index_id>` in `sys.objects` and `sys.internal_tables`) and the internal index `sys.indexes` lists beside it.
+- `ALTER INDEX` on a JSON index beyond `DISABLE` / `REBUILD`; the other forms are accepted without effect.
 - The native json TDS type a json-aware client negotiates, a json parameter sent by such a client over RPC, and json columns in BACPAC import.
 - `sp_help 'json'` — `sp_help` answers no system type name.

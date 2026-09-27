@@ -716,12 +716,26 @@ partial class Simulation
     private static bool TryParseSetInstanceMember(ParserContext context, AtPrefixedString variableToken, VariableSlot slot)
     {
         var checkpoint = context.SaveCheckpoint();
+        if (slot.DeclaredType is JsonSqlType
+            && context.GetNextRequired() is Name jsonMethod
+            && Collation.Baseline.Equals(jsonMethod.Value, "modify")
+            && context.GetNextOptional() is Operator { Character: '(' })
+        {
+            var jsonMutator = JsonModify.ParseMethod(context, new VariableReference(variableToken, context), $"@{variableToken.Value}");
+            _ = jsonMutator.GetSqlType(context.Batch, NoColumnTypeResolver);
+            if (context.Batch.IsSkipping)
+                return true;
+            slot.Assign(jsonMutator.Run(new RuntimeContext(NoColumnResolver, context.Batch)));
+            context.Connection.LastStatementRowCount = 1;
+            return true;
+        }
+        context.RestoreCheckpoint(checkpoint);
         if (context.GetNextRequired() is Name method
             && XmlMethodCall.IsKnownMethodName(method.Value)
             && context.GetNextOptional() is Operator { Character: '(' })
         {
             if (slot.DeclaredType is not XmlSqlType)
-                throw SimulatedSqlException.CannotCallMethodsOn(slot.DeclaredType.SqlServerName);
+                throw SimulatedSqlException.CannotCallMethodsOn(SimulatedSqlException.FamilyRootName(slot.DeclaredType));
             var mutator = XmlModify.Parse(new VariableReference(variableToken, context), $"@{variableToken.Value}", method.Value, context, resolveColumnType: null);
             if (context.Batch.IsSkipping)
                 return true;

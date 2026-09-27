@@ -44,6 +44,8 @@ internal sealed class HeapTableSnapshot
     private readonly UserStatistic[] userStatistics;
     private readonly XmlIndex[] xmlIndexes;
     private readonly SpatialIndex[] spatialIndexes;
+    private readonly JsonIndex[] jsonIndexes;
+    private readonly (string Name, int ColumnOrdinal, bool IsDisabled)[] jsonIndexState;
     private readonly (Trigger Trigger, bool IsDisabled)[] triggers;
 
     public HeapTableSnapshot(HeapTable table, Database? database)
@@ -77,6 +79,8 @@ internal sealed class HeapTableSnapshot
         this.userStatistics = [.. table.UserStatistics];
         this.xmlIndexes = [.. table.XmlIndexes];
         this.spatialIndexes = [.. table.SpatialIndexes];
+        this.jsonIndexes = [.. table.JsonIndexes];
+        this.jsonIndexState = [.. table.JsonIndexes.Select(static index => (index.Name, index.ColumnOrdinal, index.IsDisabled))];
         this.triggers = database is null
             ? []
             : [.. database.Schemas.Values.SelectMany(schema => schema.Triggers.Values)
@@ -151,6 +155,9 @@ internal sealed class HeapTableSnapshot
         Refill(table.UserStatistics, this.userStatistics);
         Refill(table.XmlIndexes, this.xmlIndexes);
         Refill(table.SpatialIndexes, this.spatialIndexes);
+        Refill(table.JsonIndexes, this.jsonIndexes);
+        for (var i = 0; i < this.jsonIndexes.Length; i++)
+            (this.jsonIndexes[i].Name, this.jsonIndexes[i].ColumnOrdinal, this.jsonIndexes[i].IsDisabled) = this.jsonIndexState[i];
         foreach (var (trigger, isDisabled) in this.triggers)
             trigger.IsDisabled = isDisabled;
     }

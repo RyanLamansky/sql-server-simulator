@@ -1,7 +1,7 @@
 # JSON: `JSON_VALUE` / `JSON_QUERY` / `JSON_MODIFY` / `JSON_OBJECT` / `JSON_ARRAY` / `JSON_PATH_EXISTS` / `ISJSON` / `OPENJSON`
 
 Unlocks EF's owned-types-as-JSON (`OwnsOne(...).ToJson()`) and primitive-collection emissions.
-Every function here reads text documents; SQL Server 2025's native `json` type, and what it changes about these functions' result types and states, is in [`json-type.md`](json-type.md).
+Every function here reads text documents; SQL Server 2025's native `json` type, what it changes about these functions' result types and states, and the functions that take only it (`JSON_CONTAINS`, `JSON_VALUE … RETURNING`, the `modify` method) are in [`json-type.md`](json-type.md).
 
 `JSON_VALUE(json, path)` returns `nvarchar(4000)`.
 Lax mode (default and EF's only emitted form): missing path / non-scalar match → SQL NULL.
@@ -16,6 +16,7 @@ Object/array matches → NULL in lax, **Msg 13623** State 2 in strict.
 Object/array match → raw JSON text via `JsonElement.GetRawText` (preserves the input's whitespace shape).
 Scalar match → NULL in lax, Msg 13624 State 2 in strict.
 Missing path → NULL in lax, Msg 13608 in strict.
+SQL Server 2025's trailing `WITH ARRAY WRAPPER` (any case; `CONDITIONAL`, `UNCONDITIONAL`, `WITHOUT` and a bare `WITH WRAPPER` are Msg 102) gathers every value the path selects, scalars included, into one array — see [Advanced array accessors](#advanced-array-accessors).
 NULL `json` → NULL.
 The path is optional: `JSON_QUERY(json)` is shorthand for `JSON_QUERY(json, '$')` and hands back the whole document — the input's own text, so interior whitespace survives while the padding outside the document does not (`'  {"a" : 1}  '` → `{"a" : 1}`).
 A root-level JSON scalar isn't JSON text at all, so it raises Msg 13609 rather than answering NULL; a third argument → **Msg 189** ("The json_query function requires 1 to 2 arguments.", against `JSON_VALUE`'s fixed-arity Msg 174).
@@ -105,7 +106,7 @@ A bare `NULL` literal is refused while compiling, `json_value` / `json_modify` a
 
 `['append'] ['lax' | 'strict'] '$' segment*`, where a segment is `.<name>` / `."<quoted name>"` / `[<index>]`.
 One parser (`Parser/JsonPath.cs`) serves every function, so a malformed path reports identically from `JSON_VALUE` / `JSON_QUERY` / `JSON_MODIFY` / `JSON_PATH_EXISTS` and an `OPENJSON … WITH` column.
-Only `JSON_MODIFY` reads the `append` prefix; elsewhere it is Msg 13607.
+Only `JSON_MODIFY` reads the `append` prefix; elsewhere it is Msg 13607 State 14 at its `a`.
 
 **Whitespace** separates the grammar's tokens and may sit between any two of them — around a keyword, either side of the `$`, either side of a `.`, inside an index's brackets, and trailing the path — so `'  lax  $ . a [ 0 ] '` resolves.
 It is space, tab, line feed, form feed and carriage return; vertical tab and the non-breaking space are not whitespace here.
@@ -127,6 +128,28 @@ The State byte names what the parser was reading, and one rule cuts across it: t
 | a quoted name the path never closed | 20 | `'$."a'` → `'.'` at 4 |
 
 Every row is probed verbatim against SQL Server 2025, as is the punctuation rule (`'$.a$b'` → `'$'` at 3 State 14 where `'$.a-b'` → `'-'` at 3 State 22).
+
+### Advanced array accessors
+
+SQL Server 2025 widens a bracket to `[*]`, a range `[n to m]`, `last` in place of any number, and a comma list of those (`[last, 0]`, `[0 to 1, 2]` — any order, repeats allowed), and adds the `.*` member wildcard; `JsonPath.Select` evaluates such a path to a set of values (probed 2026-09-27 against SQL Server 2025).
+The shared parser takes them everywhere, and what each reader does with a set differs:
+
+- **Found or not.**
+  A path is found when every step named something in at least one value — `[*]` or `.*` over an empty container counts, a range reaching past the end counts for the part inside it, a range that `last` turns backwards selects nothing without missing.
+  `[5 to 7]` over three elements, a wildcard over the wrong kind of value and a missing property are misses; `strict` also reads a partial reach (`[0 to 5]` over one element) as a miss.
+- **`JSON_VALUE` / `JSON_QUERY`** answer as a plain path would when exactly one value is selected, NULL for several — under `strict` Msg 13623 / 13624 State 2 over `json`, Msg 13608 State 2 over text — and a miss as any miss.
+- **`JSON_QUERY … WITH ARRAY WRAPPER`** is the reader built for sets: `[]` for a found-but-empty selection, NULL (Msg 13608, State 5 over `json` and 2 over text, under `strict`) for a miss.
+  Over text a container keeps its spacing and a string is re-escaped the way the builders write one (`\/` included); over `json` each value is its canonical text.
+- **`JSON_PATH_EXISTS`** is 1 exactly when the path is found.
+- **`JSON_MODIFY`** over text takes none of them (Msg 13660 State 4, bar the two text-wide refusals below); over `json`, `[*]`, `.*` and a range with two different ends are Msg 13660 State 5, a list of several items leaves the document alone (Msg 13608 under `strict`), and `[last]` writes into the **first** element of a non-empty array — real's own reading, reproduced.
+- **`OPENJSON`**: a wildcard document path is Msg 13665 State 5 over `json` and Msg 13660 State 2 (`OpenJson with default schema …`) over text; a `WITH` column's wildcard is Msg 13665 State 3 over `json`.
+  Otherwise a document path opens the one value it selects (nothing for several), and a column path reads the first.
+- Over a **text** document every reader refuses `last` (Msg 13660 State 2) and a list (State 5) before anything else, once the document is known to be non-NULL.
+- A range written high-to-low in plain numbers is Msg 13660 State 1 wherever the path parses.
+
+The grammar's own states extend the table above: after `[` a word that isn't a lower-case `last` reports 21, `to` must be lower case with whitespace before it (a word there reports 21 after whitespace and 15 without), a second `to` reports 14, whatever follows `[*` or `.*` reports 21 and 14 respectively, and `,` and `*` join the punctuation that reports 14 wherever it turns up out of place.
+
+Divergences: over a malformed text document the selection runs on what read cleanly and raises Msg 13609 only when it found nothing there, an approximation of the early-stopping reader the plain paths model exactly; and a range ending at exactly `4294967295`, which real reports as a corrupted json value (Msg 13643), selects as any other.
 
 ## `JSON_MODIFY` edits the source text
 

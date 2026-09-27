@@ -869,24 +869,38 @@ partial class Simulation
                 }
 
                 var columnName = setTarget.Leaf;
-                if (context.Token is not Operator { Character: '=' })
-                    throw SimulatedSqlException.SyntaxErrorNear(context);
-
-                // The assignment target admits only the merge target as
-                // written — its alias when one was given, so
-                // `MERGE t AS a … UPDATE SET t.v = 1` is Msg 4104 even though
-                // `t` is the base table (probed 2026-08-05).
-                if (setTarget.ImmediateQualifier is { } setQualifier
-                    && !context.Batch.CurrentDatabase.Collation.Equals(setQualifier, targetAlias))
+                Expression rhs;
+                var setsDefault = false;
+                if (setTarget.Count == 2 && sourceView is null && context.Token is Operator { Character: '(' }
+                    && Collation.Baseline.Equals(columnName, "modify")
+                    && Array.Find(destinationTable.Columns, c => context.Batch.CurrentDatabase.Collation.Equals(c.Name, setTarget[0])) is { Type: JsonSqlType })
                 {
-                    throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(setTarget.ToString());
+                    // The json type's `col.modify(path, value)` mutator, the
+                    // whole clause (probed 2026-09-27 against SQL Server 2025).
+                    columnName = setTarget[0];
+                    rhs = JsonModify.ParseMethod(context, new Reference(new MultiPartName(targetAlias).WithAddedPart(columnName)), columnName);
                 }
+                else
+                {
+                    if (context.Token is not Operator { Character: '=' })
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
 
-                context.MoveNextRequired();
-                var setsDefault = context.Token is ReservedKeyword { Keyword: Keyword.Default };
-                var rhs = setsDefault ? ColumnDefaultValue.Unbound : Expression.Parse(context);
-                if (setsDefault)
-                    context.MoveNextOptional();
+                    // The assignment target admits only the merge target as
+                    // written — its alias when one was given, so
+                    // `MERGE t AS a … UPDATE SET t.v = 1` is Msg 4104 even though
+                    // `t` is the base table (probed 2026-08-05).
+                    if (setTarget.ImmediateQualifier is { } setQualifier
+                        && !context.Batch.CurrentDatabase.Collation.Equals(setQualifier, targetAlias))
+                    {
+                        throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(setTarget.ToString());
+                    }
+
+                    context.MoveNextRequired();
+                    setsDefault = context.Token is ReservedKeyword { Keyword: Keyword.Default };
+                    rhs = setsDefault ? ColumnDefaultValue.Unbound : Expression.Parse(context);
+                    if (setsDefault)
+                        context.MoveNextOptional();
+                }
 
                 // Resolve user-facing column name into the base-table ordinal
                 // that the WHEN executor will mutate. View paths translate

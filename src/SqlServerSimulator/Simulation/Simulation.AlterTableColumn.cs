@@ -576,6 +576,8 @@ partial class Simulation
                 ix.IncludedColumnOrdinals[i] = oldFullToNew[ix.IncludedColumnOrdinals[i]];
             }
         }
+        foreach (var jsonIndex in table.JsonIndexes)
+            jsonIndex.ColumnOrdinal = oldFullToNew[jsonIndex.ColumnOrdinal];
         foreach (var fk in table.OutgoingForeignKeys)
         {
             for (var i = 0; i < fk.ChildColumnOrdinals.Length; i++)
@@ -767,6 +769,10 @@ partial class Simulation
         // json while a string becomes json; the change is refused by the
         // assignment grid before any row is read, rows or not (probed
         // 2026-09-26 against SQL Server 2025).
+        // A JSON index on the column refuses the change ahead of that grid
+        // (probed 2026-09-27 against SQL Server 2025).
+        if (table.JsonIndexes.Find(index => index.ColumnOrdinal == ordinal) is { } jsonIndex)
+            throw SimulatedSqlException.ColumnHasDependencies("ALTER COLUMN", columnName, [(jsonIndex.Name, SimulatedSqlException.AlterColumnBlockerKind.Index)]);
         if ((existingCol.Type is VectorSqlType or JsonSqlType || newType is VectorSqlType or JsonSqlType)
             && SqlType.PairError(TypePairOperation.Assign, existingCol.Type, newType, "") is { } vectorError)
         {
@@ -929,6 +935,13 @@ partial class Simulation
                 if (ix.KeyColumns.Any(k => k.StorageOrdinal == storageOrdinal) || Array.IndexOf(ix.IncludedColumns, storageOrdinal) >= 0)
                     blockers.Add((ix.Name, SimulatedSqlException.AlterColumnBlockerKind.Index, 5, ix.ObjectId));
             }
+        }
+        // A JSON index blocks both verbs whatever the change (probed
+        // 2026-09-27 against SQL Server 2025).
+        foreach (var jsonIndex in table.JsonIndexes)
+        {
+            if (jsonIndex.ColumnOrdinal == ordinal)
+                blockers.Add((jsonIndex.Name, SimulatedSqlException.AlterColumnBlockerKind.Index, 5, int.MaxValue));
         }
         foreach (var fk in table.OutgoingForeignKeys)
         {

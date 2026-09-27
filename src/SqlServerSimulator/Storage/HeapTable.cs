@@ -448,6 +448,13 @@ internal sealed class HeapTable : SchemaObject
     public readonly List<SpatialIndex> SpatialIndexes = [];
 
     /// <summary>
+    /// SQL Server 2025 JSON indexes on this table's <c>json</c> columns, at
+    /// most one per column. Populated by <c>CREATE JSON INDEX</c>; drained by
+    /// <c>DROP INDEX</c>. Catalog-visible metadata only.
+    /// </summary>
+    public readonly List<JsonIndex> JsonIndexes = [];
+
+    /// <summary>
     /// Lazily-interned per-row <see cref="LockResource"/>s keyed by
     /// <c>(pageIndex, slotIndex)</c> — the RID (row id) that
     /// <see cref="Heap.EnumerateRowsWithAddress"/> yields and that

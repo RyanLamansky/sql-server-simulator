@@ -73,6 +73,29 @@ internal readonly struct JsonPath
     public readonly Segment[] Segments;
 
     /// <summary>
+    /// Whether any segment is one of SQL Server 2025's advanced accessors — a
+    /// wildcard (<c>[*]</c> or <c>.*</c>), a range, a list or <c>last</c> —
+    /// which can select more than one value, or a value only the document's
+    /// shape pins down.
+    /// </summary>
+    public readonly bool IsAdvanced;
+
+    /// <summary>Whether any array accessor names <c>last</c>.</summary>
+    public readonly bool HasLast;
+
+    /// <summary>Whether any array accessor lists more than one item.</summary>
+    public readonly bool HasComma;
+
+    /// <summary>Whether any segment is <c>[*]</c> or <c>.*</c>.</summary>
+    public readonly bool HasWildcard;
+
+    /// <summary>
+    /// Whether any range is written with two different endpoints, so it can
+    /// select more than one element.
+    /// </summary>
+    public readonly bool HasWideRange;
+
+    /// <summary>
     /// Whether the path carried the <c>append</c> prefix, which turns
     /// <c>JSON_MODIFY</c>'s write into an append onto the array the path
     /// names. Only <c>JSON_MODIFY</c> takes the prefix; everywhere else it is
@@ -85,7 +108,31 @@ internal readonly struct JsonPath
         this.Mode = mode;
         this.Segments = segments;
         this.Append = append;
+        foreach (var segment in segments)
+        {
+            switch (segment.Kind)
+            {
+                case SegmentKind.PropertyWildcard or SegmentKind.ArrayWildcard:
+                    this.IsAdvanced = this.HasWildcard = true;
+                    break;
+                case SegmentKind.ArraySelector:
+                    this.IsAdvanced = true;
+                    this.HasComma |= segment.Items!.Length > 1;
+                    foreach (var item in segment.Items)
+                    {
+                        this.HasLast |= item.FromLast || item.ToLast;
+                        this.HasWideRange |= item.From != item.To || item.FromLast != item.ToLast;
+                    }
+                    break;
+            }
+        }
     }
+
+    /// <summary>
+    /// This path's mode and prefix over other segments — how an advanced path
+    /// whose every accessor settled on one element becomes a plain one.
+    /// </summary>
+    public JsonPath WithSegments(Segment[] segments) => new(this.Mode, segments, this.Append);
 
     /// <summary>
     /// The bare lax <c>$</c> path — the whole document. Backs the path-less
@@ -107,8 +154,14 @@ internal readonly struct JsonPath
         var mode = JsonPathMode.Lax;
         var append = false;
         SkipWhitespace(text, ref i);
-        if (acceptAppend && TryKeyword(text, ref i, "append"))
+        var keywordStart = i;
+        if (TryKeyword(text, ref i, "append"))
         {
+            // Only JSON_MODIFY takes the prefix; every other reader knows the
+            // word and refuses it at state 14 (probed 2026-09-27 against SQL
+            // Server 2025).
+            if (!acceptAppend)
+                throw SimulatedSqlException.JsonInvalidPath(text[keywordStart], keywordStart, StateAtEndOfPath);
             append = true;
             SkipWhitespace(text, ref i);
         }
@@ -144,6 +197,14 @@ internal readonly struct JsonPath
                     segments.Add(Segment.ForProperty(ReadQuotedName(text, ref i)));
                     segmentState = StateAtEndOfPath;
                 }
+                else if (i < text.Length && text[i] == '*')
+                {
+                    // `.*` — every member of an object. Whatever follows it
+                    // out of place reports state 14, as behind a quoted name.
+                    i++;
+                    segments.Add(Segment.PropertyWildcard);
+                    segmentState = StateAtEndOfPath;
+                }
                 else
                 {
                     // A name starts with a letter or an underscore; a digit
@@ -160,7 +221,7 @@ internal readonly struct JsonPath
             else if (text[i] == '[')
             {
                 i++;
-                segments.Add(Segment.ForIndex(ReadIndex(text, ref i)));
+                segments.Add(ReadArrayAccessor(text, ref i));
                 segmentState = StateAtSegmentStart;
             }
             else
@@ -221,16 +282,92 @@ internal readonly struct JsonPath
     }
 
     /// <summary>
-    /// Reads an array index from just past its <c>[</c> through its <c>]</c>.
-    /// Real's ceiling is <c>uint</c>'s, and it stops reading digits at the
-    /// eleventh — so <c>$[4294967296]</c> reports its tenth digit while a
-    /// twenty-digit run reports its eleventh (probe-confirmed). Anything
-    /// above <see cref="int.MaxValue"/> clamps, since no array reaches that
-    /// far and the index is only ever compared against one.
+    /// Reads an array accessor from just past its <c>[</c> through its
+    /// <c>]</c>: a plain index, the <c>*</c> wildcard, or SQL Server 2025's
+    /// comma-separated list of items, each an index or <c>last</c>, or a
+    /// range of two joined by <c>to</c>. The keywords are lower case only and
+    /// <c>to</c> needs whitespace before it; a word where one of them was due
+    /// reports state 21 when whitespace came first and 15 when it didn't, and
+    /// a second <c>to</c> reports 14 (all probed 2026-09-27 against SQL
+    /// Server 2025). A range written high-to-low in plain numbers is
+    /// Msg 13660 state 1 as the path parses.
     /// </summary>
-    private static int ReadIndex(string text, ref int i)
+    private static Segment ReadArrayAccessor(string text, ref int i)
     {
         SkipWhitespace(text, ref i);
+        if (i < text.Length && text[i] == '*')
+        {
+            i++;
+            SkipWhitespace(text, ref i);
+            if (i >= text.Length || text[i] != ']')
+                throw Malformed(text, i, StateAtIndexDigits);
+            i++;
+            return Segment.ArrayWildcard;
+        }
+
+        var items = new List<ArrayItem>();
+        while (true)
+        {
+            var from = ReadBound(text, ref i, out var fromLast, clampOverflow: false);
+            var to = from;
+            var toLast = fromLast;
+            var isRange = false;
+            var spaced = SkipSpacing(text, ref i);
+            if (spaced && IsLowerKeywordAt(text, i, "to"))
+            {
+                i += 2;
+                SkipWhitespace(text, ref i);
+                to = ReadBound(text, ref i, out toLast, clampOverflow: true);
+                isRange = true;
+                spaced = SkipSpacing(text, ref i);
+                if (spaced && IsLowerKeywordAt(text, i, "to"))
+                    throw SimulatedSqlException.JsonInvalidPath(text[i], i, StateAtEndOfPath);
+            }
+            if (isRange && !fromLast && !toLast && from > to)
+                throw SimulatedSqlException.JsonAdvancedAccessorNotSupported("Reversed indexing", 1);
+            items.Add(new ArrayItem(from, fromLast, to, toLast, isRange));
+
+            if (i < text.Length && text[i] == ',')
+            {
+                i++;
+                SkipWhitespace(text, ref i);
+                continue;
+            }
+            if (i < text.Length && text[i] == ']')
+            {
+                i++;
+                break;
+            }
+            throw Malformed(text, i, spaced ? StateAtIndexDigits : StateAtIndexClose);
+        }
+
+        // `[0 to 0]` is a range for the accessor rules even though it names
+        // one element, so only a lone index stays a plain one.
+        return items is [{ IsRange: false, FromLast: false } only]
+            ? Segment.ForIndex(only.From)
+            : Segment.ForItems([.. items]);
+    }
+
+    /// <summary>
+    /// Reads one end of an array item: digits, or the word <c>last</c>.
+    /// Real's ceiling for an index is <c>uint</c>'s, and it stops reading
+    /// digits at the eleventh — so <c>$[4294967296]</c> reports its tenth
+    /// digit while a twenty-digit run reports its eleventh (probe-confirmed).
+    /// A range's upper end takes a larger number without complaint
+    /// (<c>[0 to 5000000000]</c> reads, probed 2026-09-27), which
+    /// <paramref name="clampOverflow"/> asks for. Anything above
+    /// <see cref="int.MaxValue"/> clamps, since no array reaches that far and
+    /// the index is only ever compared against one.
+    /// </summary>
+    private static int ReadBound(string text, ref int i, out bool last, bool clampOverflow)
+    {
+        last = false;
+        if (IsLowerKeywordAt(text, i, "last"))
+        {
+            i += 4;
+            last = true;
+            return 0;
+        }
         var start = i;
         ulong value = 0;
         while (i < text.Length && char.IsAsciiDigit(text[i]) && i - start < MaxIndexDigits)
@@ -240,13 +377,22 @@ internal readonly struct JsonPath
         }
         if (i == start)
             throw Malformed(text, i, StateAtIndexDigits);
-        if (value > uint.MaxValue)
+        if (value > uint.MaxValue && !clampOverflow)
             throw SimulatedSqlException.JsonInvalidPath(text[i - 1], i - 1, StateIndexOverflow);
-        SkipWhitespace(text, ref i);
-        if (i >= text.Length || text[i] != ']')
-            throw Malformed(text, i, StateAtIndexClose);
-        i++;
         return (int)Math.Min(value, int.MaxValue);
+    }
+
+    /// <summary>
+    /// Whether the lower-case <paramref name="keyword"/> stands at
+    /// <paramref name="i"/> as a whole word. The array accessor's keywords
+    /// match case-sensitively, unlike <c>lax</c> / <c>strict</c>.
+    /// </summary>
+    private static bool IsLowerKeywordAt(string text, int i, string keyword)
+    {
+        if (i + keyword.Length > text.Length || !text.AsSpan(i, keyword.Length).SequenceEqual(keyword))
+            return false;
+        var after = i + keyword.Length;
+        return after >= text.Length || !(char.IsLetterOrDigit(text[after]) || text[after] == '_');
     }
 
     /// <summary>
@@ -267,7 +413,7 @@ internal readonly struct JsonPath
     /// own state (all probe-confirmed against SQL Server 2025).
     /// </summary>
     private static byte StateFor(char c, byte stateHere) =>
-        c is '$' or '"' or '[' or ']' or '.' || char.IsAsciiDigit(c) ? StateAtEndOfPath : stateHere;
+        c is '$' or '"' or '[' or ']' or '.' or ',' or '*' || char.IsAsciiDigit(c) ? StateAtEndOfPath : stateHere;
 
     private static void SkipWhitespace(string text, ref int i)
     {
@@ -277,6 +423,14 @@ internal readonly struct JsonPath
         // (both probe-confirmed).
         while (i < text.Length && text[i] is ' ' or '\t' or '\n' or '\f' or '\r')
             i++;
+    }
+
+    /// <summary><see cref="SkipWhitespace"/>, reporting whether there was any.</summary>
+    private static bool SkipSpacing(string text, ref int i)
+    {
+        var start = i;
+        SkipWhitespace(text, ref i);
+        return i != start;
     }
 
     /// <summary>
@@ -406,24 +560,207 @@ internal readonly struct JsonPath
         return null;
     }
 
-    /// <summary>One segment of a <see cref="JsonPath"/>: either a property
-    /// access (named) or an array index access. <see cref="IsIndex"/>
-    /// discriminates.</summary>
+    /// <summary>
+    /// Evaluates the path as SQL Server 2025's advanced accessors read it: a
+    /// set of values rather than one, each segment mapping every value
+    /// selected so far to what it names in it. Returns whether the path was
+    /// found — every segment named something in at least one value, a
+    /// wildcard over an empty container or a range running backwards past
+    /// <c>last</c> counting as naming nothing successfully — and fills
+    /// <paramref name="nodes"/> with what the last segment selected.
+    /// <paramref name="partial"/> reports a segment that missed in some value
+    /// it was applied to — an index past the end, an absent property, an
+    /// accessor over the wrong kind of value — which <c>strict</c> reads as a
+    /// miss even when the path was found elsewhere (probed 2026-09-27 against
+    /// SQL Server 2025).
+    /// </summary>
+    public bool Select(JsonElement root, List<JsonElement> nodes, out bool partial)
+    {
+        partial = false;
+        nodes.Clear();
+        nodes.Add(root);
+        var next = new List<JsonElement>();
+        foreach (var segment in this.Segments)
+        {
+            next.Clear();
+            var matched = false;
+            foreach (var node in nodes)
+            {
+                matched |= SelectFrom(node, segment, next, out var complete);
+                partial |= !complete;
+            }
+            nodes.Clear();
+            if (!matched)
+            {
+                partial = true;
+                return false;
+            }
+            nodes.AddRange(next);
+        }
+        return true;
+    }
+
+    /// <summary>
+    /// Adds what <paramref name="segment"/> names in <paramref name="node"/>
+    /// to <paramref name="into"/>, returning whether it named anything;
+    /// <paramref name="complete"/> reports whether it named everything it
+    /// asked for.
+    /// </summary>
+    private static bool SelectFrom(JsonElement node, in Segment segment, List<JsonElement> into, out bool complete)
+    {
+        complete = true;
+        switch (segment.Kind)
+        {
+            case SegmentKind.Property:
+                if (node.ValueKind == JsonValueKind.Object && FirstProperty(node, segment.Property!) is { } member)
+                {
+                    into.Add(member);
+                    return true;
+                }
+                return complete = false;
+            case SegmentKind.Index:
+                if (node.ValueKind == JsonValueKind.Array && segment.Index < node.GetArrayLength())
+                {
+                    into.Add(node[segment.Index]);
+                    return true;
+                }
+                return complete = false;
+            case SegmentKind.PropertyWildcard:
+                if (node.ValueKind != JsonValueKind.Object)
+                    return complete = false;
+                foreach (var property in node.EnumerateObject())
+                    into.Add(property.Value);
+                return true;
+            case SegmentKind.ArrayWildcard:
+                if (node.ValueKind != JsonValueKind.Array)
+                    return complete = false;
+                foreach (var element in node.EnumerateArray())
+                    into.Add(element);
+                return true;
+            default:
+                if (node.ValueKind != JsonValueKind.Array)
+                    return complete = false;
+                var length = node.GetArrayLength();
+                var any = false;
+                foreach (var item in segment.Items!)
+                {
+                    var from = item.FromLast ? length - 1 : item.From;
+                    var to = item.ToLast ? length - 1 : item.To;
+                    if (from > to && item.IsRange)
+                    {
+                        // Only `last` can run a range backwards here, which
+                        // selects nothing without missing.
+                        any = true;
+                        continue;
+                    }
+                    if (from < 0 || to >= length)
+                        complete = false;
+                    for (var k = Math.Max(from, 0); k <= Math.Min(to, length - 1); k++)
+                    {
+                        into.Add(node[k]);
+                        any = true;
+                    }
+                }
+                return any;
+        }
+    }
+
+    /// <summary>
+    /// Resolves each array accessor of a path that names at most one element
+    /// per step — a list of one item, <c>last</c>, a range with equal ends —
+    /// to the plain index <c>JSON_MODIFY</c> writes through in
+    /// <paramref name="root"/>. That is real's reading, not the selection
+    /// <see cref="Select"/> makes: <c>JSON_MODIFY</c> over <c>json</c> writes
+    /// <c>[last]</c> into the <em>first</em> element of a non-empty array
+    /// (probed 2026-09-27 against SQL Server 2025). Returns null when an
+    /// accessor lands on nothing (an empty array, a step into a missing
+    /// value); a missing <em>property</em> is left to the caller's own walk,
+    /// which knows what an absent member means to it.
+    /// </summary>
+    public JsonPath? ResolveForModify(JsonElement root)
+    {
+        var resolved = new Segment[this.Segments.Length];
+        JsonElement? current = root;
+        for (var s = 0; s < this.Segments.Length; s++)
+        {
+            var segment = this.Segments[s];
+            if (segment.Kind == SegmentKind.ArraySelector)
+            {
+                if (current is not { ValueKind: JsonValueKind.Array } array)
+                    return null;
+                var item = segment.Items![0];
+                var index = item.FromLast ? 0 : item.From;
+                if (item.FromLast && array.GetArrayLength() == 0)
+                    return null;
+                segment = Segment.ForIndex(index);
+            }
+            resolved[s] = segment;
+            current = current is { } node ? TryStep(node, segment) : null;
+        }
+        return this.WithSegments(resolved);
+    }
+
+    /// <summary>What a <see cref="Segment"/> reads.</summary>
+    public enum SegmentKind : byte
+    {
+        /// <summary><c>.name</c> / <c>."name"</c>.</summary>
+        Property,
+
+        /// <summary>A lone <c>[n]</c>.</summary>
+        Index,
+
+        /// <summary><c>.*</c> — every member of an object.</summary>
+        PropertyWildcard,
+
+        /// <summary><c>[*]</c> — every element of an array.</summary>
+        ArrayWildcard,
+
+        /// <summary>
+        /// Any other <c>[…]</c>: a list of indexes, <c>last</c> and ranges.
+        /// </summary>
+        ArraySelector,
+    }
+
+    /// <summary>
+    /// One item of an array accessor's list: an index or <c>last</c>, or a
+    /// range between two of them. A lone item has equal ends.
+    /// </summary>
+    public readonly struct ArrayItem(int from, bool fromLast, int to, bool toLast, bool isRange)
+    {
+        public readonly int From = from;
+        public readonly bool FromLast = fromLast;
+        public readonly int To = to;
+        public readonly bool ToLast = toLast;
+
+        /// <summary>Whether the item was written with <c>to</c>.</summary>
+        public readonly bool IsRange = isRange;
+    }
+
+    /// <summary>One segment of a <see cref="JsonPath"/>; <see cref="Kind"/>
+    /// says which fields it carries.</summary>
     public readonly struct Segment
     {
+        public readonly SegmentKind Kind;
         public readonly bool IsIndex;
         public readonly int Index;
         public readonly string? Property;
+        public readonly ArrayItem[]? Items;
 
-        private Segment(bool isIndex, int index, string? property)
+        private Segment(SegmentKind kind, int index, string? property, ArrayItem[]? items)
         {
-            this.IsIndex = isIndex;
+            this.Kind = kind;
+            this.IsIndex = kind == SegmentKind.Index;
             this.Index = index;
             this.Property = property;
+            this.Items = items;
         }
 
-        public static Segment ForProperty(string name) => new(false, 0, name);
-        public static Segment ForIndex(int index) => new(true, index, null);
+        public static Segment ForProperty(string name) => new(SegmentKind.Property, 0, name, null);
+        public static Segment ForIndex(int index) => new(SegmentKind.Index, index, null, null);
+        public static Segment ForItems(ArrayItem[] items) => new(SegmentKind.ArraySelector, 0, null, items);
+
+        public static readonly Segment PropertyWildcard = new(SegmentKind.PropertyWildcard, 0, null, null);
+        public static readonly Segment ArrayWildcard = new(SegmentKind.ArrayWildcard, 0, null, null);
     }
 }
 

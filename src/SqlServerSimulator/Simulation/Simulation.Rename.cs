@@ -358,13 +358,26 @@ partial class Simulation
             if (collation.Equals(index.Name, indexName))
                 target = index;
         }
-        if (target is null)
+        // A JSON index renames the same way (probed 2026-09-27 against SQL
+        // Server 2025).
+        Schemas.JsonIndex? jsonTarget = null;
+        foreach (var jsonIndex in table.JsonIndexes)
+        {
+            if (collation.Equals(jsonIndex.Name, newName))
+                throw SimulatedSqlException.RenameDuplicateName(newName, "INDEX");
+            if (collation.Equals(jsonIndex.Name, indexName))
+                jsonTarget = jsonIndex;
+        }
+        if (target is null && jsonTarget is null)
             throw SimulatedSqlException.RenameAmbiguousOrWrongType("INDEX");
 
         table.OwningDatabase?.RejectWriteWhenReadOnly();
         batch.AcquireStatementLock(table.SchemaLock, LockMode.SchemaModification);
         RecordTableDdlUndo(batch, table);
-        target.Name = newName;
+        if (target is not null)
+            target.Name = newName;
+        else
+            jsonTarget!.Name = newName;
         BumpSchemaVersion();
     }
 

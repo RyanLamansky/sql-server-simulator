@@ -210,6 +210,20 @@ partial class Simulation
                 }
             }
 
+            // A JSON index takes DISABLE and REBUILD (probed 2026-09-27
+            // against SQL Server 2025); it has nothing else to change.
+            foreach (var jsonIndex in table.JsonIndexes)
+            {
+                if (collation.Equals(jsonIndex.Name, indexName))
+                {
+                    RejectNamedIndexTarget(form, namedPartition, jsonIndex.Name, table.Name);
+                    if (form is AlterIndexForm.Disable or AlterIndexForm.Rebuild)
+                        jsonIndex.IsDisabled = form == AlterIndexForm.Disable;
+                    RecordDdlEvent(context, "ALTER_INDEX", EventSchemaName(tableName), indexName!, "INDEX", table.Name, "TABLE");
+                    return true;
+                }
+            }
+
             throw SimulatedSqlException.CannotFindIndex(indexName!);
         }
 

@@ -286,7 +286,7 @@ Where an entry carries a second clause it is because that fact changes what you'
 - **Cursors** — the full lifecycle, the sensitivity / scrollability / concurrency matrix, cursor variables, multi-source and deferred-source cursors, `WHERE CURRENT OF`.
   Several ordinary shapes silently **convert** a cursor's sensitivity, and a keyless table converts it to read-only → [`cursors.md`](docs/claude/cursors.md).
 - **CTEs** — the shapes, the recursive member's restrictions, the declared column list's scoping, and where a `WITH` prefix may appear → [`ctes.md`](docs/claude/ctes.md).
-- **JSON** — the JSON_\* scalars, ISJSON, OPENJSON, `FOR JSON`, and one shared path parser.
+- **JSON** — the JSON_\* scalars, ISJSON, OPENJSON, `FOR JSON`, and one shared path parser, SQL Server 2025's advanced array accessors (`[*]`, ranges, lists, `last`, `.*`) and `JSON_QUERY … WITH ARRAY WRAPPER` included.
   Every one of them reads the document left to right and stops as soon as the path is settled, so the same document can raise for one path and answer for another → [`json.md`](docs/claude/json.md).
 - **Name resolution, schemas, CREATE / DROP DATABASE, the `OBJECT_*` / `SCHEMA_*` / `DB_*` scalars, cross-database reads and writes, synonyms** — with the reserved-schema pin.
   An unresolved column splits by *what* failed: a bad qualifier is Msg 4104 on the whole name, everything else Msg 207 on the leaf → [`schemas.md`](docs/claude/schemas.md).
@@ -321,7 +321,7 @@ Where an entry carries a second clause it is because that fact changes what you'
 - **Application locks** — `sp_getapplock` / `sp_releaseapplock` / `APPLOCK_MODE` / `APPLOCK_TEST`, and EF's `__EFMigrationsLock` → [`app-locks.md`](docs/claude/app-locks.md).
 - **`vector`** — `vector(n)` storage, the JSON text form in both directions, the string-only conversions, the non-comparable refusals, `VECTOR_DISTANCE` / `VECTOR_NORM` / `VECTOR_NORMALIZE` / `VECTORPROPERTY` and the catalog surfaces.
   The functions are bit-exact to real's SIMD kernels, whose summation order is reverse-engineered, and clients read the text form over a down-level `varchar(max)` → [`vector.md`](docs/claude/vector.md).
-- **`json`** — the native type: its canonical text, the `DATALENGTH` of its binary form, the string-only conversions, the non-comparable refusals, and how the JSON functions read and return it.
+- **`json`** — the native type: its canonical text, the `DATALENGTH` of its binary form, the string-only conversions, the non-comparable refusals, how the JSON functions read and return it, `JSON_CONTAINS`, `JSON_VALUE … RETURNING`, the `modify` method and `CREATE JSON INDEX`.
   Every path into the type canonicalizes (whitespace, repeated names, escapes, exponent numbers as `decimal(38, 10)`), and property names are kept exactly as written → [`json-type.md`](docs/claude/json-type.md).
 - **`hierarchyid`** — OrdPath storage, byte-identical CAST / wire / DATALENGTH, and the full sixteen-tier ordinal domain (wider than `int`, so labels are `long`) → [`hierarchyid.md`](docs/claude/hierarchyid.md).
 - **`GRANT` / `REVOKE` / `DENY`** — securable resolution, the covering scope walk, role closure, ownership chaining, `EXECUTE AS`, application roles, login and server-scope DDL, and a gate on every modeled CREATE / ALTER / DROP.

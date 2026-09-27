@@ -59,4 +59,90 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException JsonReturningNotJson(bool nvarcharTarget) =>
         new(string.Create(CultureInfo.InvariantCulture, $"Incorrect syntax near '{(nvarcharTarget ? "RETURNING. Supported Syntax is RETURNING JSON" : "RETURNING")}'."), 102, 15, 19);
+
+    /// <summary>
+    /// Msg 13660: an advanced JSON array accessor — a wildcard, range, list or
+    /// <c>last</c> — somewhere real's reader doesn't take it.
+    /// <paramref name="what"/> opens the message and the state names the
+    /// refusal: 1 a range written high-to-low, 2 <c>last</c> over a text
+    /// document or a wildcard in <c>OPENJSON</c>'s default schema over one,
+    /// 4 <c>JSON_MODIFY</c> over text, 5 a list over text or a many-valued
+    /// <c>JSON_MODIFY</c> path over <c>json</c> (probed 2026-09-27 against SQL
+    /// Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException JsonAdvancedAccessorNotSupported(string what, byte state) =>
+        new($"{what} not yet supported for advanced JSON array accessors.", 13660, 16, state);
+
+    /// <summary>
+    /// Msg 13665: a wildcard path in <c>OPENJSON</c> over a <c>json</c>
+    /// document — state 5 as the document path, 3 as a <c>WITH</c> column's.
+    /// </summary>
+    internal static SimulatedSqlException JsonOpenJsonComplexPath(byte state) =>
+        new("OpenJson support with complex path parameters not yet supported for JSON native data type.", 13665, 16, state);
+
+    /// <summary>Msg 13692: <c>JSON_CONTAINS</c>'s fourth argument is neither 0 nor 1.</summary>
+    internal static SimulatedSqlException JsonContainsModeInvalid() =>
+        new("The comparison_mode argument of JSON_CONTAINS must be 0 or 1.", 13692, 16, 1);
+
+    /// <summary>
+    /// Msg 102 at state 29: <c>JSON_VALUE … RETURNING</c> names a type real
+    /// doesn't return — <paramref name="typeName"/> as written, or
+    /// <c>sys.vector</c> for <c>vector</c>.
+    /// </summary>
+    internal static SimulatedSqlException JsonValueReturningType(string typeName) =>
+        new($"Incorrect syntax near '{typeName}'.", 102, 15, 29);
+
+    /// <summary>
+    /// Msg 5302 for the <c>json</c> type's <c>.modify()</c> on a NULL column
+    /// or variable — the xml mutator's wording, but unlike it this one ends
+    /// the batch and rolls the transaction back as under
+    /// <c>SET XACT_ABORT ON</c> (probed 2026-09-27 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException JsonMutatorOnNullValue(string name) =>
+        new($"Mutator 'modify()' on '{name}' cannot be called on a null value.", 5302, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    // CREATE JSON INDEX's refusals, probed 2026-09-27 against SQL Server 2025.
+
+    /// <summary>Msg 13675: a JSON index on a temp table, named as written.</summary>
+    internal static SimulatedSqlException JsonIndexOnTempObject(string writtenName) =>
+        new($"Cannot create a JSON index on temp objects. '{writtenName}' is identified as a temp object.", 13675, 16, 1);
+
+    /// <summary>Msg 13680: the indexed column isn't <c>json</c>.</summary>
+    internal static SimulatedSqlException JsonIndexColumnNotJson(string columnName, string tableName) =>
+        new($"Column '{columnName}' on table '{tableName}' is not of JSON data type, which is required to create a JSON index on it.", 13680, 16, 1);
+
+    /// <summary>Msg 13672: the table has no clustered primary key of fewer than 32 columns.</summary>
+    internal static SimulatedSqlException JsonIndexNeedsClusteredPrimaryKey(string tableName) =>
+        new($"Table '{tableName}' needs to have a clustered primary key with less than 32 columns in it in order to create a JSON index on it.", 13672, 16, 1);
+
+    /// <summary>Msg 13681: the column already carries a JSON index, named here.</summary>
+    internal static SimulatedSqlException JsonIndexAlreadyOnColumn(string existingIndexName, string columnName, string tableName) =>
+        new($"A JSON index '{existingIndexName}' already exists on column '{columnName}' on table '{tableName}', and multiple JSON indexes per column are not allowed.", 13681, 16, 1);
+
+    /// <summary>Msg 13685 state 2: <c>DROP_EXISTING = ON</c> found no JSON index of that name on the column.</summary>
+    internal static SimulatedSqlException JsonIndexNotFound(string indexName, string columnName, string tableName) =>
+        new($"A JSON index '{indexName}' cannot be found on column '{columnName}' on table '{tableName}'.", 13685, 16, 2);
+
+    /// <summary>
+    /// Msg 13683: the <c>FOR</c> clause's paths overlap (state 1), one uses
+    /// <c>[*]</c> (state 2), or one uses another advanced accessor (state 3).
+    /// </summary>
+    internal static SimulatedSqlException JsonIndexPathsInvalid(byte state) =>
+        new("Invalid JSON paths in JSON index.", 13683, 16, state);
+
+    /// <summary>Msg 153 state 35: an index option <c>CREATE JSON INDEX</c> doesn't take, echoed as written.</summary>
+    internal static SimulatedSqlException InvalidJsonIndexOption(string optionName) =>
+        new($"Invalid usage of the option {optionName} in the CREATE JSON INDEX statement.", 153, 15, 35);
+
+    /// <summary>Msg 155 for an option no index statement knows, which real follows with Msg 153 state 35.</summary>
+    internal static SimulatedSqlException UnrecognizedJsonIndexOption(string optionName) =>
+        Aggregate([UnrecognizedIndexOption(optionName, "CREATE JSON INDEX"), InvalidJsonIndexOption(optionName)]);
+
+    /// <summary>Msg 3766 state 4: <c>DROP INDEX table.index</c> naming a JSON index.</summary>
+    internal static SimulatedSqlException JsonIndexDropNeedsOnSyntax(string writtenName) =>
+        new($"Cannot drop JSON index '{writtenName}' using old 'Table.Index' syntax, use 'Index ON Table' syntax instead.", 3766, 16, 4);
+
+    /// <summary>Msg 3767 then 3727: dropping the primary key of a table with a JSON index.</summary>
+    internal static SimulatedSqlException PrimaryKeyDropBlockedByJsonIndex(string constraintName) =>
+        FollowedByConstraintNotDropped(new($"Could not drop the primary key constraint '{constraintName}' because the table has a JSON index.", 3767, 16, 1));
 }

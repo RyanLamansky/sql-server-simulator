@@ -58,6 +58,15 @@ internal sealed class IndexCol : Expression
             return SqlValue.Null(MetadataNameType(runtime.Batch));
         }
 
+        // A JSON index's one column is its key 1 (probed 2026-09-27 against
+        // SQL Server 2025).
+        if (table.JsonIndexes.Find(index => index.IndexId == indexId) is { } jsonIndex)
+        {
+            return keyId == 1
+                ? SqlValue.FromNVarchar(MetadataNameType(runtime.Batch), table.Columns[jsonIndex.ColumnOrdinal].Name)
+                : SqlValue.Null(MetadataNameType(runtime.Batch));
+        }
+
         if (IndexLookup.ResolveByIndexId(table, indexId) is not { } resolved)
             return SqlValue.Null(MetadataNameType(runtime.Batch));
 

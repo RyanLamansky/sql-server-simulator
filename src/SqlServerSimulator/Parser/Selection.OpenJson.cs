@@ -101,7 +101,16 @@ internal sealed partial class Selection
             if (pathValue.IsNull)
                 yield break;
             var path = JsonPath.Parse(pathValue.AsString);
-            var result = path.Walk(root, scan, out var match);
+            JsonElement match;
+            JsonWalkResult result;
+            if (path.IsAdvanced)
+            {
+                result = SelectAdvancedDocumentPath(root, path, jsonValue.Type, out match);
+            }
+            else
+            {
+                result = path.Walk(root, scan, out match);
+            }
             if (result is JsonWalkResult.Exhausted && scan.HasError)
                 throw SimulatedSqlException.JsonInvalidText(scan.BadCharacter, scan.BadPosition, searchState);
             // Lax mode opens nothing where a strict path raises: a miss is
@@ -153,6 +162,55 @@ internal sealed partial class Selection
             throw SimulatedSqlException.JsonInvalidText(scan.BadCharacter, scan.BadPosition, 4);
     }
 
+    /// <summary>
+    /// An <c>OPENJSON</c> document path with SQL Server 2025's advanced
+    /// accessors (probed 2026-09-27 against SQL Server 2025): a wildcard is
+    /// Msg 13665 state 5 over <c>json</c> and Msg 13660 state 2 over text,
+    /// which also refuses <c>last</c> and a list; otherwise the one value the
+    /// path selects is opened, and a path selecting none or several opens
+    /// nothing.
+    /// </summary>
+    private static JsonWalkResult SelectAdvancedDocumentPath(JsonElement root, in JsonPath path, SqlType documentType, out JsonElement match)
+    {
+        if (documentType is JsonSqlType)
+        {
+            if (path.HasWildcard)
+                throw SimulatedSqlException.JsonOpenJsonComplexPath(5);
+        }
+        else
+        {
+            JsonText.RejectTextAccessors(path, documentType);
+            if (path.HasWildcard)
+                throw SimulatedSqlException.JsonAdvancedAccessorNotSupported("OpenJson with default schema", 2);
+        }
+
+        var nodes = new List<JsonElement>();
+        if (path.Select(root, nodes, out _) && nodes.Count == 1)
+        {
+            match = nodes[0];
+            return JsonWalkResult.Resolved;
+        }
+        match = default;
+        return JsonWalkResult.Abandoned;
+    }
+
+    /// <summary>
+    /// A <c>WITH</c> column path with SQL Server 2025's advanced accessors
+    /// reads the first value it selects (probed 2026-09-27 against SQL Server
+    /// 2025). A wildcard is Msg 13665 state 3 over <c>json</c>; text refuses
+    /// <c>last</c> and a list as every reader does.
+    /// </summary>
+    private static JsonElement? SelectAdvancedColumnPath(JsonElement element, in JsonPath path, SqlType documentType, byte strictNotFoundState)
+    {
+        if (documentType is JsonSqlType && path.HasWildcard)
+            throw SimulatedSqlException.JsonOpenJsonComplexPath(3);
+        JsonText.RejectTextAccessors(path, documentType);
+        var nodes = new List<JsonElement>();
+        return path.Select(element, nodes, out _) && nodes.Count > 0 ? nodes[0]
+            : path.Mode == JsonPathMode.Strict ? throw SimulatedSqlException.JsonStrictPathNotFound(strictNotFoundState)
+            : null;
+    }
+
     private static byte[] BuildOpenJsonRow(JsonElement element, OpenJsonColumn[]? withColumns, SqlType[] schema, string key, SqlType documentType)
     {
         if (withColumns is null)
@@ -187,7 +245,10 @@ internal sealed partial class Selection
             var column = withColumns[i];
             // A column path's strict miss is state 6, or 8 over a json
             // document (probed 2026-09-26 against SQL Server 2025).
-            var matched = column.Path.Walk(element, strictNotFoundState: documentType is JsonSqlType ? (byte)8 : (byte)6);
+            var strictState = documentType is JsonSqlType ? (byte)8 : (byte)6;
+            var matched = column.Path.IsAdvanced
+                ? SelectAdvancedColumnPath(element, column.Path, documentType, strictState)
+                : column.Path.Walk(element, strictNotFoundState: strictState);
             values[i] = matched is null
                 ? SqlValue.Null(column.Type)
                 : ExtractColumnValue(matched.Value, column, documentType);

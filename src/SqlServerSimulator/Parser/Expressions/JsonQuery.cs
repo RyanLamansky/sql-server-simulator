@@ -1,3 +1,6 @@
+using System.Text;
+using System.Text.Json;
+using SqlServerSimulator.Parser.Tokens;
 using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator.Parser.Expressions;
@@ -27,26 +30,122 @@ internal sealed class JsonQuery : Expression
     /// </summary>
     private readonly Expression? pathInput;
 
+    /// <summary>
+    /// Whether SQL Server 2025's <c>WITH ARRAY WRAPPER</c> closes the
+    /// argument list, which gathers everything the path selects into one array.
+    /// </summary>
+    private readonly bool arrayWrapper;
+
     public JsonQuery(ParserContext context)
     {
         this.jsonInput = Parse(context);
-        if (context.Token is not Tokens.Operator { Character: ',' })
-            return;
-        this.pathInput = Parse(context.MoveNextRequiredReturnSelf());
-        if (context.Token is Tokens.Operator { Character: ',' })
-            throw SimulatedSqlException.FunctionArgumentCountRange("json_query", 1, 2);
+        if (context.Token is Operator { Character: ',' })
+        {
+            this.pathInput = Parse(context.MoveNextRequiredReturnSelf());
+            if (context.Token is Operator { Character: ',' })
+                throw SimulatedSqlException.FunctionArgumentCountRange("json_query", 1, 2);
+        }
+        this.arrayWrapper = ParseArrayWrapper(context);
+    }
+
+    /// <summary>
+    /// Reads <c>WITH ARRAY WRAPPER</c> (any case). Real takes no other
+    /// wrapper form — <c>CONDITIONAL</c>, <c>UNCONDITIONAL</c> and
+    /// <c>WITHOUT</c> are Msg 102 at the word, and a bare <c>WITH WRAPPER</c>
+    /// at the token after it (probed 2026-09-27 against SQL Server 2025).
+    /// </summary>
+    private static bool ParseArrayWrapper(ParserContext context)
+    {
+        if (context.Token is not ReservedKeyword { Keyword: Keyword.With })
+            return false;
+        context.MoveNextRequired();
+        if (IsWord(context, "WRAPPER"))
+            throw SimulatedSqlException.SyntaxErrorNear(context.MoveNextRequiredReturnSelf());
+        if (!IsWord(context, "ARRAY"))
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        context.MoveNextRequired();
+        if (!IsWord(context, "WRAPPER"))
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        context.MoveNextRequired();
+        return true;
+
+        static bool IsWord(ParserContext context, string word) =>
+            context.Token is StringToken { Value: var written } && Collation.Baseline.Equals(written, word);
     }
 
     public override SqlValue Run(RuntimeContext runtime)
     {
         var jsonValue = this.jsonInput.Run(runtime);
         if (this.pathInput is null)
-            return jsonValue.IsNull ? SqlValue.Null(ResultType(jsonValue.Type)) : Extract(jsonValue, JsonPath.Root);
+        {
+            return jsonValue.IsNull ? SqlValue.Null(ResultType(jsonValue.Type))
+                : this.arrayWrapper ? Wrap(jsonValue, JsonPath.Root)
+                : Extract(jsonValue, JsonPath.Root);
+        }
 
         var pathValue = JsonText.RequirePathValue(this.pathInput.Run(runtime), "JSON_QUERY");
-        return jsonValue.IsNull
-            ? SqlValue.Null(ResultType(jsonValue.Type))
-            : Extract(jsonValue, JsonPath.Parse(pathValue.AsString));
+        if (jsonValue.IsNull)
+            return SqlValue.Null(ResultType(jsonValue.Type));
+        var path = JsonPath.Parse(pathValue.AsString);
+        return this.arrayWrapper ? Wrap(jsonValue, path)
+            : path.IsAdvanced ? ExtractAdvanced(jsonValue, path)
+            : Extract(jsonValue, path);
+    }
+
+    /// <summary>
+    /// <c>WITH ARRAY WRAPPER</c>: every value the path selects, scalars
+    /// included, as the elements of one array — <c>[]</c> for a wildcard over
+    /// an empty array, NULL for a path that finds nothing, and under
+    /// <c>strict</c> Msg 13608 for a path that misses anywhere, state 5 over
+    /// <c>json</c> and 2 over text. Over text each container keeps its own
+    /// spacing and each string is re-escaped the way the JSON builders write
+    /// one (probed 2026-09-27 against SQL Server 2025).
+    /// </summary>
+    private static SqlValue Wrap(SqlValue jsonValue, in JsonPath path)
+    {
+        JsonText.RejectTextAccessors(path, jsonValue.Type);
+        var isJson = jsonValue.Type is JsonSqlType;
+        var strict = path.Mode == JsonPathMode.Strict;
+        var nodes = new List<JsonElement>();
+        using var doc = JsonText.SelectAdvanced(jsonValue.AsString, path, nodes, out var found, out var partial);
+        if (!found || (strict && partial))
+            return strict ? throw SimulatedSqlException.JsonStrictPathNotFound(isJson ? (byte)5 : (byte)2) : SqlValue.Null(ResultType(jsonValue.Type));
+
+        var sb = new StringBuilder("[");
+        for (var i = 0; i < nodes.Count; i++)
+        {
+            if (i > 0)
+                _ = sb.Append(',');
+            if (!isJson && nodes[i].ValueKind == JsonValueKind.String)
+                JsonValueRender.AppendJsonString(sb, nodes[i].GetString()!, escapeSolidus: true);
+            else
+                _ = sb.Append(nodes[i].GetRawText());
+        }
+        var text = sb.Append(']').ToString();
+        return isJson ? SqlValue.FromJson(text) : SqlValue.FromNVarchar(SqlType.NVarcharMax, text);
+    }
+
+    /// <summary>
+    /// A path with SQL Server 2025's advanced accessors and no wrapper: one
+    /// selected value answers as a plain path's would; several are NULL, or
+    /// Msg 13624 under <c>strict</c> (probed 2026-09-27 against SQL Server
+    /// 2025). Over text, <c>last</c> and a list are refused outright.
+    /// </summary>
+    private static SqlValue ExtractAdvanced(SqlValue jsonValue, in JsonPath path)
+    {
+        JsonText.RejectTextAccessors(path, jsonValue.Type);
+        var isJson = jsonValue.Type is JsonSqlType;
+        var strict = path.Mode == JsonPathMode.Strict;
+        var nodes = new List<JsonElement>();
+        using var doc = JsonText.SelectAdvanced(jsonValue.AsString, path, nodes, out var found, out var partial);
+        if (!found || nodes.Count == 0 || (strict && partial))
+            return strict ? throw SimulatedSqlException.JsonStrictPathNotFound(isJson ? (byte)5 : (byte)2) : SqlValue.Null(ResultType(jsonValue.Type));
+        if (nodes.Count > 1)
+            return strict ? throw SimulatedSqlException.JsonObjectOrArrayNotFound(2) : SqlValue.Null(ResultType(jsonValue.Type));
+        var subtree = JsonSubtree.Extract(nodes[0], path.Mode, strictScalarState: 2);
+        return subtree is null ? SqlValue.Null(ResultType(jsonValue.Type))
+            : isJson ? SqlValue.FromJson(subtree)
+            : SqlValue.FromNVarchar(SqlType.NVarcharMax, subtree);
     }
 
     /// <summary>
@@ -88,8 +187,8 @@ internal sealed class JsonQuery : Expression
     private static SqlType ResultType(SqlType documentType) => documentType is JsonSqlType ? SqlType.Json : SqlType.NVarcharMax;
 
     internal override string DebugDisplay() => this.pathInput is null
-        ? $"JSON_QUERY({this.jsonInput.DebugDisplay()})"
-        : $"JSON_QUERY({this.jsonInput.DebugDisplay()}, {this.pathInput.DebugDisplay()})";
+        ? $"JSON_QUERY({this.jsonInput.DebugDisplay()}{(this.arrayWrapper ? " WITH ARRAY WRAPPER" : "")})"
+        : $"JSON_QUERY({this.jsonInput.DebugDisplay()}, {this.pathInput.DebugDisplay()}{(this.arrayWrapper ? " WITH ARRAY WRAPPER" : "")})";
 
-    internal override void Describe(NodeShape shape) => shape.Child(this.jsonInput).Child(this.pathInput);
+    internal override void Describe(NodeShape shape) => shape.Local(this.arrayWrapper).Child(this.jsonInput).Child(this.pathInput);
 }

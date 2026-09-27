@@ -862,8 +862,13 @@ partial class Simulation
             // Real refuses the old form for an XML or spatial index while
             // compiling, so nothing ahead of it in the batch runs (probed
             // 2026-09-26 against SQL Server 2025).
-            if (oldSyntax && context.Batch.TryResolveTable(tableName, out var compiled) && FindXmlOrSpatialIndex(context, compiled, indexName))
-                throw SimulatedSqlException.XmlIndexDropNeedsOnSyntax($"{tableName}.{indexName}");
+            if (oldSyntax && context.Batch.TryResolveTable(tableName, out var compiled))
+            {
+                if (FindXmlOrSpatialIndex(context, compiled, indexName))
+                    throw SimulatedSqlException.XmlIndexDropNeedsOnSyntax($"{tableName}.{indexName}");
+                if (FindJsonIndex(context, compiled, indexName) is not null)
+                    throw SimulatedSqlException.JsonIndexDropNeedsOnSyntax($"{tableName}.{indexName}");
+            }
             return;
         }
 
@@ -909,6 +914,18 @@ partial class Simulation
         if (DropXmlOrSpatialIndex(context, table, indexName, tableName, oldSyntax))
             return;
 
+        // A JSON index can't be named in the deprecated `table.index` form
+        // either (Msg 3766, probed 2026-09-27 against SQL Server 2025).
+        if (FindJsonIndex(context, table, indexName) is { } jsonIndex)
+        {
+            if (oldSyntax)
+                throw SimulatedSqlException.JsonIndexDropNeedsOnSyntax($"{tableName}.{indexName}");
+            table.OwningDatabase?.RejectWriteWhenReadOnly();
+            _ = table.JsonIndexes.Remove(jsonIndex);
+            RecordDdlEvent(context, "DROP_INDEX", EventSchemaName(tableName), indexName, "INDEX", table.Name, "TABLE");
+            return;
+        }
+
         if (ifExists)
             return;
         throw SimulatedSqlException.CannotDropIndexDoesNotExist(tableName.ToString(), indexName, state: 7);
@@ -942,6 +959,12 @@ partial class Simulation
         }
         RecordDdlEvent(context, "DROP_INDEX", EventSchemaName(tableName), indexName, "INDEX", table.Name, "TABLE");
         return true;
+    }
+
+    private static Schemas.JsonIndex? FindJsonIndex(ParserContext context, HeapTable table, string indexName)
+    {
+        var collation = context.Batch.CurrentDatabase.Collation;
+        return table.JsonIndexes.Find(candidate => collation.Equals(candidate.Name, indexName));
     }
 
     private static bool FindXmlOrSpatialIndex(ParserContext context, HeapTable table, string indexName)
