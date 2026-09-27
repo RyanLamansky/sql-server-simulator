@@ -221,9 +221,10 @@ partial class Simulation
         bool parsed;
         bool changesSnapshotIsolation;
         bool terminated;
+        bool combinesChangeTracking;
         try
         {
-            parsed = TryParseAlterDatabaseSetList(context, target, out changesSnapshotIsolation, out terminated);
+            parsed = TryParseAlterDatabaseSetList(context, target, out changesSnapshotIsolation, out terminated, out combinesChangeTracking);
         }
         finally
         {
@@ -233,9 +234,11 @@ partial class Simulation
             return parsed;
         if (changesSnapshotIsolation && terminated)
             throw SimulatedSqlException.FollowedByAlterDatabaseFailed(SimulatedSqlException.TerminationWithVersioningChange());
+        if (combinesChangeTracking)
+            throw SimulatedSqlException.ChangeTrackingCombinedWithOtherOptions();
 
         context.RestoreCheckpoint(start);
-        return TryParseAlterDatabaseSetList(context, target, out _, out _);
+        return TryParseAlterDatabaseSetList(context, target, out _, out _, out _);
     }
 
     /// <summary>
@@ -244,11 +247,20 @@ partial class Simulation
     /// last token — then an optional termination clause, which
     /// <c>READ_ONLY</c> and its access-mode siblings read themselves.
     /// </summary>
-    private static bool TryParseAlterDatabaseSetList(ParserContext context, Database target, out bool changesSnapshotIsolation, out bool terminated)
+    private static bool TryParseAlterDatabaseSetList(ParserContext context, Database target, out bool changesSnapshotIsolation, out bool terminated, out bool combinesChangeTracking)
     {
         changesSnapshotIsolation = false;
+        // CHANGE_TRACKING must stand alone in its SET list (Msg 22114, probed
+        // 2026-09-27 against SQL Server 2025).
+        var options = 0;
+        var changeTracking = false;
+        combinesChangeTracking = false;
         while (true)
         {
+            options++;
+            var beforeOption = context.SaveCheckpoint();
+            changeTracking |= context.GetNextOptional() is UnquotedString word && BuiltInToken.Equals(word.Value, "CHANGE_TRACKING");
+            context.RestoreCheckpoint(beforeOption);
             if (!TryParseAlterDatabaseSetOption(context, target, ref changesSnapshotIsolation))
             {
                 terminated = false;
@@ -261,6 +273,7 @@ partial class Simulation
                 break;
             }
         }
+        combinesChangeTracking = changeTracking && options > 1;
 
         var beforeTermination = context.SaveCheckpoint();
         terminated = context.GetNextOptional() is ReservedKeyword { Keyword: Keyword.With };
@@ -278,6 +291,7 @@ partial class Simulation
         return context.Token switch
         {
             UnquotedString { ContextualKeyword: ContextualKeyword.Compatibility_Level } => TryParseAlterDatabaseSetCompatibilityLevel(context, target),
+            UnquotedString changeTracking when BuiltInToken.Equals(changeTracking.Value, "CHANGE_TRACKING") => TryParseAlterDatabaseSetChangeTracking(context, target),
             UnquotedString { ContextualKeyword: ContextualKeyword.Allow_Snapshot_Isolation } => TryParseAlterDatabaseSetBooleanOption(context, target, DatabaseBooleanOption.AllowSnapshotIsolation),
             UnquotedString { ContextualKeyword: ContextualKeyword.Read_Committed_Snapshot } => TryParseAlterDatabaseSetBooleanOption(context, target, DatabaseBooleanOption.ReadCommittedSnapshot),
             UnquotedString { ContextualKeyword: ContextualKeyword.Recursive_Triggers } => TryParseAlterDatabaseSetBooleanOption(context, target, DatabaseBooleanOption.RecursiveTriggers),
@@ -1696,7 +1710,9 @@ partial class Simulation
             case UnquotedString { ContextualKeyword: ContextualKeyword.Enable or ContextualKeyword.Disable } toggle:
                 if (withCheckExplicit.HasValue)
                     throw SimulatedSqlException.SyntaxErrorNear(context);
-                return TryParseAlterTableTriggerToggle(context, tableName, disable: toggle.ContextualKeyword == ContextualKeyword.Disable);
+                return IsChangeTrackingAhead(context)
+                    ? TryParseAlterTableChangeTracking(context, tableName, disable: toggle.ContextualKeyword == ContextualKeyword.Disable)
+                    : TryParseAlterTableTriggerToggle(context, tableName, disable: toggle.ContextualKeyword == ContextualKeyword.Disable);
             default:
                 throw new NotSupportedException("ALTER TABLE supports only SET, ADD / DROP / ALTER COLUMN, ADD / DROP CONSTRAINT, CHECK / NOCHECK CONSTRAINT, ENABLE / DISABLE TRIGGER, SWITCH and REBUILD shapes.");
         }

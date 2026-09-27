@@ -157,7 +157,7 @@ partial class Simulation
             SqlValue.Null(NVarcharSqlType.Get(4000, Collation.Baseline, Coercibility.Implicit)),
             nullInt, nullName, nullName, nullName,
             SqlValue.FromBoolean(false),
-            SqlValue.FromBoolean(type is XmlSqlType || (collation is not null && collation.Name.Contains("_CS", StringComparison.OrdinalIgnoreCase))),
+            SqlValue.FromBoolean(type is XmlSqlType || (collation is not null && (collation.Name.Contains("_CS", StringComparison.OrdinalIgnoreCase) || collation.Name.Contains("_BIN", StringComparison.OrdinalIgnoreCase)))),
             SqlValue.FromBoolean(false),
             nullName, nullName, nullName, nullName, nullName,
             SqlValue.FromBoolean((origin?.Identity ?? origin?.IdentitySource ?? result.ColumnIdentitySources?[index]) is not null),

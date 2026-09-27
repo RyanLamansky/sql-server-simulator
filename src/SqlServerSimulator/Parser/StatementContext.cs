@@ -123,6 +123,13 @@ internal sealed class StatementContext
     public DateTime UtcNow = DateTime.UtcNow;
 
     /// <summary>
+    /// The statement's <c>WITH CHANGE_TRACKING_CONTEXT (…)</c> value, which
+    /// every change-tracked row it writes carries; null without the clause.
+    /// A trigger's statements run in their own frame, so they don't inherit it.
+    /// </summary>
+    public byte[]? ChangeTrackingContext;
+
+    /// <summary>
     /// The id of the autocommit transaction this statement runs in when the
     /// session has no user transaction, drawn from the server-wide counter on
     /// first read and 0 until then; cleared alongside the <see cref="UtcNow"/>

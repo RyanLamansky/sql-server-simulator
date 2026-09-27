@@ -444,9 +444,11 @@ partial class Simulation
         }
         var lockableTable = IsLockableTable(table);
         var captureVersions = Storage.VersionStore.IsVersioningEnabled(context.Batch.DatabaseFor(table)) && lockableTable;
-        foreach (var (pageIndex, slotIndex, _) in deleted)
+        var tracking = table.ChangeTracking;
+        foreach (var (pageIndex, slotIndex, fullOld) in deleted)
         {
             table.OwningDatabase?.RejectWriteWhenReadOnly();
+            tracking?.RecordRow(context.Batch, table, fullOld ?? DecodeFullRow(table, table.Heap.ReadSlotBytes(pageIndex, slotIndex)!), ChangeTrackingOperation.Delete);
             if (lockableTable)
             {
                 context.Batch.AcquireRowLockTxScoped(table, pageIndex, slotIndex, LockMode.Exclusive);

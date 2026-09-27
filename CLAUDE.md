@@ -307,6 +307,8 @@ Where an entry carries a second clause it is because that fact changes what you'
 - **CHECK / PRIMARY KEY / UNIQUE enforcement, the computed-column rules, `IGNORE_DUP_KEY`** — enforcement shares the per-`Heap` seek cache with reads and FK checks → [`constraints.md`](docs/claude/constraints.md).
 - **`FOREIGN KEY` + referential actions** — including the child triggers a cascade fires and its mutual exclusion with an `INSTEAD OF` trigger over the same verb → [`foreign-keys.md`](docs/claude/foreign-keys.md).
 - **`PERIOD FOR SYSTEM_TIME`, the history sibling and its validation, `HISTORY_RETENTION_PERIOD`, all five `FOR SYSTEM_TIME` query forms** → [`temporal-tables.md`](docs/claude/temporal-tables.md).
+- **Change tracking** — the database and table switches, `CHANGETABLE(CHANGES | VERSION …)`, `WITH CHANGE_TRACKING_CONTEXT`, the `CHANGE_TRACKING_*` scalars and catalog.
+  Tracked writes ride the undo log and draw **one version per committing transaction** in `UndoLog.Commit`, so a new write site records through `TableChangeTracking` or its rows go untracked → [`change-tracking.md`](docs/claude/change-tracking.md).
 - **`ALTER TABLE` ADD / DROP / ALTER COLUMN + CONSTRAINT, the period pair, `REBUILD`, trust toggling**.
   A DEFAULT expression has an **empty scope** — a name inside one is Msg 128 even when it *is* a column → [`alter-table.md`](docs/claude/alter-table.md).
 - **`CREATE INDEX`, inline indexes, columnstore indexes, indexed views, `ALTER INDEX`, disabled indexes, `CREATE STATISTICS`, computed columns as keys** — plus the **access-path choices** a read makes over the per-`Heap` seek cache, which is where query throughput actually lives.

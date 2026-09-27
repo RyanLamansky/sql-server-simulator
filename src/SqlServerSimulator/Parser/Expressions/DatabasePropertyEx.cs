@@ -92,6 +92,8 @@ internal sealed class DatabasePropertyEx : Expression
             "ISAUTOCREATESTATISTICSINCREMENTAL" => Switch(DatabaseSwitches.AutoCreateStatisticsIncremental),
             "ISAUTOSHRINK" => Switch(DatabaseSwitches.AutoShrink),
             "ISAUTOUPDATESTATISTICS" => Switch(DatabaseSwitches.AutoUpdateStatistics),
+            // Undocumented, but answered: tinyint 1 while the database tracks changes.
+            "ISCHANGETRACKINGENABLED" => SqlValue.FromByte(db.ChangeTracking is null ? (byte)0 : (byte)1),
             // The clone and snapshot-backup states read tinyint, and the
             // replication, standby and memory-optimized ones int — all off.
             "ISCLONE" or "ISDATABASESUSPENDEDFORSNAPSHOTBACKUP" or "ISVERIFIEDCLONE" => SqlValue.FromByte(0),

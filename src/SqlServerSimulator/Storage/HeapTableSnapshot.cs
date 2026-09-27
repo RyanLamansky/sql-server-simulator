@@ -33,6 +33,7 @@ internal sealed class HeapTableSnapshot
     private readonly int historyRetentionPeriod;
     private readonly HistoryRetentionUnit historyRetentionUnit;
     private readonly FullTextIndex? fullTextIndex;
+    private readonly TableChangeTracking? changeTracking;
     private readonly KeyConstraint[] keyConstraints;
     private readonly (string Name, bool IsDisabled, byte FillFactor, bool IsPadded)[] keyState;
     private readonly CheckConstraint[] checkConstraints;
@@ -68,6 +69,7 @@ internal sealed class HeapTableSnapshot
         this.historyRetentionPeriod = table.HistoryRetentionPeriod;
         this.historyRetentionUnit = table.HistoryRetentionUnit;
         this.fullTextIndex = table.FullTextIndex;
+        this.changeTracking = table.ChangeTracking;
         this.keyConstraints = [.. table.KeyConstraints];
         this.keyState = Array.ConvertAll(this.keyConstraints, key => (key.Name, key.IsDisabled, key.FillFactor, key.IsPadded));
         this.checkConstraints = [.. table.CheckConstraints];
@@ -121,6 +123,7 @@ internal sealed class HeapTableSnapshot
         table.HistoryRetentionPeriod = this.historyRetentionPeriod;
         table.HistoryRetentionUnit = this.historyRetentionUnit;
         table.FullTextIndex = this.fullTextIndex;
+        table.ChangeTracking = this.changeTracking;
 
         Refill(table.KeyConstraints, this.keyConstraints);
         for (var i = 0; i < this.keyConstraints.Length; i++)

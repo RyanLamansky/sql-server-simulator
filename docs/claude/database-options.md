@@ -1,7 +1,7 @@
 # `ALTER DATABASE` SET-option surface
 
 Closed accept-list parser (`RecognizedDatabaseOptions` in `Simulation.Alter.cs`) covering every database-scope toggle SqlPackage emits from a bacpac's `SqlDatabaseOptions` element.
-Most options are recorded without behavior — see [Recorded switches](#recorded-switches) — and only the seven "load-bearing" toggles (`COMPATIBILITY_LEVEL`, `ALLOW_SNAPSHOT_ISOLATION`, `READ_COMMITTED_SNAPSHOT`, `RECURSIVE_TRIGGERS`, `TRUSTWORTHY`, `DB_CHAINING`, `READ_ONLY` / `READ_WRITE`) drive actual behavior.
+Most options are recorded without behavior — see [Recorded switches](#recorded-switches) — and only the eight "load-bearing" toggles (`COMPATIBILITY_LEVEL`, `ALLOW_SNAPSHOT_ISOLATION`, `READ_COMMITTED_SNAPSHOT`, `RECURSIVE_TRIGGERS`, `TRUSTWORTHY`, `DB_CHAINING`, `READ_ONLY` / `READ_WRITE`, `CHANGE_TRACKING`) drive actual behavior.
 `RECOVERY` is tracked without driving anything — the simulator has no transaction log, but `sys.databases.recovery_model` / `recovery_model_desc` report it, and a bacpac carries the source database's value, so an imported database describes itself the way the original did.
 Real ships `master` / `tempdb` / `msdb` SIMPLE and `model` FULL, which every new user database inherits (probe-confirmed).
 
@@ -67,6 +67,8 @@ These dispatch to dedicated helpers rather than falling into the parse-and-disca
   See [`permissions.md`](permissions.md#cross-database-references).
 - **`READ_ONLY` / `READ_WRITE`** — toggles `Database.IsReadOnly`, which refuses every write to that database.
   See [Read-only databases](#read-only-databases).
+- **`CHANGE_TRACKING`** — `= ON [( … )]` / `= OFF` / `( … )` sets `Database.ChangeTracking`, which `ALTER TABLE … ENABLE CHANGE_TRACKING` requires; it must stand alone in its `SET` list.
+  See [`change-tracking.md`](change-tracking.md).
 
 Both cross-database toggles take the bare `ON` / `OFF` shape (`SET TRUSTWORTHY = ON` is Msg 102, probe-confirmed), and each refuses a set of system databases whatever the value asked for:
 

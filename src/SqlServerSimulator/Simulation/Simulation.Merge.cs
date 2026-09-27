@@ -1775,8 +1775,9 @@ partial class Simulation
 
         if (!insteadOfDelete)
         {
-            foreach (var (page, slot, _, _) in pendingDeletes)
+            foreach (var (page, slot, oldValues, _) in pendingDeletes)
             {
+                destinationTable.ChangeTracking?.RecordRow(context.Batch, destinationTable, oldValues, ChangeTrackingOperation.Delete);
                 if (lockableTable)
                 {
                     context.Batch.AcquireRowLockTxScoped(destinationTable, page, slot, LockMode.Exclusive);
@@ -1785,10 +1786,15 @@ partial class Simulation
                 destinationTable.Heap.DeleteAt(page, slot, undoLog, ReclaimSuperseded(destinationTable, context));
             }
         }
+        var tracking = destinationTable.ChangeTracking;
         if (!insteadOfUpdate)
         {
-            foreach (var (page, slot, _, newValues, _) in pendingUpdates)
+            var keyOrdinals = tracking is null ? [] : TableChangeTracking.KeyOrdinals(destinationTable);
+            var trackedColumns = tracking?.UpdatedColumns(destinationTable, keyOrdinals, updatedColumnOrdinals);
+            List<(SqlValue[] OldKey, SqlValue[] NewKey)>? keyMoves = null;
+            foreach (var (page, slot, oldValues, newValues, _) in pendingUpdates)
             {
+                tracking?.RecordUpdate(context.Batch, destinationTable, keyOrdinals, oldValues, newValues, trackedColumns, ref keyMoves);
                 var rewritten = RowEncoder.EncodeRow(destinationTable.StoredColumns, ProjectStoredValues(destinationTable, newValues), destinationTable.Heap);
                 if (lockableTable)
                 {
@@ -1798,11 +1804,13 @@ partial class Simulation
                 }
                 destinationTable.Heap.UpdateAt(page, slot, rewritten, undoLog, ReclaimSuperseded(destinationTable, context));
             }
+            tracking?.RecordKeyMoves(context.Batch, destinationTable, keyMoves);
         }
         if (!insteadOfInsert)
         {
             foreach (var (newValues, _) in pendingInserts)
             {
+                tracking?.RecordRow(context.Batch, destinationTable, newValues, ChangeTrackingOperation.Insert);
                 var (newPage, newSlot) = destinationTable.Heap.Insert(RowEncoder.EncodeRow(destinationTable.StoredColumns, ProjectStoredValues(destinationTable, newValues), destinationTable.Heap), undoLog);
                 if (lockableTable)
                     context.Batch.AcquireRowLockTxScoped(destinationTable, newPage, newSlot, LockMode.Exclusive);

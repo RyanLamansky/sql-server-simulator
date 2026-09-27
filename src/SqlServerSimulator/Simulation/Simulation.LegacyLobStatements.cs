@@ -293,6 +293,12 @@ partial class Simulation
         var lockable = IsLockableTable(table);
         if (lockable)
             batch.AcquireRowLockTxScoped(table, address.PageIndex, address.SlotIndex, LockMode.Exclusive);
+        if (table.ChangeTracking is { } tracking)
+        {
+            var keyOrdinals = TableChangeTracking.KeyOrdinals(table);
+            tracking.Record(batch, table, TableChangeTracking.KeyOf(DecodeFullRow(table, oldBytes), keyOrdinals), ChangeTrackingOperation.Update,
+                tracking.UpdatedColumns(table, keyOrdinals, [columnIndex]));
+        }
         var undoLog = table.IsTableVariable ? batch.CurrentTableVarUndoLog : batch.CurrentUndoLog;
         table.Heap.UpdateAt(address.PageIndex, address.SlotIndex, RowEncoder.EncodeRow(table.StoredColumns, values, table.Heap), undoLog);
         if (lockable && VersionStore.IsVersioningEnabled(batch.DatabaseFor(table)))

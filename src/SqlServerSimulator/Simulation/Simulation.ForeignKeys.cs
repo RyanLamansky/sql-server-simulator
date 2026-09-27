@@ -291,8 +291,11 @@ partial class Simulation
     {
         var childTable = fk.ChildTable;
         var undoLog = childTable.IsTableVariable ? context.Batch.CurrentTableVarUndoLog : context.Batch.CurrentUndoLog;
-        foreach (var (pageIndex, slotIndex, _) in matchingChildRows)
+        foreach (var (pageIndex, slotIndex, full) in matchingChildRows)
+        {
+            childTable.ChangeTracking?.RecordRow(context.Batch, childTable, full, ChangeTrackingOperation.Delete);
             childTable.Heap.DeleteAt(pageIndex, slotIndex, undoLog, ReclaimSuperseded(childTable, context));
+        }
         // Recurse: the just-deleted child rows may themselves be parents of
         // further FKs pointing at this child table.
         var oldRows = new List<SqlValue[]>(matchingChildRows.Count);
@@ -422,6 +425,11 @@ partial class Simulation
         var childTable = fk.ChildTable;
         var undoLog = childTable.IsTableVariable ? context.Batch.CurrentTableVarUndoLog : context.Batch.CurrentUndoLog;
         var newPairs = new List<(SqlValue[] OldFull, SqlValue[] NewFull)>(matching.Count);
+        // A cascade's rewrite records against the FK columns it set.
+        var tracking = childTable.ChangeTracking;
+        var keyOrdinals = tracking is null ? [] : TableChangeTracking.KeyOrdinals(childTable);
+        var trackedColumns = tracking?.UpdatedColumns(childTable, keyOrdinals, fk.ChildColumnOrdinals);
+        List<(SqlValue[] OldKey, SqlValue[] NewKey)>? keyMoves = null;
         foreach (var (pageIndex, slotIndex, full, parentNew) in matching)
         {
             var oldClone = (SqlValue[])full.Clone();
@@ -448,9 +456,11 @@ partial class Simulation
                 context.Batch.NoteSupersededRow(childTable, pageIndex, slotIndex);
                 context.Batch.ProbeKeyRangesForWrite(childTable, rewritten);
             }
+            tracking?.RecordUpdate(context.Batch, childTable, keyOrdinals, oldClone, newRow, trackedColumns, ref keyMoves);
             childTable.Heap.UpdateAt(pageIndex, slotIndex, rewritten, undoLog, ReclaimSuperseded(childTable, context));
             newPairs.Add((oldClone, newRow));
         }
+        tracking?.RecordKeyMoves(context.Batch, childTable, keyMoves);
         // Recurse: the child rows just got their FK columns rewritten — if
         // those columns are themselves a key referenced by another FK, that
         // FK's UPDATE action fires.
@@ -492,6 +502,11 @@ partial class Simulation
         var childTable = fk.ChildTable;
         var undoLog = childTable.IsTableVariable ? context.Batch.CurrentTableVarUndoLog : context.Batch.CurrentUndoLog;
         var newPairs = new List<(SqlValue[] OldFull, SqlValue[] NewFull)>(matchingChildRows.Count);
+        // A cascade's rewrite records against the FK columns it set.
+        var tracking = childTable.ChangeTracking;
+        var keyOrdinals = tracking is null ? [] : TableChangeTracking.KeyOrdinals(childTable);
+        var trackedColumns = tracking?.UpdatedColumns(childTable, keyOrdinals, fk.ChildColumnOrdinals);
+        List<(SqlValue[] OldKey, SqlValue[] NewKey)>? keyMoves = null;
         foreach (var (pageIndex, slotIndex, full) in matchingChildRows)
         {
             var oldClone = (SqlValue[])full.Clone();
@@ -511,9 +526,11 @@ partial class Simulation
                 context.Batch.NoteSupersededRow(childTable, pageIndex, slotIndex);
                 context.Batch.ProbeKeyRangesForWrite(childTable, rewritten);
             }
+            tracking?.RecordUpdate(context.Batch, childTable, keyOrdinals, oldClone, newRow, trackedColumns, ref keyMoves);
             childTable.Heap.UpdateAt(pageIndex, slotIndex, rewritten, undoLog, ReclaimSuperseded(childTable, context));
             newPairs.Add((oldClone, newRow));
         }
+        tracking?.RecordKeyMoves(context.Batch, childTable, keyMoves);
         // For SET NULL / SET DEFAULT under a DELETE on parent, the recursion
         // shape is still UPDATE on the child (the FK column changed). Use the
         // UPDATE-flavored recursion so downstream incoming FKs see the right

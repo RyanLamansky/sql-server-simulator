@@ -254,6 +254,7 @@ partial class Simulation
                 batch.AcquireRowLockTxScoped(table, pageIndex, slotIndex, LockMode.Exclusive);
                 VersionStore.CaptureWrite(batch, table, (pageIndex, slotIndex), oldRid: null, oldPayload: null, VersionWriteKind.Insert);
             }
+            table.ChangeTracking?.RecordRow(batch, table, rowValues, ChangeTrackingOperation.Insert);
 
             triggerRows?.Add((SqlValue[])rowValues.Clone());
         }

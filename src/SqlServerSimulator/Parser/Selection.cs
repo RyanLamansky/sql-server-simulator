@@ -2616,6 +2616,7 @@ internal sealed partial class Selection
             if (string.Equals(nextName.Value, "OPENJSON", StringComparison.OrdinalIgnoreCase)
                 || string.Equals(nextName.Value, "STRING_SPLIT", StringComparison.OrdinalIgnoreCase)
                 || string.Equals(nextName.Value, "GENERATE_SERIES", StringComparison.OrdinalIgnoreCase)
+                || IsChangeTableName(nextName.Value)
                 || IsRegexpRowsetName(nextName.Value, context))
             {
                 context.RestoreCheckpoint(checkpoint);
@@ -2814,6 +2815,9 @@ internal sealed partial class Selection
                 // GENERATE_SERIES: single-column (`value`) plan, SQL Server 2022+.
                 if (string.Equals(tableName.Value, "GENERATE_SERIES", StringComparison.OrdinalIgnoreCase))
                     return BuiltInRowsetSource(context, InArgumentScope(context, scope, () => ParseGenerateSeries(context, scope.OuterTypeResolver)));
+
+                if (IsChangeTableName(tableName.Value))
+                    return InArgumentScope(context, scope, () => ParseChangeTableSource(context, scope));
 
                 // The two REGEXP rowset members ship only at compatibility
                 // level 170; below it the name falls through to the ordinary

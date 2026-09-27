@@ -633,6 +633,7 @@ partial class Simulation
                         context.Batch.AcquireRowLockTxScoped(destinationTable, pageIndex, slotIndex, LockMode.Exclusive);
                         Storage.VersionStore.CaptureWrite(context.Batch, destinationTable, (pageIndex, slotIndex), oldRid: null, oldPayload: null, Storage.VersionWriteKind.Insert);
                     }
+                    destinationTable.ChangeTracking?.RecordRow(context.Batch, destinationTable, rowValues, Storage.ChangeTrackingOperation.Insert);
                 }
 
                 if (output is { } o)

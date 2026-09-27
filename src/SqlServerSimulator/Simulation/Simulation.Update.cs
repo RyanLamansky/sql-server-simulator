@@ -975,10 +975,16 @@ partial class Simulation
                 oldBytesPerAffected[i] = table.Heap.ReadSlotBytes(pageIndex, slotIndex) ?? [];
             }
         }
+        // Change tracking reads each row's old key before the write replaces it.
+        var tracking = table.ChangeTracking;
+        var keyOrdinals = tracking is null ? [] : TableChangeTracking.KeyOrdinals(table);
+        var trackedColumns = tracking?.UpdatedColumns(table, keyOrdinals, updatedColumnOrdinals);
+        List<(SqlValue[] OldKey, SqlValue[] NewKey)>? keyMoves = null;
         for (var i = 0; i < affected.Count; i++)
         {
-            var (pageIndex, slotIndex, fullNew, _) = affected[i];
+            var (pageIndex, slotIndex, fullNew, fullOld) = affected[i];
             table.OwningDatabase?.RejectWriteWhenReadOnly();
+            tracking?.RecordUpdate(context.Batch, table, keyOrdinals, fullOld ?? DecodeFullRow(table, table.Heap.ReadSlotBytes(pageIndex, slotIndex)!), fullNew, trackedColumns, ref keyMoves);
             if (lockableTable)
             {
                 context.Batch.AcquireRowLockTxScoped(table, pageIndex, slotIndex, LockMode.Exclusive);
@@ -994,6 +1000,7 @@ partial class Simulation
             if (lockableTable && oldBytesPerAffected is not null)
                 Storage.VersionStore.CaptureWrite(context.Batch, table, (pageIndex, slotIndex), (pageIndex, slotIndex), oldBytesPerAffected[i], Storage.VersionWriteKind.Update);
         }
+        tracking?.RecordKeyMoves(context.Batch, table, keyMoves);
 
         // Indexed-view maintenance: re-evaluate any unique-indexed view over
         // this table on the post-update base rows and enforce uniqueness

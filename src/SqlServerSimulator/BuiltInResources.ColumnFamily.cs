@@ -43,12 +43,9 @@ internal static partial class BuiltInResources
                     SqlValue.FromInt32(t.PeriodColumns.Value.EndOrdinal + 1),
                 }));
 
-        // sys.change_tracking_tables / sys.external_tables / sys.filetables:
-        // change tracking, PolyBase external tables, and FileTables aren't
-        // modeled, so each is an empty view with the documented SQL Server 2025
-        // shape. SMO's CREATE-scripting table query LEFT JOINs all three to
-        // detect those table flavors; the empty projection resolves the join
-        // to "not one of these".
+        // sys.change_tracking_tables: one row per tracked table of the
+        // database, in object-id order. begin_version and min_valid_version
+        // read the same value, since nothing is cleaned up.
         Sys("change_tracking_tables",
         [
             new("object_id", SqlType.Int32, null, false),
@@ -56,8 +53,25 @@ internal static partial class BuiltInResources
             new("min_valid_version", SqlType.BigInt, null, true),
             new("begin_version", SqlType.BigInt, null, true),
             new("cleanup_version", SqlType.BigInt, null, true),
-        ], static (batch, database) => []);
+        ], static (batch, database) =>
+            database.Schemas.Values
+                .SelectMany(s => s.HeapTables.Values)
+                .Where(t => t.ChangeTracking is not null)
+                .OrderBy(t => t.ObjectId)
+                .Select(t => new SqlValue[]
+                {
+                    SqlValue.FromInt32(t.ObjectId),
+                    SqlValue.FromBoolean(t.ChangeTracking!.TrackColumnsUpdated),
+                    SqlValue.FromInt64(t.ChangeTracking.MinValidVersion),
+                    SqlValue.FromInt64(t.ChangeTracking.MinValidVersion),
+                    SqlValue.Null(SqlType.BigInt),
+                }));
 
+        // sys.external_tables / sys.filetables: PolyBase external tables and
+        // FileTables aren't modeled, so each is an empty view with the
+        // documented SQL Server 2025 shape. SMO's CREATE-scripting table query
+        // LEFT JOINs both to detect those table flavors; the empty projection
+        // resolves the join to "not one of these".
         Sys("external_tables",
         [
             new("name", SqlType.SystemName, 128, false),
@@ -127,10 +141,9 @@ internal static partial class BuiltInResources
             new("rank_desc", SqlType.Varchar, 8, true),
         ], static (batch, database) => []);
 
-        // sys.database_recovery_status / sys.change_tracking_databases /
-        // sys.database_filestream_options: recovery-fork bookkeeping, database
-        // change tracking, and FILESTREAM options aren't modeled, so all three
-        // are empty views with the documented SQL Server 2025 shape. SMO's
+        // sys.database_recovery_status / sys.database_filestream_options:
+        // recovery-fork bookkeeping and FILESTREAM options aren't modeled, so
+        // both are empty views with the documented SQL Server 2025 shape. SMO's
         // database-properties preamble LEFT JOINs each by database_id; an empty
         // projection resolves each property to its ISNULL default.
         Sys("database_recovery_status",
@@ -152,7 +165,20 @@ internal static partial class BuiltInResources
             new("retention_period_units", SqlType.TinyInt, null, true),
             new("retention_period_units_desc", NVarcharSqlType.Get(60, Collation.Baseline, Coercibility.Implicit), 60, true),
             new("max_cleanup_version", SqlType.BigInt, null, true),
-        ], static (batch, database) => []);
+        ], static (batch, database) =>
+            // Server-wide like sys.databases: every tracking database, from any
+            // database's copy of the view.
+            Parser.Expressions.DbId.DatabasesWithIds(batch.Connection.Simulation)
+                .Where(entry => entry.Database.ChangeTracking is not null)
+                .Select(entry => new SqlValue[]
+                {
+                    SqlValue.FromInt32(entry.Id),
+                    SqlValue.FromByte(entry.Database.ChangeTracking!.AutoCleanup ? (byte)1 : (byte)0),
+                    SqlValue.FromInt32(entry.Database.ChangeTracking.RetentionPeriod),
+                    SqlValue.FromByte((byte)entry.Database.ChangeTracking.RetentionUnit),
+                    SqlValue.FromNVarchar(entry.Database.ChangeTracking.RetentionUnit.ToString().ToUpperInvariant()),
+                    SqlValue.Null(SqlType.BigInt),
+                }));
 
         Sys("database_filestream_options",
         [

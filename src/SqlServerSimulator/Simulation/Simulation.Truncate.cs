@@ -129,5 +129,17 @@ partial class Simulation
 
         if (context.Connection.CurrentTransaction is { } tx)
             tx.UndoLog.RecordTruncation(table.Heap, oldPages, oldLobPages, oldForwardTargets, oldFreeLobPages, [.. identitySnapshots]);
+
+        // A tracked table forgets its change history and restarts it at the
+        // current version, which the truncation itself doesn't advance (probed
+        // 2026-09-27 against SQL Server 2025).
+        if (table.ChangeTracking is { } tracking)
+        {
+            var database = batch.DatabaseFor(table);
+            if (context.Connection.CurrentTransaction is { } trackingTx)
+                trackingTx.UndoLog.RecordChangeTrackingTruncation(tracking, database);
+            else
+                tracking.Reset(database.ChangeTrackingVersion);
+        }
     }
 }

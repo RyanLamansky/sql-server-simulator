@@ -60,6 +60,10 @@ internal sealed class UndoLog
 {
     private readonly List<UndoEntry> entries = [];
 
+    // Set by the first change tracking entry, so a commit that recorded none
+    // skips the versioning pass.
+    private bool recordsChangeTracking;
+
     public void RecordInsert(Heap heap, int pageIndex, int slotIndex) =>
         this.entries.Add(new SlotChange(heap, UndoKind.Insert, pageIndex, slotIndex, freeOnCommit: false));
 
@@ -97,11 +101,6 @@ internal sealed class UndoLog
         this.entries.Add(new LocalTempTableRemoval(connection, table));
 
     /// <summary>
-    /// Records a <c>DBCC CHECKIDENT</c> reseed, which a rollback undoes
-    /// (probed 2026-09-24 against SQL Server 2025) though a generated value
-    /// never is.
-    /// </summary>
-    /// <summary>
     /// Records a catalog change to a permanent object — created, altered or
     /// dropped — whose rollback runs <paramref name="undo"/> and then
     /// invalidates every cached plan, since a plan compiled since may name the
@@ -110,11 +109,54 @@ internal sealed class UndoLog
     public void RecordSchemaChange(Simulation simulation, Action undo) =>
         this.entries.Add(new SchemaChange(simulation, undo));
 
+    /// <summary>
+    /// Records a <c>DBCC CHECKIDENT</c> reseed, which a rollback undoes
+    /// (probed 2026-09-24 against SQL Server 2025) though a generated value
+    /// never is.
+    /// </summary>
     public void RecordIdentityReseed(IdentityState state, (long? HighWaterMark, long? ReseededStart) snapshot) =>
         this.entries.Add(new IdentityReseed(state, snapshot));
 
     public void RecordTruncation(Heap heap, List<HeapPage> oldPages, List<HeapLobPage> oldLobPages, HashSet<(int Page, int Slot)> oldForwardTargets, int[] oldFreeLobPages, (IdentityState State, long? HighWaterMark)[] identitySnapshots) =>
         this.entries.Add(new HeapTruncation(heap, oldPages, oldLobPages, oldForwardTargets, oldFreeLobPages, identitySnapshots));
+
+    /// <summary>
+    /// Records a write to a change-tracked table, published with its
+    /// transaction's version when the log commits and dropped when the write
+    /// rolls back.
+    /// </summary>
+    public void RecordChangeTracking(PendingRowChange change)
+    {
+        this.recordsChangeTracking = true;
+        this.entries.Add(new ChangeTrackingRow(change));
+    }
+
+    /// <summary>
+    /// Records a truncation of a change-tracked table, which on commit forgets
+    /// the table's history and raises its minimum valid version.
+    /// </summary>
+    public void RecordChangeTrackingTruncation(TableChangeTracking tracking, Database database)
+    {
+        this.recordsChangeTracking = true;
+        this.entries.Add(new ChangeTrackingTruncation(tracking, database));
+    }
+
+    /// <summary>
+    /// Whether this log holds an uncommitted change to the tracked row
+    /// <paramref name="key"/> — which <c>CHANGETABLE(VERSION …)</c> reports as
+    /// a NULL version inside the writing transaction.
+    /// </summary>
+    public bool HasPendingChange(TableChangeTracking tracking, Parser.SqlValueKey key)
+    {
+        if (!this.recordsChangeTracking)
+            return false;
+        foreach (var entry in this.entries)
+        {
+            if (entry is ChangeTrackingRow row && ReferenceEquals(row.Change.Tracking, tracking) && key.Equals(new Parser.SqlValueKey(row.Change.Key)))
+                return true;
+        }
+        return false;
+    }
 
     /// <summary>
     /// Current end-of-log position, captured by callers as a marker before a
@@ -178,9 +220,46 @@ internal sealed class UndoLog
     /// </summary>
     public void Commit()
     {
+        if (this.recordsChangeTracking)
+        {
+            PublishChangeTracking();
+            this.recordsChangeTracking = false;
+        }
         for (var i = 0; i < this.entries.Count; i++)
             this.entries[i].Commit();
         this.entries.Clear();
+    }
+
+    /// <summary>
+    /// Gives each database whose tracked tables this transaction changed one
+    /// new version, and publishes the changes under it in log order. A
+    /// truncation alone draws no version (probed 2026-09-27 against SQL
+    /// Server 2025), so its minimum valid version is the one current before
+    /// the transaction's own.
+    /// </summary>
+    private void PublishChangeTracking()
+    {
+        Dictionary<Database, long>? versions = null;
+        foreach (var entry in this.entries)
+        {
+            switch (entry)
+            {
+                case ChangeTrackingRow row:
+                    versions ??= [];
+                    var database = row.Change.Database;
+                    if (!versions.TryGetValue(database, out var version))
+                        versions[database] = version = database.AllocateChangeTrackingVersion();
+                    row.Change.Tracking.Apply(row.Change, version);
+                    break;
+                case ChangeTrackingTruncation truncation:
+                    truncation.Tracking.Reset(versions is not null && versions.TryGetValue(truncation.Database, out var drawn)
+                        ? drawn - 1
+                        : truncation.Database.ChangeTrackingVersion);
+                    break;
+                default:
+                    break;
+            }
+        }
     }
 
     /// <summary>
@@ -401,6 +480,28 @@ internal sealed class UndoLog
         public readonly HeapTable Table = table;
 
         public override void Undo() => this.Connection.ReinstateTempTable(this.Table);
+    }
+
+    // Neither change tracking entry has anything to undo: dropping the entry
+    // is the rollback.
+    private sealed class ChangeTrackingRow(PendingRowChange change) : UndoEntry
+    {
+        public readonly PendingRowChange Change = change;
+
+        public override void Undo()
+        {
+        }
+    }
+
+    private sealed class ChangeTrackingTruncation(TableChangeTracking tracking, Database database) : UndoEntry
+    {
+        public readonly TableChangeTracking Tracking = tracking;
+
+        public readonly Database Database = database;
+
+        public override void Undo()
+        {
+        }
     }
 
     private sealed class SchemaChange(Simulation simulation, Action undo) : UndoEntry

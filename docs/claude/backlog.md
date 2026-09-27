@@ -280,7 +280,6 @@ Re-fetch <https://learn.microsoft.com/en-us/sql/t-sql/functions/functions> befor
 Blocked on a larger unmodeled parent feature (shipping a function here implies the parent ships too):
 
 - **Graph** (node/edge tables) — EDGE_ID_FROM_PARTS / GRAPH_ID_FROM_EDGE_ID / GRAPH_ID_FROM_NODE_ID / NODE_ID_FROM_PARTS / OBJECT_ID_FROM_EDGE_ID / OBJECT_ID_FROM_NODE_ID.
-- **Change tracking** — CHANGETABLE(CHANGES …) / CHANGETABLE(VERSION …).
 - **CLR procedures / TVFs / aggregates / UDTs** — CLR *scalar functions* ship (see [`clr-assemblies.md`](clr-assemblies.md)); the rest reference `Microsoft.SqlServer.Server.SqlContext` / `SqlPipe` / `SqlDataRecord` / `SqlMetaData`, which lived in .NET Framework's `System.Data.dll` and are absent from .NET's facade, so they need a substitute `System.Data` injected into the load context that type-forwards `SqlTypes` onward and supplies the missing namespace. That shim is the whole cost; scalar functions needed none, which is why they shipped first.
 - **ML scoring** (PREDICT surface not modeled) — PREDICT(MODEL = …, DATA = …).
 - **Ad-hoc data sources** — OPENROWSET (file/bulk + provider rowsets); OPENDATASOURCE (the inline four-part-name form; `OPENQUERY` ships — see [`linked-servers.md`](linked-servers.md), and `OPENXML` + the `sp_xml_preparedocument` / `sp_xml_removedocument` pair ship too — see [`xml.md`](xml.md#openxml)).

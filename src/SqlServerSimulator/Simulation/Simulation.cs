@@ -2616,6 +2616,7 @@ public sealed partial class Simulation
         batch.CurrentStatement.SubqueryResults = null;
         batch.CurrentStatement.CatalogViewRows = null;
         batch.CurrentStatement.AutocommitTransactionId = 0;
+        batch.CurrentStatement.ChangeTrackingContext = null;
 
         // WITH prefix applies to the immediately-following SELECT / INSERT /
         // UPDATE / DELETE / MERGE. ParseCteBindings sets context.CteBindings

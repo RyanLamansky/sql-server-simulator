@@ -213,6 +213,26 @@ internal sealed class Database
     public long LastRowVersion => Interlocked.Read(ref this.rowVersionCounter);
 
     /// <summary>
+    /// The database's change tracking settings, set by <c>ALTER DATABASE … SET
+    /// CHANGE_TRACKING = ON</c>; null while tracking is off.
+    /// </summary>
+    public DatabaseChangeTracking? ChangeTracking;
+
+    // The change tracking version counter outlives an OFF / ON cycle (probed
+    // 2026-09-27 against SQL Server 2025), so it lives here rather than on
+    // ChangeTracking.
+    private long changeTrackingVersion;
+
+    /// <summary>
+    /// Allocates the version a committing transaction's tracked changes carry:
+    /// one per transaction that changed a tracked table of this database.
+    /// </summary>
+    public long AllocateChangeTrackingVersion() => Interlocked.Increment(ref this.changeTrackingVersion);
+
+    /// <summary>The last change tracking version committed, which <c>CHANGE_TRACKING_CURRENT_VERSION()</c> reports.</summary>
+    public long ChangeTrackingVersion => Interlocked.Read(ref this.changeTrackingVersion);
+
+    /// <summary>
     /// <c>ALLOW_SNAPSHOT_ISOLATION</c> per-database setting. Default <c>false</c>;
     /// flipped by <c>ALTER DATABASE … SET ALLOW_SNAPSHOT_ISOLATION { ON | OFF }</c>.
     /// When <c>false</c>, any user-table access by a session whose

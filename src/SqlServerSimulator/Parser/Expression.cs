@@ -2057,6 +2057,17 @@ internal abstract class Expression : ExpressionNode
                 "FULLTEXTSERVICEPROPERTY" => new FullTextServiceProperty(context),
                 _ => null
             },
+            31 => uppercaseName switch
+            {
+                "CHANGE_TRACKING_CURRENT_VERSION" => new ChangeTrackingCurrentVersion(context),
+                _ => null
+            },
+            33 => uppercaseName switch
+            {
+                "CHANGE_TRACKING_IS_COLUMN_IN_MASK" => new ChangeTrackingIsColumnInMask(context),
+                "CHANGE_TRACKING_MIN_VALID_VERSION" => new ChangeTrackingMinValidVersion(context),
+                _ => null
+            },
             34 => uppercaseName switch
             {
                 "GET_FILESTREAM_TRANSACTION_CONTEXT" => new GetFilestreamTransactionContext(context),

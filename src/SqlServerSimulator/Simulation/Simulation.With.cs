@@ -1,5 +1,7 @@
 using SqlServerSimulator.Parser;
+using SqlServerSimulator.Parser.Expressions;
 using SqlServerSimulator.Parser.Tokens;
+using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator;
 
@@ -71,12 +73,65 @@ partial class Simulation
         }
     }
 
+    /// <summary>
+    /// Parses <c>CHANGE_TRACKING_CONTEXT ( @variable | 0x… )</c> from its keyword,
+    /// leaving the cursor past the <c>)</c>, and records the value on the
+    /// statement frame. The value may only be a variable or a binary literal —
+    /// anything else, <c>NULL</c> included, is a syntax error at it — and a
+    /// variable must be <c>varbinary</c> or <c>binary</c> of at most 128 bytes
+    /// (Msg 22109; probed 2026-09-27 against SQL Server 2025). The statement
+    /// parses and runs in one pass, so a variable is read where it stands.
+    /// </summary>
+    private static void ParseChangeTrackingContext(ParserContext context)
+    {
+        if (context.GetNextRequired() is not Operator { Character: '(' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        SqlValue value;
+        switch (context.GetNextRequired())
+        {
+            case AtPrefixedString variable:
+                var reference = new VariableReference(variable, context);
+                if (reference.DeclaredType switch
+                {
+                    VarbinarySqlType varbinary => varbinary.length is < 1 or > 128,
+                    BinarySqlType binary => binary.length > 128,
+                    _ => true,
+                })
+                {
+                    throw SimulatedSqlException.ChangeTrackingContextTypeInvalid();
+                }
+                value = context.Batch.IsSkipping ? SqlValue.Null(reference.DeclaredType) : reference.Run(new RuntimeContext(static name => throw SimulatedSqlException.InvalidColumnName(name), context.Batch));
+                break;
+            case Literal { Value.Type: VarbinarySqlType } literal:
+                value = literal.Value;
+                break;
+            default:
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+        }
+        if (context.GetNextRequired() is not Operator { Character: ')' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        context.MoveNextRequired();
+        if (!context.Batch.IsSkipping)
+            context.Batch.CurrentStatement.ChangeTrackingContext = value.IsNull ? null : value.AsBytes;
+    }
+
     private static void ParseCteBindings(ParserContext context)
     {
         var bindings = new Dictionary<string, CteBinding>(StringComparer.OrdinalIgnoreCase);
         context.CteBindings = bindings;
 
         context.MoveNextRequired();
+
+        // CHANGE_TRACKING_CONTEXT (…) tags the statement's tracked writes, and
+        // may lead a CTE list after a comma (probed 2026-09-27 against SQL
+        // Server 2025).
+        if (context.Token is UnquotedString contextWord && Collation.Baseline.Equals(contextWord.Value, "CHANGE_TRACKING_CONTEXT"))
+        {
+            ParseChangeTrackingContext(context);
+            if (context.Token is not Operator { Character: ',' })
+                return;
+            context.MoveNextRequired();
+        }
 
         // XMLNAMESPACES leads the WITH prefix — alone, or ahead of a
         // comma-separated CTE list. Real accepts it only in first position (one
@@ -96,9 +151,11 @@ partial class Simulation
         {
             // Past first position the word is still a keyword, so it can't
             // become a CTE name: real reports Msg 102 on it rather than on
-            // whatever follows.
+            // whatever follows. CHANGE_TRACKING_CONTEXT behaves the same way
+            // (probed 2026-09-27 against SQL Server 2025).
             if (context.Token is not Name cteName
-                || (context.Token is UnquotedString late && Collation.Baseline.Equals(late.Value, "XMLNAMESPACES")))
+                || (context.Token is UnquotedString late
+                    && (Collation.Baseline.Equals(late.Value, "XMLNAMESPACES") || Collation.Baseline.Equals(late.Value, "CHANGE_TRACKING_CONTEXT"))))
             {
                 throw SimulatedSqlException.SyntaxErrorNear(context);
             }

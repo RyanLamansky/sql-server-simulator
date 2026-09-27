@@ -436,6 +436,13 @@ internal sealed class HeapTable : SchemaObject
     public FullTextIndex? FullTextIndex;
 
     /// <summary>
+    /// The table's change tracking, set by <c>ALTER TABLE … ENABLE
+    /// CHANGE_TRACKING</c> and cleared by <c>DISABLE</c>; null for every table
+    /// that isn't tracked, which is the one check a write to such a table pays.
+    /// </summary>
+    public TableChangeTracking? ChangeTracking;
+
+    /// <summary>
     /// XML indexes attached to this table. At most one PRIMARY XML INDEX
     /// per column; zero or more secondary indexes per primary. Populated by
     /// <c>CREATE [PRIMARY] XML INDEX</c>; drained by <c>DROP INDEX</c>;

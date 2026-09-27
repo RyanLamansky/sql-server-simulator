@@ -390,6 +390,7 @@ partial class Simulation
                 undoLog);
             if (Simulation.IsLockableTable(this.Target))
                 this.batch.AcquireRowLockTxScoped(this.Target, newPage, newSlot, LockMode.Exclusive);
+            this.Target.ChangeTracking?.RecordRow(this.batch, this.Target, targetValues, ChangeTrackingOperation.Insert);
         }
     }
 
