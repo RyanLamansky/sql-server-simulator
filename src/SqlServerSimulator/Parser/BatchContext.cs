@@ -335,6 +335,15 @@ internal sealed class BatchContext
     public List<SimulatedSqlException>? CreateTimeBindErrors;
 
     /// <summary>
+    /// The report one statement's binder errors gather into, non-null only
+    /// while <c>Simulation.ReportEveryBindError</c> re-reads a statement whose
+    /// bind failed: the sites that meet a name miss record it here and carry
+    /// on rather than throw. A body the statement calls binds on a batch of its
+    /// own, which never sees it.
+    /// </summary>
+    public BindErrorReport? BindErrors;
+
+    /// <summary>
     /// Whether the last resume after a gathered binder error left the parse
     /// cursor on solid ground — a statement separator or the end of the body,
     /// rather than a keyword the recovery scan guessed at from inside the

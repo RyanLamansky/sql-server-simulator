@@ -146,7 +146,13 @@ partial class Simulation
         }
 
         if (bindErrors.Count > 0)
-            throw SimulatedSqlException.Aggregate(bindErrors);
+        {
+            // Each body statement settled its own report as it bound.
+            var report = SimulatedSqlException.Aggregate(bindErrors);
+            report.BindReportSettled = true;
+            report.CatchReadsFirstEntry = true;
+            throw report;
+        }
     }
 
     /// <summary>

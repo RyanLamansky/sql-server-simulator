@@ -210,7 +210,32 @@ internal sealed class WindowExpression : Expression
         if (!context.AllowsWindowExpressions)
             throw SimulatedSqlException.WindowedFunctionInWrongClause();
         context.WindowCollector?.Add(expression);
+        // Real binds the OVER clause before the function's own arguments.
+        if (context.Batch.BindErrors is { } report)
+        {
+            (int Start, int End)? over = null;
+            foreach (var partition in expression.PartitionBy)
+                over = Widen(over, report.SpanOf(partition));
+            foreach (var item in expression.OrderBy)
+                over = Widen(over, report.SpanOf(item.Expr));
+            if (over is { } overSpan)
+            {
+                foreach (var argument in (Expression?[])[expression.AggregateInfo?.Operand, expression.Operand, expression.OffsetArg, expression.DefaultArg])
+                {
+                    if (report.SpanOf(argument) is { } span && span.End <= overSpan.Start)
+                        report.Defer(span.Start, span.End, overSpan.End, sub: 1);
+                }
+            }
+        }
         return expression;
+
+        static (int Start, int End)? Widen((int Start, int End)? span, (int Start, int End)? more) =>
+            (span, more) switch
+            {
+                (null, _) => more,
+                (_, null) => span,
+                ({ } a, { } b) => (Math.Min(a.Start, b.Start), Math.Max(a.End, b.End)),
+            };
     }
 
     /// <summary>

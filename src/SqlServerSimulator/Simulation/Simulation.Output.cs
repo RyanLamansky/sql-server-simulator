@@ -109,6 +109,7 @@ partial class Simulation
         // An OUTPUT clause rejects NEXT VALUE FOR (Msg 11720), one of the
         // clauses real names in that message.
         var savedRejectNextValueFor = context.EnterNextValueForScope(NextValueForScope.Clause);
+        context.Batch.BindErrors?.EnterClause(context.Token, BindClause.Output);
         try
         {
             return ParseOutputClauseBody(context, table, allowInserted, allowDeleted);
@@ -413,6 +414,7 @@ partial class Simulation
 
         // Msg 11720, as on the mutation-side OUTPUT entry above.
         var savedRejectNextValueFor = context.EnterNextValueForScope(NextValueForScope.Clause);
+        context.Batch.BindErrors?.EnterClause(context.Token, BindClause.Output);
         try
         {
             return ParseInsertOutputClauseBody(context, destinationTable, sourceColumnNames);

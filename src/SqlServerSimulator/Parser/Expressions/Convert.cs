@@ -36,9 +36,13 @@ internal sealed class ConvertExpression : Expression
     private readonly bool tryMode;
     private readonly bool targetReportsNumeric;
 
+    /// <summary>The call's first argument, which a whole-statement bind error report places an illegal conversion at.</summary>
+    private readonly Token? openToken;
+
     public ConvertExpression(ParserContext context, bool tryMode)
     {
         this.tryMode = tryMode;
+        this.openToken = context.Token;
 
         // ResolveBuiltIn delivers context.Token already past the opening
         // paren — sitting on the first argument (the type name).
@@ -207,7 +211,9 @@ internal sealed class ConvertExpression : Expression
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
-        Cast.RejectIllegalConversion(this.source, this.source.GetSqlType(batch, resolveColumnType), this.targetType, this.targetReportsNumeric, batch);
+        batch.BindErrors is { } report
+            ? Cast.TypeWhileReporting(report, this.source, this.openToken, this.targetType, this.targetReportsNumeric, batch, resolveColumnType)
+            : Cast.RejectIllegalConversion(this.source, this.source.GetSqlType(batch, resolveColumnType), this.targetType, this.targetReportsNumeric, batch);
 
     internal override bool ResultReportsNumeric => this.targetReportsNumeric;
 

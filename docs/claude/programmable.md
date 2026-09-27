@@ -111,6 +111,7 @@ Among shape violations, source order decides, and Msg 455 comes last because its
 ### The whole report
 
 Real reports every binder error a body contains, so the bind gathers them instead of stopping at the first: a severity-16 error is recorded on `BatchContext.CreateTimeBindErrors` and the walk resumes at the next statement boundary, and the whole run leaves the `CREATE` as **one exception carrying an entry each**, in source order.
+Each statement contributes its own whole report — every unbindable reference, in the binder's order — see [`errors.md`](errors.md#a-statements-whole-binder-report); an inline function's body, read outside the dispatch loop, reports the same way through `Simulation.ReportingEveryBindError`.
 That is what a client sees from real — probe-confirmed through SqlClient, whose `SqlException.Errors` holds both Msg 207s of a two-bad-column body with their own lines and the module name on each — and the wire path writes one ERROR token per entry, so both front doors match.
 A body's own `TRY` / `CATCH` shields none of them (probe-confirmed): binding precedes any of it running, so the gather is checked ahead of the TRY-frame path in the dispatch loop.
 Procedures, triggers, scalar UDFs and multi-statement TVFs all report their run this way, and an `ALTER` reports it while leaving the previous body standing.
@@ -124,8 +125,6 @@ The walk resumes from a recovery scan, and a scan that stopped on a keyword rath
 
 ### Divergences
 
-- **One error per statement.**
-  Real reports a bad column per *reference*, so `SELECT nosuchone, nosuchtwo FROM t` is two Msg 207s from the one statement; the simulator's parser throws at the first, so a statement contributes at most one entry to the run.
 - **Errors report in source order, where real's binder makes two passes.**
   Probed with a bad column, a GROUP BY containment error and another bad column on three consecutive lines: real reports the two Msg 207s and *then* the Msg 8120, while the simulator reports all three in the order they are written.
 - **A bind abandoned at a deferral reports only what it gathered, and leaves Msg 455 unrun.**

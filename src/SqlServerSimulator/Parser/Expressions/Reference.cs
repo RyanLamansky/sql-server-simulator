@@ -57,9 +57,16 @@ internal sealed class Reference : Expression
             return true;
         });
 
+    /// <summary>
+    /// The name's first token, where a binder error reports from; null for a
+    /// reference the parser synthesized.
+    /// </summary>
+    internal readonly Token? SourceToken;
+
     public Reference(Name name)
     {
         this.ReferencedName = new MultiPartName(name.Value, name is DelimitedIdentifier);
+        this.SourceToken = name;
     }
 
     /// <summary>
@@ -103,7 +110,23 @@ internal sealed class Reference : Expression
 
     public override SqlValue Run(RuntimeContext runtime) => runtime.ResolveColumn(this.ReferencedName);
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => resolveColumnType(this.ReferencedName);
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        // A FROM source's own argument keeps throwing: the source's parse
+        // turns a miss on a sibling into Msg 4104 from the Msg 207 it sees.
+        if (batch.BindErrors is not { } report || batch.Parser.FromSourceColumnSink is not null)
+            return resolveColumnType(this.ReferencedName);
+        try
+        {
+            return resolveColumnType(this.ReferencedName);
+        }
+        catch (SimulatedSqlException error) when (report.TryRecordNameError(error, this.SourceToken))
+        {
+            // The statement is being read for its whole report and never runs,
+            // so any type lets the rest of it bind.
+            return SqlType.Int32;
+        }
+    }
 
     internal override string DebugDisplay() => this.ReferencedName.ToString();
 

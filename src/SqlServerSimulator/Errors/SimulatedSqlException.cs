@@ -240,6 +240,23 @@ public sealed partial class SimulatedSqlException : DbException
     internal bool EndedColumnRewrite;
 
     /// <summary>
+    /// Set once the innermost dispatch frame has asked whether this error's
+    /// statement carries more binder errors (<c>Simulation.ReportEveryBindError</c>),
+    /// so an enclosing frame it propagates through doesn't ask again.
+    /// </summary>
+    internal bool BindReportSettled;
+
+    /// <summary>
+    /// Set on a compile-time report — a statement's binder errors, a batch's
+    /// — whose <em>first</em> entry is what a <c>CATCH</c> reads through
+    /// <c>ERROR_NUMBER()</c> and its siblings, where an error raised as several
+    /// at run time shows its last (probed 2026-09-27 against SQL Server 2025:
+    /// <c>EXEC('SELECT x1, x2 FROM t')</c> inside <c>TRY</c> reports x1, and
+    /// so does a two-statement dynamic batch).
+    /// </summary>
+    internal bool CatchReadsFirstEntry;
+
+    /// <summary>
     /// Guards <see cref="ResolveDiagnostics"/> against re-stamping. An error
     /// born inside a nested body (procedure / dynamic-SQL batch) is resolved at
     /// its own dispatch frame's catch boundary; as it propagates outward each
@@ -363,6 +380,12 @@ public sealed partial class SimulatedSqlException : DbException
         aggregate.diagnosticsResolved = resolved;
         return aggregate;
     }
+
+    /// <summary>
+    /// A fresh copy of this single-entry error, for a report that sends the
+    /// same error twice — each entry takes its own line.
+    /// </summary>
+    internal SimulatedSqlException CopyOfError() => new(this.Errors[0].Message, this.Number, this.Class, this.State);
 
     /// <summary>1-based line number of the first error. Shortcut for <c>Errors[0].LineNumber</c>; mirrors <c>SqlException.LineNumber</c>.</summary>
     public int LineNumber => this.Errors[0].LineNumber;

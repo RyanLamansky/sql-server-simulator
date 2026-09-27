@@ -1859,12 +1859,41 @@ public sealed partial class Simulation
     /// for cursor-advance + name resolution, but no result reaches the
     /// client) and the <c>LastStatementRowCount</c> update is skipped.
     /// </summary>
-    private IEnumerable<SimulatedStatementOutcome> DispatchOneStatement(BatchContext batch, bool requireSemicolonBeforeCte, bool atBatchStart)
+    private IEnumerable<SimulatedStatementOutcome> DispatchOneStatement(BatchContext batch, bool requireSemicolonBeforeCte, bool atBatchStart) =>
+        batch.BindErrors is { } report
+            ? DetachedFrom(batch, report, this.DispatchFramedStatement(batch, requireSemicolonBeforeCte, atBatchStart))
+            : this.DispatchFramedStatement(batch, requireSemicolonBeforeCte, atBatchStart);
+
+    /// <summary>
+    /// Runs a statement nested in one being read for its whole bind error
+    /// report — an <c>IF</c> or <c>WHILE</c> body — with the report set aside:
+    /// the nested statement reports for itself.
+    /// </summary>
+    private static IEnumerable<SimulatedStatementOutcome> DetachedFrom(BatchContext batch, BindErrorReport report, IEnumerable<SimulatedStatementOutcome> nested)
+    {
+        batch.BindErrors = null;
+        try
+        {
+            foreach (var outcome in nested)
+                yield return outcome;
+        }
+        finally
+        {
+            batch.BindErrors = report;
+        }
+    }
+
+    /// <summary>The body of <see cref="DispatchOneStatement"/>.</summary>
+    private IEnumerable<SimulatedStatementOutcome> DispatchFramedStatement(BatchContext batch, bool requireSemicolonBeforeCte, bool atBatchStart)
     {
         // Snapshot the statement-start line before parser advance — used as
         // ERROR_LINE() default when an error fires inside this statement.
         batch.CurrentStatement.StartLine = batch.Parser.Token?.LineNumber ?? 1;
         batch.CurrentStatement.StartIndex = batch.Parser.Token?.StartIndex ?? 0;
+        var statementStart = batch.Parser.SaveCheckpoint();
+        // What a bind gathered before this statement: a statement read for
+        // its whole report binds its nested ones first, whose errors follow.
+        var gatheredBefore = batch.CreateTimeBindErrors?.Count ?? 0;
         // The string → date-time conversion reads the session's order from
         // here, having no session of its own; an unchanged order republishes
         // for free.
@@ -1950,6 +1979,7 @@ public sealed partial class Simulation
         SimulatedSqlException? propagated = null;
         var deferredNameError = false;
         var gatheredBindError = false;
+        var resumedAtStatementEnd = false;
         try
         {
             try
@@ -1979,8 +2009,15 @@ public sealed partial class Simulation
                 // TRY / CATCH, and trips the Msg 3616 swallowed-error rule).
                 FireDdlTriggers(batch);
             }
-            catch (SimulatedSqlException ex)
+            catch (SimulatedSqlException thrown)
             {
+                // A binder error is the first of however many the statement
+                // carries; real reports them all, so the statement is read
+                // again for the whole report before anything below judges it.
+                var ex = thrown;
+                if (!thrown.BindReportSettled)
+                    (ex, resumedAtStatementEnd) = this.ReportEveryBindError(batch, thrown, statementStart, requireSemicolonBeforeCte, atBatchStart);
+
                 // Stamp the batch-relative line / server / procedure the static
                 // factories couldn't know at throw time — the ambient-capture
                 // point. Syntax errors (severity 15) report the parser's
@@ -2070,7 +2107,7 @@ public sealed partial class Simulation
                     // (probe-confirmed). Severity 15 is real's parse phase,
                     // which preempts the whole report rather than joining it,
                     // so those keep propagating from the arm below.
-                    bindErrors.Add(ex);
+                    bindErrors.Insert(Math.Min(gatheredBefore, bindErrors.Count), ex);
                     gatheredBindError = true;
 
                     // An illegal explicit conversion ends the report where it
@@ -2160,7 +2197,7 @@ public sealed partial class Simulation
             // guessed, and the bind reads a later severity-15 error from a
             // guessed position as recovery noise.
             if (gatheredBindError)
-                batch.BindResumedCleanly = parser.Token is null or Operator { Character: ';' };
+                batch.BindResumedCleanly = resumedAtStatementEnd || parser.Token is null or Operator { Character: ';' };
             foreach (var outcome in ProducedOutcomes(batch, outcomes))
                 yield return outcome;
             yield break;
@@ -2216,15 +2253,16 @@ public sealed partial class Simulation
                 // An error raised as several — a constraint failure and its
                 // Msg 1750, a CREATE SCHEMA failure and its Msg 2759 — is the
                 // last of them to ERROR_NUMBER() and its siblings, as on real
-                // (probed 2026-09-24 against SQL Server 2025).
-                var last = caught.Errors[^1];
+                // (probed 2026-09-24 against SQL Server 2025); a compile-time
+                // report is its first.
+                var shown = caught.CatchReadsFirstEntry ? caught.Errors[0] : caught.Errors[^1];
                 batch.InFlightError = new CaughtError(
-                    last.Number,
-                    last.Message,
-                    last.Class,
-                    last.State,
-                    last.LineNumber,
-                    last.Procedure.Length == 0 ? null : last.Procedure);
+                    shown.Number,
+                    shown.Message,
+                    shown.Class,
+                    shown.State,
+                    shown.LineNumber,
+                    shown.Procedure.Length == 0 ? null : shown.Procedure);
                 batch.ErrorSignaled = true;
             }
             connection.LastErrorNumber = caught.Number;
@@ -2688,7 +2726,9 @@ public sealed partial class Simulation
         {
             if (requireSemicolonBeforeCte)
                 throw SimulatedSqlException.CteRequiresPrecedingSemicolon();
+            var withToken = context.Token;
             ParseCteBindings(context);
+            batch.BindErrors?.AddCtePrefix(withToken, context.Token);
             context.CtePrefixLeadsSelectStatement = context.Token is ReservedKeyword { Keyword: Keyword.Select } or Operator { Character: '(' };
         }
 

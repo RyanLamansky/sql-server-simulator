@@ -40,6 +40,14 @@ partial class Simulation
     /// </remarks>
     private static SimulatedStatementOutcome ParseMerge(ParserContext context)
     {
+        // Real binds the source, then ON, stopping there when ON fails; then
+        // the insert column list, every WHEN condition, and every action
+        // (probed 2026-09-27: an ON miss reports alone, and `… UPDATE SET x1 =
+        // x2 … INSERT (a, x4) VALUES (x5, 1)` reports x4, x1, x2, x5).
+        var bindErrors = context.Batch.BindErrors;
+        bindErrors?.OpenScope(context.Token);
+        bindErrors?.SetBarriers(BindClause.MergeInsertColumns);
+
         // MERGE [INTO] target [AS] alias
         var afterMerge = context.GetNextRequired();
         if (afterMerge is ReservedKeyword { Keyword: Keyword.Into })
@@ -130,6 +138,7 @@ partial class Simulation
         // USING (<source>) [AS] alias [(col, ...)]
         if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.Using })
             throw SimulatedSqlException.SyntaxErrorNear(context);
+        bindErrors?.EnterClause(context.Token, BindClause.MergeSource);
 
         var (materializeSource, sourceAlias, sourceColumnNames, sourceSchema, sourceMasks) = ParseMergeSource(context);
         if (context.Batch.CurrentDatabase.Collation.Equals(sourceAlias, targetAlias))
@@ -138,6 +147,7 @@ partial class Simulation
         // ON predicate — resolves target via targetAlias/destinationName, source via sourceAlias.
         if (context.Token is not ReservedKeyword { Keyword: Keyword.On })
             throw SimulatedSqlException.SyntaxErrorNear(context);
+        bindErrors?.EnterClause(context.Token, BindClause.MergeOn);
         context.MoveNextRequired();
 
         SqlType ResolveTypeBoth(MultiPartName name) => ResolveMergeColumnType(
@@ -670,6 +680,7 @@ partial class Simulation
 
         while (context.Token is ReservedKeyword { Keyword: Keyword.When })
         {
+            context.Batch.BindErrors?.EnterClause(context.Token, BindClause.MergeCondition);
             context.MoveNextRequired();
             bool isNotMatched;
             if (context.Token is ReservedKeyword { Keyword: Keyword.Not })
@@ -749,6 +760,7 @@ partial class Simulation
 
             if (context.Token is not ReservedKeyword { Keyword: Keyword.Then })
                 throw SimulatedSqlException.SyntaxErrorNear(context);
+            context.Batch.BindErrors?.EnterClause(context.Token, BindClause.MergeAction);
             context.MoveNextRequired();
 
             clauses.Add(ParseMergeAction(context, kind, searchCondition, destinationTable, sourceView, targetAlias, ResolveType));
@@ -815,7 +827,17 @@ partial class Simulation
                 // name against view.OutputColumns when applicable and
                 // translates to the base table column, rejecting writes
                 // to a derived projection (Msg 4406).
-                var col = ResolveInsertTargetColumn(context.Batch.CurrentDatabase.Collation, colTok.Value, destinationTable, sourceView);
+                HeapColumn col;
+                try
+                {
+                    col = ResolveInsertTargetColumn(context.Batch.CurrentDatabase.Collation, colTok.Value, destinationTable, sourceView);
+                }
+                catch (SimulatedSqlException missing) when (missing.Number == 207 && context.Batch.BindErrors is { } report && report.Covers(colTok))
+                {
+                    // A stand-in keeps the list's length for the VALUES arity check.
+                    report.Record(missing, colTok.StartIndex, BindClause.MergeInsertColumns);
+                    col = new HeapColumn(colTok.Value, SqlType.Int32, null, nullable: true);
+                }
                 if (col.Computed is not null && col.GraphKind == GraphColumnKind.None)
                     throw SimulatedSqlException.ColumnCannotBeModified(col.Name);
                 if (GraphColumns.IsInternal(col.GraphKind))
@@ -953,6 +975,7 @@ partial class Simulation
                 var columnName = setTarget.Leaf;
                 Expression rhs;
                 var setsDefault = false;
+                var unboundTarget = false;
                 if (setTarget.Count == 2 && sourceView is null && context.Token is Operator { Character: '(' }
                     && Collation.Baseline.Equals(columnName, "modify")
                     && Array.Find(destinationTable.Columns, c => context.Batch.CurrentDatabase.Collation.Equals(c.Name, setTarget[0])) is { Type: JsonSqlType })
@@ -974,7 +997,10 @@ partial class Simulation
                     if (setTarget.ImmediateQualifier is { } setQualifier
                         && !context.Batch.CurrentDatabase.Collation.Equals(setQualifier, targetAlias))
                     {
-                        throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(setTarget.ToString());
+                        if (context.Batch.BindErrors?.Covers(first) != true)
+                            throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(setTarget.ToString());
+                        context.Batch.BindErrors.Record(SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(setTarget.ToString()), first.StartIndex);
+                        unboundTarget = true;
                     }
 
                     context.MoveNextRequired();
@@ -984,56 +1010,29 @@ partial class Simulation
                         context.MoveNextOptional();
                 }
 
-                // Resolve user-facing column name into the base-table ordinal
-                // that the WHEN executor will mutate. View paths translate
-                // via OutputColumns + BaseColumnOrdinals (derived projections
-                // reject with Msg 4406); table paths look up directly.
-                int ordinal;
-                if (sourceView is not null)
+                // A target already reported binds no further; its value still
+                // does.
+                if (unboundTarget || ResolveMergeSetOrdinal(context, first, columnName, destinationTable, sourceView) is not { } ordinal)
                 {
-                    var matched = -1;
-                    for (var i = 0; i < sourceView.OutputColumns.Length; i++)
-                    {
-                        if (context.Batch.CurrentDatabase.Collation.Equals(sourceView.OutputColumns[i].Name, columnName))
-                        {
-                            matched = i;
-                            break;
-                        }
-                    }
-                    if (matched < 0)
-                        throw SimulatedSqlException.InvalidColumnName(columnName);
-                    var baseOrd = sourceView.BaseColumnOrdinals[matched];
-                    if (baseOrd < 0)
-                        throw SimulatedSqlException.ViewDmlTouchesDerivedField(DerivedFieldViewLabel(sourceView));
-                    ordinal = baseOrd;
+                    if (!setsDefault)
+                        _ = rhs.GetSqlType(context.Batch, resolveType);
                 }
                 else
                 {
-                    ordinal = -1;
-                    for (var i = 0; i < destinationTable.Columns.Length; i++)
-                    {
-                        if (context.Batch.CurrentDatabase.Collation.Equals(destinationTable.Columns[i].Name, columnName))
-                        {
-                            ordinal = i;
-                            break;
-                        }
-                    }
-                    if (ordinal < 0)
-                        throw SimulatedSqlException.InvalidColumnName(columnName);
+                    var targetColumn = destinationTable.Columns[ordinal];
+                    if (targetColumn.Identity is not null)
+                        throw SimulatedSqlException.CannotUpdateIdentityColumn(targetColumn.Name);
+                    if (targetColumn.Computed is not null)
+                        throw SimulatedSqlException.ColumnCannotBeModified(targetColumn.Name);
+                    if (targetColumn.Type == SqlType.RowVersion)
+                        throw SimulatedSqlException.CannotUpdateTimestampColumn();
+                    if (setsDefault)
+                        rhs = ColumnDefaultValue.Bind(targetColumn);
+                    AssignmentRules.RequireAssignable(rhs, rhs.GetSqlType(context.Batch, resolveType), targetColumn.Type);
+                    if (assignments.Exists(assignment => assignment.Ordinal == ordinal))
+                        throw SimulatedSqlException.ColumnAssignedMoreThanOnce(sourceView is null ? targetColumn.Name : columnName);
+                    assignments.Add((ordinal, rhs));
                 }
-                var targetColumn = destinationTable.Columns[ordinal];
-                if (targetColumn.Identity is not null)
-                    throw SimulatedSqlException.CannotUpdateIdentityColumn(targetColumn.Name);
-                if (targetColumn.Computed is not null)
-                    throw SimulatedSqlException.ColumnCannotBeModified(targetColumn.Name);
-                if (targetColumn.Type == SqlType.RowVersion)
-                    throw SimulatedSqlException.CannotUpdateTimestampColumn();
-                if (setsDefault)
-                    rhs = ColumnDefaultValue.Bind(targetColumn);
-                AssignmentRules.RequireAssignable(rhs, rhs.GetSqlType(context.Batch, resolveType), targetColumn.Type);
-                if (assignments.Exists(assignment => assignment.Ordinal == ordinal))
-                    throw SimulatedSqlException.ColumnAssignedMoreThanOnce(sourceView is null ? targetColumn.Name : columnName);
-                assignments.Add((ordinal, rhs));
 
                 if (context.Token is not Operator { Character: ',' })
                     break;
@@ -1045,6 +1044,44 @@ partial class Simulation
         }
 
         return new WhenClause(kind, MergeActionKind.Update, searchCondition, assignments: assignments, insertColumns: null, insertValues: null);
+    }
+
+    /// <summary>
+    /// Resolves a MERGE <c>UPDATE SET</c> target's user-facing column name to
+    /// the base-table ordinal the WHEN executor mutates. A view translates
+    /// through its OutputColumns and BaseColumnOrdinals (a derived projection
+    /// refuses with Msg 4406); a table looks the name up directly. A name
+    /// nothing answers is Msg 207 — recorded, with null returned, while the
+    /// statement is read for its whole bind error report.
+    /// </summary>
+    private static int? ResolveMergeSetOrdinal(ParserContext context, Token target, string columnName, HeapTable destinationTable, View? sourceView)
+    {
+        var collation = context.Batch.CurrentDatabase.Collation;
+        if (sourceView is not null)
+        {
+            for (var i = 0; i < sourceView.OutputColumns.Length; i++)
+            {
+                if (collation.Equals(sourceView.OutputColumns[i].Name, columnName))
+                {
+                    return sourceView.BaseColumnOrdinals[i] is var baseOrdinal and >= 0
+                        ? baseOrdinal
+                        : throw SimulatedSqlException.ViewDmlTouchesDerivedField(DerivedFieldViewLabel(sourceView));
+                }
+            }
+        }
+        else
+        {
+            for (var i = 0; i < destinationTable.Columns.Length; i++)
+            {
+                if (collation.Equals(destinationTable.Columns[i].Name, columnName))
+                    return i;
+            }
+        }
+
+        if (context.Batch.BindErrors is not { } report || !report.Covers(target))
+            throw SimulatedSqlException.InvalidColumnName(columnName);
+        report.Record(SimulatedSqlException.InvalidColumnName(columnName), target.StartIndex);
+        return null;
     }
 
     private static WhenClause ParseMergeDeleteAction(ParserContext context, WhenClauseKind kind, BooleanExpression? searchCondition)

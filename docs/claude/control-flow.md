@@ -230,7 +230,8 @@ Real compiles a whole batch before running any of it, so an error its compiler r
 `Simulation.CompileBatch` reproduces that ahead of the dispatch loop, for a top-level batch and for each dynamic-SQL batch (`EXEC('…')` / `sp_executesql`).
 The batch's text walks the dispatch loop once on a throwaway `BatchContext` in skip mode with `CreateTimeBinding` set — the walk a module body takes at `CREATE` ([`programmable.md`](programmable.md)) — and what it raises is yielded as one `SimulatedErrorOutcome` before anything runs, so `ExecuteReader` throws it.
 The report follows real's two phases:
-- Binder errors are gathered across every statement, in order (`IsBinderError`: severity 16, plus the severity-15 Msg 1087, which real gathers too).
+- Binder errors are gathered across every statement, in order (`IsBinderError`: severity 16, plus the severity-15 Msg 1087, which real gathers too), each statement contributing its whole report — see [`errors.md`](errors.md#a-statements-whole-binder-report).
+  An `IF` / `WHILE` condition's report comes first and its branches report as statements of their own after it.
 - A parse-phase error — a syntax error, an undeclared variable — preempts the report and comes back alone.
 
 A statement naming an object that doesn't exist when the batch compiles — a table the batch itself creates, a `#temp` a `SELECT … INTO` makes — binds when it runs, so the statements before it have run by then.

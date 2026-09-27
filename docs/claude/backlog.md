@@ -164,8 +164,6 @@ Still open from what it surfaced:
 
 - **Many-way joins do not scale**: `select5`'s 20-24-table equi-joins answer in milliseconds on real and exceed a 15-second `CommandTimeout` here, one of them running past a 40-second wall without honoring its own timeout.
   Not a correctness gap, but it is why the sweep's file list is `random/` rather than the whole corpus — see the join-strategy notes in [`joins.md`](joins.md).
-- **Real answers a statement's binder errors together where the simulator raises the leading one alone** — `INSERT` reports 207 + 110, and 273 + 10709, as one multi-error response.
-  The module-body bind already gathers every error of a *body*; this is the same shape for a single statement — see [`programmable.md`](programmable.md).
 
 **Five sweep divergences remain, each demonstrated irreducible** — real's own answer flips under something the simulator cannot legitimately model, so matching them would mean modeling plan selection rather than semantics.
 Two are the trivial-plan boundary: `WHERE <overflow> <= 18 / CAST(NULL AS int)` raises as written, and answers 0 rows the moment `DISTINCT`, `GROUP BY`, `TOP 2` or a join is added — while `ORDER BY` / `MAX()` / `COUNT(*)` leave it raising.
@@ -255,8 +253,8 @@ Already listed elsewhere here and not repeated: parenthesized set-op branches.
 
 **Name resolution** (probed 2026-09-26):
 
-- A GROUP BY term repeating an unbindable select-list name (`SELECT zz.a FROM t GROUP BY zz.a`) raises Msg 4104 once here; real reports it for both clauses.
-  It is one case of real reporting every unbindable name in a statement, once per occurrence, in its binder's clause order — `WHERE`, `GROUP BY`, `HAVING`, the select list, `ORDER BY` (probed 2026-09-27: `SELECT zz.a, qq.c FROM t GROUP BY zz.a` sends `zz.a`, `zz.a`, `qq.c`) — where a statement here reports its first.
+- A statement's binder report stops at a type check other than Msg 529, reports MERGE's Msg 5334 as Msg 207, reports only a PIVOT's `FOR` column, and misses the Msg 209 real adds for an ORDER BY name two select items share — the residue of the whole-statement report in [`errors.md`](errors.md#a-statements-whole-binder-report) (probed 2026-09-27).
+  `GROUP BY ALL` isn't parsed yet (Msg 156 here), so a statement using it reports that instead of its names.
 
 **Describe surfaces** (probed 2026-09-27):
 

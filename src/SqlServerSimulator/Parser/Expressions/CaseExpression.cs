@@ -468,6 +468,11 @@ internal sealed class CaseExpression : Expression
         if (context.Token is not ReservedKeyword { Keyword: Keyword.When })
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
+        // Real binds every condition before any result, and a simple CASE's
+        // input once per WHEN it is compared in.
+        var report = context.Batch.BindErrors;
+        var inputSpan = input is null ? null : report?.SpanOf(input);
+        List<(int Start, int End)>? resultSpans = report is null ? null : [];
         var thens = new List<Expression>();
         var searchedWhensList = input is null ? new List<BooleanExpression>() : null;
         var compareValuesList = input is not null ? new List<Expression>() : null;
@@ -478,6 +483,8 @@ internal sealed class CaseExpression : Expression
         while (context.Token is ReservedKeyword { Keyword: Keyword.When })
         {
             aggregateBounds.Add(context.AggregateCollector?.Count ?? 0);
+            if (inputSpan is { } echoed && thens.Count > 0 && report!.Covers(context.Token))
+                report.Echo(echoed.Start, echoed.End, context.Token.StartIndex);
             context.MoveNextRequired();
 
             if (input is null)
@@ -487,9 +494,16 @@ internal sealed class CaseExpression : Expression
 
             if (context.Token is not ReservedKeyword { Keyword: Keyword.Then })
                 throw SimulatedSqlException.SyntaxErrorNear(context);
+            var resultStart = context.Token.StartIndex;
             context.MoveNextRequired();
 
             thens.Add(Expression.Parse(context));
+            resultSpans?.Add((resultStart, context.Token?.StartIndex ?? int.MaxValue));
+        }
+        if (resultSpans is not null && report!.Covers(context.Token))
+        {
+            foreach (var (start, end) in resultSpans)
+                report.Defer(start, end, context.Token!.StartIndex);
         }
 
         aggregateBounds.Add(context.AggregateCollector?.Count ?? 0);

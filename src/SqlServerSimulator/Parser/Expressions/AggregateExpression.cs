@@ -214,6 +214,7 @@ internal sealed class AggregateExpression : Expression
         context.RecursiveBranchConstructs.GroupingOrAggregate = true;
         context.AggregatesParsed++;
         context.AggregateCollector?.Add(expression);
+        context.Batch.BindErrors?.NoteAggregate(expression, context.Token);
         return expression;
     }
 
@@ -247,7 +248,10 @@ internal sealed class AggregateExpression : Expression
         if ((context.AggregatesParsed > aggregatesBefore || context.SubqueriesParsed > subqueriesBefore)
             && !OverFollowsCall(context))
         {
-            throw SimulatedSqlException.AggregateOnAggregateOrSubquery();
+            if (context.Batch.BindErrors is { } report && report.Covers(context.Token))
+                report.RecordUnlessPreceded(SimulatedSqlException.AggregateOnAggregateOrSubquery(), context.Token!.StartIndex);
+            else
+                throw SimulatedSqlException.AggregateOnAggregateOrSubquery();
         }
         if (IsUntypedNullLiteral(operand))
             throw UntypedNullOperand(kind);

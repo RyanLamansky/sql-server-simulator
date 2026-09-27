@@ -778,14 +778,22 @@ internal abstract class BooleanExpression : ExpressionNode
             return new InSubqueryExpression(left, inner, negated);
         }
 
+        var report = context.Batch.BindErrors;
+        List<(int Start, int End)>? elementSpans = report is null ? null : [];
+        var elementStart = context.Token?.StartIndex ?? 0;
         var candidates = new List<Expression> { Expression.Parse(context) };
         while (context.Token is Operator { Character: ',' })
         {
+            elementSpans?.Add((elementStart, context.Token.StartIndex));
             context.MoveNextRequired();
+            elementStart = context.Token.StartIndex;
             candidates.Add(Expression.Parse(context));
         }
         if (context.Token is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
+        elementSpans?.Add((elementStart, context.Token.StartIndex));
+        if (report is not null && report.Covers(context.Token))
+            ReportInListOrder(report, report.SpanOf(left), elementSpans!);
         context.MoveNextOptional();
         if (!context.Connection.AnsiNulls && (IsNullLiteralOrVariable(left) || candidates.Exists(IsNullLiteralOrVariable)))
             return NullTolerantInList(left, candidates, negated);
@@ -895,6 +903,23 @@ internal abstract class BooleanExpression : ExpressionNode
     }
 
     /// <summary>
+    /// Places an <c>IN</c> list's errors in real's binder order, which reads
+    /// the list as the chain of comparisons it stands for built last element
+    /// first: the left operand once per element, each copy followed by the
+    /// element it is compared with (probed 2026-09-27: <c>x1 IN (x2, x3)</c>
+    /// reports x1, x3, x1, x2).
+    /// </summary>
+    private static void ReportInListOrder(BindErrorReport report, (int Start, int End)? left, List<(int Start, int End)> elements)
+    {
+        for (var k = 0; k < elements.Count; k++)
+        {
+            report.Defer(elements[k].Start, elements[k].End, elements[elements.Count - 1 - k].Start, sub: 1);
+            if (k > 0 && left is { } echoed)
+                report.Echo(echoed.Start, echoed.End, elements[k].Start);
+        }
+    }
+
+    /// <summary>
     /// Parses the <c>[NOT] BETWEEN lower AND upper</c> suffix after an
     /// expression. Entered with <see cref="ParserContext.Token"/> on the
     /// <c>BETWEEN</c> keyword; consumes <c>BETWEEN</c>, the lower expression,
@@ -911,6 +936,9 @@ internal abstract class BooleanExpression : ExpressionNode
         var lower = Expression.Parse(context);
         if (context.Token is not ReservedKeyword { Keyword: Keyword.And })
             throw SimulatedSqlException.SyntaxErrorNear(context);
+        // `v BETWEEN lo AND hi` binds as `v >= lo AND v <= hi`: v again after lo.
+        if (context.Batch.BindErrors is { } report && report.Covers(context.Token) && report.SpanOf(left) is { } subject)
+            report.Echo(subject.Start, subject.End, context.Token.StartIndex);
         context.MoveNextRequired();
         var upper = Expression.Parse(context);
         var between = new BetweenExpression(left, lower, upper, negated);

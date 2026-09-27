@@ -139,6 +139,26 @@ internal abstract class TwoSidedExpression : Expression
 
     public sealed override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
+        if (batch.BindErrors is { } report)
+        {
+            // Read for a whole bind error report: an operand whose typing
+            // recorded an error is error-typed on real, which no operator
+            // refuses.
+            var recorded = report.Count;
+            try
+            {
+                return this.TypeOperands(batch, resolveColumnType);
+            }
+            catch (SimulatedSqlException) when (report.Count > recorded)
+            {
+                return SqlType.Int32;
+            }
+        }
+        return this.TypeOperands(batch, resolveColumnType);
+    }
+
+    private SqlType TypeOperands(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
         // Fast path — shallow left operand, no allocation (mirrors Run).
         if (this.left is not TwoSidedExpression)
             return CombineType(this.left.GetSqlType(batch, resolveColumnType), batch, resolveColumnType);

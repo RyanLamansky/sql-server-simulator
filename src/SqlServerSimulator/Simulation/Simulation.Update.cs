@@ -43,6 +43,13 @@ partial class Simulation
     /// </remarks>
     private static SimulatedStatementOutcome ParseUpdate(ParserContext context)
     {
+        // Real binds FROM and WHERE first and stops there when either fails,
+        // then every SET target, stopping again, then the SET values and
+        // OUTPUT (probed 2026-09-27: `UPDATE t SET x1 = x2 WHERE x3 = 1`
+        // reports only x3, `UPDATE t SET x1 = x2, b = x3` only x1).
+        var bindErrors = context.Batch.BindErrors;
+        bindErrors?.OpenScope(context.Token);
+        bindErrors?.SetBarriers(BindClause.SetTarget, BindClause.SetValue);
         context.MoveNextRequired();
         var top = Selection.ParseDmlTopClause(context);
         var leadingIdent = BatchContext.ParseObjectName(context, acceptTableVariable: true);
@@ -108,6 +115,7 @@ partial class Simulation
         }
         if (context.Token is not ReservedKeyword { Keyword: Keyword.Set })
             throw SimulatedSqlException.SyntaxErrorNear(context);
+        bindErrors?.EnterClause(context.Token, BindClause.SetValue);
 
         // Phase-1 SET parsing: raw (columnName, expr) pairs without ordinal
         // resolution — target may not be known yet. Each entry recognizes
@@ -202,8 +210,13 @@ partial class Simulation
             // `UPDATE a SET t.id = 5 FROM t a`, `UPDATE a SET b.w = 1 FROM t a
             // JOIN u b …`, `UPDATE v SET t.id = 5` through a view, and
             // `MERGE t AS a … UPDATE SET t.v = 1`).
-            if (!Selection.QualifierIsDmlTarget(context.CurrentDatabase, leadingIdent, setTarget))
-                throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(setTarget.ToString());
+            var targetBinds = Selection.QualifierIsDmlTarget(context.CurrentDatabase, leadingIdent, setTarget);
+            if (!targetBinds)
+            {
+                if (bindErrors?.Covers(first) != true)
+                    throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(setTarget.ToString());
+                bindErrors.Record(SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(setTarget.ToString()), first.StartIndex, BindClause.SetTarget);
+            }
 
             var lhsForCompound = new Reference(setTarget);
 
@@ -220,7 +233,10 @@ partial class Simulation
             }
             var rhs = Expression.Parse(context);
             var finalExpr = assignOp == '=' ? rhs : TwoSidedExpression.FromCompoundOp(assignOp, lhsForCompound, rhs, context);
-            rawAssignments.Add((columnName, finalExpr));
+            // A target already reported unbindable binds no further; its value
+            // still does.
+            rawAssignments.Add((targetBinds ? columnName : null, finalExpr));
+            bindErrors?.NoteSetTarget(finalExpr, first);
 
             if (context.Token is Operator { Character: ',' })
                 continue;
@@ -482,7 +498,7 @@ partial class Simulation
         View? sourceView = null)
     {
         BindDeferredXmlMutators(context, table, rawAssignments, targetName.ToString());
-        var assignments = ResolveSetAssignments(rawAssignments, table, context.CurrentDatabase, sourceView);
+        var assignments = ResolveSetAssignments(rawAssignments, table, context.CurrentDatabase, sourceView, context.Batch.BindErrors);
         // Through a view, a name is the view's column and masks as the base
         // column it reads (probed 2026-09-27 against SQL Server 2025).
         var setMasks = UpdateSetMasks(context.Batch, assignments, name =>
@@ -507,6 +523,7 @@ partial class Simulation
         PositionedCursorTarget? positionedCursor = null;
         if (context.Token is ReservedKeyword { Keyword: Keyword.Where })
         {
+            context.Batch.BindErrors?.EnterClause(context.Token, BindClause.Where);
             context.MoveNextRequired();
             if (context.Token is ReservedKeyword { Keyword: Keyword.Current })
                 positionedCursor = ParseWhereCurrentOf(context, table, [.. SetColumnNames(rawAssignments)], sourceView);
@@ -768,6 +785,7 @@ partial class Simulation
         // the SELECT / INSERT … SELECT / MERGE … USING forms take).
         var savedAllowNextValueFor = context.AllowNextValueForInFromClause;
         context.AllowNextValueForInFromClause = true;
+        context.Batch.BindErrors?.EnterClause(context.Token, BindClause.From);
         try
         {
             Selection.ParseSourcesAndJoins(context, QueryScope.Statement, sourcesList, joinsList);
@@ -804,7 +822,7 @@ partial class Simulation
         _ = context.Batch.AcquireDataLockIfApplicable(table, default, isWrite: true);
 
         BindDeferredXmlMutators(context, table, rawAssignments, WrittenNameOf(sources[targetIndex], table));
-        var assignments = ResolveSetAssignments(rawAssignments, table, context.CurrentDatabase);
+        var assignments = ResolveSetAssignments(rawAssignments, table, context.CurrentDatabase, bindErrors: context.Batch.BindErrors);
         var setMasks = UpdateSetMasks(context.Batch, assignments, name => Selection.SourceColumnMask(sources, name));
 
         // Compile-time bind of the predicate and the SET values — see
@@ -815,9 +833,11 @@ partial class Simulation
         BooleanExpression? where = null;
         if (context.Token is ReservedKeyword { Keyword: Keyword.Where })
         {
+            context.Batch.BindErrors?.EnterClause(context.Token, BindClause.Where);
             context.MoveNextRequired();
             where = Selection.ParseAndBindPredicate(context, tupleTypeResolver, sources, joins);
         }
+        BindJoinPredicatesWhileReporting(context.Batch, joins, tupleTypeResolver);
 
         // Skip mode has bound everything it needs; enumerating the join would
         // run its sources, a NEXT VALUE FOR among them.
@@ -1261,11 +1281,26 @@ partial class Simulation
                 : throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(name.ToString());
     }
 
+    /// <summary>
+    /// Types a joined UPDATE's or DELETE's <c>ON</c> predicates while the
+    /// statement is read for its whole bind error report. They otherwise bind
+    /// as the join runs, which a statement read without running never
+    /// reaches, and real reports their names ahead of the <c>WHERE</c>'s.
+    /// </summary>
+    private static void BindJoinPredicatesWhileReporting(BatchContext batch, JoinSpec[] joins, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        if (batch.BindErrors is null)
+            return;
+        foreach (var join in joins)
+            join.OnPredicate?.Bind(batch, resolveColumnType);
+    }
+
     private static List<(int Ordinal, Expression Expr)> ResolveSetAssignments(
         List<(string? ColumnName, Expression Expr)> rawAssignments,
         HeapTable table,
         Database database,
-        View? sourceView = null)
+        View? sourceView = null,
+        BindErrorReport? bindErrors = null)
     {
         var assignments = new List<(int Ordinal, Expression Expr)>(rawAssignments.Count);
         var assigned = new HashSet<int>();
@@ -1289,7 +1324,14 @@ partial class Simulation
                     }
                 }
                 if (viewOrd < 0)
+                {
+                    if (bindErrors?.RecordSetTarget(SimulatedSqlException.InvalidColumnName(colName), expr) == true)
+                    {
+                        assignments.Add((-1, expr));
+                        continue;
+                    }
                     throw SimulatedSqlException.InvalidColumnName(colName);
+                }
                 columnOrdinal = sourceView.BaseColumnOrdinals[viewOrd];
                 if (columnOrdinal < 0)
                     throw SimulatedSqlException.ViewDmlTouchesDerivedField(DerivedFieldViewLabel(sourceView));
@@ -1308,7 +1350,14 @@ partial class Simulation
                 if (columnOrdinal < 0 && colName.StartsWith('$'))
                     columnOrdinal = Array.FindIndex(table.Columns, c => GraphColumns.IsPseudoColumnFor(c.Name, colName));
                 if (columnOrdinal < 0)
+                {
+                    if (bindErrors?.RecordSetTarget(SimulatedSqlException.InvalidColumnName(colName), expr) == true)
+                    {
+                        assignments.Add((-1, expr));
+                        continue;
+                    }
                     throw SimulatedSqlException.InvalidColumnName(colName);
+                }
             }
 
             if (!assigned.Add(columnOrdinal))

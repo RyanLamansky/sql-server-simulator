@@ -282,7 +282,8 @@ Where an entry carries a second clause it is because that fact changes what you'
 - **UPDATE / DELETE / INSERT…SELECT / SELECT…INTO / MERGE / OUTPUT**, plus rowversion, the identity helpers and `@@ROWCOUNT` → [`dml.md`](docs/claude/dml.md).
 - **Variables, control flow, TRY/CATCH + THROW + ERROR_\*, `@@ERROR` / `@@TRANCOUNT` / `XACT_STATE`, WAITFOR, PRINT, GOTO, batch compilation, statement errors inside procedure and dynamic-SQL bodies**.
   Every batch walks once in skip mode before it runs, so a check that reads session state or live rows (a cursor, `IDENTITY_INSERT`, a variable's value, a lock) must wait for `!IsSkipping` or it fails batches real runs → [`control-flow.md`](docs/claude/control-flow.md).
-- **Error diagnostics** — line-number rules per context, `Server` / `Procedure` population, `ERROR_LINE` / `ERROR_PROCEDURE` parity, and where informational messages (PRINT, Msg 3621 / 8153 …) land among a batch's results and errors → [`errors.md`](docs/claude/errors.md).
+- **Error diagnostics** — line-number rules per context, `Server` / `Procedure` population, `ERROR_LINE` / `ERROR_PROCEDURE` parity, where informational messages (PRINT, Msg 3621 / 8153 …) land among a batch's results and errors, and a statement's whole binder report.
+  A failing statement is **read again** for that report, so a site that meets a name miss records it on `BatchContext.BindErrors` when one is installed rather than throwing → [`errors.md`](docs/claude/errors.md).
 - **Cursors** — the full lifecycle, the sensitivity / scrollability / concurrency matrix, cursor variables, multi-source and deferred-source cursors, `WHERE CURRENT OF`.
   Several ordinary shapes silently **convert** a cursor's sensitivity, and a keyless table converts it to read-only → [`cursors.md`](docs/claude/cursors.md).
 - **CTEs** — the shapes, the recursive member's restrictions, the declared column list's scoping, and where a `WITH` prefix may appear → [`ctes.md`](docs/claude/ctes.md).
@@ -366,10 +367,11 @@ The feature docs' own **Not modeled yet** sections hold the smaller gaps.
   The same goes for most `ALTER DATABASE … SET` options → [`database-options.md`](docs/claude/database-options.md).
 - **Heap allocation tracking** (a flat page list, no IAM/PFS) → [`heap-storage.md`](docs/claude/heap-storage.md).
 - **`ALTER AUTHORIZATION`**, in every form → [`schemas.md`](docs/claude/schemas.md#create-schemas-owner-and-its-element-list).
-- **Programmable-object gaps**: CLR procedures / TVFs / aggregates / UDTs, logon triggers, INSTEAD OF UPDATE/DELETE on non-updatable views, a join view over a join view, MERGE into or OUTPUT through views, `WITH RESULT SETS`' shorthand forms, and one binder error per statement → [`programmable.md`](docs/claude/programmable.md), [`clr-assemblies.md`](docs/claude/clr-assemblies.md), [`triggers.md`](docs/claude/triggers.md).
+- **Programmable-object gaps**: CLR procedures / TVFs / aggregates / UDTs, logon triggers, INSTEAD OF UPDATE/DELETE on non-updatable views, a join view over a join view, MERGE into or OUTPUT through views, and `WITH RESULT SETS`' shorthand forms → [`programmable.md`](docs/claude/programmable.md), [`clr-assemblies.md`](docs/claude/clr-assemblies.md), [`triggers.md`](docs/claude/triggers.md).
 - **`ALTER COLUMN … ADD | DROP PERSISTED`** → [`alter-table.md`](docs/claude/alter-table.md).
 - **Filegroup placement** — a table or index `ON [fg]` isn't recorded (only a partition scheme's placement is) → [`partitioning.md`](docs/claude/partitioning.md#not-modeled-yet).
 - **`FORCESEEK`'s plan-infeasibility refusal** (Msg 8622) → [`query-hints.md`](docs/claude/query-hints.md#not-enforced).
+- **A binder report past a type check other than Msg 529**, and a few shapes' own errors within one (MERGE's Msg 5334, PIVOT's operand) → [`errors.md`](docs/claude/errors.md#not-modeled-yet-1).
 
 ## Quirks (modeled, not byte-identical to SQL Server)
 

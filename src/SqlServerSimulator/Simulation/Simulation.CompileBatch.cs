@@ -58,7 +58,11 @@ partial class Simulation
         }
 
         if (errors.Count > 0)
-            return SimulatedSqlException.Aggregate(errors);
+        {
+            var report = SimulatedSqlException.Aggregate(errors);
+            report.CatchReadsFirstEntry = true;
+            return report;
+        }
 
         if (key is { } compiled && !compileBatch.ResolvedTempTable)
         {

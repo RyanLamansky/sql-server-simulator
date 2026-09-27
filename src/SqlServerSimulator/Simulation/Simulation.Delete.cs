@@ -25,6 +25,8 @@ partial class Simulation
     /// </remarks>
     private static SimulatedStatementOutcome ParseDelete(ParserContext context)
     {
+        // Real binds FROM, then WHERE, then OUTPUT (probed 2026-09-27).
+        context.Batch.BindErrors?.OpenScope(context.Token);
         context.MoveNextRequired();
         var top = Selection.ParseDmlTopClause(context);
         if (context.Token is ReservedKeyword { Keyword: Keyword.From })
@@ -121,6 +123,7 @@ partial class Simulation
         PositionedCursorTarget? positionedCursor = null;
         if (context.Token is ReservedKeyword { Keyword: Keyword.Where })
         {
+            context.Batch.BindErrors?.EnterClause(context.Token, BindClause.Where);
             context.MoveNextRequired();
             if (context.Token is ReservedKeyword { Keyword: Keyword.Current })
                 positionedCursor = ParseWhereCurrentOf(context, table, assignedColumns: null, sourceView);
@@ -284,6 +287,7 @@ partial class Simulation
         // the SELECT / INSERT … SELECT / MERGE … USING forms take).
         var savedAllowNextValueFor = context.AllowNextValueForInFromClause;
         context.AllowNextValueForInFromClause = true;
+        context.Batch.BindErrors?.EnterClause(context.Token, BindClause.From);
         try
         {
             Selection.ParseSourcesAndJoins(context, QueryScope.Statement, sourcesList, joinsList);
@@ -320,9 +324,11 @@ partial class Simulation
         BooleanExpression? where = null;
         if (context.Token is ReservedKeyword { Keyword: Keyword.Where })
         {
+            context.Batch.BindErrors?.EnterClause(context.Token, BindClause.Where);
             context.MoveNextRequired();
             where = Selection.ParseAndBindPredicate(context, Selection.ColumnTypeResolverFor(sources), sources, joins);
         }
+        BindJoinPredicatesWhileReporting(context.Batch, joins, Selection.ColumnTypeResolverFor(sources));
 
         // Skip mode has bound everything it needs; enumerating the join would
         // run its sources, a NEXT VALUE FOR among them.

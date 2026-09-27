@@ -43,12 +43,17 @@ internal sealed class NullIf : Expression
 
     public NullIf(ParserContext context)
     {
+        var firstArgument = context.Token;
         this.First = Parse(context);
         if (IsUntypedNullLiteral(this.First))
             throw SimulatedSqlException.NullIfFirstArgumentIsNull();
-        if (context.Token is not Tokens.Operator { Character: ',' })
+        if (context.Token is not Tokens.Operator { Character: ',' } comma)
             throw SimulatedSqlException.SyntaxErrorNear(context);
         this.b = Parse(context.MoveNextRequiredReturnSelf());
+        // Real binds NULLIF(a, b) as CASE WHEN a = b THEN NULL ELSE a END:
+        // the first argument again after the second.
+        if (context.Batch.BindErrors is { } report && report.Covers(firstArgument) && report.Covers(context.Token))
+            report.Echo(firstArgument!.StartIndex, comma.StartIndex, context.Token!.StartIndex);
         this.narrowedLiteralType = NarrowedLiteralType(this.First);
         this.constantNullFirst = ConstantFolding.FoldsToNull(this.First, context);
     }

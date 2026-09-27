@@ -702,7 +702,7 @@ partial class Simulation
             var parser = innerBatch.Parser;
             parser.MoveNextRequired();
 
-            var selection = ParseBodyQuery(parser, rejectsNextValueFor: true);
+            var selection = ReportingEveryBindError(innerBatch, bodyLineOffset, () => ParseBodyQuery(parser, rejectsNextValueFor: true));
 
             // Msg 1033: an inline function is one of the five constructs the
             // message names, so its ORDER BY needs a companion TOP / OFFSET /

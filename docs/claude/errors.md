@@ -9,6 +9,7 @@ All semantics below are probe-confirmed against SQL Server 2025.
 | --- | --- | --- |
 | Runtime error (divide-by-zero, conversion) | failing statement's **start** line | not the erroring expression's line — a SELECT spanning lines 3-4 with `5/0` on line 4 reports line 3 |
 | Bind error (Msg 208 invalid object) | statement start line | |
+| Binder error on a reference (Msg 207 / 4104 / 209, a GROUP BY violation) | the **reference's** line | the statement's first line when real parameterizes it; see [the whole report](#a-statements-whole-binder-report) |
 | Constraint violation (INSERT/UPDATE) | the DML statement's line | |
 | Syntax error (severity 15: Msg 102/156/…) | the **offending token's** line | differs from statement start for multi-line statements |
 | Unclosed string (Msg 105) | the line the literal **opened** on | even when the body runs across several lines to end of input |
@@ -66,6 +67,41 @@ Probed through SqlClient 7 against SQL Server 2025 (2026-09-23):
 
 - **Msg 5703 is English whatever the language**; real words it in the language being switched to (`Die Spracheneinstellung wurde in Deutsch geändert.`).
 - **Msg 8153 over a constant `VALUES` source grouped into single-row groups** isn't sent by real (`SELECT x, SUM(y) FROM (VALUES (1, NULL), (2, 3)) v(x, y) GROUP BY x`), which evaluates those groups while compiling; the same data in a table warns on both.
+
+## A statement's whole binder report
+
+Real's binder reports every error a statement carries rather than its first: each unbindable reference once per occurrence (`SELECT x1, x1 FROM t WHERE x1 = 1` is three Msg 207s), in the binder's clause order, each at its own line (probed 2026-09-27 against SQL Server 2025).
+The parse here stops at the first, so a statement whose bind fails is read again for the whole report: `Simulation.ReportEveryBindError` re-dispatches it in skip mode with a `BindErrorReport` on `BatchContext.BindErrors`, whose recording sites carry on past a miss with a stand-in type.
+The report replaces the lone error before the dispatch arms judge it, so the batch compile walk, a module body's bind at `CREATE`, a statement bound late because the batch created its table, and a dynamic batch all report it alike; a statement that binds never allocates one.
+What starts a report is `BindErrorReport.StartsReport`; the statements that take one are a query or DML statement, a `SET` / `RETURN` reading one, an `IF` / `WHILE` condition (whose branches then report as statements of their own) and a `CREATE` / `ALTER` of a view or function.
+
+**Order** is positional within a clause and by clause between them.
+A `SELECT` binds its `FROM` (joins' `ON` and derived tables included), `WHERE`, `GROUP BY`, `HAVING`, select list, `ORDER BY`, then `TOP`; a subquery's errors sit where its text does in the parent's clause.
+An `UPDATE` binds `FROM`, `WHERE`, the `SET` targets, the `SET` values, `OUTPUT`; a `DELETE` `FROM`, `WHERE`, `OUTPUT`; an `INSERT` its source before its column list; a `MERGE` its source, `ON`, the insert column list, every `WHEN` condition, then every action.
+Real binds some shapes by expansion and reports an operand once per copy — `COALESCE(x1, x2, x3)` is x1, x2, x1, x2, x3 — and reorders others: a `CASE`'s conditions before its results, a window's `OVER` clause before its arguments, an `IN` list last element first (`x1 IN (x2, x3)` is x1, x3, x1, x2); `BindErrorReport.Echo` and `Defer` place them.
+
+**Where real stops** — each probed 2026-09-27:
+- A failing CTE ends the report, the statement it leads unbound; an `UPDATE` stops after its `FROM` / `WHERE` and again after its `SET` targets; a `MERGE` after its `ON`.
+- A FROM clause's name collision (Msg 1011 / 1012 / 1013) ends it: what bound ahead of the colliding source reports, then the collision.
+- An `INSERT … SELECT` arity refusal (Msg 120 / 121) preempts everything, as a severity-15 parse error does; an `INSERT … VALUES` one (Msg 109 / 110 / 213 / 10709, and Msg 273 beside them) follows every name.
+- An illegal conversion (Msg 529) met before any other error reports alone, at the statement's line; one met after an error is skipped, and no type check fails over an unbindable operand.
+- A GROUP BY violation (Msg 8120 / 8121 / 8127) reports after its expression's own name errors and only when nothing ahead of the expression failed; an expression whose walk meets an unbindable name before its first violation reports none, one that found a violation first reports every violation it holds.
+- Msg 130 and Msg 147 report where they sit unless an error sorts ahead of them — the aggregate's own operand included (`WHERE COUNT(x1) > 1` is the Msg 207 alone).
+- Msg 8155 reports and binding goes on, the unnamed column simply unreadable.
+
+**Lines**: each error reports its reference's own line (a GROUP BY violation its offending column's), except where real compiles the statement through simple parameterization, which reports every error at the statement's first line.
+That applies to a single-table `SELECT` / `UPDATE` / `DELETE` / `INSERT` carrying a parameterizable literal and none of the constructs that disqualify it — `BindErrorReport.IsSimplyParameterizable` lists them, a heuristic over the shapes probed — and never in a module body.
+
+A `CATCH` reads a compile-time report's first entry through `ERROR_NUMBER()` and its siblings, a multi-statement dynamic batch's included, where an error raised as several at run time shows its last (`SimulatedSqlException.CatchReadsFirstEntry`).
+
+### Not modeled yet
+
+- **A type check other than Msg 529 still throws** — an operand clash beside a bound column, an implicit-conversion refusal — which ends the re-read where the parse meets it: the report keeps what was recorded before, and the rest of the statement goes unreported.
+  The parse's order isn't the binder's (the select list types before the `WHERE`), so this can also cost a name real reports ahead of the type check.
+- **MERGE's Msg 5334** for a name outside a `WHEN NOT MATCHED BY SOURCE` clause's scope reports as Msg 207.
+- **PIVOT** reports its `FOR` column's miss alone, where real reports the aggregate's operand first.
+- **An ORDER BY name shared by two select items** (`SELECT x1, x1 … ORDER BY x1`) adds Msg 209 on real.
+- **A name only a run reaches** — one skip mode doesn't bind — reports alone.
 
 ## Bind errors in a deferred statement are catchable here and aren't on real
 

@@ -35,13 +35,20 @@ internal sealed class Coalesce : Expression
         // there, while `SELECT col, COALESCE(61, SUM(other))` is still
         // Msg 8120 — so the aggregate stays registered).
         List<int> aggregateBounds = [context.AggregateCollector?.Count ?? 0];
+        var firstArgument = context.Token;
+        Token? lastComma = null;
         List<Expression> args = [Expression.Parse(context)];
         while (context.Token is Tokens.Operator { Character: ',' })
         {
             aggregateBounds.Add(context.AggregateCollector?.Count ?? 0);
+            lastComma = context.Token;
             context.MoveNextRequired();
             args.Add(Expression.Parse(context));
         }
+        // Real binds COALESCE as the CASE it stands for, every argument but
+        // the last twice: once tested, once returned.
+        if (context.Batch.BindErrors is { } report && report.Covers(firstArgument) && lastComma is not null)
+            report.Echo(firstArgument!.StartIndex, lastComma.StartIndex, lastComma.StartIndex);
         aggregateBounds.Add(context.AggregateCollector?.Count ?? 0);
         if (args.Count < 2)
             throw SimulatedSqlException.SyntaxErrorNear(context);

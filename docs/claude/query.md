@@ -639,6 +639,7 @@ Also, `STRING_AGG`'s `WITHIN GROUP (ORDER BY …)` and the JSON aggregates' key 
 ## GROUP BY containment
 
 Msg 8120 (select list) / 8121 (HAVING) / 8127 (ORDER BY): outside an aggregate, every column reference has to be covered by the GROUP BY clause.
+Real judges it one expression at a time and only while nothing ahead of the expression failed, so beside an unbindable name it may report or not — see [`errors.md`](errors.md#a-statements-whole-binder-report).
 A **bare** grouping column covers references to that column anywhere.
 A grouping **expression** covers a projection *sub-expression that matches it* — not the columns it happens to name.
 Probed against SQL Server 2025 (2026-08-05):

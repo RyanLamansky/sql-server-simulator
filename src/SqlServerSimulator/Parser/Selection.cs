@@ -887,12 +887,15 @@ internal sealed partial class Selection
         context.EnclosingAggregateCollector = savedAggregateCollector;
         context.AggregateCollector = aggregates;
         context.WindowCollector = windows;
+        var bindErrors = context.Batch.BindErrors;
+        bindErrors?.OpenScope(context.Token);
         try
         {
             return ParseInner(context, scope, aggregates, windows, allowOrderBy);
         }
         finally
         {
+            bindErrors?.CloseScope(context.Token);
             context.AggregateCollector = savedAggregateCollector;
             context.WindowCollector = savedWindowCollector;
             context.GraphPathAggregates = savedGraphPathAggregates;
@@ -1262,6 +1265,7 @@ internal sealed partial class Selection
 
         if (firstToken is ReservedKeyword { Keyword: Keyword.Top })
         {
+            context.Batch.BindErrors?.EnterClause(firstToken, BindClause.Top);
             // The TOP count is a single operand — a parenthesized expression
             // `TOP (expr)` or the legacy bare constant / variable. Parsing it as
             // a full expression would fold a following select-list star into a
@@ -1355,10 +1359,12 @@ internal sealed partial class Selection
         List<FromSource>? preParsedSources = null;
         List<JoinSpec>? preParsedJoins = null;
         ParserContext.Checkpoint afterSources = default;
+        context.Batch.BindErrors?.EnterClause(context.Token, BindClause.SelectList);
         if (FindOwnFromClause(context) is { } fromCheckpoint)
         {
             var selectListStart = context.SaveCheckpoint();
             context.RestoreCheckpoint(fromCheckpoint);
+            context.Batch.BindErrors?.EnterClause(context.Token, BindClause.From);
             var candidateSources = new List<FromSource>();
             var candidateJoins = new List<JoinSpec>();
             try
@@ -1691,6 +1697,7 @@ internal sealed partial class Selection
                     continue;
 
                 case ReservedKeyword { Keyword: Keyword.From }:
+                    context.Batch.BindErrors?.EnterClause(context.Token, BindClause.From);
                     List<FromSource> sources;
                     List<JoinSpec> joins;
                     if (preParsedSources is not null)
@@ -2143,13 +2150,19 @@ internal sealed partial class Selection
                 if (earlier.Qualifier is null || !collation.Equals(earlier.Qualifier, exposed))
                     continue;
                 var earlierTable = ExposedTableName(collation, earlier);
-                throw (addedTable, earlierTable) switch
+                var collision = (addedTable, earlierTable) switch
                 {
                     (null, null) => SimulatedSqlException.CorrelationNameRepeated(exposed),
                     (null, { } table) => SimulatedSqlException.CorrelationNameMatchesTable(exposed, table),
                     ({ } table, null) => SimulatedSqlException.CorrelationNameMatchesTable(earlier.Qualifier, table),
                     ({ } later, { } first) => SimulatedSqlException.SameExposedNames(later, first),
                 };
+                // Read for a whole bind error report, the statement binds on so
+                // the ON predicates ahead of the collision report too.
+                if (context.Batch.BindErrors is not { } report || !report.Covers(context.Token))
+                    throw collision;
+                report.RecordCollision(collision, context.Token!.StartIndex);
+                break;
             }
         }
         sources.Add(added);
@@ -3668,7 +3681,15 @@ internal sealed partial class Selection
                     (unnamed ??= []).Add(i + 1);
             }
             if (unnamed is not null)
-                throw SimulatedSqlException.NoColumnNamesSpecified(unnamed, qualifier);
+            {
+                // Real reports it and binds on: the unnamed columns just can't
+                // be referenced (probed 2026-09-27: `SELECT x1 FROM (SELECT 1)
+                // d` is Msg 8155 then Msg 207).
+                if (context.Batch.BindErrors is not { } report || (context.Token is not null && !report.Covers(context.Token)))
+                    throw SimulatedSqlException.NoColumnNamesSpecified(unnamed, qualifier);
+                report.Record(SimulatedSqlException.NoColumnNamesSpecified(unnamed, qualifier), context.Token?.StartIndex ?? (report.Command.Length - 1));
+                return projectedNames;
+            }
             // The projection's own names must be distinct too (probed
             // 2026-09-24: `(SELECT 1 x, 2 x) d` is Msg 8156).
             return RejectRepeatedColumnName(projectedNames, qualifier);
@@ -4012,6 +4033,7 @@ internal sealed partial class Selection
             {
                 while (context.Token is ReservedKeyword { Keyword: Keyword.Where })
                 {
+                    context.Batch.BindErrors?.EnterClause(context.Token, BindClause.Where);
                     // A MATCH predicate binds only here, against this scope.
                     context.MatchScope = new Expressions.MatchScope();
                     fromClause.Excluders.Add(BooleanExpression.SimplifyForFilter(
@@ -4029,6 +4051,7 @@ internal sealed partial class Selection
 
             if (context.Token is ReservedKeyword { Keyword: Keyword.Group })
             {
+                context.Batch.BindErrors?.EnterClause(context.Token, BindClause.GroupBy);
                 if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.By })
                     throw SimulatedSqlException.SyntaxErrorNear(context);
                 context.RecursiveBranchConstructs.GroupingOrAggregate = true;
@@ -4037,6 +4060,7 @@ internal sealed partial class Selection
 
             if (context.Token is ReservedKeyword { Keyword: Keyword.Having })
             {
+                context.Batch.BindErrors?.EnterClause(context.Token, BindClause.Having);
                 context.RecursiveBranchConstructs.GroupingOrAggregate = true;
                 // A HAVING settles a comparison against a folded-NULL constant
                 // the way a WHERE doesn't — see SettleFoldedNullComparisons.
@@ -4064,6 +4088,7 @@ internal sealed partial class Selection
         // ORDER BY is rejected (Msg 156).
         if (allowOrderBy && context.Token is ReservedKeyword { Keyword: Keyword.Order })
         {
+            context.Batch.BindErrors?.EnterClause(context.Token, BindClause.OrderBy);
             if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.By })
                 throw SimulatedSqlException.SyntaxErrorNear(context);
             // ORDER BY rejects NEXT VALUE FOR (Msg 11720), but allows windowed

@@ -1105,9 +1105,12 @@ internal abstract class Expression : ExpressionNode
 
         if (operand is Reference reference && batch.Parser.ScopeSources is { } sources)
         {
-            var (sourceIndex, columnIndex) = Selection.FindSourceColumn(sources, reference.ReferencedName);
-            if (sourceIndex >= 0 && (sources[sourceIndex].WrittenObjectName ?? sources[sourceIndex].Qualifier) is { } table)
+            // The operand is typed already, so an ambiguous name has raised.
+            if (Selection.TryResolveSourceColumn(sources, reference.ReferencedName) is var (sourceIndex, columnIndex)
+                && (sources[sourceIndex].WrittenObjectName ?? sources[sourceIndex].Qualifier) is { } table)
+            {
                 return new TypePairOperand(type, operand, table, sources[sourceIndex].ColumnNames[columnIndex]);
+            }
         }
 
         return new TypePairOperand(type, operand);

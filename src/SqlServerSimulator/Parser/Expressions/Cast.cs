@@ -34,9 +34,13 @@ internal sealed class Cast : Expression
     private readonly bool tryMode;
     private readonly bool targetReportsNumeric;
 
+    /// <summary>The call's first argument, which a whole-statement bind error report places an illegal conversion at.</summary>
+    private readonly Token? openToken;
+
     public Cast(ParserContext context, bool tryMode = false)
     {
         this.tryMode = tryMode;
+        this.openToken = context.Token;
         this.source = Parse(RequireSourceBeforeAs(context, tryMode ? "try_cast" : "cast"));
         RequireAs(context, tryMode ? "try_cast" : "cast");
 
@@ -194,7 +198,33 @@ internal sealed class Cast : Expression
         targetType == SqlType.Real ? SqlValue.FromSingle(0) : SqlValue.Null(targetType);
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
-        RejectIllegalConversion(this.source, this.source.GetSqlType(batch, resolveColumnType), this.targetType, this.targetReportsNumeric, batch);
+        batch.BindErrors is { } report
+            ? TypeWhileReporting(report, this.source, this.openToken, this.targetType, this.targetReportsNumeric, batch, resolveColumnType)
+            : RejectIllegalConversion(this.source, this.source.GetSqlType(batch, resolveColumnType), this.targetType, this.targetReportsNumeric, batch);
+
+    /// <summary>
+    /// <see cref="GetSqlType"/> while a statement is read for its whole bind
+    /// error report: a source whose typing recorded an error converts to
+    /// anything, as real's error-typed operand does, and an illegal conversion
+    /// is recorded at <paramref name="at"/> rather than thrown. Shared by CAST
+    /// and CONVERT.
+    /// </summary>
+    internal static SqlType TypeWhileReporting(BindErrorReport report, Expression source, Token? at, SqlType targetType, bool targetReportsNumeric, BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        var recorded = report.Count;
+        var sourceType = source.GetSqlType(batch, resolveColumnType);
+        if (report.Count > recorded)
+            return targetType;
+        try
+        {
+            return RejectIllegalConversion(source, sourceType, targetType, targetReportsNumeric, batch);
+        }
+        catch (SimulatedSqlException illegal) when (illegal.Number == 529 && report.Covers(at))
+        {
+            report.RecordTypeError(illegal, at!.StartIndex);
+            return targetType;
+        }
+    }
 
     /// <summary>
     /// The compile-time half of Msg 529, shared by CAST and CONVERT: real

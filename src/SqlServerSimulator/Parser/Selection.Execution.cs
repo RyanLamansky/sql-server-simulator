@@ -211,7 +211,7 @@ internal sealed partial class Selection
     /// COUNT(*)</c> is Msg 8120 (probed 2026-09-24 against SQL Server 2025).
     /// </para>
     /// </summary>
-    private static void ValidateGroupByReferences(FromSource[] sources, List<Expression> expressions, List<OrderBySpec> orderBy, string[] outputColumnNames, FromClause fromClause, List<WindowExpression> windows, NullabilityContext? folds)
+    private static void ValidateGroupByReferences(FromSource[] sources, List<Expression> expressions, List<OrderBySpec> orderBy, string[] outputColumnNames, FromClause fromClause, List<WindowExpression> windows, NullabilityContext? folds, BindErrorReport? report)
     {
         var groupedBare = new HashSet<(int Source, int Column)>();
         var groupingKeys = new HashSet<ShapeKey>();
@@ -275,6 +275,12 @@ internal sealed partial class Selection
         ColumnReferenceVisitor VisitorFor(Func<string, SimulatedSqlException> error) =>
             new(name => Check(name, error), coversSubtree);
 
+        if (report is not null)
+        {
+            RecordGroupingViolations(report, sources, expressions, orderBy, outputColumnNames, fromClause, windows, groupedBare, coversSubtree);
+            return;
+        }
+
         var selectVisitor = VisitorFor(SimulatedSqlException.ColumnNotInGroupByForSelect);
         foreach (var expression in expressions)
             expression.VisitColumnReferences(selectVisitor);
@@ -334,6 +340,110 @@ internal sealed partial class Selection
     }
 
     /// <summary>
+    /// <see cref="ValidateGroupByReferences"/> for a statement re-read for its
+    /// whole bind error report: every violation is recorded rather than the
+    /// first thrown, judged one expression at a time — the HAVING clause, each
+    /// select-list item and window, each ORDER BY item — the way real does.
+    /// An expression whose walk meets an unbindable name before any violation
+    /// reports none, while one that found its violation first reports every
+    /// one it holds, the unbindable names in it notwithstanding (probed
+    /// 2026-09-27: <c>HAVING b &gt; 1 AND x1 = 1 AND c = 'x'</c> sends Msg 207
+    /// then Msg 8121 for both <c>b</c> and <c>c</c>, <c>HAVING x1 &gt; 1 AND
+    /// c = 'x'</c> the Msg 207 alone).
+    /// </summary>
+    private static void RecordGroupingViolations(
+        BindErrorReport report,
+        FromSource[] sources,
+        List<Expression> expressions,
+        List<OrderBySpec> orderBy,
+        string[] outputColumnNames,
+        FromClause fromClause,
+        List<WindowExpression> windows,
+        HashSet<(int Source, int Column)> groupedBare,
+        Func<ExpressionNode, bool> coversSubtree)
+    {
+        void Judge(List<Expression> roots, Func<string, SimulatedSqlException> error, bool orderByTerm)
+        {
+            var references = new List<(Reference? Node, MultiPartName Name)>();
+            foreach (var root in roots)
+            {
+                root.Walk((node, shape) =>
+                {
+                    if (node is AggregateExpression or WindowExpression || coversSubtree(node))
+                        return false;
+                    if (shape.Column is { } name)
+                        references.Add((node as Reference, name));
+                    return true;
+                });
+            }
+
+            var start = int.MaxValue;
+            var end = -1;
+            foreach (var (node, _) in references)
+            {
+                if (report.Covers(node?.SourceToken))
+                {
+                    start = Math.Min(start, node!.SourceToken!.StartIndex);
+                    end = Math.Max(end, node.SourceToken.StartIndex);
+                }
+            }
+            if (end < 0)
+                return;
+
+            var violations = 0;
+            foreach (var (node, name) in references)
+            {
+                var position = report.Covers(node?.SourceToken) ? node!.SourceToken!.StartIndex : -1;
+                if (position >= 0 && report.FailedAt(position))
+                {
+                    if (violations == 0)
+                        return;
+                    continue;
+                }
+                if (orderByTerm && name.ImmediateQualifier is null && Array.Exists(outputColumnNames, output => BuiltInToken.Equals(output, name.Leaf)))
+                    continue;
+                if (TryResolveSourceColumn(sources, name) is not { } id || groupedBare.Contains(id))
+                    continue;
+                var source = sources[id.Source];
+                var column = source.ColumnNames[id.Column];
+                var qualifier = source.WrittenObjectName ?? source.Qualifier;
+                violations++;
+                report.RecordGroupingViolation(error(qualifier is null ? column : $"{qualifier}.{column}"), position < 0 ? end : position, start, end);
+            }
+        }
+
+        if (fromClause.Having is { } having)
+        {
+            var operands = new List<Expression>();
+            having.VisitSurvivingOperandExpressions(operands.Add);
+            Judge(operands, SimulatedSqlException.ColumnNotInGroupByForHaving, orderByTerm: false);
+        }
+        foreach (var expression in expressions)
+            Judge([expression], SimulatedSqlException.ColumnNotInGroupByForSelect, orderByTerm: false);
+        foreach (var window in windows)
+        {
+            List<Expression> parts = [];
+            foreach (var part in (Expression?[])[window.Operand, window.AggregateInfo?.Operand, window.DefaultArg])
+            {
+                if (part is not null)
+                    parts.Add(part);
+            }
+            parts.AddRange(window.PartitionBy);
+            foreach (var item in window.OrderBy)
+            {
+                if (item.Expr is { } term)
+                    parts.Add(term);
+            }
+            Judge(parts, SimulatedSqlException.ColumnNotInGroupByForSelect, orderByTerm: false);
+        }
+        foreach (var item in orderBy)
+        {
+            if (item.Expr is { } term)
+                Judge([term], SimulatedSqlException.ColumnNotInGroupByForOrderBy, orderByTerm: true);
+        }
+    }
+
+    /// <summary>
     /// The structural identity a GROUP BY expression is matched on: its
     /// <see cref="ShapeKey"/>, with each column keyed by the source column it
     /// resolves to rather than by its spelling, so a projection and a grouping
@@ -353,7 +463,7 @@ internal sealed partial class Selection
     /// unresolved (or ambiguous — which would already have failed type
     /// resolution). Never raises: recording a diagnostic must not itself throw.
     /// </summary>
-    private static (int Source, int Column)? TryResolveSourceColumn(FromSource[] sources, MultiPartName name)
+    internal static (int Source, int Column)? TryResolveSourceColumn(FromSource[] sources, MultiPartName name)
     {
         try
         {
@@ -567,7 +677,7 @@ internal sealed partial class Selection
             context.AggregateCollector = savedCollector;
             context.MatchScope = savedMatchScope;
         }
-        if (whereAggregates.Count > 0)
+        if (whereAggregates.Count > 0 && context.Batch.BindErrors?.RecordAggregateInWhere(whereAggregates[0]) != true)
             throw SimulatedSqlException.AggregateInWhereClause();
         predicate.Bind(context.Batch, resolveColumnType);
         return BooleanExpression.SimplifyForFilter(predicate, context);
@@ -851,25 +961,35 @@ internal sealed partial class Selection
             var referenced = 0;
             var resolvedHere = 0;
             MultiPartName? unresolved = null;
-            operand.VisitColumnReferences(name =>
+            try
             {
-                referenced++;
-                if (FindSourceColumn(sources, name).SourceIndex >= 0)
-                    resolvedHere++;
-                else
-                    unresolved ??= name;
-            });
+                operand.VisitColumnReferences(name =>
+                {
+                    referenced++;
+                    if (FindSourceColumn(sources, name).SourceIndex >= 0)
+                        resolvedHere++;
+                    else
+                        unresolved ??= name;
+                });
 
-            if (referenced == 0 || resolvedHere > 0)
+                if (referenced == 0 || resolvedHere > 0)
+                    continue;
+
+                // Resolve the outer scope chain before concluding anything: with no
+                // enclosing scope at all, or with one that doesn't know the name,
+                // this is a bad column reference rather than an outer-bound
+                // aggregate.
+                if (outerTypeResolver is null)
+                    throw UnresolvedNameError(sources, unresolved!.Value);
+                _ = outerTypeResolver(unresolved!.Value);
+            }
+            catch (SimulatedSqlException) when (parseBatch.BindErrors is not null)
+            {
+                // Typing the operand records each unbindable name where it
+                // sits — COUNT never types its operand otherwise.
+                _ = operand.GetSqlType(parseBatch, name => ResolveColumnTypeAcrossSources(sources, name, outerTypeResolver));
                 continue;
-
-            // Resolve the outer scope chain before concluding anything: with no
-            // enclosing scope at all, or with one that doesn't know the name,
-            // this is a bad column reference rather than an outer-bound
-            // aggregate.
-            if (outerTypeResolver is null)
-                throw UnresolvedNameError(sources, unresolved!.Value);
-            _ = outerTypeResolver(unresolved!.Value);
+            }
 
             // The aggregate reads only the enclosing query's columns, so it
             // belongs to that query: real evaluates it there, which makes the
@@ -960,8 +1080,11 @@ internal sealed partial class Selection
 
         // What WHERE aggregated is only legal once it has moved to the query
         // whose columns it reads.
-        if (fromClause.WhereAggregates is { } whereAggregates && whereAggregates.Exists(aggregates.Contains))
+        if (fromClause.WhereAggregates is { } whereAggregates && whereAggregates.Find(aggregates.Contains) is { } whereAggregate
+            && parseBatch.BindErrors?.RecordAggregateInWhere(whereAggregate) != true)
+        {
             throw SimulatedSqlException.AggregateInWhereClause();
+        }
 
         // Convert a comma-join / CROSS JOIN carrying an equi-join predicate in
         // WHERE into an INNER JOIN, so it rides the equi-join seek / hash path
@@ -1099,16 +1222,13 @@ internal sealed partial class Selection
         // numeric, so each is marked against the column it binds to.
         foreach (var expression in expressions)
         {
+            // Typing above settled every name, so the lookups here never
+            // raise; an unbindable one a whole-statement bind error report
+            // carried past marks nothing.
             Reference.MarkNumericSpelled(expression, name =>
-            {
-                var (s, c) = FindSourceColumn(sources, name);
-                return s >= 0 && sources[s].Columns[c].SpelledNumeric;
-            });
+                TryResolveSourceColumn(sources, name) is { } id && sources[id.Source].Columns[id.Column].SpelledNumeric);
             Reference.MarkAliasTyped(expression, name =>
-            {
-                var (s, c) = FindSourceColumn(sources, name);
-                return s >= 0 ? sources[s].Columns[c].AliasType : null;
-            });
+                TryResolveSourceColumn(sources, name) is { } id ? sources[id.Source].Columns[id.Column].AliasType : null);
         }
 
         // A column a derived source filled only with bare NULLs has no type
@@ -1118,6 +1238,14 @@ internal sealed partial class Selection
         {
             if (ReadsUntypedNullColumn(sources, aggregate.Operand))
                 throw AggregateExpression.UntypedNullOperand(aggregate.Kind);
+            // A WITHIN GROUP ordering binds as the rows are read; a statement
+            // read for its whole bind error report binds it here, after the
+            // aggregate's operand as real does.
+            if (parseBatch.BindErrors is not null && aggregate.OrderBy is { } withinGroup)
+            {
+                foreach (var item in withinGroup)
+                    _ = item.Expr?.GetSqlType(parseBatch, ResolveColumnType);
+            }
         }
         foreach (var window in windows)
         {
@@ -1286,11 +1414,16 @@ internal sealed partial class Selection
                 throw SimulatedSqlException.OrderByItemNotInSelectListWithDistinct();
             orderTermMayNameAlias = orderBy[i].MayNameAlias;
             SqlType keyType;
+            var recorded = parseBatch.BindErrors?.Count ?? 0;
             try
             {
                 keyType = orderBy[i].IsOrdinal
                     ? outputSchema[orderBy[i].Ordinal - 1]
                     : orderBy[i].Expr!.GetSqlType(parseBatch, ResolveOrderByType);
+                // Real follows an unknown name under DISTINCT with DISTINCT's
+                // own complaint, the same as the throwing path below.
+                if (distinct && parseBatch.BindErrors is { } report && report.Count > recorded && report.SpanOf(orderBy[i].Expr) is { } term)
+                    report.Record(SimulatedSqlException.OrderByItemNotInSelectListWithDistinct(), term.End);
             }
             catch (SimulatedSqlException unknown) when (distinct && unknown.Number is 207 or 4104)
             {
@@ -1337,7 +1470,8 @@ internal sealed partial class Selection
                 var grouped = fromClause.GroupingSets.Count > 0 || fromClause.Having is not null;
                 ValidateGroupByReferences(
                     sources, expressions, orderBy, outputColumnNames, fromClause, windows,
-                    grouped ? new NullabilityContext(parseBatch, static _ => true, ResolveColumnType) : null);
+                    grouped ? new NullabilityContext(parseBatch, static _ => true, ResolveColumnType) : null,
+                    parseBatch.BindErrors);
             }
         }
 
@@ -1931,19 +2065,15 @@ internal sealed partial class Selection
             _ => true,
         });
 
-    private static bool ReadsNodesColumn(FromSource[] sources, Reference reference)
-    {
-        var (s, _) = FindSourceColumn(sources, reference.ReferencedName);
-        return s >= 0 && sources[s].XmlReceiverName is not null;
-    }
+    private static bool ReadsNodesColumn(FromSource[] sources, Reference reference) =>
+        TryResolveSourceColumn(sources, reference.ReferencedName) is { } id && sources[id.Source].XmlReceiverName is not null;
 
     /// <summary>Whether <paramref name="operand"/> is a bare reference to a source column with no type.</summary>
     private static bool ReadsUntypedNullColumn(FromSource[] sources, Expression? operand)
     {
-        if (operand is not Reference reference)
-            return false;
-        var (s, c) = FindSourceColumn(sources, reference.ReferencedName);
-        return s >= 0 && sources[s].Columns[c].IsUntypedNull;
+        return operand is Reference reference
+            && TryResolveSourceColumn(sources, reference.ReferencedName) is { } id
+            && sources[id.Source].Columns[id.Column].IsUntypedNull;
     }
 
     /// <summary>
