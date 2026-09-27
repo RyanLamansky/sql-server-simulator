@@ -144,12 +144,11 @@ partial class Simulation
         yield return HelpFileResultSet(single);
     }
 
-    // `str(sum(size) / 128, 10, 2) + ' MB'` over the database's files — the two
-    // synthetic files sys.database_files reports — right-aligned in str's ten
-    // columns.
+    // `str(sum(size) / 128, 10, 2) + ' MB'` over the database's files,
+    // right-aligned in str's ten columns.
     private static string HelpDbSize(Database database)
     {
-        long pages = BuiltInResources.ComputeDataFileSizePages(database) + BuiltInResources.LogFileSizePages;
+        var pages = BuiltInResources.TotalFileSizePages(database);
         return (pages / 128m).ToString("F2", CultureInfo.InvariantCulture).PadLeft(10) + " MB";
     }
 
@@ -220,11 +219,8 @@ partial class Simulation
     /// carries → Msg 15325.
     /// </summary>
     /// <remarks>
-    /// File identity is the synthetic two-file model <c>sys.database_files</c>
-    /// / <c>sys.master_files</c> / <c>FILE_ID</c> share — <c>&lt;db&gt;</c>
-    /// (fileid 1, PRIMARY) and <c>&lt;db&gt;_log</c> (fileid 2, NULL filegroup)
-    /// — so every surface reports the same sizes. Name matching is
-    /// trailing-space insensitive, as <c>FILE_ID</c>'s is.
+    /// Rows come from <see cref="Database.Files"/>, as <c>sys.database_files</c>'
+    /// do. Name matching is trailing-space insensitive, as <c>FILE_ID</c>'s is.
     /// </remarks>
     private static IEnumerable<SimulatedStatementOutcome> InvokeSpHelpFile(BatchContext batch)
     {
@@ -245,54 +241,46 @@ partial class Simulation
         yield return HelpFileResultSet(database, fileId);
     }
 
-    // real's `file_id(@filename)` over the two modeled files; null when the
-    // name matches neither.
-    private static short? HelpFileIdOf(Database database, string fileName)
-    {
-        var name = fileName.TrimEnd(' ');
-        return Collation.Baseline.Equals(name, BuiltInResources.LogicalFileName(database.Name, isLog: false)) ? 1
-            : Collation.Baseline.Equals(name, BuiltInResources.LogicalFileName(database.Name, isLog: true)) ? 2
-            : null;
-    }
+    // real's `file_id(@filename)`; null when no file carries the name.
+    private static short? HelpFileIdOf(Database database, string fileName) =>
+        database.FindFile(fileName.TrimEnd(' ')) is { } file ? (short)file.FileId : null;
 
-    // The file report. A null fileId yields every file with the fileid column;
-    // a non-null one yields that file alone through the narrower shape.
+    // The file report, in fileid order. A null fileId yields every file with
+    // the fileid column; a non-null one yields that file alone through the
+    // narrower shape. A data file's unlimited maxsize reads "Unlimited", a log
+    // file's its 2 TB cap in KB, and a percentage growth "<n>%" (probed
+    // 2026-09-27 against SQL Server 2025).
     private static SimulatedSqlResultSet HelpFileResultSet(Database database, short? fileId = null)
     {
-        var primary = SqlValue.FromSystemName("PRIMARY");
         var nullFilegroup = SqlValue.Null(SqlType.SystemName);
-        var unlimited = SqlValue.FromString(HelpFileSizeType, "Unlimited");
-        var growth = SqlValue.FromString(HelpFileSizeType,
-            BuiltInResources.FileGrowthKilobytes.ToString(CultureInfo.InvariantCulture) + " KB");
-        SqlValue[] data =
-        [
-            SqlValue.FromSystemName(BuiltInResources.LogicalFileName(database.Name, isLog: false)),
-            SqlValue.FromInt16(1),
-            SqlValue.FromString(HelpFilePathType, BuiltInResources.DataFilePath(database.Name)),
-            primary,
-            SqlValue.FromString(HelpFileSizeType, HelpFileKilobytes(BuiltInResources.ComputeDataFileSizePages(database))),
-            unlimited,
-            growth,
-            SqlValue.FromString(HelpFileUsageType, "data only"),
-        ];
-        // The log file's maxsize renders its 2 TB ceiling in KB rather than
-        // "Unlimited" (probe-confirmed), the same ceiling
-        // sys.database_files.max_size reports in pages.
-        SqlValue[] log =
-        [
-            SqlValue.FromSystemName(BuiltInResources.LogicalFileName(database.Name, isLog: true)),
-            SqlValue.FromInt16(2),
-            SqlValue.FromString(HelpFilePathType, BuiltInResources.LogFilePath(database.Name)),
-            nullFilegroup,
-            SqlValue.FromString(HelpFileSizeType, HelpFileKilobytes(BuiltInResources.LogFileSizePages)),
-            SqlValue.FromString(HelpFileSizeType, HelpFileKilobytes(BuiltInResources.LogFileMaxSizePages)),
-            growth,
-            SqlValue.FromString(HelpFileUsageType, "log only"),
-        ];
+        var rows = new List<SqlValue[]>();
+        foreach (var file in database.FilesInOrder())
+        {
+            if (fileId is not null && file.FileId != fileId)
+                continue;
+            var filegroup = file.IsLog ? nullFilegroup
+                : database.Filegroups.FirstOrDefault(entry => entry.Value == file.DataSpaceId).Key is { } filegroupName
+                    ? SqlValue.FromSystemName(filegroupName)
+                    : nullFilegroup;
+            var maxSize = BuiltInResources.ReportedMaxSizePages(file);
+            SqlValue[] row =
+            [
+                SqlValue.FromSystemName(file.Name),
+                SqlValue.FromInt16((short)file.FileId),
+                SqlValue.FromString(HelpFilePathType, file.PhysicalName),
+                filegroup,
+                SqlValue.FromString(HelpFileSizeType, HelpFileKilobytes(BuiltInResources.FileSizePages(database, file))),
+                SqlValue.FromString(HelpFileSizeType, maxSize == -1 ? "Unlimited" : HelpFileKilobytes(maxSize)),
+                SqlValue.FromString(HelpFileSizeType, file.IsPercentGrowth
+                    ? file.Growth.ToString(CultureInfo.InvariantCulture) + "%"
+                    : HelpFileKilobytes(file.Growth)),
+                SqlValue.FromString(HelpFileUsageType, file.IsLog ? "log only" : "data only"),
+            ];
+            rows.Add(fileId is null ? row : WithoutFileId(row));
+        }
         return fileId is null
-            ? new SimulatedSqlResultSet(SpHelpFileSchema, SpHelpFileColumnNames, [data, log])
-            : new SimulatedSqlResultSet(SpHelpFileNamedSchema, SpHelpFileNamedColumnNames,
-                [WithoutFileId(fileId == 1 ? data : log)]);
+            ? new SimulatedSqlResultSet(SpHelpFileSchema, SpHelpFileColumnNames, rows)
+            : new SimulatedSqlResultSet(SpHelpFileNamedSchema, SpHelpFileNamedColumnNames, rows);
     }
 
     // The named form's row: the same cells minus the fileid at ordinal 1.

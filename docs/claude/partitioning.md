@@ -50,8 +50,8 @@ Dropping a function a scheme uses is Msg 7706, one a schema-bound module's body 
 
 `ALTER DATABASE … ADD FILEGROUP name [CONTAINS …]` and `REMOVE FILEGROUP name` maintain `Database.Filegroups`; `CREATE DATABASE`'s file list registers each `FILEGROUP name` it declares, in order.
 A new filegroup takes one past the highest id held, so removing the newest and adding another reuses its id.
-Removal refuses `PRIMARY` and a filegroup a scheme maps a partition or its next-used slot to (Msg 5042 at two states).
-The file forms (`ADD [LOG] FILE (…) [TO FILEGROUP …]`, `REMOVE FILE`) parse and change nothing.
+Removal refuses `PRIMARY`, a filegroup with files, and a filegroup a scheme maps a partition or its next-used slot to (Msg 5042 at three states).
+The files in a filegroup, and `MODIFY FILEGROUP`, are in [`database-options.md`](database-options.md#files-and-filegroups).
 An `ON` clause naming neither a scheme nor a registered filegroup (nor `"default"`) is Msg 1921.
 
 ## Placement

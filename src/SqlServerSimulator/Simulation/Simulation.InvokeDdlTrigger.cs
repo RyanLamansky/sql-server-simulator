@@ -22,8 +22,8 @@ partial class Simulation
         ParserContext context,
         string eventType,
         string? schemaName,
-        string objectName,
-        string objectType,
+        string? objectName,
+        string? objectType,
         string? targetObjectName = null,
         string? targetObjectType = null,
         string? roleName = null)
@@ -181,8 +181,10 @@ partial class Simulation
         AppendElement(builder, "DatabaseName", batch.CurrentDatabase.Name);
         if (info.SchemaName is { } schemaName)
             AppendElement(builder, "SchemaName", schemaName);
-        AppendElement(builder, "ObjectName", info.ObjectName);
-        AppendElement(builder, "ObjectType", info.ObjectType);
+        if (info.ObjectName is { } objectName)
+            AppendElement(builder, "ObjectName", objectName);
+        if (info.ObjectType is { } objectType)
+            AppendElement(builder, "ObjectType", objectType);
         if (info.TargetObjectName is { } targetName)
             AppendElement(builder, "TargetObjectName", targetName);
         if (info.TargetObjectType is { } targetType)

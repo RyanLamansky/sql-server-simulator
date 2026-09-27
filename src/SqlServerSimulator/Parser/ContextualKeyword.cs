@@ -145,7 +145,6 @@ enum ContextualKeyword
     Undefined,
     Using,
     Value,
-    Verbose_Truncation_Warnings,
     View_Metadata,
     Within,
     Work,

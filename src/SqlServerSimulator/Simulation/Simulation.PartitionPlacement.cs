@@ -191,50 +191,25 @@ partial class Simulation
 
     /// <summary>
     /// <c>ALTER DATABASE … ADD FILEGROUP name [CONTAINS …]</c> and <c>REMOVE
-    /// FILEGROUP name</c>, entered on <c>ADD</c> / <c>REMOVE</c>. A filegroup is
-    /// catalog metadata only: adding one registers the name (Msg 5035 when it
-    /// is taken), removing one drops it (Msg 5014 when it doesn't exist,
-    /// Msg 5042 for <c>PRIMARY</c> and while a partition scheme maps a
-    /// partition — or its next-used slot — to it, the class-0 Msg 5044 when
-    /// done). The file forms, <c>ADD [LOG] FILE (…)
-    /// [TO FILEGROUP name]</c> and <c>REMOVE FILE name</c>, parse and change
-    /// nothing, there being no file model.
+    /// FILEGROUP name</c>, entered on <c>ADD</c> / <c>REMOVE</c>, which also
+    /// route the file forms. Adding a filegroup registers the name (Msg 5035
+    /// when it is taken); removing one drops it (Msg 5014 when it doesn't
+    /// exist, Msg 5042 for <c>PRIMARY</c>, while it has files, and while a
+    /// partition scheme maps a partition — or its next-used slot — to it, the
+    /// class-0 Msg 5044 when done). A read-only database refuses either with a
+    /// plain Msg 3906 (probed 2026-09-27 against SQL Server 2025).
     /// </summary>
     private static bool TryParseAlterDatabaseFilegroup(ParserContext context, Database target, bool add)
     {
         var word = context.GetNextRequired();
         if (word is Name { Value: var logWord } && add && BuiltInToken.Equals(logWord, "LOG"))
-            word = context.GetNextRequired();
-        if (word is ReservedKeyword { Keyword: Keyword.File })
         {
-            if (!add)
-            {
-                if (context.GetNextRequired() is not Name)
-                    throw SimulatedSqlException.SyntaxErrorNear(context);
-                context.MoveNextOptional();
-                return true;
-            }
-            if (context.GetNextRequired() is not Operator { Character: '(' })
-                throw SimulatedSqlException.SyntaxErrorNear(context);
-            SkipBalancedParens(context);
-            context.MoveNextOptional();
-            while (context.Token is Operator { Character: ',' })
-            {
-                if (context.GetNextRequired() is not Operator { Character: '(' })
-                    throw SimulatedSqlException.SyntaxErrorNear(context);
-                SkipBalancedParens(context);
-                context.MoveNextOptional();
-            }
-            if (context.Token is ReservedKeyword { Keyword: Keyword.To })
-            {
-                if (context.GetNextRequired() is not Name { Value: var toWord } || !BuiltInToken.Equals(toWord, "FILEGROUP"))
-                    throw SimulatedSqlException.SyntaxErrorNear(context);
-                if (context.GetNextRequired() is not Name)
-                    throw SimulatedSqlException.SyntaxErrorNear(context);
-                context.MoveNextOptional();
-            }
-            return true;
+            return context.GetNextRequired() is ReservedKeyword { Keyword: Keyword.File }
+                ? TryParseAlterDatabaseAddFile(context, target, isLog: true)
+                : throw SimulatedSqlException.SyntaxErrorNear(context);
         }
+        if (word is ReservedKeyword { Keyword: Keyword.File })
+            return add ? TryParseAlterDatabaseAddFile(context, target, isLog: false) : TryParseAlterDatabaseRemoveFile(context, target);
         if (word is not Name { Value: var kind } || !BuiltInToken.Equals(kind, "FILEGROUP"))
             return false;
         if (context.GetNextRequired() is not Name name)
@@ -249,6 +224,7 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return true;
 
+        target.RejectWriteWhenReadOnly();
         if (add)
         {
             if (target.Filegroups.ContainsKey(name.Value))
@@ -260,9 +236,16 @@ partial class Simulation
             throw SimulatedSqlException.FilegroupDoesNotExist(name.Value, target.Name);
         if (dataSpaceId == Database.PrimaryFilegroupId)
             throw SimulatedSqlException.FilegroupNotEmpty(name.Value, state: 6);
+        if (FileCount(target, dataSpaceId) > 0)
+            throw SimulatedSqlException.FilegroupHasFiles(name.Value);
         if (target.PartitionSchemes.Values.Any(scheme => scheme.NextUsed == dataSpaceId || scheme.Destinations.Contains(dataSpaceId)))
             throw SimulatedSqlException.FilegroupNotEmpty(name.Value, state: 12);
-        _ = target.Filegroups.TryRemove(name.Value, out _);
+        lock (target.Filegroups)
+        {
+            _ = target.Filegroups.TryRemove(name.Value, out _);
+            _ = target.ReadOnlyFilegroups.Remove(dataSpaceId);
+            _ = target.AutogrowAllFilesFilegroups.Remove(dataSpaceId);
+        }
         context.Batch.AppendInfoError(0, 1, 5044, SimulatedSqlException.FilegroupRemovedMessage(name.Value));
         return true;
     }

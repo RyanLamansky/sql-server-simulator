@@ -74,12 +74,10 @@ internal static partial class BuiltInResources
                 .Concat(EnumeratePartitionSchemeRows(database, withFunctionId: false));
         });
 
-        // sys.filegroups: the row-filegroup subset of sys.data_spaces — the
-        // simulator's single PRIMARY filegroup (data_space_id = 1). Adds the
+        // sys.filegroups: the row-filegroup subset of sys.data_spaces, plus the
         // filegroup-specific columns (filegroup_guid / log_filegroup_id /
         // is_read_only / is_autogrow_all_files) SMO's CREATE-scripting index /
-        // filegroup queries read. Probe-confirmed PRIMARY row (SQL Server 2025):
-        // is_default = 1, is_system = 0, the rest NULL / 0.
+        // filegroup queries read; the two flags follow MODIFY FILEGROUP.
         Sys("filegroups",
         [
             new("name", SqlType.SystemName, 128, false),
@@ -97,9 +95,16 @@ internal static partial class BuiltInResources
             _ = batch;
             var nullGuid = SqlValue.Null(SqlType.UniqueIdentifier);
             var nullLogId = SqlValue.Null(SqlType.Int32);
-            var falseBit = SqlValue.FromBoolean(false);
             return EnumerateFilegroupRows(database, filegroupType, filegroupTypeDesc)
-                .Select(row => new[] { row[0], row[1], row[2], row[3], row[4], row[5], nullGuid, nullLogId, falseBit, falseBit });
+                .Select(row =>
+                {
+                    var id = row[1].AsInt32;
+                    return new[]
+                    {
+                        row[0], row[1], row[2], row[3], row[4], row[5], nullGuid, nullLogId,
+                        SqlValue.FromBoolean(database.IsFilegroupReadOnly(id)), SqlValue.FromBoolean(database.IsFilegroupAutogrowAllFiles(id)),
+                    };
+                });
         });
 
         // sys.index_columns: probe-confirmed 10-column shape. One row per
@@ -608,8 +613,8 @@ internal static partial class BuiltInResources
     /// Shared row producer for <c>sys.data_spaces</c> + <c>sys.filegroups</c>
     /// (the latter widens each row with four filegroup-only trailing columns).
     /// One row per <see cref="Database.Filegroups"/> entry ordered by
-    /// <c>data_space_id</c>: <c>PRIMARY</c> (id 1) reports
-    /// <c>is_default = 1</c>, every registered filegroup <c>is_default = 0</c>;
+    /// <c>data_space_id</c>: the <see cref="Database.DefaultFilegroupId"/>
+    /// reports <c>is_default = 1</c>, every other <c>is_default = 0</c>;
     /// <c>is_system</c> is always 0. <c>sys.data_spaces</c> follows these with
     /// the partition schemes (<see cref="EnumeratePartitionSchemeRows"/>).
     /// </summary>
@@ -625,7 +630,7 @@ internal static partial class BuiltInResources
                 SqlValue.FromInt32(id),
                 filegroupType,
                 filegroupTypeDesc,
-                id == Database.PrimaryFilegroupId ? trueBit : falseBit,
+                id == database.DefaultFilegroupId ? trueBit : falseBit,
                 falseBit,
             ];
         }
@@ -1079,31 +1084,27 @@ internal static partial class BuiltInResources
         return total;
     }
 
-    /// <summary>Synthetic per-database log-file size, in 8 KB pages: the 1024 a new SQL Server 2025 database's log starts at (probed 2026-09-26).</summary>
-    internal const int LogFileSizePages = 1024;
-
     /// <summary>
-    /// Synthetic autogrowth increment, in KB — SQL Server's 64 MB default for
-    /// a database created without an explicit <c>FILEGROWTH</c>. This is the
-    /// unit <c>sp_helpfile</c>'s <c>growth</c> cell renders ("65536 KB");
-    /// the catalog views measure the same increment in pages
-    /// (<see cref="FileGrowthPages"/>).
+    /// The size, in 8 KB pages, of each file a <c>CREATE DATABASE</c> without a
+    /// file list makes, and of a file added without <c>SIZE</c>: the 1024 a new
+    /// SQL Server 2025 database's data and log files start at (probed
+    /// 2026-09-26), which is also the floor under a primary data file's
+    /// declared size (probed 2026-09-27).
     /// </summary>
-    internal const int FileGrowthKilobytes = 65536;
+    internal const int NewFileSizePages = 1024;
 
     /// <summary>
-    /// The same autogrowth increment as <see cref="FileGrowthKilobytes"/>,
-    /// expressed in 8 KB pages — the unit <c>sys.master_files</c> /
-    /// <c>sys.database_files</c>' <c>growth</c> column carries whenever
-    /// <c>is_percent_growth</c> is 0 (probe-confirmed: real reports 8192 for
-    /// the 64 MB default, not 65536).
+    /// The autogrowth increment of a file made without <c>FILEGROWTH</c>, in
+    /// 8 KB pages: SQL Server's 64 MB default, which the catalog views report
+    /// as 8192 whenever <c>is_percent_growth</c> is 0 (probe-confirmed) and
+    /// <c>sp_helpfile</c> as <c>65536 KB</c>.
     /// </summary>
-    internal const int FileGrowthPages = FileGrowthKilobytes / 8;
+    internal const int FileGrowthPages = 8192;
 
     /// <summary>
-    /// Synthetic log-file <c>max_size</c> in 8 KB pages — SQL Server's
-    /// 2 TB log ceiling, which a fresh database reports verbatim
-    /// (probe-confirmed). The data file reports -1 (unlimited) instead.
+    /// A log file's <c>max_size</c> in 8 KB pages when unlimited — SQL
+    /// Server's 2 TB log ceiling, which the catalog reports in place of -1
+    /// (probe-confirmed).
     /// </summary>
     internal const int LogFileMaxSizePages = 268435456;
 
@@ -1133,8 +1134,18 @@ internal static partial class BuiltInResources
         : databaseName.Equals("msdb", StringComparison.OrdinalIgnoreCase) ? ("MSDBData", "MSDBLog", "MSDBData")
         : null;
 
-    /// <summary>Synthetic log-file <c>SpaceUsed</c> (pages) reported by FILEPROPERTY — a small fraction of <see cref="LogFileSizePages"/>.</summary>
+    /// <summary>Synthetic primary log-file <c>SpaceUsed</c> (pages) reported by FILEPROPERTY — a small fraction of a new log's size.</summary>
     internal const int LogFileUsedPages = 24;
+
+    /// <summary>
+    /// <c>SpaceUsed</c> (pages) of a data file other than the primary one,
+    /// which holds nothing here: the 8 an empty secondary file reports
+    /// (probed 2026-09-27 against SQL Server 2025).
+    /// </summary>
+    internal const int EmptyDataFileUsedPages = 8;
+
+    /// <summary><c>SpaceUsed</c> (pages) of a log file other than the primary one, the 12 a fresh one reports (probed 2026-09-27).</summary>
+    internal const int SecondaryLogFileUsedPages = 12;
 
     /// <summary>
     /// Synthetic data-file <c>size</c> (pages) for <paramref name="database"/>:
@@ -1149,6 +1160,43 @@ internal static partial class BuiltInResources
         var size = used + Math.Max(512L, used / 2);
         return (int)Math.Min(int.MaxValue, Math.Max(1024L, size));
     }
+
+    /// <summary>
+    /// The size every file surface reports for <paramref name="file"/>: its
+    /// declared size, except that the primary data file — where every row
+    /// lands — reports at least <see cref="ComputeDataFileSizePages"/>, so a
+    /// file never reports less than its data occupies.
+    /// </summary>
+    internal static int FileSizePages(Database database, DatabaseFile file) =>
+        file.FileId == 1 ? Math.Max(file.SizePages, ComputeDataFileSizePages(database)) : file.SizePages;
+
+    /// <summary>Σ <see cref="FileSizePages"/> over the database's files, data and log — the database size the size-reporting procedures print.</summary>
+    internal static long TotalFileSizePages(Database database)
+    {
+        long total = 0;
+        foreach (var file in database.FilesInOrder())
+            total += FileSizePages(database, file);
+        return total;
+    }
+
+    /// <summary>Σ <see cref="FileSizePages"/> over the database's data files — <c>sp_spaceused</c>'s allocatable space.</summary>
+    internal static long DataFileSizePages(Database database)
+    {
+        long total = 0;
+        foreach (var file in database.FilesInOrder())
+        {
+            if (!file.IsLog)
+                total += FileSizePages(database, file);
+        }
+        return total;
+    }
+
+    /// <summary>
+    /// The <c>max_size</c> the catalog reports: a log file's unlimited ceiling
+    /// is its 2 TB cap (probed 2026-09-27).
+    /// </summary>
+    internal static int ReportedMaxSizePages(DatabaseFile file) =>
+        file.IsLog && file.MaxSizePages == -1 ? LogFileMaxSizePages : file.MaxSizePages;
 
     /// <summary>
     /// Rows for <c>sys.stats</c>: one per index <see cref="EnumerateSysIndexes"/>

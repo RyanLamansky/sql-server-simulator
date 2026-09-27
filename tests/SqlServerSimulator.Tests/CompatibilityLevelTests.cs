@@ -6,8 +6,7 @@ namespace SqlServerSimulator;
 /// <summary>
 /// Exercises compatibility-level state, trace flags, and the
 /// <c>VERBOSE_TRUNCATION_WARNINGS</c> scoped option through the truncation
-/// error format — the one user-visible behavior that currently varies by
-/// compat level. Verbose output is Msg 2628 (table/column/value); legacy is
+/// error format. Verbose output is Msg 2628 (table/column/value); legacy is
 /// Msg 8152 ("String or binary data would be truncated.").
 /// </summary>
 [TestClass]
@@ -16,45 +15,36 @@ public class CompatibilityLevelTests
     [TestMethod]
     public void DefaultCompat_ProducesVerboseTruncation()
     {
-        // Fresh simulations default to compatibility level 170 (SQL Server 2025);
-        // verbose truncation is the default at any level >= 160.
+        // Fresh simulations default to compatibility level 170 (SQL Server 2025).
         var ex = AssertTruncates(connection => { /* no compat override */ });
         Assert.Contains("would be truncated in table", ex.Message);
         Assert.Contains("Truncated value", ex.Message);
     }
 
+    // VERBOSE_TRUNCATION_WARNINGS (on by default) selects the verbose message
+    // at compatibility level 150 and up; trace flag 460 forces it whatever the
+    // level or the option says (probed 2026-09-27 against SQL Server 2025).
     [TestMethod]
-    public void Compat150_ProducesLegacyTruncation()
+    [DataRow(140, null, false, false)]
+    [DataRow(150, null, false, true)]
+    [DataRow(160, null, false, true)]
+    [DataRow(140, "on", false, false)]
+    [DataRow(170, "off", false, false)]
+    [DataRow(140, null, true, true)]
+    [DataRow(170, "off", true, true)]
+    [DataRow(140, "off", true, true)]
+    public void Truncation_VerboseByCompatOptionAndTraceFlag(int compatibilityLevel, string? option, bool traceFlag, bool verbose)
     {
         var ex = AssertTruncates(connection =>
         {
-            using var alter = connection.CreateCommand("alter database current set compatibility_level = 150");
-            _ = alter.ExecuteNonQuery();
+            _ = connection.CreateCommand($"alter database current set compatibility_level = {compatibilityLevel}").ExecuteNonQuery();
+            if (option is not null)
+                _ = connection.CreateCommand($"alter database scoped configuration set verbose_truncation_warnings = {option}").ExecuteNonQuery();
+            if (traceFlag)
+                _ = connection.CreateCommand("dbcc traceon ( 460 )").ExecuteNonQuery();
         });
-        Assert.AreEqual("String or binary data would be truncated.", ex.Errors[0].Message);
-    }
-
-    [TestMethod]
-    public void Compat160_ProducesVerboseTruncation()
-    {
-        // 160 is the level at which verbose became default (SQL Server 2022).
-        var ex = AssertTruncates(connection =>
-        {
-            using var alter = connection.CreateCommand("alter database current set compatibility_level = 160");
-            _ = alter.ExecuteNonQuery();
-        });
-        Assert.Contains("would be truncated in table", ex.Message);
-    }
-
-    [TestMethod]
-    public void TraceFlag460_ForcesVerboseUnderLegacyCompat()
-    {
-        var ex = AssertTruncates(connection =>
-        {
-            _ = connection.CreateCommand("alter database current set compatibility_level = 150").ExecuteNonQuery();
-            _ = connection.CreateCommand("dbcc traceon ( 460 )").ExecuteNonQuery();
-        });
-        Assert.Contains("would be truncated in table", ex.Message);
+        Assert.AreEqual(verbose ? 2628 : 8152, ex.Number);
+        Assert.AreEqual(verbose ? (byte)1 : (byte)30, ex.State);
     }
 
     [TestMethod]
@@ -62,45 +52,9 @@ public class CompatibilityLevelTests
     {
         var ex = AssertTruncates(connection =>
         {
-            _ = connection.CreateCommand("alter database current set compatibility_level = 150").ExecuteNonQuery();
+            _ = connection.CreateCommand("alter database current set compatibility_level = 140").ExecuteNonQuery();
             _ = connection.CreateCommand("dbcc traceon ( 460 )").ExecuteNonQuery();
             _ = connection.CreateCommand("dbcc traceoff ( 460 )").ExecuteNonQuery();
-        });
-        Assert.AreEqual("String or binary data would be truncated.", ex.Errors[0].Message);
-    }
-
-    [TestMethod]
-    public void VerboseTruncationWarningsOff_OverridesModernCompat()
-    {
-        // The scoped configuration wins over the compat-level default — the
-        // user explicitly opted out of verbose on a 170 database.
-        var ex = AssertTruncates(connection =>
-        {
-            _ = connection.CreateCommand("alter database scoped configuration set verbose_truncation_warnings = off").ExecuteNonQuery();
-        });
-        Assert.AreEqual("String or binary data would be truncated.", ex.Errors[0].Message);
-    }
-
-    [TestMethod]
-    public void VerboseTruncationWarningsOn_OverridesLegacyCompat()
-    {
-        var ex = AssertTruncates(connection =>
-        {
-            _ = connection.CreateCommand("alter database current set compatibility_level = 150").ExecuteNonQuery();
-            _ = connection.CreateCommand("alter database scoped configuration set verbose_truncation_warnings = on").ExecuteNonQuery();
-        });
-        Assert.Contains("would be truncated in table", ex.Message);
-    }
-
-    [TestMethod]
-    public void ExplicitVerboseSetting_WinsOverTraceFlag()
-    {
-        // Precedence: an explicit VERBOSE_TRUNCATION_WARNINGS setting trumps
-        // trace flag 460. OFF + 460 ON should still produce legacy output.
-        var ex = AssertTruncates(connection =>
-        {
-            _ = connection.CreateCommand("dbcc traceon ( 460 )").ExecuteNonQuery();
-            _ = connection.CreateCommand("alter database scoped configuration set verbose_truncation_warnings = off").ExecuteNonQuery();
         });
         Assert.AreEqual("String or binary data would be truncated.", ex.Errors[0].Message);
     }

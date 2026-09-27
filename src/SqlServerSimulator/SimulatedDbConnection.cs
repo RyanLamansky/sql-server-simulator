@@ -915,17 +915,17 @@ public sealed class SimulatedDbConnection : DbConnection
     /// <summary>
     /// Decides whether string truncation should raise the verbose Msg 2628
     /// (with table, column, and truncated value) or the legacy Msg 8152
-    /// (single line, no detail). Precedence: an explicit
-    /// <see cref="Database.VerboseTruncationWarnings"/> setting on the
-    /// current database wins; otherwise this connection's trace flag 460
-    /// forces verbose; otherwise the database's compatibility level decides
-    /// (verbose iff &gt;= <see cref="CompatibilityLevel.Sql160"/>, the level
-    /// at which it became default in SQL Server 2022).
+    /// (single line, no detail): this connection's trace flag 460 forces
+    /// verbose whatever else says; otherwise the current database's
+    /// <c>VERBOSE_TRUNCATION_WARNINGS</c> scoped configuration selects it at a
+    /// compatibility level of 150 or more (probed 2026-09-27 against SQL
+    /// Server 2025: level 140 stays legacy with the option on, and trace flag
+    /// 460 wins over the option off).
     /// </summary>
     internal bool IsVerboseTruncationActive() =>
-        this.CurrentDatabase.VerboseTruncationWarnings
-        ?? (this.TraceFlags.Contains(460)
-            || this.CurrentDatabase.CompatibilityLevel >= CompatibilityLevel.Sql160);
+        this.TraceFlags.Contains(460)
+        || (this.CurrentDatabase.ScopedConfiguration.VerboseTruncationWarnings
+            && this.CurrentDatabase.CompatibilityLevel >= CompatibilityLevel.Sql150);
 
     /// <summary>
     /// Fires once per informational message a command produces — a

@@ -136,7 +136,7 @@ partial class Simulation
         {
             if (!HasDbAccess.IsAccessible(batch.Connection, database))
                 continue;
-            var pages = (long)BuiltInResources.ComputeDataFileSizePages(database) + BuiltInResources.LogFileSizePages;
+            var pages = BuiltInResources.TotalFileSizePages(database);
             rows.Add([
                 SqlValue.FromString(SpDatabasesSchema[0], database.Name),
                 SqlValue.FromInt32(checked((int)(pages * 8))),

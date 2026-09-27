@@ -501,9 +501,6 @@ internal static partial class BuiltInResources
         // succeeds. SSMS's ISNULL(value_for_secondary, 'PRIMARY') /
         // ISNULL(value, 'NULL') also work — the variant NULL falls through to
         // the string fallback, and the ISNULL result stays sql_variant.
-        // Static defaults for a fresh database — the simulator doesn't track
-        // ALTER DATABASE SCOPED CONFIGURATION changes. The row set is
-        // independent of the database.
         Sys("database_scoped_configurations",
         [
             new("configuration_id", SqlType.Int32, null, true),
@@ -511,7 +508,7 @@ internal static partial class BuiltInResources
             new("value", SqlType.SqlVariant, null, true),
             new("value_for_secondary", SqlType.SqlVariant, null, true),
             new("is_value_default", SqlType.Bit, null, true),
-        ], (batch, database) => DatabaseScopedConfigurationRows);
+        ], (batch, database) => DatabaseScopedConfigurationRows(database));
 
         // sys.database_mirroring: one row per database (join key database_id),
         // surfaced so SSMS's Object-Explorer enumeration
@@ -692,15 +689,8 @@ internal static partial class BuiltInResources
             new("is_internal", SqlType.Bit, null, true),
         ], static (_, _) => EmptyCatalogRows);
 
-        // sys.master_files: one data file (type 0, ROWS) + one log file
-        // (type 1, LOG) per database, join key database_id. SSMS probes for
-        // in-memory-OLTP filegroups via
-        // `... from master.sys.master_files mf ... where mf.[type] = 2`, which
-        // must return nothing — the simulator emits no type-2 (FILESTREAM /
-        // memory-optimized) files. File contents are synthetic: logical name
-        // `<db>` / `<db>_log`, a plausible physical path, a small page
-        // count, unlimited max_size, 64 MB growth. All LSN columns numeric(25, 0),
-        // surfaced NULL (no physical log).
+        // sys.master_files: every database's files, join key database_id.
+        // All LSN columns numeric(25, 0).
         Sys("master_files",
         [
             new("database_id", SqlType.Int32, null, false),
@@ -737,14 +727,9 @@ internal static partial class BuiltInResources
             new("credential_id", SqlType.Int32, null, true),
         ], EnumerateSysMasterFiles);
 
-        // sys.database_files: the current-database view over master_files — one
-        // data file (file_id 1, type 0 ROWS) + one log file (file_id 2, type 1
-        // LOG). The join key is the database context (the resolved
-        // `database`), so a three-part `master.sys.database_files` read (SSMS
-        // reads it to derive the master data/log directory) returns master's
-        // two files. Names / file_ids / types agree with sys.master_files
-        // (`<db>` / `<db>_log`); real SQL Server has no database_id column
-        // here (implicitly the current database), so it is omitted.
+        // sys.database_files: the resolved database's slice of master_files,
+        // so a three-part `master.sys.database_files` read (SSMS reads it to
+        // derive the master data/log directory) returns master's files.
         Sys("database_files",
         [
             new("file_id", SqlType.Int32, null, false),
@@ -1082,42 +1067,35 @@ internal static partial class BuiltInResources
     }
 
     /// <summary>
-    /// Static <c>sys.database_scoped_configurations</c> rows — the fresh-database
-    /// defaults for the knobs SMO's Script-As preamble reads. The simulator
-    /// doesn't track <c>ALTER DATABASE SCOPED CONFIGURATION</c> changes, so the
-    /// set is fixed. <c>value</c> is <c>sql_variant</c> carrying each knob's
-    /// real inner base type (MAXDOP <c>int</c>; the remaining knobs <c>bit</c>,
-    /// probe-confirmed against SQL Server 2025); <c>value_for_secondary</c> is a
-    /// variant NULL (no secondary replica). configuration_id values match SQL
-    /// Server 2025's assignment.
+    /// <c>sys.database_scoped_configurations</c> rows for <paramref name="database"/>,
+    /// from its <see cref="Database.ScopedConfiguration"/>. <c>value</c> /
+    /// <c>value_for_secondary</c> are <c>sql_variant</c> carrying each option's
+    /// own base type, and <c>is_value_default</c> compares the primary value
+    /// alone with the option's default (probed 2026-09-27 against SQL Server
+    /// 2025). A system database omits <c>PREVIEW_FEATURES</c>, as real's do.
     /// </summary>
-    private static readonly SqlValue[][] DatabaseScopedConfigurationRows = BuildDatabaseScopedConfigurationRows();
-
-    private static SqlValue[][] BuildDatabaseScopedConfigurationRows()
+    private static IEnumerable<SqlValue[]> DatabaseScopedConfigurationRows(Database database)
     {
-        (int Id, string Name, SqlValue Value)[] data =
-        [
-            (1, "MAXDOP", SqlValue.FromVariant(SqlValue.FromInt32(0))),
-            (2, "LEGACY_CARDINALITY_ESTIMATION", SqlValue.FromVariant(SqlValue.FromBoolean(false))),
-            (3, "PARAMETER_SNIFFING", SqlValue.FromVariant(SqlValue.FromBoolean(true))),
-            (4, "QUERY_OPTIMIZER_HOTFIXES", SqlValue.FromVariant(SqlValue.FromBoolean(false))),
-        ];
+        var configuration = database.ScopedConfiguration;
         var nullValue = SqlValue.Null(SqlType.SqlVariant);
-        var isDefault = SqlValue.FromBoolean(true);
-        var rows = new SqlValue[data.Length][];
-        for (var i = 0; i < data.Length; i++)
+        var options = DatabaseScopedConfiguration.Options;
+        for (var i = 0; i < options.Length; i++)
         {
-            rows[i] =
+            var option = options[i];
+            if (option.Id == DatabaseScopedConfiguration.UserDatabaseOnlyId && database.Id is >= 1 and <= 4)
+                continue;
+            var value = configuration.Primary(i);
+            yield return
             [
-                SqlValue.FromInt32(data[i].Id),
-                SqlValue.FromNVarchar(data[i].Name),
-                data[i].Value,
-                nullValue,
-                isDefault,
+                SqlValue.FromInt32(option.Id),
+                SqlValue.FromNVarchar(option.Name),
+                SqlValue.FromVariant(DatabaseScopedConfiguration.ToSqlValue(option.Kind, value)),
+                configuration.Secondary(i) is { } secondary
+                    ? SqlValue.FromVariant(DatabaseScopedConfiguration.ToSqlValue(option.Kind, secondary))
+                    : nullValue,
+                SqlValue.FromBoolean(value == option.DefaultValue),
             ];
         }
-
-        return rows;
     }
 
     /// <summary>
@@ -1678,129 +1656,98 @@ internal static partial class BuiltInResources
     }
 
     /// <summary>
-    /// Rows for <c>sys.master_files</c> — one data file (<c>type</c> 0, ROWS)
-    /// and one log file (<c>type</c> 1, LOG) per database, join key
-    /// <c>database_id</c>. The simulator emits no <c>type</c>-2
-    /// (FILESTREAM / memory-optimized) files, so SSMS's in-memory-OLTP probe
-    /// (<c>where mf.[type] = 2</c>) returns nothing. Contents are synthetic:
-    /// logical name <c>&lt;db&gt;</c> / <c>&lt;db&gt;_log</c>, a plausible
-    /// physical path, a small page count, and the 64 MB default autogrowth.
-    /// <c>max_size</c> / <c>growth</c> are both in 8 KB pages here (the unit
-    /// real uses whenever <c>is_percent_growth</c> is 0): the data file
-    /// reports -1 (unlimited) and the log file the 2 TB ceiling. All LSN
-    /// columns surface NULL (no physical log).
+    /// Rows for <c>sys.master_files</c>: every file of every database, join
+    /// key <c>database_id</c>, from <see cref="Database.Files"/>. There are no
+    /// <c>type</c>-2 (FILESTREAM / memory-optimized) files, so SSMS's
+    /// in-memory-OLTP probe (<c>where mf.[type] = 2</c>) returns nothing.
+    /// <c>max_size</c> / <c>growth</c> are 8 KB pages whenever
+    /// <c>is_percent_growth</c> is 0, and a log file's unlimited ceiling reads
+    /// as its 2 TB cap. All LSN columns surface NULL (no physical log).
     /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateSysMasterFiles(Parser.BatchContext batch, Database database)
     {
         _ = database;
-        var falseBit = SqlValue.FromBoolean(false);
-        var zeroByte = SqlValue.FromByte(0);
-        var onlineState = SqlValue.FromNVarchar("ONLINE");
         var nullGuid = SqlValue.Null(SqlType.UniqueIdentifier);
         var nullTime = SqlValue.Null(SqlType.DateTime);
         var nullInt = SqlValue.Null(SqlType.Int32);
         var nullLsn = SqlValue.Null(SqlType.GetDecimal(25, 0));
-        var rowsDesc = SqlValue.FromNVarchar("ROWS");
-        var logDesc = SqlValue.FromNVarchar("LOG");
-        var unlimited = SqlValue.FromInt32(-1);
-        var logMaxSize = SqlValue.FromInt32(LogFileMaxSizePages);
-        var growthPages = SqlValue.FromInt32(FileGrowthPages);
-
-        SqlValue[] BuildFile(short id, int fileId, byte type, SqlValue typeDesc, int dataSpaceId, string logicalName, string physicalName, int sizePages) =>
-        [
-            SqlValue.FromInt32(id),
-            SqlValue.FromInt32(fileId),
-            nullGuid,
-            SqlValue.FromByte(type),
-            typeDesc,
-            SqlValue.FromInt32(dataSpaceId),
-            SqlValue.FromNVarchar(logicalName),
-            SqlValue.FromNVarchar(physicalName),
-            zeroByte,
-            onlineState,
-            SqlValue.FromInt32(sizePages),
-            type == 1 ? logMaxSize : unlimited,
-            growthPages,
-            falseBit,
-            falseBit,
-            falseBit,
-            falseBit,
-            falseBit,
-            falseBit,
-            nullLsn,
-            nullLsn,
-            nullLsn,
-            nullLsn,
-            nullLsn,
-            nullGuid,
-            nullTime,
-            nullLsn,
-            nullGuid,
-            nullLsn,
-            nullGuid,
-            nullLsn,
-            nullInt,
-        ];
 
         foreach (var (db, id) in Parser.Expressions.DbId.DatabasesWithIds(batch.Connection.Simulation))
         {
-            yield return BuildFile(id, 1, 0, rowsDesc, 1, LogicalFileName(db.Name, isLog: false), DataFilePath(db.Name), ComputeDataFileSizePages(db));
-            yield return BuildFile(id, 2, 1, logDesc, 0, LogicalFileName(db.Name, isLog: true), LogFilePath(db.Name), LogFileSizePages);
+            foreach (var file in db.FilesInOrder())
+            {
+                var common = FileRowCells(db, file);
+                yield return
+                [
+                    SqlValue.FromInt32(id),
+                    .. common,
+                    nullLsn,
+                    nullLsn,
+                    nullLsn,
+                    nullLsn,
+                    nullLsn,
+                    nullGuid,
+                    nullTime,
+                    nullLsn,
+                    nullGuid,
+                    nullLsn,
+                    nullGuid,
+                    nullLsn,
+                    nullInt,
+                ];
+            }
         }
     }
 
     /// <summary>
-    /// Rows for <c>sys.database_files</c> — the current-database projection of
-    /// <see cref="EnumerateSysMasterFiles"/>: one data file (<c>file_id</c> 1,
-    /// <c>type</c> 0 ROWS) and one log file (<c>file_id</c> 2, <c>type</c> 1
-    /// LOG) for the resolved <paramref name="database"/>. Names / file_ids /
-    /// types agree with <c>sys.master_files</c>; there is no
-    /// <c>database_id</c> column (the view is implicitly current-database), so
-    /// a three-part <c>master.sys.database_files</c> read returns master's two
-    /// files. Synthetic contents mirror master_files: logical name
-    /// <c>&lt;db&gt;</c> / <c>&lt;db&gt;_log</c>, a plausible physical
-    /// path, a small page count, and the page-denominated <c>max_size</c> /
-    /// <c>growth</c> pair (-1 unlimited on the data file, the 2 TB ceiling on
-    /// the log, 8192 pages of growth on both).
+    /// The cells <c>sys.master_files</c> reports for a file from
+    /// <c>file_id</c> through <c>is_persistent_log_buffer</c>;
+    /// <c>sys.database_files</c> takes all but that last one. A file of a <c>READ_ONLY</c> filegroup reports <c>is_read_only</c>
+    /// (probed 2026-09-27 against SQL Server 2025).
+    /// </summary>
+    private static SqlValue[] FileRowCells(Database database, DatabaseFile file)
+    {
+        var falseBit = SqlValue.FromBoolean(false);
+        var readOnly = !file.IsLog && database.IsFilegroupReadOnly(file.DataSpaceId);
+        return
+        [
+            SqlValue.FromInt32(file.FileId),
+            SqlValue.Null(SqlType.UniqueIdentifier),
+            SqlValue.FromByte(file.IsLog ? (byte)1 : (byte)0),
+            SqlValue.FromNVarchar(file.IsLog ? "LOG" : "ROWS"),
+            SqlValue.FromInt32(file.DataSpaceId),
+            SqlValue.FromNVarchar(file.Name),
+            SqlValue.FromNVarchar(file.PhysicalName),
+            SqlValue.FromByte(0),
+            SqlValue.FromNVarchar("ONLINE"),
+            SqlValue.FromInt32(FileSizePages(database, file)),
+            SqlValue.FromInt32(ReportedMaxSizePages(file)),
+            SqlValue.FromInt32(file.Growth),
+            falseBit,
+            SqlValue.FromBoolean(readOnly),
+            falseBit,
+            SqlValue.FromBoolean(file.IsPercentGrowth),
+            falseBit,
+            falseBit,
+        ];
+    }
+
+    /// <summary>
+    /// Rows for <c>sys.database_files</c> — the resolved
+    /// <paramref name="database"/>'s slice of <see cref="EnumerateSysMasterFiles"/>.
+    /// There is no <c>database_id</c> column (the view is implicitly
+    /// current-database), so a three-part <c>master.sys.database_files</c>
+    /// read returns master's files.
     /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateSysDatabaseFiles(Parser.BatchContext batch, Database database)
     {
         _ = batch;
-        var falseBit = SqlValue.FromBoolean(false);
-        var zeroByte = SqlValue.FromByte(0);
-        var onlineState = SqlValue.FromNVarchar("ONLINE");
-        var nullGuid = SqlValue.Null(SqlType.UniqueIdentifier);
-        var rowsDesc = SqlValue.FromNVarchar("ROWS");
-        var logDesc = SqlValue.FromNVarchar("LOG");
-        var unlimited = SqlValue.FromInt32(-1);
-        var logMaxSize = SqlValue.FromInt32(LogFileMaxSizePages);
-        var growthPages = SqlValue.FromInt32(FileGrowthPages);
         var nullLsn = SqlValue.Null(lsnNumeric);
-
-        SqlValue[] BuildFile(int fileId, byte type, SqlValue typeDesc, int dataSpaceId, string logicalName, string physicalName, int sizePages) =>
-        [
-            SqlValue.FromInt32(fileId),
-            nullGuid,
-            SqlValue.FromByte(type),
-            typeDesc,
-            SqlValue.FromInt32(dataSpaceId),
-            SqlValue.FromNVarchar(logicalName),
-            SqlValue.FromNVarchar(physicalName),
-            zeroByte,
-            onlineState,
-            SqlValue.FromInt32(sizePages),
-            type == 1 ? logMaxSize : unlimited,
-            growthPages,
-            falseBit,
-            falseBit,
-            falseBit,
-            falseBit,
-            falseBit,
-            nullLsn,
-        ];
-
-        yield return BuildFile(1, 0, rowsDesc, 1, LogicalFileName(database.Name, isLog: false), DataFilePath(database.Name), ComputeDataFileSizePages(database));
-        yield return BuildFile(2, 1, logDesc, 0, LogicalFileName(database.Name, isLog: true), LogFilePath(database.Name), LogFileSizePages);
+        foreach (var file in database.FilesInOrder())
+        {
+            var common = FileRowCells(database, file);
+            yield return [.. common.AsSpan(0, common.Length - 1), nullLsn];
+        }
     }
 
     /// <summary>

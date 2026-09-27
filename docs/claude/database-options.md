@@ -13,7 +13,8 @@ A name the `Simulation` doesn't host raises **Msg 5011** sev 14 state 5 (`User d
 The rest of the statement is read in skip mode before the refusal, so its `SET …` tail isn't left behind to run as a statement of its own; a `COLLATE` over a missing name is **Msg 911** instead (probed 2026-09-24 against SQL Server 2025).
 One `SET` takes a comma-separated list of options and one trailing termination clause (`WITH NO_WAIT` / `ROLLBACK …`), which every option accepts but `ALLOW_SNAPSHOT_ISOLATION` (**Msg 5083**, and nothing in the list applies); the statement is read in skip mode first, since that refusal depends on its end.
 The name also governs the `COLLATE` clause below.
-Besides `SET`, `COLLATE` and `MODIFY NAME`, the statement takes `ADD FILEGROUP` / `REMOVE FILEGROUP`, which maintain the catalog's filegroups, and the file forms, which parse and change nothing — see [`partitioning.md`](partitioning.md#filegroups).
+Besides `SET`, `COLLATE` and `MODIFY NAME`, the statement takes `ADD FILEGROUP` / `REMOVE FILEGROUP`, which maintain the catalog's filegroups ([`partitioning.md`](partitioning.md#filegroups)), and the file forms — see [Files and filegroups](#files-and-filegroups).
+Only `SET` follows a refusal with Msg 5069: the `COLLATE`, `MODIFY`, `ADD` and `REMOVE` forms name a missing database with Msg 911 instead, and the filegroup forms refuse a read-only one with a plain Msg 3906 (probed 2026-09-27).
 
 ## Recognized options by value shape
 
@@ -201,6 +202,82 @@ All raise Msg 102 — matching probed real SQL Server wording:
 - `SET RECOVERY = FULL` (EnumIdent options reject `=`)
 - `SET ACCELERATED_DATABASE_RECOVERY ON` (EqualsOnOff options require `=`)
 - `SET TARGET_RECOVERY_TIME = 60` (IntegerWithUnit options require the unit)
+
+## Files and filegroups
+
+Each database carries its files as catalog state, `Database.Files` (`DatabaseFile`) — no physical file stands behind one — and every file surface reads that list: `sys.database_files`, `sys.master_files`, `FILE_ID` / `FILE_NAME` / `FILEPROPERTY`, `sp_helpfile`, and the database sizes `sp_helpdb` / `sp_databases` / `sp_spaceused` report ([`catalog-views.md`](catalog-views.md)).
+All of it was probed 2026-09-27 against SQL Server 2025.
+
+**Sizes.**
+A size, ceiling or growth is written in `KB`, `MB` (the default), `GB` or `TB` and kept in 8 KB pages, rounded up to a whole 64 KB extent (`21001KB` is the 2632 pages `21000KB` is); a growth may be a percentage instead.
+Anything past `int` pages is Msg 1842, and like every grammar refusal here — an option the form doesn't take, a repeated one, an unknown unit (Msg 153 naming it as written, `percent` for `%`), a missing `NAME` or `FILENAME` (Msg 1036) — it is raised compiling the batch, so nothing in the batch runs.
+Since every row lands in the primary data file (placement isn't recorded), that file reports the larger of its declared size and the pages its data needs, so a file never reports less than it holds.
+
+**`CREATE DATABASE … ON [PRIMARY] <spec>, … [, FILEGROUP name [CONTAINS …] [DEFAULT] <spec>, …] [LOG ON <spec>, …]`.**
+The first data file is file 1 on `PRIMARY`, floored at `model`'s 8 MB (a smaller or missing size reads 1024 pages, and the floor lifts a ceiling it passes); the first log file is file 2, then the other data files and the other log files take 3, 4, … in order.
+Without `LOG ON` the database gets `<db>_log`; `LOG ON` without data files is Msg 188.
+A filegroup declared twice or named `PRIMARY` is Msg 5035, a repeated logical name Msg 1828; a file under 512 KB (the primary data file excepted), a ceiling under its size or a growth past its ceiling, or a path another file holds, is followed by Msg 1802.
+A database made without a file list takes the default paths, so after `MODIFY NAME` the old name can't be reused until the renamed database goes — its files keep their names and paths, as real's do.
+
+**`ADD [LOG] FILE <spec>, … [TO FILEGROUP name]`.**
+A file takes the lowest free `file_id` from 3, so a removed file's id comes back; without `TO FILEGROUP` it joins `PRIMARY` even when another filegroup is the default.
+A log file naming `PRIMARY` ignores it, and any other filegroup is Msg 5087.
+The list is all-or-nothing, and a file's creation refusal (Msg 5174 / 5103 / 5169) is followed by Msg 5009; a taken path is Msg 5009 and then Msg 5170.
+
+**`MODIFY FILE <spec>`** takes one specification and changes nothing unless everything passes.
+The size must grow (Msg 5039 otherwise), and a size past the ceiling lifts the ceiling; a ceiling under the current size is Msg 5040, and one under the current growth Msg 5169 state 3 — checked against the growth the file has, even when the statement sets a new one.
+`NEWNAME` refuses any name a file holds, the file's own in another case included (Msg 1828); `FILENAME` refuses a path another file holds (Msg 12106) and reports the class-0 Msg 5018, which real follows by using the path at the next restart.
+`OFFLINE` on a log file or a `PRIMARY` file is Msg 5077.
+
+**`REMOVE FILE`** refuses the primary data and log files (Msg 5020), a read-only filegroup's file (Msg 5055), and the default filegroup's only file (Msg 5031).
+
+**`MODIFY FILEGROUP name { DEFAULT | READ_ONLY | READ_WRITE | AUTOGROW_ALL_FILES | AUTOGROW_SINGLE_FILE | NAME = new }`** (`READONLY` / `READWRITE` spell the same) sets the flags `sys.filegroups`, `sys.data_spaces`, `FILEGROUPPROPERTY` and `FILEPROPERTY(…, 'IsReadOnly')` report.
+A property is refused on a filegroup without files (Msg 5050), `PRIMARY` can't be made read-only or read-write (Msg 5047) or renamed (Msg 5012), and a property the filegroup already has is Msg 5045; a rename onto the filegroup's own name in any case succeeds.
+A read-only filegroup's files refuse `ADD` / `MODIFY FILE` (Msg 5048).
+
+**A read-only database** refuses the file forms with Msg 5004 (state 1 adding, 3 removing, 4 modifying) and the filegroup forms with a plain Msg 3906.
+All of these refusals end only their statement.
+
+### Divergences
+
+- A read-only filegroup's tables still take writes, and the default filegroup isn't where a new table lands: placement on a filegroup isn't recorded ([`partitioning.md`](partitioning.md#not-modeled-yet)).
+- A secondary file's `SpaceUsed` is a constant, where real's varies between fresh files ([`scalars.md`](scalars.md#filepropertyfile_name-property)).
+- A path is taken only when another file in the `Simulation` holds it; real checks the disk, so a stray file there refuses it too.
+- `MODIFY FILE … FILENAME` changes the reported path at once and never fails a later restart, which real's does when nothing is at the new path.
+
+### Not modeled yet
+
+- `MODIFY FILE … OFFLINE` on a secondary data file raises `NotSupportedException`.
+- `CONTAINS FILESTREAM` / `MEMORY_OPTIMIZED_DATA` filegroups are registered, but their files aren't recorded.
+- A file's contents: every secondary file is empty, so real's Msg 5042 for removing a file holding data never arises, and `DBCC SHRINKFILE` ([`heap-storage.md`](heap-storage.md)) doesn't move the declared sizes.
+- `ALTER DATABASE … MODIFY FILE` on a system database follows the user-database rules unprobed.
+
+## Scoped configuration
+
+`ALTER DATABASE SCOPED CONFIGURATION [FOR SECONDARY] SET <option> = <value>` and `… CLEAR PROCEDURE_CACHE [plan_handle]` act on the session's database, whose `DatabaseScopedConfiguration` holds a primary and a secondary value for every option `sys.database_scoped_configurations` lists; the option table in `DatabaseScopedConfiguration.cs` carries each option's id, value grammar, default and primary-only refusal.
+Probed 2026-09-27 against SQL Server 2025.
+
+- **Values.** The bit options take `ON` / `OFF`; `MAXDOP` an integer 0–32767 (Msg 12108), `PAUSED_RESUMABLE_INDEX_ABORT_DURATION_MINUTES` 0–71582 (Msg 12121), `FULLTEXT_INDEX_VERSION` 1 or 2 (Msg 31207); the `ELEVATE_*` pair `OFF` / `WHEN_SUPPORTED` / `FAIL_UNSUPPORTED`; `LEDGER_DIGEST_STORAGE_ENDPOINT` a string or `OFF`.
+  A fractional or past-`int` number is Msg 1080, a quoted or bracketed value or name a syntax error, and an unknown option name Msg 102 at it.
+- **`PRIMARY`** is the secondary value that means "as the primary", taken by the bit options and `MAXDOP` only; as a primary value it is Msg 12109.
+  `FOR SECONDARY` on one of six primary-only options is Msg 12110, naming `GLOBAL_TEMPORARY_TABLE_AUTO_DROP` as `DISABLE_GLOBAL_TEMP_TABLE_AUTODROP` and the minutes option as `AUTO_ABORT_PAUSED_INDEX`.
+  Real sets the *primary* `FULLTEXT_INDEX_VERSION` from a `FOR SECONDARY` set, and ignores a `FOR SECONDARY` ledger endpoint `OFF`; both are mirrored.
+- **Refusals by phase.** The value and replica refusals above are raised compiling the batch.
+  Running, a caller without `ALTER` on the database gets Msg 15247 state 13, a read-only database Msg 3906 for `SET` (`CLEAR` still succeeds), a plan handle Msg 12117 (the plan cache hands none out), a ledger endpoint Msg 12136 unless it is an `https://…blob.core.windows.net` URL and then Msg 37531, there being no credential to reach it, and the Synapse-only `DW_COMPATIBILITY_LEVEL` a class-16 Msg 102; each ends the batch, and a `TRY` catches it.
+  Inside a user transaction the statement is Msg 226 state 7, which acts as under `XACT_ABORT` ([`transactions.md`](transactions.md)).
+- **What a value drives.** Only `VERBOSE_TRUNCATION_WARNINGS` changes behavior: with it on, a compatibility level of 150 or more selects the verbose Msg 2628 for string truncation over Msg 8152, and trace flag 460 selects it whatever the option and level say.
+  `CLEAR PROCEDURE_CACHE` has nothing observable to clear — the plan cache ([`plan-cache.md`](plan-cache.md)) is shared across databases and invisible to queries.
+- **Where values come from.** A new database copies `model`'s configuration, as real's does; the four system databases don't list `PREVIEW_FEATURES`.
+- Every success raises the `ALTER_DATABASE_SCOPED_CONFIGURATION` DDL event, whose `EVENTDATA()` carries no `ObjectName` / `ObjectType`.
+
+### Divergences
+
+- The permission is `ALTER` on the database (which `db_owner` holds); real's own `ALTER ANY DATABASE SCOPED CONFIGURATION` isn't separately grantable.
+- The ledger endpoint's Msg 12136 states split on the host as probed once each (a foreign host state 2, blob storage in another case state 3).
+
+### Not modeled yet
+
+- Every option but `VERBOSE_TRUNCATION_WARNINGS` is recorded without effect — `IDENTITY_CACHE = OFF`, `GLOBAL_TEMPORARY_TABLE_AUTO_DROP = OFF` and the rest change nothing the simulator does.
 
 ## Bacpac loader context
 

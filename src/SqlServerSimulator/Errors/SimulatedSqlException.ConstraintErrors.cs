@@ -14,11 +14,10 @@ partial class SimulatedSqlException
     /// nvarchar destination, whose budget is UTF-16 code units.
     /// </summary>
     /// <remarks>
-    /// Introduced in SQL Server 2019 (compatibility level 150) behind trace
-    /// flag 460 or <c>ALTER DATABASE SCOPED CONFIGURATION SET VERBOSE_TRUNCATION_WARNINGS = ON</c>;
-    /// became the default in SQL Server 2022+ (compatibility level 160+),
-    /// superseding the legacy <see cref="StringOrBinaryWouldBeTruncatedLegacy"/>
-    /// (Msg 8152). The simulator selects between the two via
+    /// Selected by trace flag 460, or by the <c>VERBOSE_TRUNCATION_WARNINGS</c>
+    /// scoped configuration at compatibility level 150 and up, over the legacy
+    /// <see cref="StringOrBinaryWouldBeTruncatedLegacy"/> (Msg 8152). The
+    /// simulator selects between the two via
     /// <see cref="SimulatedDbConnection.IsVerboseTruncationActive"/>.
     /// </remarks>
     internal static SimulatedSqlException StringOrBinaryWouldBeTruncated(string tableName, string columnName, string value, int max, System.Text.Encoding? encoding)
@@ -44,12 +43,11 @@ partial class SimulatedSqlException
     /// <summary>
     /// Mimics the legacy SQL Server truncation error (Msg 8152): same trigger
     /// as the verbose factory above but without the table, column, or value
-    /// detail. Default behavior on compatibility levels before 160 (SQL Server
-    /// 2022) and on older levels with the verbose option off. A <c>time</c>,
-    /// <c>datetime2</c> or <c>datetimeoffset</c> converted to a binary too
-    /// narrow for its layout reports it at state 17.
+    /// detail, at a state per raising site — 30 for a column write. A
+    /// <c>time</c>, <c>datetime2</c> or <c>datetimeoffset</c> converted to a
+    /// binary too narrow for its layout reports it at state 17.
     /// </summary>
-    internal static SimulatedSqlException StringOrBinaryWouldBeTruncatedLegacy(byte state = 14) =>
+    internal static SimulatedSqlException StringOrBinaryWouldBeTruncatedLegacy(byte state) =>
         new("String or binary data would be truncated.", 8152, 16, state);
 
     /// <summary>

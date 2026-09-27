@@ -94,6 +94,13 @@ internal sealed class Database
         this.Principals = new(collation);
         this.FullTextCatalogs = new(collation);
         this.Filegroups = new(collation) { ["PRIMARY"] = PrimaryFilegroupId };
+        this.Files =
+        [
+            new(1, isLog: false, BuiltInResources.LogicalFileName(name, isLog: false), BuiltInResources.DataFilePath(name), PrimaryFilegroupId,
+                BuiltInResources.NewFileSizePages, maxSizePages: -1, BuiltInResources.FileGrowthPages, isPercentGrowth: false),
+            new(2, isLog: true, BuiltInResources.LogicalFileName(name, isLog: true), BuiltInResources.LogFilePath(name), 0,
+                BuiltInResources.NewFileSizePages, BuiltInResources.LogFileMaxSizePages, BuiltInResources.FileGrowthPages, isPercentGrowth: false),
+        ];
         this.PartitionFunctions = new(collation);
         this.PartitionSchemes = new(collation);
         this.Schemas[DefaultSchemaName] = new Schema(this, DefaultSchemaName, DboSchemaId);
@@ -186,12 +193,20 @@ internal sealed class Database
     public string CollationName;
 
     /// <summary>
-    /// Explicit override of the per-database <c>VERBOSE_TRUNCATION_WARNINGS</c>
-    /// scoped configuration; <c>null</c> means follow the compatibility-level
-    /// default. Set via
-    /// <c>ALTER DATABASE SCOPED CONFIGURATION SET VERBOSE_TRUNCATION_WARNINGS = ON|OFF</c>.
+    /// The database's scoped configuration, which <c>ALTER DATABASE SCOPED
+    /// CONFIGURATION</c> sets and <c>sys.database_scoped_configurations</c>
+    /// reports.
     /// </summary>
-    public bool? VerboseTruncationWarnings;
+    public readonly DatabaseScopedConfiguration ScopedConfiguration = new();
+
+    /// <summary>
+    /// The database's files in <c>file_id</c> order — the primary data file
+    /// (1) and the primary log file (2) first, which every database has —
+    /// read under a lock on the list. Seeded with the two files a
+    /// <c>CREATE DATABASE</c> without a file list makes; see
+    /// <see cref="DatabaseFile"/>.
+    /// </summary>
+    public readonly List<DatabaseFile> Files;
 
     // A new database's counter stands at 2000, so its first rowversion is 2001
     // (probed 2026-09-24 against SQL Server 2025).
@@ -584,6 +599,66 @@ internal sealed class Database
     {
         lock (this.Filegroups)
             return this.Filegroups.GetOrAdd(name, _ => this.Filegroups.Values.Max() + 1);
+    }
+
+    /// <summary>
+    /// The <c>data_space_id</c> of the default filegroup, the one
+    /// <c>ALTER DATABASE … MODIFY FILEGROUP … DEFAULT</c> names: <c>PRIMARY</c>
+    /// until then. A table created without <c>ON</c> doesn't record it (see
+    /// <see cref="Filegroups"/>).
+    /// </summary>
+    public int DefaultFilegroupId = PrimaryFilegroupId;
+
+    /// <summary>
+    /// The <c>data_space_id</c>s of the filegroups marked <c>READ_ONLY</c>,
+    /// whose files refuse change; read and written under a lock on
+    /// <see cref="Filegroups"/>.
+    /// </summary>
+    public readonly HashSet<int> ReadOnlyFilegroups = [];
+
+    /// <summary>The <c>data_space_id</c>s of the filegroups marked <c>AUTOGROW_ALL_FILES</c>, under the same lock.</summary>
+    public readonly HashSet<int> AutogrowAllFilesFilegroups = [];
+
+    /// <summary>Whether the filegroup <paramref name="dataSpaceId"/> is marked <c>READ_ONLY</c>.</summary>
+    public bool IsFilegroupReadOnly(int dataSpaceId)
+    {
+        lock (this.Filegroups)
+            return this.ReadOnlyFilegroups.Contains(dataSpaceId);
+    }
+
+    /// <summary>Whether the filegroup <paramref name="dataSpaceId"/> is marked <c>AUTOGROW_ALL_FILES</c>.</summary>
+    public bool IsFilegroupAutogrowAllFiles(int dataSpaceId)
+    {
+        lock (this.Filegroups)
+            return this.AutogrowAllFilesFilegroups.Contains(dataSpaceId);
+    }
+
+    /// <summary>The file named <paramref name="name"/> under the database's collation, trailing spaces ignored; null when none is.</summary>
+    public DatabaseFile? FindFile(string name)
+    {
+        lock (this.Files)
+        {
+            foreach (var file in this.Files)
+            {
+                if (this.Collation.Equals(file.Name, name))
+                    return file;
+            }
+        }
+        return null;
+    }
+
+    /// <summary>The file whose <c>file_id</c> is <paramref name="fileId"/>, or null.</summary>
+    public DatabaseFile? FindFile(int fileId)
+    {
+        lock (this.Files)
+            return this.Files.Find(file => file.FileId == fileId);
+    }
+
+    /// <summary>A snapshot of <see cref="Files"/> in <c>file_id</c> order, for the surfaces that enumerate them.</summary>
+    public DatabaseFile[] FilesInOrder()
+    {
+        lock (this.Files)
+            return [.. this.Files.OrderBy(file => file.FileId)];
     }
 
     private int nextXmlCollectionId = 65535;

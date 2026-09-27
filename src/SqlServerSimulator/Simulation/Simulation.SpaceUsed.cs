@@ -167,8 +167,8 @@ partial class Simulation
         Database database, bool oneResultSet, bool includeXtp)
     {
         var (reservedPages, usedPages, dataPages, _) = BuiltInResources.SpaceUsedTotals(database, only: null);
-        long dataFilePages = BuiltInResources.ComputeDataFileSizePages(database);
-        var databaseSize = SpaceMegabytes(dataFilePages + BuiltInResources.LogFileSizePages);
+        var dataFilePages = BuiltInResources.DataFileSizePages(database);
+        var databaseSize = SpaceMegabytes(BuiltInResources.TotalFileSizePages(database));
         var unallocated = SpaceMegabytes(Math.Max(0, dataFilePages - reservedPages));
         var name = SqlValue.FromString(SpaceNameType, database.Name);
         var reserved = SpaceKilobytes(reservedPages);

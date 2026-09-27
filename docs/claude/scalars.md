@@ -779,13 +779,13 @@ Probe-confirmed against SQL Server 2025: `SQL_Latin1_General_CP1_CI_AS` → Code
 `Parser/Expressions/FileProperty.cs`: per-file metadata for a file of the **current** database.
 SSMS's Database Properties → General page reads it (`CAST(FILEPROPERTY(s.name, 'SpaceUsed') AS float) * 8` over `sys.database_files WHERE type = 1`) to compute the log file's used space, and `Database.SpaceAvailable` in SMO drives it.
 Returns **`int`** (probe-confirmed against SQL Server 2025).
-The simulator models exactly two files per database, mirroring `sys.database_files`: the primary data file `<db>` (file_id 1, ROWS) and the log file `<db>_log` (file_id 2, LOG), named by `BuiltInResources.LogicalFileName`.
+It reads `Database.Files`, as `sys.database_files` does.
 File names are matched with SQL Server's trailing-space-insensitive `=` semantics; property names are case-insensitive and trailing-space insensitive (the property arg is `TrimEnd(' ')`-ed before the switch, matching the probed reference which accepts `'SpaceUsed '`).
 
-- **SpaceUsed** — for the data file, `BuiltInResources.SumDataFilePages` (the live page total across every modeled allocation unit — the same value `sys.allocation_units` / `sys.database_files.size` derive from, so SSMS's `SpaceAvailable = size − SpaceUsed` stays non-negative); for the log file, a small synthetic constant (`BuiltInResources.LogFileUsedPages` = 24 pages, well under the 128-page log size — a fixed plausible value, since the simulator has no log to measure).
-- **IsReadOnly** — always 0 (no read-only files modeled).
-- **IsPrimaryFile** — 1 for the data file (file_id 1), 0 for the log file.
-- **IsLogFile** — 1 for the log file, 0 for the data file.
+- **SpaceUsed** — for the primary data file, `BuiltInResources.SumDataFilePages` (the live page total across every modeled allocation unit — the same value `sys.allocation_units` derives from and the file's reported size is floored by, so SSMS's `SpaceAvailable = size − SpaceUsed` stays non-negative); every row lands in that file, so another data file reports a constant 8 pages and another log file 12, where real reported 8 or 32 and 10 or 12 for fresh ones on different occasions (probed 2026-09-27); the primary log file a synthetic constant (`BuiltInResources.LogFileUsedPages` = 24 pages — the simulator has no log to measure).
+- **IsReadOnly** — 1 for a file of a `READ_ONLY` filegroup.
+- **IsPrimaryFile** — 1 for the primary data file (file_id 1) alone.
+- **IsLogFile** — 1 for a log file.
 
 An **unknown property**, an **unknown file name**, a **NULL file name**, or a **NULL property** all return NULL (all probe-confirmed).
 Data-file `SpaceUsed` is self-consistent with `sys.allocation_units` and `sys.database_files` — see the consistency contract in [`catalog-views.md`](catalog-views.md).

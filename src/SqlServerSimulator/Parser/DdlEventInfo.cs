@@ -21,7 +21,11 @@ namespace SqlServerSimulator.Parser;
 /// The owning schema, or null for a securable with no schema — real omits the
 /// <c>SchemaName</c> element entirely for <c>CREATE_USER</c> / <c>CREATE_ROLE</c>.
 /// </param>
-/// <param name="objectName">The object the statement acted on, unqualified.</param>
+/// <param name="objectName">
+/// The object the statement acted on, unqualified; null for an event about the
+/// database itself (<c>ALTER_DATABASE_SCOPED_CONFIGURATION</c>), which real
+/// reports without <c>ObjectName</c> / <c>ObjectType</c>.
+/// </param>
 /// <param name="objectType">
 /// Real's <c>ObjectType</c> spelling — <c>TABLE</c>, <c>VIEW</c>, <c>INDEX</c>,
 /// <c>SQL USER</c>, … (probe-confirmed per event).
@@ -42,16 +46,16 @@ namespace SqlServerSimulator.Parser;
 internal sealed class DdlEventInfo(
     string eventType,
     string? schemaName,
-    string objectName,
-    string objectType,
+    string? objectName,
+    string? objectType,
     string? targetObjectName = null,
     string? targetObjectType = null,
     string? roleName = null)
 {
     public readonly string EventType = eventType;
     public readonly string? SchemaName = schemaName;
-    public readonly string ObjectName = objectName;
-    public readonly string ObjectType = objectType;
+    public readonly string? ObjectName = objectName;
+    public readonly string? ObjectType = objectType;
     public readonly string? TargetObjectName = targetObjectName;
     public readonly string? TargetObjectType = targetObjectType;
     public readonly string? RoleName = roleName;

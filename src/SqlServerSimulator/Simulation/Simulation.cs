@@ -465,10 +465,14 @@ public sealed partial class Simulation
     /// lazy default-database seed in <c>SimulatedDbConnection</c> runs inside
     /// that lock). Picks the smallest <see cref="short"/> ≥ 5 not currently
     /// held by any database; a freed id (from a dropped database) is naturally
-    /// the smallest gap, so it's reused first — matching real SQL Server.
+    /// the smallest gap, so it's reused first — matching real SQL Server. The
+    /// database starts from <c>model</c>'s scoped configuration, as real's
+    /// does (probed 2026-09-27 against SQL Server 2025).
     /// </summary>
     internal void RegisterUserDatabaseLocked(Database db)
     {
+        if (this.Databases.TryGetValue(ModelDatabaseName, out var model))
+            db.ScopedConfiguration.CopyFrom(model.ScopedConfiguration);
         var used = new HashSet<short>();
         foreach (var existing in this.Databases.Values)
             _ = used.Add(existing.Id);
@@ -2583,7 +2587,8 @@ public sealed partial class Simulation
     /// <c>ALTER DATABASE SCOPED CONFIGURATION</c> inside a user transaction —
     /// Msg 226 (states 5, 6, 7) or Msg 574 for the drop — ahead of the rest of
     /// the statement; the error ends only its statement and leaves the
-    /// transaction committable (probed 2026-09-27 against SQL Server 2025).
+    /// transaction committable, save the scoped-configuration one, which acts
+    /// as under <c>XACT_ABORT</c> (probed 2026-09-27 against SQL Server 2025).
     /// Peeks without moving the cursor; null for any other statement.
     /// </summary>
     private static SimulatedSqlException? DatabaseDdlInTransaction(ParserContext context)
@@ -2598,7 +2603,7 @@ public sealed partial class Simulation
             var scoped = context.MoveNext() && context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Scoped };
             return verb switch
             {
-                Keyword.Alter when scoped => SimulatedSqlException.DatabaseStatementInTransaction("ALTER DATABASE SCOPED CONFIGURATION", 7),
+                Keyword.Alter when scoped => SimulatedSqlException.ScopedConfigurationInTransaction(),
                 Keyword.Alter => SimulatedSqlException.DatabaseStatementInTransaction("ALTER DATABASE", 6),
                 Keyword.Create => SimulatedSqlException.DatabaseStatementInTransaction("CREATE DATABASE", 5),
                 _ => SimulatedSqlException.StatementInsideUserTransaction("DROP DATABASE"),

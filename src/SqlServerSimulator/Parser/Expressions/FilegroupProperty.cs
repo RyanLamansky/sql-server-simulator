@@ -16,13 +16,13 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// every database, a user filegroup created via <c>ALTER DATABASE … ADD
 /// FILEGROUP</c> in a scratch database):
 /// <list type="bullet">
-/// <item><description><c>IsReadOnly</c> — always 0 (no read-only filegroups
-/// modeled).</description></item>
+/// <item><description><c>IsReadOnly</c> — 1 once <c>MODIFY FILEGROUP …
+/// READ_ONLY</c> marks it.</description></item>
 /// <item><description><c>IsUserDefinedFG</c> — 0 for PRIMARY
 /// (<c>data_space_id</c> 1), 1 for any registered user filegroup.</description></item>
-/// <item><description><c>IsDefault</c> — 1 for PRIMARY, 0 for a user filegroup.
-/// The simulator has no <c>MODIFY FILEGROUP … DEFAULT</c>, so PRIMARY is always
-/// the default filegroup.</description></item>
+/// <item><description><c>IsDefault</c> — 1 for the default filegroup,
+/// <c>PRIMARY</c> until <c>MODIFY FILEGROUP … DEFAULT</c> names
+/// another.</description></item>
 /// </list>
 /// </para>
 /// </remarks>
@@ -49,13 +49,14 @@ internal sealed class FilegroupProperty : Expression
             return SqlValue.Null(SqlType.Int32);
         var name = nameValue.CoerceTo(SqlType.NVarchar).AsString.TrimEnd(' ');
         var prop = propValue.CoerceTo(SqlType.NVarchar).AsString;
-        return runtime.Batch.CurrentDatabase.Filegroups.TryGetValue(name, out var filegroupId)
-            && EvaluateFilegroupProperty(filegroupId, prop.TrimEnd(' ')) is int result
+        var database = runtime.Batch.CurrentDatabase;
+        return database.Filegroups.TryGetValue(name, out var filegroupId)
+            && EvaluateFilegroupProperty(database, filegroupId, prop.TrimEnd(' ')) is int result
             ? SqlValue.FromInt32(result)
             : SqlValue.Null(SqlType.Int32);
     }
 
-    private static int? EvaluateFilegroupProperty(int filegroupId, string property)
+    private static int? EvaluateFilegroupProperty(Database database, int filegroupId, string property)
     {
         var isPrimary = filegroupId == Database.PrimaryFilegroupId;
         Span<char> upper = stackalloc char[property.Length];
@@ -63,12 +64,12 @@ internal sealed class FilegroupProperty : Expression
         {
             9 => upper switch
             {
-                "ISDEFAULT" => isPrimary ? 1 : 0,
+                "ISDEFAULT" => filegroupId == database.DefaultFilegroupId ? 1 : 0,
                 _ => null,
             },
             10 => upper switch
             {
-                "ISREADONLY" => 0,
+                "ISREADONLY" => database.IsFilegroupReadOnly(filegroupId) ? 1 : 0,
                 _ => null,
             },
             15 => upper switch

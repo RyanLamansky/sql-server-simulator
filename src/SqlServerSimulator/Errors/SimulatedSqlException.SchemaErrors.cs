@@ -2514,11 +2514,20 @@ partial class SimulatedSqlException
 
     /// <summary>
     /// Mimics SQL Server error 226: a database-level statement inside a user
-    /// transaction — state 5 for CREATE DATABASE, 6 for ALTER DATABASE, 7 for
-    /// ALTER DATABASE SCOPED CONFIGURATION (probed 2026-09-27).
+    /// transaction — state 5 for CREATE DATABASE, 6 for ALTER DATABASE (probed
+    /// 2026-09-27); <see cref="ScopedConfigurationInTransaction"/> is state 7.
     /// </summary>
     internal static SimulatedSqlException DatabaseStatementInTransaction(string statement, byte state) =>
         new($"{statement} statement not allowed within multi-statement transaction.", 226, 16, state);
+
+    /// <summary>
+    /// Msg 226 state 7, for <c>ALTER DATABASE SCOPED CONFIGURATION</c>: unlike
+    /// its siblings it behaves as under <c>XACT_ABORT</c> — uncaught it ends
+    /// the batch and rolls the transaction back, caught it dooms it (probed
+    /// 2026-09-27 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException ScopedConfigurationInTransaction() =>
+        new("ALTER DATABASE SCOPED CONFIGURATION statement not allowed within multi-statement transaction.", 226, 16, 7) { AbortsAsUnderXactAbort = true };
 
     /// <summary>
     /// Mimics SQL Server error 3749: <c>DROP INDEX table.index</c> named an XML

@@ -109,8 +109,10 @@ partial class Simulation
         if (!connection.AnsiWarnings)
             return TruncatedToColumn(source, column, max);
 
+        // A column write reports the legacy message at state 30, for INSERT and
+        // UPDATE alike (probed 2026-09-27 against SQL Server 2025).
         if (!connection.IsVerboseTruncationActive())
-            throw SimulatedSqlException.StringOrBinaryWouldBeTruncatedLegacy();
+            throw SimulatedSqlException.StringOrBinaryWouldBeTruncatedLegacy(30);
 
         var tableName = QualifyForTruncationMessage(table);
         throw column.Type is VarbinarySqlType or BinarySqlType

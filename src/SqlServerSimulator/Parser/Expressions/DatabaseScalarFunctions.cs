@@ -202,13 +202,11 @@ internal sealed class HasDbAccess : Expression
 /// <summary>
 /// SQL <c>FILE_ID('file_name')</c> (smallint) / <c>FILE_IDEX('file_name')</c>
 /// (int): the <c>file_id</c> of a logical file in the current database.
-/// The simulator models two files per database, mirroring
-/// <c>sys.database_files</c>: <c>&lt;db&gt;</c> (file_id 1, primary ROWS)
-/// and <c>&lt;db&gt;_log</c> (file_id 2, LOG). An unknown / NULL file name
-/// returns NULL. File-name comparison is trailing-space insensitive (SQL
+/// Reads <see cref="Database.Files"/>, as <c>sys.database_files</c> does. An
+/// unknown / NULL file name returns NULL. File-name comparison is trailing-space insensitive (SQL
 /// Server's internal <c>=</c>). The two forms differ only in projected result
 /// type — probe-confirmed against SQL Server 2025: FILE_ID → smallint,
-/// FILE_IDEX → int; both resolve identically over the two-file model.
+/// FILE_IDEX → int; both resolve identically.
 /// </summary>
 internal sealed class FileId : Expression
 {
@@ -233,13 +231,7 @@ internal sealed class FileId : Expression
         // internal = comparison); the modeled names carry no trailing spaces,
         // so trimming the argument is sufficient.
         var name = value.CoerceTo(SqlType.NVarchar).AsString.TrimEnd(' ');
-        var database = runtime.Batch.CurrentDatabase;
-        int fileId;
-        if (Collation.Baseline.Equals(name, BuiltInResources.LogicalFileName(database.Name, isLog: false)))
-            fileId = 1;
-        else if (Collation.Baseline.Equals(name, BuiltInResources.LogicalFileName(database.Name, isLog: true)))
-            fileId = 2;
-        else
+        if (runtime.Batch.CurrentDatabase.FindFile(name) is not { FileId: var fileId })
             return SqlValue.Null(resultType);
         return this.extended ? SqlValue.FromInt32(fileId) : SqlValue.FromInt16((short)fileId);
     }
@@ -255,10 +247,8 @@ internal sealed class FileId : Expression
 
 /// <summary>
 /// SQL <c>FILE_NAME(file_id)</c>: the logical name of a file in the current
-/// database — <c>&lt;db&gt;</c> for file_id 1, <c>&lt;db&gt;_log</c> for
-/// file_id 2 (the two-file model shared with <c>sys.database_files</c> /
-/// <see cref="FileId"/> / <see cref="FileProperty"/>). Any other id (0,
-/// negative, &gt; 2) or a NULL argument returns NULL. Result type is
+/// database, from <see cref="Database.Files"/>. An id no file carries or a
+/// NULL argument returns NULL. Result type is
 /// <see cref="Expression.MetadataNameType"/>.
 /// </summary>
 internal sealed class FileNameLookup : Expression
@@ -277,13 +267,9 @@ internal sealed class FileNameLookup : Expression
         var value = this.idArg.Run(runtime);
         if (value.IsNull)
             return SqlValue.Null(MetadataNameType(runtime.Batch));
-        var database = runtime.Batch.CurrentDatabase;
-        return ScalarArguments.CoerceToInt(value) switch
-        {
-            1 => SqlValue.FromNVarchar(MetadataNameType(runtime.Batch), BuiltInResources.LogicalFileName(database.Name, isLog: false)),
-            2 => SqlValue.FromNVarchar(MetadataNameType(runtime.Batch), BuiltInResources.LogicalFileName(database.Name, isLog: true)),
-            _ => SqlValue.Null(MetadataNameType(runtime.Batch)),
-        };
+        return runtime.Batch.CurrentDatabase.FindFile(ScalarArguments.CoerceToInt(value)) is { } file
+            ? SqlValue.FromNVarchar(MetadataNameType(runtime.Batch), file.Name)
+            : SqlValue.Null(MetadataNameType(runtime.Batch));
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)

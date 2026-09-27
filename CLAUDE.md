@@ -336,7 +336,7 @@ Where an entry carries a second clause it is because that fact changes what you'
   `OPENXML`'s patterns are **XPath 1.0** through the DOM, not the XQuery translator → [`xml.md`](docs/claude/xml.md).
 - **`geography` / `geometry`** — the parsed value model, WKT / WKB, the member surface, spatial indexes, the measures, the DE-9IM topological engines, validity and the derived points.
   Round-earth measures follow the **great elliptic arc**, which is not the geodesic → [`spatial.md`](docs/claude/spatial.md).
-- **`ALTER DATABASE SET <option>` and the database-level `COLLATE` clause** — most options parse-and-discard; the load-bearing ones (compat level, the snapshot pair, `TRUSTWORTHY`, `DB_CHAINING`, `READ_ONLY`, `QUERY_STORE`) are listed in the doc.
+- **`ALTER DATABASE SET <option>`, the database-level `COLLATE` clause, the database's files and filegroups (`ADD | MODIFY | REMOVE FILE`, `MODIFY FILEGROUP`, `CREATE DATABASE`'s file list), and `ALTER DATABASE SCOPED CONFIGURATION`** — most `SET` options parse-and-discard; the load-bearing ones (compat level, the snapshot pair, `TRUSTWORTHY`, `DB_CHAINING`, `READ_ONLY`, `QUERY_STORE`) are listed in the doc.
   `QUERY_STORE` is the only one with a sub-grammar of its own, and its whole configuration is retained though nothing is ever captured → [`database-options.md`](docs/claude/database-options.md).
 - **Per-column / per-expression collation, coercibility precedence, the cross-collation error family, the per-collation ANSI code page, and the `LIKE` / `PATINDEX` matcher**.
   A subject is read as **characters, not UTF-16 units**, and collation is bound at compile time so an empty rowset raises → [`collations.md`](docs/claude/collations.md).

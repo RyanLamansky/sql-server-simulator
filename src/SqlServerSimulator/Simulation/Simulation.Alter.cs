@@ -9,12 +9,9 @@ namespace SqlServerSimulator;
 partial class Simulation
 {
     /// <summary>
-    /// Parses the two ALTER DATABASE forms the simulator currently models:
-    /// <c>ALTER DATABASE … SET COMPATIBILITY_LEVEL = N</c> (per-database
-    /// compat) and
-    /// <c>ALTER DATABASE SCOPED CONFIGURATION SET VERBOSE_TRUNCATION_WARNINGS = ON|OFF</c>.
-    /// The simulator has a single database, so any database name (including
-    /// <c>CURRENT</c>) is accepted and ignored.
+    /// Dispatches the <c>ALTER</c> statements by the word after <c>ALTER</c>;
+    /// <c>ALTER DATABASE</c> and <c>ALTER DATABASE SCOPED CONFIGURATION</c>
+    /// are parsed here.
     /// </summary>
     private static bool TryParseAlter(ParserContext context)
     {
@@ -98,25 +95,41 @@ partial class Simulation
         if (refusal is not null)
             batch.SkipModeFlag = true;
         bool parsed;
+        // Only SET reports a refusal with Msg 5069 after it; the COLLATE,
+        // MODIFY, ADD and REMOVE forms name a database that doesn't exist with
+        // Msg 911 instead, and a read-only one with a plain Msg 3906 (probed
+        // 2026-09-27 against SQL Server 2025).
+        var verb = context.GetNextRequired();
+        var isSet = verb is ReservedKeyword { Keyword: Keyword.Set };
         try
         {
-            parsed = context.GetNextRequired() switch
+            if (!isSet && refusal is not null && afterDatabase is Name missing
+                && !context.Connection.Simulation.Databases.ContainsKey(missing.Value)
+                && verb switch
+                {
+                    ReservedKeyword { Keyword: Keyword.Collate or Keyword.Add } => true,
+                    Name { Value: var word } => BuiltInToken.Equals(word, "MODIFY") || BuiltInToken.Equals(word, "REMOVE"),
+                    _ => false,
+                })
+            {
+                throw SimulatedSqlException.DatabaseDoesNotExist(missing.Value);
+            }
+            parsed = verb switch
             {
                 ReservedKeyword { Keyword: Keyword.Set } => TryParseAlterDatabaseSet(context, target),
-                ReservedKeyword { Keyword: Keyword.Collate } when refusal is not null && afterDatabase is Name missing
-                    && !context.Connection.Simulation.Databases.ContainsKey(missing.Value)
-                    => throw SimulatedSqlException.DatabaseDoesNotExist(missing.Value),
                 ReservedKeyword { Keyword: Keyword.Collate } => TryParseAlterDatabaseCollate(context, target),
-                Name modify when BuiltInToken.Equals(modify.Value, "MODIFY") && refusal is not null && afterDatabase is Name missing
-                    && !context.Connection.Simulation.Databases.ContainsKey(missing.Value)
-                    => throw SimulatedSqlException.DatabaseDoesNotExist(missing.Value),
-                Name modify when BuiltInToken.Equals(modify.Value, "MODIFY") => TryParseAlterDatabaseModifyName(context, target),
+                Name modify when BuiltInToken.Equals(modify.Value, "MODIFY") => context.GetNextRequired() switch
+                {
+                    ReservedKeyword { Keyword: Keyword.File } => TryParseAlterDatabaseModifyFile(context, target),
+                    Name { Value: var what } when BuiltInToken.Equals(what, "FILEGROUP") => TryParseAlterDatabaseModifyFilegroup(context, target),
+                    _ => TryParseAlterDatabaseModifyName(context, target),
+                },
                 ReservedKeyword { Keyword: Keyword.Add } => TryParseAlterDatabaseFilegroup(context, target, add: true),
                 Name remove when BuiltInToken.Equals(remove.Value, "REMOVE") => TryParseAlterDatabaseFilegroup(context, target, add: false),
                 _ => false,
             };
         }
-        catch (SimulatedSqlException ex) when (ex.Number is 3906 or 12438)
+        catch (SimulatedSqlException ex) when (ex.Number is 3906 or 12438 && (isSet || verb is ReservedKeyword { Keyword: Keyword.Collate }))
         {
             throw SimulatedSqlException.FollowedByAlterDatabaseFailed(ex);
         }
@@ -155,7 +168,7 @@ partial class Simulation
 
     /// <summary>
     /// Parses <c>ALTER DATABASE name MODIFY NAME = newname</c>, entered with the
-    /// cursor on <c>MODIFY</c>, and renames the database — re-keying
+    /// cursor on <c>NAME</c>, and renames the database — re-keying
     /// <see cref="Databases"/> — with real's Msg 5021 notice, plus Msg 5701
     /// when the session sits in the renamed database. A system database is
     /// Msg 5016 and a name another database holds Msg 1801 state 4; renaming a
@@ -165,7 +178,7 @@ partial class Simulation
     /// </summary>
     private static bool TryParseAlterDatabaseModifyName(ParserContext context, Database target)
     {
-        if (context.GetNextRequired() is not Name nameWord || !BuiltInToken.Equals(nameWord.Value, "NAME"))
+        if (context.Token is not Name nameWord || !BuiltInToken.Equals(nameWord.Value, "NAME"))
             return false;
         if (context.GetNextRequired() is not Operator { Character: '=' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -1062,30 +1075,6 @@ partial class Simulation
         var database = target;
         database.Collation = resolved;
         database.CollationName = resolved.Name;
-        return true;
-    }
-
-    private static bool TryParseAlterDatabaseScopedConfiguration(ParserContext context)
-    {
-        context.MoveNextRequired();
-        if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.Configuration })
-            return false;
-
-        if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Set })
-            return false;
-
-        context.MoveNextRequired();
-        if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.Verbose_Truncation_Warnings })
-            return false;
-
-        if (context.GetNextRequired() is not Operator { Character: '=' })
-            return false;
-
-        if (context.GetNextRequired() is not ReservedKeyword { Keyword: var on } || on is not (Keyword.On or Keyword.Off))
-            return false;
-
-        if (!context.Batch.IsSkipping)
-            context.CurrentDatabase.VerboseTruncationWarnings = on == Keyword.On;
         return true;
     }
 

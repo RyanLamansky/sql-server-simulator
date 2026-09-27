@@ -31,7 +31,7 @@ A fourth arrives over the network: TDS Transaction Manager requests map onto the
 
 ## Database-level DDL inside a user transaction
 
-`CREATE` / `ALTER` / `DROP DATABASE` and `ALTER DATABASE SCOPED CONFIGURATION` are refused inside a user transaction (Msg 226, or Msg 574 for the drop) before any of the statement runs; the error ends only its statement, a TRY catches it, and the transaction stays open and committable (probed 2026-09-27 against SQL Server 2025).
+`CREATE` / `ALTER` / `DROP DATABASE` and `ALTER DATABASE SCOPED CONFIGURATION` are refused inside a user transaction (Msg 226, or Msg 574 for the drop) before any of the statement runs; the error ends only its statement, a TRY catches it, and the transaction stays open and committable — save the scoped-configuration refusal, which acts as under `XACT_ABORT`: uncaught it ends the batch and rolls the transaction back, caught it dooms it (probed 2026-09-27 against SQL Server 2025).
 The dispatch loop parses the refused statement in skip mode first, so the recovery scan resumes past it rather than at a keyword inside it.
 
 ## The transaction-aborting error class

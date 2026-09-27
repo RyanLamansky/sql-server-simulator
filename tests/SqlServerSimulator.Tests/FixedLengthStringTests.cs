@@ -174,7 +174,7 @@ public sealed class FixedLengthStringTests
     [TestMethod]
     public void Insert_WithLegacyCompatibility_RaisesMsg8152NoColumnDetail()
         => new Simulation().AssertSqlError("""
-            alter database current set compatibility_level = 150;
+            alter database current set compatibility_level = 140;
             create table t (c char(5));
             insert t values ('toolong')
             """, 8152, "String or binary data would be truncated.");
