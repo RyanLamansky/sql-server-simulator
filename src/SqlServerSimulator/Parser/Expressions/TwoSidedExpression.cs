@@ -51,7 +51,29 @@ internal abstract class TwoSidedExpression : Expression
         _ => throw new ArgumentException($"'{op}' isn't a compound-assignment arithmetic operator.", nameof(op)),
     };
 
+    /// <summary>
+    /// The mask of the projection column this node computes part of, set by
+    /// <see cref="DataMask.OfProjection"/>: a conversion error it raises for a
+    /// principal who reads that column masked hides its value and types
+    /// (<see cref="DataMasking.Redacted"/>).
+    /// </summary>
+    internal DataMask? ErrorMask;
+
     public sealed override SqlValue Run(RuntimeContext runtime)
+    {
+        if (this.ErrorMask is null)
+            return this.RunUnredacted(runtime);
+        try
+        {
+            return this.RunUnredacted(runtime);
+        }
+        catch (SimulatedSqlException error) when (DataMasking.Redacted(error, runtime.Batch, this.ErrorMask) is { } redacted)
+        {
+            throw redacted;
+        }
+    }
+
+    private SqlValue RunUnredacted(RuntimeContext runtime)
     {
         // Fast path — the dominant per-row shape (col op const, col op col, any
         // depth-1 arithmetic) has a non-chain left operand: evaluate directly

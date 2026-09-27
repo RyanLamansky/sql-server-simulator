@@ -72,10 +72,12 @@ internal static class DataMasking
     /// when the expression reads a masked column through a subquery the
     /// executing principal can't unmask (probed 2026-09-27 against SQL Server
     /// 2025: <c>SET @v = (SELECT TOP 1 masked_int FROM t)</c> into a
-    /// <c>varchar</c> assigns <c>xxxx</c>).
+    /// <c>varchar</c> assigns <c>xxxx</c>). A <c>DECLARE</c> initializer passes
+    /// false for <paramref name="functionResults"/>: it assigns a scalar UDF's
+    /// result unmasked where <c>SET</c> masks it (probed 2026-09-27).
     /// </summary>
-    public static SqlValue ForAssignment(BatchContext batch, Expression expression, SqlValue source, SqlValue value, SqlType type) =>
-        !batch.Connection.Simulation.DeclaresDataMasks || DataMask.Of(expression, static _ => null, typeOf: null) is not { } mask
+    public static SqlValue ForAssignment(BatchContext batch, Expression expression, SqlValue source, SqlValue value, SqlType type, bool functionResults = true) =>
+        !batch.Connection.Simulation.DeclaresDataMasks || DataMask.Of(expression, static _ => null, typeOf: null, functionResults) is not { } mask
             ? value
             : ForAssignment(batch, mask, source, value, type);
 
@@ -87,12 +89,27 @@ internal static class DataMasking
     /// <c>default()</c> of the variable's type (probed 2026-09-27 against SQL
     /// Server 2025: an email-masked <c>varchar(40)</c> assigns
     /// <c>jXXX@XXXX.com</c> to a <c>varchar(40)</c> variable and <c>xxxx</c> to
-    /// a <c>varchar(20)</c> one).
+    /// a <c>varchar(20)</c> one). Inside a scalar UDF body nothing is masked
+    /// on assignment — a comparison there reads the stored value — and the
+    /// function's result masks instead (<see cref="Schemas.ScalarFunction.ReturnMask"/>).
     /// </summary>
     public static SqlValue ForAssignment(BatchContext batch, DataMask mask, SqlValue source, SqlValue value, SqlType type) =>
-        value.IsNull || !Applies(batch, mask)
+        value.IsNull || batch.UdfFrame is not null || !Applies(batch, mask)
             ? value
             : ForStorage((DataMask.SameDeclaredType(source.Type, type) ? mask.Function : MaskingFunction.Default).Apply(value, type));
+
+    /// <summary>
+    /// <paramref name="error"/> as real reports it over a value the executing
+    /// principal reads through <paramref name="mask"/>, or null when it stands:
+    /// Msg 220 / 232 / 245 / 248 replace the value and every type name with
+    /// <c>******</c>, while Msg 8114 / 8115 / 235 / 241, which quote no value,
+    /// keep their text (probed 2026-09-27 against SQL Server 2025). Only an
+    /// error raised computing a masked output column's value qualifies — a
+    /// filter, an ordering or a <c>CASE WHEN</c> condition reads the stored
+    /// value and reports it.
+    /// </summary>
+    public static SimulatedSqlException? Redacted(SimulatedSqlException error, BatchContext batch, DataMask mask) =>
+        error.RedactedForMask() is { } redacted && Applies(batch, mask) ? redacted : null;
 
     /// <summary>A result set whose rows the executing principal reads through <paramref name="masks"/>.</summary>
     public static SimulatedSqlResultSet ForClient(SimulatedSqlResultSet resultSet, DataMask?[]? masks, BatchContext batch) =>

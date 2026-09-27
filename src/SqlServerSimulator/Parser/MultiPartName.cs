@@ -43,6 +43,28 @@ internal readonly struct MultiPartName
     /// <summary>Whether the schema part was written empty (<c>db..t</c>) and filled in with the default.</summary>
     private readonly bool schemaOmitted;
 
+    /// <summary>
+    /// Whether the leaf was written delimited (<c>[$node_id]</c>, <c>"$node_id"</c>),
+    /// which a graph pseudo-column needs it not to be: real reads only the bare
+    /// <c>$node_id</c> token as one (probed 2026-09-27 against SQL Server 2025).
+    /// </summary>
+    public readonly bool LeafDelimited;
+
+    /// <summary>
+    /// Whether the name was read from the statement's text rather than built
+    /// by the simulator (MATCH's desugared equalities name a graph table's
+    /// hidden internal columns, which a written name may not).
+    /// </summary>
+    public readonly bool FromText;
+
+    /// <summary>A one-part name read from the statement's text, remembering whether it was written delimited.</summary>
+    public MultiPartName(string singlePart, bool delimited)
+        : this(singlePart)
+    {
+        this.LeafDelimited = delimited;
+        this.FromText = true;
+    }
+
     public MultiPartName(string singlePart)
     {
         ArgumentNullException.ThrowIfNull(singlePart);
@@ -50,8 +72,10 @@ internal readonly struct MultiPartName
         this.Count = 1;
     }
 
-    private MultiPartName(string p1, string p2, string? p3, string? p4, int count, byte omittedLeading = 0, bool schemaOmitted = false)
+    private MultiPartName(string p1, string p2, string? p3, string? p4, int count, byte omittedLeading = 0, bool schemaOmitted = false, bool leafDelimited = false, bool fromText = false)
     {
+        this.LeafDelimited = leafDelimited;
+        this.FromText = fromText;
         this.p1 = p1;
         this.p2 = p2;
         this.p3 = p3;
@@ -70,7 +94,7 @@ internal readonly struct MultiPartName
     public MultiPartName WithOmissions(int leading, bool schema) =>
         leading == 0 && !schema
             ? this
-            : new(this.p1, this.p2!, this.p3, this.p4, this.Count, (byte)leading, schema);
+            : new(this.p1, this.p2!, this.p3, this.p4, this.Count, (byte)leading, schema, this.LeafDelimited, this.FromText);
 
     /// <summary>
     /// The name as written: empty leading parts as leading dots, an omitted
@@ -99,14 +123,15 @@ internal readonly struct MultiPartName
     /// SQL Server emits at resolution time) when the name is already at
     /// the 4-part grammar limit.
     /// </summary>
-    public MultiPartName WithAddedPart(string next)
+    /// <remarks><paramref name="delimited"/> records whether the new leaf was written delimited (<see cref="LeafDelimited"/>).</remarks>
+    public MultiPartName WithAddedPart(string next, bool delimited = false)
     {
         ArgumentNullException.ThrowIfNull(next);
         return this.Count switch
         {
-            1 => new(this.p1, next, null, null, count: 2),
-            2 => new(this.p1, this.p2!, next, null, count: 3),
-            3 => new(this.p1, this.p2!, this.p3!, next, count: 4),
+            1 => new(this.p1, next, null, null, count: 2, leafDelimited: delimited, fromText: this.FromText),
+            2 => new(this.p1, this.p2!, next, null, count: 3, leafDelimited: delimited, fromText: this.FromText),
+            3 => new(this.p1, this.p2!, this.p3!, next, count: 4, leafDelimited: delimited, fromText: this.FromText),
             _ => throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound($"{this}.{next}"),
         };
     }

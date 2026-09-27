@@ -39,7 +39,15 @@ internal sealed class VariableReference : Expression
         this.DeclaredType = slot.DeclaredType;
         this.spelledNumeric = slot.SpelledNumeric;
         this.aliasType = slot.AliasType;
+        this.Mask = slot.Mask;
     }
+
+    /// <summary>
+    /// The variable's <see cref="VariableSlot.Mask"/> where this reference was
+    /// parsed, which is the taint a scalar UDF body's analysis walk carries
+    /// from assignment to use.
+    /// </summary>
+    internal readonly DataMask? Mask;
 
     private readonly bool spelledNumeric;
 

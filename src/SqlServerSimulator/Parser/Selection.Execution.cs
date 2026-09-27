@@ -28,6 +28,18 @@ internal sealed partial class Selection
     /// </summary>
     internal static (int SourceIndex, int ColumnIndex) FindSourceColumn(FromSource[] sources, MultiPartName name)
     {
+        var found = FindSourceColumnOfAnyKind(sources, name);
+        // A graph table's hidden internal columns are there to be read only by
+        // the pseudo-columns and MATCH; naming one in a query is Msg 13908
+        // (probed 2026-09-27 against SQL Server 2025).
+        return name.FromText && found.SourceIndex >= 0
+            && sources[found.SourceIndex].Columns[found.ColumnIndex] is { IsHidden: true, GraphKind: not GraphColumnKind.None } internalColumn
+            ? throw SimulatedSqlException.InternalGraphColumnAccess(internalColumn.Name, 1)
+            : found;
+    }
+
+    private static (int SourceIndex, int ColumnIndex) FindSourceColumnOfAnyKind(FromSource[] sources, MultiPartName name)
+    {
         if (name.ImmediateQualifier is { } qualifier)
         {
             for (var s = 0; s < sources.Length; s++)
@@ -44,7 +56,7 @@ internal sealed partial class Selection
                 // Qualifier matched but the column doesn't exist in that
                 // source; fall through to outer (caller handles) — unless the
                 // name is a graph pseudo-column the source carries.
-                return name.Leaf.StartsWith('$') && GraphColumns.FindPseudoColumn(sources[s].ColumnNames, name.Leaf) is var pseudo and >= 0
+                return !name.LeafDelimited && name.Leaf.StartsWith('$') && GraphColumns.FindPseudoColumn(sources[s].ColumnNames, name.Leaf) is var pseudo and >= 0
                     ? (s, pseudo)
                     : (-1, -1);
             }
@@ -70,7 +82,7 @@ internal sealed partial class Selection
                 }
             }
         }
-        if (matches == 0 && name.Leaf.StartsWith('$'))
+        if (matches == 0 && !name.LeafDelimited && name.Leaf.StartsWith('$'))
         {
             for (var s = 0; s < sources.Length; s++)
             {
@@ -1511,7 +1523,8 @@ internal sealed partial class Selection
         selection.ColumnIsUntypedNull = UntypedNullsOf(expressions, sources);
         selection.ColumnReportsNumeric = ColumnReportsNumericOf(expressions, outputSchema);
         selection.ColumnAliasTypes = ColumnAliasTypesOf(expressions);
-        selection.ColumnMasks = DataMask.OfProjection(parseBatch, expressions, name => SourceColumnMask(sources, name), expression => expression.GetSqlType(parseBatch, ResolveColumnType));
+        var outerMask = parseBatch.Parser.OuterMaskResolver;
+        selection.ColumnMasks = DataMask.OfProjection(parseBatch, expressions, name => ScopedColumnMask(sources, name, outerMask), expression => expression.GetSqlType(parseBatch, ResolveColumnType));
         selection.ColumnIdentitySources = ColumnIdentitySourcesOf(expressions, sources, joins);
         selection.BranchFromSources = sources;
         selection.AutoSourceNames = AutoSourceNamesOf(sources);
@@ -1952,6 +1965,13 @@ internal sealed partial class Selection
         var index = ReferenceEquals(source.Columns, table.Columns) ? c : Array.IndexOf(table.Columns, column);
         return index < 0 ? null : DataMask.ForTableColumn(table, index);
     }
+
+    /// <summary>
+    /// <see cref="SourceColumnMask"/> for a name this scope's sources bind,
+    /// else the enclosing scope's answer through <paramref name="outer"/>.
+    /// </summary>
+    internal static DataMask? ScopedColumnMask(FromSource[] sources, MultiPartName name, Func<MultiPartName, DataMask?>? outer) =>
+        FindSourceColumn(sources, name).SourceIndex >= 0 ? SourceColumnMask(sources, name) : outer?.Invoke(name);
 
     private static Schemas.AliasType?[]? ColumnAliasTypesOf(List<Expression> expressions)
     {

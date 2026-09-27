@@ -131,7 +131,7 @@ partial class Simulation
         if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.Using })
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
-        var (materializeSource, sourceAlias, sourceColumnNames, sourceSchema) = ParseMergeSource(context);
+        var (materializeSource, sourceAlias, sourceColumnNames, sourceSchema, sourceMasks) = ParseMergeSource(context);
         if (context.Batch.CurrentDatabase.Collation.Equals(sourceAlias, targetAlias))
             throw SimulatedSqlException.MergeSourceAndTargetShareAName();
 
@@ -171,7 +171,10 @@ partial class Simulation
         var whenClauses = ParseMergeWhenClauses(context, destinationTable, sourceView, targetAlias, defaultTargetName, sourceAlias, sourceColumnNames, sourceSchema);
 
         // OUTPUT.
-        var output = TryParseMergeOutputClause(context, destinationTable, sourceView, sourceAlias, sourceColumnNames, sourceSchema);
+        var output = TryParseMergeOutputClause(context, destinationTable, sourceView, sourceAlias, sourceColumnNames, sourceSchema, sourceMasks);
+
+        if (context.Batch.Connection.Simulation.DeclaresDataMasks && !context.Batch.IsSkipping)
+            SettleMergeWriteMasks(context.Batch, destinationTable, sourceView, targetAlias, defaultTargetName, targetColumns, sourceAlias, sourceColumnNames, sourceMasks, whenClauses);
 
         // Msg 334 applies per action the MERGE actually performs, and the
         // message echoes the target as written — its alias when one was given
@@ -205,6 +208,76 @@ partial class Simulation
         if (!context.Batch.IsSkipping)
             CheckMergePermissions(context.Batch, destinationName, (SchemaObject?)sourceView ?? destinationTable, whenClauses);
         return ExecuteMerge(context, destinationTable, sourceView, targetAlias, materializeSource, sourceAlias, sourceColumnNames, sourceSchema, onPredicate, whenClauses, output, serializableHint);
+    }
+
+    /// <summary>
+    /// Settles, per target column, the mask a principal without <c>UNMASK</c>
+    /// writes it through: every action's value for the column — each
+    /// <c>UPDATE SET</c> and the <c>INSERT</c>'s — meets in one column as a
+    /// <c>CASE</c>'s arms do, so a bare masked source column stores its own
+    /// function, any other expression over one <c>default()</c>, and an
+    /// unmasked value written beside a masked one takes the mask too (probed
+    /// 2026-09-27 against SQL Server 2025: <c>UPDATE SET s = s + src.x</c>
+    /// with <c>INSERT VALUES (src.id, src.x)</c> stores <c>xxxx</c> both ways).
+    /// </summary>
+    private static void SettleMergeWriteMasks(
+        BatchContext batch,
+        HeapTable destinationTable,
+        View? sourceView,
+        string targetAlias,
+        string defaultTargetName,
+        HeapColumn[] targetColumns,
+        string sourceAlias,
+        string[] sourceColumnNames,
+        DataMask?[]? sourceMasks,
+        List<WhenClause> whenClauses)
+    {
+        var collation = batch.CurrentDatabase.Collation;
+        DataMask? TargetMask(string leaf)
+        {
+            var index = Array.FindIndex(targetColumns, column => collation.Equals(column.Name, leaf));
+            if (index < 0)
+                return null;
+            var ordinal = sourceView is null ? index : sourceView.BaseColumnOrdinals[index];
+            return ordinal < 0 ? null : DataMask.ForTableColumn(destinationTable, ordinal);
+        }
+        DataMask? SourceMask(string leaf)
+        {
+            var index = Array.FindIndex(sourceColumnNames, column => collation.Equals(column, leaf));
+            return index < 0 ? null : sourceMasks?[index];
+        }
+        DataMask? ColumnMask(MultiPartName name) =>
+            collation.Equals(name.ImmediateQualifier, sourceAlias) ? SourceMask(name.Leaf)
+            : collation.Equals(name.ImmediateQualifier, targetAlias) || collation.Equals(name.ImmediateQualifier, defaultTargetName) ? TargetMask(name.Leaf)
+            : name.Count == 1 ? (Array.Exists(targetColumns, column => collation.Equals(column.Name, name.Leaf)) ? TargetMask(name.Leaf) : SourceMask(name.Leaf))
+            : null;
+
+        var columns = new DataMask?[destinationTable.Columns.Length];
+        var written = new bool[columns.Length];
+        void Write(int ordinal, Expression value)
+        {
+            if (ordinal < 0)
+                return;
+            columns[ordinal] = DataMask.Merge(columns[ordinal], DataMask.Of(value, ColumnMask, typeOf: null));
+            written[ordinal] = true;
+        }
+        foreach (var clause in whenClauses)
+        {
+            if (clause.Assignments is { } assignments)
+            {
+                foreach (var (ordinal, expression) in assignments)
+                    Write(ordinal, expression);
+            }
+            if (clause is { InsertColumns: { } insertColumns, InsertValues: { } insertValues })
+            {
+                for (var i = 0; i < insertColumns.Length && i < insertValues.Length; i++)
+                    Write(Array.IndexOf(destinationTable.Columns, insertColumns[i]), insertValues[i]);
+            }
+        }
+        if (DataMasking.Applying(batch, columns) is not { } functions)
+            return;
+        foreach (var clause in whenClauses)
+            clause.WriteMasks = functions;
     }
 
     /// <summary>
@@ -262,7 +335,7 @@ partial class Simulation
     /// first column name as the would-be hint name) and the simulator
     /// matches by routing through <see cref="Selection.ParseOptionalTableHints"/>.
     /// </summary>
-    private static (Func<BatchContext, List<SqlValue[]>> Materialize, string Alias, string[] ColumnNames, SqlType[] Schema) ParseMergeSource(ParserContext context)
+    private static (Func<BatchContext, List<SqlValue[]>> Materialize, string Alias, string[] ColumnNames, SqlType[] Schema, DataMask?[]? Masks) ParseMergeSource(ParserContext context)
     {
         context.MoveNextRequired();
         return context.Token is Operator { Character: '(' }
@@ -282,13 +355,14 @@ partial class Simulation
     /// WITH. The prefix belongs ahead of the MERGE itself
     /// (<c>WITH c AS (…) MERGE … USING c</c>), which ships.
     /// </remarks>
-    private static (Func<BatchContext, List<SqlValue[]>> Materialize, string Alias, string[] ColumnNames, SqlType[] Schema) ParseParenthesizedMergeSource(ParserContext context)
+    private static (Func<BatchContext, List<SqlValue[]>> Materialize, string Alias, string[] ColumnNames, SqlType[] Schema, DataMask?[]? Masks) ParseParenthesizedMergeSource(ParserContext context)
     {
         context.MoveNextRequired();
 
         Func<BatchContext, List<SqlValue[]>> materialize;
         SqlType[] sourceSchema;
         string[] selectionColumnNames;
+        DataMask?[]? masks = null;
         if (context.Token is ReservedKeyword { Keyword: Keyword.Values })
         {
             var tuples = ParseValuesTuples(context);
@@ -330,6 +404,7 @@ partial class Simulation
 
             sourceSchema = selection.Schema;
             selectionColumnNames = selection.ColumnNames;
+            masks = selection.ColumnMasks;
             materialize = batch =>
             {
                 // The USING source is its own query expression, so it owns the
@@ -386,7 +461,7 @@ partial class Simulation
             }
         }
 
-        return (materialize, alias, columnNames, sourceSchema);
+        return (materialize, alias, columnNames, sourceSchema, masks);
     }
 
     /// <summary>
@@ -402,13 +477,14 @@ partial class Simulation
     /// table / view object. Cursor on exit: the next un-consumed token
     /// (typically <c>ON</c>).
     /// </summary>
-    private static (Func<BatchContext, List<SqlValue[]>> Materialize, string Alias, string[] ColumnNames, SqlType[] Schema) ParseBareTableMergeSource(ParserContext context)
+    private static (Func<BatchContext, List<SqlValue[]>> Materialize, string Alias, string[] ColumnNames, SqlType[] Schema, DataMask?[]? Masks) ParseBareTableMergeSource(ParserContext context)
     {
         var objectName = BatchContext.ParseObjectName(context, acceptTableVariable: true);
 
         Func<BatchContext, List<SqlValue[]>> materialize;
         SqlType[] sourceSchema;
         string[] columnNames;
+        DataMask?[]? masks = null;
 
         // CTE binding shadows table / view resolution: `WITH c AS (…) MERGE …
         // USING c ON …` references the CTE, not any same-named base object.
@@ -431,7 +507,7 @@ partial class Simulation
                     rows.Add(RowDecoder.DecodeRow(sourceSchema.AsSpan(), rowBytes));
                 return rows;
             };
-            return (materialize, cteAlias, columnNames, sourceSchema);
+            return (materialize, cteAlias, columnNames, sourceSchema, ctePlan.ColumnMasks);
         }
 
         if (context.Batch.TryResolveView(objectName, out var resolvedView))
@@ -443,6 +519,8 @@ partial class Simulation
             {
                 sourceSchema[i] = viewColumns[i].Type;
                 columnNames[i] = viewColumns[i].Name;
+                if (viewColumns[i].DerivedMask is { } viewMask)
+                    (masks ??= new DataMask?[viewColumns.Length])[i] = viewMask;
             }
             var viewSelection = Selection.ForView(resolvedView, viewColumns);
             materialize = batch =>
@@ -462,6 +540,8 @@ partial class Simulation
             {
                 sourceSchema[i] = heapTable.Columns[i].Type;
                 columnNames[i] = heapTable.Columns[i].Name;
+                if (context.Batch.Connection.Simulation.DeclaresDataMasks && DataMask.ForTableColumn(heapTable, i) is { } columnMask)
+                    (masks ??= new DataMask?[heapTable.Columns.Length])[i] = columnMask;
             }
             var sourceTable = heapTable;
             var alias = Selection.ConsumeOptionalAlias(context) ?? objectName.Leaf;
@@ -480,7 +560,7 @@ partial class Simulation
                 }
                 return rows;
             };
-            return (materialize, alias, columnNames, sourceSchema);
+            return (materialize, alias, columnNames, sourceSchema, masks);
         }
         else
         {
@@ -491,7 +571,7 @@ partial class Simulation
 
         var defaultAlias = Selection.ConsumeOptionalAlias(context) ?? objectName.Leaf;
         _ = Selection.ParseOptionalTableHints(context, allowLegacyParenForm: true, commitOnLegacyParen: true);
-        return (materialize, defaultAlias, columnNames, sourceSchema);
+        return (materialize, defaultAlias, columnNames, sourceSchema, masks);
     }
 
     /// <summary>
@@ -988,7 +1068,8 @@ partial class Simulation
         View? sourceView,
         string sourceAlias,
         string[] sourceColumnNames,
-        SqlType[] sourceSchema)
+        SqlType[] sourceSchema,
+        DataMask?[]? sourceMasks)
     {
         if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.Output })
             return null;
@@ -1094,7 +1175,7 @@ partial class Simulation
 
         return new OutputProjection(
             [.. expressions], [.. columnNames], schema, destinationTable,
-            (sourceAlias, sourceColumnNames, sourceSchema), context.Batch, outputTarget);
+            (sourceAlias, sourceColumnNames, sourceSchema), context.Batch, outputTarget, sourceMasks);
     }
 
     /// <summary>
@@ -1531,6 +1612,8 @@ partial class Simulation
         foreach (var (ord, expr) in clause.Assignments!)
         {
             var raw = expr.Run(new RuntimeContext(name => resolveCombined(targetValues, sourceValues, name), context.Batch));
+            if (clause.WriteMasks?[ord] is { } mask)
+                raw = DataMasking.ForStorage(mask.Apply(raw, destinationTable.Columns[ord].Type));
             raw = EnforceMaxLength(raw, destinationTable.Columns[ord], destinationTable, context.Connection);
             newValues[ord] = CoerceForWrite(raw, destinationTable.Columns[ord], context.Batch);
             EnforceRule(destinationTable, newValues, ord, context.Batch);
@@ -1625,6 +1708,8 @@ partial class Simulation
                 }
             }
             var source = clause.InsertValues![i].Run(new RuntimeContext(name => resolveCombined(null, sourceValues, name), context.Batch));
+            if (clause.WriteMasks?[ordinal] is { } mask)
+                source = DataMasking.ForStorage(mask.Apply(source, targetColumn.Type));
             source = EnforceMaxLength(source, targetColumn, destinationTable, context.Connection);
             var coerced = CoerceForWrite(source, targetColumn, context.Batch);
             rowValues[ordinal] = coerced;
@@ -2056,6 +2141,13 @@ partial class Simulation
         public readonly List<(int Ordinal, Expression Expr)>? Assignments = assignments;
         public readonly HeapColumn[]? InsertColumns = insertColumns;
         public readonly Expression[]? InsertValues = insertValues;
+
+        /// <summary>
+        /// Per target column (base-table ordinal), the function the executing
+        /// principal writes it through; null when nothing masks. Set once per
+        /// statement by <see cref="SettleMergeWriteMasks"/>.
+        /// </summary>
+        public MaskingFunction?[]? WriteMasks;
     }
 
     /// <summary>

@@ -124,16 +124,17 @@ internal sealed class ObjectProperty : Expression
         var key = typeCode is "PK" or "UQ" ? table.KeyConstraints.Find(candidate => candidate.ObjectId == constraint.ObjectId) : null;
         var foreignKey = typeCode == "F" ? table.OutgoingForeignKeys.Find(candidate => candidate.ObjectId == constraint.ObjectId) : null;
         var check = typeCode == "C" ? table.CheckConstraints.Find(candidate => candidate.ObjectId == constraint.ObjectId) : null;
+        var edge = typeCode == "EC" ? table.EdgeConstraints.Find(candidate => candidate.ObjectId == constraint.ObjectId) : null;
         Span<char> upper = stackalloc char[property.Length];
         return upper[..property.AsSpan().ToUpperInvariant(upper)] switch
         {
             "CNSTISCLUSTKEY" => Flag(key is { IsClustered: true }),
             "CNSTISCOLUMN" => Flag(typeCode == "D" || check is { InlineColumn: not null } || foreignKey is { ChildColumnOrdinals.Length: 1 }),
             "CNSTISDELETECASCADE" => Flag(foreignKey is { DeleteAction: ReferentialAction.Cascade }),
-            "CNSTISDISABLED" => Flag(check is { IsDisabled: true } || foreignKey is { IsDisabled: true }),
+            "CNSTISDISABLED" => Flag(check is { IsDisabled: true } || foreignKey is { IsDisabled: true } || edge is { IsDisabled: true }),
             "CNSTISNONCLUSTKEY" => Flag(key is { IsClustered: false }),
             "CNSTISNOTREPL" => Flag(check is { NotForReplication: true } || foreignKey is { NotForReplication: true }),
-            "CNSTISNOTTRUSTED" => Flag(check is { IsNotTrusted: true } || foreignKey is { IsNotTrusted: true }),
+            "CNSTISNOTTRUSTED" => Flag(check is { IsNotTrusted: true } || foreignKey is { IsNotTrusted: true } || edge is { IsNotTrusted: true }),
             "CNSTISUPDATECASCADE" => Flag(foreignKey is { UpdateAction: ReferentialAction.Cascade }),
             "ISCHECKCNST" => Flag(typeCode == "C"),
             "ISCONSTRAINT" => 1,

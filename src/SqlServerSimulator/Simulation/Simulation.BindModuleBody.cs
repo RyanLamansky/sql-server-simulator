@@ -331,6 +331,72 @@ partial class Simulation
             bodyCommand => new BatchContext(bodyCommand, frame));
 
     /// <summary>
+    /// The masked columns <paramref name="function"/>'s result reads, which a
+    /// principal without <c>UNMASK</c> reads as <c>default()</c> of the return
+    /// type wherever a query projects the call — a select list, a
+    /// <c>SET</c>, an <c>UPDATE … SET</c>, an <c>INSERT … SELECT</c> — though
+    /// the body itself reads and compares stored values (probed 2026-09-27
+    /// against SQL Server 2025, inlineable or not).
+    /// </summary>
+    /// <remarks>
+    /// Real settles it by data flow through the body: a variable assigned from
+    /// a masked column carries it until reassigned from something that doesn't,
+    /// a <c>CASE WHEN</c> condition or <c>IF</c> test over it passes nothing
+    /// on, and every <c>RETURN</c> counts whichever branch it sits in. The
+    /// body is walked once without running, as it binds at <c>CREATE</c>, with
+    /// each assignment recording its mask on the variable's slot in source
+    /// order; the answer is kept per <see cref="SchemaVersion"/>. A call inside
+    /// the function's own analysis (recursion) reads as unmasked.
+    /// </remarks>
+    internal DataMask? ScalarFunctionReturnMask(BatchContext batch, ScalarFunction function)
+    {
+        var version = Volatile.Read(ref this.SchemaVersion);
+        if (Volatile.Read(ref function.ReturnMaskSchemaVersion) == version)
+            return function.ReturnMask;
+        if (Monitor.IsEntered(function))
+            return null;
+        lock (function)
+        {
+            if (function.ReturnMaskSchemaVersion == version)
+                return function.ReturnMask;
+            var connection = batch.Connection;
+            using var bodyCommand = new SimulatedDbCommand(this, connection);
+#pragma warning disable CA2100 // BodyText is the function's own stored body
+            bodyCommand.CommandText = function.BodyText;
+#pragma warning restore CA2100
+            var variables = new Dictionary<string, VariableSlot>(BatchContext.VariableNameComparer);
+            foreach (var param in function.Parameters)
+                variables[param.Name] = new VariableSlot(param.Type, param.DeclaredMaxLength, SqlValue.Null(param.Type), parameter: null) { SpelledNumeric = param.SpelledNumeric };
+            var frame = new UdfFrame(function.ReturnType) { AnalyzesReturnMask = true };
+            var analysis = new BatchContext(bodyCommand, variables, frame) { SuppressDiagnosticsResolution = true, CalledFunctionBody = true };
+            var savedQuotedIdentifiers = connection.QuotedIdentifiers;
+            var savedAnsiNulls = connection.AnsiNulls;
+            connection.QuotedIdentifiers = function.UsesQuotedIdentifier;
+            connection.AnsiNulls = function.UsesAnsiNulls;
+            DataMask? mask = null;
+            try
+            {
+                _ = this.BindWithoutRunning(analysis, []);
+                if (frame.ReturnMask is { } read)
+                    mask = new(MaskingFunction.Default, read.Sources);
+            }
+            catch (SimulatedSqlException)
+            {
+                // A body that no longer binds raises when it runs; its result
+                // masks nothing until then.
+            }
+            finally
+            {
+                connection.QuotedIdentifiers = savedQuotedIdentifiers;
+                connection.AnsiNulls = savedAnsiNulls;
+            }
+            function.ReturnMask = mask;
+            Volatile.Write(ref function.ReturnMaskSchemaVersion, version);
+            return mask;
+        }
+    }
+
+    /// <summary>
     /// Seeds a function's declared parameters as typed NULL variable slots, so
     /// a body reference to <c>@p</c> binds instead of raising Msg 137.
     /// </summary>

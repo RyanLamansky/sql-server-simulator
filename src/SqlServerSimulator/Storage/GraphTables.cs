@@ -103,7 +103,7 @@ internal static class GraphColumns
     public static void BindPseudoReferences(Parser.ExpressionNode root, HeapColumn[] columns) =>
         root.Walk((node, _) =>
         {
-            if (node is Reference { ReferencedName: var name } reference && name.Leaf.StartsWith('$')
+            if (node is Reference { ReferencedName: var name } reference && !name.LeafDelimited && name.Leaf.StartsWith('$')
                 && Array.Find(columns, column => IsPseudoColumnFor(column.Name, name.Leaf)) is { } column)
             {
                 reference.ReferencedName = name.ImmediateQualifier is { } qualifier

@@ -28,6 +28,12 @@ internal sealed class EdgeConstraint(string name, int objectId, (HeapTable From,
     /// <summary>Added <c>WITH NOCHECK</c>, so the existing edges were never checked: <c>sys.edge_constraints.is_not_trusted</c>.</summary>
     public bool IsNotTrusted;
 
+    /// <summary>
+    /// Turned off by <c>ALTER TABLE … NOCHECK CONSTRAINT</c>: neither an edge
+    /// write nor a node delete is checked against it (<c>is_disabled</c>).
+    /// </summary>
+    public bool IsDisabled;
+
     /// <summary>Whether <paramref name="table"/> is an endpoint of any clause.</summary>
     public bool References(HeapTable table)
     {

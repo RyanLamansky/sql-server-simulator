@@ -21,4 +21,15 @@ internal sealed class UdfFrame(SqlType returnType)
     /// dispatch returns.
     /// </summary>
     public SqlValue ReturnedValue = SqlValue.Null(returnType);
+
+    /// <summary>
+    /// Set on the frame of the walk that settles which masked columns the
+    /// function's result reads (<see cref="Schemas.ScalarFunction.ReturnMask"/>):
+    /// the body's variable assignments record what they read on their slots
+    /// and each <c>RETURN</c> adds its value's to <see cref="ReturnMask"/>.
+    /// </summary>
+    public bool AnalyzesReturnMask;
+
+    /// <summary>What the analysis walk's <c>RETURN</c>s read, merged; see <see cref="AnalyzesReturnMask"/>.</summary>
+    public DataMask? ReturnMask;
 }

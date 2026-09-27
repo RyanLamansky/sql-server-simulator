@@ -117,6 +117,18 @@ internal sealed class ScalarFunction(
     /// <see cref="SqlValue.Null"/> of <see cref="ReturnType"/>.
     /// </summary>
     public readonly bool ReturnsNullOnNullInput = returnsNullOnNullInput;
+
+    /// <summary>
+    /// The masked columns the function's result reads, which a principal
+    /// without <c>UNMASK</c> reads through <c>default()</c> of the return
+    /// type; null when it reads none. Settled by
+    /// <see cref="Simulation.ScalarFunctionReturnMask"/> and kept while
+    /// <see cref="ReturnMaskSchemaVersion"/> is current.
+    /// </summary>
+    public Parser.DataMask? ReturnMask;
+
+    /// <summary>The <see cref="Simulation.SchemaVersion"/> <see cref="ReturnMask"/> was settled at; -1 before the first.</summary>
+    public long ReturnMaskSchemaVersion = -1;
 }
 
 /// <summary>

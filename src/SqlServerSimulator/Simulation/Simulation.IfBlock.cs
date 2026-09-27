@@ -444,6 +444,8 @@ partial class Simulation
                 throw SimulatedSqlException.ReturnWithValueNotAllowed();
 
             var valueExpr = Expression.Parse(context);
+            if (batch.UdfFrame is { AnalyzesReturnMask: true } analyzed)
+                analyzed.ReturnMask = DataMask.Merge(analyzed.ReturnMask, DataMask.Of(valueExpr, static _ => null, typeOf: null));
             // A scalar function's result takes its value as an assignment
             // does, settled while the body binds at CREATE among the body's
             // other binder errors — and not at all once the body broke a shape

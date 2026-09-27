@@ -516,7 +516,8 @@ partial class Simulation
         HeapTable destinationTable,
         (string SourceAlias, string[] SourceColumns, SqlType[] SourceTypes)? source,
         BatchContext batch,
-        OutputTarget? outputTarget)
+        OutputTarget? outputTarget,
+        DataMask?[]? sourceMasks = null)
     {
         public readonly SqlType[] Schema = schema;
         public readonly string[] ColumnNames = columnNames;
@@ -526,7 +527,8 @@ partial class Simulation
         /// Per OUTPUT column, how it masks for a principal without
         /// <c>UNMASK</c>: <c>INSERTED</c> / <c>DELETED</c> read the target's
         /// masked columns as a SELECT would (probed 2026-09-27 against SQL
-        /// Server 2025), both to the client and into an <c>INTO</c> target.
+        /// Server 2025), both to the client and into an <c>INTO</c> target,
+        /// and a MERGE's source columns as its source query projects them.
         /// </summary>
         private readonly DataMask?[]? masks = DataMask.OfProjection(
             batch,
@@ -535,7 +537,10 @@ partial class Simulation
                 ? Array.FindIndex(destinationTable.Columns, column => batch.CurrentDatabase.Collation.Equals(column.Name, name.Leaf)) is var ordinal and >= 0
                     ? DataMask.ForTableColumn(destinationTable, ordinal)
                     : null
-                : null,
+                : source is var (sourceAlias, sourceColumns, _) && batch.CurrentDatabase.Collation.Equals(name.ImmediateQualifier, sourceAlias)
+                    && Array.FindIndex(sourceColumns, column => batch.CurrentDatabase.Collation.Equals(column, name.Leaf)) is var sourceOrdinal and >= 0
+                    ? sourceMasks?[sourceOrdinal]
+                    : null,
             typeOf: null);
 
         // Which masks apply is the executing principal's to answer, once per

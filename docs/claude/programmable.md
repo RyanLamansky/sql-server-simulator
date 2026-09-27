@@ -437,6 +437,7 @@ The simulator preserves this — `VisibilityCheck` gates UPDATE/DELETE *row sele
 **Fidelity gaps**:
 - **OUTPUT through a view** raises `NotSupportedException` for INSERT / UPDATE / DELETE.
   Would need view-output-column rebinding for INSERTED.* / DELETED.* projection.
+- **A derived view column read in an `UPDATE … SET` value** — `UPDATE v SET o = s2` where `s2` is `s + ''` in the view — is Msg 207 here; real reads it (probed 2026-09-27 against SQL Server 2025).
 - **Multi-source UPDATE / DELETE** (alias-form `UPDATE alias SET ... FROM ...` where the alias resolves to a view) raises `NotSupportedException` — the alias-form FROM clause can't compose with the view's visibility predicate in the existing joined-update infrastructure.
 - **WHERE referencing a derived upstream column** (a chained view's WHERE that references an expression-projected column from the level below) marks the view as not-updatable with `ViewUpdatabilityRejection.UnsupportedShape` → Msg 4403 at DML.
   Real SQL Server's behavior on this specific niche shape isn't probe-confirmed; the simulator errs on the side of rejection.

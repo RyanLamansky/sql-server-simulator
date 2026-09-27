@@ -694,6 +694,21 @@ partial class SimulatedSqlException
         new($"Conversion failed when converting the {ConversionSourceName(sourceType)} value '{sourceValue}' to data type {targetType.SqlServerName}.", 245, 16, 1) { AbortsAsUnderXactAbort = true };
 
     /// <summary>
+    /// This conversion error's text as real sends it when the value came from
+    /// a column the reader sees masked: every type name and the value become
+    /// <c>******</c>, the number, class and state kept; null for an error that
+    /// quotes no value.
+    /// </summary>
+    internal SimulatedSqlException? RedactedForMask() => this.Number switch
+    {
+        220 => new("Arithmetic overflow error for data type ******, value = ******.", 220, 16, this.State),
+        232 => new("Arithmetic overflow error for type ******, value = ******.", 232, 16, this.State),
+        245 => new("Conversion failed when converting the ****** value '******' to data type ******.", 245, 16, this.State) { AbortsAsUnderXactAbort = true },
+        248 => new("The conversion of the ****** value '******' overflowed an int column.", 248, 16, this.State),
+        _ => null,
+    };
+
+    /// <summary>
     /// Mimics SQL Server error 244: parsing a string succeeded but the
     /// resulting integer value exceeded the destination column's range —
     /// limited to <c>tinyint</c> (<c>INT1</c>) and <c>smallint</c>

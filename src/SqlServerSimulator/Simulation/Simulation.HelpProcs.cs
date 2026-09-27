@@ -696,7 +696,7 @@ partial class Simulation
         {
             var clauses = string.Join(", ", edge.Clauses.Select(clause => $"{HelpTableReference(database, clause.From)} TO {HelpTableReference(database, clause.To)}"));
             rows.Add((edge.Name, false, Cells(
-                "EDGE CONSTRAINT", edge.Name, "No Action", "(n/a)", "Enabled", "(n/a)", $"CONNECTION ({clauses})")));
+                "EDGE CONSTRAINT", edge.Name, "No Action", "(n/a)", edge.IsDisabled ? "Disabled" : "Enabled", "(n/a)", $"CONNECTION ({clauses})")));
         }
 
         rows.Sort(static (a, b) =>

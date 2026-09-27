@@ -134,8 +134,20 @@ internal sealed class UserFunctionCall(ScalarFunction function, Expression?[] ar
         // non-query contexts (SET / IF operands) have no active sink and stay
         // unchecked — a documented gap.
         context.SecurableSink?.Add(new ReferencedSecurable(function.Schema.Database, function.ObjectId, function.SchemaId, function.Name, function.Schema.Name, "EXECUTE"));
-        return new(function, ParseFunctionArguments(function, context));
+        var simulation = context.Batch.Connection.Simulation;
+        return new(function, ParseFunctionArguments(function, context))
+        {
+            ReturnMask = simulation.DeclaresDataMasks ? simulation.ScalarFunctionReturnMask(context.Batch, function) : null,
+        };
     }
+
+    /// <summary>
+    /// The masked columns the function's result reads, as its body's
+    /// assignments and <c>RETURN</c>s carry them (see
+    /// <see cref="Simulation.ScalarFunctionReturnMask"/>); null when none, or
+    /// when the simulation has declared no mask.
+    /// </summary>
+    internal DataMask? ReturnMask;
 
     /// <summary>
     /// Parses the comma-separated argument list of a <c>schema.fn(...)</c>

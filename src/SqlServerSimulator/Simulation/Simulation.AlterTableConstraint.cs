@@ -185,24 +185,35 @@ partial class Simulation
             throw SimulatedSqlException.CannotFindObjectForAlterTable(tableName.ToString());
         var constraint = ResolveEdgeConstraints(context, table, [pending])[0];
         if (!withNoCheck)
-        {
-            foreach (var (_, _, bytes) in table.Heap.EnumerateRowsWithAddress())
-            {
-                var row = DecodeFullRow(table, bytes);
-                table.EdgeConstraints.Add(constraint);
-                try
-                {
-                    EnforceEdgeConstraints(table, row, context, "ALTER TABLE");
-                }
-                finally
-                {
-                    _ = table.EdgeConstraints.Remove(constraint);
-                }
-            }
-        }
+            ValidateExistingEdges(context, table, constraint);
         constraint.IsNotTrusted = withNoCheck;
         table.EdgeConstraints.Add(constraint);
         return true;
+    }
+
+    /// <summary>
+    /// Checks every edge <paramref name="table"/> holds against
+    /// <paramref name="constraint"/> alone — Msg 547 naming it for the first
+    /// that fails, as an <c>ALTER TABLE</c> statement.
+    /// </summary>
+    private static void ValidateExistingEdges(ParserContext context, HeapTable table, EdgeConstraint constraint)
+    {
+        var saved = table.EdgeConstraints.ToArray();
+        table.EdgeConstraints.Clear();
+        table.EdgeConstraints.Add(constraint);
+        var wasDisabled = constraint.IsDisabled;
+        constraint.IsDisabled = false;
+        try
+        {
+            foreach (var (_, _, bytes) in table.Heap.EnumerateRowsWithAddress())
+                EnforceEdgeConstraints(table, DecodeFullRow(table, bytes), context, "ALTER TABLE");
+        }
+        finally
+        {
+            constraint.IsDisabled = wasDisabled;
+            table.EdgeConstraints.Clear();
+            table.EdgeConstraints.AddRange(saved);
+        }
     }
 
     /// <summary>
@@ -939,10 +950,12 @@ partial class Simulation
         // before any mutation (atomicity).
         var fkTargets = new List<ForeignKey>();
         var ckTargets = new List<CheckConstraint>();
+        var edgeTargets = new List<EdgeConstraint>();
         if (allMode)
         {
             fkTargets.AddRange(table.OutgoingForeignKeys);
             ckTargets.AddRange(table.CheckConstraints);
+            edgeTargets.AddRange(table.EdgeConstraints);
         }
         else
         {
@@ -970,8 +983,13 @@ partial class Simulation
                         break;
                     }
                 }
-                if (!matchedCk)
+                if (matchedCk)
+                    continue;
+                // An edge constraint toggles as the other two do (probed
+                // 2026-09-27 against SQL Server 2025).
+                if (table.EdgeConstraints.Find(edge => context.Batch.CurrentDatabase.Collation.Equals(edge.Name, name)) is not { } matchedEdge)
                     throw SimulatedSqlException.ConstraintDoesNotExist(name);
+                edgeTargets.Add(matchedEdge);
             }
         }
 
@@ -1020,6 +1038,24 @@ partial class Simulation
                 ck.IsDisabled = false;
             }
             ck.ModifyDate = toggledAt;
+        }
+        foreach (var edge in edgeTargets)
+        {
+            if (disable)
+            {
+                edge.IsDisabled = true;
+                edge.IsNotTrusted = true;
+            }
+            else
+            {
+                if (revalidate)
+                {
+                    ValidateExistingEdges(context, table, edge);
+                    edge.IsNotTrusted = false;
+                }
+                edge.IsDisabled = false;
+            }
+            edge.ModifyDate = toggledAt;
         }
         return true;
     }

@@ -370,7 +370,7 @@ internal static partial class BuiltInResources
                 SqlValue.FromBoolean(false),
                 SqlValue.FromBoolean(false),
                 SqlValue.FromBoolean(false),
-                SqlValue.FromBoolean(false),
+                SqlValue.FromBoolean(ec.IsDisabled),
                 SqlValue.FromBoolean(ec.IsNotTrusted),
                 SqlValue.FromBoolean(ec.IsSystemNamed),
                 SqlValue.FromByte(ec.CascadeOnDelete ? (byte)1 : (byte)0),

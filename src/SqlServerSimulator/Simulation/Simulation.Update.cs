@@ -483,10 +483,17 @@ partial class Simulation
     {
         BindDeferredXmlMutators(context, table, rawAssignments, targetName.ToString());
         var assignments = ResolveSetAssignments(rawAssignments, table, context.CurrentDatabase, sourceView);
-        var setMasks = UpdateSetMasks(context.Batch, assignments, sourceView is not null ? static _ => null : name =>
-            Array.FindIndex(table.Columns, column => context.Batch.CurrentDatabase.Collation.Equals(column.Name, name.Leaf)) is var k and >= 0
-                ? DataMask.ForTableColumn(table, k)
-                : null);
+        // Through a view, a name is the view's column and masks as the base
+        // column it reads (probed 2026-09-27 against SQL Server 2025).
+        var setMasks = UpdateSetMasks(context.Batch, assignments, name =>
+            sourceView is not null
+                ? Array.FindIndex(sourceView.OutputColumns, column => context.Batch.CurrentDatabase.Collation.Equals(column.Name, name.Leaf)) is var v and >= 0
+                    && sourceView.BaseColumnOrdinals[v] is var baseOrdinal and >= 0
+                    ? DataMask.ForTableColumn(table, baseOrdinal)
+                    : null
+                : Array.FindIndex(table.Columns, column => context.Batch.CurrentDatabase.Collation.Equals(column.Name, name.Leaf)) is var k and >= 0
+                    ? DataMask.ForTableColumn(table, k)
+                    : null);
 
         // Compile-time bind of the predicate and the SET values, matching
         // real's compiling binder — a cross-collation comparison, a legacy-LOB
@@ -1597,8 +1604,10 @@ partial class Simulation
             if (ordinal < 0)
                 continue;
             var raw = expr is AssignmentExpression { Slot: var assigned } ? assigned.Value : expr.Run(runtime);
+            // The mask takes the target column's type: `SET plain = LEFT(masked, 2)`
+            // stores xxxx into a varchar(20) (probed 2026-09-27 against SQL Server 2025).
             if (setMasks?[i] is { } mask)
-                raw = DataMasking.ForStorage(mask.Apply(raw, raw.Type));
+                raw = DataMasking.ForStorage(mask.Apply(raw, table.Columns[ordinal].Type));
             raw = EnforceMaxLength(raw, table.Columns[ordinal], table, context.Connection);
             newValues[ordinal] = CoerceForWrite(raw, table.Columns[ordinal], context.Batch);
             EnforceRule(table, newValues, ordinal, context.Batch);

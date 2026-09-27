@@ -517,6 +517,15 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     public FromSource[]? ScopeSources;
 
     /// <summary>
+    /// The Dynamic Data Masking counterpart of <see cref="OuterTypeResolver"/>:
+    /// the mask an enclosing query's column reads through, so a correlated
+    /// subquery or an <c>APPLY</c> body projecting it masks as a direct
+    /// reference would (probed 2026-09-27 against SQL Server 2025). Installed
+    /// only once the simulation has declared a mask.
+    /// </summary>
+    public Func<MultiPartName, DataMask?>? OuterMaskResolver;
+
+    /// <summary>
     /// The joins between <see cref="ScopeSources"/>, installed alongside them,
     /// so a <c>MATCH</c> predicate can tell a comma-listed source from one
     /// joined with <c>JOIN</c> or <c>APPLY</c> (Msg 13920).

@@ -47,6 +47,13 @@ internal sealed class VariableSlot(SqlType declaredType, int? declaredMaxLength,
     public Schemas.AliasType? AliasType;
 
     /// <summary>
+    /// The masked columns the variable's last assignment read, tracked only
+    /// while a scalar UDF body is analyzed for the mask its result takes
+    /// (<see cref="UdfFrame.AnalyzesReturnMask"/>); null everywhere else.
+    /// </summary>
+    public DataMask? Mask;
+
+    /// <summary>
     /// Stores <paramref name="value"/>, validating and canonicalizing it first
     /// when this slot carries an <c>xml(&lt;collection&gt;)</c> binding — real
     /// does that on an assignment to a typed variable exactly as it does on a

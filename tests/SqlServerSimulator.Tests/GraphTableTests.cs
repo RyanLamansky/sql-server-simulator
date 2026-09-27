@@ -372,6 +372,58 @@ public sealed class GraphTableTests
     }
 
     [TestMethod]
+    public void EdgeConstraint_NoCheckAndCheck()
+    {
+        var sim = Seeded(Constrained);
+        _ = sim.ExecuteNonQuery("alter table L2 nocheck constraint ec2; insert L2 select p.$node_id, x.$node_id from Person p, X x where p.id = 1");
+        AreEqual("ec2|True|True|1|1", Rows(sim, "select name, is_disabled, is_not_trusted, objectproperty(object_id, 'CnstIsDisabled'), objectproperty(object_id, 'CnstIsNotTrusted') from sys.edge_constraints where name = 'ec2'"));
+        _ = sim.ExecuteNonQuery("alter table L2 check constraint ec2");
+        AreEqual("False|True", Rows(sim, "select is_disabled, is_not_trusted from sys.edge_constraints where name = 'ec2'"));
+        var ex = sim.AssertSqlError("alter table L2 with check check constraint ec2", 547);
+        Contains("The ALTER TABLE statement conflicted with the EDGE constraint \"ec2\".", ex.Message);
+        _ = sim.ExecuteNonQuery("delete L2; alter table L2 with check check constraint all");
+        AreEqual("False|False", Rows(sim, "select is_disabled, is_not_trusted from sys.edge_constraints where name = 'ec2'"));
+    }
+
+    [TestMethod]
+    public void EdgeConstraint_DisabledNeitherRefusesNorCascadesANodeDelete()
+    {
+        var sim = Seeded(Constrained, "insert L select p.$node_id, c.$node_id, 1 from Person p, City c where p.id = 1 and c.id = 10");
+        _ = sim.ExecuteNonQuery("alter table L nocheck constraint all; delete City where id = 10");
+        AreEqual(1, sim.ExecuteScalar("select count(*) from L"));
+        _ = sim.AssertSqlError("truncate table City", 13944);
+        AreEqual("Disabled", Rows(sim, "exec sp_helpconstraint 'L', 'nomsg'").Split('|')[4]);
+    }
+
+    [TestMethod]
+    [DataRow("select [$node_id] from Person", "$node_id")]
+    [DataRow("select p.[$node_id] from Person p", "$node_id")]
+    [DataRow("select \"$from_id\" from Likes", "$from_id")]
+    public void PseudoColumn_DelimitedIsAnOrdinaryName(string query, string name) =>
+        Seeded().AssertSqlError(query, 207, $"Invalid column name '{name}'.");
+
+    [TestMethod]
+    [DataRow("select {0} from Person")]
+    [DataRow("select p.{0} from Person p")]
+    [DataRow("select id from Person where {0} = 0")]
+    [DataRow("select id from Person order by {0}")]
+    [DataRow("select count({0}) from Person")]
+    public void InternalColumn_NamedInAQuery_Raises(string shape)
+    {
+        var sim = Seeded();
+        var graphId = (string)sim.ExecuteScalar("select name from sys.columns where object_id = object_id('Person') and column_id = 1")!;
+        sim.AssertSqlError(string.Format(System.Globalization.CultureInfo.InvariantCulture, shape, graphId), 13908, $"Cannot access internal graph column '{graphId}'.");
+    }
+
+    [TestMethod]
+    public void InternalColumn_PseudoColumnByFullNameReads()
+    {
+        var sim = Seeded();
+        var nodeId = (string)sim.ExecuteScalar("select name from sys.columns where object_id = object_id('Person') and column_id = 2")!;
+        AreEqual("""{"type":"node","schema":"dbo","table":"Person","id":0}""", sim.ExecuteScalar($"select [{nodeId}] from Person where id = 1"));
+    }
+
+    [TestMethod]
     public void EdgeConstraint_HelpConstraint()
     {
         using var reader = Seeded(Constrained).ExecuteReader("exec sp_helpconstraint 'L', 'nomsg'");
@@ -400,6 +452,7 @@ public sealed class GraphTableTests
     [DataRow("create table G (x int) as edge; insert G select a.$node_id, b.$node_id, 7 from N a, N b where a.id = 4 and b.id = 6; select concat(string_agg(n2.name, '->') within group (graph path), ':', x.name) from N n1, E for path e, N for path n2, G g, N x where match(shortest_path(n1(-(e)->n2)+) and last_node(n2)-(g)->x) and n1.id = 1", "c->d:f")]
     [DataRow("select count(*) from N n1, E for path e, N for path n2 where match(shortest_path(n1(-(e)->n2)+))", "17")]
     [DataRow("update E set w = null where w = 13; select string_agg(cast(e.w as varchar), ',') within group (graph path) from N n1, E for path e, N for path n2 where match(shortest_path(n1(-(e)->n2)+)) and n1.id = 1 order by 1", "NULL;12;34;34,41")]
+    [DataRow("select last_value(n2.name) within group (graph path) from N n1, E for path e, N for path n2 where match(shortest_path(n1(-(e)->n2)+) and last_node(n2) = last_node(n2)) and n1.id = 1 order by 1", "a;b;c;d")]
     public void ShortestPath_Rows(string query, string expected) => AreEqual(expected, Rows(Seeded(Paths), query));
 
     [TestMethod]
@@ -427,5 +480,6 @@ public sealed class GraphTableTests
     [DataRow("select 1 from N n1, E for path e, N for path n2 where match(shortest_path(n1(-(e)->n2){1,1}))", 13943)]
     [DataRow("select 1 from N n1, E for path e, N for path n2 where match(shortest_path(n1(-(e)->n2)*))", 102)]
     [DataRow("select (select count(*) from N n1, E for path e, N for path n2 where match(shortest_path(n1(-(e)->n2)+)))", 13957)]
+    [DataRow("select 1 from N n1, E for path e, N for path n2, N n3 where match(shortest_path(n1(-(e)->n2)+) and last_node(n2) = n3)", 102)]
     public void ShortestPath_Refusals(string query, int number) => _ = Seeded(Paths).AssertSqlError(query, number);
 }

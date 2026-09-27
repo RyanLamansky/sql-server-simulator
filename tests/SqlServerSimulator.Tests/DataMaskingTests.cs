@@ -472,4 +472,83 @@ public sealed class DataMaskingTests
     [TestMethod]
     public void TableType_ListsItsMaskedColumn() =>
         AreEqual("email()", new Simulation().ExecuteScalar("create type tt as table (a varchar(9) masked with (function = 'email()')); select masking_function from sys.masked_columns"));
+
+    [TestMethod]
+    [DataRow("select (select t.p) from t where id = 1", "ab-XX-j")]
+    [DataRow("select (select top 1 t.p from (values (1)) v (a)) from t where id = 1", "ab-XX-j")]
+    [DataRow("select a.x from t cross apply (select t.p x) a where id = 1", "ab-XX-j")]
+    [DataRow("select a.x from t outer apply (select upper(t.p) x) a where id = 1", "xxxx")]
+    [DataRow("select a.x from t cross apply (select t.plain x) a where id = 1", "p1")]
+    public void Read_OuterColumnThroughSubqueryOrApply(string query, object expected) => AreEqual(expected, AsUser(Seeded(), query));
+
+    [TestMethod]
+    [DataRow("create function dbo.f() returns varchar(30) as begin return (select p from t where id = 1) end", "select dbo.f()", "xxxx")]
+    [DataRow("create function dbo.f() returns varchar(30) as begin declare @v varchar(30); select @v = p from t where id = 1; return @v end", "select dbo.f()", "xxxx")]
+    [DataRow("create function dbo.f() returns int as begin declare @v varchar(30); select @v = p from t where id = 1; return case when @v = 'abcdefghij' then 7 else 3 end end", "select dbo.f()", 7)]
+    [DataRow("create function dbo.f() returns varchar(30) as begin declare @v varchar(30) = (select p from t where id = 1); set @v = 'z'; return @v end", "select dbo.f()", "z")]
+    [DataRow("create function dbo.f(@x int) returns varchar(30) as begin declare @v varchar(30) = 'a'; if @x = 1 select @v = p from t where id = 1; return @v end", "select dbo.f(0)", "xxxx")]
+    [DataRow("create function dbo.f() returns int as begin return (select count(*) from t) end", "select dbo.f()", 3)]
+    [DataRow("create function dbo.f() returns int as begin return (select i from t where id = 1) end", "select dbo.f()", 0)]
+    [DataRow("create function dbo.f() returns int as begin return (select i from t where id = 1) end", "declare @v int; set @v = dbo.f(); select @v", 0)]
+    [DataRow("create function dbo.f() returns int as begin return (select i from t where id = 1) end", "declare @v int = dbo.f(); select @v", 42)]
+    [DataRow("create function dbo.f() returns int as begin return (select i from t where id = 1) end", "select count(*) from t where dbo.f() = 42", 3)]
+    public void Read_ScalarFunctionResult(string function, string query, object expected)
+    {
+        var sim = Seeded(function, "grant execute to u");
+        AreEqual(expected, AsUser(sim, query));
+    }
+
+    [TestMethod]
+    public void Merge_WritesAndOutputsSourceColumnsMasked()
+    {
+        var sim = Seeded("create table m (id int, v varchar(30)); insert m values (1, 'old'); grant select, insert, update on m to u");
+        using var reader = sim.ExecuteReader("""
+            execute as user = 'u';
+            merge m using t on m.id = t.id and t.id < 3
+            when matched then update set v = t.p
+            when not matched and t.id = 2 then insert values (t.id, t.p)
+            output $action, t.p, t.s;
+            revert;
+            """);
+        List<string> rows = [];
+        while (reader.Read())
+            rows.Add($"{reader.GetString(0)}:{reader.GetString(1)}:{reader.GetString(2)}");
+        rows.Sort(StringComparer.Ordinal);
+        AreEqual("INSERT:-XX-:xxxx|UPDATE:ab-XX-j:xxxx", string.Join("|", rows));
+        reader.Close();
+        AreEqual("1=ab-XX-j;2=-XX-", sim.ExecuteScalar("select string_agg(concat(id, '=', v), ';') within group (order by id) from m"));
+    }
+
+    [TestMethod]
+    public void Merge_ActionsWritingOneColumnMeetAsCaseArms()
+    {
+        var sim = Seeded("create table m (id int, v varchar(30)); insert m values (1, 'old'); grant select, insert, update on m to u");
+        _ = sim.ExecuteNonQuery("""
+            execute as user = 'u';
+            merge m using (select id, p, plain from t where id < 3) src on m.id = src.id
+            when matched then update set v = src.p + '!'
+            when not matched then insert values (src.id, src.plain);
+            revert;
+            """);
+        AreEqual("1=xxxx;2=xxxx", sim.ExecuteScalar("select string_agg(concat(id, '=', v), ';') within group (order by id) from m"));
+    }
+
+    [TestMethod]
+    public void Update_ThroughViewMasksByBaseColumn()
+    {
+        var sim = Seeded("create view dbo.v as select id, p, plain from t", "grant select, update on v to u");
+        _ = sim.ExecuteNonQuery("execute as user = 'u'; update v set plain = p where id = 1; update v set plain = left(p, 2) where id = 2; revert;");
+        AreEqual("ab-XX-j|xxxx", sim.ExecuteScalar("select string_agg(plain, '|') within group (order by id) from t where id < 3"));
+    }
+
+    [TestMethod]
+    [DataRow("select cast(p as int) from t where id = 1", 245, "Conversion failed when converting the ****** value '******' to data type ******.")]
+    [DataRow("select x from (select p + 1 x from t where id = 1) q", 245, "Conversion failed when converting the ****** value '******' to data type ******.")]
+    [DataRow("declare @v int; select @v = cast(p as int) from t where id = 1", 245, "Conversion failed when converting the ****** value '******' to data type ******.")]
+    [DataRow("select cast(i + 1000 as tinyint) from t where id = 1", 220, "Arithmetic overflow error for data type ******, value = ******.")]
+    [DataRow("select id from t where cast(p as int) = 1", 245, "Conversion failed when converting the varchar value 'abcdefghij' to data type int.")]
+    [DataRow("select case when cast(p as int) = 1 then 1 end from t where id = 1", 245, "Conversion failed when converting the varchar value 'abcdefghij' to data type int.")]
+    [DataRow("select cast(plain as int) from t where id = 1", 245, "Conversion failed when converting the varchar value 'p1' to data type int.")]
+    public void ConversionError_HidesMaskedValue(string query, int number, string message) =>
+        Seeded().AssertSqlError($"execute as user = 'u'; {query}", number, message);
 }

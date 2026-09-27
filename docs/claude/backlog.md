@@ -235,7 +235,9 @@ Already listed elsewhere here and not repeated: parenthesized set-op branches.
 
 **Wrong results**:
 
-- `STRING_AGG(s, CAST(',' AS varchar(2)))` over a table is Msg 8733 on real and aggregates here; over a `VALUES` source real accepts it too, so what separates the two isn't settled (probed 2026-09-24).
+- `STRING_AGG(s, CAST(',' AS varchar(2)))` over a table is Msg 8733 on real and aggregates here; over a `VALUES` source real accepts it too (probed 2026-09-24).
+  What separates the two is plan-shaped rather than grammatical (probed 2026-09-27): the refusal needs a single table or view source and no `GROUP BY`, `HAVING`, `TOP`, `LIKE` filter or `OPTION (RECOMPILE)` — any of those, a derived table, a `#temp` table or a table variable accepts it — and it follows the value expression too (`UPPER(s)`, `LEFT(s, 10)`, `ISNULL(s, '')` accept; `s + ''`, `(s)`, `CAST(i AS varchar)`, `'x'` refuse), and a `CONVERT`, a `char(1)` or `varchar(max)` target and a `COLLATE` refuse like the `CAST`.
+  The shapes line up with simple parameterization's eligibility — a `CAST`'s literal turned into a parameter is no longer a literal — but `PARAMETERIZATION FORCED` doesn't make the accepted shapes refuse, so that reading isn't confirmed.
 - `LOWER` / `UPPER` use English case mapping under every collation; a Turkish collation's own mapping isn't modeled.
 
 **Real accepts, the simulator refuses**:
@@ -254,6 +256,7 @@ Already listed elsewhere here and not repeated: parenthesized set-op branches.
 **Name resolution** (probed 2026-09-26):
 
 - A GROUP BY term repeating an unbindable select-list name (`SELECT zz.a FROM t GROUP BY zz.a`) raises Msg 4104 once here; real reports it for both clauses.
+  It is one case of real reporting every unbindable name in a statement, once per occurrence, in its binder's clause order — `WHERE`, `GROUP BY`, `HAVING`, the select list, `ORDER BY` (probed 2026-09-27: `SELECT zz.a, qq.c FROM t GROUP BY zz.a` sends `zz.a`, `zz.a`, `qq.c`) — where a statement here reports its first.
 
 **Describe surfaces** (probed 2026-09-27):
 
@@ -263,6 +266,7 @@ Already listed elsewhere here and not repeated: parenthesized set-op branches.
 
 - `DIFFERENCE` scores from a code of its own rather than the two `SOUNDEX` results — `'xc'` and `'x'` share `X000` yet score differently against `'abcd'` — and is asymmetric (`DIFFERENCE('x', '1')` is 0, `DIFFERENCE('1', 'x')` 3); here it compares the codes position by position, which matches real on most pairs but not all.
   A substring search of the second code in the first, with a first letter that doesn't suppress the next code, fits 342 of 400 random pairs; the rest weren't explained.
+  A second pass (probed 2026-09-27) fit 3515 of 4000 random pairs and 5224 of a 6400-pair grid of every code over the digits 1–3, first letters A and E, with that rule and a non-letter-led string's code empty; where it still misses, a short code's zero padding scores as though two positions matched — `DIFFERENCE('a', 'abob')` (`A000`, `A100`) is 3 and `DIFFERENCE('ab', 'acoc')` (`A100`, `A220`) is 3.
 - `REGEXP_COUNT` / `REGEXP_INSTR` / `REGEXP_SUBSTR` with a `datetime` pattern or start position kill the session on real (severity 21); here they are Msg 8116, which is the answer kept.
 
 ### Result-set serialization: `FOR XML` / `FOR JSON`

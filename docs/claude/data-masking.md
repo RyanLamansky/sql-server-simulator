@@ -72,22 +72,32 @@ The sinks, each applying its plan's masks for the executing principal:
 - a SELECT's result set, a cursor's `FETCH`, a statement-level FOR JSON / untyped FOR XML document (its rows masked before serializing — a nested FOR JSON column inside it reads as a bare `xxxx`); a statement-level `FOR XML … TYPE` document reads as `<masked />` whole;
 - `SELECT … INTO` and `INSERT … SELECT`, which store the masked values;
 - `INSERT … VALUES ((SELECT masked …))`, which stores `default()` of the value's type whatever the column's function;
-- `UPDATE … SET`, which stores the masked value of its expression — `SET s = s + '!'` overwrites the column with its own mask;
+- `UPDATE … SET`, which stores the masked value of its expression at the target column's type — `SET s = s + '!'` overwrites the column with its own mask, `SET plain = LEFT(s, 2)` stores `xxxx` into a `varchar(20)` — and through a view masks each view column as its base column;
+- `MERGE`'s `UPDATE SET` and `INSERT VALUES`, whose values for one target column meet as a `CASE`'s arms do: a bare source column stores its function, any other expression over one `default()`, and an unmasked value written by another action beside a masked one is masked too (`UPDATE SET s = s + src.x` with `INSERT VALUES (src.id, src.x)` stores `xxxx` both ways); its `OUTPUT` masks the source's columns as the source query projects them;
 - `OUTPUT` `INSERTED` / `DELETED`, to the client and into an `INTO` target;
 - `SELECT @v = …`, `SET @v = …` and `DECLARE @v = …`: through the column's function when the variable is declared as the value's own type, else `default()` of the variable's type (`varchar(40)` keeps `jXXX@XXXX.com`, `varchar(20)` reads `xxxx`).
+
+A correlated subquery or an `APPLY` body projecting an enclosing query's masked column masks it as a direct reference would (`SELECT (SELECT t.s)` keeps `s`'s function, `CROSS APPLY (SELECT UPPER(t.s))` reads `default()`): `ParserContext.OuterMaskResolver` chains the enclosing scopes' masks beside their column types.
+
+A scalar UDF's call reads as `default()` of its return type wherever a query projects it — a select list, `SET @v =`, `SELECT @v =`, `UPDATE … SET`, `INSERT … SELECT` — when its result reads a masked column, but a `DECLARE @v = dbo.f()` initializer and a `WHERE` read the stored value.
+Inside the body nothing masks: `SELECT @v = s` assigns the stored value and a comparison on it sees it.
+Real settles the result's mask by data flow, inlineable or not: a variable assigned from a masked column carries it until reassigned from something that doesn't, a `CASE WHEN` or `IF` over it passes nothing on, and every `RETURN` counts whichever branch it sits in — so `IF @x = 1 SELECT @v = s … RETURN @v` masks even when the branch isn't taken.
+`Simulation.ScalarFunctionReturnMask` walks the body once without running and keeps the answer per schema version.
+
+A conversion error raised computing a masked output column's value, for a principal who reads it masked, hides its value and type names: Msg 245 reads `Conversion failed when converting the ****** value '******' to data type ******.`, and Msg 220, 232 and 248 redact the same way; Msg 8114, 8115, 235 and 241 quote no value and keep their text.
+A `WHERE`, an `ORDER BY` or a `CASE WHEN` condition reads the stored value, and its error quotes it.
+The projection's `CAST`, `CONVERT` and operator nodes carry the column's mask (`ErrorMask`) for this.
 
 A plan compiles its masks once — `Selection.ColumnMasks`, null for any query reading no masked column — and every sink tests that array before anything else, so an unmasked query pays one null test.
 The projection walk that fills it is skipped outright until the simulation's first mask is declared (`Simulation.DeclaresDataMasks`).
 
 ## Divergences
 
+- Only a `CAST`, a `CONVERT` or an operator redacts its error; a value-quoting error another function raises over a masked argument keeps its text here, unprobed on real (`ABS(s)` raises Msg 8114, which quotes nothing).
 - A cursor's `FETCH` and a masked `char` / `binary` value written to storage are padded to the type's length, as a stored value is, where a SELECT sends it unpadded.
 
 ## Not modeled yet
 
-- **A correlated subquery reading an enclosing query's masked column** reads it unmasked — `SELECT (SELECT t.s)`, `CROSS APPLY (SELECT t.s)` — since its plan compiles in its own scope with no mask for outer names.
-- **A scalar UDF's `RETURN`** of a masked value, which real masks.
-- **`MERGE`'s source columns** in its `OUTPUT` and its `UPDATE SET` / `INSERT VALUES`, and an `UPDATE` through a view, carry the stored value here; real's answer for them is unprobed.
+- **A derived table in `FROM` correlating to an enclosing query** reads the outer column unmasked: only the select list and an `APPLY` body chain the outer masks.
 - **An inline TVF's column masks** are settled when it is created, so a mask its base table gains or loses later reaches it only when it is re-created or altered.
 - **Masking a `geography`, `geometry` or `vector` value** raises `NotSupportedException`: real sends a single `0x00` byte its own client can't read back, and the simulator's values of those types are parsed, so there is no such value to send.
-- **The `******` redaction of an error's text**: a conversion of a masked value that fails keeps its text here, where real replaces the value and both type names (`Conversion failed when converting the ****** value '******' to data type ******.`).

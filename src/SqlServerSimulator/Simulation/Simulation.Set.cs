@@ -680,6 +680,13 @@ partial class Simulation
 
         context.MoveNextRequired();
         var rhs = Expression.Parse(context);
+        // A scalar UDF body's analysis walk carries what the value read to the
+        // variable, a compound assignment keeping what it held before.
+        if (context.Batch.UdfFrame is { AnalyzesReturnMask: true })
+        {
+            var read = DataMask.Of(rhs, static _ => null, typeOf: null);
+            slot.Mask = assignOp == '=' ? read : DataMask.Merge(slot.Mask, read);
+        }
         if (context.Batch.IsSkipping)
             return true;
         var assignedExpr = assignOp == '='

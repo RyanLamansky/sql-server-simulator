@@ -138,11 +138,13 @@ partial class Simulation
 
             // Optional initializer.
             var initialValue = SqlValue.Null(declaredType);
+            Expression? initExpressionForMask = null;
             var hasInitializer = context.Token is Operator { Character: '=' };
             if (hasInitializer)
             {
                 context.MoveNextRequired();
                 var initExpression = Expression.Parse(context);
+                initExpressionForMask = initExpression;
                 if (!context.Batch.IsSkipping)
                 {
                     var initType = initExpression.GetSqlType(context.Batch, NoColumnTypeResolver);
@@ -152,7 +154,7 @@ partial class Simulation
                     {
                         var initSource = initExpression.Run(new RuntimeContext(NoColumnResolver, context.Batch));
                         Parser.Expressions.Cast.RejectRoundingUnderRoundAbort(initSource, declaredType, context.Batch);
-                        initialValue = DataMasking.ForAssignment(context.Batch, initExpression, initSource, Parser.Expressions.Cast.ApplyCoercion(initSource, declaredType, declaredMaxLength), declaredType);
+                        initialValue = DataMasking.ForAssignment(context.Batch, initExpression, initSource, Parser.Expressions.Cast.ApplyCoercion(initSource, declaredType, declaredMaxLength), declaredType, functionResults: false);
                     }
                     catch (SimulatedSqlException) when (!reExecution)
                     {
@@ -191,6 +193,7 @@ partial class Simulation
                     XmlSchemaCollection = xmlSchemaCollection,
                     AliasType = aliasType,
                     SpelledNumeric = spelledNumeric,
+                    Mask = context.Batch.UdfFrame is { AnalyzesReturnMask: true } && initExpressionForMask is not null ? DataMask.Of(initExpressionForMask, static _ => null, typeOf: null) : null,
                 };
                 // Through Assign rather than the constructor so an initializer
                 // against an xml(<collection>) declaration is validated and

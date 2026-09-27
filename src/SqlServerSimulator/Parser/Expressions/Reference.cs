@@ -59,7 +59,7 @@ internal sealed class Reference : Expression
 
     public Reference(Name name)
     {
-        this.ReferencedName = new MultiPartName(name.Value);
+        this.ReferencedName = new MultiPartName(name.Value, name is DelimitedIdentifier);
     }
 
     /// <summary>
@@ -97,7 +97,7 @@ internal sealed class Reference : Expression
 
     public override string Name => this.ReferencedName.Leaf;
 
-    public void AddMultiPartComponent(Name next) => this.ReferencedName = this.ReferencedName.WithAddedPart(next.Value);
+    public void AddMultiPartComponent(Name next) => this.ReferencedName = this.ReferencedName.WithAddedPart(next.Value, next is DelimitedIdentifier);
 
     internal override bool ParallelSafe => true;
 

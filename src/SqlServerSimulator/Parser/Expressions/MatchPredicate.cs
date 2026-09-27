@@ -89,6 +89,7 @@ internal sealed class MatchPredicate : BooleanExpression
                 context.MoveNextRequired();
                 continue;
             }
+            var startsAtLastNode = IsLastNode(context);
             var node = ReadNode(context);
             var hopsBefore = hops.Count;
             while (context.GetNextRequired() is Operator { Character: '-' or '<' } arrow)
@@ -96,6 +97,11 @@ internal sealed class MatchPredicate : BooleanExpression
                 var (edge, next, forward) = ReadHop(context, arrow);
                 hops.Add(forward ? (node, edge, next) : (next, edge, node));
                 node = next;
+            }
+            if (hops.Count == hopsBefore && startsAtLastNode && context.Token is Operator { Character: '=' })
+            {
+                ReadLastNodeComparison(context, node);
+                continue;
             }
             if (hops.Count == hopsBefore)
                 throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -136,10 +142,36 @@ internal sealed class MatchPredicate : BooleanExpression
         return (backEdge, ReadNode(context), false);
     }
 
+    private static bool IsLastNode(ParserContext context) =>
+        context.Token is UnquotedString { Value: var word } && word.Equals("LAST_NODE", StringComparison.OrdinalIgnoreCase) && IsAhead(context);
+
+    /// <summary>
+    /// <c>LAST_NODE(x) = LAST_NODE(y)</c>, the cursor on the <c>=</c> and left
+    /// past the right side: real takes only another <c>LAST_NODE</c> there
+    /// (anything else is Msg 102 near it), and a path compared with its own
+    /// last node holds for every row (probed 2026-09-27 against SQL Server
+    /// 2025). Two different paths' last nodes need a second
+    /// <c>SHORTEST_PATH</c>, which isn't modeled.
+    /// </summary>
+    private static void ReadLastNodeComparison(ParserContext context, Name left)
+    {
+        context.MoveNextRequired();
+        if (!IsLastNode(context))
+        {
+            throw context.Token is ReservedKeyword keyword
+                ? SimulatedSqlException.SyntaxErrorNearKeyword(keyword)
+                : SimulatedSqlException.SyntaxErrorNear(context);
+        }
+        var right = ReadNode(context);
+        if (!context.Batch.CurrentDatabase.Collation.Equals(left.Value, right.Value))
+            throw new NotSupportedException("LAST_NODE comparing two SHORTEST_PATHs isn't modeled.");
+        context.MoveNextRequired();
+    }
+
     /// <summary>A node name, or <c>LAST_NODE(name)</c> — a path's last node — with the cursor on it and left on its end.</summary>
     private static Name ReadNode(ParserContext context)
     {
-        if (context.Token is UnquotedString { Value: var word } && word.Equals("LAST_NODE", StringComparison.OrdinalIgnoreCase) && IsAhead(context))
+        if (IsLastNode(context))
         {
             Expect(context, '(');
             var inner = ReadIdentifier(context.GetNextRequired(), context);

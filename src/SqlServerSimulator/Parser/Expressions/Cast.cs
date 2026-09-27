@@ -92,7 +92,29 @@ internal sealed class Cast : Expression
 
     internal override bool ParallelSafe => this.source.ParallelSafe;
 
+    /// <summary>
+    /// The mask of the projection column this node computes part of, set by
+    /// <see cref="DataMask.OfProjection"/>: a conversion error it raises for a
+    /// principal who reads that column masked hides its value and types
+    /// (<see cref="DataMasking.Redacted"/>).
+    /// </summary>
+    internal DataMask? ErrorMask;
+
     public override SqlValue Run(RuntimeContext runtime)
+    {
+        if (this.ErrorMask is null)
+            return this.RunUnredacted(runtime);
+        try
+        {
+            return this.RunUnredacted(runtime);
+        }
+        catch (SimulatedSqlException error) when (DataMasking.Redacted(error, runtime.Batch, this.ErrorMask) is { } redacted)
+        {
+            throw redacted;
+        }
+    }
+
+    private SqlValue RunUnredacted(RuntimeContext runtime)
     {
         var sourceValue = this.source.Run(runtime);
         var dbCollation = runtime.Batch.CurrentDatabase.Collation;

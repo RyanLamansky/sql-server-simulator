@@ -59,9 +59,11 @@ internal sealed class DataMask(MaskingFunction function, MaskSource[] sources)
 
     /// <summary>
     /// The mask <paramref name="expression"/> projects, given each column
-    /// reference's own; null when it reads no masked column.
+    /// reference's own; null when it reads no masked column. A scalar UDF's
+    /// call reads what its result does (<see cref="UserFunctionCall.ReturnMask"/>)
+    /// unless <paramref name="functionResults"/> is false.
     /// </summary>
-    public static DataMask? Of(Expression expression, Func<MultiPartName, DataMask?> columnMask, Func<Expression, SqlType>? typeOf)
+    public static DataMask? Of(Expression expression, Func<MultiPartName, DataMask?> columnMask, Func<Expression, SqlType>? typeOf, bool functionResults = true)
     {
         while (true)
         {
@@ -81,21 +83,21 @@ internal sealed class DataMask(MaskingFunction function, MaskSource[] sources)
                 case ScalarSubqueryExpression subquery:
                     return subquery.Inner.ColumnMasks is [{ } inner, ..] ? inner : null;
                 case CaseExpression caseExpression:
-                    return Combine(caseExpression.ValueArms, columnMask, typeOf);
+                    return Combine(caseExpression.ValueArms, columnMask, typeOf, functionResults);
                 case Iif iif:
-                    return Combine(iif.ValueArms, columnMask, typeOf);
+                    return Combine(iif.ValueArms, columnMask, typeOf, functionResults);
                 case NullIf nullIf:
-                    return Of(nullIf.First, columnMask, typeOf) ?? Taint(expression, columnMask);
+                    return Of(nullIf.First, columnMask, typeOf, functionResults) ?? Taint(expression, columnMask, functionResults);
             }
             if (typeOf is not null
                 && expression is { ConversionTarget: { } target, PureConversionOperand: { } operand }
-                && Taint(operand, columnMask) is not null
+                && Taint(operand, columnMask, functionResults) is not null
                 && SameDeclaredType(typeOf(operand), target))
             {
                 expression = operand;
                 continue;
             }
-            return Taint(expression, columnMask);
+            return Taint(expression, columnMask, functionResults);
         }
     }
 
@@ -112,13 +114,13 @@ internal sealed class DataMask(MaskingFunction function, MaskSource[] sources)
     private static bool SameFunction(MaskingFunction left, MaskingFunction right) =>
         ReferenceEquals(left, right) || string.Equals(left.Definition, right.Definition, StringComparison.Ordinal);
 
-    private static DataMask? Combine(Expression?[] arms, Func<MultiPartName, DataMask?> columnMask, Func<Expression, SqlType>? typeOf)
+    private static DataMask? Combine(Expression?[] arms, Func<MultiPartName, DataMask?> columnMask, Func<Expression, SqlType>? typeOf, bool functionResults)
     {
         DataMask? combined = null;
         foreach (var arm in arms)
         {
             if (arm is not null)
-                combined = Merge(combined, Of(arm, columnMask, typeOf));
+                combined = Merge(combined, Of(arm, columnMask, typeOf, functionResults));
         }
         return combined;
     }
@@ -133,7 +135,7 @@ internal sealed class DataMask(MaskingFunction function, MaskSource[] sources)
     /// a node that reads some children only for ordering or comparison reports
     /// its value children alone (<see cref="Expression.MaskValueChildren"/>).
     /// </summary>
-    private static DataMask? Taint(Expression root, Func<MultiPartName, DataMask?> columnMask)
+    private static DataMask? Taint(Expression root, Func<MultiPartName, DataMask?> columnMask, bool functionResults)
     {
         List<MaskSource>? sources = null;
         var shape = new NodeShape();
@@ -151,6 +153,12 @@ internal sealed class DataMask(MaskingFunction function, MaskSource[] sources)
                     break;
                 case ScalarSubqueryExpression subquery:
                     found = subquery.Inner.ColumnMasks is [{ } inner, ..] ? inner : null;
+                    break;
+                case VariableReference variable:
+                    found = variable.Mask;
+                    break;
+                case UserFunctionCall call when functionResults:
+                    found = call.ReturnMask;
                     break;
             }
             if (found is not null)
@@ -198,14 +206,65 @@ internal sealed class DataMask(MaskingFunction function, MaskSource[] sources)
         DataMask?[]? masks = null;
         for (var i = 0; i < expressions.Count; i++)
         {
-            if (Of(expressions[i], columnMask, typeOf) is { } mask)
+            var mask = Of(expressions[i], columnMask, typeOf);
+            if (expressions[i] is AssignmentExpression { Slot: var slot } && batch.UdfFrame is { AnalyzesReturnMask: true })
+                slot.Mask = mask;
+            if (mask is not null)
             {
+                MarkErrorScope(expressions[i], mask);
                 (masks ??= new DataMask?[expressions.Count])[i] = mask;
                 if (expressions[i] is AssignmentExpression assignment)
                     assignment.Mask = mask;
             }
         }
         return masks;
+    }
+
+    /// <summary>
+    /// Hands <paramref name="mask"/> to each conversion and operator node
+    /// computing <paramref name="root"/>'s value, so an error one raises can
+    /// hide what it quotes (<see cref="DataMasking.Redacted"/>). Predicates
+    /// aren't entered, as <see cref="Taint"/> doesn't enter them.
+    /// </summary>
+    private static void MarkErrorScope(Expression root, DataMask mask)
+    {
+        var shape = new NodeShape();
+        var pending = new Stack<ExpressionNode>();
+        pending.Push(root);
+        while (pending.TryPop(out var node))
+        {
+            switch (node)
+            {
+                case Cast cast:
+                    cast.ErrorMask = mask;
+                    break;
+                case ConvertExpression convert:
+                    convert.ErrorMask = mask;
+                    break;
+                case TwoSidedExpression twoSided:
+                    twoSided.ErrorMask = mask;
+                    break;
+                case not Expression:
+                    continue;
+            }
+            var expression = (Expression)node;
+            if (expression.MaskValueChildren is { } valueChildren)
+            {
+                foreach (var child in valueChildren)
+                {
+                    if (child is not null)
+                        pending.Push(child);
+                }
+                continue;
+            }
+            shape.Clear();
+            expression.Describe(shape);
+            foreach (var child in shape.ChildNodes)
+            {
+                if (child is Expression)
+                    pending.Push(child);
+            }
+        }
     }
 }
 

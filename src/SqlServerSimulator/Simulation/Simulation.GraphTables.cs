@@ -311,6 +311,8 @@ partial class Simulation
         var (fromObjectId, toObjectId) = (fromObject.CoerceTo(SqlType.Int32).AsInt32, toObject.CoerceTo(SqlType.Int32).AsInt32);
         foreach (var constraint in table.EdgeConstraints)
         {
+            if (constraint.IsDisabled)
+                continue;
             if (!constraint.Admits(fromObjectId, toObjectId)
                 || !NodeExists(database, fromObjectId, fromId)
                 || !NodeExists(database, toObjectId, toId))
@@ -372,6 +374,10 @@ partial class Simulation
         }
         foreach (var (edge, constraint) in referencing)
         {
+            // A disabled constraint neither refuses nor cascades; it still
+            // keeps the node table from being truncated or dropped.
+            if (constraint.IsDisabled)
+                continue;
             var reaching = EdgesReaching(edge, node.ObjectId, deletedIds);
             if (reaching.Count == 0)
                 continue;

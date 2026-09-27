@@ -866,6 +866,7 @@ internal sealed partial class Selection
         // so the select list can bind against them; restoring it here keeps
         // the enclosing scope intact on every exit path, including throws.
         var savedOuterTypeResolver = context.OuterTypeResolver;
+        var savedOuterMaskResolver = context.OuterMaskResolver;
         // The full-text predicates and the spatial property form bind against
         // this scope's own sources; a nested query installs its own and the
         // enclosing one comes back here.
@@ -897,6 +898,7 @@ internal sealed partial class Selection
             context.GraphPathAggregates = savedGraphPathAggregates;
             context.EnclosingAggregateCollector = savedEnclosingAggregateCollector;
             context.OuterTypeResolver = savedOuterTypeResolver;
+            context.OuterMaskResolver = savedOuterMaskResolver;
             context.ScopeSources = savedScopeSources;
             context.FromSourceColumnSink = savedFromSourceColumnSink;
             context.NextValueForRejection = savedNextValueForRejection;
@@ -1388,6 +1390,11 @@ internal sealed partial class Selection
             {
                 var scopeSources = preParsed.ToArray();
                 context.OuterTypeResolver = name => ResolveColumnTypeAcrossSources(scopeSources, name, scope.OuterTypeResolver);
+                if (context.Batch.Connection.Simulation.DeclaresDataMasks)
+                {
+                    var outerMask = context.OuterMaskResolver;
+                    context.OuterMaskResolver = name => ScopedColumnMask(scopeSources, name, outerMask);
+                }
                 // A projection-level CONTAINS / FREETEXT (`CASE WHEN
                 // CONTAINS(col, 'x') THEN …`) and a spatial column's property
                 // form (`Location.Lat`) both bind against the same scope.
@@ -2708,7 +2715,19 @@ internal sealed partial class Selection
         if (afterApplyParen is not ReservedKeyword { Keyword: Keyword.Select })
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
-        var lateralPlan = ParseNestedQueryRejectingNextValueFor(context, QueryScope.Nested(QueryPosition.Derived, ChainedResolver));
+        // The body projects the left side's masked columns as its own.
+        var savedOuterMask = context.OuterMaskResolver;
+        if (context.Batch.Connection.Simulation.DeclaresDataMasks)
+            context.OuterMaskResolver = name => ScopedColumnMask(leftSnapshot, name, savedOuterMask);
+        Selection lateralPlan;
+        try
+        {
+            lateralPlan = ParseNestedQueryRejectingNextValueFor(context, QueryScope.Nested(QueryPosition.Derived, ChainedResolver));
+        }
+        finally
+        {
+            context.OuterMaskResolver = savedOuterMask;
+        }
 
         var schema = lateralPlan.Schema;
         var columnNames = lateralPlan.ColumnNames;
@@ -4736,6 +4755,10 @@ internal sealed partial class Selection
                 RequireSettledOutputCollation(schema[i], "SELECT", i + 1);
         }
 
+        // Settled ahead of the bake below, whose SELECT @v = … assignments
+        // read the masks it sets.
+        var columnMasks = DataMask.OfProjection(parseBatch, expressions, parseBatch.Parser.OuterMaskResolver ?? (static _ => null), expression => expression.GetSqlType(parseBatch, TypeResolver));
+
         // Values come from the executor instead when an outer reference is in
         // play; only the types are needed here, and Run would throw on it. An
         // EXISTS never reads its select list, so real evaluates none of it —
@@ -4829,7 +4852,7 @@ internal sealed partial class Selection
             ColumnIsUntypedNull = UntypedNullsOf(expressions),
             ColumnReportsNumeric = ColumnReportsNumericOf(expressions, schema),
             ColumnAliasTypes = ColumnAliasTypesOf(expressions),
-            ColumnMasks = DataMask.OfProjection(parseBatch, expressions, static _ => null, expression => expression.GetSqlType(parseBatch, TypeResolver)),
+            ColumnMasks = columnMasks,
             // A FROM-less projection has no sources, so column nullability is
             // the per-expression rule alone (literals NOT NULL, other
             // expressions nullable) — matching real's result metadata

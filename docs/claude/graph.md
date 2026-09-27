@@ -20,6 +20,8 @@ A unique nonclustered `GRAPH_UNIQUE_INDEX_<hex>` over `graph_id` is created with
 A pseudo-column is written `$node_id` (the tokenizer's `$`-word, like `$action`), any case, qualified or not, and resolves to the internal column whose name it prefixes — through a derived table, view or CTE that projects it too, which is why the match is on the name and not on the column's kind.
 A projection of one takes the internal column's full name as its own.
 The match runs only after an ordinary lookup misses, so it costs nothing on the scan path.
+Only the bare token matches: a delimited `[$node_id]` or `"$node_id"` is an ordinary name, Msg 207 unless a column is called that (`MultiPartName.LeafDelimited`).
+A hidden internal column named in a query by its full name — in a select list, `WHERE`, `ORDER BY` or an aggregate — is Msg 13908 state 1, while a pseudo-column's full name reads it; the check sits in `FindSourceColumn` and fires only for a name read from the statement's text (`MultiPartName.FromText`), since MATCH's desugared equalities name those columns too.
 
 ## Identifiers
 
@@ -42,6 +44,8 @@ UPDATE of a pseudo-column is the computed-column Msg 271, and naming a hidden co
 Each constraint must admit every edge — some clause names its pair of node tables, and both nodes exist — and the constraints on one table are checked independently.
 Deleting a node that a constrained edge still reaches is refused, or deletes those edges under `ON DELETE CASCADE`, which fires no trigger on the edge table (a foreign key's cascade does); an edge table with no constraint keeps its dangling edges.
 A node table a constraint names can't be dropped or truncated.
+`ALTER TABLE … NOCHECK | CHECK CONSTRAINT name | ALL` toggles one as it does a foreign key: `NOCHECK` sets `is_disabled` and `is_not_trusted`, a bare `CHECK` clears only `is_disabled`, and `WITH CHECK CHECK` re-validates the existing edges (Msg 547 as an `ALTER TABLE` statement) before clearing both; `OBJECTPROPERTY`'s `CnstIsDisabled` / `CnstIsNotTrusted` and `sp_helpconstraint`'s status read the same flags.
+A disabled constraint checks no edge write and neither refuses nor cascades a node delete, yet still keeps its node tables from `TRUNCATE` and `DROP`.
 `sp_helpconstraint` lists an edge constraint with `No Action` whatever its delete action, and a node table closes with the constraints naming it.
 
 ## MATCH
@@ -56,6 +60,7 @@ Under a MATCH, a bare `SELECT *` expands the sources MATCH doesn't name first, i
 ## SHORTEST_PATH
 
 `MATCH(SHORTEST_PATH(start(-(edge)->node)+))`, the `<-(edge)-` direction, and the `{1, n}` quantifier, over an edge and node marked `FOR PATH` in the FROM clause, with graph path aggregates — `STRING_AGG`, `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`, `LAST_VALUE` followed by `WITHIN GROUP (GRAPH PATH)` — reading the path, and `LAST_NODE(node)` continuing an ordinary pattern from the path's end.
+Inside the `MATCH`, `LAST_NODE(x) = LAST_NODE(x)` holds for every row; anything but another `LAST_NODE` after the `=` is Msg 102 near it.
 The result is one row per node the start reaches, the start itself included when a cycle leads back to it, carrying the first-found shortest path to it.
 
 `ApplyShortestPath` runs once the WHERE is parsed: the two `FOR PATH` sources give way to one lateral source applied after every other source, whose rows the breadth-first walk produces per start row — the reached node's stored columns plus one column per graph path aggregate, all hidden, so `SELECT *` expands the other sources only.
@@ -65,8 +70,6 @@ A `SHORTEST_PATH` in a subquery is refused, as real refuses it; a derived table 
 
 ## Divergences
 
-- A bracketed `[$node_id]` resolves as the pseudo-column; real's Msg 207 needs the unbracketed token, and the name alone can't tell the two apart.
-- Selecting a hidden internal column by its full name reads it; real refuses it with Msg 13908, which is modeled for INSERT and UPDATE targets only.
 - `MATCH` over an `APPLY`'s right side reports the first Msg 13920 at state 1 alone, where real sends state 3 then a second one for the start node.
 - Among several shortest paths of one length, the path reported is the first the edge scan finds, and an unordered `SHORTEST_PATH` query's row order is the walk's; real's are plan-dependent.
 - Of real's several errors for one misused `FOR PATH` source (Msg 13949 then Msg 4104 and Msg 13952), only the first is raised; a `GROUP BY` over a graph path aggregate names the aggregate's column in its Msg 8120 where real names an internal one.
@@ -74,6 +77,5 @@ A `SHORTEST_PATH` in a subquery is refused, as real refuses it; a derived table 
 
 ## Not modeled yet
 
-- A `SHORTEST_PATH` repeating more than one hop (`n1(-(e1)->n2-(e2)->n3)+`), a second `SHORTEST_PATH` in one WHERE, one starting from anything but a node table, and `LAST_NODE(x) = LAST_NODE(y)` comparisons → `NotSupportedException` or a syntax error.
-- `ALTER TABLE … NOCHECK | CHECK CONSTRAINT` over an edge constraint (real accepts it; here it is Msg 4917), and the `is_disabled` it would set.
+- A `SHORTEST_PATH` repeating more than one hop (`n1(-(e1)->n2-(e2)->n3)+`), a second `SHORTEST_PATH` in one WHERE — and with it `LAST_NODE(x) = LAST_NODE(y)` over two paths — and one starting from anything but a node table → `NotSupportedException` or a syntax error.
 - A column-level permission recorded against a pseudo-column read.
