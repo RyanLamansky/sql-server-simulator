@@ -413,7 +413,7 @@ partial class Simulation
                 if (connection.TriggerBodyErrorRaised)
                     throw SimulatedSqlException.ErrorRaisedDuringTriggerExecution();
                 if (connection.TriggerTransactionEnded)
-                    throw SimulatedSqlException.TransactionEndedInTrigger();
+                    throw SimulatedSqlException.TransactionEndedInTrigger(frame.Trigger is null ? (byte)2 : (byte)1);
             }
         }
         catch (SimulatedSqlException ex)

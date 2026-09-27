@@ -70,11 +70,13 @@ partial class Simulation
         var security = connection.Security;
         if (isLogin)
         {
-            if (!LoginExists(connection.Simulation, targetName)
-                || !TryMapLoginToDatabaseUser(connection.Simulation, database, targetName, out var mapped))
-            {
+            if (!LoginExists(connection.Simulation, targetName))
                 throw SimulatedSqlException.CannotExecuteAsServerPrincipal(targetName);
-            }
+            // A login with no way into the current database is refused as the
+            // database access it would need, state 4, ending the batch and
+            // rolling back (probed 2026-09-27 against SQL Server 2025).
+            if (!TryMapLoginToDatabaseUser(connection.Simulation, database, targetName, out var mapped))
+                throw SimulatedSqlException.CannotAccessDatabaseUnderSecurityContext(targetName, database.Name, state: 4);
             RequireImpersonateLoginPermission(connection, targetName);
             security.Push(new SecurityPrincipalFrame(mapped.PrincipalId, mapped.Name, targetName));
             return;

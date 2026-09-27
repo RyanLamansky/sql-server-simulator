@@ -2820,8 +2820,8 @@ partial class SimulatedSqlException
     /// or the WITHOUT-LOGIN user's <c>S-1-9-3-…</c> SID string. Session stays in
     /// the current database. Probe-confirmed (2026-07-21): severity 14, state 2.
     /// </summary>
-    internal static SimulatedSqlException CannotAccessDatabaseUnderSecurityContext(string principalName, string databaseName) =>
-        new($"The server principal \"{principalName}\" is not able to access the database \"{databaseName}\" under the current security context.", 916, 14, 2);
+    internal static SimulatedSqlException CannotAccessDatabaseUnderSecurityContext(string principalName, string databaseName, byte state = 2) =>
+        new($"The server principal \"{principalName}\" is not able to access the database \"{databaseName}\" under the current security context.", 916, 14, state) { AbortsAsUnderXactAbort = state == 4 };
 
     /// <summary>
     /// Mimics SQL Server error 18456: an in-process connection-string login

@@ -87,9 +87,13 @@ public sealed partial class SimulatedSqlException
     /// <c>FUNCTION</c> family takes the state-18 variant instead — see
     /// <see cref="CreateModulePermissionDenied"/>. Real also raises a trailing
     /// Msg 297 on the DMV path; the simulator surfaces the single Msg 262.
+    /// A denied CREATE ends the batch — through an <c>EXEC</c> too — and rolls
+    /// the transaction back as under <c>SET XACT_ABORT ON</c>, catchable by a
+    /// TRY (probed 2026-09-27 against SQL Server 2025); the DMV path's scope is
+    /// unprobed and keeps a plain error.
     /// </summary>
-    internal static SimulatedSqlException DatabasePermissionDenied(string permission, string databaseName) =>
-        new($"{permission} permission denied in database '{databaseName}'.", 262, 14, 1);
+    internal static SimulatedSqlException DatabasePermissionDenied(string permission, string databaseName, bool aborts = true) =>
+        new($"{permission} permission denied in database '{databaseName}'.", 262, 14, 1) { AbortsAsUnderXactAbort = aborts };
 
     /// <summary>
     /// Mimics SQL Server error 371 — <c>sys.dm_exec_connections</c> read without
@@ -120,7 +124,10 @@ public sealed partial class SimulatedSqlException
         new($"{permission} permission denied in database '{databaseName}'.",
             new SimulatedError(@class: 14, lineNumber: 0,
                 message: $"{permission} permission denied in database '{databaseName}'.",
-                number: 262, procedure: moduleName, server: SimulatedDbConnection.DataSourceName, source: SourceName, state: 18));
+                number: 262, procedure: moduleName, server: SimulatedDbConnection.DataSourceName, source: SourceName, state: 18))
+        {
+            AbortsAsUnderXactAbort = true,
+        };
 
     /// <summary>
     /// Mimics SQL Server error 15247: a DDL statement the simulator doesn't model

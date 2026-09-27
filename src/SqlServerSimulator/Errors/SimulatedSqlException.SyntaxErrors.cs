@@ -287,8 +287,9 @@ partial class SimulatedSqlException
     /// statement rather than the trigger (probed 2026-09-26 against SQL Server
     /// 2025).
     /// </summary>
-    internal static SimulatedSqlException TransactionEndedInTrigger() =>
-        new("The transaction ended in the trigger. The batch has been aborted.", 3609, 16, 1) { TerminatesBatch = true };
+    /// <remarks>State 1 from a DML trigger, 2 from a DDL trigger (probed 2026-09-27).</remarks>
+    internal static SimulatedSqlException TransactionEndedInTrigger(byte state) =>
+        new("The transaction ended in the trigger. The batch has been aborted.", 3609, 16, state) { TerminatesBatch = true };
 
     /// <summary>
     /// Mimics SQL Server error 3903: a <c>ROLLBACK</c> was issued with no

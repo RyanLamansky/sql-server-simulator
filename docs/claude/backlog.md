@@ -351,11 +351,7 @@ Real bugs / limitations against shipped behavior — fixes are concrete work, no
   A statement calling a non-schema-bound scalar UDF whose body names a missing object gets Msg 208 **twice** on real, where the simulator raises only the second; a multi-statement TVF raises only the caller's on both.
   The first, attributed to the function at the line binding its definition would report, arrives while the **batch compiles** — ahead of an earlier statement's rows, past an enclosing `TRY` / `CATCH`, and even for a call a `1 = 0` conjunct short-circuits — which reads as real's compile-time inlining attempt.
   The second is the calling statement's own, at its line, and matches; a `DECLARE` / `SET` / assignment-`SELECT` / `IF` call reports only it.
-- **Permission-refusal residue found alongside the ownership probes** (probed 2026-09-27 against SQL Server 2025):
-  a denied `EXEC p` written unqualified reports line 1 and Procedure `p` on real, where the simulator reports the statement's line and `dbo.p`;
-  a denied `CREATE TABLE` (Msg 262) refuses the whole batch on real before any statement runs, where the simulator runs the statements ahead of it;
-  `EXECUTE AS LOGIN` for a login with no user in the current database is Msg 916 state 4 on real and Msg 15406 here;
-  and a DDL trigger's `EVENTDATA()` `CommandText` keeps the statement's `;` and the newline after it, and its `ROLLBACK` raises Msg 3609 in state 2, where the simulator trims both and raises state 1 → [`permissions.md`](permissions.md), [`triggers.md`](triggers.md).
+- **A DDL trigger's `EVENTDATA()` `CommandText`** keeps the statement's `;` and the newline after it in some shapes, where the simulator trims both (seen alongside the ownership probes 2026-09-27; a plain `create table t (a int);` matched, so the shape that differs is unpinned) → [`triggers.md`](triggers.md).
 - **Index-option residues** — option names in the column-level clauses; see [`indexes.md`](indexes.md#fidelity-gaps).
 
 - **A typed `xml` edit's `with` value isn't typed against the schema** — real refuses one whose type doesn't match the target (Msg 2247) and computes a schema-typed operand in its **declared** type, where the evaluator works in `double`; the difference shows in the last digits of a long decimal chain.

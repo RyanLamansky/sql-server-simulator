@@ -68,8 +68,18 @@ partial class Simulation
         }
         else
         {
-            PermissionEnforcement.CheckObject(outerBatch, procedure.Schema.Database, "EXECUTE", procedure.ObjectId, procedure.SchemaId,
-                procedure.Name, procedure.Schema.Name, procedure: $"{procedure.Schema.Name}.{procedure.Name}");
+            // Attributed to the procedure as the call spells it, at its line 1
+            // (probed 2026-09-27 against SQL Server 2025).
+            try
+            {
+                PermissionEnforcement.CheckObject(outerBatch, procedure.Schema.Database, "EXECUTE", procedure.ObjectId, procedure.SchemaId,
+                    procedure.Name, procedure.Schema.Name, procedure: attributionName);
+            }
+            catch (SimulatedSqlException denied)
+            {
+                denied.PreserveDiagnostics(1, attributionName);
+                throw;
+            }
         }
 
         // Bind arguments to parameters. Positional args fill from the left;
