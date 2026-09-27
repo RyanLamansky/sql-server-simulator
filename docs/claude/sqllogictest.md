@@ -78,4 +78,9 @@ The per-shape evidence is in the "Not folded yet" list in [`query.md`](query.md)
 The `index/` slice (213 non-empty scripts, 2,114,262 records) had **no divergent record** in its first whole differential run (2026-09-27, SQL Server 2025): every query matched, every statement succeeded on both engines, and nothing timed out.
 It is the one slice whose records scan hundreds to thousands of rows, so it is the better profiling workload for scans and predicate evaluation; per-row work shows there that `random/`'s per-statement fixed cost hides.
 
+The `evidence/` slice (12 scripts, 494 records of which 112 are excluded by the engine conditionals, 2026-09-27, SQL Server 2025) is the one written feature by feature, much of it for other engines, so over half its records are rejections both engines raise, and they have to raise the *same* error to agree.
+Its first capture had one divergent record, SQLite's `group_concat(DISTINCT x, ':')`: real reads any `name(DISTINCT …)` as an aggregate call before it knows the name, so it was Msg 102 at the comma there and Msg 195 here.
+Fixing that exposed the whole quantified-call family and, beside it, `[abs](1)` running here where real refuses a delimited one-part name as a function — see [`query.md`](query.md#a-quantified-call-is-an-aggregate-call-whatever-the-name) and [`grammar.md`](grammar.md#a-delimited-one-part-name-doesnt-call-anything).
+The slice now agrees record for record, and replays in under a second as part of the routine replay.
+
 Re-run the sweep after any bundle touching the parser, the expression evaluator or the type system.

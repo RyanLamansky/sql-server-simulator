@@ -256,7 +256,7 @@ Two positions keep Msg 102: the last token named at the end of the input (`SELEC
 
 **A binding error the statement owes waits for that check.**
 Real parses a batch before binding any of it, so a syntax error past a clause outranks the clause's own binding error: `GROUP BY 'a' 'b'` is Msg 102 at `'b'` where `GROUP BY 'a'` alone is Msg 164, and the same holds for the Msg 144 shape `GROUP BY (SELECT …) 'b'` (all three probe-confirmed).
-`ParserContext.PendingGroupByBindError` holds the clause's message until the statement's outermost query expression has parsed, and the flush yields to a trailing value literal — the same token class this rule rejects — so the syntax error wins.
+`ParserContext.PendingBindError` holds the clause's message until the statement's outermost query expression has parsed, and the flush yields to a trailing value literal — the same token class this rule rejects — so the syntax error wins.
 The first offending item still supplies the message, which is what an immediate throw produced.
 
 `ALTER TABLE … ADD COLUMN c TYPE` is rejected with **Msg 156** near COLUMN (unlike `DROP COLUMN` / `ALTER COLUMN`, the ADD form names the column directly) — a prior "COLUMN is optional here" note was based on a mistaken probe; the live reference rejects it.
@@ -325,8 +325,14 @@ A window function is the one exception the check names: the bare `OVER w` named-
 **Msg 4145's own near-token is the token following the whole non-boolean expression**, parentheses included — `IF ((1)) PRINT 'x'` names `'PRINT'`, while `SELECT 1 WHERE (1)` names `')'` because nothing follows it.
 The simulator's predicate grammar consumes a boolean group's parens on the way in, so the factory steps back over one closer per still-open group (against a checkpoint, leaving the failing parse's cursor where it was) before reading the name.
 
+## A delimited one-part name doesn't call anything
+
+`[abs](-1)` and `"abs"(1)` are syntax errors on real, built-in name or not, where a schema-qualified `[dbo].[f](1)` calls `dbo.f` as usual (probed 2026-09-27 against SQL Server 2025).
+The postfix loop's call arm raises Msg 102 at the first token inside the parens past any nested `(` — `near '-'`, `near '1'` for `[abs]((1))`, `near ')'` for `[abs]()` — which is where real names it in the select list, `SET`, `ORDER BY`, `GROUP BY` and a comparison's right side.
+
 ## Divergences
 
+- **A delimited one-part call names a different token in a few positions**: real reports `near '('` inside `VALUES`, a `CASE` arm and an `IN` list, Msg 4145 near `'('` where the call opens a predicate (`WHERE [abs](1) = 1`), and Msg 128 in `PRINT`; each is Msg 102 at the first token inside the parens here (probed 2026-09-27).
 - **Multi-statement-TVF bodies treat a `SET QUOTED_IDENTIFIER` as top-level** rather than rejecting it (real SQL Server disallows `SET QUOTED_IDENTIFIER` inside a function body).
 
 ## Expression depth limits (Msg 8631 / Msg 191 / Msg 125)

@@ -723,4 +723,43 @@ public sealed class AggregateTests
     [DataRow("varp")]
     public void AStatisticalAggregatePastFloatsRange_IsMsg8115(string aggregate)
         => new Simulation().AssertSqlError($"select {aggregate}(f) from (values (1e300), (-1e300)) v(f)", 8115, "Arithmetic overflow error converting expression to data type float.");
+
+    /// <summary>
+    /// A <c>DISTINCT</c> / <c>ALL</c> quantifier makes any call an aggregate
+    /// call to real's grammar, so the name's own grammar never sees it and the
+    /// refusal follows from what the name turns out to be.
+    /// </summary>
+    [TestMethod]
+    [DataRow("group_concat(distinct a, ':')", 102, "Incorrect syntax near ','.")]
+    [DataRow("abs(distinct a)", 195, "'abs' is not a recognized aggregate function.")]
+    [DataRow("Frog(all a) over (partition by a)", 195, "'Frog' is not a recognized aggregate function.")]
+    [DataRow("abs(distinct a) within group (order by a)", 102, "Incorrect syntax near 'within'.")]
+    [DataRow("cast(distinct a as int)", 156, "Incorrect syntax near the keyword 'as'.")]
+    [DataRow("coalesce(distinct a, 1)", 156, "Incorrect syntax near the keyword 'distinct'.")]
+    [DataRow("string_agg(distinct a, ',')", 102, "Incorrect syntax near ','.")]
+    [DataRow("STRING_AGG(all a)", 313, "An insufficient number of arguments were supplied for the procedure or function string_agg.")]
+    [DataRow("json_objectagg(distinct 'k':a)", 102, "Incorrect syntax near ':'.")]
+    [DataRow("json_arrayagg(distinct a) over ()", 10759, "Use of DISTINCT is not allowed with the OVER clause.")]
+    [DataRow("approx_count_distinct(distinct a)", 16200, "The statement failed because 'APPROX_COUNT_DISTINCT' does not support DISTINCT <column-name> parameters. Consider using 'APPROX_COUNT_DISTINCT' without DISTINCT, or COUNT or COUNT_BIG with DISTINCT.")]
+    [DataRow("approx_percentile_cont(distinct 0.5)", 8726, "Input parameter of APPROX_PERCENTILE_CONT function must be a constant.")]
+    [DataRow("dbo.frog(distinct a, 1)", 208, "Invalid object name 'dbo.frog'.")]
+    [DataRow("dbo.frog(distinct a) over ()", 102, "Incorrect syntax near 'distinct'.")]
+    [DataRow("[count](distinct a)", 156, "Incorrect syntax near the keyword 'distinct'.")]
+    public void AQuantifiedCall_IsRefusedByWhatItsNameIs(string call, int number, string message)
+        => new Simulation().AssertSqlError($"select {call} from (values (1)) t(a)", number, message);
+
+    [TestMethod]
+    public void AQuantifiedCallsBindingRefusal_YieldsToALaterSyntaxError()
+    {
+        var simulation = new Simulation();
+        simulation.AssertSqlError("select string_agg(distinct a) from (values ('x')) t(a) where (", 102, "Incorrect syntax near '('.");
+        simulation.AssertSqlError("select dbo.frog(distinct a) from nosuch", 208, "Invalid object name 'nosuch'.");
+    }
+
+    [TestMethod]
+    public void AQuantifiedCallToAMissingAggregate_BindsWhenItRuns()
+    {
+        using var connection = new Simulation().CreateOpenConnection();
+        AreEqual(1, connection.CreateCommand("if 1 = 0 select dbo.frog(distinct a) from (values (1)) t(a); select 1").ExecuteScalar());
+    }
 }

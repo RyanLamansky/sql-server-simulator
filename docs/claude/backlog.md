@@ -160,9 +160,12 @@ Re-run it after any bundle touching the parser, the expression evaluator or the 
 
 Still open from what it surfaced:
 
-- **The routine replay's file list is `random/` alone.**
+- **The top-level `select1`–`select5` scripts have no captured reference.**
   `select5`'s many-way comma joins, which once kept it out by timing out, now answer (see [`joins.md`](joins.md#join-order-reorder)), and a differential run of `lists/pilot-phase1.txt` (`select1`–`select5` plus `evidence/`) had every query agree with real (2026-09-27, SQL Server 2025).
-  The whole `index/` slice agreed with real record for record in the same week and has its own reference, replayed separately because it takes longer than the routine replay; the `evidence/` scripts are the part of the corpus with no captured reference yet.
+  The routine replay covers `random/` and `evidence/`; the whole `index/` slice agreed with real record for record in the same week and has its own reference, replayed separately because it takes longer than the routine replay.
+- **What the `evidence/` capture's one divergence led to, and didn't close** — the quantified-call family and the delimited one-part call shipped (see [`sqllogictest.md`](sqllogictest.md#standing-result)); what remains is their error *positions* and report shapes, not whether they raise.
+  A delimited one-part call names `(` in `VALUES`, `CASE` and `IN`, is Msg 4145 opening a predicate and Msg 128 in `PRINT` on real, and Msg 102 at the first token inside the parens here → [`grammar.md`](grammar.md#divergences).
+  A quantified call's skipped `OVER` clause isn't syntax-checked past its parens, and a held Msg 313 drops out of a statement's binder report → [`query.md`](query.md#a-quantified-call-is-an-aggregate-call-whatever-the-name).
 - **Every statement is parsed twice**, once by the batch-compile walk and once to run, and the `index/` slice's long `WHERE` chains make that visible: in a sampled profile of its slowest script (`in/1000`, 2026-09-27) the compile walk alone (`CompileBatch`, a throwaway parse-and-bind of the whole batch before the run parses it again) was about 15% of the simulator's time.
   Reusing the walk's parse for the run would recover most of it; it is the largest remaining per-statement cost in the replay workloads.
 
@@ -329,7 +332,7 @@ Entries are verified against the simulator, so one that no longer reproduces is 
   `LIKE`'s `_` is unaffected: it counts characters, so `LIKE N'x'` answers no there as real does.
   Two companion divergences run the *other* way and aren't register entries — real expands a ligature (`N'ß' = N'ss'`, full probed table in the doc) and equates any two standalone combining marks, where `CompareInfo` does neither → [`collations.md`](collations.md#known-gaps).
 - **A syntax error past a clause doesn't outrank an earlier binding error** — `SELECT 1 FROM t WHERE` over a missing `t` is **Msg 208** here and **Msg 102** at the `WHERE` on real, because real parses a batch before binding any of it (probed 2026-08-06, same for `FROM t PIVOT`).
-  `ParserContext.PendingGroupByBindError` already defers the GROUP BY clause's own binding error for exactly this reason; the FROM clause's object resolution has no equivalent, and giving it one runs against the parse-and-execute-in-one-pass design the simulator is built on — see [`grammar.md`](grammar.md#trailing-token-tightening).
+  `ParserContext.PendingBindError` already defers the GROUP BY clause's own binding error for exactly this reason; the FROM clause's object resolution has no equivalent, and giving it one runs against the parse-and-execute-in-one-pass design the simulator is built on — see [`grammar.md`](grammar.md#trailing-token-tightening).
 - **Non-Framework CLR assemblies load** — real resolves every `AssemblyRef` against a fixed .NET Framework catalog and raises **Msg 6503** otherwise (probe-confirmed for .NET 10 and for .NET Standard 2.0); the simulator runs on .NET so all of them bind, which is also what lets the tests emit a fixture assembly without a Framework toolchain.
   → [`clr-assemblies.md`](clr-assemblies.md#divergences).
 - **A join view over a join view is Msg 4405** for the INSERT or UPDATE naming one base table that real accepts, flattening both levels (probe-confirmed).

@@ -311,6 +311,32 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException UnrecognizedBuiltInFunction(string name) => new($"'{name}' is not a recognized built-in function name.", 195, 15, 10);
 
     /// <summary>
+    /// Mimics SQL Server's Msg 195 for a one-part name called with a
+    /// <c>DISTINCT</c> / <c>ALL</c> quantifier that isn't an aggregate — a
+    /// scalar built-in or no built-in at all — naming it as written (probed
+    /// 2026-09-27 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException UnrecognizedAggregateFunction(string name) => new($"'{name}' is not a recognized aggregate function.", 195, 15, 10);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 16200 — <c>APPROX_COUNT_DISTINCT(DISTINCT x)</c>,
+    /// raised while the statement parses (severity 15), named in capitals
+    /// whatever the spelling (probed 2026-09-27 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException ApproxCountDistinctRefusesDistinct() =>
+        new("The statement failed because 'APPROX_COUNT_DISTINCT' does not support DISTINCT <column-name> parameters. Consider using 'APPROX_COUNT_DISTINCT' without DISTINCT, or COUNT or COUNT_BIG with DISTINCT.", 16200, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 8726 — an <c>APPROX_PERCENTILE_CONT</c> /
+    /// <c>_DISC</c> fraction written with a <c>DISTINCT</c> / <c>ALL</c>
+    /// quantifier and no <c>WITHIN GROUP</c>, which real refuses as a
+    /// non-constant input even when the fraction is a literal (probed
+    /// 2026-09-27 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException PercentileInputNotConstant(string upperName) =>
+        new($"Input parameter of {upperName} function must be a constant.", 8726, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server's Msg 174 — fired when a function is called with the
     /// wrong number of arguments (e.g. <c>ISNULL(x)</c> or
     /// <c>ISNULL(a, b, c)</c>). Callers pass the spelling real reports:

@@ -21,8 +21,11 @@ The runner is in the solution, under a `tools` folder, so every build and CI com
    It took about seven minutes over 16 shards against a local server.
 4. **Replay**: `./tools/sqllogictest/replay.sh`, from then on, whenever you want the sweep.
    It runs the simulator alone, in-process, against the reference, in about a minute, and needs no server.
+   With no arguments it also replays the `evidence/` reference (step 6) after `random/`, which adds under a second.
 5. **The `index/` slice** is a second, separate reference, because its replay costs more than the routine one does: capture it with `./tools/sqllogictest/sweep-parallel.sh lists/sweep-index.txt results-index-capture 16 refs/index`, and replay it with `./tools/sqllogictest/replay.sh refs/index results-index-replay lists/sweep-index.txt`.
    Run it beside the routine replay after a change to scans, index seeks, `IN` / `BETWEEN` evaluation, views or `DELETE`, which is what its scripts exercise over tables of 10 to 10,000 rows.
+6. **The `evidence/` slice** is a third reference: capture it with `./tools/sqllogictest/sweep-parallel.sh lists/sweep-evidence.txt results-evidence-capture 12 refs/evidence` (a few seconds), and replay it alone with `./tools/sqllogictest/replay.sh refs/evidence results-evidence-replay lists/sweep-evidence.txt`.
+   Its twelve scripts exercise features rather than generated queries — `IN` edge cases, aggregates, `CREATE` / `DROP` of views, triggers and indexes, `UPDATE` — and many were written for other engines, so most of what runs is a rejection both engines must raise with the same error number.
 
 Both scripts build the runner in Release first, and its project reference rebuilds the simulator along with it, so a run always measures the working tree.
 
@@ -65,7 +68,7 @@ Run it from the data directory.
 `--repl <file>` is an ad-hoc probe mode: `;;`-separated batches, run on both engines and printed.
 `SLT_DIAG=1` also drains the simulator's reader row by row and reports each result set's shape; `SLT_NONQUERY=1` also compares `ExecuteNonQuery` return values.
 
-The file lists under `lists/` are `sweep-random.txt` (the whole `random/` slice, what the sweeps run), `sweep-index.txt` (the whole `index/` slice, less its one empty script) and the pilot lists the harness was built against: `pilot-phase1.txt` (the `select1`–`select5` scripts plus `evidence/`), `pilot-phase2.txt` (a seeded sample of `index/` and `random/`), `pilot-all.txt` (both), and `pilot-capture.txt` (the capture/replay pilot).
+The file lists under `lists/` are `sweep-random.txt` (the whole `random/` slice, what the sweeps run), `sweep-index.txt` (the whole `index/` slice, less its one empty script), `sweep-evidence.txt` (the whole `evidence/` slice) and the pilot lists the harness was built against: `pilot-phase1.txt` (the `select1`–`select5` scripts plus `evidence/`), `pilot-phase2.txt` (a seeded sample of `index/` and `random/`), `pilot-all.txt` (both), and `pilot-capture.txt` (the capture/replay pilot).
 
 ## Per-record protocol
 
@@ -140,6 +143,7 @@ Per-script state folds into the global counters under one lock when the script e
 Measured in the 16-core dev container (2026-08-03); measure locally rather than trusting these.
 The full `random/` slice took 424 s as a 16-shard differential capture and 34 s as a `--parallel 16` replay, and the replay reconciled exactly with the capture: every class tally identical, the five register records all `known_divergent_match`, `findings.jsonl` empty.
 The `index/` slice (213 non-empty scripts, 2,114,262 records) took 619 s as a 16-shard differential capture and 83–92 s as a `--parallel 16` replay (2026-09-27), again reconciling exactly; its records scan tables of up to 10,000 rows rather than a handful, so it replays at under a third of `random/`'s records per second (about 24,000 against 83,000 measured the same day) and would more than double the routine replay, which is why it isn't in the default list.
+The `evidence/` slice (12 scripts, 494 records) took 3 s as a 12-shard capture and under a second as a replay (2026-09-27).
 Server GC beat workstation GC for replay at `--parallel 16` (3.3 s against 4.2 s on the pilot list), so `replay.sh` exports `DOTNET_gcServer=1`; the csproj pins workstation GC for the differential sweep, where each single-threaded shard process wants one heap.
 Replay is simulator-bound end to end, which also makes it an honest profiling workload for the simulator itself.
 

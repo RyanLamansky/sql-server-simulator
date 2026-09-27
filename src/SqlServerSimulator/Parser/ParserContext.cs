@@ -596,15 +596,19 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     public Dictionary<int, ColumnReadTarget>? ReadColumnSink;
 
     /// <summary>
-    /// The <c>GROUP BY</c> item-binding error (Msg 144 / Msg 164) the current
-    /// query expression owes, held until its whole statement has parsed. Real
-    /// parses a batch before binding any of it, so a syntax error anywhere
-    /// past the clause outranks the clause's own binding error:
+    /// A binding error the current query expression owes, held until its
+    /// whole statement has parsed: the <c>GROUP BY</c> item errors (Msg 144 /
+    /// Msg 164) and the refusals of a quantified call (<c>QuantifiedCall</c>).
+    /// Real parses a batch before binding any of it, so a syntax error anywhere
+    /// past the offending clause outranks its binding error:
     /// <c>GROUP BY 'a' 'b'</c> is Msg 102 at <c>'b'</c>, not Msg 164
-    /// (probe-confirmed, both messages). The first offending item wins, which
-    /// is the order an immediate throw produced.
+    /// (probe-confirmed, both messages), and the FROM clause's own Msg 208
+    /// outranks a select-list call's. The first offender wins, which is the
+    /// order an immediate throw produced. Only a top-level query expression
+    /// flushes it, so a site outside one (<see cref="SecurableSink"/> null)
+    /// throws instead.
     /// </summary>
-    public SimulatedSqlException? PendingGroupByBindError;
+    public SimulatedSqlException? PendingBindError;
 
     public Simulation Simulation => Command.simulation;
 

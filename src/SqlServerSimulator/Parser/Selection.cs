@@ -558,7 +558,7 @@ internal sealed partial class Selection
             // Statement-scoped slot: a value left over from a statement that
             // failed for another reason (continue-on-error, TRY/CATCH) never
             // reaches this statement's flush below.
-            context.PendingGroupByBindError = null;
+            context.PendingBindError = null;
         }
 
         var sequenceDrawsBefore = context.SequenceDrawsParsed;
@@ -670,9 +670,9 @@ internal sealed partial class Selection
             // which a well-formed query never leaves behind. That is the
             // trailing-token syntax error the dispatcher raises next, and real
             // reports it ahead of any binding error in the same batch.
-            if (context.PendingGroupByBindError is { } pending)
+            if (context.PendingBindError is { } pending)
             {
-                context.PendingGroupByBindError = null;
+                context.PendingBindError = null;
                 throw context.Token is Numeric or Literal
                     ? SimulatedSqlException.SyntaxErrorNear(context)
                     : pending;
@@ -4280,11 +4280,11 @@ internal sealed partial class Selection
 
             // Both messages are held rather than thrown: real parses the whole
             // statement before binding it, so a stray token after the clause
-            // outranks them (see ParserContext.PendingGroupByBindError). The
+            // outranks them (see ParserContext.PendingBindError). The
             // ??= keeps the first offending item's message, which is what an
             // immediate throw produced.
             if (context.AggregatesParsed > aggregatesBefore || context.SubqueriesParsed > subqueriesBefore)
-                context.PendingGroupByBindError ??= SimulatedSqlException.AggregateOrSubqueryInGroupBy();
+                context.PendingBindError ??= SimulatedSqlException.AggregateOrSubqueryInGroupBy();
 
             // The empty grouping set contributes no expression at all, so there
             // is nothing for Msg 164 to require a column of. Probe-confirmed
@@ -4295,7 +4295,7 @@ internal sealed partial class Selection
                 contributesAnExpression |= fragment.Length > 0;
 
             if (contributesAnExpression && context.ColumnReferencesParsed == columnsBefore)
-                context.PendingGroupByBindError ??= SimulatedSqlException.GroupByExpressionHasNoLocalColumn();
+                context.PendingBindError ??= SimulatedSqlException.GroupByExpressionHasNoLocalColumn();
         } while (context.Token is Operator { Character: ',' });
 
         // Cartesian product of per-item contributions: each combination of

@@ -1465,7 +1465,7 @@ internal sealed partial class Selection
             // against them, so an item's own held Msg 144 / 164 — raised once
             // the statement has parsed — outranks this check's (`SELECT a …
             // GROUP BY 1` is Msg 164; probed 2026-09-26).
-            if (parseBatch.Parser.PendingGroupByBindError is null)
+            if (parseBatch.Parser.PendingBindError is null)
             {
                 var grouped = fromClause.GroupingSets.Count > 0 || fromClause.Having is not null;
                 ValidateGroupByReferences(

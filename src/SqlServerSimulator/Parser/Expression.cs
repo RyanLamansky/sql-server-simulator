@@ -557,6 +557,20 @@ internal abstract class Expression : ExpressionNode
                         if (expression is not Reference reference)
                             return expression;
 
+                        // A delimited one-part name (`[abs](1)`, `"abs"(1)`)
+                        // doesn't name a function to real's grammar: the call is
+                        // a syntax error at the first token inside the parens
+                        // past any nested `(` (probed 2026-09-27 against SQL
+                        // Server 2025 — a few positions name the `(` instead;
+                        // see grammar.md).
+                        if (reference.ReferencedName is { Count: 1, LeafDelimited: true })
+                        {
+                            while (context.GetNextRequired() is Operator { Character: '(' })
+                            {
+                            }
+                            throw SimulatedSqlException.SyntaxErrorNear(context);
+                        }
+
                         context.MoveNextRequired(); // Move past (
                         // 2- and 3-part dotted names route to user-defined
                         // function resolution before falling back to built-ins
@@ -673,6 +687,11 @@ internal abstract class Expression : ExpressionNode
             throw SimulatedSqlException.StatementNestedTooDeeply();
         try
         {
+            if (context.Token is ReservedKeyword { Keyword: Keyword.Distinct or Keyword.All }
+                && QuantifiedCall.Parse(reference, context) is { } quantified)
+            {
+                return quantified;
+            }
             if (reference.ReferencedName.Count >= 2)
             {
                 if (context.RuleVariables is not null)

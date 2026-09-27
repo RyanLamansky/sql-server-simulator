@@ -463,6 +463,22 @@ Sort keys decode only the ORDER BY columns off each row (`ComputeTopLevelOrderKe
 
 A filter written **above** a grouped body — and the key set of an equi-join to one — reaches *below* the grouping when it names a grouping column, so the aggregate runs over the groups the statement keeps rather than every group in the table: see [`joins.md`](joins.md#join-key-reduction-of-a-grouped-body).
 
+### A quantified call is an aggregate call whatever the name
+
+Real's grammar reads `name(DISTINCT expr)` and `name(ALL expr)` as an aggregate call before it knows what `name` is, so the quantifier never reaches the name's own grammar and the refusal depends on what the name turns out to be (probed 2026-09-27 against SQL Server 2025, every built-in name; `QuantifiedCall`):
+- The aggregates that take `DISTINCT`, and the functions with a grammar of their own (`COALESCE`, `CONVERT`, `TRY_CONVERT`, `LEFT`, `RIGHT`, `NULLIF`, which refuse the keyword where it stands with Msg 156), parse as they always do.
+- Any other one-part name takes exactly one operand, so a second argument is Msg 102 at its comma (`group_concat(DISTINCT x, ':')`, `STRING_AGG(DISTINCT x, ',')`, `ISNULL(DISTINCT x, 1)`), a `WITHIN GROUP` after the call is Msg 102 at `WITHIN`, and `CAST(DISTINCT x AS int)` is Msg 156 at the `AS`.
+- A scalar built-in or an unknown name is **Msg 195** "is not a recognized aggregate function", named as written, raised while parsing — so it outranks a later syntax error and fires in a dead branch — but only after any `OVER` clause has parsed.
+- `STRING_AGG` and the two JSON aggregates are Msg 313 state 2 and the approximate percentiles Msg 8726, both binding errors held in `ParserContext.PendingBindError`, so a later syntax error or the FROM clause's Msg 208 outranks them; with `DISTINCT` and an `OVER` they are Msg 10759 instead.
+- `APPROX_COUNT_DISTINCT(DISTINCT x)` is Msg 16200 while parsing; its `ALL` is harmless.
+- A schema-qualified name is a user-defined aggregate, which takes a whole argument list and is Msg 208 state 214 when absent — even when the name is a scalar UDF — deferred like any missing object, so a dead branch compiles.
+  With `DISTINCT` and an `OVER` it is Msg 102 near `'distinct'`, in lowercase.
+
+**Divergences.**
+The skipped `OVER` clause is checked only for balanced parentheses, so a syntax error inside one (`OVER (ORDER BY x x)`) is Msg 195 here.
+A held Msg 313 is dropped when the same statement also has a binder report (`STRING_AGG(DISTINCT s), nosuchcol` reports only the Msg 207 here, where real reports both).
+`APPROX_PERCENTILE_DISC(ALL 0.5) OVER ()` kills the session on real (severity 21, probed 2026-09-27); here it is Msg 8726.
+
 ### Streaming accumulation, and where an error surfaces
 
 A query with **one grouping set** — no GROUP BY at all, or a plain GROUP BY — reads each input row exactly once and accumulates straight off the enumeration.

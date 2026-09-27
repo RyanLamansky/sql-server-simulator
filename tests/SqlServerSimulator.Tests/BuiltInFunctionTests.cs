@@ -13,6 +13,14 @@ public sealed class BuiltInFunctionTests
         AreEqual("'frog' is not a recognized built-in function name.", exception.Message);
     }
 
+    /// <summary>A delimited one-part name doesn't name a function, even a built-in one.</summary>
+    [TestMethod]
+    [DataRow("select [abs](-1)", "Incorrect syntax near '-'.")]
+    [DataRow("select \"abs\"((1))", "Incorrect syntax near '1'.")]
+    [DataRow("select [frog]()", "Incorrect syntax near ')'.")]
+    public void ADelimitedOnePartCall_IsASyntaxError(string commandText, string message)
+        => new Simulation().AssertSqlError(commandText, 102, message);
+
     [TestMethod]
     [DataRow("abs")]
     [DataRow("datalength")]
