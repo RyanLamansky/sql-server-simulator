@@ -331,4 +331,10 @@ public sealed class ExecuteAsTests
         AreEqual(-2, ExecuteAsPrincipalId(sim, "dbo.tr_owner"));
         AreEqual(DBNull.Value, ExecuteAsPrincipalId(sim, "dbo.tr_plain"));
     }
+
+    /// <summary>A principal may impersonate itself without a grant, so a nested EXECUTE AS of the same user runs (probed 2026-09-27).</summary>
+    [TestMethod]
+    public void ExecuteAs_NestedSameUser_NeedsNoGrant()
+        => AreEqual("u", new Simulation().ExecuteScalar("create user u without login; execute as user = 'u'; execute as user = 'u'; select user_name()"));
 }
+

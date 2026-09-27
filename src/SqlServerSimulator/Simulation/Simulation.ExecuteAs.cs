@@ -107,7 +107,10 @@ partial class Simulation
     /// </remarks>
     private static void RequireImpersonatePermission(SessionSecurityContext security, Database database, int targetPrincipalId, string targetName)
     {
-        if (security.EffectiveIsDbo)
+        // A principal may always impersonate itself, so a nested EXECUTE AS
+        // of the user already in effect needs no grant (probed 2026-09-27
+        // against SQL Server 2025).
+        if (security.EffectiveIsDbo || security.Effective.DatabasePrincipalId == targetPrincipalId)
             return;
         if (!PermissionChecker.IsGranted(
                 database,
