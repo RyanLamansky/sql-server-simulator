@@ -182,6 +182,27 @@ public sealed class FloatTests
     public void NegativeZero_ExactNumericAndSignScalars_RenderUnsigned(string commandText, string expected)
         => AreEqual(expected, ExecuteScalar(commandText));
 
+    /// <summary>
+    /// A decimal widens to the nearest double, rounded once, on both sides of
+    /// the magnitude (2^53) and scale (22) where an exact division stops being
+    /// enough; the bits are SQL Server 2025's (probed 2026-09-27,
+    /// <c>SELECT CONVERT(binary(8), CAST(&lt;literal&gt; AS float))</c>).
+    /// </summary>
+    [TestMethod]
+    [DataRow("4973.3", 0x40B36D4CCCCCCCCDUL)]
+    [DataRow("-8734.53", 0xC0C10F43D70A3D71UL)]
+    [DataRow("0.1", 0x3FB999999999999AUL)]
+    [DataRow("9007199254740991", 0x433FFFFFFFFFFFFFUL)]
+    [DataRow("9007199254740993", 0x4340000000000000UL)]
+    [DataRow("900719925474099.1", 0x4309999999999999UL)]
+    [DataRow("-0.9007199254740991", 0xBFECD2B297D889BBUL)]
+    [DataRow("0.0000000000000000000001", 0x3B5E392010175EE6UL)]
+    [DataRow("0.00000000000000000000001", 0x3B282DB34012B251UL)]
+    [DataRow("0.12345678901234567890123", 0x3FBF9ADD3746F65FUL)]
+    [DataRow("1234567890123456789.0123456789", 0x43B12210F47DE981UL)]
+    public void Cast_DecimalToFloat_RoundsToTheNearestDouble(string literal, ulong expectedBits)
+        => AreEqual(BitConverter.UInt64BitsToDouble(expectedBits), ExecuteScalar($"select cast({literal} as float)"));
+
     [TestMethod]
     [DataRow("cast(f as varchar(30))", "-0")]
     [DataRow("cast(r as varchar(30))", "-0")]

@@ -160,9 +160,11 @@ Re-run it after any bundle touching the parser, the expression evaluator or the 
 
 Still open from what it surfaced:
 
-- **The sweep's file list is `random/` alone.**
+- **The routine replay's file list is `random/` alone.**
   `select5`'s many-way comma joins, which once kept it out by timing out, now answer (see [`joins.md`](joins.md#join-order-reorder)), and a differential run of `lists/pilot-phase1.txt` (`select1`–`select5` plus `evidence/`) had every query agree with real (2026-09-27, SQL Server 2025).
-  The `index/` slice hasn't been run whole, so widening the captured list starts with a differential run of it.
+  The whole `index/` slice agreed with real record for record in the same week and has its own reference, replayed separately because it takes longer than the routine replay; the `evidence/` scripts are the part of the corpus with no captured reference yet.
+- **Every statement is parsed twice**, once by the batch-compile walk and once to run, and the `index/` slice's long `WHERE` chains make that visible: in a sampled profile of its slowest script (`in/1000`, 2026-09-27) the compile walk alone (`CompileBatch`, a throwaway parse-and-bind of the whole batch before the run parses it again) was about 15% of the simulator's time.
+  Reusing the walk's parse for the run would recover most of it; it is the largest remaining per-statement cost in the replay workloads.
 
 **Five sweep divergences remain, each demonstrated irreducible** — real's own answer flips under something the simulator cannot legitimately model, so matching them would mean modeling plan selection rather than semantics.
 Two are the trivial-plan boundary: `WHERE <overflow> <= 18 / CAST(NULL AS int)` raises as written, and answers 0 rows the moment `DISTINCT`, `GROUP BY`, `TOP 2` or a join is added — while `ORDER BY` / `MAX()` / `COUNT(*)` leave it raising.

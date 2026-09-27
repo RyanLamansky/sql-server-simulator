@@ -15,6 +15,13 @@ internal readonly partial struct Decimal38
     /// <summary>Fractional digits a .NET <see cref="decimal"/> carries.</summary>
     private const int MaxDotNetDecimalScale = 28;
 
+    /// <summary>2^53: every integer below it is an exact <see cref="double"/>.</summary>
+    private static readonly UInt128 ExactDoubleLimit = (UInt128)1 << 53;
+
+    /// <summary>10^0 through 10^22, the powers of ten a <see cref="double"/> holds exactly.</summary>
+    private static readonly double[] ExactPowersOfTen =
+        [1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16, 1e17, 1e18, 1e19, 1e20, 1e21, 1e22];
+
     public static Decimal38 FromInt32(int value) => FromInt64(value);
 
     public static Decimal38 FromInt64(long value)
@@ -143,8 +150,22 @@ internal readonly partial struct Decimal38
     /// rendered and re-read rather than divided by a power of ten in binary,
     /// which would round twice.
     /// </summary>
+    /// <remarks>
+    /// A magnitude below 2^53 at a scale of 22 or less takes the exact fast path
+    /// first: both operands are exact doubles, so the one IEEE division rounds
+    /// once, correctly (Clinger's fast path for decimal-to-binary conversion).
+    /// It matters because a decimal literal compared with a <c>float</c> column
+    /// converts once per row, and rendering then re-reading it was a tenth of
+    /// the time of a scan filtered that way.
+    /// </remarks>
     public double ToDouble()
     {
+        if (this.Magnitude < ExactDoubleLimit && this.Scale < ExactPowersOfTen.Length)
+        {
+            var exact = (ulong)this.Magnitude / ExactPowersOfTen[this.Scale];
+            return this.IsNegative ? -exact : exact;
+        }
+
         Span<char> buffer = stackalloc char[MaxFormattedLength];
         _ = TryFormat(buffer, out var written);
         return double.Parse(buffer[..written], NumberStyles.Float, CultureInfo.InvariantCulture);

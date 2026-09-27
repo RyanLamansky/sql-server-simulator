@@ -75,4 +75,7 @@ Each is demonstrated irreducible, with a probe showing real's own answer flippin
 The same comparison in a **`HAVING`** folds unconditionally, because a HAVING always carries a grouping and so never gets the trivial plan — which is why that position is modeled and `WHERE` is not.
 The per-shape evidence is in the "Not folded yet" list in [`query.md`](query.md); the rules the sweep did close are in the "Compile-time predicate folding" section above it.
 
+The `index/` slice (213 non-empty scripts, 2,114,262 records) had **no divergent record** in its first whole differential run (2026-09-27, SQL Server 2025): every query matched, every statement succeeded on both engines, and nothing timed out.
+It is the one slice whose records scan hundreds to thousands of rows, so it is the better profiling workload for scans and predicate evaluation; per-row work shows there that `random/`'s per-statement fixed cost hides.
+
 Re-run the sweep after any bundle touching the parser, the expression evaluator or the type system.
