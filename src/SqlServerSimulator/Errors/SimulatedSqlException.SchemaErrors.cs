@@ -2797,8 +2797,11 @@ partial class SimulatedSqlException
     /// (2026-07-21) — including the quirk that <c>EXECUTE AS USER = 'dbo'</c>
     /// raises this even for a sysadmin session.
     /// </summary>
+    /// <remarks>Ends the batch and rolls the transaction back as under
+    /// <c>SET XACT_ABORT ON</c>, as does its server-principal sibling Msg 15406
+    /// (probed 2026-09-27 against SQL Server 2025).</remarks>
     internal static SimulatedSqlException CannotExecuteAsDatabasePrincipal(string name) =>
-        new($"Cannot execute as the database principal because the principal \"{name}\" does not exist, this type of principal cannot be impersonated, or you do not have permission.", 15517, 16, 1);
+        new($"Cannot execute as the database principal because the principal \"{name}\" does not exist, this type of principal cannot be impersonated, or you do not have permission.", 15517, 16, 1) { AbortsAsUnderXactAbort = true };
 
     /// <summary>
     /// Mimics SQL Server error 15406: <c>EXECUTE AS LOGIN = 'l'</c> when the
@@ -2807,7 +2810,7 @@ partial class SimulatedSqlException
     /// (2026-07-21).
     /// </summary>
     internal static SimulatedSqlException CannotExecuteAsServerPrincipal(string name) =>
-        new($"Cannot execute as the server principal because the principal \"{name}\" does not exist, this type of principal cannot be impersonated, or you do not have permission.", 15406, 16, 1);
+        new($"Cannot execute as the server principal because the principal \"{name}\" does not exist, this type of principal cannot be impersonated, or you do not have permission.", 15406, 16, 1) { AbortsAsUnderXactAbort = true };
 
     /// <summary>
     /// Mimics SQL Server error 916: a session running under a restricted

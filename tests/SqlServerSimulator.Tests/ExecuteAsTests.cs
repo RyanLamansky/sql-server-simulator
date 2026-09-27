@@ -336,5 +336,21 @@ public sealed class ExecuteAsTests
     [TestMethod]
     public void ExecuteAs_NestedSameUser_NeedsNoGrant()
         => AreEqual("u", new Simulation().ExecuteScalar("create user u without login; execute as user = 'u'; execute as user = 'u'; select user_name()"));
+
+    /// <summary>An impersonation that fails ends the batch and rolls back, as under XACT_ABORT (probed 2026-09-27).</summary>
+    [TestMethod]
+    [DataRow("execute as user = 'nope'", 15517)]
+    [DataRow("execute as login = 'nope'", 15406)]
+    public void AFailedImpersonation_EndsTheBatchAndRollsBack(string statement, int number)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (a int)");
+        using var connection = sim.CreateOpenConnection();
+        using var command = connection.CreateCommand();
+        command.CommandText = $"begin tran; insert t values (1); {statement}; insert t values (2)";
+        AreEqual(number, Throws<SimulatedSqlException>(() => command.ExecuteNonQuery()).Number);
+        command.CommandText = "select concat(@@trancount, ':', (select count(*) from t))";
+        AreEqual("0:0", command.ExecuteScalar());
+    }
 }
 

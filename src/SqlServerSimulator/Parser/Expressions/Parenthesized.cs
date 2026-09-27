@@ -14,6 +14,9 @@ internal sealed class Parenthesized(Expression wrapped) : Expression
 
     internal override bool ParallelSafe => this.Wrapped.ParallelSafe;
 
+    /// <summary>A parenthesized column keeps the column's name as its projection's (<c>SELECT (e)</c> names the result <c>e</c>, probed 2026-09-27 against SQL Server 2025); anything else stays unnamed.</summary>
+    public override string Name => this.Wrapped is Reference or Parenthesized ? this.Wrapped.Name : string.Empty;
+
     internal override Schemas.AliasType? ResultAliasType => this.Wrapped.ResultAliasType;
 
     public override Storage.SqlValue Run(RuntimeContext runtime) => this.Wrapped.Run(runtime);
