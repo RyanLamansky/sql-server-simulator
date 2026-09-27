@@ -49,6 +49,26 @@ public sealed class BulkCopyTests
     }
 
     [TestMethod]
+    public async Task NodeTable_AllocatesGraphIdsLikeInsert()
+    {
+        var (_, listener, connection) = await SetUpAsync("create table P (id int, name varchar(10)) as node; insert P values (1, 'a')", TestContext.CancellationToken);
+        await using var listenerScope = listener;
+        await using var connectionScope = connection;
+
+        var data = Table(("id", typeof(int)), ("name", typeof(string)));
+        _ = data.Rows.Add(2, "b");
+        _ = data.Rows.Add(3, "c");
+        using (var bulk = new SqlBulkCopy(connection) { DestinationTableName = "P" })
+        {
+            Map(bulk, "id", "id");
+            Map(bulk, "name", "name");
+            await bulk.WriteToServerAsync(data, TestContext.CancellationToken);
+        }
+
+        AreEqual("0,1,2", Scalar(connection, "select string_agg(cast(graph_id_from_node_id($node_id) as varchar), ',') within group (order by id) from P"));
+    }
+
+    [TestMethod]
     public async Task DataTableSource_Async_InsertsRowsAndGeneratesServerSideColumns()
     {
         var (_, listener, connection) = await SetUpAsync(

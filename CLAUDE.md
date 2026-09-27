@@ -332,6 +332,8 @@ Where an entry carries a second clause it is because that fact changes what you'
   A cross-database reference resolves the login's user in the **target**, and dbo bypasses every check → [`permissions.md`](docs/claude/permissions.md).
 - **Dynamic Data Masking** — `MASKED WITH`, `ALTER COLUMN … ADD | DROP MASKED`, `sys.masked_columns`, `UNMASK` at every scope, and what a principal without it reads and writes.
   Each output column's mask compiles onto the plan and applies only at the statement's output sinks, so predicates, joins and ordering read stored values → [`data-masking.md`](docs/claude/data-masking.md).
+- **Graph tables** — `AS NODE` / `AS EDGE`, the `$node_id` / `$edge_id` / `$from_id` / `$to_id` pseudo-columns and their JSON identifiers, edge constraints, `MATCH`, `SHORTEST_PATH` with its graph path aggregates, and the six identifier functions.
+  A pseudo-column is a computed column over hidden ones, resolved by name prefix, and a `MATCH` hop desugars into equalities the join planner hashes → [`graph.md`](docs/claude/graph.md).
 - **Full-text search** — the catalogs and indexes, `CONTAINS` / `FREETEXT`, the two rowset functions, the whole `contains_search_condition` grammar, the word breaker, stoplist and stemmer.
   Searches read live rows rather than a crawled index, so a write is searchable immediately where real's lags → [`full-text.md`](docs/claude/full-text.md).
 - **`xml` type and XML schema collections** — typed writes and canonical form, the XQuery-subset evaluator behind `.value()` / `.nodes()` / `.query()` / `.exist()`, `.modify()` XML-DML, XML indexes, `FOR XML` in all four modes, and `OPENXML`.

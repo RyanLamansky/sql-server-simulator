@@ -272,5 +272,15 @@ internal sealed class HeapColumn(string name, SqlType type, int? maxLength, bool
     /// </summary>
     public DataMask? DerivedMask;
 
+    /// <summary>
+    /// The internal column of a node or edge table this is
+    /// (<c>sys.columns.graph_type</c>), or <see cref="GraphColumnKind.None"/>
+    /// for any other column. The pseudo-column kinds carry a
+    /// <see cref="Parser.Expressions.GraphIdentifier"/> as their
+    /// <see cref="Computed"/> expression, though the catalog reports them as
+    /// ordinary columns.
+    /// </summary>
+    public GraphColumnKind GraphKind;
+
     internal string DebugDisplay() => $"{this.Name} {this.Type}{(this.MaxLength is int n ? $"({n})" : "")}";
 }

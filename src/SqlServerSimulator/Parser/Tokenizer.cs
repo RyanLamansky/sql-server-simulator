@@ -72,6 +72,10 @@ static class Tokenizer
             '+' or '*' or '%' or '(' or ')' or ',' or '.' or ';' or ':' or '=' or '&' or '|' or '^' or '~' or '>' or '<' or '!' or '{' or '}' => new Operator(command, index++),
             '$' when IsDollarWord(command, index, "action") => ParseDollarWord(command, ref index, "action".Length),
             '$' when IsDollarWord(command, index, "partition") => ParseDollarWord(command, ref index, "partition".Length),
+            '$' when IsDollarWord(command, index, "node_id") => ParseDollarWord(command, ref index, "node_id".Length),
+            '$' when IsDollarWord(command, index, "edge_id") => ParseDollarWord(command, ref index, "edge_id".Length),
+            '$' when IsDollarWord(command, index, "from_id") => ParseDollarWord(command, ref index, "from_id".Length),
+            '$' when IsDollarWord(command, index, "to_id") => ParseDollarWord(command, ref index, "to_id".Length),
             '$' or '¢' or '£' or '¥' or '฿' or (>= '₠' and <= '₱') => ParseCurrencyLiteral(command, ref index),
             // Non-ASCII BMP letters (fullwidth, accented, Greek, CJK, ...) start identifiers on real SQL Server — probe-confirmed against SQL Server 2025.
             var c when char.IsLetter(c) => ParseUnquotedStringOrReservedKeyword(command, ref index, compatibilityLevel),
@@ -411,9 +415,11 @@ static class Tokenizer
         c is (>= '0' and <= '9') or (>= 'a' and <= 'f') or (>= 'A' and <= 'F');
 
     /// <summary>
-    /// Whether a <c>$</c> at <paramref name="index"/> begins one of the two
-    /// <c>$</c>-words T-SQL has: <c>$action</c> (the MERGE OUTPUT pseudo-column)
-    /// or <c>$partition</c> (the partition-function qualifier), matched without
+    /// Whether a <c>$</c> at <paramref name="index"/> begins one of the
+    /// <c>$</c>-words T-SQL has: <c>$action</c> (the MERGE OUTPUT pseudo-column),
+    /// <c>$partition</c> (the partition-function qualifier) or one of the four
+    /// graph pseudo-columns (<c>$node_id</c> / <c>$edge_id</c> / <c>$from_id</c> /
+    /// <c>$to_id</c>, see <c>GraphColumns</c>), matched without
     /// regard to case and not followed by more identifier characters. Any
     /// other <c>$</c> starts a money literal.
     /// </summary>

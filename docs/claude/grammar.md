@@ -44,7 +44,7 @@ A variable naming the procedure takes the same form — a batch opening `@p 1` r
 `Tokenizer.IsIdentifierBodyChar` governs what may follow an unquoted identifier's first character: letters and digits, `_`, **`$`, `#`, `@`**, and Unicode non-spacing marks (so a decomposed spelling — `zzcafe` + U+0301 — tokenizes and resolves to a table created as composed `zzcafé`).
 
 `$` / `#` / `@` are body-only.
-A *leading* `@` or `#` dispatches separately, as a variable or a temp-table name, and a leading `$` (outside `$action`) is a currency literal — so these three characters only extend an identifier mid-token.
+A *leading* `@` or `#` dispatches separately, as a variable or a temp-table name, and a leading `$` is a currency literal unless it opens one of the `$`-words (`$action`, `$partition`, and the graph pseudo-columns `$node_id` / `$edge_id` / `$from_id` / `$to_id`) — so these three characters only extend an identifier mid-token.
 ORMs emit exactly this shape: Django's annotations tests generate crafted aliases like `crafted_alia$`, which is what motivated the rule.
 
 # Reserved keywords as identifiers

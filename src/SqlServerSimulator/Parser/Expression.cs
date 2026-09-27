@@ -611,6 +611,12 @@ internal abstract class Expression : ExpressionNode
                 case UnquotedString { ContextualKeyword: ContextualKeyword.Within }
                     when expression is AggregateExpression aggregateForOrderBy:
                     {
+                        // WITHIN GROUP (GRAPH PATH) aggregates a SHORTEST_PATH instead.
+                        if (GraphPathAggregate.IsAhead(context))
+                        {
+                            expression = GraphPathAggregate.FromAggregate(aggregateForOrderBy, context);
+                            continue;
+                        }
                         ParseWithinGroupOrderBy(aggregateForOrderBy, context);
                         continue;
                     }
@@ -1801,6 +1807,7 @@ internal abstract class Expression : ExpressionNode
                 "LOG10" => new Log10(context),
                 "LOWER" => new Lower(context),
                 "LTRIM" => new LeftTrim(context),
+                "MATCH" => MatchPredicate.RejectMisplaced(context),
                 "MONTH" => new DatePart(context, DatePartKind.Month, "month"),
                 "NCHAR" => new NCharFromCode(context),
                 "NEWID" => new NewId(context),
@@ -2043,6 +2050,8 @@ internal abstract class Expression : ExpressionNode
                 "CURRENT_REQUEST_ID" => new CurrentRequestId(context),
                 "DATABASEPROPERTYEX" => new DatabasePropertyEx(context),
                 "DATETIME2FROMPARTS" => new DatePartsBuilder(context, DatePartsBuilderKind.DateTime2FromParts),
+                "EDGE_ID_FROM_PARTS" => new GraphIdFromParts(context, edge: true),
+                "NODE_ID_FROM_PARTS" => new GraphIdFromParts(context, edge: false),
                 "OBJECT_SCHEMA_NAME" => new ObjectSchemaName(context),
                 _ => null
             },
@@ -2056,6 +2065,8 @@ internal abstract class Expression : ExpressionNode
             {
                 "APPROX_COUNT_DISTINCT" => AggregateExpression.Parse(context, AggregateKind.ApproxCountDistinct),
                 "DATABASE_PRINCIPAL_ID" => new PrincipalIdLookup(context, PrincipalIdKind.DatabasePrincipalId),
+                "GRAPH_ID_FROM_EDGE_ID" => new GraphIdPart(context, GraphIdPartKind.GraphIdFromEdge),
+                "GRAPH_ID_FROM_NODE_ID" => new GraphIdPart(context, GraphIdPartKind.GraphIdFromNode),
                 "MIN_ACTIVE_ROWVERSION" => new MinActiveRowVersion(context),
                 _ => null
             },
@@ -2064,6 +2075,8 @@ internal abstract class Expression : ExpressionNode
                 "APPROX_PERCENTILE_CONT" => AggregateExpression.ParseApproxPercentile(context, AggregateKind.ApproxPercentileCont),
                 "APPROX_PERCENTILE_DISC" => AggregateExpression.ParseApproxPercentile(context, AggregateKind.ApproxPercentileDisc),
                 "CURRENT_TRANSACTION_ID" => new CurrentTransactionId(context),
+                "OBJECT_ID_FROM_EDGE_ID" => new GraphIdPart(context, GraphIdPartKind.ObjectIdFromEdge),
+                "OBJECT_ID_FROM_NODE_ID" => new GraphIdPart(context, GraphIdPartKind.ObjectIdFromNode),
                 "SMALLDATETIMEFROMPARTS" => new DatePartsBuilder(context, DatePartsBuilderKind.SmallDateTimeFromParts),
                 _ => null
             },

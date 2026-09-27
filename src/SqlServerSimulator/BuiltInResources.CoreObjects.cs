@@ -106,9 +106,9 @@ internal static partial class BuiltInResources
             new("temporal_type_desc", nvarchar60Catalog, 60, true),
             new("history_table_id", SqlType.Int32, null, true),
             // Table-flavor flags SMO's Object-Explorer Tables node filters on.
-            // None of these table kinds are modeled (memory-optimized,
-            // filetable, external/PolyBase, graph node/edge, ledger), so each
-            // ships as a constant 0. ledger_type is tinyint (0 = NON_LEDGER_TABLE,
+            // is_node / is_edge report a graph table; the other kinds
+            // (memory-optimized, filetable, external/PolyBase, ledger) aren't
+            // modeled, so each ships as a constant 0. ledger_type is tinyint (0 = NON_LEDGER_TABLE,
             // probe-confirmed non-null on SQL Server 2025). See docs/claude/catalog-views.md.
             new("is_memory_optimized", SqlType.Bit, null, true),
             new("is_filetable", SqlType.Bit, null, true),
@@ -216,8 +216,8 @@ internal static partial class BuiltInResources
                         falseTableFlag,
                         falseTableFlag,
                         falseTableFlag,
-                        falseTableFlag,
-                        falseTableFlag,
+                        SqlValue.FromBoolean(t.GraphKind == GraphTableKind.Node),
+                        SqlValue.FromBoolean(t.GraphKind == GraphTableKind.Edge),
                         SqlValue.FromByte(0),
                         durabilityDescSchemaAndData,
                         ledgerTypeNone,
@@ -487,7 +487,7 @@ internal static partial class BuiltInResources
             new("is_persisted", SqlType.Bit, null, false),
             new("is_index_column_expression", SqlType.Bit, null, true)), "is_sparse", "is_column_set"),
             (batch, database) => UserColumnRows(batch, database)
-                .Where(static entry => entry.Host is ColumnHost.Table or ColumnHost.ReturnTable && entry.Column.Computed is not null)
+                .Where(static entry => entry.Host is ColumnHost.Table or ColumnHost.ReturnTable && entry.Column is { Computed: not null, GraphKind: GraphColumnKind.None })
                 .Select(entry => (SqlValue[])[
                     .. familyOrdinals.Select(i => entry.Row[i]),
                     entry.Host == ColumnHost.Table && entry.Column.ComputedDefinition is { } definition ? SqlValue.FromNVarchar(definition) : SqlValue.Null(SqlType.NVarchar),
@@ -631,7 +631,9 @@ internal static partial class BuiltInResources
                 SqlValue.FromByte(scale),
                 SqlValue.FromBoolean(col.Nullable),
                 SqlValue.FromBoolean(declared ? col.Identity is not null : col.IdentitySource is not null),
-                declared ? SqlValue.FromBoolean(col.Computed is not null) : falseBit,
+                // A graph pseudo-column computes its value but reads as an
+                // ordinary column here (probed 2026-09-27 against SQL Server 2025).
+                declared ? SqlValue.FromBoolean(col.Computed is not null && col.GraphKind == GraphColumnKind.None) : falseBit,
                 CollationFor(col),
                 SqlValue.FromBoolean(col.IsSparse),
                 falseBit,
@@ -648,7 +650,7 @@ internal static partial class BuiltInResources
                 nullSysName,
                 nullInt,
                 SqlValue.FromByte((byte)col.GeneratedAs),
-                nullInt,
+                col.GraphKind == GraphColumnKind.None ? nullInt : SqlValue.FromInt32((int)col.GraphKind),
                 falseBit,
                 SqlValue.FromBoolean(col.IsHidden),
                 SqlValue.FromBoolean(declared && col.MaskingFunction is not null),
@@ -661,7 +663,7 @@ internal static partial class BuiltInResources
                 GeneratedAlwaysDescFor(col),
                 nullEncryptionTypeDesc,
                 nullSysName,
-                nullGraphTypeDesc,
+                GraphColumns.Describe(col.GraphKind) is { } graphTypeDesc ? SqlValue.FromString(nvarchar60Catalog, graphTypeDesc) : nullGraphTypeDesc,
                 falseBit,
                 col.Type is VectorSqlType ? float32Id : nullVectorBaseTypeId,
             ];
@@ -1116,6 +1118,23 @@ internal static partial class BuiltInResources
                     SqlValue.FromNVarchar("FOREIGN_KEY_CONSTRAINT"),
                     SqlValue.FromDateTime(fk.CreateDate),
                     SqlValue.FromDateTime(fk.ModifyDate),
+                    shipped,
+                    notPublished,
+                    notPublished,
+                ];
+            }
+            foreach (var ec in t.EdgeConstraints)
+            {
+                yield return [
+                    SqlValue.FromInt32(ec.ObjectId),
+                    SqlValue.FromSystemName(ec.Name),
+                    schemaIdValue,
+                    tableObjectId,
+                    nullPrincipal,
+                    SqlValue.FromChar(charTwo, "EC"),
+                    SqlValue.FromNVarchar("EDGE_CONSTRAINT"),
+                    SqlValue.FromDateTime(ec.CreateDate),
+                    SqlValue.FromDateTime(ec.ModifyDate),
                     shipped,
                     notPublished,
                     notPublished,

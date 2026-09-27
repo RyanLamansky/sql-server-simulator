@@ -116,6 +116,21 @@ internal sealed class HeapTable : SchemaObject
         return false;
     }
 
+    /// <summary>Whether <c>CREATE TABLE … AS NODE | AS EDGE</c> made this a graph table.</summary>
+    public GraphTableKind GraphKind;
+
+    /// <summary>
+    /// The <c>graph_id</c> the next row of a node or edge table takes. An
+    /// explicit <c>$node_id</c> / <c>$edge_id</c> above it raises it past the
+    /// written id, a rolled-back row's id isn't reissued, and
+    /// <c>TRUNCATE TABLE</c> doesn't reset it (probed 2026-09-27 against SQL
+    /// Server 2025).
+    /// </summary>
+    public long NextGraphId;
+
+    /// <summary>The <c>CONNECTION</c> constraints an edge table carries.</summary>
+    public readonly List<EdgeConstraint> EdgeConstraints = [];
+
     public override string ObjectTypeCode => "U ";
     public override string ObjectTypeDescription => "USER_TABLE";
 

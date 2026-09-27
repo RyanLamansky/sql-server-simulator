@@ -880,6 +880,8 @@ internal sealed partial class Selection
         var savedNextValueForRejection = context.NextValueForRejection;
         var aggregates = new List<AggregateExpression>();
         var windows = new List<WindowExpression>();
+        var savedGraphPathAggregates = context.GraphPathAggregates;
+        context.GraphPathAggregates = [];
         var savedEnclosingAggregateCollector = context.EnclosingAggregateCollector;
         context.EnclosingAggregateCollector = savedAggregateCollector;
         context.AggregateCollector = aggregates;
@@ -892,6 +894,7 @@ internal sealed partial class Selection
         {
             context.AggregateCollector = savedAggregateCollector;
             context.WindowCollector = savedWindowCollector;
+            context.GraphPathAggregates = savedGraphPathAggregates;
             context.EnclosingAggregateCollector = savedEnclosingAggregateCollector;
             context.OuterTypeResolver = savedOuterTypeResolver;
             context.ScopeSources = savedScopeSources;
@@ -949,6 +952,13 @@ internal sealed partial class Selection
         public bool GroupingSetsWritten;
 
         public BooleanExpression? Having;
+
+        /// <summary>
+        /// The sources a WHERE clause's <c>MATCH</c> bound, which lead a bare
+        /// <c>SELECT *</c> in real's order rather than the FROM clause's.
+        /// </summary>
+        public Expressions.MatchScope? Match;
+
         public readonly List<OrderBySpec> OrderBy = [];
 
         /// <summary>
@@ -1683,7 +1693,7 @@ internal sealed partial class Selection
                         sources = preParsedSources;
                         joins = preParsedJoins!;
                         context.RestoreCheckpoint(afterSources);
-                        ConsumeWhereOrderByWithOuterScope(context, fromClause, [.. sources], allowOrderBy, scope);
+                        ConsumeWhereOrderByWithOuterScope(context, fromClause, [.. sources], [.. joins], allowOrderBy, scope);
                     }
                     else
                     {
@@ -1709,7 +1719,8 @@ internal sealed partial class Selection
                         topWithTies = false;
                     }
                     RejectMisplacedIdentityFunction(context, expressions, intoTarget);
-                    ExpandStars(context.Batch.CurrentDatabase.Collation, expressions, sources);
+                    ApplyShortestPath(context, scope, sources, joins, expressions, fromClause);
+                    ExpandStars(context.Batch.CurrentDatabase.Collation, expressions, fromClause.Match?.StarOrder(sources) ?? sources);
                     JoinSpec[] joinArray = [.. joins];
                     var plan = BuildSqlProjection(context.Batch, [.. sources], joinArray, expressions, fromClause, distinct, topExpression, topPercent, topWithTies, aggregates, windows, scope, ResolveAssignmentMode(expressions), intoTarget, context.ReadColumnSink);
                     // The decorrelated key plan an enclosing EXISTS / IN can
@@ -2057,7 +2068,7 @@ internal sealed partial class Selection
         ParseSourcesAndJoins(context, scope, sources, joins);
 
         // Now register the multi-source type resolver and parse WHERE / etc.
-        ConsumeWhereOrderByWithOuterScope(context, fromClause, [.. sources], allowOrderBy, scope);
+        ConsumeWhereOrderByWithOuterScope(context, fromClause, [.. sources], [.. joins], allowOrderBy, scope);
     }
 
     /// <summary>
@@ -2097,7 +2108,7 @@ internal sealed partial class Selection
         // for the chain's first ParseSingleFromSource call.
         while (context.Token is Operator { Character: ',' })
         {
-            joins.Add(new JoinSpec(JoinKind.Cross, onPredicate: null));
+            joins.Add(new JoinSpec(JoinKind.Cross, onPredicate: null) { IsComma = true });
             ParseExplicitJoinChain(context, scope, sources, joins, siblingCandidates);
         }
 
@@ -2357,7 +2368,11 @@ internal sealed partial class Selection
     {
         var scope = sources.GetRange(scopeStart, sources.Count - scopeStart).ToArray();
         var saved = context.OuterTypeResolver;
+        var savedMatchScope = context.MatchScope;
         context.OuterTypeResolver = name => ResolveColumnTypeAcrossSources(scope, name, outerTypeResolver);
+        // A MATCH in an ON binds too, against the ON's own sources, every one
+        // of them joined (Msg 13920).
+        context.MatchScope = new Expressions.MatchScope { Sources = scope, AllJoined = true };
         try
         {
             return BooleanExpression.SimplifyForFilter(BooleanExpression.Parse(context), context);
@@ -2365,6 +2380,7 @@ internal sealed partial class Selection
         finally
         {
             context.OuterTypeResolver = saved;
+            context.MatchScope = savedMatchScope;
         }
     }
 
@@ -3177,7 +3193,8 @@ internal sealed partial class Selection
                 // Optional FOR SYSTEM_TIME clause between the table name and
                 // any alias. Only legal on a system-versioned parent; a
                 // non-temporal target is Msg 13544.
-                var temporalRowSource = ParseOptionalForSystemTime(context, heapTable);
+                var forPath = ParseOptionalForPath(context);
+                var temporalRowSource = forPath ? null : ParseOptionalForSystemTime(context, heapTable);
 
                 // FOR SYSTEM_TIME leaves the cursor at the post-clause lookahead
                 // token (its ALL / AS-OF-expr parse already advanced past the
@@ -3221,7 +3238,10 @@ internal sealed partial class Selection
                     viaSynonym: heapSynonym,
                     autoElementName: heapAlias ?? objectName.ToString(),
                     writtenObjectName: objectName.ToString(),
-                    unaliasedName: heapAlias is null ? FromSource.Resolved(objectName, context.Batch.CurrentDatabase) : null);
+                    unaliasedName: heapAlias is null ? FromSource.Resolved(objectName, context.Batch.CurrentDatabase) : null)
+                {
+                    ForPath = forPath,
+                };
 
             // Table-variable source: <c>FROM @t [alias]</c>. Routes through
             // BatchContext.TableVariables instead of the regular schema dict;
@@ -3833,6 +3853,7 @@ internal sealed partial class Selection
         ParserContext context,
         FromClause fromClause,
         FromSource[] sources,
+        JoinSpec[] joins,
         bool allowOrderBy,
         QueryScope scope)
     {
@@ -3840,10 +3861,12 @@ internal sealed partial class Selection
 
         var saved = context.OuterTypeResolver;
         var savedScopeSources = context.ScopeSources;
+        var savedScopeJoins = context.ScopeJoins;
         context.OuterTypeResolver = MyResolver;
         // A WHERE-clause CONTAINS / FREETEXT binds its column specification
-        // against these same sources.
+        // against these same sources, as does a MATCH, which reads the joins too.
         context.ScopeSources = sources;
+        context.ScopeJoins = joins;
         try
         {
             ConsumeWhereAndOrderBy(context, fromClause, allowOrderBy, scope);
@@ -3852,6 +3875,7 @@ internal sealed partial class Selection
         {
             context.OuterTypeResolver = saved;
             context.ScopeSources = savedScopeSources;
+            context.ScopeJoins = savedScopeJoins;
         }
     }
 
@@ -3964,10 +3988,22 @@ internal sealed partial class Selection
         {
             var collector = context.AggregateCollector;
             var aggregatesBefore = collector?.Count ?? 0;
-            while (context.Token is ReservedKeyword { Keyword: Keyword.Where })
+            var savedMatchScope = context.MatchScope;
+            try
             {
-                fromClause.Excluders.Add(BooleanExpression.SimplifyForFilter(
-                    BooleanExpression.Parse(context.MoveNextRequiredReturnSelf()), context));
+                while (context.Token is ReservedKeyword { Keyword: Keyword.Where })
+                {
+                    // A MATCH predicate binds only here, against this scope.
+                    context.MatchScope = new Expressions.MatchScope();
+                    fromClause.Excluders.Add(BooleanExpression.SimplifyForFilter(
+                        BooleanExpression.Parse(context.MoveNextRequiredReturnSelf()), context));
+                    if (context.MatchScope.Edges.Count > 0 || context.MatchScope.ShortestPath is not null)
+                        fromClause.Match = context.MatchScope;
+                }
+            }
+            finally
+            {
+                context.MatchScope = savedMatchScope;
             }
             if (collector is not null && collector.Count > aggregatesBefore)
                 fromClause.WhereAggregates = collector.GetRange(aggregatesBefore, collector.Count - aggregatesBefore);

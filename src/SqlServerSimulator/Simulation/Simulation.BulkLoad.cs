@@ -218,6 +218,9 @@ partial class Simulation
                 rowValues[identityOrdinal] = CoerceForIdentity(GenerateIdentity(identityColumn), identityColumn);
             }
 
+            if (table.GraphKind != GraphTableKind.None)
+                SettleGraphColumns(table, rowValues, plan.TargetColumns, batch);
+
             for (var i = 0; i < table.Columns.Length; i++)
             {
                 if (table.Columns[i].Type == SqlType.RowVersion)

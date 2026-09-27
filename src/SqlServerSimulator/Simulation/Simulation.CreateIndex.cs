@@ -444,7 +444,10 @@ partial class Simulation
             if (collation.Equals(table.Columns[i].Name, columnName))
                 return i;
         }
-        throw SimulatedSqlException.IndexColumnMissing(columnName);
+        // A graph pseudo-column keys an index as the column it names.
+        return columnName.StartsWith('$') && Array.FindIndex(table.Columns, c => GraphColumns.IsPseudoColumnFor(c.Name, columnName)) is var pseudo and >= 0
+            ? pseudo
+            : throw SimulatedSqlException.IndexColumnMissing(columnName);
     }
 
     /// <summary>

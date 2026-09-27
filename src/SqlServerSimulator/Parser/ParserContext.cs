@@ -517,6 +517,27 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     public FromSource[]? ScopeSources;
 
     /// <summary>
+    /// The joins between <see cref="ScopeSources"/>, installed alongside them,
+    /// so a <c>MATCH</c> predicate can tell a comma-listed source from one
+    /// joined with <c>JOIN</c> or <c>APPLY</c> (Msg 13920).
+    /// </summary>
+    public JoinSpec[]? ScopeJoins;
+
+    /// <summary>
+    /// The sources the current WHERE clause's <c>MATCH</c> predicates have
+    /// bound, non-null only while a WHERE parses — which is also the only place
+    /// <c>MATCH</c> is recognized.
+    /// </summary>
+    public Expressions.MatchScope? MatchScope;
+
+    /// <summary>
+    /// The <c>WITHIN GROUP (GRAPH PATH)</c> aggregates the query being parsed
+    /// has met, which its <c>SHORTEST_PATH</c> computes; one list per query
+    /// level, installed alongside <see cref="AggregateCollector"/>.
+    /// </summary>
+    public List<Expressions.GraphPathAggregate>? GraphPathAggregates;
+
+    /// <summary>
     /// Common-table-expression bindings registered by a <c>WITH</c> prefix
     /// that scope to the immediately-following statement. Populated by
     /// <c>Simulation.ParseCteBindings</c> before the SELECT / INSERT /

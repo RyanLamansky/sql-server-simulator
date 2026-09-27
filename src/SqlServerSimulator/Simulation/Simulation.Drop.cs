@@ -725,6 +725,13 @@ partial class Simulation
         // self-reference doesn't count; it goes with the table.
         if (removedTable.IncomingForeignKeys.Exists(fk => fk.ChildTable != removedTable))
             throw SimulatedSqlException.CannotDropTableReferencedByForeignKey(name.ToString());
+        // A node table an edge constraint names can't go either, though its
+        // own edges may (probed 2026-09-27 against SQL Server 2025).
+        if (removedTable.GraphKind == GraphTableKind.Node && schema is not null
+            && EdgeConstraintsReferencing(schema.Database, removedTable).Exists(pair => !ReferenceEquals(pair.Edge, removedTable)))
+        {
+            throw SimulatedSqlException.NodeTableReferencedByEdgeConstraint(name.Leaf);
+        }
         // Schema-binding protection, which real applies after the FK gate
         // (probe-confirmed: a table that is both an FK parent and a
         // schema-bound view's base reports Msg 3726). Temp tables are exempt —

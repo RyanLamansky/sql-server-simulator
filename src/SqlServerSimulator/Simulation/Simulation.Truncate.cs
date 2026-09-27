@@ -90,6 +90,8 @@ partial class Simulation
         // against SQL Server 2025).
         if (table.IncomingForeignKeys.Exists(fk => fk.ChildTable != table))
             throw SimulatedSqlException.CannotTruncateTableReferencedByForeignKey(name.Written);
+        if (table.GraphKind == GraphTableKind.Node && EdgeConstraintsReferencing(context.Batch.DatabaseFor(table), table).Count > 0)
+            throw SimulatedSqlException.CannotTruncateNodeTableReferencedByEdgeConstraint(name.Written);
 
         // Sch-M on the target for the duration of the statement — waits for
         // any concurrent Sch-S holders to drain before the destructive page-

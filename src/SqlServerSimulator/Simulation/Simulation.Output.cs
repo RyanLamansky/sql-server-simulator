@@ -145,6 +145,8 @@ partial class Simulation
                 continue;
             }
             var expr = Expression.Parse(context);
+            if (table.GraphKind != GraphTableKind.None)
+                GraphColumns.BindPseudoReferences(expr, table.Columns);
             switch (context.Token)
             {
                 case ReservedKeyword { Keyword: Keyword.As }:
@@ -474,6 +476,8 @@ partial class Simulation
                 continue;
             }
             var expr = Expression.Parse(context);
+            if (destinationTable.GraphKind != GraphTableKind.None)
+                GraphColumns.BindPseudoReferences(expr, destinationTable.Columns);
             switch (context.Token)
             {
                 case ReservedKeyword { Keyword: Keyword.As }:

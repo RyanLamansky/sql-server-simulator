@@ -809,7 +809,7 @@ partial class Simulation
         if (context.Token is ReservedKeyword { Keyword: Keyword.Where })
         {
             context.MoveNextRequired();
-            where = Selection.ParseAndBindPredicate(context, tupleTypeResolver);
+            where = Selection.ParseAndBindPredicate(context, tupleTypeResolver, sources, joins);
         }
 
         // Skip mode has bound everything it needs; enumerating the join would
@@ -1298,6 +1298,8 @@ partial class Simulation
                         break;
                     }
                 }
+                if (columnOrdinal < 0 && colName.StartsWith('$'))
+                    columnOrdinal = Array.FindIndex(table.Columns, c => GraphColumns.IsPseudoColumnFor(c.Name, colName));
                 if (columnOrdinal < 0)
                     throw SimulatedSqlException.InvalidColumnName(colName);
             }
@@ -1367,6 +1369,8 @@ partial class Simulation
     private static void RejectUnmodifiableSetTarget(HeapTable table, int columnOrdinal, Database database)
     {
         var column = table.Columns[columnOrdinal];
+        if (GraphColumns.IsInternal(column.GraphKind))
+            throw SimulatedSqlException.InternalGraphColumnAccess(column.Name, state: 3);
         if (column.Identity is not null)
             throw SimulatedSqlException.CannotUpdateIdentityColumn(column.Name);
         if (column.Computed is not null)

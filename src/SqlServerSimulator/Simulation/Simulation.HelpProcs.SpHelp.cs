@@ -598,6 +598,7 @@ partial class Simulation
         "AF" => "aggregate function",
         "C " => "check cns",
         "D " => "default (maybe cns)",
+        "EC" => "edge cns",
         "F " => "foreign key cns",
         "FN" => "scalar function",
         "FS" => "assembly scalar function",

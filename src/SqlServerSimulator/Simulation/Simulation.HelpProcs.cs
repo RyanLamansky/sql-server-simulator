@@ -94,6 +94,8 @@ partial class Simulation
 
     private static readonly string[] SpHelpReferencingFkColumnNames = ["Table is referenced by foreign key"];
 
+    private static readonly string[] SpHelpReferencingEdgeColumnNames = ["Node table is referenced by edge constraints"];
+
     /// <summary>
     /// Handles <c>EXEC sp_helptext @objname [, @columnname]</c> — the source
     /// text of a programmable module (procedure / view / function / trigger),
@@ -465,12 +467,24 @@ partial class Simulation
         if (referencing.Count == 0)
         {
             yield return HelpNoReferencingForeignKeys(batch, procedureName, 353, objectName);
-            yield break;
+        }
+        else
+        {
+            referencing.Sort(ByFirstCell);
+            yield return new SimulatedSqlResultSet(
+                SpHelpReferencingFkSchema, SpHelpReferencingFkColumnNames, referencing);
         }
 
-        referencing.Sort(ByFirstCell);
-        yield return new SimulatedSqlResultSet(
-            SpHelpReferencingFkSchema, SpHelpReferencingFkColumnNames, referencing);
+        // A node table closes with the edge constraints naming it (probed
+        // 2026-09-27 against SQL Server 2025).
+        if (target.Table is { GraphKind: GraphTableKind.Node } node
+            && EdgeConstraintsReferencing(database, node) is { Count: > 0 } edges)
+        {
+            var edgeRows = edges.ConvertAll(pair => new[] { SqlValue.FromString(HelpReferencingFkType, $"{HelpTableReference(database, pair.Edge)}: {pair.Constraint.Name}") });
+            edgeRows.Sort(ByFirstCell);
+            yield return HelpBlankLine(batch, procedureName, 357);
+            yield return new SimulatedSqlResultSet(SpHelpReferencingFkSchema, SpHelpReferencingEdgeColumnNames, edgeRows);
+        }
     }
 
     // A message a system procedure prints, in its place among its result sets;
@@ -675,6 +689,16 @@ partial class Simulation
                 $"REFERENCES {HelpTableReference(database, fk.ReferencedTable)} ({string.Join(", ", parentColumns)})")));
         }
 
+        // An edge constraint lists its clauses as written; its delete action
+        // reads No Action even under ON DELETE CASCADE (probed 2026-09-27
+        // against SQL Server 2025).
+        foreach (var edge in table.EdgeConstraints)
+        {
+            var clauses = string.Join(", ", edge.Clauses.Select(clause => $"{HelpTableReference(database, clause.From)} TO {HelpTableReference(database, clause.To)}"));
+            rows.Add((edge.Name, false, Cells(
+                "EDGE CONSTRAINT", edge.Name, "No Action", "(n/a)", "Enabled", "(n/a)", $"CONNECTION ({clauses})")));
+        }
+
         rows.Sort(static (a, b) =>
         {
             var cmp = string.Compare(a.SortName, b.SortName, StringComparison.OrdinalIgnoreCase);
@@ -784,6 +808,8 @@ partial class Simulation
                 yield return (key.Name, key.Kind == KeyConstraintKind.PrimaryKey ? "PK" : "UQ", table, null);
             foreach (var fk in table.OutgoingForeignKeys)
                 yield return (fk.Name, "F ", table, null);
+            foreach (var edge in table.EdgeConstraints)
+                yield return (edge.Name, "EC", table, null);
         }
     }
 }

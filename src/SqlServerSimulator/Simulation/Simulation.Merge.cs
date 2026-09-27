@@ -736,8 +736,10 @@ partial class Simulation
                 // translates to the base table column, rejecting writes
                 // to a derived projection (Msg 4406).
                 var col = ResolveInsertTargetColumn(context.Batch.CurrentDatabase.Collation, colTok.Value, destinationTable, sourceView);
-                if (col.Computed is not null)
+                if (col.Computed is not null && col.GraphKind == GraphColumnKind.None)
                     throw SimulatedSqlException.ColumnCannotBeModified(col.Name);
+                if (GraphColumns.IsInternal(col.GraphKind))
+                    throw SimulatedSqlException.InternalGraphColumnAccess(col.Name, state: 1);
                 if (col.Type == SqlType.RowVersion)
                     throw SimulatedSqlException.CannotInsertExplicitTimestamp();
                 if (insertColumns.Contains(col))
@@ -797,7 +799,7 @@ partial class Simulation
                 var defaultCols = new List<HeapColumn>();
                 foreach (var c in destinationTable.Columns)
                 {
-                    if (c.Computed is null && c.Type != SqlType.RowVersion)
+                    if (IsImplicitInsertColumn(c) && c.Type != SqlType.RowVersion)
                         defaultCols.Add(c);
                 }
                 columns = [.. defaultCols];
@@ -1654,11 +1656,14 @@ partial class Simulation
                 rowValues[i] = SqlValue.FromRowVersion(context.Batch.DatabaseFor(destinationTable).AllocateRowVersion());
         }
 
+        if (destinationTable.GraphKind != GraphTableKind.None)
+            SettleGraphColumns(destinationTable, rowValues, clause.InsertColumns, context.Batch);
         EvaluateComputedColumns(destinationTable, rowValues, context.Batch);
         if (!insteadOfInsert)
         {
             EnforceNotNull(destinationTable, rowValues);
             EnforceCheckConstraints(destinationTable, rowValues, context.Batch);
+            EnforceEdgeConstraints(destinationTable, rowValues, context, "MERGE");
         }
 
         // WITH CHECK OPTION on the post-insert row, matching INSERT-through-view.

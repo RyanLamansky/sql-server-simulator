@@ -330,10 +330,8 @@ internal static partial class BuiltInResources
             new("is_system_named", SqlType.Bit, null, false),
         ], EnumerateSysDefaultConstraints);
 
-        // sys.edge_constraints / sys.edge_constraint_clauses: graph edge
-        // constraints (CONNECTION (...) on an edge table). Graph tables aren't
-        // modeled (sys.tables.is_edge is a constant 0), so both ship empty with
-        // the full probe-confirmed shape (SQL Server 2025, 2026-07-16).
+        // sys.edge_constraints / sys.edge_constraint_clauses: an edge table's
+        // CONNECTION (...) constraints, one clause row per node-table pair.
         Sys("edge_constraints",
         [
             new("name", SqlType.SystemName, 128, false),
@@ -353,14 +351,50 @@ internal static partial class BuiltInResources
             new("is_system_named", SqlType.Bit, null, false),
             new("delete_referential_action", SqlType.TinyInt, null, true),
             new("delete_referential_action_desc", nvarchar60Catalog, 60, true),
-        ], static (_, _) => EmptyCatalogRows);
+        ], (batch, database) =>
+            from schema in database.Schemas.Values
+            from table in CatalogTables(schema, batch)
+            from ec in table.EdgeConstraints
+            orderby ec.ObjectId
+            select new SqlValue[]
+            {
+                SqlValue.FromSystemName(ec.Name),
+                SqlValue.FromInt32(ec.ObjectId),
+                SqlValue.Null(SqlType.Int32),
+                SqlValue.FromInt32(table.SchemaId),
+                SqlValue.FromInt32(table.ObjectId),
+                SqlValue.FromChar(charTwo, "EC"),
+                SqlValue.FromString(nvarchar60Catalog, "EDGE_CONSTRAINT"),
+                SqlValue.FromDateTime(ec.CreateDate),
+                SqlValue.FromDateTime(ec.ModifyDate),
+                SqlValue.FromBoolean(false),
+                SqlValue.FromBoolean(false),
+                SqlValue.FromBoolean(false),
+                SqlValue.FromBoolean(false),
+                SqlValue.FromBoolean(ec.IsNotTrusted),
+                SqlValue.FromBoolean(ec.IsSystemNamed),
+                SqlValue.FromByte(ec.CascadeOnDelete ? (byte)1 : (byte)0),
+                SqlValue.FromString(nvarchar60Catalog, ec.CascadeOnDelete ? "CASCADE" : "NO_ACTION"),
+            });
         Sys("edge_constraint_clauses",
         [
             new("object_id", SqlType.Int32, null, false),
             new("clause_number", SqlType.Int32, null, false),
             new("from_object_id", SqlType.Int32, null, false),
             new("to_object_id", SqlType.Int32, null, false),
-        ], static (_, _) => EmptyCatalogRows);
+        ], (batch, database) =>
+            from schema in database.Schemas.Values
+            from table in CatalogTables(schema, batch)
+            from ec in table.EdgeConstraints
+            orderby ec.ObjectId
+            from clause in ec.Clauses.Select((pair, index) => (pair.From, pair.To, Number: index + 1))
+            select new SqlValue[]
+            {
+                SqlValue.FromInt32(ec.ObjectId),
+                SqlValue.FromInt32(clause.Number),
+                SqlValue.FromInt32(clause.From.ObjectId),
+                SqlValue.FromInt32(clause.To.ObjectId),
+            });
 
         // sys.events: one row per event a trigger or event notification fires
         // for — the broader superset of sys.trigger_events (which the simulator

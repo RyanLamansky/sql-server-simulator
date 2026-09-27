@@ -103,5 +103,7 @@ internal static class ConstraintLookup
             yield return new(check.ObjectId, check.Name, "C", table, schema);
         foreach (var foreignKey in table.OutgoingForeignKeys)
             yield return new(foreignKey.ObjectId, foreignKey.Name, "F", table, schema);
+        foreach (var edge in table.EdgeConstraints)
+            yield return new(edge.ObjectId, edge.Name, "EC", table, schema);
     }
 }

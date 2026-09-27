@@ -501,6 +501,8 @@ partial class Simulation
             }
             if (toDropOrdinals.Contains(ordinal))
                 throw SimulatedSqlException.DropColumnDoesNotExist(name, table.Name);
+            if (table.Columns[ordinal].GraphKind != GraphColumnKind.None)
+                throw SimulatedSqlException.InternalGraphColumnCannotBeAltered(state: 5);
             toDropOrdinals.Add(ordinal);
         }
 
@@ -763,6 +765,8 @@ partial class Simulation
             throw SimulatedSqlException.AlterColumnDoesNotExist(columnName, table.Name);
 
         var existingCol = table.Columns[ordinal];
+        if (existingCol.GraphKind != GraphColumnKind.None)
+            throw SimulatedSqlException.InternalGraphColumnCannotBeAltered(state: 2);
         if (existingCol.Computed is not null)
             throw SimulatedSqlException.CannotAlterColumnOfKind(columnName, "COMPUTED");
         if (existingCol.Type == SqlType.RowVersion)

@@ -42,8 +42,11 @@ internal sealed partial class Selection
                         return (s, c);
                 }
                 // Qualifier matched but the column doesn't exist in that
-                // source; fall through to outer (caller handles).
-                return (-1, -1);
+                // source; fall through to outer (caller handles) — unless the
+                // name is a graph pseudo-column the source carries.
+                return name.Leaf.StartsWith('$') && GraphColumns.FindPseudoColumn(sources[s].ColumnNames, name.Leaf) is var pseudo and >= 0
+                    ? (s, pseudo)
+                    : (-1, -1);
             }
             // No source's qualifier matches the prefix → outer fallthrough.
             return (-1, -1);
@@ -64,6 +67,17 @@ internal sealed partial class Selection
                         foundColumn = c;
                     }
                     matches++;
+                }
+            }
+        }
+        if (matches == 0 && name.Leaf.StartsWith('$'))
+        {
+            for (var s = 0; s < sources.Length; s++)
+            {
+                if (GraphColumns.FindPseudoColumn(sources[s].ColumnNames, name.Leaf) is var pseudo and >= 0)
+                {
+                    if (matches++ == 0)
+                        (foundSource, foundColumn) = (s, pseudo);
                 }
             }
         }
@@ -513,8 +527,11 @@ internal sealed partial class Selection
     /// target columns while typing its own projection — then binds the
     /// predicate itself through <see cref="BooleanExpression.Bind"/>.
     /// </summary>
-    internal static BooleanExpression ParseAndBindPredicate(ParserContext context, Func<MultiPartName, SqlType> resolveColumnType)
+    internal static BooleanExpression ParseAndBindPredicate(ParserContext context, Func<MultiPartName, SqlType> resolveColumnType, FromSource[]? matchSources = null, JoinSpec[]? matchJoins = null)
     {
+        // A joined UPDATE / DELETE's WHERE takes a MATCH over its FROM sources.
+        var savedMatchScope = context.MatchScope;
+        context.MatchScope = matchSources is null ? null : new MatchScope { Sources = matchSources, Joins = matchJoins };
         var saved = context.OuterTypeResolver;
         context.OuterTypeResolver = resolveColumnType;
         // A DML WHERE is one of the eight clauses real's Msg 11720 names, and
@@ -536,6 +553,7 @@ internal sealed partial class Selection
             context.OuterTypeResolver = saved;
             context.NextValueForRejection = savedRejection;
             context.AggregateCollector = savedCollector;
+            context.MatchScope = savedMatchScope;
         }
         if (whereAggregates.Count > 0)
             throw SimulatedSqlException.AggregateInWhereClause();
@@ -1058,7 +1076,11 @@ internal sealed partial class Selection
         for (var i = 0; i < expressions.Count; i++)
         {
             outputSchema[i] = expressions[i].GetSqlType(parseBatch, readColumnSink is null ? ResolveColumnType : RecordingResolver);
-            outputColumnNames[i] = expressions[i].Name;
+            outputColumnNames[i] = expressions[i] is Reference { ReferencedName.Leaf: ['$', ..] } pseudo && FindSourceColumn(sources, pseudo.ReferencedName) is ( >= 0, var pseudoColumn) and var (pseudoSource, _)
+                // A graph pseudo-column names its result after the internal
+                // column it reads (probed 2026-09-27 against SQL Server 2025).
+                ? sources[pseudoSource].ColumnNames[pseudoColumn]
+                : expressions[i].Name;
         }
 
         // A reference to a numeric-spelled column names what reads it
@@ -1826,7 +1848,9 @@ internal sealed partial class Selection
         return column switch
         {
             { Identity: not null } => 0x10,
-            { Computed: not null } => 0x20,
+            // A graph pseudo-column reads as updatable, not computed (probed
+            // 2026-09-27 against SQL Server 2025).
+            { Computed: not null, GraphKind: GraphColumnKind.None } => 0x20,
             { Type: RowVersionSqlType } => 0x00,
             _ => 0x08,
         };

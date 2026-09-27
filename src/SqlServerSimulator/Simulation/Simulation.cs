@@ -2387,7 +2387,7 @@ public sealed partial class Simulation
         || error.EndedColumnRewrite
         || ((!batch.BatchAborted || error.EndedTriggerBody || error.Number == 127)
             && batch.CurrentStatement.WritesRows
-            && error.Number is 127 or 220 or 232 or 513 or 515 or 547 or 550 or 2601 or 2627 or 2628 or 8115 or 8134 or 8152 or 16947);
+            && error.Number is 127 or 220 or 232 or 513 or 515 or 547 or 550 or 2601 or 2627 or 2628 or 8115 or 8134 or 8152 or 13921 or 16947);
 
     /// <summary>
     /// True for the parse-time error real SQL Server defers to bind time —

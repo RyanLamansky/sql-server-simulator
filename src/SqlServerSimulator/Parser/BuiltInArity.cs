@@ -173,6 +173,7 @@ internal readonly struct BuiltInArity(int min, int max, BuiltInArity.Refusal bel
         var checkpoint = context.SaveCheckpoint();
         var count = CountArguments(context);
         var within = false;
+        var graphPath = false;
         var nullTreatment = false;
         var over = false;
         if (count >= 0 && context.MoveNext())
@@ -180,6 +181,7 @@ internal readonly struct BuiltInArity(int min, int max, BuiltInArity.Refusal bel
             if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Within })
             {
                 within = true;
+                graphPath = Expressions.GraphPathAggregate.IsAhead(context);
                 SkipWithinGroup(context);
             }
             if (context.Token is UnquotedString { Value: var word }
@@ -213,7 +215,7 @@ internal readonly struct BuiltInArity(int min, int max, BuiltInArity.Refusal bel
                     throw SimulatedSqlException.FunctionMustHaveOverClause(name, state: 1);
                 break;
             case WindowShape.Value:
-                if (!over)
+                if (!over && !graphPath)
                     throw SimulatedSqlException.FunctionMustHaveOverClause(name, state: 1);
                 if (count != arguments)
                     throw SimulatedSqlException.FunctionRequiresNArguments(name, arguments);
@@ -347,6 +349,7 @@ internal readonly struct BuiltInArity(int min, int max, BuiltInArity.Refusal bel
             "DECOMPRESS" => Exactly("Decompress", 1),
             "DEGREES" => Exactly("degrees", 1),
             "DIFFERENCE" => Exactly("difference", 2),
+            "EDGE_ID_FROM_PARTS" => Exactly("edge_id_from_parts", 2),
             "EOMONTH" => Between("eomonth", 1, 2),
             "ERROR_LINE" => Exactly("error_line", 0),
             "ERROR_MESSAGE" => Exactly("error_message", 0),
@@ -373,6 +376,8 @@ internal readonly struct BuiltInArity(int min, int max, BuiltInArity.Refusal bel
             "GETUTCDATE" => Exactly("getutcdate", 0),
             "GET_BIT" => Exactly("get_bit", 2),
             "GET_FILESTREAM_TRANSACTION_CONTEXT" => Exactly("get_filestream_transaction_context", 0),
+            "GRAPH_ID_FROM_EDGE_ID" => Exactly("graph_id_from_edge_id", 1),
+            "GRAPH_ID_FROM_NODE_ID" => Exactly("graph_id_from_node_id", 1),
             "GREATEST" => Between("greatest", 1, 254),
             "GROUPING" => Exactly("grouping", 1),
             "HASHBYTES" => Exactly("hashbytes", 2),
@@ -414,10 +419,13 @@ internal readonly struct BuiltInArity(int min, int max, BuiltInArity.Refusal bel
             "NCHAR" => Exactly("nchar", 1),
             "NEWID" => Exactly("newid", 0),
             "NEWSEQUENTIALID" => Exactly("newsequentialid", 0),
+            "NODE_ID_FROM_PARTS" => Exactly("node_id_from_parts", 2),
             "OBJECTPROPERTY" => Exactly("objectproperty", 2),
             "OBJECTPROPERTYEX" => Exactly("objectpropertyex", 2),
             "OBJECT_DEFINITION" => new(1, 2, new(189, "object_definition", 1, 3, 1), new(174, "object_definition", 1, 0, 5)),
             "OBJECT_ID" => Between("object_id", 1, 2),
+            "OBJECT_ID_FROM_EDGE_ID" => Exactly("object_id_from_edge_id", 1),
+            "OBJECT_ID_FROM_NODE_ID" => Exactly("object_id_from_node_id", 1),
             "OBJECT_NAME" => Between("object_name", 1, 2),
             "OBJECT_SCHEMA_NAME" => Between("object_schema_name", 1, 2),
             "ORIGINAL_DB_NAME" => Exactly("original_db_name", 0),

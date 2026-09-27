@@ -52,6 +52,12 @@ internal sealed class FromSource(
     public readonly string? Qualifier = qualifier;
 
     /// <summary>
+    /// Written <c>FOR PATH</c>: a node or edge table a <c>SHORTEST_PATH</c>
+    /// recurses over, whose columns only graph path aggregates may read.
+    /// </summary>
+    public bool ForPath;
+
+    /// <summary>
     /// The object this source names, spelled as the FROM clause wrote it and
     /// with any alias ignored — <c>g1</c>, <c>dbo.g1</c>, <c>@t</c>. Null for a
     /// source that has no object of its own (a derived table, a CTE, a table
@@ -415,6 +421,13 @@ internal sealed class JoinSpec(JoinKind kind, BooleanExpression? onPredicate)
 {
     public readonly JoinKind Kind = kind;
     public readonly BooleanExpression? OnPredicate = onPredicate;
+
+    /// <summary>
+    /// Whether this join is a comma in the FROM list rather than a written
+    /// <c>CROSS JOIN</c>, which the two otherwise share; <c>MATCH</c> accepts
+    /// only comma-listed sources.
+    /// </summary>
+    public bool IsComma;
 
     /// <summary>
     /// The number of contiguous flat <c>sources[]</c> slots this join's right

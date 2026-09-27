@@ -178,6 +178,8 @@ internal abstract class BooleanExpression : ExpressionNode
             context.MoveNextRequired();
             operands.Add(ParseAnd(context));
         }
+        if (context.MatchScope is { Edges.Count: > 0 })
+            Expressions.MatchPredicate.RejectUnder(operands);
         var chain = new OrExpression([.. operands]);
         return FoldConstantChain(chain, operands, context, absorbing: true);
     }
@@ -324,6 +326,8 @@ internal abstract class BooleanExpression : ExpressionNode
             context.MoveNextRequired();
         }
         var atom = ParseAtom(context);
+        if (negations > 0 && context.MatchScope is { Edges.Count: > 0 })
+            Expressions.MatchPredicate.RejectUnder([atom]);
         return negations % 2 == 1 ? new NotExpression(atom) : atom;
     }
 
@@ -377,6 +381,11 @@ internal abstract class BooleanExpression : ExpressionNode
             ReservedKeyword { Keyword: Keyword.Contains or Keyword.FreeText }
                 => Expressions.FullTextPredicate.Parse(context),
             ReservedKeyword { Keyword: Keyword.Exists } => ParseExists(context),
+            // MATCH is an unreserved word that means the graph predicate only
+            // in a WHERE clause over comma-listed sources (see MatchPredicate).
+            UnquotedString { Value: var match } when context.MatchScope is not null
+                && match.Equals("MATCH", StringComparison.OrdinalIgnoreCase)
+                && Expressions.MatchPredicate.IsAhead(context) => Expressions.MatchPredicate.Parse(context),
             // REGEXP_LIKE is reserved (at compatibility level 170, where it
             // ships) and boolean-only — real raises Msg 156 for
             // `SELECT REGEXP_LIKE(a, b)`, so it binds here rather than in
@@ -1216,6 +1225,12 @@ internal abstract class BooleanExpression : ExpressionNode
     /// planner recovers the individual key equalities.
     /// </summary>
     internal static BooleanExpression And(BooleanExpression left, BooleanExpression right) => new AndExpression([left, right]);
+
+    /// <summary>An n-ary <c>AND</c> over <paramref name="operands"/>, for a predicate a construct desugars into.</summary>
+    internal static BooleanExpression AndAll(BooleanExpression[] operands) => operands.Length == 1 ? operands[0] : new AndExpression(operands);
+
+    /// <summary>A plain <c>left = right</c>, for a predicate a construct desugars into.</summary>
+    internal static BooleanExpression Equality(Expression left, Expression right) => new EqualityExpression(left, right);
 
     /// <summary>
     /// Rebuilds <paramref name="predicate"/> with each of its operands replaced

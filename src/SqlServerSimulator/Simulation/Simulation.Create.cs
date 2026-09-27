@@ -102,7 +102,10 @@ partial class Simulation
             return false;
         var tableName = BatchContext.ParseObjectName(context);
 
-        if (context.GetNextRequired() is not Operator { Character: '(' })
+        // `AS NODE` / `AS EDGE` follows the column list, which an edge table
+        // may leave out altogether.
+        var hasColumnList = context.GetNextRequired() is Operator { Character: '(' };
+        if (!hasColumnList && (context.Token is not ReservedKeyword { Keyword: Keyword.As } || PeekGraphKeyword(context) == GraphTableKind.None))
             return false;
 
         var heapColumns = new List<HeapColumn?>();
@@ -112,8 +115,32 @@ partial class Simulation
         var pendingPeriod = new List<(string StartCol, string EndCol)>();
         var pendingForeignKeys = new List<PendingForeignKey>();
         var pendingIndexes = new List<PendingInlineIndex>();
-        if (!ParseColumnList(context, tableName.Leaf, isTableVariable: false, isTableType: false, heapColumns, pendingKeys, pendingChecks, pendingComputed, pendingPeriod, pendingForeignKeys, pendingIndexes))
-            return false;
+        var pendingEdgeConstraints = new List<PendingEdgeConstraint>();
+        GraphTableKind graphKind;
+        if (hasColumnList)
+        {
+            graphKind = PeekGraphTableKind(context);
+            if (graphKind != GraphTableKind.None)
+                heapColumns.AddRange(GraphColumns.Create(graphKind, tableName.Leaf, context.Batch.Connection.CurrentDatabase.Collation));
+            if (!ParseColumnList(context, tableName.Leaf, isTableVariable: false, isTableType: false, heapColumns, pendingKeys, pendingChecks, pendingComputed, pendingPeriod, pendingForeignKeys, pendingIndexes, pendingEdgeConstraints))
+                return false;
+            if (graphKind != GraphTableKind.None)
+            {
+                context.MoveNextRequired();
+                _ = ConsumeGraphTableClause(context, hasColumnList: true);
+            }
+        }
+        else
+        {
+            graphKind = ConsumeGraphTableClause(context, hasColumnList: false);
+            heapColumns.AddRange(GraphColumns.Create(graphKind, tableName.Leaf, context.Batch.Connection.CurrentDatabase.Collation));
+        }
+        if (graphKind != GraphTableKind.None)
+        {
+            if (BatchContext.IsLocalTempName(tableName.Leaf) || BatchContext.IsGlobalTempName(tableName.Leaf))
+                throw SimulatedSqlException.GraphTableCannotBeTemporary();
+            pendingIndexes.Add(GraphUniqueIndex(heapColumns[0]!, pendingKeys.Count));
+        }
 
         // Optional trailing placement and option clauses, in any order:
         //   ON <filegroup> | ON <scheme>(<column>) [TEXTIMAGE_ON <filegroup>]
@@ -125,8 +152,9 @@ partial class Simulation
         // observed scripts, but we accept either ordering for generality.
         // Parsed regardless of skip mode so the cursor advances cleanly;
         // the resulting historyTableName is only used after the skip-mode
-        // gate below.
-        context.MoveNextOptional();
+        // gate below. A graph table's clause already moved past its list.
+        if (graphKind == GraphTableKind.None)
+            context.MoveNextOptional();
         var tableDataSpace = ParseOptionalDataSpaceClause(context, out var textImageOn);
         SystemVersioningOptions? systemVersioning = null;
         if (context.Token is ReservedKeyword { Keyword: Keyword.With })
@@ -382,7 +410,9 @@ partial class Simulation
         {
             OwningDatabase = owningDatabase,
             UsesAnsiNulls = context.Batch.Connection.AnsiNulls,
+            GraphKind = graphKind,
         };
+        AttachGraphColumns(heapTable);
         PlaceNewTable(context.Batch, heapTable, tableDataSpace, textImageOn);
         if (isGlobalTempTable)
             heapTable.OwnerSession = context.Batch.Connection.Session;
@@ -447,6 +477,8 @@ partial class Simulation
                 ResolveForeignKeys(heapTable, pendingForeignKeys, context);
             if (pendingIndexes.Count > 0)
                 AddInlineIndexes(context.Batch, heapTable, tableName.ToString(), pendingIndexes, indexObjectIds);
+            if (pendingEdgeConstraints.Count > 0)
+                heapTable.EdgeConstraints.AddRange(ResolveEdgeConstraints(context, heapTable, pendingEdgeConstraints));
         }
         catch
         {
@@ -1232,9 +1264,12 @@ partial class Simulation
         List<(int Index, string Name, Expression Expression, bool Persisted, bool Nullable, string Definition)> pendingComputed,
         List<(string StartCol, string EndCol)>? pendingPeriod = null,
         List<PendingForeignKey>? pendingForeignKeys = null,
-        List<PendingInlineIndex>? pendingIndexes = null)
+        List<PendingInlineIndex>? pendingIndexes = null,
+        List<PendingEdgeConstraint>? pendingEdgeConstraints = null)
     {
         var identityCount = 0;
+        // A node or edge table's internal columns arrive already in the list.
+        var leadingColumns = heapColumns.Count;
         // Parallel to heapColumns: true when the user wrote an explicit
         // `NULL` declaration on this column. Required at end-of-list to
         // disambiguate table-level PK promotion (probe-confirmed: real SQL
@@ -1242,7 +1277,7 @@ partial class Simulation
         // PK to NOT NULL; only an explicit `NULL` declaration raises Msg
         // 8111 in that context). Inline PK already handles this inside the
         // parse loop.
-        var explicitNull = new List<bool>();
+        var explicitNull = new List<bool>(Enumerable.Repeat(false, leadingColumns));
         do
         {
             context.MoveNextRequired();
@@ -1256,7 +1291,7 @@ partial class Simulation
             // commas and a leading comma stay Msg 102 as well: only the single
             // trailing one is admitted, which is why this tests for the paren
             // rather than looping. All probe-confirmed against SQL Server 2025.
-            if (!isTableVariable && !isTableType && context.Token is Operator { Character: ')' } && heapColumns.Count > 0)
+            if (!isTableVariable && !isTableType && context.Token is Operator { Character: ')' } && heapColumns.Count > leadingColumns)
                 break;
 
             // Table-level constraint: `[CONSTRAINT name] PRIMARY KEY | UNIQUE (cols)`
@@ -1274,7 +1309,12 @@ partial class Simulation
                 throw SimulatedSqlException.SyntaxErrorNearKeyword("FOREIGN");
             if (context.Token is ReservedKeyword { Keyword: Keyword.Constraint or Keyword.Primary or Keyword.Unique or Keyword.Check or Keyword.Foreign })
             {
-                ParseTableLevelConstraint(context, heapColumns, pendingKeys, pendingChecks, pendingComputed, pendingForeignKeys);
+                ParseTableLevelConstraint(context, heapColumns, pendingKeys, pendingChecks, pendingComputed, pendingForeignKeys, pendingEdgeConstraints);
+                continue;
+            }
+            if (pendingEdgeConstraints is not null && IsEdgeConstraintAhead(context))
+            {
+                pendingEdgeConstraints.Add(ParseEdgeConstraint(context, name: null));
                 continue;
             }
 
@@ -2512,7 +2552,8 @@ partial class Simulation
         List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals, bool? Clustered, IndexOptions Options, bool[] Descending)> pendingKeys,
         List<(string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition, bool NotForReplication)> pendingChecks,
         List<(int Index, string Name, Expression Expression, bool Persisted, bool Nullable, string Definition)> pendingComputed,
-        List<PendingForeignKey>? pendingForeignKeys = null)
+        List<PendingForeignKey>? pendingForeignKeys = null,
+        List<PendingEdgeConstraint>? pendingEdgeConstraints = null)
     {
         string? constraintName = null;
         if (context.Token is ReservedKeyword { Keyword: Keyword.Constraint })
@@ -2534,6 +2575,9 @@ partial class Simulation
                 return;
             case ReservedKeyword { Keyword: Keyword.Primary or Keyword.Unique }:
                 break;
+            case UnquotedString { Value: var connection } when pendingEdgeConstraints is not null && connection.Equals("CONNECTION", StringComparison.OrdinalIgnoreCase):
+                pendingEdgeConstraints.Add(ParseEdgeConstraint(context, constraintName));
+                return;
             default:
                 throw SimulatedSqlException.SyntaxErrorNear(context);
         }

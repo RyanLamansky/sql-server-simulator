@@ -165,7 +165,7 @@ partial class Simulation
         var insteadOfActive = HasInsteadOfTrigger(context.Batch, insteadOfParent, TriggerActions.Delete);
         var needsFullForTriggers = hasDeleteTriggers || insteadOfActive;
         var needsFullForHistory = table.SystemVersioning is not null;
-        var needsFullForFk = table.IncomingForeignKeys.Count > 0;
+        var needsFullForFk = table.IncomingForeignKeys.Count > 0 || table.GraphKind == GraphTableKind.Node;
 
         // Seek the target when WHERE carries an indexable equality / range
         // (positioned DELETE leaves where null, so it keeps the full scan — the
@@ -321,7 +321,7 @@ partial class Simulation
         if (context.Token is ReservedKeyword { Keyword: Keyword.Where })
         {
             context.MoveNextRequired();
-            where = Selection.ParseAndBindPredicate(context, Selection.ColumnTypeResolverFor(sources));
+            where = Selection.ParseAndBindPredicate(context, Selection.ColumnTypeResolverFor(sources), sources, joins);
         }
 
         // Skip mode has bound everything it needs; enumerating the join would
@@ -372,7 +372,8 @@ partial class Simulation
                 || HasAfterTrigger(context.Batch, table, TriggerActions.Delete)
                 || HasInsteadOfTrigger(context.Batch, table, TriggerActions.Delete)
                 || table.SystemVersioning is not null
-                || table.IncomingForeignKeys.Count > 0;
+                || table.IncomingForeignKeys.Count > 0
+                || table.GraphKind == GraphTableKind.Node;
             if (needsFull)
             {
                 fullValues = DecodeFullRow(table, targetBytes);
@@ -474,7 +475,7 @@ partial class Simulation
         // DELETE action on every child table whose FK columns reference one
         // of the deleted rows. NO ACTION raises Msg 547; CASCADE recurses;
         // SET NULL / SET DEFAULT rewrite the child's FK columns.
-        if (table.IncomingForeignKeys.Count > 0)
+        if (table.IncomingForeignKeys.Count > 0 || table.GraphKind == GraphTableKind.Node)
         {
             var oldRows = new List<SqlValue[]>(deleted.Count);
             foreach (var (_, _, oldFull) in deleted)
@@ -484,6 +485,8 @@ partial class Simulation
             }
             if (oldRows.Count > 0)
                 EnforceIncomingForeignKeysOnDelete(table, oldRows, context, "DELETE", depth: 0);
+            if (table.GraphKind == GraphTableKind.Node)
+                EnforceEdgeConstraintsOnNodeDelete(table, oldRows, context);
         }
 
         if (output is not null)

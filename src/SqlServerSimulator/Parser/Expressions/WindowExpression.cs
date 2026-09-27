@@ -587,7 +587,7 @@ internal sealed class WindowExpression : Expression
     /// partition's leading row. Explicit frames shift the "first" reference
     /// to the frame's start.
     /// </summary>
-    public static WindowExpression ParseFirstValue(ParserContext context) =>
+    public static Expression ParseFirstValue(ParserContext context) =>
         ParseFirstOrLastValue(context, WindowKind.FirstValue);
 
     /// <summary>
@@ -599,15 +599,18 @@ internal sealed class WindowExpression : Expression
     /// <c>ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING</c>.
     /// Probe-confirmed against SQL Server 2025.
     /// </summary>
-    public static WindowExpression ParseLastValue(ParserContext context) =>
+    public static Expression ParseLastValue(ParserContext context) =>
         ParseFirstOrLastValue(context, WindowKind.LastValue);
 
-    private static WindowExpression ParseFirstOrLastValue(ParserContext context, WindowKind kind)
+    private static Expression ParseFirstOrLastValue(ParserContext context, WindowKind kind)
     {
         var operand = Expression.Parse(context);
         if (context.Token is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextRequired();
+        // LAST_VALUE(x) WITHIN GROUP (GRAPH PATH) reads a SHORTEST_PATH's last step.
+        if (kind == WindowKind.LastValue && GraphPathAggregate.IsAhead(context))
+            return GraphPathAggregate.LastValue(operand, context);
         var ignoreNulls = ReadNullTreatment(context, LowerNameFor(kind), supported: true);
         if (context.Token is not ReservedKeyword { Keyword: Keyword.Over })
             throw context.Token is ReservedKeyword notOver ? SimulatedSqlException.SyntaxErrorNearKeyword(notOver) : SimulatedSqlException.SyntaxErrorNear(context);

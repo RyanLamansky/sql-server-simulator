@@ -167,10 +167,10 @@ partial class Simulation
             // or computed (0x20) (probed 2026-09-26 against SQL Server 2025).
             SqlValue.FromBoolean(result.ColumnWireFlags is { } updatableFlags
                 ? !result.IsGrouped && (updatableFlags[index] & 0x08) != 0
-                : !result.IsGrouped && origin is { Identity: null, Computed: null } && type != SqlType.RowVersion),
+                : !result.IsGrouped && origin is { Identity: null } && (origin.Computed is null || origin.GraphKind != GraphColumnKind.None) && type != SqlType.RowVersion),
             SqlValue.FromBoolean(result.ColumnWireFlags is { } computedFlags
                 ? (computedFlags[index] & 0x20) != 0
-                : origin?.Computed is not null || (origin is null && result.ColumnIsComputed is { } computed && computed[index])),
+                : origin is { Computed: not null, GraphKind: GraphColumnKind.None } || (origin is null && result.ColumnIsComputed is { } computed && computed[index])),
             SqlValue.FromBoolean(false),
             nullSmall, SqlValue.Null(SqlType.Bit), nullSmall,
             SqlValue.FromInt32(tdsType),

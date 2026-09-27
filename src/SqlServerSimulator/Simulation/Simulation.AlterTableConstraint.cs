@@ -57,7 +57,7 @@ partial class Simulation
         List<string>? primaryKeyColumns = null;
         while (true)
         {
-            if (context.Token is Name or UnquotedString)
+            if (context.Token is Name or UnquotedString && !IsEdgeConstraintAhead(context))
             {
                 (columns ??= new AddedColumns(context, tableName)).ParseOne(context);
             }
@@ -167,8 +167,42 @@ partial class Simulation
             ReservedKeyword { Keyword: Keyword.Foreign } => ParseAddForeignKeyConstraint(context, tableName, explicitName, withNoCheck),
             ReservedKeyword { Keyword: Keyword.Primary or Keyword.Unique } => ParseAddKeyConstraint(context, tableName, explicitName),
             ReservedKeyword { Keyword: Keyword.Default } => ParseAddDefaultConstraint(context, tableName, explicitName),
+            UnquotedString { Value: var word } when word.Equals("CONNECTION", StringComparison.OrdinalIgnoreCase) => ParseAddEdgeConstraint(context, tableName, explicitName, withNoCheck),
             _ => throw SimulatedSqlException.SyntaxErrorNear(context),
         };
+    }
+
+    /// <summary>
+    /// <c>ALTER TABLE … ADD [CONSTRAINT name] CONNECTION (…)</c>. Without
+    /// <c>WITH NOCHECK</c> the table's existing edges must already satisfy it.
+    /// </summary>
+    private static bool ParseAddEdgeConstraint(ParserContext context, MultiPartName tableName, string? explicitName, bool withNoCheck)
+    {
+        var pending = ParseEdgeConstraint(context, explicitName);
+        if (context.Batch.IsSkipping)
+            return true;
+        if (!context.Batch.TryResolveTable(tableName, out var table))
+            throw SimulatedSqlException.CannotFindObjectForAlterTable(tableName.ToString());
+        var constraint = ResolveEdgeConstraints(context, table, [pending])[0];
+        if (!withNoCheck)
+        {
+            foreach (var (_, _, bytes) in table.Heap.EnumerateRowsWithAddress())
+            {
+                var row = DecodeFullRow(table, bytes);
+                table.EdgeConstraints.Add(constraint);
+                try
+                {
+                    EnforceEdgeConstraints(table, row, context, "ALTER TABLE");
+                }
+                finally
+                {
+                    _ = table.EdgeConstraints.Remove(constraint);
+                }
+            }
+        }
+        constraint.IsNotTrusted = withNoCheck;
+        table.EdgeConstraints.Add(constraint);
+        return true;
     }
 
     /// <summary>
@@ -426,6 +460,8 @@ partial class Simulation
                     break;
                 }
             }
+            if (found < 0 && columnNames[c].StartsWith('$'))
+                found = Array.FindIndex(table.Columns, column => GraphColumns.IsPseudoColumnFor(column.Name, columnNames[c]));
             if (found < 0)
                 throw SimulatedSqlException.IndexColumnMissing(columnNames[c]);
             fullOrdinals[c] = found;
@@ -988,15 +1024,16 @@ partial class Simulation
         return true;
     }
 
-    private enum DropConstraintFamily { None, Key, Check, ForeignKey, Default }
+    private enum DropConstraintFamily { None, Key, Check, ForeignKey, Default, Edge }
 
-    private sealed class DropConstraintAction(DropConstraintFamily family, KeyConstraint? key, CheckConstraint? check, ForeignKey? foreignKey, HeapColumn? defaultColumn)
+    private sealed class DropConstraintAction(DropConstraintFamily family, KeyConstraint? key, CheckConstraint? check, ForeignKey? foreignKey, HeapColumn? defaultColumn, EdgeConstraint? edge = null)
     {
         public readonly DropConstraintFamily Family = family;
         public readonly KeyConstraint? Key = key;
         public readonly CheckConstraint? Check = check;
         public readonly ForeignKey? ForeignKey = foreignKey;
         public readonly HeapColumn? DefaultColumn = defaultColumn;
+        public readonly EdgeConstraint? Edge = edge;
     }
 
     private static DropConstraintAction FindConstraintByName(Collation collation, HeapTable table, string name)
@@ -1020,6 +1057,11 @@ partial class Simulation
         {
             if (col.DefaultConstraint is { } df && collation.Equals(df.Name, name))
                 return new DropConstraintAction(DropConstraintFamily.Default, null, null, null, col);
+        }
+        foreach (var ec in table.EdgeConstraints)
+        {
+            if (collation.Equals(ec.Name, name))
+                return new DropConstraintAction(DropConstraintFamily.Edge, null, null, null, null, ec);
         }
         return new DropConstraintAction(DropConstraintFamily.None, null, null, null, null);
     }
@@ -1094,6 +1136,9 @@ partial class Simulation
             case DropConstraintFamily.Default:
                 action.DefaultColumn!.Default = null;
                 action.DefaultColumn.DefaultConstraint = null;
+                break;
+            case DropConstraintFamily.Edge:
+                _ = table.EdgeConstraints.Remove(action.Edge!);
                 break;
         }
     }
