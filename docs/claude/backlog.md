@@ -253,6 +253,10 @@ Already listed elsewhere here and not repeated: parenthesized set-op branches.
 
 - A GROUP BY term repeating an unbindable select-list name (`SELECT zz.a FROM t GROUP BY zz.a`) raises Msg 4104 once here; real reports it for both clauses.
 
+**Describe surfaces** (probed 2026-09-27):
+
+- `JSON_VALUE` and `OPENJSON`'s `key` / `value` columns describe as a bare `nvarchar` where real reports `nvarchar(4000)` / `nvarchar(4000)` / `nvarchar(max)`, and `JSON_QUERY` over a literal as `nvarchar(max)` where real reports `nvarchar(4000)`: the results carry the unsized `nvarchar` type, and sizing them reaches their runtime values and collation, not just the describe text.
+
 **Built-in values** (probed 2026-09-26):
 
 - `DIFFERENCE` scores from a code of its own rather than the two `SOUNDEX` results — `'xc'` and `'x'` share `X000` yet score differently against `'abcd'` — and is asymmetric (`DIFFERENCE('x', '1')` is 0, `DIFFERENCE('1', 'x')` 3); here it compares the codes position by position, which matches real on most pairs but not all.
