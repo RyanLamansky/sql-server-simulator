@@ -1942,6 +1942,23 @@ public sealed partial class Simulation
         {
             try
             {
+                if (!batch.IsSkipping && batch.Connection.CurrentTransaction is not null && DatabaseDdlInTransaction(batch.Parser) is { } refusal)
+                {
+                    // Parsed without running, so the refusal leaves the cursor
+                    // past the statement for the recovery scan.
+                    batch.SkipModeFlag = true;
+                    try
+                    {
+                        foreach (var _ in DispatchOneStatementCore(batch, requireSemicolonBeforeCte, atBatchStart))
+                        {
+                        }
+                    }
+                    finally
+                    {
+                        batch.SkipModeFlag = false;
+                    }
+                    throw refusal;
+                }
                 foreach (var outcome in DispatchOneStatementCore(batch, requireSemicolonBeforeCte, atBatchStart))
                     outcomes.Add(outcome);
                 // Database-scope DDL triggers fire after the statement's own
@@ -2561,6 +2578,38 @@ public sealed partial class Simulation
     /// at the next boundary keyword would read the broken statement's tail as
     /// statements of its own.
     /// </summary>
+    /// <summary>
+    /// Refuses <c>CREATE</c> / <c>ALTER</c> / <c>DROP DATABASE</c> and
+    /// <c>ALTER DATABASE SCOPED CONFIGURATION</c> inside a user transaction —
+    /// Msg 226 (states 5, 6, 7) or Msg 574 for the drop — ahead of the rest of
+    /// the statement; the error ends only its statement and leaves the
+    /// transaction committable (probed 2026-09-27 against SQL Server 2025).
+    /// Peeks without moving the cursor; null for any other statement.
+    /// </summary>
+    private static SimulatedSqlException? DatabaseDdlInTransaction(ParserContext context)
+    {
+        if (context.Token is not ReservedKeyword { Keyword: var verb } || verb is not (Keyword.Alter or Keyword.Create or Keyword.Drop))
+            return null;
+        var checkpoint = context.SaveCheckpoint();
+        try
+        {
+            if (!context.MoveNext() || context.Token is not ReservedKeyword { Keyword: Keyword.Database })
+                return null;
+            var scoped = context.MoveNext() && context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Scoped };
+            return verb switch
+            {
+                Keyword.Alter when scoped => SimulatedSqlException.DatabaseStatementInTransaction("ALTER DATABASE SCOPED CONFIGURATION", 7),
+                Keyword.Alter => SimulatedSqlException.DatabaseStatementInTransaction("ALTER DATABASE", 6),
+                Keyword.Create => SimulatedSqlException.DatabaseStatementInTransaction("CREATE DATABASE", 5),
+                _ => SimulatedSqlException.StatementInsideUserTransaction("DROP DATABASE"),
+            };
+        }
+        finally
+        {
+            context.RestoreCheckpoint(checkpoint);
+        }
+    }
+
     /// <summary>
     /// Whether the statement at <paramref name="parser"/>'s cursor changes a
     /// table's or index's structure (see

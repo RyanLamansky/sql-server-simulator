@@ -82,7 +82,7 @@ partial class SimulatedSqlException
     // The full-text DDL refusals below were probed 2026-09-26 against SQL
     // Server 2025; each names what real's does.
 
-    /// <summary>Msg 574: full-text DDL inside a user transaction, naming the statement (<c>ALTER FULLTEXT INDEX</c>…).</summary>
+    /// <summary>Msg 574: full-text DDL or <c>DROP DATABASE</c> inside a user transaction, naming the statement (<c>ALTER FULLTEXT INDEX</c>…).</summary>
     internal static SimulatedSqlException StatementInsideUserTransaction(string statement) =>
         new($"{statement} statement cannot be used inside a user transaction.", 574, 16, 0);
 

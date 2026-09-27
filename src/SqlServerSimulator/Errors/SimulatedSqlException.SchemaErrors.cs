@@ -2513,6 +2513,14 @@ partial class SimulatedSqlException
         new($"Cannot create more than one clustered index on table '{tableName}'. Drop the existing clustered index '{existingClusteredName}' before creating another.", 1902, 16, 3);
 
     /// <summary>
+    /// Mimics SQL Server error 226: a database-level statement inside a user
+    /// transaction — state 5 for CREATE DATABASE, 6 for ALTER DATABASE, 7 for
+    /// ALTER DATABASE SCOPED CONFIGURATION (probed 2026-09-27).
+    /// </summary>
+    internal static SimulatedSqlException DatabaseStatementInTransaction(string statement, byte state) =>
+        new($"{statement} statement not allowed within multi-statement transaction.", 226, 16, state);
+
+    /// <summary>
     /// Mimics SQL Server error 3749: <c>DROP INDEX table.index</c> named an XML
     /// or spatial index, which only the <c>index ON table</c> form may drop.
     /// Real's wording says "XML Index" for a spatial one too.

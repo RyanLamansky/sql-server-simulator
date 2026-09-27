@@ -76,7 +76,6 @@ It is recorded on `StatementContext`, so a trigger's own statements don't inheri
   Retention and `AUTO_CLEANUP` are recorded and reported but never run, so the minimum valid version moves only on enable and truncation, and the cleanup columns stay NULL.
 - **A `MERGE` records the union of its `WHEN MATCHED THEN UPDATE` clauses' columns** for every row it updates, rather than the columns of the clause that fired.
 - **`WITH CHANGE_TRACKING_CONTEXT (…) WITH cte …`** reports real's Msg 156 without the Msg 319 real sends after it.
-- **`ALTER DATABASE … SET CHANGE_TRACKING` runs inside a user transaction**, where real refuses it with Msg 226.
 
 ## Not modeled yet
 
