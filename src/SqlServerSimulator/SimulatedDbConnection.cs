@@ -394,6 +394,12 @@ public sealed class SimulatedDbConnection : DbConnection
     internal CancellationToken ExecutionCancellationToken => Volatile.Read(ref this.executionCancellation).Token;
 
     /// <summary>
+    /// Whether the current execution has been cancelled — the per-row poll the
+    /// join operators make, which skips materializing a token.
+    /// </summary>
+    internal bool ExecutionCancellationRequested => Volatile.Read(ref this.executionCancellation).IsCancellationRequested;
+
+    /// <summary>
     /// Requests cancellation of the command currently executing on this
     /// connection. Safe to call from any thread (the TDS attention watcher, an
     /// <c>ExecuteReader</c> caller's <c>Cancel()</c>): the engine observes the

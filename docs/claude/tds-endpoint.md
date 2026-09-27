@@ -514,7 +514,7 @@ Bulk-insert-begin (`INSERT BULK`, whose next packet is the bulk-data type-7, not
 
 **Where the engine stops (safe points).**
 `SimulatedDbConnection` owns a per-execution `CancellationTokenSource`, replaced at the top of `CreateResultSetsForCommand` (so a cancel against a prior command on the same connection doesn't bleed forward) and connection-scoped so proc / UDF / dynamic-SQL bodies inherit it.
-`DispatchStatementsUntil` and the `WHILE` loop poll it at statement / iteration boundaries; `WAITFOR DELAY` waits on its wait handle; `StreamOutcomesAsync` polls between outcomes and between rows (never mid-ROW-token).
+`DispatchStatementsUntil` and the `WHILE` loop poll it at statement / iteration boundaries; the join operators poll it per left row inside a statement; `WAITFOR DELAY` waits on its wait handle; `StreamOutcomesAsync` polls between outcomes and between rows (never mid-ROW-token).
 On cancel the streamer returns a "cancelled" flag; the batch loop applies the transaction semantics below and writes the single `DONE_ATTN`.
 
 **Transaction / session semantics (probed).**

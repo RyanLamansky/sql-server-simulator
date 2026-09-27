@@ -61,6 +61,38 @@ public sealed class AttentionTests
         await AssertSessionReusableAsync(connection, TestContext.CancellationToken);
     }
 
+    /// <summary>
+    /// A timeout landing inside one long statement — a nine-way cross product
+    /// no seek or hash can shortcut — is noticed at the join's per-row safe
+    /// point rather than after the fold completes: the one error SqlClient
+    /// surfaces is its own Msg -2, and the session stays usable.
+    /// </summary>
+    [TestMethod]
+    public async Task CommandTimeout_InsideALongJoin_RaisesTimeoutAndSessionStaysReusable()
+    {
+        var simulation = new Simulation();
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+        await using (var setup = new SqlCommand("create table pa (x int); insert pa values (1), (2), (3), (4), (5), (6), (7), (8), (9), (10)", connection))
+            _ = await setup.ExecuteNonQueryAsync(TestContext.CancellationToken);
+
+        const string longJoin = """
+            select a.x from pa a, pa b, pa c, pa d, pa e, pa f, pa g, pa h, pa i
+            where a.x + b.x + c.x + d.x + e.x + f.x + g.x + h.x + i.x < 0
+            """;
+        var elapsed = System.Diagnostics.Stopwatch.StartNew();
+        await using (var command = new SqlCommand(longJoin, connection) { CommandTimeout = 1 })
+        {
+            var error = await ThrowsExactlyAsync<SqlException>(
+                async () => await command.ExecuteScalarAsync(TestContext.CancellationToken));
+            AreEqual(-2, error.Number);
+            HasCount(1, error.Errors);
+        }
+
+        IsLessThan(10, elapsed.Elapsed.TotalSeconds);
+        await AssertSessionReusableAsync(connection, TestContext.CancellationToken);
+    }
+
     [TestMethod]
     public async Task Cancel_DuringWaitfor_RaisesCancelAndSessionStaysReusable()
     {

@@ -488,4 +488,5 @@ Probe-confirmed against SQL Server 2025: the connection stays usable afterwards 
 The wire path needs none of this: SqlClient enforces its own `CommandTimeout` client-side by sending an attention, which the endpoint already answers.
 
 **Enforcement is at safe points, not a hard deadline.**
-A timeout is observed at a statement boundary, a `WHILE` iteration, or during a `WAITFOR` wait, so a *single* long-running statement still materializes to completion before the deadline is noticed — the same bound the cancel path documents.
+A timeout is observed at a statement boundary, a `WHILE` iteration, during a `WAITFOR` wait, and inside a statement at each row a join level reads from its left ([`joins.md`](joins.md#joindriver)); a single-source statement still materializes to completion before the deadline is noticed.
+Inside a statement the cancellation raises the same Msg -2 / Msg 0 marked as an attention (`SimulatedSqlException.IsAttention`): no `TRY` frame catches it, it ends the batch, and the interrupted statement rolls back like any failed one — so an interrupted `INSERT … SELECT` inside an open transaction leaves the transaction open with the earlier statements' rows, and under `SET XACT_ABORT ON` the transaction rolls back (all four probed 2026-09-27 against SQL Server 2025 through SqlClient 7.0.2, with a one-second timeout on a nine-way cross product).

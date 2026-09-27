@@ -32,11 +32,25 @@ partial class SimulatedSqlException
     /// included) with Class 11 / State 0 — probe-confirmed against SqlClient
     /// 7.0.2 driving SQL Server 2025.
     /// </summary>
-    internal static SimulatedSqlException ExecutionTimeoutExpired() =>
-        new("Execution Timeout Expired.  The timeout period elapsed prior to completion of the operation or the server is not responding.", -2, 11, 0);
+    internal static SimulatedSqlException ExecutionTimeoutExpired() => new(ExecutionTimeoutExpiredMessage, -2, 11, 0);
 
-    internal static SimulatedSqlException CommandCancelled() =>
-        new("A severe error occurred on the current command.  The results, if any, should be discarded.", 0, 11, 0);
+    internal static SimulatedSqlException CommandCancelled() => new(CommandCancelledMessage, 0, 11, 0);
+
+    private const string ExecutionTimeoutExpiredMessage =
+        "Execution Timeout Expired.  The timeout period elapsed prior to completion of the operation or the server is not responding.";
+
+    private const string CommandCancelledMessage =
+        "A severe error occurred on the current command.  The results, if any, should be discarded.";
+
+    /// <summary>
+    /// The cancellation a running statement observes at a row-level safe point:
+    /// <see cref="ExecutionTimeoutExpired"/> or <see cref="CommandCancelled"/>
+    /// by cause, marked <see cref="IsAttention"/> so the dispatch loop ends the
+    /// batch with it rather than handing it to a <c>CATCH</c>.
+    /// </summary>
+    internal static SimulatedSqlException Attention(bool timedOut) => timedOut
+        ? new(ExecutionTimeoutExpiredMessage, -2, 11, 0) { IsAttention = true }
+        : new(CommandCancelledMessage, 0, 11, 0) { IsAttention = true };
 
     internal static SimulatedSqlException LockRequestTimeOutExceeded(byte state = 56) =>
         new("Lock request time out period exceeded.", 1222, 16, state);

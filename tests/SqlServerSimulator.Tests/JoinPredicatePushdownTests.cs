@@ -4,8 +4,9 @@ namespace SqlServerSimulator;
 
 /// <summary>
 /// Behavior a multi-source query keeps when a WHERE predicate is pushed down
-/// onto a source the FROM clause doesn't name first, and when a pure INNER
-/// equi-join chain is then reordered to drive from it: the rows every join kind
+/// onto a source the FROM clause doesn't name first, and when an INNER / comma
+/// equi-join chain is then reordered to drive from it or to connect a comma list
+/// written out of join order: the rows every join kind
 /// produces are unchanged, an outer join's NULL extension survives, an ON
 /// conjunct pairing two non-adjacent sources still binds, and the shapes the
 /// reorder declines answer identically either way. The strategy each shape
@@ -520,5 +521,82 @@ public sealed class JoinPredicatePushdownTests
         AreEqual(26, sim.ExecuteScalar(query));
         _ = sim.ExecuteNonQuery("insert line values (99, 21, 100, 100)");
         AreEqual(126, sim.ExecuteScalar(query));
+    }
+
+    // ---- a comma list written out of join order -----------------------------
+
+    /// <summary>
+    /// A comma list whose written order puts two unrelated sources side by side
+    /// (<c>line</c>, then <c>region</c>) reads its WHERE equalities as join
+    /// edges and folds in a connected order instead. It answers exactly what the
+    /// explicit-join spelling does, row for row: region south's two customers,
+    /// their four orders and those orders' eight lines.
+    /// </summary>
+    [TestMethod]
+    public void CommaListOutOfJoinOrder_MatchesTheExplicitJoinSpelling()
+    {
+        var sim = Sales();
+        var comma = Rows(sim, """
+            select c.cust_name, o.ord_id, l.line_id, i.item_name
+            from line l, region r, item i, ord o, cust c
+            where l.item_id = i.item_id and c.region_id = r.region_id
+              and o.cust_id = c.cust_id and l.ord_id = o.ord_id and r.region_name = 'south'
+            """);
+        var joined = Rows(sim, """
+            select c.cust_name, o.ord_id, l.line_id, i.item_name
+            from region r
+            join cust c on c.region_id = r.region_id
+            join ord o on o.cust_id = c.cust_id
+            join line l on l.ord_id = o.ord_id
+            join item i on i.item_id = l.item_id
+            where r.region_name = 'south'
+            """);
+        HasCount(8, comma);
+        CollectionAssert.AreEquivalent(joined, comma);
+    }
+
+    /// <summary>
+    /// With nothing narrowed the out-of-order list still connects, from its
+    /// first-written source: all twenty-four lines, each once.
+    /// </summary>
+    [TestMethod]
+    public void CommaListOutOfJoinOrder_Unfiltered_CountsEveryLineOnce()
+        => AreEqual("24|24", Rows(Sales(), """
+            select count(*), count(distinct l.line_id)
+            from line l, region r, cust c, ord o
+            where l.ord_id = o.ord_id and c.region_id = r.region_id and o.cust_id = c.cust_id
+            """)[0]);
+
+    /// <summary>
+    /// A source no WHERE equality reaches is a genuine cross product, which the
+    /// connected order takes between whole components: customer 5's two orders
+    /// times all four items.
+    /// </summary>
+    [TestMethod]
+    public void CommaListWithADisconnectedSource_KeepsTheCrossProduct()
+        => AreEqual(8, Sales().ExecuteScalar("""
+            select count(*) from item i, ord o, cust c
+            where o.cust_id = c.cust_id and c.cust_id = 5
+            """));
+
+    /// <summary>
+    /// NULL keys match nothing and duplicate keys multiply, whichever order the
+    /// list folds in: <c>a</c> and <c>b</c> only meet through <c>m</c>, key 1
+    /// pairs two <c>a</c> rows with two <c>b</c> rows, and the NULL rows drop.
+    /// </summary>
+    [TestMethod]
+    public void CommaListOutOfJoinOrder_KeepsNullAndDuplicateSemantics()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table a (k int, tag varchar(5));
+            create table b (k int, tag varchar(5));
+            create table m (k int);
+            insert a values (1, 'a1'), (1, 'a1b'), (2, 'a2'), (null, 'an');
+            insert b values (1, 'b1'), (1, 'b1b'), (3, 'b3'), (null, 'bn');
+            insert m values (1), (2), (3), (null)
+            """);
+        var rows = Rows(sim, "select a.tag, b.tag from a, b, m where a.k = m.k and b.k = m.k");
+        CollectionAssert.AreEquivalent(new[] { "a1|b1", "a1|b1b", "a1b|b1", "a1b|b1b" }, rows);
     }
 }

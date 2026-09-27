@@ -26,6 +26,9 @@ The post-WHERE result is therefore provably unchanged regardless of outer joins 
 Only equi-keys are pulled; a non-equi WHERE term (`b.id > 10`) stays a post-join filter, so the synthesized ON's residual count is 0.
 A derived-table right side after a comma keeps its `LateralPlan` at parse time, so it's skipped and its level stays `Cross` — the execution-time materialization below still collapses its re-execution, but the level nested-loops over the materialized list rather than hashing.
 
+The rewrite reads the **written order**: a level whose every WHERE partner is written to its right has nothing to key on yet and stays `Cross`.
+A comma list written out of join order (`FROM t51, t29, t31, t55 WHERE a51 = b31 AND …`) therefore keeps levels that multiply the rowset by a whole table each; the execution-time [reorder](#join-order-reorder) is what connects it.
+
 ## Exposed names
 
 Two sources in one FROM clause may not share an exposed name (`AddSource` in `Selection.cs`, probed 2026-09-26 against SQL Server 2025).
@@ -76,6 +79,9 @@ Correctness over a rare, typically tiny shape (SSMS's Table Designer partition-m
 
 `JoinDriver` is a fold over `joins[]`: the leftmost rowset is wrapped with each join's operator in turn to produce the final enumerator.
 `ApplyJoin` picks the operator per join level — and is the single point where the strategy (hash vs nested loop) is decided.
+
+**Cancellation inside the fold.**
+Every join operator polls the execution's cancellation once per row it reads from its left (`ThrowIfExecutionCancelled`), so a `CommandTimeout` or `Cancel()` interrupts a long fold instead of waiting for the statement boundary — see [`control-flow.md`](control-flow.md) for how the interrupted statement surfaces.
 
 ### Equi-join fast path
 
@@ -170,25 +176,38 @@ A grouped **view** reference reports its eligibility from the updatability rejec
 
 A joined UPDATE / DELETE takes this pass too, through `Selection.PrepareMutationJoinSources`, with no DML-specific code: the pass only ever rewrites a deferred body's slot, which the mutation target — a base table the write pipeline addresses row by row — can never be.
 
-### Narrowed-source-first reorder
+### Join-order reorder
 
-When the pushdown narrows a source the FROM clause doesn't name first, `ReorderToDriveFromNarrowedSource` rebuilds a **pure INNER equi-join chain** to drive from it.
-INNER joins commute and their ON conjuncts are WHERE-equivalent, so the conjunction of every ON conjunct over the cross product is the result whatever order the sources fold in: any permutation that keeps each conjunct's two sources both placed by the step it attaches to produces the same rows.
+`ReorderJoinChain` (run per execution at the end of `NarrowJoinSources`) rebuilds a chain of **INNER equi-joins and `CROSS` / comma levels** in a better order, for two reasons: to drive from a source the pushdown narrowed that the FROM clause doesn't name first, and to connect a comma list the written order leaves as a cross product.
+INNER and CROSS joins commute and their ON conjuncts are WHERE-equivalent, so the conjunction of every ON conjunct over the cross product is the result whatever order the sources fold in: any permutation that keeps each conjunct's two sources both placed by the step it attaches to produces the same rows.
 Row *order* can change, which is legal without an ORDER BY.
 Column resolution is name-based and rejects an ambiguous unqualified name outright (Msg 209), so it is order-independent too.
 
 It engages only when every one of these holds:
 
-- The best driver is a **non-leftmost** narrowed source seeking at most `SeekOuterRowCap` rows.
-  Several narrowed sources compete on the seek's own candidate count (ties break on the written order); a narrowed leftmost that seeks at least as few already drives, and a wider narrowing leaves the written order alone rather than trading a small outer's per-outer seeks for a large one's hash probes.
-- Every join is `Inner` with an `ON` and no parenthesized group.
+- Every join is `Inner` with an `ON` or `Cross` without one, and none is a parenthesized group.
 - Every ON conjunct decomposes into an equality between two **distinct** sources' bare column references, with a key-type pair the runtime `=` could promote — the level-independent counterpart of `TryExtractEquiKey`.
-  A single-source filter conjunct, a non-equi conjunct, or an OR declines the whole reorder.
+  A single-source filter conjunct, a non-equi conjunct, or an OR in an ON declines the whole reorder.
 - No source carries a `LateralPlan` (moving it would change how often it runs) or is a skip-mode placeholder, and no two sources share an exposed name.
+- There is a reason to move: a driver (below), or a `Cross` level.
+  A pure INNER chain with no driver keeps its written order outright.
 
-Placement is greedy from the driver: the candidates at each step are the unplaced sources connected to the placed set by an ON equi-conjunct, and a candidate whose connecting columns **cover one of its own unique keys** (a PRIMARY KEY / UNIQUE constraint, or an enabled unfiltered unique index) wins — that join can't multiply the driving set, so the outer stays small enough for the next link to seek.
-Ties break on the written order; a disconnected join graph declines entirely.
+**The driver** is the best **non-leftmost** narrowed source seeking at most `SeekOuterRowCap` rows.
+Several narrowed sources compete on the seek's own candidate count (ties break on the written order); a narrowed leftmost that seeks at least as few already drives, and a wider narrowing leaves the leftmost driving rather than trading a small outer's per-outer seeks for a large one's hash probes.
+A chain with a `Cross` level and no such driver drives from its leftmost source.
+
+**A chain with a `Cross` level also reads the WHERE's equi-conjuncts as graph edges**, which is what connects a comma list written out of join order.
+A WHERE conjunct attached as an ON conjunct stays in the WHERE — the comma rewrite's residual invariant — so it can only drop tuples the WHERE drops anyway; a conjunct the comma rewrite already moved into an ON is one edge, not two.
+A pure INNER chain doesn't read its WHERE this way, so a shape that never had a `Cross` level keys exactly what it keyed before.
+
+Placement is greedy from the driver: the candidates at each step are the unplaced sources connected to the placed set by an equi-conjunct, and a candidate whose connecting columns **cover one of its own unique keys** (a PRIMARY KEY / UNIQUE constraint, or an enabled unfiltered unique index) wins — that join can't multiply the driving set, so the outer stays small enough for the next link to seek.
+Ties break on the written order.
+When no candidate connects, a pure INNER chain declines; a chain with a `Cross` level starts the next **connected component** as a `Cross` step, from its hardest-narrowed source or else its first-written one, so a genuine cross product is taken between whole components — after the narrowed one — rather than inside one.
 Each conjunct then re-attaches at the step that places the later of its two sources, so a conjunct pairing two sources the reorder placed earlier rides along at the step that completed the pair.
+An order identical to the written one returns nothing: the comma rewrite already gave each written level every equality its left side could supply.
+
+Measured on sqllogictest's `select5.test` (64 ten-row tables, 732 queries joining 4 to 64 of them as comma lists in shuffled order, each with one key filter), in-process with a 15-second `CommandTimeout`: before, 20-table joins took 2.3–4.9 s and the run stopped at its 211th query, a 21-table join that ran past a 40-second wall without honoring its timeout; after, all 732 answer in **7.9 s total, the slowest in 47 ms** (a 63-table join), and a differential run against SQL Server 2025 matched all 732.
+On WWI, a four-table comma list written out of join order (`InvoiceLines, Customers, StockItems, Invoices` filtered to one customer) went **196 ms → 3.4 ms** (live 1.0 ms), level with its in-order spelling; the unfiltered three-table one **211 ms → 102 ms**, whose remaining gap to its in-order spelling measured as warm-up rather than plan (both ~40 ms once tiered up).
 
 A materialized derived table (see below) can be a reorder *member* — its rows are fixed for the enumeration — but never the driver, since only a seek-narrowed base table drives.
 
@@ -289,7 +308,7 @@ EF Core 10's LINQ `LeftJoin` / `RightJoin` operators translate to LEFT / RIGHT J
 
 The strategy chosen per join is recorded through the opt-in `JoinDiagnostics.Sink` — a `[ThreadStatic]` ambient list, null by default.
 Most kinds log at the single `ApplyJoin` dispatch point; INNER / LEFT equi-joins log from inside `EquiJoinSeekOrHash` once the seek-vs-hash choice is made (`NestedLoopIndexSeek(keys=N)` vs `HashMatch(keys=N,residual=M)`).
-A reordered chain logs one `Reorder(i,j,k,…)` entry naming the placement order in **written** source indices, so `Reorder(2,1,0)` reads "drive from the third-written source"; its absence means the written order stood.
+A reordered chain logs one `Reorder(i,j,k,…)` entry naming the placement order in **written** source indices, so `Reorder(2,1,0)` reads "drive from the third-written source" — a driver move and a connected comma list alike; its absence means the written order stood.
 `Tests.Internal/JoinStrategyTests` reads it to assert the per-outer seek engages for a small filtered outer with an indexed inner, the hash build for a large outer or unindexed inner, the nested loop for non-equi / CROSS, and each condition that engages or declines the reorder — guarding against a silent fall-back to the O(L × R) loop, a perf regression the correctness suite wouldn't catch.
 The result-level counterpart is `Tests`' `JoinPredicatePushdownTests`, which pins the rows each shape produces either way.
 

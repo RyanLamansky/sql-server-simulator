@@ -348,13 +348,47 @@ public sealed class JoinStrategyTests
             "select r.id from r join q on q.id = r.q_id join p on q.id = r.q_id where q.id = 5")));
 
     /// <summary>
-    /// A CROSS level with no ON carries no edge at all, so a chain mixing one in
-    /// declines.
+    /// A CROSS level with no ON is a cross product whichever order the chain
+    /// folds in, so it no longer declines the reorder: the chain drives from the
+    /// narrowed <c>p</c>, seeks <c>q</c>, and takes the cross product last,
+    /// against the one surviving row.
     /// </summary>
     [TestMethod]
-    public void CrossJoinInTheChain_DeclinesTheReorder()
-        => IsNull(ReorderOf(CaptureStrategies(ChainSetup,
-            "select r.id from r cross join q join p on p.id = q.p_id where p.id = 5")));
+    public void CrossJoinInTheChain_CrossesTheDisconnectedSourceLast()
+    {
+        var trace = CaptureStrategies(ChainSetup,
+            "select r.id from r cross join q join p on p.id = q.p_id where p.id = 5");
+        AreEqual("Reorder(2,1,0)", ReorderOf(trace));
+        Contains("Cross:NestedLoops", trace);
+    }
+
+    /// <summary>
+    /// A comma list written out of join order — <c>r</c> then <c>p</c>, which
+    /// only meet through <c>q</c> — reads its WHERE equalities as edges and
+    /// folds in a connected order even with nothing narrowed, so no level is
+    /// left a cross product.
+    /// </summary>
+    [TestMethod]
+    public void CommaListOutOfJoinOrder_ConnectsEveryLevel()
+    {
+        var trace = CaptureStrategies(ChainSetup,
+            "select r.id from r, p, q where q.id = r.q_id and p.id = q.p_id");
+        AreEqual("Reorder(0,2,1)", ReorderOf(trace));
+        DoesNotContain("Cross:NestedLoops", trace);
+    }
+
+    /// <summary>
+    /// A comma list already written in join order is what the parse-time comma
+    /// rewrite fully connects, so the per-execution reorder leaves it alone.
+    /// </summary>
+    [TestMethod]
+    public void CommaListInJoinOrder_KeepsTheWrittenOrder()
+    {
+        var trace = CaptureStrategies(ChainSetup,
+            "select r.id from r, q, p where q.id = r.q_id and p.id = q.p_id");
+        IsNull(ReorderOf(trace));
+        DoesNotContain("Cross:NestedLoops", trace);
+    }
 
     /// <summary>
     /// A wide narrowing declines: driving from 150 seeked rows would trade the

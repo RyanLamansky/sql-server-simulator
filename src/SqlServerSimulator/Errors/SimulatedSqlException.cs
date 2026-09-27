@@ -173,6 +173,16 @@ public sealed partial class SimulatedSqlException : DbException
     internal bool AbortsAsUnderXactAbort { get; private init; }
 
     /// <summary>
+    /// When <see langword="true"/>, this is a cancellation (a
+    /// <c>CommandTimeout</c> expiry or a caller's cancel) observed inside a
+    /// running statement rather than between two. It ends the batch and no
+    /// <c>BEGIN TRY</c> frame catches it, as an attention does on real, while
+    /// the statement it interrupted rolls back like any failed statement.
+    /// Internal — never part of the public <c>SqlException</c>-shaped surface.
+    /// </summary>
+    internal bool IsAttention { get; private init; }
+
+    /// <summary>
     /// An identity value past its column's type, which real follows with the
     /// class-0 Msg 3606 (<c>Arithmetic overflow occurred.</c>) where another
     /// error ending a write is followed by Msg 3621 (probed 2026-09-25 against

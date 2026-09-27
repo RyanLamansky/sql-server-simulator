@@ -1111,7 +1111,8 @@ public sealed partial class Simulation
         // CommandTimeout is seconds, 0 meaning infinite (the SqlClient
         // convention). The deadline is enforced at the engine's safe points,
         // so a batch aborts between statements / loop iterations / during a
-        // WAITFOR — a single statement still materializes to completion first.
+        // WAITFOR, and inside a statement at each row a join level reads from
+        // its left (Selection.ThrowIfExecutionCancelled).
         command.Connection?.BeginExecutionScope(
             command.CommandTimeout > 0 ? TimeSpan.FromSeconds(command.CommandTimeout) : null);
 
@@ -2617,7 +2618,7 @@ public sealed partial class Simulation
     /// error is catchable (probed 2026-09-26 against SQL Server 2025).
     /// </summary>
     private static bool CaughtByTryFrame(BatchContext batch, SimulatedSqlException ex) =>
-        batch.TryFrameDepth > 0 && !ex.AbortsTransaction && !batch.CreateTimeBinding
+        batch.TryFrameDepth > 0 && !ex.AbortsTransaction && !ex.IsAttention && !batch.CreateTimeBinding
         && !(IsDeferredCompileError(ex) && !ex.EndedCalledBatch);
 
     /// <summary>
@@ -2702,7 +2703,7 @@ public sealed partial class Simulation
     }
 
     private static bool EndsBatch(SimulatedSqlException ex)
-        => ((IsDeferredCompileError(ex) || ex.Class == 15) && !ex.EndedCalledBatch) || ex.TerminatesBatch || ex.XactAbortPromoted;
+        => ((IsDeferredCompileError(ex) || ex.Class == 15) && !ex.EndedCalledBatch) || ex.TerminatesBatch || ex.XactAbortPromoted || ex.IsAttention;
 
     private IEnumerable<SimulatedStatementOutcome> DispatchOneStatementCore(BatchContext batch, bool requireSemicolonBeforeCte, bool atBatchStart)
     {

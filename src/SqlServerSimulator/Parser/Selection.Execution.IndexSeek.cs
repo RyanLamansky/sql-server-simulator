@@ -1434,9 +1434,10 @@ internal sealed partial class Selection
     /// Pushes single-source WHERE equality / range predicates (<c>col = literal
     /// / variable</c>, <c>col &gt; literal</c>, …) down onto <b>every</b>
     /// base-table FROM source of a multi-source query, seeking each before the
-    /// join runs, and hands the result to
-    /// <see cref="ReorderToDriveFromNarrowedSource"/> when the narrowing landed
-    /// somewhere the written order doesn't drive from.
+    /// join runs, and hands the result to <see cref="ReorderJoinChain"/>,
+    /// which drives from a narrowing that landed somewhere the written order
+    /// doesn't drive from and connects a comma list the written order leaves
+    /// as a cross product.
     /// <para>
     /// Narrowing one source is semantics-preserving for every join kind because
     /// the matched conjuncts <b>stay</b> in the residual WHERE: a NULL-extended
@@ -1517,16 +1518,12 @@ internal sealed partial class Selection
             seekedCandidates[i] = candidates;
         }
 
-        if (narrowed is null)
-            return (sources, joins);
-
         // The reorder picks its driver by seeked candidate count, which a
         // prefiltered source doesn't have (its stream is lazy and counting it
-        // would materialize the table). With nothing seeked, the written order
-        // stands and the prefilter alone does the narrowing.
-        return seekedCandidates is null
-            ? (narrowed, joins)
-            : ReorderToDriveFromNarrowedSource(narrowed, joins, seekedCandidates) ?? (narrowed, joins);
+        // would materialize the table). With nothing seeked, only a chain whose
+        // written order leaves a CROSS level the WHERE could connect reorders.
+        var current = narrowed ?? sources;
+        return ReorderJoinChain(current, joins, conjuncts, seekedCandidates) ?? (current, joins);
     }
 
     /// <summary>
@@ -1581,15 +1578,17 @@ internal sealed partial class Selection
         && source.HeapPlan is { SerializableRangeMode: null, RowTxScoped: false };
 
     /// <summary>
-    /// Reorders a <b>pure INNER equi-join chain</b> so it drives from the source
-    /// the WHERE narrowed hardest, instead of whichever source the query happens
-    /// to name first. Returns <c>null</c> — leaving the written order — for
-    /// anything outside that shape.
+    /// Reorders a chain of <b>INNER equi-joins and <c>CROSS</c> / comma
+    /// levels</b> so it drives from the source the WHERE narrowed hardest and
+    /// joins every later source on an equality, instead of folding in whatever
+    /// order the query happens to name its sources. Returns <c>null</c> —
+    /// leaving the written order — for anything outside that shape, and when
+    /// the written order is already the one the rules below pick.
     /// <para>
-    /// INNER joins commute and their ON conjuncts are WHERE-equivalent, so the
-    /// conjunction of every ON conjunct applied over the cross product is the
-    /// result whatever order the sources fold in: any permutation that keeps
-    /// each conjunct's two sources both placed by the step it attaches to
+    /// INNER and CROSS joins commute and their ON conjuncts are WHERE-equivalent,
+    /// so the conjunction of every ON conjunct applied over the cross product is
+    /// the result whatever order the sources fold in: any permutation that
+    /// keeps each conjunct's two sources both placed by the step it attaches to
     /// produces the same rows. Row <em>order</em> can change, which is legal
     /// without an ORDER BY. Column resolution is name-based and rejects an
     /// ambiguous unqualified name outright (Msg 209), so it is order-independent
@@ -1597,43 +1596,71 @@ internal sealed partial class Selection
     /// wouldn't be.
     /// </para>
     /// <para>
-    /// The reorder engages only when the best driver is a <em>non-leftmost</em>
-    /// narrowed source seeking at most <see cref="SeekOuterRowCap"/> rows — the
-    /// regime where <see cref="EquiJoinSeekOrHash"/> keeps seeking the next link
-    /// per outer row, which is what collapses a deep chain filtered in the
-    /// middle. A wider narrowing leaves the written order alone rather than
-    /// trading a small outer's per-outer seeks for a large one's hash probes.
+    /// A chain with a CROSS level also reads its WHERE's equi-conjuncts as join
+    /// graph edges, which is what connects a comma list: the parse-time
+    /// <see cref="RewriteCommaJoinsToEquiJoins"/> can only attach a WHERE
+    /// equality to a level whose partner is written to its left, so a comma list
+    /// written out of join order keeps CROSS levels that multiply the rowset by a
+    /// whole table each. A WHERE conjunct attached here as an ON conjunct
+    /// <b>stays</b> in the WHERE, the same residual invariant that rewrite rests
+    /// on, so the attachment can only drop tuples the WHERE drops anyway.
+    /// </para>
+    /// <para>
+    /// The driver is a <em>non-leftmost</em> narrowed source seeking at most
+    /// <see cref="SeekOuterRowCap"/> rows — the regime where
+    /// <see cref="EquiJoinSeekOrHash"/> keeps seeking the next link per outer
+    /// row, which is what collapses a deep chain filtered in the middle. A wider
+    /// narrowing leaves the leftmost source driving rather than trading a small
+    /// outer's per-outer seeks for a large one's hash probes, and a pure INNER
+    /// chain with no such driver keeps its written order outright.
     /// </para>
     /// <para>
     /// Placement is greedy from the driver: at each step the sources connected
-    /// to the placed set by an ON equi-conjunct are the candidates, and a
+    /// to the placed set by an equi-conjunct are the candidates, and a
     /// candidate whose connecting columns cover one of its own unique keys wins
     /// (that join can't multiply the driving set, so the outer stays inside the
-    /// seek cap for the next link); ties break on the written order. A
-    /// disconnected join graph declines entirely.
+    /// seek cap for the next link); ties break on the written order. When no
+    /// candidate connects, a pure INNER chain declines, while a chain with a
+    /// CROSS level starts the next connected component as a CROSS step — from
+    /// its hardest-narrowed source, else its first-written one — so a genuine
+    /// cross product is taken between whole components rather than inside one.
     /// </para>
     /// </summary>
-    private static (FromSource[] Sources, JoinSpec[] Joins)? ReorderToDriveFromNarrowedSource(
-        FromSource[] sources, JoinSpec[] joins, int[] seekedCandidates)
+    private static (FromSource[] Sources, JoinSpec[] Joins)? ReorderJoinChain(
+        FromSource[] sources, JoinSpec[] joins, List<BooleanExpression> whereConjuncts, int[]? seekedCandidates)
     {
-        var driver = -1;
-        for (var i = 1; i < sources.Length; i++)
-        {
-            if (seekedCandidates[i] is < 0 or > SeekOuterRowCap)
-                continue;
-            if (driver < 0 || seekedCandidates[i] < seekedCandidates[driver])
-                driver = i;
-        }
-
-        // Nothing narrowed past the leftmost slot, or the leftmost narrowed at
-        // least as hard and already drives.
-        if (driver < 0 || (seekedCandidates[0] >= 0 && seekedCandidates[0] <= seekedCandidates[driver]))
-            return null;
-
+        var hasCross = false;
         foreach (var join in joins)
         {
-            if (join.Kind != JoinKind.Inner || join.GroupCount != 1 || join.OnPredicate is null)
+            if (join.GroupCount != 1)
                 return null;
+            if (join.Kind == JoinKind.Cross && join.OnPredicate is null)
+                hasCross = true;
+            else if (join.Kind != JoinKind.Inner || join.OnPredicate is null)
+                return null;
+        }
+
+        var driver = -1;
+        if (seekedCandidates is not null)
+        {
+            for (var i = 1; i < sources.Length; i++)
+            {
+                if (seekedCandidates[i] is < 0 or > SeekOuterRowCap)
+                    continue;
+                if (driver < 0 || seekedCandidates[i] < seekedCandidates[driver])
+                    driver = i;
+            }
+
+            // The leftmost narrowed at least as hard and already drives.
+            if (driver >= 0 && seekedCandidates[0] >= 0 && seekedCandidates[0] <= seekedCandidates[driver])
+                driver = -1;
+        }
+
+        if (driver < 0)
+        {
+            if (!hasCross)
+                return null;
+            driver = 0;
         }
 
         for (var i = 0; i < sources.Length; i++)
@@ -1655,13 +1682,26 @@ internal sealed partial class Selection
         var conjuncts = new List<BooleanExpression>();
         foreach (var join in joins)
         {
+            if (join.OnPredicate is null)
+                continue;
             conjuncts.Clear();
-            join.OnPredicate!.CollectConjuncts(conjuncts);
+            join.OnPredicate.CollectConjuncts(conjuncts);
             foreach (var conjunct in conjuncts)
             {
                 if (!TryExtractEquiEdge(conjunct, sources, out var edge))
                     return null;
                 edges.Add(edge);
+            }
+        }
+
+        if (hasCross)
+        {
+            // The comma rewrite already moved some of these into an ON; each
+            // conjunct becomes one edge however many places carry it.
+            foreach (var conjunct in whereConjuncts)
+            {
+                if (!edges.Exists(edge => ReferenceEquals(edge.Conjunct, conjunct)) && TryExtractEquiEdge(conjunct, sources, out var edge))
+                    edges.Add(edge);
             }
         }
 
@@ -1671,6 +1711,7 @@ internal sealed partial class Selection
         Array.Fill(placedAt, -1);
         order[0] = driver;
         placedAt[driver] = 0;
+        var reordered = driver != 0;
         for (var step = 1; step < count; step++)
         {
             var best = -1;
@@ -1685,10 +1726,21 @@ internal sealed partial class Selection
             }
 
             if (best < 0)
-                return null;
+            {
+                if (!hasCross)
+                    return null;
+                best = NextComponentStart(placedAt, seekedCandidates);
+            }
+
             order[step] = best;
             placedAt[best] = step;
+            reordered |= best != step;
         }
+
+        // The written order already is the one chosen: the comma rewrite gave
+        // each of its levels every equality its left side could supply.
+        if (!reordered)
+            return null;
 
         // Each conjunct attaches at the step that places the later of its two
         // sources — which is the step that first makes both readable, whether
@@ -1708,14 +1760,38 @@ internal sealed partial class Selection
         reorderedSources[0] = sources[order[0]];
         for (var step = 1; step < count; step++)
         {
-            if (stepPredicates[step] is not { } on)
-                return null;
             reorderedSources[step] = sources[order[step]];
-            reorderedJoins[step - 1] = new JoinSpec(JoinKind.Inner, on);
+            reorderedJoins[step - 1] = stepPredicates[step] is { } on
+                ? new JoinSpec(JoinKind.Inner, on)
+                : new JoinSpec(JoinKind.Cross, null);
         }
 
         JoinDiagnostics.Sink?.Add($"Reorder({string.Join(",", order)})");
         return (reorderedSources, reorderedJoins);
+    }
+
+    /// <summary>
+    /// The source a CROSS step starts the next connected component from: the
+    /// unplaced one the seek narrowed hardest, else the first-written unplaced
+    /// one.
+    /// </summary>
+    private static int NextComponentStart(int[] placedAt, int[]? seekedCandidates)
+    {
+        var start = -1;
+        for (var i = 0; i < placedAt.Length; i++)
+        {
+            if (placedAt[i] >= 0)
+                continue;
+            if (start < 0)
+                start = i;
+            if (seekedCandidates is not null && seekedCandidates[i] >= 0
+                && (seekedCandidates[start] < 0 || seekedCandidates[i] < seekedCandidates[start]))
+            {
+                start = i;
+            }
+        }
+
+        return start;
     }
 
     /// <summary>
