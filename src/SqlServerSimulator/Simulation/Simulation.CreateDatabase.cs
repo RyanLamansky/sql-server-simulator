@@ -127,6 +127,11 @@ partial class Simulation
             if (this.Databases.ContainsKey(databaseName))
                 throw SimulatedSqlException.DatabaseAlreadyExists(databaseName);
             var database = new Database(databaseName, collation);
+            // The creating login owns the new database (probed 2026-09-27
+            // against SQL Server 2025 with a dbcreator login); a session with no
+            // registered login — the in-process default — creates as sa.
+            if (this.Logins.TryGetValue(context.Connection.Security.Effective.LoginName, out var creator))
+                database.OwnerLoginName = creator.Name;
             if (groups is not null)
                 this.ApplyCreateDatabaseFileList(database, groups, logFiles ?? []);
             else

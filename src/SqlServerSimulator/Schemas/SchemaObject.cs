@@ -65,6 +65,17 @@ internal abstract class SchemaObject(string name, int objectId, int schemaId, Da
     public int SchemaId = schemaId;
 
     /// <summary>
+    /// The object's explicit owner — <c>sys.objects.principal_id</c> — set by
+    /// <c>ALTER AUTHORIZATION</c>; null means the owning schema's owner, which
+    /// is also what <c>TO SCHEMA OWNER</c> restores. Survives an
+    /// <c>ALTER SCHEMA … TRANSFER</c> (probed 2026-09-27 against SQL Server
+    /// 2025). A trigger never carries one: it follows its parent's owner, as a
+    /// constraint does. <see cref="Ownership.EffectiveOwnerId(Database, SchemaObject)"/>
+    /// resolves the owner either way.
+    /// </summary>
+    public int? OwnerPrincipalId;
+
+    /// <summary>
     /// UTC creation timestamp — captured at CREATE time from the executing
     /// statement's frozen UtcNow on
     /// <see cref="Parser.StatementContext"/>. Surfaces in

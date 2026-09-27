@@ -26,13 +26,14 @@ partial class Simulation
         string? objectType,
         string? targetObjectName = null,
         string? targetObjectType = null,
-        string? roleName = null)
+        string? roleName = null,
+        string? ownerName = null)
     {
         if (context.Batch.IsSkipping || context.Connection.SuppressDdlTriggers || context.CurrentDatabase.DdlTriggers.IsEmpty)
             return;
         var statement = context.Batch.CurrentStatement;
         (statement.PendingDdlEvents ??= []).Add(
-            new DdlEventInfo(eventType, schemaName, objectName, objectType, targetObjectName, targetObjectType, roleName));
+            new DdlEventInfo(eventType, schemaName, objectName, objectType, targetObjectName, targetObjectType, roleName, ownerName));
     }
 
     /// <summary>
@@ -185,6 +186,8 @@ partial class Simulation
             AppendElement(builder, "ObjectName", objectName);
         if (info.ObjectType is { } objectType)
             AppendElement(builder, "ObjectType", objectType);
+        if (info.OwnerName is { } ownerName)
+            AppendElement(builder, "OwnerName", ownerName);
         if (info.TargetObjectName is { } targetName)
             AppendElement(builder, "TargetObjectName", targetName);
         if (info.TargetObjectType is { } targetType)
@@ -213,6 +216,13 @@ partial class Simulation
 
     private static void AppendElement(StringBuilder builder, string name, string value)
     {
+        // An empty value is the self-closing form real's xml renders — an
+        // ALTER_AUTHORIZATION_DATABASE event's <SchemaName /> for a schema.
+        if (value.Length == 0)
+        {
+            _ = builder.Append('<').Append(name).Append(" />");
+            return;
+        }
         _ = builder.Append('<').Append(name).Append('>');
         foreach (var c in value)
         {

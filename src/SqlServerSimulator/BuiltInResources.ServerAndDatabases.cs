@@ -1138,7 +1138,6 @@ internal static partial class BuiltInResources
         var falseBit = SqlValue.FromBoolean(false);
         var trueBit = SqlValue.FromBoolean(true);
         var zeroByte = SqlValue.FromByte(0);
-        var ownerSid = SqlValue.FromVarbinary([0x01]);
         var createDate = SqlValue.FromDateTime(SysDatabasesCreateDate);
         var brokerGuid = SqlValue.FromGuid(SysDatabasesBrokerGuid);
         var online = SqlValue.FromNVarchar("ONLINE");
@@ -1173,7 +1172,7 @@ internal static partial class BuiltInResources
                 SqlValue.FromSystemName(db.Name),
                 SqlValue.FromInt32(id),
                 nullInt,
-                ownerSid,
+                SqlValue.FromVarbinary(Ownership.OwnerSid(db)),
                 createDate,
                 SqlValue.FromByte((byte)db.CompatibilityLevel),
                 SqlValue.FromSystemName(db.CollationName),

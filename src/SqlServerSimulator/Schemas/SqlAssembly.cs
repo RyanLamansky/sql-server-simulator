@@ -67,8 +67,9 @@ internal sealed class SqlAssembly(
     public readonly AssemblyPermissionSet PermissionSet = permissionSet;
 
     /// <summary>Owning database principal — <c>dbo</c> (1) unless
-    /// <c>AUTHORIZATION</c> named another.</summary>
-    public readonly int PrincipalId = principalId;
+    /// <c>AUTHORIZATION</c> named another, or <c>ALTER AUTHORIZATION</c>
+    /// moved it.</summary>
+    public int PrincipalId = principalId;
 
     public readonly DateTime CreateDate = createDate;
     public DateTime ModifyDate = createDate;

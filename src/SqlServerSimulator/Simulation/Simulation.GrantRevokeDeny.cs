@@ -138,6 +138,12 @@ partial class Simulation
                     serverScopeSecurable = true;
                     loginSecurableName = securableName.Leaf;
                     break;
+                case "ROLE":
+                    // A role is a database principal like a user: class 4
+                    // DATABASE_PRINCIPAL.
+                    permClass = PermissionChecker.ClassDatabasePrincipal;
+                    userSecurableName = securableName;
+                    break;
                 case "SCHEMA":
                     permClass = PermissionChecker.ClassSchema;
                     objectSecurableName = securableName;

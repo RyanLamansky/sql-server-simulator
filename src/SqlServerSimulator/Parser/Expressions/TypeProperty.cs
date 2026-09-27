@@ -25,7 +25,7 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// <c>timestamp</c> / <c>sysname</c>.</description></item>
 /// <item><description><c>UsesAnsiTrim</c> — 1 for the blank-padded
 /// single-byte types and <c>sql_variant</c>.</description></item>
-/// <item><description><c>OwnerId</c> — the owning schema's principal.</description></item>
+/// <item><description><c>OwnerId</c> — the type's explicit owner, else the owning schema's.</description></item>
 /// </list>
 /// </para>
 /// <para>
@@ -111,9 +111,11 @@ internal sealed class TypeProperty : Expression
                 ColumnProperty.Scale(alias.UnderlyingType),
                 alias.IsNullable ? 1 : 0,
                 alias.UnderlyingType is CharSqlType or VarcharSqlType or BinarySqlType or VarbinarySqlType or SqlVariantSqlType ? 1 : null,
-                schema.PrincipalId);
+                Ownership.EffectiveOwnerId(alias));
         }
-        return schema.TableTypes.ContainsKey(name.Leaf) ? new(0, null, 0, null, schema.PrincipalId) : null;
+        return schema.TableTypes.TryGetValue(name.Leaf, out var tableType)
+            ? new(0, null, 0, null, tableType.OwnerPrincipalId ?? schema.PrincipalId)
+            : null;
     }
 
     private static TypeMetadata? LookupType(string typeName)

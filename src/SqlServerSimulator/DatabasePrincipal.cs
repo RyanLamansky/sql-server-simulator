@@ -104,4 +104,13 @@ internal sealed class DatabasePrincipal(
     /// hardening would only bill activation.
     /// </summary>
     public byte[]? PasswordHash;
+
+    /// <summary>
+    /// A database role's owner — <c>sys.database_principals.owning_principal_id</c>
+    /// — which <c>CREATE ROLE … AUTHORIZATION</c> and <c>ALTER AUTHORIZATION ON
+    /// ROLE::</c> set; <c>dbo</c> otherwise, fixed roles included. A role may
+    /// own itself, and its owner's members hold <c>CONTROL</c> on it. Read only
+    /// for type <c>R</c>.
+    /// </summary>
+    public int OwningPrincipalId = Database.DboPrincipalId;
 }

@@ -188,6 +188,7 @@ partial class Simulation
             "sp_addrolemember" => InvokeSpRoleMember(batch, isAdd: true),
             "sp_bindefault" => InvokeSpBind(batch, CalledName(procName), isRule: false),
             "sp_bindrule" => InvokeSpBind(batch, CalledName(procName), isRule: true),
+            "sp_changedbowner" => InvokeSpChangeDbOwner(batch),
             "sp_column_privileges" => InvokeSpColumnPrivileges(batch),
             "sp_columns" => InvokeSpColumns(batch, classic: true),
             "sp_columns_100" => InvokeSpColumns(batch, classic: false),

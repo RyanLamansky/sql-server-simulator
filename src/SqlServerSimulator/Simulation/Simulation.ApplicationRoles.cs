@@ -117,6 +117,7 @@ partial class Simulation
         var database = context.CurrentDatabase;
         if (!TryGetApplicationRole(database, name, out var role))
             throw SimulatedSqlException.CannotFindPrincipal(name);
+        Ownership.RejectDropOfOwner(database, role.PrincipalId);
         RecordSecurityUndo(context, database);
         _ = database.Principals.TryRemove(name, out _);
         lock (database.RoleMembers)

@@ -32,6 +32,8 @@ partial class Simulation
     /// overriding any explicit <c>FOR LOGIN</c> mapping (probe6 N3). The dbo
     /// effective principal then bypasses every check, including explicit
     /// DENY (N3b).</item>
+    /// <item>The login that <b>owns</b> the database
+    /// (<see cref="Database.OwnerLoginName"/>) → <c>dbo</c> there.</item>
     /// <item>An explicit mapped user (<c>CREATE USER … FOR LOGIN</c>) in the
     /// target database → that (restricted) user.</item>
     /// <item><c>guest</c> where it is accessible (<c>master</c> / <c>tempdb</c> /
@@ -54,7 +56,8 @@ partial class Simulation
             return true;
         }
 
-        if (simulation.IsLoginSysadmin(loginName))
+        // The login that owns the database is its dbo (probed 2026-09-27).
+        if (simulation.IsLoginSysadmin(loginName) || target.Collation.Equals(target.OwnerLoginName, loginName))
         {
             principal = target.Principals["dbo"];
             return true;

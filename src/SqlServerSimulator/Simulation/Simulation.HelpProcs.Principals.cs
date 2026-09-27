@@ -184,6 +184,8 @@ partial class Simulation
             if (only is not null && !database.Collation.Equals(principal.Name, only))
                 continue;
 
+            // dbo reports the login that owns the database (probed 2026-09-27).
+            var login = principal.PrincipalId == Database.DboPrincipalId ? database.OwnerLoginName : principal.LoginName;
             var before = rows.Count;
             foreach (var (roleId, memberId) in members)
             {
@@ -192,12 +194,12 @@ partial class Simulation
                 foreach (var role in database.Principals.Values)
                 {
                     if (role.PrincipalId == roleId)
-                        rows.Add((principal.Name, role.Name, principal.LoginName, principal.PrincipalId));
+                        rows.Add((principal.Name, role.Name, login, principal.PrincipalId));
                 }
             }
 
             if (rows.Count == before)
-                rows.Add((principal.Name, "public", principal.LoginName, principal.PrincipalId));
+                rows.Add((principal.Name, "public", login, principal.PrincipalId));
         }
 
         rows.Sort(static (a, b) => string.Compare(a.User, b.User, StringComparison.OrdinalIgnoreCase));

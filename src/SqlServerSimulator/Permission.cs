@@ -184,6 +184,9 @@ internal static class PermissionCatalog
                 "CREATE VIEW" => Permission.CreateView,
                 "CREATE XML SCHEMA COLLECTION" => Permission.CreateXmlSchemaCollection,
                 "DELETE" => Permission.Delete,
+                // GRANT EXEC is the same permission, stored and reported as EXECUTE
+                // (probed 2026-09-27 against SQL Server 2025).
+                "EXEC" => Permission.Execute,
                 "EXECUTE" => Permission.Execute,
                 "IMPERSONATE" => Permission.Impersonate,
                 "IMPERSONATE ANY LOGIN" => Permission.ImpersonateAnyLogin,

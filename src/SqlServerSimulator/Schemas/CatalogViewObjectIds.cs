@@ -218,6 +218,7 @@ internal static class CatalogViewObjectIds
         ["sp_addlinkedsrvlogin"] = -946112541,
         ["sp_bindefault"] = -999020156,
         ["sp_bindrule"] = -713274700,
+        ["sp_changedbowner"] = -300099822,
         ["sp_column_privileges"] = -38074391,
         ["sp_columns"] = -10461767,
         ["sp_columns_100"] = -513496712,

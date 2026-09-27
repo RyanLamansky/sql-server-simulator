@@ -159,7 +159,7 @@ partial class Simulation
         [
             [
                 SqlValue.FromSystemName(target.Name),
-                SqlValue.FromSystemName(HelpOwnerName(target.Schema)),
+                SqlValue.FromSystemName(HelpOwnerName(target.Schema, target.Object ?? target.Table)),
                 SqlValue.FromString(HelpObjectTypeType, HelpObjectTypeText(target.TypeCode)),
                 SqlValue.FromDateTime(target.CreateDate),
             ],
@@ -279,29 +279,30 @@ partial class Simulation
         return parsed.Count is >= 1 and <= 3 && TryResolveHelpTarget(batch, parsed, out target);
     }
 
-    // Every simulator schema is dbo-owned, so an object's owner is dbo unless
-    // it lives in one of the fixed catalog schemas (which own themselves).
-    private static string HelpOwnerName(Schema schema) =>
-        schema.SchemaId is Database.SysSchemaId or Database.InformationSchemaId
-            ? schema.Name
-            : Database.DefaultSchemaName;
+    // The name of the object's effective owner — its explicit one, else its
+    // schema's (probed 2026-09-27: a table in a u1-owned schema reports u1);
+    // a constraint answers for its table.
+    private static string HelpOwnerName(Schema schema, SchemaObject? obj)
+    {
+        var ownerId = obj is null ? schema.PrincipalId : Ownership.EffectiveOwnerId(schema.Database, obj);
+        return Ownership.PrincipalName(schema.Database, ownerId) ?? schema.Name;
+    }
 
     private static SimulatedSqlResultSet HelpObjectListResultSet(Database database)
     {
         var rows = new List<SqlValue[]>();
         foreach (var schema in database.Schemas.Values)
         {
-            var owner = SqlValue.FromSystemName(HelpOwnerName(schema));
-            void Add(string name, string typeCode) => rows.Add([
+            void Add(string name, string typeCode, SchemaObject owned) => rows.Add([
                 SqlValue.FromSystemName(name),
-                owner,
+                SqlValue.FromSystemName(HelpOwnerName(schema, owned)),
                 SqlValue.FromString(HelpObjectTypeType, HelpObjectTypeText(typeCode)),
             ]);
 
             foreach (var obj in schema.SchemaObjects())
-                Add(obj.Name, obj.ObjectTypeCode);
+                Add(obj.Name, obj.ObjectTypeCode, obj);
             foreach (var constraint in HelpConstraintObjects(schema))
-                Add(constraint.Name, constraint.TypeCode);
+                Add(constraint.Name, constraint.TypeCode, constraint.Table);
         }
 
         // Real's order: owner ascending, object type DESCENDING, name ascending

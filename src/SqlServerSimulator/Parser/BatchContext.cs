@@ -766,8 +766,9 @@ internal sealed class BatchContext
     /// Whether execution-time permission checks apply to statements dispatched
     /// in this batch. False inside a static module body (procedure / view /
     /// TVF / scalar-UDF / trigger) — ownership chaining suppresses checks on
-    /// the body's object references (everything is dbo-owned, so all chains are
-    /// unbroken). Dynamic SQL (<c>EXEC('…')</c> / <c>sp_executesql</c>) breaks
+    /// the body's object references that share the module's owner
+    /// (<see cref="OwnershipChainOwnerId"/>); a reference to an object with
+    /// another owner breaks the chain and is checked anyway. Dynamic SQL (<c>EXEC('…')</c> / <c>sp_executesql</c>) breaks
     /// the chain: its <see cref="ProcFrame"/> carries
     /// <see cref="Parser.ProcFrame.IsDynamicSql"/>, so checks re-engage. The
     /// <c>dbo</c> bypass is a separate, cheaper short-circuit the enforcement
@@ -781,6 +782,17 @@ internal sealed class BatchContext
         !this.CreateTimeBinding
         && this.UdfFrame is null && this.TriggerFrame is null
         && (this.ProcFrame is null || this.ProcFrame.IsDynamicSql);
+
+    /// <summary>
+    /// The effective owner of the module whose body this batch runs — a
+    /// procedure's, a scalar function's, or a DML trigger's (its table's) —
+    /// against which ownership chaining compares each object the body
+    /// references: the same owner keeps the chain and skips the caller's check,
+    /// any other owner breaks it (probed 2026-09-27 against SQL Server 2025).
+    /// Null outside such a body, and in the module bodies that don't set it,
+    /// whose references all stay chained.
+    /// </summary>
+    public int? OwnershipChainOwnerId;
 
     /// <summary>
     /// Leaf names (<c>#foo</c>) of local temp tables created while this batch's

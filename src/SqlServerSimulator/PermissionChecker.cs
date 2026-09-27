@@ -120,7 +120,7 @@ internal static class PermissionEnforcement
     /// checks the caller's rights on the object the module reached across
     /// (probe-confirmed: a dbo-owned view selecting from another database
     /// raises Msg 229 naming the base table there). The chaining exemption is
-    /// applied one step later, in <see cref="TryResolveScope"/>, so that the
+    /// applied one step later, in <see cref="TryResolveScope(BatchContext, Database, int, out int)"/>, so that the
     /// Msg 916 a missing user in the target earns still fires. A create-time
     /// bind suppresses everything — it reads no row.
     /// </summary>
@@ -176,8 +176,23 @@ internal static class PermissionEnforcement
     /// check) for a session that bypasses, and for a cross-database reference
     /// whose target principal is <c>dbo</c>.
     /// </summary>
-    private static bool TryResolveScope(BatchContext batch, Database target, out int principalId)
+    private static bool TryResolveScope(BatchContext batch, Database target, out int principalId) =>
+        TryResolveScope(batch, target, objectId: 0, out principalId);
+
+    /// <summary>
+    /// <see cref="TryResolveScope(BatchContext, Database, out int)"/> for a
+    /// reference to object <paramref name="objectId"/>, which additionally
+    /// answers a broken ownership chain: inside a module body that records its
+    /// owner, a same-database object with another owner is checked against the
+    /// caller as though no module intervened.
+    /// </summary>
+    private static bool TryResolveScope(BatchContext batch, Database target, int objectId, out int principalId)
     {
+        if (objectId != 0 && BreaksOwnershipChain(batch, target, objectId))
+        {
+            principalId = batch.Connection.Security.Effective.DatabasePrincipalId;
+            return true;
+        }
         if (!Applies(batch, target))
         {
             principalId = 0;
@@ -197,10 +212,25 @@ internal static class PermissionEnforcement
     }
 
     /// <summary>
+    /// Whether a same-database reference from inside a module body falls off
+    /// its ownership chain — the object's effective owner differs from
+    /// <see cref="BatchContext.OwnershipChainOwnerId"/>. Never for a bypassing
+    /// session or a create-time bind, and never outside a module body.
+    /// </summary>
+    private static bool BreaksOwnershipChain(BatchContext batch, Database target, int objectId) =>
+        !batch.EnforcesPermissions
+        && batch.OwnershipChainOwnerId is int chainOwner
+        && !batch.CreateTimeBinding
+        && ReferenceEquals(target, batch.CurrentDatabase)
+        && !Bypasses(batch.Connection, target)
+        && Ownership.EffectiveOwnerId(target, objectId) is int owner
+        && owner != chainOwner;
+
+    /// <summary>
     /// Whether an ownership chain re-links across the boundary between two
     /// databases: <c>DB_CHAINING</c> on in <em>both</em>. Real additionally
-    /// requires the two objects to share an owner, which every simulated object
-    /// does (all dbo-owned). Probe-confirmed against SQL Server 2025: on/on
+    /// requires the two objects to share an owner, which this doesn't compare
+    /// (not built yet). Probe-confirmed against SQL Server 2025: on/on
     /// carries the chain through a view and through a procedure body, while
     /// on/off, off/on and off/off all break it and the caller needs its own
     /// grant on the object the module reached.
@@ -317,7 +347,7 @@ internal static class PermissionEnforcement
         foreach (var s in securables)
         {
             var database = s.Database;
-            if (!TryResolveScope(batch, database, out var principalId))
+            if (!TryResolveScope(batch, database, s.ObjectId, out var principalId))
                 continue;
             var permission = Permission.Resolve(s.Permission);
             // Column-grain path: a SELECT read with tracked columns.
@@ -393,6 +423,71 @@ internal static class PermissionEnforcement
     }
 
     /// <summary>
+    /// Checks an inlined module body's reads — a view's or an inline TVF's —
+    /// at invocation: the cross-database ones as
+    /// <see cref="CheckCrossDatabaseReads"/> does, and the same-database ones
+    /// whose object has an owner other than <paramref name="module"/>'s, where
+    /// the ownership chain breaks and the caller needs its own rights (probed
+    /// 2026-09-27 against SQL Server 2025: a <c>u1</c>-owned view over a
+    /// dbo-owned table is Msg 229 naming the table). A chain that holds costs a
+    /// dbo session nothing and a restricted one a linear owner lookup.
+    /// </summary>
+    internal static void CheckModuleBodyReads(BatchContext batch, Schemas.SchemaObject module, Database moduleDatabase, Selection body)
+    {
+        var securables = body.ReferencedSecurables;
+        CheckCrossDatabaseReads(batch, moduleDatabase, securables);
+        if (securables is null || batch.CreateTimeBinding || Bypasses(batch.Connection, moduleDatabase))
+            return;
+        int? moduleOwner = null;
+        foreach (var s in securables)
+        {
+            if (!ReferenceEquals(s.Database, moduleDatabase))
+                continue;
+            moduleOwner ??= Ownership.EffectiveOwnerId(moduleDatabase, module);
+            if (Ownership.EffectiveOwnerId(moduleDatabase, s.ObjectId) is not int owner || owner == moduleOwner)
+                continue;
+            var principalId = ReferenceEquals(moduleDatabase, batch.CurrentDatabase)
+                ? batch.Connection.Security.Effective.DatabasePrincipalId
+                : ResolveCrossDatabasePrincipal(batch.Connection, moduleDatabase).PrincipalId;
+            if (principalId == Database.DboPrincipalId)
+                continue;
+            var permission = Permission.Resolve(s.Permission);
+            if (permission == Permission.Select && body.ReadColumnsByObject is { } readColumns && readColumns.TryGetValue(s.ObjectId, out var target))
+            {
+                CheckColumnGrants(moduleDatabase, principalId, Permission.Select, target);
+                continue;
+            }
+            if (!PermissionChecker.IsGranted(moduleDatabase, principalId, permission, PermissionChecker.ClassObject, s.ObjectId, s.SchemaId))
+                throw SimulatedSqlException.PermissionDenied(s.Permission.ToUpperInvariant(), s.ObjectName, moduleDatabase.Name, s.SchemaName);
+        }
+    }
+
+    /// <summary>
+    /// Checks a write that passes through <paramref name="module"/> into
+    /// <paramref name="target"/> — an <c>INSERT</c> through an updatable view
+    /// — when the two have different owners, which breaks the ownership chain
+    /// and makes the caller need the permission on the base object itself
+    /// (probed 2026-09-27 against SQL Server 2025: Msg 229 naming the table).
+    /// </summary>
+    internal static void CheckBrokenChainWrite(BatchContext batch, string permission, Schemas.SchemaObject module, Schemas.SchemaObject target)
+    {
+        var database = batch.DatabaseFor(target);
+        if (batch.CreateTimeBinding || Bypasses(batch.Connection, database)
+            || Ownership.EffectiveOwnerId(batch.DatabaseFor(module), module) == Ownership.EffectiveOwnerId(database, target))
+        {
+            return;
+        }
+        var principalId = ReferenceEquals(database, batch.CurrentDatabase)
+            ? batch.Connection.Security.Effective.DatabasePrincipalId
+            : ResolveCrossDatabasePrincipal(batch.Connection, database).PrincipalId;
+        if (principalId != Database.DboPrincipalId
+            && !PermissionChecker.IsGranted(database, principalId, Permission.Resolve(permission), PermissionChecker.ClassObject, target.ObjectId, target.SchemaId))
+        {
+            throw SimulatedSqlException.PermissionDenied(permission, target.Name, database.Name, SchemaNameFor(database, target.SchemaId));
+        }
+    }
+
+    /// <summary>
     /// Column-level enforcement over an ordinal set gathered inline (the UPDATE /
     /// DELETE write and read-implies-SELECT paths, which don't ride a
     /// <see cref="Parser.Selection"/> plan). No-op for dbo / module bodies, and
@@ -404,7 +499,7 @@ internal static class PermissionEnforcement
         if (target.Ordinals.Count == 0)
             return;
         var database = batch.DatabaseFor(target.Securable);
-        if (TryResolveScope(batch, database, out var principalId))
+        if (TryResolveScope(batch, database, target.Securable.ObjectId, out var principalId))
             CheckColumnGrants(database, principalId, permission, target);
     }
 
@@ -444,7 +539,7 @@ internal static class PermissionEnforcement
     internal static void CheckScalarFunctionExecute(BatchContext batch, Schemas.ScalarFunction function)
     {
         var database = batch.DatabaseFor(function);
-        if (!TryResolveScope(batch, database, out var principalId))
+        if (!TryResolveScope(batch, database, function.ObjectId, out var principalId))
             return;
         var checkedIds = batch.ExecuteCheckedFunctionIds ??= [];
         if (!checkedIds.Add(function.ObjectId))
@@ -456,7 +551,7 @@ internal static class PermissionEnforcement
     /// <summary>Checks one permission on one object in <paramref name="database"/>; throws Msg 229 (with optional Procedure attribution) on denial. No-op when checks don't apply.</summary>
     internal static void CheckObject(BatchContext batch, Database database, string permission, int objectId, int schemaId, string objectName, string schemaName, string procedure = "")
     {
-        if (!TryResolveScope(batch, database, out var principalId))
+        if (!TryResolveScope(batch, database, objectId, out var principalId))
             return;
         if (!PermissionChecker.IsGranted(database, principalId, Permission.Resolve(permission), PermissionChecker.ClassObject, objectId, schemaId))
             throw SimulatedSqlException.PermissionDenied(permission.ToUpperInvariant(), objectName, database.Name, schemaName, procedure);
@@ -551,6 +646,25 @@ internal static class PermissionEnforcement
     internal static bool HasObjectControl(BatchContext batch, Database database, int objectId, int schemaId) =>
         !TryResolveScope(batch, database, out var principalId)
         || PermissionChecker.IsGranted(database, principalId, Permission.Control, PermissionChecker.ClassObject, objectId, schemaId);
+
+    /// <summary>
+    /// Whether the effective principal holds <paramref name="permission"/> on the
+    /// described securable in <paramref name="database"/> — the generic form of
+    /// the typed gates above. True for dbo / module bodies.
+    /// </summary>
+    internal static bool HoldsPermission(BatchContext batch, Database database, Permission permission, byte securableClass, int majorId, int schemaId) =>
+        !TryResolveScope(batch, database, out var principalId)
+        || PermissionChecker.IsGranted(database, principalId, permission, securableClass, majorId, schemaId);
+
+    /// <summary>
+    /// Whether the effective principal may name <paramref name="targetPrincipalId"/>
+    /// as a new owner: itself or a role it belongs to, else <c>IMPERSONATE</c> on
+    /// the target (which <c>CONTROL</c> covers). True for dbo / module bodies.
+    /// </summary>
+    internal static bool MayActAs(BatchContext batch, Database database, int targetPrincipalId) =>
+        !TryResolveScope(batch, database, out var principalId)
+        || PermissionChecker.BuildPrincipalClosure(database, principalId).Contains(targetPrincipalId)
+        || PermissionChecker.IsGranted(database, principalId, Permission.Impersonate, PermissionChecker.ClassDatabasePrincipal, targetPrincipalId, 0);
 
     /// <summary>
     /// Whether the effective principal may create or drop a database — the one
@@ -671,6 +785,8 @@ internal static class PermissionChecker
             return false;
 
         var closure = BuildClosure(database, principalId);
+        if (OwnsSecurable(database, closure, securableClass, majorId, schemaId))
+            return true;
         var satisfiers = BuildSatisfiers(permission, securableClass, majorId, schemaId, columnOrdinal: 0);
 
         // DENY binds first — explicit D rows, then the deny-roles.
@@ -689,6 +805,37 @@ internal static class PermissionChecker
             || (permission.Category == PermissionCategory.Ddl
                 && closure.Contains(DbDdlAdmin)
                 && !IsBlanketDatabaseAlter(permission, securableClass));
+    }
+
+    /// <summary>
+    /// Whether the principal closure <paramref name="closure"/> owns the
+    /// securable — an object through its effective owner or its schema's
+    /// owner, a schema through its owner, a role through its owner. An owner
+    /// holds <c>CONTROL</c> that no <c>DENY</c> can take away, and a role's
+    /// members share its ownership (probed 2026-09-27 against SQL Server 2025:
+    /// a member of the role that owns a table reads it with no grant).
+    /// Restricted principals only reach this, so the linear owner lookups stay
+    /// off the <c>dbo</c> path.
+    /// </summary>
+    private static bool OwnsSecurable(Database database, HashSet<int> closure, byte securableClass, int majorId, int schemaId)
+    {
+        switch (securableClass)
+        {
+            case ClassObject:
+                return closure.Contains(Ownership.SchemaOwnerId(database, schemaId))
+                    || (Ownership.EffectiveOwnerId(database, majorId) is int owner && closure.Contains(owner));
+            case ClassSchema:
+                return closure.Contains(Ownership.SchemaOwnerId(database, majorId));
+            case ClassDatabasePrincipal:
+                foreach (var principal in database.Principals.Values)
+                {
+                    if (principal.PrincipalId == majorId)
+                        return principal.TypeCode == "R" && closure.Contains(principal.OwningPrincipalId);
+                }
+                return false;
+            default:
+                return false;
+        }
     }
 
     /// <summary>
@@ -719,6 +866,8 @@ internal static class PermissionChecker
             return false;
 
         var closure = BuildClosure(database, principalId);
+        if (OwnsSecurable(database, closure, ClassObject, objectId, schemaId))
+            return true;
         var satisfiers = BuildSatisfiers(permission, ClassObject, objectId, schemaId, columnOrdinal);
 
         // DENY binds first — a column / object / schema / db DENY, then the deny-roles.
@@ -830,7 +979,7 @@ internal static class PermissionChecker
 
     internal static bool CanViewMetadata(Database database, HashSet<int> closure, int objectId, int schemaId)
     {
-        if (HasFullMetadataVisibility(database, closure))
+        if (HasFullMetadataVisibility(database, closure) || OwnsSecurable(database, closure, ClassObject, objectId, schemaId))
             return true;
         foreach (var row in database.Permissions)
         {

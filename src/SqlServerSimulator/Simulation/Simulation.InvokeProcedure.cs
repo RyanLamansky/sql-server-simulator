@@ -261,6 +261,7 @@ partial class Simulation
                 LineOffset = procedure.BodyLineOffset,
                 ErrorProcedureName = attributionName,
                 ContinueOnError = ContinuesCalledBatch(outerBatch),
+                OwnershipChainOwnerId = Ownership.EffectiveOwnerId(procedure.Schema.Database, procedure),
             };
             // Seed cursor parameters as unallocated cursor variables in the
             // child frame; the body SETs and OPENs a cursor on each.

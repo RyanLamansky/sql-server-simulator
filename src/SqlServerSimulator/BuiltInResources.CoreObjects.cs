@@ -40,7 +40,7 @@ internal static partial class BuiltInResources
             foreach (var (name, id) in FixedCatalogOnlySchemas)
             {
                 if (!database.Schemas.ContainsKey(name))
-                    rows.Add(SchemaRow(name, id));
+                    rows.Add(SchemaRow(name, id, Ownership.SchemaOwnerId(database, id)));
             }
 
             rows.Sort((a, b) => a[1].AsInt32.CompareTo(b[1].AsInt32));
@@ -92,10 +92,8 @@ internal static partial class BuiltInResources
             new("object_id", SqlType.Int32, null, false),
             new("name", SqlType.SystemName, 128, false),
             new("schema_id", SqlType.Int32, null, false),
-            // No explicit table owner is modeled (ownership follows the
-            // schema), so principal_id is always NULL — matching real SQL
-            // Server for tables without an AUTHORIZATION override. SMO's
-            // CREATE-scripting table query reads it.
+            // The explicit owner ALTER AUTHORIZATION set, NULL when ownership
+            // follows the schema. SMO's CREATE-scripting table query reads it.
             new("principal_id", SqlType.Int32, null, true),
             new("type", charTwo, 2, true),
             new("type_desc", nvarchar60Catalog, 60, true),
@@ -204,7 +202,7 @@ internal static partial class BuiltInResources
                         SqlValue.FromInt32(t.ObjectId),
                         SqlValue.FromSystemName(t.Name),
                         SqlValue.FromInt32(t.SchemaId),
-                        SqlValue.Null(SqlType.Int32),
+                        Ownership.PrincipalIdValue(t.OwnerPrincipalId),
                         tableType,
                         tableTypeDesc,
                         SqlValue.FromDateTime(t.CreateDate),
@@ -275,9 +273,8 @@ internal static partial class BuiltInResources
             new("name", SqlType.SystemName, 128, false),
             new("schema_id", SqlType.Int32, null, false),
             new("parent_object_id", SqlType.Int32, null, false),
-            // No explicit object owner is modeled (ownership follows the
-            // schema), so principal_id is always NULL — matching real SQL
-            // Server for objects without an AUTHORIZATION override. SMO's
+            // The explicit owner ALTER AUTHORIZATION set, NULL when ownership
+            // follows the schema (always for a trigger or constraint). SMO's
             // Object-Explorer function / procedure / sequence enumeration
             // reads ISNULL(o.principal_id, OBJECTPROPERTY(o.object_id,'OwnerId')).
             new("principal_id", SqlType.Int32, null, true),
@@ -761,14 +758,15 @@ internal static partial class BuiltInResources
     private static readonly (string Name, int Id)[] FixedCatalogOnlySchemas =
         [("guest", 2), .. Database.FixedDatabaseRoles.Select(r => (r.Name, r.Id))];
 
-    // One sys.schemas row: principal_id follows real's ownership convention —
-    // fixed schemas (ids ≤ 4 or ≥ 16384) are owned by the like-id principal;
-    // user schemas (5..16383) are owned by dbo (principal_id 1).
-    private static SqlValue[] SchemaRow(string name, int schemaId, int? ownerPrincipalId = null) =>
+    // One sys.schemas row, projecting the owner the schema carries: the like-id
+    // principal for a fixed schema until ALTER AUTHORIZATION moves a fixed-role
+    // one, dbo for a user schema unless CREATE SCHEMA … AUTHORIZATION or ALTER
+    // AUTHORIZATION named another.
+    private static SqlValue[] SchemaRow(string name, int schemaId, int ownerPrincipalId) =>
     [
         SqlValue.FromSystemName(name),
         SqlValue.FromInt32(schemaId),
-        SqlValue.FromInt32(schemaId is >= 5 and < 16384 ? ownerPrincipalId ?? Database.DboPrincipalId : schemaId),
+        SqlValue.FromInt32(ownerPrincipalId),
     ];
 
     /// <summary>
@@ -863,7 +861,6 @@ internal static partial class BuiltInResources
     /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateSynonyms(Database database, SqlType charTwo, SqlValue zeroParent)
     {
-        var nullPrincipal = SqlValue.Null(SqlType.Int32);
         var notPublished = SqlValue.FromBoolean(false);
         var typeCode = SqlValue.FromChar(charTwo, "SN");
         var typeDesc = SqlValue.FromNVarchar("SYNONYM");
@@ -875,7 +872,7 @@ internal static partial class BuiltInResources
                 yield return [
                     SqlValue.FromSystemName(synonym.Name),
                     SqlValue.FromInt32(synonym.ObjectId),
-                    nullPrincipal,
+                    Ownership.PrincipalIdValue(synonym.OwnerPrincipalId),
                     schemaId,
                     zeroParent,
                     typeCode,
@@ -979,7 +976,7 @@ internal static partial class BuiltInResources
                     SqlValue.FromSystemName(obj.Name),
                     SqlValue.FromInt32(obj.SchemaId),
                     parent,
-                    nullPrincipal,
+                    Ownership.PrincipalIdValue(obj.OwnerPrincipalId),
                     SqlValue.FromChar(charTwo, obj.ObjectTypeCode),
                     SqlValue.FromNVarchar(obj.ObjectTypeDescription),
                     SqlValue.FromDateTime(obj.CreateDate),

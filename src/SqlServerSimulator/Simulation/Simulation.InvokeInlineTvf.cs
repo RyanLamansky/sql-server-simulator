@@ -126,9 +126,10 @@ partial class Simulation
             var parser = innerBatch.Parser;
             parser.MoveNextRequired();
             var bodySelection = ParseInlineTvfBody(parser, function, writtenName);
-            // Inlined like a view body, so the same chain-break applies: reads
-            // into another database answer to the caller's rights there.
-            PermissionEnforcement.CheckCrossDatabaseReads(outerBatch, function.Schema.Database, bodySelection.ReferencedSecurables);
+            // Inlined like a view body, so the same chain-breaks apply: reads
+            // into another database, or of an object with another owner,
+            // answer to the caller's rights.
+            PermissionEnforcement.CheckModuleBodyReads(outerBatch, function, function.Schema.Database, bodySelection);
             var resultSet = bodySelection.Execute(innerBatch, outerResolver: null);
             foreach (var rowBytes in resultSet.RowBytes)
                 yield return rowBytes;

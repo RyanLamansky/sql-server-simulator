@@ -173,30 +173,53 @@ partial class Simulation
 
     /// <summary>
     /// Pushes a stored procedure's <c>WITH EXECUTE AS</c> frame at invocation.
-    /// OWNER / SELF resolve to <c>dbo</c> (every module is dbo-owned and
-    /// dbo-created); CALLER / absent is a no-op; a named user pushes that
+    /// OWNER resolves to the procedure's owner and SELF to <c>dbo</c>; CALLER /
+    /// absent is a no-op; a named user pushes that
     /// database principal, raising Msg 15517 at EXEC time if it's missing. The
     /// matching pop is the caller's <see cref="SessionSecurityContext.RevertTo"/>
     /// on body exit.
     /// </summary>
     private static void PushProcedureExecuteAsFrame(SimulatedDbConnection connection, Procedure procedure, Database database) =>
-        PushModuleExecuteAsFrame(connection, procedure.ExecuteAsClause, database);
+        PushModuleExecuteAsFrame(connection, procedure.ExecuteAsClause, database, Ownership.EffectiveOwnerId(procedure.Schema.Database, procedure), procedure.Name);
 
     /// <summary>
     /// Pushes a module's <c>WITH EXECUTE AS</c> frame (procedure, scalar UDF, or
-    /// trigger) at invocation. OWNER / SELF resolve to <c>dbo</c>; CALLER /
-    /// absent is a no-op; a named user pushes that database principal, raising
+    /// trigger) at invocation. OWNER resolves to <paramref name="ownerPrincipalId"/>
+    /// — the module's effective owner, a trigger's being its parent's — and
+    /// SELF to <c>dbo</c>; an owner that is a role or an application role can't
+    /// be impersonated, which is Msg 15517 naming it (probed 2026-09-27 against
+    /// SQL Server 2025, attributed to a procedure's unqualified
+    /// <paramref name="procedureName"/> at line 0). CALLER / absent is a no-op; a named user pushes that database principal, raising
     /// Msg 15517 at invoke time if it's missing. Every form the clause names is
     /// <see cref="SecurityPrincipalFrame.IsDatabaseScoped"/> — including the
     /// <c>dbo</c> that OWNER / SELF resolve to, whose privilege stops at the
     /// database boundary. The matching pop is the caller's
     /// <see cref="SessionSecurityContext.RevertTo"/> on body exit.
     /// </summary>
-    internal static void PushModuleExecuteAsFrame(SimulatedDbConnection connection, string? clause, Database database)
+    internal static void PushModuleExecuteAsFrame(SimulatedDbConnection connection, string? clause, Database database, int ownerPrincipalId, string? procedureName = null)
     {
         if (clause is null || clause.Equals("CALLER", StringComparison.OrdinalIgnoreCase))
             return;
-        if (clause.Equals("OWNER", StringComparison.OrdinalIgnoreCase) || clause.Equals("SELF", StringComparison.OrdinalIgnoreCase))
+        var isOwner = clause.Equals("OWNER", StringComparison.OrdinalIgnoreCase);
+        if (isOwner && ownerPrincipalId != Database.DboPrincipalId)
+        {
+            foreach (var owner in database.Principals.Values)
+            {
+                if (owner.PrincipalId != ownerPrincipalId)
+                    continue;
+                if (owner.TypeCode is "R" or "A")
+                {
+                    // A procedure's refusal reports its unqualified name at line 0.
+                    var refusal = SimulatedSqlException.CannotExecuteAsDatabasePrincipal(owner.Name);
+                    if (procedureName is not null)
+                        refusal.PreserveDiagnostics(0, procedureName);
+                    throw refusal;
+                }
+                connection.Security.Push(new SecurityPrincipalFrame(owner.PrincipalId, owner.Name, owner.EffectiveLoginIdentity, isDatabaseScoped: true));
+                return;
+            }
+        }
+        if (isOwner || clause.Equals("SELF", StringComparison.OrdinalIgnoreCase))
         {
             // Database-scoped like the named-user form: the token is minted in
             // this database and carries no server principal, so it reaches

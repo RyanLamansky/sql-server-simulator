@@ -42,6 +42,13 @@ internal sealed class AliasType(
 {
     public Schema Schema = schema;
 
+    /// <summary>
+    /// The type's explicit owner — <c>sys.types.principal_id</c> — set by
+    /// <c>ALTER AUTHORIZATION ON TYPE::</c>; null means the owning schema's
+    /// owner, which is also what <c>TO SCHEMA OWNER</c> restores.
+    /// </summary>
+    public int? OwnerPrincipalId;
+
     public readonly string Name = name;
 
     /// <summary>

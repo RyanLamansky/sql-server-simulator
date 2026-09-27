@@ -39,8 +39,9 @@ internal sealed class FullTextCatalog(
 
     /// <summary>Owning principal id — <c>sys.fulltext_catalogs.principal_id</c>.
     /// Defaults to <c>dbo</c> (principal_id = 1) unless an explicit
-    /// <c>AUTHORIZATION</c> clause names another principal.</summary>
-    public readonly int PrincipalId = principalId;
+    /// <c>AUTHORIZATION</c> clause names another principal, or
+    /// <c>ALTER AUTHORIZATION</c> moves it.</summary>
+    public int PrincipalId = principalId;
 
     public readonly DateTime CreateDate = createDate;
 }

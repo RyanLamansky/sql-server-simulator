@@ -535,8 +535,8 @@ internal static partial class BuiltInResources
     /// <item><c>authentication_type</c> is <c>1</c> / <c>INSTANCE</c> for
     /// <c>dbo</c> and <c>0</c> / <c>NONE</c> for everything else — never
     /// NULL.</item>
-    /// <item><c>sid</c> is the well-known <c>0x01</c> for <c>dbo</c> and
-    /// <c>0x00</c> for <c>guest</c>, NULL for the catalog principals, and a
+    /// <item><c>sid</c> is the database owner's login SID for <c>dbo</c> (the
+    /// well-known <c>0x01</c> while <c>sa</c> owns it), <c>0x00</c> for <c>guest</c>, NULL for the catalog principals, and a
     /// 28-byte <c>S-1-9-4-…</c> database-scoped SID for every user and role —
     /// deterministic per name, or per principal_id for a fixed role, the way
     /// real encodes the role id in the last sub-authority.</item>
@@ -553,13 +553,14 @@ internal static partial class BuiltInResources
         var authNoneDesc = SqlValue.FromNVarchar("NONE");
         var authInstance = SqlValue.FromInt32(1);
         var authInstanceDesc = SqlValue.FromNVarchar("INSTANCE");
-        // Database roles are owned by dbo (principal_id 1) — probe-confirmed on
+        // Database roles are owned by dbo (principal_id 1) unless CREATE ROLE …
+        // AUTHORIZATION or ALTER AUTHORIZATION named another — probe-confirmed on
         // the reference (every WWI custom role: owning_principal_id = 1). This
         // must be non-NULL: DacFx's role reverse-engineering filters
         // `USER_NAME(owning_principal_id) != N'cdc'`, and a NULL owner makes
         // that predicate UNKNOWN, silently dropping every SqlRole from the
         // export. dbo is seeded at the fixed id 1 (see Database ctor).
-        var dboOwningId = SqlValue.FromInt32(1);
+        var dboSid = SqlValue.FromVarbinary(Ownership.OwnerSid(database));
         var nullSid = SqlValue.Null(SqlType.Varbinary);
         var nullLanguageName = SqlValue.Null(SqlType.SystemName);
         var nullLanguageLcid = SqlValue.Null(SqlType.Int32);
@@ -587,8 +588,8 @@ internal static partial class BuiltInResources
                     : dboSchemaName,
                 createDate,
                 createDate,
-                p.TypeCode == "R" ? dboOwningId : nullOwningId,
-                isDbo ? DboSid
+                p.TypeCode == "R" ? SqlValue.FromInt32(p.OwningPrincipalId) : nullOwningId,
+                isDbo ? dboSid
                     : isGuest ? GuestSid
                     : isCatalogPrincipal ? nullSid
                     : SqlValue.FromVarbinary(DeriveDatabasePrincipalSid(p)),
@@ -602,9 +603,6 @@ internal static partial class BuiltInResources
             ];
         }
     }
-
-    /// <summary>The well-known single-byte <c>sid</c> <c>dbo</c> reports.</summary>
-    private static readonly SqlValue DboSid = SqlValue.FromVarbinary([0x01]);
 
     /// <summary>The well-known single-byte <c>sid</c> <c>guest</c> reports.</summary>
     private static readonly SqlValue GuestSid = SqlValue.FromVarbinary([0x00]);

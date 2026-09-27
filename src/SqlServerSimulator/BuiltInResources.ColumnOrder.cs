@@ -261,7 +261,6 @@ internal static partial class BuiltInResources
         ],
         ["sys.procedures"] =
         [
-            (new("principal_id", SqlType.Int32, null, true), SqlValue.Null(SqlType.Int32)),
             (new("parent_object_id", SqlType.Int32, null, false), SqlValue.FromInt32(0)),
             (new("is_published", SqlType.Bit, null, false), SqlValue.FromBoolean(false)),
             (new("is_schema_published", SqlType.Bit, null, false), SqlValue.FromBoolean(false)),

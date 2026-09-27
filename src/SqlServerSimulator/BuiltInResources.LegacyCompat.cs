@@ -84,6 +84,8 @@ internal static partial class BuiltInResources
         "sp_bindrule",
         "sp_unbindefault",
         "sp_unbindrule",
+        // sp_changedbowner: the deprecated ALTER AUTHORIZATION ON DATABASE.
+        "sp_changedbowner",
         // xp_msver returns a version/host-info table (SSMS calls it on connect);
         // xp_qv is the AlwaysOn-availability probe; xp_instance_regread reads
         // instance registry defaults.

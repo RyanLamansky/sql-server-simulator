@@ -183,14 +183,16 @@ Default class is `OBJECT` (the bare form with no prefix).
 - **Sch-M acquisition**: every actual move (same-schema fast-path excluded) calls `batch.AcquireStatementLock(obj.SchemaLock, LockMode.SchemaModification)` on the moving object before mutating the source / destination dicts.
   Statement-scoped — matches the idiom every other DDL site uses (`CREATE` / `ALTER` / `DROP` / `TRUNCATE`).
   Same-schema transfers skip the lock acquisition along with the mutation.
+- **Ownership**: an object's explicit owner survives the move, while one owned through its schema is then owned by the destination's owner (probed 2026-09-27 against SQL Server 2025).
 
-**Deferred**: `ALTER SCHEMA … TRANSFER` with the niche class prefixes past OBJECT, TYPE and XML SCHEMA COLLECTION; `ALTER AUTHORIZATION` in every form (there is no parser for the statement at all, so a schema's owner is settled once at CREATE); `DROP SCHEMA` cascade-mode (real SQL Server's ANSI extension; not in the standard T-SQL grammar).
+**Deferred**: `ALTER SCHEMA … TRANSFER` with the niche class prefixes past OBJECT, TYPE and XML SCHEMA COLLECTION; `DROP SCHEMA` cascade-mode (real SQL Server's ANSI extension; not in the standard T-SQL grammar).
 
 ## CREATE SCHEMA's owner and its element list
 
 `CREATE SCHEMA [<name>] [AUTHORIZATION <owner>] [<schema_element> …]` ships whole.
 
 **`AUTHORIZATION`** binds a database principal as the schema's owner, which `sys.schemas.principal_id` projects; a schema created without the clause is owned by `dbo` (principal 1), matching real.
+`ALTER AUTHORIZATION ON SCHEMA::` moves it later, and every object in the schema without an explicit owner follows — see [`permissions.md`](permissions.md#ownership).
 Any database principal will do, roles included.
 A principal the database doesn't carry is **Msg 15151**'s *user* variant (`Cannot find the user 'nobody', …`, distinct from the object variant a `GRANT` element reports), and a principal that owns a schema cannot be dropped — `DROP USER` / `DROP ROLE` is **Msg 15138** (`The database principal owns a schema in the database, and cannot be dropped.`).
 Written without a schema name the clause supplies one: `CREATE SCHEMA AUTHORIZATION dbo` claims the name `dbo`, which is then the ordinary reserved-name Msg 2760.

@@ -147,7 +147,7 @@ internal sealed class ObjectProperty : Expression
             "ISDEFAULT" or "ISEXECUTED" or "ISEXTENDEDPROC" or "ISINLINEFUNCTION" or "ISMSSHIPPED" or "ISPROCEDURE" or "ISQUEUE"
                 or "ISREPLPROC" or "ISRULE" or "ISSCALARFUNCTION" or "ISSYSTEMTABLE" or "ISTABLE" or "ISTABLEFUNCTION" or "ISTRIGGER"
                 or "ISUSERTABLE" or "ISVIEW" => 0,
-            "OWNERID" => constraint.Schema.PrincipalId,
+            "OWNERID" => Ownership.EffectiveOwnerId(constraint.Schema.Database, constraint.Table),
             "SCHEMAID" => constraint.Schema.SchemaId,
             _ => null,
         };
@@ -287,7 +287,7 @@ internal sealed class ObjectProperty : Expression
             "ISTABLEFUNCTION" => Flag(obj is InlineTableValuedFunction or MultiStatementTableValuedFunction),
             "ISTRIGGER" => Flag(obj is Trigger),
             "ISVIEW" => Flag(obj is View),
-            "OWNERID" => FindOwningSchema(database, obj)?.PrincipalId,
+            "OWNERID" => FindOwningSchema(database, obj) is null ? null : Ownership.EffectiveOwnerId(database, obj),
             "SCHEMAID" => FindOwningSchema(database, obj)?.SchemaId,
             "TABLEDELETETRIGGER" => FirstTriggerFor(database, obj, TriggerActions.Delete),
             "TABLEDELETETRIGGERCOUNT" => TableTriggerCount(database, obj, TriggerActions.Delete),

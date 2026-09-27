@@ -214,11 +214,12 @@ partial class Simulation
             parser.MoveNextRequired();
             var bodySelection = ParseBodyQuery(parser, position: QueryPosition.Inlined);
             // A view body is inlined into the referencing statement, so its
-            // reads reach no ordinary check site — and every same-database one
-            // is chained anyway. What isn't chained is a read into another
-            // database: DB_CHAINING off breaks the chain at that boundary, so
-            // the caller needs its own rights there (probe-confirmed).
-            PermissionEnforcement.CheckCrossDatabaseReads(outerBatch, view.Schema.Database, bodySelection.ReferencedSecurables);
+            // reads reach no ordinary check site — and a same-database one
+            // sharing the view's owner is chained anyway. What isn't chained is
+            // a read into another database (DB_CHAINING off breaks the chain at
+            // that boundary) or of an object with another owner: the caller
+            // needs its own rights there (probe-confirmed).
+            PermissionEnforcement.CheckModuleBodyReads(outerBatch, view, view.Schema.Database, bodySelection);
             // A referencing statement's pushed WHERE conjuncts land here, after
             // the body bound (so its own errors report as they always did) and
             // after the permission check (which reads the body as written). A

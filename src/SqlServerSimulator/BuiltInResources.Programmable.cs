@@ -77,9 +77,9 @@ internal static partial class BuiltInResources
         // INFORMATION_SCHEMA.SCHEMATA: ISO-standard 6-column shape. Rows cover
         // the materialized schemas plus the catalog-only fixed ones (guest and
         // the nine fixed-database-role schemas) sys.schemas already injects, so
-        // a fresh database lists real's 13. SCHEMA_OWNER follows the same
-        // ownership rule sys.schemas.principal_id does: a fixed schema mirrors
-        // its own name, a user schema reports dbo (probe-confirmed).
+        // a fresh database lists real's 13. SCHEMA_OWNER names the owner
+        // sys.schemas.principal_id reports (probe-confirmed, including a user
+        // schema created with AUTHORIZATION u1 reporting u1).
         var defaultCsName = SqlValue.FromSystemName("iso_1");
         var nullSysName = SqlValue.Null(SqlType.SystemName);
         Iso("SCHEMATA",
@@ -148,8 +148,8 @@ internal static partial class BuiltInResources
             new("object_id", SqlType.Int32, null, false),
             new("name", SqlType.SystemName, 128, false),
             new("schema_id", SqlType.Int32, null, false),
-            // principal_id is always NULL (ownership follows the schema, no
-            // AUTHORIZATION override modeled); ledger_view_type is a constant
+            // principal_id is the explicit owner ALTER AUTHORIZATION set, NULL
+            // when ownership follows the schema; ledger_view_type is a constant
             // 0 (ledger unmodeled). SMO's Object-Explorer Views enumeration
             // reads create_date, principal_id, is_ms_shipped, ledger_view_type.
             new("principal_id", SqlType.Int32, null, true),
@@ -217,14 +217,14 @@ internal static partial class BuiltInResources
         // procedures (sp_procoption) aren't modeled, so is_auto_executed is a
         // constant 0 (non-nullable bit); SMO's StoredProcedure property-bag
         // query projects it as [Startup], and without the column the whole bag
-        // query fails Msg 207 and every StoredProcedure property errors. Other
-        // documented columns (principal_id, is_execution_replicated, etc.)
-        // aren't modeled.
+        // query fails Msg 207 and every StoredProcedure property errors.
+        // principal_id is the explicit owner ALTER AUTHORIZATION set.
         Sys("procedures",
         [
             new("object_id", SqlType.Int32, null, false),
             new("name", SqlType.SystemName, 128, false),
             new("schema_id", SqlType.Int32, null, false),
+            new("principal_id", SqlType.Int32, null, true),
             new("type", charTwo, 2, true),
             new("type_desc", nvarchar60Catalog, 60, true),
             new("create_date", SqlType.DateTime, null, false),
@@ -420,8 +420,8 @@ internal static partial class BuiltInResources
             // collation_name: the database collation for the character-family
             // types (char/varchar/nchar/nvarchar/text/ntext/sysname and alias
             // types over them — probe-confirmed real reports the database
-            // collation there), NULL for everything else. principal_id /
-            // default_object_id: NULL, and the CREATE DEFAULT object
+            // collation there), NULL for everything else. principal_id:
+            // the explicit owner, else NULL. default_object_id: the CREATE DEFAULT object
             // sp_bindefault bound to an alias type (else 0). DacFx's UDDT
             // scripting reads all three.
             new("collation_name", SqlType.SystemName, 128, true),
@@ -440,7 +440,7 @@ internal static partial class BuiltInResources
         // columns are constant for every table type (probe-confirmed against
         // SQL Server 2025): system_type_id 243, max_length -1, precision 0,
         // scale 0, collation_name NULL, is_nullable 0, is_assembly_type 0,
-        // is_table_type 1, principal_id NULL. is_memory_optimized is a constant
+        // is_table_type 1; principal_id is the explicit owner, else NULL. is_memory_optimized is a constant
         // 0 (memory-optimized table types aren't modeled). SMO's UDTT
         // property-bag / Script query reads tt.max_length / is_nullable /
         // collation_name / principal_id, and its SSMS index/key/FK sub-node
@@ -482,8 +482,8 @@ internal static partial class BuiltInResources
             new("name", SqlType.SystemName, 128, false),
             new("object_id", SqlType.Int32, null, false),
             new("schema_id", SqlType.Int32, null, false),
-            // principal_id is always NULL (ownership follows the schema);
-            // create_date / modify_date come from the ALTER-preserving
+            // principal_id is the explicit owner, NULL when ownership follows
+            // the schema; create_date / modify_date come from the ALTER-preserving
             // SchemaObject timestamps. SMO's Object-Explorer Sequences
             // enumeration reads create_date and principal_id.
             new("principal_id", SqlType.Int32, null, true),
@@ -775,7 +775,7 @@ internal static partial class BuiltInResources
                     zeroByte,
                     zeroByte,
                     nullCollation,
-                    nullPrincipal,
+                    Ownership.PrincipalIdValue(tt.OwnerPrincipalId),
                     zeroDefaultObject,
                     zeroDefaultObject,
                 ];
@@ -810,7 +810,7 @@ internal static partial class BuiltInResources
                     SqlValue.FromByte(precision),
                     SqlValue.FromByte(scale),
                     alias.UnderlyingType.Collation is not null ? databaseCollation : nullCollation,
-                    nullPrincipal,
+                    Ownership.PrincipalIdValue(alias.OwnerPrincipalId),
                     alias.BoundDefault is { } boundDefault ? SqlValue.FromInt32(boundDefault.ObjectId) : zeroDefaultObject,
                     alias.BoundRule is { } boundRule ? SqlValue.FromInt32(boundRule.ObjectId) : zeroDefaultObject,
                 ];
@@ -840,7 +840,7 @@ internal static partial class BuiltInResources
                     SqlValue.FromInt32(tt.UserTypeId),
                     falseBit,
                     tableTypeSystemTypeId,
-                    nullPrincipal,
+                    Ownership.PrincipalIdValue(tt.OwnerPrincipalId),
                     negOneLength,
                     zeroByte,
                     zeroByte,
@@ -877,7 +877,7 @@ internal static partial class BuiltInResources
                     SqlValue.FromSystemName(seq.Name),
                     SqlValue.FromInt32(seq.ObjectId),
                     schemaId,
-                    nullPrincipal,
+                    Ownership.PrincipalIdValue(seq.OwnerPrincipalId),
                     SqlValue.FromDateTime(seq.CreateDate),
                     SqlValue.FromDateTime(seq.ModifyDate),
                     seq.AsDeclaredVariant(seq.StartValue),
@@ -960,6 +960,7 @@ internal static partial class BuiltInResources
                     SqlValue.FromInt32(proc.ObjectId),
                     SqlValue.FromSystemName(proc.Name),
                     SqlValue.FromInt32(proc.Schema.SchemaId),
+                    Ownership.PrincipalIdValue(proc.OwnerPrincipalId),
                     procType,
                     procTypeDesc,
                     SqlValue.FromDateTime(proc.CreateDate),
@@ -1080,7 +1081,7 @@ internal static partial class BuiltInResources
                     SqlValue.FromInt32(view.ObjectId),
                     SqlValue.FromSystemName(view.Name),
                     SqlValue.FromInt32(view.Schema.SchemaId),
-                    nullPrincipal,
+                    Ownership.PrincipalIdValue(view.OwnerPrincipalId),
                     viewType,
                     viewTypeDesc,
                     SqlValue.FromDateTime(view.CreateDate),
@@ -1231,21 +1232,20 @@ internal static partial class BuiltInResources
     /// Rows for <c>INFORMATION_SCHEMA.SCHEMATA</c>, ordered by schema_id over
     /// the union <c>sys.schemas</c> projects: the materialized
     /// <see cref="Database.Schemas"/> plus the catalog-only fixed schemas.
-    /// <c>SCHEMA_OWNER</c> is the schema's own name for a fixed schema
-    /// (schema_id ≤ 4 or ≥ 16384) and <c>dbo</c> for a user schema — the
-    /// ownership rule <c>sys.schemas.principal_id</c> follows.
+    /// <c>SCHEMA_OWNER</c> names the principal <c>sys.schemas.principal_id</c>
+    /// reports — the like-named principal for an unmoved fixed schema, dbo or
+    /// the <c>AUTHORIZATION</c> / <c>ALTER AUTHORIZATION</c> owner otherwise.
     /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateInformationSchemaSchemata(Database database, SqlValue nullSysName, SqlValue defaultCsName)
     {
         var catalog = SqlValue.FromSystemName(database.Name);
-        var dbo = SqlValue.FromSystemName(Database.DefaultSchemaName);
         var rows = new List<(int SchemaId, SqlValue[] Row)>();
 
         void Add(string name, int schemaId) =>
             rows.Add((schemaId, [
                 catalog,
                 SqlValue.FromSystemName(name),
-                schemaId is >= 5 and < 16384 ? dbo : SqlValue.FromSystemName(name),
+                SqlValue.FromSystemName(Ownership.PrincipalName(database, Ownership.SchemaOwnerId(database, schemaId)) ?? name),
                 nullSysName,
                 nullSysName,
                 defaultCsName,

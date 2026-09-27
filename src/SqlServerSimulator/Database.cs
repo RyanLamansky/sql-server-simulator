@@ -104,8 +104,8 @@ internal sealed class Database
         this.PartitionFunctions = new(collation);
         this.PartitionSchemes = new(collation);
         this.Schemas[DefaultSchemaName] = new Schema(this, DefaultSchemaName, DboSchemaId);
-        this.Schemas["INFORMATION_SCHEMA"] = new Schema(this, "INFORMATION_SCHEMA", InformationSchemaId);
-        this.Schemas["sys"] = new Schema(this, "sys", SysSchemaId);
+        this.Schemas["INFORMATION_SCHEMA"] = new Schema(this, "INFORMATION_SCHEMA", InformationSchemaId) { PrincipalId = InformationSchemaPrincipalId };
+        this.Schemas["sys"] = new Schema(this, "sys", SysSchemaId) { PrincipalId = SysPrincipalId };
         // Pre-seed the fixed database principals so AW's GRANT … TO public
         // resolves at parse time without a CREATE USER / CREATE ROLE
         // prologue. Principal ids match real SQL Server's convention
@@ -145,6 +145,24 @@ internal sealed class Database
         (16392, "db_denydatareader"),
         (16393, "db_denydatawriter"),
     ];
+
+    /// <summary>
+    /// The login that owns this database — <c>sys.databases.owner_sid</c>,
+    /// <c>sp_helpdb</c>'s <c>owner</c> and the login <c>dbo</c> maps to. <c>sa</c>
+    /// unless <c>CREATE DATABASE</c> ran under another registered login or
+    /// <c>ALTER AUTHORIZATION ON DATABASE::</c> / <c>sp_changedbowner</c> moved
+    /// it. A login that owns a database connects to it as <c>dbo</c>, can't also
+    /// hold a user there (Msg 15110 / 15063), and can't be dropped (Msg 15174).
+    /// </summary>
+    public string OwnerLoginName = "sa";
+
+    /// <summary>
+    /// Owners <c>ALTER AUTHORIZATION ON SCHEMA::</c> gave the nine fixed-role
+    /// schemas (<c>db_owner</c> … <c>db_denydatawriter</c>), keyed by schema id.
+    /// Those schemas exist only as catalog rows, so a moved owner is kept here;
+    /// an absent entry is the like-id role, real's default.
+    /// </summary>
+    public readonly Dictionary<int, int> FixedRoleSchemaOwners = [];
 
     private int nextSchemaId = 4;
 

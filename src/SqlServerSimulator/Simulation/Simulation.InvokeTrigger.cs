@@ -330,6 +330,9 @@ partial class Simulation
         connection.LastStatementRowCount = affectedRowCount;
 
         var savedImpersonationDepth = connection.Security.ImpersonationDepth;
+        // A DML trigger is owned through its table, which is whose rights its
+        // body's ownership chain carries; a DDL trigger keeps the legacy chain.
+        int? chainOwner = frame.Trigger is { } dmlTrigger ? Ownership.EffectiveOwnerId(bodyDatabase, dmlTrigger) : null;
         var savedBodyErrorRaised = connection.TriggerBodyErrorRaised;
         var savedTransactionEnded = connection.TriggerTransactionEnded;
         // The body resolves names in the trigger's own database — the session's
@@ -375,7 +378,7 @@ partial class Simulation
             // Module WITH EXECUTE AS: run the body as the impersonated
             // principal (OWNER / SELF → dbo, CALLER → no-op, named user →
             // that principal); unwound in the finally below.
-            PushModuleExecuteAsFrame(connection, executeAsClause, connection.CurrentDatabase);
+            PushModuleExecuteAsFrame(connection, executeAsClause, connection.CurrentDatabase, chainOwner ?? Database.DboPrincipalId);
             if (!string.IsNullOrEmpty(bodyText))
             {
                 using var bodyCommand = new SimulatedDbCommand(this, connection);
@@ -391,6 +394,7 @@ partial class Simulation
                     LineOffset = bodyLineOffset,
                     ErrorProcedureName = triggerName,
                     ContinueOnError = ContinuesCalledBatch(outerBatch),
+                    OwnershipChainOwnerId = chainOwner,
                 };
                 var parser = innerBatch.Parser;
                 parser.MoveNextOptional();

@@ -34,9 +34,10 @@ internal sealed class XmlSchemaCollection(
     /// <summary>
     /// Owning principal id. Probe-confirmed against SQL Server 2025: the
     /// column is nullable and CREATE without AUTHORIZATION leaves it
-    /// NULL. The simulator preserves that semantic.
+    /// NULL, which means the owning schema's owner; <c>ALTER AUTHORIZATION</c>
+    /// sets it, and <c>TO SCHEMA OWNER</c> puts it back to NULL.
     /// </summary>
-    public readonly int? PrincipalId = principalId;
+    public int? PrincipalId = principalId;
 
     /// <summary>
     /// Raw XSD source text passed to <c>AS '…'</c>. Kept verbatim; the only

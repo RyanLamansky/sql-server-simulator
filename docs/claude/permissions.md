@@ -62,14 +62,14 @@ An unauthenticated in-process connection uses `CreateDefault()` — dbo as login
   **`dbo` is an ordinary target**: a session holding IMPERSONATE on it — a sysadmin / `dbo` session, a `db_owner` member, or an explicit `GRANT IMPERSONATE ON USER::dbo` grantee — impersonates it successfully, and only a principal holding none of that gets Msg 15517 (severity 16 state 1, naming `dbo`).
   Probe-confirmed against SQL Server 2025 on two instances, which is what retires the earlier always-raises claim: the probe that produced it read a principal without the permission.
   The pushed frame is database-scoped like every other `EXECUTE AS USER` one, so it narrows even an `sa` session — a cross-database reference out of a non-`TRUSTWORTHY` database raises Msg 916 (probe-confirmed).
-  Real reports the *database owner's* login through `SYSTEM_USER` while impersonating (`sa` on both probed instances); the simulator reports `dbo`, the identity every simulated database is owned by — the same divergence a module's `WITH EXECUTE AS OWNER` frame carries.
+  Real reports the *database owner's* login through `SYSTEM_USER` while impersonating (`sa` on both probed instances); the simulator reports `dbo` whoever owns the database — the same divergence a module's `WITH EXECUTE AS OWNER` frame carries.
 - `EXECUTE AS LOGIN = 'l'` maps l to its database user in the current DB (Msg 15406 on a missing login).
 - `REVERT` pops one frame; a stray REVERT at the base is a silent no-op.
 - Nested `EXECUTE AS USER` by a non-dbo principal needs IMPERSONATE on the target at class 4, answered by the ordinary `PermissionChecker.IsGranted` walk — so an explicit grant, a role that holds one, `CONTROL` on the principal, and `db_owner` membership all admit it, and a DENY binds first.
 - Nested `EXECUTE AS LOGIN` gates at **server** scope instead: `IMPERSONATE ON LOGIN::<target>` (class 101) or the server-wide `IMPERSONATE ANY LOGIN` (class 100), with a class-101 DENY overriding the blanket grant and `CONTROL ON LOGIN::` covering IMPERSONATE.
   A refusal reports the same Msg 15406 as a missing login — real leaks no distinction (probe-confirmed).
   See [`ON LOGIN::` securables](#on-login-securables).
-- Module `WITH EXECUTE AS {CALLER | SELF | OWNER | 'user'}` is captured (on `Procedure.ExecuteAsClause` / `UserDefinedFunction.ExecuteAsClause` / `Trigger.ExecuteAsClause`) and pushed/popped around the body via the shared `PushModuleExecuteAsFrame` — procedures (`InvokeProcedure`), scalar UDFs / TVFs (`InvokeScalarFunction`), and triggers (`InvokeTrigger`) all honor it at runtime (OWNER / SELF → dbo, CALLER → no-op, a named user → that principal).
+- Module `WITH EXECUTE AS {CALLER | SELF | OWNER | 'user'}` is captured (on `Procedure.ExecuteAsClause` / `UserDefinedFunction.ExecuteAsClause` / `Trigger.ExecuteAsClause`) and pushed/popped around the body via the shared `PushModuleExecuteAsFrame` — procedures (`InvokeProcedure`), scalar UDFs / TVFs (`InvokeScalarFunction`), and triggers (`InvokeTrigger`) all honor it at runtime (OWNER → the module's effective owner — see [Ownership](#ownership) — SELF → dbo, CALLER → no-op, a named user → that principal).
   The clause also resolves to a principal id at CREATE, stored on `SchemaObject.ExecuteAsPrincipalId` and projected by `sys.sql_modules.execute_as_principal_id` — see [`catalog-views.md`](catalog-views.md#execute_as_principal_id) for real's encoding.
   A scalar UDF's own `EXECUTE` permission is checked at the invocation seam (once per statement, memoized on `BatchContext.ExecuteCheckedFunctionIds`), covering the SET / IF operand contexts the query read-source sink doesn't reach.
 
@@ -141,7 +141,6 @@ Wiring:
 - **A subquery that owns its own read list** — one written in an expression slot no query expression encloses: a scalar UDF's value-form `RETURN (SELECT …)`, a `SET` / `DECLARE` initializer, an `IF` / `WHILE` condition, a `PRINT` operand, an `UPDATE` SET-RHS or `INSERT … VALUES` element, a **CTE** body, a **`MERGE … USING`** source — reaches none of the per-statement check sites, so its list is checked where its plan executes (`PermissionEnforcement.CheckSubqueryReads`, called from the four subquery expression classes and from the MERGE source materializer; a CTE body's list rides the referencing statement's instead, folded in by `Selection.FoldSecurables` at the FROM source).
   A subquery *nested* in a query expression records into that statement's list and carries none of its own, so the per-row evaluation path reads one null field.
   Real draws no distinction between those shapes and an ordinary read (probe-confirmed against SQL Server 2025): the two scalar-UDF body forms — `RETURN (SELECT … FROM t)` and `SELECT @v = … FROM t` — behave *identically*, an intact ownership chain skipping the check for both and a chain broken by an other-owner schema or by the database boundary raising Msg 229 naming the base object for both.
-  Since every simulated object is dbo-owned the same-database chain is always intact, so what this reaches in practice is the cross-database reference and the user's own statement.
 - **INSERT / UPDATE / DELETE / MERGE** — the target's write permission is checked (INSERT / UPDATE / DELETE; MERGE checks the union of its action kinds plus SELECT on the target); `INSERT … SELECT` also checks SELECT on the source's recorded reads.
   **UPDATE / DELETE read-implies-SELECT** (probe M1/M2): the target's SELECT is also required *when the statement reads it* — a WHERE clause, or a SET expression that references a target column (`SET v = v + 'x'`, detected via a static column-reference probe). A constant-SET UPDATE / bare DELETE with no WHERE reads nothing and needs only the write permission. The SELECT check runs *first*, so with neither SELECT nor the write granted the SELECT denial surfaces (real raises both records; the simulator raises the SELECT-first single error). A joined UPDATE / DELETE (`… FROM t JOIN u …`) SELECT-checks every backing-table source — the non-target sources first, then the target (matching real's ordering).
   On a **single target** (the no-FROM UPDATE / DELETE path) both the read-implies-SELECT and the UPDATE are **column-grain**, against a base table or a view alike (SELECT per WHERE / SET-RHS column, UPDATE per assigned column); the joined form, and any target reached through a synonym, stay object-grain. See [Column-level grants](#column-level-grants).
@@ -150,9 +149,9 @@ Wiring:
 - **UNMASK** is no gate but a value filter: a principal without it reads masked values rather than being refused, and ownership chaining doesn't lift it — see [`data-masking.md`](data-masking.md#unmask).
 - **TRUNCATE** — ALTER on the object → Msg 1088 (state 7).
 - **DDL gates** — see [DDL statement gates](#ddl-statement-gates) for the per-statement matrix.
-- **Ownership chaining** — inside a proc / view / TVF / scalar-UDF / trigger body (`BatchContext.EnforcesPermissions` is false there) all checks are suppressed; dynamic SQL (`EXEC('…')` / `sp_executesql`, whose `ProcFrame.IsDynamicSql` is set) re-enables them.
-  Everything is dbo-owned, so all static chains are unbroken — only the outermost referenced object of the user's statement is checked.
-  A module body's DDL is chained the same way: `DROP TABLE` inside a procedure runs unchecked for a caller who only holds EXECUTE on it.
+- **Ownership chaining** — see [Ownership](#ownership) for how the chain compares owners.
+  Inside a proc / view / TVF / scalar-UDF / trigger body (`BatchContext.EnforcesPermissions` is false there) a reference to an object with the module's own owner is unchecked; dynamic SQL (`EXEC('…')` / `sp_executesql`, whose `ProcFrame.IsDynamicSql` is set) re-enables every check.
+  A module body's DDL is chained whatever its target's owner: `DROP TABLE` inside a procedure runs unchecked for a caller who only holds EXECUTE on it.
 
 ### DDL statement gates
 
@@ -205,7 +204,7 @@ That split is encoded twice: `ALTER ANY ROLE` sits outside `PermissionCategory.D
 
 **Ownership.**
 Real also admits every ALTER / DROP above to the object's (or schema's) owner without an explicit grant — probe-confirmed against a `CREATE SCHEMA … AUTHORIZATION <user>` schema.
-Every simulated object is dbo-owned and the `dbo` bypass covers that case, so no separate owner path exists.
+The checker's owner path answers it — see [Ownership](#ownership).
 
 **Cross-database.**
 The gates route through the same `PermissionEnforcement` seam as the DML checks, so a three-part DDL target resolves the login's principal in the *target* database (Msg 916 when it has none).
@@ -241,7 +240,7 @@ The UPDATE / DELETE single-target paths don't ride a `Selection` plan, so they b
 
 **Views are column-grantable too.**
 A view carries its own column ordinals (`View.OutputColumns`, what `GRANT SELECT (col) ON <view>` stores as `minor_id`), and enforcement uses them rather than the base table's — so a view column computed from several base columns (`a + b AS both`) is one grantable unit and a denial names it.
-The base table is **never** consulted for a reference through the view (ownership chaining): a grant on the base does not admit the view read, and a DENY on the base does not block it.
+While the view and its base share an owner the base table is **never** consulted for a reference through the view (ownership chaining): a grant on the base does not admit the view read, and a DENY on the base does not block it.
 Both SELECT and the UPDATE pair (assigned columns need UPDATE, WHERE / SET-RHS columns need SELECT) are column-grain through a view; INSERT and DELETE through a view stay object-grain, matching real.
 All probe-confirmed against SQL Server 2025.
 
@@ -276,20 +275,20 @@ The name in the message is the frame's reported login identity: the login for a 
 **`WITH EXECUTE AS OWNER` / `SELF` is database-scoped too**, though both resolve to `dbo`: the token is minted in the module's database and its `dbo`-ness stops at the boundary, so a body that reads, writes, `USE`s or reads the catalog of another database out of a non-trustworthy source is refused — probe-confirmed, and refused even when the session's own login is `sa`.
 Data reference, catalog read and `OBJECT_ID`'s three-part name all raise the same Msg 916; the id-form `OBJECT_NAME` / `OBJECT_SCHEMA_NAME` still answer, since those ask only the visibility question (see [Cross-database metadata visibility](#cross-database-metadata-visibility)).
 Everything the frame does in its *own* database is unaffected — the bypass is boundary-aware, not withdrawn.
-The message names `dbo`, the identity every simulated database is owned by; real names the owner's login (`sa` on the probed instance).
+The message names `dbo`; real names the owner's login (`sa` on the probed instance).
 
 Turning the **source** database's `TRUSTWORTHY` on (the database the token was made in — the target's flag is irrelevant) accepts the token, after which the frame's own login answers in the target like any ordinary session's: an object it holds nothing on is Msg 229 naming the target, and a login with no user there is still Msg 916 — while an accepted `OWNER` / `SELF` token carries its `dbo` through and answers unrestricted.
 So a `WITHOUT LOGIN` user, whose reported identity is a SID rather than a login, is refused however trustworthy the source is.
 All probe-confirmed against SQL Server 2025.
 
 Real gates the crossing on an **authenticator** as well: the source database's owner must hold `AUTHENTICATE` in the target — probed as the exact line between allowed and refused, with a `sa`-owned source qualifying through `dbo`, an owner with no user in the target refused, and an owner whose user there lacks `AUTHENTICATE` refused too.
-Every simulated database is dbo-owned (there is no `ALTER AUTHORIZATION ON DATABASE` surface), so the authenticator always qualifies and the flag alone decides.
+The database owner is modeled (see [Ownership](#ownership)), but this rule isn't built yet: the flag alone decides.
 
 **Ownership chaining crosses the database boundary only with `DB_CHAINING` on in both databases.**
 With either side off — the default for a user database — a dbo-owned module does not lend its owner's rights to an object in another database: the caller needs its own grant there and the denial names the base object.
 With both on the chain re-links and the module's reference is unchecked, through a view and through a statement-dispatching body alike.
 Chaining lends **rights, not access**: the caller still needs a user in the target, so a login with none is Msg 916 either way (probe-confirmed — a `guest` grant in the target is enough to satisfy it).
-Real additionally requires the two objects to share an owner (probed: a view owned by a schema's own user over a dbo-owned base still breaks, chaining on or not); every simulated object is dbo-owned, so that half is always satisfied.
+Real additionally requires the two objects to share an owner (probed: a view owned by a schema's own user over a dbo-owned base still breaks, chaining on or not); across the boundary the simulator compares no owners yet, so that half is always satisfied.
 A reference the *user* wrote is never chained, whatever the flags say.
 
 Mechanically, `PermissionEnforcement.Applies(batch, target)` keeps the module-body suppression only for a same-database securable, which covers procedure / trigger / scalar-UDF bodies through the ordinary per-statement check sites; a **view or inline-TVF body is inlined** into the referencing statement and reaches none of those, so its plan's cross-database reads are checked once at invocation via `PermissionEnforcement.CheckCrossDatabaseReads`.
@@ -380,12 +379,53 @@ Their bypass is the plain effective-`dbo` one rather than the boundary-aware `By
 - `ALTER USER name WITH option = value, …` — `NAME` renames, `DEFAULT_SCHEMA` sets the default schema, the rest are read without effect; a missing user is **Msg 15151** state 1 and a taken name **Msg 15023** state 10.
   The default schema is catalog-only: an unqualified name still resolves through `dbo` for every user (not built yet).
 - `CREATE ROLE name [AUTHORIZATION owner]` — `type_code='R'`.
-  AUTHORIZATION clause parse-and-discards.
+  `AUTHORIZATION` sets `owning_principal_id`; an unknown owner is Msg 15151's *user* wording (probed 2026-09-27 against SQL Server 2025).
 - `ALTER ROLE name { ADD MEMBER name | DROP MEMBER name | WITH NAME = newname }` — ADD/DROP MEMBER append/remove `(role_id, member_id)` on `Database.RoleMembers`, refusing `dbo` (**Msg 15405**), the role itself (**Msg 15413**) and `[public]` (**Msg 15081**); a name that isn't a role is `Cannot alter the role` and a missing member `Cannot add` / `Cannot drop the principal` (all Msg 15151 state 1); `WITH NAME` renames, a taken name being **Msg 15023** state 10.
   `sp_addrolemember` / `sp_droprolemember` run the same change, differing only in a missing member to add (**Msg 15410**, class 11); both spellings raise `ADD_ROLE_MEMBER` / `DROP_ROLE_MEMBER` naming the member (probed 2026-09-25 against SQL Server 2025).
 - `DROP USER [IF EXISTS] name` and `DROP ROLE [IF EXISTS] name` — drop from `Database.Principals`; a user's memberships go with it, while a role that still has members is **Msg 15144**.
   All probed 2026-09-25 against SQL Server 2025.
+  A principal that still owns something can't be dropped — see [Ownership](#ownership).
   Dispatched ahead of the generic DROP-target switch in `Simulation.Drop.cs` because principals don't live in a per-schema dict.
+
+### Ownership
+
+Probed 2026-09-27 against SQL Server 2025 throughout.
+
+**Who owns what.**
+An object, alias or table type, or XML schema collection carries an explicit owner only once `ALTER AUTHORIZATION` gives it one (`SchemaObject.OwnerPrincipalId`, `sys.objects.principal_id`); until then — and again after `TO SCHEMA OWNER` — it is owned by its schema's owner.
+A trigger or constraint is owned through its parent.
+`Ownership.EffectiveOwnerId` is the one answer `OBJECTPROPERTY(…, 'OwnerId')`, `TYPEPROPERTY(…, 'OwnerId')`, `sp_help`'s `Owner`, the checker and the chain all read.
+A role has an owner (`owning_principal_id`, dbo by default), itself allowed; a schema, a full-text catalog and an assembly have one each; a database is owned by a **login** (`Database.OwnerLoginName`, `sa` unless another registered login ran the `CREATE DATABASE`).
+
+**`ALTER AUTHORIZATION ON [<class>::]<entity> TO {<principal> | SCHEMA OWNER}`** (`Simulation.AlterAuthorization.cs`) covers `OBJECT` (the default), `SCHEMA`, `TYPE`, `XML SCHEMA COLLECTION`, `ROLE`, `FULLTEXT CATALOG`, `ASSEMBLY` and `DATABASE`, plus `sp_changedbowner`.
+Any database principal may own a database-scoped securable — users, `guest`, `dbo`, roles (fixed ones and `[public]` included) and application roles — but not `sys` / `INFORMATION_SCHEMA`; `SCHEMA OWNER` is accepted only for an object, type or XML schema collection.
+The refusals, each an error factory with its number: a trigger or constraint (Msg 15346), a temp table, a `USER::` or an `APPLICATION ROLE::` (Msg 15344), the four fixed schemas `dbo` / `guest` / `sys` / `INFORMATION_SCHEMA` (Msg 15150; the fixed-role schemas are movable), a system type (Msg 15247), `master` / `model` / `tempdb` (Msg 15109), a database owner that is a server role (Msg 15353) or already a user there (Msg 15110), and Msg 15151 for everything not found — worded by the class looked for, and a three-part object name is never found.
+The entity resolves before the new owner.
+A restricted caller needs `TAKE OWNERSHIP` on the entity (else the entity's own not-found wording) and must be the new owner, a member of it, or hold `IMPERSONATE` on it (else `Cannot find the principal`, state 1).
+A change of **effective** owner drops every permission granted on the securable — objects, schemas and roles alike — while naming the owner it already has (`TO dbo` on a dbo-schema table) keeps them.
+Every change rolls back with the transaction, and each raises `ALTER_AUTHORIZATION_DATABASE` with an `OwnerName` element.
+
+**What an owner gets.**
+An owner holds `CONTROL` that no `DENY` removes, and so does every member of a role that owns (`PermissionChecker.OwnsSecurable`): an object's owner or its schema's owner reads, writes, alters and sees the metadata of the object with no grant.
+A principal that owns anything can't be dropped, and real checks in a fixed order — objects (Msg 15183), types (Msg 15184), schemas (Msg 15138), roles including itself (Msg 15421), then XML schema collections and full-text catalogs (Msg 15138's other wordings); `DROP APPLICATION ROLE` takes the same checks.
+A login that owns a database connects to it as `dbo`, can't also be given a user there (Msg 15063), and can't be dropped (Msg 15174).
+
+**Ownership chaining compares owners.**
+A procedure, scalar function or DML trigger body records its module's effective owner (`BatchContext.OwnershipChainOwnerId`; a trigger's is its table's), and a same-database reference whose object has a different owner is checked against the caller as though no module intervened — Msg 229 naming the base object, with the module's Procedure attribution.
+A view or inline TVF, inlined into the referencing statement, checks its body's other-owner reads once at invocation (`PermissionEnforcement.CheckModuleBodyReads`), and an `INSERT` through an updatable view checks the base table when the two owners differ (`CheckBrokenChainWrite`).
+
+**`WITH EXECUTE AS OWNER`** runs the body as the module's effective owner; an owner that is a role or an application role can't be impersonated, which is Msg 15517 naming it (a procedure's at line 0 under its unqualified name).
+
+**Catalog.**
+`principal_id` reports the explicit owner in `sys.objects` / `all_objects` / `tables` / `views` / `procedures` / `sequences` / `synonyms` / `types` / `table_types` / `xml_schema_collections`, but stays NULL on a table type's `TT` row; `sys.schemas.principal_id` and `INFORMATION_SCHEMA.SCHEMATA.SCHEMA_OWNER` follow the schema owner, `sys.databases.owner_sid` / `dbo`'s `sid` / `sp_helpdb`'s `owner` / `sp_helpuser`'s dbo `LoginName` the database owner.
+
+**Divergences.**
+A restricted caller changing a database's owner needs `TAKE OWNERSHIP` on the database but no `IMPERSONATE` on the new login.
+The type-class and XML-schema-collection gates ask for `TAKE OWNERSHIP` on the owning schema, and the full-text-catalog and assembly gates on the database, since `GRANT` models none of those classes.
+`WITH EXECUTE AS SELF` still runs as `dbo`, and an owner's `SYSTEM_USER` under `EXECUTE AS OWNER` is the synthetic SID every `WITHOUT LOGIN` user reports.
+
+**Not modeled yet.**
+The `ALTER AUTHORIZATION` classes past the eight above raise `NotSupportedException`; `UPDATE` / `DELETE` / `MERGE` through a view don't check a broken chain to the base table; a cross-database chain compares no owners; and `ALTER AUTHORIZATION ON DATABASE` raises no server-scope `ALTER_AUTHORIZATION_SERVER` event.
 
 ### Server logins (`Simulation/Simulation.LoginDdl.cs`)
 

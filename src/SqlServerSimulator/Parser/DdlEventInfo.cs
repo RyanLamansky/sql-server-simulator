@@ -43,6 +43,10 @@ namespace SqlServerSimulator.Parser;
 /// The role an <c>ADD_ROLE_MEMBER</c> / <c>DROP_ROLE_MEMBER</c> event changed,
 /// whose member is the object.
 /// </param>
+/// <param name="ownerName">
+/// The new owner an <c>ALTER_AUTHORIZATION_DATABASE</c> event names, emitted
+/// after <c>ObjectType</c> (probed 2026-09-27 against SQL Server 2025).
+/// </param>
 internal sealed class DdlEventInfo(
     string eventType,
     string? schemaName,
@@ -50,7 +54,8 @@ internal sealed class DdlEventInfo(
     string? objectType,
     string? targetObjectName = null,
     string? targetObjectType = null,
-    string? roleName = null)
+    string? roleName = null,
+    string? ownerName = null)
 {
     public readonly string EventType = eventType;
     public readonly string? SchemaName = schemaName;
@@ -59,4 +64,5 @@ internal sealed class DdlEventInfo(
     public readonly string? TargetObjectName = targetObjectName;
     public readonly string? TargetObjectType = targetObjectType;
     public readonly string? RoleName = roleName;
+    public readonly string? OwnerName = ownerName;
 }

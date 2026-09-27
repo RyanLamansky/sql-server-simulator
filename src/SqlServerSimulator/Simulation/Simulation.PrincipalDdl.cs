@@ -38,6 +38,9 @@ partial class Simulation
             throw SimulatedSqlException.UserDoesNotHavePermission();
         if (context.CurrentDatabase.Principals.ContainsKey(name))
             throw SimulatedSqlException.PrincipalAlreadyExists(name);
+        // The database owner's login is already here as dbo (probed 2026-09-27).
+        if (loginLink is not null && context.CurrentDatabase.Collation.Equals(loginLink, context.CurrentDatabase.OwnerLoginName))
+            throw SimulatedSqlException.LoginAlreadyHasAccount("dbo");
         var id = context.CurrentDatabase.AllocatePrincipalId();
         RecordSecurityUndo(context, context.CurrentDatabase);
         context.CurrentDatabase.Principals[name] = new DatabasePrincipal(
@@ -202,8 +205,9 @@ partial class Simulation
     /// <summary>
     /// Parses <c>CREATE ROLE name [AUTHORIZATION owner]</c>. Like
     /// <see cref="TryParseCreateUser"/>, only the role name + id land in
-    /// the catalog; the AUTHORIZATION clause parse-and-discards. The
-    /// post-create role is empty (no members) until
+    /// the catalog, plus the owner the AUTHORIZATION clause names
+    /// (<c>sys.database_principals.owning_principal_id</c>; an unknown one is
+    /// Msg 15151's user wording, probed 2026-09-27). The post-create role is empty (no members) until
     /// <see cref="TryParseAlterRole"/> adds them.
     /// </summary>
     internal static bool TryParseCreateRole(ParserContext context)
@@ -212,6 +216,13 @@ partial class Simulation
         if (context.Token is not Name nameToken)
             throw SimulatedSqlException.SyntaxErrorNear(context);
         var name = nameToken.Value;
+        string? ownerName = null;
+        if (context.GetNextOptional() is ReservedKeyword { Keyword: Keyword.Authorization })
+        {
+            if (context.GetNextRequired() is not Name ownerToken)
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            ownerName = ownerToken.Value;
+        }
         ConsumeToStatementBoundary(context);
         if (context.Batch.IsSkipping)
             return true;
@@ -222,10 +233,20 @@ partial class Simulation
             throw SimulatedSqlException.UserDoesNotHavePermission();
         if (context.CurrentDatabase.Principals.ContainsKey(name))
             throw SimulatedSqlException.PrincipalAlreadyExists(name);
+        var owner = Database.DboPrincipalId;
+        if (ownerName is not null)
+        {
+            owner = context.CurrentDatabase.Principals.TryGetValue(ownerName, out var ownerPrincipal)
+                ? ownerPrincipal.PrincipalId
+                : throw SimulatedSqlException.CannotFindUser(ownerName);
+        }
         var id = context.CurrentDatabase.AllocatePrincipalId();
         RecordSecurityUndo(context, context.CurrentDatabase);
         context.CurrentDatabase.Principals[name] = new DatabasePrincipal(
-            id, name, "R", "DATABASE_ROLE", isFixedRole: false, context.Batch.CurrentStatement.UtcNow);
+            id, name, "R", "DATABASE_ROLE", isFixedRole: false, context.Batch.CurrentStatement.UtcNow)
+        {
+            OwningPrincipalId = owner,
+        };
         RecordDdlEvent(context, "CREATE_ROLE", null, name, "ROLE");
         return true;
     }
@@ -430,13 +451,9 @@ partial class Simulation
         {
             return ifExists ? true : throw SimulatedSqlException.CannotFindPrincipal(name);
         }
-        // A principal that owns a schema can't be dropped — Msg 15138, which
-        // names neither the principal nor the schema (probe-confirmed).
-        foreach (var schema in context.CurrentDatabase.Schemas.Values)
-        {
-            if (schema.PrincipalId == removed.PrincipalId)
-                throw SimulatedSqlException.PrincipalOwnsASchema();
-        }
+        // A principal that still owns anything can't be dropped; the refusals
+        // name neither the principal nor what it owns (probe-confirmed).
+        Ownership.RejectDropOfOwner(context.CurrentDatabase, removed.PrincipalId);
         // A role that still has members can't go (probed 2026-09-25 against
         // SQL Server 2025); a user in roles can, its memberships going with it.
         if (isRole && context.CurrentDatabase.RoleMembers.Exists(rm => rm.RoleId == removed.PrincipalId))

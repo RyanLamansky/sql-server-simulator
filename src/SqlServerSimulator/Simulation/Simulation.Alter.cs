@@ -54,6 +54,8 @@ partial class Simulation
                 return TryParseAlterApplicationRole(context);
             case UnquotedString { ContextualKeyword: ContextualKeyword.FullText }:
                 return TryParseAlterFullText(context);
+            case ReservedKeyword { Keyword: Keyword.Authorization }:
+                return TryParseAlterAuthorization(context);
             case ReservedKeyword { Keyword: Keyword.Database }:
                 break;
             default:

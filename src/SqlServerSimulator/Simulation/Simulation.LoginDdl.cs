@@ -131,6 +131,15 @@ partial class Simulation
             return true;
         if (!HoldsLoginDdlPermission(context, name))
             throw SimulatedSqlException.CannotAlterOrDropLogin("drop", name);
+        var simulation = context.Batch.Connection.Simulation;
+        if (simulation.Logins.ContainsKey(name))
+        {
+            foreach (var database in simulation.Databases.Values)
+            {
+                if (database.Collation.Equals(database.OwnerLoginName, name))
+                    throw SimulatedSqlException.LoginOwnsDatabases(name);
+            }
+        }
         RecordServerSecurityUndo(context.Batch);
         return context.Batch.Connection.Simulation.Logins.TryRemove(name, out _)
             ? true

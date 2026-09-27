@@ -100,13 +100,14 @@ partial class Simulation
         // Errors inside a scalar-UDF body attribute to the outer invoking
         // statement (probe-confirmed: real reports the SELECT's line, no
         // procedure) — so this frame leaves the exception unresolved.
-        var innerBatch = new BatchContext(bodyCommand, variables, udfFrame) { SuppressDiagnosticsResolution = true, CalledFunctionBody = true };
+        var functionOwner = Ownership.EffectiveOwnerId(function.Schema.Database, function);
+        var innerBatch = new BatchContext(bodyCommand, variables, udfFrame) { SuppressDiagnosticsResolution = true, CalledFunctionBody = true, OwnershipChainOwnerId = functionOwner };
         connection.NestingLevel++;
         // Module WITH EXECUTE AS: push the impersonation frame around the body
         // (OWNER / SELF → dbo, CALLER → no-op, a named user → that principal),
         // so the body's identity scalars observe the impersonated principal.
         var savedImpersonationDepth = connection.Security.ImpersonationDepth;
-        PushModuleExecuteAsFrame(connection, function.ExecuteAsClause, outerBatch.CurrentDatabase);
+        PushModuleExecuteAsFrame(connection, function.ExecuteAsClause, outerBatch.CurrentDatabase, functionOwner);
         try
         {
             var parser = innerBatch.Parser;

@@ -108,8 +108,6 @@ partial class Simulation
             throw SimulatedSqlException.HelpDatabaseDoesNotExist(databaseName);
         }
 
-        // SUSER_SNAME of the owner_sid sys.databases reports, which is sa's.
-        var owner = SqlValue.FromSystemName("sa");
         var rows = new List<SqlValue[]>();
         foreach (var (database, id) in DbId.DatabasesWithIds(simulation))
         {
@@ -125,7 +123,8 @@ partial class Simulation
             rows.Add([
                 SqlValue.FromSystemName(database.Name),
                 SqlValue.FromString(HelpDbSizeType, HelpDbSize(database)),
-                owner,
+                // SUSER_SNAME of the owner_sid sys.databases reports.
+                SqlValue.FromSystemName(database.OwnerLoginName),
                 SqlValue.FromInt16(id),
                 SqlValue.FromString(HelpDbCreatedType, HelpDbCreated(BuiltInResources.SysDatabasesCreateDate)),
                 SqlValue.FromString(HelpDbStatusType, HelpDbOptionString(database)),

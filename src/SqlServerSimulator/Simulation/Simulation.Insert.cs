@@ -79,7 +79,11 @@ partial class Simulation
     private static SimulatedStatementOutcome ProcessViewInsert(View destinationView, ParserContext context, Selection.DmlTopLimit? top, MultiPartName destinationName)
     {
         if (!context.Batch.IsSkipping)
+        {
             PermissionEnforcement.CheckReference(context.Batch, "INSERT", destinationName, destinationView);
+            if (destinationView.BaseTable is { } baseTable)
+                PermissionEnforcement.CheckBrokenChainWrite(context.Batch, "INSERT", destinationView, baseTable);
+        }
         return ProcessViewInsertCore(destinationView, context, top, destinationName);
     }
 

@@ -329,7 +329,7 @@ Where an entry carries a second clause it is because that fact changes what you'
 - **`json`** — the native type: its canonical text, the `DATALENGTH` of its binary form, the string-only conversions, the non-comparable refusals, how the JSON functions read and return it, `JSON_CONTAINS`, `JSON_VALUE … RETURNING`, the `modify` method and `CREATE JSON INDEX`.
   Every path into the type canonicalizes (whitespace, repeated names, escapes, exponent numbers as `decimal(38, 10)`), and property names are kept exactly as written → [`json-type.md`](docs/claude/json-type.md).
 - **`hierarchyid`** — OrdPath storage, byte-identical CAST / wire / DATALENGTH, and the full sixteen-tier ordinal domain (wider than `int`, so labels are `long`) → [`hierarchyid.md`](docs/claude/hierarchyid.md).
-- **`GRANT` / `REVOKE` / `DENY`** — securable resolution, the covering scope walk, role closure, ownership chaining, `EXECUTE AS`, application roles, login and server-scope DDL, and a gate on every modeled CREATE / ALTER / DROP.
+- **`GRANT` / `REVOKE` / `DENY`** — securable resolution, the covering scope walk, role closure, ownership and `ALTER AUTHORIZATION`, ownership chaining by owner, `EXECUTE AS`, application roles, login and server-scope DDL, and a gate on every modeled CREATE / ALTER / DROP.
   A cross-database reference resolves the login's user in the **target**, and dbo bypasses every check → [`permissions.md`](docs/claude/permissions.md).
 - **Dynamic Data Masking** — `MASKED WITH`, `ALTER COLUMN … ADD | DROP MASKED`, `sys.masked_columns`, `UNMASK` at every scope, and what a principal without it reads and writes.
   Each output column's mask compiles onto the plan and applies only at the statement's output sinks, so predicates, joins and ordering read stored values → [`data-masking.md`](docs/claude/data-masking.md).
@@ -366,7 +366,6 @@ The feature docs' own **Not modeled yet** sections hold the smaller gaps.
 - **Most `SET <option>` toggles parse and are discarded** (`Simulation.Set.cs`); the ones with semantic effect are handled by name there.
   The same goes for most `ALTER DATABASE … SET` options → [`database-options.md`](docs/claude/database-options.md).
 - **Heap allocation tracking** (a flat page list, no IAM/PFS) → [`heap-storage.md`](docs/claude/heap-storage.md).
-- **`ALTER AUTHORIZATION`**, in every form → [`schemas.md`](docs/claude/schemas.md#create-schemas-owner-and-its-element-list).
 - **Programmable-object gaps**: CLR procedures / TVFs / aggregates / UDTs, logon triggers, INSTEAD OF UPDATE/DELETE on non-updatable views, a join view over a join view, MERGE into or OUTPUT through views, and `WITH RESULT SETS`' shorthand forms → [`programmable.md`](docs/claude/programmable.md), [`clr-assemblies.md`](docs/claude/clr-assemblies.md), [`triggers.md`](docs/claude/triggers.md).
 - **`ALTER COLUMN … ADD | DROP PERSISTED`** → [`alter-table.md`](docs/claude/alter-table.md).
 - **Filegroup placement** — a table or index `ON [fg]` isn't recorded (only a partition scheme's placement is) → [`partitioning.md`](docs/claude/partitioning.md#not-modeled-yet).
