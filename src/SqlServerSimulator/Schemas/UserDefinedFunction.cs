@@ -97,6 +97,13 @@ internal sealed class ScalarFunction(
 
     public readonly SqlType ReturnType = returnType;
 
+    /// <summary>
+    /// The declared width of a string or binary return type (1 when written
+    /// without one), which the returned value is cut to; null for the other
+    /// types.
+    /// </summary>
+    public int? ReturnMaxLength;
+
     /// <summary>The return type was written <c>numeric</c>, which a call reports (probed 2026-09-24).</summary>
     public bool ReturnSpelledNumeric;
 
@@ -314,6 +321,13 @@ internal sealed class UdfParameter(string name, SqlType type, Expression? defaul
 
     /// <summary>The user alias type the parameter was declared with; see <see cref="HeapColumn.AliasType"/>.</summary>
     public AliasType? AliasType;
+
+    /// <summary>
+    /// The declared width of a string or binary parameter (1 when written
+    /// without one), which an argument is cut to as a variable assignment
+    /// would; null for the other types.
+    /// </summary>
+    public int? DeclaredMaxLength;
 
     public readonly string Name = name;
     public readonly SqlType Type = type;

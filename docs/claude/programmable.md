@@ -190,6 +190,7 @@ Probed against SQL Server 2025.
   Variables declared inside are function-scoped.
 - **`RETURN <value>`** legal only inside a UDF body — outside raises **Msg 178** at parse time; inside, value coerces to declared return type.
 - **Arity errors**: too few → **Msg 313**; too many → **Msg 8144**.
+- **Declared widths bind**: a string or binary parameter or return type cuts its value to the declared width, as a variable assignment does, and one written without a width is 1 wide — for every function kind, procedure and `sp_executesql` parameter alike, where only a `CAST` defaults to 30 (probed 2026-09-27 against SQL Server 2025).
 - **DEFAULT keyword required for omission.**
   `fn()` raises Msg 313 even when every parameter has a declared default — the `DEFAULT` keyword is the only legal omission (re-evaluated per call in the child batch).
 - **WITH RETURNS NULL ON NULL INPUT**: any non-DEFAULT NULL arg short-circuits the body and returns typed NULL.

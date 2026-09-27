@@ -121,10 +121,10 @@ partial class Simulation
                 (declaredType, declaredMaxLength, xmlSchemaCollection) = ParseDeclareTypeSpec(context, variableName, out aliasType);
                 spelledNumeric = aliasType?.SpelledNumeric ?? spelledNumeric;
             }
-            catch (SimulatedSqlException missingType) when (missingType.Number is 2715 or 2717 or 2750 && context.Batch.CreateTimeBindErrors is { } bindErrors)
+            catch (SimulatedSqlException missingType) when (missingType.Number is 2715 or 2716 or 2717 or 2750 && context.Batch.CreateTimeBindErrors is { } bindErrors)
             {
                 // Binding without running, real reports the missing type — or
-                // a precision past the type's maximum — and still declares the
+                // a width or precision the type refuses — and still declares the
                 // variable, so a later reference to it binds rather than
                 // raising Msg 137 (a table-type use raises Msg 1087, since the
                 // variable isn't a table) — probed 2026-09-24 against SQL
@@ -268,7 +268,7 @@ partial class Simulation
         (var resolved, var maxLength, _, aliasType) = ResolveTypeReference(
             context.Batch, qualifiedTypeName, typeName, declaredMaxLength, declaredScale,
             // Real numbers a variable among every one the batch declares.
-            context.Batch.Variables.Count + 1, TypeSpecSite.Scalar, variableName);
+            context.Batch.Variables.Count + 1, TypeSpecSite.Scalar, "@" + variableName);
         // The legacy LOB types are column-only — real refuses them for a local
         // variable outright (probe-confirmed), which is why no string function
         // ever sees one through a variable.

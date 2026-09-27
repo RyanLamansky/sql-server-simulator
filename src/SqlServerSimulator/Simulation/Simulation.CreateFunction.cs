@@ -329,7 +329,7 @@ partial class Simulation
     private static bool ParseScalarTail(ParserContext context, Schema schema, MultiPartName functionName, List<UdfParameter> parameters, bool isAlter, bool createOrAlter)
     {
         var returnSpelledNumeric = IsNumericTypeWord(context.Token);
-        var returnType = ParseFunctionReturnType(context, ordinal: 0, out var returnAliasType);
+        var returnType = ParseFunctionReturnType(context, ordinal: 0, parameterName: "", out var returnMaxLength, out var returnAliasType);
         returnSpelledNumeric = returnAliasType?.SpelledNumeric ?? returnSpelledNumeric;
 
         // Optional WITH clause. RETURNS NULL ON NULL INPUT is the only option
@@ -448,6 +448,7 @@ partial class Simulation
             UsesAnsiNulls = context.Batch.Connection.AnsiNulls,
             ReturnSpelledNumeric = returnSpelledNumeric,
             ReturnAliasType = returnAliasType,
+            ReturnMaxLength = returnMaxLength,
         };
         if (replaced is not null)
             function.ModifyDate = context.Batch.CurrentStatement.UtcNow;
@@ -757,7 +758,7 @@ partial class Simulation
         context.MoveNextRequired();
 
         var spelledNumeric = IsNumericTypeWord(context.Token);
-        var paramType = ParseFunctionReturnType(context, ordinal, out var aliasType);
+        var paramType = ParseFunctionReturnType(context, ordinal, "@" + name, out var paramMaxLength, out var aliasType);
         spelledNumeric = aliasType?.SpelledNumeric ?? spelledNumeric;
 
         Expression? defaultExpression = null;
@@ -766,7 +767,7 @@ partial class Simulation
             context.MoveNextRequired();
             defaultExpression = Expression.Parse(context);
         }
-        return new UdfParameter(name, paramType, defaultExpression) { SpelledNumeric = spelledNumeric, AliasType = aliasType };
+        return new UdfParameter(name, paramType, defaultExpression) { SpelledNumeric = spelledNumeric, AliasType = aliasType, DeclaredMaxLength = paramMaxLength };
     }
 
     /// <summary>
@@ -778,7 +779,7 @@ partial class Simulation
     /// <paramref name="ordinal"/> is the parameter's position, 0 for the
     /// return type.
     /// </summary>
-    private static SqlType ParseFunctionReturnType(ParserContext context, int ordinal, out AliasType? aliasType)
+    private static SqlType ParseFunctionReturnType(ParserContext context, int ordinal, string parameterName, out int? maxLength, out AliasType? aliasType)
     {
         var (qualifiedTypeName, typeName) = TypeNameSynonyms.ReadTypeName(context);
         context.MoveNextRequired();
@@ -809,9 +810,9 @@ partial class Simulation
             context.MoveNextRequired();
         }
 
-        (var resolvedType, _, _, aliasType) = ResolveTypeReference(
+        (var resolvedType, maxLength, _, aliasType) = ResolveTypeReference(
             context.Batch, qualifiedTypeName, typeName, declaredMaxLength, declaredScale,
-            index: ordinal, TypeSpecSite.Scalar, columnName: null);
+            index: ordinal, TypeSpecSite.Scalar, columnName: parameterName);
         return resolvedType;
     }
 }

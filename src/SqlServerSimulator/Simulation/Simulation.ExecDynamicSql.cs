@@ -411,7 +411,7 @@ partial class Simulation
             defContext.MoveNextRequired();
 
             // Type parsing reuses the procedure-parameter type grammar.
-            var (type, declaredMaxLength) = ParseSpExecuteSqlParamType(defContext, parameters.Count + 1);
+            var (type, declaredMaxLength) = ParseSpExecuteSqlParamType(defContext, parameters.Count + 1, "@" + name.Value);
 
             // A default comes before OUTPUT and is a constant, as a procedure
             // parameter's is: `@p int = 5 OUTPUT` (probed 2026-09-25 against
@@ -478,7 +478,7 @@ partial class Simulation
     /// string. Shape mirrors <see cref="ParseProcedureParameterType"/> but
     /// without the optional default expression.
     /// </summary>
-    private static (SqlType Type, int? DeclaredMaxLength) ParseSpExecuteSqlParamType(ParserContext context, int ordinal)
+    private static (SqlType Type, int? DeclaredMaxLength) ParseSpExecuteSqlParamType(ParserContext context, int ordinal, string parameterName)
     {
         var (qualifiedTypeName, typeName) = TypeNameSynonyms.ReadTypeName(context);
         context.MoveNextOptional();
@@ -509,10 +509,10 @@ partial class Simulation
             context.MoveNextOptional();
         }
 
-        var (resolvedType, _, _, _) = ResolveTypeReference(
+        var (resolvedType, resolvedMaxLength, _, _) = ResolveTypeReference(
             context.Batch, qualifiedTypeName, typeName, declaredMaxLength, declaredScale,
-            index: ordinal, TypeSpecSite.Scalar, columnName: null);
-        return (resolvedType, declaredMaxLength);
+            index: ordinal, TypeSpecSite.Scalar, columnName: parameterName);
+        return (resolvedType, resolvedMaxLength);
     }
 
     /// <summary>

@@ -297,7 +297,7 @@ partial class Simulation
             {
                 (resolvedType, resolvedMaxLength) = SqlType.GetByName(
                     baseLeafToken, declaredMaxLength, declaredScale,
-                    index: 0, TypeSpecSite.Scalar, columnName: typeName.Leaf);
+                    index: 0, TypeSpecSite.Scalar, columnName: baseLeafToken.Value);
             }
             catch (SimulatedSqlException ex) when (ex.Number == 2750)
             {

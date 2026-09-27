@@ -90,7 +90,11 @@ partial class Simulation
                 ? defaultExpr.Run(new RuntimeContext(_ => throw SimulatedSqlException.MustDeclareScalarVariable(""), outerBatch))
                     .CoerceTo(param.Type)
                 : argValues[i];
-            variables[param.Name] = new VariableSlot(param.Type, declaredMaxLength: null, value, parameter: null) { SpelledNumeric = param.SpelledNumeric };
+            // An argument past the parameter's width is cut to it, as a
+            // variable assignment is (probed 2026-09-27 against SQL Server
+            // 2025).
+            value = Parser.Expressions.Cast.ApplyCoercion(value, param.Type, param.DeclaredMaxLength);
+            variables[param.Name] = new VariableSlot(param.Type, declaredMaxLength: param.DeclaredMaxLength, value, parameter: null) { SpelledNumeric = param.SpelledNumeric };
         }
 
         // Construct a fresh return-table HeapTable for this call. Constraint

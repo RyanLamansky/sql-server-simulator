@@ -723,12 +723,13 @@ internal abstract partial class SqlType
     /// <see cref="TypeSpecSite"/>).
     /// </param>
     /// <param name="columnName">
-    /// Unquoted column name when called from a column declaration; null when
-    /// called from a CAST/CONVERT expression. Selects the SQL Server error
-    /// variant — column declarations and casts raise different Msg numbers
-    /// for the same underlying mistake (e.g. unknown type → 2715 vs 243;
-    /// width-on-fixed-type → 2716 vs 291; oversize varchar → 131 with
-    /// "column" vs "type" wording; oversize nvarchar → 2717 vs 131).
+    /// The name an error names: the unquoted column name in a column
+    /// declaration; the <c>@</c>-prefixed variable or parameter name, <c>''</c>
+    /// for a function's return type, or the base type's name for an alias
+    /// type; null in a CAST/CONVERT expression. Declarations and casts raise
+    /// different Msg numbers for the same underlying mistake (e.g. unknown type
+    /// → 2715 vs 243; width-on-fixed-type → 2716 vs 291; oversize nvarchar →
+    /// 2717 vs 131), picked by <paramref name="site"/>.
     /// </param>
     /// <returns>
     /// The resolved <see cref="SqlType"/> and, for <c>varchar</c> / <c>nvarchar</c>,
@@ -824,11 +825,11 @@ internal abstract partial class SqlType
         // path would reject the parameter) and (b) SQL Server picks different
         // defaults by context: 1 in column declarations, 30 in CAST.
         if ((resolvedName == 4 && upper.SequenceEqual("CHAR")) || (resolvedName == 9 && upper.SequenceEqual("CHARACTER")))
-            return ResolveFixedString(declaredMaxLength, columnName, name.LineNumber, max: 8000, isNvarcharCousin: false, "char", GetChar);
+            return ResolveFixedString(declaredMaxLength, site, columnName, name.LineNumber, max: 8000, isNvarcharCousin: false, "char", GetChar);
         if (resolvedName == 5 && upper.SequenceEqual("NCHAR"))
-            return ResolveFixedString(declaredMaxLength, columnName, name.LineNumber, max: 4000, isNvarcharCousin: true, "nchar", GetNChar);
+            return ResolveFixedString(declaredMaxLength, site, columnName, name.LineNumber, max: 4000, isNvarcharCousin: true, "nchar", GetNChar);
         if (resolvedName == 6 && upper.SequenceEqual("BINARY"))
-            return ResolveFixedString(declaredMaxLength, columnName, name.LineNumber, max: 8000, isNvarcharCousin: false, "binary", GetBinary);
+            return ResolveFixedString(declaredMaxLength, site, columnName, name.LineNumber, max: 8000, isNvarcharCousin: false, "binary", GetBinary);
 
         // Length-then-name dispatch over the simple keyword-named singletons.
         // (CHAR / NCHAR / BINARY / VARCHAR(MAX) / etc. with parameter handling
@@ -838,7 +839,7 @@ internal abstract partial class SqlType
         // dispatch as a switch expression here would force per-arm casts to
         // satisfy best-common-type inference.
         var resolved = ResolveSimpleKeyword(resolvedName, upper)
-            ?? throw (columnName is not null
+            ?? throw (site != TypeSpecSite.Cast
                 ? SimulatedSqlException.CannotFindDataType(name.Span, index)
                 : SimulatedSqlException.CannotFindDataTypeInCast(name.Span));
 
@@ -849,7 +850,7 @@ internal abstract partial class SqlType
         if (resolved is SqlVariantSqlType)
         {
             return declaredMaxLength is not null
-                ? throw (columnName is not null
+                ? throw (site != TypeSpecSite.Cast
                     ? SimulatedSqlException.CannotSpecifyColumnWidth(resolved, index)
                     : SimulatedSqlException.CannotSpecifyColumnWidthInCast(resolved))
                 : (resolved, null);
@@ -870,7 +871,7 @@ internal abstract partial class SqlType
         if (resolved.IsLob)
         {
             return declaredMaxLength is not null
-                ? throw (columnName is not null
+                ? throw (site != TypeSpecSite.Cast
                     ? SimulatedSqlException.CannotSpecifyColumnWidth(resolved, index)
                     : SimulatedSqlException.CannotSpecifyColumnWidthInCast(resolved))
                 : (resolved, MaxLengthSentinel);
@@ -879,7 +880,7 @@ internal abstract partial class SqlType
         if (resolved.IsFixedLength)
         {
             return declaredMaxLength is not null
-                ? throw (columnName is not null
+                ? throw (site != TypeSpecSite.Cast
                     ? SimulatedSqlException.CannotSpecifyColumnWidth(resolved, index)
                     : SimulatedSqlException.CannotSpecifyColumnWidthInCast(resolved))
                 : (resolved, null);
@@ -902,7 +903,7 @@ internal abstract partial class SqlType
         if (resolved is SystemNameSqlType)
         {
             return declaredMaxLength is not null
-                ? throw (columnName is not null
+                ? throw (site != TypeSpecSite.Cast
                     ? SimulatedSqlException.CannotSpecifyColumnWidth(resolved, index)
                     : SimulatedSqlException.CannotSpecifyColumnWidthInCast(resolved))
                 : (resolved, 128);
@@ -910,23 +911,14 @@ internal abstract partial class SqlType
 
         // Variable-length string types are bounded per type. SQL Server has the
         // same two-context rule as fixed-length char/nchar/binary: missing
-        // length defaults to 1 in a column declaration but 30 in a CAST/CONVERT
-        // expression — the columnName parameter (null in CAST context) selects
-        // between them. Probe-confirmed against SQL Server 2025: `CAST('hello'
+        // length defaults to 1 in a declaration but 30 in a CAST/CONVERT
+        // expression (DefaultLength). Probe-confirmed against SQL Server 2025: `CAST('hello'
         // AS varchar)` returns the full string, which would truncate to 'h' if
         // the CAST default were 1.
         var max = resolved is NVarcharSqlType ? 4000 : 8000;
-        var declared = declaredMaxLength ?? (columnName is null ? 30 : 1);
+        var declared = declaredMaxLength ?? DefaultLength(site);
         if (declared < 1 || declared > max)
-        {
-            throw (columnName, resolved is NVarcharSqlType) switch
-            {
-                (not null, true) => SimulatedSqlException.NVarcharSizeExceedsMaximumColumn(columnName, declared),
-                (not null, false) => SimulatedSqlException.SizeExceedsMaximumColumn(columnName, declared, max),
-                (null, true) => SimulatedSqlException.NVarcharSizeExceedsMaximumCast("nvarchar", declared),
-                (null, false) => SimulatedSqlException.SizeExceedsMaximumCast(resolved.ToString()!, declared, max),
-            };
-        }
+            throw SizeExceedsMaximum(site, columnName, resolved is NVarcharSqlType, resolved is NVarcharSqlType ? "nvarchar" : resolved.ToString()!, declared, max);
         return (ResolveVarFamilyForLength(resolved, declared), declared);
     }
 
@@ -936,7 +928,7 @@ internal abstract partial class SqlType
             throw SimulatedSqlException.ScaleExceedsPrecision();
         if (dimensions is null or MaxLengthSentinel || baseType is not (null or VectorSqlType.Float32BaseType))
         {
-            throw columnName is not null
+            throw site != TypeSpecSite.Cast
                 ? SimulatedSqlException.CannotFindDataType(name.Span, index)
                 : SimulatedSqlException.CannotFindDataTypeInCast(name.Span);
         }
@@ -988,23 +980,36 @@ internal abstract partial class SqlType
     /// 0 raises Msg 1001 first, oversize raises Msg 131 (varchar/varbinary
     /// wording) or 2717 (nchar wording).
     /// </summary>
-    private static (SqlType Type, int? MaxLength) ResolveFixedString(int? declaredMaxLength, string? columnName, int line, int max, bool isNvarcharCousin, string typeName, Func<int, SqlType> factory)
+    private static (SqlType Type, int? MaxLength) ResolveFixedString(int? declaredMaxLength, TypeSpecSite site, string? columnName, int line, int max, bool isNvarcharCousin, string typeName, Func<int, SqlType> factory)
     {
         if (declaredMaxLength == 0)
             throw SimulatedSqlException.LengthOrPrecisionSpecificationInvalid(0, line);
-        var declared = declaredMaxLength ?? (columnName is null ? 30 : 1);
+        var declared = declaredMaxLength ?? DefaultLength(site);
         if (declared < 1 || declared > max)
-        {
-            throw (columnName, isNvarcharCousin) switch
-            {
-                (not null, true) => SimulatedSqlException.NVarcharSizeExceedsMaximumColumn(columnName, declared),
-                (not null, false) => SimulatedSqlException.SizeExceedsMaximumColumn(columnName, declared, max),
-                (null, true) => SimulatedSqlException.NVarcharSizeExceedsMaximumCast(typeName, declared),
-                (null, false) => SimulatedSqlException.SizeExceedsMaximumCast(typeName, declared, max),
-            };
-        }
+            throw SizeExceedsMaximum(site, columnName, isNvarcharCousin, typeName, declared, max);
         return (factory(declared), declared);
     }
+
+    // A string or binary type written without a length is 30 wide in a CAST
+    // and 1 wide everywhere else — a column, variable, parameter, return type
+    // or alias type (probed 2026-09-27 against SQL Server 2025).
+    private static int DefaultLength(TypeSpecSite site) => site == TypeSpecSite.Cast ? 30 : 1;
+
+    // A length past the type's maximum, worded by where the spec is written: a
+    // column names itself (Msg 131 state 2, or Msg 2717 for the n-types); a
+    // variable, parameter, return type or alias type reports the plain types'
+    // size against the type (Msg 131 state 3) and the n-types' against the
+    // parameter name it was given — the variable's, '' for a function's return,
+    // the base type's for an alias type (probed 2026-09-27 against SQL Server
+    // 2025); a CAST keeps its own pair.
+    private static SimulatedSqlException SizeExceedsMaximum(TypeSpecSite site, string? columnName, bool nType, string typeName, int declared, int max) => (site, nType) switch
+    {
+        (TypeSpecSite.Cast, false) => SimulatedSqlException.SizeExceedsMaximumCast(typeName, declared, max),
+        (TypeSpecSite.Cast, true) => SimulatedSqlException.NVarcharSizeExceedsMaximumCast(typeName, declared),
+        (TypeSpecSite.Column, false) => SimulatedSqlException.SizeExceedsMaximumColumn(columnName!, declared, max),
+        (_, true) => SimulatedSqlException.NVarcharSizeExceedsMaximumColumn(columnName ?? "", declared),
+        _ => SimulatedSqlException.SizeExceedsMaximumCast(typeName, declared, max),
+    };
 
     /// <summary>
     /// True when <paramref name="name"/> spells a built-in type's keyword name
