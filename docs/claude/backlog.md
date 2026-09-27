@@ -166,8 +166,12 @@ Still open from what it surfaced:
 - **What the `evidence/` capture's one divergence led to, and didn't close** — the quantified-call family and the delimited one-part call shipped (see [`sqllogictest.md`](sqllogictest.md#standing-result)); what remains is their error *positions* and report shapes, not whether they raise.
   A delimited one-part call names `(` in `VALUES`, `CASE` and `IN`, is Msg 4145 opening a predicate and Msg 128 in `PRINT` on real, and Msg 102 at the first token inside the parens here → [`grammar.md`](grammar.md#divergences).
   A quantified call's skipped `OVER` clause isn't syntax-checked past its parens, and a held Msg 313 drops out of a statement's binder report → [`query.md`](query.md#a-quantified-call-is-an-aggregate-call-whatever-the-name).
-- **Every statement is parsed twice**, once by the batch-compile walk and once to run, and the `index/` slice's long `WHERE` chains make that visible: in a sampled profile of its slowest script (`in/1000`, 2026-09-27) the compile walk alone (`CompileBatch`, a throwaway parse-and-bind of the whole batch before the run parses it again) was about 15% of the simulator's time.
-  Reusing the walk's parse for the run would recover most of it; it is the largest remaining per-statement cost in the replay workloads.
+- **Every statement is parsed twice**, once by the batch-compile walk and once to run.
+  Replaying `index/in/1000` single-threaded (measured 2026-09-27), the walk is 8.8% of process CPU — 7.8 points of it parsing the SELECT, tokenizing already shared with the run — and skipping it outright bounds the win at 13.0 → 12.1 s.
+  Its texts are all unique, so `compiledBatches` never hits, and parameterized workloads (WWI) reach the plan cache before the walk runs, so a wider cache recovers nothing measured.
+  Reusing the walk's `Selection` for the run isn't sound as-is: skip mode takes `DataLockPlan.Bypass`, and permission checks, FROM-less evaluation, placeholder sources and the `TOP (@p)` declared-type check all differ under it.
+  Skipping the walk for a one-statement batch isn't a shortcut either: a compile error surfaces at `ExecuteReader` where a run-time one surfaces at `Read()`, and the batch-abort rules differ.
+  The prerequisite for any real win is moving those parse-time run-only effects into an execution step, so that a skip-mode plan equals the run's.
 
 **Five sweep divergences remain, each demonstrated irreducible** — real's own answer flips under something the simulator cannot legitimately model, so matching them would mean modeling plan selection rather than semantics.
 Two are the trivial-plan boundary: `WHERE <overflow> <= 18 / CAST(NULL AS int)` raises as written, and answers 0 rows the moment `DISTINCT`, `GROUP BY`, `TOP 2` or a join is added — while `ORDER BY` / `MAX()` / `COUNT(*)` leave it raising.
