@@ -22,6 +22,7 @@ internal sealed class HeapTableSnapshot
     private readonly string name;
     private readonly DateTime modifyDate;
     private readonly byte lockEscalation;
+    private readonly Schemas.PartitionPlacement? partitioning;
     private readonly int maxColumnIdUsed;
     private readonly HeapColumn[] columns;
     private readonly (string Name, int ColumnId, bool IsRowGuidCol, bool IsSparse, Parser.Expression? Default, DefaultConstraint? DefaultConstraint, string? DefaultName)[] columnState;
@@ -54,6 +55,7 @@ internal sealed class HeapTableSnapshot
         this.name = table.Name;
         this.modifyDate = table.ModifyDate;
         this.lockEscalation = table.LockEscalation;
+        this.partitioning = table.Partitioning;
         this.maxColumnIdUsed = table.MaxColumnIdUsed;
         this.columns = table.Columns;
         this.columnState = Array.ConvertAll(table.Columns, column => (
@@ -94,6 +96,7 @@ internal sealed class HeapTableSnapshot
         table.Name = this.name;
         table.ModifyDate = this.modifyDate;
         table.LockEscalation = this.lockEscalation;
+        table.Partitioning = this.partitioning;
         table.MaxColumnIdUsed = this.maxColumnIdUsed;
         table.Columns = this.columns;
         for (var i = 0; i < this.columns.Length; i++)

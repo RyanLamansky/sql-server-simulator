@@ -176,6 +176,7 @@ internal static class ModelXmlReader
         // Inline TVFs whose first CREATE attempt failed; drained at the end of
         // the phase, once their siblings exist.
         var deferredInlineTvfs = new List<XElement>();
+        var deferredPartitionSchemes = new List<XElement>();
         foreach (var element in elements)
         {
             var type = element.Attribute("Type")?.Value!;
@@ -267,14 +268,12 @@ internal static class ModelXmlReader
                     // FILEGROUP-scoped extended properties (phase 9) resolve the
                     // registered data_space_id.
                     ("SqlFilegroup", 1) => Run(() => EmitFilegroup(name, connection)),
-                    // Partitioning is a storage-layout concern; the simulator has
-                    // a single in-process heap so both are parse-and-skip.
-                    // PartitionFunction / PartitionScheme define filegroup-mapping
-                    // boundaries that tables / indexes reference for physical
-                    // placement (no semantic effect when placement isn't
-                    // tracked). Phase 1 placement is fine — no dependencies.
-                    ("SqlPartitionFunction", 1) => Run(static () => { }),
-                    ("SqlPartitionScheme", 1) => Run(static () => { }),
+                    // A partition function has no dependencies; a scheme names
+                    // filegroups, which DacFx may list later in the model, so
+                    // the schemes wait for the end of phase 1. Both precede the
+                    // phase-2 tables placed on them.
+                    ("SqlPartitionFunction", 1) => Run(() => EmitPartitionFunction(element, name, connection)),
+                    ("SqlPartitionScheme", 1) => Run(() => deferredPartitionSchemes.Add(element)),
                     // A columnstore index lands with the other indexes.
                     ("SqlColumnStoreIndex", 8) => Run(() => EmitColumnstoreIndex(element, name, connection, result)),
                     ("SqlExtendedProperty", 9) => Run(() => EmitExtendedProperty(element, name, connection, viewNames, result)),
@@ -304,6 +303,17 @@ internal static class ModelXmlReader
         }
 
         DrainDeferredInlineTvfs(deferredInlineTvfs, connection, result);
+        foreach (var element in deferredPartitionSchemes)
+        {
+            try
+            {
+                EmitPartitionScheme(element, element.Attribute("Name")?.Value, connection);
+            }
+            catch (Exception ex) when (ex is not OutOfMemoryException and not StackOverflowException)
+            {
+                result.AddSkipped(new BacpacSkipped("SqlPartitionScheme", element.Attribute("Name")?.Value, $"Load failed: {ex.GetType().Name}: {ex.Message}"));
+            }
+        }
 
         // Phase 8 is where the standalone unique indexes land, so a full-text
         // index whose KEY INDEX is one gets its second — and reporting — try.
@@ -1059,7 +1069,7 @@ internal static class ModelXmlReader
 
         try
         {
-            ExecuteCreateTable(qualifiedName, inlineDdls, connection);
+            ExecuteCreateTable(qualifiedName, inlineDdls, connection, PlacementClause(element, partitionedOnly: true));
             // Inline succeeded: HeapTable.Columns is in model order, so the
             // alias side-map keeps a slot per model column (computed slots are
             // false and never read — BCP filters computed columns out before
@@ -1076,7 +1086,7 @@ internal static class ModelXmlReader
             var strippedDdls = new List<string>(columns.Where(c => !c.Computed).Select(c => c.Ddl));
             if (periodClause is not null)
                 strippedDdls.Add(periodClause);
-            ExecuteCreateTable(qualifiedName, strippedDdls, connection);
+            ExecuteCreateTable(qualifiedName, strippedDdls, connection, PlacementClause(element, partitionedOnly: true));
             _ = deferredComputedTables.Add(qualifiedName);
             // Computed columns land at the end of HeapTable.Columns in phase 8,
             // so the alias side-map is simple-columns-only, index-aligned to the
@@ -1085,11 +1095,11 @@ internal static class ModelXmlReader
         }
     }
 
-    private static void ExecuteCreateTable(string qualifiedName, List<string> columnDdls, DbConnection connection)
+    private static void ExecuteCreateTable(string qualifiedName, List<string> columnDdls, DbConnection connection, string placement)
     {
         using var command = connection.CreateCommand();
 #pragma warning disable CA2100 // bacpac content is caller-trusted; the loader is a translator, not an end-user input handler
-        command.CommandText = $"CREATE TABLE {qualifiedName} ({string.Join(", ", columnDdls)});";
+        command.CommandText = $"CREATE TABLE {qualifiedName} ({string.Join(", ", columnDdls)}){placement};";
 #pragma warning restore CA2100
         _ = command.ExecuteNonQuery();
     }
@@ -1430,7 +1440,7 @@ internal static class ModelXmlReader
 
         using var command = connection.CreateCommand();
 #pragma warning disable CA2100 // bacpac content is caller-trusted; the loader is a translator, not an end-user input handler
-        command.CommandText = $"ALTER TABLE {definingTable} ADD {constraintPrefix}{kind}{clusteringClause} ({columnLeaves});";
+        command.CommandText = $"ALTER TABLE {definingTable} ADD {constraintPrefix}{kind}{clusteringClause} ({columnLeaves}){PlacementClause(element, partitionedOnly: false)};";
 #pragma warning restore CA2100
         _ = command.ExecuteNonQuery();
     }
@@ -2055,7 +2065,7 @@ internal static class ModelXmlReader
 
         using var command = connection.CreateCommand();
 #pragma warning disable CA2100 // bacpac content is caller-trusted; the loader is a translator, not an end-user input handler
-        command.CommandText = $"CREATE {uniqueClause}{clusteringClause}INDEX {Leaf(indexName)} ON {indexedObject} ({keyList}){includeClause}{whereClause};";
+        command.CommandText = $"CREATE {uniqueClause}{clusteringClause}INDEX {Leaf(indexName)} ON {indexedObject} ({keyList}){includeClause}{whereClause}{PlacementClause(element, partitionedOnly: false)};";
 #pragma warning restore CA2100
         try
         {
@@ -2098,7 +2108,7 @@ internal static class ModelXmlReader
 
         using var command = connection.CreateCommand();
 #pragma warning disable CA2100 // bacpac content is caller-trusted; the loader is a translator, not an end-user input handler
-        command.CommandText = $"CREATE {(isClustered ? "CLUSTERED" : "NONCLUSTERED")} COLUMNSTORE INDEX {Leaf(indexName)} ON {indexedObject}{columnList}{whereClause};";
+        command.CommandText = $"CREATE {(isClustered ? "CLUSTERED" : "NONCLUSTERED")} COLUMNSTORE INDEX {Leaf(indexName)} ON {indexedObject}{columnList}{whereClause}{PlacementClause(element, partitionedOnly: true)};";
 #pragma warning restore CA2100
         try
         {
@@ -2136,12 +2146,85 @@ internal static class ModelXmlReader
     }
 
     /// <summary>
+    /// The <c>ON</c> clause an element's placement writes: <c>ON scheme(column)</c>
+    /// for one on a partition scheme, else — unless
+    /// <paramref name="partitionedOnly"/> — <c>ON filegroup</c> for one naming
+    /// its filegroup, which is what keeps a unique index a model places off a
+    /// partitioned table's scheme from defaulting onto it. Empty when neither.
+    /// </summary>
+    private static string PlacementClause(XElement element, bool partitionedOnly)
+    {
+        if (ReadSingleReference(element, "PartitionScheme") is { } scheme
+            && ReadSingleReference(element, "PartitionColumn") is { } column)
+        {
+            return $" ON {scheme}({Leaf(column)})";
+        }
+        return !partitionedOnly && ReadSingleReference(element, "Filegroup") is { } filegroup ? $" ON {filegroup}" : "";
+    }
+
+    /// <summary>
+    /// Emits <c>CREATE PARTITION FUNCTION name (type) AS RANGE LEFT | RIGHT FOR
+    /// VALUES (…)</c> for a <c>SqlPartitionFunction</c> element: its
+    /// <c>Range</c> property is 2 for <c>RIGHT</c>, its <c>ParameterType</c> a
+    /// type specifier, and each boundary a <c>SqlPartitionValue</c>'s
+    /// expression script.
+    /// </summary>
+    private static void EmitPartitionFunction(XElement element, string? functionName, DbConnection connection)
+    {
+        if (string.IsNullOrEmpty(functionName))
+            throw new InvalidDataException("bacpac: SqlPartitionFunction missing Name attribute.");
+        var typeSpec = element.Elements(Ns + "Relationship")
+            .FirstOrDefault(r => r.Attribute("Name")?.Value == "ParameterType")
+            ?.Elements(Ns + "Entry").Elements(Ns + "Element").FirstOrDefault()
+            ?? throw new InvalidDataException($"bacpac: SqlPartitionFunction '{functionName}' missing ParameterType.");
+        var values = element.Elements(Ns + "Relationship")
+            .FirstOrDefault(r => r.Attribute("Name")?.Value == "BoundaryValues")
+            ?.Elements(Ns + "Entry").Elements(Ns + "Element")
+            .Select(value => ReadScriptProperty(value, "ExpressionScript"))
+            .OfType<string>()
+            .ToList() ?? [];
+        var side = ReadStringProperty(element, "Range") == "2" ? "RIGHT" : "LEFT";
+
+        using var command = connection.CreateCommand();
+#pragma warning disable CA2100 // bacpac content is caller-trusted; the loader is a translator, not an end-user input handler
+        command.CommandText = $"CREATE PARTITION FUNCTION {functionName} ({TranslateTypeSpecifier(typeSpec)}) AS RANGE {side} FOR VALUES ({string.Join(", ", values)});";
+#pragma warning restore CA2100
+        _ = command.ExecuteNonQuery();
+    }
+
+    /// <summary>
+    /// Emits <c>CREATE PARTITION SCHEME name AS PARTITION function TO (…)</c>
+    /// for a <c>SqlPartitionScheme</c> element, one filegroup per
+    /// <c>SqlFilegroupSpecifier</c> in model order — one more than the
+    /// function's partitions when the scheme had a <c>NEXT USED</c> filegroup.
+    /// </summary>
+    private static void EmitPartitionScheme(XElement element, string? schemeName, DbConnection connection)
+    {
+        if (string.IsNullOrEmpty(schemeName))
+            throw new InvalidDataException("bacpac: SqlPartitionScheme missing Name attribute.");
+        var function = ReadSingleReference(element, "PartitionFunction")
+            ?? throw new InvalidDataException($"bacpac: SqlPartitionScheme '{schemeName}' missing PartitionFunction.");
+        var filegroups = element.Elements(Ns + "Relationship")
+            .FirstOrDefault(r => r.Attribute("Name")?.Value == "Filegroups")
+            ?.Elements(Ns + "Entry").Elements(Ns + "Element")
+            .Select(specifier => ReadSingleReference(specifier, "Filegroup"))
+            .OfType<string>()
+            .ToList() ?? [];
+
+        using var command = connection.CreateCommand();
+#pragma warning disable CA2100 // bacpac content is caller-trusted; the loader is a translator, not an end-user input handler
+        command.CommandText = $"CREATE PARTITION SCHEME {schemeName} AS PARTITION {function} TO ({string.Join(", ", filegroups)});";
+#pragma warning restore CA2100
+        _ = command.ExecuteNonQuery();
+    }
+
+    /// <summary>
     /// Registers a user filegroup from a <c>SqlFilegroup</c> element so
     /// <c>sys.filegroups</c> / <c>sys.data_spaces</c> surface it and DacFx
     /// re-emits the standalone element on export. The element Name is the
     /// 1-part bracketed filegroup name (e.g. <c>[USERDATA]</c>); <c>PRIMARY</c>
-    /// is built-in and never arrives here. No physical file / placement model
-    /// — every heap lives on PRIMARY regardless.
+    /// is built-in and never arrives here. No physical file model; a partition
+    /// scheme can map partitions to the filegroup.
     /// </summary>
     private static void EmitFilegroup(string? elementName, DbConnection connection)
     {

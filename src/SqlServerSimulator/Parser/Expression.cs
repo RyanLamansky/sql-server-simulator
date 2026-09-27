@@ -298,6 +298,7 @@ internal abstract class Expression : ExpressionNode
         // by '(' — the postfix loop hands the call shape off to ResolveBuiltIn.
         ReservedKeyword { Keyword: Keyword.Left or Keyword.Right or Keyword.Convert or Keyword.Try_Convert or Keyword.Coalesce or Keyword.NullIf } reserved => Counted(context, new Reference(reserved.ToString())),
         UnquotedString { ContextualKeyword: ContextualKeyword.Next } nextToken => (Expression?)TryParseNextValueForOrFallback(context) ?? Counted(context, new Reference(nextToken)),
+        UnquotedString { IsDollarPartition: true } => PartitionFunctionCall.Parse(context, databaseName: null),
         Name name => Counted(context, new Reference(name)),
         Operator { Character: '.' } when LeadingDotReference(context) is { } dotted => dotted,
         Operator { Character: '(' } => ParseGroupedExpression(context),
@@ -369,6 +370,17 @@ internal abstract class Expression : ExpressionNode
                         if (afterDot is Operator { Character: '*' })
                         {
                             throw SimulatedSqlException.SyntaxErrorNear(context);
+                        }
+                        else if (afterDot is UnquotedString { IsDollarPartition: true })
+                        {
+                            // `database.$partition.function(value)`: the one
+                            // qualifier a partition-function call takes.
+                            if (expression is not Reference { ReferencedName.Count: 1 } databaseQualifier)
+                                throw SimulatedSqlException.SyntaxErrorNear(context);
+                            context.ColumnReferencesParsed--;
+                            if (ReferenceEquals(context.ScalarOnlyColumnReference, databaseQualifier))
+                                context.ScalarOnlyColumnReference = null;
+                            expression = PartitionFunctionCall.Parse(context, databaseQualifier.ReferencedName.Leaf);
                         }
                         else if (afterDot is Name name)
                         {

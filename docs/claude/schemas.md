@@ -255,7 +255,7 @@ The single sources of truth are `Simulation.SystemDatabaseIds` (the system name�
 
 ## `CREATE DATABASE` / `DROP DATABASE` / `MODIFY NAME`
 
-`CREATE DATABASE <name> [COLLATE <collation>] [<file / option clauses>]` (`Simulation.CreateDatabase.cs`): the name is a single identifier (bare or bracketed, so `[app b-2]` with spaces works); `COLLATE` sets the new database's collation (default = the server collation, mirroring `model.collation`); every remaining clause (`ON (…)`, `LOG ON (…)`, `WITH …`, `CONTAINMENT = …`, `FOR ATTACH`, …) is parse-and-discarded — no physical-file model.
+`CREATE DATABASE <name> [COLLATE <collation>] [<file / option clauses>]` (`Simulation.CreateDatabase.cs`): the name is a single identifier (bare or bracketed, so `[app b-2]` with spaces works); `COLLATE` sets the new database's collation (default = the server collation, mirroring `model.collation`); every remaining clause (`ON (…)`, `LOG ON (…)`, `WITH …`, `CONTAINMENT = …`, `FOR ATTACH`, …) is parse-and-discarded — no physical-file model — except that each `FILEGROUP name` the file list declares registers a filegroup ([`partitioning.md`](partitioning.md#filegroups)).
 A duplicate name raises **Msg 1801**.
 The database registers with the smallest-free id (above) and is immediately usable via `USE`.
 

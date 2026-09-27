@@ -1399,6 +1399,19 @@ internal abstract class BooleanExpression : ExpressionNode
     }
 
     /// <summary>
+    /// Exposes the tested operand and the <c>NOT</c> when this predicate is
+    /// <c>expr IS [NOT] NULL</c>; returns false otherwise. Lets the
+    /// <c>ALTER TABLE … SWITCH</c> constraint reasoning read whether a CHECK
+    /// admits NULL.
+    /// </summary>
+    internal virtual bool TryGetNullTest([NotNullWhen(true)] out Expression? subject, out bool negated)
+    {
+        subject = null;
+        negated = false;
+        return false;
+    }
+
+    /// <summary>
     /// A predicate real SQL Server settled to a constant while compiling: its
     /// <see cref="Run"/> answers that constant and the written operands never
     /// evaluate. Two rules build one — a comparison against a NULL constant
@@ -1734,6 +1747,13 @@ internal abstract class BooleanExpression : ExpressionNode
         internal override void Describe(NodeShape shape) => shape.Local(negated).Child(source);
 
         internal override void VisitOperandExpressions(Action<Expression> visitor) => visitor(source);
+
+        internal override bool TryGetNullTest([NotNullWhen(true)] out Expression? subject, out bool isNotNull)
+        {
+            subject = source;
+            isNotNull = negated;
+            return true;
+        }
 
         private protected override bool TryAppendFilterDefinition(StringBuilder sb, BatchContext batch)
         {

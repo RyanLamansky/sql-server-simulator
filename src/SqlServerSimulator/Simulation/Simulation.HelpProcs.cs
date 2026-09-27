@@ -50,8 +50,8 @@ partial class Simulation
     private static readonly NVarcharSqlType HelpReferencingFkType =
         NVarcharSqlType.Get(516, Collation.Baseline, Coercibility.Implicit);
 
-    // Allocation is a flat page list with no filegroup model, so every index
-    // and table reports the one filegroup a default SQL Server database has.
+    // A filegroup placement isn't recorded, so a table or index that isn't on
+    // a partition scheme reports the one filegroup a default database has.
     private const string HelpFilegroupName = "PRIMARY";
 
     private static readonly SqlType[] SpHelpTextSchema = [HelpTextLine];
@@ -273,7 +273,7 @@ partial class Simulation
                 continue;
             rows.Add([
                 SqlValue.FromSystemName(identity.Name!),
-                SqlValue.FromString(HelpIndexDescriptionType, HelpIndexDescription(identity)),
+                SqlValue.FromString(HelpIndexDescriptionType, HelpIndexDescription(identity, target.Object is HeapTable table ? PlacementOf(table, identity) : null)),
                 // A columnstore index has no key to list (probed 2026-09-26
                 // against SQL Server 2025).
                 identity.Index is { IsColumnstore: true }
@@ -296,8 +296,9 @@ partial class Simulation
     // columnstore, ignore-duplicate-keys, uniqueness, the constraint role, then
     // the filegroup. The hypothetical / hash / auto-create /
     // stats-no-recompute clauses real can also emit have no simulator
-    // counterpart, so they never appear.
-    private static string HelpIndexDescription(IndexIdentity identity)
+    // counterpart, so they never appear. An index on a partition scheme is
+    // located on the scheme (probed 2026-09-27 against SQL Server 2025).
+    private static string HelpIndexDescription(IndexIdentity identity, Schemas.PartitionPlacement? placement)
     {
         var ignoreDupKey = identity.Constraint?.IgnoreDupKey ?? identity.Index!.IgnoreDupKey;
         var isUnique = identity.Constraint is not null || identity.Index!.IsUnique;
@@ -308,7 +309,7 @@ partial class Simulation
             + (isUnique ? ", unique" : "")
             + (kind == KeyConstraintKind.PrimaryKey ? ", primary key" : "")
             + (kind == KeyConstraintKind.Unique ? ", unique key" : "")
-            + " located on " + HelpFilegroupName;
+            + " located on " + (placement?.Scheme.Name ?? HelpFilegroupName);
     }
 
     // Key columns in key order, comma-separated, with real's "(-)" suffix on a

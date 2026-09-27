@@ -18,6 +18,14 @@ internal sealed class HeapTable : SchemaObject
     /// </summary>
     public byte LockEscalation;
 
+    /// <summary>
+    /// The partition scheme and column the table's base rows — the heap, or
+    /// the clustered index — are placed on, or null when they sit on a
+    /// filegroup. Set by <c>CREATE TABLE … ON scheme(column)</c> or a clustered
+    /// index created on one, cleared by a clustered index moved onto a filegroup.
+    /// </summary>
+    public Schemas.PartitionPlacement? Partitioning;
+
     public HeapTable(string name, HeapColumn[] columns, int objectId, int schemaId = Database.DboSchemaId, DateTime createDate = default, KeyConstraint[]? keyConstraints = null, CheckConstraint[]? checkConstraints = null, bool isTableVariable = false, bool isTableValuedParameter = false, (int StartOrdinal, int EndOrdinal)? periodColumns = null)
         : base(name, objectId, schemaId, createDate == default ? DateTime.UtcNow : createDate)
     {

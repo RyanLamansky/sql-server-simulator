@@ -37,10 +37,20 @@ partial class Simulation
         // continues CREATE DATABASE, so it's consumed rather than stopping the
         // scan.
         string? collationName = null;
+        var filegroups = new List<string>();
         var depth = 0;
         context.MoveNextOptional();
         while (context.Token is { } token)
         {
+            // `FILEGROUP name` in the file list declares a filegroup, which
+            // the catalog lists in declaration order after PRIMARY.
+            if (depth == 0 && token is Name { Value: var filegroupWord } && BuiltInToken.Equals(filegroupWord, "FILEGROUP")
+                && context.GetNextRequired() is Name filegroupName)
+            {
+                filegroups.Add(filegroupName.Value);
+                context.MoveNextOptional();
+                continue;
+            }
             if (depth == 0 && token is ReservedKeyword { Keyword: Keyword.Collate })
             {
                 if (context.GetNextRequired() is not UnquotedString collationToken)
@@ -85,7 +95,10 @@ partial class Simulation
         {
             if (this.Databases.ContainsKey(databaseName))
                 throw SimulatedSqlException.DatabaseAlreadyExists(databaseName);
-            RegisterUserDatabaseLocked(new Database(databaseName, collation));
+            var database = new Database(databaseName, collation);
+            foreach (var filegroup in filegroups)
+                _ = database.RegisterFilegroup(filegroup);
+            RegisterUserDatabaseLocked(database);
         }
         return true;
     }

@@ -478,12 +478,14 @@ public sealed class TemporalTableTests
             "Cannot find the object \"dbo.tNoSuch\" because it does not exist or you do not have permissions.");
 
     [TestMethod]
-    public void AlterTable_UnsupportedShape_RaisesNotSupported()
+    public void Switch_OutOfSystemVersioned_RaisesMsg13546()
     {
         var simulation = new Simulation();
         simulation.ExecuteBatches(CreateTemporalCustomers);
-        _ = ThrowsExactly<NotSupportedException>(
-            () => simulation.ExecuteNonQuery("alter table Customers switch partition 1 to Archive"));
+        simulation.AssertSqlError(
+            "create table Archive (Id int not null primary key, Name nvarchar(30) not null, Vf datetime2 not null, Vt datetime2 not null); alter table Customers switch to Archive",
+            13546,
+            "Switching out partition failed on table 'simulated.dbo.Customers' because it is not a supported operation on system-versioned tables. Consider setting SYSTEM_VERSIONING to OFF and trying again.");
     }
 
     [TestMethod]

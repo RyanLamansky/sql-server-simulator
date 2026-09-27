@@ -89,6 +89,47 @@ internal static class SchemaBinding
     }
 
     /// <summary>
+    /// The schema-bound module with the lowest object id whose body calls
+    /// <c>$PARTITION.</c><paramref name="functionName"/>, or null when none
+    /// does — what refuses a <c>DROP PARTITION FUNCTION</c> (probed 2026-09-27
+    /// against SQL Server 2025).
+    /// </summary>
+    internal static SchemaObject? FindPartitionFunctionReference(Database database, string functionName)
+    {
+        List<SchemaObject> matches = [];
+        foreach (var schema in database.Schemas.Values)
+        {
+            foreach (var view in schema.Views.Values)
+            {
+                if (view.IsSchemaBound && CallsPartitionFunction(database, view.BodyText, functionName))
+                    matches.Add(view);
+            }
+            foreach (var function in schema.Functions.Values)
+            {
+                if (function.IsSchemaBound && CallsPartitionFunction(database, function.BodyText, functionName))
+                    matches.Add(function);
+            }
+        }
+        return matches.Count == 0 ? null : matches.MinBy(static module => module.ObjectId);
+    }
+
+    private static bool CallsPartitionFunction(Database database, string bodyText, string functionName)
+    {
+        var tokens = Tokenize(bodyText);
+        for (var i = 0; i + 2 < tokens.Count; i++)
+        {
+            if (tokens[i] is UnquotedString { IsDollarPartition: true }
+                && tokens[i + 1] is Operator { Character: '.' }
+                && tokens[i + 2] is Name name
+                && database.Collation.Equals(name.Value, functionName))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// <summary>
     /// Every schema-bound view that references <paramref name="table"/> —
     /// indexed or not — which <c>sp_help</c> lists as the views referencing
     /// it (probed 2026-09-26 against SQL Server 2025).

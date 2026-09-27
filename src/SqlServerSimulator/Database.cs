@@ -94,6 +94,8 @@ internal sealed class Database
         this.Principals = new(collation);
         this.FullTextCatalogs = new(collation);
         this.Filegroups = new(collation) { ["PRIMARY"] = PrimaryFilegroupId };
+        this.PartitionFunctions = new(collation);
+        this.PartitionSchemes = new(collation);
         this.Schemas[DefaultSchemaName] = new Schema(this, DefaultSchemaName, DboSchemaId);
         this.Schemas["INFORMATION_SCHEMA"] = new Schema(this, "INFORMATION_SCHEMA", InformationSchemaId);
         this.Schemas["sys"] = new Schema(this, "sys", SysSchemaId);
@@ -539,27 +541,30 @@ internal sealed class Database
     /// Per-database filegroups keyed by name (case-insensitive), value =
     /// <c>data_space_id</c>. Seeded with <c>PRIMARY = 1</c> (the built-in
     /// default filegroup every database carries). Additional filegroups
-    /// register through the bacpac loader's <c>SqlFilegroup</c> dispatch and
-    /// receive sequential ids from 2 in registration order. Surfaced by
+    /// register through <c>CREATE DATABASE</c>'s file list, <c>ALTER DATABASE
+    /// … ADD FILEGROUP</c> and the bacpac loader's <c>SqlFilegroup</c> dispatch
+    /// (<see cref="RegisterFilegroup"/>). Surfaced by
     /// <c>sys.filegroups</c> / <c>sys.data_spaces</c> and consumed by
     /// FILEGROUP-scoped extended properties (class 20 = DATASPACE, whose
     /// <c>major_id</c> is the <c>data_space_id</c>). There is no physical file
     /// model — the registry exists for catalog-view visibility + bacpac
     /// round-trip (DacFx re-emits a <c>SqlFilegroup</c> element per non-PRIMARY
-    /// row) only; table / index placement isn't tracked (every heap lives on
-    /// PRIMARY).
+    /// row) and partition schemes, which map partitions to filegroups; a
+    /// table's or index's own <c>ON [filegroup]</c> isn't recorded.
     /// </summary>
     public readonly ConcurrentDictionary<string, int> Filegroups;
-
-    private int nextFilegroupId = PrimaryFilegroupId;
 
     /// <summary>
     /// Registers a filegroup by name (idempotent), returning its
     /// <c>data_space_id</c>. A name already present keeps its id; a new name
-    /// gets the next sequential id from 2 (PRIMARY holds 1).
+    /// gets one past the highest id held, so a removed filegroup's id comes
+    /// back when it was the highest (probed 2026-09-27 against SQL Server 2025).
     /// </summary>
-    public int RegisterFilegroup(string name) =>
-        this.Filegroups.GetOrAdd(name, _ => Interlocked.Increment(ref this.nextFilegroupId));
+    public int RegisterFilegroup(string name)
+    {
+        lock (this.Filegroups)
+            return this.Filegroups.GetOrAdd(name, _ => this.Filegroups.Values.Max() + 1);
+    }
 
     private int nextXmlCollectionId = 65535;
 
@@ -571,6 +576,44 @@ internal sealed class Database
     /// allocation returns 65536, matching that convention.
     /// </summary>
     public int AllocateXmlCollectionId() => Interlocked.Increment(ref this.nextXmlCollectionId);
+
+    /// <summary>
+    /// The database's partition functions by name, compared under its
+    /// collation. A partition function isn't a schema object: its name is
+    /// one-part and database-wide.
+    /// </summary>
+    public readonly ConcurrentDictionary<string, Schemas.PartitionFunction> PartitionFunctions;
+
+    /// <summary>
+    /// The database's partition schemes by name, compared under its collation;
+    /// a scheme's name may not repeat a filegroup's (<see cref="Filegroups"/>).
+    /// </summary>
+    public readonly ConcurrentDictionary<string, Schemas.PartitionScheme> PartitionSchemes;
+
+    private int nextPartitionFunctionId = 65535;
+
+    private int nextPartitionSchemeId = 65600;
+
+    /// <summary>
+    /// Allocates the next partition function id: 65536 first, one up per
+    /// <c>CREATE PARTITION FUNCTION</c> that got past its parse, failed or not,
+    /// and never reused after a drop (probed 2026-09-27 against SQL Server 2025).
+    /// </summary>
+    public int AllocatePartitionFunctionId() => Interlocked.Increment(ref this.nextPartitionFunctionId);
+
+    /// <summary>
+    /// Allocates the next partition scheme <c>data_space_id</c>: 65601 first,
+    /// one up per allocation and never reused (probed 2026-09-27 against SQL
+    /// Server 2025); which failures consume one is the caller's ordering.
+    /// </summary>
+    public int AllocatePartitionSchemeId() => Interlocked.Increment(ref this.nextPartitionSchemeId);
+
+    /// <summary>
+    /// The data space named <paramref name="name"/> among the filegroups and
+    /// the partition schemes, the one name space <c>sys.data_spaces</c> lists.
+    /// </summary>
+    public bool HasDataSpaceNamed(string name) =>
+        this.Filegroups.ContainsKey(name) || this.PartitionSchemes.ContainsKey(name);
 }
 
 /// <summary>

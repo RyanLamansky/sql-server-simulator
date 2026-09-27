@@ -48,6 +48,7 @@ public sealed partial class BacpacBuilder
     private readonly List<FullTextCatalogDef> _fullTextCatalogs = [];
     private readonly List<FullTextIndexDef> _fullTextIndexes = [];
     private readonly List<(string ElementType, string Name)> _silentlySkipped = [];
+    private readonly List<Func<XNamespace, XElement>> _partitionElements = [];
     private readonly List<(string ElementType, string Name)> _unknownElements = [];
     private readonly List<XElement> _principalElements = [];
     private string? _dspName;
@@ -409,25 +410,50 @@ public sealed partial class BacpacBuilder
     }
 
     /// <summary>
-    /// Emits a <c>SqlPartitionFunction</c> element. The loader treats this
-    /// as a silent no-op (filegroup-mapping metadata with no semantic effect
-    /// on the simulator's row-store-only storage); the test surface for
-    /// this builder method is "presence of the element doesn't add a
-    /// Skipped entry".
+    /// Emits a <c>SqlPartitionFunction</c> element as DacFx writes one: a
+    /// <c>Range</c> property (2 for <c>RIGHT</c>), a <c>ParameterType</c>
+    /// specifier naming the built-in <paramref name="typeName"/>, and one
+    /// <c>SqlPartitionValue</c> per boundary expression script.
     /// </summary>
-    public BacpacBuilder PartitionFunction(string name)
+    public BacpacBuilder PartitionFunction(string name, string typeName, bool rangeRight, params string[] boundaryScripts)
     {
-        _silentlySkipped.Add(("SqlPartitionFunction", $"[{name}]"));
+        _partitionElements.Add(ns => new XElement(ns + "Element",
+            new XAttribute("Type", "SqlPartitionFunction"),
+            new XAttribute("Name", $"[{name}]"),
+            new XElement(ns + "Property", new XAttribute("Name", "Range"), new XAttribute("Value", rangeRight ? "2" : "1")),
+            new XElement(ns + "Relationship", new XAttribute("Name", "BoundaryValues"),
+                boundaryScripts.Select(script => new XElement(ns + "Entry",
+                    new XElement(ns + "Element", new XAttribute("Type", "SqlPartitionValue"),
+                        new XElement(ns + "Property", new XAttribute("Name", "ExpressionScript"),
+                            new XElement(ns + "Value", new XCData(script))))))),
+            new XElement(ns + "Relationship", new XAttribute("Name", "ParameterType"),
+                new XElement(ns + "Entry",
+                    new XElement(ns + "Element", new XAttribute("Type", "SqlTypeSpecifier"),
+                        new XElement(ns + "Relationship", new XAttribute("Name", "Type"),
+                            new XElement(ns + "Entry",
+                                new XElement(ns + "References", new XAttribute("ExternalSource", "BuiltIns"), new XAttribute("Name", $"[{typeName}]")))))))));
         return this;
     }
 
     /// <summary>
-    /// Emits a <c>SqlPartitionScheme</c> element. Same silent-skip path as
-    /// <see cref="PartitionFunction"/>.
+    /// Emits a <c>SqlPartitionScheme</c> element: one
+    /// <c>SqlFilegroupSpecifier</c> per filegroup, in order, and the
+    /// <c>PartitionFunction</c> it maps. DacFx lists schemes ahead of the
+    /// filegroups they name, which this builder reproduces by writing
+    /// partition elements before the silent-skip ones.
     /// </summary>
-    public BacpacBuilder PartitionScheme(string name)
+    public BacpacBuilder PartitionScheme(string name, string function, params string[] filegroups)
     {
-        _silentlySkipped.Add(("SqlPartitionScheme", $"[{name}]"));
+        _partitionElements.Add(ns => new XElement(ns + "Element",
+            new XAttribute("Type", "SqlPartitionScheme"),
+            new XAttribute("Name", $"[{name}]"),
+            new XElement(ns + "Relationship", new XAttribute("Name", "Filegroups"),
+                filegroups.Select(filegroup => new XElement(ns + "Entry",
+                    new XElement(ns + "Element", new XAttribute("Type", "SqlFilegroupSpecifier"),
+                        new XElement(ns + "Relationship", new XAttribute("Name", "Filegroup"),
+                            new XElement(ns + "Entry", new XElement(ns + "References", new XAttribute("Name", $"[{filegroup}]")))))))),
+            new XElement(ns + "Relationship", new XAttribute("Name", "PartitionFunction"),
+                new XElement(ns + "Entry", new XElement(ns + "References", new XAttribute("Name", $"[{function}]"))))));
         return this;
     }
 
@@ -556,6 +582,8 @@ public sealed partial class BacpacBuilder
                 new XAttribute("Name", $"[{schemaName}]")));
         }
 
+        foreach (var partitionElement in _partitionElements)
+            model.Add(partitionElement(ns));
         foreach (var table in _tables)
             model.Add(table.ToModelElement(ns));
 

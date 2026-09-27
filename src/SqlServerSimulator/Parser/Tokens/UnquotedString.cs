@@ -10,6 +10,13 @@ sealed class UnquotedString : Name
     public override ReadOnlySpan<char> Span => Source;
 
     /// <summary>
+    /// Whether this is the <c>$partition</c> qualifier of a partition-function
+    /// call. Only the tokenizer's <c>$</c>-word path yields an unquoted token
+    /// starting with <c>$</c>, so a bracketed <c>[$partition]</c> never is.
+    /// </summary>
+    public bool IsDollarPartition => this.Source.Length == 10 && this.Source[0] == '$' && this.Source[1..].Equals("partition", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
     /// Lazily classifies this token against <see cref="Parser.ContextualKeyword"/>.
     /// First access parses <see cref="Span"/> via <see cref="Enum.TryParse{TEnum}(ReadOnlySpan{char}, bool, out TEnum)"/>
     /// (case-insensitive); the result is cached on the field so repeat reads at

@@ -57,8 +57,8 @@ The two public types sit at the project root in namespace `SqlServerSimulator`, 
 
 | Phase | Elements |
 |---|---|
-| 1 | DB options + schemas + UDDTs + sequences + roles + **logins + users** + table types + XML schema collections + **full-text catalogs** + **filegroups** (registered on `Database.Filegroups` so `sys.filegroups` / `sys.data_spaces` surface them — no physical file model) + partition function/scheme (silent skip) |
-| 2 | Tables (columns + computed columns inline at model ordinal, defaults inline; a computed expression that forward-references a not-yet-created UDF makes the CREATE TABLE throw, so that one table is re-created with computed columns stripped and they defer to phase 8) |
+| 1 | DB options + schemas + UDDTs + sequences + roles + **logins + users** + table types + XML schema collections + **full-text catalogs** + **filegroups** (registered on `Database.Filegroups` so `sys.filegroups` / `sys.data_spaces` surface them — no physical file model) + **partition functions**, then at the end of the phase the **partition schemes** (DacFx lists a scheme ahead of the filegroups it names) |
+| 2 | Tables (columns + computed columns inline at model ordinal, defaults inline, `ON scheme(column)` for a table the model places on a partition scheme; a computed expression that forward-references a not-yet-created UDF makes the CREATE TABLE throw, so that one table is re-created with computed columns stripped and they defer to phase 8) |
 | 3 | Constraints (PK / UQ / CHECK / DEFAULT — DACFx already parenthesizes `DefaultExpressionScript` (`(NEXT VALUE FOR …)`), so `EmitDefaultConstraint` wraps only an unparenthesized script; wrapping an already-`(…)` script would double the parens the `ALTER … DEFAULT (…)` parser re-derives, diverging from real's single-pair `sys.default_constraints.definition`) |
 | 4 | Foreign keys |
 | 5 | Deferred system-versioning links (`ALTER TABLE … SET (SYSTEM_VERSIONING = ON (HISTORY_TABLE = …))`) + **full-text indexes** (`CREATE FULLTEXT INDEX … KEY INDEX … ON catalog`; needs the table from phase 2, the catalog from phase 1 and the KEY INDEX, which for a PK / UNIQUE constraint landed in phase 3 — one whose KEY INDEX is a standalone unique index instead fails here and is retried at the end of phase 8, where it reports for real) |
@@ -225,7 +225,10 @@ The remaining four families:
   Export needed `sys.fulltext_languages` populated (DacFx INNER JOINs it by `language_id` to name the column's language — an empty view NREs the column-specifier populator) and `sys.fulltext_indexes.data_space_id` = 1 (PRIMARY) + `stoplist_id` = 0 (system stoplist), both of which DacFx INNER JOINs `sys.data_spaces` on the former (NULL drops the parent index element, orphaning its column specifiers → NRE) and reads the latter to decide `DoUseSystemStopList` vs `IsStopListOff`.
   See [`full-text.md`](full-text.md).
 - **`SqlFilegroup`** (phase 1) → registers the (non-PRIMARY) filegroup on `Database.Filegroups` so `sys.filegroups` / `sys.data_spaces` surface it and DacFx re-emits the standalone element.
-  No physical file / placement model — every heap lives on PRIMARY, so no table/index `Filegroup` relationships are emitted (the model-diff ignores relationships anyway).
+  No physical file model, and a table's `Filegroup` relationship is dropped; an index's or key constraint's becomes its `ON [filegroup]`, which is what keeps a unique index the model places off a partitioned table's scheme from defaulting onto it (and failing Msg 1908).
+- **`SqlPartitionFunction`** (phase 1) → `CREATE PARTITION FUNCTION name (type) AS RANGE LEFT | RIGHT FOR VALUES (…)` — `Range` 2 is `RIGHT`, the boundaries are the `SqlPartitionValue` expression scripts.
+  **`SqlPartitionScheme`** (end of phase 1) → `CREATE PARTITION SCHEME name AS PARTITION function TO (…)`, its filegroup specifiers in order, the one past the partitions becoming `NEXT USED`.
+  A table, index, key constraint or columnstore index carrying `PartitionScheme` + `PartitionColumn` relationships is created `ON scheme(column)`; see [`partitioning.md`](partitioning.md).
   WWI's `[USERDATA]` closes its 1-element gap.
   See [`database-options.md`](database-options.md).
 - **`SqlExtendedProperty`** on a **database DDL trigger** (`@level0type=N'TRIGGER'` → class 1, major_id = trigger object_id) or a **filegroup** (`@level0type=N'FILEGROUP'` → class 20 DATASPACE, major_id = data_space_id).
@@ -252,7 +255,7 @@ Doesn't block real import (verified: aw-export re-imports into a live SQL Server
 **Zero remaining Skipped categories**, which took the `TOP (@parameter)` bind rule ([`query.md`](query.md)), `ALTER TABLE … ADD PERIOD FOR SYSTEM_TIME` ([`alter-table.md`](alter-table.md)) and computed-column nullability inference ([`catalog-views.md`](catalog-views.md)) — the last of which is what lets `Warehouse.StockItems` adopt its history table.
 
 **WideWorldImporters-Full** — same row volume + schema as Standard, adds partitioning + columnstore + one natively-compiled procedure + 17 system-versioned base→history pairings.
-Loader survives with `SqlPartitionFunction` / `SqlPartitionScheme` as silent skips (storage-organization decorations with no semantic effect on row-store queries — same pattern as `SqlFilegroup`), and creates its three columnstore indexes.
+Its two partition functions and schemes load, `Sales.CustomerTransactions` and `Purchasing.SupplierTransactions` land partitioned with their aligned indexes (`$PARTITION` and `sys.partitions` agree on the per-year row split), and its three columnstore indexes are created.
 After the NATIVE_COMPILATION + BEGIN ATOMIC parser support, **WWI-Full reaches zero remaining Skipped categories** — every element type loads cleanly.
 
 **Insite.Commerce** (Optimizely Configured Commerce) — imports clean, zero skips and zero warnings; the third reference bacpac, and the one whose schema is application-shaped rather than sample-shaped.

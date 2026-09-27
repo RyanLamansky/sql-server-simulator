@@ -41,6 +41,8 @@ partial class Simulation
                 return TryParseCreateType(context);
             case UnquotedString { ContextualKeyword: ContextualKeyword.Sequence }:
                 return TryParseCreateSequence(context);
+            case UnquotedString { ContextualKeyword: ContextualKeyword.Partition }:
+                return TryParseCreatePartition(context);
             case ReservedKeyword { Keyword: Keyword.User }:
                 return TryParseCreateUser(context);
             case UnquotedString { ContextualKeyword: ContextualKeyword.Role }:
@@ -114,8 +116,8 @@ partial class Simulation
             return false;
 
         // Optional trailing placement and option clauses, in any order:
-        //   ON <filegroup> [TEXTIMAGE_ON <filegroup>] — parsed and discarded
-        //     (the simulator has no filegroup model).
+        //   ON <filegroup> | ON <scheme>(<column>) [TEXTIMAGE_ON <filegroup>]
+        //     — only a partition scheme placement is recorded.
         //   WITH (SYSTEM_VERSIONING = ON (HISTORY_TABLE = X)) — load-bearing.
         // SSMS-emitted CREATE TABLE always trails `) ON [PRIMARY]` and may
         // additionally trail `TEXTIMAGE_ON [PRIMARY]`; SYSTEM_VERSIONING is
@@ -125,7 +127,7 @@ partial class Simulation
         // the resulting historyTableName is only used after the skip-mode
         // gate below.
         context.MoveNextOptional();
-        SkipOptionalFilegroupClause(context);
+        var tableDataSpace = ParseOptionalDataSpaceClause(context, out var textImageOn);
         SystemVersioningOptions? systemVersioning = null;
         if (context.Token is ReservedKeyword { Keyword: Keyword.With })
             systemVersioning = ParseTableOptions(context);
@@ -381,6 +383,7 @@ partial class Simulation
             OwningDatabase = owningDatabase,
             UsesAnsiNulls = context.Batch.Connection.AnsiNulls,
         };
+        PlaceNewTable(context.Batch, heapTable, tableDataSpace, textImageOn);
         if (isGlobalTempTable)
             heapTable.OwnerSession = context.Batch.Connection.Session;
         if (isLocalTempTable)
@@ -1110,34 +1113,6 @@ partial class Simulation
         return value is < 1 or > 100
             ? throw SimulatedSqlException.FillFactorOutOfRange(value)
             : (byte)value;
-    }
-
-    /// <summary>
-    /// Skips trailing <c>ON &lt;filegroup&gt;</c> and <c>TEXTIMAGE_ON &lt;filegroup&gt;</c>
-    /// placement clauses on tables / indexes / inline PK-UNIQUE constraints
-    /// (e.g. <c>ON [PRIMARY]</c>). The simulator has no filegroup model —
-    /// every heap lives in a single flat page list — so the clauses are
-    /// parsed and discarded. The filegroup name accepts the same shapes as a
-    /// regular identifier (bare, bracketed, or quoted) so SSMS's bracketed
-    /// <c>[PRIMARY]</c> and the unbracketed grammar form both pass. No-op
-    /// when the cursor isn't on a recognized leading keyword. Cursor on
-    /// exit: first token past the consumed clause(s), or unchanged when no
-    /// clause was present.
-    /// </summary>
-    internal static void SkipOptionalFilegroupClause(ParserContext context)
-    {
-        if (context.Token is ReservedKeyword { Keyword: Keyword.On })
-        {
-            if (context.GetNextRequired() is not Name)
-                throw SimulatedSqlException.SyntaxErrorNear(context);
-            context.MoveNextOptional();
-        }
-        if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.TextImage_On })
-        {
-            if (context.GetNextRequired() is not Name)
-                throw SimulatedSqlException.SyntaxErrorNear(context);
-            context.MoveNextOptional();
-        }
     }
 
     /// <summary>
@@ -2585,8 +2560,7 @@ partial class Simulation
         // trailers are no-ops in the simulator (no B-tree storage, no
         // filegroup model) but the parser must consume them so the
         // column-list do-while sees a comma or closing paren next.
-        var indexOptions = ParseOptionalIndexWithClause(context);
-        SkipOptionalFilegroupClause(context);
+        var indexOptions = ParseOptionalIndexWithClause(context).WithDataSpace(ParseOptionalDataSpaceClause(context, out _));
 
         pendingKeys.Add((kind, constraintName, [.. ordinals], clustered, indexOptions, [.. descending]));
     }

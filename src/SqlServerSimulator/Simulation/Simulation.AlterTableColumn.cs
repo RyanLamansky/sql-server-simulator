@@ -923,9 +923,13 @@ partial class Simulation
         }
         foreach (var (module, moduleId) in SchemaBinding.ColumnReferencingModules(database, table, col.Name))
             blockers.Add((module, objectKind, 3, moduleId));
+        // A table partitioned on the column names itself (probed 2026-09-27
+        // against SQL Server 2025), whatever the change.
+        if (ReferenceEquals(table.Partitioning?.Column, col))
+            blockers.Add((table.Name, objectKind, 4, int.MinValue));
         foreach (var kc in table.KeyConstraints)
         {
-            if (storageOrdinal >= 0 && Array.IndexOf(kc.StorageOrdinals, storageOrdinal) >= 0)
+            if ((storageOrdinal >= 0 && Array.IndexOf(kc.StorageOrdinals, storageOrdinal) >= 0) || ReferenceEquals(kc.Partitioning?.Column, col))
                 blockers.Add((kc.Name, objectKind, 4, kc.ObjectId));
         }
         if (includeIndexes && storageOrdinal >= 0)
@@ -935,6 +939,11 @@ partial class Simulation
                 if (ix.KeyColumns.Any(k => k.StorageOrdinal == storageOrdinal) || Array.IndexOf(ix.IncludedColumns, storageOrdinal) >= 0)
                     blockers.Add((ix.Name, SimulatedSqlException.AlterColumnBlockerKind.Index, 5, ix.ObjectId));
             }
+        }
+        foreach (var ix in table.Indexes)
+        {
+            if (ReferenceEquals(ix.Partitioning?.Column, col) && !blockers.Exists(blocker => blocker.ObjectId == ix.ObjectId))
+                blockers.Add((ix.Name, SimulatedSqlException.AlterColumnBlockerKind.Index, 5, ix.ObjectId));
         }
         // A JSON index blocks both verbs whatever the change (probed
         // 2026-09-27 against SQL Server 2025).

@@ -323,7 +323,7 @@ When the count crosses `RowLockEscalationThreshold` (5000, matching real SQL Ser
 3. Marks the table in `EscalatedTables` so subsequent row-X requests on the same table short-circuit (the table-X already covers).
 
 `AcquireRowLockTxScoped` checks the escalated-set before acquiring; the short-circuit means escalation amortizes across long bulk-DML sequences.
-A table set `LOCK_ESCALATION = DISABLE` (`HeapTable.LockEscalation`) never escalates; `AUTO` behaves as `TABLE`, there being no partitions to escalate to.
+A table set `LOCK_ESCALATION = DISABLE` (`HeapTable.LockEscalation`) never escalates; `AUTO` behaves as `TABLE`, even on a partitioned table, where real escalates to the partition — partition-level locks aren't modeled.
 
 ## Acquisition sites
 

@@ -37,6 +37,8 @@ partial class Simulation
                 return TryParseCreateFunction(context, isAlter: true, createOrAlter: false);
             case UnquotedString { ContextualKeyword: ContextualKeyword.Sequence }:
                 return TryParseAlterSequence(context);
+            case UnquotedString { ContextualKeyword: ContextualKeyword.Partition }:
+                return TryParseAlterPartition(context);
             case ReservedKeyword { Keyword: Keyword.Schema }:
                 return TryParseAlterSchemaTransfer(context);
             case ReservedKeyword { Keyword: Keyword.Table }:
@@ -109,6 +111,8 @@ partial class Simulation
                     && !context.Connection.Simulation.Databases.ContainsKey(missing.Value)
                     => throw SimulatedSqlException.DatabaseDoesNotExist(missing.Value),
                 Name modify when BuiltInToken.Equals(modify.Value, "MODIFY") => TryParseAlterDatabaseModifyName(context, target),
+                ReservedKeyword { Keyword: Keyword.Add } => TryParseAlterDatabaseFilegroup(context, target, add: true),
+                Name remove when BuiltInToken.Equals(remove.Value, "REMOVE") => TryParseAlterDatabaseFilegroup(context, target, add: false),
                 _ => false,
             };
         }
@@ -1685,12 +1689,16 @@ partial class Simulation
                 if (withCheckExplicit.HasValue)
                     throw SimulatedSqlException.SyntaxErrorNear(context);
                 return TryParseAlterTableRebuild(context, tableName);
+            case Name switchWord when switchWord.Value.Equals("SWITCH", StringComparison.OrdinalIgnoreCase):
+                if (withCheckExplicit.HasValue)
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                return TryParseAlterTableSwitch(context, tableName);
             case UnquotedString { ContextualKeyword: ContextualKeyword.Enable or ContextualKeyword.Disable } toggle:
                 if (withCheckExplicit.HasValue)
                     throw SimulatedSqlException.SyntaxErrorNear(context);
                 return TryParseAlterTableTriggerToggle(context, tableName, disable: toggle.ContextualKeyword == ContextualKeyword.Disable);
             default:
-                throw new NotSupportedException("ALTER TABLE supports only SET, ADD / DROP / ALTER COLUMN, ADD / DROP CONSTRAINT, CHECK / NOCHECK CONSTRAINT, ENABLE / DISABLE TRIGGER and REBUILD shapes.");
+                throw new NotSupportedException("ALTER TABLE supports only SET, ADD / DROP / ALTER COLUMN, ADD / DROP CONSTRAINT, CHECK / NOCHECK CONSTRAINT, ENABLE / DISABLE TRIGGER, SWITCH and REBUILD shapes.");
         }
     }
 
@@ -2008,7 +2016,7 @@ partial class Simulation
     private static bool TryParseAlterTableRebuild(ParserContext context, MultiPartName tableName)
     {
         context.MoveNextOptional();
-        var namedPartition = ParseOptionalIndexPartitionClause(context);
+        var namedPartition = ParseOptionalIndexPartitionClause(context, out var partitionNumber);
         var namedPartitionList = ParseOptionalRebuildOptions(context, out var compressionLevel);
 
         if (context.Batch.IsSkipping)
@@ -2016,13 +2024,19 @@ partial class Simulation
 
         if (!context.Batch.TryResolveTable(tableName, out var table))
             throw SimulatedSqlException.CannotFindObjectForAlterTable(tableName.ToString());
-        if (namedPartitionList)
+        if (namedPartitionList && table.Partitioning is null)
             throw SimulatedSqlException.PartitionNumberOnUnpartitionedTable(table.Name);
         if (namedPartition)
         {
-            throw table.KeyConstraints.Count > 0
-                ? SimulatedSqlException.PartitionNumberOnUnpartitionedIndex(table.KeyConstraints[0].Name)
-                : SimulatedSqlException.RebuildPartitionOnUnpartitioned(alterIndex: false, indexName: null, table.Name);
+            // The rebuild is of the heap or the clustered index, which a
+            // partition number is checked against by name.
+            var clusteredName = table.KeyConstraints.Count > 0 ? table.KeyConstraints[0].Name : null;
+            if (clusteredName is not null)
+                RejectPartitionNumber(partitionNumber, table.Partitioning, clusteredName);
+            else if (table.Partitioning is not { } heapPlacement)
+                throw SimulatedSqlException.RebuildPartitionOnUnpartitioned(alterIndex: false, indexName: null, table.Name);
+            else if (partitionNumber < 1 || partitionNumber > heapPlacement.Fanout)
+                throw SimulatedSqlException.AlterTablePartitionNotFound(partitionNumber, table.Name);
         }
 
         // Rebuilding a clustered columnstore table recompresses its index

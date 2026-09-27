@@ -400,10 +400,11 @@ partial class Simulation
         context.MoveNextOptional();
 
         // SSMS emits `ADD CONSTRAINT name UNIQUE NONCLUSTERED (cols) WITH
-        // (PAD_INDEX = OFF, …) ON [PRIMARY]`. The filegroup trailer is a no-op
-        // (no filegroup model); of the index options only IGNORE_DUP_KEY lands.
-        var indexOptions = ParseOptionalIndexWithClause(context, IndexOptionStatement.AlterTable);
-        SkipOptionalFilegroupClause(context);
+        // (PAD_INDEX = OFF, …) ON [PRIMARY]`. The placement trailer matters
+        // only for a partition scheme; of the index options only
+        // IGNORE_DUP_KEY lands.
+        var indexOptions = ParseOptionalIndexWithClause(context, IndexOptionStatement.AlterTable)
+            .WithDataSpace(ParseOptionalDataSpaceClause(context, out _));
 
         if (context.Batch.IsSkipping)
             return true;
@@ -483,8 +484,14 @@ partial class Simulation
         }
 
         var constraint = new KeyConstraint(kind, name, storageOrdinals, fullOrdinals, context.CurrentDatabase.AllocateObjectId(), isClustered, indexOptions, context.Batch.CurrentStatement.UtcNow, [.. descending]);
+        var placement = PlacementFor(context.Batch, table, constraint.WrittenDataSpace);
+        RequirePartitionColumnInUniqueKey(placement, table, fullOrdinals, name, isConstraint: true);
         ValidateExistingRowsForKeyConstraint(table, constraint, context.Batch);
         table.KeyConstraints.Add(constraint);
+        if (isClustered)
+            table.Partitioning = placement;
+        else
+            constraint.Partitioning = placement;
         return true;
     }
 

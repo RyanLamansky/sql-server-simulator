@@ -195,6 +195,19 @@ internal sealed class Index(
     public bool IsDisabled;
 
     /// <summary>
+    /// The partition scheme and column a nonclustered one is placed on, or
+    /// null when it sits on a filegroup; a clustered one follows its table's
+    /// <see cref="HeapTable.Partitioning"/> instead.
+    /// </summary>
+    public Schemas.PartitionPlacement? Partitioning;
+
+    /// <summary>
+    /// The <c>ON</c> clause the declaration wrote, kept until the owning
+    /// statement resolves it into <see cref="Partitioning"/>.
+    /// </summary>
+    public readonly Schemas.DataSpaceClause? WrittenDataSpace = options.DataSpace;
+
+    /// <summary>
     /// A columnstore index: <c>sys.indexes</c> type 5 / 6. It has no key; a
     /// nonclustered one's columns ride in <see cref="IncludedColumns"/>, which
     /// is how <c>sys.index_columns</c> lists them, and a clustered one covers

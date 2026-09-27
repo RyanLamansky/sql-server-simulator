@@ -50,6 +50,12 @@ partial class Simulation
         context.MoveNextRequired(); // consume TABLE
 
         var name = BatchContext.ParseObjectName(context);
+        List<(Parser.Expression Low, Parser.Expression? High)>? partitions = null;
+        var afterName = context.SaveCheckpoint();
+        if (context.GetNextOptional() is ReservedKeyword { Keyword: Keyword.With })
+            partitions = ParseTruncatePartitions(context);
+        else
+            context.RestoreCheckpoint(afterName);
 
         if (batch.IsSkipping)
             return;
@@ -89,6 +95,13 @@ partial class Simulation
         // any concurrent Sch-S holders to drain before the destructive page-
         // swap and identity reset proceed.
         batch.AcquireStatementLock(table.SchemaLock, LockMode.SchemaModification);
+
+        // WITH (PARTITIONS …) deletes the listed partitions' rows instead.
+        if (partitions is not null)
+        {
+            TruncatePartitions(batch, table, partitions);
+            return;
+        }
 
         var oldPages = new List<HeapPage>(table.Heap.Pages);
         var oldLobPages = new List<HeapLobPage>(table.Heap.LobPages);

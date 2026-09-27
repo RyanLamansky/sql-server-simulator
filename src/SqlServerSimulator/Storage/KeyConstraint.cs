@@ -174,5 +174,18 @@ internal sealed class KeyConstraint(KeyConstraintKind kind, string name, int[] s
     /// </summary>
     public bool IsDisabled;
 
+    /// <summary>
+    /// The partition scheme and column a nonclustered one is placed on, or
+    /// null when it sits on a filegroup; a clustered one follows its table's
+    /// <see cref="HeapTable.Partitioning"/> instead.
+    /// </summary>
+    public Schemas.PartitionPlacement? Partitioning;
+
+    /// <summary>
+    /// The <c>ON</c> clause the declaration wrote, kept until the owning
+    /// statement resolves it into <see cref="Partitioning"/>.
+    /// </summary>
+    public readonly Schemas.DataSpaceClause? WrittenDataSpace = options.DataSpace;
+
     public string ViolationKindWord => this.Kind == KeyConstraintKind.PrimaryKey ? "PRIMARY KEY" : "UNIQUE KEY";
 }

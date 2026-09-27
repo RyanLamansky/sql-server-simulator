@@ -233,8 +233,9 @@ internal static partial class BuiltInResources
                         // varchar/nvarchar/varbinary(MAX), text/ntext/image,
                         // xml, geography/geometry — and 0 otherwise
                         // (probe-confirmed; hierarchyid and sql_variant leave
-                        // it 0).
-                        SqlValue.FromInt32(HasLobColumn(t) ? 1 : 0),
+                        // it 0) — the partition scheme's id for a table on
+                        // one (probed 2026-09-27 against SQL Server 2025).
+                        SqlValue.FromInt32(HasLobColumn(t) ? t.Partitioning?.Scheme.DataSpaceId ?? 1 : 0),
                         SqlValue.FromInt32(t.MaxColumnIdUsed),
                         falseTableFlag, // is_replicated
                         falseTableFlag, // lock_on_bulk_load

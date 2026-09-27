@@ -53,9 +53,9 @@ internal static partial class BuiltInResources
         // (data_space_id = 1) — the same id every sys.indexes row reports for
         // data_space_id, so SMO's LEFT JOIN idx.data_space_id → dsidx resolves.
         // Probe-confirmed shape (SQL Server 2025): name / data_space_id / type
-        // char(2) / type_desc / is_default / is_system. 'FG' = ROWS_FILEGROUP;
-        // partition schemes ('PS' — what SMO's IsPartitioned probe compares
-        // against) aren't modeled, so type is always 'FG'. See
+        // char(2) / type_desc / is_default / is_system. 'FG' = ROWS_FILEGROUP,
+        // then the partition schemes as 'PS' = PARTITION_SCHEME (what SMO's
+        // IsPartitioned probe compares against). See
         // docs/claude/catalog-views.md.
         var filegroupType = SqlValue.FromChar(charTwo, "FG");
         var filegroupTypeDesc = SqlValue.FromNVarchar("ROWS_FILEGROUP");
@@ -70,7 +70,8 @@ internal static partial class BuiltInResources
         ], (batch, database) =>
         {
             _ = batch;
-            return EnumerateFilegroupRows(database, filegroupType, filegroupTypeDesc);
+            return EnumerateFilegroupRows(database, filegroupType, filegroupTypeDesc)
+                .Concat(EnumeratePartitionSchemeRows(database, withFunctionId: false));
         });
 
         // sys.filegroups: the row-filegroup subset of sys.data_spaces — the
@@ -124,11 +125,10 @@ internal static partial class BuiltInResources
         // sys.partitions: probe-confirmed 11-column shape against SQL Server
         // 2025 (2026-07-15). One row per (object_id, index_id) that
         // sys.indexes reports — the heap row (index_id = 0) or clustered
-        // (index_id = 1) plus every nonclustered index — all with
-        // partition_number = 1 (the simulator models a single, unpartitioned
-        // partition per index/heap). rows carries the table's live row count
-        // (HeapTable.Heap.RowCount), so it tracks INSERT/DELETE within the
-        // same batch. partition_id / hobt_id are synthetic-deterministic
+        // (index_id = 1) plus every nonclustered index — one row per
+        // partition for an index on a partition scheme. rows carries the
+        // table's live row count (HeapTable.Heap.RowCount), or a partition's
+        // share of it, so it tracks INSERT/DELETE within the same batch. partition_id / hobt_id are synthetic-deterministic
         // (distinct per object_id/index_id, not byte-matching SQL Server's
         // allocation-unit ids). Compression isn't modeled, so
         // data_compression = 0 (NONE) / xml_compression = 0 (OFF) always —
@@ -182,8 +182,8 @@ internal static partial class BuiltInResources
         ], EnumerateSysAllocationUnits);
 
         // sys.dm_db_partition_stats: probe-confirmed 14-column shape against SQL
-        // Server 2025 (2026-07-16). One row per (object_id, index_id) that
-        // sys.partitions / sys.allocation_units report — partition_number = 1,
+        // Server 2025 (2026-07-16). One row per partition that
+        // sys.partitions / sys.allocation_units report,
         // partition_id = the same synthetic id those views use (the join key).
         // Page counts derive from the table's live heap page count, kept
         // consistent with sys.allocation_units: in_row_* = Heap.Pages.Count on
@@ -457,15 +457,12 @@ internal static partial class BuiltInResources
             new("build_parameters", NVarcharSqlType.Get(4000, Collation.Get("Latin1_General_100_BIN2_UTF8"), Coercibility.Implicit), 4000, true),
         ], static (_, _) => EmptyCatalogRows);
 
-        // sys.partition_functions / sys.partition_schemes /
-        // sys.partition_range_values: table/index partitioning isn't modeled
-        // (every table reads as a single unpartitioned partition — see
-        // sys.data_spaces / sys.partitions), so all three ship empty with the
-        // full probe-confirmed shape (SQL Server 2025). partition_range_values'
-        // value column is a first-class sql_variant matching real SQL Server —
-        // the view is always empty, so only the column type carries (a boundary
-        // value's inner base type would be the partition function's parameter
-        // type). See docs/claude/catalog-views.md.
+        // The partitioning catalog: one row per partition function, scheme,
+        // boundary value, parameter and scheme destination the database holds
+        // (shapes and values probed 2026-09-27 against SQL Server 2025). A
+        // boundary value is a sql_variant whose inner type is the function's
+        // declared parameter type; a scheme lists its NEXT USED filegroup as
+        // one destination past its partitions.
         Sys("partition_functions",
         [
             new("name", SqlType.SystemName, 128, false),
@@ -477,7 +474,7 @@ internal static partial class BuiltInResources
             new("is_system", SqlType.Bit, null, false),
             new("create_date", SqlType.DateTime, null, false),
             new("modify_date", SqlType.DateTime, null, false),
-        ], static (_, _) => EmptyCatalogRows);
+        ], (_, database) => EnumeratePartitionFunctions(database));
         Sys("partition_schemes",
         [
             new("name", SqlType.SystemName, 128, false),
@@ -487,19 +484,14 @@ internal static partial class BuiltInResources
             new("is_default", SqlType.Bit, null, true),
             new("is_system", SqlType.Bit, null, true),
             new("function_id", SqlType.Int32, null, false),
-        ], static (_, _) => EmptyCatalogRows);
+        ], (_, database) => EnumeratePartitionSchemeRows(database, withFunctionId: true));
         Sys("partition_range_values",
         [
             new("function_id", SqlType.Int32, null, false),
             new("boundary_id", SqlType.Int32, null, false),
             new("parameter_id", SqlType.Int32, null, false),
             new("value", SqlType.SqlVariant, null, true),
-        ], static (_, _) => EmptyCatalogRows);
-
-        // sys.partition_parameters / sys.destination_data_spaces: the
-        // remaining partitioning-catalog surface DacFx's SqlPartitionFunction /
-        // SqlPartitionScheme populators read; partitioning isn't modeled, so
-        // both ship empty with the probe-confirmed shape (SQL Server 2025).
+        ], (_, database) => EnumeratePartitionRangeValues(database));
         Sys("partition_parameters",
         [
             new("function_id", SqlType.Int32, null, false),
@@ -510,13 +502,106 @@ internal static partial class BuiltInResources
             new("scale", SqlType.TinyInt, null, false),
             new("collation_name", SqlType.SystemName, 128, true),
             new("user_type_id", SqlType.Int32, null, false),
-        ], static (_, _) => EmptyCatalogRows);
+        ], (_, database) => EnumeratePartitionParameters(database));
         Sys("destination_data_spaces",
         [
             new("partition_scheme_id", SqlType.Int32, null, false),
             new("destination_id", SqlType.Int32, null, false),
             new("data_space_id", SqlType.Int32, null, false),
-        ], static (_, _) => EmptyCatalogRows);
+        ], (_, database) => EnumerateDestinationDataSpaces(database));
+    }
+
+    /// <summary>Rows for <c>sys.partition_functions</c>, by function id.</summary>
+    private static IEnumerable<SqlValue[]> EnumeratePartitionFunctions(Database database)
+    {
+        var rangeType = SqlValue.FromChar(charTwo, "R");
+        var rangeDesc = SqlValue.FromNVarchar("RANGE");
+        var falseBit = SqlValue.FromBoolean(false);
+        foreach (var function in database.PartitionFunctions.Values.OrderBy(function => function.FunctionId))
+        {
+            yield return
+            [
+                SqlValue.FromSystemName(function.Name),
+                SqlValue.FromInt32(function.FunctionId),
+                rangeType,
+                rangeDesc,
+                SqlValue.FromInt32(function.Fanout),
+                SqlValue.FromBoolean(function.BoundaryOnRight),
+                falseBit,
+                SqlValue.FromDateTime(function.CreateDate),
+                SqlValue.FromDateTime(function.ModifyDate),
+            ];
+        }
+    }
+
+    /// <summary>
+    /// Rows for <c>sys.partition_schemes</c> (<paramref name="withFunctionId"/>)
+    /// or the scheme rows of <c>sys.data_spaces</c>, by data space id.
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumeratePartitionSchemeRows(Database database, bool withFunctionId)
+    {
+        var schemeType = SqlValue.FromChar(charTwo, "PS");
+        var schemeDesc = SqlValue.FromNVarchar("PARTITION_SCHEME");
+        var falseBit = SqlValue.FromBoolean(false);
+        foreach (var scheme in database.PartitionSchemes.Values.OrderBy(scheme => scheme.DataSpaceId))
+        {
+            SqlValue[] row = [SqlValue.FromSystemName(scheme.Name), SqlValue.FromInt32(scheme.DataSpaceId), schemeType, schemeDesc, falseBit, falseBit];
+            yield return withFunctionId ? [.. row, SqlValue.FromInt32(scheme.Function.FunctionId)] : row;
+        }
+    }
+
+    /// <summary>Rows for <c>sys.partition_range_values</c>: each function's boundaries in ascending order.</summary>
+    private static IEnumerable<SqlValue[]> EnumeratePartitionRangeValues(Database database)
+    {
+        var parameterId = SqlValue.FromInt32(1);
+        var nullVariant = SqlValue.Null(SqlType.SqlVariant);
+        foreach (var function in database.PartitionFunctions.Values.OrderBy(function => function.FunctionId))
+        {
+            var functionId = SqlValue.FromInt32(function.FunctionId);
+            var boundaries = function.Boundaries;
+            for (var i = 0; i < boundaries.Length; i++)
+                yield return [functionId, SqlValue.FromInt32(i + 1), parameterId, boundaries[i].IsNull ? nullVariant : SqlValue.FromVariant(boundaries[i])];
+        }
+    }
+
+    /// <summary>Rows for <c>sys.partition_parameters</c>: each function's one parameter, described as <c>sys.columns</c> describes a column.</summary>
+    private static IEnumerable<SqlValue[]> EnumeratePartitionParameters(Database database)
+    {
+        var parameterId = SqlValue.FromInt32(1);
+        var nullCollation = SqlValue.Null(SqlType.SystemName);
+        foreach (var function in database.PartitionFunctions.Values.OrderBy(function => function.FunctionId))
+        {
+            var type = function.ParameterType;
+            var (maxLength, precision, scale) = GetSysColumnMetadata(new HeapColumn(string.Empty, type, function.DeclaredMaxLength, nullable: true));
+            yield return
+            [
+                SqlValue.FromInt32(function.FunctionId),
+                parameterId,
+                SqlValue.FromByte(type.SystemTypeId),
+                SqlValue.FromInt16(maxLength),
+                SqlValue.FromByte(precision),
+                SqlValue.FromByte(scale),
+                SqlType.IsCollatedString(type) && type.Collation is { } collation ? SqlValue.FromSystemName(collation.Name) : nullCollation,
+                SqlValue.FromInt32(type.UserTypeId),
+            ];
+        }
+    }
+
+    /// <summary>
+    /// Rows for <c>sys.destination_data_spaces</c>: each scheme's filegroup per
+    /// partition, then its <c>NEXT USED</c> filegroup as one destination more.
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateDestinationDataSpaces(Database database)
+    {
+        foreach (var scheme in database.PartitionSchemes.Values.OrderBy(scheme => scheme.DataSpaceId))
+        {
+            var schemeId = SqlValue.FromInt32(scheme.DataSpaceId);
+            var destinations = scheme.Destinations;
+            for (var i = 0; i < destinations.Count; i++)
+                yield return [schemeId, SqlValue.FromInt32(i + 1), SqlValue.FromInt32(destinations[i])];
+            if (scheme.NextUsed is { } nextUsed)
+                yield return [schemeId, SqlValue.FromInt32(destinations.Count + 1), SqlValue.FromInt32(nextUsed)];
+        }
     }
 
     /// <summary>
@@ -525,8 +610,8 @@ internal static partial class BuiltInResources
     /// One row per <see cref="Database.Filegroups"/> entry ordered by
     /// <c>data_space_id</c>: <c>PRIMARY</c> (id 1) reports
     /// <c>is_default = 1</c>, every registered filegroup <c>is_default = 0</c>;
-    /// <c>is_system</c> is always 0. Partition schemes ('PS') aren't modeled, so
-    /// every row is a 'FG' ROWS_FILEGROUP.
+    /// <c>is_system</c> is always 0. <c>sys.data_spaces</c> follows these with
+    /// the partition schemes (<see cref="EnumeratePartitionSchemeRows"/>).
     /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateFilegroupRows(Database database, SqlValue filegroupType, SqlValue filegroupTypeDesc)
     {
@@ -584,7 +669,7 @@ internal static partial class BuiltInResources
                     continue;
                 var tableObjectId = SqlValue.FromInt32(table.ObjectId);
                 foreach (var identity in table.IndexIdentities())
-                    yield return RowForIdentity(tableObjectId, identity);
+                    yield return RowForIdentity(tableObjectId, identity, Simulation.PlacementOf(table, identity));
                 // XML and spatial indexes follow at their own index-id ranges,
                 // with every option at its default (probed 2026-09-26 against
                 // SQL Server 2025).
@@ -606,11 +691,11 @@ internal static partial class BuiltInResources
                     continue;
                 var viewObjectId = SqlValue.FromInt32(view.ObjectId);
                 foreach (var identity in view.IndexIdentities())
-                    yield return RowForIdentity(viewObjectId, identity);
+                    yield return RowForIdentity(viewObjectId, identity, placement: null);
             }
         }
 
-        SqlValue[] RowForIdentity(SqlValue objectId, IndexIdentity identity)
+        SqlValue[] RowForIdentity(SqlValue objectId, IndexIdentity identity, PartitionPlacement? placement)
         {
             var typeDesc = identity.Type switch
             {
@@ -675,7 +760,7 @@ internal static partial class BuiltInResources
                 type: SqlValue.FromByte(identity.Type),
                 typeDesc: typeDesc,
                 isUnique: isUnique,
-                dataSpaceId: primaryDataSpace,
+                dataSpaceId: placement is null ? primaryDataSpace : SqlValue.FromInt32(placement.Scheme.DataSpaceId),
                 isPrimaryKey: isPrimaryKey,
                 isUniqueConstraint: isUniqueConstraint,
                 hasFilter: hasFilter,
@@ -750,26 +835,26 @@ internal static partial class BuiltInResources
     /// <c>sys.stats_columns</c> list under its type table though no partition
     /// view does (probed 2026-09-26 against SQL Server 2025).
     /// </summary>
-    private static IEnumerable<(HeapTable Table, int IndexId, string? Name, bool IsHeap, Storage.Index? Index)> TypeTableIndexIdentities(Database database)
+    private static IEnumerable<(HeapTable Table, int IndexId, string? Name, bool IsHeap, Storage.Index? Index, PartitionPlacement? Placement)> TypeTableIndexIdentities(Database database)
     {
         foreach (var schema in database.Schemas.Values)
         {
             foreach (var tableType in schema.TableTypes.Values.OrderBy(t => t.ObjectId))
             {
                 foreach (var identity in tableType.CatalogShape.IndexIdentities())
-                    yield return (tableType.CatalogShape, identity.IndexId, identity.Name, identity.IsHeap, identity.Index);
+                    yield return (tableType.CatalogShape, identity.IndexId, identity.Name, identity.IsHeap, identity.Index, null);
             }
         }
     }
 
-    private static IEnumerable<(HeapTable Table, int IndexId, string? Name, bool IsHeap, Storage.Index? Index)> EnumerateTableIndexIdentities(Database database, Parser.BatchContext? batch)
+    private static IEnumerable<(HeapTable Table, int IndexId, string? Name, bool IsHeap, Storage.Index? Index, PartitionPlacement? Placement)> EnumerateTableIndexIdentities(Database database, Parser.BatchContext? batch)
     {
         foreach (var schema in database.Schemas.Values)
         {
             foreach (var table in CatalogTables(schema, batch))
             {
                 foreach (var identity in table.IndexIdentities())
-                    yield return (table, identity.IndexId, identity.Name, identity.IsHeap, identity.Index);
+                    yield return (table, identity.IndexId, identity.Name, identity.IsHeap, identity.Index, Simulation.PlacementOf(table, identity));
             }
         }
     }
@@ -789,20 +874,24 @@ internal static partial class BuiltInResources
     {
         long reserved = 0, used = 0, data = 0, rows = 0;
         HeapTable? lastTable = null;
-        foreach (var (table, indexId, _, _, _) in EnumerateTableIndexIdentities(database, batch: null))
+        var census = new PartitionCensus();
+        foreach (var (table, indexId, _, _, _, placement) in EnumerateTableIndexIdentities(database, batch: null))
         {
             var isBase = !ReferenceEquals(table, lastTable);
             lastTable = table;
             if (only is not null && !ReferenceEquals(table, only))
                 continue;
-            long inRow = table.Heap.Pages.Count;
-            var lob = isBase ? table.Heap.LobPages.Count : 0;
-            reserved += inRow + lob;
-            used += inRow + lob;
-            if (indexId >= 2)
-                continue;
-            data += inRow + lob;
-            rows += table.Heap.RowCount;
+            foreach (var unit in census.Units(table, indexId, placement))
+            {
+                var inRow = unit.InRowPages;
+                var lob = isBase && unit.Number == 1 ? table.Heap.LobPages.Count : 0;
+                reserved += inRow + lob;
+                used += inRow + lob;
+                if (indexId >= 2)
+                    continue;
+                data += inRow + lob;
+                rows += unit.Rows;
+            }
         }
 
         return (reserved, used, data, rows);
@@ -810,12 +899,12 @@ internal static partial class BuiltInResources
 
     /// <summary>
     /// Rows for <c>sys.partitions</c>: one per (object_id, index_id) that
-    /// <see cref="EnumerateSysIndexes"/> reports, all with partition_number = 1
-    /// (single, unpartitioned partition per index/heap). rows carries the
-    /// table's live <see cref="Storage.Heap.RowCount"/>, so it reflects
-    /// same-batch INSERT/DELETE. partition_id / hobt_id are synthetic-
-    /// deterministic (distinct per object_id/index_id; not SQL Server's
-    /// allocation-unit ids). Rowstore compression is unmodeled: data_compression
+    /// <see cref="EnumerateSysIndexes"/> reports, or one per partition for an
+    /// index on a partition scheme (<see cref="PartitionCensus"/>). rows carries
+    /// the table's live <see cref="Storage.Heap.RowCount"/> or the partition's
+    /// share of it, so it reflects same-batch INSERT/DELETE. partition_id /
+    /// hobt_id are synthetic-deterministic (distinct per partition; not SQL
+    /// Server's allocation-unit ids). Rowstore compression is unmodeled: data_compression
     /// = 0 (NONE) but for a columnstore index's 3 / 4, and xml_compression = 0
     /// (OFF).
     /// </summary>
@@ -829,26 +918,29 @@ internal static partial class BuiltInResources
         SqlValue[] archiveCompression = [SqlValue.FromByte(4), SqlValue.FromNVarchar("COLUMNSTORE_ARCHIVE")];
         var xmlOff = SqlValue.FromBoolean(false);
         var xmlOffDesc = SqlValue.FromVarchar(VarcharSqlType.Get(3, Collation.Catalog, Coercibility.Implicit), "OFF");
-        foreach (var (table, indexId, _, _, index) in EnumerateTableIndexIdentities(database, batch))
+        var census = new PartitionCensus();
+        foreach (var (table, indexId, _, _, index, placement) in EnumerateTableIndexIdentities(database, batch))
         {
-            var objectId = table.ObjectId;
-            var partitionId = ((long)(uint)objectId << 16) | (uint)indexId;
-            var partitionIdValue = SqlValue.FromInt64(partitionId);
-            yield return
-            [
-                partitionIdValue,
-                SqlValue.FromInt32(objectId),
-                SqlValue.FromInt32(indexId),
-                partitionNumber,
-                partitionIdValue,
-                SqlValue.FromInt64(table.Heap.RowCount),
-                filestreamFg,
-                .. index is { IsColumnstore: true } columnstore
-                    ? (columnstore.ColumnstoreArchive ? archiveCompression : columnstoreCompression)
-                    : noneCompression,
-                xmlOff,
-                xmlOffDesc,
-            ];
+            var compression = index is { IsColumnstore: true } columnstore
+                ? (columnstore.ColumnstoreArchive ? archiveCompression : columnstoreCompression)
+                : noneCompression;
+            foreach (var unit in census.Units(table, indexId, placement))
+            {
+                var partitionIdValue = SqlValue.FromInt64(unit.PartitionId);
+                yield return
+                [
+                    partitionIdValue,
+                    SqlValue.FromInt32(table.ObjectId),
+                    SqlValue.FromInt32(indexId),
+                    unit.Number == 1 ? partitionNumber : SqlValue.FromInt32(unit.Number),
+                    partitionIdValue,
+                    SqlValue.FromInt64(unit.Rows),
+                    filestreamFg,
+                    .. compression,
+                    xmlOff,
+                    xmlOffDesc,
+                ];
+            }
         }
     }
 
@@ -863,20 +955,26 @@ internal static partial class BuiltInResources
     /// LobPages.Count for LOB), so they track same-batch INSERT/DELETE. LOB
     /// tuples report data_pages = 0, matching real SQL Server.
     /// </summary>
-    private static IEnumerable<(long ContainerId, byte Type, long TotalPages, long UsedPages, long DataPages)> EnumerateAllocationUnitData(Database database)
+    private static IEnumerable<(long ContainerId, byte Type, long TotalPages, long UsedPages, long DataPages, int DataSpaceId)> EnumerateAllocationUnitData(Database database)
     {
         HeapTable? lastTable = null;
-        foreach (var (table, indexId, _, _, _) in EnumerateTableIndexIdentities(database, batch: null))
+        var census = new PartitionCensus();
+        foreach (var (table, indexId, _, _, _, placement) in EnumerateTableIndexIdentities(database, batch: null))
         {
-            var partitionId = ((long)(uint)table.ObjectId << 16) | (uint)indexId;
-            long dataPages = table.Heap.Pages.Count;
-            yield return (partitionId, 1, dataPages, dataPages, dataPages);
-            if (!ReferenceEquals(table, lastTable))
+            var isBase = !ReferenceEquals(table, lastTable);
+            lastTable = table;
+            foreach (var unit in census.Units(table, indexId, placement))
             {
-                lastTable = table;
-                long lobPages = table.Heap.LobPages.Count;
-                if (lobPages > 0)
-                    yield return (partitionId, 2, lobPages, lobPages, 0);
+                // A partition's allocation lives on the filegroup its scheme
+                // maps it to (probed 2026-09-27 against SQL Server 2025).
+                var dataSpaceId = placement is null ? Database.PrimaryFilegroupId : placement.Scheme.Destinations[unit.Number - 1];
+                yield return (unit.PartitionId, 1, unit.InRowPages, unit.InRowPages, unit.InRowPages, dataSpaceId);
+                if (isBase && unit.Number == 1)
+                {
+                    long lobPages = table.Heap.LobPages.Count;
+                    if (lobPages > 0)
+                        yield return (unit.PartitionId, 2, lobPages, lobPages, 0, dataSpaceId);
+                }
             }
         }
     }
@@ -886,23 +984,23 @@ internal static partial class BuiltInResources
     /// <see cref="EnumerateAllocationUnitData"/>. allocation_unit_id is
     /// synthetic-deterministic (partition_id shifted, low bits carrying the
     /// type — distinct per partition/type, not SQL Server's real id);
-    /// data_space_id is always 1 (the single modeled PRIMARY filegroup).
+    /// data_space_id is the partition's filegroup — PRIMARY for an index on a
+    /// filegroup, whose placement isn't recorded.
     /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateSysAllocationUnits(Parser.BatchContext batch, Database database)
     {
         _ = batch;
         var inRowDesc = SqlValue.FromNVarchar("IN_ROW_DATA");
         var lobDesc = SqlValue.FromNVarchar("LOB_DATA");
-        var primaryDataSpace = SqlValue.FromInt32(1);
-        foreach (var (containerId, type, totalPages, usedPages, dataPages) in EnumerateAllocationUnitData(database))
+        foreach (var (containerId, type, totalPages, usedPages, dataPages, dataSpaceId) in EnumerateAllocationUnitData(database))
         {
             yield return
             [
-                SqlValue.FromInt64((containerId << 8) | type),
+                SqlValue.FromInt64(PartitionCensus.AllocationUnitId(containerId, type)),
                 SqlValue.FromByte(type),
                 type == 2 ? lobDesc : inRowDesc,
                 SqlValue.FromInt64(containerId),
-                primaryDataSpace,
+                SqlValue.FromInt32(dataSpaceId),
                 SqlValue.FromInt64(totalPages),
                 SqlValue.FromInt64(usedPages),
                 SqlValue.FromInt64(dataPages),
@@ -911,8 +1009,8 @@ internal static partial class BuiltInResources
     }
 
     /// <summary>
-    /// Rows for <c>sys.dm_db_partition_stats</c>: one per (object_id, index_id)
-    /// that <see cref="EnumerateSysPartitions"/> reports, partition_number = 1,
+    /// Rows for <c>sys.dm_db_partition_stats</c>: one per partition that
+    /// <see cref="EnumerateSysPartitions"/> reports,
     /// partition_id = the same synthetic id (the <c>sys.partitions</c> /
     /// <c>sys.allocation_units</c> join key). Page counts derive from the live
     /// <see cref="Storage.Heap"/> the same way <see cref="EnumerateAllocationUnitData"/>
@@ -928,22 +1026,28 @@ internal static partial class BuiltInResources
         var partitionNumber = SqlValue.FromInt32(1);
         var zeroPages = SqlValue.FromInt64(0);
         HeapTable? lastTable = null;
-        foreach (var (table, indexId, _, _, _) in EnumerateTableIndexIdentities(database, batch))
+        var census = new PartitionCensus();
+        foreach (var (table, indexId, _, _, _, placement) in EnumerateTableIndexIdentities(database, batch))
         {
             var isBase = !ReferenceEquals(table, lastTable);
             lastTable = table;
-            var partitionId = ((long)(uint)table.ObjectId << 16) | (uint)indexId;
-            long inRow = table.Heap.Pages.Count;
-            long lob = isBase ? table.Heap.LobPages.Count : 0;
+            foreach (var unit in census.Units(table, indexId, placement))
+                yield return StatsRow(table, indexId, unit, isBase && unit.Number == 1 ? table.Heap.LobPages.Count : 0);
+        }
+
+        SqlValue[] StatsRow(HeapTable table, int indexId, PartitionCensus.Unit unit, long lob)
+        {
+            var partitionId = unit.PartitionId;
+            var inRow = unit.InRowPages;
             var inRowValue = SqlValue.FromInt64(inRow);
             var lobValue = SqlValue.FromInt64(lob);
             var usedReserved = SqlValue.FromInt64(inRow + lob);
-            yield return
+            return
             [
                 SqlValue.FromInt64(partitionId),
                 SqlValue.FromInt32(table.ObjectId),
                 SqlValue.FromInt32(indexId),
-                partitionNumber,
+                unit.Number == 1 ? partitionNumber : SqlValue.FromInt32(unit.Number),
                 inRowValue, // in_row_data_page_count
                 inRowValue, // in_row_used_page_count
                 inRowValue, // in_row_reserved_page_count
@@ -953,7 +1057,7 @@ internal static partial class BuiltInResources
                 zeroPages,  // row_overflow_reserved_page_count
                 usedReserved, // used_page_count
                 usedReserved, // reserved_page_count
-                SqlValue.FromInt64(table.Heap.RowCount),
+                SqlValue.FromInt64(unit.Rows),
             ];
         }
     }
@@ -970,7 +1074,7 @@ internal static partial class BuiltInResources
     internal static long SumDataFilePages(Database database)
     {
         long total = 0;
-        foreach (var (_, _, totalPages, _, _) in EnumerateAllocationUnitData(database))
+        foreach (var (_, _, totalPages, _, _, _) in EnumerateAllocationUnitData(database))
             total += totalPages;
         return total;
     }
@@ -1067,7 +1171,7 @@ internal static partial class BuiltInResources
         var primaryRoleDesc = SqlValue.FromString(NVarcharSqlType.Get(60, Collation.Catalog, Coercibility.Implicit), "PRIMARY");
         var nullName = SqlValue.Null(SqlType.SystemName);
         var trueBit = SqlValue.FromBoolean(true);
-        foreach (var (table, indexId, name, isHeap, _) in EnumerateTableIndexIdentities(database, batch).Concat(TypeTableIndexIdentities(database)))
+        foreach (var (table, indexId, name, isHeap, _, _) in EnumerateTableIndexIdentities(database, batch).Concat(TypeTableIndexIdentities(database)))
         {
             if (isHeap)
                 continue;
@@ -1255,7 +1359,25 @@ internal static partial class BuiltInResources
                     var columnIds = identity.Constraint is { } key
                         ? ResolveConstraintColumnIds(key, table)
                         : IndexKeyColumnIds(identity.Index!, table);
-                    foreach (var row in EmitStatsColumns(tableObjectId, SqlValue.FromInt32(identity.IndexId), columnIds, identity.Type == 1))
+                    var statsIdValue = SqlValue.FromInt32(identity.IndexId);
+                    // An index on a scheme adds its partition column, at the
+                    // index_column_id sys.index_columns gives it (probed
+                    // 2026-09-27 against SQL Server 2025).
+                    if (Simulation.PlacementOf(table, identity) is { } placement && Array.IndexOf(columnIds, placement.Column.ColumnId) < 0)
+                    {
+                        if (identity.Type == 1)
+                        {
+                            columnIds = [.. columnIds, placement.Column.ColumnId];
+                        }
+                        else
+                        {
+                            foreach (var row in EmitStatsColumns(tableObjectId, statsIdValue, columnIds, isClustered: false))
+                                yield return row;
+                            yield return [tableObjectId, statsIdValue, SqlValue.FromInt32(columnIds.Length + (identity.Index?.IncludedColumnOrdinals.Length ?? 0) + 1), SqlValue.FromInt32(placement.Column.ColumnId)];
+                            continue;
+                        }
+                    }
+                    foreach (var row in EmitStatsColumns(tableObjectId, statsIdValue, columnIds, identity.Type == 1))
                         yield return row;
                 }
                 // CREATE STATISTICS columns, in declared order — the leading
@@ -1349,19 +1471,19 @@ internal static partial class BuiltInResources
                 var tableObjectId = SqlValue.FromInt32(table.ObjectId);
                 foreach (var identity in table.IndexIdentities())
                 {
-                    if (identity.IsHeap)
+                    var placement = Simulation.PlacementOf(table, identity);
+                    if (identity.IsHeap && placement is null)
                         continue;
                     var indexIdValue = SqlValue.FromInt32(identity.IndexId);
-                    if (identity.Constraint is { } key)
-                    {
-                        foreach (var row in EmitKeyConstraintColumns(tableObjectId, indexIdValue, key, table, identity.Type == 1, falseBit, trueBit, zeroByte))
-                            yield return row;
-                    }
-                    else
-                    {
-                        foreach (var row in IndexColumnRows(tableObjectId, indexIdValue, identity.Index!, table, identity.Type == 1))
-                            yield return row;
-                    }
+                    var rows = identity.IsHeap
+                        ? []
+                        : identity.Constraint is { } key
+                            ? EmitKeyConstraintColumns(tableObjectId, indexIdValue, key, table, identity.Type == 1, falseBit, trueBit, zeroByte)
+                            : IndexColumnRows(tableObjectId, indexIdValue, identity.Index!, table, identity.Type == 1);
+                    if (placement is not null)
+                        rows = WithPartitionColumn([.. rows], placement.Column.ColumnId, tableObjectId, indexIdValue, clustered: identity.Type is 1 or 5);
+                    foreach (var row in rows)
+                        yield return row;
                 }
                 // XML indexes: one index_column row per index (the indexed xml
                 // column), key_ordinal 0 / index_column_id 1 (probe-confirmed
@@ -1432,6 +1554,32 @@ internal static partial class BuiltInResources
                         yield return row;
                 }
             }
+        }
+
+        // The partition column of an index on a scheme carries
+        // partition_ordinal 1: flagged where the index already lists it, else
+        // listed as one more column, neither key nor included — last for a
+        // nonclustered index, in column order for a clustered one or the heap
+        // (probed 2026-09-27 against SQL Server 2025).
+        List<SqlValue[]> WithPartitionColumn(List<SqlValue[]> rows, int columnId, SqlValue objectId, SqlValue indexIdValue, bool clustered)
+        {
+            var one = SqlValue.FromByte(1);
+            foreach (var row in rows)
+            {
+                if (row[3].AsInt32 == columnId)
+                {
+                    row[5] = one;
+                    return rows;
+                }
+            }
+            rows.Add([objectId, indexIdValue, SqlValue.FromInt32(rows.Count + 1), SqlValue.FromInt32(columnId), zeroByte, one, falseBit, falseBit, zeroByte, zeroByte]);
+            if (clustered || rows.Count == 1)
+            {
+                rows.Sort(static (a, b) => a[3].AsInt32.CompareTo(b[3].AsInt32));
+                for (var i = 0; i < rows.Count; i++)
+                    rows[i][2] = SqlValue.FromInt32(i + 1);
+            }
+            return rows;
         }
 
         IEnumerable<SqlValue[]> IndexColumnRows(SqlValue objectId, SqlValue indexIdValue, Storage.Index index, HeapTable? table, bool isClustered)
@@ -1673,4 +1821,51 @@ internal static partial class BuiltInResources
             }
         }
     }
+}
+
+/// <summary>
+/// The partitions one catalog read reports for each (table, index): one for
+/// an index on a filegroup, carrying the heap's live row and page counts, or
+/// one per partition of a scheme, each counted by reading the partition column
+/// off every row (the rows aren't stored apart). A census is taken once per
+/// (table, placement) and shared by the indexes aligned on it.
+/// </summary>
+internal sealed class PartitionCensus
+{
+    private readonly Dictionary<(HeapTable Table, PartitionPlacement Placement), (long[] Rows, long[] Pages)> taken = [];
+
+    /// <summary>One partition as the page and row views report it.</summary>
+    internal readonly struct Unit(long partitionId, int number, long rows, long inRowPages)
+    {
+        /// <summary>Synthetic, distinct per (object, index, partition); partition 1 keeps the unpartitioned id.</summary>
+        public readonly long PartitionId = partitionId;
+        public readonly int Number = number;
+        public readonly long Rows = rows;
+
+        /// <summary>The heap pages holding one of the partition's rows; every heap page for an unpartitioned index.</summary>
+        public readonly long InRowPages = inRowPages;
+    }
+
+    public IEnumerable<Unit> Units(HeapTable table, int indexId, PartitionPlacement? placement)
+    {
+        var baseId = ((long)(uint)table.ObjectId << 16) | (uint)indexId;
+        if (placement is null)
+        {
+            yield return new Unit(baseId, 1, table.Heap.RowCount, table.Heap.Pages.Count);
+            yield break;
+        }
+        if (!this.taken.TryGetValue((table, placement), out var counts))
+            this.taken[(table, placement)] = counts = placement.Census(table);
+        for (var i = 0; i < counts.Rows.Length; i++)
+            yield return new Unit(baseId | ((long)i << 47), i + 1, counts.Rows[i], counts.Pages[i]);
+    }
+
+    /// <summary>
+    /// A synthetic <c>allocation_unit_id</c>, distinct per partition and unit
+    /// type: the partition id shifted past the type for partition 1, as for an
+    /// unpartitioned index, and past two bits for the later partitions, whose
+    /// ids carry the partition number in their high bits.
+    /// </summary>
+    public static long AllocationUnitId(long partitionId, byte type) =>
+        partitionId >> 47 == 0 ? (partitionId << 8) | type : (partitionId << 2) | type;
 }

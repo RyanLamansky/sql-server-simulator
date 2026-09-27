@@ -1929,17 +1929,13 @@ public class BacpacLoaderTests
     }
 
     [TestMethod]
-    public void PartitionFunction_PartitionScheme_AreSilentlySkipped_ColumnStoreIndexesLand()
+    public void ColumnStoreIndexesLand()
     {
-        // WWI-Full's partitioning element types are loader no-ops —
-        // recognized by Type, action is empty, and not on Skipped. Its
-        // columnstore indexes are created, a clustered one without the column
-        // list DacFx writes for it.
+        // WWI-Full's columnstore indexes are created, a clustered one without
+        // the column list DacFx writes for it.
         using var bacpac = BacpacBuilder.Create()
             .Table("dbo", "Item", t => t.Column("Id", "int").Column("Qty", "int").Row(1, 2))
             .Table("dbo", "Line", t => t.Column("Id", "int").Column("Qty", "int").Row(1, 2))
-            .PartitionFunction("PF_DateRange")
-            .PartitionScheme("PS_DateRange")
             .ColumnStoreIndex("dbo", "Item", "CCX_Item", isClustered: true, "Id", "Qty")
             .ColumnStoreIndex("dbo", "Line", "NCCX_Line", isClustered: false, "Qty")
             .Build();
@@ -1951,6 +1947,30 @@ public class BacpacLoaderTests
             "SELECT STRING_AGG(type_desc, ',') WITHIN GROUP (ORDER BY type) FROM sys.indexes WHERE type IN (5, 6);"));
         // Table + row payload still load.
         AreEqual(1, sim.ExecuteScalar("SELECT COUNT(*) FROM Item;"));
+    }
+
+    [TestMethod]
+    public void PartitionFunctionSchemeAndPartitionedTableLand()
+    {
+        // WWI-Full's shape: the scheme precedes the filegroup it names in the
+        // model, and lists one filegroup more than the function's partitions
+        // — its NEXT USED one.
+        using var bacpac = BacpacBuilder.Create()
+            .PartitionFunction("PF_Date", "date", rangeRight: true, "'01/01/2014 00:00:00'", "'01/01/2015 00:00:00'")
+            .PartitionScheme("PS_Date", "PF_Date", "USERDATA", "USERDATA", "USERDATA", "USERDATA")
+            .Filegroup("USERDATA")
+            .Table("dbo", "Tx", t => t.Column("Id", "int").Column("TransactionDate", "date")
+                .OnPartitionScheme("PS_Date", "TransactionDate")
+                .Row(1, new DateOnly(2013, 6, 1)).Row(2, new DateOnly(2014, 1, 1)).Row(3, new DateOnly(2015, 3, 1)))
+            .Build();
+
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
+        IsEmpty(diag.Skipped);
+        AreEqual("PF_Date|3|1", sim.ExecuteScalar("select concat(name, '|', fanout, '|', cast(boundary_value_on_right as int)) from sys.partition_functions"));
+        AreEqual("2,2,2,2", sim.ExecuteScalar("select string_agg(cast(data_space_id as varchar(10)), ',') within group (order by destination_id) from sys.destination_data_spaces"));
+        AreEqual("PS_Date", sim.ExecuteScalar("select ds.name from sys.indexes i join sys.data_spaces ds on ds.data_space_id = i.data_space_id where i.object_id = object_id('dbo.Tx')"));
+        AreEqual("1,1,1", sim.ExecuteScalar("select string_agg(cast(rows as varchar(10)), ',') within group (order by partition_number) from sys.partitions where object_id = object_id('dbo.Tx')"));
     }
 
     [TestMethod]

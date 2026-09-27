@@ -28,6 +28,8 @@ public sealed class TableBuilder
     internal string? HistorySchemaName;
     internal string? HistoryTableName;
 
+    private (string Scheme, string Column)? partitioning;
+
     internal TableBuilder(string schemaName, string tableName)
     {
         SchemaName = schemaName;
@@ -66,6 +68,18 @@ public sealed class TableBuilder
     {
         HistorySchemaName = historySchema;
         HistoryTableName = historyTable;
+        return this;
+    }
+
+    /// <summary>
+    /// Places the table on partition scheme <paramref name="scheme"/> by
+    /// <paramref name="column"/>: the <c>PartitionScheme</c> and
+    /// <c>PartitionColumn</c> relationships DacFx writes on a partitioned
+    /// <c>SqlTable</c>.
+    /// </summary>
+    public TableBuilder OnPartitionScheme(string scheme, string column)
+    {
+        partitioning = (scheme, column);
         return this;
     }
 
@@ -201,6 +215,15 @@ public sealed class TableBuilder
             new XAttribute("Type", "SqlTable"),
             new XAttribute("Name", $"[{SchemaName}].[{TableName}]"),
             columnsRelationship);
+
+        if (partitioning is var (scheme, column))
+        {
+            tableElement.Add(
+                new XElement(ns + "Relationship", new XAttribute("Name", "PartitionColumn"),
+                    new XElement(ns + "Entry", new XElement(ns + "References", new XAttribute("Name", $"[{SchemaName}].[{TableName}].[{column}]")))),
+                new XElement(ns + "Relationship", new XAttribute("Name", "PartitionScheme"),
+                    new XElement(ns + "Entry", new XElement(ns + "References", new XAttribute("Name", $"[{scheme}]")))));
+        }
 
         if (HistorySchemaName is not null && HistoryTableName is not null)
         {

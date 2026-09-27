@@ -13,6 +13,7 @@ A name the `Simulation` doesn't host raises **Msg 5011** sev 14 state 5 (`User d
 The rest of the statement is read in skip mode before the refusal, so its `SET …` tail isn't left behind to run as a statement of its own; a `COLLATE` over a missing name is **Msg 911** instead (probed 2026-09-24 against SQL Server 2025).
 One `SET` takes a comma-separated list of options and one trailing termination clause (`WITH NO_WAIT` / `ROLLBACK …`), which every option accepts but `ALLOW_SNAPSHOT_ISOLATION` (**Msg 5083**, and nothing in the list applies); the statement is read in skip mode first, since that refusal depends on its end.
 The name also governs the `COLLATE` clause below.
+Besides `SET`, `COLLATE` and `MODIFY NAME`, the statement takes `ADD FILEGROUP` / `REMOVE FILEGROUP`, which maintain the catalog's filegroups, and the file forms, which parse and change nothing — see [`partitioning.md`](partitioning.md#filegroups).
 
 ## Recognized options by value shape
 

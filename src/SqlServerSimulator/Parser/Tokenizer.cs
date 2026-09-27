@@ -70,7 +70,8 @@ static class Tokenizer
             // they carry no other meaning in T-SQL. Tokenized as single-char
             // operators and consumed by Expression.ParseOdbcEscape.
             '+' or '*' or '%' or '(' or ')' or ',' or '.' or ';' or ':' or '=' or '&' or '|' or '^' or '~' or '>' or '<' or '!' or '{' or '}' => new Operator(command, index++),
-            '$' when IsDollarAction(command, index) => ParseDollarAction(command, ref index),
+            '$' when IsDollarWord(command, index, "action") => ParseDollarWord(command, ref index, "action".Length),
+            '$' when IsDollarWord(command, index, "partition") => ParseDollarWord(command, ref index, "partition".Length),
             '$' or '¢' or '£' or '¥' or '฿' or (>= '₠' and <= '₱') => ParseCurrencyLiteral(command, ref index),
             // Non-ASCII BMP letters (fullwidth, accented, Greek, CJK, ...) start identifiers on real SQL Server — probe-confirmed against SQL Server 2025.
             var c when char.IsLetter(c) => ParseUnquotedStringOrReservedKeyword(command, ref index, compatibilityLevel),
@@ -410,40 +411,34 @@ static class Tokenizer
         c is (>= '0' and <= '9') or (>= 'a' and <= 'f') or (>= 'A' and <= 'F');
 
     /// <summary>
-    /// Returns true when the cursor sits on a <c>$action</c> pseudo-column
-    /// — only recognized in MERGE's OUTPUT clause, but tokenized here so
-    /// it surfaces as a single <see cref="UnquotedString"/> with value
-    /// <c>"$action"</c> rather than tokenizing into a money-literal
-    /// <c>$</c> followed by an unrelated identifier. Word-boundary
-    /// terminated (rejects <c>$action_</c>).
+    /// Whether a <c>$</c> at <paramref name="index"/> begins one of the two
+    /// <c>$</c>-words T-SQL has: <c>$action</c> (the MERGE OUTPUT pseudo-column)
+    /// or <c>$partition</c> (the partition-function qualifier), matched without
+    /// regard to case and not followed by more identifier characters. Any
+    /// other <c>$</c> starts a money literal.
     /// </summary>
-    private static bool IsDollarAction(string command, int index)
+    private static bool IsDollarWord(string command, int index, string word)
     {
-        if (index + 6 >= command.Length)
+        var end = index + 1 + word.Length;
+        if (end > command.Length)
             return false;
-        var body = command.AsSpan(index + 1, 6);
-        if (!body.Equals("action", StringComparison.OrdinalIgnoreCase))
+        if (!command.AsSpan(index + 1, word.Length).Equals(word, StringComparison.OrdinalIgnoreCase))
             return false;
-        if (index + 7 < command.Length)
-        {
-            var next = command[index + 7];
-            if (char.IsLetterOrDigit(next) || next == '_')
-                return false;
-        }
-        return true;
+        return end == command.Length || !IsIdentifierBodyChar(command[end]);
     }
 
     /// <summary>
-    /// Emits the <c>$action</c> pseudo-column as a single
-    /// <see cref="UnquotedString"/>. The MERGE OUTPUT parser detects it
-    /// by string comparison and synthesizes a <c>MergeActionReference</c>
-    /// expression.
+    /// Emits a <c>$</c>-word as a single <see cref="UnquotedString"/> whose
+    /// text keeps the <c>$</c>, which no other unquoted identifier can start
+    /// with: the MERGE OUTPUT parser detects <c>$action</c> by string
+    /// comparison, and the expression parser reads <c>$partition</c> as a
+    /// partition-function call (<see cref="UnquotedString.IsDollarPartition"/>).
     /// </summary>
-    private static UnquotedString ParseDollarAction(string command, ref int index)
+    private static UnquotedString ParseDollarWord(string command, ref int index, int wordLength)
     {
         var start = index;
-        index += 7;
-        return (UnquotedString)UnquotedString.CheckReserved(command, start, 7);
+        index += wordLength + 1;
+        return (UnquotedString)UnquotedString.CheckReserved(command, start, wordLength + 1);
     }
 
     /// <summary>

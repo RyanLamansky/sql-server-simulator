@@ -136,6 +136,7 @@ partial class Simulation
         int? compressionDelay = null;
         var rebuildOptions = default(IndexOptions);
         var namedPartition = false;
+        long partitionNumber = 0;
         switch (form)
         {
             case AlterIndexForm.Set:
@@ -157,14 +158,14 @@ partial class Simulation
                 break;
             case AlterIndexForm.Reorganize:
                 context.MoveNextOptional();
-                namedPartition = ParseOptionalIndexPartitionClause(context);
+                namedPartition = ParseOptionalIndexPartitionClause(context, out partitionNumber);
                 ParseOptionalReorganizeWithClause(context);
                 break;
             default:
                 // REBUILD takes an optional PARTITION = ALL and its own WITH (…)
                 // option block; neither describes anything a heap has.
                 context.MoveNextOptional();
-                namedPartition = ParseOptionalIndexPartitionClause(context);
+                namedPartition = ParseOptionalIndexPartitionClause(context, out partitionNumber);
                 rebuildOptions = ParseOptionalIndexWithClause(
                     context, targetColumnstore == true ? IndexOptionStatement.RebuildColumnstoreIndex : IndexOptionStatement.AlterIndexRebuild, indexName);
                 break;
@@ -192,7 +193,7 @@ partial class Simulation
             {
                 if (collation.Equals(constraint.Name, indexName))
                 {
-                    RejectNamedIndexTarget(form, namedPartition, constraint.Name, table.Name);
+                    RejectNamedIndexTarget(form, namedPartition, partitionNumber, constraint.IsClustered ? table.Partitioning : constraint.Partitioning, constraint.Name, table.Name);
                     ApplyToConstraint(table, constraint, form, ignoreDupKey, rebuildOptions, context.Batch);
                     RecordDdlEvent(context, "ALTER_INDEX", EventSchemaName(tableName), indexName!, "INDEX", table.Name, "TABLE");
                     return true;
@@ -203,7 +204,7 @@ partial class Simulation
             {
                 if (collation.Equals(index.Name, indexName))
                 {
-                    RejectNamedIndexTarget(form, namedPartition, index.Name, table.Name);
+                    RejectNamedIndexTarget(form, namedPartition, partitionNumber, index.IsClustered ? table.Partitioning : index.Partitioning, index.Name, table.Name);
                     ApplyToIndex(context, table, index, form, ignoreDupKey, compressionDelay, rebuildOptions);
                     RecordDdlEvent(context, "ALTER_INDEX", EventSchemaName(tableName), indexName!, "INDEX", table.Name, "TABLE");
                     return true;
@@ -216,7 +217,7 @@ partial class Simulation
             {
                 if (collation.Equals(jsonIndex.Name, indexName))
                 {
-                    RejectNamedIndexTarget(form, namedPartition, jsonIndex.Name, table.Name);
+                    RejectNamedIndexTarget(form, namedPartition, partitionNumber, placement: null, jsonIndex.Name, table.Name);
                     if (form is AlterIndexForm.Disable or AlterIndexForm.Rebuild)
                         jsonIndex.IsDisabled = form == AlterIndexForm.Disable;
                     RecordDdlEvent(context, "ALTER_INDEX", EventSchemaName(tableName), indexName!, "INDEX", table.Name, "TABLE");
@@ -237,10 +238,10 @@ partial class Simulation
             // Real names the first index the statement would have touched —
             // index_id order, so a constraint's clustered index first — and
             // falls back to the table when there is none.
-            var firstTarget = table.KeyConstraints.Count > 0 ? table.KeyConstraints[0].Name
-                : table.Indexes.Count > 0 ? table.Indexes[0].Name
-                : null;
-            throw SimulatedSqlException.RebuildPartitionOnUnpartitioned(alterIndex: true, firstTarget, table.Name);
+            var firstTarget = table.IndexIdentities().Find(identity => !identity.IsHeap);
+            if (firstTarget.Name is null || PlacementOf(table, firstTarget) is not { } firstPlacement)
+                throw SimulatedSqlException.RebuildPartitionOnUnpartitioned(alterIndex: true, firstTarget.Name, table.Name);
+            RejectPartitionNumber(partitionNumber, firstPlacement, firstTarget.Name);
         }
 
         // ALL: constraints first, matching real's abort-on-first-refusal — a
@@ -270,10 +271,10 @@ partial class Simulation
     /// resolved: the partition clause on an unpartitioned index (Msg 7729) and
     /// the resumable forms' Msg 10638.
     /// </summary>
-    private static void RejectNamedIndexTarget(AlterIndexForm form, bool namedPartition, string indexName, string tableName)
+    private static void RejectNamedIndexTarget(AlterIndexForm form, bool namedPartition, long partitionNumber, Schemas.PartitionPlacement? placement, string indexName, string tableName)
     {
         if (namedPartition)
-            throw SimulatedSqlException.PartitionNumberOnUnpartitionedIndex(indexName);
+            RejectPartitionNumber(partitionNumber, placement, indexName);
         if (form is AlterIndexForm.Resume or AlterIndexForm.Pause or AlterIndexForm.Abort)
             throw SimulatedSqlException.NoPendingResumableIndexOperation(FormName(form), indexName, tableName);
     }
@@ -529,18 +530,32 @@ partial class Simulation
     /// real's refusal once it knows what to name. Cursor on entry: the first
     /// token past the form keyword. On exit: the first token past the clause.
     /// </summary>
-    private static bool ParseOptionalIndexPartitionClause(ParserContext context)
+    private static bool ParseOptionalIndexPartitionClause(ParserContext context, out long number)
     {
+        number = 0;
         if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.Partition })
             return false;
         context.MoveNextRequired();
         if (context.Token is not Operator { Character: '=' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         var named = context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.All };
-        if (named && context.Token is not Numeric)
-            throw SimulatedSqlException.SyntaxErrorNear(context);
+        if (named)
+            number = context.Token is Numeric { Value: { IsNull: false } value } ? value.CoerceTo(SqlType.BigInt).AsInt64 : throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextOptional();
         return named;
+    }
+
+    /// <summary>
+    /// Refuses a partition number an index can't take: Msg 7729 for an index
+    /// on a filegroup, Msg 7730 for a number past a partitioned one's
+    /// partitions (probed 2026-09-27 against SQL Server 2025).
+    /// </summary>
+    private static void RejectPartitionNumber(long number, Schemas.PartitionPlacement? placement, string indexName)
+    {
+        if (placement is null)
+            throw SimulatedSqlException.PartitionNumberOnUnpartitionedIndex(indexName);
+        if (number < 1 || number > placement.Fanout)
+            throw SimulatedSqlException.AlterIndexPartitionNotFound(number, indexName);
     }
 
     /// <summary>

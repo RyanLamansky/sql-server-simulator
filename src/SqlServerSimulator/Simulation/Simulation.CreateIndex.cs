@@ -253,13 +253,21 @@ partial class Simulation
         if ((filter is not null || IndexCoversComputedColumn(table, index)) && IncorrectSetOptionNames(context) is { } setOptions)
             throw SimulatedSqlException.IncorrectSetOptions("CREATE INDEX", setOptions);
 
+        var placement = PlacementFor(context.Batch, table, index.WrittenDataSpace);
         if (isUnique)
+        {
+            RequirePartitionColumnInUniqueKey(placement, table, [.. resolvedKeyColumns.Select(static key => key.ColumnOrdinal)], indexName, isConstraint: false);
             ValidateExistingRowsForUniqueIndex(table, index, context.Batch, qualifiedTableName);
+        }
 
         if (replaced is not null)
             table.Indexes[table.Indexes.IndexOf(replaced)] = index;
         else
             table.Indexes.Add(index);
+        if (isClustered)
+            table.Partitioning = placement;
+        else
+            index.Partitioning = placement;
         RecordDdlEvent(context, "CREATE_INDEX", EventSchemaName(targetTableName), indexName, "INDEX", table.Name, "TABLE");
         return true;
     }
@@ -356,7 +364,7 @@ partial class Simulation
                 includeColumns[i] = table.StorageOrdinals[fullOrdinal];
                 includeOrdinals[i] = fullOrdinal;
             }
-            table.Indexes.Add(new StoredIndex(
+            var index = new StoredIndex(
                 pending.Name,
                 objectIds?[position] ?? batch.CurrentDatabase.AllocateObjectId(),
                 pending.IsUnique,
@@ -366,7 +374,10 @@ partial class Simulation
                 includeOrdinals,
                 pending.Filter,
                 pending.FilterDefinition,
-                pending.Options));
+                pending.Options);
+            if (!table.IsTableVariable && !table.IsTypeTable)
+                PlaceNewIndex(batch, table, index);
+            table.Indexes.Add(index);
         }
     }
 
@@ -537,9 +548,9 @@ partial class Simulation
     /// inline in a <c>CREATE TABLE</c>: <c>INCLUDE (…)</c> where
     /// <paramref name="acceptsInclude"/> says (a column-level inline index
     /// takes none), a <c>WHERE</c> filter, <c>WITH (option = value, …)</c> and
-    /// <c>ON &lt;filegroup&gt;</c>. The filegroup clause is discarded (no
-    /// filegroup model) and so is every index option except
-    /// <c>IGNORE_DUP_KEY</c>, the one with a semantic here.
+    /// an <c>ON</c> placement, which rides back on
+    /// <see cref="IndexOptions.DataSpace"/>. Every index option but
+    /// <c>IGNORE_DUP_KEY</c>, the one with a semantic here, is discarded.
     /// </summary>
     private static (List<string> IncludeColumnNames, BooleanExpression? Filter, string? FilterDefinition, IndexOptions Options) ParseIndexTail(
         ParserContext context, string indexName, string tableLeaf, bool acceptsInclude, IndexOptionStatement statement = IndexOptionStatement.Unchecked, string? optionIndexName = null)
@@ -577,8 +588,8 @@ partial class Simulation
             filterDefinition = filter.RenderFilterDefinition(context.Batch);
         }
 
-        var options = ParseOptionalIndexWithClause(context, statement, optionIndexName);
-        SkipOptionalFilegroupClause(context);
+        var options = ParseOptionalIndexWithClause(context, statement, optionIndexName)
+            .WithDataSpace(ParseOptionalDataSpaceClause(context, out _));
         return (includeColumnNames, filter, filterDefinition, options);
     }
 

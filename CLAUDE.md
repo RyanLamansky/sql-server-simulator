@@ -311,6 +311,8 @@ Where an entry carries a second clause it is because that fact changes what you'
   A DEFAULT expression has an **empty scope** — a name inside one is Msg 128 even when it *is* a column → [`alter-table.md`](docs/claude/alter-table.md).
 - **`CREATE INDEX`, inline indexes, columnstore indexes, indexed views, `ALTER INDEX`, disabled indexes, `CREATE STATISTICS`, computed columns as keys** — plus the **access-path choices** a read makes over the per-`Heap` seek cache, which is where query throughput actually lives.
   A scan of a clustered table follows its **key order**, not write order, so an unordered result or a bare `TOP` over one reads by key → [`indexes.md`](docs/claude/indexes.md).
+- **Partitioning** — `CREATE` / `ALTER` / `DROP PARTITION FUNCTION` and `SCHEME`, `$PARTITION`, tables and indexes `ON scheme(column)`, the per-partition catalog, `TRUNCATE … WITH (PARTITIONS …)`, `ALTER TABLE … SWITCH`, and `ALTER DATABASE … ADD | REMOVE FILEGROUP`.
+  A partition is a **logical assignment** computed from the row's partition column, never a separate store, so every per-partition count reads the whole table → [`partitioning.md`](docs/claude/partitioning.md).
 - **Table hints (`WITH (NOLOCK …)`) and statement `OPTION (…)` hints**, including `FORCESEEK`'s nested form and the legacy no-`WITH` parenthesized form → [`query-hints.md`](docs/claude/query-hints.md).
 - **Heap page lifecycle** — reclamation / reuse, tail-only shrink, `DBCC SHRINKDATABASE` / `SHRINKFILE`, `Heap.RowCount`, and which callers may take the reused encode buffer → [`heap-storage.md`](docs/claude/heap-storage.md).
 - **Per-`Simulation` plan cache and token memo** — the two reuse layers over a repeated `CommandText`.
@@ -359,7 +361,8 @@ The feature docs' own **Not modeled yet** sections hold the smaller gaps.
 - **Heap allocation tracking** (a flat page list, no IAM/PFS) → [`heap-storage.md`](docs/claude/heap-storage.md).
 - **`ALTER AUTHORIZATION`**, in every form → [`schemas.md`](docs/claude/schemas.md#create-schemas-owner-and-its-element-list).
 - **Programmable-object gaps**: CLR procedures / TVFs / aggregates / UDTs, logon triggers, INSTEAD OF UPDATE/DELETE on non-updatable views, a join view over a join view, MERGE into or OUTPUT through views, `WITH RESULT SETS`' shorthand forms, and one binder error per statement → [`programmable.md`](docs/claude/programmable.md), [`clr-assemblies.md`](docs/claude/clr-assemblies.md), [`triggers.md`](docs/claude/triggers.md).
-- **`ALTER TABLE … SWITCH PARTITION`** and `ALTER COLUMN … ADD | DROP {PERSISTED | MASKED}` → [`alter-table.md`](docs/claude/alter-table.md).
+- **`ALTER COLUMN … ADD | DROP {PERSISTED | MASKED}`** → [`alter-table.md`](docs/claude/alter-table.md).
+- **Filegroup placement** — a table or index `ON [fg]` isn't recorded (only a partition scheme's placement is) → [`partitioning.md`](docs/claude/partitioning.md#not-modeled-yet).
 - **`FORCESEEK`'s plan-infeasibility refusal** (Msg 8622) → [`query-hints.md`](docs/claude/query-hints.md#not-enforced).
 
 ## Quirks (modeled, not byte-identical to SQL Server)

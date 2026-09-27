@@ -68,6 +68,8 @@ partial class Simulation
             // object names the shared comma-list path below resolves.
             case ReservedKeyword { Keyword: Keyword.Statistics }:
                 return TryParseDropStatistics(context);
+            case UnquotedString { ContextualKeyword: ContextualKeyword.Partition }:
+                return TryParseDropPartition(context);
         }
 
         var targetKind = context.Token switch
