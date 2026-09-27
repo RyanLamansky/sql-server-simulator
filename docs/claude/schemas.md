@@ -184,7 +184,7 @@ Default class is `OBJECT` (the bare form with no prefix).
   Statement-scoped — matches the idiom every other DDL site uses (`CREATE` / `ALTER` / `DROP` / `TRUNCATE`).
   Same-schema transfers skip the lock acquisition along with the mutation.
 
-**Deferred**: `ALTER SCHEMA … TRANSFER` with the `XML SCHEMA COLLECTION::` / `PARTITION FUNCTION::` / other niche class prefixes (the simulator only models OBJECT and TYPE); `ALTER AUTHORIZATION` in every form (there is no parser for the statement at all, so a schema's owner is settled once at CREATE); `DROP SCHEMA` cascade-mode (real SQL Server's ANSI extension; not in the standard T-SQL grammar).
+**Deferred**: `ALTER SCHEMA … TRANSFER` with the niche class prefixes past OBJECT, TYPE and XML SCHEMA COLLECTION; `ALTER AUTHORIZATION` in every form (there is no parser for the statement at all, so a schema's owner is settled once at CREATE); `DROP SCHEMA` cascade-mode (real SQL Server's ANSI extension; not in the standard T-SQL grammar).
 
 ## CREATE SCHEMA's owner and its element list
 
