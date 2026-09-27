@@ -155,6 +155,29 @@ partial class Simulation
             }
             PermissionEnforcement.CheckSchemaObject(context.Batch, "DELETE", securable);
         }
+        // Through a single-table view with another owner than its base table
+        // the chain breaks, so the base table is checked after the view — even
+        // from a module body whose reference to the view is chained: SELECT on
+        // the columns the WHERE reads, then DELETE; under an INSTEAD OF DELETE
+        // trigger, SELECT on every column its pseudo-tables read and no DELETE
+        // (probed 2026-09-27 against SQL Server 2025).
+        if (deleteSecurable is not null && sourceView is { BaseTable: { } deleteBase })
+        {
+            if (HasInsteadOfTrigger(context.Batch, sourceView, TriggerActions.Delete))
+            {
+                PermissionEnforcement.CheckBrokenChainColumns(context.Batch, Permission.Select, sourceView, viewColumns: null);
+            }
+            else
+            {
+                if (where is not null)
+                {
+                    var baseRead = new ColumnReadTarget(sourceView);
+                    where.VisitOperandExpressions(op => op.VisitColumnReferences(baseRead.Add));
+                    PermissionEnforcement.CheckBrokenChainColumns(context.Batch, Permission.Select, sourceView, baseRead);
+                }
+                PermissionEnforcement.CheckBrokenChainWrite(context.Batch, "DELETE", sourceView, deleteBase);
+            }
+        }
 
         if (positionedCursor is null)
             Selection.SettleSerializableWriteFence(table, where, serializableHint, context.Batch);

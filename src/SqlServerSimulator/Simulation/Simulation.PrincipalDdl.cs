@@ -454,6 +454,15 @@ partial class Simulation
         // A principal that still owns anything can't be dropped; the refusals
         // name neither the principal nor what it owns (probe-confirmed).
         Ownership.RejectDropOfOwner(context.CurrentDatabase, removed.PrincipalId);
+        // Nor can one a module runs as — the OWNER sentinel names no principal.
+        foreach (var schema in context.CurrentDatabase.Schemas.Values)
+        {
+            foreach (var obj in schema.SchemaObjects())
+            {
+                if (obj.ExecuteAsPrincipalId == removed.PrincipalId)
+                    throw SimulatedSqlException.PrincipalIsExecutionContext();
+            }
+        }
         // A role that still has members can't go (probed 2026-09-25 against
         // SQL Server 2025); a user in roles can, its memberships going with it.
         if (isRole && context.CurrentDatabase.RoleMembers.Exists(rm => rm.RoleId == removed.PrincipalId))

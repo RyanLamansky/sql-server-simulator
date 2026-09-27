@@ -293,17 +293,14 @@ partial class Simulation
     /// <summary>
     /// Checks MERGE permissions on the target: SELECT (the ON predicate reads
     /// it) plus the write permission of each action kind present (INSERT /
-    /// UPDATE / DELETE). Denials surface as Msg 229. The source read is not
-    /// separately checked — a documented gap.
+    /// UPDATE / DELETE). Denials surface as Msg 229. A single-table view
+    /// target whose owner differs from its base table's breaks the ownership
+    /// chain, so the same permissions are then checked on the base table,
+    /// after the view's (probed 2026-09-27 against SQL Server 2025). The
+    /// source read is not separately checked — a documented gap.
     /// </summary>
     private static void CheckMergePermissions(BatchContext batch, MultiPartName destinationName, SchemaObject destination, List<WhenClause> whenClauses)
     {
-        var target = PermissionEnforcement.SecurableFor(batch, destinationName, destination);
-        if (!PermissionEnforcement.Applies(batch, batch.DatabaseFor(target)))
-            return;
-        void Check(string permission) => PermissionEnforcement.CheckSchemaObject(batch, permission, target);
-
-        Check("SELECT");
         var insert = false;
         var update = false;
         var delete = false;
@@ -322,12 +319,30 @@ partial class Simulation
                     break;
             }
         }
+
+        var target = PermissionEnforcement.SecurableFor(batch, destinationName, destination);
+        if (PermissionEnforcement.Applies(batch, batch.DatabaseFor(target)))
+        {
+            void Check(string permission) => PermissionEnforcement.CheckSchemaObject(batch, permission, target);
+            Check("SELECT");
+            if (insert)
+                Check("INSERT");
+            if (update)
+                Check("UPDATE");
+            if (delete)
+                Check("DELETE");
+        }
+
+        if (destination is not View { BaseTable: { } baseTable } view)
+            return;
+        void CheckBase(string permission) => PermissionEnforcement.CheckBrokenChainWrite(batch, permission, view, baseTable);
+        CheckBase("SELECT");
         if (insert)
-            Check("INSERT");
+            CheckBase("INSERT");
         if (update)
-            Check("UPDATE");
+            CheckBase("UPDATE");
         if (delete)
-            Check("DELETE");
+            CheckBase("DELETE");
     }
 
     /// <summary>

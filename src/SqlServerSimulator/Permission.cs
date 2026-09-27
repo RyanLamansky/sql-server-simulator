@@ -20,6 +20,7 @@ internal enum Permission : byte
     AlterAnyLogin,
     AlterAnyRole,
     AlterAnySchema,
+    Authenticate,
     Connect,
     Control,
     CreateAnyDatabase,
@@ -119,6 +120,7 @@ internal static class PermissionCatalog
         // role DDL (probe-confirmed — DROP ROLE stays Msg 15151 for a member).
         new("ALTER ANY ROLE", "ALRL", PermissionCategory.None),     // AlterAnyRole
         new("ALTER ANY SCHEMA", "ALSM", PermissionCategory.Ddl),    // AlterAnySchema
+        new("AUTHENTICATE", "AUTH", PermissionCategory.None),       // Authenticate
         new("CONNECT", "CO  ", PermissionCategory.None),            // Connect
         new("CONTROL", "CL  ", PermissionCategory.None),            // Control
         new("CREATE ANY DATABASE", "CRDB", PermissionCategory.None), // CreateAnyDatabase (server scope)
@@ -170,6 +172,7 @@ internal static class PermissionCatalog
                 "ALTER ANY LOGIN" => Permission.AlterAnyLogin,
                 "ALTER ANY ROLE" => Permission.AlterAnyRole,
                 "ALTER ANY SCHEMA" => Permission.AlterAnySchema,
+                "AUTHENTICATE" => Permission.Authenticate,
                 "CONNECT" => Permission.Connect,
                 "CONTROL" => Permission.Control,
                 "CREATE ANY DATABASE" => Permission.CreateAnyDatabase,

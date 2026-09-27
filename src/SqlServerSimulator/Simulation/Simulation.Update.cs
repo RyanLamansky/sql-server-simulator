@@ -665,8 +665,16 @@ partial class Simulation
         var updateSecurable = context.Batch.IsSkipping
             ? null
             : PermissionEnforcement.SecurableFor(context.Batch, targetName, (SchemaObject?)sourceView ?? table);
-        if (updateSecurable is null || !PermissionEnforcement.Applies(context.Batch, context.Batch.DatabaseFor(updateSecurable)))
+        if (updateSecurable is null)
             return;
+        if (!PermissionEnforcement.Applies(context.Batch, context.Batch.DatabaseFor(updateSecurable)))
+        {
+            // A module body's reference to the view is chained, but the
+            // view's own reference to its base table still breaks on an
+            // owner change.
+            CheckBrokenChainUpdate(context, sourceView, rawAssignments, where);
+            return;
+        }
 
         if (updateSecurable is Synonym synonym)
         {
@@ -675,6 +683,7 @@ partial class Simulation
             if (where is not null || AnySetExpressionReadsColumn(rawAssignments, table, context.Batch))
                 PermissionEnforcement.CheckSchemaObject(context.Batch, "SELECT", synonym);
             PermissionEnforcement.CheckSchemaObject(context.Batch, "UPDATE", synonym);
+            CheckBrokenChainUpdate(context, sourceView, rawAssignments, where);
             return;
         }
 
@@ -695,6 +704,40 @@ partial class Simulation
         foreach (var columnName in SetColumnNames(rawAssignments))
             assigned.Add(columnName);
         PermissionEnforcement.CheckColumns(context.Batch, Permission.Update, assigned);
+        CheckBrokenChainUpdate(context, sourceView, rawAssignments, where);
+    }
+
+    /// <summary>
+    /// An UPDATE through a single-table view whose owner differs from its base
+    /// table's checks the base table too, after the view: SELECT on the base
+    /// columns the WHERE and SET expressions read, then UPDATE on the ones
+    /// assigned (probed 2026-09-27 against SQL Server 2025). Under an
+    /// <c>INSTEAD OF UPDATE</c> trigger nothing is written through the view,
+    /// but its pseudo-tables still read every base column, which takes SELECT
+    /// on the whole base table.
+    /// </summary>
+    private static void CheckBrokenChainUpdate(
+        ParserContext context,
+        View? sourceView,
+        List<(string? ColumnName, Expression Expr)> rawAssignments,
+        BooleanExpression? where)
+    {
+        if (sourceView is not { BaseTable: not null })
+            return;
+        if (HasInsteadOfTrigger(context.Batch, sourceView, TriggerActions.Update))
+        {
+            PermissionEnforcement.CheckBrokenChainColumns(context.Batch, Permission.Select, sourceView, viewColumns: null);
+            return;
+        }
+        var read = new ColumnReadTarget(sourceView);
+        where?.VisitOperandExpressions(op => op.VisitColumnReferences(read.Add));
+        foreach (var (_, expr) in rawAssignments)
+            expr.VisitColumnReferences(read.Add);
+        PermissionEnforcement.CheckBrokenChainColumns(context.Batch, Permission.Select, sourceView, read);
+        var assigned = new ColumnReadTarget(sourceView);
+        foreach (var columnName in SetColumnNames(rawAssignments))
+            assigned.Add(columnName);
+        PermissionEnforcement.CheckBrokenChainColumns(context.Batch, Permission.Update, sourceView, assigned);
     }
 
     /// <summary>

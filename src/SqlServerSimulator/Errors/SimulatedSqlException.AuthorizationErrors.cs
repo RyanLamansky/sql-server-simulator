@@ -109,6 +109,15 @@ partial class SimulatedSqlException
         new("The database principal owns a database role and cannot be dropped.", 15421, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 15136: dropping a user that a module's
+    /// <c>WITH EXECUTE AS SELF</c> or <c>WITH EXECUTE AS 'user'</c> names —
+    /// raised after every ownership refusal. Probed 2026-09-27 against SQL
+    /// Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException PrincipalIsExecutionContext() =>
+        new("The database principal is set as the execution context of one or more procedures, functions, or event notifications and cannot be dropped.", 15136, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 15138 for the securables past a schema:
     /// <paramref name="what"/> is <c>a XML namespace</c> (real's words, article
     /// included) or <c>a fulltext catalog</c>. Probed 2026-09-27 against SQL

@@ -37,6 +37,7 @@ Mirrors SqlClient's round-trip behavior for hand-rolled scripts that mutate para
 
 **`@@ROWCOUNT`**: tracks the most-recently-completed statement's row count via `SimulatedDbConnection.LastStatementRowCount`.
 SELECT row counts populate after the dispatch materializes rows up-front (so the next statement in the batch sees the final count); DML mutations write their affected count; `SET` / `DECLARE @v = init` write 1; bare `DECLARE @v` (no initializer) preserves the prior count; transaction / DDL statements reset to 0.
+A statement that fails resets it to 0 as well, whether the batch continues past the error or a `CATCH` block reads it (probed 2026-09-27 against SQL Server 2025).
 
 **`@@ERROR`**: error number of the most-recently-completed statement; `int`.
 Backed by `SimulatedDbConnection.LastErrorNumber`, which the per-statement dispatch wrapper sets to a failed statement's number, whether a `CATCH` or the client receives the error, and resets to 0 when a statement succeeds.

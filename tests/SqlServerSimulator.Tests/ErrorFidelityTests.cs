@@ -306,4 +306,27 @@ public sealed class ErrorFidelityTests
     [DataRow("select translate(N'abc' collate Latin1_General_100_CI_AS_SC, N'ab', N'x')", 3)]
     public void TranslateLengthMismatch_RaisesMsg9828_StateByStringFamily(string sql, int state)
         => AreEqual(state, new Simulation().AssertSqlError(sql, 9828).State);
+
+    // A failed statement leaves @@ROWCOUNT at 0 whatever ran before it
+    // (probed 2026-09-27 against SQL Server 2025).
+    [TestMethod]
+    [DataRow("insert t values (1)")]
+    [DataRow("insert t values (-1)")]
+    [DataRow("raiserror('x', 16, 1)")]
+    [DataRow("execute as user = 'c'; delete t")]
+    public void FailedStatement_ResetsRowCount(string failing)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create user c without login; create table t (a int primary key check (a > 0)); insert t values (1)");
+        AreEqual(0, sim.ExecuteScalar($"""
+            declare @x int;
+            begin try
+                select @x = a from (values (1), (2)) v (a);
+                {failing}
+            end try
+            begin catch
+                select @@rowcount
+            end catch
+            """));
+    }
 }

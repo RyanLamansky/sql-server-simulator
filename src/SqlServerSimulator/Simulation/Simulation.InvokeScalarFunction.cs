@@ -104,10 +104,11 @@ partial class Simulation
         var innerBatch = new BatchContext(bodyCommand, variables, udfFrame) { SuppressDiagnosticsResolution = true, CalledFunctionBody = true, OwnershipChainOwnerId = functionOwner };
         connection.NestingLevel++;
         // Module WITH EXECUTE AS: push the impersonation frame around the body
-        // (OWNER / SELF → dbo, CALLER → no-op, a named user → that principal),
-        // so the body's identity scalars observe the impersonated principal.
+        // (OWNER → the owner, SELF → the creator, CALLER → no-op, a named user →
+        // that principal), so the body's identity scalars observe the
+        // impersonated principal.
         var savedImpersonationDepth = connection.Security.ImpersonationDepth;
-        PushModuleExecuteAsFrame(connection, function.ExecuteAsClause, outerBatch.CurrentDatabase, functionOwner);
+        PushModuleExecuteAsFrame(connection, function.ExecuteAsClause, function.ExecuteAsPrincipalId, outerBatch.CurrentDatabase, functionOwner);
         try
         {
             var parser = innerBatch.Parser;

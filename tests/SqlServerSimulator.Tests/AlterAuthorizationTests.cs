@@ -270,6 +270,100 @@ public sealed class AlterAuthorizationTests
         Contains("The INSERT permission was denied on the object 't'", ex.Errors[0].Message);
     }
 
+    // A dbo-owned view over a w-owned table: the chain breaks at the table.
+    private static Simulation BrokenViewChain(string grants)
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create user c without login; create user w without login; create table t (a int, b int); insert t values (1, 1), (2, 2); alter authorization on t to w",
+            "create view v as select a, b from t");
+        _ = sim.ExecuteNonQuery(grants);
+        return sim;
+    }
+
+    [TestMethod]
+    [DataRow("grant update on v to c", "update v set a = 5", "The UPDATE permission was denied on the object 't'")]
+    [DataRow("grant update, select on v to c; grant update on t to c", "update v set a = 5 where b = 1", "The SELECT permission was denied on the object 't'")]
+    [DataRow("grant update, select on v to c; grant update on t to c", "update v set a = a + 1", "The SELECT permission was denied on the object 't'")]
+    [DataRow("grant delete on v to c", "delete v", "The DELETE permission was denied on the object 't'")]
+    [DataRow("grant delete, select on v to c; grant delete on t to c", "delete v where a = 1", "The SELECT permission was denied on the object 't'")]
+    [DataRow("grant select, update on v to c", "merge v using (select 1 k) s on v.a = s.k when matched then update set b = 9;", "The SELECT permission was denied on the object 't'")]
+    [DataRow("grant select, update on v to c; grant select on t to c", "merge v using (select 1 k) s on v.a = s.k when matched then update set b = 9;", "The UPDATE permission was denied on the object 't'")]
+    [DataRow("grant select, insert, delete on v to c; grant select on t to c", "merge v using (select 1 k) s on v.a = s.k when matched then delete when not matched then insert (a, b) values (7, 7);", "The INSERT permission was denied on the object 't'")]
+    [DataRow("grant select, delete on v to c; grant select on t to c", "merge v using (select 1 k) s on v.a = s.k when matched then delete;", "The DELETE permission was denied on the object 't'")]
+    public void Chain_BrokenForDmlThroughAView(string grants, string statement, string message)
+    {
+        var ex = BrokenViewChain(grants).AssertSqlError($"execute as user = 'c'; {statement}", 229);
+        Contains(message, ex.Errors[0].Message);
+    }
+
+    [TestMethod]
+    [DataRow("grant select, update on t to c", "update v set a = 5 where b = 1")]
+    [DataRow("grant update (a) on t to c; grant select (b) on t to c", "update v set a = 5 where b = 1")]
+    [DataRow("grant select, delete on t to c", "delete v where a = 1")]
+    [DataRow("grant select, update on t to c", "merge v using (select 1 k) s on v.a = s.k when matched then update set b = 9;")]
+    public void Chain_BrokenForDmlThroughAView_BaseGrantAdmits(string grants, string statement)
+    {
+        var sim = BrokenViewChain("grant select, insert, update, delete on v to c; " + grants);
+        AreEqual(1, sim.ExecuteScalar($"execute as user = 'c'; {statement} select @@rowcount"));
+    }
+
+    [TestMethod]
+    [DataRow("grant update (b) on t to c; grant select (b) on t to c", "update v set a = 5 where b = 1", "The UPDATE permission was denied on the column 'a' of the object 't'")]
+    [DataRow("grant update (a) on t to c; grant select (a) on t to c", "update v set a = 5 where b = 1", "The SELECT permission was denied on the column 'b' of the object 't'")]
+    public void Chain_BrokenForAnUpdateThroughAView_IsColumnGrain(string grants, string statement, string message)
+    {
+        var ex = BrokenViewChain("grant select, update on v to c; " + grants).AssertSqlError($"execute as user = 'c'; {statement}", 230);
+        Contains(message, ex.Errors[0].Message);
+    }
+
+    [TestMethod]
+    public void Chain_BrokenThroughAViewOwnedByAnother()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create user c without login; create user w without login; create table t (a int); insert t values (1)",
+            "create view v as select a from t");
+        _ = sim.ExecuteNonQuery("alter authorization on v to w; grant update, delete on v to c");
+        Contains("The UPDATE permission was denied on the object 't'",
+            sim.AssertSqlError("execute as user = 'c'; update v set a = 5", 229).Errors[0].Message);
+        Contains("The DELETE permission was denied on the object 't'",
+            sim.AssertSqlError("execute as user = 'c'; delete v", 229).Errors[0].Message);
+    }
+
+    [TestMethod]
+    public void Chain_BrokenThroughAView_InsteadOfTriggers()
+    {
+        // INSTEAD OF INSERT writes nothing through the view and checks nothing
+        // on the base; INSTEAD OF UPDATE / DELETE still read the base rows for
+        // their pseudo-tables, which takes SELECT on it.
+        var sim = BrokenViewChain("grant insert, update, delete on v to c");
+        sim.ExecuteBatches(
+            "create trigger tri on v instead of insert as select 'fired'",
+            "create trigger tru on v instead of update as select 'fired'",
+            "create trigger trd on v instead of delete as select 'fired'");
+        AreEqual("fired", sim.ExecuteScalar("execute as user = 'c'; insert v values (3, 3)"));
+        Contains("The SELECT permission was denied on the object 't'",
+            sim.AssertSqlError("execute as user = 'c'; update v set a = 3", 229).Errors[0].Message);
+        Contains("The SELECT permission was denied on the object 't'",
+            sim.AssertSqlError("execute as user = 'c'; delete v", 229).Errors[0].Message);
+        _ = sim.ExecuteNonQuery("grant select on t to c");
+        AreEqual("fired", sim.ExecuteScalar("execute as user = 'c'; update v set a = 3"));
+        AreEqual("fired", sim.ExecuteScalar("execute as user = 'c'; delete v"));
+    }
+
+    [TestMethod]
+    public void Chain_IntactThroughAView_NeedsNoBaseGrant()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create user c without login; create table t (a int, b int); insert t values (1, 1)",
+            "create view v as select a, b from t");
+        _ = sim.ExecuteNonQuery("grant select, update, delete on v to c");
+        AreEqual(1, sim.ExecuteScalar("execute as user = 'c'; update v set a = 5 where b = 1; select @@rowcount"));
+        AreEqual(1, sim.ExecuteScalar("execute as user = 'c'; delete v where a = 5; select @@rowcount"));
+    }
+
     [TestMethod]
     public void ExecuteAsOwner_RunsAsTheEffectiveOwner()
     {
@@ -333,6 +427,42 @@ public sealed class AlterAuthorizationTests
         AreEqual("l1", sim.ExecuteScalar("select suser_sname(owner_sid) from sys.databases where name = 'simulated'"));
         _ = sim.ExecuteNonQuery("exec sp_changedbowner 'sa'; drop login l1");
         AreEqual("sa", sim.ExecuteScalar("select suser_sname(owner_sid) from sys.databases where name = 'simulated'"));
+    }
+
+    [TestMethod]
+    [DataRow("grant take ownership on database::simulated to u", "alter authorization on database::simulated to l2", "l2")]
+    [DataRow("alter role db_owner add member u", "alter authorization on database::simulated to l2", "l2")]
+    [DataRow("grant take ownership on database::simulated to u", "alter authorization on database::simulated to sa", "sa")]
+    [DataRow("grant take ownership on database::simulated to u", "exec sp_changedbowner 'l2'", "l2")]
+    public void Database_RestrictedCaller_NeedsImpersonateOnTheNewOwner(string grant, string statement, string owner)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery($"create login l1 with password = 'Xx!12345678'; create login l2 with password = 'Xx!12345678'; create user u for login l1; {grant}");
+        sim.AssertSqlError($"execute as login = 'l1'; {statement}", 15151,
+            $"Cannot find the principal '{owner}', because it does not exist or you do not have permission.");
+        AreEqual("sa", sim.ExecuteScalar("select suser_sname(owner_sid) from sys.databases where name = 'simulated'"));
+        _ = sim.ExecuteNonQuery($"use master; grant impersonate on login::{owner} to l1");
+        _ = sim.ExecuteNonQuery($"execute as login = 'l1'; {statement}; revert");
+        AreEqual(owner, sim.ExecuteScalar("select suser_sname(owner_sid) from sys.databases where name = 'simulated'"));
+    }
+
+    [TestMethod]
+    public void Database_RestrictedCaller_ImpersonateCheckPrecedes15110()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create login l1 with password = 'Xx!12345678'; create login l2 with password = 'Xx!12345678'; create user u for login l1; create user u2 for login l2; grant take ownership on database::simulated to u");
+        _ = sim.AssertSqlError("execute as login = 'l1'; alter authorization on database::simulated to l2", 15151);
+    }
+
+    [TestMethod]
+    public void Database_OwnerChange_RaisesTheDatabaseEventInTheSessionsDatabase()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create database other");
+        sim.ExecuteBatches("create trigger dt on database for alter_authorization_database as select eventdata().value('(/EVENT_INSTANCE/ObjectType)[1]', 'sysname') + ':' + eventdata().value('(/EVENT_INSTANCE/ObjectName)[1]', 'sysname') + ':' + eventdata().value('(/EVENT_INSTANCE/OwnerName)[1]', 'sysname') + ':' + eventdata().value('(/EVENT_INSTANCE/SchemaName)[1]', 'sysname')");
+        AreEqual("DATABASE:simulated:sa:", sim.ExecuteScalar("alter authorization on database::simulated to sa"));
+        AreEqual("DATABASE:other:sa:", sim.ExecuteScalar("alter authorization on database::other to sa"));
+        AreEqual("DATABASE:simulated:sa:", sim.ExecuteScalar("exec sp_changedbowner 'sa'"));
     }
 
     [TestMethod]

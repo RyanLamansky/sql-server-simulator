@@ -81,7 +81,10 @@ partial class Simulation
         if (!context.Batch.IsSkipping)
         {
             PermissionEnforcement.CheckReference(context.Batch, "INSERT", destinationName, destinationView);
-            if (destinationView.BaseTable is { } baseTable)
+            // An INSTEAD OF INSERT trigger writes nothing through the view, so
+            // the base table goes unchecked (probed 2026-09-27 against SQL
+            // Server 2025).
+            if (destinationView.BaseTable is { } baseTable && !HasInsteadOfTrigger(context.Batch, destinationView, TriggerActions.Insert))
                 PermissionEnforcement.CheckBrokenChainWrite(context.Batch, "INSERT", destinationView, baseTable);
         }
         return ProcessViewInsertCore(destinationView, context, top, destinationName);

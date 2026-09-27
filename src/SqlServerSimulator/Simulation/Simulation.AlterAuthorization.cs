@@ -366,8 +366,7 @@ partial class Simulation
     /// <summary>
     /// <c>ALTER AUTHORIZATION ON DATABASE::</c>, shared with
     /// <c>sp_changedbowner</c>: the new owner is a login, which then connects
-    /// to the database as <c>dbo</c>. Real also asks a restricted caller for
-    /// <c>IMPERSONATE</c> on that login, which the simulator doesn't check.
+    /// to the database as <c>dbo</c>.
     /// </summary>
     private static void ChangeDatabaseOwner(ParserContext context, string databaseName, string? loginName)
     {
@@ -404,6 +403,17 @@ partial class Simulation
             throw SimulatedSqlException.DatabaseCannotBeOwnedByRole();
         else
             throw SimulatedSqlException.CannotFindSecurable("principal", loginName);
+        // A caller short of dbo needs IMPERSONATE on the new owner's login —
+        // a db_owner member included, sa included — and is refused as though
+        // the login didn't exist, ahead of the Msg 15110 check (probed
+        // 2026-09-27 against SQL Server 2025).
+        var security = context.Connection.Security;
+        if (!security.EffectiveIsDbo
+            && !(simulation.TryResolveServerPrincipalId(canonical, out var ownerId)
+                && simulation.HoldsServerPrincipalPermission(security.Effective.LoginName, ownerId, Permission.Impersonate, Permission.ImpersonateAnyLogin)))
+        {
+            throw SimulatedSqlException.CannotFindSecurable("principal", loginName);
+        }
         foreach (var principal in target.Principals.Values)
         {
             if (principal.LoginName is { } mapped && target.Collation.Equals(mapped, canonical))
@@ -412,6 +422,10 @@ partial class Simulation
         var previous = target.OwnerLoginName;
         target.OwnerLoginName = canonical;
         RecordDdlUndo(context, () => target.OwnerLoginName = previous);
+        // The event fires in the session's database whichever database changed
+        // hands, with an empty SchemaName (probed 2026-09-27 against SQL Server
+        // 2025).
+        RecordDdlEvent(context, "ALTER_AUTHORIZATION_DATABASE", "", target.Name, "DATABASE", ownerName: canonical);
     }
 
     /// <summary>

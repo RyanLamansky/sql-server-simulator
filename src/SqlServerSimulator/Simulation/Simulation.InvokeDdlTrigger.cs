@@ -114,7 +114,6 @@ partial class Simulation
                         trigger.BodyText,
                         trigger.BodyLineOffset,
                         trigger.Name,
-                        executeAsClause: null,
                         trigger.ObjectId,
                         countsAsAfterFrame: false,
                         affectedRowCount: 0,

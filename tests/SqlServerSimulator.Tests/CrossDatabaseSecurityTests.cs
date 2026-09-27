@@ -600,6 +600,77 @@ public sealed class CrossDatabasePermissionTests
         AreEqual(7, connection.CreateCommand("select id from away.dbo.remote").ExecuteScalar());
     }
 
+    // ---- TRUSTWORTHY needs the source owner to authenticate in the target ----
+    // Probed 2026-09-27 against SQL Server 2025: the source database's owner
+    // must be dbo in the target or hold AUTHENTICATE there.
+
+    private static Simulation OwnedByAnotherLogin()
+    {
+        var sim = TwoDatabaseFixture();
+        CreateAwayUser(sim, "grant select on dbo.remote to awayuser");
+        _ = sim.ExecuteNonQuery("""
+            create login owner2 with password = 'S3cret!Pass';
+            alter authorization on database::home to owner2;
+            alter database home set trustworthy on
+            """);
+        return sim;
+    }
+
+    [TestMethod]
+    public void ExecuteAsUser_TrustworthySource_OwnerMustAuthenticateInTheTarget()
+    {
+        var sim = OwnedByAnotherLogin();
+        const string read = "use home; execute as user = 'homeuser'; select id from away.dbo.remote";
+        var ex = sim.AssertSqlError(read, 916);
+        AreEqual("The server principal \"app\" is not able to access the database \"away\" under the current security context.", ex.Errors[0].Message);
+        _ = sim.ExecuteNonQuery("use away; create user o for login owner2");
+        _ = sim.AssertSqlError(read, 916);
+        _ = sim.ExecuteNonQuery("use away; grant authenticate to o");
+        AreEqual(7, sim.ExecuteScalar(read));
+    }
+
+    [TestMethod]
+    public void ExecuteAsUser_TrustworthySource_OwnerOwningTheTargetOrInDbOwner_Authenticates()
+    {
+        var sim = OwnedByAnotherLogin();
+        const string read = "use home; execute as user = 'homeuser'; select id from away.dbo.remote";
+        _ = sim.ExecuteNonQuery("use away; create user o for login owner2; alter role db_owner add member o");
+        AreEqual(7, sim.ExecuteScalar(read));
+        _ = sim.ExecuteNonQuery("use away; alter role db_owner drop member o; drop user o; alter authorization on database::away to owner2");
+        AreEqual(7, sim.ExecuteScalar(read));
+    }
+
+    [TestMethod]
+    public void ModuleOwnerFrame_TrustworthySource_AnswersAsTheOwnersLoginInTheTarget()
+    {
+        var sim = OwnedByAnotherLogin();
+        sim.ExecuteBatches(
+            "use away; create user o for login owner2; grant authenticate to o",
+            "use home",
+            "create procedure dbo.p_owner with execute as owner as select id from away.dbo.remote");
+        var ex = sim.AssertSqlError("use home; exec dbo.p_owner", 229);
+        AreEqual("The SELECT permission was denied on the object 'remote', database 'away', schema 'dbo'.", ex.Errors[0].Message);
+        _ = sim.ExecuteNonQuery("use away; grant select on dbo.remote to o");
+        AreEqual(7, sim.ExecuteScalar("use home; exec dbo.p_owner"));
+    }
+
+    [TestMethod]
+    public void ModuleOwnerFrame_ReportsTheDatabaseOwnersLogin()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create procedure dbo.p_owner with execute as owner as select system_user");
+        AreEqual("sa", sim.ExecuteScalar("exec dbo.p_owner"));
+    }
+
+    [TestMethod]
+    public void Authenticate_IsACatalogPermission()
+        => AreEqual("AUTHENTICATE|AUTH", new Simulation().ExecuteScalar("""
+            create user o without login;
+            grant authenticate to o;
+            select permission_name + '|' + type from sys.database_permissions
+            where grantee_principal_id = user_id('o') and permission_name <> 'CONNECT'
+            """));
+
     // ---- DB_CHAINING re-links the ownership chain ----
 
     /// <summary>
@@ -683,6 +754,51 @@ public sealed class CrossDatabasePermissionTests
         using var connection = ConnectAsApp(sim);
         var ex = Throws<SimulatedSqlException>(() => connection.CreateCommand("select id from away.dbo.remote").ExecuteScalar());
         AreEqual(229, ex.Number);
+    }
+
+    // The chain re-links only when the module's owner and the object's owner
+    // map to one login, dbo standing for the database owner (probed 2026-09-27
+    // against SQL Server 2025).
+
+    [TestMethod]
+    public void ChainingOnBothSides_DatabasesOwnedByDifferentLogins_BreaksTheChain()
+    {
+        var sim = ChainFixture("on on");
+        _ = sim.ExecuteNonQuery("create login owner2 with password = 'S3cret!Pass'; alter authorization on database::away to owner2");
+        using var connection = ConnectAsApp(sim);
+        var ex = Throws<SimulatedSqlException>(() => connection.CreateCommand("select id from dbo.v_remote").ExecuteScalar());
+        AreEqual(229, ex.Number);
+        ex = Throws<SimulatedSqlException>(() => connection.CreateCommand("exec dbo.p_remote").ExecuteScalar());
+        AreEqual(229, ex.Number);
+    }
+
+    [TestMethod]
+    public void ChainingOnBothSides_DatabasesOwnedByOneLogin_CarriesTheChain()
+    {
+        var sim = ChainFixture("on on");
+        _ = sim.ExecuteNonQuery("""
+            create login owner2 with password = 'S3cret!Pass';
+            alter authorization on database::home to owner2;
+            alter authorization on database::away to owner2
+            """);
+        using var connection = ConnectAsApp(sim);
+        AreEqual(7, connection.CreateCommand("exec dbo.p_remote").ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void ChainingOnBothSides_ObjectOwners_ComparedByLogin()
+    {
+        var sim = ChainFixture("on on");
+        _ = sim.ExecuteNonQuery("""
+            create login owner2 with password = 'S3cret!Pass';
+            use away; create user o for login owner2; alter authorization on dbo.remote to o
+            """);
+        using var connection = ConnectAsApp(sim);
+        var ex = Throws<SimulatedSqlException>(() => connection.CreateCommand("exec dbo.p_remote").ExecuteScalar());
+        AreEqual(229, ex.Number);
+        // The owner change drops the EXECUTE grant, so it is given again.
+        _ = sim.ExecuteNonQuery("use home; create user o for login owner2; alter authorization on dbo.p_remote to o; grant execute on dbo.p_remote to homeuser");
+        AreEqual(7, connection.CreateCommand("exec dbo.p_remote").ExecuteScalar());
     }
 
     // ---- USE / ChangeDatabase ----

@@ -4,7 +4,7 @@
 **Permissions are enforced**: a non-dbo session's SELECT / INSERT / UPDATE / DELETE / EXECUTE and every modeled CREATE / ALTER / DROP statement are checked at execution time against its effective principal, with role closure, fixed roles, DENY-beats-GRANT, covering permissions, and ownership chaining.
 **Session identity is real**: a per-connection principal (original login + database user + impersonation stack) drives the identity scalars, `EXECUTE AS` / `REVERT`, module `WITH EXECUTE AS`, connection-string / TDS authentication, and the per-database identity a cross-database reference or a `USE` resolves through.
 A session that never authenticates and never runs `EXECUTE AS` is the `sa` login — what `SYSTEM_USER` / `SUSER_SNAME()` / `ORIGINAL_LOGIN()` report, and a `sysadmin` to `IS_SRVROLEMEMBER`, as a default real connection is — mapped to `dbo` in every database, and **dbo bypasses every check** — the enforcement layer short-circuits on `SessionSecurityContext.EffectiveIsDbo` before any allocation, so existing (dbo) consumers see byte-identical behavior.
-(The one `dbo` that doesn't bypass everything is a module's `WITH EXECUTE AS OWNER` / `SELF` frame, whose privilege stops at the database boundary — see [Cross-database references](#cross-database-references).)
+(The one `dbo` that doesn't bypass everything is a database-scoped frame — `EXECUTE AS USER = 'dbo'`, or a module's `WITH EXECUTE AS OWNER` / `SELF` that resolves to `dbo` — whose privilege stops at the database boundary — see [Cross-database references](#cross-database-references).)
 Logins are enforced as connection credentials at both front doors (TDS endpoint — see [`tds-endpoint.md`](tds-endpoint.md) — and in-process `User ID=` connection strings).
 
 ## Storage
@@ -62,14 +62,16 @@ An unauthenticated in-process connection uses `CreateDefault()` — dbo as login
   **`dbo` is an ordinary target**: a session holding IMPERSONATE on it — a sysadmin / `dbo` session, a `db_owner` member, or an explicit `GRANT IMPERSONATE ON USER::dbo` grantee — impersonates it successfully, and only a principal holding none of that gets Msg 15517 (severity 16 state 1, naming `dbo`).
   Probe-confirmed against SQL Server 2025 on two instances, which is what retires the earlier always-raises claim: the probe that produced it read a principal without the permission.
   The pushed frame is database-scoped like every other `EXECUTE AS USER` one, so it narrows even an `sa` session — a cross-database reference out of a non-`TRUSTWORTHY` database raises Msg 916 (probe-confirmed).
-  Real reports the *database owner's* login through `SYSTEM_USER` while impersonating (`sa` on both probed instances); the simulator reports `dbo` whoever owns the database — the same divergence a module's `WITH EXECUTE AS OWNER` frame carries.
+  `SYSTEM_USER` reports the *database owner's* login while impersonating (`sa` on both probed instances), as it does under a module frame that resolves to `dbo`; that login is also what the frame answers as in another database (probed 2026-09-27 against SQL Server 2025).
 - `EXECUTE AS LOGIN = 'l'` maps l to its database user in the current DB (Msg 15406 on a missing login).
 - `REVERT` pops one frame; a stray REVERT at the base is a silent no-op.
 - Nested `EXECUTE AS USER` by a non-dbo principal needs IMPERSONATE on the target at class 4, answered by the ordinary `PermissionChecker.IsGranted` walk — so an explicit grant, a role that holds one, `CONTROL` on the principal, and `db_owner` membership all admit it, and a DENY binds first.
 - Nested `EXECUTE AS LOGIN` gates at **server** scope instead: `IMPERSONATE ON LOGIN::<target>` (class 101) or the server-wide `IMPERSONATE ANY LOGIN` (class 100), with a class-101 DENY overriding the blanket grant and `CONTROL ON LOGIN::` covering IMPERSONATE.
   A refusal reports the same Msg 15406 as a missing login — real leaks no distinction (probe-confirmed).
   See [`ON LOGIN::` securables](#on-login-securables).
-- Module `WITH EXECUTE AS {CALLER | SELF | OWNER | 'user'}` is captured (on `Procedure.ExecuteAsClause` / `UserDefinedFunction.ExecuteAsClause` / `Trigger.ExecuteAsClause`) and pushed/popped around the body via the shared `PushModuleExecuteAsFrame` — procedures (`InvokeProcedure`), scalar UDFs / TVFs (`InvokeScalarFunction`), and triggers (`InvokeTrigger`) all honor it at runtime (OWNER → the module's effective owner — see [Ownership](#ownership) — SELF → dbo, CALLER → no-op, a named user → that principal).
+- Module `WITH EXECUTE AS {CALLER | SELF | OWNER | 'user'}` is captured (on `Procedure.ExecuteAsClause` / `UserDefinedFunction.ExecuteAsClause` / `Trigger.ExecuteAsClause`) and pushed/popped around the body via the shared `PushModuleExecuteAsFrame` — procedures (`InvokeProcedure`), scalar UDFs / TVFs (`InvokeScalarFunction`), and triggers (`InvokeTrigger`) all honor it at runtime (OWNER → the module's effective owner — see [Ownership](#ownership) — SELF → the principal that ran the CREATE or the last ALTER, CALLER → no-op, a named user → that principal).
+  SELF's principal is what `execute_as_principal_id` records, and an ownership change leaves it alone; the frame is that principal's, so a broken chain or dynamic SQL in the body checks the creator's rights (probed 2026-09-27 against SQL Server 2025).
+  A user a module runs as — through SELF or by name — can't be dropped: Msg 15136, raised after every ownership refusal.
   The clause also resolves to a principal id at CREATE, stored on `SchemaObject.ExecuteAsPrincipalId` and projected by `sys.sql_modules.execute_as_principal_id` — see [`catalog-views.md`](catalog-views.md#execute_as_principal_id) for real's encoding.
   A scalar UDF's own `EXECUTE` permission is checked at the invocation seam (once per statement, memoized on `BatchContext.ExecuteCheckedFunctionIds`), covering the SET / IF operand contexts the query read-source sink doesn't reach.
 
@@ -259,10 +261,10 @@ All probe-confirmed against SQL Server 2025.
 | The login's user in the target holds the permission | allowed |
 | It holds nothing (the session-database user's grant does **not** travel) | **Msg 229** naming the *target* database — `The SELECT permission was denied on the object 't2', database 'other', schema 'dbo'.` |
 | The login has **no user** in the target | **Msg 916** sev 14 state 2 — `The server principal "app" is not able to access the database "other" under the current security context.` |
-| The effective principal is `dbo` (sysadmin, or the unauthenticated in-process default) | unrestricted — unless the `dbo` is a module's database-scoped `WITH EXECUTE AS OWNER` / `SELF` frame, which is refused like any other one |
+| The effective principal is `dbo` (sysadmin, or the unauthenticated in-process default) | unrestricted — unless the `dbo` is a database-scoped frame, which is refused like any other one |
 
 The `dbo` bypass stays two field reads on the session's effective frame, so nothing but a genuinely restricted principal ever pays a lookup, and the lookup only runs when the touched database differs from the session's.
-That bypass is exact in the simulator's principal model: an effective `dbo` can only have come from a sysadmin login, the empty-registry dev mode, or a module's `WITH EXECUTE AS OWNER` / `SELF` frame — the first two `dbo` in every database, and the third refused at the boundary along with the other database-scoped identities below.
+That bypass is exact in the simulator's principal model: an effective `dbo` can only have come from a sysadmin login, the empty-registry dev mode, or a database-scoped frame — the first two `dbo` in every database, and the third answering at the boundary like the other database-scoped identities below.
 `PermissionEnforcement.Bypasses(connection, target)` is the boundary-aware form every cross-database check site asks (`BypassesEverywhere` the same question with no target in hand, for the securable-list skips); `SessionSecurityContext.EffectiveIsDbo` remains the same-database one.
 
 A **catalog-view** read of another database asks the same question — see [Cross-database metadata visibility](#cross-database-metadata-visibility).
@@ -272,23 +274,24 @@ An `EXECUTE AS USER` frame, any of a module's `WITH EXECUTE AS` frames, and an a
 The name in the message is the frame's reported login identity: the login for a `FOR LOGIN` user or an application role (the session's login survives the activation), and the `S-1-9-3-…` SID for a `WITHOUT LOGIN` user.
 `SecurityPrincipalFrame.IsDatabaseScoped` is the marker.
 
-**`WITH EXECUTE AS OWNER` / `SELF` is database-scoped too**, though both resolve to `dbo`: the token is minted in the module's database and its `dbo`-ness stops at the boundary, so a body that reads, writes, `USE`s or reads the catalog of another database out of a non-trustworthy source is refused — probe-confirmed, and refused even when the session's own login is `sa`.
+**A frame that resolves to `dbo` is database-scoped too** — `EXECUTE AS USER = 'dbo'`, and `WITH EXECUTE AS OWNER` / `SELF` in a dbo-owned or dbo-created module: the token is minted in the module's database and its `dbo`-ness stops at the boundary, so a body that reads, writes, `USE`s or reads the catalog of another database out of a non-trustworthy source is refused — probe-confirmed, and refused even when the session's own login is `sa`.
 Data reference, catalog read and `OBJECT_ID`'s three-part name all raise the same Msg 916; the id-form `OBJECT_NAME` / `OBJECT_SCHEMA_NAME` still answer, since those ask only the visibility question (see [Cross-database metadata visibility](#cross-database-metadata-visibility)).
 Everything the frame does in its *own* database is unaffected — the bypass is boundary-aware, not withdrawn.
-The message names `dbo`; real names the owner's login (`sa` on the probed instance).
+The message names the database owner's login, which is the frame's login.
 
-Turning the **source** database's `TRUSTWORTHY` on (the database the token was made in — the target's flag is irrelevant) accepts the token, after which the frame's own login answers in the target like any ordinary session's: an object it holds nothing on is Msg 229 naming the target, and a login with no user there is still Msg 916 — while an accepted `OWNER` / `SELF` token carries its `dbo` through and answers unrestricted.
+Turning the **source** database's `TRUSTWORTHY` on (the database the token was made in — the target's flag is irrelevant) accepts the token, after which the frame's own login answers in the target like any ordinary session's: an object it holds nothing on is Msg 229 naming the target, and a login with no user there is still Msg 916 — and a `dbo` frame answers as the database owner's login, so a `sa`-owned source's is unrestricted and another owner's is checked as that login's user there (probed 2026-09-27 against SQL Server 2025).
 So a `WITHOUT LOGIN` user, whose reported identity is a SID rather than a login, is refused however trustworthy the source is.
 All probe-confirmed against SQL Server 2025.
 
-Real gates the crossing on an **authenticator** as well: the source database's owner must hold `AUTHENTICATE` in the target — probed as the exact line between allowed and refused, with a `sa`-owned source qualifying through `dbo`, an owner with no user in the target refused, and an owner whose user there lacks `AUTHENTICATE` refused too.
-The database owner is modeled (see [Ownership](#ownership)), but this rule isn't built yet: the flag alone decides.
+The crossing also needs an **authenticator**: the source database's owner must be `dbo` in the target or hold `AUTHENTICATE` there — probed as the exact line between allowed and refused, with a `sa`-owned source qualifying through `dbo`, an owner that owns the target or is a `db_owner` member there qualifying too, and an owner with no user in the target, or one whose user lacks `AUTHENTICATE`, refused with Msg 916 (probed 2026-09-27 against SQL Server 2025).
+`PermissionEnforcement.AcceptsDatabaseScopedToken` is the rule.
 
 **Ownership chaining crosses the database boundary only with `DB_CHAINING` on in both databases.**
 With either side off — the default for a user database — a dbo-owned module does not lend its owner's rights to an object in another database: the caller needs its own grant there and the denial names the base object.
 With both on the chain re-links and the module's reference is unchecked, through a view and through a statement-dispatching body alike.
 Chaining lends **rights, not access**: the caller still needs a user in the target, so a login with none is Msg 916 either way (probe-confirmed — a `guest` grant in the target is enough to satisfy it).
-Real additionally requires the two objects to share an owner (probed: a view owned by a schema's own user over a dbo-owned base still breaks, chaining on or not); across the boundary the simulator compares no owners yet, so that half is always satisfied.
+The two objects must also share an owner, compared by **login**: a `dbo` owner stands for its database's owner, a `FOR LOGIN` user for its login, and anything else matches nothing (`Ownership.OwnerLogin`).
+So databases owned by different logins break the chain, as does a target owned by a user of another login, while two users of one login in the two databases keep it (probed 2026-09-27 against SQL Server 2025).
 A reference the *user* wrote is never chained, whatever the flags say.
 
 Mechanically, `PermissionEnforcement.Applies(batch, target)` keeps the module-body suppression only for a same-database securable, which covers procedure / trigger / scalar-UDF bodies through the ordinary per-statement check sites; a **view or inline-TVF body is inlined** into the referencing statement and reaches none of those, so its plan's cross-database reads are checked once at invocation via `PermissionEnforcement.CheckCrossDatabaseReads`.
@@ -303,7 +306,7 @@ A login with no user there gets Msg 916 and the session stays put; a missing dat
 `USE` runs the same gate, so a `TRUSTWORTHY` source lets an impersonating session switch where a non-trustworthy one gets Msg 916 (probe-confirmed).
 
 **Divergences.**
-The `TRUSTWORTHY` flag is read off the **session's** current database, which is the token's home for a direct `EXECUTE AS USER` and for every same-database module; a module invoked through a three-part name carries a frame made in *its* database, and real would read the flag there.
+The `TRUSTWORTHY` flag and the authenticator's owner are read off the **session's** current database, which is the token's home for a direct `EXECUTE AS USER` and for every same-database module; a module invoked through a three-part name carries a frame made in *its* database, and real would read both there.
 
 ### Reference provenance: synonyms
 
@@ -403,7 +406,8 @@ The refusals, each an error factory with its number: a trigger or constraint (Ms
 The entity resolves before the new owner.
 A restricted caller needs `TAKE OWNERSHIP` on the entity (else the entity's own not-found wording) and must be the new owner, a member of it, or hold `IMPERSONATE` on it (else `Cannot find the principal`, state 1).
 A change of **effective** owner drops every permission granted on the securable — objects, schemas and roles alike — while naming the owner it already has (`TO dbo` on a dbo-schema table) keeps them.
-Every change rolls back with the transaction, and each raises `ALTER_AUTHORIZATION_DATABASE` with an `OwnerName` element.
+Every change rolls back with the transaction, and each raises `ALTER_AUTHORIZATION_DATABASE` with an `OwnerName` element — a database's too, with `ObjectType` `DATABASE` and an empty `SchemaName`, fired in the *session's* database whichever database changed hands (probed 2026-09-27 against SQL Server 2025).
+Changing a database's owner additionally asks a caller short of `dbo` — a `db_owner` member included — for `IMPERSONATE` on the new owner's login (`sa` included), refusing with `Cannot find the principal` ahead of Msg 15110.
 
 **What an owner gets.**
 An owner holds `CONTROL` that no `DENY` removes, and so does every member of a role that owns (`PermissionChecker.OwnsSecurable`): an object's owner or its schema's owner reads, writes, alters and sees the metadata of the object with no grant.
@@ -412,7 +416,10 @@ A login that owns a database connects to it as `dbo`, can't also be given a user
 
 **Ownership chaining compares owners.**
 A procedure, scalar function or DML trigger body records its module's effective owner (`BatchContext.OwnershipChainOwnerId`; a trigger's is its table's), and a same-database reference whose object has a different owner is checked against the caller as though no module intervened — Msg 229 naming the base object, with the module's Procedure attribution.
-A view or inline TVF, inlined into the referencing statement, checks its body's other-owner reads once at invocation (`PermissionEnforcement.CheckModuleBodyReads`), and an `INSERT` through an updatable view checks the base table when the two owners differ (`CheckBrokenChainWrite`).
+A view or inline TVF, inlined into the referencing statement, checks its body's other-owner reads once at invocation (`PermissionEnforcement.CheckModuleBodyReads`), and DML through a single-table updatable view checks the base table after the view when the two owners differ — even from a module body whose reference to the view is chained.
+`INSERT` and `DELETE` check the write object-grain (`CheckBrokenChainWrite`); `UPDATE`'s SELECT and UPDATE and `DELETE`'s SELECT are column-grain on the base columns the view's columns read (`CheckBrokenChainColumns`, Msg 230 naming the base column); `MERGE` checks SELECT and each action's permission object-grain.
+Under an `INSTEAD OF` trigger an `INSERT` checks nothing on the base, while an `UPDATE` or `DELETE` still needs SELECT on every base column for the pseudo-tables.
+All probed 2026-09-27 against SQL Server 2025, which raises the SELECT denial and the write denial together where the simulator raises the first.
 
 **`WITH EXECUTE AS OWNER`** runs the body as the module's effective owner; an owner that is a role or an application role can't be impersonated, which is Msg 15517 naming it (a procedure's at line 0 under its unqualified name).
 
@@ -420,12 +427,14 @@ A view or inline TVF, inlined into the referencing statement, checks its body's 
 `principal_id` reports the explicit owner in `sys.objects` / `all_objects` / `tables` / `views` / `procedures` / `sequences` / `synonyms` / `types` / `table_types` / `xml_schema_collections`, but stays NULL on a table type's `TT` row; `sys.schemas.principal_id` and `INFORMATION_SCHEMA.SCHEMATA.SCHEMA_OWNER` follow the schema owner, `sys.databases.owner_sid` / `dbo`'s `sid` / `sp_helpdb`'s `owner` / `sp_helpuser`'s dbo `LoginName` the database owner.
 
 **Divergences.**
-A restricted caller changing a database's owner needs `TAKE OWNERSHIP` on the database but no `IMPERSONATE` on the new login.
 The type-class and XML-schema-collection gates ask for `TAKE OWNERSHIP` on the owning schema, and the full-text-catalog and assembly gates on the database, since `GRANT` models none of those classes.
-`WITH EXECUTE AS SELF` still runs as `dbo`, and an owner's `SYSTEM_USER` under `EXECUTE AS OWNER` is the synthetic SID every `WITHOUT LOGIN` user reports.
+A `WITHOUT LOGIN` owner's or creator's `SYSTEM_USER` under `EXECUTE AS OWNER` / `SELF` is the deterministic SID every such user reports, where real's is random.
 
 **Not modeled yet.**
-The `ALTER AUTHORIZATION` classes past the eight above raise `NotSupportedException`; `UPDATE` / `DELETE` / `MERGE` through a view don't check a broken chain to the base table; a cross-database chain compares no owners; and `ALTER AUTHORIZATION ON DATABASE` raises no server-scope `ALTER_AUTHORIZATION_SERVER` event.
+The `ALTER AUTHORIZATION` classes past the eight above raise `NotSupportedException`.
+DML through a **multi-table (join) view** checks no broken chain to its base tables — real checks SELECT on each other-owner base table the join reads, and the write permission on the one it writes (probed 2026-09-27 against SQL Server 2025).
+A chain through **nested views** compares only the outermost view's owner with the base table's, where real compares each link.
+Server-scope DDL triggers aren't modeled, so `ALTER AUTHORIZATION ON DATABASE` raises no `ALTER_AUTHORIZATION_SERVER` event.
 
 ### Server logins (`Simulation/Simulation.LoginDdl.cs`)
 

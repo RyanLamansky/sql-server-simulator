@@ -87,9 +87,11 @@ public sealed class ExecuteAsTests
     // grantee — impersonates it successfully, and only a principal holding none
     // of that gets Msg 15517.
 
+    // Impersonating dbo reports the database owner's login (probed 2026-09-27
+    // against SQL Server 2025).
     [TestMethod]
     public void ExecuteAsUser_Dbo_FromDboSession_Succeeds()
-        => AreEqual("dbo|dbo", new Simulation().ExecuteScalar(
+        => AreEqual("dbo|sa", new Simulation().ExecuteScalar(
             "execute as user = 'dbo'; select current_user + '|' + system_user"));
 
     [TestMethod]
@@ -134,7 +136,7 @@ public sealed class ExecuteAsTests
         _ = sim.ExecuteNonQuery("create database other");
         _ = sim.ExecuteNonQuery("use other; create table dbo.t (id int not null); insert dbo.t values (1)");
         var ex = sim.AssertSqlError("execute as user = 'dbo'; select id from other.dbo.t", 916);
-        AreEqual("The server principal \"dbo\" is not able to access the database \"other\" under the current security context.", ex.Message);
+        AreEqual("The server principal \"sa\" is not able to access the database \"other\" under the current security context.", ex.Message);
     }
 
     [TestMethod]
@@ -216,6 +218,117 @@ public sealed class ExecuteAsTests
         var sim = new Simulation();
         sim.ExecuteBatches("create procedure dbo.p_self with execute as self as select current_user");
         AreEqual("dbo", sim.ExecuteScalar("exec dbo.p_self"));
+    }
+
+    // SELF is the principal that ran the CREATE or the last ALTER, which an
+    // ownership change leaves in place (probed 2026-09-27 against SQL Server 2025).
+    private const string SelfCreatorSetup = """
+        create user u without login; create user v without login; create user c without login;
+        grant create procedure, create function to u, v; grant alter on schema::dbo to u, v;
+        create table t (a int); insert t values (1);
+        create table log (n sysname);
+        """;
+
+    [TestMethod]
+    public void Procedure_ExecuteAsSelf_RunsAsTheCreator()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery(SelfCreatorSetup + """
+            execute as user = 'u';
+            exec('create procedure p with execute as self as select current_user');
+            revert;
+            """);
+        AreEqual("u", sim.ExecuteScalar("exec p"));
+        _ = sim.ExecuteNonQuery("alter authorization on p to v");
+        AreEqual("u", sim.ExecuteScalar("exec p"));
+        AreEqual("u", sim.ExecuteScalar("select user_name(execute_as_principal_id) from sys.sql_modules where object_id = object_id('p')"));
+    }
+
+    [TestMethod]
+    public void Procedure_ExecuteAsSelf_AlterRecordsTheAlteringPrincipal()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery(SelfCreatorSetup + """
+            execute as user = 'u';
+            exec('create procedure p with execute as self as select current_user');
+            revert;
+            execute as user = 'v';
+            exec('alter procedure p with execute as self as select current_user');
+            revert;
+            """);
+        AreEqual("v", sim.ExecuteScalar("exec p"));
+    }
+
+    [TestMethod]
+    public void FunctionAndTrigger_ExecuteAsSelf_RunAsTheCreator()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery(SelfCreatorSetup + """
+            grant alter on t to u;
+            execute as user = 'u';
+            exec('create function f() returns sysname with execute as self as begin return current_user end');
+            exec('create trigger tr on t with execute as self after insert as insert log select current_user');
+            revert;
+            """);
+        AreEqual("u", sim.ExecuteScalar("select dbo.f()"));
+        AreEqual("u", sim.ExecuteScalar("insert t values (2); select n from log"));
+    }
+
+    [TestMethod]
+    public void Procedure_ExecuteAsSelf_BrokenChainChecksTheCreator()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery(SelfCreatorSetup + """
+            alter authorization on t to v;
+            execute as user = 'u';
+            exec('create procedure p with execute as self as select count(*) from t');
+            revert;
+            grant execute on p to c;
+            """);
+        _ = sim.AssertSqlError("execute as user = 'c'; exec p", 229);
+        _ = sim.ExecuteNonQuery("grant select on t to u");
+        AreEqual(1, sim.ExecuteScalar("execute as user = 'c'; exec p"));
+    }
+
+    [TestMethod]
+    public void Procedure_ExecuteAsSelf_DynamicSqlChecksTheCreator()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery(SelfCreatorSetup + """
+            execute as user = 'u';
+            exec('create procedure p with execute as self as exec(''select count(*) from t'')');
+            revert;
+            grant execute on p to c;
+            """);
+        _ = sim.AssertSqlError("execute as user = 'c'; exec p", 229);
+        _ = sim.ExecuteNonQuery("grant select on t to u");
+        AreEqual(1, sim.ExecuteScalar("execute as user = 'c'; exec p"));
+    }
+
+    [TestMethod]
+    public void DropUser_ModuleExecutionContext_Raises15136()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery(SelfCreatorSetup + """
+            execute as user = 'u';
+            exec('create procedure p with execute as self as select 1');
+            revert;
+            """);
+        sim.ExecuteBatches("create trigger tr on t with execute as 'v' after insert as select 1");
+        sim.AssertSqlError("drop user u", 15136,
+            "The database principal is set as the execution context of one or more procedures, functions, or event notifications and cannot be dropped.");
+        _ = sim.AssertSqlError("drop user v", 15136);
+        _ = sim.ExecuteNonQuery("drop procedure p; drop user u");
+    }
+
+    [TestMethod]
+    public void DropUser_OwnershipRefusalPrecedes15136()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create user u without login; create table t (a int); alter authorization on t to u",
+            "create procedure p with execute as 'u' as select 1");
+        _ = sim.AssertSqlError("drop user u", 15183);
     }
 
     [TestMethod]

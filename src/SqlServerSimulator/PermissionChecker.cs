@@ -136,34 +136,32 @@ internal static class PermissionEnforcement
     /// principal model, where such a <c>dbo</c> came from a sysadmin login or
     /// the empty-registry dev mode, both <c>dbo</c> in every database. The one
     /// exception is a <c>dbo</c> identity that exists only inside one database:
-    /// a module's <c>WITH EXECUTE AS OWNER</c> / <c>SELF</c> frame carries no
-    /// server principal, so it reaches another database only out of a
-    /// <see cref="Database.Trustworthy"/> source and is otherwise refused with
-    /// Msg 916 — probe-confirmed, and refused even when the session's own login
-    /// is <c>sa</c>. The same-database question stays one frame read plus two of
-    /// its fields, so the hot path pays nothing for the boundary case.
+    /// an <c>EXECUTE AS USER = 'dbo'</c> or a module's <c>WITH EXECUTE AS
+    /// OWNER</c> / <c>SELF</c> frame carries no server principal, so another
+    /// database answers it as it answers any database-scoped frame, through
+    /// <see cref="TryResolveCrossDatabasePrincipal"/> — Msg 916 out of an
+    /// ordinary source even when the session's own login is <c>sa</c>
+    /// (probe-confirmed). The same-database question stays one frame read plus
+    /// two of its fields, so the hot path pays nothing for the boundary case.
     /// </summary>
     internal static bool Bypasses(SimulatedDbConnection connection, Database target)
     {
         var effective = connection.Security.Effective;
         return effective.DatabasePrincipalId == Database.DboPrincipalId
-            && (!effective.IsDatabaseScoped
-                || ReferenceEquals(target, connection.CurrentDatabase)
-                || connection.CurrentDatabase.Trustworthy);
+            && (!effective.IsDatabaseScoped || ReferenceEquals(target, connection.CurrentDatabase));
     }
 
     /// <summary>
     /// <see cref="Bypasses"/> with no target in hand — true when the effective
     /// identity waves through whatever database a securable turns out to live
     /// in, which is what lets a list be skipped whole. A database-scoped
-    /// <c>dbo</c> frame out of a non-trustworthy source answers false, and each
-    /// securable is then examined in turn.
+    /// <c>dbo</c> frame answers false, and each securable is then examined in
+    /// turn.
     /// </summary>
     private static bool BypassesEverywhere(SimulatedDbConnection connection)
     {
         var effective = connection.Security.Effective;
-        return effective.DatabasePrincipalId == Database.DboPrincipalId
-            && (!effective.IsDatabaseScoped || connection.CurrentDatabase.Trustworthy);
+        return effective.DatabasePrincipalId == Database.DboPrincipalId && !effective.IsDatabaseScoped;
     }
 
     /// <summary>
@@ -207,7 +205,8 @@ internal static class PermissionEnforcement
         // rights, not access to the database, so a login with no user there is
         // still Msg 916 (probe-confirmed).
         principalId = ResolveCrossDatabasePrincipal(batch.Connection, target).PrincipalId;
-        var chained = !batch.EnforcesPermissions && ChainsAcross(batch.CurrentDatabase, target);
+        var chained = !batch.EnforcesPermissions
+            && ChainsAcross(batch.CurrentDatabase, batch.OwnershipChainOwnerId ?? Database.DboPrincipalId, target, objectId);
         return principalId != Database.DboPrincipalId && !chained;
     }
 
@@ -228,15 +227,25 @@ internal static class PermissionEnforcement
 
     /// <summary>
     /// Whether an ownership chain re-links across the boundary between two
-    /// databases: <c>DB_CHAINING</c> on in <em>both</em>. Real additionally
-    /// requires the two objects to share an owner, which this doesn't compare
-    /// (not built yet). Probe-confirmed against SQL Server 2025: on/on
-    /// carries the chain through a view and through a procedure body, while
-    /// on/off, off/on and off/off all break it and the caller needs its own
-    /// grant on the object the module reached.
+    /// databases: <c>DB_CHAINING</c> on in <em>both</em>, and the module's
+    /// owner <paramref name="fromOwnerId"/> and object
+    /// <paramref name="objectId"/>'s owner mapping to the same login — a
+    /// <c>dbo</c> standing for its database's owner. Probe-confirmed against
+    /// SQL Server 2025: on/on carries the chain through a view and through a
+    /// procedure body, while on/off, off/on and off/off all break it and the
+    /// caller needs its own grant on the object the module reached; with both
+    /// on, databases owned by different logins break it (probed 2026-09-27),
+    /// as does a target object owned by a user of another login, while two
+    /// users of one login keep it. An <paramref name="objectId"/> of 0 — no
+    /// object in hand — asks the flags alone.
     /// </summary>
-    private static bool ChainsAcross(Database from, Database to) =>
-        from.CrossDatabaseChaining && to.CrossDatabaseChaining;
+    private static bool ChainsAcross(Database from, int fromOwnerId, Database to, int objectId) =>
+        from.CrossDatabaseChaining && to.CrossDatabaseChaining
+        && (objectId == 0
+            || (Ownership.OwnerLogin(from, fromOwnerId) is { } fromLogin
+                && Ownership.EffectiveOwnerId(to, objectId) is int toOwnerId
+                && Ownership.OwnerLogin(to, toOwnerId) is { } toLogin
+                && BuiltInToken.Comparer.Equals(fromLogin, toLogin)));
 
     /// <summary>
     /// The database user <paramref name="connection"/>'s login runs as in
@@ -267,13 +276,28 @@ internal static class PermissionEnforcement
     internal static bool TryResolveCrossDatabasePrincipal(SimulatedDbConnection connection, Database target, out DatabasePrincipal principal)
     {
         var effective = connection.Security.Effective;
-        if (effective.IsDatabaseScoped && !connection.CurrentDatabase.Trustworthy)
+        if (effective.IsDatabaseScoped && !AcceptsDatabaseScopedToken(connection.Simulation, connection.CurrentDatabase, target))
         {
             principal = null!;
             return false;
         }
         return Simulation.TryMapLoginToDatabaseUser(connection.Simulation, target, effective.LoginName, out principal);
     }
+
+    /// <summary>
+    /// Whether <paramref name="target"/> accepts a database-scoped token minted
+    /// in <paramref name="source"/>: the source is <c>TRUSTWORTHY</c> and its
+    /// owner's login is an authenticator in the target — <c>dbo</c> there, or a
+    /// user holding <c>AUTHENTICATE</c> (a <c>db_owner</c> member does). Probed
+    /// 2026-09-27 against SQL Server 2025 as the exact line: an owner with no
+    /// user in the target, or one whose user lacks <c>AUTHENTICATE</c>, is
+    /// Msg 916 however trustworthy the source.
+    /// </summary>
+    private static bool AcceptsDatabaseScopedToken(Simulation simulation, Database source, Database target) =>
+        source.Trustworthy
+        && Simulation.TryMapLoginToDatabaseUser(simulation, target, source.OwnerLoginName, out var authenticator)
+        && (authenticator.PrincipalId == Database.DboPrincipalId
+            || PermissionChecker.IsGranted(target, authenticator.PrincipalId, Permission.Authenticate, PermissionChecker.ClassDatabase, 0, 0));
 
     /// <summary>
     /// The principal a catalog-view read of <paramref name="target"/> filters
@@ -402,19 +426,19 @@ internal static class PermissionEnforcement
     /// a view body is inlined into the referencing statement and reaches none,
     /// so its plan is checked at invocation.
     /// </summary>
-    internal static void CheckCrossDatabaseReads(BatchContext batch, Database moduleDatabase, List<ReferencedSecurable>? securables)
+    internal static void CheckCrossDatabaseReads(BatchContext batch, Database moduleDatabase, int moduleOwnerId, List<ReferencedSecurable>? securables)
     {
         if (securables is null || BypassesEverywhere(batch.Connection) || batch.CreateTimeBinding)
             return;
         foreach (var s in securables)
         {
-            if (ReferenceEquals(s.Database, moduleDatabase))
+            if (ReferenceEquals(s.Database, moduleDatabase) || Bypasses(batch.Connection, s.Database))
                 continue;
             // Resolving first is what keeps Msg 916 in play even when the chain
             // re-links — the caller needs a user in the target either way.
             var principalId = ResolveCrossDatabasePrincipal(batch.Connection, s.Database).PrincipalId;
             if (principalId != Database.DboPrincipalId
-                && !ChainsAcross(moduleDatabase, s.Database)
+                && !ChainsAcross(moduleDatabase, moduleOwnerId, s.Database, s.ObjectId)
                 && !PermissionChecker.IsGranted(s.Database, principalId, Permission.Resolve(s.Permission), PermissionChecker.ClassObject, s.ObjectId, s.SchemaId))
             {
                 throw SimulatedSqlException.PermissionDenied(s.Permission.ToUpperInvariant(), s.ObjectName, s.Database.Name, s.SchemaName);
@@ -435,7 +459,7 @@ internal static class PermissionEnforcement
     internal static void CheckModuleBodyReads(BatchContext batch, Schemas.SchemaObject module, Database moduleDatabase, Selection body)
     {
         var securables = body.ReferencedSecurables;
-        CheckCrossDatabaseReads(batch, moduleDatabase, securables);
+        CheckCrossDatabaseReads(batch, moduleDatabase, Ownership.EffectiveOwnerId(moduleDatabase, module), securables);
         if (securables is null || batch.CreateTimeBinding || Bypasses(batch.Connection, moduleDatabase))
             return;
         int? moduleOwner = null;
@@ -464,27 +488,72 @@ internal static class PermissionEnforcement
 
     /// <summary>
     /// Checks a write that passes through <paramref name="module"/> into
-    /// <paramref name="target"/> — an <c>INSERT</c> through an updatable view
+    /// <paramref name="target"/> — a DML statement through an updatable view
     /// — when the two have different owners, which breaks the ownership chain
     /// and makes the caller need the permission on the base object itself
     /// (probed 2026-09-27 against SQL Server 2025: Msg 229 naming the table).
     /// </summary>
     internal static void CheckBrokenChainWrite(BatchContext batch, string permission, Schemas.SchemaObject module, Schemas.SchemaObject target)
     {
-        var database = batch.DatabaseFor(target);
-        if (batch.CreateTimeBinding || Bypasses(batch.Connection, database)
-            || Ownership.EffectiveOwnerId(batch.DatabaseFor(module), module) == Ownership.EffectiveOwnerId(database, target))
-        {
-            return;
-        }
-        var principalId = ReferenceEquals(database, batch.CurrentDatabase)
-            ? batch.Connection.Security.Effective.DatabasePrincipalId
-            : ResolveCrossDatabasePrincipal(batch.Connection, database).PrincipalId;
-        if (principalId != Database.DboPrincipalId
+        if (TryResolveBrokenChain(batch, module, target, out var database, out var principalId)
             && !PermissionChecker.IsGranted(database, principalId, Permission.Resolve(permission), PermissionChecker.ClassObject, target.ObjectId, target.SchemaId))
         {
             throw SimulatedSqlException.PermissionDenied(permission, target.Name, database.Name, SchemaNameFor(database, target.SchemaId));
         }
+    }
+
+    /// <summary>
+    /// The column-grain form of <see cref="CheckBrokenChainWrite"/> for an
+    /// <c>UPDATE</c> / <c>DELETE</c> through a single-table view:
+    /// <paramref name="viewColumns"/>' ordinals translate to the base table's
+    /// through <see cref="Schemas.View.BaseColumnOrdinals"/>, so a column the
+    /// view names is checked on the base column it reads (probed 2026-09-27
+    /// against SQL Server 2025: Msg 230 naming the base column and table). A
+    /// null <paramref name="viewColumns"/> checks every base column — the
+    /// read an <c>INSTEAD OF</c> trigger's pseudo-tables make — and an empty
+    /// set checks nothing.
+    /// </summary>
+    internal static void CheckBrokenChainColumns(BatchContext batch, Permission permission, Schemas.View view, ColumnReadTarget? viewColumns)
+    {
+        if (view.BaseTable is not { } baseTable
+            || viewColumns is { Ordinals.Count: 0 }
+            || !TryResolveBrokenChain(batch, view, baseTable, out var database, out var principalId))
+        {
+            return;
+        }
+        var baseColumns = new ColumnReadTarget(baseTable);
+        if (viewColumns is not null)
+        {
+            foreach (var ordinal in viewColumns.Ordinals)
+            {
+                if (view.BaseColumnOrdinals[ordinal - 1] is var baseOrdinal and >= 0)
+                    _ = baseColumns.Ordinals.Add(baseOrdinal + 1);
+            }
+            if (baseColumns.Ordinals.Count == 0)
+                return;
+        }
+        CheckColumnGrants(database, principalId, permission, baseColumns);
+    }
+
+    /// <summary>
+    /// True when a write through <paramref name="module"/> into
+    /// <paramref name="target"/> must be checked on the target: the owners
+    /// differ and the caller, resolved in the target's database, isn't
+    /// <c>dbo</c>. A create-time bind checks nothing.
+    /// </summary>
+    private static bool TryResolveBrokenChain(BatchContext batch, Schemas.SchemaObject module, Schemas.SchemaObject target, out Database database, out int principalId)
+    {
+        database = batch.DatabaseFor(target);
+        principalId = Database.DboPrincipalId;
+        if (batch.CreateTimeBinding || Bypasses(batch.Connection, database)
+            || Ownership.EffectiveOwnerId(batch.DatabaseFor(module), module) == Ownership.EffectiveOwnerId(database, target))
+        {
+            return false;
+        }
+        principalId = ReferenceEquals(database, batch.CurrentDatabase)
+            ? batch.Connection.Security.Effective.DatabasePrincipalId
+            : ResolveCrossDatabasePrincipal(batch.Connection, database).PrincipalId;
+        return principalId != Database.DboPrincipalId;
     }
 
     /// <summary>

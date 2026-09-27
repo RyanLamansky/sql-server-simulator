@@ -125,6 +125,35 @@ internal static class Ownership
     }
 
     /// <summary>
+    /// The server identity <paramref name="principal"/> stands for — what a
+    /// token made from it reports through <c>SYSTEM_USER</c> and names in
+    /// another database: <c>dbo</c> is the database owner's login (probed
+    /// 2026-09-27 against SQL Server 2025), everyone else their own login or
+    /// SID.
+    /// </summary>
+    internal static string LoginIdentity(Database database, DatabasePrincipal principal) =>
+        principal.PrincipalId == Database.DboPrincipalId ? database.OwnerLoginName : principal.EffectiveLoginIdentity;
+
+    /// <summary>
+    /// The login <paramref name="principalId"/> maps to in
+    /// <paramref name="database"/> — the database owner's for <c>dbo</c>, the
+    /// mapped login for a <c>FOR LOGIN</c> user — or null for a principal with
+    /// none, which therefore shares an owner with nothing across a database
+    /// boundary.
+    /// </summary>
+    internal static string? OwnerLogin(Database database, int principalId)
+    {
+        if (principalId == Database.DboPrincipalId)
+            return database.OwnerLoginName;
+        foreach (var principal in database.Principals.Values)
+        {
+            if (principal.PrincipalId == principalId)
+                return principal.LoginName;
+        }
+        return null;
+    }
+
+    /// <summary>
     /// The SID <c>sys.databases.owner_sid</c> and <c>dbo</c>'s
     /// <c>sys.database_principals.sid</c> report: <c>sa</c>'s well-known
     /// <c>0x01</c>, or the owning login's derived SID.

@@ -259,7 +259,6 @@ partial class Simulation
                     trigger.BodyText,
                     trigger.BodyLineOffset,
                     trigger.Name,
-                    trigger.ExecuteAsClause,
                     trigger.ObjectId,
                     trigger.Timing == TriggerTiming.After,
                     affectedRowCount,
@@ -297,7 +296,6 @@ partial class Simulation
     /// <param name="bodyText">Raw body source, re-tokenized in the child batch.</param>
     /// <param name="bodyLineOffset">Newlines from the CREATE verb to the body, for error-line attribution.</param>
     /// <param name="triggerName">The trigger's unqualified name, reported as <c>ERROR_PROCEDURE</c>.</param>
-    /// <param name="executeAsClause">Module <c>WITH EXECUTE AS</c> principal, or null.</param>
     /// <param name="objectId">The trigger's object id, pushed on the in-flight stack.</param>
     /// <param name="countsAsAfterFrame">
     /// Whether the frame this body pushes counts as an AFTER-trigger frame for
@@ -316,7 +314,6 @@ partial class Simulation
         string bodyText,
         int bodyLineOffset,
         string triggerName,
-        string? executeAsClause,
         int objectId,
         bool countsAsAfterFrame,
         int affectedRowCount,
@@ -375,10 +372,11 @@ partial class Simulation
             connection.FiringTriggers.Add((objectId, countsAsAfterFrame, frame.DdlTrigger is not null));
             connection.TriggerBodyErrorRaised = false;
             connection.TriggerTransactionEnded = false;
-            // Module WITH EXECUTE AS: run the body as the impersonated
-            // principal (OWNER / SELF → dbo, CALLER → no-op, named user →
-            // that principal); unwound in the finally below.
-            PushModuleExecuteAsFrame(connection, executeAsClause, connection.CurrentDatabase, chainOwner ?? Database.DboPrincipalId);
+            // A DML trigger's WITH EXECUTE AS: run the body as the impersonated
+            // principal (OWNER → the table's owner, SELF → the creator, CALLER →
+            // no-op, named user → that principal); unwound in the finally below.
+            if (frame.Trigger is { } executeAsTrigger)
+                PushModuleExecuteAsFrame(connection, executeAsTrigger.ExecuteAsClause, executeAsTrigger.ExecuteAsPrincipalId, connection.CurrentDatabase, chainOwner ?? Database.DboPrincipalId);
             if (!string.IsNullOrEmpty(bodyText))
             {
                 using var bodyCommand = new SimulatedDbCommand(this, connection);

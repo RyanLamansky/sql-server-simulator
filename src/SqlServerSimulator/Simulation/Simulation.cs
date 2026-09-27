@@ -2128,6 +2128,9 @@ public sealed partial class Simulation
                     // statement that failed mid-parse, which the rest of the
                     // TRY body skips.
                     caught = ex;
+                    // A failed statement leaves @@ROWCOUNT at 0, whatever ran
+                    // before it (probed 2026-09-27 against SQL Server 2025).
+                    connection.LastStatementRowCount = 0;
                 }
                 else if (batch.ContinueOnError && batch.ProcFrame is null && batch.TriggerFrame is null && EndsBatch(ex))
                 {
@@ -2154,6 +2157,7 @@ public sealed partial class Simulation
                     // one that ends the batch propagates below instead, so it
                     // unwinds every caller it reaches.
                     continuedError = ex;
+                    connection.LastStatementRowCount = 0;
                 }
                 else
                 {
