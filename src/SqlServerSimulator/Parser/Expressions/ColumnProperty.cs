@@ -347,7 +347,7 @@ internal sealed class ColumnProperty : Expression
     {
         TextSqlType or ImageSqlType => int.MaxValue,
         NTextSqlType => int.MaxValue / 2,
-        XmlSqlType or GeographySqlType or GeometrySqlType => -1,
+        XmlSqlType or JsonSqlType or GeographySqlType or GeometrySqlType => -1,
         HierarchyIdSqlType => 892,
         SqlVariantSqlType => 0,
         SystemNameSqlType => 128,

@@ -134,6 +134,13 @@ internal sealed class AggregateExpression : Expression
     /// </summary>
     public JsonNullClause JsonNulls;
 
+    /// <summary>
+    /// For the two JSON aggregates, whether a <c>RETURNING json</c> clause
+    /// asked for a <c>json</c> result — which a <c>json</c> operand also
+    /// yields (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    public bool ReturningJson;
+
     private AggregateExpression(AggregateKind kind, Expression? operand, bool distinct, Expression? separator)
     {
         this.Kind = kind;
@@ -312,7 +319,8 @@ internal sealed class AggregateExpression : Expression
         // STRING_AGG refuses a legacy LOB in either slot, and real binds that
         // while compiling — so the gate runs here as well as per value.
         AggregateKind.StringAgg => BindStringAggArguments(batch, resolveColumnType),
-        AggregateKind.JsonArrayAgg or AggregateKind.JsonObjectAgg => NVarcharMax,
+        AggregateKind.JsonArrayAgg or AggregateKind.JsonObjectAgg =>
+            this.ReturningJson || this.Operand!.GetSqlType(batch, resolveColumnType) is JsonSqlType ? SqlType.Json : NVarcharMax,
         AggregateKind.Sum => DeriveSumResultType(this.RejectDistinctLob(this.Operand!.GetSqlType(batch, resolveColumnType))),
         AggregateKind.Avg => DeriveAvgResultType(this.RejectDistinctLob(this.Operand!.GetSqlType(batch, resolveColumnType))),
         AggregateKind.Product => DeriveProductResultType(this.RejectDistinctLob(this.Operand!.GetSqlType(batch, resolveColumnType))),
@@ -640,10 +648,12 @@ internal sealed class AggregateExpression : Expression
         if (context.Token is ReservedKeyword { Keyword: Keyword.Order })
             orderBy = ParseInParensOrderBy(context);
         var jsonNulls = JsonNullClauseParser.Parse(context, JsonNullClause.AbsentOnNull);
+        var returningJson = JsonNullClauseParser.ParseReturning(context);
         return Register(context, new AggregateExpression(AggregateKind.JsonArrayAgg, operand, distinct: false, separator: null)
         {
             OrderBy = orderBy,
             JsonNulls = jsonNulls,
+            ReturningJson = returningJson,
         });
     }
 
@@ -677,6 +687,7 @@ internal sealed class AggregateExpression : Expression
         context.MoveNextRequired();
         var value = Expression.Parse(context);
         var jsonNulls = JsonNullClauseParser.Parse(context, JsonNullClause.NullOnNull);
+        var returningJson = JsonNullClauseParser.ParseReturning(context);
         // JSON_OBJECTAGG has no ordered-set form; ORDER BY here is Msg 156 near
         // the keyword (real SQL Server), not the generic Msg 102 the bare
         // missing-')' fall-through would otherwise raise.
@@ -686,6 +697,7 @@ internal sealed class AggregateExpression : Expression
             {
                 KeyExpression = key,
                 JsonNulls = jsonNulls,
+                ReturningJson = returningJson,
             });
     }
 
@@ -756,7 +768,7 @@ internal sealed class AggregateExpression : Expression
 
     internal override void Describe(NodeShape shape)
     {
-        _ = shape.Local(this.Kind).Local(this.Distinct).Local(this.JsonNulls).Child(this.KeyExpression).Child(this.Operand).Child(this.Separator).Local(this.OrderBy?.Count ?? -1);
+        _ = shape.Local(this.Kind).Local(this.Distinct).Local(this.JsonNulls).Local(this.ReturningJson).Child(this.KeyExpression).Child(this.Operand).Child(this.Separator).Local(this.OrderBy?.Count ?? -1);
         foreach (var item in this.OrderBy ?? [])
             _ = shape.Local(item.Descending).Local(item.Ordinal).Child(item.Expr);
     }

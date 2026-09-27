@@ -321,6 +321,8 @@ Where an entry carries a second clause it is because that fact changes what you'
 - **Application locks** — `sp_getapplock` / `sp_releaseapplock` / `APPLOCK_MODE` / `APPLOCK_TEST`, and EF's `__EFMigrationsLock` → [`app-locks.md`](docs/claude/app-locks.md).
 - **`vector`** — `vector(n)` storage, the JSON text form in both directions, the string-only conversions, the non-comparable refusals, `VECTOR_DISTANCE` / `VECTOR_NORM` / `VECTOR_NORMALIZE` / `VECTORPROPERTY` and the catalog surfaces.
   The functions are bit-exact to real's SIMD kernels, whose summation order is reverse-engineered, and clients read the text form over a down-level `varchar(max)` → [`vector.md`](docs/claude/vector.md).
+- **`json`** — the native type: its canonical text, the `DATALENGTH` of its binary form, the string-only conversions, the non-comparable refusals, and how the JSON functions read and return it.
+  Every path into the type canonicalizes (whitespace, repeated names, escapes, exponent numbers as `decimal(38, 10)`), and property names are kept exactly as written → [`json-type.md`](docs/claude/json-type.md).
 - **`hierarchyid`** — OrdPath storage, byte-identical CAST / wire / DATALENGTH, and the full sixteen-tier ordinal domain (wider than `int`, so labels are `long`) → [`hierarchyid.md`](docs/claude/hierarchyid.md).
 - **`GRANT` / `REVOKE` / `DENY`** — securable resolution, the covering scope walk, role closure, ownership chaining, `EXECUTE AS`, application roles, login and server-scope DDL, and a gate on every modeled CREATE / ALTER / DROP.
   A cross-database reference resolves the login's user in the **target**, and dbo bypasses every check → [`permissions.md`](docs/claude/permissions.md).

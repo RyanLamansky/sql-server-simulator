@@ -79,7 +79,7 @@ internal sealed class JsonValue : Expression
             }
         }
 
-        JsonText.RaiseUnresolved(scan, result, path.Mode);
+        JsonText.RaiseUnresolved(scan, result, path.Mode, jsonValue.Type);
         return SqlValue.Null(SqlType.NVarchar);
     }
 

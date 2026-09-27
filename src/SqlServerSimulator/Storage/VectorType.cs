@@ -87,11 +87,15 @@ internal sealed class VectorSqlType : SqlType
 
     public override string ToString() => $"vector({this.dimensions.ToString(CultureInfo.InvariantCulture)})";
 
-    /// <summary>The storage bytes for <paramref name="elements"/>, which must number <paramref name="dimensions"/>.</summary>
-    public static byte[] ToBytes(ReadOnlySpan<float> elements, int dimensions)
+    /// <summary>
+    /// The storage bytes for <paramref name="elements"/>, which must number
+    /// <paramref name="dimensions"/> — else Msg 42204 at
+    /// <paramref name="mismatchState"/>.
+    /// </summary>
+    public static byte[] ToBytes(ReadOnlySpan<float> elements, int dimensions, byte mismatchState = 4)
     {
         if (elements.Length != dimensions)
-            throw SimulatedSqlException.VectorDimensionsMismatch(dimensions, elements.Length, 4);
+            throw SimulatedSqlException.VectorDimensionsMismatch(dimensions, elements.Length, mismatchState);
         var bytes = new byte[HeaderLength + (4 * elements.Length)];
         bytes[0] = 0xA9;
         bytes[1] = 0x01;
@@ -140,9 +144,10 @@ internal sealed class VectorSqlType : SqlType
     /// 13670 as soon as it is read — a nested container once its first member
     /// shows it isn't empty — and an element outside float32's range is Msg
     /// 42241. Only a complete array with nothing but whitespace after it has
-    /// its length checked, as Msg 42204.
+    /// its length checked, as Msg 42204 at <paramref name="mismatchState"/> (4 for
+    /// text, 2 for a json value).
     /// </summary>
-    public static byte[] Parse(string text, int dimensions)
+    public static byte[] Parse(string text, int dimensions, byte mismatchState = 4)
     {
         var input = Encoding.UTF8.GetBytes(text);
         var i = 0;
@@ -189,7 +194,7 @@ internal sealed class VectorSqlType : SqlType
         SkipWhitespace(input, ref i);
         if (i < input.Length)
             throw Malformed(input, i);
-        return ToBytes(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(elements), dimensions);
+        return ToBytes(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(elements), dimensions, mismatchState);
     }
 
     /// <summary>
@@ -246,7 +251,7 @@ internal sealed class VectorSqlType : SqlType
     /// a quote or the end of the text. Anything else belongs to the token, so
     /// a stray byte inside one condemns the whole token from its first byte.
     /// </summary>
-    private static int TokenEnd(byte[] input, int start)
+    internal static int TokenEnd(byte[] input, int start)
     {
         var end = start;
         while (end < input.Length && input[end] is not ((byte)' ' or (byte)'\t' or (byte)'\n' or (byte)'\r' or (byte)',' or (byte)'[' or (byte)']' or (byte)'{' or (byte)'}' or (byte)':' or (byte)'"'))
@@ -255,7 +260,7 @@ internal sealed class VectorSqlType : SqlType
     }
 
     /// <summary>JSON's number grammar: <c>-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?</c>.</summary>
-    private static bool IsJsonNumber(ReadOnlySpan<byte> token)
+    internal static bool IsJsonNumber(ReadOnlySpan<byte> token)
     {
         var i = 0;
         if (i < token.Length && token[i] == '-')

@@ -763,10 +763,11 @@ partial class Simulation
             context.Batch, qualifiedTypeName, typeName, declaredMaxLength, declaredScale,
             index: ordinal + 1, TypeSpecSite.Column, columnName: columnName);
         // A vector column converts only to and from the character strings and
-        // keeps its dimension count; the change is refused by the assignment
-        // grid before any row is read, rows or not (probed 2026-09-26 against
-        // SQL Server 2025).
-        if ((existingCol.Type is VectorSqlType || newType is VectorSqlType)
+        // keeps its dimension count, and a json column becomes nothing but
+        // json while a string becomes json; the change is refused by the
+        // assignment grid before any row is read, rows or not (probed
+        // 2026-09-26 against SQL Server 2025).
+        if ((existingCol.Type is VectorSqlType or JsonSqlType || newType is VectorSqlType or JsonSqlType)
             && SqlType.PairError(TypePairOperation.Assign, existingCol.Type, newType, "") is { } vectorError)
         {
             throw vectorError;

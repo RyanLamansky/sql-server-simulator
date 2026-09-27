@@ -33,7 +33,8 @@ internal static class JsonText
     /// </summary>
     internal static void RequireDocumentAndPath(Expression json, Expression? path, BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType, string functionName)
     {
-        _ = StringScalars.RequireStringArgument(json, json.GetSqlType(batch, resolveColumnType), functionName, 1, acceptsLegacyLob: false);
+        if (json.GetSqlType(batch, resolveColumnType) is not JsonSqlType and var documentType)
+            _ = StringScalars.RequireStringArgument(json, documentType, functionName, 1, acceptsLegacyLob: false);
         if (path is null)
             return;
         if (Expression.IsUntypedNullLiteral(path))
@@ -76,14 +77,15 @@ internal static class JsonText
     /// resolve: the document's pending Msg 13609 when the reader had to get as
     /// far as the problem, else the strict-mode Msg 13608. Returns without
     /// raising for a lax path over a document with nothing wrong ahead of it —
-    /// the caller answers NULL.
+    /// the caller answers NULL. The strict miss is state 5 over a <c>json</c>
+    /// document and 1 over text (probed 2026-09-26 against SQL Server 2025).
     /// </summary>
-    public static void RaiseUnresolved(in JsonScan scan, JsonWalkResult result, JsonPathMode mode)
+    public static void RaiseUnresolved(in JsonScan scan, JsonWalkResult result, JsonPathMode mode, SqlType documentType)
     {
         if (result is not JsonWalkResult.Abandoned && scan.HasError)
             throw SimulatedSqlException.JsonInvalidText(scan.BadCharacter, scan.BadPosition);
         if (mode == JsonPathMode.Strict)
-            throw SimulatedSqlException.JsonStrictPathNotFound();
+            throw SimulatedSqlException.JsonStrictPathNotFound(documentType is JsonSqlType ? (byte)5 : (byte)1);
     }
 
     private enum State

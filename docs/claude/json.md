@@ -1,7 +1,7 @@
 # JSON: `JSON_VALUE` / `JSON_QUERY` / `JSON_MODIFY` / `JSON_OBJECT` / `JSON_ARRAY` / `JSON_PATH_EXISTS` / `ISJSON` / `OPENJSON`
 
 Unlocks EF's owned-types-as-JSON (`OwnsOne(...).ToJson()`) and primitive-collection emissions.
-JSON columns are plain `nvarchar(max)`.
+Every function here reads text documents; SQL Server 2025's native `json` type, and what it changes about these functions' result types and states, is in [`json-type.md`](json-type.md).
 
 `JSON_VALUE(json, path)` returns `nvarchar(4000)`.
 Lax mode (default and EF's only emitted form): missing path / non-scalar match → SQL NULL.
@@ -47,7 +47,7 @@ Both support `OVER (...)` windows — `PARTITION BY`, running `ORDER BY`, and ex
 The aggregators build the closing `]` / `}` onto a snapshot rather than mutating the running buffer, so repeated `Result()` calls across sliding-window frames stay correct.
 `DISTINCT` is not accepted by either.
 
-All the `nvarchar(max)` JSON producers (`JSON_QUERY`, `JSON_MODIFY`, `JSON_OBJECT`, `JSON_ARRAY`, `JSON_ARRAYAGG`, `JSON_OBJECTAGG`) are typed `SqlType.NVarcharMax` at both `GetSqlType` and `Run` — not the length-0 `SqlType.NVarchar` "size from value" form.
+All the `nvarchar(max)` JSON producers (`JSON_QUERY`, `JSON_MODIFY`, `JSON_OBJECT`, `JSON_ARRAY`, `JSON_ARRAYAGG`, `JSON_OBJECTAGG`) are typed `SqlType.NVarcharMax` at both `GetSqlType` and `Run` — not the length-0 `SqlType.NVarchar` "size from value" form — except where a `json` input or `RETURNING json` makes them `json` (see [`json-type.md`](json-type.md#the-json-functions-over-a-json-document)).
 This is load-bearing over the TDS wire: a length-0 result over 32,767 chars overflows the codec's bounded 2-byte length prefix, whereas a MAX result streams as PLP.
 `JSON_VALUE` stays bounded (`nvarchar(4000)`) and is safe by its 4000-char cap.
 See [`tds-endpoint.md`](tds-endpoint.md) for the wire mechanism.
@@ -98,7 +98,7 @@ The second argument narrows or widens the kind asked for: `VALUE` takes any JSON
 
 ## Argument types
 
-`JSON_VALUE`, `JSON_QUERY`, `JSON_MODIFY`, `JSON_PATH_EXISTS` and `ISJSON` read the document, and the four path functions the path, as text: any other type — `text` / `ntext` and `xml` included — is Msg 8116 while compiling, so an empty rowset raises it too (probed 2026-09-25 against SQL Server 2025).
+`JSON_VALUE`, `JSON_QUERY`, `JSON_MODIFY`, `JSON_PATH_EXISTS` and `ISJSON` read the document, and the four path functions the path, as text or — the document only — as `json`: any other type — `text` / `ntext` and `xml` included — is Msg 8116 while compiling, so an empty rowset raises it too (probed 2026-09-25 against SQL Server 2025).
 A path is never NULL.
 A bare `NULL` literal is refused while compiling, `json_value` / `json_modify` at state 1 in lower case and `JSON_QUERY` / `JSON_PATH_EXISTS` at state 8 in capitals; a path that *evaluates* to NULL — a typed NULL, a variable, a column, a `NULLIF` — is refused at runtime by all four at state 8 in capitals, whatever the document holds, a NULL document included.
 ## The path grammar

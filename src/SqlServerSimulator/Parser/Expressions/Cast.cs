@@ -405,7 +405,8 @@ internal sealed class Cast : Expression
     /// every source but a string refuses <c>text</c> / <c>ntext</c> — the
     /// mirror of the legacy-LOB allow-lists above.</item>
     /// <item>A <b><c>vector</c></b> converts to and from the character strings
-    /// and nothing else.</item>
+    /// and <c>json</c>, and <c>json</c> to and from the character strings and
+    /// <c>vector</c>; nothing else.</item>
     /// </list>
     /// Types outside that grid (<c>rowversion</c>, <c>hierarchyid</c>, the
     /// spatial pair, alias types) are not in the table and keep whatever the
@@ -422,6 +423,13 @@ internal sealed class Cast : Expression
         // explicitly (probed 2026-09-25 against SQL Server 2025).
         if (target is SqlVariantSqlType && source is VarcharSqlType { length: SqlType.MaxLengthSentinel } or NVarcharSqlType { length: SqlType.MaxLengthSentinel } or VarbinarySqlType { length: SqlType.MaxLengthSentinel })
             return true;
+
+        // json converts to and from the character strings and vector alone
+        // (probed 2026-09-26 against SQL Server 2025).
+        if (source is JsonSqlType)
+            return target is not (JsonSqlType or VectorSqlType) && !IsCharacterString(target);
+        if (target is JsonSqlType)
+            return source is not VectorSqlType && !IsCharacterString(source);
 
         // A vector converts to and from the character strings alone — not a
         // binary, not text / ntext, not sql_variant (probed 2026-09-26 against
@@ -731,13 +739,14 @@ internal sealed class Cast : Expression
     }
 
     /// <summary>
-    /// The refusals of a conversion to or from <c>vector</c> that
-    /// <c>TRY_CAST</c> / <c>TRY_CONVERT</c> answer with NULL: malformed or
+    /// The refusals of a conversion to or from <c>vector</c> or <c>json</c>
+    /// that <c>TRY_CAST</c> / <c>TRY_CONVERT</c> answer with NULL: malformed or
     /// non-numeric JSON, the wrong dimension count, an element outside
     /// float32, a text form too long for its target (probed 2026-09-26
-    /// against SQL Server 2025).
+    /// against SQL Server 2025). A json document's number out of range (Msg
+    /// 1007) or nesting too deep (Msg 13645) still raises.
     /// </summary>
-    internal static bool IsVectorConversionFailure(int number) => number is 13609 or 13670 or 42204 or 42211 or 42241;
+    internal static bool IsVectorConversionFailure(int number) => number is 13609 or 13639 or 13670 or 42204 or 42211 or 42241;
 
     /// <summary>
     /// Set of <see cref="SimulatedSqlException.Number"/> values that

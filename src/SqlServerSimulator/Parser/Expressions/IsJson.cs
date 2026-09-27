@@ -63,12 +63,13 @@ internal sealed class IsJson : Expression
         var value = this.operand.Run(runtime);
         if (value.IsNull)
             return SqlValue.Null(SqlType.Int32);
-        return SqlValue.FromInt32(SqlType.IsStringCategory(value.Type) && JsonText.RootKind(value.AsString) is not '\0' and var kind && this.acceptedKinds.Contains(kind, StringComparison.Ordinal) ? 1 : 0);
+        return SqlValue.FromInt32((SqlType.IsStringCategory(value.Type) || value.Type is JsonSqlType) && JsonText.RootKind(value.AsString) is not '\0' and var kind && this.acceptedKinds.Contains(kind, StringComparison.Ordinal) ? 1 : 0);
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
-        _ = StringScalars.RequireStringArgument(this.operand, this.operand.GetSqlType(batch, resolveColumnType), "isjson", 1, acceptsLegacyLob: false);
+        if (this.operand.GetSqlType(batch, resolveColumnType) is not JsonSqlType and var type)
+            _ = StringScalars.RequireStringArgument(this.operand, type, "isjson", 1, acceptsLegacyLob: false);
         return SqlType.Int32;
     }
 

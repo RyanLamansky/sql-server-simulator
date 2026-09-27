@@ -99,10 +99,10 @@ internal abstract class Aggregator
     private static Aggregator CreateFor(AggregateExpression aggregate, SqlType operandType, SqlType resultType, bool removable) => aggregate.Kind switch
     {
         AggregateKind.Count => CountsUncountable(aggregate, operandType)
-            ? throw SimulatedSqlException.OperandDataTypeInvalid(operandType, "count", CountState(aggregate))
+            ? throw SimulatedSqlException.OperandDataTypeInvalid(operandType, "count", CountState(aggregate, operandType))
             : new CountAggregator(isStar: aggregate.Operand is null || aggregate.CountsRowsOnly, isBigCount: false, distinct: aggregate.Distinct),
         AggregateKind.CountBig => CountsUncountable(aggregate, operandType)
-            ? throw SimulatedSqlException.OperandDataTypeInvalid(operandType, "count_big", CountState(aggregate))
+            ? throw SimulatedSqlException.OperandDataTypeInvalid(operandType, "count_big", CountState(aggregate, operandType))
             : new CountAggregator(isStar: aggregate.Operand is null || aggregate.CountsRowsOnly, isBigCount: true, distinct: aggregate.Distinct),
         AggregateKind.ApproxCountDistinct => new CountAggregator(isStar: false, isBigCount: true, distinct: true),
         AggregateKind.Max => operandType.IsIncomparable || operandType is BitSqlType
@@ -139,19 +139,22 @@ internal abstract class Aggregator
 
     /// <summary>
     /// COUNT and COUNT_BIG refuse the legacy <c>text</c> / <c>ntext</c> /
-    /// <c>image</c> trio outright, even though counting never compares a value.
+    /// <c>image</c> trio and <c>json</c> outright, even though counting never
+    /// compares a value.
     /// <c>xml</c> and the spatial types they do count — until a DISTINCT asks
     /// them to fold duplicates, which needs the comparison none of the three
     /// families have. The star form carries no operand to refuse.
     /// </summary>
     private static bool CountsUncountable(AggregateExpression aggregate, SqlType operandType) =>
         aggregate.Operand is not null && !aggregate.CountsRowsOnly
-        && (operandType.IsLegacyLob || (aggregate.Distinct && operandType.IsIncomparable));
+        && (operandType.IsLegacyLob || operandType is JsonSqlType || (aggregate.Distinct && operandType.IsIncomparable));
 
     /// <summary>
     /// Real reports <c>COUNT(DISTINCT &lt;legacy LOB&gt;)</c> at state 2 and the
     /// undistinct form at state 1 — a split MAX / MIN don't make, where
-    /// <c>MAX(DISTINCT …)</c> stays at state 1.
+    /// <c>MAX(DISTINCT …)</c> stays at state 1. A <c>json</c> operand, which
+    /// COUNT refuses too, is state 2 either way (probed 2026-09-26).
     /// </summary>
-    private static byte CountState(AggregateExpression aggregate) => aggregate.Distinct ? (byte)2 : (byte)1;
+    private static byte CountState(AggregateExpression aggregate, SqlType operandType) =>
+        aggregate.Distinct || operandType is JsonSqlType ? (byte)2 : (byte)1;
 }

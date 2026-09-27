@@ -73,12 +73,13 @@ internal static class StringScalars
     /// <c>CREATE</c> of a module whose body carries it — and the two callers
     /// share this body so the compile-time and per-value gates can't drift.
     /// </summary>
-    /// <para>An <c>xml</c> or <c>sql_variant</c> argument is refused the same
-    /// way by every string scalar (probed 2026-09-25 against SQL Server 2025),
-    /// so the gate takes those two as well.</para>
+    /// <para>An <c>xml</c>, <c>json</c> or <c>sql_variant</c> argument is
+    /// refused the same way by every string scalar (probed 2026-09-25 and, for
+    /// json, 2026-09-26 against SQL Server 2025), so the gate takes those
+    /// as well.</para>
     public static void RejectLegacyLobType(SqlType type, string functionLowerName, int argumentIndex = 1, bool allowAnsiText = false)
     {
-        if (type is NTextSqlType or ImageSqlType or XmlSqlType or SqlVariantSqlType || (!allowAnsiText && type is TextSqlType))
+        if (type is NTextSqlType or ImageSqlType or XmlSqlType or JsonSqlType or SqlVariantSqlType || (!allowAnsiText && type is TextSqlType))
             throw SimulatedSqlException.InvalidArgumentDataType(type.SqlServerName, argumentIndex, functionLowerName);
     }
 
@@ -95,7 +96,7 @@ internal static class StringScalars
     /// </summary>
     public static void RejectLegacyLobInCoercion(SqlType type, string functionLowerName, int argumentIndex = 1, bool allowLegacyLob = false)
     {
-        if (type is XmlSqlType or SqlVariantSqlType)
+        if (type is XmlSqlType or JsonSqlType or SqlVariantSqlType)
         {
             throw allowLegacyLob
                 ? SimulatedSqlException.ImplicitConversionNotAllowed(type.SqlServerName, "varchar")

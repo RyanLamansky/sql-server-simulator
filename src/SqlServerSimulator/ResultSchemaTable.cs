@@ -165,6 +165,7 @@ internal static class ResultSchemaTable
         // The text form, typed as the varchar(max) real sends a client without
         // vector support, under the vector's own name.
         VectorSqlType => new(int.MaxValue, 255, 255, typeof(string), SqlDbType.VarChar, typeof(SqlString), "vector", isLong: true),
+        JsonSqlType => new(int.MaxValue, 255, 255, typeof(string), SqlDbType.VarChar, typeof(SqlString), "json", isLong: true),
         HierarchyIdSqlType => new(892, 255, 255, null, SqlDbType.Udt, null, $"{databaseName}.sys.hierarchyid", udtName: Network.TdsTypeCodec.HierarchyIdAssemblyQualifiedName),
         SpatialSqlType spatial => new(-1, 255, 255, null, SqlDbType.Udt, null, $"{databaseName}.sys.{spatial.SqlServerName}", udtName: Network.TdsTypeCodec.SpatialAssemblyQualifiedName(spatial)),
         _ => new(-1, 255, 255, type.ClrType, SqlDbType.Variant, null, type.SqlServerName),

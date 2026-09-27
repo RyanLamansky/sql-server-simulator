@@ -94,10 +94,10 @@ internal sealed class SqlVariantProperty : Expression
         var argumentType = this.valueArg.GetSqlType(batch, resolveColumnType);
         VectorArguments.RejectVector(argumentType, "sql_variant_property", 1, 6);
         // The argument converts implicitly to sql_variant, which can't hold a
-        // MAX string or binary, xml, a legacy LOB, rowversion or a CLR type:
+        // MAX string or binary, xml, json, a legacy LOB, rowversion or a CLR type:
         // Msg 206 while compiling (probed 2026-09-25 against SQL Server 2025).
         if (argumentType is VarcharSqlType { length: SqlType.MaxLengthSentinel } or NVarcharSqlType { length: SqlType.MaxLengthSentinel }
-                or VarbinarySqlType { length: SqlType.MaxLengthSentinel } or XmlSqlType or TextSqlType or NTextSqlType or ImageSqlType
+                or VarbinarySqlType { length: SqlType.MaxLengthSentinel } or XmlSqlType or JsonSqlType or TextSqlType or NTextSqlType or ImageSqlType
                 or RowVersionSqlType or HierarchyIdSqlType or GeographySqlType or GeometrySqlType)
         {
             throw SimulatedSqlException.OperandTypeClash(argumentType == SqlType.RowVersion ? "timestamp" : SimulatedSqlException.FamilyRootName(argumentType), "sql_variant");

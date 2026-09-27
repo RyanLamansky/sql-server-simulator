@@ -414,7 +414,8 @@ partial class Selection
     /// </summary>
     private static void AppendForJsonValue(StringBuilder sb, SqlValue value, bool raw)
     {
-        if (raw)
+        // A json value embeds as the document it is (probed 2026-09-26).
+        if (raw || value.Type is JsonSqlType)
         {
             _ = sb.Append(value.CoerceTo(SqlType.NVarchar).AsString);
             return;

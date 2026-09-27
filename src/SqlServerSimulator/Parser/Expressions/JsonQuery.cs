@@ -41,11 +41,11 @@ internal sealed class JsonQuery : Expression
     {
         var jsonValue = this.jsonInput.Run(runtime);
         if (this.pathInput is null)
-            return jsonValue.IsNull ? SqlValue.Null(SqlType.NVarcharMax) : Extract(jsonValue, JsonPath.Root);
+            return jsonValue.IsNull ? SqlValue.Null(ResultType(jsonValue.Type)) : Extract(jsonValue, JsonPath.Root);
 
         var pathValue = JsonText.RequirePathValue(this.pathInput.Run(runtime), "JSON_QUERY");
         return jsonValue.IsNull
-            ? SqlValue.Null(SqlType.NVarcharMax)
+            ? SqlValue.Null(ResultType(jsonValue.Type))
             : Extract(jsonValue, JsonPath.Parse(pathValue.AsString));
     }
 
@@ -64,19 +64,28 @@ internal sealed class JsonQuery : Expression
             if (result == JsonWalkResult.Resolved)
             {
                 var subtree = JsonSubtree.Extract(match, path.Mode, strictScalarState: 2);
-                return subtree is null ? SqlValue.Null(SqlType.NVarcharMax) : SqlValue.FromNVarchar(SqlType.NVarcharMax, subtree);
+                return subtree is null ? SqlValue.Null(ResultType(jsonValue.Type))
+                    : jsonValue.Type is JsonSqlType ? SqlValue.FromJson(subtree)
+                    : SqlValue.FromNVarchar(SqlType.NVarcharMax, subtree);
             }
         }
 
-        JsonText.RaiseUnresolved(scan, result, path.Mode);
-        return SqlValue.Null(SqlType.NVarcharMax);
+        JsonText.RaiseUnresolved(scan, result, path.Mode, jsonValue.Type);
+        return SqlValue.Null(ResultType(jsonValue.Type));
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
         JsonText.RequireDocumentAndPath(this.jsonInput, this.pathInput, batch, resolveColumnType, "json_query");
-        return SqlType.NVarcharMax;
+        return ResultType(this.jsonInput.GetSqlType(batch, resolveColumnType));
     }
+
+    /// <summary>
+    /// <c>json</c> over a <c>json</c> document — the subtree of a canonical
+    /// document is itself canonical — and <c>nvarchar(max)</c> over text
+    /// (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    private static SqlType ResultType(SqlType documentType) => documentType is JsonSqlType ? SqlType.Json : SqlType.NVarcharMax;
 
     internal override string DebugDisplay() => this.pathInput is null
         ? $"JSON_QUERY({this.jsonInput.DebugDisplay()})"

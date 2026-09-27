@@ -105,14 +105,14 @@ internal sealed partial class Selection
             if (result is JsonWalkResult.Exhausted && scan.HasError)
                 throw SimulatedSqlException.JsonInvalidText(scan.BadCharacter, scan.BadPosition, searchState);
             // Lax mode opens nothing where a strict path raises: a miss is
-            // Msg 13608 state 3, and a value that isn't an object or array —
-            // JSON null included — Msg 13611 (probed 2026-09-24 against
-            // SQL Server 2025).
+            // Msg 13608 state 3 (7 over a json document, probed 2026-09-26),
+            // and a value that isn't an object or array — JSON null included
+            // — Msg 13611 (probed 2026-09-24 against SQL Server 2025).
             var strict = path.Mode == JsonPathMode.Strict;
             if (result is JsonWalkResult.Exhausted or JsonWalkResult.Abandoned)
             {
                 if (strict)
-                    throw SimulatedSqlException.JsonStrictPathNotFound(state: 3);
+                    throw SimulatedSqlException.JsonStrictPathNotFound(jsonValue.Type is JsonSqlType ? (byte)7 : (byte)3);
                 yield break;
             }
             if (strict && match.ValueKind is not (JsonValueKind.Object or JsonValueKind.Array))
@@ -129,21 +129,21 @@ internal sealed partial class Selection
         // per object property.
         if (root.ValueKind == JsonValueKind.Object && withColumns is not null)
         {
-            yield return BuildOpenJsonRow(root, withColumns, schema, key: "");
+            yield return BuildOpenJsonRow(root, withColumns, schema, key: "", jsonValue.Type);
         }
         else if (root.ValueKind == JsonValueKind.Array)
         {
             var index = 0;
             foreach (var element in root.EnumerateArray())
             {
-                yield return BuildOpenJsonRow(element, withColumns, schema, key: index.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                yield return BuildOpenJsonRow(element, withColumns, schema, key: index.ToString(System.Globalization.CultureInfo.InvariantCulture), jsonValue.Type);
                 index++;
             }
         }
         else if (root.ValueKind == JsonValueKind.Object)
         {
             foreach (var property in root.EnumerateObject())
-                yield return BuildOpenJsonRow(property.Value, withColumns, schema, key: property.Name);
+                yield return BuildOpenJsonRow(property.Value, withColumns, schema, key: property.Name, jsonValue.Type);
         }
 
         // A target that stopped short is Msg 13609 only after the rows it did
@@ -153,7 +153,7 @@ internal sealed partial class Selection
             throw SimulatedSqlException.JsonInvalidText(scan.BadCharacter, scan.BadPosition, 4);
     }
 
-    private static byte[] BuildOpenJsonRow(JsonElement element, OpenJsonColumn[]? withColumns, SqlType[] schema, string key)
+    private static byte[] BuildOpenJsonRow(JsonElement element, OpenJsonColumn[]? withColumns, SqlType[] schema, string key, SqlType documentType)
     {
         if (withColumns is null)
         {
@@ -185,10 +185,12 @@ internal sealed partial class Selection
         for (var i = 0; i < withColumns.Length; i++)
         {
             var column = withColumns[i];
-            var matched = column.Path.Walk(element, strictNotFoundState: 6);
+            // A column path's strict miss is state 6, or 8 over a json
+            // document (probed 2026-09-26 against SQL Server 2025).
+            var matched = column.Path.Walk(element, strictNotFoundState: documentType is JsonSqlType ? (byte)8 : (byte)6);
             values[i] = matched is null
                 ? SqlValue.Null(column.Type)
-                : ExtractColumnValue(matched.Value, column);
+                : ExtractColumnValue(matched.Value, column, documentType);
         }
         return RowEncoder.EncodeRow(schema, values);
     }
@@ -199,7 +201,7 @@ internal sealed partial class Selection
     /// parse via the standard numeric literal route. NULL JSON values
     /// surface as SQL NULL of the column's type.
     /// </summary>
-    private static SqlValue ExtractColumnValue(JsonElement element, OpenJsonColumn column)
+    private static SqlValue ExtractColumnValue(JsonElement element, OpenJsonColumn column, SqlType documentType)
     {
         if (column.AsJson)
         {
@@ -209,6 +211,13 @@ internal sealed partial class Selection
             var subtree = JsonSubtree.Extract(element, column.Path.Mode);
             return subtree is null ? SqlValue.Null(column.Type) : SqlValue.FromNVarchar(subtree).CoerceTo(column.Type);
         }
+
+        // A json column without AS JSON reads nothing from a json document,
+        // whatever the path finds; over text it converts the scalar's text
+        // as any column does, so a number is Msg 13609 (probed 2026-09-26
+        // against SQL Server 2025).
+        if (column.Type is JsonSqlType && documentType is JsonSqlType)
+            return SqlValue.Null(column.Type);
 
         if (element.ValueKind == JsonValueKind.Null)
             return SqlValue.Null(column.Type);
@@ -357,7 +366,7 @@ internal sealed partial class Selection
             }
 
             // AS JSON modifier — real SQL Server accepts it only on
-            // nvarchar(max) columns and raises Msg 13618 for any other type
+            // nvarchar(max) and json columns and raises Msg 13618 for any other type
             // (probe-confirmed). The matched object/array subtree is later
             // extracted as verbatim JSON text; see ExtractColumnValue.
             var asJson = false;
@@ -368,7 +377,7 @@ internal sealed partial class Selection
                 {
                     throw SimulatedSqlException.SyntaxErrorNear(context);
                 }
-                if (resolvedType is not NVarcharSqlType { length: SqlType.MaxLengthSentinel })
+                if (resolvedType is not (NVarcharSqlType { length: SqlType.MaxLengthSentinel } or JsonSqlType))
                     throw SimulatedSqlException.OpenJsonAsJsonRequiresNVarcharMax();
                 asJson = true;
                 context.MoveNextRequired();

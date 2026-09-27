@@ -84,10 +84,10 @@ partial class SimulatedSqlException
         new("Constraints of type CHECK cannot be created on columns of type vector.", 1760, 16, 0);
 
     /// <summary>
-    /// Msg 1978 at state 4: a vector column named as a key of a
-    /// <c>CREATE INDEX</c> or <c>CREATE STATISTICS</c> — where a key constraint
-    /// takes Msg 1919 instead.
+    /// Msg 1978: a vector column (state 4) or a json column (state 3) named as
+    /// a key of a <c>CREATE INDEX</c> or <c>CREATE STATISTICS</c> — where a key
+    /// constraint takes Msg 1919 instead.
     /// </summary>
-    internal static SimulatedSqlException VectorKeyColumnInvalid(string columnName, string tableName) =>
-        new($"Column '{columnName}' in table '{tableName}' is of a type that is invalid for use as a key column in an index or statistics.", 1978, 16, 4);
+    internal static SimulatedSqlException VectorKeyColumnInvalid(string columnName, string tableName, byte state = 4) =>
+        new($"Column '{columnName}' in table '{tableName}' is of a type that is invalid for use as a key column in an index or statistics.", 1978, 16, state);
 }

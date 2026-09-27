@@ -572,6 +572,8 @@ partial class Simulation
             VarbinarySqlType v => HelpVariableGeometry(v.length, declaredMaxLength, 1, 2147483647),
             SqlVariantSqlType => (8016, 0, null),
             XmlSqlType => (-1, -1, null),
+            // A json parameter's Prec is 0 (probed 2026-09-26).
+            JsonSqlType => (-1, 0, null),
             HierarchyIdSqlType => (892, 892, null),
             SpatialSqlType => (-1, -1, null),
             VectorSqlType vector => (vector.ByteLength, vector.ByteLength, null),

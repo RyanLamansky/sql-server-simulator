@@ -1836,7 +1836,7 @@ partial class Simulation
             actualNullable = false;
         }
 
-        if (columnCollation is not null && resolvedType is VectorSqlType)
+        if (columnCollation is not null && resolvedType is VectorSqlType or JsonSqlType)
             throw SimulatedSqlException.CollateClauseRequiresString(resolvedType.SqlServerName, 1);
         if (resolvedType.Category == SqlTypeCategory.String)
         {
@@ -2654,12 +2654,12 @@ partial class Simulation
                 // determinism / precision gate CREATE INDEX applies.
                 if (column.Computed is not null && !column.IsPersisted && pending.Kind == KeyConstraintKind.PrimaryKey)
                     throw SimulatedSqlException.ComputedColumnPkRequiresPersisted(column.Name, tableName);
+                // A vector or json key is refused with the constraint's own Msg
+                // 1750 after it (probed 2026-09-26 against SQL Server 2025).
+                if (column.Type is VectorSqlType or JsonSqlType)
+                    throw SimulatedSqlException.FollowedByConstraintNotCreated(SimulatedSqlException.KeyColumnInvalidType(column.Name, tableName), state: 0);
                 if (column.IsLob)
                     throw SimulatedSqlException.KeyColumnInvalidType(column.Name, tableName);
-                // A vector key is refused with the constraint's own Msg 1750 after it
-                // (probed 2026-09-26 against SQL Server 2025).
-                if (column.Type is VectorSqlType)
-                    throw SimulatedSqlException.FollowedByConstraintNotCreated(SimulatedSqlException.KeyColumnInvalidType(column.Name, tableName), state: 0);
                 if (column.IsSparse)
                     throw SimulatedSqlException.FollowedByConstraintNotCreated(SimulatedSqlException.KeyColumnInvalidType(column.Name, tableName, state: 3));
                 if (pending.Kind == KeyConstraintKind.PrimaryKey && column.Nullable)

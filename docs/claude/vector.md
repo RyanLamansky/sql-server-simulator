@@ -23,7 +23,7 @@ The reader's order of refusal is its own and matters:
 
 ## Conversions and type pairs
 
-Only the character strings convert, both ways, implicitly and explicitly (`text` / `ntext`, binaries and `sql_variant` are Msg 529).
+Only the character strings and `json` convert, both ways, implicitly and explicitly (`text` / `ntext`, binaries and `sql_variant` are Msg 529); the `json` pair is described in [`json-type.md`](json-type.md#conversions-and-type-pairs).
 A bounded target too short for the whole text is Msg 42211, never a truncation, and `TRY_CAST` / `TRY_CONVERT` absorb that and every text-reading error (`Cast.IsVectorConversionFailure`).
 The vector row and column of the pair grids (`SqlType.PairRules.cs`) were probed against one member of each class in both orders; the grid gained an `o` cell (Msg 8117 naming the right operand) for it.
 Two vectors of different counts are Msg 42204 state 1 in a unification or assignment; a set of CASE / COALESCE arms names the settled arm's count first, where `ISNULL` names the replacement's.
@@ -74,5 +74,4 @@ The TDS endpoint acknowledges no vector feature extension and sends a vector col
 
 - Vector indexes (`CREATE VECTOR INDEX`, DiskANN) and `VECTOR_SEARCH`.
 - The `float16` base type (a preview feature on real).
-- The `json` type as a conversion partner (the `json` type itself isn't built).
 - A vector parameter sent by a vector-aware client over RPC, and vector columns in BACPAC import.

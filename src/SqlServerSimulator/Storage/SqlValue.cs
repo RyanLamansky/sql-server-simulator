@@ -115,6 +115,17 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
     }
 
     /// <summary>
+    /// Non-NULL <c>json</c> value from its canonical text, which the caller
+    /// has already produced (<see cref="JsonDocumentText.Canonicalize"/>) or
+    /// read back from storage.
+    /// </summary>
+    public static SqlValue FromJson(string canonical)
+    {
+        ArgumentNullException.ThrowIfNull(canonical);
+        return new(SqlType.Json, 0, canonical, isNull: false);
+    }
+
+    /// <summary>
     /// Non-NULL SQL <c>geography</c> value. Carries the parsed instance; the
     /// storage and wire bytes are SQL Server's spatial UDT serialization,
     /// produced on demand by <see cref="Spatial.SpatialBinaryCodec"/>.
@@ -636,6 +647,7 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
         : type == SqlType.Text ? FromText(value)
         : type == SqlType.NText ? FromNText(value)
         : type == SqlType.Xml ? FromXml(value)
+        : type is JsonSqlType ? FromJson(JsonDocumentText.Canonicalize(value))
         : type is SpatialSqlType spatial ? FromSpatial(SpatialWktReader.Read(value, SpatialGeometry.DefaultSridFor(spatial.IsGeography), spatial.IsGeography), spatial.IsGeography)
         : type is CharSqlType ? FromChar(type, value)
         : type is NCharSqlType ? FromNChar(type, value)
@@ -675,7 +687,7 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
             // A spatial value's string form is its WKT, Z and M included —
             // what real returns from CAST(… AS nvarchar(max)) and ToString().
             ? SpatialWktWriter.Write(spatial, includeZM: true)
-            : this.Type.Category != SqlTypeCategory.String
+            : this.Type.Category != SqlTypeCategory.String && this.Type is not JsonSqlType
                 ? throw new InvalidOperationException($"Value is {this.Type}, not a string type.")
                 : (string)this.reference!;
 
@@ -886,6 +898,8 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
         // A vector surfaces as its text form — what real sends a client that
         // doesn't negotiate SQL Server 2025's vector support.
         VectorSqlType => VectorSqlType.Format(this.AsVectorBytes),
+        // So does a json value, for the same reason.
+        JsonSqlType => (string)this.reference!,
         _ => throw new NotSupportedException($"No object representation for {this.Type}."),
     };
 
@@ -1175,6 +1189,7 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
         _ when this.Type == SqlType.Money || this.Type == SqlType.SmallMoney => this.AsMoneyDecimal38.ToString(),
         SqlVariantSqlType => this.AsVariantInner.AsCurrentType(),
         VectorSqlType => $"'{VectorSqlType.Format(this.AsVectorBytes)}'",
+        JsonSqlType => $"'{this.reference}'",
         _ => "?",
     };
 }

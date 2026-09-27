@@ -816,6 +816,8 @@ internal static partial class BuiltInResources
             // xml: real SQL Server reports max_length = -1 (matching the
             // nvarchar(MAX) storage shape) and no numeric precision/scale.
             XmlSqlType => (-1, 0, 0),
+            // json: the same LOB shape (probed 2026-09-26).
+            JsonSqlType => (-1, 0, 0),
             // geography / geometry: same max_length = -1 reporting as xml,
             // matching the probed sys.columns shape for spatial-typed columns.
             SpatialSqlType => (-1, 0, 0),

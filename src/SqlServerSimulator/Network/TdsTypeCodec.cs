@@ -448,6 +448,15 @@ internal static class TdsTypeCodec
                 writer.WriteUInt16(0xFFFF);
                 TdsCollationCodec.For(VectorWireCollation).Write(writer);
                 break;
+            case JsonSqlType:
+                // Likewise json, with no json feature extension acknowledged:
+                // real's down-level form for a TDS 7.4 client is the same
+                // varchar(max) collated Latin1_General_100_BIN2_UTF8, per the
+                // json data type's own documentation.
+                writer.WriteByte(0xA7);
+                writer.WriteUInt16(0xFFFF);
+                TdsCollationCodec.For(VectorWireCollation).Write(writer);
+                break;
             case SqlVariantSqlType:
                 // SSVARIANTTYPE: a LONGLEN type whose TYPE_INFO is the type
                 // byte plus a 4-byte max length (8009 = 8000 data bytes + the
@@ -700,6 +709,12 @@ internal static class TdsTypeCodec
                     writer.WriteUInt64(ulong.MaxValue);
                 else
                     WritePlpChunks(writer, System.Text.Encoding.UTF8.GetBytes(VectorSqlType.Format(value.AsVectorBytes)));
+                break;
+            case JsonSqlType:
+                if (value.IsNull)
+                    writer.WriteUInt64(ulong.MaxValue);
+                else
+                    WritePlpChunks(writer, System.Text.Encoding.UTF8.GetBytes(value.AsString));
                 break;
             case SqlVariantSqlType:
                 WriteVariant(writer, value);
@@ -1224,7 +1239,7 @@ internal static class TdsTypeCodec
     /// <c>GetSqlBytes</c> / <c>GetBytes</c>. Version/token probe-matched to SQL
     /// Server 2025 (2026-07-16).
     /// </summary>
-    /// <summary>The collation of the <c>varchar(max)</c> a vector column travels as.</summary>
+    /// <summary>The collation of the <c>varchar(max)</c> a vector or json column travels as.</summary>
     private static readonly Collation VectorWireCollation = Collation.Get("Latin1_General_100_BIN2_UTF8");
 
     internal const string HierarchyIdAssemblyQualifiedName =

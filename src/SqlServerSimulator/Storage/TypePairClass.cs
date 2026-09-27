@@ -34,4 +34,5 @@ internal enum TypePairClass : byte
     HierarchyId,
     Spatial,
     Vector,
+    Json,
 }

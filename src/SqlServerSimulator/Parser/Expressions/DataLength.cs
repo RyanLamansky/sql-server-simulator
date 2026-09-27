@@ -59,6 +59,8 @@ internal sealed class DataLength(ParserContext context) : Expression
             // report the same size. GetVariableByteCount stays the text count,
             // which is what the storage layer needs.
             XmlSqlType => XmlBinarySize.Measure(value.AsString),
+            // json likewise reports real's binary form.
+            JsonSqlType => JsonDocumentText.BinaryLength(value.AsString),
             { IsFixedLength: true } => value.Type.FixedLength,
             _ => value.Type.GetVariableByteCount(value),
         };

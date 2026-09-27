@@ -1159,6 +1159,9 @@ internal abstract class BooleanExpression : ExpressionNode
         // 2026-09-26 against SQL Server 2025).
         else if (leftType is VectorSqlType || rightType is VectorSqlType)
             throw SimulatedSqlException.OperandDataTypeInvalid(leftType is VectorSqlType ? leftType : rightType, operatorName);
+        // So does json, with its own refusal (probed 2026-09-26).
+        else if (leftType is JsonSqlType || rightType is JsonSqlType)
+            throw SimulatedSqlException.JsonCannotBeComparedOrSorted(1);
         RequireResolvableCollation(leftType, rightType, operatorName);
     }
 

@@ -288,7 +288,7 @@ Blocked on a larger unmodeled parent feature (shipping a function here implies t
   Ships piecemeal by popularity, not as a bundle.
 
 - **SQL Server 2025's vector search** — vector indexes (`CREATE VECTOR INDEX`), `VECTOR_SEARCH`, the `float16` base type, and the binary vector TDS type a vector-aware client negotiates (the `vector` type and its four functions ship — see [`vector.md`](vector.md)).
-- **SQL Server 2025's native `json` type** — the storage type and the functions that take only it (`JSON_CONTAINS` refuses a `varchar` document with Msg 8116), along with its catalog and TDS surface.
+- **SQL Server 2025's `json` residue** — `JSON_CONTAINS` (which takes only a `json` document, refusing `varchar` with Msg 8116) and its `[*]` wildcard path, the json `modify` method, `CREATE JSON INDEX`, `JSON_VALUE … RETURNING`, and the native json TDS type a json-aware client negotiates (the type itself ships — see [`json-type.md`](json-type.md)).
 
 Low priority / niche — simulatable (as placeholder constants or a small model) but rarely hit, so not worth attention yet:
 

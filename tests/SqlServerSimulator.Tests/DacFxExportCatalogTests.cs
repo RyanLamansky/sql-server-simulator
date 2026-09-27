@@ -99,8 +99,9 @@ public sealed class DacFxExportCatalogTests
     /// empty views resolves (no Msg 207) and returns an empty set — including
     /// the sql_variant-substituted (partition_range_values.value,
     /// symmetric_keys.cryptographic_provider_algid), nvarchar(max)-substituted
-    /// (security_predicates.predicate_definition, external_models.parameters),
-    /// datetime2 (external_models.create_time), and varbinary(max)
+    /// (security_predicates.predicate_definition), json
+    /// (external_models.parameters), datetime2 (external_models.create_time),
+    /// and varbinary(max)
     /// (assembly_files.content) columns.
     /// </summary>
     [TestMethod]

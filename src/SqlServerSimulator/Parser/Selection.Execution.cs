@@ -877,7 +877,8 @@ internal sealed partial class Selection
     /// The sorting / grouping rejection for a type <see cref="SqlType.IsIncomparable"/>
     /// marks, dispatched to the number real gives that family: <b>Msg 306</b>
     /// for the legacy <c>text</c> / <c>ntext</c> / <c>image</c> trio,
-    /// <b>Msg 305</b> for <c>xml</c>, <b>Msg 42213</b> for <c>vector</c>, and
+    /// <b>Msg 305</b> for <c>xml</c>, <b>Msg 42213</b> for <c>vector</c>,
+    /// <b>Msg 13636</b> (state 2) for <c>json</c>, and
     /// <b>Msg 249</b> — the only one that names <paramref name="clause"/> — for
     /// the two spatial types. DISTINCT and the deduping set operators make no such split; they
     /// report one message across all three families.
@@ -886,6 +887,7 @@ internal sealed partial class Selection
         type.IsLegacyLob ? SimulatedSqlException.LobTypesCannotBeComparedOrSorted()
         : type is XmlSqlType ? SimulatedSqlException.XmlCannotBeComparedOrSorted()
         : type is VectorSqlType ? SimulatedSqlException.VectorCannotBeComparedOrSorted()
+        : type is JsonSqlType ? SimulatedSqlException.JsonCannotBeComparedOrSorted(2)
         : SimulatedSqlException.TypeNotComparableInClause(type, clause);
 
     /// <summary>

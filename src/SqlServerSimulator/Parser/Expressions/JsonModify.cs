@@ -40,6 +40,9 @@ internal sealed class JsonModify : Expression
     /// <summary>Msg 13608's State byte when JSON_MODIFY is the one raising it.</summary>
     private const byte StrictNotFoundState = 2;
 
+    /// <summary>Msg 13608's State byte over a <c>json</c> document (probed 2026-09-26).</summary>
+    private const byte JsonTypeStrictNotFoundState = 5;
+
     private readonly Expression jsonInput;
     private readonly Expression pathInput;
     private readonly Expression newValueInput;
@@ -62,9 +65,22 @@ internal sealed class JsonModify : Expression
         this.newValueIsJson = JsonValueRender.ProducesJson(this.newValueInput);
     }
 
+    /// <summary>
+    /// Over a <c>json</c> document the edit is made to its text as over any
+    /// other, and the result is <c>json</c> again, canonical (probed
+    /// 2026-09-26 against SQL Server 2025).
+    /// </summary>
     public override SqlValue Run(RuntimeContext runtime)
     {
         var jsonInputValue = this.jsonInput.Run(runtime);
+        if (jsonInputValue.Type is not JsonSqlType)
+            return this.Edit(runtime, jsonInputValue, StrictNotFoundState);
+        var edited = this.Edit(runtime, jsonInputValue, JsonTypeStrictNotFoundState);
+        return edited.IsNull ? SqlValue.Null(SqlType.Json) : SqlValue.FromJson(JsonDocumentText.Canonicalize(edited.AsString));
+    }
+
+    private SqlValue Edit(RuntimeContext runtime, SqlValue jsonInputValue, byte strictState)
+    {
         var pathValue = JsonText.RequirePathValue(this.pathInput.Run(runtime), "JSON_MODIFY");
         var newSqlValue = this.newValueInput.Run(runtime);
         RequireWritableValueType(newSqlValue.Type);
@@ -103,9 +119,9 @@ internal sealed class JsonModify : Expression
         return site.Outcome switch
         {
             JsonEditOutcome.Found => this.EditFound(document, path, site, newSqlValue),
-            JsonEditOutcome.MemberMissing => this.EditMissing(document, path, site, newSqlValue),
+            JsonEditOutcome.MemberMissing => this.EditMissing(document, path, site, newSqlValue, strictState),
             _ => path.Mode == JsonPathMode.Strict
-                ? throw SimulatedSqlException.JsonStrictPathNotFound(StrictNotFoundState)
+                ? throw SimulatedSqlException.JsonStrictPathNotFound(strictState)
                 : Unchanged(document),
         };
     }
@@ -153,10 +169,10 @@ internal sealed class JsonModify : Expression
     /// joins an object; an out-of-range array index has no slot to occupy and
     /// leaves the document alone.
     /// </summary>
-    private SqlValue EditMissing(string document, in JsonPath path, in JsonEditSite site, SqlValue newValue)
+    private SqlValue EditMissing(string document, in JsonPath path, in JsonEditSite site, SqlValue newValue, byte strictState)
     {
         if (path.Mode == JsonPathMode.Strict)
-            throw SimulatedSqlException.JsonStrictPathNotFound(StrictNotFoundState);
+            throw SimulatedSqlException.JsonStrictPathNotFound(strictState);
 
         var leaf = path.Segments[^1];
         if (leaf.IsIndex || (newValue.IsNull && !path.Append))
@@ -233,7 +249,7 @@ internal sealed class JsonModify : Expression
     {
         JsonText.RequireDocumentAndPath(this.jsonInput, this.pathInput, batch, resolveColumnType, "json_modify");
         RequireWritableValueType(this.newValueInput.GetSqlType(batch, resolveColumnType));
-        return SqlType.NVarcharMax;
+        return this.jsonInput.GetSqlType(batch, resolveColumnType) is JsonSqlType ? SqlType.Json : SqlType.NVarcharMax;
     }
 
     internal override string DebugDisplay() => $"JSON_MODIFY({this.jsonInput.DebugDisplay()}, {this.pathInput.DebugDisplay()}, {this.newValueInput.DebugDisplay()})";

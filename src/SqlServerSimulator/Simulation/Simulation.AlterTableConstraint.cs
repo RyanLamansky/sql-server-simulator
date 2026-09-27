@@ -449,12 +449,12 @@ partial class Simulation
         for (var i = 0; i < fullOrdinals.Length; i++)
         {
             var col = table.Columns[fullOrdinals[i]];
+            // A vector or json key is refused with the constraint's own Msg 1750
+            // after it (probed 2026-09-26 against SQL Server 2025).
+            if (col.Type is VectorSqlType or JsonSqlType)
+                throw SimulatedSqlException.FollowedByConstraintNotCreated(SimulatedSqlException.KeyColumnInvalidType(col.Name, table.Name), state: 0);
             if (col.IsLob)
                 throw SimulatedSqlException.KeyColumnInvalidType(col.Name, table.Name);
-            // A vector key is refused with the constraint's own Msg 1750 after it
-            // (probed 2026-09-26 against SQL Server 2025).
-            if (col.Type is VectorSqlType)
-                throw SimulatedSqlException.FollowedByConstraintNotCreated(SimulatedSqlException.KeyColumnInvalidType(col.Name, table.Name), state: 0);
             // A non-persisted computed column is a legal UNIQUE key — its value
             // is evaluated per row by the enforcement paths — subject to the
             // determinism / precision gate CREATE INDEX applies. PRIMARY KEY on

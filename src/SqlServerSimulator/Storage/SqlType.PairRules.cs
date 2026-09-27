@@ -4,7 +4,7 @@ namespace SqlServerSimulator.Storage;
 // comparison or an arithmetic operator, and the error real raises when not.
 partial class SqlType
 {
-    private const int PairClassCount = (int)TypePairClass.Vector + 1;
+    private const int PairClassCount = (int)TypePairClass.Json + 1;
 
     // The grids: one row per left operand class, one column per right operand
     // class, both in TypePairClass order. A cell is the outcome real reports:
@@ -16,6 +16,7 @@ partial class SqlType
     //   O  o  Msg 8117 operand data type invalid, naming the left / right operand
     //   U  u  Msg 403 invalid operator, naming the left / right operand
     //   X     Msg 305, xml can't be compared
+    //   J     Msg 13636, json can't be compared
     // Probed 2026-09-23 against SQL Server 2025 over every ordered pair of 37
     // types (every class member, the MAX forms and sysname included), each one
     // statement per batch over empty-table columns so constant folding can't
@@ -23,13 +24,14 @@ partial class SqlType
     // exception is folded in by PairError: a MAX string or binary can't reach
     // sql_variant, so that pair is Msg 206 naming the MAX side first. The
     // vector row and column were probed 2026-09-26 the same way, vector(2)
-    // against one member of each class in both orders.
+    // against one member of each class in both orders, and the json row and
+    // column the same way on 2026-09-26.
     //
     // Each grid is one span, row after row, so a row that isn't exactly
     // PairClassCount cells long shifts every cell after it; the lookup
     // asserts the total.
     //
-    // Columns:                    bit int exact approx ansi uni bin text image ts uid dt date time dt2 xml variant hid spatial vector
+    // Columns:                    bit int exact approx ansi uni bin text image ts uid dt date time dt2 xml variant hid spatial vector json
 
     // Assign reads its source down the rows and its target across the
     // columns, probed 2026-09-24 against SQL Server 2025 by declaring a
@@ -37,158 +39,165 @@ partial class SqlType
     // image classes and a timestamp target were left out (no variable takes
     // them) and read as legal.
     private static ReadOnlySpan<byte> AssignGrid =>
-        "..........C.CCCC.CCC"u8 // bit
-        + "..........C.CCCC.CCC"u8 // integer
-        + "..........C.CCCC.CCC"u8 // exact numeric
-        + "..........C.CCCC.CCC"u8 // approximate
-        + "......V............."u8 // ansi string
-        + "......V............."u8 // unicode string
-        + "...C........VVV....C"u8 // binary
-        + "...................."u8 // text
-        + "...................."u8 // image
-        + "...C.C....C.CCCCCCC."u8 // timestamp
-        + "CCCC.......CCCCC.CCC"u8 // uniqueidentifier
-        + "VVVV..V...C....C.CCC"u8 // datetime / smalldatetime
-        + "CCCC..V...C..C.C.CCC"u8 // date
-        + "CCCC..V...C.C..C.CCC"u8 // time
-        + "CCCC..V...C....C.CCC"u8 // datetime2 / datetimeoffset
-        + "CCCCVVV...CCCCC.CCCC"u8 // xml
-        + "VVVVVVV...VVVVVC.CCC"u8 // sql_variant
-        + "CCCCVVV...CCCCCCC.CC"u8 // hierarchyid
-        + "CCCCVVV...CCCCCCCC.C"u8 // spatial
-        + "CCCC..C...CCCCCCCCC."u8; // vector
+        "..........C.CCCC.CCCC"u8 // bit
+        + "..........C.CCCC.CCCC"u8 // integer
+        + "..........C.CCCC.CCCC"u8 // exact numeric
+        + "..........C.CCCC.CCCC"u8 // approximate
+        + "......V.............."u8 // ansi string
+        + "......V.............."u8 // unicode string
+        + "...C........VVV....CC"u8 // binary
+        + "....................."u8 // text
+        + "....................."u8 // image
+        + "...C.C....C.CCCCCCC.."u8 // timestamp
+        + "CCCC.......CCCCC.CCCC"u8 // uniqueidentifier
+        + "VVVV..V...C....C.CCCC"u8 // datetime / smalldatetime
+        + "CCCC..V...C..C.C.CCCC"u8 // date
+        + "CCCC..V...C.C..C.CCCC"u8 // time
+        + "CCCC..V...C....C.CCCC"u8 // datetime2 / datetimeoffset
+        + "CCCCVVV...CCCCC.CCCCC"u8 // xml
+        + "VVVVVVV...VVVVVC.CCCC"u8 // sql_variant
+        + "CCCCVVV...CCCCCCC.CCC"u8 // hierarchyid
+        + "CCCCVVV...CCCCCCCC.CC"u8 // spatial
+        + "CCCC..C...CCCCCCCCC.."u8 // vector
+        + "CCCCVVC...CCCCCCCCC.."u8; // json
 
     private static ReadOnlySpan<byte> UnifyGrid =>
-        ".......cc.c.CCCC.CCc"u8 // bit
-        + ".......cc.c.CCCC.CCc"u8 // integer
-        + ".......cc.c.CCCC.CCc"u8 // exact numeric
-        + "......ccccc.CCCC.CCc"u8 // approximate
-        + ".........V.........."u8 // ansi string
-        + "........CV.........."u8 // unicode string
-        + "...C...C....VVV....C"u8 // binary
-        + "CCCC..c.cccCCCC.CCCc"u8 // text
-        + "CCCC.c.C..cCCCCCCCCc"u8 // image
-        + "...Cvv.C..c.CCCCCCCc"u8 // timestamp
-        + "CCCC...CCC.CCCCC.CCc"u8 // uniqueidentifier
-        + ".......cc.c....C.CCc"u8 // datetime / smalldatetime
-        + "cccc..vcccc..c.C.CCc"u8 // date
-        + "cccc..vcccc.C..C.CCc"u8 // time
-        + "cccc..vcccc....C.CCc"u8 // datetime2 / datetimeoffset
-        + "cccc....ccccccc.cccc"u8 // xml
-        + ".......ccc.....C.CCc"u8 // sql_variant
-        + "cccc...ccccccccCc.cc"u8 // hierarchyid
-        + "cccc...ccccccccCcccc"u8 // spatial
-        + "CCCC..cCCCCCCCCCCCC."u8; // vector
+        ".......cc.c.CCCC.CCcC"u8 // bit
+        + ".......cc.c.CCCC.CCcC"u8 // integer
+        + ".......cc.c.CCCC.CCcC"u8 // exact numeric
+        + "......ccccc.CCCC.CCcC"u8 // approximate
+        + ".........V..........."u8 // ansi string
+        + "........CV..........."u8 // unicode string
+        + "...C...C....VVV....CC"u8 // binary
+        + "CCCC..c.cccCCCC.CCCcC"u8 // text
+        + "CCCC.c.C..cCCCCCCCCcC"u8 // image
+        + "...Cvv.C..c.CCCCCCCcC"u8 // timestamp
+        + "CCCC...CCC.CCCCC.CCcC"u8 // uniqueidentifier
+        + ".......cc.c....C.CCcC"u8 // datetime / smalldatetime
+        + "cccc..vcccc..c.C.CCcC"u8 // date
+        + "cccc..vcccc.C..C.CCcC"u8 // time
+        + "cccc..vcccc....C.CCcC"u8 // datetime2 / datetimeoffset
+        + "cccc....ccccccc.ccccC"u8 // xml
+        + ".......ccc.....C.CCcC"u8 // sql_variant
+        + "cccc...ccccccccCc.ccC"u8 // hierarchyid
+        + "cccc...ccccccccCccccC"u8 // spatial
+        + "CCCC..cCCCCCCCCCCCC.."u8 // vector
+        + "cccc..ccccccccccccc.."u8; // json
 
     private static ReadOnlySpan<byte> CompareGrid =>
-        ".......cc.c.cccc.CuI"u8 // bit
-        + ".......cc.c.cccc.CuI"u8 // integer
-        + ".......cc.c.cccc.CuI"u8 // exact numeric
-        + "......ccccc.cccc.Cuo"u8 // approximate
-        + ".......IIV.....I..uo"u8 // ansi string
-        + ".......IIV.....I..uo"u8 // unicode string
-        + "...C...II...IIII..uo"u8 // binary
-        + "CCCCIIIIICCCIIIICCuo"u8 // text
-        + "CCCCIIIII.CCIIIICCuo"u8 // image
-        + "...Cvv.c..c.ccccCCuo"u8 // timestamp
-        + "CCCC...ccC.Ccccc.Cuo"u8 // uniqueidentifier
-        + ".......cc.c..I.c.Cuo"u8 // datetime / smalldatetime
-        + "CCCC..IIICC..I.I.Cuo"u8 // date
-        + "CCCC..IIICCII.II.Cuo"u8 // time
-        + "CCCC..IIICC..I.I.Cuo"u8 // datetime2 / datetimeoffset
-        + "CCCCIIIIICCCIIIXCCuo"u8 // xml
-        + ".......ccc.....c.Cuo"u8 // sql_variant
-        + "cccc...cccccccccc.cc"u8 // hierarchyid
-        + "UUUUUUUUUUUUUUUUUUUU"u8 // spatial
-        + "IIIOOOOOOOOOOOOOOCuO"u8; // vector
+        ".......cc.c.cccc.CuIc"u8 // bit
+        + ".......cc.c.cccc.CuIc"u8 // integer
+        + ".......cc.c.cccc.CuIc"u8 // exact numeric
+        + "......ccccc.cccc.Cuoc"u8 // approximate
+        + ".......IIV.....I..uoI"u8 // ansi string
+        + ".......IIV.....I..uoI"u8 // unicode string
+        + "...C...II...IIII..uoI"u8 // binary
+        + "CCCCIIIIICCCIIIICCuoI"u8 // text
+        + "CCCCIIIII.CCIIIICCuoI"u8 // image
+        + "...Cvv.c..c.ccccCCuoc"u8 // timestamp
+        + "CCCC...ccC.Ccccc.Cuoc"u8 // uniqueidentifier
+        + ".......cc.c..I.c.CuoI"u8 // datetime / smalldatetime
+        + "CCCC..IIICC..I.I.CuoI"u8 // date
+        + "CCCC..IIICCII.II.CuoI"u8 // time
+        + "CCCC..IIICC..I.I.CuoI"u8 // datetime2 / datetimeoffset
+        + "CCCCIIIIICCCIIIXCCuoI"u8 // xml
+        + ".......ccc.....c.Cuoc"u8 // sql_variant
+        + "cccc...cccccccccc.ccc"u8 // hierarchyid
+        + "UUUUUUUUUUUUUUUUUUUUU"u8 // spatial
+        + "IIIOOOOOOOOOOOOOOCuOO"u8 // vector
+        + "CCCCIIIIICCIIIIICCuoJ"u8; // json
 
     private static ReadOnlySpan<byte> AddGrid =>
-        "I...IIIIIII.IIIIIuuo"u8 // bit
-        + ".......cc.c.ccccvuuo"u8 // integer
-        + ".......cc.c.ccccvuuo"u8 // exact numeric
-        + "......ccccc.ccccvuuo"u8 // approximate
-        + "I.....IIIII.IIIIIuuo"u8 // ansi string
-        + "I.....IIIII.IIIIIuuo"u8 // unicode string
-        + "I..CII.II.I.IIIIIuuo"u8 // binary
-        + "ICCCIIIOOIOIOOOOIuuo"u8 // text
-        + "ICCCIIIOOIOIOOOOIuuo"u8 // image
-        + "I..CII.II.IIIIIIIuuI"u8 // timestamp
-        + "ICCCIIIOOIOIOOOOIuuo"u8 // uniqueidentifier
-        + ".......IIII.IIIIvuuo"u8 // datetime / smalldatetime
-        + "ICCCIIIOOIOIOOOOIuuo"u8 // date
-        + "ICCCIIIOOIOIOOOOIuuo"u8 // time
-        + "ICCCIIIOOIOIOOOOIuuo"u8 // datetime2 / datetimeoffset
-        + "ICCCIIIOOIOIOOOOIuuo"u8 // xml
-        + "IVVVIIIIIIIVIIIIIuuo"u8 // sql_variant
-        + "UUUUUUUUUUUUUUUUUUUU"u8 // hierarchyid
-        + "UUUUUUUUUUUUUUUUUUUU"u8 // spatial
-        + "OOOOOOOOOIOOOOOOOuuO"u8; // vector
+        "I...IIIIIII.IIIIIuuoI"u8 // bit
+        + ".......cc.c.ccccvuuoc"u8 // integer
+        + ".......cc.c.ccccvuuoc"u8 // exact numeric
+        + "......ccccc.ccccvuuoc"u8 // approximate
+        + "I.....IIIII.IIIIIuuoI"u8 // ansi string
+        + "I.....IIIII.IIIIIuuoI"u8 // unicode string
+        + "I..CII.II.I.IIIIIuuoI"u8 // binary
+        + "ICCCIIIOOIOIOOOOIuuoO"u8 // text
+        + "ICCCIIIOOIOIOOOOIuuoO"u8 // image
+        + "I..CII.II.IIIIIIIuuII"u8 // timestamp
+        + "ICCCIIIOOIOIOOOOIuuoO"u8 // uniqueidentifier
+        + ".......IIII.IIIIvuuoI"u8 // datetime / smalldatetime
+        + "ICCCIIIOOIOIOOOOIuuoO"u8 // date
+        + "ICCCIIIOOIOIOOOOIuuoO"u8 // time
+        + "ICCCIIIOOIOIOOOOIuuoO"u8 // datetime2 / datetimeoffset
+        + "ICCCIIIOOIOIOOOOIuuoO"u8 // xml
+        + "IVVVIIIIIIIVIIIIIuuoI"u8 // sql_variant
+        + "UUUUUUUUUUUUUUUUUUUUU"u8 // hierarchyid
+        + "UUUUUUUUUUUUUUUUUUUUU"u8 // spatial
+        + "OOOOOOOOOIOOOOOOOuuOO"u8 // vector
+        + "ICCCIIIOOIOIOOOOIuuoO"u8; // json
 
     private static ReadOnlySpan<byte> SubtractGrid =>
-        "I...IIIIIII.IIIIIuuo"u8 // bit
-        + ".......cc.c.ccccvuuo"u8 // integer
-        + ".......cc.c.ccccvuuo"u8 // exact numeric
-        + "......ccccc.ccccvuuo"u8 // approximate
-        + "I...IIIIIII.IIIIIuuo"u8 // ansi string
-        + "I...IIIIIII.IIIIIuuo"u8 // unicode string
-        + "I..CIIIIIII.IIIIIuuo"u8 // binary
-        + "ICCCIIIOOOOIOOOOIuuo"u8 // text
-        + "ICCCIIIOOOOIOOOOIuuo"u8 // image
-        + "I..CIIIOOOOIOOOOIuuo"u8 // timestamp
-        + "ICCCIIIOOOOIOOOOIuuo"u8 // uniqueidentifier
-        + ".......IIII.IIIIvuuo"u8 // datetime / smalldatetime
-        + "ICCCIIIOOOOIOOOOIuuo"u8 // date
-        + "ICCCIIIOOOOIOOOOIuuo"u8 // time
-        + "ICCCIIIOOOOIOOOOIuuo"u8 // datetime2 / datetimeoffset
-        + "ICCCIIIOOOOIOOOOIuuo"u8 // xml
-        + "IVVVIIIIIIIVIIIIIuuo"u8 // sql_variant
-        + "UUUUUUUUUUUUUUUUUUUU"u8 // hierarchyid
-        + "UUUUUUUUUUUUUUUUUUUU"u8 // spatial
-        + "OOOOOOOOOOOOOOOOOuuO"u8; // vector
+        "I...IIIIIII.IIIIIuuoI"u8 // bit
+        + ".......cc.c.ccccvuuoc"u8 // integer
+        + ".......cc.c.ccccvuuoc"u8 // exact numeric
+        + "......ccccc.ccccvuuoc"u8 // approximate
+        + "I...IIIIIII.IIIIIuuoI"u8 // ansi string
+        + "I...IIIIIII.IIIIIuuoI"u8 // unicode string
+        + "I..CIIIIIII.IIIIIuuoI"u8 // binary
+        + "ICCCIIIOOOOIOOOOIuuoO"u8 // text
+        + "ICCCIIIOOOOIOOOOIuuoO"u8 // image
+        + "I..CIIIOOOOIOOOOIuuoO"u8 // timestamp
+        + "ICCCIIIOOOOIOOOOIuuoO"u8 // uniqueidentifier
+        + ".......IIII.IIIIvuuoI"u8 // datetime / smalldatetime
+        + "ICCCIIIOOOOIOOOOIuuoO"u8 // date
+        + "ICCCIIIOOOOIOOOOIuuoO"u8 // time
+        + "ICCCIIIOOOOIOOOOIuuoO"u8 // datetime2 / datetimeoffset
+        + "ICCCIIIOOOOIOOOOIuuoO"u8 // xml
+        + "IVVVIIIIIIIVIIIIIuuoI"u8 // sql_variant
+        + "UUUUUUUUUUUUUUUUUUUUU"u8 // hierarchyid
+        + "UUUUUUUUUUUUUUUUUUUUU"u8 // spatial
+        + "OOOOOOOOOOOOOOOOOuuOO"u8 // vector
+        + "ICCCIIIOOOOIOOOOIuuoO"u8; // json
 
     private static ReadOnlySpan<byte> MultiplyDivideGrid =>
-        "O...OOOOOOOOOOOOOuuo"u8 // bit
-        + ".......cc.cvccccvuuo"u8 // integer
-        + ".......cc.cvccccvuuo"u8 // exact numeric
-        + "......cccccvccccvuuo"u8 // approximate
-        + "O...OOOOOOOOOOOOOuuo"u8 // ansi string
-        + "O...OOOOOOOOOOOOOuuo"u8 // unicode string
-        + "O..COOOOOOOOOOOOOuuo"u8 // binary
-        + "OCCCOOOOOOOOOOOOOuuo"u8 // text
-        + "OCCCOOOOOOOOOOOOOuuo"u8 // image
-        + "O..COOOOOOOOOOOOOuuo"u8 // timestamp
-        + "OCCCOOOOOOOOOOOOOuuo"u8 // uniqueidentifier
-        + "OVVVOOOOOOOOOOOOOuuo"u8 // datetime / smalldatetime
-        + "OCCCOOOOOOOOOOOOOuuo"u8 // date
-        + "OCCCOOOOOOOOOOOOOuuo"u8 // time
-        + "OCCCOOOOOOOOOOOOOuuo"u8 // datetime2 / datetimeoffset
-        + "OCCCOOOOOOOOOOOOOuuo"u8 // xml
-        + "OVVVOOOOOOOOOOOOOuuo"u8 // sql_variant
-        + "UUUUUUUUUUUUUUUUUUUU"u8 // hierarchyid
-        + "UUUUUUUUUUUUUUUUUUUU"u8 // spatial
-        + "OOOOOOOOOOOOOOOOOuuO"u8; // vector
+        "O...OOOOOOOOOOOOOuuoO"u8 // bit
+        + ".......cc.cvccccvuuoc"u8 // integer
+        + ".......cc.cvccccvuuoc"u8 // exact numeric
+        + "......cccccvccccvuuoc"u8 // approximate
+        + "O...OOOOOOOOOOOOOuuoO"u8 // ansi string
+        + "O...OOOOOOOOOOOOOuuoO"u8 // unicode string
+        + "O..COOOOOOOOOOOOOuuoO"u8 // binary
+        + "OCCCOOOOOOOOOOOOOuuoO"u8 // text
+        + "OCCCOOOOOOOOOOOOOuuoO"u8 // image
+        + "O..COOOOOOOOOOOOOuuoO"u8 // timestamp
+        + "OCCCOOOOOOOOOOOOOuuoO"u8 // uniqueidentifier
+        + "OVVVOOOOOOOOOOOOOuuoO"u8 // datetime / smalldatetime
+        + "OCCCOOOOOOOOOOOOOuuoO"u8 // date
+        + "OCCCOOOOOOOOOOOOOuuoO"u8 // time
+        + "OCCCOOOOOOOOOOOOOuuoO"u8 // datetime2 / datetimeoffset
+        + "OCCCOOOOOOOOOOOOOuuoO"u8 // xml
+        + "OVVVOOOOOOOOOOOOOuuoO"u8 // sql_variant
+        + "UUUUUUUUUUUUUUUUUUUUU"u8 // hierarchyid
+        + "UUUUUUUUUUUUUUUUUUUUU"u8 // spatial
+        + "OOOOOOOOOOOOOOOOOuuOO"u8 // vector
+        + "OCCCOOOOOOOOOOOOOuuoO"u8; // json
 
     private static ReadOnlySpan<byte> ModuloGrid =>
-        "I..IIIIIIIIIIIIIIuuo"u8 // bit
-        + "...I...II.IIIIIIIuuo"u8 // integer
-        + "...IIIIIIIIIIIIIIuuo"u8 // exact numeric
-        + "IIIOIIIOOIOOOOOOOuuo"u8 // approximate
-        + "I.IIIIIIIIIIIIIIIuuo"u8 // ansi string
-        + "I.IIIIIIIIIIIIIIIuuo"u8 // unicode string
-        + "I.IIIIIIIIIIIIIIIuuo"u8 // binary
-        + "IIIOIIIOOIOOOOOOOuuo"u8 // text
-        + "IIIOIIIOOIOOOOOOOuuo"u8 // image
-        + "I.IIIIIIIIIIIIIIIuuo"u8 // timestamp
-        + "IIIOIIIOOIOOOOOOOuuo"u8 // uniqueidentifier
-        + "IIIOIIIOOIOOOOOOOuuo"u8 // datetime / smalldatetime
-        + "IIIOIIIOOIOOOOOOOuuo"u8 // date
-        + "IIIOIIIOOIOOOOOOOuuo"u8 // time
-        + "IIIOIIIOOIOOOOOOOuuo"u8 // datetime2 / datetimeoffset
-        + "IIIOIIIOOIOOOOOOOuuo"u8 // xml
-        + "IIIOIIIOOIOOOOOOOuuo"u8 // sql_variant
-        + "UUUUUUUUUUUUUUUUUUUU"u8 // hierarchyid
-        + "UUUUUUUUUUUUUUUUUUUU"u8 // spatial
-        + "OOOOOOOOOOOOOOOOOuuO"u8; // vector
+        "I..IIIIIIIIIIIIIIuuoI"u8 // bit
+        + "...I...II.IIIIIIIuuoI"u8 // integer
+        + "...IIIIIIIIIIIIIIuuoI"u8 // exact numeric
+        + "IIIOIIIOOIOOOOOOOuuoO"u8 // approximate
+        + "I.IIIIIIIIIIIIIIIuuoI"u8 // ansi string
+        + "I.IIIIIIIIIIIIIIIuuoI"u8 // unicode string
+        + "I.IIIIIIIIIIIIIIIuuoI"u8 // binary
+        + "IIIOIIIOOIOOOOOOOuuoO"u8 // text
+        + "IIIOIIIOOIOOOOOOOuuoO"u8 // image
+        + "I.IIIIIIIIIIIIIIIuuoI"u8 // timestamp
+        + "IIIOIIIOOIOOOOOOOuuoO"u8 // uniqueidentifier
+        + "IIIOIIIOOIOOOOOOOuuoO"u8 // datetime / smalldatetime
+        + "IIIOIIIOOIOOOOOOOuuoO"u8 // date
+        + "IIIOIIIOOIOOOOOOOuuoO"u8 // time
+        + "IIIOIIIOOIOOOOOOOuuoO"u8 // datetime2 / datetimeoffset
+        + "IIIOIIIOOIOOOOOOOuuoO"u8 // xml
+        + "IIIOIIIOOIOOOOOOOuuoO"u8 // sql_variant
+        + "UUUUUUUUUUUUUUUUUUUUU"u8 // hierarchyid
+        + "UUUUUUUUUUUUUUUUUUUUU"u8 // spatial
+        + "OOOOOOOOOOOOOOOOOuuOO"u8 // vector
+        + "IIIOIIIOOIOOOOOOOuuoO"u8; // json
 
     // The bitwise operators, probed 2026-09-25 against SQL Server 2025 over
     // every ordered pair of empty-table columns of the 19 classes with `&`,
@@ -197,26 +206,27 @@ partial class SqlType
     // quoted ('&'). An untyped NULL is handled ahead of the grid, pairing only
     // with an integer.
     private static ReadOnlySpan<byte> BitwiseGrid =>
-        "..II...II.IIIIIIIuuo"u8 // bit
-        + "..II...II.IIIIIIIuuo"u8 // integer
-        + "IIOOIIIOOIOOOOOOOuuo"u8 // exact numeric
-        + "IIOOIIIOOIOOOOOOOuuo"u8 // approximate
-        + "..IIIIIIIIIIIIIIIuuo"u8 // ansi string
-        + "..IIIIIIIIIIIIIIIuuo"u8 // unicode string
-        + "..IIIIIIIIIIIIIIIuuo"u8 // binary
-        + "IIOOIIIOOIOOOOOOOuuo"u8 // text
-        + "IIOOIIIOOIOOOOOOOuuo"u8 // image
-        + "..IIIIIIIIIIIIIIIuuo"u8 // timestamp
-        + "IIOOIIIOOIOOOOOOOuuo"u8 // uniqueidentifier
-        + "IIOOIIIOOIOOOOOOOuuo"u8 // datetime / smalldatetime
-        + "IIOOIIIOOIOOOOOOOuuo"u8 // date
-        + "IIOOIIIOOIOOOOOOOuuo"u8 // time
-        + "IIOOIIIOOIOOOOOOOuuo"u8 // datetime2 / datetimeoffset
-        + "IIOOIIIOOIOOOOOOOuuo"u8 // xml
-        + "IIOOIIIOOIOOOOOOOuuo"u8 // sql_variant
-        + "UUUUUUUUUUUUUUUUUUUU"u8 // hierarchyid
-        + "UUUUUUUUUUUUUUUUUUUU"u8 // spatial
-        + "OOOOOOOOOOOOOOOOOuuO"u8; // vector
+        "..II...II.IIIIIIIuuoI"u8 // bit
+        + "..II...II.IIIIIIIuuoI"u8 // integer
+        + "IIOOIIIOOIOOOOOOOuuoO"u8 // exact numeric
+        + "IIOOIIIOOIOOOOOOOuuoO"u8 // approximate
+        + "..IIIIIIIIIIIIIIIuuoI"u8 // ansi string
+        + "..IIIIIIIIIIIIIIIuuoI"u8 // unicode string
+        + "..IIIIIIIIIIIIIIIuuoI"u8 // binary
+        + "IIOOIIIOOIOOOOOOOuuoO"u8 // text
+        + "IIOOIIIOOIOOOOOOOuuoO"u8 // image
+        + "..IIIIIIIIIIIIIIIuuoI"u8 // timestamp
+        + "IIOOIIIOOIOOOOOOOuuoO"u8 // uniqueidentifier
+        + "IIOOIIIOOIOOOOOOOuuoO"u8 // datetime / smalldatetime
+        + "IIOOIIIOOIOOOOOOOuuoO"u8 // date
+        + "IIOOIIIOOIOOOOOOOuuoO"u8 // time
+        + "IIOOIIIOOIOOOOOOOuuoO"u8 // datetime2 / datetimeoffset
+        + "IIOOIIIOOIOOOOOOOuuoO"u8 // xml
+        + "IIOOIIIOOIOOOOOOOuuoO"u8 // sql_variant
+        + "UUUUUUUUUUUUUUUUUUUUU"u8 // hierarchyid
+        + "UUUUUUUUUUUUUUUUUUUUU"u8 // spatial
+        + "OOOOOOOOOOOOOOOOOuuOO"u8 // vector
+        + "IIOOIIIOOIOOOOOOOuuoO"u8; // json
 
     /// <summary>
     /// Whether <paramref name="left"/> and <paramref name="right"/> may meet in
@@ -292,6 +302,7 @@ partial class SqlType
             'u' => SimulatedSqlException.InvalidOperatorForDataType(operatorName, OperandName(right)),
             'V' => ImplicitConversionError(operation, left, right),
             'v' => ImplicitConversionError(operation, right, left),
+            'J' => SimulatedSqlException.JsonCannotBeComparedOrSorted(1),
             _ => SimulatedSqlException.XmlCannotBeComparedOrSorted(),
         };
     }
@@ -309,11 +320,11 @@ partial class SqlType
     // `.` legal, `I` Msg 402 naming NULL in its position, `U` Msg 403 naming
     // the other operand. Two NULLs always combine. `+` alone is asymmetric —
     // a timestamp takes a NULL on its left but not on its right.
-    private static ReadOnlySpan<byte> NullAfterAdd => "I......IIII.IIIIIUUI"u8;
-    private static ReadOnlySpan<byte> NullBeforeAdd => "I......II.I.IIIIIUUI"u8;
-    private static ReadOnlySpan<byte> NullSubtract => "I...IIIIIII.IIIIIUUI"u8;
-    private static ReadOnlySpan<byte> NullMultiplyDivide => "I...IIIIIIIIIIIIIUUI"u8;
-    private static ReadOnlySpan<byte> NullModulo => "I..IIIIIIIIIIIIIIUUI"u8;
+    private static ReadOnlySpan<byte> NullAfterAdd => "I......IIII.IIIIIUUII"u8;
+    private static ReadOnlySpan<byte> NullBeforeAdd => "I......II.I.IIIIIUUII"u8;
+    private static ReadOnlySpan<byte> NullSubtract => "I...IIIIIII.IIIIIUUII"u8;
+    private static ReadOnlySpan<byte> NullMultiplyDivide => "I...IIIIIIIIIIIIIUUII"u8;
+    private static ReadOnlySpan<byte> NullModulo => "I..IIIIIIIIIIIIIIUUII"u8;
 
     /// <summary>
     /// The NULL row cell for an arithmetic pair holding exactly one untyped

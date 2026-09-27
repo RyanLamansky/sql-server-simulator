@@ -36,6 +36,8 @@ internal readonly partial struct SqlValue
             return this;
         if (this.IsNull)
             return Null(target);
+        if (target is JsonSqlType || this.Type is JsonSqlType)
+            return this.CoerceJson(target);
         if (target is VectorSqlType || this.Type is VectorSqlType)
             return this.CoerceVector(target);
 
@@ -2232,5 +2234,45 @@ internal readonly partial struct SqlValue
             _ => int.MaxValue,
         };
         return text.Length > width ? throw SimulatedSqlException.VectorTruncation() : FromString(target, text);
+    }
+
+    /// <summary>
+    /// A json value's conversions: a character string reads as a document
+    /// (<see cref="JsonDocumentText.Canonicalize"/>), as does a vector's text
+    /// form; json writes its canonical text to a string, refusing (Msg 13639)
+    /// a bounded target too narrow for all of it, and reads as a vector, an
+    /// object refused as a vector (Msg 13670 state 20) before its text is read
+    /// (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    private SqlValue CoerceJson(SqlType target)
+    {
+        if (target is JsonSqlType)
+        {
+            return this.Type switch
+            {
+                VectorSqlType => FromJson(JsonDocumentText.Canonicalize(VectorSqlType.Format(this.AsVectorBytes))),
+                _ when SqlType.IsCollatedString(this.Type) && !this.Type.IsLegacyLob => FromJson(JsonDocumentText.Canonicalize(this.AsString)),
+                _ => throw SimulatedSqlException.ExplicitConversionNotAllowed(this.Type, target),
+            };
+        }
+        var text = this.AsString;
+        if (target is VectorSqlType vector)
+        {
+            return text.StartsWith('{')
+                ? throw SimulatedSqlException.VectorJsonInvalid("Key-Value Not Supported", 20)
+                : FromVector(vector, VectorSqlType.Parse(text, vector.dimensions, mismatchState: 2));
+        }
+        if (!SqlType.IsCollatedString(target) || target.IsLegacyLob)
+            throw SimulatedSqlException.ExplicitConversionNotAllowed(this.Type, target);
+        var width = target switch
+        {
+            VarcharSqlType { length: > 0 } varchar => varchar.length,
+            NVarcharSqlType { length: > 0 } nvarchar => nvarchar.length,
+            CharSqlType fixedChar => fixedChar.length,
+            NCharSqlType fixedNChar => fixedNChar.length,
+            SystemNameSqlType => 128,
+            _ => int.MaxValue,
+        };
+        return text.Length > width ? throw SimulatedSqlException.JsonTargetTooSmall() : FromString(target, text);
     }
 }

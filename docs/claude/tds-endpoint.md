@@ -411,6 +411,8 @@ Specifics:
   Oracle: `HierarchyIdWireTests`.
 - **`vector`** (`0xA7` `varchar(max)`, collated `Latin1_General_100_BIN2_UTF8`): the endpoint acknowledges no vector feature extension, so a vector column travels as the text form real sends a client without vector support (probed 2026-09-26 through SqlClient 5.1); a vector-aware SqlClient reads a string where real would hand it `SqlVector<float>` — see [`vector.md`](vector.md).
   Oracle: `VectorWireTests`.
+- **`json`** (the same `0xA7` `varchar(max)`, collated `Latin1_General_100_BIN2_UTF8`): with no json feature extension acknowledged, a json column travels as the canonical text, the down-level form Microsoft's json data type page gives for a TDS 7.4 client; a json-aware SqlClient reads a string where real would hand it the native type — see [`json-type.md`](json-type.md).
+  Oracle: `JsonWireTests`.
 - **`text` / `ntext` / `image`** (legacy in-band textptr form) — see [Legacy text / ntext / image](#legacy-text--ntext--image-wire-forms) below.
 - Every modeled result-column type has a wire encoding; an unmodeled one would surface as `WriteTypeInfo`'s `NotSupportedException` → ERROR 50000.
 

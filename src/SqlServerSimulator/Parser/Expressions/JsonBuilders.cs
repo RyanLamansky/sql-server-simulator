@@ -39,9 +39,10 @@ internal static class JsonValueRender
             _ = sb.Append(NullLiteral);
             return;
         }
-        // A vector's text form is already a JSON array, and embeds as one
-        // (probed 2026-09-26 against SQL Server 2025).
-        if (embedRaw || value.Type is VectorSqlType)
+        // A vector's text form is already a JSON array, and a json value is a
+        // document; each embeds as it is (probed 2026-09-26 against SQL Server
+        // 2025).
+        if (embedRaw || value.Type is VectorSqlType or JsonSqlType)
         {
             _ = sb.Append(value.CoerceTo(SqlType.NVarcharMax).AsString);
             return;
@@ -235,6 +236,32 @@ internal static class JsonNullClauseParser
         return @default;
     }
 
+    /// <summary>
+    /// Consumes an optional <c>RETURNING json</c> suffix — the only target
+    /// real takes; any other is Msg 102 (probed 2026-09-26 against SQL Server
+    /// 2025). Leaves the cursor past it.
+    /// </summary>
+    public static bool ParseReturning(ParserContext context)
+    {
+        if (context.Token is not UnquotedString { Value: var word } || !Collation.Baseline.Equals(word, "RETURNING"))
+            return false;
+        context.MoveNextRequired();
+        if (context.Token is not Name { Value: var target } || !Collation.Baseline.Equals(target, "json"))
+            throw SimulatedSqlException.JsonReturningNotJson(context.Token is Name { Value: var other } && Collation.Baseline.Equals(other, "nvarchar"));
+        context.MoveNextRequired();
+        return true;
+    }
+
+    /// <summary>
+    /// A builder's result: <c>json</c>, canonicalized, when its
+    /// <c>RETURNING json</c> clause asks for it or a value it embeds is
+    /// <c>json</c> — so <c>JSON_OBJECT('a': &lt;json&gt;)</c> is itself json —
+    /// else <c>nvarchar(max)</c> (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    public static SqlValue Result(StringBuilder text, bool returnsJson) => returnsJson
+        ? SqlValue.FromJson(JsonDocumentText.Canonicalize(text.ToString()))
+        : SqlValue.FromNVarchar(SqlType.NVarcharMax, text.ToString());
+
     private static void ExpectOnNull(ParserContext context)
     {
         context.MoveNextRequired();
@@ -268,6 +295,10 @@ internal sealed class JsonObject : Expression
 {
     private readonly (Expression Key, Expression Value, bool EmbedRaw)[] entries;
     private readonly JsonNullClause nullClause;
+    private readonly bool returningJson;
+
+    /// <summary>Settled while binding: whether the result is <c>json</c> (see <see cref="JsonNullClauseParser.Result"/>).</summary>
+    private bool returnsJson;
 
     public JsonObject(ParserContext context)
     {
@@ -309,6 +340,7 @@ internal sealed class JsonObject : Expression
         }
 
         this.nullClause = JsonNullClauseParser.Parse(context, JsonNullClause.NullOnNull);
+        this.returningJson = JsonNullClauseParser.ParseReturning(context);
         if (context.Token is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         this.entries = [.. list];
@@ -332,17 +364,23 @@ internal sealed class JsonObject : Expression
             JsonValueRender.Append(sb, valueResult, embedRaw);
         }
         _ = sb.Append('}');
-        return SqlValue.FromNVarchar(SqlType.NVarcharMax, sb.ToString());
+        return JsonNullClauseParser.Result(sb, this.returnsJson);
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.NVarcharMax;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        this.returnsJson = this.returningJson;
+        foreach (var (_, value, _) in this.entries)
+            this.returnsJson |= value.GetSqlType(batch, resolveColumnType) is JsonSqlType;
+        return this.returnsJson ? SqlType.Json : SqlType.NVarcharMax;
+    }
 
     internal override string DebugDisplay() =>
         $"JSON_OBJECT({string.Join(", ", this.entries.Select(e => $"{e.Key.DebugDisplay()}: {e.Value.DebugDisplay()}"))})";
 
     internal override void Describe(NodeShape shape)
     {
-        _ = shape.Local(this.nullClause).Local(this.entries.Length);
+        _ = shape.Local(this.nullClause).Local(this.returningJson).Local(this.entries.Length);
         foreach (var (key, value, _) in this.entries)
             _ = shape.Child(key).Child(value);
     }
@@ -363,6 +401,10 @@ internal sealed class JsonArray : Expression
 {
     private readonly (Expression Value, bool EmbedRaw)[] items;
     private readonly JsonNullClause nullClause;
+    private readonly bool returningJson;
+
+    /// <summary>Settled while binding: whether the result is <c>json</c> (see <see cref="JsonNullClauseParser.Result"/>).</summary>
+    private bool returnsJson;
 
     public JsonArray(ParserContext context)
     {
@@ -387,6 +429,7 @@ internal sealed class JsonArray : Expression
         }
 
         this.nullClause = JsonNullClauseParser.Parse(context);
+        this.returningJson = JsonNullClauseParser.ParseReturning(context);
         if (context.Token is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         this.items = [.. list];
@@ -408,13 +451,19 @@ internal sealed class JsonArray : Expression
             JsonValueRender.Append(sb, result, embedRaw);
         }
         _ = sb.Append(']');
-        return SqlValue.FromNVarchar(SqlType.NVarcharMax, sb.ToString());
+        return JsonNullClauseParser.Result(sb, this.returnsJson);
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.NVarcharMax;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        this.returnsJson = this.returningJson;
+        foreach (var (value, _) in this.items)
+            this.returnsJson |= value.GetSqlType(batch, resolveColumnType) is JsonSqlType;
+        return this.returnsJson ? SqlType.Json : SqlType.NVarcharMax;
+    }
 
     internal override string DebugDisplay() =>
         $"JSON_ARRAY({string.Join(", ", this.items.Select(i => i.Value.DebugDisplay()))})";
 
-    internal override void Describe(NodeShape shape) => shape.Local(this.nullClause).Children([.. this.items.Select(item => item.Value)]);
+    internal override void Describe(NodeShape shape) => shape.Local(this.nullClause).Local(this.returningJson).Children([.. this.items.Select(item => item.Value)]);
 }

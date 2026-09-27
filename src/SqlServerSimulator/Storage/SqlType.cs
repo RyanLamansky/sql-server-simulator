@@ -92,7 +92,7 @@ internal abstract partial class SqlType
 
     /// <summary>
     /// True for types that always store their content off-row in a LOB page
-    /// chain — <c>text</c>, <c>ntext</c>, <c>image</c>, <c>xml</c> and the two
+    /// chain — <c>text</c>, <c>ntext</c>, <c>image</c>, <c>xml</c>, <c>json</c> and the two
     /// spatial types. The MAX variants of
     /// <c>varchar</c>/<c>nvarchar</c>/<c>varbinary</c> are LOB-eligible at the
     /// <em>column</em> level (when <c>HeapColumn.MaxLength</c> is the
@@ -244,6 +244,7 @@ internal abstract partial class SqlType
         _ when this == HierarchyId => 240,
         SpatialSqlType => 240,
         XmlSqlType => 241,
+        JsonSqlType => 244,
         _ => throw new NotSupportedException($"No SystemTypeId defined for {this}."),
     };
 
@@ -556,6 +557,9 @@ internal abstract partial class SqlType
     /// <c>docs/claude/xml.md</c> for the modeled subset.
     /// </remarks>
     public static readonly XmlSqlType Xml = new();
+
+    /// <summary>SQL Server 2025's <c>json</c>; see <see cref="JsonSqlType"/>.</summary>
+    public static readonly JsonSqlType Json = new();
 
     /// <remarks>
     /// SQL Server's <c>sql_variant</c>: a value slot that carries its own base
@@ -1039,6 +1043,7 @@ internal abstract partial class SqlType
         4 => upper switch
         {
             "DATE" => Date,
+            "JSON" => Json,
             "REAL" => Real,
             "TEXT" => Text,
             _ => null,

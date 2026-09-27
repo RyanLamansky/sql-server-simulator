@@ -598,9 +598,8 @@ internal static partial class BuiltInResources
         // external libraries, and external AI models (sp_invoke_external_rest_
         // endpoint / AI_GENERATE_EMBEDDINGS) aren't modeled, so all three ship
         // empty with the full probe-confirmed shape (SQL Server 2025,
-        // 2026-07-16). external_models' parameters column is the json type on
-        // real SQL Server, substituted here as nvarchar(max) since the view is
-        // always empty. See docs/claude/catalog-views.md.
+        // 2026-07-16), external_models' parameters column typed json as real's
+        // is.
         Sys("external_languages",
         [
             new("external_language_id", SqlType.Int32, null, false),
@@ -650,7 +649,7 @@ internal static partial class BuiltInResources
             new("model_type_desc", NVarcharSqlType.Get(65, Collation.Baseline, Coercibility.Implicit), 65, true),
             new("model", SqlType.NVarchar, 100, true),
             new("credential_id", SqlType.Int32, null, true),
-            new("parameters", NVarcharSqlType.Get(-1, Collation.Baseline, Coercibility.CoercibleDefault), SqlType.MaxLengthSentinel, true),
+            new("parameters", SqlType.Json, SqlType.MaxLengthSentinel, true),
             new("create_time", SqlType.GetDateTime2(7), null, true),
             new("modify_time", SqlType.GetDateTime2(7), null, true),
         ], static (_, _) => EmptyCatalogRows);
@@ -1447,7 +1446,7 @@ internal static partial class BuiltInResources
             // INFORMATION_SCHEMA.COLUMNS query raise, including one filtered to
             // an unrelated table (both AdventureWorks and WideWorldImporters
             // carry such columns).
-            XmlSqlType or SpatialSqlType => (-1, -1, null, null, null, null),
+            XmlSqlType or JsonSqlType or SpatialSqlType => (-1, -1, null, null, null, null),
             HierarchyIdSqlType => (892, 892, null, null, null, null),
             SqlVariantSqlType => (0, 0, null, null, null, null),
             VectorSqlType vector => (vector.ByteLength, vector.ByteLength, null, null, null, null),
