@@ -15,8 +15,9 @@ partial class Simulation
     /// </summary>
     /// <remarks>
     /// A no-op in skip mode (an un-taken <c>IF</c> branch never runs its DDL)
-    /// and when the database carries no DDL trigger at all, which keeps the
-    /// per-statement cost of the common case to one dictionary-emptiness test.
+    /// and when neither the database nor the server carries a DDL trigger,
+    /// which keeps the per-statement cost of the common case to one
+    /// dictionary-emptiness test and one array-length read.
     /// </remarks>
     internal static void RecordDdlEvent(
         ParserContext context,
@@ -29,12 +30,62 @@ partial class Simulation
         string? roleName = null,
         string? ownerName = null)
     {
-        if (context.Batch.IsSkipping || context.Connection.SuppressDdlTriggers || context.CurrentDatabase.DdlTriggers.IsEmpty)
+        if (context.Batch.IsSkipping || context.Connection.SuppressDdlTriggers
+            || (context.CurrentDatabase.DdlTriggers.IsEmpty && context.Simulation.ServerTriggers.All.Length == 0))
+        {
             return;
+        }
         var statement = context.Batch.CurrentStatement;
         (statement.PendingDdlEvents ??= []).Add(
             new DdlEventInfo(eventType, schemaName, objectName, objectType, targetObjectName, targetObjectType, roleName, ownerName));
     }
+
+    /// <summary>
+    /// Records a server-level DDL event — one only a server-scope trigger
+    /// takes, whose <c>EVENTDATA()</c> carries no <c>UserName</c>: a database
+    /// event names its database, a login event the login's own elements.
+    /// </summary>
+    /// <param name="context">The statement raising it.</param>
+    /// <param name="eventType">The <c>sys.trigger_event_types</c> leaf name.</param>
+    /// <param name="databaseName">The database a <c>*_DATABASE</c> event names; null for a login event.</param>
+    /// <param name="loginName">The login a <c>*_LOGIN</c> event names; null for a database event.</param>
+    /// <param name="passwordStart">Where the statement's password literal starts, or -1.</param>
+    /// <param name="passwordEnd">Where it ends.</param>
+    internal static void RecordServerDdlEvent(
+        ParserContext context, string eventType, string? databaseName, string? loginName, int passwordStart = -1, int passwordEnd = -1)
+    {
+        if (context.Batch.IsSkipping || context.Connection.SuppressDdlTriggers || context.Simulation.ServerTriggers.All.Length == 0)
+            return;
+        string? loginElements = null;
+        if (loginName is not null)
+        {
+            // The simulator keeps no default database or language per login,
+            // so every login reports the server defaults real gives one created
+            // without them.
+            var elements = new StringBuilder(160);
+            AppendElement(elements, "DefaultLanguage", "us_english");
+            AppendElement(elements, "DefaultDatabase", MasterDatabaseName);
+            AppendElement(elements, "LoginType", "SQL Login");
+            AppendElement(elements, "SID", Convert.ToBase64String(LoginSid(loginName)));
+            loginElements = elements.ToString();
+        }
+        (context.Batch.CurrentStatement.PendingDdlEvents ??= []).Add(new DdlEventInfo(
+            eventType,
+            schemaName: null,
+            objectName: loginName,
+            objectType: loginName is null ? null : "LOGIN",
+            serverLevelDatabase: databaseName ?? "",
+            loginElements: loginElements,
+            maskStart: passwordStart,
+            maskEnd: passwordEnd));
+    }
+
+    /// <summary>
+    /// The sid a login reports in <c>EVENTDATA()</c> and <c>SUSER_SID</c>:
+    /// the well-known <c>0x01</c> for <c>sa</c>, else its synthetic one.
+    /// </summary>
+    internal static byte[] LoginSid(string loginName) =>
+        BuiltInToken.Comparer.Equals(loginName, "sa") ? [0x01] : BuiltInResources.DeriveLoginSid(loginName);
 
     /// <summary>
     /// Fires every enabled database-scope DDL trigger matching the events the
@@ -52,9 +103,9 @@ partial class Simulation
     /// rolled back; see <c>docs/claude/triggers.md</c>.
     /// </para>
     /// <para>
-    /// Order across several triggers is by <c>object_id</c>, i.e. creation
-    /// order, which is what real ran them in without <c>sp_settriggerorder</c>
-    /// (whose DATABASE namespace isn't modeled).
+    /// Order across several triggers of one scope is by <c>object_id</c>, i.e.
+    /// creation order, which is what real ran them in, between the ends
+    /// <c>sp_settriggerorder</c> pinned.
     /// </para>
     /// </remarks>
     private void FireDdlTriggers(BatchContext batch)
@@ -66,7 +117,8 @@ partial class Simulation
         var createdThisStatement = statement.DdlTriggerCreatedThisStatement;
 
         var database = batch.CurrentDatabase;
-        if (database.DdlTriggers.IsEmpty)
+        var serverTriggers = this.ServerTriggers.All;
+        if (database.DdlTriggers.IsEmpty && serverTriggers.Length == 0)
             return;
 
         // The statement's own source text, which every event this statement
@@ -80,21 +132,51 @@ partial class Simulation
         var end = Math.Min(batch.Parser.Token?.StartIndex ?? commandText.Length, commandText.Length);
         var statementText = end > start ? commandText[start..end].TrimEnd() : string.Empty;
 
+        // Server-scope triggers run ahead of the database's own for the same
+        // event (probed 2026-09-28 against SQL Server 2025), and a server-level
+        // event reaches them alone.
         List<(DdlTrigger Trigger, string EventData, int EventType)>? fires = null;
         foreach (var info in events)
         {
-            foreach (var trigger in database.DdlTriggers.Values.OrderBy(t => t.ObjectId))
+            var eventType = TriggerEventTypes.TryResolve(info.EventType, out var resolved) ? resolved.Type : 0;
+            string? eventData = null;
+            var text = info.MaskStart >= start && info.MaskEnd <= end && info.MaskStart < info.MaskEnd
+                ? string.Concat(commandText.AsSpan(start, info.MaskStart - start), "'******'", commandText.AsSpan(info.MaskEnd, end - info.MaskEnd)).TrimEnd()
+                : statementText;
+            if (serverTriggers.Length != 0)
+            {
+                List<DdlTrigger>? serverMatched = null;
+                foreach (var trigger in serverTriggers)
+                {
+                    if (!trigger.IsDisabled && trigger.Covers(info.EventType) && CanFireDdlTrigger(batch, trigger))
+                        (serverMatched ??= []).Add(trigger);
+                }
+                if (serverMatched is not null)
+                {
+                    foreach (var trigger in OrderScopedTriggers(serverMatched, eventType))
+                        (fires ??= []).Add((trigger, eventData ??= BuildDdlEventData(batch, info, text), eventType));
+                }
+            }
+            if (info.ServerLevelDatabase is not null)
+                continue;
+            List<DdlTrigger>? databaseMatched = null;
+            foreach (var trigger in database.DdlTriggers.Values)
             {
                 if (trigger.ObjectId == createdThisStatement)
                     continue;
                 if (trigger.IsDisabled || !trigger.Covers(info.EventType) || !CanFireDdlTrigger(batch, trigger))
                     continue;
-                (fires ??= []).Add((trigger, BuildDdlEventData(batch, info, statementText), TriggerEventTypes.TryResolve(info.EventType, out var eventType) ? eventType.Type : 0));
+                (databaseMatched ??= []).Add(trigger);
             }
+            if (databaseMatched is null)
+                continue;
+            foreach (var trigger in OrderScopedTriggers(databaseMatched, eventType))
+                (fires ??= []).Add((trigger, eventData ??= BuildDdlEventData(batch, info, text), eventType));
         }
         if (fires is null)
             return;
 
+        var master = this.Databases[MasterDatabaseName];
         _ = RunMutation(batch.Parser, _ =>
         {
             var connection = batch.Connection;
@@ -109,7 +191,7 @@ partial class Simulation
                 {
                     RunOneTriggerBody(
                         batch,
-                        database,
+                        trigger.IsServerScoped ? master : database,
                         new TriggerFrame(trigger, eventData, eventType),
                         trigger.BodyText,
                         trigger.BodyLineOffset,
@@ -177,8 +259,19 @@ partial class Simulation
         AppendElement(builder, "SPID", spid.ToString(CultureInfo.InvariantCulture));
         AppendElement(builder, "ServerName", ServerNameValue);
         AppendElement(builder, "LoginName", connection.Security.Effective.LoginName);
-        AppendElement(builder, "UserName", connection.Security.Effective.DatabasePrincipalName);
-        AppendElement(builder, "DatabaseName", batch.CurrentDatabase.Name);
+        if (info.ServerLevelDatabase is { } serverLevelDatabase)
+        {
+            // A server-level event reports no user, and a database it names
+            // rather than the session's (probed 2026-09-28 against SQL Server
+            // 2025 for the LOGIN and DATABASE events).
+            if (serverLevelDatabase.Length != 0)
+                AppendElement(builder, "DatabaseName", serverLevelDatabase);
+        }
+        else
+        {
+            AppendElement(builder, "UserName", connection.Security.Effective.DatabasePrincipalName);
+            AppendElement(builder, "DatabaseName", batch.CurrentDatabase.Name);
+        }
         if (info.SchemaName is { } schemaName)
             AppendElement(builder, "SchemaName", schemaName);
         if (info.ObjectName is { } objectName)
@@ -193,6 +286,8 @@ partial class Simulation
             AppendElement(builder, "TargetObjectType", targetType);
         if (info.RoleName is { } roleName)
             AppendElement(builder, "RoleName", roleName);
+        if (info.LoginElements is { } loginElements)
+            _ = builder.Append(loginElements);
         _ = builder
             .Append("<TSQLCommand><SetOptions ANSI_NULLS=\"ON\" ANSI_NULL_DEFAULT=\"ON\" ANSI_PADDING=\"ON\" QUOTED_IDENTIFIER=\"")
             .Append(connection.QuotedIdentifiers ? "ON" : "OFF")

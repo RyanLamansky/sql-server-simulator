@@ -131,11 +131,9 @@ internal sealed class ParseName : Expression
 }
 
 /// <summary>
-/// SQL <c>ORIGINAL_DB_NAME()</c>: returns the database name specified at
-/// connection time. The simulator captures the connection's initial
-/// database name when the session opens and exposes it here; real
-/// SQL Server returns the connection-string Initial Catalog. Result is
-/// <see cref="Expression.MetadataNameType"/>.
+/// SQL <c>ORIGINAL_DB_NAME()</c>: the database the login asked for — the
+/// connection string's Initial Catalog — or the empty string when it named
+/// none. Result is <see cref="Expression.MetadataNameType"/>.
 /// </summary>
 internal sealed class OriginalDbName : Expression
 {
@@ -146,7 +144,7 @@ internal sealed class OriginalDbName : Expression
     }
 
     public override SqlValue Run(RuntimeContext runtime) =>
-        SqlValue.FromNVarchar(MetadataNameType(runtime.Batch), Simulation.DefaultDatabaseName);
+        SqlValue.FromNVarchar(MetadataNameType(runtime.Batch), runtime.Batch.Connection.OriginalDatabaseName);
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => MetadataNameType(batch);
 

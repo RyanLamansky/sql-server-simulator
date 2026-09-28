@@ -304,7 +304,7 @@ Where an entry carries a second clause it is because that fact changes what you'
 - **`CREATE DEFAULT` / `CREATE RULE`, `sp_bindefault` / `sp_bindrule` and their unbind pair, Msg 513** — a binding sets the column's ordinary default expression, and a rule judges only the columns a write sets → [`rules-and-defaults.md`](docs/claude/rules-and-defaults.md).
 - **`sp_addextendedproperty` / `fn_listextendedproperty` / `sys.extended_properties`** → [`extended-properties.md`](docs/claude/extended-properties.md).
 - **`CREATE/ALTER/DROP SEQUENCE`, `NEXT VALUE FOR`, `sys.sequences`** — a reference is refused in nine distinct contexts, all settled at parse, so the sequence never advances → [`sequences.md`](docs/claude/sequences.md).
-- **DML + DDL triggers** — `CREATE TRIGGER`, `INSERTED` / `DELETED`, `EVENTDATA()`, `UPDATE(col)` / `COLUMNS_UPDATED()`, firing order, the two nesting options.
+- **DML, DDL and server-scope triggers** — `CREATE TRIGGER`, `INSERTED` / `DELETED`, `EVENTDATA()`, `UPDATE(col)` / `COLUMNS_UPDATED()`, firing order, the two nesting options, and `ON ALL SERVER` triggers: logon triggers firing on every session open (in-process, TDS login and pooled reset) and server-scope DDL triggers.
   A trigger body has **no atomic scope of its own**: it and the firing statement roll back as one unit → [`triggers.md`](docs/claude/triggers.md).
 - **CHECK / PRIMARY KEY / UNIQUE enforcement, the computed-column rules, `IGNORE_DUP_KEY`** — enforcement shares the per-`Heap` seek cache with reads and FK checks → [`constraints.md`](docs/claude/constraints.md).
 - **`FOREIGN KEY` + referential actions** — including the child triggers a cascade fires and its mutual exclusion with an `INSTEAD OF` trigger over the same verb → [`foreign-keys.md`](docs/claude/foreign-keys.md).
@@ -367,7 +367,6 @@ The feature docs' own **Not modeled yet** sections hold the smaller gaps.
 - **Most `SET <option>` toggles parse and are discarded** (`Simulation.Set.cs`); the ones with semantic effect are handled by name there.
   The same goes for most `ALTER DATABASE … SET` options → [`database-options.md`](docs/claude/database-options.md).
 - **Heap allocation tracking** (a flat page list, no IAM/PFS) → [`heap-storage.md`](docs/claude/heap-storage.md).
-- **Programmable-object gaps**: logon triggers and MERGE into a join view → [`programmable.md`](docs/claude/programmable.md), [`triggers.md`](docs/claude/triggers.md).
 - **`ALTER COLUMN … ADD | DROP PERSISTED`** → [`alter-table.md`](docs/claude/alter-table.md).
 - **Filegroup placement** — a table or index `ON [fg]` isn't recorded (only a partition scheme's placement is) → [`partitioning.md`](docs/claude/partitioning.md#not-modeled-yet).
 - **`FORCESEEK`'s plan-infeasibility refusal** (Msg 8622) → [`query-hints.md`](docs/claude/query-hints.md#not-enforced).

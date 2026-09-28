@@ -3,12 +3,14 @@ using System.Collections.Frozen;
 namespace SqlServerSimulator.Schemas;
 
 /// <summary>
-/// One database-scope DDL trigger created via
-/// <c>CREATE TRIGGER [schema.]name ON DATABASE FOR &lt;event_type_group&gt; AS &lt;body&gt;</c>.
-/// Stored on <see cref="Database.DdlTriggers"/> rather than a per-schema
-/// dict because the parent scope is the database itself
-/// (<c>parent_class = 0</c> in <c>sys.triggers</c>) — DDL triggers don't
-/// belong to any single schema.
+/// One database- or server-scope trigger created via
+/// <c>CREATE TRIGGER name ON { DATABASE | ALL SERVER } FOR &lt;event_type_group&gt; AS &lt;body&gt;</c>.
+/// A database-scope trigger is stored on <see cref="Database.DdlTriggers"/>
+/// rather than a per-schema dict because the parent scope is the database
+/// itself (<c>parent_class = 0</c> in <c>sys.triggers</c>); a server-scope one
+/// (<c>ON ALL SERVER</c>, <c>parent_class = 100</c> in
+/// <c>sys.server_triggers</c>) on <see cref="Simulation.ServerTriggers"/>, and
+/// only it may name the <c>LOGON</c> event.
 /// </summary>
 /// <remarks>
 /// The body fires after a matching DDL statement completes, inside that
@@ -22,7 +24,8 @@ internal sealed class DdlTrigger(
     List<string> eventTypes,
     string bodyText,
     DateTime createDate,
-    int bodyLineOffset)
+    int bodyLineOffset,
+    bool isServerScoped = false)
     : SchemaObject(name, objectId, schemaId, createDate)
 {
     public override string ObjectTypeCode => this.ClrEntry is null ? "TR" : "TA";
@@ -34,6 +37,50 @@ internal sealed class DdlTrigger(
     /// T-SQL trigger.
     /// </summary>
     public ClrEntryPoint? ClrEntry;
+
+    /// <summary>
+    /// True for a trigger created <c>ON ALL SERVER</c>: its body runs in
+    /// <c>master</c> whatever database raised the event, and it fires on the
+    /// events of every database as well as the server-level ones.
+    /// </summary>
+    public readonly bool IsServerScoped = isServerScoped;
+
+    /// <summary>
+    /// The login a server-scope trigger's <c>WITH EXECUTE AS</c> runs its
+    /// body as — the named login, or for <c>SELF</c> the one that ran the
+    /// CREATE; <see langword="null"/> for <c>CALLER</c> or no clause.
+    /// </summary>
+    public string? ExecuteAsLoginName;
+
+    /// <summary>
+    /// The event types <c>sp_settriggerorder … @namespace = 'SERVER'</c>
+    /// pinned this trigger first / last for, by <c>sys.trigger_event_types</c>
+    /// type (<see cref="LogonEventType"/> for <c>LOGON</c>).
+    /// </summary>
+    public HashSet<int>? FirstForEvents, LastForEvents;
+
+    /// <summary>
+    /// The <c>type</c> <c>sys.server_trigger_events</c> reports for the
+    /// <c>LOGON</c> event, which <c>sys.trigger_event_types</c> doesn't list.
+    /// </summary>
+    public const int LogonEventType = 147;
+
+    /// <summary>
+    /// Whether this is a logon trigger — a server-scope trigger whose event
+    /// list names <c>LOGON</c>, which may sit beside DDL events.
+    /// </summary>
+    public bool FiresOnLogon
+    {
+        get
+        {
+            foreach (var name in this.EventTypes)
+            {
+                if (name.Equals("LOGON", StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+            return false;
+        }
+    }
 
     /// <summary>
     /// The set of DDL event types this trigger fires on, as written:

@@ -995,4 +995,16 @@ public sealed class MergeTests
         insert src values (1, 100), (2, 200), (3, 300);
         insert lookup values (100);
         """;
+
+    /// <summary>
+    /// <c>WHEN NOT MATCHED THEN INSERT DEFAULT VALUES</c> fills every column
+    /// from its default and identity (probed 2026-09-28 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void NotMatched_InsertDefaultValues()
+        => AreEqual("1|7", new Simulation().ExecuteScalar("""
+            create table dv (id int identity primary key, x int default 7);
+            merge dv using (values (1)) s(a) on 1 = 0 when not matched then insert default values;
+            select concat(id, '|', x) from dv
+            """));
 }

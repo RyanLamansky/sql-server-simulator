@@ -206,4 +206,21 @@ public sealed class TriggerAtomicScopeTests
         _ = connection.CreateCommand("insert main_t (v) values (2)").ExecuteNonQuery();
         AreEqual("audit=2 main=2", State(connection));
     }
+
+    /// <summary>
+    /// A body that turned <c>XACT_ABORT</c> off first leaves a caught error
+    /// dooming nothing, so no Msg 3616 follows and both writes stand (probed
+    /// 2026-09-28 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void BodyTurnsXactAbortOff_CaughtError_NoMsg3616()
+    {
+        using var connection = Seeded("""
+            set xact_abort off;
+            insert audit_t (note) values ('w');
+            begin try declare @z int = 1/0; end try begin catch end catch
+            """);
+        _ = connection.CreateCommand("insert main_t (v) values (1)").ExecuteNonQuery();
+        AreEqual("audit=1 main=1", State(connection));
+    }
 }

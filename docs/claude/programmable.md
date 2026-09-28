@@ -501,11 +501,24 @@ Targets on two paths are Msg 4405, and DELETE stays Msg 4405 (all probed 2026-09
 
 **Positioned DML follows for free.** `WHERE CURRENT OF` through a join-view cursor binds via the identity slot the cursor stamped with that view, so a single-base positioned UPDATE writes through, a SET list spanning both base tables is Msg 4405, a positioned DELETE is Msg 4405, and naming the base table under the view is Msg 16933 — see [`cursors.md`](cursors.md#where-current-of).
 
+**MERGE** into a join view matches and acts on the **view's own rows**, the way a MERGE into a view with INSTEAD OF triggers does, and then carries each action to the base row that view row shows (`Simulation.Merge.JoinView.cs`).
+Every action must land in one base table — the `UPDATE SET` targets and the `INSERT` column list, bound left to right across the `WHEN` clauses as the UPDATE path binds its SET list, a split across two being Msg 4405 and a derived target Msg 4406, both naming the view as written.
+An `INSERT` with no column list, or `DEFAULT VALUES`, names no table and is Msg 4405.
+A `DELETE` removes the row from the table the other actions write, or with no other action from the **first table in the bottom view's `FROM`** (probed 2026-09-27 and 2026-09-28 against SQL Server 2025).
+
+`PlanJoinViewMerge` settles the table and `LoadJoinViewMergeRows` fills the view-shaped target from the chain's own join tuples, recording against each row the written table's `(page, slot)` — or none, for a row NULL-extended on that side.
+`CommitJoinViewMerge` then builds the base table's own action lists and commits them as a MERGE into that table would, so its constraints, foreign keys, identity, change tracking and AFTER triggers all apply.
+The rules the translation adds, each probed 2026-09-28:
+
+- A base row two view rows show takes one `DELETE` but not two `UPDATE`s: the second is **Msg 8672**, even when it writes the same value, and `@@ROWCOUNT` counts base rows.
+  Msg 8672 ends the batch and rolls the transaction back as under `XACT_ABORT`, on a table target as much as a view.
+- An `UPDATE` landing on a row an outer join NULL-extended is real's **Msg 8705** (`A DML statement encountered a missing entry in index ID 1 of table ID …`), and nothing is written.
+- `WITH CHECK OPTION` judges the written row through the join, as the UPDATE path does.
+- `OUTPUT` reads the view's rows: `DELETED` the whole row as it stood, `INSERTED` only the columns reading the written table (Msg 404 per column otherwise), with its identity and computed values read back from the row written; the written table's triggers refuse an `OUTPUT` without `INTO` with Msg 334 naming that table.
+
 **Not modeled yet**:
-- **MERGE** into a join view is Msg 4405 for statements real accepts (probed 2026-09-27 against SQL Server 2025): every action must land in one base table — an `UPDATE SET` and an `INSERT` column list naming one table's columns, or a split across two being Msg 4405 — and a `DELETE` removes the row from the table the other actions write, or with no other action from the **first table in the view's `FROM`**.
-  The MERGE executor matches against one heap's rows, so a join view needs its tuples as the target rows and each action translated back to the base row they came from.
 - A bottom source that is a **single-table view or a derived table** (`FROM (SELECT … FROM a) d JOIN b`) is Msg 4405, where real writes through it (probed for the derived table).
-- `OUTPUT` through a join view whose written table sits under a **nested** join view raises `NotSupportedException`.
+- `OUTPUT` through a join view whose written table sits under a **nested** join view raises `NotSupportedException`, for UPDATE, INSERT and MERGE alike.
 - The broken-chain check gathers only the outermost chain's own base tables, and real reports the SELECT and the write denials together where the simulator raises the first.
 
 ## Stored procedures

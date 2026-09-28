@@ -65,6 +65,7 @@ internal static class Tds
     public const ushort DoneError = 0x0002;
     public const ushort DoneCount = 0x0010;
     public const ushort DoneAttention = 0x0020;
+    public const ushort DoneServerError = 0x0100;
 
     /// <summary>
     /// DONE <c>CurCmd</c> for a SELECT, the one statement kind a client has to

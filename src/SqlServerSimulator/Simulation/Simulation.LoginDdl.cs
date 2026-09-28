@@ -28,7 +28,7 @@ partial class Simulation
     {
         context.MoveNextRequired();
         var name = ParseLoginName(context);
-        var password = ParseLoginPasswordClause(context, required: true);
+        var password = ParseLoginPasswordClause(context, required: true, out var passwordStart, out var passwordEnd);
         ConsumeToStatementBoundary(context);
         if (context.Batch.IsSkipping)
             return true;
@@ -56,6 +56,7 @@ partial class Simulation
         // grantor sa) — probe6 N4b.
         lock (simulation.ServerPermissions)
             simulation.ServerPermissions.Add(new ServerPermission(login.PrincipalId, 1, "CONNECT SQL", "COSQ", PermissionState.Grant));
+        RecordServerDdlEvent(context, "CREATE_LOGIN", databaseName: null, name, passwordStart, passwordEnd);
         return true;
     }
 
@@ -72,7 +73,7 @@ partial class Simulation
     {
         context.MoveNextRequired();
         var name = ParseLoginName(context);
-        var password = ParseLoginPasswordClause(context, required: false);
+        var password = ParseLoginPasswordClause(context, required: false, out var passwordStart, out var passwordEnd);
         ConsumeToStatementBoundary(context);
         if (context.Batch.IsSkipping)
             return true;
@@ -101,6 +102,7 @@ partial class Simulation
                     + "would mean adding it to the login registry, which switches the TDS endpoint "
                     + "from accepting any credentials to enforcing them.");
             }
+            RecordServerDdlEvent(context, "ALTER_LOGIN", databaseName: null, name, passwordStart, passwordEnd);
             return true;
         }
         if (password is not null)
@@ -111,6 +113,7 @@ partial class Simulation
                 existing.PrincipalId, existing.Name, PasswordHash.EncryptLegacy(password), existing.CreateDate,
                 context.Batch.CurrentStatement.UtcNow);
         }
+        RecordServerDdlEvent(context, "ALTER_LOGIN", databaseName: null, name, passwordStart, passwordEnd);
         return true;
     }
 
@@ -141,9 +144,10 @@ partial class Simulation
             }
         }
         RecordServerSecurityUndo(context.Batch);
-        return context.Batch.Connection.Simulation.Logins.TryRemove(name, out _)
-            ? true
-            : throw SimulatedSqlException.CannotAlterOrDropLogin("drop", name);
+        if (!context.Batch.Connection.Simulation.Logins.TryRemove(name, out _))
+            throw SimulatedSqlException.CannotAlterOrDropLogin("drop", name);
+        RecordServerDdlEvent(context, "DROP_LOGIN", databaseName: null, name);
+        return true;
     }
 
     /// <summary>
@@ -201,8 +205,9 @@ partial class Simulation
     /// forms). Rejects the unmodeled CREATE forms: <c>FROM</c> sources and
     /// <c>PASSWORD = 0x… HASHED</c>.
     /// </summary>
-    private static string? ParseLoginPasswordClause(ParserContext context, bool required)
+    private static string? ParseLoginPasswordClause(ParserContext context, bool required, out int literalStart, out int literalEnd)
     {
+        literalStart = literalEnd = -1;
         context.MoveNextRequired();
         if (context.Token is ReservedKeyword { Keyword: Keyword.From })
             throw new NotSupportedException("Only SQL-authentication logins (CREATE LOGIN name WITH PASSWORD = '…') are modeled; Windows, certificate, asymmetric-key, and external-provider logins are not.");
@@ -223,6 +228,10 @@ partial class Simulation
         context.MoveNextRequired();
         if (context.Token is not Literal { Value: var passwordValue } || !SqlType.IsStringCategory(passwordValue.Type))
             throw new NotSupportedException("Only the clear-text password form (PASSWORD = '…') is modeled; the hashed-password form (PASSWORD = 0x… HASHED) is not.");
+        // A DDL event's CommandText masks the literal (probed 2026-09-28
+        // against SQL Server 2025).
+        literalStart = context.Token.StartIndex;
+        literalEnd = context.Token.EndIndex;
         context.MoveNextOptional();
         return passwordValue.AsString;
     }

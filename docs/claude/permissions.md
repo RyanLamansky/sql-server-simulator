@@ -180,6 +180,7 @@ Two shapes recur, and the difference between them is load-bearing:
 | `CREATE OR ALTER` over a free name | the plain-CREATE gate for that kind | **Msg 262** state 18 |
 | `CREATE` / `ALTER` / `DROP TRIGGER` (DML) | ALTER-shaped, on the **parent table / view** — a DML trigger is not its own securable | **Msg 2104** sev 14 state 1 on create (name echoed *as written*); **Msg 3701** state 20 on alter / drop (leaf) |
 | `CREATE` / `ALTER` / `DROP TRIGGER … ON DATABASE` | db-scope `ALTER ANY DATABASE DDL TRIGGER` | same 2104 / 3701 pair |
+| `CREATE` / `ALTER` / `DROP TRIGGER … ON ALL SERVER` | a sysadmin login — real's `CONTROL SERVER`, which isn't modeled as a grantable permission; a `db_owner` is refused (probed 2026-09-28) | same 2104 / 3701 pair |
 | `CREATE INDEX` | ALTER-shaped, on the table (or the view, for an indexed view) | **Msg 1088** sev 16 **state 12**, double-quoted table name *as written* |
 | `ALTER INDEX` | ALTER-shaped, on the table | **Msg 1088** **state 9**, table name as written |
 | `DROP INDEX` | ALTER-shaped, on the table | **Msg 1088** **state 9**, `"<table as written>.<index>"` |

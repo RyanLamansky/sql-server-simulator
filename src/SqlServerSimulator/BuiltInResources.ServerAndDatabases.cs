@@ -1570,7 +1570,7 @@ internal static partial class BuiltInResources
                 SqlValue.FromNVarchar(effectiveLogin),
                 nullName,
                 nullName,
-                SqlValue.FromString(NVarcharSqlType.Get(30, Collation.Catalog, Coercibility.Implicit), ReferenceEquals(connection, batch.Connection) ? "running" : "sleeping"),
+                SqlValue.FromString(NVarcharSqlType.Get(30, Collation.Catalog, Coercibility.Implicit), connection.RunningLogonTriggers ? "preconnect" : ReferenceEquals(connection, batch.Connection) ? "running" : "sleeping"),
                 connection.ContextInfo is { } contextInfo ? SqlValue.FromVarbinary(contextInfo) : SqlValue.Null(SqlType.Varbinary),
                 zero,
                 zero,

@@ -51,8 +51,19 @@ public sealed class MetadataAndStringScalarTests
         => AreEqual(DBNull.Value, new Simulation().ExecuteScalar("select parsename('a.b', null)"));
 
     [TestMethod]
-    public void OriginalDbName_ReturnsSimulated()
-        => AreEqual("simulated", new Simulation().ExecuteScalar("select original_db_name()"));
+    public void OriginalDbName_NoInitialCatalog_ReturnsEmpty()
+        => AreEqual("", new Simulation().ExecuteScalar("select original_db_name()"));
+
+    [TestMethod]
+    public void OriginalDbName_ReturnsInitialCatalog_NotCurrentDatabase()
+    {
+        using var connection = new Simulation().CreateDbConnection();
+        connection.ConnectionString = "Initial Catalog=tempdb";
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "use master; select original_db_name()";
+        AreEqual("tempdb", command.ExecuteScalar());
+    }
 
     [TestMethod]
     public void GetAnsiNull_ReturnsOne()

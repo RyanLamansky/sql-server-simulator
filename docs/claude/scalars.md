@@ -670,7 +670,7 @@ Constants whose values don't carry real session/server identity in the simulator
   The same value `sys.dm_exec_sessions.host_name` and `sp_who` / `sp_who2`'s `HostName` project.
 - **`APP_NAME()`** — the client application name, from the connection string's `Application Name` / `App` keyword or LOGIN7's `AppName`, `''` when neither supplied one.
   The same value `sys.dm_exec_sessions.program_name` and `sp_who2`'s `ProgramName` project.
-- **`ORIGINAL_DB_NAME()`** — returns `Simulation.DefaultDatabaseName` (`"simulated"`).
+- **`ORIGINAL_DB_NAME()`** — the database the login asked for (the connection string's `Initial Catalog`, LOGIN7's database), or the empty string when it named none, whatever `USE` has done since (probed 2026-09-28 against SQL Server 2025).
 - **`GETANSINULL([db])`** — returns 1 (the simulator's ANSI-NULL behavior matches `SET ANSI_NULLS ON`, which is the only modeled mode).
 - **`@@DATEFIRST`** — session state (`SimulatedDbConnection.DateFirst`), default 7 (Sunday), `tinyint`.
   `SET DATEFIRST` carries semantic effect — see [`SET DATEFIRST and the parts that read it`](#set-datefirst-and-the-parts-that-read-it).

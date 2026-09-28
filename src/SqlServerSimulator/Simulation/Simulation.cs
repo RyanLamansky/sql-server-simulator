@@ -2276,8 +2276,10 @@ public sealed partial class Simulation
             // though this CATCH swallowed it — real doesn't let a body's own
             // TRY / CATCH rescue the statement that fired it (probe-confirmed,
             // including for a module the body called; severity <= 10 is
-            // informational and leaves the unit intact).
-            if (connection.TriggerNestLevel > 0 && caught.Class >= 11)
+            // informational and leaves the unit intact). A body that turned
+            // XACT_ABORT off first keeps the error from dooming anything, and
+            // the statement stands (probed 2026-09-28 against SQL Server 2025).
+            if (connection.TriggerNestLevel > 0 && caught.Class >= 11 && connection.XactAbort)
                 connection.TriggerBodyErrorRaised = true;
 
             // The parser threw mid-statement, so the cursor is at an
@@ -2433,7 +2435,7 @@ public sealed partial class Simulation
         || error.EndedColumnRewrite
         || ((!batch.BatchAborted || error.EndedTriggerBody || error.Number == 127)
             && batch.CurrentStatement.WritesRows
-            && error.Number is 127 or 220 or 232 or 513 or 515 or 547 or 550 or 2601 or 2627 or 2628 or 3991 or 3992 or 6522 or 6549 or 8115 or 8134 or 8152 or 13921 or 16947);
+            && error.Number is 127 or 220 or 232 or 513 or 515 or 547 or 550 or 2601 or 2627 or 2628 or 3991 or 3992 or 6522 or 6549 or 8115 or 8134 or 8152 or 8705 or 13921 or 16947);
 
     /// <summary>
     /// True for the parse-time error real SQL Server defers to bind time —

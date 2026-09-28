@@ -411,6 +411,25 @@ internal static class TriggerEventTypes
     internal static bool IsGroup(in TriggerEventType entry) => entry.Type >= GroupTypeThreshold;
 
     /// <summary>
+    /// Whether a database-scope trigger may name <paramref name="entry"/>: it
+    /// is <c>DDL_DATABASE_LEVEL_EVENTS</c> or sits under it. Everything else in
+    /// the catalog is raised only at server scope, where naming it on
+    /// <c>ON DATABASE</c> is Msg 1098 (probed 2026-09-28 against SQL Server 2025).
+    /// </summary>
+    internal static bool IsDatabaseLevel(in TriggerEventType entry)
+    {
+        const int databaseLevelEvents = 10016;
+        int? cursor = entry.Type;
+        while (cursor is int type)
+        {
+            if (type == databaseLevelEvents)
+                return true;
+            cursor = ByType[type].ParentType;
+        }
+        return false;
+    }
+
+    /// <summary>
     /// The leaf events reachable under <paramref name="group"/> (ascending type
     /// order). Empty for a non-group type.
     /// </summary>

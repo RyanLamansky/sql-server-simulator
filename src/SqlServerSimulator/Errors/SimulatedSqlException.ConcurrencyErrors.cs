@@ -56,6 +56,16 @@ partial class SimulatedSqlException
         new("Lock request time out period exceeded.", 1222, 16, state);
 
     /// <summary>
+    /// Mimics SQL Server error 8705 as a <c>MERGE</c> through an outer-join
+    /// view raises it when an <c>UPDATE</c> action lands on a NULL-extended
+    /// row of the written table — real's own wording, naming that table's
+    /// clustered index (or heap) and object id, though no other transaction is
+    /// involved (probed 2026-09-28 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException MissingIndexEntryInDml(int indexId, int tableId, string databaseName) =>
+        new($"A DML statement encountered a missing entry in index ID {indexId} of table ID {tableId}, in the database '{databaseName}' due to an interaction with another transaction. If you continue to see this error, consider using Repeatable Read or higher isolation level.", 8705, 16, 1);
+
+    /// <summary>
     /// Msg 1205 — fired on the deadlock victim. The wording embeds the
     /// victim's session SPID (<see cref="SimulatedDbConnection.Spid"/>) verbatim;
     /// probe-confirmed against SQL Server 2025: the parenthesized number is

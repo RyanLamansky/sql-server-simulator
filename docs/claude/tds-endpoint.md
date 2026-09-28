@@ -37,6 +37,9 @@ The LOGIN7 password field de-obfuscates per MS-TDS (each byte XOR 0xA5 then nibb
 `ALTER LOGIN … WITH PASSWORD` / `DROP LOGIN` update the registry live (entries are immutable and replaced wholesale, so a concurrent login sees a consistent hash); dropping the last login reverts the endpoint to accept-anything.
 Login DDL details in [`permissions.md`](permissions.md).
 
+Once the credentials and the database have settled, the server's **logon triggers** run (`TdsSession.TryFireLogonTriggers`), and again at every pooled connection's reset (`TryResetConnection`).
+A refusal at login is the database and language notices then **Msg 17892** with no `LOGINACK`; at a reset it is Msg 17892 and **Msg 596** with `DONE_SRVERROR`, and the session closes — both shapes, and what the trigger body sees, are in [`triggers.md`](triggers.md#logon-triggers).
+
 `SimulatedNetworkListener` is `IDisposable`/`IAsyncDisposable`: disposal is aggressive and waits for nothing — listening sockets close, each session's backing `SimulatedDbConnection` is disposed with normal session teardown semantics (transactions roll back, temp tables drop), and mid-query clients see an abrupt connection reset.
 `DisposeAsync` is the same teardown returning a completed task.
 

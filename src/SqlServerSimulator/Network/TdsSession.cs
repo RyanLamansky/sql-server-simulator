@@ -153,6 +153,11 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
             transport.Spid = unchecked((ushort)this.connection!.Spid);
             this.connection.Transport = transport.Counters = new ConnectionTransport(
                 Ipv4Form(socket.RemoteEndPoint), Ipv4Form(socket.LocalEndPoint), login.TdsVersion, transport.PacketSize);
+            if (!this.TryFireLogonTriggers(writer))
+            {
+                await writer.FlushAsync(final: true, cancellationToken).ConfigureAwait(false);
+                return;
+            }
             this.WriteLoginResponse(writer, transport.PacketSize, login.TdsVersion == Tds.Version8 ? Tds.Version8 : Tds.Version74);
             await writer.FlushAsync(final: true, cancellationToken).ConfigureAwait(false);
 
@@ -410,13 +415,14 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
         var requestedDatabase = login.Database;
         var userName = login.UserName;
         var opened = simulation.CreateDbConnection();
-        opened.Open();
+        opened.OpenSession();
         opened.InfoMessage += this.OnInfoMessage;
         // LOGIN7 carries the client's workstation and application names; the
         // session keeps them for HOST_NAME() / APP_NAME(),
         // sys.dm_exec_sessions and the sp_who family.
         opened.ClientHostName = login.HostName;
         opened.ClientApplicationName = login.AppName;
+        opened.OriginalDatabaseName = requestedDatabase;
         var target = opened.CurrentDatabase;
         if (requestedDatabase.Length > 0)
         {
@@ -446,6 +452,36 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
 
         this.connection = opened;
         return true;
+    }
+
+    /// <summary>
+    /// Runs the server's logon triggers for the login just settled. A refusal
+    /// reaches the client after the login's database and language notices, as
+    /// real sends them (probed 2026-09-28 against SQL Server 2025: SqlClient
+    /// reports Msg 17892 with Msg 5701 and 5703 beside it), and closes the
+    /// connection without a LOGINACK.
+    /// </summary>
+    private bool TryFireLogonTriggers(TdsTokenWriter writer)
+    {
+        var opened = this.connection!;
+        try
+        {
+            simulation.FireLogonTriggers(opened, isPooled: false);
+            return true;
+        }
+        catch (SimulatedSqlException ex)
+        {
+            var database = opened.Database;
+            writer.WriteEnvChange(Tds.EnvDatabase, database, "master");
+            writer.WriteErrorOrInfo(Tds.TokenInfo, 5701, 2, 0, $"Changed database context to '{database}'.", ServerName, "", 1);
+            writer.WriteEnvChange(Tds.EnvLanguage, "us_english", "");
+            writer.WriteErrorOrInfo(Tds.TokenInfo, 5703, 1, 0, "Changed language setting to us_english.", ServerName, "", 1);
+            WriteErrors(writer, ex);
+            writer.WriteDone(Tds.DoneError, 0);
+            this.connection = null;
+            opened.Dispose();
+            return false;
+        }
     }
 
     private static bool FailLogin(TdsTokenWriter writer, string databaseName, string userName, SimulatedDbConnection opened)
@@ -626,7 +662,8 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
     {
         if ((message.FirstStatus & (Tds.StatusResetConnection | Tds.StatusResetConnectionSkipTran)) != 0)
         {
-            this.ResetConnection();
+            if (!this.TryResetConnection(writer))
+                return;
             writer.WriteResetConnectionAck();
         }
 
@@ -967,6 +1004,33 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
             ? new IPEndPoint(mapped.Address.MapToIPv4(), mapped.Port)
             : endPoint as IPEndPoint;
 
+    /// <summary>
+    /// Resets the session for a pooled connection's reuse, which is a login
+    /// again as far as logon triggers go: they fire with <c>IsPooled</c> 1
+    /// (probed 2026-09-28 against SQL Server 2025). A refusal kills the
+    /// session — Msg 17892 then Msg 596 fail the request that carried the
+    /// reset, and the connection closes — and returns false.
+    /// </summary>
+    private bool TryResetConnection(TdsTokenWriter writer)
+    {
+        this.ResetConnection();
+        try
+        {
+            simulation.FireLogonTriggers(this.connection!, isPooled: true);
+            return true;
+        }
+        catch (SimulatedSqlException ex)
+        {
+            // DONE_SRVERROR marks the request as killed, which SqlClient
+            // reports as its own severe error after these two.
+            WriteErrors(writer, ex);
+            WriteErrors(writer, SimulatedSqlException.SessionInKillState());
+            writer.WriteDone(Tds.DoneError | Tds.DoneServerError, 0);
+            this.connection!.Close();
+            return false;
+        }
+    }
+
     private void ResetConnection()
     {
         var previous = this.connection!;
@@ -978,13 +1042,14 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
         previous.Dispose();
 
         var fresh = new SimulatedDbConnection(simulation, previous.Spid);
-        fresh.Open();
+        fresh.OpenSession();
         fresh.InfoMessage += this.OnInfoMessage;
         // The SPID, the physical connection and the client identity LOGIN7
         // reported outlive the reset.
         fresh.Transport = previous.Transport;
         fresh.ClientHostName = clientHostName;
         fresh.ClientApplicationName = clientApplicationName;
+        fresh.OriginalDatabaseName = previous.OriginalDatabaseName;
         this.pendingInfoMessages.Clear();
         if (!string.Equals(fresh.Database, database, StringComparison.Ordinal))
             fresh.ChangeDatabase(database);

@@ -302,6 +302,13 @@ public sealed class SimulatedDbConnection : DbConnection
     internal Language Language = Language.Default;
 
     /// <summary>
+    /// Set while the server's logon triggers run for this session opening,
+    /// where <c>SET NOCOUNT OFF</c> has no effect (real writes a notice to its
+    /// error log instead; probed 2026-09-28 against SQL Server 2025).
+    /// </summary>
+    internal bool RunningLogonTriggers;
+
+    /// <summary>
     /// The three session options a procedure / trigger / dynamic-SQL body may
     /// change for its own duration only: real applies the change inside the
     /// body and restores the caller's value when the body returns
@@ -460,6 +467,14 @@ public sealed class SimulatedDbConnection : DbConnection
     /// <c>ProgramName</c> column.
     /// </summary>
     internal string ClientApplicationName = "";
+
+    /// <summary>
+    /// The database the login asked for — the connection string's
+    /// <c>Initial Catalog</c> or LOGIN7's database — which
+    /// <c>ORIGINAL_DB_NAME()</c> reports, empty when it asked for none (probed
+    /// 2026-09-28 against SQL Server 2025).
+    /// </summary>
+    internal string OriginalDatabaseName = "";
 
     /// <summary>
     /// Session-scoped transaction-isolation level. Default is
@@ -1178,8 +1193,32 @@ public sealed class SimulatedDbConnection : DbConnection
     }
 
     /// <inheritdoc/>
+    /// <remarks>
+    /// Opening is a login, so the server's enabled logon triggers run once the
+    /// identity is settled; one that fails refuses the open with Msg 17892 and
+    /// leaves the connection closed.
+    /// </remarks>
     public override void Open()
     {
+        this.OpenSession();
+        try
+        {
+            this.Simulation.FireLogonTriggers(this, isPooled: false);
+        }
+        catch
+        {
+            this.state = ConnectionState.Closed;
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// <see cref="Open"/> without the logon triggers, for the TDS endpoint,
+    /// which settles the login's identity afterwards and fires them itself.
+    /// </summary>
+    internal void OpenSession()
+    {
+        this.OriginalDatabaseName = this.pendingInitialCatalog ?? "";
         // Connection-string authentication. A User ID validates against the
         // CREATE LOGIN registry (empty registry accepts anything, mirroring the
         // TDS endpoint) and stamps the session principal to the login's mapped

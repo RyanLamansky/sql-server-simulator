@@ -138,6 +138,7 @@ partial class Simulation
                 this.RejectTakenPaths(database);
             RegisterUserDatabaseLocked(database);
         }
+        RecordServerDdlEvent(context, "CREATE_DATABASE", databaseName, loginName: null);
         return true;
     }
 

@@ -330,7 +330,7 @@ Probe-confirmed schema-inference rules:
 `<when-clause>` is one of:
 
 - `WHEN MATCHED [AND <cond>] THEN UPDATE SET col = expr [, …]` / `DELETE`
-- `WHEN NOT MATCHED [BY TARGET] [AND <cond>] THEN INSERT (cols) VALUES (exprs)`
+- `WHEN NOT MATCHED [BY TARGET] [AND <cond>] THEN INSERT [(cols)] VALUES (exprs)` / `INSERT DEFAULT VALUES`
 - `WHEN NOT MATCHED BY SOURCE [AND <cond>] THEN UPDATE SET col = expr [, …]` / `DELETE`
 
 ### Grammar enforcement
@@ -339,12 +339,14 @@ Probe-confirmed schema-inference rules:
 |---|---|
 | **5316** | The target has an INSTEAD OF trigger for some of the actions the WHEN clauses perform but not all — see [`triggers.md`](triggers.md#instead-of-on-views). |
 | **5324** | A WHEN MATCHED or WHEN NOT MATCHED BY SOURCE clause with `AND` appeared after the unconditional clause in the same family. |
-| **8672** | A target row matched more than one source row, and the WHEN MATCHED clause that fired chose UPDATE. DELETE is forgiving (multiple matches collapse to one delete — probe-confirmed). |
+| **8672** | A target row matched more than one source row, and the WHEN MATCHED clause that fired chose UPDATE. DELETE is forgiving (multiple matches collapse to one delete — probe-confirmed). It ends the batch and rolls the transaction back as under `XACT_ABORT` (probed 2026-09-28). |
 | **10710** | WHEN NOT MATCHED [BY TARGET] clause specified UPDATE or DELETE (only INSERT is legal). |
 | **10711** | WHEN MATCHED or WHEN NOT MATCHED BY SOURCE clause specified INSERT (only UPDATE / DELETE are legal). |
 | **10713** | MERGE statement missing the required trailing `;`. The dispatch loop accepts either `;` or end-of-batch; anything else here raises. |
 | **10714** | More than one WHEN NOT MATCHED [BY TARGET] clause (real SQL Server admits at most one INSERT branch — different from MATCHED / NOT MATCHED BY SOURCE which allow multiple AND-conditioned clauses). |
 | **207** / **4104** | A name in the `ON` predicate or a `WHEN … AND` that neither side answers to. Which side failed decides the message, matching real: a name whose qualifier is the target or source alias — or that carries no qualifier at all — is a bad *column* (Msg 207), while a qualifier neither side answers to is an unbindable identifier (Msg 4104). Both bind while compiling, so they fire over an empty rowset and at CREATE of a module carrying the MERGE. |
+
+A view target is written through its base table when it has one; a view with none is matched as its own rows, which its INSTEAD OF triggers take ([`triggers.md`](triggers.md#instead-of-on-views)) or, for a join view, are carried back to the one base table the actions name ([`programmable.md`](programmable.md#dml-through-a-join-view)).
 
 ### Execution
 

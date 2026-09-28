@@ -378,8 +378,11 @@ partial class Simulation
             // A DML trigger's WITH EXECUTE AS: run the body as the impersonated
             // principal (OWNER → the table's owner, SELF → the creator, CALLER →
             // no-op, named user → that principal); unwound in the finally below.
+            // A server-scope trigger's names a login instead.
             if (frame.Trigger is { } executeAsTrigger)
                 PushModuleExecuteAsFrame(connection, executeAsTrigger.ExecuteAsClause, executeAsTrigger.ExecuteAsPrincipalId, connection.CurrentDatabase, chainOwner ?? Database.DboPrincipalId);
+            else if (frame.DdlTrigger is { IsServerScoped: true, ExecuteAsLoginName: { } executeAsLogin })
+                PushServerTriggerExecuteAsFrame(connection, executeAsLogin, bodyDatabase);
             if (!string.IsNullOrEmpty(bodyText))
             {
                 using var bodyCommand = new SimulatedDbCommand(this, connection);

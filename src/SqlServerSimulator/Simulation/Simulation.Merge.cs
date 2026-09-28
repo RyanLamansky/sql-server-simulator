@@ -87,7 +87,10 @@ partial class Simulation
         HeapTable destinationTable;
         if (TryResolveCteTarget(context, destinationName, out var resolvedView) || context.Batch.TryResolveView(destinationName, out resolvedView))
         {
-            if (readsViewRows ?? ((resolvedView.BaseTable is null && !resolvedView.IsJoinUpdatable) || HasAnyInsteadOfTrigger(context.Batch, resolvedView)))
+            // A view with no single base table is always matched as its own
+            // rows: its INSTEAD OF triggers take them, or for a join view the
+            // actions are carried to the one base table they name.
+            if (resolvedView.BaseTable is null || (readsViewRows ?? HasAnyInsteadOfTrigger(context.Batch, resolvedView)))
             {
                 // The view's own rows, under its own column names, stand in
                 // for the target; nothing is written to them.
@@ -216,17 +219,26 @@ partial class Simulation
         // Which actions INSTEAD OF triggers take is settled while compiling:
         // some but not all of the statement's is Msg 5316.
         var insteadOfActions = MergeInsteadOfActions(context.Batch, triggerTarget, whenClauses, destinationName);
+        JoinViewMergePlan? joinWrite = null;
         if (viewRowsTarget is not null && !insteadOfActions)
         {
             if (viewRowsTarget.BaseTable is not null)
                 return null;
-            throw RefuseMergeIntoNonUpdatableView(viewRowsTarget, destinationTable, whenClauses, destinationName);
+            if (!viewRowsTarget.IsJoinUpdatable)
+                throw RefuseMergeIntoNonUpdatableView(viewRowsTarget, destinationTable, whenClauses, destinationName);
+            joinWrite = PlanJoinViewMerge(context.Batch, viewRowsTarget, destinationTable, whenClauses, destinationName);
         }
 
-        // OUTPUT.
+        // OUTPUT. Through a join view INSERTED may name only the columns that
+        // read the written table alone (Msg 404 otherwise); under INSTEAD OF
+        // triggers it names none.
         var output = TryParseMergeOutputClause(
             context, destinationTable, sourceAlias, sourceColumnNames, sourceSchema, sourceMasks,
-            viewRowsTarget is not null
+            joinWrite is not null && context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Output }
+                ? new ViewOutputShape(destinationTable.Columns, read: null, insertedRefused: joinWrite.Path.Length == 1
+                    ? ordinal => JoinViewColumnReadsOtherSource(context.Batch, joinWrite.Chain, joinWrite.Chain.Views.Length - 1, ordinal, joinWrite.Path[0])
+                    : throw JoinOverJoinViewOutputNotModeled(viewRowsTarget!))
+                : viewRowsTarget is not null
                 ? new ViewOutputShape(destinationTable.Columns, read: null, insertedRefused: static _ => true)
                 : sourceView is not null && context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Output }
                 ? SingleBaseViewOutputShape(context.Batch, sourceView, destinationName, destinationTable)
@@ -244,6 +256,7 @@ partial class Simulation
             // Written through a view, the base table's triggers refuse it and
             // the message names that table, as for the other statements.
             var mergeTarget = sourceView is not null ? destinationTable.Name
+                : joinWrite is not null ? joinWrite.Table.Name
                 : context.Batch.CurrentDatabase.Collation.Equals(targetAlias, defaultTargetName)
                 ? destinationName.ToString()
                 : targetAlias;
@@ -251,7 +264,7 @@ partial class Simulation
             {
                 RejectClientOutputOnTriggeredTarget(
                     context.Batch,
-                    (SchemaObject?)viewRowsTarget ?? destinationTable,
+                    (SchemaObject?)joinWrite?.Table ?? (SchemaObject?)viewRowsTarget ?? destinationTable,
                     clause.Action switch
                     {
                         MergeActionKind.Insert => TriggerActions.Insert,
@@ -268,13 +281,17 @@ partial class Simulation
         if (context.Token is not Operator { Character: ';' })
             throw SimulatedSqlException.MergeMustBeTerminated();
         if (!context.Batch.IsSkipping)
-            CheckMergePermissions(context.Batch, destinationName, triggerTarget, whenClauses);
-        if (viewRowsTarget is not null && !context.Batch.IsSkipping)
+            CheckMergePermissions(context.Batch, destinationName, triggerTarget, whenClauses, joinWrite?.Table);
+        if (joinWrite is not null && !context.Batch.IsSkipping)
+        {
+            LoadJoinViewMergeRows(context.Batch, joinWrite, destinationTable);
+        }
+        else if (viewRowsTarget is not null && !context.Batch.IsSkipping)
         {
             foreach (var row in ReadViewRows(context.Batch, viewRowsTarget, destinationTable.Columns))
                 _ = destinationTable.Heap.Insert(RowEncoder.EncodeRow(destinationTable.StoredColumns, ProjectStoredValues(destinationTable, row), destinationTable.Heap), undoLog: null);
         }
-        return ExecuteMerge(context, destinationTable, sourceView, targetAlias, materializeSource, sourceAlias, sourceColumnNames, sourceSchema, onPredicate, whenClauses, output, serializableHint, viewRowsTarget);
+        return ExecuteMerge(context, destinationTable, sourceView, targetAlias, materializeSource, sourceAlias, sourceColumnNames, sourceSchema, onPredicate, whenClauses, output, serializableHint, viewRowsTarget, joinWrite);
     }
 
     /// <summary>Whether the view carries an INSTEAD OF trigger for any action.</summary>
@@ -417,7 +434,7 @@ partial class Simulation
     /// after the view's (probed 2026-09-27 against SQL Server 2025). The
     /// source read is not separately checked — a documented gap.
     /// </summary>
-    private static void CheckMergePermissions(BatchContext batch, MultiPartName destinationName, SchemaObject destination, List<WhenClause> whenClauses)
+    private static void CheckMergePermissions(BatchContext batch, MultiPartName destinationName, SchemaObject destination, List<WhenClause> whenClauses, HeapTable? joinViewTable = null)
     {
         var insert = false;
         var update = false;
@@ -451,7 +468,8 @@ partial class Simulation
                 Check("DELETE");
         }
 
-        if (destination is not View { BaseTable: { } baseTable } view)
+        // A join view's write crosses to the one base table it names.
+        if (destination is not View view || (view.BaseTable ?? joinViewTable) is not { } baseTable)
             return;
         void CheckBase(string permission) => PermissionEnforcement.CheckBrokenChainWrite(batch, permission, view, baseTable);
         CheckBase("SELECT");
@@ -950,6 +968,14 @@ partial class Simulation
 
         var insertColumns = new List<HeapColumn>();
         var afterInsert = context.GetNextRequired();
+        // INSERT DEFAULT VALUES: every column takes its default.
+        if (afterInsert is ReservedKeyword { Keyword: Keyword.Default })
+        {
+            if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Values })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            context.MoveNextOptional();
+            return new WhenClause(kind, MergeActionKind.Insert, searchCondition, assignments: null, insertColumns: [], insertValues: [], insertColumnsImplied: true);
+        }
         if (afterInsert is Operator { Character: '(' })
         {
             while (true)
@@ -1068,7 +1094,7 @@ partial class Simulation
                 AssignmentRules.RequireAssignable(insertValues[i], insertValues[i].GetSqlType(context.Batch, resolveType), columns[i].Type);
         }
 
-        return new WhenClause(kind, MergeActionKind.Insert, searchCondition, assignments: null, insertColumns: columns, insertValues: [.. insertValues]);
+        return new WhenClause(kind, MergeActionKind.Insert, searchCondition, assignments: null, insertColumns: columns, insertValues: [.. insertValues], insertColumnsImplied: insertColumns.Count == 0);
     }
 
     private static WhenClause ParseMergeUpdateAction(
@@ -1425,7 +1451,8 @@ partial class Simulation
         List<WhenClause> whenClauses,
         OutputProjection? output,
         bool serializableHint,
-        View? viewRowsTarget)
+        View? viewRowsTarget,
+        JoinViewMergePlan? joinWrite)
     {
         // Skip mode commits nothing (CommitMerge returns early), so the match
         // walk is pure cost — and running the ON predicate / WHEN actions
@@ -1703,13 +1730,15 @@ partial class Simulation
                 {
                     continue;
                 }
-                ApplyInsert(context, destinationTable, sourceView, nmbtClause, sourceValues, ResolveCombined, pendingInserts, insteadOfInsert: HasInsteadOfTrigger(context.Batch, insteadOfInsertTarget, TriggerActions.Insert));
+                // A join view's row is formed only to be carried to its base
+                // table, whose own INSERT path validates it.
+                ApplyInsert(context, destinationTable, sourceView, nmbtClause, sourceValues, ResolveCombined, pendingInserts, insteadOfInsert: joinWrite is not null || HasInsteadOfTrigger(context.Batch, insteadOfInsertTarget, TriggerActions.Insert));
                 Tag(si);
             }
         }
 
         // Phase C: commit mutations.
-        return CommitMerge(context, destinationTable, sourceView, pendingInserts, pendingUpdates, pendingDeletes, output, outputOrder, whenClauses, viewRowsTarget);
+        return CommitMerge(context, destinationTable, sourceView, pendingInserts, pendingUpdates, pendingDeletes, output, outputOrder, whenClauses, viewRowsTarget, joinWrite);
     }
 
     /// <summary>
@@ -1955,24 +1984,32 @@ partial class Simulation
         OutputProjection? output,
         List<(int Key, MergeActionKind Kind, int Index)>? outputOrder,
         List<WhenClause> whenClauses,
-        View? viewRowsTarget)
+        View? viewRowsTarget,
+        JoinViewMergePlan? joinWrite = null,
+        List<int>? updatedColumnOrdinals = null)
     {
         if (context.Batch.IsSkipping)
             return new SimulatedNonQuery(0);
+        if (joinWrite is not null)
+            return CommitJoinViewMerge(context, destinationTable, joinWrite, pendingInserts, pendingUpdates, pendingDeletes, output, outputOrder, whenClauses);
 
         // UPDATE(col) / COLUMNS_UPDATED() report the statement's SET-clause
         // membership rather than what any row actually changed, so the mask
         // is the union of every WHEN MATCHED THEN UPDATE clause's targets
-        // whether or not that clause fired.
-        var updatedColumnOrdinals = new List<int>();
-        foreach (var clause in whenClauses)
+        // whether or not that clause fired. A join view's write hands in the
+        // base-table ordinals its SET lists reach.
+        if (updatedColumnOrdinals is null)
         {
-            if (clause.Action != MergeActionKind.Update || clause.Assignments is null)
-                continue;
-            foreach (var (ordinal, _) in clause.Assignments)
+            updatedColumnOrdinals = [];
+            foreach (var clause in whenClauses)
             {
-                if (!updatedColumnOrdinals.Contains(ordinal))
-                    updatedColumnOrdinals.Add(ordinal);
+                if (clause.Action != MergeActionKind.Update || clause.Assignments is null)
+                    continue;
+                foreach (var (ordinal, _) in clause.Assignments)
+                {
+                    if (!updatedColumnOrdinals.Contains(ordinal))
+                        updatedColumnOrdinals.Add(ordinal);
+                }
             }
         }
 
@@ -2123,25 +2160,7 @@ partial class Simulation
         }
 
         // Build OUTPUT result, in the order the match phase keyed the actions.
-        var outputRows = output is null ? null : new List<byte[]>();
-        if (output is not null)
-        {
-            var nullTarget = new SqlValue[destinationTable.Columns.Length];
-            for (var i = 0; i < nullTarget.Length; i++)
-                nullTarget[i] = SqlValue.Null(destinationTable.Columns[i].Type);
-
-            foreach (var (_, kind, index) in outputOrder!.OrderBy(action => action.Key))
-            {
-                var bytes = kind switch
-                {
-                    MergeActionKind.Insert => output.ProjectRow(insertedValues: pendingInserts[index].NewValues, deletedValues: nullTarget, sourceValues: pendingInserts[index].SourceValues, action: "INSERT"),
-                    MergeActionKind.Update => output.ProjectRow(insertedValues: pendingUpdates[index].NewValues, deletedValues: pendingUpdates[index].OldValues, sourceValues: pendingUpdates[index].SourceValues, action: "UPDATE"),
-                    _ => output.ProjectRow(insertedValues: nullTarget, deletedValues: pendingDeletes[index].OldValues, sourceValues: pendingDeletes[index].SourceValues, action: "DELETE"),
-                };
-                if (bytes is not null)
-                    outputRows!.Add(bytes);
-            }
-        }
+        var outputRows = output is null ? null : ProjectMergeOutput(output, outputOrder!, destinationTable.Columns, pendingInserts, pendingUpdates, pendingDeletes);
 
         // Fire triggers in INSERT → UPDATE → DELETE order (probe-confirmed).
         // For each action, route to INSTEAD OF if attached, else AFTER (if
@@ -2318,7 +2337,8 @@ partial class Simulation
         BooleanExpression? searchCondition,
         List<(int Ordinal, Expression Expr)>? assignments,
         HeapColumn[]? insertColumns,
-        Expression[]? insertValues)
+        Expression[]? insertValues,
+        bool insertColumnsImplied = false)
     {
         public readonly WhenClauseKind Kind = kind;
         public readonly MergeActionKind Action = action;
@@ -2326,6 +2346,14 @@ partial class Simulation
         public readonly List<(int Ordinal, Expression Expr)>? Assignments = assignments;
         public readonly HeapColumn[]? InsertColumns = insertColumns;
         public readonly Expression[]? InsertValues = insertValues;
+
+        /// <summary>
+        /// True for an <c>INSERT</c> that wrote no column list — the
+        /// <c>VALUES</c> form taking the target's shape, or <c>DEFAULT
+        /// VALUES</c> — which names no base table to route a join view's
+        /// write to.
+        /// </summary>
+        public readonly bool InsertColumnsImplied = insertColumnsImplied;
 
         /// <summary>
         /// Per target column (base-table ordinal), the function the executing

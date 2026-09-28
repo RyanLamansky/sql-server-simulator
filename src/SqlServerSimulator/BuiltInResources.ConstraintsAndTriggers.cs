@@ -72,6 +72,45 @@ internal static partial class BuiltInResources
             new("parent_type", SqlType.Int32, null, true),
         ], (batch, database) => EnumerateSysTriggerEventTypes(eventTypeNameCol));
 
+        // The server-scope trigger catalog (CREATE TRIGGER … ON ALL SERVER),
+        // identical from every database; shapes probed 2026-09-28 against
+        // SQL Server 2025. sys.server_trigger_events orders its columns
+        // unlike sys.trigger_events, with is_trigger_event ahead of the
+        // ordering pair.
+        Sys("server_triggers",
+        [
+            new("name", SqlType.SystemName, 128, false),
+            new("object_id", SqlType.Int32, null, false),
+            new("parent_class", SqlType.TinyInt, null, false),
+            new("parent_class_desc", nvarchar60Catalog, 60, true),
+            new("parent_id", SqlType.Int32, null, false),
+            new("type", charTwo, 2, false),
+            new("type_desc", nvarchar60Catalog, 60, true),
+            new("create_date", SqlType.DateTime, null, false),
+            new("modify_date", SqlType.DateTime, null, false),
+            new("is_ms_shipped", SqlType.Bit, null, false),
+            new("is_disabled", SqlType.Bit, null, false),
+        ], (batch, database) => EnumerateSysServerTriggers(batch, charTwo));
+        Sys("server_trigger_events",
+        [
+            new("object_id", SqlType.Int32, null, false),
+            new("type", SqlType.Int32, null, false),
+            new("type_desc", nvarchar128Catalog, 128, false),
+            new("is_trigger_event", SqlType.Bit, null, true),
+            new("is_first", SqlType.Bit, null, true),
+            new("is_last", SqlType.Bit, null, true),
+            new("event_group_type", SqlType.Int32, null, true),
+            new("event_group_type_desc", nvarchar128Catalog, 128, true),
+        ], static (batch, database) => EnumerateSysServerTriggerEvents(batch));
+        Sys("server_sql_modules",
+        [
+            new("object_id", SqlType.Int32, null, false),
+            new("definition", SqlType.NVarchar, SqlType.MaxLengthSentinel, true),
+            new("uses_ansi_nulls", SqlType.Bit, null, true),
+            new("uses_quoted_identifier", SqlType.Bit, null, true),
+            new("execute_as_principal_id", SqlType.Int32, null, true),
+        ], static (batch, database) => EnumerateSysServerSqlModules(batch));
+
         // sys.assembly_modules: one row per CLR routine bound through an
         // EXTERNAL NAME clause. SMO's CREATE-scripting trigger query LEFT JOINs
         // it to detect a CLR trigger; only scalar functions are modeled, so
@@ -516,7 +555,7 @@ internal static partial class BuiltInResources
     /// <c>is_last</c> read that action's <c>sp_settriggerorder</c> slot
     /// (<see cref="Trigger.FirstForActions"/> / <see cref="Trigger.LastForActions"/>),
     /// so ordering a multi-action trigger first for INSERT leaves its UPDATE
-    /// row at 0; DDL triggers take no ordering and stay 0.
+    /// row at 0; a DDL trigger reads its per-event slots the same way.
     /// <c>is_trigger_event</c> is 1.
     /// DacFx's SqlDatabaseDdlTrigger reverse-engineering builds the element's
     /// EventType relationship from these rows.
@@ -562,51 +601,135 @@ internal static partial class BuiltInResources
         // DDL triggers: each stored event-type name is either an event group
         // (expand to the leaf events in its transitive closure, tagging each
         // with the group's id/desc) or an individual event (one row, NULL
-        // group). Duplicate leaves across overlapping group names are
-        // de-duplicated so a trigger declared FOR two overlapping groups
-        // doesn't double-emit a shared event.
+        // group).
         foreach (var ddl in database.DdlTriggers.Values.OrderBy(t => t.ObjectId))
         {
             var objectId = SqlValue.FromInt32(ddl.ObjectId);
-            var emitted = new HashSet<int>();
-            foreach (var eventName in ddl.EventTypes)
+            foreach (var (type, desc, groupType, groupDesc) in ExpandDdlTriggerEvents(ddl))
             {
-                if (!TriggerEventTypes.TryResolve(eventName, out var entry))
-                    continue;
-                if (TriggerEventTypes.IsGroup(entry))
+                yield return [
+                    objectId,
+                    SqlValue.FromInt32(type),
+                    SqlValue.FromString(eventTypeName, desc),
+                    ddl.FirstForEvents?.Contains(type) == true ? trueBit : falseBit,
+                    ddl.LastForEvents?.Contains(type) == true ? trueBit : falseBit,
+                    groupType is int g ? SqlValue.FromInt32(g) : nullInt,
+                    groupDesc is { } d ? SqlValue.FromString(eventTypeName, d) : nullDesc,
+                    trueBit,
+                ];
+            }
+        }
+    }
+
+    /// <summary>
+    /// The events a database- or server-scope trigger's declared list expands
+    /// to: a group name yields every leaf event in its transitive closure,
+    /// tagged with the group, and an individual event (or <c>LOGON</c>, which
+    /// the event-type catalog doesn't carry) one untagged row. A leaf two
+    /// overlapping groups share is emitted once.
+    /// </summary>
+    private static IEnumerable<(int Type, string Desc, int? GroupType, string? GroupDesc)> ExpandDdlTriggerEvents(DdlTrigger trigger)
+    {
+        var emitted = new HashSet<int>();
+        foreach (var eventName in trigger.EventTypes)
+        {
+            if (eventName.Equals("LOGON", StringComparison.OrdinalIgnoreCase))
+            {
+                if (emitted.Add(DdlTrigger.LogonEventType))
+                    yield return (DdlTrigger.LogonEventType, "LOGON", null, null);
+                continue;
+            }
+            if (!TriggerEventTypes.TryResolve(eventName, out var entry))
+                continue;
+            if (TriggerEventTypes.IsGroup(entry))
+            {
+                foreach (var leaf in TriggerEventTypes.LeafClosure(entry.Type))
                 {
-                    var groupType = SqlValue.FromInt32(entry.Type);
-                    var groupDesc = SqlValue.FromString(eventTypeName, entry.TypeName);
-                    foreach (var leaf in TriggerEventTypes.LeafClosure(entry.Type))
-                    {
-                        if (!emitted.Add(leaf.Type))
-                            continue;
-                        yield return [
-                            objectId,
-                            SqlValue.FromInt32(leaf.Type),
-                            SqlValue.FromString(eventTypeName, leaf.TypeName),
-                            falseBit,
-                            falseBit,
-                            groupType,
-                            groupDesc,
-                            trueBit,
-                        ];
-                    }
-                }
-                else if (emitted.Add(entry.Type))
-                {
-                    yield return [
-                        objectId,
-                        SqlValue.FromInt32(entry.Type),
-                        SqlValue.FromString(eventTypeName, entry.TypeName),
-                        falseBit,
-                        falseBit,
-                        nullInt,
-                        nullDesc,
-                        trueBit,
-                    ];
+                    if (emitted.Add(leaf.Type))
+                        yield return (leaf.Type, leaf.TypeName, entry.Type, entry.TypeName);
                 }
             }
+            else if (emitted.Add(entry.Type))
+            {
+                yield return (entry.Type, entry.TypeName, null, null);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Rows for <c>sys.server_triggers</c>: every server-scope trigger, with
+    /// <c>parent_class</c> 100 (<c>SERVER</c>) and <c>parent_id</c> 0.
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateSysServerTriggers(Parser.BatchContext batch, SqlType charTwo)
+    {
+        var trueBit = SqlValue.FromBoolean(true);
+        var falseBit = SqlValue.FromBoolean(false);
+        foreach (var trigger in batch.Connection.Simulation.ServerTriggers.All)
+        {
+            yield return [
+                SqlValue.FromSystemName(trigger.Name),
+                SqlValue.FromInt32(trigger.ObjectId),
+                SqlValue.FromByte(100),
+                SqlValue.FromNVarchar("SERVER"),
+                SqlValue.FromInt32(0),
+                SqlValue.FromChar(charTwo, trigger.ObjectTypeCode),
+                SqlValue.FromNVarchar(trigger.ObjectTypeDescription),
+                SqlValue.FromDateTime(trigger.CreateDate),
+                SqlValue.FromDateTime(trigger.ModifyDate),
+                falseBit,
+                trigger.IsDisabled ? trueBit : falseBit,
+            ];
+        }
+    }
+
+    /// <summary>
+    /// Rows for <c>sys.server_trigger_events</c>: one per event each
+    /// server-scope trigger fires on, expanded as <c>sys.trigger_events</c>
+    /// expands a database-scope trigger's list, with <c>is_first</c> /
+    /// <c>is_last</c> reading <c>sp_settriggerorder … 'SERVER'</c>.
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateSysServerTriggerEvents(Parser.BatchContext batch)
+    {
+        var trueBit = SqlValue.FromBoolean(true);
+        var falseBit = SqlValue.FromBoolean(false);
+        var eventTypeName = NVarcharSqlType.Get(128, Collation.Catalog, Coercibility.Implicit);
+        foreach (var trigger in batch.Connection.Simulation.ServerTriggers.All)
+        {
+            var objectId = SqlValue.FromInt32(trigger.ObjectId);
+            foreach (var (type, desc, groupType, groupDesc) in ExpandDdlTriggerEvents(trigger))
+            {
+                yield return [
+                    objectId,
+                    SqlValue.FromInt32(type),
+                    SqlValue.FromString(eventTypeName, desc),
+                    trueBit,
+                    trigger.FirstForEvents?.Contains(type) == true ? trueBit : falseBit,
+                    trigger.LastForEvents?.Contains(type) == true ? trueBit : falseBit,
+                    groupType is int g ? SqlValue.FromInt32(g) : SqlValue.Null(SqlType.Int32),
+                    groupDesc is { } d ? SqlValue.FromString(eventTypeName, d) : SqlValue.Null(eventTypeName),
+                ];
+            }
+        }
+    }
+
+    /// <summary>
+    /// Rows for <c>sys.server_sql_modules</c>: each T-SQL server-scope
+    /// trigger's definition — NULL under <c>WITH ENCRYPTION</c> — and the
+    /// server principal id its <c>EXECUTE AS</c> resolved to.
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateSysServerSqlModules(Parser.BatchContext batch)
+    {
+        foreach (var trigger in batch.Connection.Simulation.ServerTriggers.All)
+        {
+            if (trigger.ClrEntry is not null)
+                continue;
+            yield return [
+                SqlValue.FromInt32(trigger.ObjectId),
+                trigger.DefinitionText is { } definition ? SqlValue.FromNVarchar(definition) : SqlValue.Null(SqlType.NVarchar),
+                SqlValue.FromBoolean(trigger.UsesAnsiNulls),
+                SqlValue.FromBoolean(trigger.UsesQuotedIdentifier),
+                trigger.ExecuteAsPrincipalId is int principalId ? SqlValue.FromInt32(principalId) : SqlValue.Null(SqlType.Int32),
+            ];
         }
     }
 

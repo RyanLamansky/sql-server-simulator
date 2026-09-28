@@ -32,7 +32,8 @@ internal sealed partial class TdsSession
     {
         if ((message.FirstStatus & (Tds.StatusResetConnection | Tds.StatusResetConnectionSkipTran)) != 0)
         {
-            this.ResetConnection();
+            if (!this.TryResetConnection(writer))
+                return;
             writer.WriteResetConnectionAck();
         }
 

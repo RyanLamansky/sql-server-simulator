@@ -140,9 +140,11 @@ partial class Simulation
             batch.SkipModeFlag = savedSkip;
         }
 
-        return parsed && refusal is not null
-            ? throw SimulatedSqlException.FollowedByAlterDatabaseFailed(refusal)
-            : parsed;
+        if (parsed && refusal is not null)
+            throw SimulatedSqlException.FollowedByAlterDatabaseFailed(refusal);
+        if (parsed)
+            RecordServerDdlEvent(context, "ALTER_DATABASE", target.Name, loginName: null);
+        return parsed;
     }
 
     /// <summary>

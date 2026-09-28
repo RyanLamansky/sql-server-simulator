@@ -228,11 +228,15 @@ partial class Simulation
         // evicted and blocking only the executing one.
         if (BuiltInToken.Comparer.Equals(context.CurrentDatabase.Name, name))
             throw SimulatedSqlException.CannotDropDatabaseInUse(name);
+        bool removed;
         lock (simulation.Databases)
         {
-            if (!simulation.Databases.Remove(name) && !ifExists)
+            removed = simulation.Databases.Remove(name);
+            if (!removed && !ifExists)
                 throw SimulatedSqlException.CannotDropDatabaseNotFound(name);
         }
+        if (removed)
+            RecordServerDdlEvent(context, "DROP_DATABASE", name, loginName: null);
     }
 
     /// <summary>
@@ -326,34 +330,48 @@ partial class Simulation
     /// </remarks>
     private static void DropOneTrigger(ParserContext context, MultiPartName name, bool ifExists)
     {
-        // Peek for the ON DATABASE trailer. The caller's loop normally
-        // advances after this returns; we capture the next token here to
-        // route correctly, and if not "ON DATABASE", leave the cursor on
-        // the name's last segment for the caller's advance step.
-        var checkpoint = context.SaveCheckpoint();
-        var next = context.GetNextOptional();
-        var isDdl = false;
-        if (next is ReservedKeyword { Keyword: Keyword.On })
+        // The ON { DATABASE | ALL SERVER } trailer scopes every name in the
+        // comma list, so look past the rest of the list for it; the last name
+        // consumes it, leaving the cursor on its final token for the caller's
+        // advance step.
+        var scope = PeekTriggerDropScope(context);
+        if (scope != TriggerDropScope.Object)
         {
-            var afterOn = context.GetNextOptional();
-            if (afterOn is ReservedKeyword { Keyword: Keyword.Database })
+            var checkpoint = context.SaveCheckpoint();
+            if (context.GetNextOptional() is ReservedKeyword { Keyword: Keyword.On })
             {
-                isDdl = true;
+                context.MoveNextRequired();
+                _ = IsAllServer(context);
             }
             else
             {
                 context.RestoreCheckpoint(checkpoint);
             }
-        }
-        else
-        {
-            context.RestoreCheckpoint(checkpoint);
+            if (name.Count > 1)
+                throw SimulatedSqlException.SchemaPrefixOnScopedTrigger();
         }
 
         if (context.Batch.IsSkipping)
             return;
 
-        if (isDdl)
+        if (scope == TriggerDropScope.Server)
+        {
+            var registry = context.Simulation.ServerTriggers;
+            if (!registry.TryGetValue(name.Leaf, out var existingServer))
+            {
+                if (ifExists)
+                    return;
+                throw SimulatedSqlException.CannotDropTriggerDoesNotExist(name.ToString());
+            }
+            if (!context.Simulation.IsLoginSysadmin(context.Connection.Security.Effective.LoginName))
+                throw SimulatedSqlException.DropObjectPermissionDenied("trigger", name.Leaf);
+            context.Batch.AcquireStatementLock(existingServer.SchemaLock, LockMode.SchemaModification);
+            if (registry.Remove(name.Leaf, out var removedServer) && removedServer is not null)
+                RecordDdlUndo(context, () => _ = registry.Set(removedServer));
+            return;
+        }
+
+        if (scope == TriggerDropScope.Database)
         {
             if (!context.CurrentDatabase.DdlTriggers.TryGetValue(name.Leaf, out var existingDdl))
             {
@@ -364,8 +382,10 @@ partial class Simulation
             if (!PermissionEnforcement.HasDatabasePermission(context.Batch, context.CurrentDatabase, Permission.AlterAnyDatabaseDdlTrigger))
                 throw SimulatedSqlException.DropObjectPermissionDenied("trigger", name.Leaf);
             context.Batch.AcquireStatementLock(existingDdl.SchemaLock, LockMode.SchemaModification);
-            if (!context.CurrentDatabase.DdlTriggers.TryRemove(name.Leaf, out _) && !ifExists)
+            if (!context.CurrentDatabase.DdlTriggers.TryRemove(name.Leaf, out var removedDdl) && !ifExists)
                 throw SimulatedSqlException.CannotDropTriggerDoesNotExist(name.ToString());
+            if (removedDdl is not null)
+                RecordSlotUndo(context, context.CurrentDatabase.DdlTriggers, name.Leaf, removedDdl);
             RecordDdlEvent(context, "DROP_TRIGGER", EventSchemaName(name), name.Leaf, "TRIGGER");
             return;
         }
@@ -400,6 +420,43 @@ partial class Simulation
             context, "DROP_TRIGGER", schema.Name, name.Leaf, "TRIGGER",
             existing.Parent.Name,
             existing.Parent is View ? "VIEW" : "TABLE");
+    }
+
+    private enum TriggerDropScope { Object, Database, Server }
+
+    /// <summary>
+    /// The scope a <c>DROP TRIGGER</c> list names: past the remaining
+    /// <c>, name</c> entries, an <c>ON DATABASE</c> or <c>ON ALL SERVER</c>
+    /// trailer, else a DML trigger's schema scope. The cursor doesn't move.
+    /// </summary>
+    private static TriggerDropScope PeekTriggerDropScope(ParserContext context)
+    {
+        var checkpoint = context.SaveCheckpoint();
+        try
+        {
+            while (true)
+            {
+                switch (context.GetNextOptional())
+                {
+                    case Operator { Character: ',' }:
+                        if (context.GetNextOptional() is not Name)
+                            return TriggerDropScope.Object;
+                        _ = BatchContext.ParseObjectName(context);
+                        continue;
+                    case ReservedKeyword { Keyword: Keyword.On }:
+                        context.MoveNextOptional();
+                        return context.Token is ReservedKeyword { Keyword: Keyword.Database } ? TriggerDropScope.Database
+                            : IsAllServer(context) ? TriggerDropScope.Server
+                            : TriggerDropScope.Object;
+                    default:
+                        return TriggerDropScope.Object;
+                }
+            }
+        }
+        finally
+        {
+            context.RestoreCheckpoint(checkpoint);
+        }
     }
 
     /// <summary>

@@ -57,7 +57,11 @@ partial class Simulation
         // Name → DML trigger attached to a heap-table or view parent.
         if (context.Token is ReservedKeyword { Keyword: Keyword.Database })
         {
-            return ParseDdlTriggerBody(context, triggerName, triggerSchema, isAlter, createOrAlter);
+            return ParseDdlTriggerBody(context, triggerName, triggerSchema, isAlter, createOrAlter, serverScope: false);
+        }
+        if (IsAllServer(context))
+        {
+            return ParseDdlTriggerBody(context, triggerName, triggerSchema, isAlter, createOrAlter, serverScope: true);
         }
 
         if (context.Token is not Name)
@@ -346,20 +350,27 @@ partial class Simulation
         context.MoveNextRequired();
 
         // ON DATABASE toggles a database-scope DDL trigger instead of a DML
-        // one; the ALL form covers every DDL trigger in the database.
-        if (context.Token is ReservedKeyword { Keyword: Keyword.Database })
+        // one, and ON ALL SERVER a server-scope trigger; the ALL form covers
+        // every trigger of that scope. A name the scope doesn't hold is
+        // Msg 1088 state 119 (probed 2026-09-28 against SQL Server 2025).
+        var serverScope = IsAllServer(context);
+        if (serverScope || context.Token is ReservedKeyword { Keyword: Keyword.Database })
         {
+            if (!allTriggers && triggerName.Count > 1)
+                throw SimulatedSqlException.SchemaPrefixOnScopedTrigger();
             if (context.Batch.IsSkipping)
                 return true;
+            IEnumerable<DdlTrigger> scoped = serverScope ? context.Simulation.ServerTriggers.All : context.CurrentDatabase.DdlTriggers.Values;
             if (allTriggers)
             {
-                foreach (var ddlTrigger in context.CurrentDatabase.DdlTriggers.Values)
+                foreach (var ddlTrigger in scoped)
                     ddlTrigger.IsDisabled = disable;
                 return true;
             }
-            if (!context.CurrentDatabase.DdlTriggers.TryGetValue(triggerName.Leaf, out var matchedDdlTrigger))
-                throw SimulatedSqlException.InvalidObjectName(triggerName);
-            matchedDdlTrigger.IsDisabled = disable;
+            var matchedDdlTrigger = serverScope
+                ? context.Simulation.ServerTriggers.TryGetValue(triggerName.Leaf, out var serverTrigger) ? serverTrigger : null
+                : context.CurrentDatabase.DdlTriggers.TryGetValue(triggerName.Leaf, out var databaseTrigger) ? databaseTrigger : null;
+            (matchedDdlTrigger ?? throw SimulatedSqlException.CannotFindScopedTrigger(triggerName.Leaf)).IsDisabled = disable;
             return true;
         }
 
@@ -400,51 +411,106 @@ partial class Simulation
     }
 
     /// <summary>
-    /// Parses the body of a database-scope DDL trigger. Cursor enters on
-    /// the <c>DATABASE</c> keyword (already matched by the caller); on
-    /// successful return the trigger is registered in
-    /// <see cref="Database.DdlTriggers"/>. Grammar:
-    /// <c>… ON DATABASE [WITH …] { FOR | AFTER } &lt;event_type [, …]&gt; AS &lt;body&gt;</c>.
+    /// Whether the cursor sits on <c>ALL SERVER</c>, the server-scope parent of
+    /// a <c>CREATE</c> / <c>DROP</c> / <c>ENABLE</c> / <c>DISABLE TRIGGER</c>.
+    /// On success the cursor is left on <c>SERVER</c>; otherwise it hasn't moved.
+    /// </summary>
+    private static bool IsAllServer(ParserContext context)
+    {
+        if (context.Token is not ReservedKeyword { Keyword: Keyword.All })
+            return false;
+        var checkpoint = context.SaveCheckpoint();
+        if (context.GetNextOptional() is Name { Value: var word } && word.Equals("SERVER", StringComparison.OrdinalIgnoreCase))
+            return true;
+        context.RestoreCheckpoint(checkpoint);
+        return false;
+    }
+
+    /// <summary>
+    /// Parses the body of a database-scope DDL trigger (<c>ON DATABASE</c>) or a
+    /// server-scope trigger (<c>ON ALL SERVER</c>). Cursor enters on the
+    /// <c>DATABASE</c> / <c>SERVER</c> keyword (already matched by the caller);
+    /// on successful return the trigger is registered in
+    /// <see cref="Database.DdlTriggers"/> or <see cref="ServerTriggers"/>.
+    /// Grammar: <c>… ON { DATABASE | ALL SERVER } [WITH …] { FOR | AFTER }
+    /// &lt;event_type [, …]&gt; AS &lt;body&gt;</c>.
     /// </summary>
     /// <remarks>
     /// Event types parse as bare identifiers (e.g. <c>DDL_DATABASE_LEVEL_EVENTS</c>,
-    /// <c>CREATE_TABLE</c>, <c>ALTER_PROCEDURE</c>). The simulator stores
-    /// the list verbatim — the source casing survives into
-    /// <c>sys.trigger_events</c>, and both that projection and the fire-time
-    /// <see cref="DdlTrigger.Covers"/> match case-insensitively. A name
-    /// SQL Server's event-type catalog doesn't carry is accepted and never
-    /// matches anything.
+    /// <c>CREATE_TABLE</c>, <c>LOGON</c>). The simulator stores the list
+    /// verbatim — the source casing survives into <c>sys.trigger_events</c>,
+    /// and both that projection and the fire-time <see cref="DdlTrigger.Covers"/>
+    /// match case-insensitively. A name the event-type catalog doesn't carry
+    /// is Msg 1084, and one the scope can't raise — a DML action, <c>LOGON</c>
+    /// or a server-level event at database scope — Msg 1098 (probed
+    /// 2026-09-28 against SQL Server 2025).
     /// </remarks>
-    private static bool ParseDdlTriggerBody(ParserContext context, MultiPartName triggerName, Schema triggerSchema, bool isAlter, bool createOrAlter)
+    private static bool ParseDdlTriggerBody(ParserContext context, MultiPartName triggerName, Schema triggerSchema, bool isAlter, bool createOrAlter, bool serverScope)
     {
-        // Cursor on DATABASE. Advance to the next significant token.
+        // Cursor on DATABASE / SERVER. Advance to the next significant token.
         context.MoveNextRequired();
 
-        // Optional WITH option list, judged as the DML trigger's is; a DDL
-        // trigger runs as its caller whatever EXECUTE AS says.
+        // A database- or server-level trigger belongs to no schema.
+        if (triggerName.Count > 1)
+            throw SimulatedSqlException.SchemaPrefixOnScopedTrigger();
+
+        // Optional WITH option list, judged as the DML trigger's is. A
+        // database-scope DDL trigger runs as its caller whatever EXECUTE AS
+        // says; a server-scope one runs as the login it names.
         var options = ParseModuleOptions(context, ModuleOptionHost.Trigger, triggerName.Leaf);
+        if (options.ExecuteAs is { } executeAs && executeAs.Equals("OWNER", StringComparison.OrdinalIgnoreCase))
+            throw SimulatedSqlException.ExecuteAsOwnerOnScopedTrigger();
 
-        if (context.Token is not (ReservedKeyword { Keyword: Keyword.For } or
-            UnquotedString { ContextualKeyword: ContextualKeyword.After }))
+        switch (context.Token)
         {
-            throw SimulatedSqlException.SyntaxErrorNear(context);
+            case ReservedKeyword { Keyword: Keyword.For }:
+            case UnquotedString { ContextualKeyword: ContextualKeyword.After }:
+                context.MoveNextRequired();
+                break;
+            case UnquotedString { ContextualKeyword: ContextualKeyword.Instead }:
+                // INSTEAD OF parses, and the event after it is the syntax error
+                // (probed 2026-09-28 against SQL Server 2025).
+                if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Of })
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                context.MoveNextRequired();
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            default:
+                throw SimulatedSqlException.SyntaxErrorNear(context);
         }
-        context.MoveNextRequired();
 
         // Event-type list — bare identifiers, comma-separated. UnquotedString
         // (which carries identifiers like DDL_DATABASE_LEVEL_EVENTS) is a
         // Name subclass; the Name arm covers both quoted and unquoted forms.
+        // A DML action is a keyword rather than a name, and names an event no
+        // DDL trigger can take.
         var eventTypes = new List<string>();
+        var invalidForScope = false;
         while (true)
         {
-            if (context.Token is not Name eventToken)
-                throw SimulatedSqlException.SyntaxErrorNear(context);
-            eventTypes.Add(eventToken.Value);
+            switch (context.Token)
+            {
+                case ReservedKeyword { Keyword: Keyword.Insert or Keyword.Update or Keyword.Delete }:
+                    invalidForScope = true;
+                    break;
+                case Name eventToken:
+                    if (eventToken.Value.Equals("LOGON", StringComparison.OrdinalIgnoreCase))
+                        invalidForScope |= !serverScope;
+                    else if (!TriggerEventTypes.TryResolve(eventToken.Value, out var entry))
+                        throw SimulatedSqlException.InvalidEventType(eventToken.Value);
+                    else
+                        invalidForScope |= !serverScope && !TriggerEventTypes.IsDatabaseLevel(entry);
+                    eventTypes.Add(eventToken.Value);
+                    break;
+                default:
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+            }
             context.MoveNextRequired();
             if (context.Token is not Operator { Character: ',' })
                 break;
             context.MoveNextRequired();
         }
+        if (invalidForScope)
+            throw SimulatedSqlException.EventTypeInvalidOnTarget();
 
         if (context.Token is not ReservedKeyword { Keyword: Keyword.As })
             throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -458,8 +524,15 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return true;
 
+        if (externalName is not null && serverScope)
+            throw new NotSupportedException("CLR server-scope triggers (CREATE TRIGGER … ON ALL SERVER … AS EXTERNAL NAME) are not modeled.");
         if (externalName is not null && options.Encryption)
             throw SimulatedSqlException.ClrTriggerEncryption();
+
+        var simulation = context.Simulation;
+        // A server-scope trigger's body runs in master, so that is where it
+        // binds and where its object id comes from.
+        var homeDatabase = serverScope ? simulation.Databases[MasterDatabaseName] : context.CurrentDatabase;
 
         // Bind the body ahead of the collision gates, same ordering the DML
         // form uses. A DDL body has no INSERTED / DELETED, so the frame only
@@ -469,39 +542,86 @@ partial class Simulation
         var clrEntry = externalName is { } ddlExternalName ? BindClrTrigger(context, ddlExternalName) : null;
         if (clrEntry is null)
         {
-            context.Simulation.BindTriggerBodyAtCreate(
-                context,
-                triggerName.Leaf,
-                new TriggerFrame(
-                    new DdlTrigger(triggerName.Leaf, objectId: 0, triggerSchema.SchemaId, eventTypes, bodyText,
-                        createDate: context.Batch.CurrentStatement.UtcNow, bodyLineOffset),
-                    eventData: ""),
-                bodyText,
-                bodyLineOffset);
+            var connection = context.Connection;
+            var savedDatabase = connection.CurrentDatabase;
+            connection.CurrentDatabase = homeDatabase;
+            try
+            {
+                simulation.BindTriggerBodyAtCreate(
+                    context,
+                    triggerName.Leaf,
+                    new TriggerFrame(
+                        new DdlTrigger(triggerName.Leaf, objectId: 0, triggerSchema.SchemaId, eventTypes, bodyText,
+                            createDate: context.Batch.CurrentStatement.UtcNow, bodyLineOffset, serverScope),
+                        eventData: ""),
+                    bodyText,
+                    bodyLineOffset);
+            }
+            finally
+            {
+                connection.CurrentDatabase = savedDatabase;
+            }
         }
 
-        // DDL triggers live in their own per-database dict, but the NAME
-        // collision check still applies against the per-schema shared
-        // namespace (probe-confirmed: a DDL trigger named [foo] collides
-        // with a DML trigger or any other schema object named [foo] in
-        // the same schema). triggerSchema is the resolved owner schema
-        // from the caller (default dbo for unqualified names).
-        var existed = context.CurrentDatabase.DdlTriggers.TryGetValue(triggerName.Leaf, out var existing);
-        if (!isAlter && !createOrAlter && (existed || triggerSchema.HasNameInSharedNamespace(triggerName.Leaf)))
-            throw SimulatedSqlException.ThereIsAlreadyAnObject(triggerName.Leaf, state: 2);
-        if (isAlter && !existed)
-            throw SimulatedSqlException.InvalidObjectName(triggerName);
-        RejectClrTriggerKindChange(existed ? existing : null, clrEntry, triggerName);
+        DdlTrigger? existing;
+        bool existed;
+        if (serverScope)
+        {
+            existed = simulation.ServerTriggers.TryGetValue(triggerName.Leaf, out var existingServer);
+            existing = existed ? existingServer : null;
+            if (!isAlter && !createOrAlter && existed)
+                throw SimulatedSqlException.ThereIsAlreadyAnObject(triggerName.Leaf, state: 2);
+            if (isAlter && !existed)
+                throw SimulatedSqlException.InvalidObjectName(triggerName, state: 6);
+        }
+        else
+        {
+            // DDL triggers live in their own per-database dict, but the NAME
+            // collision check still applies against the per-schema shared
+            // namespace (probe-confirmed: a DDL trigger named [foo] collides
+            // with a DML trigger or any other schema object named [foo] in
+            // the same schema). triggerSchema is the resolved owner schema
+            // from the caller (default dbo for unqualified names). A
+            // server-scope trigger of the same name doesn't collide.
+            existed = context.CurrentDatabase.DdlTriggers.TryGetValue(triggerName.Leaf, out var existingDatabase);
+            existing = existed ? existingDatabase : null;
+            if (!isAlter && !createOrAlter && (existed || triggerSchema.HasNameInSharedNamespace(triggerName.Leaf)))
+                throw SimulatedSqlException.ThereIsAlreadyAnObject(triggerName.Leaf, state: 2);
+            if (isAlter && !existed)
+                throw SimulatedSqlException.InvalidObjectName(triggerName);
+        }
+        RejectClrTriggerKindChange(existing, clrEntry, triggerName);
         // A database-scope DDL trigger is gated on ALTER ANY DATABASE DDL
-        // TRIGGER instead of a parent object's ALTER (probe-confirmed).
-        if (!PermissionEnforcement.HasDatabasePermission(context.Batch, context.CurrentDatabase, Permission.AlterAnyDatabaseDdlTrigger))
+        // TRIGGER instead of a parent object's ALTER, and a server-scope one on
+        // CONTROL SERVER, which only a sysadmin holds here (probed 2026-09-28
+        // against SQL Server 2025: a db_owner is refused with Msg 2104).
+        var permitted = serverScope
+            ? simulation.IsLoginSysadmin(context.Connection.Security.Effective.LoginName)
+            : PermissionEnforcement.HasDatabasePermission(context.Batch, context.CurrentDatabase, Permission.AlterAnyDatabaseDdlTrigger);
+        if (!permitted)
         {
             throw existed
                 ? SimulatedSqlException.AlterObjectPermissionDenied("trigger", triggerName.Leaf)
                 : SimulatedSqlException.CreateTriggerPermissionDenied(triggerName.ToString());
         }
 
-        var objectId = existed ? existing!.ObjectId : context.CurrentDatabase.AllocateObjectId();
+        // A server-scope trigger's EXECUTE AS names a login: SELF is the one
+        // running the CREATE, and execute_as_principal_id its server principal
+        // id (probed 2026-09-28 against SQL Server 2025 — 1 for both 'sa' and
+        // SELF under sa).
+        string? executeAsLogin = null;
+        int? executeAsPrincipalId = null;
+        if (serverScope && options.ExecuteAs is { } serverExecuteAs && !serverExecuteAs.Equals("CALLER", StringComparison.OrdinalIgnoreCase))
+        {
+            executeAsLogin = serverExecuteAs.Equals("SELF", StringComparison.OrdinalIgnoreCase)
+                ? context.Connection.Security.Effective.LoginName
+                : serverExecuteAs;
+            if (!LoginExists(simulation, executeAsLogin) || !simulation.TryResolveServerPrincipalId(executeAsLogin, out var loginPrincipalId))
+                throw SimulatedSqlException.CannotExecuteAsLogin(serverExecuteAs);
+            executeAsPrincipalId = loginPrincipalId;
+        }
+
+        var objectId = existed ? existing!.ObjectId : homeDatabase.AllocateObjectId();
         var trigger = new DdlTrigger(
             triggerName.Leaf,
             objectId,
@@ -509,16 +629,33 @@ partial class Simulation
             eventTypes,
             bodyText,
             createDate: existed ? existing!.CreateDate : context.Batch.CurrentStatement.UtcNow,
-            bodyLineOffset: bodyLineOffset)
+            bodyLineOffset: bodyLineOffset,
+            isServerScoped: serverScope)
         {
             DefinitionText = options.Encryption || clrEntry is not null ? null : BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, isAlter, createOrAlter),
             ClrEntry = clrEntry,
             UsesQuotedIdentifier = context.QuotedIdentifiers,
             UsesAnsiNulls = context.Batch.Connection.AnsiNulls,
+            ExecuteAsLoginName = executeAsLogin,
+            ExecuteAsPrincipalId = executeAsPrincipalId,
         };
         if (existed)
             trigger.ModifyDate = context.Batch.CurrentStatement.UtcNow;
+        if (serverScope)
+        {
+            var registry = simulation.ServerTriggers;
+            var previous = registry.Set(trigger);
+            RecordDdlUndo(context, () =>
+            {
+                if (previous is null)
+                    _ = registry.Remove(trigger.Name, out _);
+                else
+                    _ = registry.Set(previous);
+            });
+            return true;
+        }
         context.CurrentDatabase.DdlTriggers[triggerName.Leaf] = trigger;
+        RecordSlotUndo(context, context.CurrentDatabase.DdlTriggers, triggerName.Leaf, existing);
         if (!existed)
             context.Batch.CurrentStatement.DdlTriggerCreatedThisStatement = objectId;
         RecordDdlEvent(

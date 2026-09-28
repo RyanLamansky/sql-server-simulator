@@ -47,6 +47,20 @@ namespace SqlServerSimulator.Parser;
 /// The new owner an <c>ALTER_AUTHORIZATION_DATABASE</c> event names, emitted
 /// after <c>ObjectType</c> (probed 2026-09-27 against SQL Server 2025).
 /// </param>
+/// <param name="serverLevelDatabase">
+/// For a server-level event (<c>CREATE_LOGIN</c>, <c>CREATE_DATABASE</c>, …),
+/// which only a server-scope trigger takes: the database a database event
+/// names, or the empty string for one that names none. Null for a
+/// database-level event.
+/// </param>
+/// <param name="loginElements">
+/// A login event's <c>DefaultLanguage</c> … <c>SID</c> elements, rendered.
+/// </param>
+/// <param name="maskStart">
+/// Where a password literal starts in the batch text, which the event's
+/// <c>CommandText</c> reports as <c>'******'</c>; -1 when there is none.
+/// </param>
+/// <param name="maskEnd">The end of that literal.</param>
 internal sealed class DdlEventInfo(
     string eventType,
     string? schemaName,
@@ -55,7 +69,11 @@ internal sealed class DdlEventInfo(
     string? targetObjectName = null,
     string? targetObjectType = null,
     string? roleName = null,
-    string? ownerName = null)
+    string? ownerName = null,
+    string? serverLevelDatabase = null,
+    string? loginElements = null,
+    int maskStart = -1,
+    int maskEnd = -1)
 {
     public readonly string EventType = eventType;
     public readonly string? SchemaName = schemaName;
@@ -65,4 +83,8 @@ internal sealed class DdlEventInfo(
     public readonly string? TargetObjectType = targetObjectType;
     public readonly string? RoleName = roleName;
     public readonly string? OwnerName = ownerName;
+    public readonly string? ServerLevelDatabase = serverLevelDatabase;
+    public readonly string? LoginElements = loginElements;
+    public readonly int MaskStart = maskStart;
+    public readonly int MaskEnd = maskEnd;
 }

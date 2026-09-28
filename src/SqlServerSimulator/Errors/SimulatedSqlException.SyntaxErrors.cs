@@ -461,10 +461,12 @@ partial class SimulatedSqlException
     /// same target row from multiple source rows. SQL Server's <c>DELETE</c>
     /// matched branch is forgiving (multiple matches collapse to one delete),
     /// but <c>UPDATE</c> raises this. Probe-confirmed against SQL Server 2025
-    /// (2026-05-13): Class 16, State 1, exact wording verbatim.
+    /// (2026-05-13): Class 16, State 1, exact wording verbatim. It ends the
+    /// batch and rolls the transaction back as under <c>XACT_ABORT</c>, a
+    /// <c>CATCH</c> seeing <c>XACT_STATE()</c> 0 (probed 2026-09-28).
     /// </summary>
     internal static SimulatedSqlException MergeMultiMatch() =>
-        new("The MERGE statement attempted to UPDATE or DELETE the same row more than once. This happens when a target row matches more than one source row. A MERGE statement cannot UPDATE/DELETE the same row of the target table multiple times. Refine the ON clause to ensure a target row matches at most one source row, or use the GROUP BY clause to group the source rows.", 8672, 16, 1);
+        new("The MERGE statement attempted to UPDATE or DELETE the same row more than once. This happens when a target row matches more than one source row. A MERGE statement cannot UPDATE/DELETE the same row of the target table multiple times. Refine the ON clause to ensure a target row matches at most one source row, or use the GROUP BY clause to group the source rows.", 8672, 16, 1) { AbortsAsUnderXactAbort = true };
 
     /// <summary>
     /// Mimics SQL Server error 10710: a <c>MERGE</c> statement specified an

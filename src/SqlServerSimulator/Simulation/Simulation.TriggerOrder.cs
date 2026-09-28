@@ -26,8 +26,8 @@ partial class Simulation
     /// action is <strong>Msg 15125</strong>; an INSTEAD OF trigger is
     /// <strong>Msg 15133</strong> (at most one exists per action, so ordering
     /// is meaningless); an unresolvable name is <strong>Msg 15165</strong>.
-    /// <c>@namespace</c> is accepted and ignored — it selects DATABASE / SERVER
-    /// scope for DDL triggers, which don't fire yet.
+    /// <c>@namespace</c> selects a database- or server-scope trigger instead,
+    /// ordered per event by <see cref="SetScopedTriggerOrder"/>.
     /// </para>
     /// </remarks>
     private static IEnumerable<SimulatedStatementOutcome> InvokeSpSetTriggerOrder(BatchContext batch)
@@ -36,9 +36,21 @@ partial class Simulation
         if (batch.IsSkipping)
             yield break;
 
-        var (triggerName, order, statementType) = ParseSetTriggerOrderArgs(arguments);
+        var (triggerName, order, statementType, triggerNamespace) = ParseSetTriggerOrderArgs(arguments);
         if (string.IsNullOrEmpty(triggerName) || order is null || statementType is null)
             throw SimulatedSqlException.InvalidTriggerOrderParameter();
+
+        // @namespace selects a server- or database-scope trigger; a DML
+        // action keeps the table-trigger path whatever it says.
+        if (triggerNamespace is not null
+            && !BuiltInToken.Equals(statementType, "INSERT") && !BuiltInToken.Equals(statementType, "UPDATE") && !BuiltInToken.Equals(statementType, "DELETE"))
+        {
+            var serverScope = BuiltInToken.Equals(triggerNamespace, "SERVER");
+            if (!serverScope && !BuiltInToken.Equals(triggerNamespace, "DATABASE"))
+                throw SimulatedSqlException.InvalidTriggerOrderParameter();
+            SetScopedTriggerOrder(batch, triggerName, order, statementType, serverScope);
+            yield break;
+        }
 
         var action = statementType switch
         {
@@ -109,9 +121,9 @@ partial class Simulation
         }
     }
 
-    private static (string? TriggerName, string? Order, string? StatementType) ParseSetTriggerOrderArgs(List<ProcArgument> arguments)
+    private static (string? TriggerName, string? Order, string? StatementType, string? Namespace) ParseSetTriggerOrderArgs(List<ProcArgument> arguments)
     {
-        string? triggerName = null, order = null, statementType = null;
+        string? triggerName = null, order = null, statementType = null, triggerNamespace = null;
         var positional = 0;
         foreach (var arg in arguments)
         {
@@ -122,9 +134,7 @@ partial class Simulation
                     case 0: triggerName = CatalogStringArg(arg); break;
                     case 1: order = CatalogStringArg(arg); break;
                     case 2: statementType = CatalogStringArg(arg); break;
-                    // The fourth positional is @namespace (DATABASE / SERVER
-                    // scope for DDL triggers), accepted and ignored.
-                    case 3: break;
+                    case 3: triggerNamespace = CatalogStringArg(arg); break;
                     default: throw SimulatedSqlException.InvalidTriggerOrderParameter();
                 }
 
@@ -136,10 +146,10 @@ partial class Simulation
                 case var n when BuiltInToken.Equals(n, "triggername"): triggerName = CatalogStringArg(arg); break;
                 case var n when BuiltInToken.Equals(n, "order"): order = CatalogStringArg(arg); break;
                 case var n when BuiltInToken.Equals(n, "stmttype"): statementType = CatalogStringArg(arg); break;
-                case var n when BuiltInToken.Equals(n, "namespace"): break;
+                case var n when BuiltInToken.Equals(n, "namespace"): triggerNamespace = CatalogStringArg(arg); break;
                 default: throw SimulatedSqlException.InvalidTriggerOrderParameter();
             }
         }
-        return (triggerName, order, statementType);
+        return (triggerName, order, statementType, triggerNamespace);
     }
 }

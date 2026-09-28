@@ -229,7 +229,7 @@ partial class Simulation
         if (firstName.Equals("NOCOUNT", StringComparison.OrdinalIgnoreCase) && !context.Batch.IsSkipping
             && context.Token is ReservedKeyword { Keyword: var nocountOnOff })
         {
-            context.Connection.NoCount = nocountOnOff == Keyword.On;
+            context.Connection.NoCount = nocountOnOff == Keyword.On || context.Connection.RunningLogonTriggers;
         }
 
         // CONTEXT_INFO carries semantic effect: store the binary value,
