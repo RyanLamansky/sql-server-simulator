@@ -563,6 +563,38 @@ internal sealed class BatchContext
     public List<Selection>? PlanCacheSequence;
 
     /// <summary>
+    /// The locks each <see cref="PlanCacheSequence"/> entry took while it
+    /// parsed, index for index, which a replay takes again as its own session.
+    /// </summary>
+    public List<ReplayedLock[]>? PlanCacheSequenceLocks;
+
+    /// <summary>
+    /// Records every lock acquisition and <c>NOWAIT</c> table while non-null —
+    /// armed by the SELECT arm around a top-level statement's parse in a batch
+    /// the plan cache may store. Taking schema-stability and table-level data
+    /// locks is part of parsing a SELECT here, so a replay, which parses
+    /// nothing, takes the recorded list again as the replaying session.
+    /// </summary>
+    public List<ReplayedLock>? ReplayLockLog;
+
+    /// <summary>
+    /// Takes <paramref name="locks"/> — a cached statement's parse-time
+    /// acquisitions — as this batch's session, in the order the parse took them.
+    /// </summary>
+    public void TakeReplayedLocks(ReplayedLock[] locks)
+    {
+        foreach (var taken in locks)
+        {
+            if (taken.NoWaitTable is { } table)
+                _ = this.noWaitTables.Add(table);
+            else if (taken.TransactionScoped)
+                this.AcquireTransactionLock(taken.Resource!, taken.Mode, taken.NoWait);
+            else
+                this.AcquireStatementLock(taken.Resource!, taken.Mode, taken.NoWait);
+        }
+    }
+
+    /// <summary>
     /// Top-level statements dispatched by this batch, counted by the dispatch
     /// loop. Compared against <see cref="PlanCacheSequence"/>'s length at the
     /// promotion site: equal counts mean every statement the batch ran was an
@@ -1016,6 +1048,7 @@ internal sealed class BatchContext
     /// </summary>
     public void AcquireStatementLock(LockResource resource, LockMode mode, bool noWait = false)
     {
+        this.ReplayLockLog?.Add(new ReplayedLock(resource, mode, noWait, transactionScoped: false));
         var connection = this.Connection;
         connection.Simulation.LockManager.Acquire(resource, mode, connection.Session, noWait ? 0 : connection.LockTimeoutMillis);
         this.StatementSchemaLocks.Add((resource, mode));
@@ -1037,6 +1070,7 @@ internal sealed class BatchContext
     /// </remarks>
     public void AcquireTransactionLock(LockResource resource, LockMode mode, bool noWait = false)
     {
+        this.ReplayLockLog?.Add(new ReplayedLock(resource, mode, noWait, transactionScoped: true));
         var connection = this.Connection;
         connection.Simulation.LockManager.Acquire(resource, mode, connection.Session, noWait ? 0 : connection.LockTimeoutMillis);
         if (connection.CurrentTransaction is { } tx)
@@ -1111,7 +1145,10 @@ internal sealed class BatchContext
             return DataLockPlan.Bypass;
 
         if (hints.NoWait)
+        {
             _ = this.noWaitTables.Add(table);
+            this.ReplayLockLog?.Add(new ReplayedLock(table));
+        }
 
         var connection = this.Connection;
         var isolation = connection.SessionIsolationLevel;
@@ -1198,11 +1235,9 @@ internal sealed class BatchContext
             // as long as the ranges are held — that writer takes no per-row
             // lock, so the range probe would never see it.
             this.AcquireTransactionLock(table.TableDataLock, LockMode.IntentShared, hints.NoWait);
-            // Not plan-cacheable. Half the fence (the table-level acquisition,
-            // and the whole-table fallback the scan path reaches through the
-            // FROM source's captured batch) belongs to the session that parsed
-            // it, so a replay on another connection would settle a second
-            // session's protection against the first's transaction.
+            // Not plan-cacheable: the plan's PhantomFenceState records
+            // whether the fence is settled, and a replay sharing it would find
+            // the first execution's fence already taken and take none.
             this.HasSessionScopedReference = true;
             return new DataLockPlan(
                 rowMode: null, rowTxScoped: false, skipBlockedRows: hints.ReadPast, noLockReader: false,
@@ -1843,11 +1878,10 @@ internal sealed class BatchContext
     /// Wraps <paramref name="table"/>'s row enumeration with per-row
     /// conflict checks driven by <paramref name="plan"/>. Each yielded
     /// row's RID flows through <see cref="TouchRowForRead"/>; READPAST-
-    /// blocked rows are silently skipped. The wrapper captures
-    /// <paramref name="batch"/> at FROM-source parse time and reuses it
-    /// when the SELECT plan iterates (same batch instance — by-reference
-    /// capture is safe even for correlated subqueries, which iterate the
-    /// same source repeatedly).
+    /// blocked rows are silently skipped. <paramref name="batch"/> is the
+    /// executing one: a SELECT's FROM source holds a
+    /// <see cref="LockCheckedScanRows"/> that calls here per execution, since
+    /// a cached plan is replayed by other sessions.
     /// </summary>
     public static IEnumerable<byte[]> WrapWithRowConflictChecks(HeapTable table, BatchContext batch, DataLockPlan plan)
     {

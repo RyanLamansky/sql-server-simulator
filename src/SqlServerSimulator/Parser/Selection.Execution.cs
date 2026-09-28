@@ -477,6 +477,16 @@ internal sealed partial class Selection
     }
 
     /// <summary>
+    /// A column-type resolver over <paramref name="sources"/> falling back to
+    /// <paramref name="outerTypeResolver"/>. Built here rather than as a
+    /// closure at the call site so it captures nothing else from there: a
+    /// resolver can end up held by a cached plan, which must not reach the
+    /// parsing batch.
+    /// </summary>
+    private static Func<MultiPartName, SqlType> TypeResolverOver(FromSource[] sources, Func<MultiPartName, SqlType>? outerTypeResolver) =>
+        name => ResolveColumnTypeAcrossSources(sources, name, outerTypeResolver);
+
+    /// <summary>
     /// Static type-resolution counterpart to <see cref="FindSourceColumn"/>:
     /// returns the column's declared type if it resolves locally across
     /// sources; falls through to <paramref name="outerTypeResolver"/> if
@@ -1716,7 +1726,7 @@ internal sealed partial class Selection
         selection.ColumnReportsNumeric = ColumnReportsNumericOf(expressions, outputSchema);
         selection.ColumnAliasTypes = ColumnAliasTypesOf(expressions);
         var outerMask = parseBatch.Parser.OuterMaskResolver;
-        selection.ColumnMasks = DataMask.OfProjection(parseBatch, expressions, name => ScopedColumnMask(sources, name, outerMask), expression => expression.GetSqlType(parseBatch, ResolveColumnType));
+        selection.ColumnMasks = ProjectionMasks(parseBatch, expressions, sources, outerMask, ResolveColumnType);
         selection.ColumnIdentitySources = ColumnIdentitySourcesOf(expressions, sources, joins);
         selection.BranchFromSources = sources;
         selection.AutoSourceNames = AutoSourceNamesOf(sources);
@@ -2162,6 +2172,13 @@ internal sealed partial class Selection
         var index = ReferenceEquals(source.Columns, table.Columns) ? c : Array.IndexOf(table.Columns, column);
         return index < 0 ? null : DataMask.ForTableColumn(table, index);
     }
+
+    // The projection's column masks. A static method of its own so the lambdas
+    // capture only these parameters: written inline in BuildSqlProjection, the
+    // one reading parseBatch hoisted it into the closure the plan's row source
+    // shares, and every cached plan then held its parsing batch.
+    private static DataMask?[]? ProjectionMasks(BatchContext parseBatch, List<Expression> expressions, FromSource[] sources, Func<MultiPartName, DataMask?>? outerMask, Func<MultiPartName, SqlType> resolveColumnType) =>
+        DataMask.OfProjection(parseBatch, expressions, name => ScopedColumnMask(sources, name, outerMask), expression => expression.GetSqlType(parseBatch, resolveColumnType));
 
     /// <summary>
     /// <see cref="SourceColumnMask"/> for a name this scope's sources bind,

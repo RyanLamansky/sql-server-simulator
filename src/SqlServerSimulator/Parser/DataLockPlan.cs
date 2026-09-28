@@ -169,3 +169,37 @@ internal readonly struct KeyFenceInterval(SqlValueKey? lower, bool lowerInclusiv
     /// <summary>The whole key space — what a scan reaches.</summary>
     public static readonly KeyFenceInterval Everything = new(null, false, null, false, false);
 }
+
+/// <summary>
+/// One step a top-level SELECT's parse took on the lock manager — a lock on
+/// <see cref="Resource"/>, or the <c>NOWAIT</c> hint on
+/// <see cref="NoWaitTable"/> — recorded so a plan-cache replay retakes it as
+/// the replaying session (<c>BatchContext.TakeReplayedLocks</c>).
+/// </summary>
+internal readonly struct ReplayedLock
+{
+    public ReplayedLock(LockResource resource, LockMode mode, bool noWait, bool transactionScoped)
+    {
+        this.Resource = resource;
+        this.Mode = mode;
+        this.NoWait = noWait;
+        this.TransactionScoped = transactionScoped;
+    }
+
+    public ReplayedLock(HeapTable noWaitTable) => this.NoWaitTable = noWaitTable;
+
+    /// <summary>The locked resource; null for a <see cref="NoWaitTable"/> step.</summary>
+    public readonly LockResource? Resource;
+
+    /// <summary>The mode taken on <see cref="Resource"/>.</summary>
+    public readonly LockMode Mode;
+
+    /// <summary>Whether the acquisition refused to wait.</summary>
+    public readonly bool NoWait;
+
+    /// <summary>Held to the transaction's end rather than the statement's.</summary>
+    public readonly bool TransactionScoped;
+
+    /// <summary>A table the statement named with a <c>NOWAIT</c> hint.</summary>
+    public readonly HeapTable? NoWaitTable;
+}

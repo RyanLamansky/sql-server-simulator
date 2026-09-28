@@ -130,7 +130,7 @@ partial class Selection
         var probed = 0;
         var kept = 0;
         var filtering = true;
-        foreach (var row in source.Rows)
+        foreach (var row in source.RowsFor(batch))
         {
             if (!filtering)
             {

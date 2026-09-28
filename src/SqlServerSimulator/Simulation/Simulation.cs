@@ -977,9 +977,12 @@ public sealed partial class Simulation
     /// dispatch order, plus the <see cref="SchemaVersion"/> active when they
     /// were parsed. Usually one; a batch of several top-level SELECTs caches
     /// as the sequence it is.</summary>
-    private sealed class PlanCacheEntry(Selection[] plans, long schemaVersionAtParse)
+    private sealed class PlanCacheEntry(Selection[] plans, ReplayedLock[][] locks, long schemaVersionAtParse)
     {
         public readonly Selection[] Plans = plans;
+
+        /// <summary>The locks each of <see cref="Plans"/> took as it parsed, which its replay retakes.</summary>
+        public readonly ReplayedLock[][] Locks = locks;
         public readonly long SchemaVersionAtParse = schemaVersionAtParse;
     }
 
@@ -1173,7 +1176,7 @@ public sealed partial class Simulation
             && entry.SchemaVersionAtParse == schemaVersionAtStart)
         {
             _ = Interlocked.Increment(ref this.PlanCacheHits);
-            foreach (var outcome in ReplayCachedSelections(command, entry.Plans))
+            foreach (var outcome in ReplayCachedSelections(command, entry))
                 yield return outcome;
             yield break;
         }
@@ -1359,7 +1362,10 @@ public sealed partial class Simulation
         // entry under this key, the indexer overwrites without growing the
         // dictionary. The capacity cap therefore only gates fresh keys, not
         // re-cached versions of an already-tracked one.
-        var entry = new PlanCacheEntry([.. plans], batch.PlanCacheSchemaVersion);
+#if DEBUG
+        PlanCacheCaptureAudit.Verify(plans, text);
+#endif
+        var entry = new PlanCacheEntry([.. plans], [.. batch.PlanCacheSequenceLocks!], batch.PlanCacheSchemaVersion);
         if (this.planCache.ContainsKey(key))
             this.planCache[key] = entry;
         else if (this.PlanCacheCount < PlanCacheCapacity && this.planCache.TryAdd(key, entry))
@@ -1438,8 +1444,8 @@ public sealed partial class Simulation
                 && connection.SessionIsolationLevel == System.Data.IsolationLevel.ReadCommitted
                 && !connection.NoBrowseTable
                 // A replayed plan opens no implicit transaction and runs under
-                // NOEXEC / PARSEONLY, each of which a parse settles.
-                && !connection.ImplicitTransactions && !connection.NoExec && !connection.ParseOnly
+                // NOEXEC / PARSEONLY / FMTONLY, each of which a parse settles.
+                && !connection.ImplicitTransactions && !connection.NoExec && !connection.ParseOnly && !connection.FmtOnly
                 && BuildPlanCacheParameterSignature(command) is { } sig
                     ? new PlanCacheKey(command.CommandText, currentDb.Name, sig, connection.QuotedIdentifiers, connection.DateFormat, connection.AnsiNulls, connection.ConcatNullYieldsNull)
                     : null;
@@ -1487,14 +1493,15 @@ public sealed partial class Simulation
     /// <see cref="SimulatedDbConnection.LastStatementRowCount"/>
     /// maintenance. Bypasses tokenization and parsing entirely.
     /// </summary>
-    private static IEnumerable<SimulatedStatementOutcome> ReplayCachedSelections(SimulatedDbCommand command, Selection[] selections)
+    private static IEnumerable<SimulatedStatementOutcome> ReplayCachedSelections(SimulatedDbCommand command, PlanCacheEntry entry)
     {
         var batch = new BatchContext(command);
         try
         {
             var connection = batch.Connection;
-            foreach (var selection in selections)
+            for (var statement = 0; statement < entry.Plans.Length; statement++)
             {
+                var selection = entry.Plans[statement];
                 // Replay bypasses the dispatch loop, so each statement stamps
                 // the per-statement frame the loop's top-of-iteration would.
                 // Without the clock a replayed GETDATE() reads
@@ -1515,6 +1522,12 @@ public sealed partial class Simulation
                 batch.CurrentStatement.OwesOverflowNotice = batch.CurrentStatement.OwesDivideByZeroNotice = false;
                 batch.RcsiStatementSnapshotXid = null;
                 batch.BumpRowStamp();
+                // The parse this replay skips took these locks; the
+                // replaying session takes them now, and gives back the
+                // statement-scoped ones when the statement ends — when the
+                // consumer moves past it, as in the dispatch loop, or in the
+                // finally below.
+                batch.TakeReplayedLocks(entry.Locks[statement]);
                 // The cached plan is shared across principals; re-run the
                 // SELECT permission check against the replaying session's
                 // current principal.
@@ -1553,8 +1566,11 @@ public sealed partial class Simulation
                     ? new SimulatedNonQuery(rowCount, countsRowsReturned: true)
                     : (SimulatedStatementOutcome)executed;
                 // Replay bypasses the dispatch loop, so it stamps the NOCOUNT
-                // suppression the loop's post-statement walk would have.
+                // suppression and the TEXTSIZE the loop's post-statement
+                // walk would have.
                 replayed.CountSuppressed = connection.NoCount;
+                if (connection.TextSize >= 0 && replayed is SimulatedQueryResult query)
+                    query.ClientTextSize = connection.TextSize;
                 foreach (var message in DrainPendingMessages(connection))
                     yield return message;
                 yield return replayed;
@@ -1564,12 +1580,14 @@ public sealed partial class Simulation
                     yield return NullEliminatedWarning(batch);
                 foreach (var notice in ArithmeticNotices(batch))
                     yield return notice;
+                batch.ReleaseStatementSchemaLocks();
             }
 
             WriteBackOutputParameters(batch);
         }
         finally
         {
+            batch.ReleaseStatementSchemaLocks();
             // Whatever a consumer that stopped early left unread goes with it.
             batch.Connection.PendingMessages.Clear();
         }
@@ -3063,18 +3081,32 @@ public sealed partial class Simulation
                 {
                     var statementStart = context.SaveCheckpoint();
                     context.ForBrowseSeen = false;
-                    var selection = ParseSelectStatement(context, browse: connection.NoBrowseTable);
-                    // A trailing FOR BROWSE puts the one statement in browse
-                    // mode, which decides its projection, so the statement is
-                    // read again as a browse statement (probed 2026-09-26).
-                    if (context.ForBrowseSeen && !connection.NoBrowseTable)
+                    List<ReplayedLock>? replayLocks;
+                    // A statement the plan cache may store records the locks
+                    // its parse takes, which a replay takes again as its own
+                    // session.
+                    batch.ReplayLockLog = batch.PlanCacheCommandText is not null && batch.BlockDepth == 0 && !batch.IsSkipping ? [] : null;
+                    Selection selection;
+                    try
                     {
-                        context.RestoreCheckpoint(statementStart);
-                        selection = ParseSelectStatement(context, browse: true);
+                        selection = ParseSelectStatement(context, browse: connection.NoBrowseTable);
+                        // A trailing FOR BROWSE puts the one statement in browse
+                        // mode, which decides its projection, so the statement is
+                        // read again as a browse statement (probed 2026-09-26).
+                        if (context.ForBrowseSeen && !connection.NoBrowseTable)
+                        {
+                            context.RestoreCheckpoint(statementStart);
+                            selection = ParseSelectStatement(context, browse: true);
+                        }
+                        else if (connection.NoBrowseTable && selection.IsSetOperationResult)
+                        {
+                            selection.Browse = Selection.SetOperationBrowseInfo(selection.Schema.Length);
+                        }
                     }
-                    else if (connection.NoBrowseTable && selection.IsSetOperationResult)
+                    finally
                     {
-                        selection.Browse = Selection.SetOperationBrowseInfo(selection.Schema.Length);
+                        replayLocks = batch.ReplayLockLog;
+                        batch.ReplayLockLog = null;
                     }
                     // A value literal or a name left dangling after a complete
                     // SELECT is always unconsumed trailing input — real SQL
@@ -3186,6 +3218,7 @@ public sealed partial class Simulation
                         && !batch.HasSessionScopedReference)
                     {
                         (batch.PlanCacheSequence ??= []).Add(selection);
+                        (batch.PlanCacheSequenceLocks ??= []).Add(replayLocks is null ? [] : [.. replayLocks]);
                         if (batch.PlanCacheSequence.Count == batch.TopLevelStatementsDispatched + 1
                             && IsAtEndOfBatch(context))
                         {

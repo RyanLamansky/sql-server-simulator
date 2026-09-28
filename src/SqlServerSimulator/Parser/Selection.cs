@@ -1,4 +1,3 @@
-using System.Collections;
 using System.Runtime.ExceptionServices;
 using SqlServerSimulator.Parser.Expressions;
 using SqlServerSimulator.Parser.Tokens;
@@ -2748,8 +2747,7 @@ internal sealed partial class Selection
             // so OPENJSON / STRING_SPLIT / user TVF parse-time GetSqlType
             // calls reach them.
             var leftSnapshotForName = leftSources.ToArray();
-            SqlType ChainedResolverForName(MultiPartName name) =>
-                ResolveColumnTypeAcrossSources(leftSnapshotForName, name, scope.OuterTypeResolver);
+            var chainedResolverForName = TypeResolverOver(leftSnapshotForName, scope.OuterTypeResolver);
 
             // Built-in rowset functions (OPENJSON, STRING_SPLIT,
             // GENERATE_SERIES) share the same APPLY-friendly shape as user-
@@ -2763,7 +2761,7 @@ internal sealed partial class Selection
                 || IsRegexpRowsetName(nextName.Value, context))
             {
                 context.RestoreCheckpoint(checkpoint);
-                return AcrossApplyBoundary(context, leftSnapshotForName, () => ParseSingleFromSource(context, scope.WithOuter(ChainedResolverForName)));
+                return AcrossApplyBoundary(context, leftSnapshotForName, () => ParseSingleFromSource(context, scope.WithOuter(chainedResolverForName)));
             }
 
             // Peek the resolved object name to decide between TVF route
@@ -2796,7 +2794,7 @@ internal sealed partial class Selection
             var isFunctionCallShape = context.MoveNext() && context.Token is Operator { Character: '(' };
             context.RestoreCheckpoint(checkpoint);
             if (resolvedIsTvf)
-                return AcrossApplyBoundary(context, leftSnapshotForName, () => ParseSingleFromSource(context, scope.WithOuter(ChainedResolverForName)));
+                return AcrossApplyBoundary(context, leftSnapshotForName, () => ParseSingleFromSource(context, scope.WithOuter(chainedResolverForName)));
             // A function-call shape that didn't resolve to a known TVF is a
             // deferred name-resolution error (Msg 208), not a syntax error:
             // real SQL Server binds the TVF name lazily, so an un-taken IF
@@ -2813,15 +2811,14 @@ internal sealed partial class Selection
         var afterApplyParen = context.GetNextRequired();
 
         var leftSnapshot = leftSources.ToArray();
-        SqlType ChainedResolver(MultiPartName name) =>
-            ResolveColumnTypeAcrossSources(leftSnapshot, name, scope.OuterTypeResolver);
+        var chainedResolver = TypeResolverOver(leftSnapshot, scope.OuterTypeResolver);
 
         // CROSS / OUTER APPLY (VALUES (…), (…)) alias(cols): the table value
         // constructor's rows can reference the left APPLY sources — the SSMS
         // dm_os_host_info server-properties shape. The chained resolver wires
         // that correlation in at parse and (via ForValuesConstructor) runtime.
         if (afterApplyParen is ReservedKeyword { Keyword: Keyword.Values })
-            return AcrossApplyBoundary(context, leftSnapshot, () => ParseValuesDerivedTable(context, ChainedResolver));
+            return AcrossApplyBoundary(context, leftSnapshot, () => ParseValuesDerivedTable(context, chainedResolver));
 
         if (afterApplyParen is not ReservedKeyword { Keyword: Keyword.Select })
             throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -2833,7 +2830,7 @@ internal sealed partial class Selection
         Selection lateralPlan;
         try
         {
-            lateralPlan = AcrossApplyBoundary(context, leftSnapshot, () => ParseNestedQueryRejectingNextValueFor(context, QueryScope.Nested(QueryPosition.Derived, ChainedResolver)));
+            lateralPlan = AcrossApplyBoundary(context, leftSnapshot, () => ParseNestedQueryRejectingNextValueFor(context, QueryScope.Nested(QueryPosition.Derived, chainedResolver)));
         }
         finally
         {
@@ -3433,7 +3430,7 @@ internal sealed partial class Selection
                 var heapRows = temporalRowSource
                     ?? (heapPlan.NoLockReader
                         ? ClusteredScan.Rows(heapTable)
-                        : BatchContext.WrapWithRowConflictChecks(heapTable, context.Batch, heapPlan));
+                        : new LockCheckedScanRows(heapTable, heapPlan));
 
                 return new FromSource(
                     qualifier: heapQualifier,
@@ -5316,7 +5313,7 @@ internal sealed partial class Selection
 
         return heapTable is null
             ? null
-            : new TemporalRowSource(heapTable, heapTable.SystemVersioning!, heapTable.PeriodColumns!.Value, kind, lower, upper, context.Batch);
+            : new TemporalRowSource(heapTable, heapTable.SystemVersioning!, heapTable.PeriodColumns!.Value, kind, lower, upper);
     }
 
     /// <summary>
@@ -5414,10 +5411,9 @@ internal sealed class TemporalRowSource(
     (int StartOrdinal, int EndOrdinal) period,
     TemporalQueryKind kind,
     Expression? lowerBound,
-    Expression? upperBound,
-    BatchContext batch) : IEnumerable<byte[]>
+    Expression? upperBound) : PerExecutionRows
 {
-    public IEnumerator<byte[]> GetEnumerator()
+    public override IEnumerable<byte[]> For(BatchContext batch)
     {
         // Evaluate the bounds once at iteration start. A NULL bound makes
         // every comparison unknown, so the whole source is empty (real
@@ -5449,8 +5445,6 @@ internal sealed class TemporalRowSource(
                 yield return bytes;
         }
     }
-
-    IEnumerator IEnumerable.GetEnumerator() => this.GetEnumerator();
 
     /// <summary>
     /// Evaluates one bound to a <c>datetime2(7)</c> point, or null when the

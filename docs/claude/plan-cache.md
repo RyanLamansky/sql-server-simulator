@@ -13,8 +13,9 @@ The two are independent: a plan-cache hit never consults the memo (it doesn't pa
 
 ## Cache key
 
-`(string CommandText, string DatabaseName, string ParameterSignature, bool QuotedIdentifiers, DateOrder DateFormat)` keyed by command text, the connection's current database, a parameter-type signature folded from each `SimulatedDbCommand.Parameters` entry's name + `DbType` + `Size` + `Precision` + `Scale` (declaration order), the session's effective `QUOTED_IDENTIFIER` setting, and its `SET DATEFORMAT` order, which decides how a date string read while parsing reads.
-Any of those can affect parse-time type inference, so a mismatch demands a fresh parse.
+`Simulation.PlanCacheKey` holds the command text, the connection's current database, a parameter-type signature folded from each `SimulatedDbCommand.Parameters` entry's name + `DbType` + `Size` + `Precision` + `Scale` (declaration order), the session's effective `QUOTED_IDENTIFIER` setting, its `SET DATEFORMAT` order (which decides how a date string read while parsing reads), and its `ANSI_NULLS` and `CONCAT_NULL_YIELDS_NULL` settings.
+Any of those can affect what the parse produces, so a mismatch demands a fresh parse.
+Every other session setting is read by the executing batch at run time, which `PlanCacheSessionTests` pins by differential: a replay under `DATEFIRST`, `LANGUAGE`, `ARITHABORT` / `ANSI_WARNINGS`, `NUMERIC_ROUNDABORT`, `TEXTSIZE`, `CONTEXT_INFO`, session context, an open transaction, a `#temp` table or another principal must answer what a fresh parse under that setting answers, in both directions.
 `QUOTED_IDENTIFIER` is in the key because it changes what the *same text* tokenizes to — `"x"` is a delimited identifier when on, a varchar literal when off — so a cached plan from one setting is wrong under the other.
 Backed by `ConcurrentDictionary` with the default ordinal-case-sensitive string comparer.
 
@@ -63,9 +64,9 @@ Two mechanisms carry it:
 `ReplayCachedSelections` loops the sequence, and each iteration re-stamps the per-statement frame the dispatch loop's top-of-iteration would have — `UtcNow`, `StatementScopedValues`, `SubqueryResults`, `RcsiStatementSnapshotXid`, `BumpRowStamp` — so a second statement neither reads the first's frozen `RAND()` draw nor its cached subquery results, and `LastStatementRowCount` advances statement by statement.
 
 One gate sits further out, in `TryBuildPlanCacheKey`, so it suppresses the **lookup** as well as the promotion: the session must be at the default **READ COMMITTED**.
-A plan's FROM sources carry the lock acquisitions their parsing session made, so replaying one under a different isolation level would settle the wrong session's protection, or none at all — a SERIALIZABLE reader's key-range fence most visibly (see [`locking.md`](locking.md#key-range-locks)).
+The table-level locks a parse takes, and the per-row lock plan it hands its FROM sources, are chosen by the isolation level, so a plan parsed under one level replayed under another would take the wrong locks — a SERIALIZABLE reader's key-range fence most visibly (see [`locking.md`](locking.md#key-range-locks)).
 A session at any other level re-parses per execution.
-The same gate holds `SET IMPLICIT_TRANSACTIONS`, `NOEXEC` and `PARSEONLY` off: each is settled while a statement parses — the transaction it opens, and whether it runs at all — so a replay would skip it (see [`session-options.md`](session-options.md)).
+The same gate holds `SET IMPLICIT_TRANSACTIONS`, `NOEXEC`, `PARSEONLY` and `FMTONLY` off: each is settled while a statement parses — the transaction it opens, whether it runs at all, and whether it returns only metadata — so a replay would skip it (see [`session-options.md`](session-options.md)).
 
 ## Disqualifying state: `HasSessionScopedReference`
 
@@ -145,7 +146,7 @@ Capacity is the plan cache's: 1024 entries, "first 1024 unique texts win", no LR
 
 A cached `Selection` is **one object executed by many commands, possibly concurrently**.
 Anything that varies per execution must therefore live in execution-scoped state (`BatchContext` / `StatementContext`), never on the plan or its expression tree.
-The original single-owner assumption ("Expression instances aren't shared across queries, and query execution is single-threaded") predated the cache; four latent violations shipped with it and were fixed together after the AW / WWI workload driver surfaced intermittent sim-vs-live divergences in aggregate / window templates under 8-worker concurrency:
+The original single-owner assumption ("Expression instances aren't shared across queries, and query execution is single-threaded") predated the cache; latent violations shipped with it, the first four fixed together after the AW / WWI workload driver surfaced intermittent sim-vs-live divergences in aggregate / window templates under 8-worker concurrency, the rest as a replay on a second connection surfaced them:
 
 - **Aggregate / window bind results** — `AggregateExpression` / `WindowExpression` bound each group's / row's computed value into instance fields before projecting; two concurrent executions interleaved binds and projected each other's values (measured ~1% of reads wrong; zero single-threaded).
   The results move to `BatchContext.BoundProjectionResults` (lazily-allocated, reference-keyed by expression instance); `BindResult(batch, value)` writes it, `Run` reads it through `runtime.Batch`.
@@ -157,8 +158,24 @@ The original single-owner assumption ("Expression instances aren't shared across
   The replay path stamps `UtcNow` + `StartLine` itself.
 - **The session scalars** — `@@SPID`, `@@TRANCOUNT`, `@@DATEFIRST`, `@@LANGUAGE`, `@@LANGID`, `@@TEXTSIZE` and `@@LOCK_TIMEOUT` read the `ParserContext` they were parsed under, so a plan one session cached answered every later session with the first one's values (`WHERE session_id = @@SPID` over a DMV found no row).
   They read `runtime.Batch.Connection` instead; a primary-constructor `ParserContext` an expression's `Run` touches is the shape to look for.
+- **The session a replay reads as** — a base-table FROM source held the lock-checked scan iterator built over the *parsing* batch, so every replay probed and took row locks as the session that compiled the plan.
+  A replay then read past that session's own uncommitted writes, waited with its lock timeout (and ignored its own `NOWAIT`), leaked an `UPDLOCK` read's statement-scoped U lock onto a batch that had already ended, and — once the compiling connection was disposed — raised `ObjectDisposedException` from its cancellation source on meeting another session's lock, which over TDS ended the session.
+  A `FOR SYSTEM_TIME AS OF @p` source likewise evaluated its bounds against the parsing batch, answering every replay with the first execution's parameter.
+  Both are now a `PerExecutionRows` — `LockCheckedScanRows` and `TemporalRowSource` — built per execution from the batch `FromSource.RowsFor` is handed; enumerating one directly throws, so a missed enumeration site fails loudly.
+- **The locks a parse takes** — schema-stability locks as a name resolves, and a FROM source's table-level IS / IX / S / X — were taken by the first execution only, so a replay read through another session's `TABLOCKX` without waiting.
+  The SELECT arm records them (`BatchContext.ReplayLockLog`, armed only while a cacheable top-level SELECT parses) into the cache entry beside its plan, and the replay retakes them as its own session before it runs and releases the statement-scoped ones when the statement ends, as the dispatch loop does.
+- **What a plan keeps alive** — a closure built while parsing shares its compiler-generated display class with every other closure of the same method, so a runtime row source that captured nothing session-scoped still rooted the parsing batch when a sibling parse-time lambda read it.
+  Every cached plan held its compiling connection alive, and an abandoned connection that had compiled one was never finalized and never reclaimed (see [`locking.md`](locking.md#abandoned-session-reclamation)).
+  The fix is shape, not policy: a parse-time lambda that reads the batch moves into a static helper (`Selection.ProjectionMasks`, `Selection.TypeResolverOver`) so nothing the plan holds reaches it.
+- **Settings the dispatch loop applies around a statement** — a replay under `SET FMTONLY ON` returned rows where the dispatch loop answers metadata alone, and one under `SET TEXTSIZE` returned untruncated values because the loop's post-statement walk is what stamps the client limit.
+  `FMTONLY` joined the lookup gate, and the replay stamps `TEXTSIZE` itself.
 
 When adding any executor or expression feature that computes per-row / per-group / per-execution values, bind them through `BatchContext` / `StatementContext` — never through fields on parse-time objects.
+
+**The contract is checked in Debug builds.**
+`PlanCacheCaptureAudit.Verify` runs at every promotion and walks everything a cached plan reaches — fields, closures' targets, iterator state machines, collections — stopping at the shared server objects a plan may hold (tables, databases, schema objects, collations, types), and throws on reaching a `BatchContext`, `ParserContext`, `StatementContext`, connection, command, transaction, `SessionToken`, security context, `VariableSlot`, undo log, `#temp` table, table variable or SERIALIZABLE fence state.
+Every test that caches a plan therefore checks it, and CI's Debug leg fails on a new capture; the Release build carries no cost.
+It catches a reference, not a value: state a parse *copies* out of the session — a folded constant, a setting read into a field — is what the differential tests in `PlanCacheSessionTests` are for.
 
 ## Co-fix: `VariableReference` resolves at Run time
 
@@ -177,10 +194,11 @@ Parse-time `context.Batch.GetVariableSlot(name)` is still called once (for the M
 A cache hit short-circuits the full dispatch via `ReplayCachedSelection`:
 
 - New `BatchContext` for the incoming command (seeds `Variables` from parameters, allocates the same lock / undo / lifecycle scaffolding the standard path would).
+- Per statement: the recorded parse-time locks are retaken as the replaying session, the read permission check reruns against its principal, and the statement-scoped locks are released when the statement ends.
 - `selection.Execute(batch)` runs the cached Selection.
   `MaterializeRows()` drains them, mirroring the standard path's `LastStatementRowCount` accounting — and, like the standard path, keeping the producer's own row form (see [`data-reader.md`](data-reader.md#the-row-form-the-reader-reads)).
 - Outcome shape: `SimulatedSqlResultSet` (the only shape we cache — assignment-only Selections never cache).
-- `WriteBackOutputParameters` runs and queued messages are placed in the outcome stream, same as the standard path.
+- `NOCOUNT` and `TEXTSIZE` are stamped on the outcome as the dispatch loop's post-statement walk would, `WriteBackOutputParameters` runs, and queued messages are placed in the outcome stream, same as the standard path.
 
 The replay path is also where `PlanCacheHits` increments; misses increment in `CreateResultSetsForCommand` on the fall-through.
 
@@ -199,6 +217,8 @@ If this becomes a real problem an LRU layer can land later.
 `Simulation.PlanCacheHits` and `PlanCacheMisses` (`long`, `Interlocked.Increment`-mutated) plus `PlanCacheCount` (the maintained entry count) are `internal` and consumed by `PlanCacheTests` to assert hit / miss behavior at boundary conditions: identical-query replay, distinct CommandTexts get distinct entries, DDL invalidation, temp-table disqualification, table-variable disqualification, distinct parameter types get distinct entries, identical parameter types with different values still hit, result correctness across hit / miss, non-SELECT batch bypass.
 The sequence rules add: a multi-SELECT batch caches as one entry whose replay reproduces both result sets, a trailing semicolon still caches, a batch mixing a SELECT with an `INSERT` or a `SET` doesn't, the replay refreshes per-statement state (two `RAND()` statements draw twice, on the cached path as on the uncached one), and `@@ROWCOUNT` after a replayed sequence reads the last statement's count.
 The shared-plan contract has its own section of tests there: parameterized TOP / OFFSET-FETCH replay resolves new values, RAND re-draws per execution, GETDATE reads the current clock on replay, recursive CTEs decline caching under either anchor shape, and two 8-worker concurrency tests hammer one cached aggregate / window plan asserting zero cross-execution contamination.
+`PlanCacheSessionTests` (public API) replays one text across connections: a replay meeting another session's lock after its compiler was disposed times out rather than raising `ObjectDisposedException`, it doesn't read past the compiler's own uncommitted write or another session's `TABLOCKX` insert, it waits with its own lock timeout and honors `NOWAIT`, its `UPDLOCK` read holds for its own transaction and releases outside one, an RCSI replay reads its own statement's snapshot, `FOR SYSTEM_TIME AS OF @p` reads each execution's parameter, and the session-setting differential above.
+`PlanCacheRetentionTests` (Tests.Internal) pins that an abandoned connection whose SELECT became a cached plan is still finalized and reclaimed.
 
 `Simulation.TokenMemo`'s `Hits` / `Misses` / `Count` back `TokenMemoTests`: a repeated DML batch is served on its second execution, a text carrying every token shape replays identically, each `QUOTED_IDENTIFIER` setting gets its own entry while a text that *flips* it mid-batch is never served, a tokenizer error reports the same message on every execution, the back-and-forth-lookahead shape memoizes what it parsed, a procedure body is served across invocations, and 8 workers share one sequence with no divergence.
 Those tests deliberately use plan-cache-declined shapes: a bare repeated SELECT is served by the plan cache and never reaches the memo at all, which makes a memo-hit assertion over one silently vacuous.

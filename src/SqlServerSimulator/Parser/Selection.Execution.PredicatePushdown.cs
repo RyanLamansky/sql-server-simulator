@@ -587,7 +587,7 @@ partial class Selection
         var keys = new List<SqlValue>();
         var seen = new HashSet<SqlValue>();
         var examined = 0;
-        foreach (var row in partner.Rows)
+        foreach (var row in partner.RowsFor(batch))
         {
             if (++examined > GroupedReductionKeyCap)
                 return null;

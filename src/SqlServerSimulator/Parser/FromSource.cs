@@ -159,6 +159,16 @@ internal sealed class FromSource(
     public readonly IEnumerable<byte[]> Rows = rows;
 
     /// <summary>
+    /// The rows this source yields to an execution by <paramref name="batch"/>:
+    /// <see cref="Rows"/>, unless that is a <see cref="PerExecutionRows"/>,
+    /// which is built afresh for the executing batch. Every enumeration site
+    /// reads through here, since the source belongs to a plan any session may
+    /// replay.
+    /// </summary>
+    public IEnumerable<byte[]> RowsFor(BatchContext batch) =>
+        this.Rows is PerExecutionRows perExecution ? perExecution.For(batch) : this.Rows;
+
+    /// <summary>
     /// Back-reference to the <see cref="HeapTable"/> when this source is a
     /// table (or system table); null for derived-table sources. Used by the
     /// UPDATE / DELETE mutation paths to reach the table's
@@ -466,4 +476,33 @@ internal sealed class JoinSpec(JoinKind kind, BooleanExpression? onPredicate)
 
     /// <inheritdoc cref="ScopeStart"/>
     public int ScopeEnd = -1;
+}
+
+/// <summary>
+/// A <see cref="FromSource"/>'s rows when producing them needs the executing
+/// session — its locks, lock timeout, snapshot, parameters and statement clock.
+/// A cached plan is replayed by every session that sends its text, so the
+/// batch can't be captured when the source is parsed; each enumeration site
+/// asks <see cref="FromSource.RowsFor"/> instead, and enumerating one of these
+/// directly is a missed site, which throws.
+/// </summary>
+internal abstract class PerExecutionRows : IEnumerable<byte[]>
+{
+    /// <summary>The rows as an execution by <paramref name="batch"/> reads them.</summary>
+    public abstract IEnumerable<byte[]> For(BatchContext batch);
+
+    public IEnumerator<byte[]> GetEnumerator() =>
+        throw new InvalidOperationException("A per-execution row source is read through FromSource.RowsFor.");
+
+    System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => this.GetEnumerator();
+}
+
+/// <summary>
+/// A base-table scan read with the per-row lock checks <paramref name="plan"/>
+/// asks for, as the executing session.
+/// </summary>
+internal sealed class LockCheckedScanRows(HeapTable table, DataLockPlan plan) : PerExecutionRows
+{
+    public override IEnumerable<byte[]> For(BatchContext batch) =>
+        BatchContext.WrapWithRowConflictChecks(table, batch, plan);
 }

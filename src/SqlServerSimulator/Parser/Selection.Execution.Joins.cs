@@ -155,7 +155,7 @@ internal sealed partial class Selection
     {
         var rows = source.LateralPlan is { } plan
             ? plan.Execute(batch, outerResolver).RowBytes
-            : source.Rows;
+            : source.RowsFor(batch);
         foreach (var row in rows)
         {
             tuple[slot] = row;
@@ -341,7 +341,7 @@ internal sealed partial class Selection
             ThrowIfExecutionCancelled(batch);
             var rows = right.LateralPlan is { } plan
                 ? plan.Execute(batch, resolve).RowBytes
-                : right.Rows;
+                : right.RowsFor(batch);
             foreach (var row in rows)
             {
                 tuple[level] = row;
@@ -373,7 +373,7 @@ internal sealed partial class Selection
             ThrowIfExecutionCancelled(batch);
             var rows = right.LateralPlan is { } plan
                 ? plan.Execute(batch, resolve).RowBytes
-                : right.Rows;
+                : right.RowsFor(batch);
             var matched = false;
             foreach (var row in rows)
             {
@@ -420,7 +420,7 @@ internal sealed partial class Selection
     {
         List<byte[]> rightRows = right.LateralPlan is { } plan
             ? [.. plan.Execute(batch, outerResolver).RowBytes]
-            : [.. right.Rows];
+            : [.. right.RowsFor(batch)];
         var matched = new bool[rightRows.Count];
 
         foreach (var _ in left)
@@ -471,7 +471,7 @@ internal sealed partial class Selection
     {
         List<byte[]> rightRows = right.LateralPlan is { } plan
             ? [.. plan.Execute(batch, outerResolver).RowBytes]
-            : [.. right.Rows];
+            : [.. right.RowsFor(batch)];
         var matched = new bool[rightRows.Count];
 
         foreach (var _ in left)
@@ -838,7 +838,7 @@ internal sealed partial class Selection
             Array.Copy(buffer[i], tuple, level);
             var seeked = i == 0 ? firstSeek : MaybeApplyIndexSeek([right], NoJoins, [join.OnPredicate!], batch, resolve);
             var matched = false;
-            foreach (var row in seeked[0].Rows)
+            foreach (var row in seeked[0].RowsFor(batch))
             {
                 tuple[level] = row;
                 if (join.OnPredicate!.Run(runtime) == true)
@@ -933,7 +933,7 @@ internal sealed partial class Selection
         var next = expectedRows > 0 ? new List<int>(expectedRows) : [];
         var buckets = new Dictionary<SqlValueKey, (int Head, int Tail)>();
         var keyScratch = new SqlValue[plan.Keys.Length];
-        foreach (var row in right.Rows)
+        foreach (var row in right.RowsFor(batch))
         {
             tuple[level] = row;
             var ordinal = rightRows.Count;
