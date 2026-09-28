@@ -818,13 +818,14 @@ partial class Simulation
     }
 
     /// <summary>
-    /// SI writer's tombstoned-slot pre-flight: walks the version chain
-    /// dict for entries whose live heap slot is tombstoned, decodes each
-    /// snapshot-visible historical payload, evaluates the UPDATE / DELETE
-    /// WHERE predicate against it, and raises Msg 3960 (with auto-rollback)
-    /// if any match. Closes the SI-vs-RC-deleted-row conflict path the
-    /// regular live-heap iteration misses (heap iteration skips tombstoned
-    /// slots). No-op for non-SI sessions and for sessions whose snapshot
+    /// SI writer's pre-flight: walks the version chain dict for entries whose
+    /// live heap slot is tombstoned or was changed by another transaction
+    /// since the snapshot, decodes each snapshot-visible historical payload,
+    /// evaluates the UPDATE / DELETE WHERE predicate against it, and raises
+    /// Msg 3960 (with auto-rollback) if any match. Closes the conflict paths
+    /// the regular live-heap iteration misses: a deleted row (heap iteration
+    /// skips tombstoned slots) and a row whose change took it out of the
+    /// WHERE. No-op for non-SI sessions and for sessions whose snapshot
     /// hasn't been allocated yet.
     /// </summary>
     private static void CheckSnapshotConflictOnTombstonedRows(ParserContext context, HeapTable table, BooleanExpression? where, View? sourceView)
@@ -837,9 +838,14 @@ partial class Simulation
             return;
         foreach (var kv in table.RowVersions)
         {
-            if (!table.Heap.IsSlotTombstoned(kv.Key.PageIndex, kv.Key.SlotIndex))
-                continue;
-            var hist = Storage.VersionStore.ResolveTombstonedSlotForSnapshot(kv.Value, sx, batch.Connection.CurrentTransaction);
+            // A live row another transaction changed since the snapshot is
+            // judged by the version the snapshot sees too, so an UPDATE whose
+            // WHERE matched the row before another transaction moved its key
+            // is the conflict it is on real (probed 2026-09-28 against SQL
+            // Server 2025).
+            var hist = table.Heap.IsSlotTombstoned(kv.Key.PageIndex, kv.Key.SlotIndex)
+                ? Storage.VersionStore.ResolveTombstonedSlotForSnapshot(kv.Value, sx, batch.Connection.CurrentTransaction)
+                : Storage.VersionStore.ResolveChangedLiveSlotForSnapshot(kv.Value, sx, batch.Connection.CurrentTransaction);
             if (hist is null)
                 continue;
             var fullValues = DecodeFullRow(table, hist);
@@ -872,7 +878,7 @@ partial class Simulation
             if (where is not null && where.Run(new RuntimeContext(Resolve, batch)) != true)
                 continue;
             batch.Connection.CurrentTransaction?.EndRollback();
-            throw SimulatedSqlException.SnapshotIsolationUpdateConflict($"{Database.DefaultSchemaName}.{table.Name}", batch.DatabaseFor(table).Name);
+            throw SimulatedSqlException.SnapshotIsolationUpdateConflict($"{Database.DefaultSchemaName}.{table.Name}", batch.DatabaseFor(table).Name, table.HasClusteredIndex());
         }
     }
 

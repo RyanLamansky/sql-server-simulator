@@ -109,7 +109,10 @@ partial class Simulation
             createDate: outerBatch.CurrentStatement.UtcNow,
             keyConstraints: function.KeyConstraints,
             checkConstraints: function.CheckConstraints,
-            isTableVariable: true);
+            isTableVariable: true)
+        {
+            ReturnTableOf = function,
+        };
 
         // The body binds and runs in the function's own database; it has run
         // to completion before the first row is handed back.

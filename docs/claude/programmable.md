@@ -269,6 +269,7 @@ Probed against SQL Server 2025.
 - **Catalog surface**: `sys.objects` `type='TF'` / `type_desc='SQL_TABLE_VALUED_FUNCTION'` (distinct from inline TVF's `'IF'`).
   `OBJECT_ID(name, 'TF')` resolves multi-statement TVFs only.
   The return table's columns are catalogued as a table's are (probed 2026-09-26): `sys.columns` with their declared nullability, identity and computed flags, and `sys.identity_columns` / `sys.computed_columns` / `sys.default_constraints` rows keyed by the function — a computed column's `definition` NULL, and an unnamed constraint named after the function (`DF__f__x__…`) though its errors name the table `@r`.
+  Msg 2628 is the exception, naming the table for the function (`db.dbo.f`), while Msg 547 names the function's database; a failing write there ends the calling statement with Msg 3621 as a write of its own would (`HeapTable.ReturnTableOf`, probed 2026-09-28 against SQL Server 2025).
 - **EF Core integration**: `HasDbFunction` mapped to an `IQueryable<T>`-returning DbContext method emits `SELECT ... FROM dbo.fn(@p)` through the SqlServer provider; the simulator dispatches the body and yields rows back through the same FROM-source pipeline.
   LINQ composition (`Where` / `OrderBy` / `Select`) applies to the function's result rows post-dispatch — no pushdown into the body.
 

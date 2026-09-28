@@ -521,6 +521,7 @@ partial class Simulation
             catch (SimulatedSqlException exception) when (SystemProcedureErrorSite(systemProcName, exception) is { } site)
             {
                 exception.PreserveDiagnostics(site.Line, site.Procedure ?? calledName);
+                exception.RaisedBySystemProcedure = exception.Number != 201;
                 throw;
             }
             yield return enumerator.Current;

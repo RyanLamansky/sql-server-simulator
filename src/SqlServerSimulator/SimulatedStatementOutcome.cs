@@ -33,6 +33,32 @@ abstract class SimulatedStatementOutcome
     public bool? CountSuppressed;
 
     /// <summary>
+    /// The kind of statement real SQL Server names in the DONE token that
+    /// closes this outcome (a <see cref="StatementDoneKind"/> value), stamped by
+    /// the statement that produced it; <see cref="StatementDoneKind.NoDone"/>
+    /// until then. Only the TDS endpoint reads it.
+    /// </summary>
+    public ushort DoneKind;
+
+    /// <summary>
+    /// Whether the producing statement ran in a trigger body, whose DONE
+    /// tokens are DONEINPROC as a procedure's are, and whose count-less DONEs
+    /// <c>NOCOUNT</c> drops as it does a procedure's (probed 2026-09-28
+    /// against SQL Server 2025).
+    /// </summary>
+    public bool InModule;
+
+    /// <summary>
+    /// How many transaction events the session had recorded when the producing
+    /// statement finished (<see cref="SimulatedDbConnection.TransactionEventsRecorded"/>),
+    /// or -1 when unstamped: the TDS endpoint announces the events before that
+    /// mark ahead of this outcome's DONE, which keeps a procedure body's
+    /// transaction ENVCHANGEs beside the statements that caused them though
+    /// the body ran whole before its first outcome went out.
+    /// </summary>
+    public int TransactionEventMark = -1;
+
+    /// <summary>
     /// What this outcome contributes to <c>ExecuteNonQuery</c> and to
     /// <c>DbDataReader.RecordsAffected</c>, or <c>-1</c> when it contributes
     /// nothing: its count, unless <c>NOCOUNT</c> suppressed it or the count is

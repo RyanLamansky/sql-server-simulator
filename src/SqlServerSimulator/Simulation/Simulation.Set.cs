@@ -26,6 +26,14 @@ partial class Simulation
     {
         var afterSet = context.GetNextRequired();
         assignsVariable = afterSet is AtPrefixedString;
+        // What the statement names in its DONE (probed 2026-09-28 against SQL
+        // Server 2025): a variable assignment is a SELECT-kind statement
+        // counting one row; the option forms refine it below.
+        if (assignsVariable)
+        {
+            context.Batch.CurrentStatement.DoneKind = StatementDoneKind.Select;
+            context.Batch.CurrentStatement.DoneCount = 1;
+        }
         return afterSet switch
         {
             ReservedKeyword { Keyword: Keyword.Identity_Insert } => TryParseSetIdentityInsert(context),
@@ -50,6 +58,7 @@ partial class Simulation
         switch (afterSet)
         {
             case ReservedKeyword { Keyword: Keyword.Transaction }:
+                context.Batch.CurrentStatement.DoneKind = StatementDoneKind.SetValue;
                 return TryParseSetTransactionIsolationLevel(context);
             case ReservedKeyword { Keyword: Keyword.Statistics }:
                 return TryParseSetStatistics(context);
@@ -57,6 +66,7 @@ partial class Simulation
             // They tokenize as ReservedKeyword because the words appear in the
             // T-SQL reserved set; the SET parser accepts them by Keyword check.
             case ReservedKeyword { Keyword: var intOption and (Keyword.RowCount or Keyword.TextSize) }:
+                context.Batch.CurrentStatement.DoneKind = intOption == Keyword.TextSize ? StatementDoneKind.SetTextSize : StatementDoneKind.SetRowCount;
                 return ConsumeIntegerValue(context, applyTextSize: intOption == Keyword.TextSize);
         }
 
@@ -87,6 +97,7 @@ partial class Simulation
             if (context.Token is not ReservedKeyword { Keyword: Keyword.On or Keyword.Off } commaOnOff)
                 return false;
             var commaOn = commaOnOff.Keyword == Keyword.On;
+            context.Batch.CurrentStatement.DoneKind = commaOn ? StatementDoneKind.SetOptionOn : StatementDoneKind.SetOptionOff;
             if (affectsQuotedIdentifier)
                 ApplyQuotedIdentifierOption(context, commaOn);
             // Every listed option shares the trailing ON|OFF value.
@@ -117,6 +128,13 @@ partial class Simulation
             firstKind != SetOptionKind.OnOff ? "SET COMMAND"
                 : context.Token is ReservedKeyword { Keyword: Keyword.On } ? "SET OPTION ON" : "SET OPTION OFF",
             FunctionBodyShape.StatementOperatorState);
+
+        // QUOTED_IDENTIFIER and PARSEONLY, which apply while the batch
+        // compiles, send no DONE of their own.
+        context.Batch.CurrentStatement.DoneKind = firstKind != SetOptionKind.OnOff ? StatementDoneKind.SetValue
+            : firstName.Equals("QUOTED_IDENTIFIER", StringComparison.OrdinalIgnoreCase) || firstName.Equals("PARSEONLY", StringComparison.OrdinalIgnoreCase) ? StatementDoneKind.NoDone
+            : context.Token is ReservedKeyword { Keyword: Keyword.On } ? StatementDoneKind.SetOptionOn
+            : StatementDoneKind.SetOptionOff;
 
         if (IsQuotedIdentifierOption(firstName) && context.Token is ReservedKeyword { Keyword: var qiOnOff })
             ApplyQuotedIdentifierOption(context, qiOnOff == Keyword.On);
@@ -513,6 +531,7 @@ partial class Simulation
         var onOff = context.GetNextRequired();
         if (subOption is not StringToken || onOff is not ReservedKeyword { Keyword: var statisticsOnOff and (Keyword.On or Keyword.Off) })
             return false;
+        context.Batch.CurrentStatement.DoneKind = statisticsOnOff == Keyword.On ? StatementDoneKind.SetStatisticsOn : StatementDoneKind.SetStatisticsOff;
         FunctionBodyShape.NoteSideEffect(
             context.Batch,
             statisticsOnOff == Keyword.On ? "SET STATISTICS ON" : "SET STATISTICS OFF",
@@ -914,6 +933,8 @@ partial class Simulation
         switch (context.Token)
         {
             case ReservedKeyword { Keyword: Keyword.Cursor }:
+                // A cursor assignment reports no count (probed 2026-09-28).
+                context.Batch.CurrentStatement.DoneCount = -1;
                 if (BuildCursorDefinition(context.Batch, "", reqStatic: false, scroll: false) is not { } built)
                     return true; // skipping — tokens consumed
                 built.Cursor.IsUnnamed = true;
@@ -980,6 +1001,7 @@ partial class Simulation
         if (context.GetNextRequired() is not ReservedKeyword { Keyword: var onOff } || onOff is not (Keyword.On or Keyword.Off))
             return false;
 
+        context.Batch.CurrentStatement.DoneKind = StatementDoneKind.SetIdentityInsert;
         FunctionBodyShape.NoteSideEffect(
             context.Batch,
             onOff == Keyword.On ? "SET IDENTITY_INSERT ON" : "SET IDENTITY_INSERT OFF",

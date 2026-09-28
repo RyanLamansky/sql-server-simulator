@@ -338,7 +338,7 @@ internal sealed class WindowExpression : Expression
     /// diagnostic — <c>varchar(max)</c>, <c>nvarchar(max)</c>,
     /// <c>varbinary(max)</c>.
     /// </summary>
-    private static bool IsMaxFormType(SqlType? type) => type switch
+    internal static bool IsMaxFormType(SqlType? type) => type switch
     {
         VarcharSqlType v => v.length == SqlType.MaxLengthSentinel,
         NVarcharSqlType n => n.length == SqlType.MaxLengthSentinel,

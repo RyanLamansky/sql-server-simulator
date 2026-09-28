@@ -45,7 +45,7 @@ internal sealed partial class TdsSession
         catch (NotSupportedException ex)
         {
             writer.WriteErrorOrInfo(Tds.TokenError, 50000, 1, 16, $"SqlServerSimulator: {ex.Message}", "SIMULATED", "", 1);
-            writer.WriteDoneToken(Tds.TokenDoneProc, Tds.DoneError, 0);
+            writer.WriteDoneToken(Tds.TokenDoneProc, Tds.DoneError, 0, StatementDoneKind.Execute);
             return;
         }
         catch (SimulatedSqlException ex)
@@ -55,7 +55,7 @@ internal sealed partial class TdsSession
             // Msg 8023) is raised from the parser; surface it as a real error
             // rather than letting it escape the session's crash boundary.
             WriteErrors(writer, ex);
-            writer.WriteDoneToken(Tds.TokenDoneProc, Tds.DoneError, 0);
+            writer.WriteDoneToken(Tds.TokenDoneProc, Tds.DoneError, 0, StatementDoneKind.Execute);
             return;
         }
 
@@ -73,7 +73,7 @@ internal sealed partial class TdsSession
                 WriteErrors(writer, ex);
                 if (!moreRequests)
                     this.WriteSessionEnvChangesIfAny(writer);
-                writer.WriteDoneToken(Tds.TokenDoneProc, (ushort)(Tds.DoneError | (moreRequests ? Tds.DoneMore : Tds.DoneFinal)), 0);
+                writer.WriteDoneToken(Tds.TokenDoneProc, (ushort)(Tds.DoneError | (moreRequests ? Tds.DoneMore : Tds.DoneFinal)), 0, StatementDoneKind.Execute);
             }
             catch (NotSupportedException ex)
             {
@@ -81,7 +81,7 @@ internal sealed partial class TdsSession
                 writer.WriteErrorOrInfo(Tds.TokenError, 50000, 1, 16, $"SqlServerSimulator: {ex.Message}", "SIMULATED", "", 1);
                 if (!moreRequests)
                     this.WriteSessionEnvChangesIfAny(writer);
-                writer.WriteDoneToken(Tds.TokenDoneProc, (ushort)(Tds.DoneError | (moreRequests ? Tds.DoneMore : Tds.DoneFinal)), 0);
+                writer.WriteDoneToken(Tds.TokenDoneProc, (ushort)(Tds.DoneError | (moreRequests ? Tds.DoneMore : Tds.DoneFinal)), 0, StatementDoneKind.Execute);
             }
 #pragma warning disable CA1031 // Deliberate: an unmodeled statement must not cost the whole session — see IsRecoverableStatementFault.
             catch (Exception ex) when (IsRecoverableStatementFault(ex, writer))
@@ -90,7 +90,7 @@ internal sealed partial class TdsSession
                 WriteUnexpectedStatementFault(writer, ex);
                 if (!moreRequests)
                     this.WriteSessionEnvChangesIfAny(writer);
-                writer.WriteDoneToken(Tds.TokenDoneProc, (ushort)(Tds.DoneError | (moreRequests ? Tds.DoneMore : Tds.DoneFinal)), 0);
+                writer.WriteDoneToken(Tds.TokenDoneProc, (ushort)(Tds.DoneError | (moreRequests ? Tds.DoneMore : Tds.DoneFinal)), 0, StatementDoneKind.Execute);
             }
 #pragma warning restore CA1031
         }
@@ -138,7 +138,7 @@ internal sealed partial class TdsSession
                     var handle = this.StorePreparedStatement(ParameterText(request.Parameters, 2), ParameterText(request.Parameters, 1));
                     TdsTypeCodec.WriteReturnValue(writer, 0, request.Parameters[0].Name, DbType.Int32, handle);
                     writer.WriteReturnStatus(0);
-                    writer.WriteDoneToken(Tds.TokenDoneProc, moreRequests ? Tds.DoneMore : Tds.DoneFinal, 0);
+                    writer.WriteDoneToken(Tds.TokenDoneProc, moreRequests ? Tds.DoneMore : Tds.DoneFinal, 0, StatementDoneKind.Execute);
                     break;
                 }
 
@@ -148,7 +148,7 @@ internal sealed partial class TdsSession
                     if (!this.preparedStatements.TryGetValue(handle, out var prepared))
                     {
                         writer.WriteErrorOrInfo(Tds.TokenError, 8179, 1, 16, $"Could not find prepared statement with handle {handle}.", "SIMULATED", "", 1);
-                        writer.WriteDoneToken(Tds.TokenDoneProc, (ushort)(Tds.DoneError | (moreRequests ? Tds.DoneMore : Tds.DoneFinal)), 0);
+                        writer.WriteDoneToken(Tds.TokenDoneProc, (ushort)(Tds.DoneError | (moreRequests ? Tds.DoneMore : Tds.DoneFinal)), 0, StatementDoneKind.Execute);
                         break;
                     }
 
@@ -173,14 +173,14 @@ internal sealed partial class TdsSession
             case Tds.ProcIdUnprepare:
                 _ = this.preparedStatements.Remove(Convert.ToInt32(request.Parameters[0].Value, CultureInfo.InvariantCulture));
                 writer.WriteReturnStatus(0);
-                writer.WriteDoneToken(Tds.TokenDoneProc, moreRequests ? Tds.DoneMore : Tds.DoneFinal, 0);
+                writer.WriteDoneToken(Tds.TokenDoneProc, moreRequests ? Tds.DoneMore : Tds.DoneFinal, 0, StatementDoneKind.Execute);
                 break;
             default:
                 writer.WriteErrorOrInfo(
                     Tds.TokenError, 50000, 1, 16,
                     $"The SqlServerSimulator network listener does not support the well-known RPC procedure id {procId}.",
                     "SIMULATED", "", 1);
-                writer.WriteDoneToken(Tds.TokenDoneProc, (ushort)(Tds.DoneError | (moreRequests ? Tds.DoneMore : Tds.DoneFinal)), 0);
+                writer.WriteDoneToken(Tds.TokenDoneProc, (ushort)(Tds.DoneError | (moreRequests ? Tds.DoneMore : Tds.DoneFinal)), 0, StatementDoneKind.Execute);
                 break;
         }
     }
@@ -218,6 +218,21 @@ internal sealed partial class TdsSession
         if (await this.StreamOutcomesAsync(command, writer, Tds.TokenDoneInProc, trailingTokensFollow: true, cancellationToken).ConfigureAwait(false))
             return;
 
+        // Statements an error ended close with a DONEPROC carrying it, after
+        // the error's number as the return status when the error was raised
+        // compiling a statement, and after nothing when it was raised running
+        // one (probed 2026-09-28 against SQL Server 2025).
+        if (this.rpcEndingError is { } ended)
+        {
+            this.rpcEndingError = null;
+            if (Simulation.IsDeferredCompileError(ended) || ended.Class == 15)
+                writer.WriteReturnStatus(ended.Number);
+            if (!moreRequests)
+                this.WriteSessionEnvChangesIfAny(writer);
+            writer.WriteDoneToken(Tds.TokenDoneProc, (ushort)(Tds.DoneError | (moreRequests ? Tds.DoneMore : Tds.DoneFinal)), 0, StatementDoneKind.Execute);
+            return;
+        }
+
         writer.WriteReturnStatus(0);
         if (handleReturn is { } handleValue)
             TdsTypeCodec.WriteReturnValue(writer, 0, handleValue.Name, DbType.Int32, handleValue.Handle);
@@ -226,7 +241,7 @@ internal sealed partial class TdsSession
 
         if (!moreRequests)
             this.WriteSessionEnvChangesIfAny(writer);
-        writer.WriteDoneToken(Tds.TokenDoneProc, moreRequests ? Tds.DoneMore : Tds.DoneFinal, 0);
+        writer.WriteDoneToken(Tds.TokenDoneProc, moreRequests ? Tds.DoneMore : Tds.DoneFinal, 0, StatementDoneKind.Execute);
     }
 
     /// <summary>Direct stored-procedure invocation by name.</summary>
@@ -257,12 +272,21 @@ internal sealed partial class TdsSession
         if (await this.StreamOutcomesAsync(command, writer, Tds.TokenDoneInProc, trailingTokensFollow: true, cancellationToken).ConfigureAwait(false))
             return;
 
+        if (this.rpcEndingError is not null)
+        {
+            this.rpcEndingError = null;
+            if (!moreRequests)
+                this.WriteSessionEnvChangesIfAny(writer);
+            writer.WriteDoneToken(Tds.TokenDoneProc, (ushort)(Tds.DoneError | (moreRequests ? Tds.DoneMore : Tds.DoneFinal)), 0, StatementDoneKind.Execute);
+            return;
+        }
+
         writer.WriteReturnStatus(returnParameter.Value is int returnCode ? returnCode : 0);
         WriteOutputReturnValues(writer, outputs, this.connection!.CurrentDatabase.Name);
 
         if (!moreRequests)
             this.WriteSessionEnvChangesIfAny(writer);
-        writer.WriteDoneToken(Tds.TokenDoneProc, moreRequests ? Tds.DoneMore : Tds.DoneFinal, 0);
+        writer.WriteDoneToken(Tds.TokenDoneProc, moreRequests ? Tds.DoneMore : Tds.DoneFinal, 0, StatementDoneKind.Execute);
     }
 
     /// <summary>

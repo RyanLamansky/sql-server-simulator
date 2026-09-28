@@ -29,6 +29,7 @@ internal sealed partial class TdsSession
     /// </summary>
     internal void RunTransactionManagerRequestForTesting(SimulatedDbConnection testConnection, TdsMessage message, TdsTokenWriter writer)
     {
+        testConnection.FramesEveryStatement = true;
         this.connection = testConnection;
         testConnection.TransactionEvents ??= [];
         this.ExecuteTransactionManagerRequest(message, writer);
@@ -43,6 +44,7 @@ internal sealed partial class TdsSession
     /// </summary>
     internal void RunBatchForTesting(SimulatedDbConnection testConnection, TdsMessage message, TdsTokenWriter writer)
     {
+        testConnection.FramesEveryStatement = true;
         this.connection = testConnection;
         testConnection.TransactionEvents ??= [];
         this.ExecuteBatchAsync(message, writer, CancellationToken.None).AsTask().GetAwaiter().GetResult();

@@ -133,17 +133,19 @@ partial class Simulation
         }
     }
 
+    // Each field takes one digit or two: real reads '0:0:0' and
+    // '0:00:00.001' (probed 2026-09-28 against SQL Server 2025).
     private static readonly string[] waitForTimeFormats =
     [
-        @"hh\:mm\:ss",
-        @"hh\:mm\:ss\.f",
-        @"hh\:mm\:ss\.ff",
-        @"hh\:mm\:ss\.fff",
-        @"hh\:mm\:ss\.ffff",
-        @"hh\:mm\:ss\.fffff",
-        @"hh\:mm\:ss\.ffffff",
-        @"hh\:mm\:ss\.fffffff",
-        @"hh\:mm",
+        @"h\:m\:s",
+        @"h\:m\:s\.f",
+        @"h\:m\:s\.ff",
+        @"h\:m\:s\.fff",
+        @"h\:m\:s\.ffff",
+        @"h\:m\:s\.fffff",
+        @"h\:m\:s\.ffffff",
+        @"h\:m\:s\.fffffff",
+        @"h\:m",
     ];
 
     private static bool TryParseWaitForTime(string value, out TimeSpan result) =>

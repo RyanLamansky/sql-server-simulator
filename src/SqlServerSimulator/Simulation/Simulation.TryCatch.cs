@@ -80,6 +80,12 @@ partial class Simulation
         // Save outer error state for nested TRY/CATCH: a re-throw from an
         // inner CATCH must surface to the outer CATCH with the re-thrown
         // error in flight, not the (possibly different) outer pre-state.
+        // BEGIN TRY, a CATCH entered and END CATCH each close with a DONE of
+        // their own (probed 2026-09-28 against SQL Server 2025).
+        var frames = batch.Connection.FramesEveryStatement && !batch.IsSkipping;
+        if (frames)
+            yield return StatementDone(batch, StatementDoneKind.BeginTry);
+
         var outerInFlight = batch.InFlightError;
         var outerErrorSignaled = batch.ErrorSignaled;
         batch.InFlightError = null;
@@ -142,6 +148,8 @@ partial class Simulation
             // CATCH dispatch wants normal execution). Bump CatchDepth so
             // ERROR_*() and THROW; know they're inside a CATCH.
             batch.ErrorSignaled = false;
+            if (frames)
+                yield return StatementDone(batch, StatementDoneKind.BeginCatch);
             batch.CatchDepth++;
             try
             {
@@ -204,6 +212,8 @@ partial class Simulation
         if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.Catch })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextOptional();
+        if (frames && !batch.ReturnSignaled && batch.PendingGotoLabel is null)
+            yield return StatementDone(batch, StatementDoneKind.EndCatch);
     }
 
     /// <summary>

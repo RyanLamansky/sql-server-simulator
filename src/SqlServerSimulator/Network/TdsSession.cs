@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Security;
 using System.Net.Sockets;
+using System.Runtime.ExceptionServices;
 using System.Security.Authentication;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
@@ -451,6 +452,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
             return FailLogin(writer, target.Name, userName, opened);
         opened.Security = Simulation.BuildAuthenticatedSecurityContext(principal, userName);
 
+        opened.FramesEveryStatement = true;
         this.connection = opened;
         return true;
     }
@@ -690,14 +692,14 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
             _ = this.FlushInfoMessages(writer);
             WriteErrors(writer, ex);
             this.WriteSessionEnvChangesIfAny(writer);
-            writer.WriteDone(Tds.DoneError, 0);
+            writer.WriteDoneToken(Tds.TokenDone, ErrorDoneStatus(ex), 0, StatementDoneKind.Batch);
         }
         catch (NotSupportedException ex)
         {
             _ = this.FlushInfoMessages(writer);
             writer.WriteErrorOrInfo(Tds.TokenError, 50000, 1, 16, $"SqlServerSimulator: {ex.Message}", "SIMULATED", "", 1);
             this.WriteSessionEnvChangesIfAny(writer);
-            writer.WriteDone(Tds.DoneError, 0);
+            writer.WriteDoneToken(Tds.TokenDone, Tds.DoneError, 0, StatementDoneKind.Batch);
         }
 #pragma warning disable CA1031 // Deliberate: an unmodeled statement must not cost the whole session — see IsRecoverableStatementFault.
         catch (Exception ex) when (IsRecoverableStatementFault(ex, writer))
@@ -705,7 +707,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
             _ = this.FlushInfoMessages(writer);
             WriteUnexpectedStatementFault(writer, ex);
             this.WriteSessionEnvChangesIfAny(writer);
-            writer.WriteDone(Tds.DoneError, 0);
+            writer.WriteDoneToken(Tds.TokenDone, Tds.DoneError, 0, StatementDoneKind.Batch);
         }
 #pragma warning restore CA1031
     }
@@ -723,6 +725,16 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
     private string? databaseAtMessageStart;
 
     /// <summary>
+    /// The error that ended the statements an RPC ran, which closes the RPC's
+    /// DONEPROC rather than a DONEINPROC of its own; set by
+    /// <see cref="StreamOutcomesAsync"/> and taken by the RPC handler.
+    /// </summary>
+    private SimulatedSqlException? rpcEndingError;
+
+    /// <summary>The language the session last announced with ENVCHANGE type 2.</summary>
+    private string announcedLanguage = "us_english";
+
+    /// <summary>
     /// Writes the session-state ENVCHANGEs a message may have earned: the
     /// database-change ENVCHANGE when the session database differs from
     /// <see cref="databaseAtMessageStart"/> (the <c>USE</c> statement's own
@@ -736,6 +748,15 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
     private void WriteSessionEnvChangesIfAny(TdsTokenWriter writer)
     {
         this.WriteTransactionEnvChanges(writer);
+        this.WriteDatabaseEnvChange(writer);
+    }
+
+    /// <summary>
+    /// The database ENVCHANGE, when the session database differs from the one
+    /// last announced.
+    /// </summary>
+    private void WriteDatabaseEnvChange(TdsTokenWriter writer)
+    {
         var current = this.connection!.Database;
         if (this.databaseAtMessageStart is null || string.Equals(current, this.databaseAtMessageStart, StringComparison.Ordinal))
             return;
@@ -762,7 +783,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
         var count = Math.Min(limit, events.Count);
         for (var i = 0; i < count; i++)
         {
-            var (transactionEvent, transaction) = events[i];
+            var (transactionEvent, transaction, _) = events[i];
             writer.WriteEnvChangeTransaction(
                 transactionEvent switch
                 {
@@ -783,6 +804,22 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
     private int PendingTransactionEventCount => this.connection?.TransactionEvents?.Count ?? 0;
 
     /// <summary>
+    /// The pending transaction events the statement that produced
+    /// <paramref name="outcome"/> had recorded by the time it finished, which
+    /// go out ahead of its DONE; <paramref name="unstamped"/> for an outcome
+    /// carrying no mark.
+    /// </summary>
+    private int EventsBefore(SimulatedStatementOutcome outcome, int unstamped)
+    {
+        if (outcome.TransactionEventMark < 0 || this.connection?.TransactionEvents is not { } events)
+            return unstamped;
+        var count = 0;
+        while (count < events.Count && events[count].Serial < outcome.TransactionEventMark)
+            count++;
+        return count;
+    }
+
+    /// <summary>
     /// The pending transaction events that go out ahead of an outcome's first
     /// token: all of them, except that a rollback the outcome's own error
     /// caused goes out after that error, as real sends it (probed 2026-09-28
@@ -790,7 +827,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
     /// </summary>
     private int TransactionEventsAheadOf(SimulatedStatementOutcome outcome)
     {
-        var count = this.PendingTransactionEventCount;
+        var count = this.EventsBefore(outcome, this.PendingTransactionEventCount);
         return count > 0
             && outcome is SimulatedErrorOutcome or SimulatedSqlResultSet { EndedByError: true, ErrorCaught: false }
             && this.connection!.TransactionEvents![count - 1].Event == TransactionEvent.Rollback
@@ -799,37 +836,108 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
     }
 
     /// <summary>
+    /// An outcome as the response renders it: whether its DONE is a
+    /// DONEINPROC, which it is inside a procedure, trigger or dynamic-SQL
+    /// scope and throughout an RPC.
+    /// </summary>
+    private readonly struct RenderedOutcome(SimulatedStatementOutcome outcome, bool inProc)
+    {
+        public readonly SimulatedStatementOutcome Outcome = outcome;
+        public readonly bool InProc = inProc;
+    }
+
+    /// <summary>
+    /// The outcomes that put a token on the wire, each with where it renders.
+    /// Scope entry markers write nothing, and inside a scope <c>NOCOUNT</c>
+    /// drops every DONEINPROC that would carry neither a result set nor an
+    /// error — a DML statement's, a <c>SET</c>'s, a nested call's — where at
+    /// batch level it only clears the count bit (probed 2026-09-28 against
+    /// SQL Server 2025). Filtering ahead of the writer is what lets the more
+    /// bit read "another token follows".
+    /// </summary>
+    private static IEnumerable<RenderedOutcome> RenderedOutcomes(IEnumerable<SimulatedStatementOutcome> outcomes, bool rpc)
+    {
+        var depth = 0;
+        foreach (var outcome in outcomes)
+        {
+            switch (outcome)
+            {
+                case SimulatedProcScopeBoundary { IsEnter: true }:
+                    depth++;
+                    continue;
+                case SimulatedProcScopeBoundary exit:
+                    depth = Math.Max(depth - 1, 0);
+                    var nested = depth > 0 || exit.InModule || rpc;
+                    if (nested && exit.CountSuppressed == true && !exit.EndedByError)
+                        continue;
+                    yield return new(outcome, nested);
+                    continue;
+                case SimulatedReturnStatus:
+                    // Rendered where the exit it precedes would be.
+                    yield return new(outcome, depth > 1 || outcome.InModule || rpc);
+                    continue;
+            }
+            var inProc = depth > 0 || outcome.InModule || rpc;
+            if (inProc && outcome is SimulatedNonQuery { CountSuppressed: true })
+                continue;
+            yield return new(outcome, inProc);
+        }
+    }
+
+    /// <summary>
     /// Executes a command and streams its outcomes as result-set and DONE
-    /// tokens. Batches use the DONE token; RPC responses use DONEINPROC with
-    /// <paramref name="trailingTokensFollow"/> set, because RETURNVALUE /
-    /// RETURNSTATUS / DONEPROC still follow and every DONEINPROC must carry
-    /// the more bit. Fully drains the outcome enumerator, which is what
-    /// triggers the engine's output-parameter writeback.
+    /// tokens, every statement closing with a DONE of its own that names its
+    /// kind (<see cref="StatementDoneKind"/>) — a plain DONE at batch level,
+    /// DONEINPROC inside a scope — and every procedure or dynamic-SQL scope
+    /// with RETURNSTATUS + DONEPROC, or a DONEINPROC when it is nested in
+    /// another. RPC responses pass <paramref name="trailingTokensFollow"/>,
+    /// because RETURNVALUE / RETURNSTATUS / DONEPROC still follow and every
+    /// DONEINPROC must carry the more bit. Fully drains the outcome
+    /// enumerator, which is what triggers the engine's output-parameter
+    /// writeback.
     /// </summary>
     private async ValueTask<bool> StreamOutcomesAsync(SimulatedDbCommand command, TdsTokenWriter writer, byte doneToken, bool trailingTokensFollow, CancellationToken cancellationToken)
     {
-        using var outcomes = simulation.CreateResultSetsForCommand(command, continueOnError: true).GetEnumerator();
+        using var outcomes = RenderedOutcomes(simulation.CreateResultSetsForCommand(command, continueOnError: true), trailingTokensFollow).GetEnumerator();
 
         var hasOutcome = outcomes.MoveNext();
-        var anyOutcome = hasOutcome;
+        // Whether the last token written closes with a DONE; when it doesn't,
+        // the batch closes with one of its own.
+        var closed = false;
+        var unclosedError = false;
+
+        // An error that escapes the outcome stream while it looks ahead — one
+        // ending the batch, or an RPC's procedure — is raised once the outcome
+        // just written has its DONE, which carries the more bit since the
+        // error's tokens follow it, as real sends them.
+        ExceptionDispatchInfo? escaped = null;
+        bool Advance()
+        {
+            try
+            {
+                return outcomes.MoveNext();
+            }
+            catch (Exception ex) when (ex is SimulatedSqlException or NotSupportedException)
+            {
+                escaped = ExceptionDispatchInfo.Capture(ex);
+                return true;
+            }
+        }
 
         // Steps past the outcome just written, first writing any message that
-        // closes it (Msg 8153) ahead of its DONE, where real sends it.
+        // closes it (Msg 8153, Msg 3621) ahead of its DONE, where real sends it.
         bool AdvancePastClosingMessages()
         {
-            var more = outcomes.MoveNext();
-            while (more && outcomes.Current is SimulatedInfoOutcome { FollowsRows: true } closing)
+            var more = Advance();
+            while (more && escaped is null && outcomes.Current.Outcome is SimulatedInfoOutcome { FollowsRows: true } closing)
             {
                 var message = closing.Message;
                 writer.WriteErrorOrInfo(Tds.TokenInfo, message.Number, message.State, message.Class, message.Message, ServerName, message.Procedure, message.LineNumber);
-                more = outcomes.MoveNext();
+                more = Advance();
             }
             return more;
         }
-        // Depth of EXEC('…') / sp_executesql scopes currently open: while > 0,
-        // statement outcomes render with DONEINPROC (0xFF) instead of the
-        // batch/RPC done token, matching real SQL Server's nested-proc discipline.
-        var procScopeDepth = 0;
+
         while (hasOutcome)
         {
             // Client attention (SqlCommand.Cancel / CommandTimeout) observed at
@@ -839,54 +947,78 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
             if (this.connection!.ExecutionCancellationToken.IsCancellationRequested)
                 return true;
 
-            var outcome = outcomes.Current;
-            this.WriteTransactionEnvChanges(writer, this.TransactionEventsAheadOf(outcome));
+            escaped?.Throw();
+            var rendered = outcomes.Current;
+            var outcome = rendered.Outcome;
+            var effectiveDoneToken = rendered.InProc ? Tds.TokenDoneInProc : doneToken;
 
             // An informational message is an INFO token ahead of whatever the
-            // next outcome writes, and carries no DONE of its own.
+            // next outcome writes, and carries no DONE of its own. A USE's
+            // Msg 5701 follows the database ENVCHANGE and precedes the new
+            // database's collation, as real sends them.
             if (outcome is SimulatedInfoOutcome info)
             {
-                this.pendingInfoMessages.Enqueue(info.Message);
-                hasOutcome = outcomes.MoveNext();
-                continue;
-            }
-
-            // Proc-scope markers bracket a dynamic-SQL body. Entry raises the
-            // depth (no token); exit lowers it and closes the scope with
-            // RETURNSTATUS + DONEPROC, exactly as real SQL Server frames an
-            // EXEC('…'). The DONEPROC carries the usual more/final bit.
-            if (outcome is SimulatedProcScopeBoundary boundary)
-            {
-                var boundaryEvents = this.PendingTransactionEventCount;
-                hasOutcome = outcomes.MoveNext();
-                if (boundary.IsEnter)
+                if (info.Message.Number == 5701)
                 {
-                    procScopeDepth++;
-                    continue;
+                    // Every USE announces its database, the current one included.
+                    _ = this.FlushInfoMessages(writer);
+                    writer.WriteEnvChange(Tds.EnvDatabase, this.connection.Database, this.databaseAtMessageStart ?? this.connection.Database);
+                    this.databaseAtMessageStart = this.connection.Database;
+                    var message = info.Message;
+                    writer.WriteErrorOrInfo(Tds.TokenInfo, message.Number, message.State, message.Class, message.Message, ServerName, message.Procedure, message.LineNumber);
+                    var collation = TdsCollationCodec.For(this.connection.CurrentDatabase.Collation);
+                    writer.WriteEnvChangeSqlCollation(collation.Info, collation.SortId);
+                    closed = false;
                 }
-
-                procScopeDepth--;
-                var procStatus = this.OutcomeDoneStatus(hasOutcome, trailingTokensFollow);
-                this.WriteTransactionEnvChanges(writer, boundaryEvents);
-                if ((procStatus & Tds.DoneMore) == 0)
-                    this.WriteSessionEnvChangesIfAny(writer);
-                writer.WriteReturnStatus(0);
-                writer.WriteDoneToken(Tds.TokenDoneProc, procStatus, 0);
+                // A SET LANGUAGE's Msg 5703 follows the language ENVCHANGE.
+                else if (info.Message.Number == 5703)
+                {
+                    _ = this.FlushInfoMessages(writer);
+                    writer.WriteEnvChange(Tds.EnvLanguage, this.connection.Language.Name, this.announcedLanguage);
+                    this.announcedLanguage = this.connection.Language.Name;
+                    this.pendingInfoMessages.Enqueue(info.Message);
+                }
+                else
+                {
+                    this.pendingInfoMessages.Enqueue(info.Message);
+                }
+                hasOutcome = Advance();
                 continue;
             }
 
-            // Inside a dynamic-SQL scope every statement uses DONEINPROC.
-            var effectiveDoneToken = procScopeDepth > 0 ? Tds.TokenDoneInProc : doneToken;
+            this.WriteTransactionEnvChanges(writer, this.TransactionEventsAheadOf(outcome));
+            _ = this.FlushInfoMessages(writer);
 
-            // Messages from a preceding no-outcome statement (PRINT,
-            // severity<=10 RAISERROR): real SQL Server gives that statement
-            // its own DONE after the INFO tokens. Without it SqlClient's
-            // token reader stalls on the INFO/COLMETADATA adjacency until
-            // command timeout (go-sqlcmd shakedown, 2026-07-14). RPC
-            // responses skip the extra DONEINPROC — their per-statement
-            // DONEINPROC stream is already well-formed for proc-body PRINT.
-            if (this.FlushInfoMessages(writer) && !trailingTokensFollow)
-                writer.WriteDoneToken(effectiveDoneToken, Tds.DoneMore, 0);
+            // A return status sent ahead of the error that closes its scope.
+            if (outcome is SimulatedReturnStatus returned)
+            {
+                if (!rendered.InProc)
+                    writer.WriteReturnStatus(returned.Status);
+                hasOutcome = Advance();
+                continue;
+            }
+
+            // A scope's exit closes it with RETURNSTATUS + DONEPROC, or a
+            // DONEINPROC when nested — neither carrying a status when an error
+            // abandoned the scope, the DONEPROC then carrying the error bit.
+            if (outcome is SimulatedProcScopeBoundary exit)
+            {
+                var exitEvents = this.EventsBefore(exit, this.PendingTransactionEventCount);
+                hasOutcome = Advance();
+                var exitStatus = this.OutcomeDoneStatus(hasOutcome, trailingTokensFollow);
+                if (exit.EndedByError)
+                    exitStatus |= Tds.DoneError;
+                this.WriteTransactionEnvChanges(writer, exitEvents);
+                if ((exitStatus & Tds.DoneMore) == 0)
+                    this.WriteSessionEnvChangesIfAny(writer);
+                if (!rendered.InProc && exit.ReturnStatus is int returnStatus)
+                    writer.WriteReturnStatus(returnStatus);
+                writer.WriteDoneToken(rendered.InProc ? Tds.TokenDoneInProc : Tds.TokenDoneProc, exitStatus, 0, StatementDoneKind.Execute);
+                closed = true;
+                unclosedError = false;
+                continue;
+            }
+
             if (outcome is SimulatedQueryResult query)
             {
                 TdsTypeCodec.WriteColMetadata(writer, query.Schema, query.ColumnNames, query.ColumnNullability, query.ColumnReportsNumeric, query.HiddenColumnCount, query.ColumnWireFlags, this.connection!.CurrentDatabase.Name, query.Browse);
@@ -907,15 +1039,15 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                     }
                 }
 
-                var queryEvents = this.PendingTransactionEventCount;
+                var queryEvents = this.EventsBefore(query, this.PendingTransactionEventCount);
                 hasOutcome = AdvancePastClosingMessages();
                 // A statement whose own error cut its rows short sends that
                 // error ahead of the result set's DONE, as real does.
                 var cutShort = false;
-                if (query is SimulatedSqlResultSet { EndedByError: true, ErrorCaught: false } && hasOutcome && outcomes.Current is SimulatedErrorOutcome cutShortError)
+                if (query is SimulatedSqlResultSet { EndedByError: true, ErrorCaught: false } && hasOutcome && escaped is null && outcomes.Current.Outcome is SimulatedErrorOutcome cutShortError)
                 {
                     WriteErrors(writer, cutShortError.Exception);
-                    queryEvents = this.PendingTransactionEventCount;
+                    queryEvents = this.EventsBefore(cutShortError, this.PendingTransactionEventCount);
                     hasOutcome = AdvancePastClosingMessages();
                     cutShort = true;
                 }
@@ -947,27 +1079,44 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                     this.WriteSessionEnvChangesIfAny(writer);
                 // CurCmd tells the client whether that count is rows returned
                 // or rows affected. A DML statement's OUTPUT clause makes the
-                // statement tabular without making its count a SELECT's, so it
-                // is the one result set that goes out unclassified.
-                writer.WriteDoneToken(effectiveDoneToken, queryStatus, rows, query.CountsRowsReturned ? Tds.CmdSelect : (ushort)0);
+                // statement tabular without making its count a SELECT's.
+                writer.WriteDoneToken(effectiveDoneToken, queryStatus, rows, DoneKindOf(query));
+                closed = true;
+                unclosedError = false;
             }
             else if (outcome is SimulatedErrorOutcome errorOutcome)
             {
                 // Statement-terminating error the engine chose to continue past
-                // (continueOnError). Emit its error token(s) and a DONE with
-                // DONE_ERROR; the more/final bit follows the same rule as any
-                // other outcome, so a mid-batch error carries DONE_MORE and a
-                // trailing error closes with the final DONE. The batch loop
-                // then proceeds to the next outcome — real SQL Server's
-                // non-XACT_ABORT behavior for a failed statement mid-batch.
+                // (continueOnError): its error token(s), then the statement's
+                // DONE carrying DONE_ERROR — or none, when the procedure scope
+                // it ended closes with a DONEPROC carrying the bit, and the
+                // batch's closing DONE when it ended the batch.
                 WriteErrors(writer, errorOutcome.Exception);
-                var errorEvents = this.PendingTransactionEventCount;
+                var errorEvents = this.EventsBefore(errorOutcome, this.PendingTransactionEventCount);
                 hasOutcome = AdvancePastClosingMessages();
-                var status = (ushort)(this.OutcomeDoneStatus(hasOutcome, trailingTokensFollow) | Tds.DoneError);
                 this.WriteTransactionEnvChanges(writer, errorEvents);
+                if (errorOutcome.DoneKind == StatementDoneKind.ClosedByScope)
+                {
+                    closed = false;
+                    unclosedError = true;
+                    continue;
+                }
+                // An error that ended the batch closes it with the batch's own
+                // DONE, whatever scope it was raised in — or, in an RPC, with
+                // the RPC's DONEPROC.
+                var errorKind = errorOutcome.DoneKind == StatementDoneKind.NoDone ? StatementDoneKind.Batch : errorOutcome.DoneKind;
+                if (trailingTokensFollow && errorKind == StatementDoneKind.Batch)
+                {
+                    this.rpcEndingError = errorOutcome.Exception;
+                    closed = false;
+                    continue;
+                }
+                var status = (ushort)(this.OutcomeDoneStatus(hasOutcome, trailingTokensFollow) | ErrorDoneStatus(errorOutcome.Exception));
                 if ((status & Tds.DoneMore) == 0)
                     this.WriteSessionEnvChangesIfAny(writer);
-                writer.WriteDoneToken(effectiveDoneToken, status, 0);
+                writer.WriteDoneToken(errorKind == StatementDoneKind.Batch ? doneToken : effectiveDoneToken, status, 0, errorKind);
+                closed = true;
+                unclosedError = false;
             }
             else
             {
@@ -981,7 +1130,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                 // MoveNext below, and its own SET NOCOUNT would otherwise decide
                 // this statement's DONE.
                 var suppressCount = outcome.CountSuppressed == true;
-                var statementEvents = this.PendingTransactionEventCount;
+                var statementEvents = this.EventsBefore(outcome, this.PendingTransactionEventCount);
                 hasOutcome = AdvancePastClosingMessages();
                 var status = this.OutcomeDoneStatus(hasOutcome, trailingTokensFollow);
                 if (affected >= 0 && !suppressCount)
@@ -992,27 +1141,36 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                     this.WriteSessionEnvChangesIfAny(writer);
                 // Real keeps the row count in the token and only clears the
                 // flag, so a suppressed count still goes out as the number.
-                writer.WriteDoneToken(
-                    effectiveDoneToken,
-                    status,
-                    Math.Max(affected, 0),
-                    outcome.CountsRowsReturned ? Tds.CmdSelect : (ushort)0);
+                writer.WriteDoneToken(effectiveDoneToken, status, Math.Max(affected, 0), DoneKindOf(outcome));
+                closed = true;
+                unclosedError = false;
             }
         }
 
-        // Trailing messages (batch ends in PRINT): INFO may never follow the
-        // final DONE, so the last outcome's DONE stayed DONE_MORE (see
-        // OutcomeDoneStatus) and the batch closes with its own final DONE.
-        // A mid-batch USE's ENVCHANGE must likewise precede the final DONE.
+        // A response whose last statement sent no DONE of its own — a batch
+        // ending in a DECLARE, an empty one, one an error ended — or that ends
+        // in messages (INFO may never follow the final DONE) closes with the
+        // batch's own DONE, which carries the error bit of an error left
+        // without one (probed 2026-09-28 against SQL Server 2025). A mid-batch
+        // USE's ENVCHANGE must likewise precede the final DONE.
         var flushedTrailing = this.FlushInfoMessages(writer);
-        if (!trailingTokensFollow && (flushedTrailing || !anyOutcome))
+        if (!trailingTokensFollow && (flushedTrailing || !closed))
         {
             this.WriteSessionEnvChangesIfAny(writer);
-            writer.WriteDoneToken(doneToken, Tds.DoneFinal, 0);
+            writer.WriteDoneToken(doneToken, unclosedError ? Tds.DoneError : Tds.DoneFinal, 0, StatementDoneKind.Batch);
         }
 
         return false;
     }
+
+    /// <summary>
+    /// The kind an outcome's DONE names: what its statement stamped, else a
+    /// result set's SELECT.
+    /// </summary>
+    private static ushort DoneKindOf(SimulatedStatementOutcome outcome) =>
+        outcome.DoneKind != StatementDoneKind.NoDone ? outcome.DoneKind
+            : outcome.CountsRowsReturned ? StatementDoneKind.Select
+            : (ushort)0;
 
     /// <summary>
     /// DONE status for a completed outcome: more tokens follow when another
@@ -1104,6 +1262,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
         if (Simulation.TryMapLoginToDatabaseUser(simulation, fresh.CurrentDatabase, loginName, out var principal))
             fresh.Security = Simulation.BuildAuthenticatedSecurityContext(principal, loginName);
 
+        fresh.FramesEveryStatement = true;
         this.connection = fresh;
     }
 
@@ -1133,8 +1292,17 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
     private static void WriteErrors(TdsTokenWriter writer, SimulatedSqlException exception)
     {
         foreach (var error in exception.Errors)
-            writer.WriteErrorOrInfo(Tds.TokenError, error.Number, error.State, error.Class, error.Message, ServerName, error.Procedure, error.LineNumber);
+        {
+            if (exception.EndsSession && error.Number == 0)
+                continue;
+            var sessionKilled = exception.EndsSession && error.Number == 596;
+            writer.WriteErrorOrInfo(Tds.TokenError, error.Number, error.State, error.Class, error.Message, ServerName, sessionKilled ? "" : error.Procedure, sessionKilled ? 0 : error.LineNumber);
+        }
     }
+
+    /// <summary>The DONE status bits an error's closing DONE carries.</summary>
+    private static ushort ErrorDoneStatus(SimulatedSqlException exception) =>
+        exception.EndsSession ? (ushort)(Tds.DoneError | Tds.DoneServerError) : Tds.DoneError;
 
     /// <summary>Skips the ALL_HEADERS section and decodes the UCS-2 batch text.</summary>
     private static string ExtractBatchText(byte[] payload) =>

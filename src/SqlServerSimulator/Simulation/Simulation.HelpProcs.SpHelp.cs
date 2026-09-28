@@ -34,6 +34,12 @@ partial class Simulation
     private static readonly string[] SpHelpObjectColumnNames =
         ["Name", "Owner", "Type", "Created_datetime"];
 
+    // Created_datetime is NOT NULL, and Seed / Increment are numeric, as real
+    // describes them on the wire (probed 2026-09-28 against SQL Server 2025).
+    private static readonly bool[] SpHelpObjectNullability = [true, true, true, false];
+
+    private static readonly bool[] SpHelpIdentityReportsNumeric = [false, true, true, false];
+
     private static readonly SqlType[] SpHelpObjectListSchema =
         [SqlType.SystemName, SqlType.SystemName, HelpObjectTypeType];
 
@@ -164,7 +170,7 @@ partial class Simulation
                 SqlValue.FromDateTime(target.CreateDate),
             ],
         ];
-        yield return new SimulatedSqlResultSet(SpHelpObjectSchema, SpHelpObjectColumnNames, objectInfo);
+        yield return new SimulatedSqlResultSet(SpHelpObjectSchema, SpHelpObjectColumnNames, objectInfo) { ColumnNullability = SpHelpObjectNullability };
         // Each section follows a blank line real prints at a fixed line of
         // its own source; see HelpMessage.
         yield return HelpBlankLine(batch, procedureName, 122);
@@ -258,7 +264,7 @@ partial class Simulation
                 SqlValue.FromDateTime(BuiltInResources.SystemObjectDate),
             ],
         ];
-        yield return new SimulatedSqlResultSet(SpHelpObjectSchema, SpHelpObjectColumnNames, objectInfo);
+        yield return new SimulatedSqlResultSet(SpHelpObjectSchema, SpHelpObjectColumnNames, objectInfo) { ColumnNullability = SpHelpObjectNullability };
         yield return HelpBlankLine(batch, procedureName, 122);
         yield return HelpBlankLine(batch, procedureName, 135);
         yield return HelpColumnResultSet(batch.CurrentDatabase, view.Columns);
@@ -371,7 +377,7 @@ partial class Simulation
                     : SqlValue.FromInt32(identity.NotForReplication ? 1 : 0),
             ],
         ];
-        return new SimulatedSqlResultSet(SpHelpIdentitySchema, SpHelpIdentityColumnNames, rows);
+        return new SimulatedSqlResultSet(SpHelpIdentitySchema, SpHelpIdentityColumnNames, rows) { ColumnReportsNumeric = SpHelpIdentityReportsNumeric };
     }
 
     private static SimulatedSqlResultSet HelpRowGuidColResultSet(HeapColumn[] columns)

@@ -21,7 +21,7 @@ public sealed class SimulatedDbTransaction : DbTransaction
         this.IsolationLevel = isolationLevel;
         this.TransactionId = simulation.AllocateTransactionId();
         this.target = this;
-        connection.TransactionEvents?.Add((TransactionEvent.Begin, this));
+        connection.RecordTransactionEvent(TransactionEvent.Begin, this);
     }
 
     /// <summary>
@@ -466,7 +466,7 @@ public sealed class SimulatedDbTransaction : DbTransaction
         Storage.VersionStore.RunGarbageCollection(this.simulation, db);
         this.Owner.CurrentTransaction = null;
         this.Ended = true;
-        this.Owner.TransactionEvents?.Add((TransactionEvent.Commit, this));
+        this.Owner.RecordTransactionEvent(TransactionEvent.Commit, this);
     }
 
     /// <summary>
@@ -488,7 +488,7 @@ public sealed class SimulatedDbTransaction : DbTransaction
         Storage.VersionStore.RunGarbageCollection(this.simulation, db);
         this.Owner.CurrentTransaction = null;
         this.Ended = true;
-        this.Owner.TransactionEvents?.Add((cause, this));
+        this.Owner.RecordTransactionEvent(cause, this);
     }
 
     /// <summary>

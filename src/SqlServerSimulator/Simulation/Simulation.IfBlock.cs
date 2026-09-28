@@ -69,6 +69,10 @@ partial class Simulation
         else if (!outerSkipping)
         {
             connection.LastErrorNumber = 0;
+            // The condition closes with a DONE of its own, ahead of the branch
+            // it chose (probed 2026-09-28 against SQL Server 2025).
+            if (connection.FramesEveryStatement)
+                yield return StatementDone(batch, StatementDoneKind.Condition);
         }
         var thenSkip = !condResult;
 
@@ -167,9 +171,14 @@ partial class Simulation
     private static IEnumerable<SimulatedStatementOutcome> ConditionErrorOutcomes(BatchContext batch, SimulatedSqlException error)
     {
         batch.Connection.LastErrorNumber = error.Number;
-        yield return new SimulatedErrorOutcome(error);
+        yield return new SimulatedErrorOutcome(error)
+        {
+            DoneKind = StatementDoneKind.Condition,
+            InModule = batch.ProcFrame is not null || batch.TriggerFrame is not null,
+            TransactionEventMark = batch.Connection.TransactionEventsRecorded,
+        };
         if (IsStatementTerminationNoticed(batch, error))
-            yield return new SimulatedInfoOutcome(SimulatedSqlException.StatementTerminatedMessage(batch));
+            yield return new SimulatedInfoOutcome(SimulatedSqlException.StatementTerminatedMessage(batch), followsRows: true);
     }
 
     /// <summary>
@@ -321,6 +330,8 @@ partial class Simulation
                     else
                     {
                         connection.LastErrorNumber = 0;
+                        if (connection.FramesEveryStatement)
+                            yield return StatementDone(batch, StatementDoneKind.Condition);
                     }
 
                     if (!condResult)

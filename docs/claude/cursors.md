@@ -15,6 +15,8 @@ Behavior probed against SQL Server 2025.
 - **`Simulation.InvokeView.cs`'s `TryParseViewBodyPlan`** — the parse-only view-body seam cursor planning looks through a view with; mirrors `InvokeViewCore`'s child-batch setup but stops at parse and returns null rather than propagating a body error.
 - **`Parser/Expressions/CursorScalars.cs`** — `@@FETCH_STATUS`, `@@CURSOR_ROWS`, `CURSOR_STATUS(scope, name)`.
 - **`Errors/SimulatedSqlException.CursorErrors.cs`** — Msg 16905 / 16911 / 16915 / 16916 / 16917 / 16924 / 16925 / 16929 / 16931 / 16932 (FOR UPDATE OF) / 16933 (target not one of the cursor's tables) / 16947+3621 (nothing to mutate) / 16947+16934+3621 (OPTIMISTIC conflict chain) / 16950 (unallocated cursor variable) — all probe-confirmed verbatim.
+  Msg 16916 reports line 0 from `OPEN` and `FETCH` and the statement's line from `CLOSE` and `DEALLOCATE` (probed 2026-09-28 against SQL Server 2025).
+- **A fetch's result** names its columns' base tables and columns in the TDS browse tokens real sends with every fetch — see [`tds-endpoint.md`](tds-endpoint.md#per-statement-done-tokens).
   TYPE_WARNING's Msg 16956 and the self-join Msg 16961 ride the `BatchContext.AppendInfoError` info pipeline, not this factory set.
 
 The dispatch routes `Keyword.Declare` to cursor handling when the token after `DECLARE` isn't `@`-prefixed (cursor names are bare identifiers; that's the only non-`@` DECLARE form).

@@ -633,11 +633,15 @@ This is load-bearing for bacpac export: DacFx's `SqlRole` reverse-engineering fi
 
 Every database starts with the grants real's does (probed 2026-09-28 against SQL Server 2025), seeded by `Database.SeedPermissions` and shared across databases since the rows are immutable: `public` holding `VIEW ANY COLUMN ENCRYPTION KEY DEFINITION` and `VIEW ANY COLUMN MASTER KEY DEFINITION`, `dbo` holding `CONNECT`, `guest` holding `CONNECT` in `master`, `tempdb` and `msdb`, and `public` holding `SELECT` on 232 system objects by real's fixed ids (`Database.PublicSelectSeedObjectIds`) — most of them catalog views, the rest system objects the simulator has no catalog for.
 `CREATE USER` adds the user's own `CONNECT`.
+`master` adds its own: `public` holding `SELECT` on 645 further system objects and `EXECUTE` on 1827 system procedures and functions, by the same fixed ids (`Database.SeedPermissions.Master.cs`), and the policy engine's user and the agent's certificate-mapped user with their grants.
+`msdb` seeds the principals its features run as — the agent, Database Mail, SSIS, data-collector, policy, server-group and utility roles and three users — with real's principal ids, memberships and database-level grants (probed 2026-09-28 against SQL Server 2025).
 The seed is ordinary state: `REVOKE` removes a row, `GRANT` and `DENY` replace one (a securable holds one row per grantee and permission, so `DENY` after `GRANT` leaves only the `D` row, and the reverse), `sp_helprotect` reports them (the catalog views as `sys` objects with column `(All)`), and `HAS_PERMS_BY_NAME` answers from them.
 Guest's access follows its `CONNECT` alone, and `master` and `tempdb` refuse to lose it (Msg 15182).
 
 A catalog view is a securable of the database it's read in, `GRANT` / `REVOKE` / `DENY` resolving `sys.<view>` to its id.
-A restricted principal's read of one is refused with Msg 229 naming the view in `mssqlsystemresource` when a `DENY` reaches it, or when the view is one the seed grants `public` and no grant reaches it any more — a revoked seed row refuses `sys.tables`, while a view outside the seed answers only to a `DENY`, since real grants those elsewhere (`PermissionChecker.CanReadCatalogView`).
+A restricted principal's read of one is refused with Msg 229 naming the view in `mssqlsystemresource` when a `DENY` reaches it, or when the view is one the seed grants `public` and no grant reaches it any more — a revoked seed row refuses `sys.tables`, while a view outside the seed answers only to a `DENY`, since real grants those elsewhere (`PermissionChecker.CanReadCatalogView`, the seed set being `master`'s larger one there).
+
+**Not modeled yet**: the grants real's `msdb` roles hold on msdb's own tables, procedures and XML schema collections, whose objects the simulator doesn't carry, and `master`'s `SELECT` for `public` on its five `spt_*` tables.
 
 **`sys.database_role_members`** (2-col full row): `role_principal_id` / `member_principal_id`.
 

@@ -115,7 +115,16 @@ partial class Simulation
         }
 
         context.MoveNextRequired(); // consume FOR
-        var selection = ParseBodyQuery(context);
+        context.CursorStatement = true;
+        Selection selection;
+        try
+        {
+            selection = ParseBodyQuery(context);
+        }
+        finally
+        {
+            context.CursorStatement = false;
+        }
 
         // Trailing SQL-92 updatability clause: FOR READ ONLY | FOR UPDATE [OF cols].
         List<string>? forUpdateColumns = null;
@@ -270,7 +279,7 @@ partial class Simulation
         var reference = ReadCursorReference(context);
         if (batch.IsSkipping)
             return;
-        var cursor = ResolveCursor(batch, reference);
+        var cursor = ResolveCursor(batch, reference, missingAtLineZero: true);
         batch.BeginImplicitTransaction();
         cursor.Open(batch);
     }
@@ -387,7 +396,7 @@ partial class Simulation
         if (batch.IsSkipping)
             yield break;
 
-        var cursor = ResolveCursor(batch, reference);
+        var cursor = ResolveCursor(batch, reference, missingAtLineZero: true);
         batch.BeginImplicitTransaction();
 
         // The INTO-list cardinality check fires regardless of whether the
@@ -467,7 +476,13 @@ partial class Simulation
     /// A named reference resolves LOCAL-first then GLOBAL when unqualified, or
     /// GLOBAL-only when <c>GLOBAL</c>-qualified (Msg 16916 on a miss).
     /// </summary>
-    private static Cursor ResolveCursor(BatchContext batch, CursorReference reference) =>
+    /// <remarks>
+    /// <c>OPEN</c> and <c>FETCH</c> report a missing cursor at line 0, where
+    /// <c>CLOSE</c> and <c>DEALLOCATE</c> report the statement's line (probed
+    /// 2026-09-28 against SQL Server 2025); <paramref name="missingAtLineZero"/>
+    /// says which.
+    /// </remarks>
+    private static Cursor ResolveCursor(BatchContext batch, CursorReference reference, bool missingAtLineZero = false) =>
         reference.IsVariable
             ? batch.CursorVariables.TryGetValue(reference.Name, out var bound) && bound is not null
                 ? bound
@@ -476,7 +491,9 @@ partial class Simulation
                 ? local
                 : batch.Connection.Cursors.TryGetValue(reference.Name, out var global)
                     ? global
-                    : throw SimulatedSqlException.CursorDoesNotExist(reference.Name);
+                    : missingAtLineZero
+                        ? throw SimulatedSqlException.CursorDoesNotExist(reference.Name).PinLine(0)
+                        : throw SimulatedSqlException.CursorDoesNotExist(reference.Name);
 
     /// <summary>
     /// Registers a freshly-declared named cursor in its scope — the batch/proc-

@@ -259,6 +259,17 @@ public sealed class SimulatedDbConnection : DbConnection
     internal bool NoBrowseTable;
 
     /// <summary>
+    /// Whether this connection serves a TDS session, whose response gives
+    /// every statement a DONE token of its own, each naming the statement's
+    /// kind (see <see cref="StatementDoneKind"/>). While set, the engine sends
+    /// an outcome for each statement that would otherwise produce none — a
+    /// <c>SET</c>, a <c>BEGIN TRANSACTION</c>, an <c>IF</c> condition — and
+    /// brackets every procedure call in scope markers. In-process consumers
+    /// ignore both, so an in-process connection doesn't produce them.
+    /// </summary>
+    internal bool FramesEveryStatement;
+
+    /// <summary>
     /// Session-scoped <c>XACT_ABORT</c> setting (default
     /// <see langword="false"/>, surfaced as <c>@@OPTIONS &amp; 16384</c>).
     /// While on, a run-time error that would otherwise terminate only its own
@@ -794,7 +805,19 @@ public sealed class SimulatedDbConnection : DbConnection
     /// 2026-09-28 against SQL Server 2025). Null in process, where nothing
     /// reads them, so recording costs one null check.
     /// </summary>
-    internal List<(TransactionEvent Event, SimulatedDbTransaction Transaction)>? TransactionEvents;
+    internal List<(TransactionEvent Event, SimulatedDbTransaction Transaction, int Serial)>? TransactionEvents;
+
+    /// <summary>
+    /// How many events <see cref="TransactionEvents"/> has ever recorded — each
+    /// event's serial is the count before it — so an outcome stamped with the
+    /// count when its statement finished (<see cref="SimulatedStatementOutcome.TransactionEventMark"/>)
+    /// says which events that statement's DONE follows.
+    /// </summary>
+    internal int TransactionEventsRecorded;
+
+    /// <summary>Records a transaction event for the TDS endpoint to announce; a no-op in process.</summary>
+    internal void RecordTransactionEvent(TransactionEvent transactionEvent, SimulatedDbTransaction transaction) =>
+        this.TransactionEvents?.Add((transactionEvent, transaction, this.TransactionEventsRecorded++));
 
     /// <summary>
     /// Backs <c>@@ROWCOUNT</c>. Updated after each statement in
@@ -952,9 +975,18 @@ public sealed class SimulatedDbConnection : DbConnection
     /// body ended the transaction — the user's, or the firing statement's own
     /// auto-commit unit, which reads as <c>@@TRANCOUNT</c> 1 in the body. The
     /// body runs on, and real then aborts the batch with Msg 3609 when it
-    /// returns (probed 2026-09-26 and 2026-09-28 against SQL Server 2025).
+    /// returns with no transaction open (probed 2026-09-26 and 2026-09-28
+    /// against SQL Server 2025).
     /// </summary>
     internal bool TriggerTransactionEnded;
+
+    /// <summary>
+    /// Set when a trigger body ended the transaction and returned with another
+    /// of its own open — which leaves the firing statement standing, where
+    /// returning with none open is Msg 3609 (probed 2026-09-28 against SQL
+    /// Server 2025).
+    /// </summary>
+    internal bool TriggerReplacedTransaction;
 
     /// <summary>
     /// Set when a logon trigger's <c>COMMIT</c> committed the unit the login

@@ -210,6 +210,21 @@ internal sealed class StatementContext
     public bool WritesRows;
 
     /// <summary>
+    /// The kind real names in this statement's own DONE token
+    /// (<see cref="StatementDoneKind"/>), read off its leading tokens when it
+    /// starts and refined by a parser that learns more — a <c>DECLARE</c>'s
+    /// initializer, a <c>SET</c>'s option, a <c>RETURN</c>'s value.
+    /// </summary>
+    public ushort DoneKind;
+
+    /// <summary>
+    /// The count that DONE reports, or -1 for none: 1 for a <c>SET</c> or
+    /// <c>DECLARE</c> assigning a variable and a procedure's valued
+    /// <c>RETURN</c>, which real counts as one row.
+    /// </summary>
+    public int DoneCount;
+
+    /// <summary>
     /// The shape of the result set a row-writing statement's <c>OUTPUT</c>
     /// clause returns to the client, recorded as the clause parses; null when
     /// it has none or directs its rows <c>INTO</c> a table.

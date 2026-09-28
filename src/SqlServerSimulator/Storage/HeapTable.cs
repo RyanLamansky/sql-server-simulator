@@ -420,6 +420,14 @@ internal sealed class HeapTable : SchemaObject
     public string? InternalName;
 
     /// <summary>
+    /// For a multi-statement table-valued function's return table, the
+    /// function, whose name real's Msg 2628 gives the table and whose database
+    /// its Msg 547 names (probed 2026-09-28 against SQL Server 2025); null
+    /// otherwise.
+    /// </summary>
+    public Schemas.MultiStatementTableValuedFunction? ReturnTableOf;
+
+    /// <summary>
     /// The <see cref="Database"/> this table is registered in, stamped when it
     /// enters a <see cref="Schema.HeapTables"/> dict. Null for the tables that
     /// belong to no database — temp tables, table variables, table-valued
@@ -684,6 +692,26 @@ internal sealed class HeapTable : SchemaObject
     /// id 1.</description></item>
     /// </list>
     /// </summary>
+    /// <summary>
+    /// Whether a clustered PRIMARY KEY, UNIQUE constraint or index orders the
+    /// table — whose rows real locks and reports as keys rather than a heap's
+    /// row ids.
+    /// </summary>
+    public bool HasClusteredIndex()
+    {
+        foreach (var key in this.KeyConstraints)
+        {
+            if (key.IsClustered)
+                return true;
+        }
+        foreach (var index in this.Indexes)
+        {
+            if (index.IsClustered)
+                return true;
+        }
+        return false;
+    }
+
     public List<IndexIdentity> IndexIdentities()
     {
         var entries = new List<(int ObjectId, bool Clustered, KeyConstraint? Key, Index? Index)>(this.KeyConstraints.Count + this.Indexes.Count);

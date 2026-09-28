@@ -142,6 +142,11 @@ partial class Simulation
             var hasInitializer = context.Token is Operator { Character: '=' };
             if (hasInitializer)
             {
+                // A DECLARE that initializes is a SELECT-kind statement, the
+                // whole statement counting one row (probed 2026-09-28 against
+                // SQL Server 2025).
+                context.Batch.CurrentStatement.DoneKind = StatementDoneKind.Select;
+                context.Batch.CurrentStatement.DoneCount = 1;
                 context.MoveNextRequired();
                 var initExpression = Expression.Parse(context);
                 initExpressionForMask = initExpression;

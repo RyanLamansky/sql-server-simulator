@@ -68,4 +68,40 @@ public sealed class TriggerCommitTests
     [DataRow("select str(xact_state(), 1) + '|' + str(@@trancount, 1)", "0|0")]
     public void XactState_InAnAutoCommitWrite(string batch, string expected)
         => AreEqual(expected, new Simulation().ExecuteScalar(batch));
+
+    [TestMethod]
+    public void AutoCommitUnit_CommittedThenBegun_StandsAndCommitsAtStatementEnd()
+    {
+        // A body that ends the unit and begins its own transaction leaves the
+        // statement standing, and the statement's end commits that
+        // transaction (probed 2026-09-28 against SQL Server 2025).
+        var simulation = With("commit; begin tran; insert log values ('in', 0, 0);");
+        AreEqual("0|1|1", simulation.ExecuteScalar(
+            "insert t values (1); select concat(@@trancount, '|', (select count(*) from t), '|', (select count(*) from log))"));
+    }
+
+    [TestMethod]
+    public void AutoCommitUnit_RolledBackThenBegun_KeepsOnlyTheBodysLaterWrite()
+        => AreEqual("0|0|1", With("rollback; begin tran; insert log values ('in', 0, 0);").ExecuteScalar(
+            "insert t values (1); select concat(@@trancount, '|', (select count(*) from t), '|', (select count(*) from log))"));
+
+    [TestMethod]
+    public void AutoCommitUnit_TwoBegins_LeaveOneOpen()
+    {
+        var simulation = With("commit; begin tran; begin tran;");
+        using var connection = simulation.CreateOpenConnection();
+        AreEqual(1, connection.CreateCommand("insert t values (1); select @@trancount").ExecuteScalar());
+        _ = connection.CreateCommand("rollback").ExecuteNonQuery();
+        AreEqual(1, simulation.ExecuteScalar("select count(*) from t"));
+    }
+
+    [TestMethod]
+    public void UserTransaction_CommittedThenBegun_LeavesTheBodysTransactionOpen()
+    {
+        var simulation = With("commit; begin tran; insert log values ('in', 0, 0);");
+        using var connection = simulation.CreateOpenConnection();
+        AreEqual(1, connection.CreateCommand("begin tran; insert t values (1); select @@trancount").ExecuteScalar());
+        _ = connection.CreateCommand("rollback").ExecuteNonQuery();
+        AreEqual("1|0", simulation.ExecuteScalar("select concat((select count(*) from t), '|', (select count(*) from log))"));
+    }
 }

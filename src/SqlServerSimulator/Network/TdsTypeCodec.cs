@@ -99,15 +99,20 @@ internal static class TdsTypeCodec
             foreach (var part in parts)
                 tabNameLength += 2 + (part.Length * 2);
         }
-        writer.WriteByte(Tds.TokenTabName);
-        writer.WriteUInt16(checked((ushort)tabNameLength));
-        foreach (var parts in browse.Tables)
+        // A result reading no table sends no TABNAME (probed 2026-09-28
+        // against SQL Server 2025, a cursor fetch of constants).
+        if (browse.Tables.Length > 0)
         {
-            writer.WriteByte(checked((byte)parts.Length));
-            foreach (var part in parts)
+            writer.WriteByte(Tds.TokenTabName);
+            writer.WriteUInt16(checked((ushort)tabNameLength));
+            foreach (var parts in browse.Tables)
             {
-                writer.WriteUInt16(checked((ushort)part.Length));
-                writer.WriteBytes(System.Text.Encoding.Unicode.GetBytes(part));
+                writer.WriteByte(checked((byte)parts.Length));
+                foreach (var part in parts)
+                {
+                    writer.WriteUInt16(checked((ushort)part.Length));
+                    writer.WriteBytes(System.Text.Encoding.Unicode.GetBytes(part));
+                }
             }
         }
 

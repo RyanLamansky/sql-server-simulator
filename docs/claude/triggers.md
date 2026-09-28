@@ -216,6 +216,8 @@ A `ROLLBACK` in the body ends it — the user's transaction when there is one, e
 The body runs on, what it writes afterwards commits on its own (a body `INSERT` after the `ROLLBACK` survives), and its `RAISERROR`s reach the client; when it returns, **Msg 3609** (`The transaction ended in the trigger. The batch has been aborted.`) ends the batch, attributed to the firing statement.
 `SimulatedDbConnection.TriggerTransactionEnded` carries the fact from the `ROLLBACK` to the body's return.
 A `COMMIT` that ends the same transaction — the auto-commit unit, or the user's when it brings `@@TRANCOUNT` to 0 — does the same with the writes kept: the firing statement's rows and the body's so far commit, and Msg 3609 follows; one that leaves a nested user transaction open ends nothing (probed 2026-09-28 against SQL Server 2025).
+Msg 3609 needs the body to return with no transaction open: one that ended the transaction and began another leaves the firing statement standing (`SimulatedDbConnection.TriggerReplacedTransaction`).
+Over an auto-commit statement the statement's end then takes one level off the transaction the body began, as it would have off the unit it replaced — one `BEGIN` commits, two leave `@@TRANCOUNT` at 1 — and over a user transaction the body's transaction stays open as the user's (probed 2026-09-28 against SQL Server 2025).
 An error after it ends the batch with its own number, and what was committed stays.
 `XACT_STATE()` reads 1 in the unit, as it does in any statement writing a table or table variable.
 

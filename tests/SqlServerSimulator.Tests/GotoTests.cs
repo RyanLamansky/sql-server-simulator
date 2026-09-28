@@ -160,4 +160,21 @@ public sealed class GotoTests
     [TestMethod]
     public void BracketedLabel_IsNotALabel()
         => _ = new Simulation().AssertSqlError("print 'a'; [my label]: print 'b';", 102);
+
+    [TestMethod]
+    public void BackwardJump_FromTheLastStatement_StillJumps()
+    {
+        // A label follows a DECLARE on the next line, and the GOTO ending the
+        // batch still jumps (probed 2026-09-28 against SQL Server 2025).
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (a int);
+            declare @i int = 0
+            l:
+            set @i += 1
+            insert t values (@i)
+            if @i < 3 goto l
+            """);
+        AreEqual(3, sim.ExecuteScalar("select count(*) from t"));
+    }
 }

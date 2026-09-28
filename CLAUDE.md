@@ -355,6 +355,7 @@ Where an entry carries a second clause it is because that fact changes what you'
 - **Linked servers** — `AddRemoteSimulation`, `sp_addlinkedserver`, `sp_serveroption`, four-part reads and writes, `OPENQUERY` as source and target, `EXEC … AT`, remote procedure calls, `sys.servers`.
   A write runs locally against a stand-in of the remote table and replays on the remote inside one remote transaction; inside a local transaction it is real's out-of-the-box distributed-transaction refusal, never a commit → [`linked-servers.md`](docs/claude/linked-servers.md).
 - **TDS network endpoint** — `ListenLocalAsync` / `ListenNetworkAsync`, the SQLBatch / RPC / TM / BulkLoad families, API server cursors, attention, MARS, TDS 8.0, and the projection-nullability inference behind COLMETADATA's `fNullable`.
+  Every statement closes with a DONE naming its kind, so a new statement kind needs its `StatementDoneKind` mapping; the engine sends the stand-in outcomes only on a TDS session's connection.
   Oracles are `*.Tests.SqlClient` + `*.Tests.Smo` → [`tds-endpoint.md`](docs/claude/tds-endpoint.md).
 
 ## Not modeled yet

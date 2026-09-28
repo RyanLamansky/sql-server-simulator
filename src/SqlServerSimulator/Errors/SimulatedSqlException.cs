@@ -223,6 +223,21 @@ public sealed partial class SimulatedSqlException : DbException
     internal bool EndedCalledBatch;
 
     /// <summary>
+    /// The batch <see cref="EndedCalledBatch"/> was set in: within that batch
+    /// the error still ends everything it passes through — a <c>BEGIN … END</c>
+    /// block around the failing statement included — and only its caller
+    /// carries on.
+    /// </summary>
+    internal object? EndedCalledBatchIn;
+
+    /// <summary>
+    /// Set when a write in a function body raised this error — a
+    /// multi-statement function filling its return table — which ends the
+    /// calling statement as a write of its own would, Msg 3621 following it.
+    /// </summary>
+    internal bool EndedFunctionWrite;
+
+    /// <summary>
     /// Set by the first dispatch frame that sees this error, which is the
     /// scope whose statement raised it. Only that scope's procedure counts the
     /// error toward the status it returns without a <c>RETURN</c> value
@@ -280,6 +295,25 @@ public sealed partial class SimulatedSqlException : DbException
     /// <see cref="ClrTypeParseFoldedAtCompile"/>).
     /// </summary>
     internal bool IsClrTypeParseFailure;
+
+    /// <summary>
+    /// Set on the error that ends the session (a <c>RAISERROR … WITH LOG</c> at
+    /// severity 20 or more), whose last entry is the severity-20 Msg 0 SqlClient
+    /// adds on its own side when the server severs the connection — on the
+    /// wire, real sends the entries before it, Msg 596 at line 0 and in no
+    /// procedure, and a DONE carrying <c>DONE_SRVERROR</c> (probed 2026-09-28
+    /// against SQL Server 2025).
+    /// </summary>
+    internal bool EndsSession;
+
+    /// <summary>
+    /// Set on an error a system procedure raised from its own body, which real
+    /// reports as the procedure's <c>RAISERROR</c>: a DONEINPROC carrying the
+    /// error, then the procedure returning 1 with no error on its DONEPROC
+    /// (probed 2026-09-28 against SQL Server 2025, <c>sp_help</c> of a missing
+    /// object).
+    /// </summary>
+    internal bool RaisedBySystemProcedure;
 
     /// <summary>Set by <see cref="PinLine"/>: the line holds wherever the error is caught.</summary>
     private bool linePinned;

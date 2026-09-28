@@ -1157,7 +1157,7 @@ public sealed partial class Simulation
         // call entrypoint that hand-rolled SqlClient code uses.
         if (command.CommandType == CommandType.StoredProcedure)
         {
-            foreach (var outcome in InvokeFromCommandTypeStoredProcedure(command))
+            foreach (var outcome in InvokeFromCommandTypeStoredProcedure(command, continueOnError))
                 yield return outcome;
             yield break;
         }
@@ -1603,13 +1603,15 @@ public sealed partial class Simulation
     /// <c>DbParameter.Value</c> at exit (mirroring SqlClient); the ReturnValue
     /// parameter captures the procedure's <c>RETURN</c> code (default 0).
     /// </summary>
-    private IEnumerable<SimulatedStatementOutcome> InvokeFromCommandTypeStoredProcedure(SimulatedDbCommand command)
+    private IEnumerable<SimulatedStatementOutcome> InvokeFromCommandTypeStoredProcedure(SimulatedDbCommand command, bool continueOnError)
     {
         // Build a transient outer batch to host the call. This batch's
         // variable dict isn't used for parameter binding (procs read from
         // their child batch's own variable dict, seeded from boundValues);
-        // but it's the home for the temporary writeback slots.
-        var batch = new BatchContext(command);
+        // but it's the home for the temporary writeback slots. The body runs
+        // on past a statement-terminating error as one a batch's EXEC calls
+        // does (probed 2026-09-28 against SQL Server 2025 over RPC).
+        var batch = new BatchContext(command) { ContinueOnError = continueOnError };
         var context = batch.Parser;
         context.MoveNextOptional();
         if (context.Token is not Name)
@@ -1639,7 +1641,13 @@ public sealed partial class Simulation
         var writtenName = procName.ToString();
         procName = batch.ExpandSynonym(procName);
         if (!batch.TryResolveProcedure(procName, out var procedure))
-            throw SimulatedSqlException.CouldNotFindStoredProcedure(procName.ToString());
+        {
+            // Called by RPC, the miss is attributed to the name at line 1
+            // (probed 2026-09-28 against SQL Server 2025).
+            var missing = SimulatedSqlException.CouldNotFindStoredProcedure(procName.ToString());
+            missing.PreserveDiagnostics(1, procName.ToString());
+            throw missing;
+        }
 
         // Translate each non-ReturnValue parameter into a ProcArgument. The
         // ReturnValue-direction parameter (at most one) gets pulled out and
@@ -1791,8 +1799,19 @@ public sealed partial class Simulation
         var childBatch = new BatchContext(childCommand);
         var parser = childBatch.Parser;
         parser.MoveNextOptional();
+        // The RPC is the procedure's scope, so the scope markers the
+        // synthesized EXEC puts around it drop out.
+        var depth = 0;
         foreach (var outcome in DispatchStatementsUntil(childBatch, endKeyword: null))
+        {
+            if (outcome is SimulatedProcScopeBoundary boundary)
+            {
+                depth += boundary.IsEnter ? 1 : -1;
+                if (depth == (boundary.IsEnter ? 1 : 0))
+                    continue;
+            }
             yield return outcome;
+        }
     }
 
     /// <summary>
@@ -1876,7 +1895,8 @@ public sealed partial class Simulation
 
         try
         {
-            while (context.Token is not null)
+            // A GOTO that is the batch's last statement still jumps.
+            while (context.Token is not null || batch.PendingGotoLabel is not null)
             {
                 // A GOTO is serviced by the innermost dispatch loop the label
                 // is inside — the one whose BEGIN…END nesting it shares or
@@ -1942,7 +1962,9 @@ public sealed partial class Simulation
                     continue;
                 }
 
-                var statementStartIndex = context.Token.StartIndex;
+                if (context.Token is not { } statementToken)
+                    yield break;
+                var statementStartIndex = statementToken.StartIndex;
                 foreach (var outcome in DispatchOneStatement(batch, requireSemicolonBeforeCte, atBatchStart))
                     yield return outcome;
                 requireSemicolonBeforeCte = true;
@@ -2045,6 +2067,14 @@ public sealed partial class Simulation
         batch.CurrentStatement.PendingDdlEvents = null;
         batch.CurrentStatement.DdlTriggerCreatedThisStatement = null;
         batch.CurrentStatement.ChangesTableStructure = ChangesTableStructure(batch.Parser);
+        // What this statement names in its own DONE token, which only a
+        // connection serving a TDS session renders; null for a compound
+        // statement, whose parts send their own.
+        var framesStatement = batch.Connection.FramesEveryStatement && !batch.IsSkipping;
+        var startDoneKind = framesStatement ? StatementDoneKindOf(batch.Parser) : null;
+        var isCall = framesStatement && IsProcedureCall(batch.Parser, atBatchStart);
+        batch.CurrentStatement.DoneKind = startDoneKind ?? StatementDoneKind.NoDone;
+        batch.CurrentStatement.DoneCount = -1;
         batch.CurrentStatement.StatementVerb = batch.Parser.Token switch
         {
             ReservedKeyword { Keyword: Keyword.Insert } => "INSERT",
@@ -2169,6 +2199,11 @@ public sealed partial class Simulation
                 // statement's frame stamps it (probe-confirmed — real reports
                 // the outer statement's line, no procedure). All other frames
                 // (top-level, procedure, trigger, dynamic-SQL) resolve here.
+                // A function body's failing write ends the calling statement,
+                // which real follows with the Msg 3621 a write earns (probed
+                // 2026-09-28 against SQL Server 2025).
+                if (batch.SuppressDiagnosticsResolution && batch.CurrentStatement.WritesRows && !batch.IsSkipping)
+                    ex.EndedFunctionWrite = true;
                 if (!batch.SuppressDiagnosticsResolution)
                 {
                     var diagnosticLine = ex.Class == 15
@@ -2293,7 +2328,7 @@ public sealed partial class Simulation
                     continuedError = ex;
                     batch.BatchAborted = true;
                 }
-                else if (batch.ContinueOnError && !EndsBatch(ex) && IsStatementTerminating(ex))
+                else if (batch.ContinueOnError && !EndsBatch(ex) && IsStatementTerminating(ex) && !(ex.EndedCalledBatch && ReferenceEquals(ex.EndedCalledBatchIn, batch)))
                 {
                     // A continuing procedure, trigger or dynamic-SQL body takes this arm
                     // too, and its error travels up among the body's outcomes;
@@ -2307,8 +2342,11 @@ public sealed partial class Simulation
                     // A procedure's, dynamic SQL's or called function's batch
                     // is as far as a batch-aborting name-resolution error
                     // reaches.
-                    if ((batch.ProcFrame is not null || batch.CalledFunctionBody) && IsBatchAbortingNameResolution(ex))
+                    if ((batch.ProcFrame is not null || batch.CalledFunctionBody) && IsBatchAbortingNameResolution(ex) && !ex.EndedCalledBatch)
+                    {
                         ex.EndedCalledBatch = true;
+                        ex.EndedCalledBatchIn = batch;
+                    }
                     propagated = ex;
                 }
             }
@@ -2323,14 +2361,20 @@ public sealed partial class Simulation
 
         if (propagated is not null)
         {
+            // A module or dynamic batch's failing statement closes with its
+            // DONE at its own level when a TRY frame further out is what
+            // catches the error — a write with its count — as a caught error's
+            // statement does (probed 2026-09-28 against SQL Server 2025).
+            var caughtFurtherOut = !batch.IsSkipping && !batch.CreateTimeBinding && connection.OpenTryFrames > 0
+                && !propagated.AbortsTransaction && !propagated.IsAttention;
+            var count = caughtFurtherOut ? CaughtWriteCount(batch) : null;
+            if (startDoneKind is not null)
+                _ = FrameStatement(batch, outcomes, standInForNone: framesStatement && caughtFurtherOut && count is null && !isCall);
             foreach (var outcome in ProducedOutcomes(batch, outcomes))
                 yield return outcome;
-            // A module or dynamic batch's failing write reports its count at
-            // its own level when a TRY frame further out is what catches it.
-            if (!batch.IsSkipping && !batch.CreateTimeBinding && connection.OpenTryFrames > 0
-                && !propagated.AbortsTransaction && !propagated.IsAttention
-                && CaughtWriteCount(batch) is { } count)
+            if (count is not null)
             {
+                count.DoneKind = batch.CurrentStatement.DoneKind;
                 yield return count;
             }
             ExceptionDispatchInfo.Throw(propagated);
@@ -2382,14 +2426,49 @@ public sealed partial class Simulation
                 while (parser.Token is not null && !IsStatementBoundary(parser.Token))
                     parser.MoveNextOptional();
             }
+            // The error closes with its statement's DONE — or, when it ended
+            // the batch, with the batch's closing one, and when it ended a
+            // procedure call, with that call's DONEPROC (probed 2026-09-28
+            // against SQL Server 2025).
+            var errorOutcome = new SimulatedErrorOutcome(continuedError);
+            List<SimulatedStatementOutcome>? closedScopes = null;
+            if (framesStatement)
+            {
+                if (startDoneKind is not null)
+                    _ = FrameStatement(batch, outcomes, standInForNone: false);
+                if (batch.BatchAborted)
+                {
+                    errorOutcome.DoneKind = StatementDoneKind.Batch;
+                }
+                else if (isCall && continuedError.RaisedBySystemProcedure && OpenProcScopes(outcomes) == 1)
+                {
+                    errorOutcome.DoneKind = StatementDoneKind.RaisError;
+                    closedScopes = [ScopeExit(batch, 1)];
+                }
+                else if (isCall || OpenProcScopes(outcomes) > 0)
+                {
+                    errorOutcome.DoneKind = StatementDoneKind.ClosedByScope;
+                    closedScopes = [];
+                    CloseAbandonedProcScopes(batch, [.. outcomes], closedScopes, isCall, endedByError: true);
+                }
+                else
+                {
+                    errorOutcome.DoneKind = batch.CurrentStatement.DoneKind is StatementDoneKind.NoDone ? StatementDoneKind.Batch : batch.CurrentStatement.DoneKind;
+                }
+                errorOutcome.InModule = batch.ProcFrame is not null || batch.TriggerFrame is not null;
+                errorOutcome.TransactionEventMark = connection.TransactionEventsRecorded;
+            }
             foreach (var outcome in ProducedOutcomes(batch, outcomes))
                 yield return outcome;
-            yield return new SimulatedErrorOutcome(continuedError);
+            yield return errorOutcome;
+            // Msg 3621 goes out ahead of the statement's DONE, as real sends it.
             if (IsStatementTerminationNoticed(batch, continuedError))
             {
-                yield return new SimulatedInfoOutcome(continuedError.IsIdentityOverflow
-                    ? SimulatedSqlException.ArithmeticOverflowOccurredMessage(batch)
-                    : SimulatedSqlException.StatementTerminatedMessage(batch, continuedError));
+                yield return new SimulatedInfoOutcome(
+                    continuedError.IsIdentityOverflow
+                        ? SimulatedSqlException.ArithmeticOverflowOccurredMessage(batch)
+                        : SimulatedSqlException.StatementTerminatedMessage(batch, continuedError),
+                    followsRows: true);
             }
             else if (continuedError.IsIdentityOverflow && batch.BatchAborted)
             {
@@ -2400,6 +2479,11 @@ public sealed partial class Simulation
                 notice.LineNumber = 1;
                 notice.Procedure = string.Empty;
                 yield return new SimulatedInfoOutcome(notice);
+            }
+            if (closedScopes is not null)
+            {
+                foreach (var closed in closedScopes)
+                    yield return closed;
             }
             yield break;
         }
@@ -2453,6 +2537,21 @@ public sealed partial class Simulation
             var parser = batch.Parser;
             while (parser.Token is not null && !IsStatementBoundary(parser.Token))
                 parser.MoveNextOptional();
+            // A caught error's statement still closes with its DONE, the error
+            // bit clear — a procedure call with its DONEPROC, no return status
+            // (probed 2026-09-28 against SQL Server 2025).
+            if (framesStatement)
+            {
+                if (isCall || OpenProcScopes(outcomes) > 0)
+                {
+                    CloseAbandonedProcScopes(batch, [.. outcomes], outcomes, isCall, endedByError: false);
+                }
+                else if (startDoneKind is not null)
+                {
+                    _ = caughtCount?.DoneKind = batch.CurrentStatement.DoneKind;
+                    _ = FrameStatement(batch, outcomes, standInForNone: caughtCount is null);
+                }
+            }
             foreach (var outcome in ProducedOutcomes(batch, outcomes))
                 yield return outcome;
             if (caughtCount is not null)
@@ -2477,6 +2576,8 @@ public sealed partial class Simulation
         // enclosing procedure, which a downstream projection (EXEC … WITH
         // RESULT SETS) attributes its errors to. Already-stamped results pass
         // through untouched so the innermost producing frame wins.
+        if (startDoneKind is not null)
+            _ = FrameStatement(batch, outcomes, standInForNone: true);
         foreach (var o in outcomes)
         {
             // SET NOCOUNT ON suppresses the statement's count wherever a client
@@ -2621,7 +2722,7 @@ public sealed partial class Simulation
         error.Number == 1505
         || error.EndedColumnRewrite
         || ((!batch.BatchAborted || error.EndedTriggerBody || error.Number == 127)
-            && batch.CurrentStatement.WritesRows
+            && (batch.CurrentStatement.WritesRows || error.EndedFunctionWrite)
             && error.Number is 127 or 220 or 232 or 512 or 513 or 515 or 547 or 550 or 2601 or 2627 or 2628 or 3991 or 3992 or 6522 or 6549 or 8115 or 8134 or 8152 or 8705 or 13921 or 16947);
 
     /// <summary>
@@ -2659,7 +2760,9 @@ public sealed partial class Simulation
     /// ends the current statement but lets the batch continue to the next one
     /// (SQL Server's default severity model). Severity (<see cref="SimulatedSqlException.Class"/>)
     /// 11..16 are statement-terminating; severity ≤ 10 are informational (not
-    /// raised as errors) and ≥ 17 are batch/connection-terminating. Deadlock
+    /// raised as errors) and ≥ 17 are batch/connection-terminating — save a
+    /// <c>RAISERROR</c> through 19, after which the batch carries on (probed
+    /// 2026-09-28 against SQL Server 2025). Deadlock
     /// (Msg 1205, class 13) is the one in-range exception — it aborts the batch
     /// — so it is excluded. Consulted on every top-level batch
     /// (<see cref="BatchContext.ContinueOnError"/>).
@@ -2668,7 +2771,7 @@ public sealed partial class Simulation
     /// deferred raises one mid-batch.
     /// </summary>
     private static bool IsStatementTerminating(SimulatedSqlException ex)
-        => ex.Class is >= 11 and <= 16 && ex.Number != 1205;
+        => (ex.Class is >= 11 and <= 16 || (ex.RaisedByRaiserror && ex.Class <= 19)) && ex.Number != 1205;
 
     /// <summary>
     /// Applies <c>SET XACT_ABORT ON</c>'s error promotion to
@@ -2814,7 +2917,7 @@ public sealed partial class Simulation
     /// deferred its statement; Msg 8124 2026-09-28). An error not listed keeps a run-time error's
     /// handling.
     /// </summary>
-    private static bool IsDeferredCompileError(SimulatedSqlException ex)
+    internal static bool IsDeferredCompileError(SimulatedSqlException ex)
         => IsBatchAbortingNameResolution(ex) || ex.Number is 4902 or 2705
             || ex.Number is 107 or 108 or 130 or 145 or 147 or 164 or 174 or 205 or 206 or 213 or 243 or 264 or 321 or 447 or 448 or 529
                 or 1011 or 1012 or 1013 or 4108 or 4115 or 5318 or 8117 or 8120 or 8121 or 8124 or 8155 or 8622;
@@ -3025,7 +3128,7 @@ public sealed partial class Simulation
                 {
                     // SELECT … INTO closes with a DONE counting 0, as the
                     // suppressed DML below does.
-                    yield return new SimulatedNonQuery(0) { CountSuppressed = false };
+                    yield return new SimulatedNonQuery(0) { CountSuppressed = false, DoneKind = StatementDoneKind.SelectInto };
                 }
 
                 yield break;
@@ -3142,6 +3245,7 @@ public sealed partial class Simulation
                         // skip mode, ExecuteSelectInto returns SimulatedNonQuery(0)
                         // without touching the heap.
                         outcome = RunMutation(context, _ => ExecuteSelectInto(selection, batch));
+                        outcome.DoneKind = StatementDoneKind.SelectInto;
                         if (!batch.IsSkipping)
                         {
                             connection.LastStatementRowCount = outcome.RecordsAffected;
@@ -3317,6 +3421,14 @@ public sealed partial class Simulation
                     // itself starts skipping.
                     var returnRuns = !batch.IsSkipping;
                     var carriesStatus = ParseReturnStatement(batch);
+                    // A procedure's RETURN of a value is a SELECT-kind
+                    // statement counting one row (probed 2026-09-28 against
+                    // SQL Server 2025).
+                    if (carriesStatus)
+                    {
+                        batch.CurrentStatement.DoneKind = StatementDoneKind.Select;
+                        batch.CurrentStatement.DoneCount = 1;
+                    }
                     if (returnRuns && batch.UdfFrame is null && !batch.CalledFunctionBody)
                         connection.LastStatementRowCount = carriesStatus ? 1 : 0;
                 }
@@ -3613,7 +3725,10 @@ public sealed partial class Simulation
         // statement ended on a boundary, or it would still be set when the
         // next one finishes and would reject that statement's own tail.
         var rejectTrailingToken = context.ConsumeRejectTrailingToken();
-        if (!IsStatementBoundary(context.Token))
+        // A label begins the next statement as a keyword does (probed
+        // 2026-09-28 against SQL Server 2025: `DECLARE @i int = 0` and
+        // `GOTO l` each run on into a label on the next line).
+        if (!IsStatementBoundary(context.Token) && !IsLabelDeclaration(context))
         {
             if (rejectTrailingToken)
                 throw SimulatedSqlException.SyntaxErrorNear(context);

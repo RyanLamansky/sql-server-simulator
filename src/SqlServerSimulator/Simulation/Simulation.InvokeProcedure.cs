@@ -48,7 +48,8 @@ partial class Simulation
         List<ProcArgument> arguments,
         string? returnCodeVariableName,
         string attributionName,
-        Synonym? viaSynonym = null)
+        Synonym? viaSynonym = null,
+        bool framesScope = false)
     {
         var connection = outerBatch.Connection;
         if (connection.NestingLevel >= SimulatedDbConnection.MaxNestingLevel)
@@ -409,12 +410,23 @@ partial class Simulation
             rcSlot.Value = SqlValue.FromInt32(rc).CoerceTo(rcSlot.DeclaredType);
         }
 
+        // A call its caller frames brackets the body in scope markers, the
+        // exit carrying the return status (probed 2026-09-28 against SQL
+        // Server 2025); one an error ended is closed by the calling statement.
+        if (framesScope)
+            yield return new SimulatedProcScopeBoundary(isEnter: true);
         foreach (var outcome in outcomes)
             yield return outcome;
         if (bodyError is not null)
             ExceptionDispatchInfo.Throw(bodyError);
         if ((connection.CurrentTransaction?.TranCount ?? 0) is var exitTranCount && exitTranCount != enteredTranCount && !endedUnderImplicitTransactions)
+        {
+            if (framesScope)
+                yield return new SimulatedReturnStatus(procFrame.ReturnCode ?? procFrame.StatusWithoutReturnValue) { InModule = outerBatch.ProcFrame is not null || outerBatch.TriggerFrame is not null };
             throw SimulatedSqlException.TransactionCountMismatch(enteredTranCount, exitTranCount, attributionName);
+        }
+        if (framesScope)
+            yield return ScopeExit(outerBatch, procFrame.ReturnCode ?? procFrame.StatusWithoutReturnValue);
     }
 
     /// <summary>

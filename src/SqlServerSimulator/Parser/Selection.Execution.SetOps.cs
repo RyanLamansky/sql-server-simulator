@@ -61,6 +61,13 @@ internal sealed partial class Selection
     /// <summary>The browse-mode metadata the statement's result carries; see <see cref="SimulatedQueryResult.Browse"/>.</summary>
     internal BrowseInfo? Browse;
 
+    /// <summary>
+    /// For a cursor's query, what a <c>FETCH</c> result names its columns'
+    /// base tables and columns as — the browse tokens real sends with every
+    /// fetch, less the key flag (probed 2026-09-28 against SQL Server 2025).
+    /// </summary>
+    internal BrowseInfo? CursorBrowse;
+
     /// <summary>How many trailing columns are browse mode's hidden key and rowversion columns.</summary>
     internal int HiddenColumnCount;
 

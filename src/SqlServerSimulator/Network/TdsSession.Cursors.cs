@@ -520,7 +520,7 @@ internal sealed partial class TdsSession
         if (!moreRequests)
             this.WriteSessionEnvChangesIfAny(writer);
         var status = (ushort)((error ? Tds.DoneError : 0) | (moreRequests ? Tds.DoneMore : Tds.DoneFinal));
-        writer.WriteDoneToken(Tds.TokenDoneProc, status, 0);
+        writer.WriteDoneToken(Tds.TokenDoneProc, status, 0, StatementDoneKind.Execute);
     }
 
     private static string AsString(List<TdsRpcParameter> parameters, int index) =>

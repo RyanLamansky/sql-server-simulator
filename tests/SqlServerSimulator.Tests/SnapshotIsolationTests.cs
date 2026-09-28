@@ -437,4 +437,43 @@ public sealed class SnapshotIsolationTests
         _ = siConn.CreateCommand("commit").ExecuteNonQuery();
         AreEqual(100, sim.ExecuteScalar("select v from t where id = 1"));
     }
+
+    [TestMethod]
+    [DataRow("update t set v = 300 where id = 1", "update t set id = 10 where id = 1", 2, DisplayName = "key moved")]
+    [DataRow("delete t where v = 100", "update t set v = 5 where id = 1", 2, DisplayName = "row left the predicate")]
+    public void Msg3960_WhenAnotherTransactionTookTheRowOutOfTheWhere(string snapshotWrite, string otherWrite, int state)
+    {
+        // The row the snapshot sees matches, though the live row no longer
+        // does (probed 2026-09-28 against SQL Server 2025).
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            alter database current set allow_snapshot_isolation on;
+            create table t (id int not null primary key, v int);
+            insert t values (1, 100), (2, 200)
+            """);
+        using var siConn = sim.CreateOpenConnection();
+        _ = siConn.CreateCommand("set transaction isolation level snapshot; begin tran; select count(*) from t").ExecuteScalar();
+        using (var rcConn = sim.CreateOpenConnection())
+            _ = rcConn.CreateCommand(otherWrite).ExecuteNonQuery();
+        var ex = Throws<SimulatedSqlException>(() => siConn.CreateCommand(snapshotWrite).ExecuteNonQuery());
+        AreEqual((3960, (byte)state), (ex.Number, ex.State));
+        AreEqual(0, siConn.CreateCommand("select @@trancount").ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void Msg3960_OnAHeap_IsState6()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            alter database current set allow_snapshot_isolation on;
+            create table h (id int, v int);
+            insert h values (1, 100)
+            """);
+        using var siConn = sim.CreateOpenConnection();
+        _ = siConn.CreateCommand("set transaction isolation level snapshot; begin tran; select count(*) from h").ExecuteScalar();
+        using (var rcConn = sim.CreateOpenConnection())
+            _ = rcConn.CreateCommand("update h set v = 5 where id = 1").ExecuteNonQuery();
+        var ex = Throws<SimulatedSqlException>(() => siConn.CreateCommand("update h set v = 3 where id = 1").ExecuteNonQuery());
+        AreEqual((3960, (byte)6), (ex.Number, ex.State));
+    }
 }

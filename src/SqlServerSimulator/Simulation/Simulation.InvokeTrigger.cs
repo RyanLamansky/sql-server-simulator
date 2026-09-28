@@ -249,6 +249,14 @@ partial class Simulation
         var outerTriggerVersionEntries = connection.TriggerStatementVersionEntries;
         connection.TriggerStatementUndoLog = outerBatch.CurrentUndoLog;
         connection.TriggerStatementVersionEntries = outerBatch.CurrentStatementVersionEntries;
+        // A statement firing in auto-commit whose trigger ended the statement's
+        // unit and began a transaction of its own ends that transaction's
+        // outermost level when it completes, as the unit it replaced would
+        // have: one BEGIN is committed, two leave one open (probed 2026-09-28
+        // against SQL Server 2025).
+        var autoCommit = connection.CurrentTransaction is null;
+        var outerReplaced = connection.TriggerReplacedTransaction;
+        connection.TriggerReplacedTransaction = false;
 
         try
         {
@@ -270,9 +278,15 @@ partial class Simulation
                     trigger.UsesQuotedIdentifier,
                     trigger.UsesAnsiNulls);
             }
+            if (autoCommit && connection.TriggerReplacedTransaction && connection.CurrentTransaction is { } begunInTrigger)
+            {
+                if (--begunInTrigger.TranCount == 0)
+                    begunInTrigger.EndCommit();
+            }
         }
         finally
         {
+            connection.TriggerReplacedTransaction = outerReplaced;
             connection.TriggerStatementUndoLog = outerTriggerLog;
             connection.TriggerStatementVersionEntries = outerTriggerVersionEntries;
         }
@@ -419,8 +433,15 @@ partial class Simulation
                 // TRY / CATCH swallowed — the swallow doesn't save it.
                 if (connection.TriggerBodyErrorRaised)
                     throw SimulatedSqlException.ErrorRaisedDuringTriggerExecution();
+                // A body that ended the transaction and began another leaves
+                // the statement standing (probed 2026-09-28 against SQL Server
+                // 2025); only one that returns with none open aborts the batch.
                 if (connection.TriggerTransactionEnded)
-                    throw SimulatedSqlException.TransactionEndedInTrigger(frame.Trigger is null ? (byte)2 : (byte)1);
+                {
+                    if (connection.CurrentTransaction is null)
+                        throw SimulatedSqlException.TransactionEndedInTrigger(frame.Trigger is null ? (byte)2 : (byte)1);
+                    connection.TriggerReplacedTransaction = true;
+                }
             }
             else if ((frame.Trigger?.ClrEntry ?? frame.DdlTrigger?.ClrEntry) is { } clrEntry)
             {

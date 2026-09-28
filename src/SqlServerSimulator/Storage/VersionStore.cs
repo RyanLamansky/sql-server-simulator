@@ -443,7 +443,7 @@ internal static class VersionStore
         // Row was modified by another tx after my snapshot. Probe-confirmed
         // auto-rollback: the SI tx terminates with @@TRANCOUNT = 0.
         connection.CurrentTransaction?.EndRollback();
-        throw SimulatedSqlException.SnapshotIsolationUpdateConflict($"{Database.DefaultSchemaName}.{table.Name}", batch.DatabaseFor(table).Name);
+        throw SimulatedSqlException.SnapshotIsolationUpdateConflict($"{Database.DefaultSchemaName}.{table.Name}", batch.DatabaseFor(table).Name, table.HasClusteredIndex());
     }
 
     /// <summary>
@@ -490,6 +490,22 @@ internal static class VersionStore
             : chain.IsDeletedLive && chain.LiveXmin > snapshotXid
                 ? WalkHistory(chain.Head, snapshotXid)
                 : null;
+    }
+
+    /// <summary>
+    /// For a slot whose live row another transaction changed after
+    /// <paramref name="snapshotXid"/> — committed since, or still in flight —
+    /// the version the snapshot sees instead; <c>null</c> when the live row
+    /// is the snapshot's own view, was inserted after it, or is the reader's
+    /// own write.
+    /// </summary>
+    internal static byte[]? ResolveChangedLiveSlotForSnapshot(RowVersionChain chain, long snapshotXid, SimulatedDbTransaction? readerTx)
+    {
+        if (chain.IsDeletedLive)
+            return null;
+        if (chain.WriterTx is { } writer)
+            return ReferenceEquals(writer, readerTx) ? null : WalkHistory(chain.Head, snapshotXid);
+        return chain.LiveXmin > snapshotXid ? WalkHistory(chain.Head, snapshotXid) : null;
     }
 
     private static byte[]? WalkHistory(HistoricalVersion? head, long snapshotXid)

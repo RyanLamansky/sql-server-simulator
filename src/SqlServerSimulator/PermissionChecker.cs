@@ -898,8 +898,8 @@ internal static class PermissionChecker
     /// <summary>
     /// Whether <paramref name="principalId"/> may read the catalog view with id
     /// <paramref name="viewId"/>: a <c>DENY SELECT</c> reaching it refuses, and
-    /// one of the system objects every database grants <c>public</c>
-    /// <c>SELECT</c> on (<see cref="Database.PublicSelectSeedObjectIdSet"/>)
+    /// one of the system objects the database grants <c>public</c>
+    /// <c>SELECT</c> on (<see cref="Database.SeedsPublicSelect"/>)
     /// needs that grant, or another, still standing — a <c>REVOKE</c> of the
     /// seeded one refuses it (probed 2026-09-28 against SQL Server 2025). The
     /// deny roles and data roles don't reach the catalog.
@@ -910,7 +910,7 @@ internal static class PermissionChecker
         var satisfiers = BuildSatisfiers(Permission.Select, ClassObject, viewId, schemaId, columnOrdinal: 0);
         if (HasMatchingRow(database, closure, satisfiers, deny: true))
             return false;
-        return !Database.PublicSelectSeedObjectIdSet.Contains(viewId)
+        return !database.SeedsPublicSelect(viewId)
             || closure.Contains(DbOwner)
             || HasMatchingRow(database, closure, satisfiers, deny: false);
     }

@@ -1739,6 +1739,11 @@ internal sealed partial class Selection
             selection.Browse = BrowseInfoFor(sources, expressions, outputColumnNames, browseHidden);
             selection.HiddenColumnCount = browseHidden;
         }
+        if (parseBatch.Parser.CursorStatement && scope.Position == QueryPosition.Statement)
+        {
+            parseBatch.Parser.CursorStatement = false;
+            selection.CursorBrowse = BrowseInfoFor(sources, expressions, outputColumnNames, 0, markKeys: false);
+        }
         selection.StartsConstants = startsConstants;
         selection.HasWindows = windows.Count > 0;
         // A plain SELECT-project-filter body can carry an enclosing statement's

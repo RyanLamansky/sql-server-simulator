@@ -147,6 +147,11 @@ partial class Simulation
         if (!context.Batch.Connection.Simulation.Logins.TryRemove(name, out _))
             throw SimulatedSqlException.CannotAlterOrDropLogin("drop", name);
         RecordServerDdlEvent(context, "DROP_LOGIN", databaseName: null, name);
+        // Real's DROP LOGIN runs two internal procedures whose return statuses
+        // reach the client on their own, and sends no DONE of its own (probed
+        // 2026-09-28 against SQL Server 2025).
+        if (context.Batch.Connection.FramesEveryStatement)
+            (context.Batch.PendingTriggerOutcomes ??= []).AddRange([new SimulatedReturnStatus(0), new SimulatedReturnStatus(0)]);
         return true;
     }
 

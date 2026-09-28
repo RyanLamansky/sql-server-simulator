@@ -1373,9 +1373,19 @@ partial class Simulation
             foreach (var outcome in connection.Simulation.ParseExec(batch, insertExecSource: true))
             {
                 // The procedure's messages still reach the client, ahead of
-                // the INSERT's own outcome.
-                if (outcome is SimulatedInfoOutcome info)
+                // the INSERT's own outcome, and on a connection that frames
+                // every statement so do its statements' DONEINPROCs, none
+                // carrying a count — the rows went to the table (probed
+                // 2026-09-28 against SQL Server 2025).
+                if (connection.FramesEveryStatement)
+                {
+                    if (FramedInsertExecOutcome(outcome) is { } framed)
+                        (batch.PendingTriggerOutcomes ??= []).Add(framed);
+                }
+                else if (outcome is SimulatedInfoOutcome info)
+                {
                     connection.PendingMessages.Enqueue(info.Message);
+                }
                 if (outcome is not SimulatedSqlResultSet resultSet)
                     continue;
                 if (resultSet.Schema.Length != expectedColumnCount)
@@ -1391,6 +1401,25 @@ partial class Simulation
         }
         return rows;
     }
+
+    /// <summary>
+    /// What one of an <c>INSERT … EXEC</c> body's outcomes sends the client:
+    /// its messages as they are, a statement's DONE without its count, and
+    /// nothing for a result set's rows or a scope's close, which real frames
+    /// as neither.
+    /// </summary>
+    private static SimulatedStatementOutcome? FramedInsertExecOutcome(SimulatedStatementOutcome outcome) => outcome switch
+    {
+        SimulatedInfoOutcome => outcome,
+        SimulatedQueryResult or SimulatedNonQuery => new SimulatedNonQuery(-1)
+        {
+            DoneKind = outcome.DoneKind == StatementDoneKind.NoDone ? StatementDoneKind.Select : outcome.DoneKind,
+            InModule = true,
+            CountSuppressed = false,
+            TransactionEventMark = outcome.TransactionEventMark,
+        },
+        _ => null,
+    };
 
     /// <summary>
     /// A <c>SELECT</c> whose rows an <c>INSERT … EXEC</c> takes meets the

@@ -392,6 +392,12 @@ internal static class ConstantFolding
         if (!term.IsWrittenConstant)
             return term;
 
+        // Real doesn't fold a constant of a MAX type, so one reads as a
+        // key that orders nothing — no Msg 5309, and no Msg 8728 under a
+        // RANGE frame either (probed 2026-09-28 against SQL Server 2025).
+        if (Expressions.WindowExpression.IsMaxFormType(ConstantTermType(term, context)))
+            return NeverEvaluatedKey();
+
         SqlValue folded;
         try
         {
@@ -413,6 +419,23 @@ internal static class ConstantFolding
         throw !folded.IsNull && folded.Type == SqlType.Int32 && folded.AsInt32 >= 1
             ? SimulatedSqlException.IntegerIndexNotAllowedInOrderedAggregate()
             : SimulatedSqlException.ConstantNotAllowedInOrderedAggregate();
+    }
+
+    /// <summary>
+    /// A written constant's static type, or null for one whose type reads a
+    /// column — an arm a <c>COALESCE</c> or <c>CASE</c> settles still types
+    /// through the arms it drops.
+    /// </summary>
+    private static SqlType? ConstantTermType(Expression term, ParserContext context)
+    {
+        try
+        {
+            return term.GetSqlType(context.Batch, static _ => throw new NotSupportedException());
+        }
+        catch (NotSupportedException)
+        {
+            return null;
+        }
     }
 
     /// <summary>

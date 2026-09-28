@@ -854,6 +854,7 @@ partial class SimulatedSqlException
         return new(string.Join(Environment.NewLine, entries.Select(entry => entry.Message)), System.Runtime.InteropServices.CollectionsMarshal.AsSpan(entries))
         {
             AbortsTransaction = true,
+            EndsSession = true,
         };
     }
 

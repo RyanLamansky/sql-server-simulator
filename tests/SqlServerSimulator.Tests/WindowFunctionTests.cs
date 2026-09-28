@@ -929,5 +929,15 @@ public sealed class WindowFunctionTests
     [DataRow("lag(v, 3000000000, 7) over (order by id)", "7|7|7")]
     public void LagOffset_NullOrPastThePartition(string window, string expected)
         => AreEqual(expected, new Simulation().ExecuteScalar($"select string_agg(coalesce(cast(r as varchar(5)), ''), '|') within group (order by id) from (select id, {window} r from (values (1, 10), (2, 20), (3, 30)) t(id, v)) q"));
-}
 
+    [TestMethod]
+    [DataRow("cast('a' as varchar(max))")]
+    [DataRow("cast(null as nvarchar(max))")]
+    [DataRow("cast('a' as nvarchar(max)) + 'b'")]
+    public void WindowOrderBy_MaxTypedConstant_OrdersNothing(string term)
+        // Real doesn't fold a MAX-typed constant, so neither Msg 5309 nor,
+        // under a RANGE frame, Msg 8728 (probed 2026-09-28 against SQL Server
+        // 2025).
+        => AreEqual(2, new Simulation().ExecuteScalar(
+            $"select max(s) from (select sum(1) over (order by {term} range between unbounded preceding and current row) s from (values (1), (2)) t(x)) q"));
+}

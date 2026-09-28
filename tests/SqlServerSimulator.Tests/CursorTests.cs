@@ -726,4 +726,14 @@ public sealed class CursorTests
             declare @i int;
             fetch {fetch} from c into @i;
             """, error, message);
+
+    [TestMethod]
+    [DataRow("open nope", 0)]
+    [DataRow("fetch next from nope", 0)]
+    [DataRow("close nope", 2)]
+    [DataRow("deallocate nope", 2)]
+    public void UndeclaredCursor_Msg16916_Line(string statement, int line)
+        // OPEN and FETCH report line 0, CLOSE and DEALLOCATE the statement's
+        // (probed 2026-09-28 against SQL Server 2025).
+        => AreEqual(line, new Simulation().AssertSqlError($"select 1\n{statement}", 16916).LineNumber);
 }

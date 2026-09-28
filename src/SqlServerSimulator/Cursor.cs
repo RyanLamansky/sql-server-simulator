@@ -450,6 +450,13 @@ internal sealed class Cursor(
             ColumnReportsNumeric = selection.ColumnReportsNumeric is { } numeric ? [.. numeric, false] : null,
             ColumnWireFlags = selection.ColumnWireFlags is { } flags ? [.. flags, 0] : null,
             HiddenColumnCount = 1,
+            // The browse tokens name each column's base table — every column
+            // an expression when the query reads none — and the ROWSTAT
+            // hidden and an expression (probed 2026-09-28 against SQL Server
+            // 2025).
+            Browse = selection.CursorBrowse is { } browse
+                ? new BrowseInfo(browse.Tables, [.. browse.Columns, (0, 0x14, null)])
+                : new BrowseInfo([], [.. Parser.Selection.SetOperationBrowseInfo(width).Columns, (0, 0x14, null)]),
         };
     }
 

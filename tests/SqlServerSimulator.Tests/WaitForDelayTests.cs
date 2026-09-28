@@ -426,4 +426,11 @@ public sealed class WaitForDelayTests
         probe.CommandText = "select @@TRANCOUNT";
         AreEqual(1, probe.ExecuteScalar());
     }
+
+    [TestMethod]
+    [DataRow("0:0:0")]
+    [DataRow("0:00:00.001")]
+    public void Delay_OneDigitFields_Accepted(string delay)
+        // Probed 2026-09-28 against SQL Server 2025.
+        => AreEqual(1, new Simulation().ExecuteScalar($"waitfor delay '{delay}'; select 1"));
 }

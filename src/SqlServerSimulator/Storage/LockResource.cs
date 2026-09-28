@@ -277,7 +277,7 @@ internal sealed class LockManager
         switch (this.TryAcquire(resource, mode, owner, timeoutMillis))
         {
             case LockAcquireOutcome.TimedOut:
-                throw SimulatedSqlException.LockRequestTimeOutExceeded();
+                throw SimulatedSqlException.LockRequestTimeOutExceeded(TimeoutState(resource));
             case LockAcquireOutcome.Deadlocked:
                 throw SimulatedSqlException.TransactionDeadlocked(owner.Spid);
             case LockAcquireOutcome.Cancelled:
@@ -288,6 +288,19 @@ internal sealed class LockManager
                     : SimulatedSqlException.CommandCancelled();
         }
     }
+
+    /// <summary>
+    /// Msg 1222's state, which names the kind of lock that timed out: 51 for
+    /// a key lock — a row of a table with a clustered index is one — 45 for a
+    /// heap's row, 56 for a table or schema lock (probed 2026-09-28 against
+    /// SQL Server 2025).
+    /// </summary>
+    private static byte TimeoutState(LockResource resource) => resource switch
+    {
+        { KeyGroup: not null } => 51,
+        { RowAddress: not null, OwningTable: { } table } => table.HasClusteredIndex() ? (byte)51 : (byte)45,
+        _ => 56,
+    };
 
     /// <summary>
     /// Non-throwing acquire core. Identical semantics to

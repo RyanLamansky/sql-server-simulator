@@ -206,4 +206,27 @@ public sealed class ProcedureBodyContinuationTests
     [TestMethod]
     public void ExecString_TakesNoReturnCodeVariable()
         => new Simulation().ValidateSyntaxError("declare @rc int; exec @rc = ('select 1')", "(");
+
+    [TestMethod]
+    public void MissingTableInABlock_EndsTheProcedure_NotTheCaller()
+    {
+        // The block around the failing statement ends with the body, and the
+        // caller carries on (probed 2026-09-28 against SQL Server 2025).
+        var simulation = WithLog("create procedure p as begin insert log values (1); select * from nosuch; insert log values (2) end");
+        AreEqual(208, Fails(simulation, "exec p; insert log values (3)").Number);
+        CollectionAssert.AreEqual(new[] { 1, 3 }, Steps(simulation));
+    }
+
+    [TestMethod]
+    public void StoredProcedureCommand_RunsOnPastAStatementError()
+    {
+        // Called by RPC, the body runs on as one a batch's EXEC calls does
+        // (probed 2026-09-28 against SQL Server 2025).
+        var simulation = WithLog("create procedure p as insert log values (1); select 1/0; insert log values (2)");
+        using var connection = simulation.CreateOpenConnection();
+        using var command = connection.CreateCommand("p");
+        command.CommandType = System.Data.CommandType.StoredProcedure;
+        AreEqual(8134, Throws<SimulatedSqlException>(() => command.ExecuteNonQuery()).Number);
+        CollectionAssert.AreEqual(new[] { 1, 2 }, Steps(simulation));
+    }
 }

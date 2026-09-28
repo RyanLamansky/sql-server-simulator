@@ -118,6 +118,85 @@ internal sealed class TdsSessionFixture : IDisposable
         return tokens;
     }
 
+    /// <summary>
+    /// The response's tokens as short text naming each DONE's kind, bits and
+    /// count — <c>DONE D4 MORE 0</c>, <c>DONEINPROC C1 MORE|COUNT 1</c>,
+    /// <c>DONEPROC E0 FINAL 0</c> — with <c>RET n</c> for a RETURNSTATUS,
+    /// <c>ENVn</c> for an ENVCHANGE, <c>ERR n</c> / <c>INFO n</c>, and
+    /// <c>ROWS</c> for a result set, which may carry only <c>int</c> columns.
+    /// </summary>
+    public static List<string> Describe(byte[] response)
+    {
+        var tokens = new List<string>();
+        var fixedInt = new List<bool>();
+        var i = 0;
+        while (i < response.Length)
+        {
+            var token = response[i++];
+            switch (token)
+            {
+                case Tds.TokenEnvChange:
+                    tokens.Add($"ENV{response[i + 2]}");
+                    i += 2 + BinaryPrimitives.ReadUInt16LittleEndian(response.AsSpan(i));
+                    break;
+                case Tds.TokenError:
+                case Tds.TokenInfo:
+                    tokens.Add($"{(token == Tds.TokenError ? "ERR" : "INFO")} {BinaryPrimitives.ReadInt32LittleEndian(response.AsSpan(i + 2))}");
+                    i += 2 + BinaryPrimitives.ReadUInt16LittleEndian(response.AsSpan(i));
+                    break;
+                case Tds.TokenTabName:
+                case Tds.TokenColInfo:
+                    i += 2 + BinaryPrimitives.ReadUInt16LittleEndian(response.AsSpan(i));
+                    break;
+                case Tds.TokenColMetadata:
+                    {
+                        var columns = BinaryPrimitives.ReadUInt16LittleEndian(response.AsSpan(i));
+                        i += 2;
+                        fixedInt.Clear();
+                        for (var c = 0; c < columns; c++)
+                        {
+                            i += 6; // user type, flags
+                            // INT4 (NOT NULL) is the type byte alone, INTN
+                            // carries its length.
+                            fixedInt.Add(response[i] == 0x38);
+                            i += response[i] == 0x26 ? 2 : 1;
+                            i += 1 + (response[i] * 2); // name
+                        }
+                        tokens.Add("ROWS");
+                        break;
+                    }
+                case Tds.TokenRow:
+                    foreach (var isFixed in fixedInt)
+                        i += isFixed ? 4 : 1 + response[i];
+                    break;
+                case Tds.TokenReturnStatus:
+                    tokens.Add($"RET {BinaryPrimitives.ReadInt32LittleEndian(response.AsSpan(i))}");
+                    i += 4;
+                    break;
+                case Tds.TokenDone:
+                case Tds.TokenDoneProc:
+                case Tds.TokenDoneInProc:
+                    {
+                        var status = BinaryPrimitives.ReadUInt16LittleEndian(response.AsSpan(i));
+                        var bits = new List<string>();
+                        if ((status & Tds.DoneMore) != 0)
+                            bits.Add("MORE");
+                        if ((status & Tds.DoneError) != 0)
+                            bits.Add("ERROR");
+                        if ((status & Tds.DoneCount) != 0)
+                            bits.Add("COUNT");
+                        var name = token == Tds.TokenDone ? "DONE" : token == Tds.TokenDoneProc ? "DONEPROC" : "DONEINPROC";
+                        tokens.Add($"{name} {BinaryPrimitives.ReadUInt16LittleEndian(response.AsSpan(i + 2)):X2} {(bits.Count == 0 ? "FINAL" : string.Join('|', bits))} {BinaryPrimitives.ReadInt64LittleEndian(response.AsSpan(i + 4))}");
+                        i += 12;
+                        break;
+                    }
+                default:
+                    throw new InvalidDataException($"Unexpected token 0x{token:X2}.");
+            }
+        }
+        return tokens;
+    }
+
     public void Dispose()
     {
         this.connection.Dispose();

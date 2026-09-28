@@ -285,8 +285,15 @@ partial class Simulation
         {
             if (OpensImplicitTransaction(systemProcName!))
                 batch.BeginImplicitTransaction();
+            // A system procedure is a procedure scope like any other;
+            // sp_executesql frames its own.
+            var framesScope = batch.Connection.FramesEveryStatement && !batch.IsSkipping && !insertExecSource && systemProcName != "sp_executesql";
+            if (framesScope)
+                yield return new SimulatedProcScopeBoundary(isEnter: true);
             foreach (var outcome in AttributedToSystemProcedure(systemProc, systemProcName!, CalledName(procName)))
                 yield return outcome;
+            if (framesScope)
+                yield return ScopeExit(batch, 0);
             // A system procedure that finishes answers 0 to `EXEC @rc = …`
             // (probed 2026-09-25 across sp_help, sp_who, sp_rename and the
             // extended-property procedures); the few with codes of their own
@@ -341,7 +348,8 @@ partial class Simulation
         }
 
         var invocation = this.InvokeProcedure(
-            batch, procedure, arguments, returnCodeVar, execSynonym is null ? writtenName : $"{procedure.Schema.Name}.{procedure.Name}", execSynonym);
+            batch, procedure, arguments, returnCodeVar, execSynonym is null ? writtenName : $"{procedure.Schema.Name}.{procedure.Name}", execSynonym,
+            framesScope: batch.Connection.FramesEveryStatement && !insertExecSource);
         foreach (var outcome in resultSets is null ? invocation : ApplyResultSetsContract(invocation, resultSets))
             yield return outcome;
         batch.CurrentStatement.SuppressErrorReset = true;

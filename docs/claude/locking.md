@@ -379,7 +379,7 @@ When a conflict-driven wait would block, `LockManager.Acquire`:
 ## Lock-timeout semantics
 
 `SET LOCK_TIMEOUT N` → `connection.LockTimeoutMillis`.
-Negative = wait forever (default), `0` = fail-fast on first conflict, positive `N` = wait up to `N` ms before raising Msg 1222.
+Negative = wait forever (default), `0` = fail-fast on first conflict, positive `N` = wait up to `N` ms before raising Msg 1222, whose state names the kind of lock (`LockManager.TimeoutState`).
 Applies uniformly to schema locks, data locks, and row locks.
 
 **A blocked wait also observes the command's own cancellation** — its `CommandTimeout`, a TDS attention, or an in-process `Cancel()`.
@@ -551,8 +551,9 @@ A rollback to a savepoint discards the entries written after it, as it undoes th
 
 ### Update-conflict detection (Msg 3960)
 `VersionStore.CheckSnapshotUpdateConflict(batch, table, rid)` runs at the top of `CommitUpdate` and `CommitDelete` when the writer's iso is Snapshot.
-Raises **Msg 3960** verbatim (`Snapshot isolation transaction aborted due to update conflict. You cannot use snapshot isolation to access table '<schema>.<table>' directly or indirectly in database '<db>' to update, delete, or insert the row that has been modified or deleted by another transaction. Retry the transaction or change the isolation level for the update/delete statement.` Cls 16, State 2) when the chain at the target Rid shows `LiveXmin > snapshotXid` or a foreign `WriterTx`.
+Raises **Msg 3960** verbatim (`Snapshot isolation transaction aborted due to update conflict. You cannot use snapshot isolation to access table '<schema>.<table>' directly or indirectly in database '<db>' to update, delete, or insert the row that has been modified or deleted by another transaction. Retry the transaction or change the isolation level for the update/delete statement.` Cls 16) when the chain at the target Rid shows `LiveXmin > snapshotXid` or a foreign `WriterTx` — state 2 for a table with a clustered index, 6 for a heap (probed 2026-09-28 against SQL Server 2025).
 Auto-rolls back the SI transaction before throwing (probe-confirmed `@@TRANCOUNT = 0` in the CATCH block).
+A row another transaction changed so that the live row no longer matches the WHERE — its key moved, or the column the predicate reads — is a conflict too when the version the snapshot sees matches: the writer's pre-flight judges it by that version (`VersionStore.ResolveChangedLiveSlotForSnapshot`), as the next section's does a deleted row (probed 2026-09-28 against SQL Server 2025).
 
 ### Tombstoned-slot snapshot pass
 SI / RCSI iteration walks tombstoned slots in a second pass after the live-heap pass so deleted rows whose pre-delete payload is still visible at the snapshot surface correctly.
@@ -586,7 +587,7 @@ The oldest active Xid comes from `Simulation.ActiveSnapshotTxs`, a `ConcurrentDi
 RCSI per-statement snapshots don't register here — their sub-statement lifetime means the once-per-tx GC cadence won't observe them as load-bearing, and the short window of risk is bounded by statement execution time.
 
 ### Known MVCC limitations
-- **An update conflict over a changed key**: a SNAPSHOT transaction updating a row another transaction has since given a new key finds nothing to update, where real refuses it with Msg 3960 (probed 2026-09-28 against SQL Server 2025).
+- **Msg 3960's state 4**: real reports a conflict it meets scanning a table with a clustered index at state 4 and one it meets seeking at state 2, where the simulator, knowing no access path there, reports 2 for every table with a clustered index (probed 2026-09-28 against SQL Server 2025).
 - **`sys.dm_tran_version_store` timing**: real lists a version while its writer is still in flight and keeps it until its cleanup task runs, where the simulator lists only finalized versions and collects them at commit once no snapshot needs them.
 
 ## Table-level and schema-lock behaviors
@@ -597,7 +598,7 @@ Retained at table / schema granularity:
 - `SchemaObject.SchemaLock` field.
 - `SimulatedDbConnection.Spid` / `LockTimeoutMillis` / `CurrentExecutingThreadId` / `WaitingOnResource`.
 - `Simulation.AllocateSpid()` (first user SPID = 51).
-- Msg 1222 verbatim wording (Class 16, State 56).
+- Msg 1222 verbatim wording (Class 16), its state naming the lock that timed out: 51 for a key lock — a row of a table with a clustered index is one — 45 for a heap's row, 56 for a table or schema lock (probed 2026-09-28 against SQL Server 2025).
 - Msg 1205 verbatim wording with SPID interpolation; auto-rollback of victim's tx.
 - Same-thread-deadlock short-circuit.
 - HOLDLOCK retain-until-tx-end semantic, over a key range where the predicate offers one and table-S otherwise, in the range mode any `UPDLOCK` / `XLOCK` alongside it names.

@@ -373,21 +373,23 @@ partial class Simulation
     /// temp table qualified into <c>tempdb.dbo</c> by its padded internal name
     /// as for <see cref="QualifyForNullMessage"/>, and a table variable
     /// likewise by its own, <c>#</c> and the eight hex digits of its negative
-    /// object id (<c>tempdb.dbo.#B9CBEB0A</c>; probed 2026-09-28).
+    /// object id (<c>tempdb.dbo.#B9CBEB0A</c>; probed 2026-09-28) — save a
+    /// multi-statement function's return table, named for the function.
     /// </summary>
     internal static string QualifyForTruncationMessage(HeapTable table) =>
-        table.OwningDatabase is { } owner
-            ? QualifyTableName(table, owner)
+        table.ReturnTableOf is { } function ? $"{function.Schema.Database.Name}.{function.Schema.Name}.{function.Name}"
+            : table.OwningDatabase is { } owner ? QualifyTableName(table, owner)
             : $"{TempdbDatabaseName}.{Database.DefaultSchemaName}.{table.InternalName ?? table.Name}";
 
     /// <summary>
     /// The database name the constraint-violation messages (the Msg 547
     /// family) put in their <c>in database "…"</c> slot: the table's own
     /// owning database, or <c>tempdb</c> for a temp table or table variable,
-    /// which is where real serves those from.
+    /// which is where real serves those from — save a multi-statement
+    /// function's return table, in the function's database.
     /// </summary>
     internal static string DatabaseNameFor(HeapTable table) =>
-        table.OwningDatabase?.Name ?? TempdbDatabaseName;
+        table.ReturnTableOf?.Schema.Database.Name ?? table.OwningDatabase?.Name ?? TempdbDatabaseName;
 
     /// <summary>
     /// The <c>schema.table</c> half of the same messages; a local <c>#temp</c>

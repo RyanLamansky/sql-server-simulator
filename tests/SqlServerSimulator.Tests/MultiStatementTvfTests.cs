@@ -342,4 +342,20 @@ public sealed class MultiStatementTvfTests
         _ = sim.AssertSqlError(call + "; insert t values (7)", 208);
         AreEqual(7, sim.ExecuteScalar("select a from t"));
     }
+
+    [TestMethod]
+    [DataRow("a varchar(2)", "'abc'", 2628, "String or binary data would be truncated in table 'simulated.dbo.f', column 'a'. Truncated value: 'ab'.")]
+    [DataRow("a int check (a > 0)", "0", 547, "The conflict occurred in database \"simulated\", table \"@r\", column 'a'.")]
+    [DataRow("a int primary key", "1), (1", 2627, "Cannot insert duplicate key in object 'dbo.@r'.")]
+    public void ReturnTableWriteError_NamesTheFunction_AndTerminatesTheStatement(string column, string values, int number, string fragment)
+    {
+        // Msg 2628 names the return table for the function, Msg 547 its
+        // database, and each is followed by Msg 3621 (probed 2026-09-28
+        // against SQL Server 2025).
+        var simulation = new Simulation();
+        simulation.ExecuteBatches($"create function dbo.f() returns @r table ({column}) as begin insert @r values ({values}); return end");
+        var ex = simulation.AssertSqlError("select * from dbo.f()", number);
+        Assert.Contains(fragment, ex.Errors[0].Message);
+        Assert.Contains("The statement has been terminated.", ex.Message);
+    }
 }

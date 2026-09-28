@@ -146,4 +146,32 @@ public sealed class PermissionSeedTests
         AreEqual(1, reader.GetInt32(1));
         AreEqual(1, reader.GetInt32(2));
     }
+
+    [TestMethod]
+    public void Master_GrantsPublicItsSystemProcedures_AndSeedsItsPolicyUsers()
+    {
+        // Probed 2026-09-28 against SQL Server 2025.
+        var sim = new Simulation();
+        AreEqual("877|1827|4", sim.ExecuteScalar("""
+            use master;
+            select concat(
+                (select count(*) from sys.database_permissions where class = 1 and grantee_principal_id = 0 and type = 'SL'), '|',
+                (select count(*) from sys.database_permissions where class = 1 and grantee_principal_id = 0 and type = 'EX'), '|',
+                (select count(*) from sys.database_permissions p join sys.database_principals u on u.principal_id = p.grantee_principal_id where u.name like '##%'))
+            """));
+        AreEqual("C", sim.ExecuteScalar("select type from master.sys.database_principals where name = '##MS_AgentSigningCertificate##'"));
+    }
+
+    [TestMethod]
+    public void Msdb_SeedsItsAgentRoles_WithTheirMemberships()
+    {
+        var sim = new Simulation();
+        AreEqual("SQLAgentReaderRole", sim.ExecuteScalar("""
+            select r.name from msdb.sys.database_role_members m
+            join msdb.sys.database_principals r on r.principal_id = m.role_principal_id
+            join msdb.sys.database_principals u on u.principal_id = m.member_principal_id
+            where u.name = 'SQLAgentOperatorRole'
+            """));
+        AreEqual(25, sim.ExecuteScalar("use msdb; create user fresh without login; select database_principal_id('fresh')"));
+    }
 }

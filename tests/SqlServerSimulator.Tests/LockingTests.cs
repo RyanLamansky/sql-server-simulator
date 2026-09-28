@@ -860,4 +860,24 @@ public sealed class LockingTests
         var count = (int)sim.ExecuteScalar("select count(*) from sys.dm_tran_locks")!;
         IsGreaterThanOrEqualTo(0, count);
     }
+
+    [TestMethod]
+    [DataRow("create table t (id int primary key, v int)", "update t set v = 2 where id = 1", "select v from t where id = 1", 51, DisplayName = "key lock")]
+    [DataRow("create table t (id int, v int)", "update t set v = 2 where id = 1", "select v from t where id = 1", 45, DisplayName = "heap row")]
+    [DataRow("create table t (id int, v int)", "select * from t with (tablockx)", "select v from t", 56, DisplayName = "table lock")]
+    public async Task LockTimeout_StateNamesTheLockKind(string create, string holder, string waiter, int state)
+    {
+        // Msg 1222's state: 51 for a key lock, 45 for a heap's row, 56 for a
+        // table or schema lock (probed 2026-09-28 against SQL Server 2025).
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery($"{create}; insert t values (1, 1), (2, 2)");
+        using var writer = sim.CreateOpenConnection();
+        using var reader = sim.CreateOpenConnection();
+        _ = writer.CreateCommand($"begin tran; {holder}").ExecuteNonQuery();
+        var ex = await Task.Run(() =>
+            Throws<SimulatedSqlException>(() => reader.CreateCommand($"set lock_timeout 0; {waiter}").ExecuteScalar()),
+            TestContext.CancellationToken);
+        AreEqual((1222, (byte)state), (ex.Number, ex.State));
+        _ = writer.CreateCommand("rollback").ExecuteNonQuery();
+    }
 }

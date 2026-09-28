@@ -140,6 +140,13 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     public bool BrowseStatement;
 
     /// <summary>
+    /// Set while a cursor declaration parses its query, whose statement-level
+    /// query specification then records the base-column metadata a
+    /// <c>FETCH</c> sends (<see cref="Selection.CursorBrowse"/>).
+    /// </summary>
+    public bool CursorStatement;
+
+    /// <summary>
     /// Set when a statement's query ends in <c>FOR BROWSE</c>, so the SELECT
     /// dispatch can read the statement again as a browse statement — the
     /// clause arrives after the projection it decides.

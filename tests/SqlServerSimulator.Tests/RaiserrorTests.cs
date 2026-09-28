@@ -500,4 +500,12 @@ public sealed class RaiserrorTests
         AreEqual("ExecuteScalar requires an open and available Connection. The connection's current state is closed.", closed.Message);
         AreEqual(0, simulation.ExecuteScalar("select count(*) from t"));
     }
+
+    [TestMethod]
+    public void Sev19WithLog_EndsOnlyItsStatement()
+    {
+        // The batch carries on past it (probed 2026-09-28 against SQL Server 2025).
+        var ex = new Simulation().AssertSqlError("raiserror('x', 19, 1) with log; select 1 / 0", 50000);
+        AreEqual(8134, ex.Errors[1].Number);
+    }
 }

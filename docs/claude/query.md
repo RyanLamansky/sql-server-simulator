@@ -383,10 +383,12 @@ Real applies **no range check** against the select list: `OVER (ORDER BY 100)` o
 
 Deciding 5308 vs 5309 needs the folded *value*, so the gate evaluates the term at parse time; **a fold that raises is no rejection**, and in an `OVER` clause real never evaluates that key at all: `OVER (ORDER BY 1/0)`, `OVER (ORDER BY CAST('a' AS int))` and `OVER (PARTITION BY 1/0 …)` return their rows unraised (probed 2026-09-26), so the parser swaps such a key for a constant the sort reads instead.
 A `WITHIN GROUP` key orders the aggregated values and real does evaluate it — `STRING_AGG(v, ',') WITHIN GROUP (ORDER BY 1/0)` raises — so that position keeps its term.
+**A constant of a MAX type isn't folded at all**: `OVER (ORDER BY CAST('a' AS varchar(max)))`, `CAST(NULL AS nvarchar(max))` and `CAST('a' AS nvarchar(max)) + 'b'` order nothing and raise neither Msg 5309 nor, under a RANGE frame, the Msg 8728 a MAX-typed column earns (probed 2026-09-28 against SQL Server 2025), so the parser swaps such a key for the same stand-in constant.
 
 **Divergences** on the window path:
 
 - An `int`-typed NULL a `TRY_` conversion produced is Msg 5308 on real — its index test is a "not less than one" comparison, which NULL answers UNKNOWN — while the simulator reports 5309 for every NULL, matching real only for the written `NULL` and `CAST(NULL AS int)` spellings.
+- Real doesn't fold some deterministic built-ins either — `OVER (ORDER BY UPPER('a'))` sorts (probed 2026-09-28) — where the simulator folds every written constant but a MAX-typed one and reports Msg 5309.
 - Two cells land on the wrong side of the 5308 / 5309 split for type-modeling reasons unrelated to the gate: `NULLIF(1, 2)` is `tinyint` on real (small integer literals are typed by magnitude) but `int` here, and `JSON_PATH_EXISTS` returns `int` on real but `bit` here.
 - `ROW_NUMBER() OVER w` — a named-window reference from a *non-aggregate* window function — isn't parsed at all (Msg 102); the aggregate form (`SUM(v) OVER w`) is, and carries the gate.
 

@@ -70,7 +70,7 @@ internal sealed partial class Selection
     /// The browse metadata for a statement whose last <paramref name="hidden"/>
     /// columns are browse mode's own.
     /// </summary>
-    private static BrowseInfo BrowseInfoFor(FromSource[] sources, List<Expression> expressions, string[] outputColumnNames, int hidden)
+    private static BrowseInfo BrowseInfoFor(FromSource[] sources, List<Expression> expressions, string[] outputColumnNames, int hidden, bool markKeys = true)
     {
         var tables = new List<string[]>();
         var tableNumbers = new int[sources.Length];
@@ -102,7 +102,7 @@ internal sealed partial class Selection
 
             var baseName = table.Columns[columnIndex].Name;
             var renamed = !string.Equals(outputColumnNames[i], baseName, StringComparison.Ordinal);
-            var status = (Array.IndexOf(BrowseKeyOrdinals(table), columnIndex) >= 0 ? 0x08 : 0)
+            var status = (markKeys && Array.IndexOf(BrowseKeyOrdinals(table), columnIndex) >= 0 ? 0x08 : 0)
                 | (isHidden ? 0x10 : 0)
                 | (renamed ? 0x20 : 0);
             columns[i] = ((byte)tableNumbers[sourceIndex], (byte)status, renamed ? baseName : null);

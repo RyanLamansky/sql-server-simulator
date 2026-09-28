@@ -224,8 +224,7 @@ internal sealed class TdsTokenWriter(TdsPacketTransport transport)
 
     /// <summary>
     /// DONE, DONEPROC, and DONEINPROC share one 13-byte layout. <paramref name="curCmd"/>
-    /// is the kind of statement that produced the token; see <see cref="Tds.CmdSelect"/>
-    /// for what the simulator classifies and what it leaves at 0.
+    /// is the kind of statement that produced the token (<see cref="StatementDoneKind"/>).
     /// </summary>
     public void WriteDoneToken(byte token, ushort status, long rowCount, ushort curCmd = 0)
     {

@@ -214,6 +214,7 @@ The whole walk is skipped unless the batch's raw text carries a `:` or the lette
 **The jump is a flag, not an exception**, following the same rule as BREAK / CONTINUE / RETURN.
 `BatchContext.PendingGotoLabel` makes `IsSkipping` true, so every enclosing dispatch loop unwinds without demanding its own terminator, and the jump is serviced by the innermost loop the label is inside — compared on `BatchContext.DispatchLoopDepth`, which counts only the loops `BEGIN…END` / `BEGIN TRY` / `BEGIN CATCH` open (distinct from `BlockDepth`, which an `IF` / `WHILE` over a single statement also bumps).
 That is what lets `WHILE … BEGIN … GOTO l; l: … END` keep iterating while `WHILE … BEGIN … GOTO l; END l: …` leaves the loop.
+A `GOTO` that is the batch's last statement still jumps, and a label begins the next statement as a keyword does, so `DECLARE @i int = 0` on one line runs on into `l:` on the next (probed 2026-09-28 against SQL Server 2025).
 Jumping *into* a block — legal on real, which simply runs on from the label — leaves that block's opening `BEGIN` unexecuted, so `BatchContext.PendingBlockEnds` counts the `END`s the loop then steps over.
 
 Labels are scoped to their batch or module body: a procedure carries its own set, and reusing the caller's name is not a collision.
@@ -276,6 +277,7 @@ This path deliberately does **not** touch `InFlightError` / `ErrorSignaled` — 
 **Batch-aborting errors** — a path sits *before* the statement-terminating one and stops the whole batch (emit the one error, set `BatchContext.BatchAborted`, `DispatchStatementsUntil` breaks on the flag, **no** cursor-recovery scan).
 Two kinds:
 - **Bind-class name-resolution misses** (`IsBatchAbortingNameResolution`: Msg 208 invalid object, 207 invalid column, 209 ambiguous column, 4104 unbindable multi-part identifier, 4121 unfound column/function, 195 unrecognized function), which reach run time from a statement [batch compilation](#batch-compilation) deferred.
+  Raised in a procedure or dynamic batch, one ends that batch — a `BEGIN … END` block around the failing statement included (`SimulatedSqlException.EndedCalledBatchIn`) — and only the caller carries on (probed 2026-09-28 against SQL Server 2025).
   Real SQL Server aborts the remaining batch (probe-confirmed: `SELECT 1; SELECT * FROM missing; SELECT 2` streams `1`, surfaces one Msg 208, never runs `SELECT 2` — contrast Msg 3701 / 8134 / a severity-16 RAISERROR, which continue).
 - **Any other compile error of a deferred statement** (`IsDeferredCompileError`) — a type check, a grouping rule, a table hint, a derived table's column names — which real meets recompiling the statement once its table exists (`CREATE TABLE t2 (a int); INSERT t2 VALUES (1, 2); PRINT 'after'` never prints; probed 2026-09-26 against SQL Server 2025).
   Like the name-resolution set, a `TRY` in the same scope doesn't catch it, while one raised by a called procedure or dynamic batch is caught (`CaughtByTryFrame`).
@@ -287,7 +289,7 @@ Two kinds:
 Skipping the recovery scan is load-bearing: it kills the **abandoned-mid-parse cascade** — the error is thrown mid-parse (e.g. inside a DacFx `SELECT * FROM (…) AS [_results] OPTION (USE HINT('FORCE_LEGACY_CARDINALITY_ESTIMATION'))`), and the scan would otherwise stop on the OPTION clause's leading `USE` token and re-dispatch `USE HINT(…)` as a `USE <database>` statement → spurious Msg 911 / 319 / 102.
 Regression: `BatchErrorRecoveryTests` (both `SqlServerSimulator.Tests` and `.Tests.SqlClient`).
 
-**Classification** — `IsStatementTerminating`: continue when `ex.Class is >= 11 and <= 16 && ex.Number != 1205`, unless the error is batch-aborting (name-resolution set or `TerminatesBatch`, checked in an earlier branch).
+**Classification** — `IsStatementTerminating`: continue when `ex.Class is >= 11 and <= 16 && ex.Number != 1205`, or for a `RAISERROR` through severity 19 (`WITH LOG`), after which real's batch carries on too (probed 2026-09-28 against SQL Server 2025), unless the error is batch-aborting (name-resolution set or `TerminatesBatch`, checked in an earlier branch).
 Severity ≤ 10 are informational (not raised as errors — they flow to `InfoMessage`); severity ≥ 17 are batch/connection-terminating → abort; deadlock (Msg 1205, class 13) is the one in-range exception → abort (its class-13 rollback fires first).
 No factory produces class ≥ 17, so the reachable batch-aborting cases are deadlock (concurrent sessions), `NotSupportedException` (any unmodeled feature; it propagates out of the stream to the caller / wire top-level `catch`), the name-resolution set, and an uncaught THROW.
 
@@ -473,7 +475,7 @@ The rendering is the implicit conversion to a character string real applies, not
 Operand grammar is strict (matches probe of SQL Server 2025): only a varchar/nvarchar string literal or an `@-variable` reference.
 `cast(...)`, integer literal, bare `NULL` literal all fail at parse (Msg 102/156); `time`-typed variable raises **Msg 9815** (`"Waitfor delay and waitfor time cannot be of type time."` — note SQL Server reserves the operand slot for *string-typed* values, not its own `time` type).
 Empty string and NULL-valued variable both silently succeed as zero delay.
-Bad-format string raises **Msg 148** with the offending value embedded.
+Bad-format string raises **Msg 148** with the offending value embedded; each field takes one digit or two, so `'0:0:0'` and `'0:00:00.001'` are accepted (probed 2026-09-28 against SQL Server 2025).
 `@@ROWCOUNT` resets to 0.
 Skip-mode suppresses the sleep entirely (an `IF 1=0 WAITFOR DELAY '00:00:10'` returns instantly).
 **`WAITFOR TIME`** (absolute-time wait) raises `NotSupportedException` — scheduling-style primitive not yet needed.

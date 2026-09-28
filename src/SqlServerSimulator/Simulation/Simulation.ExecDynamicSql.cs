@@ -643,12 +643,15 @@ partial class Simulation
         // RETURNSTATUS + DONEPROC — matching real SQL Server, which runs an
         // EXEC('…') / sp_executesql body as a nested procedure scope. In-process
         // consumers ignore the markers.
+        // The scope returns the status a procedure without a RETURN value
+        // would (probed 2026-09-28 against SQL Server 2025); one an error ended
+        // is closed by the calling statement, with no status.
         yield return new SimulatedProcScopeBoundary(isEnter: true);
         foreach (var outcome in outcomes)
             yield return outcome;
-        yield return new SimulatedProcScopeBoundary(isEnter: false);
         if (batchError is not null)
             ExceptionDispatchInfo.Throw(batchError);
+        yield return ScopeExit(outerBatch, procFrame.StatusWithoutReturnValue);
         if ((connection.CurrentTransaction?.TranCount ?? 0) is var exitTranCount && exitTranCount != enteredTranCount && !endedUnderImplicitTransactions)
             throw SimulatedSqlException.TransactionCountMismatch(enteredTranCount, exitTranCount, procedure: "");
     }

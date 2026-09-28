@@ -3,16 +3,6 @@ namespace SqlServerSimulator;
 partial class SimulatedSqlException
 {
     /// <summary>
-    /// Msg 1222 — fired when a lock acquisition exceeds the session's
-    /// configured <c>@@LOCK_TIMEOUT</c>. Single, fixed wording regardless of
-    /// the lock kind that timed out — probe-confirmed against SQL Server 2025
-    /// (2026-05-14): both row-level and schema-stability (Sch-S / Sch-M) lock
-    /// timeouts surface this exact message. The only differentiator on the
-    /// real server is <c>State</c> (45 for row / IS paths; 56 when a schema-
-    /// stability lock is involved on either side). The state is parameterized
-    /// so callers can match the real-server discriminator.
-    /// </summary>
-    /// <summary>
     /// The client-side exception a cancelled command surfaces — <b>Msg 0</b>,
     /// not a server error: real SQL Server sends no error token for an
     /// attention, so SqlClient manufactures this from its own state and the
@@ -52,7 +42,14 @@ partial class SimulatedSqlException
         ? new(ExecutionTimeoutExpiredMessage, -2, 11, 0) { IsAttention = true }
         : new(CommandCancelledMessage, 0, 11, 0) { IsAttention = true };
 
-    internal static SimulatedSqlException LockRequestTimeOutExceeded(byte state = 56) =>
+    /// <summary>
+    /// Msg 1222 — fired when a lock acquisition exceeds the session's
+    /// configured <c>@@LOCK_TIMEOUT</c>. Single, fixed wording regardless of
+    /// the lock kind that timed out (probed against SQL Server 2025); the
+    /// state names the kind: 51 for a key lock, 45 for a heap row's, 56 for a
+    /// table or schema lock (probed 2026-09-28).
+    /// </summary>
+    internal static SimulatedSqlException LockRequestTimeOutExceeded(byte state) =>
         new("Lock request time out period exceeded.", 1222, 16, state);
 
     /// <summary>
@@ -213,13 +210,14 @@ partial class SimulatedSqlException
     /// Msg 3960 — raised when a SNAPSHOT-isolation transaction attempts to
     /// write a row whose live version was committed by a different
     /// transaction after this transaction's snapshot was taken. Probe-
-    /// confirmed verbatim wording (Cls 16, State 2) against SQL Server 2025
+    /// confirmed verbatim wording (Cls 16) against SQL Server 2025
     /// — the message embeds the offending table's two-part name and the
     /// containing database. The probed real server auto-rolls back the
     /// failing SI transaction (<c>@@TRANCOUNT</c> drops to 0); the simulator
     /// matches that auto-rollback behavior. Uncaught it ends the batch
-    /// (probed 2026-09-28).
+    /// (probed 2026-09-28). The state names the table's organization: 2 for
+    /// a table with a clustered index, 6 for a heap (probed 2026-09-28).
     /// </summary>
-    internal static SimulatedSqlException SnapshotIsolationUpdateConflict(string qualifiedTableName, string databaseName) =>
-        new($"Snapshot isolation transaction aborted due to update conflict. You cannot use snapshot isolation to access table '{qualifiedTableName}' directly or indirectly in database '{databaseName}' to update, delete, or insert the row that has been modified or deleted by another transaction. Retry the transaction or change the isolation level for the update/delete statement.", 3960, 16, 2) { TerminatesBatch = true };
+    internal static SimulatedSqlException SnapshotIsolationUpdateConflict(string qualifiedTableName, string databaseName, bool clustered) =>
+        new($"Snapshot isolation transaction aborted due to update conflict. You cannot use snapshot isolation to access table '{qualifiedTableName}' directly or indirectly in database '{databaseName}' to update, delete, or insert the row that has been modified or deleted by another transaction. Retry the transaction or change the isolation level for the update/delete statement.", 3960, 16, clustered ? (byte)2 : (byte)6) { TerminatesBatch = true };
 }
