@@ -397,6 +397,10 @@ partial class Simulation
         var oldHeap = table.Heap;
         var newHeap = new Heap();
         var newStoredColumns = table.StoredColumns;
+        // A PERSISTED computed column added over existing rows stores its
+        // expression's value for each, read off the row's other columns.
+        var persistsComputed = Array.Exists(newColumns, static column => column is { Computed: not null, IsPersisted: true });
+        var fullRow = persistsComputed ? new SqlValue[table.Columns.Length] : null;
 
         // One encoded-row buffer for the rebuild — Insert copies into the page.
         byte[]? encoded = null;
@@ -418,6 +422,28 @@ partial class Simulation
                         ? SqlValue.FromRowVersion(context.Batch.DatabaseFor(table).AllocateRowVersion())
                         : backfillValues[i] ?? SqlValue.Null(c.Type);
                 newStorageIndex++;
+            }
+
+            if (fullRow is not null)
+            {
+                for (var i = 0; i < fullRow.Length; i++)
+                    fullRow[i] = table.StorageOrdinals[i] is var slot and >= 0 ? newStoredValues[slot] : SqlValue.Null(table.Columns[i].Type);
+                for (var i = 0; i < newColumns.Length; i++)
+                {
+                    if (newColumns[i] is not { Computed: not null, IsPersisted: true })
+                        continue;
+                    var ordinal = existingCount + i;
+                    try
+                    {
+                        fullRow[ordinal] = EvaluateComputedColumn(table, fullRow, ordinal, batch);
+                    }
+                    catch (SimulatedSqlException evaluation)
+                    {
+                        evaluation.EndedColumnRewrite = true;
+                        throw;
+                    }
+                    newStoredValues[table.StorageOrdinals[ordinal]] = fullRow[ordinal];
+                }
             }
 
             var length = RowEncoder.EncodeRowInto(newStoredColumns, newStoredValues, newHeap, ref encoded);
@@ -912,7 +938,8 @@ partial class Simulation
     /// indexes count; everything else always does.
     /// </summary>
     private static List<(string Name, SimulatedSqlException.AlterColumnBlockerKind Kind)> CollectColumnBlockers(
-        Database database, HeapTable table, int ordinal, HeapColumn col, bool includeCheckAndDefault, bool includeIndexes)
+        Database database, HeapTable table, int ordinal, HeapColumn col, bool includeCheckAndDefault, bool includeIndexes,
+        bool includedColumnsBlock = true, bool includeStatistics = false)
     {
         var collation = database.Collation;
         var blockers = new List<(string Name, SimulatedSqlException.AlterColumnBlockerKind Kind, int Rank, int ObjectId)>();
@@ -955,8 +982,16 @@ partial class Simulation
         {
             foreach (var ix in table.Indexes)
             {
-                if (ix.KeyColumns.Any(k => k.StorageOrdinal == storageOrdinal) || Array.IndexOf(ix.IncludedColumns, storageOrdinal) >= 0)
+                if (ix.KeyColumns.Any(k => k.StorageOrdinal == storageOrdinal) || (includedColumnsBlock && Array.IndexOf(ix.IncludedColumns, storageOrdinal) >= 0))
                     blockers.Add((ix.Name, SimulatedSqlException.AlterColumnBlockerKind.Index, 5, ix.ObjectId));
+            }
+        }
+        if (includeStatistics)
+        {
+            foreach (var statistic in table.UserStatistics)
+            {
+                if (Array.IndexOf(statistic.ColumnFullOrdinals, ordinal) >= 0)
+                    blockers.Add((statistic.Name, SimulatedSqlException.AlterColumnBlockerKind.Statistics, 5, int.MaxValue - 1));
             }
         }
         foreach (var ix in table.Indexes)
@@ -1207,8 +1242,7 @@ partial class Simulation
         {
             ReservedKeyword { Keyword: Keyword.RowGuidCol } => ColumnAttribute.RowGuidCol,
             UnquotedString { ContextualKeyword: ContextualKeyword.Sparse } => ColumnAttribute.Sparse,
-            UnquotedString { ContextualKeyword: ContextualKeyword.Persisted } =>
-                throw new NotSupportedException("ALTER TABLE ALTER COLUMN ADD / DROP PERSISTED isn't modeled."),
+            UnquotedString { ContextualKeyword: ContextualKeyword.Persisted } => ColumnAttribute.Persisted,
             UnquotedString { ContextualKeyword: ContextualKeyword.Masked } => ColumnAttribute.Masked,
             _ => throw SimulatedSqlException.SyntaxErrorNear(context),
         };
@@ -1219,6 +1253,9 @@ partial class Simulation
             maskingFunctionText = ParseMaskedWithClause(context);
         else
             context.MoveNextOptional();
+        // PERSISTED takes no NOT NULL here, unlike a column definition's.
+        if (attribute == ColumnAttribute.Persisted && context.Token is ReservedKeyword { Keyword: Keyword.Not } persistedTrailer)
+            throw SimulatedSqlException.SyntaxErrorNearKeyword(persistedTrailer);
         if (context.Batch.IsSkipping)
             return true;
 
@@ -1235,7 +1272,13 @@ partial class Simulation
                 break;
             }
         }
-        var target = found ?? throw SimulatedSqlException.AlterColumnDoesNotExist(columnName, table.Name);
+        var target = found ?? throw SimulatedSqlException.AlterColumnDoesNotExist(columnName, table.Name, state: attribute == ColumnAttribute.Persisted ? (byte)2 : (byte)1);
+
+        if (attribute == ColumnAttribute.Persisted)
+        {
+            AlterColumnPersisted(context, table, target, adding);
+            return true;
+        }
 
         if (attribute == ColumnAttribute.Masked)
         {
@@ -1279,6 +1322,149 @@ partial class Simulation
         RowGuidCol,
         Sparse,
         Masked,
+        Persisted,
+    }
+
+    /// <summary>
+    /// <c>ALTER COLUMN c { ADD | DROP } PERSISTED</c>: converts a computed
+    /// column between stored and evaluated-on-read in place, idempotently,
+    /// which moves a storage slot in or out of every row (probed 2026-09-28
+    /// against SQL Server 2025). <c>ADD</c> takes a deterministic expression
+    /// (Msg 4936) and evaluates it for every row, so a row it fails on ends
+    /// the statement as a write does; <c>DROP</c> is refused while a CHECK, a
+    /// key, an index keying the column (an included column doesn't count), a
+    /// statistics object, a foreign key or a schema-bound module depends on it
+    /// (Msg 5074 each, then Msg 4922). A column that isn't computed is
+    /// Msg 4919.
+    /// </summary>
+    private static void AlterColumnPersisted(ParserContext context, HeapTable table, HeapColumn target, bool adding)
+    {
+        if (target.Computed is null)
+            throw SimulatedSqlException.PersistedOnNonComputedColumn(target.Name);
+        if (target.IsPersisted == adding)
+            return;
+
+        var database = context.Batch.CurrentDatabase;
+        var ordinal = Array.IndexOf(table.Columns, target);
+        if (adding)
+        {
+            if (target.ComputedDefinition is { } definition
+                && !Schemas.ModuleDeterminism.IsComputedColumnDeterministic(database, table.Columns, definition))
+            {
+                throw SimulatedSqlException.ComputedColumnCannotBePersisted(target.Name, table.Name);
+            }
+        }
+        else
+        {
+            var blockers = CollectColumnBlockers(database, table, ordinal, target,
+                includeCheckAndDefault: true, includeIndexes: true, includedColumnsBlock: false, includeStatistics: true);
+            if (blockers.Count > 0)
+                throw SimulatedSqlException.ColumnHasDependencies("ALTER COLUMN", target.Name, blockers);
+        }
+
+        var originalColumns = table.Columns;
+        var originalStorageOrdinals = table.StorageOrdinals;
+        var originalStoredColumns = table.StoredColumns;
+        var newColumns = (HeapColumn[])originalColumns.Clone();
+        newColumns[ordinal] = target.WithPersisted(adding);
+        table.Columns = newColumns;
+        table.RecomputeStorageProjections();
+
+        // The slots after the one gained or lost shift; the keys and indexes
+        // that name slots follow them, and back again on a rollback.
+        var oldToNew = new int[originalStoredColumns.Length];
+        var newToOld = new int[table.StoredColumns.Length];
+        for (var i = 0; i < newColumns.Length; i++)
+        {
+            var before = originalStorageOrdinals[i];
+            var after = table.StorageOrdinals[i];
+            if (before >= 0)
+                oldToNew[before] = after;
+            if (after >= 0)
+                newToOld[after] = before;
+        }
+
+        // Every row is rewritten, so an error evaluating one is followed by
+        // Msg 3621 as a DML statement's is.
+        context.Batch.CurrentStatement.WritesRows = true;
+        try
+        {
+            var oldHeap = table.Heap;
+            var newHeap = new Heap();
+            var newStoredColumns = table.StoredColumns;
+            var full = new SqlValue[newColumns.Length];
+            byte[]? encoded = null;
+            foreach (var oldBytes in oldHeap.EnumerateRows())
+            {
+                for (var i = 0; i < newColumns.Length; i++)
+                {
+                    full[i] = originalStorageOrdinals[i] is var stored and >= 0
+                        ? RowDecoder.DecodeColumn(originalStoredColumns, oldBytes, stored, oldHeap)
+                        : SqlValue.Null(newColumns[i].Type);
+                }
+                if (adding)
+                {
+                    try
+                    {
+                        full[ordinal] = EvaluateComputedColumn(table, full, ordinal, context.Batch);
+                    }
+                    catch (SimulatedSqlException evaluation)
+                    {
+                        evaluation.EndedColumnRewrite = true;
+                        throw;
+                    }
+                }
+                var values = new SqlValue[newStoredColumns.Length];
+                for (var i = 0; i < newColumns.Length; i++)
+                {
+                    if (table.StorageOrdinals[i] is var slot and >= 0)
+                        values[slot] = full[i];
+                }
+                var length = RowEncoder.EncodeRowInto(newStoredColumns, values, newHeap, ref encoded);
+                _ = newHeap.Insert(encoded.AsSpan(0, length));
+            }
+            table.Heap = newHeap;
+            // The fresh heap takes the off-row reclaim list the projection sets.
+            table.RecomputeStorageProjections();
+        }
+        catch
+        {
+            table.Columns = originalColumns;
+            table.RecomputeStorageProjections();
+            throw;
+        }
+        var slotAfter = table.StorageOrdinals[ordinal];
+        var slotBefore = originalStorageOrdinals[ordinal];
+        RemapStorageSlots(table, oldToNew, ordinal, slotAfter);
+        RecordDdlUndo(context, () => RemapStorageSlots(table, newToOld, ordinal, slotBefore));
+    }
+
+    /// <summary>
+    /// Moves every storage slot a key constraint or index names through
+    /// <paramref name="slotMap"/>, and points whatever names the column at
+    /// <paramref name="columnOrdinal"/> at <paramref name="columnSlot"/> — -1
+    /// being the no-slot marker a non-persisted computed column carries.
+    /// </summary>
+    private static void RemapStorageSlots(HeapTable table, int[] slotMap, int columnOrdinal, int columnSlot)
+    {
+        int Map(int slot) => slot >= 0 ? slotMap[slot] : slot;
+        foreach (var key in table.KeyConstraints)
+        {
+            for (var i = 0; i < key.StorageOrdinals.Length; i++)
+                key.StorageOrdinals[i] = key.FullOrdinals[i] == columnOrdinal ? columnSlot : Map(key.StorageOrdinals[i]);
+        }
+        foreach (var index in table.Indexes)
+        {
+            for (var i = 0; i < index.KeyColumns.Length; i++)
+            {
+                var keyColumn = index.KeyColumns[i];
+                var slot = keyColumn.ColumnOrdinal == columnOrdinal ? columnSlot : Map(keyColumn.StorageOrdinal);
+                index.KeyColumns[i] = new IndexKeyColumn(slot, keyColumn.ColumnOrdinal, keyColumn.IsDescending);
+                index.KeyStorageOrdinals[i] = slot;
+            }
+            for (var i = 0; i < index.IncludedColumns.Length; i++)
+                index.IncludedColumns[i] = index.IncludedColumnOrdinals[i] == columnOrdinal ? columnSlot : Map(index.IncludedColumns[i]);
+        }
     }
 
     private static HeapColumn? FindRowGuidColumn(HeapTable table)

@@ -26,6 +26,38 @@ internal sealed class HeapTable : SchemaObject
     /// </summary>
     public Schemas.PartitionPlacement? Partitioning;
 
+    /// <summary>
+    /// The filegroup (<c>data_space_id</c>) the table's rows — the heap, or the
+    /// clustered index — are on when <see cref="Partitioning"/> is null: the
+    /// <c>ON</c> clause's, else the database's default filegroup at creation,
+    /// moved by a clustered index created on another and kept when one is
+    /// dropped.
+    /// </summary>
+    public int FilegroupId = Database.PrimaryFilegroupId;
+
+    /// <summary>
+    /// The filegroup the table's LOB data is on: <c>TEXTIMAGE_ON</c>'s, else
+    /// where the rows were at creation, which a clustered index moving the rows
+    /// leaves behind (probed 2026-09-28 against SQL Server 2025).
+    /// </summary>
+    public int LobFilegroupId = Database.PrimaryFilegroupId;
+
+    /// <summary>
+    /// Whether a column routes through the LOB-page chain
+    /// (<see cref="HeapColumn.IsLob"/>) — what gives the table a LOB allocation
+    /// unit and a non-zero <c>sys.tables.lob_data_space_id</c>, and what
+    /// <c>TEXTIMAGE_ON</c> requires.
+    /// </summary>
+    public bool HasLobColumn()
+    {
+        foreach (var column in this.Columns)
+        {
+            if (column.IsLob)
+                return true;
+        }
+        return false;
+    }
+
     public HeapTable(string name, HeapColumn[] columns, int objectId, int schemaId = Database.DboSchemaId, DateTime createDate = default, KeyConstraint[]? keyConstraints = null, CheckConstraint[]? checkConstraints = null, bool isTableVariable = false, bool isTableValuedParameter = false, (int StartOrdinal, int EndOrdinal)? periodColumns = null)
         : base(name, objectId, schemaId, createDate == default ? DateTime.UtcNow : createDate)
     {

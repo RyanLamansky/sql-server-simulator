@@ -53,8 +53,11 @@ namespace SqlServerSimulator.Parser;
 /// names, or the empty string for one that names none. Null for a
 /// database-level event.
 /// </param>
-/// <param name="loginElements">
-/// A login event's <c>DefaultLanguage</c> … <c>SID</c> elements, rendered.
+/// <param name="trailingElements">
+/// The elements an event kind carries after the common ones, rendered: a login
+/// event's <c>DefaultLanguage</c> … <c>SID</c>, a permission event's
+/// <c>Grantor</c> … <c>CascadeOption</c>, an extended-property or binding
+/// event's property and <c>Parameters</c> list.
 /// </param>
 /// <param name="maskStart">
 /// Where a password literal starts in the batch text, which the event's
@@ -71,7 +74,7 @@ internal sealed class DdlEventInfo(
     string? roleName = null,
     string? ownerName = null,
     string? serverLevelDatabase = null,
-    string? loginElements = null,
+    string? trailingElements = null,
     int maskStart = -1,
     int maskEnd = -1)
 {
@@ -84,7 +87,7 @@ internal sealed class DdlEventInfo(
     public readonly string? RoleName = roleName;
     public readonly string? OwnerName = ownerName;
     public readonly string? ServerLevelDatabase = serverLevelDatabase;
-    public readonly string? LoginElements = loginElements;
+    public readonly string? TrailingElements = trailingElements;
     public readonly int MaskStart = maskStart;
     public readonly int MaskEnd = maskEnd;
 }

@@ -261,6 +261,8 @@ public class ClrUserDefinedTypeTests
         var sim = Types();
         AreEqual("1,2", sim.ExecuteScalar("declare @t table (p Point); insert @t values ('1,2'); select p.ToString() from @t"));
         _ = sim.AssertSqlError("create table #t (p Point)", 2715);
+        var ex = sim.AssertSqlError("select cast(null as Point) p into #t; select 'not reached'", 6220);
+        AreEqual(1, ex.Errors.Count);
     }
 
     [TestMethod]

@@ -441,6 +441,8 @@ partial class Simulation
 
         var insteadOfParent = (SchemaObject?)sourceView ?? table;
         var insteadOfActive = HasInsteadOfTrigger(context.Batch, insteadOfParent, TriggerActions.Delete);
+        if (!insteadOfActive)
+            RejectWriteToUnwritableFilegroup(table, context.Batch, "DELETE");
 
         // SNAPSHOT isolation write-conflict: a DELETE on a row modified
         // since this SI tx's snapshot raises Msg 3960 and auto-rolls-back.

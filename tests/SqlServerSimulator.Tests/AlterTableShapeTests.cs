@@ -173,8 +173,8 @@ public sealed class AlterTableShapeTests
         => AssertSqlError("create table t (a int, b int default 3); alter table t alter column b add sparse", 11410);
 
     [TestMethod]
-    public void AlterColumnAddPersisted_IsNotModeledYet()
-        => Throws<NotSupportedException>(() => ExecuteScalar("create table t (a int, b as a + 1); alter table t alter column b add persisted"));
+    public void AlterColumnAddPersisted_StoresTheColumn()
+        => IsTrue((bool)ExecuteScalar("create table t (a int, b as a + 1); alter table t alter column b add persisted; select is_persisted from sys.computed_columns")!);
 
     // --- multi-element ADD ---
 

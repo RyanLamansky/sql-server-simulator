@@ -367,8 +367,6 @@ The feature docs' own **Not modeled yet** sections hold the smaller gaps.
 - **Most `SET <option>` toggles parse and are discarded** (`Simulation.Set.cs`); the ones with semantic effect are handled by name there.
   The same goes for most `ALTER DATABASE … SET` options → [`database-options.md`](docs/claude/database-options.md).
 - **Heap allocation tracking** (a flat page list, no IAM/PFS) → [`heap-storage.md`](docs/claude/heap-storage.md).
-- **`ALTER COLUMN … ADD | DROP PERSISTED`** → [`alter-table.md`](docs/claude/alter-table.md).
-- **Filegroup placement** — a table or index `ON [fg]` isn't recorded (only a partition scheme's placement is) → [`partitioning.md`](docs/claude/partitioning.md#not-modeled-yet).
 - **`FORCESEEK`'s plan-infeasibility refusal** (Msg 8622) → [`query-hints.md`](docs/claude/query-hints.md#not-enforced).
 - **A binder report past a type check other than Msg 529**, and a few shapes' own errors within one (MERGE's Msg 5334, PIVOT's operand) → [`errors.md`](docs/claude/errors.md#not-modeled-yet-1).
 

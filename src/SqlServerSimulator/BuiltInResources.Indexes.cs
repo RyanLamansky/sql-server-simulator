@@ -674,7 +674,7 @@ internal static partial class BuiltInResources
                     continue;
                 var tableObjectId = SqlValue.FromInt32(table.ObjectId);
                 foreach (var identity in table.IndexIdentities())
-                    yield return RowForIdentity(tableObjectId, identity, Simulation.PlacementOf(table, identity));
+                    yield return RowForIdentity(tableObjectId, identity, Simulation.PlacementOf(table, identity), Simulation.FilegroupOf(table, identity));
                 // XML and spatial indexes follow at their own index-id ranges,
                 // with every option at its default (probed 2026-09-26 against
                 // SQL Server 2025).
@@ -696,11 +696,11 @@ internal static partial class BuiltInResources
                     continue;
                 var viewObjectId = SqlValue.FromInt32(view.ObjectId);
                 foreach (var identity in view.IndexIdentities())
-                    yield return RowForIdentity(viewObjectId, identity, placement: null);
+                    yield return RowForIdentity(viewObjectId, identity, placement: null, Database.PrimaryFilegroupId);
             }
         }
 
-        SqlValue[] RowForIdentity(SqlValue objectId, IndexIdentity identity, PartitionPlacement? placement)
+        SqlValue[] RowForIdentity(SqlValue objectId, IndexIdentity identity, PartitionPlacement? placement, int filegroupId)
         {
             var typeDesc = identity.Type switch
             {
@@ -765,7 +765,8 @@ internal static partial class BuiltInResources
                 type: SqlValue.FromByte(identity.Type),
                 typeDesc: typeDesc,
                 isUnique: isUnique,
-                dataSpaceId: placement is null ? primaryDataSpace : SqlValue.FromInt32(placement.Scheme.DataSpaceId),
+                dataSpaceId: placement is not null ? SqlValue.FromInt32(placement.Scheme.DataSpaceId)
+                    : filegroupId == Database.PrimaryFilegroupId ? primaryDataSpace : SqlValue.FromInt32(filegroupId),
                 isPrimaryKey: isPrimaryKey,
                 isUniqueConstraint: isUniqueConstraint,
                 hasFilter: hasFilter,
@@ -962,23 +963,32 @@ internal static partial class BuiltInResources
     /// </summary>
     private static IEnumerable<(long ContainerId, byte Type, long TotalPages, long UsedPages, long DataPages, int DataSpaceId)> EnumerateAllocationUnitData(Database database)
     {
-        HeapTable? lastTable = null;
         var census = new PartitionCensus();
-        foreach (var (table, indexId, _, _, _, placement) in EnumerateTableIndexIdentities(database, batch: null))
+        foreach (var schema in database.Schemas.Values)
         {
-            var isBase = !ReferenceEquals(table, lastTable);
-            lastTable = table;
-            foreach (var unit in census.Units(table, indexId, placement))
+            foreach (var table in CatalogTables(schema, batch: null))
             {
-                // A partition's allocation lives on the filegroup its scheme
-                // maps it to (probed 2026-09-27 against SQL Server 2025).
-                var dataSpaceId = placement is null ? Database.PrimaryFilegroupId : placement.Scheme.Destinations[unit.Number - 1];
-                yield return (unit.PartitionId, 1, unit.InRowPages, unit.InRowPages, unit.InRowPages, dataSpaceId);
-                if (isBase && unit.Number == 1)
+                var isBase = true;
+                foreach (var identity in table.IndexIdentities())
                 {
-                    long lobPages = table.Heap.LobPages.Count;
-                    if (lobPages > 0)
-                        yield return (unit.PartitionId, 2, lobPages, lobPages, 0, dataSpaceId);
+                    var placement = Simulation.PlacementOf(table, identity);
+                    foreach (var unit in census.Units(table, identity.IndexId, placement))
+                    {
+                        // A partition's allocation lives on the filegroup its
+                        // scheme maps it to (probed 2026-09-27 against SQL
+                        // Server 2025), an unpartitioned index's on its own
+                        // filegroup and the LOB data on TEXTIMAGE_ON's
+                        // (probed 2026-09-28).
+                        var dataSpaceId = placement is null ? Simulation.FilegroupOf(table, identity) : placement.Scheme.Destinations[unit.Number - 1];
+                        yield return (unit.PartitionId, 1, unit.InRowPages, unit.InRowPages, unit.InRowPages, dataSpaceId);
+                        if (isBase && unit.Number == 1)
+                        {
+                            long lobPages = table.Heap.LobPages.Count;
+                            if (lobPages > 0)
+                                yield return (unit.PartitionId, 2, lobPages, lobPages, 0, placement is null ? table.LobFilegroupId : dataSpaceId);
+                        }
+                    }
+                    isBase = false;
                 }
             }
         }
@@ -989,8 +999,7 @@ internal static partial class BuiltInResources
     /// <see cref="EnumerateAllocationUnitData"/>. allocation_unit_id is
     /// synthetic-deterministic (partition_id shifted, low bits carrying the
     /// type — distinct per partition/type, not SQL Server's real id);
-    /// data_space_id is the partition's filegroup — PRIMARY for an index on a
-    /// filegroup, whose placement isn't recorded.
+    /// data_space_id is the partition's or the index's filegroup.
     /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateSysAllocationUnits(Parser.BatchContext batch, Database database)
     {
@@ -1894,9 +1903,12 @@ internal sealed class PartitionCensus
         public readonly long InRowPages = inRowPages;
     }
 
+    /// <summary>The synthetic <c>partition_id</c> of an unpartitioned index, its only partition's.</summary>
+    public static long UnpartitionedId(HeapTable table, int indexId) => ((long)(uint)table.ObjectId << 16) | (uint)indexId;
+
     public IEnumerable<Unit> Units(HeapTable table, int indexId, PartitionPlacement? placement)
     {
-        var baseId = ((long)(uint)table.ObjectId << 16) | (uint)indexId;
+        var baseId = UnpartitionedId(table, indexId);
         if (placement is null)
         {
             yield return new Unit(baseId, 1, table.Heap.RowCount, table.Heap.Pages.Count);

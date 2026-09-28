@@ -28,16 +28,39 @@ partial class Simulation
         string? targetObjectName = null,
         string? targetObjectType = null,
         string? roleName = null,
-        string? ownerName = null)
+        string? ownerName = null,
+        string? trailingElements = null,
+        int maskStart = -1,
+        int maskEnd = -1)
     {
-        if (context.Batch.IsSkipping || context.Connection.SuppressDdlTriggers
-            || (context.CurrentDatabase.DdlTriggers.IsEmpty && context.Simulation.ServerTriggers.All.Length == 0))
-        {
+        if (!RaisesDdlEvents(context))
             return;
-        }
         var statement = context.Batch.CurrentStatement;
-        (statement.PendingDdlEvents ??= []).Add(
-            new DdlEventInfo(eventType, schemaName, objectName, objectType, targetObjectName, targetObjectType, roleName, ownerName));
+        (statement.PendingDdlEvents ??= []).Add(new DdlEventInfo(
+            eventType, schemaName, objectName, objectType, targetObjectName, targetObjectType, roleName, ownerName,
+            trailingElements: trailingElements, maskStart: maskStart, maskEnd: maskEnd));
+    }
+
+    /// <summary>
+    /// Whether <see cref="RecordDdlEvent"/> would record anything, which a site
+    /// rendering an event's <c>trailingElements</c> asks first so the common
+    /// case — no DDL trigger anywhere — renders nothing.
+    /// </summary>
+    internal static bool RaisesDdlEvents(ParserContext context) =>
+        !context.Batch.IsSkipping && !context.Connection.SuppressDdlTriggers
+        && (!context.CurrentDatabase.DdlTriggers.IsEmpty || context.Simulation.ServerTriggers.All.Length != 0);
+
+    /// <summary>
+    /// Renders a <c>&lt;Parameters&gt;</c> list, one <c>&lt;Param&gt;</c> per
+    /// procedure parameter in declaration order, an absent argument as an empty
+    /// element — the list an extended-property or binding event carries.
+    /// </summary>
+    internal static string RenderEventParameters(params ReadOnlySpan<string?> values)
+    {
+        var builder = new StringBuilder("<Parameters>");
+        foreach (var value in values)
+            AppendElement(builder, "Param", value ?? "");
+        return builder.Append("</Parameters>").ToString();
     }
 
     /// <summary>
@@ -75,7 +98,7 @@ partial class Simulation
             objectName: loginName,
             objectType: loginName is null ? null : "LOGIN",
             serverLevelDatabase: databaseName ?? "",
-            loginElements: loginElements,
+            trailingElements: loginElements,
             maskStart: passwordStart,
             maskEnd: passwordEnd));
     }
@@ -299,8 +322,8 @@ partial class Simulation
             AppendElement(builder, "TargetObjectType", targetType);
         if (info.RoleName is { } roleName)
             AppendElement(builder, "RoleName", roleName);
-        if (info.LoginElements is { } loginElements)
-            _ = builder.Append(loginElements);
+        if (info.TrailingElements is { } trailingElements)
+            _ = builder.Append(trailingElements);
         _ = builder
             .Append("<TSQLCommand><SetOptions ANSI_NULLS=\"ON\" ANSI_NULL_DEFAULT=\"ON\" ANSI_PADDING=\"ON\" QUOTED_IDENTIFIER=\"")
             .Append(connection.QuotedIdentifiers ? "ON" : "OFF")
@@ -392,11 +415,11 @@ partial class Simulation
         return Is(1, "LOGIN") || Is(1, "ROLE") || Is(1, "APPLICATION")
             || ((create || alter) && (Is(1, "USER") || Is(1, "SEQUENCE")))
             || ((create || drop) && Is(1, "TYPE"))
-            || (create && (Is(1, "SYNONYM") || (Is(1, "XML") && Is(2, "SCHEMA"))))
+            || (create && Is(1, "SYNONYM"))
             || (drop && Is(1, "SCHEMA"))
             || (alter && (Is(1, "AUTHORIZATION") || (Is(1, "DATABASE") && Is(2, "SCOPED"))))
             || (Is(1, "PARTITION") && (Is(2, "SCHEME") || (create && Is(2, "FUNCTION"))))
-            || (Is(1, "FULLTEXT") && Is(2, "CATALOG"))
+            || Is(1, "FULLTEXT")
             ? CommandTextExtent.ThroughSeparator
             : CommandTextExtent.Statement;
     }

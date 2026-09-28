@@ -193,6 +193,10 @@ partial class Simulation
             throw isRule ? SimulatedSqlException.RuleDoesNotExist(objectName) : SimulatedSqlException.DefaultDoesNotExist(objectName);
 
         var target = ResolveBindTarget(batch, targetName);
+        // Recorded ahead of the refusals below, which end the statement before
+        // its events fire.
+        RecordDdlEvent(batch.Parser, isRule ? "BIND_RULE" : "BIND_DEFAULT", EventSchemaName(boundName), boundName.Leaf, isRule ? "RULE" : "DEFAULT",
+            trailingElements: RaisesDdlEvents(batch.Parser) ? RenderEventParameters(objectName, targetName, futureOnlyText) : null);
         if (target.Column is { } column)
         {
             if (isRule)
@@ -268,6 +272,16 @@ partial class Simulation
         var futureOnly = futureOnlyText is not null && BuiltInToken.Equals(futureOnlyText, "futureonly");
 
         var target = ResolveBindTarget(batch, targetName);
+        // A column reports its table's schema and its own name, a type its own
+        // (probed 2026-09-28 against SQL Server 2025).
+        if (RaisesDdlEvents(batch.Parser))
+        {
+            var (eventSchema, eventObject, eventType) = target.Column is { } unboundColumn
+                ? (ObjectId.TryParseObjectName(targetName, out var columnPath) && columnPath.Count == 3 ? columnPath[0] : Database.DefaultSchemaName, unboundColumn.Name, "COLUMN")
+                : (target.AliasType!.Schema.Name, target.AliasType.Name, "TYPE");
+            RecordDdlEvent(batch.Parser, isRule ? "UNBIND_RULE" : "UNBIND_DEFAULT", eventSchema, eventObject, eventType,
+                trailingElements: RenderEventParameters(targetName, futureOnlyText));
+        }
         if (target.Column is { } column)
         {
             if (isRule ? column.BoundRule is null : column.BoundDefault is null)

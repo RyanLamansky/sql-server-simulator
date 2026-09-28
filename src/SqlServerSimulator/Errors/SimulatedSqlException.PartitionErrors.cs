@@ -126,6 +126,35 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException PartitionColumnNotPersisted(string columnName, string tableName) =>
         new($"Computed column cannot be used as a partition key if it is not persisted. Partition key column '{columnName}' in table '{tableName}' is not persisted.", 7724, 16, 1) { AbortsAsUnderXactAbort = true };
 
+    /// <summary>Msg 1709: <c>TEXTIMAGE_ON</c> on a table without a LOB column (probed 2026-09-28 against SQL Server 2025).</summary>
+    internal static SimulatedSqlException TextImageOnWithoutLobColumn() =>
+        new("Cannot use TEXTIMAGE_ON when a table has no text, ntext, image, varchar(max), nvarchar(max), non-FILESTREAM varbinary(max), xml or large CLR type columns.", 1709, 16, 1);
+
+    /// <summary>Msg 1924 state 2: a table or index created on a read-only filegroup (probed 2026-09-28 against SQL Server 2025).</summary>
+    internal static SimulatedSqlException FilegroupIsReadOnly(string name) =>
+        new($"Filegroup '{name}' is read-only.", 1924, 16, 2);
+
+    /// <summary>
+    /// Msg 622 state 3: rows written to a filegroup without files — an
+    /// <c>INSERT</c> into a table on one, or an index built on one over a table
+    /// with rows (probed 2026-09-28 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException FilegroupHasNoFiles(string name) =>
+        new($"The filegroup \"{name}\" has no files assigned to it. Tables, indexes, text columns, ntext columns, and image columns cannot be populated on this filegroup until a file is added.", 622, 16, 3);
+
+    /// <summary>
+    /// Msg 652: a write reaching a rowset on a read-only filegroup — the heap
+    /// (named <c>""</c>), a clustered or a nonclustered index — naming its
+    /// <c>sys.partitions.partition_id</c> as the RowsetId (probed 2026-09-28
+    /// against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException RowsetOnReadOnlyFilegroup(string indexName, string qualifiedTableName, long rowsetId, string filegroupName) =>
+        new($"The index \"{indexName}\" for table \"{qualifiedTableName}\" (RowsetId {rowsetId}) resides on a read-only filegroup (\"{filegroupName}\"), which cannot be modified.", 652, 16, 1);
+
+    /// <summary>Msg 5042 state 1: <c>REMOVE FILE</c> of a file whose filegroup holds rows (probed 2026-09-28 against SQL Server 2025).</summary>
+    internal static SimulatedSqlException FileNotEmpty(string name) =>
+        new($"The file '{name}' cannot be removed because it is not empty.", 5042, 16, 1);
+
     /// <summary>Msg 1707: <c>TEXTIMAGE_ON</c> on a partitioned table.</summary>
     internal static SimulatedSqlException TextImageOnPartitionedTable() =>
         new("Cannot specify TEXTIMAGE_ON filegroup for a partitioned table.", 1707, 16, 1) { AbortsAsUnderXactAbort = true };

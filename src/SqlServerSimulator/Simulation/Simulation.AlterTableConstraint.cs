@@ -532,13 +532,22 @@ partial class Simulation
 
         var constraint = new KeyConstraint(kind, name, storageOrdinals, fullOrdinals, context.CurrentDatabase.AllocateObjectId(), isClustered, indexOptions, context.Batch.CurrentStatement.UtcNow, [.. descending]);
         var placement = PlacementFor(context.Batch, table, constraint.WrittenDataSpace);
+        var filegroup = FilegroupFor(context.Batch, table, constraint.WrittenDataSpace);
         RequirePartitionColumnInUniqueKey(placement, table, fullOrdinals, name, isConstraint: true);
         ValidateExistingRowsForKeyConstraint(table, constraint, context.Batch);
+        if (placement is null)
+            RejectIndexOnEmptyFilegroup(context.Batch, table, filegroup);
         table.KeyConstraints.Add(constraint);
         if (isClustered)
+        {
             table.Partitioning = placement;
+            table.FilegroupId = filegroup;
+        }
         else
+        {
             constraint.Partitioning = placement;
+            constraint.FilegroupId = filegroup;
+        }
         return true;
     }
 

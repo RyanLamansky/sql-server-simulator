@@ -62,6 +62,7 @@ partial class Simulation
         FunctionBodyShape.NoteTableWrite(batch, "UPDATE", table);
         RejectDisabledClusteredIndex(table);
         RejectIncorrectSetOptionsForWrite(table, batch, "UPDATE");
+        RejectWriteToUnwritableFilegroup(table, batch, "UPDATE");
         _ = batch.AcquireDataLockIfApplicable(table, default, isWrite: true);
 
         // Compile-time bind of the SET values and the predicate against the

@@ -59,7 +59,7 @@ public class ClrTriggerTests
         Contains("The statement has been terminated.", ex.Message);
         AreEqual("0|0", sim.ExecuteScalar("select concat_ws('|', @@trancount, count(*)) from t"));
         AreEqual("6522|tr|0", sim.ExecuteScalar(
-            "begin try insert t values (1) end try begin catch select concat_ws('|', error_number(), error_procedure(), xact_state()) end catch"));
+            "begin try insert t values (1) end try begin catch select cast(error_number() as varchar) + '|' + error_procedure() + '|' + cast(xact_state() as varchar) end catch"));
     }
 
     [TestMethod]

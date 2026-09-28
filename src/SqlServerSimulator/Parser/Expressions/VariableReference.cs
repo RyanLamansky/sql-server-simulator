@@ -40,6 +40,10 @@ internal sealed class VariableReference : Expression
         this.spelledNumeric = slot.SpelledNumeric;
         this.aliasType = slot.AliasType;
         this.Mask = slot.Mask;
+        // A CLR-typed value opens the statement's transaction (probed
+        // 2026-09-28 against SQL Server 2025).
+        if (this.DeclaredType is HierarchyIdSqlType or SpatialSqlType or ClrUdtSqlType)
+            context.Batch.CurrentStatement.MarkOpensTransaction();
     }
 
     /// <summary>

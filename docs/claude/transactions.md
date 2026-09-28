@@ -29,6 +29,21 @@ A fourth arrives over the network: TDS Transaction Manager requests map onto the
   The undo log is per-connection and its entries reference their `Heap` directly, so a write through a three-part name rolls back with the rest of the transaction with no extra routing; `@@TRANCOUNT` / `XACT_STATE()` never reflect the crossing (probe-confirmed).
   What *is* per-database — the rowversion counter, the version store's commit-Xid counter, trigger dispatch — follows the target table rather than the session; see the cross-database-writes section of [`schemas.md`](schemas.md#cross-database-writes).
 
+## The statement's own transaction
+
+With no user transaction, real opens one for any statement that touches data, and `XACT_STATE()` read inside the statement reports it as 1 while `@@TRANCOUNT` stays 0 (probed 2026-09-28 against SQL Server 2025).
+A statement touches data when it writes rows, or when its compile meets any of these — the parse sites mark `StatementContext.OpensTransaction`, which the statement's `XACT_STATE()` calls share through one mark, so the read costs nothing per row:
+- a FROM source other than a derived table or `VALUES` — a table of any kind (permanent, `#temp`, a table variable), a view, a CTE, a catalog view or DMV, a TVF, a built-in rowset function;
+- a function or sequence object: a scalar UDF call, `NEXT VALUE FOR`;
+- a CLR type: a method or property of `xml`, `hierarchyid`, `geography`, `geometry` or a user type, a `type::` static member, a `CAST` / `CONVERT` to one, a variable declared as one;
+- a built-in of the metadata, security or session families (`OBJECT_ID`, `DB_NAME`, `USER_NAME`, `SESSION_CONTEXT`, `CURRENT_USER`, …), every `@@` function but `@@ROWCOUNT`, `@@ERROR`, `@@TRANCOUNT`, `@@FETCH_STATUS` and `@@CURSOR_ROWS`, and a scattering real classes with them — `CONCAT`, `CHOOSE`, `DATENAME`, `GREATEST`, the `…FROMPARTS` constructors — where their neighbours `IIF`, `DATEPART`, `GETDATE` and `LEN` open none.
+
+The rule is per statement: `IF EXISTS (SELECT * FROM t) SELECT XACT_STATE()` reads 0 in its body, an `IF` or `WHILE` condition reads its own, and a cursor's rows read the statement its query was declared in.
+A function body always reads 1, since its caller named the function; a procedure body's statements read their own.
+
+**Not modeled yet**: `SET IMPLICIT_TRANSACTIONS ON` is parsed and discarded, so a statement that touches data leaves no transaction open behind it, where real opens one that `@@TRANCOUNT` then reads 1 — a `SELECT` from a table, `#temp` table, table variable or catalog view included (probed 2026-09-28 against SQL Server 2025).
+A built-in outside the probed families reads 0.
+
 ## Database-level DDL inside a user transaction
 
 `CREATE` / `ALTER` / `DROP DATABASE` and `ALTER DATABASE SCOPED CONFIGURATION` are refused inside a user transaction (Msg 226, or Msg 574 for the drop) before any of the statement runs; the error ends only its statement, a TRY catches it, and the transaction stays open and committable — save the scoped-configuration refusal, which acts as under `XACT_ABORT`: uncaught it ends the batch and rolls the transaction back, caught it dooms it (probed 2026-09-27 against SQL Server 2025).

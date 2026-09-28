@@ -237,6 +237,7 @@ partial class Simulation
     {
         RejectDisabledClusteredIndex(destinationTable);
         RejectIncorrectSetOptionsForWrite(destinationTable, context.Batch, "INSERT");
+        RejectWriteToUnwritableFilegroup(destinationTable, context.Batch, "INSERT");
         // Direct INSERT into a history sibling is rejected — history rows
         // are populated only by the engine via UPDATE / DELETE on the parent.
         if (destinationTable.IsHistoryTable)

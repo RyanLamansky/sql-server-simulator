@@ -133,6 +133,8 @@ partial class Simulation
             {
                 case "DATABASE":
                     permClass = PermissionChecker.ClassDatabase;
+                    if (!context.Batch.IsSkipping && !context.CurrentDatabase.Collation.Equals(securableName.Leaf, context.CurrentDatabase.Name))
+                        throw SimulatedSqlException.GrantOnAnotherDatabase();
                     break;
                 case "LOGIN":
                     serverScopeSecurable = true;
@@ -205,12 +207,13 @@ partial class Simulation
             cascade = true;
             context.MoveNextOptional();
         }
+        string? asGrantor = null;
         if (context.Token is ReservedKeyword { Keyword: Keyword.As })
         {
             context.MoveNextRequired();
             if (context.Token is not Name)
                 throw SimulatedSqlException.SyntaxErrorNear(context);
-            _ = BatchContext.ParseObjectName(context);
+            asGrantor = BatchContext.ParseObjectName(context).Leaf;
             context.MoveNextOptional();
         }
 
@@ -337,6 +340,12 @@ partial class Simulation
             }
         }
 
+        // Read ahead of the rows changing: the event's CascadeOption reports a
+        // CASCADE that had a grant option to reach.
+        (string EventType, string SchemaName, string ObjectName, string ObjectType, string TrailingElements)? permissionEvent = RaisesDdlEvents(context)
+            ? RenderPermissionEvent(context, database, kind, permissions, granteeNames, permClass, permMajorId, securableObject, objectSecurableName,
+                revokeGrantOptionOnly, withGrantOption, cascade, asGrantor)
+            : null;
         RecordSecurityUndo(context, database);
         foreach (var granteeName in granteeNames)
         {
@@ -360,7 +369,101 @@ partial class Simulation
                 }
             }
         }
+        if (permissionEvent is { } recorded)
+        {
+            RecordDdlEvent(context, recorded.EventType, recorded.SchemaName, recorded.ObjectName, recorded.ObjectType,
+                trailingElements: recorded.TrailingElements);
+        }
         return true;
+    }
+
+    /// <summary>
+    /// The <c>GRANT_DATABASE</c> / <c>DENY_DATABASE</c> / <c>REVOKE_DATABASE</c>
+    /// event a database-scope permission statement raises, one per statement
+    /// (probed 2026-09-28 against SQL Server 2025): the securable — an object
+    /// under its schema, a schema, principal or the database itself under an
+    /// empty <c>SchemaName</c> — then the grantor (a user or application role
+    /// securable itself, a role securable its owner), the permissions in lower case without their column
+    /// lists, the grantees, the <c>AS</c> principal, and the two options, a
+    /// <c>CASCADE</c> counting only when a grantee held the grant option it
+    /// reaches.
+    /// </summary>
+    private static (string EventType, string SchemaName, string ObjectName, string ObjectType, string TrailingElements) RenderPermissionEvent(
+        ParserContext context, Database database, PermissionStatementKind kind, List<(string Name, List<string>? Columns)> permissions,
+        List<string> granteeNames, byte permClass, int permMajorId, SchemaObject? securableObject, MultiPartName? objectSecurableName,
+        bool revokeGrantOptionOnly, bool withGrantOption, bool cascade, string? asGrantor)
+    {
+        var grantor = context.Connection.Security.Effective.DatabasePrincipalName;
+        var (schemaName, objectName, objectType) = ("", database.Name, "DATABASE");
+        if (securableObject is not null)
+        {
+            (schemaName, objectName, objectType) = (EventSchemaName(objectSecurableName!.Value), securableObject.Name, AuthorizationObjectType(securableObject));
+        }
+        else if (permClass == PermissionChecker.ClassSchema)
+        {
+            objectName = objectSecurableName!.Value.Leaf;
+            objectType = "SCHEMA";
+        }
+        else if (permClass == PermissionChecker.ClassDatabasePrincipal)
+        {
+            foreach (var principal in database.Principals.Values)
+            {
+                if (principal.PrincipalId != permMajorId)
+                    continue;
+                objectName = principal.Name;
+                objectType = principal.TypeCode switch
+                {
+                    "A" => "APPLICATION ROLE",
+                    "R" => "ROLE",
+                    _ => "USER",
+                };
+                // A role reports its owner as the grantor, any other principal
+                // itself.
+                grantor = principal.TypeCode == "R" ? Ownership.PrincipalName(database, principal.OwningPrincipalId) ?? principal.Name : principal.Name;
+            }
+        }
+
+        var cascadeReaches = false;
+        if (cascade)
+        {
+            foreach (var permission in database.Permissions)
+            {
+                if (permission.State != PermissionState.GrantWithGrantOption)
+                    continue;
+                foreach (var granteeName in granteeNames)
+                {
+                    if (database.Principals.TryGetValue(granteeName, out var grantee) && grantee.PrincipalId == permission.GranteePrincipalId
+                        && permissions.Exists(p => permission.IsFor(permClass, permMajorId, Permission.Resolve(p.Name), p.Name, database)))
+                    {
+                        cascadeReaches = true;
+                    }
+                }
+            }
+        }
+
+        var elements = new System.Text.StringBuilder();
+        AppendElement(elements, "Grantor", grantor);
+        _ = elements.Append("<Permissions>");
+        foreach (var (name, _) in permissions)
+        {
+#pragma warning disable CA1308 // Real reports the permission names in lower case.
+            AppendElement(elements, "Permission", name.ToLowerInvariant());
+#pragma warning restore CA1308
+        }
+        _ = elements.Append("</Permissions><Grantees>");
+        foreach (var granteeName in granteeNames)
+            AppendElement(elements, "Grantee", granteeName);
+        _ = elements.Append("</Grantees>");
+        AppendElement(elements, "AsGrantor", asGrantor ?? "");
+        AppendElement(elements, "GrantOption", withGrantOption || revokeGrantOptionOnly ? "1" : "0");
+        AppendElement(elements, "CascadeOption", cascadeReaches ? "1" : "0");
+        var eventType = kind switch
+        {
+            PermissionStatementKind.Grant => "GRANT_DATABASE",
+            PermissionStatementKind.Deny => "DENY_DATABASE",
+            _ => "REVOKE_DATABASE",
+        };
+        return (eventType, schemaName, objectName, objectType, elements.ToString());
     }
 
     /// <summary>
@@ -613,7 +716,9 @@ partial class Simulation
             || permName.Equals("UPDATE", StringComparison.OrdinalIgnoreCase)
             || permName.Equals("DELETE", StringComparison.OrdinalIgnoreCase);
         var isExecute = permName.Equals("EXECUTE", StringComparison.OrdinalIgnoreCase);
-        if (isDml && !kindIsTabular)
+        // A sequence takes UPDATE, the permission NEXT VALUE FOR reads
+        // (probed 2026-09-28 against SQL Server 2025).
+        if (isDml && !kindIsTabular && !(objectTypeCode == "SO" && permName.Equals("UPDATE", StringComparison.OrdinalIgnoreCase)))
             throw SimulatedSqlException.PermissionIncompatibleWithObject(permName.ToUpperInvariant());
         if (isExecute && !kindIsExecutable)
             throw SimulatedSqlException.PermissionIncompatibleWithObject(permName.ToUpperInvariant());

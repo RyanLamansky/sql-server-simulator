@@ -254,20 +254,29 @@ partial class Simulation
             throw SimulatedSqlException.IncorrectSetOptions("CREATE INDEX", setOptions);
 
         var placement = PlacementFor(context.Batch, table, index.WrittenDataSpace);
+        var filegroup = FilegroupFor(context.Batch, table, index.WrittenDataSpace);
         if (isUnique)
         {
             RequirePartitionColumnInUniqueKey(placement, table, [.. resolvedKeyColumns.Select(static key => key.ColumnOrdinal)], indexName, isConstraint: false);
             ValidateExistingRowsForUniqueIndex(table, index, context.Batch, qualifiedTableName);
         }
+        if (placement is null)
+            RejectIndexOnEmptyFilegroup(context.Batch, table, filegroup);
 
         if (replaced is not null)
             table.Indexes[table.Indexes.IndexOf(replaced)] = index;
         else
             table.Indexes.Add(index);
         if (isClustered)
+        {
             table.Partitioning = placement;
+            table.FilegroupId = filegroup;
+        }
         else
+        {
             index.Partitioning = placement;
+            index.FilegroupId = filegroup;
+        }
         RecordDdlEvent(context, "CREATE_INDEX", EventSchemaName(targetTableName), indexName, "INDEX", table.Name, "TABLE");
         return true;
     }

@@ -102,8 +102,8 @@ DENY <perm_list> [ON <securable>] TO <principal_list> [AS <grantor>]
   A sequence of bare identifiers fuses into one permission name (e.g. `VIEW ANY COLUMN ENCRYPTION KEY DEFINITION` → single permission).
 - `ON` clause resolves to a real (class, major_id): a bare or `OBJECT::<name>` name → class 1 + the object's id (and its schema id, for the covering-scope walk); `SCHEMA::<name>` → class 3 + schema id; `USER::<name>` → class 4 + principal id (the IMPERSONATE gate); no `ON` clause / `DATABASE::<name>` → class 0.
   `SERVER::<name>` and `LOGIN::<name>` route out of the database entirely, to `Simulation.ServerPermissions` — see [Server roles + server-scope permissions](#server-roles--server-scope-permissions-simulationsimulationserverrolescs).
-  An unknown securable raises the Msg 15151 object-variant (`Cannot find the object '<name>', because it does not exist or you do not have permission.`).
-  A permission incompatible with the object kind (SELECT on a proc, EXECUTE on a table / view / TVF) raises **Msg 4606**.
+  An unknown securable raises the Msg 15151 object-variant (`Cannot find the object '<name>', because it does not exist or you do not have permission.`), and a `DATABASE::` naming another database **Msg 4610** (probed 2026-09-28 against SQL Server 2025).
+  A permission incompatible with the object kind (SELECT on a proc, EXECUTE on a table / view / TVF, anything but UPDATE among the four DML permissions on a sequence) raises **Msg 4606**.
 - Grantee names accept either `Name` or `ReservedKeyword` raw text (so `public` works without special-casing).
 - The stored row's grantor is the granting session's **effective principal** (an impersonated grant records the impersonated grantor).
 - A **column list** after a permission name — `GRANT SELECT (a, b) ON t TO u`, `DENY SELECT (c) ON t TO u`, `GRANT UPDATE (b) ON t TO u`, `REFERENCES (col)` — stores **one row per column** at `minor_id` = the column's 1-based ordinal (`sys.columns.column_id`); an unknown column raises **Msg 4615** (`Invalid column name '<col>'.`).
@@ -736,4 +736,5 @@ The current-principal / id scalars read the session's effective principal; `HAS_
 - **Msg 229 multi-error round trip** — when both SELECT and the write permission are missing, a single SELECT-first denial is raised, not real's paired SELECT-then-write error records.
 - **`ALTER TABLE ADD`-column SET-reads detection** on the joined form isn't distinguished — a joined UPDATE / DELETE SELECT-checks all backing-table sources unconditionally.
 - **Guest enable/disable**, **`CREATE USER … FROM EXTERNAL PROVIDER`** + the `WITH` option tail — parse-and-discard.
+- **Grammar residue** — `DENY … CASCADE` is Msg 156 here where real accepts it and cascades the denial to the grantee's own grantees, `GRANT ALL` omits real's class-0 **Msg 4628** deprecation notice, and the `TYPE::`, `XML SCHEMA COLLECTION::` and `APPLICATION ROLE::` securable classes aren't parsed (probed 2026-09-28 against SQL Server 2025).
 - **Login-model edges** — login DDL itself is permission-unchecked (the reference login can't reach those checks anyway); DISABLE / password policy / lockout not enforced.

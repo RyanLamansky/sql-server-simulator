@@ -191,6 +191,7 @@ partial class Simulation
             principalId: null,
             xsdText: xsdText,
             createDate: context.Batch.CurrentStatement.UtcNow);
+        RecordDdlEvent(context, "CREATE_XML_SCHEMA_COLLECTION", schemaName, name.Leaf, "XML SCHEMA COLLECTION");
         return true;
     }
 
@@ -351,6 +352,7 @@ partial class Simulation
         if (!PermissionEnforcement.HasSchemaAlter(context.Batch, ownerSchema))
             throw SimulatedSqlException.CannotDropXmlSchemaCollection(name.Leaf);
         _ = ownerSchema.XmlSchemaCollections.TryRemove(name.Leaf, out _);
+        RecordDdlEvent(context, "DROP_XML_SCHEMA_COLLECTION", schemaName, name.Leaf, "XML SCHEMA COLLECTION");
         return true;
     }
 }

@@ -203,6 +203,7 @@ The type shares `hierarchyid`'s row and column of the type-pair grids, which rea
 - A type marked `IsByteOrdered` compares, sorts, groups, keys an index and a constraint, and joins by its bytes.
   One that isn't is `SqlType.IsIncomparable`: Msg 403 for a comparison, 249 in `ORDER BY` / `GROUP BY`, 421 for `DISTINCT`, 1978 for an index key and 1919 for a key constraint.
 - A temp table can't use it (Msg 2715 state 6): the type lives in the user database, as an alias type does.
+  `SELECT … INTO` a temp table meets the same wall as Msg 6220, which ends the batch (probed 2026-09-28 against SQL Server 2025).
 
 ### Members
 

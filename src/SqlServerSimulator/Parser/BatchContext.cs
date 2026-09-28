@@ -2538,6 +2538,7 @@ internal sealed class BatchContext
             return this.TryResolveFunction(functionBase, out function);
         }
         this.AcquireStatementLock(function.SchemaLock, LockMode.SchemaStability);
+        this.CurrentStatement.MarkOpensTransaction();
         return true;
     }
 

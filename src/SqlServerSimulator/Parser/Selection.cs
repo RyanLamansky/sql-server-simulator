@@ -2862,6 +2862,12 @@ internal sealed partial class Selection
     private static FromSource ParseSingleFromSourceCore(ParserContext context, QueryScope scope)
     {
         var token = context.GetNextRequired();
+        // Every source but a derived table or VALUES — a table, view, CTE,
+        // table variable, rowset function or catalog view — opens the
+        // statement's transaction; a derived table opens it only through a
+        // source of its own.
+        if (token is not Operator { Character: '(' })
+            context.Batch.CurrentStatement.MarkOpensTransaction();
         switch (token)
         {
             // A leading `.` opens a name whose db/schema positions are omitted

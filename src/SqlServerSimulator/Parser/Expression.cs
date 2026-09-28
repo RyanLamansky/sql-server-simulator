@@ -258,7 +258,7 @@ internal abstract class Expression : ExpressionNode
         Literal literal => new Value(literal.Value),
         AtPrefixedString atPrefixed when context.RuleVariables is { } ruleVariables => RuleVariable(ruleVariables, atPrefixed),
         AtPrefixedString atPrefixed => new VariableReference(atPrefixed, context),
-        DoubleAtPrefixedString doubleAtPrefixedString => doubleAtPrefixedString.Parse() switch
+        DoubleAtPrefixedString doubleAtPrefixedString => MarkOpeningAtAt(context, doubleAtPrefixedString.Parse()) switch
         {
             AtAtKeyword.Connections => new ConnectionsExpression(),
             AtAtKeyword.Error => new LastErrorExpression(),
@@ -289,10 +289,10 @@ internal abstract class Expression : ExpressionNode
         // catching the unexpected `(`.
         ReservedKeyword { Keyword: Keyword.Current_Timestamp } => new CurrentTimeFunction(CurrentTimeKind.CurrentTimestamp),
         ReservedKeyword { Keyword: Keyword.Current_Date } => new CurrentTimeFunction(CurrentTimeKind.CurrentDate),
-        ReservedKeyword { Keyword: Keyword.Current_User } => new CurrentPrincipalKeyword("CURRENT_USER"),
-        ReservedKeyword { Keyword: Keyword.Session_User } => new CurrentPrincipalKeyword("SESSION_USER"),
-        ReservedKeyword { Keyword: Keyword.System_user } => new CurrentPrincipalKeyword("SYSTEM_USER", isLogin: true),
-        ReservedKeyword { Keyword: Keyword.User } => new CurrentPrincipalKeyword("USER"),
+        ReservedKeyword { Keyword: Keyword.Current_User } => OpensStatementTransaction(context, new CurrentPrincipalKeyword("CURRENT_USER")),
+        ReservedKeyword { Keyword: Keyword.Session_User } => OpensStatementTransaction(context, new CurrentPrincipalKeyword("SESSION_USER")),
+        ReservedKeyword { Keyword: Keyword.System_user } => OpensStatementTransaction(context, new CurrentPrincipalKeyword("SYSTEM_USER", isLogin: true)),
+        ReservedKeyword { Keyword: Keyword.User } => OpensStatementTransaction(context, new CurrentPrincipalKeyword("USER")),
         // LEFT, RIGHT, CONVERT, TRY_CONVERT, COALESCE, and NULLIF are
         // reserved keywords but dispatch as function calls when followed
         // by '(' — the postfix loop hands the call shape off to ResolveBuiltIn.
@@ -391,6 +391,7 @@ internal abstract class Expression : ExpressionNode
                             // exist only where the host enabled CLR.
                             if (context.Simulation.EnableClr && ClrTypeMemberCall.ReceiverType(expression, context) is { } clrType)
                             {
+                                context.Batch.CurrentStatement.MarkOpensTransaction();
                                 expression = ClrTypeMemberCall.ParseInstance(expression, clrType, name.Value, context);
                                 continue;
                             }
@@ -414,6 +415,7 @@ internal abstract class Expression : ExpressionNode
                                 var probe = context.GetNextOptional();
                                 if (probe is Operator { Character: '(' })
                                 {
+                                    context.Batch.CurrentStatement.MarkOpensTransaction();
                                     expression = HierarchyIdMethodCall.Parse(expression, name.Value, context);
                                     continue;
                                 }
@@ -449,6 +451,7 @@ internal abstract class Expression : ExpressionNode
                                 var probe = context.GetNextOptional();
                                 if (probe is Operator { Character: '(' })
                                 {
+                                    context.Batch.CurrentStatement.MarkOpensTransaction();
                                     expression = XmlMethodCall.Parse(expression, name.Value, context);
                                     continue;
                                 }
@@ -468,6 +471,7 @@ internal abstract class Expression : ExpressionNode
                                 var probe = context.GetNextOptional();
                                 if (probe is Operator { Character: '(' })
                                 {
+                                    context.Batch.CurrentStatement.MarkOpensTransaction();
                                     expression = SpatialMethodCall.Parse(expression, name.Value, context);
                                     continue;
                                 }
@@ -494,10 +498,12 @@ internal abstract class Expression : ExpressionNode
                                 var memberCheckpoint = context.SaveCheckpoint();
                                 if (context.GetNextOptional() is Operator { Character: '(' })
                                 {
+                                    context.Batch.CurrentStatement.MarkOpensTransaction();
                                     expression = SpatialMethodCall.Parse(expression, name.Value, context);
                                     continue;
                                 }
                                 context.RestoreCheckpoint(memberCheckpoint);
+                                context.Batch.CurrentStatement.MarkOpensTransaction();
                                 expression = SpatialMethodCall.Property(expression, name.Value);
                                 continue;
                             }
@@ -559,6 +565,9 @@ internal abstract class Expression : ExpressionNode
                             throw SimulatedSqlException.SyntaxErrorNear(context);
                         var typeName = colonRef.ReferencedName.Leaf;
                         context.MoveNextRequired();
+                        // A CLR type's static member opens the statement's
+                        // transaction, as its instance members do.
+                        context.Batch.CurrentStatement.MarkOpensTransaction();
                         // A CLR user-defined type's static members, through
                         // its one- or two-part name; any other name is no
                         // type (probed 2026-09-28 against SQL Server 2025).
@@ -1768,12 +1777,67 @@ internal abstract class Expression : ExpressionNode
             FunctionBodyShape.NoteSideEffect(context.Batch, operatorName, FunctionBodyShape.BuiltInOperatorState);
     }
 
+    /// <summary>
+    /// Every <c>@@</c> function but the five that report the last statement's
+    /// or cursor's outcome and the transaction count opens the statement's
+    /// transaction (probed 2026-09-28 against SQL Server 2025); see
+    /// <see cref="OpensStatementTransaction(ReadOnlySpan{char})"/>.
+    /// </summary>
+    private static AtAtKeyword MarkOpeningAtAt(ParserContext context, AtAtKeyword keyword)
+    {
+        if (keyword is not (AtAtKeyword.CursorRows or AtAtKeyword.Error or AtAtKeyword.FetchStatus or AtAtKeyword.RowCount or AtAtKeyword.TranCount))
+            context.Batch.CurrentStatement.MarkOpensTransaction();
+        return keyword;
+    }
+
+    private static Expression OpensStatementTransaction(ParserContext context, Expression expression)
+    {
+        context.Batch.CurrentStatement.MarkOpensTransaction();
+        return expression;
+    }
+
+    /// <summary>
+    /// The built-ins real opens the statement's transaction for, which
+    /// <c>XACT_STATE()</c> reads as 1 (probed 2026-09-28 against SQL Server
+    /// 2025): the metadata, security and session families, and a scattering
+    /// of others — <c>CONCAT</c>, <c>CHOOSE</c>, <c>DATENAME</c>, the
+    /// <c>…FROMPARTS</c> constructors — where their neighbours (<c>IIF</c>,
+    /// <c>DATEPART</c>, <c>GETDATE</c>, <c>LEN</c>) open none.
+    /// </summary>
+    private static bool OpensStatementTransaction(ReadOnlySpan<char> uppercaseName) => uppercaseName switch
+    {
+        "APP_NAME" or "ASSEMBLYPROPERTY" or "ASYMKEY_ID" or "CERTENCODED" or "CERT_ID"
+            or "CHANGE_TRACKING_CURRENT_VERSION" or "CHOOSE" or "COLLATIONPROPERTY" or "COLUMNPROPERTY"
+            or "COLUMNS_UPDATED" or "COL_LENGTH" or "COL_NAME" or "CONCAT" or "CONCAT_WS"
+            or "CONNECTIONPROPERTY" or "CONTEXT_INFO" or "CRYPT_GEN_RANDOM" or "CURRENT_REQUEST_ID"
+            or "CURRENT_TRANSACTION_ID" or "DATABASEPROPERTY" or "DATABASEPROPERTYEX"
+            or "DATABASE_PRINCIPAL_ID" or "DATEFROMPARTS" or "DATENAME" or "DATETIME2FROMPARTS"
+            or "DATETIMEFROMPARTS" or "DATETIMEOFFSETFROMPARTS" or "DB_ID" or "DB_NAME"
+            or "DECRYPTBYPASSPHRASE" or "DIFFERENCE" or "ENCRYPTBYPASSPHRASE" or "FILEGROUP_ID"
+            or "FILEGROUP_NAME" or "FILEPROPERTY" or "FILE_ID" or "FILE_NAME"
+            or "FULLTEXTCATALOGPROPERTY" or "FULLTEXTSERVICEPROPERTY" or "GETANSINULL" or "GREATEST"
+            or "HASHBYTES" or "HAS_DBACCESS" or "HAS_PERMS_BY_NAME" or "HOST_ID" or "HOST_NAME"
+            or "IDENT_CURRENT" or "IDENT_INCR" or "IDENT_SEED" or "INDEXKEY_PROPERTY" or "INDEXPROPERTY"
+            or "INDEX_COL" or "ISDATE" or "IS_MEMBER" or "IS_ROLEMEMBER" or "IS_SRVROLEMEMBER"
+            or "KEY_ID" or "LEAST" or "LOGINPROPERTY" or "OBJECTPROPERTY" or "OBJECTPROPERTYEX"
+            or "OBJECT_DEFINITION" or "OBJECT_ID" or "OBJECT_NAME" or "OBJECT_SCHEMA_NAME"
+            or "ORIGINAL_DB_NAME" or "ORIGINAL_LOGIN" or "PARSENAME" or "PWDENCRYPT" or "SCHEMA_ID"
+            or "SCHEMA_NAME" or "SCOPE_IDENTITY" or "SERVERPROPERTY" or "SESSIONPROPERTY"
+            or "SESSION_CONTEXT" or "SMALLDATETIMEFROMPARTS" or "SOUNDEX" or "SQL_VARIANT_PROPERTY"
+            or "STATS_DATE" or "SUSER_ID" or "SUSER_NAME" or "SUSER_SID" or "SUSER_SNAME"
+            or "SYMKEYPROPERTY" or "TIMEFROMPARTS" or "TRIGGER_NESTLEVEL" or "TYPEPROPERTY" or "TYPE_ID"
+            or "TYPE_NAME" or "USER_ID" or "USER_NAME" or "USER_SID" => true,
+        _ => false,
+    };
+
     private static Expression ResolveBuiltIn(string name, ParserContext context)
     {
         Span<char> uppercaseName = stackalloc char[name.Length];
         RecordNondeterministicBuiltIn(name, context);
         RecordSideEffectingBuiltIn(name, context);
         _ = name.ToUpperInvariant(uppercaseName);
+        if (OpensStatementTransaction(uppercaseName))
+            context.Batch.CurrentStatement.MarkOpensTransaction();
         BuiltInArity.Check(uppercaseName, context);
         BuiltInArity.CheckWindowClauses(uppercaseName, context);
         if (!ConstantFolding.IsFoldedBuiltIn(uppercaseName))
@@ -2183,6 +2247,7 @@ internal abstract class Expression : ExpressionNode
         }
         var sequenceName = BatchContext.ParseObjectName(context);
         var nvf = new NextValueFor(context, sequenceName);
+        context.Batch.CurrentStatement.MarkOpensTransaction();
 
         // Optional OVER (ORDER BY ...) — parsed and discarded. The simulator
         // iterates rows in one deterministic order regardless of the OVER

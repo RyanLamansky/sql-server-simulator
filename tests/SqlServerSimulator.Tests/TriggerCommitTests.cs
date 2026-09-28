@@ -50,7 +50,7 @@ public sealed class TriggerCommitTests
 
     [TestMethod]
     public void CaughtInTry()
-        => AreEqual("3609|0|0|1", With("commit;").ExecuteScalar(
+        => AreEqual("3609|1|0|1", With("commit;").ExecuteScalar(
             "begin try insert t values (1); end try begin catch select concat(error_number(), '|', xact_state(), '|', @@trancount, '|', (select count(*) from t)); end catch"));
 
     [TestMethod]
@@ -64,7 +64,8 @@ public sealed class TriggerCommitTests
     [TestMethod]
     [DataRow("create table log (x int, tc int); insert log values (xact_state(), @@trancount); select concat(x, '|', tc) from log", "1|2")]
     [DataRow("declare @l table (x int, tc int); insert @l values (xact_state(), @@trancount); select concat(x, '|', tc) from @l", "1|0")]
-    [DataRow("select concat(xact_state(), '|', @@trancount)", "0|0")]
+    [DataRow("select concat(xact_state(), '|', @@trancount)", "1|0")]
+    [DataRow("select str(xact_state(), 1) + '|' + str(@@trancount, 1)", "0|0")]
     public void XactState_InAnAutoCommitWrite(string batch, string expected)
         => AreEqual(expected, new Simulation().ExecuteScalar(batch));
 }

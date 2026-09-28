@@ -58,7 +58,7 @@ An `ON` clause naming neither a scheme nor a registered filegroup (nor `"default
 
 `CREATE TABLE … ON scheme(column)` places the table's rows — the heap, or whichever clustered index it gets — on the scheme (`HeapTable.Partitioning`).
 A key constraint or index written without its own `ON` is **aligned**: it lands where the rows are.
-One written `ON [filegroup]` is not, and reports `data_space_id` 1.
+One written `ON [filegroup]` is not, and lands on that filegroup — see [Filegroup placement](#filegroup-placement).
 A clustered index created `ON` a scheme moves the rows there, one created `ON [PRIMARY]` moves them off, and dropping the clustered index leaves the heap where the index was.
 
 The partition column must resolve (Msg 1911), be named once (Msg 2703, ahead of the one-column count check, Msg 2726 — also what a scheme written without a column list gets), be persisted if computed (Msg 7724), and have exactly the parameter's type, length included (Msg 7726), and collation (Msg 7727).
@@ -69,6 +69,26 @@ A unique index or key must carry the partition column in its key (Msg 1908, foll
 The partition column carries `partition_ordinal` 1 in `sys.index_columns`: flagged where the index already lists it, else added as one more column that is neither key nor included — after the includes for a nonclustered index, in column order for a clustered index, and as the heap's only row (index_id 0).
 `sys.stats_columns` lists it at the same position, though never an included column.
 `sys.partitions` / `sys.dm_db_partition_stats` / `sys.allocation_units` report one row per partition of each aligned index, `sys.allocation_units.data_space_id` naming the partition's filegroup; `sp_help` says the table and its indexes are located on the scheme.
+
+## Filegroup placement
+
+Off a scheme, the rows — the heap, or the clustered index — sit on a filegroup (`HeapTable.FilegroupId`), as does each nonclustered index or key (`Index.FilegroupId`, `KeyConstraint.FilegroupId`) and the LOB data (`HeapTable.LobFilegroupId`); all probed 2026-09-28 against SQL Server 2025.
+- A `CREATE TABLE` without `ON` lands on the database's **default** filegroup, as does `SELECT … INTO`; `ON [default]` names it too.
+- A clustered key or index moves the rows onto its own `ON`, and dropping it leaves the heap there.
+- A nonclustered index or key without its own `ON` lands where the rows are when it is created.
+- The LOB data lands on `TEXTIMAGE_ON`'s filegroup, else where the rows were at creation, and stays there when a clustered index moves them.
+  `TEXTIMAGE_ON` on a table without a LOB column is **Msg 1709**.
+
+`sys.indexes.data_space_id`, `sys.tables.lob_data_space_id`, `sys.allocation_units.data_space_id` (the LOB unit's the LOB filegroup) and `sp_help`'s `Data_located_on_filegroup` and `located on …` descriptions read it.
+
+A filegroup constrains what lands on it:
+- an unknown one is **Msg 1921**, and one that is read-only takes no new table or index (**Msg 1924** state 2);
+- one without files takes a table but not its rows: an `INSERT` into it, or an index built on it over a table with rows, is **Msg 622** state 3 — the index build ending its statement;
+- a read-only one refuses a write reaching a rowset on it with **Msg 652**, naming the heap as `""` — an `UPDATE` reaching a nonclustered index only when it changes a column the index keys or includes;
+- `REMOVE FILEGROUP` refuses one holding a table, index or LOB data (**Msg 5042** state 8), and `REMOVE FILE` a non-primary file whose filegroup holds a table with rows or with the pages deleted rows left (**Msg 5042** state 1).
+
+**Divergences.**
+Msg 652's `RowsetId` is the simulator's synthetic `sys.partitions.partition_id`, not real's allocation-derived one; the write refusals are settled once per statement, so a statement writing no row is refused too; and the checks read an unpartitioned table only — a scheme's read-only or file-less partition filegroup takes writes.
 
 ## `TRUNCATE TABLE … WITH (PARTITIONS (…))`
 
@@ -118,7 +138,8 @@ The loader creates the functions and schemes and places tables, indexes and key 
 
 ## Not modeled yet
 
-- **Placement on a non-`PRIMARY` filegroup** isn't recorded: a table or index `ON [fg]` reports `data_space_id` 1, only a scheme's partitions report their filegroups.
+- **`FILESTREAM_ON`** and a `FILESTREAM` column are a syntax error here, where real refuses a non-FILESTREAM filegroup with Msg 1724 (probed 2026-09-28 against SQL Server 2025).
+- **LOB data spilling onto a filegroup without files** is written, where real refuses it with Msg 622 once a value leaves the row.
 - **An indexed view's index on a scheme** reports `data_space_id` 1, and a nonclustered columnstore index on a partitioned table isn't aligned by default.
 - **Per-partition data compression** (`REBUILD PARTITION = n WITH (DATA_COMPRESSION = …)`), and so SWITCH's compression check (Msg 11406, which real raises switching out of a page-compressed history table).
 - **`SELECT … INTO … ON filegroup`** is a syntax error here.

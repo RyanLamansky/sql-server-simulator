@@ -200,6 +200,37 @@ internal sealed class StatementContext
     public bool TransactedWrite;
 
     /// <summary>
+    /// Set as the statement compiles something real opens a transaction for
+    /// even when nothing is written — a FROM source other than a derived table
+    /// or <c>VALUES</c>, a function or sequence object, a metadata, security
+    /// or session built-in, a CLR type — which <c>XACT_STATE()</c> reads as 1
+    /// while <c>@@TRANCOUNT</c> stays 0 (probed 2026-09-28 against SQL Server
+    /// 2025). Published to <see cref="TransactionMark"/> once an
+    /// <c>XACT_STATE()</c> call has taken one.
+    /// </summary>
+    public bool OpensTransaction;
+
+    /// <summary>
+    /// The mark the statement's <c>XACT_STATE()</c> calls read, allocated by
+    /// the first of them, so a mark met later in the statement's text — the
+    /// FROM clause after the select list — still reaches them, and a cursor
+    /// or a cached plan re-running the expression reads what its own
+    /// statement compiled.
+    /// </summary>
+    public StatementTransactionMark? TransactionMark;
+
+    /// <summary>Records one of the constructs <see cref="OpensTransaction"/> lists.</summary>
+    public void MarkOpensTransaction()
+    {
+        this.OpensTransaction = true;
+        if (this.TransactionMark is { } mark)
+            mark.Opens = true;
+    }
+
+    /// <summary>The mark an <c>XACT_STATE()</c> call reads, shared by the statement's calls.</summary>
+    public StatementTransactionMark TakeTransactionMark() => this.TransactionMark ??= new() { Opens = this.OpensTransaction };
+
+    /// <summary>
     /// Set in skip mode when a FROM source names an object that doesn't exist,
     /// so the statement parsed over a placeholder. Real binds none of such a
     /// statement until it runs, so a binder error it raises defers with it.
@@ -290,4 +321,13 @@ internal sealed class StatementContext
     /// against SQL Server 2025). Set at dispatch entry.
     /// </summary>
     public bool ChangesTableStructure;
+}
+
+/// <summary>
+/// Whether the statement an <c>XACT_STATE()</c> call was compiled in opens a
+/// transaction for itself; see <see cref="StatementContext.OpensTransaction"/>.
+/// </summary>
+internal sealed class StatementTransactionMark
+{
+    public bool Opens;
 }

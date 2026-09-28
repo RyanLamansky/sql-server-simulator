@@ -475,6 +475,14 @@ partial class Simulation
         // raises and the table stays in place — matching real SQL Server's
         // probe-confirmed behavior, where the CREATE TABLE statement rolls
         // back atomically only after the per-FK validation completes.
+        // A temporary table's FOREIGN KEY is skipped with a notice rather
+        // than resolved (probed 2026-09-28 against SQL Server 2025).
+        if (isTempTable)
+        {
+            foreach (var _ in pendingForeignKeys)
+                context.Batch.AppendInfoError(@class: 0, state: 0, number: 1756, SimulatedSqlException.TemporaryTableForeignKeySkippedMessage(tableName.Leaf));
+            pendingForeignKeys.Clear();
+        }
         try
         {
             if (pendingForeignKeys.Count > 0)
@@ -2573,7 +2581,8 @@ partial class Simulation
             clustered = modifier.Keyword == Keyword.Clustered;
             context.MoveNextOptional();
         }
-        return (kind, clustered, ParseOptionalIndexWithClause(context));
+        // A column-level key takes its own ON clause as a table-level one does.
+        return (kind, clustered, ParseOptionalIndexWithClause(context).WithDataSpace(ParseOptionalDataSpaceClause(context, out _)));
     }
 
     /// <summary>
@@ -2656,10 +2665,8 @@ partial class Simulation
         context.MoveNextRequired();
 
         // SSMS emits `… PRIMARY KEY CLUSTERED (cols) WITH (PAD_INDEX = OFF, …)
-        // ON [PRIMARY]` for inline table-level PK / UNIQUE constraints. Both
-        // trailers are no-ops in the simulator (no B-tree storage, no
-        // filegroup model) but the parser must consume them so the
-        // column-list do-while sees a comma or closing paren next.
+        // ON [PRIMARY]` for inline table-level PK / UNIQUE constraints; the
+        // ON clause places the key's index.
         var indexOptions = ParseOptionalIndexWithClause(context).WithDataSpace(ParseOptionalDataSpaceClause(context, out _));
 
         pendingKeys.Add((kind, constraintName, [.. ordinals], clustered, indexOptions, [.. descending]));
@@ -3378,6 +3385,25 @@ partial class Simulation
     /// validation failure raises and the caller (CREATE TABLE) rolls the
     /// table back out of its dict.
     /// </remarks>
+    /// <summary>
+    /// Refuses a FOREIGN KEY whose column pairs differ in type (Msg 1778),
+    /// length, precision or scale (1753) or collation (1757).
+    /// </summary>
+    private static void RejectForeignKeyColumnMismatch(HeapTable childTable, int[] childOrdinals, HeapTable referencedTable, int[] referencedOrdinals, string foreignKeyName)
+    {
+        for (var i = 0; i < childOrdinals.Length; i++)
+        {
+            var child = childTable.Columns[childOrdinals[i]];
+            var parent = referencedTable.Columns[referencedOrdinals[i]];
+            var number = child.SystemTypeId != parent.SystemTypeId || (child.SystemTypeId == 240 && child.Type != parent.Type) ? 1778
+                : BuiltInResources.GetSysColumnMetadata(child) != BuiltInResources.GetSysColumnMetadata(parent) ? 1753
+                : SqlType.IsCollatedString(child.Type) && !string.Equals(child.Type.Collation?.Name, parent.Type.Collation?.Name, StringComparison.OrdinalIgnoreCase) ? 1757
+                : 0;
+            if (number != 0)
+                throw SimulatedSqlException.ForeignKeyColumnMismatch(number, $"{referencedTable.Name}.{parent.Name}", $"{childTable.Name}.{child.Name}", foreignKeyName);
+        }
+    }
+
     private static void ResolveForeignKeys(HeapTable childTable, List<PendingForeignKey> pending, ParserContext context)
     {
         if (pending.Count == 0)
@@ -3428,7 +3454,12 @@ partial class Simulation
                         }
                     }
                     if (found < 0)
-                        throw SimulatedSqlException.InvalidColumnName(pf.ReferencedColumnNames[i]);
+                    {
+                        throw SimulatedSqlException.ForeignKeyReferencesInvalidColumn(
+                            pf.ConstraintName ?? AutoForeignKeyName(childTable.Name, pf.ChildColumnNames, pending.IndexOf(pf)),
+                            pf.ReferencedColumnNames[i],
+                            pf.ReferencedTable.Leaf);
+                    }
                     refOrdinals[i] = found;
                 }
             }
@@ -3451,6 +3482,7 @@ partial class Simulation
             }
 
             var fkName = pf.ConstraintName ?? AutoForeignKeyName(childTable.Name, pf.ChildColumnNames, pending.IndexOf(pf));
+            RejectForeignKeyColumnMismatch(childTable, pf.ChildFullOrdinals, referencedTable, refOrdinals, fkName);
 
             // A computed referencing column has to be PERSISTED (Msg 1764), and
             // then constrains the referential actions to the ones that never

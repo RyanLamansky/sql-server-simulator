@@ -275,7 +275,7 @@ partial class Simulation
                 continue;
             rows.Add([
                 SqlValue.FromSystemName(identity.Name!),
-                SqlValue.FromString(HelpIndexDescriptionType, HelpIndexDescription(identity, target.Object is HeapTable table ? PlacementOf(table, identity) : null)),
+                SqlValue.FromString(HelpIndexDescriptionType, HelpIndexDescription(identity, target.Object is HeapTable table ? PlacementLocation(batch, table, identity) : HelpFilegroupName)),
                 // A columnstore index has no key to list (probed 2026-09-26
                 // against SQL Server 2025).
                 identity.Index is { IsColumnstore: true }
@@ -300,7 +300,7 @@ partial class Simulation
     // stats-no-recompute clauses real can also emit have no simulator
     // counterpart, so they never appear. An index on a partition scheme is
     // located on the scheme (probed 2026-09-27 against SQL Server 2025).
-    private static string HelpIndexDescription(IndexIdentity identity, Schemas.PartitionPlacement? placement)
+    private static string HelpIndexDescription(IndexIdentity identity, string location)
     {
         var ignoreDupKey = identity.Constraint?.IgnoreDupKey ?? identity.Index!.IgnoreDupKey;
         var isUnique = identity.Constraint is not null || identity.Index!.IsUnique;
@@ -311,8 +311,16 @@ partial class Simulation
             + (isUnique ? ", unique" : "")
             + (kind == KeyConstraintKind.PrimaryKey ? ", primary key" : "")
             + (kind == KeyConstraintKind.Unique ? ", unique key" : "")
-            + " located on " + (placement?.Scheme.Name ?? HelpFilegroupName);
+            + " located on " + location;
     }
+
+    /// <summary>
+    /// Where the sp_help family says an index of <paramref name="table"/> is
+    /// located: its partition scheme, else its filegroup (probed 2026-09-28
+    /// against SQL Server 2025).
+    /// </summary>
+    private static string PlacementLocation(BatchContext batch, HeapTable table, IndexIdentity identity) =>
+        PlacementOf(table, identity)?.Scheme.Name ?? FilegroupName(DatabaseOf(batch, table), FilegroupOf(table, identity));
 
     // Key columns in key order, comma-separated, with real's "(-)" suffix on a
     // descending key. Constraint-backed indexes read their storage ordinals;

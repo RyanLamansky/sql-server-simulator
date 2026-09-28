@@ -1005,6 +1005,7 @@ partial class Simulation
     {
         if (context.Batch.IsSkipping)
             return new SimulatedNonQuery(0);
+        RejectWriteToUnwritableFilegroup(table, context.Batch, "UPDATE", updatedColumnOrdinals);
 
         var insteadOfParent = (SchemaObject?)sourceView ?? table;
         var insteadOfActive = HasInsteadOfTrigger(context.Batch, insteadOfParent, TriggerActions.Update);

@@ -29,7 +29,7 @@ partial class Simulation
     internal static bool TryParseCreateApplicationRole(ParserContext context)
     {
         var name = ParseApplicationRoleHeader(context);
-        var (password, defaultSchema) = ParseApplicationRoleOptions(context, requirePassword: true);
+        var (password, defaultSchema, passwordStart, passwordEnd) = ParseApplicationRoleOptions(context, requirePassword: true);
         if (context.Batch.IsSkipping)
             return true;
         context.CurrentDatabase.RejectWriteWhenReadOnly();
@@ -50,6 +50,7 @@ partial class Simulation
             DefaultSchemaName = defaultSchema ?? Database.DefaultSchemaName,
             PasswordHash = PasswordHash.EncryptLegacy(password),
         };
+        RecordDdlEvent(context, "CREATE_APPLICATION_ROLE", schemaName: null, name, "APPLICATION ROLE", maskStart: passwordStart, maskEnd: passwordEnd);
         return true;
     }
 
@@ -63,7 +64,7 @@ partial class Simulation
     internal static bool TryParseAlterApplicationRole(ParserContext context)
     {
         var name = ParseApplicationRoleHeader(context);
-        var (password, defaultSchema, newName) = ParseAlterApplicationRoleOptions(context);
+        var (password, defaultSchema, newName, passwordStart, passwordEnd) = ParseAlterApplicationRoleOptions(context);
         if (context.Batch.IsSkipping)
             return true;
         context.CurrentDatabase.RejectWriteWhenReadOnly();
@@ -96,6 +97,9 @@ partial class Simulation
             _ = database.Principals.TryRemove(name, out _);
             database.Principals[newName] = renamed;
         }
+        // The event names the role as the statement leaves it (probed
+        // 2026-09-28 against SQL Server 2025).
+        RecordDdlEvent(context, "ALTER_APPLICATION_ROLE", schemaName: null, newName ?? name, "APPLICATION ROLE", maskStart: passwordStart, maskEnd: passwordEnd);
         return true;
     }
 
@@ -122,6 +126,7 @@ partial class Simulation
         _ = database.Principals.TryRemove(name, out _);
         lock (database.RoleMembers)
             _ = database.RoleMembers.RemoveAll(m => m.RoleId == role.PrincipalId || m.MemberId == role.PrincipalId);
+        RecordDdlEvent(context, "DROP_APPLICATION_ROLE", schemaName: null, name, "APPLICATION ROLE");
         return true;
     }
 
@@ -143,34 +148,37 @@ partial class Simulation
     /// <c>CREATE APPLICATION ROLE</c>. A missing PASSWORD when
     /// <paramref name="requirePassword"/> is a syntax error.
     /// </summary>
-    private static (string? Password, string? DefaultSchema) ParseApplicationRoleOptions(ParserContext context, bool requirePassword)
+    private static (string? Password, string? DefaultSchema, int PasswordStart, int PasswordEnd) ParseApplicationRoleOptions(ParserContext context, bool requirePassword)
     {
-        var (password, defaultSchema, _) = ParseApplicationRoleOptionList(context, acceptName: false);
+        var (password, defaultSchema, _, passwordStart, passwordEnd) = ParseApplicationRoleOptionList(context, acceptName: false);
         return requirePassword && password is null
             ? throw SimulatedSqlException.SyntaxErrorNear(context)
-            : (password, defaultSchema);
+            : (password, defaultSchema, passwordStart, passwordEnd);
     }
 
     /// <summary>Longest recognized <c>WITH</c>-option word (<c>DEFAULT_SCHEMA</c>) — the shared uppercase buffer's size.</summary>
     private const int LongestApplicationRoleOptionWord = 14;
 
     /// <summary>Parses <c>ALTER APPLICATION ROLE</c>'s option tail, which additionally accepts <c>NAME = new</c>.</summary>
-    private static (string? Password, string? DefaultSchema, string? NewName) ParseAlterApplicationRoleOptions(ParserContext context) =>
+    private static (string? Password, string? DefaultSchema, string? NewName, int PasswordStart, int PasswordEnd) ParseAlterApplicationRoleOptions(ParserContext context) =>
         ParseApplicationRoleOptionList(context, acceptName: true);
 
     /// <summary>
     /// Parses the shared <c>WITH &lt;option&gt; [, &lt;option&gt;]</c> tail:
     /// <c>PASSWORD</c>, <c>DEFAULT_SCHEMA</c>, and (ALTER only) <c>NAME</c>.
     /// An unrecognized option is a syntax error rather than a silent discard,
-    /// since each of the three carries meaning.
+    /// since each of the three carries meaning. The password literal's extent
+    /// is what a DDL event's <c>CommandText</c> masks (probed 2026-09-28
+    /// against SQL Server 2025).
     /// </summary>
-    private static (string? Password, string? DefaultSchema, string? NewName) ParseApplicationRoleOptionList(ParserContext context, bool acceptName)
+    private static (string? Password, string? DefaultSchema, string? NewName, int PasswordStart, int PasswordEnd) ParseApplicationRoleOptionList(ParserContext context, bool acceptName)
     {
         string? password = null;
         string? defaultSchema = null;
         string? newName = null;
+        int passwordStart = -1, passwordEnd = -1;
         if (context.Token is not ReservedKeyword { Keyword: Keyword.With })
-            return (password, defaultSchema, newName);
+            return (password, defaultSchema, newName, passwordStart, passwordEnd);
         context.MoveNextRequired();
         // One buffer for the whole loop (CA2014): the three recognized option
         // words all fit, and an over-long word can't match any of them.
@@ -205,13 +213,14 @@ partial class Simulation
                     password = context.Token is Literal { Value: var passwordValue } && SqlType.IsStringCategory(passwordValue.Type)
                         ? passwordValue.AsString
                         : throw new NotSupportedException("Only the clear-text password form (PASSWORD = '…') is modeled for application roles.");
+                    (passwordStart, passwordEnd) = (context.Token.StartIndex, context.Token.EndIndex);
                     break;
                 default:
                     throw SimulatedSqlException.SyntaxErrorNear(context);
             }
             context.MoveNextOptional();
             if (context.Token is not Operator { Character: ',' })
-                return (password, defaultSchema, newName);
+                return (password, defaultSchema, newName, passwordStart, passwordEnd);
             context.MoveNextRequired();
         }
     }

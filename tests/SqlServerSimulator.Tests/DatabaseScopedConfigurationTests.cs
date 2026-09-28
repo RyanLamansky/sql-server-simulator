@@ -159,7 +159,7 @@ public sealed class DatabaseScopedConfigurationTests
         using var connection = new Simulation().CreateOpenConnection();
         var ex = Throws<SimulatedSqlException>(() => connection.CreateCommand("begin tran; alter database scoped configuration set maxdop = 3; select 1").ExecuteScalar());
         AreEqual((226, (byte)7), (ex.Number, ex.State));
-        AreEqual("0:0", connection.CreateCommand("select concat(@@trancount, ':', xact_state())").ExecuteScalar());
+        AreEqual("0:0", connection.CreateCommand("select cast(@@trancount as varchar) + ':' + cast(xact_state() as varchar)").ExecuteScalar());
         AreEqual("1:-1", connection.CreateCommand("""
             begin tran;
             begin try alter database scoped configuration set maxdop = 3 end try begin catch end catch;

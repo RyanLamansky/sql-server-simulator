@@ -145,6 +145,7 @@ partial class Simulation
         // affected row at mutation time.
         RejectDisabledClusteredIndex(destinationTable);
         RejectIncorrectSetOptionsForWrite(destinationTable, context.Batch, "MERGE");
+        RejectWriteToUnwritableFilegroup(destinationTable, context.Batch, "MERGE");
         _ = context.Batch.AcquireDataLockIfApplicable(destinationTable, default, isWrite: true);
 
         // Optional target alias: AS <alias> or bare <alias>.

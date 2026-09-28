@@ -345,6 +345,10 @@ partial class Simulation
                 throw SimulatedSqlException.FileIsReadOnly(file.Name);
             if (file.DataSpaceId == target.DefaultFilegroupId && FileCount(target, file.DataSpaceId) == 1)
                 throw SimulatedSqlException.CannotRemoveOnlyDefaultFile(file.Name);
+            // Rows aren't kept per file, so any row on the filegroup counts
+            // as the file's.
+            if (file.DataSpaceId != Database.PrimaryFilegroupId && FilegroupHoldsObjects(target, file.DataSpaceId, withRowsOnly: true))
+                throw SimulatedSqlException.FileNotEmpty(file.Name);
         }
         lock (target.Files)
             _ = target.Files.Remove(file);

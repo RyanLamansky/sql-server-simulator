@@ -51,6 +51,10 @@ internal sealed class ConvertExpression : Expression
             ?? throw SimulatedSqlException.SyntaxErrorNear(context);
         this.targetReportsNumeric = Cast.ReportsNumeric(typeName);
         (this.targetType, this.targetMaxLength) = Cast.ParseTargetTypeSpec(context, typeName);
+        // A CLR type opens the statement's transaction (probed 2026-09-28
+        // against SQL Server 2025).
+        if (this.targetType is HierarchyIdSqlType or SpatialSqlType or ClrUdtSqlType)
+            context.Batch.CurrentStatement.MarkOpensTransaction();
 
         if (context.Token is not Operator { Character: ',' })
             throw SimulatedSqlException.SyntaxErrorNear(context);

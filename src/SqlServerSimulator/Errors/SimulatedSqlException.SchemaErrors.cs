@@ -1956,7 +1956,41 @@ partial class SimulatedSqlException
     /// SQL Server 2025, and the pair's states (0, then 1) on 2026-09-24.
     /// </summary>
     internal static SimulatedSqlException ForeignKeyNoMatchingKey(string referencedTable, string foreignKeyName) =>
-        FollowedByConstraintNotCreated(new($"There are no primary or candidate keys in the referenced table '{referencedTable}' that match the referencing column list in the foreign key '{foreignKeyName}'.", 1776, 16, 0));
+        FollowedByConstraintNotCreated(new($"There are no primary or candidate keys in the referenced table '{referencedTable}' that match the referencing column list in the foreign key '{foreignKeyName}'.", 1776, 16, 0) { AbortsAsUnderXactAbort = true });
+
+    /// <summary>
+    /// Mimics SQL Server error 1770: a FOREIGN KEY's referenced column list
+    /// names a column the referenced table doesn't have, followed by Msg 1750
+    /// (probed 2026-09-28 against SQL Server 2025). Like every FOREIGN KEY
+    /// definition error it ends the batch and rolls the transaction back, from
+    /// <c>CREATE TABLE</c> as from <c>ALTER TABLE</c>.
+    /// </summary>
+    internal static SimulatedSqlException ForeignKeyReferencesInvalidColumn(string foreignKeyName, string columnName, string referencedTable) =>
+        FollowedByConstraintNotCreated(new($"Foreign key '{foreignKeyName}' references invalid column '{columnName}' in referenced table '{referencedTable}'.", 1770, 16, 0) { AbortsAsUnderXactAbort = true });
+
+    /// <summary>
+    /// Mimics SQL Server error 1778 (another type — <c>numeric</c> and
+    /// <c>decimal</c> counting as two, an alias type as its base), 1753 (the
+    /// same type at another length, precision or scale) and 1757 (another
+    /// collation): a FOREIGN KEY column pair that differs, followed by
+    /// Msg 1750 (probed 2026-09-28 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException ForeignKeyColumnMismatch(int number, string referencedColumn, string referencingColumn, string foreignKeyName) =>
+        FollowedByConstraintNotCreated(new(number switch
+        {
+            1753 => $"Column '{referencedColumn}' is not the same length or scale as referencing column '{referencingColumn}' in foreign key '{foreignKeyName}'. Columns participating in a foreign key relationship must be defined with the same length and scale.",
+            1757 => $"Column '{referencedColumn}' is not of same collation as referencing column '{referencingColumn}' in foreign key '{foreignKeyName}'.",
+            _ => $"Column '{referencedColumn}' is not the same data type as referencing column '{referencingColumn}' in foreign key '{foreignKeyName}'.",
+        }, number, 16, 0)
+        { AbortsAsUnderXactAbort = true });
+
+    /// <summary>
+    /// The class-0 Msg 1756 a temporary table's FOREIGN KEY draws in place of
+    /// the constraint, which isn't created (probed 2026-09-28 against SQL
+    /// Server 2025).
+    /// </summary>
+    internal static string TemporaryTableForeignKeySkippedMessage(string tableName) =>
+        $"Skipping FOREIGN KEY constraint '{tableName}' definition for temporary table. FOREIGN KEY constraints are not enforced on local or global temporary tables.";
 
     /// <summary>
     /// Mimics SQL Server error 1773: a FOREIGN KEY written without a
@@ -1970,7 +2004,7 @@ partial class SimulatedSqlException
     /// as the statement wrote it on 2026-09-24.
     /// </summary>
     internal static SimulatedSqlException ForeignKeyImplicitReferenceWithoutPrimaryKey(string foreignKeyName, string referencedTable) =>
-        FollowedByConstraintNotCreated(new($"Foreign key '{foreignKeyName}' has implicit reference to object '{referencedTable}' which does not have a primary key defined on it.", 1773, 16, 0));
+        FollowedByConstraintNotCreated(new($"Foreign key '{foreignKeyName}' has implicit reference to object '{referencedTable}' which does not have a primary key defined on it.", 1773, 16, 0) { AbortsAsUnderXactAbort = true });
 
     /// <summary>
     /// Mimics SQL Server error 1764: a FOREIGN KEY's referencing column is a
@@ -2108,7 +2142,7 @@ partial class SimulatedSqlException
     /// Probed 2026-09-25 against SQL Server 2025.
     /// </summary>
     internal static SimulatedSqlException ForeignKeyReferencesInvalidTable(string foreignKeyName, string referencedTable) =>
-        FollowedByConstraintNotCreated(new($"Foreign key '{foreignKeyName}' references invalid table '{referencedTable}'.", 1767, 16, 0));
+        FollowedByConstraintNotCreated(new($"Foreign key '{foreignKeyName}' references invalid table '{referencedTable}'.", 1767, 16, 0) { AbortsAsUnderXactAbort = true });
 
     /// <summary>
     /// Mimics SQL Server error 1769: <c>ADD CONSTRAINT … FOREIGN KEY (col)
@@ -2699,8 +2733,16 @@ partial class SimulatedSqlException
     /// a column that doesn't exist on the target table. Probe-confirmed
     /// (same error code as the DROP COLUMN variant, distinct phrasing).
     /// </summary>
-    internal static SimulatedSqlException AlterColumnDoesNotExist(string columnName, string tableName) =>
-        new($"ALTER TABLE ALTER COLUMN failed because column '{columnName}' does not exist in table '{tableName}'.", 4924, 16, 1);
+    internal static SimulatedSqlException AlterColumnDoesNotExist(string columnName, string tableName, byte state = 1) =>
+        new($"ALTER TABLE ALTER COLUMN failed because column '{columnName}' does not exist in table '{tableName}'.", 4924, 16, state);
+
+    /// <summary>
+    /// Mimics SQL Server error 4919: <c>ALTER COLUMN … { ADD | DROP }
+    /// PERSISTED</c> on a column that isn't computed — real reports it at
+    /// state 0 (probed 2026-09-28 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException PersistedOnNonComputedColumn(string columnName) =>
+        new($"PERSISTED attribute cannot be altered on column '{columnName}' because this column is not computed.", 4919, 16, 0);
 
     /// <summary>
     /// Mimics SQL Server error 4928: <c>ALTER TABLE ALTER COLUMN</c>
@@ -2721,6 +2763,7 @@ partial class SimulatedSqlException
         Object,
         Index,
         Column,
+        Statistics,
     }
 
     /// <summary>
@@ -2740,6 +2783,7 @@ partial class SimulatedSqlException
             {
                 AlterColumnBlockerKind.Index => "index",
                 AlterColumnBlockerKind.Column => "column",
+                AlterColumnBlockerKind.Statistics => "statistics",
                 _ => "object",
             };
             errors.Add(new($"The {noun} '{name}' is dependent on column '{columnName}'.", 5074, 16, 1));

@@ -46,9 +46,8 @@ An `IF` or `WHILE` condition resets it, so the branch or loop body reads 0; a cu
 
 **`@@TRANCOUNT`** / **`XACT_STATE()`**: transaction-state surface.
 `@@TRANCOUNT` reads `SimulatedDbConnection.CurrentTransaction?.TranCount` as `int` (0 when no transaction is active).
-`XACT_STATE()` (`Parser/Expressions/TransactionScalarFunctions.cs`) returns a tristate `smallint`: `0` = no active transaction, `1` = active and committable, `-1` = doomed (active but uncommittable).
-The simulator doesn't model the doomed state, so values collapse to `0` / `1`.
-`@@TRANCOUNT > 0` and `XACT_STATE() = 1` are equivalent observables under the modeled scope.
+`XACT_STATE()` (`Parser/Expressions/TransactionScalarFunctions.cs`) returns a tristate `smallint`: `0` = no active transaction, `1` = active and committable, `-1` = doomed (active but uncommittable — see [`transactions.md`](transactions.md)).
+It reads 1 with no user transaction too, for the transaction real opens for the statement it sits in, while `@@TRANCOUNT` stays 0 — see [The statement's own transaction](transactions.md#the-statements-own-transaction).
 
 **Compound assignment** (`SET @v += expr` / `-=` / `*=` / `/=` / `%=` / `&=` / `|=` / `^=`) is a parse-time desugar: `@v += rhs` is rewritten as `FromCompoundOp('+', VariableReference(@v), rhs)` and routed through the existing assignment path, so the arithmetic / string-concat dispatch handles three-valued logic (NULL on either side propagates), string `+=` concatenates `varchar` / `nvarchar`, decimal / money widening matches plain `+`, and divide-by-zero raises Msg 8134 from the decimal path (or surfaces a raw `DivideByZeroException` on the integer path — same simulator gap as plain `select 10/0`).
 The two characters of a compound op must be adjacent in source — probe-confirmed: `SET @v + = 5` (with a space) raises Msg 102 in real SQL Server, so an `EndIndex == StartIndex` adjacency check in `TryConsumeAssignmentOperator` matches.

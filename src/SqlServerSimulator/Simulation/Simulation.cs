@@ -1908,6 +1908,8 @@ public sealed partial class Simulation
         batch.CurrentStatement.TransactedWrite = false;
         batch.CurrentStatement.BindsDeferredSource = false;
         batch.CurrentStatement.ReadsPermanentObject = batch.CurrentStatement.ReadsTemporaryObject = false;
+        batch.CurrentStatement.OpensTransaction = false;
+        batch.CurrentStatement.TransactionMark = null;
         batch.CurrentStatement.PendingDdlEvents = null;
         batch.CurrentStatement.DdlTriggerCreatedThisStatement = null;
         batch.CurrentStatement.ChangesTableStructure = ChangesTableStructure(batch.Parser);

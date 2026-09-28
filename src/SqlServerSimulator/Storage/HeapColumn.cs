@@ -282,5 +282,29 @@ internal sealed class HeapColumn(string name, SqlType type, int? maxLength, bool
     /// </summary>
     public GraphColumnKind GraphKind;
 
+    /// <summary>
+    /// This computed column with its <see cref="IsPersisted"/> flipped to
+    /// <paramref name="persisted"/>, every other attribute carried over — what
+    /// <c>ALTER TABLE … ALTER COLUMN c { ADD | DROP } PERSISTED</c> swaps in, a
+    /// fresh instance so a rolled-back transaction's snapshot keeps the old one.
+    /// </summary>
+    internal HeapColumn WithPersisted(bool persisted) =>
+        new(this.Name, this.Type, this.MaxLength, this.Nullable, this.Identity, this.Default, this.Computed, persisted,
+            this.GeneratedAs, this.IsHidden, this.Collation, this.ComputedDefinition, this.IsRowGuidCol, this.SpelledNumeric)
+        {
+            ColumnId = this.ColumnId,
+            IsUntypedNull = this.IsUntypedNull,
+            IsSparse = this.IsSparse,
+            DefaultConstraint = this.DefaultConstraint,
+            XmlSchemaCollection = this.XmlSchemaCollection,
+            AliasType = this.AliasType,
+            BoundDefault = this.BoundDefault,
+            BoundRule = this.BoundRule,
+            IdentitySource = this.IdentitySource,
+            MaskingFunction = this.MaskingFunction,
+            DerivedMask = this.DerivedMask,
+            GraphKind = this.GraphKind,
+        };
+
     internal string DebugDisplay() => $"{this.Name} {this.Type}{(this.MaxLength is int n ? $"({n})" : "")}";
 }

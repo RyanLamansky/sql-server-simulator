@@ -3,6 +3,15 @@ namespace SqlServerSimulator;
 partial class SimulatedSqlException
 {
     /// <summary>
+    /// Mimics SQL Server error 6220: <c>SELECT … INTO</c> a table in a database
+    /// that doesn't carry a CLR type a column of it has — a temporary table's
+    /// <c>tempdb</c> always — which ends the batch (probed 2026-09-28 against
+    /// SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException SelectIntoClrTypeMissingInTarget(string typeName) =>
+        new($"SELECT INTO failed because CLR type \"{typeName}\" does not exist in the target database.", 6220, 16, 1) { TerminatesBatch = true };
+
+    /// <summary>
     /// Mimics SQL Server error 6544: the bytes supplied to
     /// <c>CREATE ASSEMBLY … FROM</c> are not a loadable pure-IL managed
     /// assembly. The trailing detail sentence is a separate format argument

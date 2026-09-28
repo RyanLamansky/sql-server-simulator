@@ -194,7 +194,7 @@ partial class Simulation
 
         if (target.Object is HeapTable helpTable)
         {
-            List<SqlValue[]> filegroup = [[SqlValue.FromSystemName(helpTable.Partitioning?.Scheme.Name ?? HelpFilegroupName)]];
+            List<SqlValue[]> filegroup = [[SqlValue.FromSystemName(helpTable.Partitioning?.Scheme.Name ?? FilegroupName(DatabaseOf(batch, helpTable), helpTable.FilegroupId))]];
             yield return HelpBlankLine(batch, procedureName, 202);
             yield return new SimulatedSqlResultSet(
                 SingleSystemNameColumn, SpHelpFilegroupColumnNames, filegroup);

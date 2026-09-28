@@ -240,7 +240,7 @@ All of these refusals end only their statement.
 
 ### Divergences
 
-- A read-only filegroup's tables still take writes, and the default filegroup isn't where a new table lands: placement on a filegroup isn't recorded ([`partitioning.md`](partitioning.md#not-modeled-yet)).
+- What a filegroup holds is its tables' and indexes' placement ([`partitioning.md`](partitioning.md#filegroup-placement)), not pages kept per file: `REMOVE FILE` counts any row on the file's filegroup as the file's.
 - A secondary file's `SpaceUsed` is a constant, where real's varies between fresh files ([`scalars.md`](scalars.md#filepropertyfile_name-property)).
 - A path is taken only when another file in the `Simulation` holds it; real checks the disk, so a stray file there refuses it too.
 - `MODIFY FILE … FILENAME` changes the reported path at once and never fails a later restart, which real's does when nothing is at the new path.
@@ -249,7 +249,7 @@ All of these refusals end only their statement.
 
 - `MODIFY FILE … OFFLINE` on a secondary data file raises `NotSupportedException`.
 - `CONTAINS FILESTREAM` / `MEMORY_OPTIMIZED_DATA` filegroups are registered, but their files aren't recorded.
-- A file's contents: every secondary file is empty, so real's Msg 5042 for removing a file holding data never arises, and `DBCC SHRINKFILE` ([`heap-storage.md`](heap-storage.md)) doesn't move the declared sizes.
+- A file's contents: rows aren't kept per file, so `DBCC SHRINKFILE` ([`heap-storage.md`](heap-storage.md)) doesn't move the declared sizes.
 - `ALTER DATABASE … MODIFY FILE` on a system database follows the user-database rules unprobed.
 
 ## Scoped configuration

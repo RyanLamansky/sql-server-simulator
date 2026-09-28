@@ -18,17 +18,25 @@ internal sealed class XactState : Expression
     {
         if (context.Token is not Tokens.Operator { Character: ')' })
             throw SimulatedSqlException.FunctionRequiresNArguments("xact_state", 0);
+        this.statementMark = context.Batch.CurrentStatement.TakeTransactionMark();
     }
 
+    private readonly StatementTransactionMark statementMark;
+
     /// <remarks>
-    /// With no user transaction it reads 1 inside the unit a trigger body runs
-    /// in and inside a statement writing a table, table variables included —
-    /// the transaction real opens for it (probed 2026-09-28 against SQL Server
-    /// 2025).
+    /// With no user transaction it reads 1 for the transaction real opens for
+    /// the statement itself: inside the unit a trigger body runs in, inside a
+    /// statement writing a table (table variables included), inside a function
+    /// body (its caller named the function), and in a statement whose compile
+    /// met anything <see cref="StatementContext.OpensTransaction"/> lists
+    /// (probed 2026-09-28 against SQL Server 2025).
     /// </remarks>
     public override SqlValue Run(RuntimeContext runtime) => SqlValue.FromInt16(
         runtime.Batch.Connection.CurrentTransaction is { TranCount: > 0 } transaction ? (transaction.Doomed ? (short)-1 : (short)1)
-            : runtime.Batch.Connection.TriggerStatementUndoLog is not null || runtime.Batch.CurrentStatement.WritesRows ? (short)1
+            : this.statementMark.Opens
+                || runtime.Batch.Connection.TriggerStatementUndoLog is not null
+                || runtime.Batch.CurrentStatement.WritesRows
+                || runtime.Batch.UdfFrame is not null ? (short)1
             : (short)0);
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SmallInt;

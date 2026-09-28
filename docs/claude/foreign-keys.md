@@ -53,12 +53,18 @@ Self-referencing FKs are supported (the parent table is already in its schema di
 ## Validation at CREATE
 
 1. **Referenced table must exist** — `MultiPartName` lookup against the live schema dict; missing → Msg 1767 naming the constraint and the table as written, then Msg 1750 (probed 2026-09-25).
-2. **Referenced column set must form a PRIMARY KEY or UNIQUE** — multiset compare against `referencedTable.KeyConstraints`.
-   Mismatch → Msg 1776.
-3. **Cascade-cycle / multiple-path check** — see below. → Msg 1785.
+2. **Referenced columns must exist** — an unknown one → Msg 1770 naming the column and the referenced table, then Msg 1750.
+3. **Referenced column set must form a PRIMARY KEY or UNIQUE** — multiset compare against `referencedTable.KeyConstraints`.
+   Mismatch → Msg 1776; an omitted list over a table without a primary key → Msg 1773.
+4. **Each column pair must agree** — another type → Msg 1778 (`numeric` and `decimal` are two types, an alias type is its base), the same type at another length, precision or scale → Msg 1753, another collation → Msg 1757, each then Msg 1750.
+5. **Cascade-cycle / multiple-path check** — see below. → Msg 1785.
 
 The validation runs across the full pending FK list *before* mutating either table's `OutgoingForeignKeys` / `IncomingForeignKeys`.
 A failure unwinds the partial `CREATE TABLE` by removing the new table from its dict.
+
+Messages 1767, 1770, 1773, 1776, 1778, 1753 and 1757 end the batch and roll the transaction back, from `CREATE TABLE` as from `ALTER TABLE … ADD`; caught by `TRY`, they doom it (`XACT_STATE()` -1, `ERROR_NUMBER()` 1750) (probed 2026-09-28 against SQL Server 2025).
+
+A **temporary table** takes no foreign key: each one it declares is skipped unresolved with the class-0 **Msg 1756** naming the table (`Skipping FOREIGN KEY constraint '#t' definition for temporary table. …`), and its child rows are never checked.
 
 ### The Msg 1785 rule
 

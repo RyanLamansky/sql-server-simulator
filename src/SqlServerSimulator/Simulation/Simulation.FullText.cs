@@ -167,6 +167,7 @@ partial class Simulation
         context.CurrentDatabase.FullTextCatalogs[name] = new FullTextCatalog(
             id, name, asDefault, accentSensitive, owner.PrincipalId,
             context.Batch.CurrentStatement.UtcNow);
+        RecordDdlEvent(context, "CREATE_FULLTEXT_CATALOG", schemaName: null, name, "FULLTEXT CATALOG");
         return true;
     }
 
@@ -329,6 +330,7 @@ partial class Simulation
             ChangeTracking = options.ChangeTracking,
             StoplistOff = options.StoplistOff,
         };
+        RecordDdlEvent(context, "CREATE_FULLTEXT_INDEX", EventSchemaName(tableName), tableName.Leaf, "TABLE");
         return true;
     }
 
@@ -622,6 +624,7 @@ partial class Simulation
         if (!PermissionEnforcement.HasDatabasePermission(context.Batch, context.CurrentDatabase, Permission.AlterAnyFullTextCatalog))
             throw SimulatedSqlException.FullTextCatalogNotFoundOrDenied(name, context.CurrentDatabase.Name);
         _ = context.CurrentDatabase.FullTextCatalogs.TryRemove(name, out _);
+        RecordDdlEvent(context, "DROP_FULLTEXT_CATALOG", schemaName: null, name, "FULLTEXT CATALOG");
         return true;
     }
 
@@ -647,6 +650,7 @@ partial class Simulation
         if (table.FullTextIndex is null)
             throw SimulatedSqlException.FullTextIndexMissing(tableName.Leaf, state: 5);
         table.FullTextIndex = null;
+        RecordDdlEvent(context, "DROP_FULLTEXT_INDEX", EventSchemaName(tableName), tableName.Leaf, "TABLE");
         return true;
     }
 

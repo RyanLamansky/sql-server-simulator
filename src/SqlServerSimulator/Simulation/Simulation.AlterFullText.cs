@@ -262,6 +262,7 @@ partial class Simulation
                     messages.Enqueue(SimulatedSqlException.FullTextResumeIgnoredMessage(batch));
                 break;
         }
+        RecordDdlEvent(context, "ALTER_FULLTEXT_INDEX", EventSchemaName(tableName), tableName.Leaf, "TABLE");
         return true;
     }
 
@@ -372,6 +373,7 @@ partial class Simulation
             catalog.IsAccentSensitive = sensitive;
             context.Connection.Simulation.BumpSchemaVersion();
         }
+        RecordDdlEvent(context, "ALTER_FULLTEXT_CATALOG", schemaName: null, name, "FULLTEXT CATALOG");
         return true;
     }
 }

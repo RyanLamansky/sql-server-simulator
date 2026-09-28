@@ -20,11 +20,12 @@ partial class Simulation
     /// <summary>
     /// Parses the trailing placement clauses of a table, an index or a key
     /// constraint: <c>ON name</c> or <c>ON scheme(column [, …])</c>, then
-    /// <c>TEXTIMAGE_ON name</c>. A name takes any identifier form, so SSMS's
-    /// bracketed <c>[PRIMARY]</c> passes. No-op when neither keyword is next.
-    /// Cursor on exit: the first token past the clauses.
+    /// <c>TEXTIMAGE_ON name</c>, whose name comes back in
+    /// <paramref name="textImageOn"/>. A name takes any identifier form, so
+    /// SSMS's bracketed <c>[PRIMARY]</c> passes. No-op when neither keyword is
+    /// next. Cursor on exit: the first token past the clauses.
     /// </summary>
-    internal static DataSpaceClause? ParseOptionalDataSpaceClause(ParserContext context, out bool textImageOn)
+    internal static DataSpaceClause? ParseOptionalDataSpaceClause(ParserContext context, out string? textImageOn)
     {
         DataSpaceClause? clause = null;
         if (context.Token is ReservedKeyword { Keyword: Keyword.On })
@@ -48,11 +49,12 @@ partial class Simulation
             }
             clause = new DataSpaceClause(name.Value, columns);
         }
-        textImageOn = context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.TextImage_On };
-        if (textImageOn)
+        textImageOn = null;
+        if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.TextImage_On })
         {
-            if (context.GetNextRequired() is not Name)
+            if (context.GetNextRequired() is not Name textImageName)
                 throw SimulatedSqlException.SyntaxErrorNear(context);
+            textImageOn = textImageName.Value;
             context.MoveNextOptional();
         }
         return clause;
@@ -144,17 +146,22 @@ partial class Simulation
     /// clause or the rows. <c>TEXTIMAGE_ON</c> on a partitioned table is
     /// Msg 1707.
     /// </summary>
-    internal static void PlaceNewTable(BatchContext batch, HeapTable table, DataSpaceClause? written, bool textImageOn)
+    internal static void PlaceNewTable(BatchContext batch, HeapTable table, DataSpaceClause? written, string? textImageOn)
     {
         var rows = written is null ? null : ResolveDataSpaceClause(batch, written, table);
-        if (textImageOn && rows is not null)
+        if (textImageOn is not null && rows is not null)
             throw SimulatedSqlException.TextImageOnPartitionedTable();
         table.Partitioning = rows;
+        // Without an ON clause the rows land on the default filegroup
+        // (probed 2026-09-28 against SQL Server 2025).
+        var database = DatabaseOf(batch, table);
+        table.FilegroupId = written is null ? database.DefaultFilegroupId : FilegroupFor(batch, table, written);
         foreach (var key in table.KeyConstraints)
         {
             if (!key.IsClustered)
                 continue;
             table.Partitioning = key.WrittenDataSpace is { } clustered ? ResolveDataSpaceClause(batch, clustered, table) : rows;
+            table.FilegroupId = FilegroupFor(batch, table, key.WrittenDataSpace);
             RequirePartitionColumnInUniqueKey(table.Partitioning, table, key.FullOrdinals, key.Name, isConstraint: true);
         }
         foreach (var key in table.KeyConstraints)
@@ -162,8 +169,127 @@ partial class Simulation
             if (key.IsClustered)
                 continue;
             key.Partitioning = PlacementFor(batch, table, key.WrittenDataSpace);
+            key.FilegroupId = FilegroupFor(batch, table, key.WrittenDataSpace);
             RequirePartitionColumnInUniqueKey(key.Partitioning, table, key.FullOrdinals, key.Name, isConstraint: true);
         }
+        table.LobFilegroupId = table.FilegroupId;
+        if (textImageOn is not null)
+        {
+            if (!table.HasLobColumn())
+                throw SimulatedSqlException.TextImageOnWithoutLobColumn();
+            table.LobFilegroupId = ResolveWritableFilegroup(database, textImageOn);
+        }
+    }
+
+    /// <summary>The database a table's placement names filegroups of — its own, or <c>tempdb</c> for a temporary one.</summary>
+    private static Database DatabaseOf(BatchContext batch, HeapTable table) =>
+        table.OwningDatabase ?? batch.Connection.Simulation.Databases[TempdbDatabaseName];
+
+    /// <summary>
+    /// The filegroup a placement clause puts rows on: the table's rows' own
+    /// when the clause is absent or names a scheme, else the named filegroup
+    /// (<c>"default"</c> reading the default one), which a new table or index
+    /// may not be created on while it is read-only (Msg 1924).
+    /// </summary>
+    internal static int FilegroupFor(BatchContext batch, HeapTable table, DataSpaceClause? written) =>
+        written is null || written.Columns is not null || DatabaseOf(batch, table).PartitionSchemes.ContainsKey(written.Name)
+            ? table.FilegroupId
+            : ResolveWritableFilegroup(DatabaseOf(batch, table), written.Name);
+
+    /// <summary>
+    /// A filegroup named by a placement clause: a registered one or
+    /// <c>"default"</c> (else Msg 1921), and not read-only (Msg 1924).
+    /// </summary>
+    private static int ResolveWritableFilegroup(Database database, string name)
+    {
+        var id = BuiltInToken.Equals(name, "default") ? database.DefaultFilegroupId
+            : database.Filegroups.TryGetValue(name, out var registered) ? registered
+            : throw SimulatedSqlException.InvalidDataSpace(scheme: false, name);
+        return database.IsFilegroupReadOnly(id) ? throw SimulatedSqlException.FilegroupIsReadOnly(FilegroupName(database, id)) : id;
+    }
+
+    /// <summary>The name <paramref name="dataSpaceId"/> is registered under.</summary>
+    internal static string FilegroupName(Database database, int dataSpaceId)
+    {
+        foreach (var (name, id) in database.Filegroups)
+        {
+            if (id == dataSpaceId)
+                return name;
+        }
+        return "PRIMARY";
+    }
+
+    /// <summary>
+    /// Refuses a write to <paramref name="table"/> reaching a rowset on a
+    /// read-only filegroup (Msg 652, naming the heap as <c>""</c>) or, for an
+    /// <c>INSERT</c> or <c>MERGE</c>, on a filegroup without files (Msg 622) —
+    /// settled once per statement rather than per row written, so a statement
+    /// that writes no row is refused too. An <c>UPDATE</c> reaches a
+    /// nonclustered index only through the <paramref name="updatedColumns"/>
+    /// it keys or includes (probed 2026-09-28 against SQL Server 2025).
+    /// </summary>
+    internal static void RejectWriteToUnwritableFilegroup(HeapTable table, BatchContext batch, string verb, IReadOnlyList<int>? updatedColumns = null)
+    {
+        if (batch.IsSkipping || batch.CreateTimeBinding || table.Partitioning is not null || table.IsTableVariable)
+            return;
+        var anyElsewhere = table.FilegroupId != Database.PrimaryFilegroupId;
+        foreach (var index in table.Indexes)
+            anyElsewhere |= !index.IsClustered && index.FilegroupId != Database.PrimaryFilegroupId;
+        foreach (var key in table.KeyConstraints)
+            anyElsewhere |= !key.IsClustered && key.FilegroupId != Database.PrimaryFilegroupId;
+        if (!anyElsewhere)
+            return;
+
+        var database = DatabaseOf(batch, table);
+        var inserting = verb is "INSERT" or "MERGE";
+        foreach (var identity in table.IndexIdentities())
+        {
+            if (identity.IndexId > 1 && (PlacementOf(table, identity) is not null || (updatedColumns is not null && !IndexCoversAny(identity, updatedColumns))))
+                continue;
+            var filegroup = FilegroupOf(table, identity);
+            if (filegroup == Database.PrimaryFilegroupId)
+                continue;
+            if (database.IsFilegroupReadOnly(filegroup))
+            {
+                throw SimulatedSqlException.RowsetOnReadOnlyFilegroup(
+                    identity.Name ?? "", SchemaQualifyTableName(table, database), PartitionCensus.UnpartitionedId(table, identity.IndexId), FilegroupName(database, filegroup));
+            }
+            if (inserting && FileCount(database, filegroup) == 0)
+                throw SimulatedSqlException.FilegroupHasNoFiles(FilegroupName(database, filegroup));
+        }
+    }
+
+    /// <summary>Whether the nonclustered index or key <paramref name="identity"/> keys or includes one of <paramref name="columns"/>.</summary>
+    private static bool IndexCoversAny(IndexIdentity identity, IReadOnlyList<int> columns)
+    {
+        foreach (var column in columns)
+        {
+            if (identity.Constraint is { } key && Array.IndexOf(key.FullOrdinals, column) >= 0)
+                return true;
+            if (identity.Index is { } index
+                && (Array.Exists(index.KeyColumns, keyColumn => keyColumn.ColumnOrdinal == column) || Array.IndexOf(index.IncludedColumnOrdinals, column) >= 0))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Refuses an index about to be built on <paramref name="filegroupId"/>
+    /// over a table that has rows while that filegroup has no files (Msg 622,
+    /// which ends the statement).
+    /// </summary>
+    internal static void RejectIndexOnEmptyFilegroup(BatchContext batch, HeapTable table, int filegroupId)
+    {
+        if (filegroupId == Database.PrimaryFilegroupId || table.Heap.RowCount == 0)
+            return;
+        var database = DatabaseOf(batch, table);
+        if (FileCount(database, filegroupId) != 0)
+            return;
+        var error = SimulatedSqlException.FilegroupHasNoFiles(FilegroupName(database, filegroupId));
+        error.EndedColumnRewrite = true;
+        throw error;
     }
 
     /// <summary>
@@ -176,10 +302,17 @@ partial class Simulation
         var placement = PlacementFor(batch, table, index.WrittenDataSpace);
         if (index.IsUnique)
             RequirePartitionColumnInUniqueKey(placement, table, [.. index.KeyColumns.Select(static key => key.ColumnOrdinal)], index.Name, isConstraint: false);
+        var filegroup = FilegroupFor(batch, table, index.WrittenDataSpace);
         if (index.IsClustered)
+        {
             table.Partitioning = placement;
+            table.FilegroupId = filegroup;
+        }
         else
+        {
             index.Partitioning = placement;
+            index.FilegroupId = filegroup;
+        }
     }
 
     /// <summary>
@@ -188,6 +321,49 @@ partial class Simulation
     /// </summary>
     internal static PartitionPlacement? PlacementOf(HeapTable table, IndexIdentity identity) =>
         identity.IndexId <= 1 ? table.Partitioning : identity.Constraint?.Partitioning ?? identity.Index?.Partitioning;
+
+    /// <summary>
+    /// The filegroup of the index <paramref name="identity"/> names, read where
+    /// <see cref="PlacementOf"/> is null: the table's rows' for its heap or
+    /// clustered index, else the index's or key's own.
+    /// </summary>
+    internal static int FilegroupOf(HeapTable table, IndexIdentity identity) =>
+        identity.IndexId <= 1 ? table.FilegroupId : identity.Constraint?.FilegroupId ?? identity.Index?.FilegroupId ?? table.FilegroupId;
+
+    /// <summary>
+    /// Whether a table, one of its indexes or its LOB data is placed on
+    /// <paramref name="dataSpaceId"/> — with <paramref name="withRowsOnly"/>,
+    /// a table that holds rows or the pages deleted ones left — which keeps the filegroup (Msg 5042 state 8)
+    /// or its last file (state 1) from being removed (probed 2026-09-28
+    /// against SQL Server 2025).
+    /// </summary>
+    internal static bool FilegroupHoldsObjects(Database database, int dataSpaceId, bool withRowsOnly)
+    {
+        foreach (var schema in database.Schemas.Values)
+        {
+            foreach (var table in schema.HeapTables.Values)
+            {
+                // A table keeps its pages when its rows are deleted.
+                if (withRowsOnly && table.Heap.RowCount == 0 && table.Heap.Pages.Count == 0)
+                    continue;
+                if (table.Partitioning is null && table.FilegroupId == dataSpaceId)
+                    return true;
+                if (table.HasLobColumn() && table.LobFilegroupId == dataSpaceId)
+                    return true;
+                foreach (var index in table.Indexes)
+                {
+                    if (!index.IsClustered && index.Partitioning is null && index.FilegroupId == dataSpaceId)
+                        return true;
+                }
+                foreach (var key in table.KeyConstraints)
+                {
+                    if (!key.IsClustered && key.Partitioning is null && key.FilegroupId == dataSpaceId)
+                        return true;
+                }
+            }
+        }
+        return false;
+    }
 
     /// <summary>
     /// <c>ALTER DATABASE … ADD FILEGROUP name [CONTAINS …]</c> and <c>REMOVE
@@ -240,6 +416,8 @@ partial class Simulation
             throw SimulatedSqlException.FilegroupHasFiles(name.Value);
         if (target.PartitionSchemes.Values.Any(scheme => scheme.NextUsed == dataSpaceId || scheme.Destinations.Contains(dataSpaceId)))
             throw SimulatedSqlException.FilegroupNotEmpty(name.Value, state: 12);
+        if (FilegroupHoldsObjects(target, dataSpaceId, withRowsOnly: false))
+            throw SimulatedSqlException.FilegroupNotEmpty(name.Value, state: 8);
         lock (target.Filegroups)
         {
             _ = target.Filegroups.TryRemove(name.Value, out _);

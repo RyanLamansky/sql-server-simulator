@@ -157,7 +157,48 @@ partial class Simulation
             else
                 _ = props.TryRemove(key, out _);
         });
+        if (RaisesDdlEvents(batch.Parser))
+            RecordExtendedPropertyEvent(batch, op, name, value, level0Type, level0Name, level1Type, level1Name, level2Type, level2Name);
         yield break;
+    }
+
+    /// <summary>
+    /// Records the <c>CREATE_</c> / <c>ALTER_</c> / <c>DROP_EXTENDED_PROPERTY</c>
+    /// event: the deepest level named is the object — a level-2 one with its
+    /// level-1 host as the target, a schema or the database itself with an
+    /// empty <c>SchemaName</c> — followed by the property and the procedure's
+    /// arguments as written (probed 2026-09-28 against SQL Server 2025).
+    /// </summary>
+    private static void RecordExtendedPropertyEvent(
+        BatchContext batch, ExtendedPropertyOp op, string name, SqlValue value,
+        string? level0Type, string? level0Name, string? level1Type, string? level1Name, string? level2Type, string? level2Name)
+    {
+        var (schemaName, objectName, objectType, targetName, targetType) =
+            level2Type is not null ? (level0Name ?? "", level2Name ?? "", level2Type, level1Name ?? "", level1Type ?? "")
+            : level1Type is not null ? (level0Name ?? "", level1Name ?? "", level1Type, "", "")
+            : level0Type is not null ? ("", level0Name ?? "", level0Type, "", "")
+            : ("", batch.CurrentDatabase.Name, "DATABASE", "", "");
+        var elements = new System.Text.StringBuilder();
+        AppendElement(elements, "PropertyName", name);
+        string? valueText = null;
+        if (op != ExtendedPropertyOp.Drop && !value.IsNull)
+        {
+            valueText = value.Type.Category == SqlTypeCategory.String
+                ? value.AsString
+                : value.CoerceTo(NVarcharSqlType.Get(-1, Collation.Baseline, Coercibility.CoercibleDefault)).AsString;
+            AppendElement(elements, "PropertyValue", valueText);
+        }
+        _ = elements.Append(op == ExtendedPropertyOp.Drop
+            ? RenderEventParameters(name, level0Type, level0Name, level1Type, level1Name, level2Type, level2Name)
+            : RenderEventParameters(name, valueText, level0Type, level0Name, level1Type, level1Name, level2Type, level2Name));
+        var eventType = op switch
+        {
+            ExtendedPropertyOp.Add => "CREATE_EXTENDED_PROPERTY",
+            ExtendedPropertyOp.Update => "ALTER_EXTENDED_PROPERTY",
+            _ => "DROP_EXTENDED_PROPERTY",
+        };
+        RecordDdlEvent(batch.Parser, eventType, schemaName, objectName, objectType.ToUpperInvariant(),
+            targetName, targetType.ToUpperInvariant(), trailingElements: elements.ToString());
     }
 
     /// <summary>

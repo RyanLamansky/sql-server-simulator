@@ -1,7 +1,6 @@
 # ALTER TABLE
 
-`ALTER TABLE` ships these modeled shapes: `SET (SYSTEM_VERSIONING = OFF | ON (HISTORY_TABLE = name [, DATA_CONSISTENCY_CHECK = ON|OFF]))` (see [`temporal-tables.md`](temporal-tables.md)), `SET (LOCK_ESCALATION = TABLE | DISABLE | AUTO)`, `{ ENABLE | DISABLE } TRIGGER { ALL | name [, …] }` (see [`triggers.md`](triggers.md)), `[WITH CHECK | WITH NOCHECK] ADD [CONSTRAINT name] (PRIMARY KEY | UNIQUE | FOREIGN KEY | CHECK | DEFAULT) [, …]` (multi-element constraint list — see [Multi-element ADD](#multi-element-add)), `DROP CONSTRAINT [IF EXISTS] name [, …]`, `[WITH CHECK | WITH NOCHECK] (CHECK | NOCHECK) CONSTRAINT (ALL | name [, …])` (trust toggling), `ADD [COLUMN] col TYPE [, …]` (multi-column add — see [Column ops](#column-ops)), `DROP COLUMN [IF EXISTS] col [, …]` (multi-column drop with dependency rejection), `ALTER COLUMN col TYPE[(prec[,scale])] [COLLATE coll] [NULL|NOT NULL]` (single-column type / nullability change — see [ALTER COLUMN](#alter-column)), `ALTER COLUMN col { ADD | DROP } { ROWGUIDCOL | SPARSE }` (see [Column attributes](#column-attributes)), `ALTER COLUMN col { ADD MASKED WITH (…) | DROP MASKED }` (see [`data-masking.md`](data-masking.md#ddl)), `DROP PERIOD FOR SYSTEM_TIME` (see [DROP PERIOD FOR SYSTEM_TIME](#drop-period-for-system_time)), `REBUILD` (see [REBUILD](#rebuild)), and `SWITCH [PARTITION n] TO target [PARTITION m]` (see [`partitioning.md`](partitioning.md#alter-table--switch)).
-The `ALTER COLUMN col ADD/DROP PERSISTED` sub-clause form raises `NotSupportedException`.
+`ALTER TABLE` ships these modeled shapes: `SET (SYSTEM_VERSIONING = OFF | ON (HISTORY_TABLE = name [, DATA_CONSISTENCY_CHECK = ON|OFF]))` (see [`temporal-tables.md`](temporal-tables.md)), `SET (LOCK_ESCALATION = TABLE | DISABLE | AUTO)`, `{ ENABLE | DISABLE } TRIGGER { ALL | name [, …] }` (see [`triggers.md`](triggers.md)), `[WITH CHECK | WITH NOCHECK] ADD [CONSTRAINT name] (PRIMARY KEY | UNIQUE | FOREIGN KEY | CHECK | DEFAULT) [, …]` (multi-element constraint list — see [Multi-element ADD](#multi-element-add)), `DROP CONSTRAINT [IF EXISTS] name [, …]`, `[WITH CHECK | WITH NOCHECK] (CHECK | NOCHECK) CONSTRAINT (ALL | name [, …])` (trust toggling), `ADD [COLUMN] col TYPE [, …]` (multi-column add — see [Column ops](#column-ops)), `DROP COLUMN [IF EXISTS] col [, …]` (multi-column drop with dependency rejection), `ALTER COLUMN col TYPE[(prec[,scale])] [COLLATE coll] [NULL|NOT NULL]` (single-column type / nullability change — see [ALTER COLUMN](#alter-column)), `ALTER COLUMN col { ADD | DROP } { ROWGUIDCOL | SPARSE }` (see [Column attributes](#column-attributes)), `ALTER COLUMN col { ADD MASKED WITH (…) | DROP MASKED }` (see [`data-masking.md`](data-masking.md#ddl)), `ALTER COLUMN col { ADD | DROP } PERSISTED` (see [PERSISTED](#persisted)), `DROP PERIOD FOR SYSTEM_TIME` (see [DROP PERIOD FOR SYSTEM_TIME](#drop-period-for-system_time)), `REBUILD` (see [REBUILD](#rebuild)), and `SWITCH [PARTITION n] TO target [PARTITION m]` (see [`partitioning.md`](partitioning.md#alter-table--switch)).
 Probe-confirmed against SQL Server 2025.
 
 ## Grammar
@@ -184,8 +183,27 @@ Probed refusals:
 
 Both Msg 4925 and Msg 4926 are followed by **Msg 1750**, as a failed constraint is.
 
-`ADD | DROP PERSISTED` raises `NotSupportedException`; see [`backlog.md`](backlog.md) for the probe data.
-`ADD | DROP MASKED` is [Dynamic Data Masking](data-masking.md#ddl)'s.
+`ADD | DROP PERSISTED` is [PERSISTED](#persisted)'s, and `ADD | DROP MASKED` is [Dynamic Data Masking](data-masking.md#ddl)'s.
+
+## PERSISTED
+
+`ALTER COLUMN c { ADD | DROP } PERSISTED` converts a computed column between stored and evaluated-on-read in place, each form a no-op on a column already in that state, and `sys.computed_columns.is_persisted` follows (probed 2026-09-28 against SQL Server 2025).
+The column keeps its position and `column_id`; what moves is a storage slot, which every row gains or loses, so the statement rewrites the heap and shifts the slots after it for the keys and indexes that name them (`AlterColumnPersisted`, undone slot by slot on a rollback).
+
+`ADD` evaluates the expression for every row on the way in, so a row it fails on (a divide by zero, an overflow) ends the statement with its error and Msg 3621 and leaves the column as it was.
+An index keying the column while it was evaluated-on-read keys the stored slot afterwards.
+
+Probed refusals:
+
+| Statement | Refusal |
+| --- | --- |
+| Either form on a column that isn't computed | **Msg 4919** state 0 |
+| Either form on a column the table doesn't have | **Msg 4924** state 2 |
+| `ADD` over a nondeterministic expression — `NEWID()`, `GETDATE()`, a non-schema-bound function | **Msg 4936** state 1 |
+| `DROP` while a CHECK, key, index keying the column, statistics object, foreign key or schema-bound module depends on it | **Msg 5074** per dependent, then **Msg 4922** state 9 |
+| `ADD PERSISTED NOT NULL` | **Msg 156** near `not` |
+
+An index that only *includes* the column doesn't hold `DROP` back, and an imprecise (`float`) expression persists.
 
 ## ADD PERIOD FOR SYSTEM_TIME
 
@@ -408,7 +426,7 @@ Routed from `TryParseAlterTable` via `Keyword.Alter` into `TryParseAlterTableAlt
 The trailing `NULL`/`NOT NULL` keyword is optional — omitting it preserves the column's existing nullability (probe-confirmed).
 `COLLATE` sets the column's collation, which a CHECK, DEFAULT or index on it refuses as a type change (see [Blockers](#blockers-msg-5074)).
 
-The `ALTER COLUMN col ADD/DROP {ROWGUIDCOL|SPARSE}` sub-clauses are [column attributes](#column-attributes), `MASKED` is [Dynamic Data Masking](data-masking.md#ddl)'s, and `PERSISTED` raises `NotSupportedException`.
+The `ALTER COLUMN col ADD/DROP {ROWGUIDCOL|SPARSE}` sub-clauses are [column attributes](#column-attributes), `MASKED` is [Dynamic Data Masking](data-masking.md#ddl)'s, and `PERSISTED` is [PERSISTED](#persisted)'s.
 A type change drops the column's mask unless the clause restates one (`ALTER COLUMN c varchar(20) MASKED WITH (…) NULL`).
 
 ### Conversion fidelity

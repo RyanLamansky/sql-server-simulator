@@ -226,14 +226,14 @@ internal static partial class BuiltInResources
                         lockEscalationDesc[t.LockEscalation],
                         SqlValue.Null(SqlType.Int32), // filestream_data_space_id
                         // lob_data_space_id names the filegroup holding the
-                        // table's LOB allocation unit: the single PRIMARY
-                        // filegroup (1) once any column is LOB-eligible —
-                        // varchar/nvarchar/varbinary(MAX), text/ntext/image,
-                        // xml, geography/geometry — and 0 otherwise
-                        // (probe-confirmed; hierarchyid and sql_variant leave
-                        // it 0) — the partition scheme's id for a table on
-                        // one (probed 2026-09-27 against SQL Server 2025).
-                        SqlValue.FromInt32(HasLobColumn(t) ? t.Partitioning?.Scheme.DataSpaceId ?? 1 : 0),
+                        // table's LOB allocation unit once any column is
+                        // LOB-eligible — varchar/nvarchar/varbinary(MAX),
+                        // text/ntext/image, xml, geography/geometry — and 0
+                        // otherwise (probe-confirmed; hierarchyid and
+                        // sql_variant leave it 0) — the partition scheme's id
+                        // for a table on one (probed 2026-09-27 against SQL
+                        // Server 2025).
+                        SqlValue.FromInt32(t.HasLobColumn() ? t.Partitioning?.Scheme.DataSpaceId ?? t.LobFilegroupId : 0),
                         SqlValue.FromInt32(t.MaxColumnIdUsed),
                         falseTableFlag, // is_replicated
                         falseTableFlag, // lock_on_bulk_load
@@ -733,21 +733,6 @@ internal static partial class BuiltInResources
                     yield return (Row(typeObjectId, tt.Columns[i], i + 1, declared: true), tt.Columns[i], ColumnHost.TableType);
             }
         }
-    }
-
-    /// <summary>
-    /// True when any of <paramref name="table"/>'s columns routes through the
-    /// LOB-page chain (<see cref="HeapColumn.IsLob"/>) — the condition real
-    /// reports through a non-zero <c>sys.tables.lob_data_space_id</c>.
-    /// </summary>
-    private static bool HasLobColumn(HeapTable table)
-    {
-        foreach (var column in table.Columns)
-        {
-            if (column.IsLob)
-                return true;
-        }
-        return false;
     }
 
     // The fixed schemas real SQL Server ships that the simulator does not

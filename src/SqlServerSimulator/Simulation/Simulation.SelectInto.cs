@@ -66,10 +66,25 @@ partial class Simulation
         // (probe-confirmed). A #temp destination resolves no schema and stays
         // legal.
         owningDatabase?.RejectWriteWhenReadOnly();
-        var destTable = new HeapTable(leaf, destColumns, (owningDatabase ?? batch.Connection.Simulation.Databases[TempdbDatabaseName]).AllocateObjectId())
+        // tempdb carries no user CLR type, so a temporary destination can't
+        // take a column of one (probed 2026-09-28 against SQL Server 2025).
+        if (isLocalTemp || isGlobalTemp)
+        {
+            foreach (var column in destColumns)
+            {
+                if (column.Type is ClrUdtSqlType clrType)
+                    throw SimulatedSqlException.SelectIntoClrTypeMissingInTarget(clrType.Udt.Name);
+            }
+        }
+        var destinationDatabase = owningDatabase ?? batch.Connection.Simulation.Databases[TempdbDatabaseName];
+        var destTable = new HeapTable(leaf, destColumns, destinationDatabase.AllocateObjectId())
         {
             OwningDatabase = owningDatabase,
             UsesAnsiNulls = batch.Connection.AnsiNulls,
+            // The rows land on the default filegroup, as a CREATE TABLE's
+            // without an ON clause do.
+            FilegroupId = destinationDatabase.DefaultFilegroupId,
+            LobFilegroupId = destinationDatabase.DefaultFilegroupId,
         };
         if (isGlobalTemp)
             destTable.OwnerSession = batch.Connection.Session;

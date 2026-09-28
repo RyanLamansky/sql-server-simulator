@@ -53,6 +53,14 @@ public sealed partial class SimulatedSqlException
     /// (<c>GRANT SELECT (a) ON t (b)</c>). Severity 15, state 1, probe-confirmed
     /// wording.
     /// </summary>
+    /// <summary>
+    /// Mimics SQL Server error 4610: a <c>DATABASE::</c> securable naming a
+    /// database other than the current one (probed 2026-09-28 against SQL
+    /// Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException GrantOnAnotherDatabase() =>
+        new("You can only grant or revoke permissions on objects in the current database.", 4610, 16, 1);
+
     internal static SimulatedSqlException GrantInvalidColumnListAfterObject() =>
         new("Invalid column list after object name in GRANT/REVOKE statement.", 1019, 15, 1);
 

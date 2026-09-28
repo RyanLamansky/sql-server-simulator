@@ -202,6 +202,13 @@ internal sealed class Index(
     public Schemas.PartitionPlacement? Partitioning;
 
     /// <summary>
+    /// A nonclustered index's filegroup when <see cref="Partitioning"/> is null:
+    /// its own <c>ON</c> clause's, else the table's rows' at creation. A
+    /// clustered index's placement is the table's (<c>HeapTable.FilegroupId</c>).
+    /// </summary>
+    public int FilegroupId = Database.PrimaryFilegroupId;
+
+    /// <summary>
     /// The <c>ON</c> clause the declaration wrote, kept until the owning
     /// statement resolves it into <see cref="Partitioning"/>.
     /// </summary>

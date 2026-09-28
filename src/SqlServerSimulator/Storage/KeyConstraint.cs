@@ -182,6 +182,12 @@ internal sealed class KeyConstraint(KeyConstraintKind kind, string name, int[] s
     public Schemas.PartitionPlacement? Partitioning;
 
     /// <summary>
+    /// A nonclustered key's filegroup when <see cref="Partitioning"/> is null,
+    /// as an index's (<see cref="Index.FilegroupId"/>).
+    /// </summary>
+    public int FilegroupId = Database.PrimaryFilegroupId;
+
+    /// <summary>
     /// The <c>ON</c> clause the declaration wrote, kept until the owning
     /// statement resolves it into <see cref="Partitioning"/>.
     /// </summary>
