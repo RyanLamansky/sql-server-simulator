@@ -35,7 +35,10 @@ internal enum BindClause : byte
     MergeOn,
     MergeInsertColumns,
     MergeCondition,
+    MergeNotMatchedCondition,
+    MergeBySourceCondition,
     MergeAction,
+    Assignment,
     Output,
     InsertArity,
 }
@@ -66,7 +69,45 @@ internal sealed class BindErrorReport(string command)
     /// it first is worth reading the statement again for the whole report.
     /// </summary>
     public static bool StartsReport(SimulatedSqlException error) =>
-        error.Number is 109 or 110 or 130 or 147 or 207 or 209 or 213 or 273 or 529 or 1011 or 1012 or 1013 or 4104 or 8120 or 8121 or 8127 or 8155 or 10709 or 13536;
+        error.Number is 109 or 110 or 130 or 147 or 157 or 206 or 207 or 209 or 213 or 257 or 273 or 402 or 468 or 529 or 1011 or 1012 or 1013 or 1015
+            or 4101 or 4104 or 5310 or 5319 or 5333 or 5334 or 8116 or 8117 or 8120 or 8121 or 8124 or 8127 or 8155 or 10709 or 13536;
+
+    /// <summary>
+    /// Whether <paramref name="error"/> is a type check real reports where it
+    /// sits among a statement's binder errors and binds on past: an operand
+    /// type clash, incompatible operand types, an implicit conversion or
+    /// collation it can't settle, an operand or argument type an operator or
+    /// function refuses. Each reports only while nothing ahead of it has
+    /// failed, so a statement reports at most one (probed 2026-09-28 against
+    /// SQL Server 2025: <c>SELECT a + d, x1</c> is Msg 206 then Msg 207,
+    /// <c>SELECT x1, a + d</c> the Msg 207 alone, <c>SELECT a + d, a + d</c> one
+    /// Msg 206). An illegal explicit conversion (Msg 529) is the exception real
+    /// stops binding at; see <see cref="RecordTypeError"/>.
+    /// </summary>
+    public static bool IsTypeCheck(SimulatedSqlException error) =>
+        error.Number is 206 or 257 or 402 or 468 or 8116 or 8117;
+
+    /// <summary>
+    /// Whether the re-read carries on past <paramref name="error"/>, raised
+    /// typing <paramref name="node"/>: an operand whose typing recorded an error
+    /// since <paramref name="recordedBefore"/> is error-typed on real, which no
+    /// check refuses, and a type check of its own is recorded where the node's
+    /// first column reference sits. A node reading no column keeps throwing.
+    /// </summary>
+    public bool CarriesPastTypeCheck(SimulatedSqlException error, int recordedBefore, ExpressionNode node)
+    {
+        if (!IsTypeCheck(error))
+            return false;
+        if (this.Count > recordedBefore)
+            return true;
+        if (this.SpanOf(node) is not { } span)
+            return false;
+        // A term typed again (for its nullability, say) meets its operands'
+        // errors, and its own check, already recorded.
+        if (!this.entries.Exists(entry => span.Start <= entry.LinePosition && entry.LinePosition < span.End))
+            this.RecordUnlessPreceded(error, span.Start);
+        return true;
+    }
 
     /// <summary>The text whose offsets every recorded position is into.</summary>
     public readonly string Command = command;
@@ -111,6 +152,13 @@ internal sealed class BindErrorReport(string command)
 
         /// <summary>A FROM clause's name collision, after which real binds nothing more.</summary>
         public bool Ends;
+
+        /// <summary>
+        /// An error real meets binding its query's aggregates, which it does
+        /// ahead of judging that query's grouping: no grouping violation of the
+        /// same query reports beside it, wherever each is written.
+        /// </summary>
+        public bool PrecedesGrouping;
     }
 
     /// <summary>How many errors have been recorded, so a caller can tell whether its operand's typing failed.</summary>
@@ -243,7 +291,7 @@ internal sealed class BindErrorReport(string command)
     /// <see cref="Command"/> — first reference to just past the last — or
     /// null when it reads none written there.
     /// </summary>
-    public (int Start, int End)? SpanOf(Expression? expression)
+    public (int Start, int End)? SpanOf(ExpressionNode? expression)
     {
         if (expression is null)
             return null;
@@ -272,18 +320,29 @@ internal sealed class BindErrorReport(string command)
     }
 
     /// <summary>
-    /// Records Msg 147 for <paramref name="aggregate"/>, a <c>WHERE</c>
-    /// clause's own, answering whether it could. Real reports it where the
-    /// aggregate ends, and not at all when an unbindable name comes first —
-    /// its operand's included (probed 2026-09-27: <c>WHERE COUNT(x1) &gt; 1</c>
-    /// is the Msg 207 alone, <c>WHERE SUM(a) &gt; 1 AND x2 = 1</c> Msg 147
-    /// then Msg 207).
+    /// Records <paramref name="error"/> — an aggregate standing where real
+    /// refuses one, Msg 147 for a <c>WHERE</c> clause's own — against
+    /// <paramref name="aggregate"/>, answering whether it could. Real reports it
+    /// where the aggregate ends, and not at all when an unbindable name comes
+    /// first — its operand's included (probed 2026-09-27: <c>WHERE COUNT(x1)
+    /// &gt; 1</c> is the Msg 207 alone, <c>WHERE SUM(a) &gt; 1 AND x2 = 1</c>
+    /// Msg 147 then Msg 207).
     /// </summary>
-    public bool RecordAggregateInWhere(Expressions.AggregateExpression aggregate)
+    public bool RecordAggregatePlacement(SimulatedSqlException error, Expressions.AggregateExpression aggregate)
     {
         if (this.aggregateEnds is null || !this.aggregateEnds.TryGetValue(aggregate, out var end))
             return false;
-        this.RecordUnlessPreceded(SimulatedSqlException.AggregateInWhereClause(), end);
+        // Real binds a query's aggregates before judging its grouping (probed
+        // 2026-09-28: a subquery's `ORDER BY MAX(t.a + u.c)` is Msg 8124 alone
+        // beside its ungrouped select list).
+        this.entries.Add(new Entry
+        {
+            Error = error,
+            SortPosition = end,
+            LinePosition = end,
+            EligibleFrom = end,
+            PrecedesGrouping = error.Number == 8124,
+        });
         return true;
     }
 
@@ -330,7 +389,7 @@ internal sealed class BindErrorReport(string command)
     /// </summary>
     public bool TryRecordNameError(SimulatedSqlException error, Token? token)
     {
-        if (error.Number is not (207 or 209 or 4104) || !this.Covers(token))
+        if (error.Number is not (207 or 209 or 4104 or 5333 or 5334) || !this.Covers(token))
             return false;
         if (!this.FailedAt(token!.StartIndex))
             this.Record(error, token.StartIndex);
@@ -347,6 +406,34 @@ internal sealed class BindErrorReport(string command)
             Clause = clause,
             EligibleFrom = -1,
         });
+
+    /// <summary>
+    /// Records a value its write target can't take without an explicit
+    /// conversion (Msg 206 / 257 and the other type checks), answering whether
+    /// it could. Real makes the check once every value of the statement has
+    /// bound, and only while nothing failed ahead of it (probed 2026-09-28
+    /// against SQL Server 2025: <c>UPDATE t SET a = d, s = x1</c> and
+    /// <c>INSERT u (c, e) SELECT d, x1 FROM t</c> report the Msg 207 alone).
+    /// </summary>
+    public bool TryRecordAssignmentCheck(SimulatedSqlException error, ExpressionNode? value)
+    {
+        if (!IsTypeCheck(error))
+            return false;
+        // A value reading no column sorts by its statement, the clause alone
+        // placing it.
+        var position = this.SpanOf(value)?.Start ?? (this.openScopes.Find(scope => scope.Start >= 0) is { } statement ? statement.Start : -1);
+        if (position < 0)
+            return false;
+        this.entries.Add(new Entry
+        {
+            Error = error,
+            SortPosition = position,
+            LinePosition = position,
+            Clause = BindClause.Assignment,
+            EligibleFrom = position,
+        });
+        return true;
+    }
 
     /// <summary>
     /// Records an illegal conversion (Msg 529), which real reports alone when
@@ -500,7 +587,9 @@ internal sealed class BindErrorReport(string command)
         List<(int Rank, int Anchor)>? firstKept = null;
         foreach (var (key, entry, _) in keyed)
         {
-            if (entry.EligibleFrom >= 0 && firstKept is not null && CompareKeys(firstKept, this.KeyOf(entry.EligibleFrom, null)) < 0)
+            if (entry.Tier == 1 && this.ChainOf(entry.SortPosition) is [.., var own] && keyed.Exists(other => other.Entry.PrecedesGrouping && this.ChainOf(other.Entry.SortPosition) is [.., var otherOwn] && otherOwn == own))
+                continue;
+            if (entry.EligibleFrom >= 0 && firstKept is not null && CompareKeys(firstKept, this.KeyOf(entry.EligibleFrom, entry.Clause)) < 0)
                 continue;
             if (entry.Alone)
             {
@@ -528,7 +617,7 @@ internal sealed class BindErrorReport(string command)
             var gathered = stopper.Errors.Count > 1;
             foreach (var error in stopper.Errors)
             {
-                if (error.Number is 104 or 207 or 209 or 1011 or 1012 or 1013 or 4104 or 5334
+                if (error.Number is 104 or 207 or 209 or 1011 or 1012 or 1013 or 4104 or 5333 or 5334
                     && (gathered || !reported.Exists(existing => existing.Number == error.Number && existing.Message == error.Message)))
                 {
                     reported.Add(SimulatedSqlException.FromErrors([error]));

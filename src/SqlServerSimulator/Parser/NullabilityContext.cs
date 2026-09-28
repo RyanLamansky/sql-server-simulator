@@ -40,7 +40,7 @@ internal readonly struct NullabilityContext(
 
     /// <summary>The static result type of <paramref name="expression"/> under this context's resolvers.</summary>
     internal SqlType TypeOf(Expression expression) =>
-        expression.GetSqlType(this.Batch, this.ColumnType);
+        expression.TypeCarryingTypeChecks(this.Batch, this.ColumnType);
 
     /// <summary>
     /// Evaluates <paramref name="expression"/> when real would have folded it

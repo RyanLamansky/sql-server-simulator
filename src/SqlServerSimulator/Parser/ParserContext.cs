@@ -285,6 +285,12 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     public bool ScalarOnlyOperand;
 
     /// <summary>
+    /// Armed while a DML statement's <c>OUTPUT</c> item parses: a subquery
+    /// there is Msg 10705, refused before its body binds.
+    /// </summary>
+    public bool InOutputItem;
+
+    /// <summary>
     /// The first column reference met while <see cref="ScalarOnlyOperand"/> is
     /// armed. The reference is recorded rather than its name, since the dotted
     /// parts are appended after construction — the whole multi-part name only

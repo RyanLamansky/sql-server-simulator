@@ -1052,8 +1052,19 @@ partial class Simulation
         {
             for (var i = 0; i < tuple.Length && i < destinationColumns.Length; i++)
             {
-                if (tuple[i] is not Parser.Expressions.DefaultValueExpression)
-                    AssignmentRules.RequireAssignable(tuple[i], tuple[i].GetSqlType(batch, static name => throw SimulatedSqlException.UnboundColumnReference(name)), destinationColumns[i].Type);
+                if (tuple[i] is Parser.Expressions.DefaultValueExpression)
+                    continue;
+                var recorded = batch.BindErrors?.Count ?? 0;
+                var type = tuple[i].GetSqlType(batch, static name => throw SimulatedSqlException.UnboundColumnReference(name));
+                if (batch.BindErrors?.Count > recorded)
+                    continue;
+                try
+                {
+                    AssignmentRules.RequireAssignable(tuple[i], type, destinationColumns[i].Type);
+                }
+                catch (SimulatedSqlException error) when (batch.BindErrors?.TryRecordAssignmentCheck(error, tuple[i]) == true)
+                {
+                }
             }
         }
     }
@@ -1214,7 +1225,15 @@ partial class Simulation
             if (UndeclaredParameterDeduction.NoteExact(projected, destinationColumns[i].Type))
                 continue;
             if (selection.ColumnIsUntypedNull is not { } untyped || !untyped[i])
-                AssignmentRules.RequireAssignable(selection.Schema[i], destinationColumns[i].Type);
+            {
+                try
+                {
+                    AssignmentRules.RequireAssignable(selection.Schema[i], destinationColumns[i].Type);
+                }
+                catch (SimulatedSqlException error) when (context.Batch.BindErrors?.TryRecordAssignmentCheck(error, projected) == true)
+                {
+                }
+            }
         }
 
         // The arity checks above are binding, so they still run; running the

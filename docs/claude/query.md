@@ -607,10 +607,7 @@ The same seam covers a FROM-less scalar subquery wrapping a correlated one with 
 
 Covered shapes (all probe-confirmed): a FROM-less subquery projecting an outer column, a derived table (VALUES or SELECT, including a FROM-less or set-operation body) in a subquery's FROM, and APPLY both at the top level and nested inside a subquery.
 
-**Not modeled: an aggregate reading only the enclosing query's columns, where there is no enclosing collector to move it to.**
-`(SELECT MAX(t.col) FROM u)` inside a query over `t` binds to the *outer* query on real, collapsing it to one row.
-Where the scope has a collector the simulator moves it across and matches real ([Aggregate ownership across scopes](#aggregate-ownership-across-scopes)); where it hasn't, binding the aggregate to the query it is written in would silently return one row per outer row, so `RehomeAggregatesOverOuterScope` raises `NotSupportedException` instead of answering.
-An aggregate mixing inner and outer references, or reading no column (`COUNT(*)`, `MAX(1)`), is unaffected.
+An aggregate reading only the enclosing query's columns — `(SELECT MAX(t.col) FROM u)` inside a query over `t` — binds to the *outer* query on real, collapsing it to one row; see [Aggregate ownership across scopes](#aggregate-ownership-across-scopes).
 
 ## Aggregate / GROUP BY binding rules
 
@@ -703,7 +700,29 @@ Grouping alone doesn't imply distinct output — the projection can be narrower 
 An aggregate whose operand reads only an **enclosing** query's columns belongs to that query: real evaluates it there, which makes the enclosing query an aggregate query and collapses it to one row per group.
 `RehomeAggregatesOverOuterScope` moves the same `AggregateExpression` instance into the enclosing scope's collector at parse time (`ParserContext.EnclosingAggregateCollector`), so the nested expression tree keeps referencing it and reads the value the owning query bound.
 This is what makes an ORM's `GREATEST` / `LEAST` emission work — `(SELECT MAX(value) FROM (VALUES (AVG(b.rating)), (AVG(b.price))) AS _G(value))` over a joined, grouped outer query.
-An aggregate mixing inner and outer references, or reading no column (`COUNT(*)`), is untouched; with no enclosing scope to move to, it still raises `NotSupportedException`.
+An aggregate reading no column (`COUNT(*)`, `MAX(1)`) stays where it is written.
+It moves one scope at a time, so one written two levels down reaches the outermost query through the middle one, and a derived table, a `VALUES` list (whose cells own no aggregate of their own) and a CTE body pass it along the same way (all probed 2026-09-28 against SQL Server 2025).
+
+**The value changes per group without the subquery reading the outer row.**
+The memoized outer-independent subquery ([`subqueries.md`](subqueries.md#an-outer-independent-inner-plan-runs-once-per-statement)) and the once-per-enumeration deferred source both judge replayability by whether the plan consulted the outer row, and a moved aggregate's value arrives through the batch's bound results instead, so `AggregateExpression.ReadsEnclosingGroup` counts each read among `SimulatedDbConnection.VolatileEvaluations`, as `GROUPING` / `GROUPING_ID` reads do.
+Without it `SELECT b, (SELECT SUM(t.a) FROM u) FROM t GROUP BY b` answered the first group's sum for every group.
+
+Where the aggregate lands decides whether it may stand there (probed 2026-09-28):
+
+| Moved to | Real |
+| --- | --- |
+| a select list, `HAVING`, `ORDER BY` | stands |
+| `WHERE` | Msg 147 |
+| a join's `ON`, in a `SELECT`, joined `UPDATE` / `DELETE` or `MERGE` | Msg 1015 |
+| an `UPDATE`'s or a `MERGE` action's `SET` list | Msg 157 |
+| a `MERGE`'s `WHEN … AND` condition | Msg 5319 |
+| a table value constructor — `INSERT … VALUES`, a `MERGE` insert action, a `VALUES` derived table — when it reads no enclosing column | Msg 5310 |
+| a `TOP` / `OFFSET` / `FETCH` count | Msg 4115, naming the column's leaf |
+| across an `APPLY`, reading the left side's columns | Msg 4101 |
+
+The clause-owned refusals are raised by a collector the clause installs (`Selection.RefuseClauseAggregates`), and an `APPLY`'s right side sees an `ApplyAggregateBoundary` in its enclosing collector's place: an aggregate reading the left side stops there, one reading columns from further out passes through to the query holding the `APPLY` and on outward.
+An operand reading an enclosing column beside a column of any other scope — its own, or a scope between — is Msg 8124 (`MAX(t.a + u.c)` in a subquery over `u`), where `MAX(t.a + t.b)` and `MAX(t.a + @v)` belong to `t`'s query.
+A subquery in a DML `OUTPUT` clause is Msg 10705 before its body binds, so an aggregate over `DELETED` never gets that far.
 
 A name that resolves in **no** scope isn't this case at all — it is real's **Msg 207**, at compile time, in a plain statement and at CREATE of a module alike (probe-confirmed: `HAVING MAX(nosuchcol) = 1` refuses a `CREATE VIEW` outright, while the genuinely-outer form creates and only misbehaves when run).
 The enclosing type resolver settles which of the two it is — it raises Msg 207 itself once the scope chain runs out — and a FROM-clause placeholder suspends the question entirely, since the name could belong to the missing object.

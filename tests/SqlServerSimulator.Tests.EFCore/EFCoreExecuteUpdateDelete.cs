@@ -121,6 +121,20 @@ public class EFCoreExecuteUpdateDelete
     }
 
     [TestMethod]
+    public void ExecuteUpdate_SetsCorrelatedCount()
+    {
+        // The value subquery correlates to the aliased target:
+        // UPDATE [u] SET … = (SELECT COUNT(*) FROM [Users] AS [u0] WHERE [u0].[Active] = [u].[Active]) FROM [Users] AS [u].
+        using var context = SeededContext();
+        var affected = context.Users
+            .ExecuteUpdate(s => s.SetProperty(u => u.LoginCount, u => context.Users.Count(o => o.Active == u.Active && o.Id <= u.Id)));
+        Assert.AreEqual(4, affected);
+        CollectionAssert.AreEqual(
+            new[] { 1, 1, 2, 2 },
+            context.Users.AsNoTracking().OrderBy(u => u.Id).Select(u => u.LoginCount).ToArray());
+    }
+
+    [TestMethod]
     public void ExecuteDelete_RemovesFiltered()
     {
         using var context = SeededContext();

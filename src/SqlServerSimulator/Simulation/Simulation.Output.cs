@@ -148,7 +148,7 @@ partial class Simulation
                 context.MoveNextOptional();
                 continue;
             }
-            var expr = Expression.Parse(context);
+            var expr = ParseOutputItem(context);
             if (table.GraphKind != GraphTableKind.None)
                 GraphColumns.BindPseudoReferences(expr, table.Columns);
             switch (context.Token)
@@ -206,6 +206,20 @@ partial class Simulation
         view?.ThrowRefusals();
 
         return NoteClientOutput(context.Batch, new OutputProjection([.. expressions], [.. names], schema, table, source: null, context.Batch, outputTarget, view: view));
+    }
+
+    /// <summary>Parses one <c>OUTPUT</c> item, where a subquery is Msg 10705.</summary>
+    private static Expression ParseOutputItem(ParserContext context)
+    {
+        context.InOutputItem = true;
+        try
+        {
+            return Expression.Parse(context);
+        }
+        finally
+        {
+            context.InOutputItem = false;
+        }
     }
 
     /// <summary>

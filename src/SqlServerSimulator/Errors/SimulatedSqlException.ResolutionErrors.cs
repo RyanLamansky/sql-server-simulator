@@ -52,6 +52,25 @@ partial class SimulatedSqlException
         new($"The objects \"{later}\" and \"{earlier}\" in the FROM clause have the same exposed names. Use correlation names to distinguish them.", 1013, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server's Msg 5333 — a <c>WHEN NOT MATCHED [BY TARGET]</c>
+    /// condition naming anything but a source column: state 2 for a qualified
+    /// name, 1 for a bare one, a name bound nowhere included (probed 2026-09-28
+    /// against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException MergeNotMatchedConditionOutOfScope(MultiPartName name) =>
+        new($"The identifier '{name}' cannot be bound. Only source columns and columns in the clause scope are allowed in the 'WHEN NOT MATCHED' clause of a MERGE statement.", 5333, 16, name.Count == 1 ? (byte)1 : (byte)2);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 5334 — a <c>WHEN NOT MATCHED BY SOURCE</c>
+    /// condition naming anything but a target column: state 2 for a qualified
+    /// name, 1 for a bare one, a name bound nowhere included, while a
+    /// target-qualified miss stays Msg 207 (probed 2026-09-28 against SQL Server
+    /// 2025).
+    /// </summary>
+    internal static SimulatedSqlException MergeBySourceConditionOutOfScope(MultiPartName name) =>
+        new($"The identifier '{name}' cannot be bound. Only target columns and columns in the clause scope are allowed in the 'WHEN NOT MATCHED BY SOURCE' clause of a MERGE statement.", 5334, 16, name.Count == 1 ? (byte)1 : (byte)2);
+
+    /// <summary>
     /// Mimics SQL Server's Msg 5318: a MERGE whose source exposes the same name
     /// or alias as its target.
     /// </summary>

@@ -36,6 +36,7 @@ Probe-confirmed against SQL Server 2025: `SELECT COUNT(DISTINCT g) FROM (SELECT 
 `RAND()` and the current-time family therefore need no gate: both engines already freeze them for the statement (`StatementContext`).
 
 The counter has a second consumer with the same reasoning: the once-per-enumeration materialization of a deferred FROM source, in [`joins.md`](joins.md#deferred-sources-materialize-once-per-enumeration).
+It also counts reads of a value the enclosing query binds per group — an aggregate that query owns, `GROUPING` — which differ from one outer row to the next without the plan consulting the outer row ([`query.md`](query.md#aggregate-ownership-across-scopes)).
 
 ## An equi-correlated body switches to a hash semi / anti-join
 

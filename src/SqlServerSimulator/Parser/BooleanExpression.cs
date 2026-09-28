@@ -1151,6 +1151,30 @@ internal abstract class BooleanExpression : ExpressionNode
         this.VisitOperandExpressions(operand => _ = operand.GetSqlType(batch, resolveColumnType));
 
     /// <summary>
+    /// <see cref="Bind"/> for a clause's predicate or one operand of a logical
+    /// connective: while a statement is read for its whole bind error report, a
+    /// type check the predicate fails is recorded rather than thrown (see
+    /// <see cref="BindErrorReport.CarriesPastTypeCheck"/>), so the connective's
+    /// other operands and the rest of the statement still bind.
+    /// </summary>
+    internal void BindCarryingTypeChecks(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        if (batch.BindErrors is not { } report)
+        {
+            this.Bind(batch, resolveColumnType);
+            return;
+        }
+        var recorded = report.Count;
+        try
+        {
+            this.Bind(batch, resolveColumnType);
+        }
+        catch (SimulatedSqlException error) when (report.CarriesPastTypeCheck(error, recorded, this))
+        {
+        }
+    }
+
+    /// <summary>
     /// Raises **Msg 468** when two string operands of a comparison carry
     /// collations that can't be resolved to one. Shared by the compile-time
     /// <see cref="Bind"/> path and the per-value
@@ -1179,7 +1203,7 @@ internal abstract class BooleanExpression : ExpressionNode
     /// <see cref="RequireResolvableCollation"/> over the pair.
     /// </summary>
     private static void BindComparison(Expression left, Expression right, BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType, string operatorName) =>
-        RequireComparable(left, left.GetSqlType(batch, resolveColumnType), right, right.GetSqlType(batch, resolveColumnType), batch, operatorName);
+        RequireComparable(left, left.TypeCarryingTypeChecks(batch, resolveColumnType), right, right.TypeCarryingTypeChecks(batch, resolveColumnType), batch, operatorName);
 
     /// <summary>
     /// The compile-time half of a comparison: real settles whether the two
@@ -1632,7 +1656,7 @@ internal abstract class BooleanExpression : ExpressionNode
         internal override void Bind(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
         {
             foreach (var operand in operands)
-                operand.Bind(batch, resolveColumnType);
+                operand.BindCarryingTypeChecks(batch, resolveColumnType);
         }
 
         internal override void CollectConjuncts(List<BooleanExpression> sink)
@@ -1739,7 +1763,7 @@ internal abstract class BooleanExpression : ExpressionNode
         internal override void Bind(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
         {
             foreach (var operand in operands)
-                operand.Bind(batch, resolveColumnType);
+                operand.BindCarryingTypeChecks(batch, resolveColumnType);
         }
 
         internal override void CollectDisjuncts(List<BooleanExpression> sink)

@@ -382,6 +382,9 @@ partial class Simulation
             case "ARITHABORT":
                 connection.Arithabort = on;
                 break;
+            case "ARITHIGNORE":
+                connection.ArithIgnore = on;
+                break;
             case "CONCAT_NULL_YIELDS_NULL":
                 connection.ConcatNullYieldsNull = on;
                 break;

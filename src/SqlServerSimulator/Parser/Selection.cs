@@ -2104,6 +2104,58 @@ internal sealed partial class Selection
         }
     }
 
+    /// <summary>
+    /// An alias-form <c>UPDATE</c>'s <c>FROM</c> clause, parsed ahead of the
+    /// <c>SET</c> list so a subquery there binds against the statement's
+    /// sources, and the checkpoint just past it where the statement resumes.
+    /// </summary>
+    internal sealed class PreParsedFrom(List<FromSource> sources, List<JoinSpec> joins, ParserContext.Checkpoint after)
+    {
+        public readonly List<FromSource> Sources = sources;
+        public readonly List<JoinSpec> Joins = joins;
+        public readonly ParserContext.Checkpoint After = after;
+    }
+
+    /// <summary>
+    /// Parses an alias-form <c>UPDATE</c>'s own <c>FROM</c> clause ahead of its
+    /// <c>SET</c> list, entered and left with the cursor on the <c>SET</c>
+    /// keyword, so a <c>SET</c> subquery reading the target's alias binds
+    /// (probed 2026-09-28 against SQL Server 2025: EF Core's <c>UPDATE [b] SET
+    /// [b].[n] = (SELECT COUNT(*) FROM [p] WHERE [b].[Id] = [p].[BlogId]) FROM
+    /// [Blogs] AS [b]</c>). Speculative in the way the <c>SELECT</c> pre-pass
+    /// is: null when there is no such clause or it doesn't parse on its own,
+    /// and the statement then parses it in place.
+    /// </summary>
+    internal static PreParsedFrom? PreParseMutationFrom(ParserContext context)
+    {
+        var atSet = context.SaveCheckpoint();
+        if (!context.MoveNext() || FindOwnFromClause(context) is not { } fromCheckpoint)
+        {
+            context.RestoreCheckpoint(atSet);
+            return null;
+        }
+        context.RestoreCheckpoint(fromCheckpoint);
+        context.Batch.BindErrors?.EnterClause(context.Token, BindClause.From);
+        var sources = new List<FromSource>();
+        var joins = new List<JoinSpec>();
+        var savedAllowNextValueFor = context.AllowNextValueForInFromClause;
+        context.AllowNextValueForInFromClause = true;
+        try
+        {
+            ParseSourcesAndJoins(context, QueryScope.Statement, sources, joins);
+            return new PreParsedFrom(sources, joins, context.SaveCheckpoint());
+        }
+        catch (Exception ex) when (ex is SimulatedSqlException or NotSupportedException)
+        {
+            return null;
+        }
+        finally
+        {
+            context.AllowNextValueForInFromClause = savedAllowNextValueFor;
+            context.RestoreCheckpoint(atSet);
+        }
+    }
+
     private static void ParseFromSourceAndJoins(
         ParserContext context,
         QueryScope scope,
@@ -2426,15 +2478,26 @@ internal sealed partial class Selection
         // A MATCH in an ON binds too, against the ON's own sources, every one
         // of them joined (Msg 13920).
         context.MatchScope = new Expressions.MatchScope { Sources = scope, AllJoined = true };
+        // An aggregate the ON would own — written there, or moved there from a
+        // subquery reading only the join's columns — is Msg 1015; one reading
+        // only an enclosing query's columns belongs to that query.
+        var savedCollector = context.AggregateCollector;
+        var onAggregates = new List<AggregateExpression>();
+        context.AggregateCollector = onAggregates;
+        BooleanExpression predicate;
         try
         {
-            return BooleanExpression.SimplifyForFilter(BooleanExpression.Parse(context), context);
+            predicate = BooleanExpression.SimplifyForFilter(BooleanExpression.Parse(context), context);
         }
         finally
         {
             context.OuterTypeResolver = saved;
             context.MatchScope = savedMatchScope;
+            context.AggregateCollector = savedCollector;
         }
+        RehomeAggregatesOverOuterScope(context.Batch, [.. sources], onAggregates, outerTypeResolver);
+        RefuseClauseAggregates(context.Batch, onAggregates, SimulatedSqlException.AggregateInOnClause());
+        return predicate;
     }
 
     /// <summary>
@@ -2698,7 +2761,7 @@ internal sealed partial class Selection
                 || IsRegexpRowsetName(nextName.Value, context))
             {
                 context.RestoreCheckpoint(checkpoint);
-                return ParseSingleFromSource(context, scope.WithOuter(ChainedResolverForName));
+                return AcrossApplyBoundary(context, leftSnapshotForName, () => ParseSingleFromSource(context, scope.WithOuter(ChainedResolverForName)));
             }
 
             // Peek the resolved object name to decide between TVF route
@@ -2731,7 +2794,7 @@ internal sealed partial class Selection
             var isFunctionCallShape = context.MoveNext() && context.Token is Operator { Character: '(' };
             context.RestoreCheckpoint(checkpoint);
             if (resolvedIsTvf)
-                return ParseSingleFromSource(context, scope.WithOuter(ChainedResolverForName));
+                return AcrossApplyBoundary(context, leftSnapshotForName, () => ParseSingleFromSource(context, scope.WithOuter(ChainedResolverForName)));
             // A function-call shape that didn't resolve to a known TVF is a
             // deferred name-resolution error (Msg 208), not a syntax error:
             // real SQL Server binds the TVF name lazily, so an un-taken IF
@@ -2756,7 +2819,7 @@ internal sealed partial class Selection
         // dm_os_host_info server-properties shape. The chained resolver wires
         // that correlation in at parse and (via ForValuesConstructor) runtime.
         if (afterApplyParen is ReservedKeyword { Keyword: Keyword.Values })
-            return ParseValuesDerivedTable(context, ChainedResolver);
+            return AcrossApplyBoundary(context, leftSnapshot, () => ParseValuesDerivedTable(context, ChainedResolver));
 
         if (afterApplyParen is not ReservedKeyword { Keyword: Keyword.Select })
             throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -2768,7 +2831,7 @@ internal sealed partial class Selection
         Selection lateralPlan;
         try
         {
-            lateralPlan = ParseNestedQueryRejectingNextValueFor(context, QueryScope.Nested(QueryPosition.Derived, ChainedResolver));
+            lateralPlan = AcrossApplyBoundary(context, leftSnapshot, () => ParseNestedQueryRejectingNextValueFor(context, QueryScope.Nested(QueryPosition.Derived, ChainedResolver)));
         }
         finally
         {
@@ -2794,6 +2857,36 @@ internal sealed partial class Selection
             rows: [],
             lateralPlan: lateralPlan,
             lateralIsQueryBody: true);
+    }
+
+    /// <summary>
+    /// Parses an <c>APPLY</c>'s right side through <paramref name="parse"/>
+    /// with an <see cref="ApplyAggregateBoundary"/> as its enclosing
+    /// collector: an aggregate moving out of the right side stops there when
+    /// it reads <paramref name="leftSources"/> (Msg 4101) and otherwise goes on
+    /// to the query holding the <c>APPLY</c>. One a function argument registers
+    /// directly makes the same move once the parse is done.
+    /// </summary>
+    private static T AcrossApplyBoundary<T>(ParserContext context, FromSource[] leftSources, Func<T> parse)
+    {
+        var savedCollector = context.AggregateCollector;
+        var boundary = new ApplyAggregateBoundary(leftSources, savedCollector);
+        context.AggregateCollector = boundary;
+        T parsed;
+        try
+        {
+            parsed = parse();
+        }
+        finally
+        {
+            context.AggregateCollector = savedCollector;
+        }
+        foreach (var aggregate in boundary)
+        {
+            if (!MoveToEnclosingQuery(context.Batch, aggregate, boundary))
+                throw new NotSupportedException("An aggregate in an APPLY's function argument, with no enclosing query collecting aggregates, isn't modeled.");
+        }
+        return parsed;
     }
 
     /// <summary>
@@ -3575,8 +3668,20 @@ internal sealed partial class Selection
     {
         // ParseValuesTuples enters on VALUES and leaves the cursor on the token
         // after the last tuple's ')', which must be the (VALUES …) wrapper's
-        // closing ')'.
-        var tuples = Simulation.ParseValuesTuples(context);
+        // closing ')'. A subquery in a cell reads the same scope a bare cell
+        // reference does — under APPLY, the left side.
+        var savedOuter = context.OuterTypeResolver;
+        if (outerTypeResolver is not null)
+            context.OuterTypeResolver = outerTypeResolver;
+        List<Expression[]> tuples;
+        try
+        {
+            tuples = Simulation.ParseValuesTuples(context);
+        }
+        finally
+        {
+            context.OuterTypeResolver = savedOuter;
+        }
         if (context.Token is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
@@ -4582,6 +4687,22 @@ internal sealed partial class Selection
     }
 
     /// <summary>
+    /// Raises Msg 4115 for an aggregate a row-count operand's subquery moved
+    /// to this query because it reads only this query's columns — the count
+    /// reads the column as surely as a bare reference would (probed 2026-09-28
+    /// against SQL Server 2025: <c>OFFSET (SELECT MAX(t.a) FROM u) ROWS</c>).
+    /// </summary>
+    private static void RefuseRowLimitAggregates(ParserContext context, int aggregatesBefore)
+    {
+        if (context.AggregateCollector is not { } collector || collector.Count <= aggregatesBefore)
+            return;
+        MultiPartName? first = null;
+        collector[aggregatesBefore].Operand?.VisitColumnReferences(name => first ??= name);
+        if (first is { } column)
+            throw SimulatedSqlException.ColumnReferenceNotAllowed(column);
+    }
+
+    /// <summary>
     /// Consumes the optional <c>OFFSET n ROWS [FETCH NEXT|FIRST k ROW|ROWS ONLY]</c>
     /// tail. Must be called immediately after <see cref="ParseOrderByItems"/>
     /// — SQL Server requires OFFSET/FETCH to follow ORDER BY (no ORDER BY → the
@@ -4602,7 +4723,9 @@ internal sealed partial class Selection
             return;
 
         context.MoveNextRequired();
+        var aggregatesBefore = context.AggregateCollector?.Count ?? 0;
         var offsetExpression = Expression.Parse(context);
+        RefuseRowLimitAggregates(context, aggregatesBefore);
         _ = ResolveRowCountLimit(offsetExpression, RowLimitKind.Offset, context.Batch);
         context.RecursiveBranchConstructs.TopOrOffset = true;
         fromClause.OffsetExpression = offsetExpression;
@@ -4619,7 +4742,9 @@ internal sealed partial class Selection
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextRequired();
 
+        aggregatesBefore = context.AggregateCollector?.Count ?? 0;
         var fetchExpression = Expression.Parse(context);
+        RefuseRowLimitAggregates(context, aggregatesBefore);
         _ = ResolveRowCountLimit(fetchExpression, RowLimitKind.Fetch, context.Batch);
         fromClause.FetchExpression = fetchExpression;
 

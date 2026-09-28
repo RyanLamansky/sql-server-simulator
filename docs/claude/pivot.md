@@ -37,7 +37,8 @@ WHERE / ORDER BY / further joins on the pivoted source operate on its rotated ou
 | Two aggregates (`SUM(a), COUNT(b) FOR …`) | Msg 102 |
 | `IN` entries that aren't identifiers (`'East'`, `N'East'`, bare `2020`) | Msg 102 |
 | Missing `AS alias` | Msg 102 |
-| Unknown FOR column | Msg 207 |
+| Unknown aggregate operand, then unknown FOR column | Msg 207 each, in that order |
+| A grouping column (every source column but the operand and the FOR column) of a type real can't compare — `text`, `xml`, `vector` … | Msg 488, after the names (probed 2026-09-28) |
 | Duplicate `IN` value | Msg 8156 (`The column 'X' was specified multiple times for '<alias>'.`) |
 
 The `IN` entries must be identifiers (`[2020]`, `[East]`, bare names): SQL Server rejects string/numeric literals here.

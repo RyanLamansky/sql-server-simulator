@@ -250,4 +250,116 @@ public sealed partial class BinderErrorReportTests
     [TestMethod]
     public void DynamicBatch_ReportsEveryError()
         => AreEqual("207:1:x2 207:1:x1", Report("exec('select x1 from t where x2 = 1')"));
+
+    private const string TypedSetup = """
+        create table tt (a int, s varchar(10), d date, tx text, g uniqueidentifier, b varbinary(10),
+            cs varchar(10) collate Latin1_General_CS_AS, ci varchar(10) collate Latin1_General_CI_AS);
+        create table uu (c int, e int);
+        """;
+
+    /// <summary><see cref="Report"/> over the typed tables, whose columns meet every type check.</summary>
+    private static string TypedReport(string statement)
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery(TypedSetup);
+        return Render(Throws<SimulatedSqlException>(() => simulation.ExecuteNonQuery(statement)));
+    }
+
+    /// <summary>
+    /// A type check other than an illegal explicit conversion reports where it
+    /// sits and binding goes on past it, but only while nothing ahead of it has
+    /// failed — so a statement reports at most one, and none behind a name
+    /// error (probed 2026-09-28 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select a + d, x1 from tt", "206:1: 207:1:x1")]
+    [DataRow("select x1, a + d from tt", "207:1:x1")]
+    [DataRow("select a + d, a + d from tt", "206:1:")]
+    [DataRow("select x1 from tt where a = d", "206:1: 207:1:x1")]
+    [DataRow("select a from tt where a = d and x2 = 1", "206:1: 207:1:x2")]
+    [DataRow("select a from tt where x2 = 1 and a = d", "207:1:x2")]
+    [DataRow("select x1 from tt where x2 = d", "207:1:x2 207:1:x1")]
+    [DataRow("select x1, (select a + d from tt t2) from tt", "207:1:x1")]
+    [DataRow("select case when tx = s then 1 end, x1 from tt", "402:1: 207:1:x1")]
+    [DataRow("select case when cs = ci then 1 end, x1 from tt", "468:1:Latin1_General_CI_AS 207:1:x1")]
+    [DataRow("select sum(s), x1 from tt", "8117:1: 207:1:x1")]
+    [DataRow("select x1 from tt where sum(s) is null", "8117:1: 207:1:x1")]
+    [DataRow("select substring(g, 1, 1), x1 from tt", "8116:1: 207:1:x1")]
+    [DataRow("select a + d, s from tt group by a", "206:1: 8120:1:tt.d")]
+    [DataRow("select x1 from tt group by a + d", "206:1: 207:1:x1")]
+    [DataRow("select a from tt group by a having a = max(d) and x1 = 1", "206:1: 207:1:x1")]
+    [DataRow("select a from tt order by a + d, x1", "206:1: 207:1:x1")]
+    [DataRow("select x1 from tt join uu on tt.a = tt.d and uu.zz = 1", "206:1: 207:1:zz 207:1:x1")]
+    [DataRow("select a + d, cast(d as int), x1 from tt", "206:1: 207:1:x1")]
+    [DataRow("select cast(d as int), a + d, x1 from tt", "529:1:")]
+    [DataRow("delete tt where a = d and x1 = 1", "206:1: 207:1:x1")]
+    [DataRow("insert uu (c, e) select a + d, x1 from tt", "206:1: 207:1:x1")]
+    public void TypeCheck_ReportsWhereItSitsAndBindingGoesOn(string statement, string expected)
+        => AreEqual(expected, TypedReport(statement));
+
+    /// <summary>
+    /// Whether a written value suits its target is checked once every value has
+    /// bound, and only when nothing failed (probed 2026-09-28).
+    /// </summary>
+    [TestMethod]
+    [DataRow("update tt set a = d, s = x1", "207:1:x1")]
+    [DataRow("update tt set b = d, s = x1", "207:1:x1")]
+    [DataRow("insert uu (c, e) select d, x1 from tt", "207:1:x1")]
+    [DataRow("insert uu (c, e) values (cast(getdate() as date), x1)", "207:1:x1")]
+    [DataRow("update tt set a = d", "206:1:")]
+    public void AssignmentCheck_FollowsEveryValue(string statement, string expected)
+        => AreEqual(expected, TypedReport(statement));
+
+    /// <summary>
+    /// An aggregate standing where real refuses one reports among the names,
+    /// unless a name error sorts ahead of it (probed 2026-09-28).
+    /// </summary>
+    [TestMethod]
+    [DataRow("update tt set a = max(a), s = x1", "157:1: 207:1:x1")]
+    [DataRow("update tt set s = x1, a = max(a)", "207:1:x1")]
+    [DataRow("update tt set a = max(a) where count(*) > 0 and x1 = 1", "147:1: 207:1:x1")]
+    [DataRow("select x1 from tt join uu on count(*) = 1", "1015:1: 207:1:x1")]
+    [DataRow("select a from tt join uu on count(*) = 1 and uu.zz = 1", "1015:1: 207:1:zz")]
+    [DataRow("select (select max(tt.a + uu.c) from uu), x1 from tt", "8124:1: 207:1:x1")]
+    [DataRow("select x1, (select max(tt.a + uu.c) from uu) from tt", "207:1:x1")]
+    [DataRow("select x.m, x1 from tt cross apply (select max(tt.a) m from uu) x", "4101:1: 207:1:x1")]
+    [DataRow("insert uu values (max(1), x1)", "5310:1: 207:1:x1")]
+    public void AggregatePlacement_ReportsAmongTheNames(string statement, string expected)
+        => AreEqual(expected, TypedReport(statement));
+
+    /// <summary>
+    /// A NOT MATCHED clause's condition reads only its own side of a MERGE, and
+    /// its action misses there with the ordinary binder errors; real binds the
+    /// MATCHED conditions, then the NOT MATCHED, then the NOT MATCHED BY SOURCE
+    /// ones, whatever order they are written in (probed 2026-09-28).
+    /// </summary>
+    [TestMethod]
+    [DataRow("merge uu using tt on uu.c = tt.a when not matched by source and tt.a = 1 then delete;", "5334:1:tt.a")]
+    [DataRow("merge uu using tt on uu.c = tt.a when not matched by source and s = 'x' then delete;", "5334:1:s")]
+    [DataRow("merge uu using tt on uu.c = tt.a when not matched by source and tt.a = 1 and x9 = 1 then delete;", "5334:1:tt.a 5334:1:x9")]
+    [DataRow("merge uu using tt on uu.c = tt.a when not matched by source and uu.zz = 1 then delete;", "207:1:zz")]
+    [DataRow("merge uu using tt on uu.c = tt.a when not matched by source and exists (select 1 where tt.a = 1) then delete;", "5334:1:tt.a")]
+    [DataRow("merge uu using tt on uu.c = tt.a when not matched by source then update set e = tt.a;", "4104:1:tt.a")]
+    [DataRow("merge uu using tt on uu.c = tt.a when not matched by source then update set e = a;", "207:1:a")]
+    [DataRow("merge uu using tt on uu.c = tt.a when not matched and uu.e = 1 then insert values (tt.a, 0);", "5333:1:uu.e")]
+    [DataRow("merge uu using tt on uu.c = tt.a when not matched and e = 1 then insert values (tt.a, 0);", "5333:1:e")]
+    [DataRow("merge uu using tt on uu.c = tt.a when not matched then insert values (uu.e, 0);", "4104:1:uu.e")]
+    [DataRow("merge uu using tt on uu.c = tt.a when not matched by source and tt.a = 1 then delete when not matched and uu.e = 1 then insert values (tt.a, 0);", "5333:1:uu.e 5334:1:tt.a")]
+    [DataRow("merge uu using tt on uu.c = tt.a when not matched by source and x8 = 1 then delete when matched and x9 = 1 then delete;", "207:1:x9 5334:1:x8")]
+    [DataRow("merge uu using tt on uu.c = tt.a when not matched by source then update set e = x8 when matched and x9 = 1 then delete;", "207:1:x9 207:1:x8")]
+    public void MergeClauseScope_BindsEachSideAlone(string statement, string expected)
+        => AreEqual(expected, TypedReport(statement));
+
+    /// <summary>
+    /// A PIVOT binds its aggregate's operand, then its FOR column, then its
+    /// grouping columns' comparability; an UNPIVOT every listed column. Past a
+    /// miss, nothing more binds against the rotated source (probed 2026-09-28).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select * from tt pivot (sum(x1) for x2 in ([1])) p", "207:1:x1 207:1:x2 488:1:tx")]
+    [DataRow("select x3 from tt pivot (sum(x1) for x2 in ([1])) p", "207:1:x1 207:1:x2 488:1:tx")]
+    [DataRow("select * from tt pivot (sum(a) for x2 in ([1])) p", "207:1:x2 488:1:tx")]
+    [DataRow("select * from tt unpivot (v for k in (x1, x2)) p", "207:1:x1 207:1:x2")]
+    public void Rotation_ReportsEveryName(string statement, string expected)
+        => AreEqual(expected, TypedReport(statement));
 }

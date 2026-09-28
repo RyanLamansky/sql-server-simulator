@@ -100,4 +100,25 @@ public sealed class SessionOptionTimingTests
     [DataRow("select @@options & 256; if 1 = 0 set ansi_defaults off; select @@options & 256", "0,0")]
     public void AtAtOptions_QuotedIdentifier_ReadsTheBatchsLastSet(string batch, string expected)
         => AreEqual(expected, string.Join(",", Scalars(batch)));
+
+    /// <summary>
+    /// <c>ARITHIGNORE</c> is <c>@@OPTIONS</c> bit 128, applies inside a
+    /// procedure that sets it and reverts when the procedure returns, and has no
+    /// <c>SESSIONPROPERTY</c> (probed 2026-09-28 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void ArithIgnore_ReadsAsOptionsBit128AndRevertsAfterAProcedure()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches("create procedure p as begin set arithignore on; select @@options & 128 end");
+        using var reader = simulation.ExecuteBatchesReader("exec p; select @@options & 128; set arithignore on; select @@options & 128, sessionproperty('ARITHIGNORE')");
+        var values = new List<object>();
+        do
+        {
+            while (reader.Read())
+                values.Add(reader.GetValue(0));
+        }
+        while (reader.NextResult());
+        CollectionAssert.AreEqual(new object[] { 128, 0, 128 }, values);
+    }
 }

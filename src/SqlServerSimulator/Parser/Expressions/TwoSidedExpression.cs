@@ -143,13 +143,14 @@ internal abstract class TwoSidedExpression : Expression
         {
             // Read for a whole bind error report: an operand whose typing
             // recorded an error is error-typed on real, which no operator
-            // refuses.
+            // refuses, and this operator's own type check is recorded where it
+            // sits so the rest of the statement binds on.
             var recorded = report.Count;
             try
             {
                 return this.TypeOperands(batch, resolveColumnType);
             }
-            catch (SimulatedSqlException) when (report.Count > recorded)
+            catch (SimulatedSqlException error) when (report.Count > recorded || report.CarriesPastTypeCheck(error, recorded, this))
             {
                 return SqlType.Int32;
             }
@@ -161,7 +162,7 @@ internal abstract class TwoSidedExpression : Expression
     {
         // Fast path — shallow left operand, no allocation (mirrors Run).
         if (this.left is not TwoSidedExpression)
-            return CombineType(this.left.GetSqlType(batch, resolveColumnType), batch, resolveColumnType);
+            return CombineType(this.left.TypeCarryingTypeChecks(batch, resolveColumnType), batch, resolveColumnType);
 
         // Iterative left-spine walk, mirroring Run: fold the leftmost operand's
         // type through each node's CombineType so a flat chain resolves its
@@ -173,10 +174,31 @@ internal abstract class TwoSidedExpression : Expression
             spine.Add(twoSided);
             node = twoSided.left;
         }
-        var accumulated = node.GetSqlType(batch, resolveColumnType);
+        var accumulated = node.TypeCarryingTypeChecks(batch, resolveColumnType);
         for (var i = spine.Count - 1; i >= 0; i--)
-            accumulated = spine[i].CombineType(accumulated, batch, resolveColumnType);
+            accumulated = spine[i].CombineTypeCarryingTypeChecks(accumulated, batch, resolveColumnType);
         return accumulated;
+    }
+
+    /// <summary>
+    /// <see cref="CombineType"/> for one node of a left spine: while a statement
+    /// is read for its whole bind error report, the node's own type check is
+    /// recorded rather than thrown, so the nodes above it type their right
+    /// operands too.
+    /// </summary>
+    private SqlType CombineTypeCarryingTypeChecks(SqlType leftType, BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        if (batch.BindErrors is not { } report)
+            return this.CombineType(leftType, batch, resolveColumnType);
+        var recorded = report.Count;
+        try
+        {
+            return this.CombineType(leftType, batch, resolveColumnType);
+        }
+        catch (SimulatedSqlException error) when (report.Count > recorded || report.CarriesPastTypeCheck(error, recorded, this))
+        {
+            return SqlType.Int32;
+        }
     }
 
     /// <summary>
@@ -286,7 +308,7 @@ internal abstract class TwoSidedExpression : Expression
     /// </summary>
     private SqlType CombineType(SqlType leftType, BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
-        var rightType = this.right.GetSqlType(batch, resolveColumnType);
+        var rightType = this.right.TypeCarryingTypeChecks(batch, resolveColumnType);
         // A bare NULL beside a string in `+` is a one-character string of that
         // string's family: 'abc' + NULL is varchar(4), N'a' + NULL nvarchar(2)
         // (probed 2026-09-24 against SQL Server 2025).

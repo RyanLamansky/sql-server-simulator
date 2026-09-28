@@ -888,6 +888,28 @@ internal abstract class Expression : ExpressionNode
     public abstract SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType);
 
     /// <summary>
+    /// <see cref="GetSqlType"/> for a clause's own term: while a statement is
+    /// read for its whole bind error report, a type check the term fails is
+    /// recorded rather than thrown (see
+    /// <see cref="BindErrorReport.CarriesPastTypeCheck"/>) and the term reads
+    /// as <c>int</c>, so the rest of the statement binds.
+    /// </summary>
+    internal SqlType TypeCarryingTypeChecks(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        if (batch.BindErrors is not { } report)
+            return this.GetSqlType(batch, resolveColumnType);
+        var recorded = report.Count;
+        try
+        {
+            return this.GetSqlType(batch, resolveColumnType);
+        }
+        catch (SimulatedSqlException error) when (report.CarriesPastTypeCheck(error, recorded, this))
+        {
+            return SqlType.Int32;
+        }
+    }
+
+    /// <summary>
     /// Diagnostic-only string rendering, surfaced to debuggers via
     /// <see cref="DebuggerDisplayAttribute"/>. Production paths must not call
     /// this — they should produce purpose-built formats (Msg-shaped error
@@ -1564,6 +1586,8 @@ internal abstract class Expression : ExpressionNode
         // parse so its columns can't be mistaken for the operand's.
         if (context.ScalarOnlyOperand)
             throw ScalarOnlyOperandError(context);
+        if (context.InOutputItem)
+            throw SimulatedSqlException.SubqueryInOutputClause();
         var saved = context.EnterNextValueForScope(NextValueForScope.Nested);
         Selection subquery;
         try

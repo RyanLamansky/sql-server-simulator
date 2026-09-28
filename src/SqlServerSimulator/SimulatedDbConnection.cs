@@ -223,6 +223,16 @@ public sealed class SimulatedDbConnection : DbConnection
     internal bool Arithabort;
 
     /// <summary>
+    /// Session-scoped <c>ARITHIGNORE</c> setting (default <see langword="false"/>).
+    /// On, a divide by zero or an overflow that <see cref="AnsiWarnings"/> and
+    /// <see cref="Arithabort"/> both off answer with NULL sends no Msg 3606 /
+    /// 3607 after it; with either of them on it changes nothing (probed
+    /// 2026-09-28 against SQL Server 2025). Scoping matches
+    /// <see cref="XactAbort"/>.
+    /// </summary>
+    internal bool ArithIgnore;
+
+    /// <summary>
     /// Session-scoped <c>CONCAT_NULL_YIELDS_NULL</c> setting (default
     /// <see langword="true"/>), surfaced by
     /// <c>SESSIONPROPERTY('CONCAT_NULL_YIELDS_NULL')</c>, and captured while
@@ -385,6 +395,7 @@ public sealed class SimulatedDbConnection : DbConnection
         private readonly bool ansiPadding = connection.AnsiPadding;
         private readonly bool ansiWarnings = connection.AnsiWarnings;
         private readonly bool arithabort = connection.Arithabort;
+        private readonly bool arithIgnore = connection.ArithIgnore;
         private readonly bool concatNullYieldsNull = connection.ConcatNullYieldsNull;
         private readonly bool numericRoundabort = connection.NumericRoundabort;
         private readonly bool implicitTransactions = connection.ImplicitTransactions;
@@ -404,6 +415,7 @@ public sealed class SimulatedDbConnection : DbConnection
             connection.AnsiPadding = this.ansiPadding;
             connection.AnsiWarnings = this.ansiWarnings;
             connection.Arithabort = this.arithabort;
+            connection.ArithIgnore = this.arithIgnore;
             connection.ConcatNullYieldsNull = this.concatNullYieldsNull;
             connection.NumericRoundabort = this.numericRoundabort;
             connection.ImplicitTransactions = this.implicitTransactions;
@@ -805,6 +817,12 @@ public sealed class SimulatedDbConnection : DbConnection
     /// candidate is already frozen for the statement's duration
     /// (<c>RAND()</c> and the current-time family both live in
     /// <see cref="Parser.StatementContext"/>), so they don't count here.
+    /// A read of a value an enclosing query binds per group counts too — an
+    /// aggregate that query owns, <c>GROUPING</c> / <c>GROUPING_ID</c> — since
+    /// it changes from one enclosing row to the next without the plan reading
+    /// it through the enclosing row's resolver (probed 2026-09-28 against SQL
+    /// Server 2025: <c>SELECT b, (SELECT SUM(t.a) FROM u) FROM t GROUP BY
+    /// b</c> answers each group's own sum).
     /// <para>
     /// Read only as a before / after pair by
     /// <see cref="Parser.UncorrelatedSubqueryCache"/>: a subquery plan whose

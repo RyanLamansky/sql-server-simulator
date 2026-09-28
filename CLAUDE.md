@@ -275,7 +275,7 @@ Where an entry carries a second clause it is because that fact changes what you'
   A grouping *expression* covers a matching projection sub-expression rather than the columns it names, and the parallel grouped accumulation ships **off by default** → [`query.md`](docs/claude/query.md).
 - **Subqueries** — EXISTS / IN / scalar / quantified, three-valued rules, arbitrary-depth correlation, and the two decorrelation transforms.
   Whether an inner plan runs once per statement or once per outer row is decided by a **runtime probe**, not by parse-time inspection → [`subqueries.md`](docs/claude/subqueries.md).
-- **Outer-scope correlation from the select list** — the FROM clause binds before the select list, which is SQL Server's binder order rather than the written one → [`query.md`](docs/claude/query.md#outer-scope-correlation-in-the-select-list).
+- **Outer-scope correlation from the select list, and aggregate ownership across scopes** — the FROM clause binds before the select list, which is SQL Server's binder order rather than the written one, and an aggregate reading only an enclosing query's columns belongs to that query wherever it is written → [`query.md`](docs/claude/query.md#outer-scope-correlation-in-the-select-list).
 - **JOIN / APPLY** — every join kind, comma-FROM, the hash-vs-nested-loop choice, WHERE pushdown and the narrowed-source-first reorder.
   A deferred FROM source that can't change across one enumeration is materialized once; APPLY and a `NEWID()`-drawing plan aren't → [`joins.md`](docs/claude/joins.md).
 - **`PIVOT` / `UNPIVOT`** — both attach as a postfix wrapper on the derived-table `LateralPlan` seam → [`pivot.md`](docs/claude/pivot.md).
@@ -363,12 +363,11 @@ This is a trigger list: [`backlog.md`](docs/claude/backlog.md) carries the weigh
 Entries that raise a *real* SQL Server error deliberately are **not** here; they're coverage, and live in their feature's deep-dive.
 The feature docs' own **Not modeled yet** sections hold the smaller gaps.
 
-- **An aggregate reading only an enclosing query's columns** where no collector can rehome it → `NotSupportedException` → [`query.md`](docs/claude/query.md#outer-scope-correlation-in-the-select-list).
 - **Cross-server DML** through a four-part name → `NotSupportedException` via `BatchContext.RejectCrossServerMutation` (cross-*database* DML ships) → [`linked-servers.md`](docs/claude/linked-servers.md), [`schemas.md`](docs/claude/schemas.md#cross-database-writes).
 - **A few `SET <option>` toggles still parse and are discarded** — `STATISTICS IO` / `TIME`, the `SHOWPLAN_*` family, `ARITHIGNORE`, `FORCEPLAN` → [`session-options.md`](docs/claude/session-options.md#not-modeled-yet).
   The same goes for most `ALTER DATABASE … SET` options → [`database-options.md`](docs/claude/database-options.md).
 - **Heap allocation tracking** (a flat page list, no IAM/PFS) → [`heap-storage.md`](docs/claude/heap-storage.md).
-- **A binder report past a type check other than Msg 529**, and a few shapes' own errors within one (MERGE's Msg 5334, PIVOT's operand) → [`errors.md`](docs/claude/errors.md#not-modeled-yet-1).
+- **A binder report's ORDER BY Msg 209** for a name two select items share, and a name only a run reaches → [`errors.md`](docs/claude/errors.md#not-modeled-yet-1).
 
 ## Quirks (modeled, not byte-identical to SQL Server)
 

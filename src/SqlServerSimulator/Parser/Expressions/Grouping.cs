@@ -30,6 +30,9 @@ internal sealed class Grouping(ParserContext context) : Expression
 
     public override SqlValue Run(RuntimeContext runtime)
     {
+        // Read inside a subquery, the grouping set is the enclosing query's
+        // current one, which no memoized execution may stand in for.
+        runtime.Batch.Connection.VolatileEvaluations++;
         var currentSet = runtime.Batch.GroupingSetExpressions;
         var allSet = runtime.Batch.AllGroupingExpressions;
         return currentSet is null || allSet is null || !FindArg(allSet, this.argument)
@@ -92,6 +95,7 @@ internal sealed class GroupingId : Expression
         var allSet = runtime.Batch.AllGroupingExpressions;
         if (currentSet is null || allSet is null)
             throw SimulatedSqlException.GroupingArgumentNotInGroupBy(1, "GROUPING_ID");
+        runtime.Batch.Connection.VolatileEvaluations++;
 
         var bitmap = 0;
         for (var i = 0; i < this.arguments.Length; i++)

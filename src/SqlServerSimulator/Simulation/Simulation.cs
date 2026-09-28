@@ -2568,14 +2568,16 @@ public sealed partial class Simulation
     /// (probed 2026-09-26). A CLR routine's throw (Msg 6522) earns it too,
     /// a CLR trigger's or a CLR type's <c>Parse</c> converting a written value,
     /// as does a CLR trigger's context connection ending the firing
-    /// statement's transaction (Msg 6549, 3991, 3992; probed 2026-09-28).
+    /// statement's transaction (Msg 6549, 3991, 3992; probed 2026-09-28), and so
+    /// does a scalar subquery answering more than one row (Msg 512) inside a
+    /// writing statement (probed 2026-09-28).
     /// </summary>
     private static bool IsStatementTerminationNoticed(BatchContext batch, SimulatedSqlException error) =>
         error.Number == 1505
         || error.EndedColumnRewrite
         || ((!batch.BatchAborted || error.EndedTriggerBody || error.Number == 127)
             && batch.CurrentStatement.WritesRows
-            && error.Number is 127 or 220 or 232 or 513 or 515 or 547 or 550 or 2601 or 2627 or 2628 or 3991 or 3992 or 6522 or 6549 or 8115 or 8134 or 8152 or 8705 or 13921 or 16947);
+            && error.Number is 127 or 220 or 232 or 512 or 513 or 515 or 547 or 550 or 2601 or 2627 or 2628 or 3991 or 3992 or 6522 or 6549 or 8115 or 8134 or 8152 or 8705 or 13921 or 16947);
 
     /// <summary>
     /// True for the parse-time error real SQL Server defers to bind time —
@@ -2656,7 +2658,12 @@ public sealed partial class Simulation
         // ALTER INDEX's missing index (Msg 2727) does too, though its class is
         // 11.
         var structuralFailure = changesTableStructure && (ex.Class == 16 || ex.Number == 2727) && ex.Number is not (4902 or 2705);
-        if (!(connection.XactAbort || ex.AbortsAsUnderXactAbort || structuralFailure)
+        // A divide by zero or an arithmetic overflow under ARITHABORT ON with
+        // ANSI_WARNINGS OFF ends the batch and rolls the transaction back as
+        // under XACT_ABORT, dooming it when caught, from a procedure body too
+        // (probed 2026-09-28 against SQL Server 2025).
+        var arithmeticAbort = connection.Arithabort && !connection.AnsiWarnings && ex.Number is 220 or 232 or 8115 or 8134 && !ex.IsIdentityOverflow;
+        if (!(connection.XactAbort || ex.AbortsAsUnderXactAbort || structuralFailure || arithmeticAbort)
             || ex.XactAbortPromoted
             || ex.AbortsTransaction
             || ex.Class is not ((>= 11 and <= 14) or 16)
@@ -2759,13 +2766,13 @@ public sealed partial class Simulation
     /// raised where the batch's compile deferred the statement, ends the batch
     /// uncatchable by the same scope's TRY as a name-resolution miss does
     /// (probed 2026-09-26 against SQL Server 2025, each after a CREATE TABLE
-    /// deferred its statement). An error not listed keeps a run-time error's
+    /// deferred its statement; Msg 8124 2026-09-28). An error not listed keeps a run-time error's
     /// handling.
     /// </summary>
     private static bool IsDeferredCompileError(SimulatedSqlException ex)
         => IsBatchAbortingNameResolution(ex) || ex.Number is 4902 or 2705
             || ex.Number is 107 or 108 or 130 or 145 or 147 or 164 or 174 or 205 or 206 or 213 or 243 or 264 or 321 or 447 or 448 or 529
-                or 1011 or 1012 or 1013 or 4108 or 4115 or 5318 or 8117 or 8120 or 8121 or 8155 or 8622;
+                or 1011 or 1012 or 1013 or 4108 or 4115 or 5318 or 8117 or 8120 or 8121 or 8124 or 8155 or 8622;
 
     /// <summary>
     /// Whether a TRY frame catches <paramref name="ex"/> where it is raised:

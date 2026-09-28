@@ -189,19 +189,20 @@ internal sealed class BatchContext
     /// a fresh session's ARITHABORT is off, so <c>SET ANSI_WARNINGS OFF</c>
     /// alone gets there (probed 2026-09-25 against SQL Server 2025). An
     /// identity overflow and a failed conversion still raise. When true the
-    /// notice has been noted.
+    /// notice has been noted, unless <c>SET ARITHIGNORE ON</c> suppresses it.
     /// </summary>
     internal bool AbsorbsArithmeticFault(SimulatedSqlException error)
     {
         if (this.Connection.Arithabort || this.Connection.AnsiWarnings || error.IsIdentityOverflow)
             return false;
+        var noticed = !this.Connection.ArithIgnore;
         switch (error.Number)
         {
             case 220 or 232 or 8115:
-                this.CurrentStatement.OwesOverflowNotice = true;
+                this.CurrentStatement.OwesOverflowNotice |= noticed;
                 return true;
             case 8134:
-                this.CurrentStatement.OwesDivideByZeroNotice = true;
+                this.CurrentStatement.OwesDivideByZeroNotice |= noticed;
                 return true;
             default:
                 return false;

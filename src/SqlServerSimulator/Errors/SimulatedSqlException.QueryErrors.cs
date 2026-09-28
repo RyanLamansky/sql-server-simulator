@@ -14,12 +14,14 @@ partial class SimulatedSqlException
         new("Uncompressed or corrupted data passed as argument to DECOMPRESS builtin.", 9826, 16, 1);
 
     /// <summary>
-    /// Mimics the SqlException that occurs then when a TOP/OFFSET/FETCH clause has an inappropriate column reference.
+    /// Mimics SQL Server error 4115 — a TOP / OFFSET / FETCH count reading the
+    /// query's own column, a subquery's reference or aggregate over one
+    /// included. The message names the column's leaf however it was qualified
+    /// (probed 2026-09-28 against SQL Server 2025: <c>TOP (t.a)</c> reports
+    /// <c>"a"</c>).
     /// </summary>
-    /// <param name="name">The name of the column.</param>
-    /// <returns>The exception.</returns>
     internal static SimulatedSqlException ColumnReferenceNotAllowed(MultiPartName name)
-        => new($"The reference to column \"{name}\" is not allowed in an argument to a TOP, OFFSET, or FETCH clause. Only references to columns at an outer scope or standalone expressions and subqueries are allowed here.", 4115, 15, 1);
+        => new($"The reference to column \"{name.Leaf}\" is not allowed in an argument to a TOP, OFFSET, or FETCH clause. Only references to columns at an outer scope or standalone expressions and subqueries are allowed here.", 4115, 15, 1);
 
     /// <summary>
     /// Mimics SQL Server's Msg 205 — fired when the branches of a UNION /
@@ -398,6 +400,79 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException AggregateInWhereClause() =>
         new("An aggregate may not appear in the WHERE clause unless it is in a subquery contained in a HAVING clause or a select list, and the column being aggregated is an outer reference.", 147, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 488 — a <c>PIVOT</c> grouping column (any
+    /// source column but the aggregate's operand and the <c>FOR</c> column) of
+    /// a type real can't compare, reported after the operand's and the
+    /// <c>FOR</c> column's name errors (probed 2026-09-28 against SQL Server
+    /// 2025).
+    /// </summary>
+    internal static SimulatedSqlException PivotGroupingColumnNotComparable(string column, SqlType type) =>
+        new($"Pivot grouping columns must be comparable. The type of column \"{column}\" is \"{type.SqlServerName}\", which is not comparable.", 488, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 1015 — an aggregate in a join's <c>ON</c>, in a
+    /// <c>SELECT</c>, a joined <c>UPDATE</c> / <c>DELETE</c> or a
+    /// <c>MERGE</c>, whether written there or moved there from a subquery
+    /// reading only the joining query's columns (probed 2026-09-28 against SQL
+    /// Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException AggregateInOnClause() =>
+        new("An aggregate cannot appear in an ON clause unless it is in a subquery contained in a HAVING clause or select list, and the column being aggregated is an outer reference.", 1015, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 157 — an aggregate in an <c>UPDATE</c>'s or a
+    /// <c>MERGE</c> action's <c>SET</c> list, a subquery's aggregate over the
+    /// target's columns included (probed 2026-09-28 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException AggregateInSetList() =>
+        new("An aggregate may not appear in the set list of an UPDATE statement.", 157, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 5310 — an aggregate a table value constructor
+    /// would own: in an <c>INSERT … VALUES</c>, a <c>MERGE</c>'s insert action
+    /// and a <c>VALUES</c> derived table alike, while one reading only an
+    /// enclosing query's columns belongs to that query (probed 2026-09-28
+    /// against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException AggregateInValuesList() =>
+        new("Aggregates are not allowed in the VALUES list of an INSERT statement.", 5310, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 5319 — an aggregate in a <c>MERGE</c>'s
+    /// <c>WHEN … AND</c> condition (probed 2026-09-28 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException AggregateInMergeWhenClause() =>
+        new("Aggregates are not allowed in a WHEN clause of a MERGE statement.", 5319, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 4101 — an aggregate on an <c>APPLY</c>'s right
+    /// side, at any depth, reading only the left side's columns, which would
+    /// make the query holding the <c>APPLY</c> own it (probed 2026-09-28
+    /// against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException AggregateOverApplyLeftSide() =>
+        new("Aggregates on the right side of an APPLY cannot reference columns from the left side.", 4101, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 8124 — an aggregate's operand reading an
+    /// enclosing query's column beside a column of another scope, the
+    /// aggregate's own included (probed 2026-09-28 against SQL Server 2025:
+    /// <c>MAX(t.a + u.c)</c> in a subquery over <c>u</c>, while
+    /// <c>MAX(t.a + t.b)</c> and <c>MAX(t.a + @v)</c> belong to <c>t</c>'s
+    /// query).
+    /// </summary>
+    internal static SimulatedSqlException OuterReferenceMixedInAggregate() =>
+        new("Multiple columns are specified in an aggregated expression containing an outer reference. If an expression being aggregated contains an outer reference, then that outer reference must be the only column referenced in the expression.", 8124, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 10705 — a subquery in a DML statement's
+    /// <c>OUTPUT</c> clause, refused ahead of binding its body (probed
+    /// 2026-09-28 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException SubqueryInOutputClause() =>
+        new("Subqueries are not allowed in the OUTPUT clause.", 10705, 15, 1);
 
     /// <summary>
     /// Mimics SQL Server error 1023 — a function's keyword-only argument

@@ -350,6 +350,8 @@ Probe-confirmed schema-inference rules:
 | **10713** | MERGE statement missing the required trailing `;`. The dispatch loop accepts either `;` or end-of-batch; anything else here raises. |
 | **10714** | More than one WHEN NOT MATCHED [BY TARGET] clause (real SQL Server admits at most one INSERT branch — different from MATCHED / NOT MATCHED BY SOURCE which allow multiple AND-conditioned clauses). |
 | **207** / **4104** | A name in the `ON` predicate or a `WHEN … AND` that neither side answers to. Which side failed decides the message, matching real: a name whose qualifier is the target or source alias — or that carries no qualifier at all — is a bad *column* (Msg 207), while a qualifier neither side answers to is an unbindable identifier (Msg 4104). Both bind while compiling, so they fire over an empty rowset and at CREATE of a module carrying the MERGE. |
+| **5333** / **5334** | A `WHEN NOT MATCHED [BY TARGET]` condition naming anything but a source column, or a `WHEN NOT MATCHED BY SOURCE` one naming anything but a target column — a name bound nowhere and one in a subquery included; state 2 for a qualified name, 1 for a bare one, while a miss qualified by the clause's own side stays Msg 207. The clause's action sees only that side too, missing the other with the ordinary Msg 4104 / 207 (probed 2026-09-28). |
+| **1015** / **157** / **5310** / **5319** | An aggregate in the `ON`, an action's `SET` list, an insert action's `VALUES` or a `WHEN … AND`, written there or moved there from a subquery reading only the statement's columns ([`query.md`](query.md#aggregate-ownership-across-scopes)). |
 
 A view target is written through its base table when it has one; a view with none is matched as its own rows, which its INSTEAD OF triggers take ([`triggers.md`](triggers.md#instead-of-on-views)) or, for a join view, are carried back to the one base table the actions name ([`programmable.md`](programmable.md#dml-through-a-join-view)).
 
@@ -429,3 +431,4 @@ EF Core's `ExecuteUpdate` / `ExecuteDelete` for batched single-statement DML emi
 - `WHEN NOT MATCHED BY SOURCE` with `THEN INSERT` — Msg 10711 (parsing rejects).
 - MERGE into a view ships for a single-base updatable view (`MergeViewTests`), its `OUTPUT` reading the view's columns, for any view whose INSTEAD OF triggers take its actions, and for a join view whose actions each land in one base table — see [`programmable.md`](programmable.md#dml-through-a-join-view).
 - Multi-statement WHEN-clause bodies (real SQL Server only allows the one DML action per WHEN — same restriction here).
+- **An `OUTPUT` naming a source column in a MERGE whose only clauses are `WHEN NOT MATCHED BY SOURCE`** is Msg 4104 on real, which binds no source there; here it reads NULL (probed 2026-09-28).

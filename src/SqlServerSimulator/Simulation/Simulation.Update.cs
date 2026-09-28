@@ -128,11 +128,23 @@ partial class Simulation
         // Restored right after the loop; a throw in between aborts the whole
         // statement, so there is no later parse to see a stale scope.
         var savedOuterTypeResolver = context.OuterTypeResolver;
+        Selection.PreParsedFrom? preParsedFrom = null;
         if (leadingTable is { } scopeTable)
         {
             var enclosing = savedOuterTypeResolver;
             context.OuterTypeResolver = name => ResolveUpdateTargetColumnType(context.Batch, leadingIdent, scopeTable, name, enclosing);
         }
+        else if (leadingView is null && Selection.PreParseMutationFrom(context) is { } preFrom)
+        {
+            preParsedFrom = preFrom;
+            context.OuterTypeResolver = Selection.ColumnTypeResolverFor([.. preFrom.Sources], savedOuterTypeResolver);
+        }
+
+        // The SET list owns no aggregate (Msg 157), a subquery's over the
+        // target's columns included. Restored with the scope after the loop.
+        var savedCollector = context.AggregateCollector;
+        var setAggregates = new List<AggregateExpression>();
+        context.AggregateCollector = setAggregates;
 
         while (true)
         {
@@ -245,6 +257,8 @@ partial class Simulation
         }
 
         context.OuterTypeResolver = savedOuterTypeResolver;
+        context.AggregateCollector = savedCollector;
+        Selection.RefuseClauseAggregates(context.Batch, setAggregates, SimulatedSqlException.AggregateInSetList());
 
         // An INSTEAD OF UPDATE trigger on a view takes the write, reading the
         // view's own rows; a multi-source view's SET list names the base
@@ -280,7 +294,7 @@ partial class Simulation
         {
             return leadingView is not null
                 ? throw new NotSupportedException($"Multi-source UPDATE through a view ('{leadingView.Schema.Name}.{leadingView.Name}') isn't modeled — the alias-form FROM clause can't compose with the view's visibility predicate. Target the underlying table directly.")
-                : ExecuteJoinedUpdate(context, leadingIdent, leadingTable, rawAssignments, output, top);
+                : ExecuteJoinedUpdate(context, leadingIdent, leadingTable, rawAssignments, output, top, preParsedFrom);
         }
 
         var table = leadingTable ?? throw (BatchContext.IsTableVariableName(leadingIdent.Leaf)
@@ -840,24 +854,33 @@ partial class Simulation
         HeapTable? leadingTable,
         List<(string? ColumnName, Expression Expr)> rawAssignments,
         OutputProjection? output,
-        Selection.DmlTopLimit? top)
+        Selection.DmlTopLimit? top,
+        Selection.PreParsedFrom? preParsedFrom)
     {
-        var sourcesList = new List<FromSource>();
-        var joinsList = new List<JoinSpec>();
-        // Real leaves NEXT VALUE FOR legal in a joined UPDATE / DELETE's own
-        // FROM-clause derived table, where every other derived table refuses it
-        // (probe-confirmed 2026-08-05, both spellings, against the Msg 11719
-        // the SELECT / INSERT … SELECT / MERGE … USING forms take).
-        var savedAllowNextValueFor = context.AllowNextValueForInFromClause;
-        context.AllowNextValueForInFromClause = true;
-        context.Batch.BindErrors?.EnterClause(context.Token, BindClause.From);
-        try
+        var sourcesList = preParsedFrom?.Sources ?? [];
+        var joinsList = preParsedFrom?.Joins ?? [];
+        if (preParsedFrom is not null)
         {
-            Selection.ParseSourcesAndJoins(context, QueryScope.Statement, sourcesList, joinsList);
+            // The SET list's scope already parsed the sources; resume past them.
+            context.RestoreCheckpoint(preParsedFrom.After);
         }
-        finally
+        else
         {
-            context.AllowNextValueForInFromClause = savedAllowNextValueFor;
+            // Real leaves NEXT VALUE FOR legal in a joined UPDATE / DELETE's own
+            // FROM-clause derived table, where every other derived table refuses it
+            // (probe-confirmed 2026-08-05, both spellings, against the Msg 11719
+            // the SELECT / INSERT … SELECT / MERGE … USING forms take).
+            var savedAllowNextValueFor = context.AllowNextValueForInFromClause;
+            context.AllowNextValueForInFromClause = true;
+            context.Batch.BindErrors?.EnterClause(context.Token, BindClause.From);
+            try
+            {
+                Selection.ParseSourcesAndJoins(context, QueryScope.Statement, sourcesList, joinsList);
+            }
+            finally
+            {
+                context.AllowNextValueForInFromClause = savedAllowNextValueFor;
+            }
         }
         var targetIndex = FindOrAppendMutationTarget(context, sourcesList, joinsList, leadingIdent, leadingTable);
         var sources = sourcesList.ToArray();
@@ -1465,10 +1488,29 @@ partial class Simulation
     {
         foreach (var (ordinal, expr) in assignments)
         {
-            var type = expr.GetSqlType(batch, resolveColumnType);
-            UnresolvedCollation.RequireAssignable(type);
-            if (ordinal >= 0 && expr is not AssignmentExpression)
+            // A statement read for its whole bind error report records a type
+            // check here and binds the next value on; an error-typed value
+            // takes any target.
+            var recorded = batch.BindErrors?.Count ?? 0;
+            SqlType type;
+            try
+            {
+                type = expr.GetSqlType(batch, resolveColumnType);
+                UnresolvedCollation.RequireAssignable(type);
+            }
+            catch (SimulatedSqlException error) when (batch.BindErrors is { } report && report.CarriesPastTypeCheck(error, recorded, expr))
+            {
+                continue;
+            }
+            if (ordinal < 0 || expr is AssignmentExpression || batch.BindErrors?.Count > recorded)
+                continue;
+            try
+            {
                 AssignmentRules.RequireAssignable(expr, type, table.Columns[ordinal].Type);
+            }
+            catch (SimulatedSqlException error) when (batch.BindErrors?.TryRecordAssignmentCheck(error, expr) == true)
+            {
+            }
         }
     }
 

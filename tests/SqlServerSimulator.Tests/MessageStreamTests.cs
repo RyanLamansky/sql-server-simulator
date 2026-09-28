@@ -312,6 +312,91 @@ public sealed class MessageStreamTests
     }
 
     /// <summary>
+    /// <c>SET ARITHIGNORE ON</c> keeps the NULL answers and drops their Msg 3606 /
+    /// 3607, including from a write, and changes nothing while either
+    /// <c>ANSI_WARNINGS</c> or <c>ARITHABORT</c> is on (probed 2026-09-28
+    /// against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("set ansi_warnings off; set arithignore on; select 1/0, cast(300 as tinyint), 2147483647 + 1", "NULL|NULL|NULL", "")]
+    [DataRow("set ansi_warnings off; set arithignore on; insert t values (1/0)", "", "")]
+    [DataRow("set ansi_warnings off; set arithignore on; select sum(v) from (values (2147483647), (1)) x(v)", "NULL", "")]
+    [DataRow("set ansi_warnings off; set arithignore on; set arithignore off; select 1/0", "NULL", "event 3607: Division by zero occurred.")]
+    [DataRow("set ansi_warnings off; set arithignore on; declare @x int = 1/0; select @x", "NULL", "")]
+    public void ArithIgnore_DropsTheNotice(string sql, string expected, string notice)
+    {
+        var (connection, log) = Open("create table t (a int)");
+        using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        using (var reader = command.ExecuteReader())
+        {
+            var rows = new List<string>();
+            do
+            {
+                while (reader.Read())
+                    rows.Add(string.Join('|', Enumerable.Range(0, reader.FieldCount).Select(i => reader.IsDBNull(i) ? "NULL" : Convert.ToString(reader.GetValue(i), System.Globalization.CultureInfo.InvariantCulture))));
+            }
+            while (reader.NextResult());
+            AreEqual(expected, string.Join(' ', rows));
+        }
+        AreEqual(notice, string.Join(' ', log));
+    }
+
+    [TestMethod]
+    [DataRow("set arithignore on; select 1/0")]
+    [DataRow("set arithabort on; set arithignore on; set ansi_warnings off; select cast(300 as tinyint)")]
+    public void ArithIgnore_LeavesTheErrorWhereAnOptionRaisesIt(string sql)
+    {
+        var (connection, _) = Open();
+        _ = Throws<SimulatedSqlException>(() => connection.CreateCommand(sql).ExecuteNonQuery());
+    }
+
+    /// <summary>
+    /// Under <c>ARITHABORT ON</c> with <c>ANSI_WARNINGS OFF</c> a divide by zero
+    /// or an overflow ends the batch and rolls the transaction back as under
+    /// <c>XACT_ABORT</c>, from a procedure body too, and a <c>TRY</c> that
+    /// catches it is left with a doomed transaction (probed 2026-09-28 against
+    /// SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select 1/0")]
+    [DataRow("select cast(300 as tinyint) + 0")]
+    [DataRow("select 2147483647 + 1")]
+    [DataRow("select cast(1e300 as real)")]
+    [DataRow("insert t values (2 / 0)")]
+    public void ArithabortWithoutAnsiWarnings_EndsTheBatchAndRollsBack(string failing)
+    {
+        var (connection, _) = Open();
+        _ = Throws<SimulatedSqlException>(() => connection.CreateCommand($"set ansi_warnings off; set arithabort on; begin tran; insert t values (5); {failing}; insert t values (6)").ExecuteNonQuery());
+        AreEqual("0|1", connection.CreateCommand("select concat(@@trancount, '|', (select count(*) from t))").ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void ArithabortWithoutAnsiWarnings_CaughtDoomsTheTransaction()
+    {
+        using var command = Open().Connection.CreateCommand("""
+            set ansi_warnings off; set arithabort on; begin tran;
+            begin try select 1/0 end try begin catch select xact_state() end catch
+            """);
+        using var reader = command.ExecuteReader();
+        IsTrue(reader.NextResult());
+        IsTrue(reader.Read());
+        AreEqual((short)-1, reader.GetValue(0));
+        AreEqual(3998, Throws<SimulatedSqlException>(() => reader.NextResult()).Number);
+    }
+
+    [TestMethod]
+    public void ArithabortWithoutAnsiWarnings_EndsTheCallersBatch()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches("create procedure p as begin set ansi_warnings off; set arithabort on; select 1/0; select 'in proc' end");
+        using var connection = simulation.CreateOpenConnection();
+        var ex = Throws<SimulatedSqlException>(() => connection.CreateCommand("exec p; create table after_exec (a int)").ExecuteNonQuery());
+        AreEqual(8134, ex.Number);
+        AreEqual(DBNull.Value, connection.CreateCommand("select object_id('after_exec')").ExecuteScalar());
+    }
+
+    /// <summary>
     /// A statement that met both faults sends Msg 3606 ahead of 3607 whichever
     /// came first (probed 2026-09-26 against SQL Server 2025).
     /// </summary>

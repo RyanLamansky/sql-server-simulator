@@ -76,13 +76,15 @@ internal sealed partial class Selection
         context.MoveNextRequired();
         // COUNT(*) reaches here with `*` (an Operator), so the Name cast fails
         // → Msg 102, matching SQL Server's rejection of COUNT(*) in PIVOT.
-        var argColName = (context.Token as Name)?.Value ?? throw SimulatedSqlException.SyntaxErrorNear(context);
+        var argToken = context.Token;
+        var argColName = (argToken as Name)?.Value ?? throw SimulatedSqlException.SyntaxErrorNear(context);
         ExpectOperator(context.GetNextRequired(), ')');
 
         if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.For })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextRequired();
-        var forColName = (context.Token as Name)?.Value ?? throw SimulatedSqlException.SyntaxErrorNear(context);
+        var forToken = context.Token;
+        var forColName = (forToken as Name)?.Value ?? throw SimulatedSqlException.SyntaxErrorNear(context);
 
         var pivotValues = ParseInValueIdentifiers(context);
 
@@ -90,26 +92,53 @@ internal sealed partial class Selection
         var alias = ConsumeOptionalAlias(context)
             ?? throw SimulatedSqlException.SyntaxErrorNear(context);
 
-        // Resolve the FOR and argument columns against the inner source. The
-        // CASE input (FOR column) isn't type-resolved by BuildSqlProjection,
-        // so an unknown name would otherwise escape to a runtime failure;
-        // validate both up front to surface Msg 207 at parse time.
+        // Resolve the argument and FOR columns against the inner source, in
+        // that order, then the grouping columns — real's binding order (probed
+        // 2026-09-28 against SQL Server 2025: `PIVOT (SUM(x1) FOR x2 IN …)`
+        // reports x1, x2, then any grouping column Msg 488 refuses). The CASE
+        // input (FOR column) isn't type-resolved by BuildSqlProjection, so an
+        // unknown name would otherwise escape to a runtime failure. A
+        // statement read for its whole bind error report records each and,
+        // with a name missing, binds nothing more against the rotated source.
+        var report = context.Batch.BindErrors;
+        var namesMissing = false;
+        if (FindSourceColumn([source], new MultiPartName(argColName)).SourceIndex == -1)
+        {
+            if (report?.Covers(argToken) != true)
+                throw SimulatedSqlException.InvalidColumnName(argColName);
+            report.Record(SimulatedSqlException.InvalidColumnName(argColName), argToken!.StartIndex);
+            namesMissing = true;
+        }
         var (forSource, forCol) = FindSourceColumn([source], new MultiPartName(forColName));
         if (forSource == -1)
-            throw SimulatedSqlException.InvalidColumnName(forColName);
-        var forColType = source.Columns[forCol].Type;
-        if (FindSourceColumn([source], new MultiPartName(argColName)).SourceIndex == -1)
-            throw SimulatedSqlException.InvalidColumnName(argColName);
+        {
+            if (report?.Covers(forToken) != true)
+                throw SimulatedSqlException.InvalidColumnName(forColName);
+            report.Record(SimulatedSqlException.InvalidColumnName(forColName), forToken!.StartIndex);
+            namesMissing = true;
+        }
 
         // Grouping key = every inner column except the FOR column and the
-        // aggregate argument column.
+        // aggregate argument column. Each has to be comparable (Msg 488).
         var groupingRefs = new List<Expression>();
-        foreach (var colName in source.ColumnNames)
+        for (var i = 0; i < source.ColumnNames.Length; i++)
         {
+            var colName = source.ColumnNames[i];
             if (BuiltInToken.Equals(colName, forColName) || BuiltInToken.Equals(colName, argColName))
                 continue;
+            if (source.Columns[i].Type.IsIncomparable)
+            {
+                var refusal = SimulatedSqlException.PivotGroupingColumnNotComparable(colName, source.Columns[i].Type);
+                if (report?.Covers(forToken) != true)
+                    throw refusal;
+                report.Record(refusal, forToken!.StartIndex);
+                namesMissing = true;
+            }
             groupingRefs.Add(new Reference(colName));
         }
+        if (namesMissing)
+            return FromSource.DeferredPlaceholder(alias);
+        var forColType = source.Columns[forCol].Type;
 
         var projection = new List<Expression>(groupingRefs);
         var aggregates = new List<AggregateExpression>();
@@ -162,7 +191,8 @@ internal sealed partial class Selection
         context.MoveNextRequired();
         var nameColName = (context.Token as Name)?.Value ?? throw SimulatedSqlException.SyntaxErrorNear(context);
 
-        var unpivotColumns = ParseInValueIdentifiers(context);
+        var unpivotTokens = new List<Token>();
+        var unpivotColumns = ParseInValueIdentifiers(context, unpivotTokens);
 
         ExpectOperator(context.GetNextRequired(), ')');
         var alias = ConsumeOptionalAlias(context)
@@ -173,13 +203,28 @@ internal sealed partial class Selection
         // int + bigint conflicts). The first column's type is the value type.
         // An untyped NULL column (`SELECT NULL AS x`) has no type to share, so
         // it conflicts with every typed one (probed 2026-09-26).
+        // A statement read for its whole bind error report records every
+        // listed column that doesn't bind, each where it is written (probed
+        // 2026-09-28 against SQL Server 2025), and binds nothing more against
+        // the rotated source.
         SqlType? valueType = null;
         var valueIsUntypedNull = false;
-        foreach (var col in unpivotColumns)
+        var report = context.Batch.BindErrors;
+        var namesMissing = false;
+        for (var i = 0; i < unpivotColumns.Count; i++)
         {
+            var col = unpivotColumns[i];
             var (s, c) = FindSourceColumn([source], new MultiPartName(col));
             if (s == -1)
-                throw SimulatedSqlException.InvalidColumnName(col);
+            {
+                if (report?.Covers(unpivotTokens[i]) != true)
+                    throw SimulatedSqlException.InvalidColumnName(col);
+                report.Record(SimulatedSqlException.InvalidColumnName(col), unpivotTokens[i].StartIndex);
+                namesMissing = true;
+                continue;
+            }
+            if (namesMissing)
+                continue;
             var column = source.Columns[c];
             if (valueType is null)
             {
@@ -191,6 +236,8 @@ internal sealed partial class Selection
                 throw SimulatedSqlException.UnpivotColumnTypeConflict(col);
             }
         }
+        if (namesMissing)
+            return FromSource.DeferredPlaceholder(alias);
 
         // Passthrough columns = inner columns not folded by the IN list.
         var passthroughNames = new List<string>();
@@ -300,7 +347,7 @@ internal sealed partial class Selection
     /// identifiers (<c>[2020]</c> / bare names) — string / numeric literals
     /// raise Msg 102, matching SQL Server.
     /// </summary>
-    private static List<string> ParseInValueIdentifiers(ParserContext context)
+    private static List<string> ParseInValueIdentifiers(ParserContext context, List<Token>? tokens = null)
     {
         if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.In })
             throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -310,7 +357,9 @@ internal sealed partial class Selection
         while (true)
         {
             context.MoveNextRequired();
-            values.Add((context.Token as Name)?.Value ?? throw SimulatedSqlException.SyntaxErrorNear(context));
+            var name = context.Token as Name ?? throw SimulatedSqlException.SyntaxErrorNear(context);
+            values.Add(name.Value);
+            tokens?.Add(name);
             switch (context.GetNextRequired())
             {
                 case Operator { Character: ',' }:

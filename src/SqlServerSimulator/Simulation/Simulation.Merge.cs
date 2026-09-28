@@ -198,6 +198,9 @@ partial class Simulation
         // ON is one of the eight clauses Msg 11720 names, and a MERGE's ON
         // takes it like a join's (probe-confirmed).
         var savedRejection = context.EnterNextValueForScope(NextValueForScope.Clause);
+        var savedCollector = context.AggregateCollector;
+        var onAggregates = new List<AggregateExpression>();
+        context.AggregateCollector = onAggregates;
         BooleanExpression onPredicate;
         try
         {
@@ -207,7 +210,9 @@ partial class Simulation
         {
             context.OuterTypeResolver = prevResolver;
             context.NextValueForRejection = savedRejection;
+            context.AggregateCollector = savedCollector;
         }
+        Selection.RefuseClauseAggregates(context.Batch, onAggregates, SimulatedSqlException.AggregateInOnClause());
 
         // Compile-time bind of the ON predicate against the same two-sided
         // resolver, so a cross-collation comparison, a legacy-LOB string-scalar
@@ -754,6 +759,19 @@ partial class Simulation
     /// the ON predicate and the WHEN clauses parse, so a correlated subquery
     /// inside either binds to a MERGE column rather than failing to resolve.
     /// </summary>
+    /// <summary>Which sides of a <c>MERGE</c> a clause's column names bind against.</summary>
+    private enum MergeNameScope
+    {
+        Both,
+        Target,
+        Source,
+    }
+
+    /// <summary>Whether <paramref name="name"/>'s qualifier is one of the two spellings of a MERGE side.</summary>
+    private static bool NamesMergeSide(ParserContext context, MultiPartName name, string alias, string otherSpelling) =>
+        context.Batch.CurrentDatabase.Collation.Equals(name.ImmediateQualifier, alias)
+        || context.Batch.CurrentDatabase.Collation.Equals(name.ImmediateQualifier, otherSpelling);
+
     private static SqlType ResolveMergeColumnType(
         ParserContext context,
         MultiPartName name,
@@ -762,10 +780,16 @@ partial class Simulation
         HeapColumn[] targetColumns,
         string sourceAlias,
         string[] sourceColumnNames,
-        SqlType[] sourceSchema)
+        SqlType[] sourceSchema,
+        MergeNameScope scope = MergeNameScope.Both)
     {
+        // A clause reading one side sees nothing of the other: the other side's
+        // qualifier is as unbound as any unknown one (Msg 4104).
         var collation = context.Batch.CurrentDatabase.Collation;
-        if (collation.Equals(name.ImmediateQualifier, targetAlias) || collation.Equals(name.ImmediateQualifier, defaultTargetName))
+        var namesTarget = scope != MergeNameScope.Source && NamesMergeSide(context, name, targetAlias, defaultTargetName);
+        var namesSource = scope != MergeNameScope.Target && collation.Equals(name.ImmediateQualifier, sourceAlias);
+        var unqualified = name.Count == 1;
+        if (scope != MergeNameScope.Source && (namesTarget || unqualified))
         {
             foreach (var column in targetColumns)
             {
@@ -773,22 +797,8 @@ partial class Simulation
                     return column.Type;
             }
         }
-        if (collation.Equals(name.ImmediateQualifier, sourceAlias))
+        if (scope != MergeNameScope.Target && (namesSource || unqualified))
         {
-            for (var i = 0; i < sourceColumnNames.Length; i++)
-            {
-                if (collation.Equals(sourceColumnNames[i], name.Leaf))
-                    return sourceSchema[i];
-            }
-        }
-        // Unqualified: try target then source.
-        if (name.Count == 1)
-        {
-            foreach (var column in targetColumns)
-            {
-                if (collation.Equals(column.Name, name.Leaf))
-                    return column.Type;
-            }
             for (var i = 0; i < sourceColumnNames.Length; i++)
             {
                 if (collation.Equals(sourceColumnNames[i], name.Leaf))
@@ -801,10 +811,7 @@ partial class Simulation
         // is a bad *column* — Msg 207 — while a qualifier neither side answers
         // to is an unbindable identifier — Msg 4104. Both probe-confirmed at
         // compile time, on an empty rowset and at CREATE of a module.
-        return name.Count == 1
-            || collation.Equals(name.ImmediateQualifier, targetAlias)
-            || collation.Equals(name.ImmediateQualifier, defaultTargetName)
-            || collation.Equals(name.ImmediateQualifier, sourceAlias)
+        return unqualified || namesTarget || namesSource
             ? throw SimulatedSqlException.InvalidColumnName(name)
             : throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(name.ToString());
     }
@@ -830,10 +837,39 @@ partial class Simulation
 
         SqlType ResolveType(MultiPartName name) => ResolveMergeColumnType(
             context, name, targetAlias, defaultTargetName, targetColumns, sourceAlias, sourceColumnNames, sourceSchema);
+        SqlType ResolveTargetOnly(MultiPartName name) => ResolveMergeColumnType(
+            context, name, targetAlias, defaultTargetName, targetColumns, sourceAlias, sourceColumnNames, sourceSchema, MergeNameScope.Target);
+        SqlType ResolveSourceOnly(MultiPartName name) => ResolveMergeColumnType(
+            context, name, targetAlias, defaultTargetName, targetColumns, sourceAlias, sourceColumnNames, sourceSchema, MergeNameScope.Source);
 
-        while (context.Token is ReservedKeyword { Keyword: Keyword.When })
+        // A NOT MATCHED clause's condition reads only its own side: any other
+        // name is Msg 5333 / 5334, but for a miss qualified by that side, which
+        // stays the ordinary Msg 207.
+        SqlType ResolveBySourceCondition(MultiPartName name)
         {
-            context.Batch.BindErrors?.EnterClause(context.Token, BindClause.MergeCondition);
+            try
+            {
+                return ResolveTargetOnly(name);
+            }
+            catch (SimulatedSqlException miss) when (miss.Number is 207 or 4104 && !NamesMergeSide(context, name, targetAlias, defaultTargetName))
+            {
+                throw SimulatedSqlException.MergeBySourceConditionOutOfScope(name);
+            }
+        }
+        SqlType ResolveNotMatchedCondition(MultiPartName name)
+        {
+            try
+            {
+                return ResolveSourceOnly(name);
+            }
+            catch (SimulatedSqlException miss) when (miss.Number is 207 or 4104 && !NamesMergeSide(context, name, sourceAlias, sourceAlias))
+            {
+                throw SimulatedSqlException.MergeNotMatchedConditionOutOfScope(name);
+            }
+        }
+
+        while (context.Token is ReservedKeyword { Keyword: Keyword.When } whenToken)
+        {
             context.MoveNextRequired();
             bool isNotMatched;
             if (context.Token is ReservedKeyword { Keyword: Keyword.Not })
@@ -871,13 +907,32 @@ partial class Simulation
                 kind = isNotMatched ? WhenClauseKind.NotMatchedByTarget : WhenClauseKind.Matched;
             }
 
+            // Real binds every MATCHED condition, then the NOT MATCHED ones,
+            // then the NOT MATCHED BY SOURCE ones, whatever order they are
+            // written in (probed 2026-09-28 against SQL Server 2025).
+            context.Batch.BindErrors?.EnterClause(whenToken, kind switch
+            {
+                WhenClauseKind.Matched => BindClause.MergeCondition,
+                WhenClauseKind.NotMatchedByTarget => BindClause.MergeNotMatchedCondition,
+                _ => BindClause.MergeBySourceCondition,
+            });
+            Func<MultiPartName, SqlType> conditionResolver = kind switch
+            {
+                WhenClauseKind.Matched => ResolveType,
+                WhenClauseKind.NotMatchedByTarget => ResolveNotMatchedCondition,
+                _ => ResolveBySourceCondition,
+            };
+
             // Optional AND search_condition.
             BooleanExpression? searchCondition = null;
             if (context.Token is ReservedKeyword { Keyword: Keyword.And })
             {
                 context.MoveNextRequired();
                 var prevResolver = context.OuterTypeResolver;
-                context.OuterTypeResolver = ResolveType;
+                context.OuterTypeResolver = conditionResolver;
+                var savedCollector = context.AggregateCollector;
+                var conditionAggregates = new List<AggregateExpression>();
+                context.AggregateCollector = conditionAggregates;
                 try
                 {
                     searchCondition = BooleanExpression.Parse(context);
@@ -885,8 +940,10 @@ partial class Simulation
                 finally
                 {
                     context.OuterTypeResolver = prevResolver;
+                    context.AggregateCollector = savedCollector;
                 }
-                searchCondition.Bind(context.Batch, ResolveType);
+                Selection.RefuseClauseAggregates(context.Batch, conditionAggregates, SimulatedSqlException.AggregateInMergeWhenClause());
+                searchCondition.BindCarryingTypeChecks(context.Batch, conditionResolver);
             }
 
             // Family-level ordering checks.
@@ -916,7 +973,14 @@ partial class Simulation
             context.Batch.BindErrors?.EnterClause(context.Token, BindClause.MergeAction);
             context.MoveNextRequired();
 
-            clauses.Add(ParseMergeAction(context, kind, searchCondition, destinationTable, sourceView, targetAlias, ResolveType));
+            // An action reads its clause's side too, and misses there with the
+            // ordinary binder errors (probed 2026-09-28).
+            clauses.Add(ParseMergeAction(context, kind, searchCondition, destinationTable, sourceView, targetAlias, kind switch
+            {
+                WhenClauseKind.Matched => ResolveType,
+                WhenClauseKind.NotMatchedByTarget => ResolveSourceOnly,
+                _ => ResolveTargetOnly,
+            }));
         }
 
         return clauses.Count == 0 ? throw SimulatedSqlException.SyntaxErrorNear(context) : clauses;
@@ -939,9 +1003,16 @@ partial class Simulation
         // and the INSERT VALUES tuple — and a CASE around the reference still
         // reports Msg 11741, which is why this is a floor rather than a set.
         var savedRejection = context.EnterNextValueForScope(NextValueForScope.MergeAction);
+        // An action owns no aggregate: its SET list is Msg 157 as an UPDATE's
+        // is, its VALUES list Msg 5310 as an INSERT's is.
+        var savedCollector = context.AggregateCollector;
+        var actionAggregates = new List<AggregateExpression>();
+        context.AggregateCollector = actionAggregates;
+        var isInsert = context.Token is ReservedKeyword { Keyword: Keyword.Insert };
+        WhenClause clause;
         try
         {
-            return context.Token switch
+            clause = context.Token switch
             {
                 ReservedKeyword { Keyword: Keyword.Insert } => ParseMergeInsertAction(context, kind, searchCondition, destinationTable, sourceView, resolveType),
                 ReservedKeyword { Keyword: Keyword.Update } => ParseMergeUpdateAction(context, kind, searchCondition, destinationTable, sourceView, targetAlias, resolveType),
@@ -952,7 +1023,13 @@ partial class Simulation
         finally
         {
             context.NextValueForRejection = savedRejection;
+            context.AggregateCollector = savedCollector;
         }
+        Selection.RefuseClauseAggregates(
+            context.Batch,
+            actionAggregates,
+            isInsert ? SimulatedSqlException.AggregateInValuesList() : SimulatedSqlException.AggregateInSetList());
+        return clause;
     }
 
     private static WhenClause ParseMergeInsertAction(
@@ -1341,7 +1418,7 @@ partial class Simulation
                 context.MoveNextOptional();
                 continue;
             }
-            var expr = Expression.Parse(context);
+            var expr = ParseOutputItem(context);
             switch (context.Token)
             {
                 case ReservedKeyword { Keyword: Keyword.As }:
@@ -2301,6 +2378,35 @@ partial class Simulation
     /// SQL Server, which permits <c>DEFAULT</c> only inside <c>INSERT … VALUES</c>.
     /// </remarks>
     internal static List<Expression[]> ParseValuesTuples(ParserContext context, bool allowDefault = false)
+    {
+        // A table value constructor owns no aggregate (Msg 5310), but one
+        // reading only an enclosing query's columns is that query's.
+        var savedCollector = context.AggregateCollector;
+        var valuesAggregates = new List<AggregateExpression>();
+        context.AggregateCollector = valuesAggregates;
+        List<Expression[]> tuples;
+        try
+        {
+            tuples = ParseValuesTupleList(context, allowDefault);
+        }
+        finally
+        {
+            context.AggregateCollector = savedCollector;
+        }
+        foreach (var aggregate in valuesAggregates)
+        {
+            var readsColumn = false;
+            aggregate.Operand?.VisitColumnReferences(_ => readsColumn = true);
+            if (!readsColumn || !Selection.MoveToEnclosingQuery(context.Batch, aggregate, savedCollector))
+            {
+                Selection.RefuseAggregatePlacement(context.Batch, aggregate, SimulatedSqlException.AggregateInValuesList());
+                break;
+            }
+        }
+        return tuples;
+    }
+
+    private static List<Expression[]> ParseValuesTupleList(ParserContext context, bool allowDefault)
     {
         var tuples = new List<Expression[]>();
         do

@@ -18,16 +18,29 @@ Two clocks, probed against SQL Server 2025:
 ## How far a `SET` reaches
 
 A procedure, trigger or dynamic-SQL body's `SET` applies inside the body and reverts when the body returns, the caller's value restored by `SimulatedDbConnection.SessionOptionScope` at each invocation seam and around a parameterized ad-hoc command (which SqlClient sends as `sp_executesql`).
-That holds for `ANSI_PADDING`, `ANSI_WARNINGS`, `ARITHABORT`, `CONCAT_NULL_YIELDS_NULL`, `NUMERIC_ROUNDABORT`, `ANSI_NULL_DFLT_ON` / `_OFF`, `IMPLICIT_TRANSACTIONS`, `CURSOR_CLOSE_ON_COMMIT`, `NOEXEC`, `DEADLOCK_PRIORITY`, `XACT_ABORT`, `ROWCOUNT`, `DATEFIRST`, `DATEFORMAT`, `NOCOUNT` and `TEXTSIZE` (probed 2026-09-28: a procedure setting five of the ANSI toggles reads `@@OPTIONS` 9568 inside and the caller 5432 after).
+That holds for `ANSI_PADDING`, `ANSI_WARNINGS`, `ARITHABORT`, `ARITHIGNORE`, `CONCAT_NULL_YIELDS_NULL`, `NUMERIC_ROUNDABORT`, `ANSI_NULL_DFLT_ON` / `_OFF`, `IMPLICIT_TRANSACTIONS`, `CURSOR_CLOSE_ON_COMMIT`, `NOEXEC`, `DEADLOCK_PRIORITY`, `XACT_ABORT`, `ROWCOUNT`, `DATEFIRST`, `DATEFORMAT`, `NOCOUNT` and `TEXTSIZE` (probed 2026-09-28: a procedure setting five of the ANSI toggles reads `@@OPTIONS` 9568 inside and the caller 5432 after).
 `ANSI_NULLS` and `QUOTED_IDENTIFIER` are the exceptions: a procedure or trigger body ignores its own `SET` of them, running under the setting captured when the module was created, while dynamic SQL applies them to its own batch.
 `PARSEONLY` in a procedure, trigger or function body refuses the `CREATE` with Msg 1059, at line 0 wherever the `SET` sits (probed 2026-09-28).
 
 ## `@@OPTIONS`, `SESSIONPROPERTY` and `sys.dm_exec_sessions`
 
-`@@OPTIONS` (`OptionsExpression`) carries `IMPLICIT_TRANSACTIONS` 2, `CURSOR_CLOSE_ON_COMMIT` 4, `ANSI_WARNINGS` 8, `ANSI_PADDING` 16, `ANSI_NULLS` 32, `ARITHABORT` 64, `QUOTED_IDENTIFIER` 256, `NOCOUNT` 512, `ANSI_NULL_DFLT_ON` 1024, `ANSI_NULL_DFLT_OFF` 2048, `CONCAT_NULL_YIELDS_NULL` 4096, `NUMERIC_ROUNDABORT` 8192 and `XACT_ABORT` 16384; a fresh SqlClient session reads 5432.
+`@@OPTIONS` (`OptionsExpression`) carries `IMPLICIT_TRANSACTIONS` 2, `CURSOR_CLOSE_ON_COMMIT` 4, `ANSI_WARNINGS` 8, `ANSI_PADDING` 16, `ANSI_NULLS` 32, `ARITHABORT` 64, `ARITHIGNORE` 128, `QUOTED_IDENTIFIER` 256, `NOCOUNT` 512, `ANSI_NULL_DFLT_ON` 1024, `ANSI_NULL_DFLT_OFF` 2048, `CONCAT_NULL_YIELDS_NULL` 4096, `NUMERIC_ROUNDABORT` 8192 and `XACT_ABORT` 16384; a fresh SqlClient session reads 5432.
 `NOEXEC`, `PARSEONLY` and `DEADLOCK_PRIORITY` have no bit.
 `SESSIONPROPERTY` answers only its documented seven and NULL for the rest — `IMPLICIT_TRANSACTIONS`, `CURSOR_CLOSE_ON_COMMIT` and `ANSI_NULL_DFLT_ON` included (probed 2026-09-28).
 `sys.dm_exec_sessions` / `sys.dm_exec_requests` report `ansi_null_dflt_on`, `deadlock_priority`, and `ansi_defaults`, which reads 1 only while all seven options the bundle sets are on, so a SqlClient session — whose login turns `IMPLICIT_TRANSACTIONS` and `CURSOR_CLOSE_ON_COMMIT` back off — reads 0.
+
+## `ARITHIGNORE` and `ARITHABORT`
+
+Probed 2026-09-28 against SQL Server 2025, a divide by zero or an arithmetic overflow (Msg 8134, 220, 232, 8115) under each pairing of `ANSI_WARNINGS` and `ARITHABORT`:
+
+| `ANSI_WARNINGS` | `ARITHABORT` | Real |
+| --- | --- | --- |
+| on | either | the error ends its statement, and the batch runs on |
+| off | off | NULL, then Msg 3606 / 3607 after the statement's rows ([`errors.md`](errors.md#the-message-stream)); under `ARITHIGNORE ON` the NULL alone |
+| off | on | the error ends the batch and rolls the transaction back as under `XACT_ABORT` — a procedure's error ends its caller's batch, and a `TRY` that catches it is left with a doomed transaction (`Simulation.ApplyXactAbortPromotion`) |
+
+So `ARITHIGNORE` only reaches the NULL-answering pairing (`BatchContext.AbsorbsArithmeticFault`), a write storing the NULL included.
+`SESSIONPROPERTY('ARITHIGNORE')` is NULL, as for the other options outside its documented seven.
 
 ## `ANSI_DEFAULTS`
 
@@ -57,7 +70,7 @@ Takes `LOW` (-5), `NORMAL` (0), `HIGH` (5) or an integer in -10..10, from a lite
 ## Not modeled yet
 
 - `SET STATISTICS IO` / `TIME` report page counts and timings that depend on the engine's storage and the machine, and `STATISTICS XML` / `PROFILE` and the `SHOWPLAN_*` family return plans; all parse and are discarded, so no extra message or result set arrives and a `SHOWPLAN` batch runs where real only describes it.
-- `ARITHIGNORE`, `FORCEPLAN`, `QUERY_GOVERNOR_COST_LIMIT`, `REMOTE_PROC_TRANSACTIONS` and `DISABLE_DEF_CNST_CHK` parse and are discarded.
+- `FORCEPLAN`, `QUERY_GOVERNOR_COST_LIMIT`, `REMOTE_PROC_TRANSACTIONS` and `DISABLE_DEF_CNST_CHK` parse and are discarded.
 - `DBCC USEROPTIONS`.
 
 ## Divergences

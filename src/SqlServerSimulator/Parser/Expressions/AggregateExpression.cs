@@ -79,6 +79,18 @@ internal sealed class AggregateExpression : Expression
     internal bool WarnsOnNullInput = true;
 
     /// <summary>
+    /// Set at parse time when this aggregate was written in a nested scope but
+    /// reads only an enclosing query's columns, so that query owns it and the
+    /// nested scope reads the value bound for the enclosing query's current
+    /// group. That value changes from one enclosing row to the next without the
+    /// nested plan reading the enclosing row, so <see cref="Run"/> counts itself
+    /// among <see cref="SimulatedDbConnection.VolatileEvaluations"/>: a
+    /// subquery or deferred source reading it can't replay one execution for
+    /// the rest of the statement.
+    /// </summary>
+    public bool ReadsEnclosingGroup;
+
+    /// <summary>
     /// Passes one operand value through, noting on the executing statement
     /// when it is a NULL this aggregate skips with real's Msg 8153 warning —
     /// every aggregate does but <c>COUNT(*)</c> (and a <c>COUNT</c> reduced to
@@ -309,10 +321,14 @@ internal sealed class AggregateExpression : Expression
     /// </summary>
     internal void BindResult(BatchContext batch, SqlValue value) => batch.BindProjectionResult(this, value);
 
-    public override SqlValue Run(RuntimeContext runtime) =>
-        runtime.Batch.BoundProjectionResults is { } bound && bound.TryGetValue(this, out var result)
+    public override SqlValue Run(RuntimeContext runtime)
+    {
+        if (this.ReadsEnclosingGroup)
+            runtime.Batch.Connection.VolatileEvaluations++;
+        return runtime.Batch.BoundProjectionResults is { } bound && bound.TryGetValue(this, out var result)
             ? result
             : throw new InvalidOperationException("AggregateExpression.Run was called before its result was bound; this indicates the Selection executor didn't recognize it as an aggregate.");
+    }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {

@@ -563,8 +563,8 @@ internal sealed partial class Selection
     /// its own <see cref="FromSource"/> set and needs the same
     /// compile-time column binding a SELECT gets.
     /// </summary>
-    internal static Func<MultiPartName, SqlType> ColumnTypeResolverFor(FromSource[] sources) =>
-        name => ResolveColumnTypeAcrossSources(sources, name, null);
+    internal static Func<MultiPartName, SqlType> ColumnTypeResolverFor(FromSource[] sources, Func<MultiPartName, SqlType>? outerTypeResolver = null) =>
+        name => ResolveColumnTypeAcrossSources(sources, name, outerTypeResolver);
 
     /// <summary>
     /// The compile-time resolver for DML written against a view whose body
@@ -677,9 +677,8 @@ internal sealed partial class Selection
             context.AggregateCollector = savedCollector;
             context.MatchScope = savedMatchScope;
         }
-        if (whereAggregates.Count > 0 && context.Batch.BindErrors?.RecordAggregateInWhere(whereAggregates[0]) != true)
-            throw SimulatedSqlException.AggregateInWhereClause();
-        predicate.Bind(context.Batch, resolveColumnType);
+        RefuseClauseAggregates(context.Batch, whereAggregates, SimulatedSqlException.AggregateInWhereClause());
+        predicate.BindCarryingTypeChecks(context.Batch, resolveColumnType);
         return BooleanExpression.SimplifyForFilter(predicate, context);
     }
 
@@ -918,27 +917,27 @@ internal sealed partial class Selection
     }
 
     /// <summary>
-    /// Rejects an aggregate whose operand reads only the <em>enclosing</em>
+    /// Moves each aggregate whose operand reads only an <em>enclosing</em>
     /// query's columns, such as <c>(SELECT MAX(t.col) FROM u)</c> inside a
-    /// query over <c>t</c>. Real SQL Server binds that aggregate to the outer
-    /// query, which then becomes an aggregate query itself and collapses to
-    /// one row; the simulator binds it to the query it is written in, so it
-    /// would silently return one row per outer row instead.
+    /// query over <c>t</c>, to that query's collector: real binds it there,
+    /// which makes the enclosing query an aggregate query collapsing to one row
+    /// per group. The same instance moves, so the nested expression tree keeps
+    /// referencing it and reads the value the owning query binds.
     /// </summary>
     /// <remarks>
-    /// A wrong answer is worse than a refusal, so this raises rather than
-    /// guessing. An aggregate mixing inner and outer references, or reading no
-    /// column at all (<c>COUNT(*)</c>, <c>MAX(1)</c>), is left alone — only the
-    /// wholly-outer case is ambiguous.
+    /// An aggregate reading no column at all (<c>COUNT(*)</c>, <c>MAX(1)</c>)
+    /// stays, and one reading an enclosing query's column beside a column of
+    /// its own is real's Msg 8124; an operand reading two enclosing scopes is
+    /// judged again once it has moved one level out, where one of them is
+    /// local.
     /// <para>A name that resolves in <em>no</em> scope isn't that case at all:
     /// it is real's Msg 207, which real reports at compile time (probe-confirmed
     /// — <c>HAVING MAX(nosuchcol) = 1</c> refuses a <c>CREATE VIEW</c> outright,
-    /// while the genuinely-outer <c>(SELECT MAX(t.a) FROM u)</c> creates and
-    /// only misbehaves at run time). The enclosing type resolver is what tells
-    /// the two apart; it raises Msg 207 itself once the scope chain runs
-    /// out.</para>
+    /// while the genuinely-outer <c>(SELECT MAX(t.a) FROM u)</c> creates). The
+    /// enclosing type resolver is what tells the two apart; it raises Msg 207
+    /// itself once the scope chain runs out.</para>
     /// </remarks>
-    private static void RehomeAggregatesOverOuterScope(
+    internal static void RehomeAggregatesOverOuterScope(
         BatchContext parseBatch,
         FromSource[] sources,
         List<AggregateExpression> aggregates,
@@ -960,7 +959,7 @@ internal sealed partial class Selection
 
             var referenced = 0;
             var resolvedHere = 0;
-            MultiPartName? unresolved = null;
+            List<MultiPartName>? unresolved = null;
             try
             {
                 operand.VisitColumnReferences(name =>
@@ -969,19 +968,22 @@ internal sealed partial class Selection
                     if (FindSourceColumn(sources, name).SourceIndex >= 0)
                         resolvedHere++;
                     else
-                        unresolved ??= name;
+                        (unresolved ??= []).Add(name);
                 });
 
-                if (referenced == 0 || resolvedHere > 0)
+                if (unresolved is null)
                     continue;
 
                 // Resolve the outer scope chain before concluding anything: with no
                 // enclosing scope at all, or with one that doesn't know the name,
                 // this is a bad column reference rather than an outer-bound
                 // aggregate.
-                if (outerTypeResolver is null)
-                    throw UnresolvedNameError(sources, unresolved!.Value);
-                _ = outerTypeResolver(unresolved!.Value);
+                foreach (var name in unresolved)
+                {
+                    if (outerTypeResolver is null)
+                        throw UnresolvedNameError(sources, name);
+                    _ = outerTypeResolver(name);
+                }
             }
             catch (SimulatedSqlException) when (parseBatch.BindErrors is not null)
             {
@@ -991,21 +993,67 @@ internal sealed partial class Selection
                 continue;
             }
 
-            // The aggregate reads only the enclosing query's columns, so it
-            // belongs to that query: real evaluates it there, which makes the
-            // enclosing query an aggregate query and collapses it to one row
-            // per group. Move the same instance across — the expression tree
-            // here keeps referencing it, so once the owning query binds its
-            // per-group result this scope reads that value.
-            if (parseBatch.Parser.EnclosingAggregateCollector is not { } enclosing)
-                throw new NotSupportedException("An aggregate over an enclosing query's columns (which binds to the outer query on SQL Server) isn't modeled.");
-
-            enclosing.Add(aggregate);
+            // A refused aggregate leaves this scope's list too, so no later
+            // placement check refuses it a second time.
+            if (resolvedHere > 0)
+                RefuseAggregatePlacement(parseBatch, aggregate, SimulatedSqlException.OuterReferenceMixedInAggregate());
+            else if (!MoveToEnclosingQuery(parseBatch, aggregate, parseBatch.Parser.EnclosingAggregateCollector))
+                throw new NotSupportedException("An aggregate over an enclosing query's columns, with no enclosing query collecting aggregates, isn't modeled.");
             (rehomed ??= []).Add(aggregate);
         }
 
         if (rehomed is not null)
             _ = aggregates.RemoveAll(rehomed.Contains);
+    }
+
+    /// <summary>
+    /// Hands <paramref name="aggregate"/>, which reads only columns from outside
+    /// the scope it was written in, to <paramref name="enclosing"/>, walking
+    /// through any <c>APPLY</c> boundary on the way — one whose left side it
+    /// reads is Msg 4101. False when there is no enclosing collector at all.
+    /// </summary>
+    internal static bool MoveToEnclosingQuery(BatchContext parseBatch, AggregateExpression aggregate, List<AggregateExpression>? enclosing)
+    {
+        while (enclosing is ApplyAggregateBoundary boundary)
+        {
+            var readsLeft = false;
+            aggregate.Operand?.VisitColumnReferences(name => readsLeft |= FindSourceColumn(boundary.LeftSources, name).SourceIndex >= 0);
+            if (readsLeft)
+            {
+                RefuseAggregatePlacement(parseBatch, aggregate, SimulatedSqlException.AggregateOverApplyLeftSide());
+                return true;
+            }
+            enclosing = boundary.Enclosing;
+        }
+        if (enclosing is null)
+            return false;
+        aggregate.ReadsEnclosingGroup = true;
+        enclosing.Add(aggregate);
+        return true;
+    }
+
+    /// <summary>
+    /// Raises <paramref name="error"/>, an aggregate standing where real
+    /// refuses one, or records it in the statement's binder report when one is
+    /// being gathered.
+    /// </summary>
+    internal static void RefuseAggregatePlacement(BatchContext parseBatch, AggregateExpression aggregate, SimulatedSqlException error)
+    {
+        if (parseBatch.BindErrors?.RecordAggregatePlacement(error, aggregate) != true)
+            throw error;
+    }
+
+    /// <summary>
+    /// Refuses with <paramref name="error"/> the first aggregate a clause that
+    /// can own none collected — an <c>UPDATE</c>'s <c>SET</c> list, a
+    /// <c>MERGE</c>'s <c>ON</c>, <c>WHEN</c> condition or action — whether
+    /// written there or moved there from a subquery reading only the
+    /// statement's columns.
+    /// </summary>
+    internal static void RefuseClauseAggregates(BatchContext parseBatch, List<AggregateExpression> collected, SimulatedSqlException error)
+    {
+        if (collected.Count > 0)
+            RefuseAggregatePlacement(parseBatch, collected[0], error);
     }
 
     /// <summary>
@@ -1080,11 +1128,8 @@ internal sealed partial class Selection
 
         // What WHERE aggregated is only legal once it has moved to the query
         // whose columns it reads.
-        if (fromClause.WhereAggregates is { } whereAggregates && whereAggregates.Find(aggregates.Contains) is { } whereAggregate
-            && parseBatch.BindErrors?.RecordAggregateInWhere(whereAggregate) != true)
-        {
-            throw SimulatedSqlException.AggregateInWhereClause();
-        }
+        if (fromClause.WhereAggregates is { } whereAggregates && whereAggregates.Find(aggregates.Contains) is { } whereAggregate)
+            RefuseAggregatePlacement(parseBatch, whereAggregate, SimulatedSqlException.AggregateInWhereClause());
 
         // Convert a comma-join / CROSS JOIN carrying an equi-join predicate in
         // WHERE into an INNER JOIN, so it rides the equi-join seek / hash path
@@ -1210,7 +1255,7 @@ internal sealed partial class Selection
             RejectDirectNodesColumnRead(expression, sources);
         for (var i = 0; i < expressions.Count; i++)
         {
-            outputSchema[i] = expressions[i].GetSqlType(parseBatch, readColumnSink is null ? ResolveColumnType : RecordingResolver);
+            outputSchema[i] = expressions[i].TypeCarryingTypeChecks(parseBatch, readColumnSink is null ? ResolveColumnType : RecordingResolver);
             outputColumnNames[i] = expressions[i] is Reference { ReferencedName.Leaf: ['$', ..] } pseudo && FindSourceColumn(sources, pseudo.ReferencedName) is ( >= 0, var pseudoColumn) and var (pseudoSource, _)
                 // A graph pseudo-column names its result after the internal
                 // column it reads (probed 2026-09-27 against SQL Server 2025).
@@ -1307,18 +1352,18 @@ internal sealed partial class Selection
         // first, and driven off the non-recording resolver because the
         // read-column sink walks these clauses structurally just below.
         foreach (var excluder in fromClause.Excluders)
-            excluder.Bind(parseBatch, ResolveColumnType);
+            excluder.BindCarryingTypeChecks(parseBatch, ResolveColumnType);
         foreach (var join in joins)
         {
             if (join.OnPredicate is not { } on)
                 continue;
             if (join.ScopeEnd < 0)
             {
-                on.Bind(parseBatch, ResolveColumnType);
+                on.BindCarryingTypeChecks(parseBatch, ResolveColumnType);
                 continue;
             }
             var onScope = sources[join.ScopeStart..join.ScopeEnd];
-            on.Bind(parseBatch, name => ResolveColumnTypeAcrossSources(onScope, name, scope.OuterTypeResolver));
+            on.BindCarryingTypeChecks(parseBatch, name => ResolveColumnTypeAcrossSources(onScope, name, scope.OuterTypeResolver));
         }
         // A grouping term names a collation too, and real numbers those slots
         // from 2 — the grouped projection it builds carries one column ahead of
@@ -1327,9 +1372,9 @@ internal sealed partial class Selection
         var groupingOrdinal = 2;
         foreach (var grouping in fromClause.AllGroupingExpressions)
         {
-            RequireSettledOutputCollation(grouping.GetSqlType(parseBatch, ResolveColumnType), "GROUP BY", groupingOrdinal++);
+            RequireSettledOutputCollation(grouping.TypeCarryingTypeChecks(parseBatch, ResolveColumnType), "GROUP BY", groupingOrdinal++);
         }
-        fromClause.Having?.Bind(parseBatch, ResolveColumnType);
+        fromClause.Having?.BindCarryingTypeChecks(parseBatch, ResolveColumnType);
 
         if (readColumnSink is not null)
         {
@@ -1419,7 +1464,7 @@ internal sealed partial class Selection
             {
                 keyType = orderBy[i].IsOrdinal
                     ? outputSchema[orderBy[i].Ordinal - 1]
-                    : orderBy[i].Expr!.GetSqlType(parseBatch, ResolveOrderByType);
+                    : orderBy[i].Expr!.TypeCarryingTypeChecks(parseBatch, ResolveOrderByType);
                 // Real follows an unknown name under DISTINCT with DISTINCT's
                 // own complaint, the same as the throwing path below.
                 if (distinct && parseBatch.BindErrors is { } report && report.Count > recorded && report.SpanOf(orderBy[i].Expr) is { } term)

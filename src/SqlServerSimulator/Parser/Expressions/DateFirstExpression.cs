@@ -91,6 +91,7 @@ internal sealed class OptionsExpression(ParserContext context) : Expression
             | (connection.AnsiPadding ? 16 : 0)
             | (connection.AnsiNulls ? 32 : 0)
             | (connection.Arithabort ? 64 : 0)
+            | (connection.ArithIgnore ? 128 : 0)
             | (this.parsedQuotedIdentifier ?? runtime.Batch.QuotedIdentifiersAfterParse ?? connection.QuotedIdentifiers ? 256 : 0)
             | (connection.NoCount ? 512 : 0)
             | (connection.AnsiNullDefaultOn ? 1024 : 0)

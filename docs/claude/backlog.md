@@ -257,7 +257,7 @@ Already listed elsewhere here and not repeated: parenthesized set-op branches.
 
 **Name resolution** (probed 2026-09-26):
 
-- A statement's binder report stops at a type check other than Msg 529, reports MERGE's Msg 5334 as Msg 207, reports only a PIVOT's `FOR` column, and misses the Msg 209 real adds for an ORDER BY name two select items share — the residue of the whole-statement report in [`errors.md`](errors.md#a-statements-whole-binder-report) (probed 2026-09-27).
+- A statement's binder report misses the Msg 209 real adds for an ORDER BY name two select items share — the residue of the whole-statement report in [`errors.md`](errors.md#a-statements-whole-binder-report) (probed 2026-09-27).
   `GROUP BY ALL` isn't parsed yet (Msg 156 here), so a statement using it reports that instead of its names.
 
 **Describe surfaces** (probed 2026-09-27):
@@ -347,7 +347,7 @@ Real bugs / limitations against shipped behavior — fixes are concrete work, no
   A statement calling a non-schema-bound scalar UDF whose body names a missing object gets Msg 208 **twice** on real, where the simulator raises only the second; a multi-statement TVF raises only the caller's on both.
   The first, attributed to the function at the line binding its definition would report, arrives while the **batch compiles** — ahead of an earlier statement's rows, past an enclosing `TRY` / `CATCH`, and even for a call a `1 = 0` conjunct short-circuits — which reads as real's compile-time inlining attempt.
   The second is the calling statement's own, at its line, and matches; a `DECLARE` / `SET` / assignment-`SELECT` / `IF` call reports only it.
-- **Session-option residues** — `SET STATISTICS IO` / `TIME` messages and the `SHOWPLAN_*` / `STATISTICS XML` plan result sets, `ARITHIGNORE`, `FORCEPLAN`, `DBCC USEROPTIONS`, and a same-batch `ALTER DATABASE … ANSI_NULL_DEFAULT` that real settles before the batch runs → [`session-options.md`](session-options.md#not-modeled-yet).
+- **Session-option residues** — `SET STATISTICS IO` / `TIME` messages and the `SHOWPLAN_*` / `STATISTICS XML` plan result sets, `FORCEPLAN`, `DBCC USEROPTIONS`, and a same-batch `ALTER DATABASE … ANSI_NULL_DEFAULT` that real settles before the batch runs → [`session-options.md`](session-options.md#not-modeled-yet).
 - **Transaction-object residues** — `Save` / `Rollback(name)` on `SimulatedDbTransaction` aren't built, and SqlClient's API rollback of a transaction SQL text rolled back succeeds or refuses depending on whether a command ran in between, where it always refuses here → [`transactions.md`](transactions.md#begintransaction-and-sql-text-transactions).
 - **Table-variable internal names in messages** — real names a table variable `#` plus eight hex digits of its negative object id in Msg 2628 (`tempdb.dbo.#B81E2941`) and in its auto-named CHECK constraint, and omits the column from its Msg 547, where the simulator writes `@t` and the column (probed 2026-09-28); a `#temp` table's padded name ships for the messages but not the catalog → [`temp-tables.md`](temp-tables.md#tempdbs-catalog-lists-them).
 - **`SET FMTONLY ON` DML reports no count** — real closes an `INSERT` under the option with a DONE counting 0, where the simulator sends none (probed 2026-09-28).
