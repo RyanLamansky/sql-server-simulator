@@ -57,8 +57,11 @@ partial class Simulation
         var wasSkipModeFlag = batch.SkipModeFlag;
         var outerSkipping = batch.IsSkipping || bindError is not null;
         SimulatedSqlException? conditionError = null;
+        StatementClock? conditionClock = connection.StatisticsTime ? StatementClock.Start(connection) : null;
         var condResult = !outerSkipping && RunCondition(cond, batch, out conditionError);
         batch.QueueNullEliminatedWarning();
+        if (!outerSkipping && conditionError is null)
+            QueueConditionStatistics(batch, conditionClock, batch.CurrentStatement.StartLine);
         // The condition is a statement of its own for @@ERROR: the branch it
         // chose reads 0 (probed 2026-09-24 against SQL Server 2025).
         if (conditionError is not null)
@@ -278,6 +281,7 @@ partial class Simulation
         var context = batch.Parser;
         var connection = context.Connection;
 
+        var whileLine = batch.CurrentStatement.StartLine;
         context.MoveNextRequired(); // consume WHILE
         var cond = ParseCondition(batch);
         var bindError = BindCondition(cond, batch);
@@ -319,8 +323,11 @@ partial class Simulation
                     }
 
                     context.RestoreCheckpoint(bodyStart);
+                    StatementClock? conditionClock = connection.StatisticsTime ? StatementClock.Start(connection) : null;
                     var condResult = RunCondition(cond, batch, out var conditionError);
                     batch.QueueNullEliminatedWarning();
+                    if (conditionError is null)
+                        QueueConditionStatistics(batch, conditionClock, whileLine);
                     // As for IF, the body reads @@ERROR 0 after its condition.
                     if (conditionError is not null)
                     {

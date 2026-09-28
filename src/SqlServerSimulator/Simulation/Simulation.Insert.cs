@@ -731,6 +731,7 @@ partial class Simulation
                     if (IsLockableTable(destinationTable))
                         context.Batch.ProbeKeyLocksForInsert(destinationTable, image);
                     var (pageIndex, slotIndex) = destinationTable.Heap.Insert(image, destinationTable.IsTableVariable ? context.Batch.CurrentTableVarUndoLog : context.Batch.CurrentUndoLog);
+                    context.Connection.StatementIo?.CountWrite(destinationTable);
                     if (IsLockableTable(destinationTable))
                     {
                         context.Batch.AcquireRowLockTxScoped(destinationTable, pageIndex, slotIndex, LockMode.Exclusive, RowLockPurpose.Insert);

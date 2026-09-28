@@ -547,15 +547,26 @@ partial class Simulation
         if (subOption is not StringToken || onOff is not ReservedKeyword { Keyword: var statisticsOnOff and (Keyword.On or Keyword.Off) })
             return false;
         context.Batch.CurrentStatement.DoneKind = statisticsOnOff == Keyword.On ? StatementDoneKind.SetStatisticsOn : StatementDoneKind.SetStatisticsOff;
-        var listed = subOption.ToString() switch
+        var on = statisticsOnOff == Keyword.On;
+        var name = subOption.ToString();
+        if (BuiltInToken.Equals(name, "IO") || BuiltInToken.Equals(name, "TIME"))
         {
-            var name when BuiltInToken.Equals(name, "IO") => ListedOnlyOptions.StatisticsIo,
-            var name when BuiltInToken.Equals(name, "PROFILE") => ListedOnlyOptions.StatisticsProfile,
-            var name when BuiltInToken.Equals(name, "TIME") => ListedOnlyOptions.StatisticsTime,
-            var name when BuiltInToken.Equals(name, "XML") => ListedOnlyOptions.StatisticsXml,
-            _ => ListedOnlyOptions.None,
-        };
-        RecordListedOnlyOption(context, listed, statisticsOnOff == Keyword.On);
+            var batch = context.Batch;
+            if (!batch.IsSkipping && batch.UdfFrame is null)
+            {
+                if (BuiltInToken.Equals(name, "IO"))
+                    context.Connection.StatisticsIo = on;
+                else
+                    context.Connection.StatisticsTime = on;
+            }
+        }
+        else
+        {
+            var listed = BuiltInToken.Equals(name, "PROFILE") ? ListedOnlyOptions.StatisticsProfile
+                : BuiltInToken.Equals(name, "XML") ? ListedOnlyOptions.StatisticsXml
+                : ListedOnlyOptions.None;
+            RecordListedOnlyOption(context, listed, on);
+        }
         FunctionBodyShape.NoteSideEffect(
             context.Batch,
             statisticsOnOff == Keyword.On ? "SET STATISTICS ON" : "SET STATISTICS OFF",
@@ -1057,15 +1068,13 @@ partial class Simulation
 
 /// <summary>
 /// The <c>SET</c> switches the simulator keeps only so <c>DBCC USEROPTIONS</c>
-/// can list them: the <c>STATISTICS</c> family (whose messages and plans aren't
+/// can list them: <c>STATISTICS PROFILE</c> and <c>XML</c> (whose plans aren't
 /// built), <c>FORCEPLAN</c> and <c>REMOTE_PROC_TRANSACTIONS</c>.
 /// </summary>
 [Flags]
 internal enum ListedOnlyOptions
 {
     None = 0,
-    StatisticsTime = 1 << 0,
-    StatisticsIo = 1 << 1,
     StatisticsProfile = 1 << 2,
     StatisticsXml = 1 << 3,
     ForcePlan = 1 << 4,

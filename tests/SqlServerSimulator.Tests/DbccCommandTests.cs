@@ -705,4 +705,15 @@ public sealed class DbccCommandTests
         AreEqual("2", Run("select 1 union select 2; dbcc traceon(3604); select @@rowcount").Rows[^1]);
         AreEqual("2", Run("create table t (id int identity); select 1 union select 2; dbcc checkident(t) with no_infomsgs; select @@rowcount").Rows[^1]);
     }
+
+    [TestMethod]
+    public void CheckTable_UnderExecuteAsUserIsMsg916UnlessTabLock()
+    {
+        const string Setup = "create table t (id int primary key); create user u without login; alter role db_owner add member u; execute as user = 'u'; ";
+        var error = new Simulation().AssertSqlError(Setup + "dbcc checktable(t) with no_infomsgs; select 'unreached'", 916);
+        MatchesRegex(new System.Text.RegularExpressions.Regex(@"^The server principal ""S-1-9-3-\d+-\d+-\d+-\d+"" is not able to access the database ""simulated"" under the current security context\.$"), error.Errors[0].Message);
+        AreEqual(2, error.Errors[0].State);
+        AreEqual("ran", new Simulation().ExecuteScalar(Setup + "dbcc checktable(t) with tablock, no_infomsgs; dbcc checkdb with no_infomsgs; select 'ran'"));
+        AreEqual(916, new Simulation().ExecuteScalar(Setup + "begin try dbcc checktable(t); end try begin catch select error_number(); end catch"));
+    }
 }

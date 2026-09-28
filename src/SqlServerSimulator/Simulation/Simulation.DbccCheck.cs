@@ -131,6 +131,8 @@ partial class Simulation
             Info(batch, SimulatedSqlException.EstimatedTempdbSpaceMessage(batch, "CHECKTABLE", batch.CurrentDatabase.Name, Math.Max(1, table.Heap.Pages.Count)));
             return DbccCompleted(batch, dbcc, []);
         }
+        if (!dbcc.Has(DbccOptions.TabLock) && batch.Connection.Security.Effective is { IsDatabaseScoped: true } identity)
+            throw SimulatedSqlException.DbccSnapshotInaccessible(identity.LoginName, batch.CurrentDatabase.Name);
         if (dbcc.Has(DbccOptions.NoInfoMessages))
             return [];
         if (dbcc.Has(DbccOptions.PhysicalOnly))

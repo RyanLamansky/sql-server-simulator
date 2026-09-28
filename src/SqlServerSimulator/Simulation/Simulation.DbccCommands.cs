@@ -453,8 +453,8 @@ partial class Simulation
         Row("dateformat", connection.DateFormat.Name);
         Row("datefirst", dateFirst.ToString(CultureInfo.InvariantCulture));
         var listed = connection.ListedOnlyOptions;
-        Switch("statistics time", (listed & ListedOnlyOptions.StatisticsTime) != 0);
-        Switch("statistics io", (listed & ListedOnlyOptions.StatisticsIo) != 0);
+        Switch("statistics time", connection.StatisticsTime);
+        Switch("statistics io", connection.StatisticsIo);
         Switch("statistics profile", (listed & ListedOnlyOptions.StatisticsProfile) != 0);
         Switch("statistics XML", (listed & ListedOnlyOptions.StatisticsXml) != 0);
         Row("lock_timeout", lockTimeout.ToString(CultureInfo.InvariantCulture));

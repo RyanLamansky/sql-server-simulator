@@ -136,6 +136,12 @@ partial class Simulation
         innerBatch.TableVariables[function.ReturnVariableName] = returnTable;
         connection.NestingLevel++;
         var identityScope = IdentityScope.Enter(connection);
+        // What the body reads real doesn't report under STATISTICS IO; the
+        // caller's statement reports its scan of the return table instead,
+        // under a table variable's name (probed 2026-09-28 against SQL Server
+        // 2025).
+        var callerIo = connection.StatementIo;
+        connection.StatementIo = null;
         try
         {
             var parser = innerBatch.Parser;
@@ -150,6 +156,7 @@ partial class Simulation
         }
         finally
         {
+            connection.StatementIo = callerIo;
             connection.NestingLevel--;
             connection.QuotedIdentifiers = savedQuotedIdentifiers;
             connection.AnsiNulls = savedAnsiNulls;
@@ -159,7 +166,20 @@ partial class Simulation
 
         // Yield the accumulated @r rows. Iterating the table-variable's Heap
         // returns row bytes directly — same shape the inline TVF path yields.
-        foreach (var rowBytes in returnTable.Rows)
+        if (callerIo is null)
+        {
+            foreach (var rowBytes in returnTable.Rows)
+                yield return rowBytes;
+            yield break;
+        }
+        returnTable.InternalName = connection.Simulation.AllocateTableVariableInternalName();
+        var counts = callerIo.Touch(returnTable);
+        _ = counts?.ScanCount += 1;
+        var lastPage = -1;
+        foreach (var (page, _, rowBytes) in returnTable.Heap.EnumerateRowsWithAddress())
+        {
+            counts?.Enter(page, ref lastPage);
             yield return rowBytes;
+        }
     }
 }

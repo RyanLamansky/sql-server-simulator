@@ -988,6 +988,10 @@ internal sealed partial class Selection
         else
         {
             (rightRows, next, buckets) = BuildHashSide(right, plan, tuple, level, batch, runtime);
+            // Real's plan joins a write's sources by nested loops where it
+            // hashes a query's.
+            if (!batch.CurrentStatement.WritesRows)
+                batch.Connection.StatementIo?.UseWorktable(hashJoin: true);
         }
 
         // Only RIGHT / FULL read the matched bitmap; INNER / LEFT would pay a

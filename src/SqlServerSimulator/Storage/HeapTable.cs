@@ -428,6 +428,13 @@ internal sealed class HeapTable : SchemaObject
     public Schemas.MultiStatementTableValuedFunction? ReturnTableOf;
 
     /// <summary>
+    /// For an <c>INSTEAD OF</c> trigger's <c>inserted</c> / <c>deleted</c>,
+    /// which real keeps in a work table: <c>STATISTICS IO</c> lists a read of
+    /// it as <c>Worktable</c> (<see cref="Parser.IoStatistics.Touch"/>).
+    /// </summary>
+    public bool ReadsAsWorktable;
+
+    /// <summary>
     /// The <see cref="Database"/> this table is registered in, stamped when it
     /// enters a <see cref="Schema.HeapTables"/> dict. Null for the tables that
     /// belong to no database — temp tables, table variables, table-valued

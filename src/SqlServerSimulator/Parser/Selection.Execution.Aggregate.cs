@@ -694,6 +694,11 @@ internal sealed partial class Selection
             }
         }
 
+        if (fromClause.GroupingSets.Count > 1)
+            batch.Connection.StatementIo?.UseWorktable();
+        else if (fromClause.GroupingSets.Count == 1)
+            NoteGroupingWorktable(batch, sources, fromClause.GroupingSets[0]);
+
         // The bounded heap already holds exactly the rows the sort-then-cap
         // below would have kept, in the same order, so it answers on its own.
         if (topNGroups is not null)
@@ -714,7 +719,10 @@ internal sealed partial class Selection
         // before any row-count limiting — so TOP / FETCH select the correct
         // rows rather than an arbitrary prefix.
         if (orderByItems.Count > 0)
+        {
             output.Sort((a, b) => CompareOrderKeys(a.OrderKeys, b.OrderKeys, orderByItems));
+            NoteSortWorktable(batch, sources, orderByItems, expressions);
+        }
 
         IEnumerable<(SqlValue[] OrderKeys, SqlValue[] Row)> limited = output;
         if (ComputeTopCap(output, o => o.OrderKeys, orderByItems, top, fetchCount: null) is { } topLimit)

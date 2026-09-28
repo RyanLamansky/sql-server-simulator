@@ -56,7 +56,7 @@ partial class Simulation
         var rowMaps = new Dictionary<byte[], byte[]?[]>[path.Length - 1];
         var sources = batch.IsSkipping
             ? chain.Sources
-            : SourcesAlongPath(batch, chain, path, 0, original => WrapSourceWithAddressTracking(original, table, targetAddresses), rowMaps);
+            : SourcesAlongPath(batch, chain, path, 0, original => WrapSourceWithAddressTracking(original, table, targetAddresses, batch.Connection.StatementIo), rowMaps);
 
         BindDeferredXmlMutators(context, table, rawAssignments, targetName.ToString());
         FunctionBodyShape.NoteTableWrite(batch, "UPDATE", table);

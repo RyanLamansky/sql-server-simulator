@@ -70,6 +70,22 @@ partial class SimulatedSqlException
     internal static SimulatedError LanguageChangedMessage(BatchContext batch, string languageName) =>
         batch.InfoMessage(@class: 0, state: 1, number: 5703, $"Changed language setting to {languageName}.");
 
+    /// <summary>
+    /// Msg 3613, <c>SET STATISTICS TIME</c>'s report on a compile — a batch's,
+    /// a module's on each call, a dynamic batch's, a simply parameterized
+    /// statement's (probed 2026-09-28 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedError ParseAndCompileTimeMessage(BatchContext batch, long cpuMilliseconds, long elapsedMilliseconds) =>
+        batch.InfoMessage(@class: 0, state: 0, number: 3613, $"SQL Server parse and compile time: \n   CPU time = {cpuMilliseconds} ms, elapsed time = {elapsedMilliseconds} ms.");
+
+    /// <summary>Msg 3612, <c>SET STATISTICS TIME</c>'s report after each statement that closes with a DONE.</summary>
+    internal static SimulatedError ExecutionTimesMessage(BatchContext batch, long cpuMilliseconds, long elapsedMilliseconds) =>
+        batch.InfoMessage(@class: 0, state: 0, number: 3612, $"\n SQL Server Execution Times:\n   CPU time = {cpuMilliseconds} ms,  elapsed time = {elapsedMilliseconds} ms.");
+
+    /// <summary>Msg 3615, <c>SET STATISTICS IO</c>'s line for one table a statement read (<see cref="IoStatistics.Lines"/>).</summary>
+    internal static SimulatedError TableIoMessage(BatchContext batch, string line) =>
+        batch.InfoMessage(@class: 0, state: 0, number: 3615, line);
+
     /// <summary>Msg 8153, once per statement whose aggregate skipped a NULL.</summary>
     internal static SimulatedError NullEliminatedMessage(BatchContext batch) =>
         batch.InfoMessage(@class: 0, state: 1, number: 8153, "Warning: Null value is eliminated by an aggregate or other SET operation.");

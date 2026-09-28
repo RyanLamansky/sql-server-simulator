@@ -144,11 +144,22 @@ internal sealed partial class Selection
         {
             var seen = new HashSet<SqlValue[]>(RowEqualityComparer.Instance);
             filtered = projectedBuffer.Where(item => seen.Add(item.Projected));
+            NoteGroupingWorktable(batch, sources, expressions);
+        }
+
+        // Each window's partitioning and ordering is a sort of its own.
+        foreach (var window in windows)
+        {
+            List<OrderBySpec> windowOrder = [.. window.PartitionBy.Select(static term => OrderBySpec.FromExpression(term, descending: false)), .. window.OrderBy];
+            NoteSortWorktable(batch, sources, windowOrder, expressions);
         }
 
         var materialized = filtered.ToList();
         if (orderBy.Count > 0)
+        {
             materialized.Sort((a, b) => CompareOrderKeys(a.Keys, b.Keys, orderBy));
+            NoteSortWorktable(batch, sources, orderBy, expressions);
+        }
 
         var cap = ComputeTopCap(materialized, item => item.Keys, orderBy, top, fetchCount);
 

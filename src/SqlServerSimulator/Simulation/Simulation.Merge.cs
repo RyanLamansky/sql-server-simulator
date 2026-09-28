@@ -748,7 +748,7 @@ partial class Simulation
             materialize = batch =>
             {
                 var rows = new List<SqlValue[]>();
-                foreach (var rowBytes in ClusteredScan.Rows(sourceTable))
+                foreach (var rowBytes in ClusteredScan.Rows(sourceTable, batch.Connection.StatementIo))
                 {
                     var fullValues = DecodeFullRow(sourceTable, rowBytes);
                     EvaluateComputedColumns(sourceTable, fullValues, batch);
@@ -1707,6 +1707,8 @@ partial class Simulation
         var targetSeek = sourceView is null
             ? Selection.TryPrepareMergeTargetSeek(destinationTable, targetAlias, onPredicate, context.Batch)
             : null;
+        // Real's MERGE lists a work table between its source and its target.
+        context.Connection.StatementIo?.UseWorktable();
 
         if (targetSeek is not null)
         {
@@ -1742,7 +1744,7 @@ partial class Simulation
                 // their precomputed source list, unmatched rows fall to WHEN NOT
                 // MATCHED BY SOURCE. Heap-order interleaving matches the scan path's
                 // discovery order, but with no per-target source loop.
-                foreach (var (pageIndex, slotIndex, rowBytes) in ClusteredScan.RowsWithAddress(destinationTable))
+                foreach (var (pageIndex, slotIndex, rowBytes) in ClusteredScan.RowsWithAddress(destinationTable, context.Connection.StatementIo))
                 {
                     var targetValues = DecodeFullRow(destinationTable, rowBytes);
                     EvaluateComputedColumns(destinationTable, targetValues, context.Batch);
@@ -1785,7 +1787,7 @@ partial class Simulation
             // source row may fire before a target row asks.
             MergeSourceHash? sourceHash = null;
 
-            foreach (var (pageIndex, slotIndex, rowBytes) in ClusteredScan.RowsWithAddress(destinationTable))
+            foreach (var (pageIndex, slotIndex, rowBytes) in ClusteredScan.RowsWithAddress(destinationTable, context.Connection.StatementIo))
             {
                 var targetValues = DecodeFullRow(destinationTable, rowBytes);
                 EvaluateComputedColumns(destinationTable, targetValues, context.Batch);
@@ -2247,6 +2249,7 @@ partial class Simulation
             {
                 tracking?.RecordRow(context.Batch, destinationTable, newValues, ChangeTrackingOperation.Insert);
                 var (newPage, newSlot) = destinationTable.Heap.Insert(RowEncoder.EncodeRow(destinationTable.StoredColumns, ProjectStoredValues(destinationTable, newValues), destinationTable.Heap), undoLog);
+                context.Connection.StatementIo?.CountWrite(destinationTable);
                 if (lockableTable)
                     context.Batch.AcquireRowLockTxScoped(destinationTable, newPage, newSlot, LockMode.Exclusive, RowLockPurpose.Insert);
             }

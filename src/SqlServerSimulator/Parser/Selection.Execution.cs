@@ -2795,12 +2795,16 @@ internal sealed partial class Selection
         {
             var seen = new HashSet<SqlValue[]>(RowEqualityComparer.Instance);
             filtered = buffer.Where(item => seen.Add(item.Projected));
+            NoteGroupingWorktable(batch, sources, expressions);
         }
 
         var materialized = filtered.ToList();
 
         if (orderBy.Count > 0)
+        {
             materialized.Sort((a, b) => CompareOrderKeys(a.Keys, b.Keys, orderBy));
+            NoteSortWorktable(batch, sources, orderBy, expressions);
+        }
 
         var cap = ComputeTopCap(materialized, item => item.Keys, orderBy, top, fetchCount);
 

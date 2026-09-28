@@ -1251,12 +1251,16 @@ public sealed partial class Simulation
 
             // Nothing runs when the batch doesn't compile; the error is the
             // batch's whole response, raised at ExecuteReader like real's.
-            if (this.CompileBatch(CompileContextFor(batch, command), cacheKey) is { } compileError)
+            var compileContext = CompileContextFor(batch, command);
+            StatementClock? compileClock = batch.Connection.StatisticsTime ? StatementClock.Start(batch.Connection) : null;
+            if (this.CompileBatch(compileContext, cacheKey) is { } compileError)
             {
                 batch.Connection.LastErrorNumber = compileError.Number;
                 yield return new SimulatedErrorOutcome(compileError);
                 yield break;
             }
+            if (compileClock is not null)
+                yield return new SimulatedInfoOutcome(CompileTime(batch, compileClock, compileContext.LastTopLevelStatementLine, BatchCreatedModuleName(command) ?? batch.ErrorProcedureName));
 
             var context = batch.Parser;
             context.MoveNextOptional();
@@ -1403,12 +1407,15 @@ public sealed partial class Simulation
     /// hashes (<c>sys.dm_exec_requests.sql_handle</c>'s value) — and, for a
     /// whole-cache clear, the token memo too, so the next execution of any text
     /// tokenizes and parses afresh: <c>DBCC FREEPROCCACHE</c> and
-    /// <c>DBCC FREESYSTEMCACHE('ALL')</c>.
+    /// <c>DBCC FREESYSTEMCACHE('ALL')</c>. With <paramref name="database"/>,
+    /// only the entries compiled in it, the token memo kept: <c>ALTER DATABASE
+    /// SCOPED CONFIGURATION CLEAR PROCEDURE_CACHE</c>.
     /// </summary>
-    internal void ClearPlanCache(byte[]? sqlHandle = null)
+    internal void ClearPlanCache(byte[]? sqlHandle = null, Database? database = null)
     {
         bool Matches(PlanCacheKey key) =>
-            sqlHandle is null || BuiltInResources.SqlHandleOf(key.CommandText).AsSpan().SequenceEqual(sqlHandle.AsSpan(0, BuiltInResources.SqlHandleLength));
+            (sqlHandle is null || BuiltInResources.SqlHandleOf(key.CommandText).AsSpan().SequenceEqual(sqlHandle.AsSpan(0, BuiltInResources.SqlHandleLength)))
+            && (database is null || BuiltInToken.Equals(key.DatabaseName, database.Name));
         foreach (var key in this.planCache.Keys)
         {
             if (Matches(key) && this.planCache.TryRemove(key, out _))
@@ -1419,7 +1426,7 @@ public sealed partial class Simulation
             if (Matches(key) && this.compiledBatches.TryRemove(key, out _))
                 _ = Interlocked.Decrement(ref this.compiledBatchCount);
         }
-        if (sqlHandle is null)
+        if (sqlHandle is null && database is null)
             this.TokenMemo.Clear();
     }
 
@@ -1497,6 +1504,9 @@ public sealed partial class Simulation
                 // A replayed plan opens no implicit transaction and runs under
                 // NOEXEC / PARSEONLY / FMTONLY, each of which a parse settles.
                 && !connection.ImplicitTransactions && !connection.NoExec && !connection.ParseOnly && !connection.FmtOnly
+                // A replay reports no STATISTICS IO / TIME, and a compile that
+                // reports its time has to run.
+                && !connection.StatisticsIo && !connection.StatisticsTime
                 && BuildPlanCacheParameterSignature(command) is { } sig
                     ? new PlanCacheKey(command.CommandText, currentDb.Name, sig, connection.QuotedIdentifiers, connection.DateFormat, connection.AnsiNulls, connection.ConcatNullYieldsNull)
                     : null;
@@ -2019,6 +2029,8 @@ public sealed partial class Simulation
                 if (context.Token is not { } statementToken)
                     yield break;
                 var statementStartIndex = statementToken.StartIndex;
+                if (!nestedBlock && batch.Connection.StatisticsTime)
+                    batch.LastTopLevelStatementLine = IsBeginTry(context) ? -1 : statementToken.LineNumber;
                 foreach (var outcome in DispatchOneStatement(batch, requireSemicolonBeforeCte, atBatchStart))
                     yield return outcome;
                 requireSemicolonBeforeCte = true;
@@ -2127,7 +2139,15 @@ public sealed partial class Simulation
         var framesStatement = batch.Connection.FramesEveryStatement && !batch.IsSkipping;
         var startDoneKind = framesStatement ? StatementDoneKindOf(batch.Parser) : null;
         var isCall = framesStatement && IsProcedureCall(batch.Parser, atBatchStart);
-        batch.CurrentStatement.DoneKind = startDoneKind ?? StatementDoneKind.NoDone;
+        // SET STATISTICS TIME reports each statement that closes with a DONE,
+        // and a procedure call after its body (probed 2026-09-28 against SQL
+        // Server 2025); a function or view body inlines into its caller's.
+        var reportsStatistics = ReportsStatistics(batch);
+        var timedKind = reportsStatistics && batch.Connection.StatisticsTime ? startDoneKind ?? StatementDoneKindOf(batch.Parser) : null;
+        var timedCall = reportsStatistics && batch.Connection.StatisticsTime && (isCall || IsProcedureCall(batch.Parser, atBatchStart));
+        var statementClock = timedKind is not null || timedCall ? StatementClock.Start(batch.Connection) : default;
+        var createdModule = timedKind is not null ? CreatedModuleName(batch.Parser) : null;
+        batch.CurrentStatement.DoneKind = startDoneKind ?? timedKind ?? StatementDoneKind.NoDone;
         batch.CurrentStatement.DoneCount = -1;
         batch.CurrentStatement.StatementVerb = batch.Parser.Token switch
         {
@@ -2180,6 +2200,12 @@ public sealed partial class Simulation
         var connection = batch.Connection;
         var savedThreadId = connection.CurrentExecutingThreadId;
         connection.CurrentExecutingThreadId = Environment.CurrentManagedThreadId;
+        // SET STATISTICS IO: the statement gathers its own reads, its caller's
+        // put aside until it completes.
+        var enclosingIo = connection.StatementIo;
+        if (reportsStatistics)
+            connection.StatementIo = connection.StatisticsIo ? new IoStatistics() : null;
+        var statementIo = reportsStatistics ? connection.StatementIo : null;
         // Function body-shape recording (Msg 455 / 444 / 443) — active only
         // while a scalar UDF's / multi-statement TVF's body binds at CREATE.
         // An IF / WHILE brackets its contained statements so none of them can
@@ -2409,6 +2435,8 @@ public sealed partial class Simulation
         {
             batch.ReleaseStatementSchemaLocks();
             connection.CurrentExecutingThreadId = savedThreadId;
+            if (reportsStatistics)
+                connection.StatementIo = enclosingIo;
             if (opensConditional)
                 shape!.ConditionalDepth--;
         }
@@ -2512,9 +2540,17 @@ public sealed partial class Simulation
                 errorOutcome.InModule = batch.ProcFrame is not null || batch.TriggerFrame is not null;
                 errorOutcome.TransactionEventMark = connection.TransactionEventsRecorded;
             }
+            // A statement compiled before its error ran into it.
+            if (timedKind is not null && !batch.BatchAborted && connection.StatisticsTime && (batch.CurrentStatement.CallsUserFunction || CompilesParameterized(batch, statementStart)))
+                yield return new SimulatedInfoOutcome(CompileTime(batch, clock: null, batch.CurrentStatement.StartLine + batch.LineOffset, batch.ErrorProcedureName));
             foreach (var outcome in ProducedOutcomes(batch, outcomes))
                 yield return outcome;
             yield return errorOutcome;
+            // A statement its error ended still reports its time, after the
+            // error and ahead of Msg 3621; one that ended the batch doesn't
+            // (probed 2026-09-28 against SQL Server 2025).
+            if ((timedKind is not null || timedCall) && !batch.BatchAborted && connection.StatisticsTime)
+                yield return new SimulatedInfoOutcome(ExecutionTimes(batch, statementClock, createdModule), followsRows: true);
             // Msg 3621 goes out ahead of the statement's DONE, as real sends it.
             if (IsStatementTerminationNoticed(batch, continuedError))
             {
@@ -2610,6 +2646,8 @@ public sealed partial class Simulation
                 yield return outcome;
             if (caughtCount is not null)
                 yield return caughtCount;
+            if ((timedKind is not null || timedCall) && connection.StatisticsTime)
+                yield return new SimulatedInfoOutcome(ExecutionTimes(batch, statementClock, createdModule));
             yield break;
         }
 
@@ -2653,6 +2691,12 @@ public sealed partial class Simulation
             }
         }
 
+        // A statement calling a user function compiles it as it runs, and a
+        // simply parameterized one compiles its parameterized form, which
+        // STATISTICS TIME reports ahead of the statement's output (probed
+        // 2026-09-28 against SQL Server 2025).
+        if (timedKind is not null && connection.StatisticsTime && (batch.CurrentStatement.CallsUserFunction || CompilesParameterized(batch, statementStart)))
+            yield return new SimulatedInfoOutcome(CompileTime(batch, clock: null, batch.CurrentStatement.StartLine + batch.LineOffset, batch.ErrorProcedureName));
         foreach (var outcome in ProducedOutcomes(batch, outcomes))
             yield return outcome;
 
@@ -2666,6 +2710,11 @@ public sealed partial class Simulation
                 yield return NullEliminatedWarning(batch);
         }
         foreach (var notice in ArithmeticNotices(batch))
+            yield return notice;
+        // A statement that turns STATISTICS TIME on or off reports no time,
+        // having started or ended without it.
+        var timed = timedCall || (timedKind is not null && batch.CurrentStatement.DoneKind != StatementDoneKind.NoDone);
+        foreach (var notice in StatisticsReport(batch, statementIo, outcomes, timed && connection.StatisticsTime, statementClock, timedCall, createdModule))
             yield return notice;
     }
 

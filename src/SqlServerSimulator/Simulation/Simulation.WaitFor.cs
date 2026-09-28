@@ -120,6 +120,7 @@ partial class Simulation
         var session = batch.Connection.Session;
         session.WaitStartedTicks = Environment.TickCount64;
         session.InWaitFor = true;
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
         try
         {
             if (token.CanBeCanceled)
@@ -130,6 +131,7 @@ partial class Simulation
         finally
         {
             session.InWaitFor = false;
+            batch.Connection.WaitedTicks += System.Diagnostics.Stopwatch.GetElapsedTime(started).Ticks;
         }
     }
 

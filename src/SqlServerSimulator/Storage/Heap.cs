@@ -963,6 +963,13 @@ internal sealed class Heap
     /// </summary>
     internal const int LobScratchStackThreshold = 256;
 
+    /// <summary>
+    /// How many LOB pages have been read off this heap, ever: what a
+    /// statement's <c>STATISTICS IO</c> reports as its LOB reads is this
+    /// counter's growth while it ran (<see cref="Parser.IoTableCounts"/>).
+    /// </summary>
+    public long LobPagesRead;
+
     private void FillLobChain(Span<byte> destination, int headIndex)
     {
         var totalLength = destination.Length;
@@ -971,6 +978,7 @@ internal sealed class Heap
         while (current >= 0 && dest.Length > 0)
         {
             var page = this.LobPages[current];
+            this.LobPagesRead++;
             var payload = page.Payload;
             if (payload.Length > dest.Length)
                 throw new InvalidDataException($"LOB chain at head {headIndex} produced more bytes than the row's declared total length {totalLength}.");

@@ -25,9 +25,8 @@ partial class Simulation
     /// <c>FOR SECONDARY</c> <c>FULLTEXT_INDEX_VERSION</c> by setting the
     /// primary's value, and a <c>FOR SECONDARY</c>
     /// <c>LEDGER_DIGEST_STORAGE_ENDPOINT = OFF</c> by changing nothing, and so
-    /// does this. <c>CLEAR PROCEDURE_CACHE</c> without a handle has nothing
-    /// observable to clear: the plan cache is shared across databases and
-    /// invisible to queries. Each success raises the
+    /// does this. <c>CLEAR PROCEDURE_CACHE</c> without a handle clears the
+    /// database's cached plans (<see cref="ClearPlanCache"/>). Each success raises the
     /// <c>ALTER_DATABASE_SCOPED_CONFIGURATION</c> DDL event.
     /// </remarks>
     private static bool TryParseAlterDatabaseScopedConfiguration(ParserContext context)
@@ -183,7 +182,7 @@ partial class Simulation
     /// <c>CLEAR PROCEDURE_CACHE [plan_handle]</c>, entered on <c>CLEAR</c>. A
     /// plan handle is a binary literal, and none matches a cached plan here
     /// (Msg 12117); without one the statement succeeds, on a read-only database
-    /// too (probed 2026-09-27).
+    /// too (probed 2026-09-27), dropping the plans cached for the database.
     /// </summary>
     private static bool TryParseClearProcedureCache(ParserContext context)
     {
@@ -201,6 +200,7 @@ partial class Simulation
         RejectScopedConfigurationWithoutPermission(context, context.CurrentDatabase);
         if (withHandle)
             throw SimulatedSqlException.PlanHandleNotFound();
+        context.Connection.Simulation.ClearPlanCache(database: context.CurrentDatabase);
         RecordDdlEvent(context, "ALTER_DATABASE_SCOPED_CONFIGURATION", schemaName: null, objectName: null, objectType: null);
         return true;
     }

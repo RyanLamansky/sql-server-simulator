@@ -42,7 +42,9 @@ Every bump also invalidates the catalog row cache, which the non-DDL metadata ch
 
 `Simulation.ClearPlanCache` removes entries rather than staling them: `DBCC FREEPROCCACHE` (bare, or naming the `default` pool, which holds every plan here) and `DBCC FREESYSTEMCACHE('ALL' | 'SQL Plans')` empty the plan cache, the compiled-batch memo and the token memo, so the next execution of any text tokenizes, compiles and parses afresh.
 Given a `sql_handle` (the value `sys.dm_exec_requests.sql_handle` reports), `FREEPROCCACHE` removes the plan cache and compiled-batch entries whose command text hashes to it, and leaves the token memo alone.
+`ALTER DATABASE SCOPED CONFIGURATION CLEAR PROCEDURE_CACHE` removes the plan cache and compiled-batch entries compiled in the session's database, and leaves the token memo alone.
 The `internal` pool and a plan handle name nothing, the simulator exposing no plans; `DbccPlanCacheTests` (Tests.Internal) pins each scope.
+A session with `STATISTICS IO` or `TIME` on neither reads nor fills either cache, so its every batch compiles and reports ([`session-options.md`](session-options.md#statistics-time)).
 
 ## Promotion happens inline in the SELECT arm
 

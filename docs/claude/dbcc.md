@@ -40,7 +40,7 @@ The duration is a positive `int` literal; 0, a negative, a decimal, a variable o
 The session's `SET` options in real's fixed order: `textsize`, `rowcount` when set, `language`, `dateformat`, `datefirst`, the `statistics` switches, `lock_timeout`, then each on/off switch while on, `ansi_defaults` while all seven of its options are on, and `isolation level` last, reading `read committed snapshot` under `READ_COMMITTED_SNAPSHOT`.
 `quoted_identifier` reads the batch's parse-time value, as `@@OPTIONS` does ([`session-options.md`](session-options.md#when-a-set-applies)).
 `DEADLOCK_PRIORITY`, `QUERY_GOVERNOR_COST_LIMIT`, `CONTEXT_INFO`, `IDENTITY_INSERT` and `FMTONLY` never appear.
-The `STATISTICS` family, `FORCEPLAN` and `REMOTE_PROC_TRANSACTIONS` do nothing else here and are kept only to be listed (`SimulatedDbConnection.ListedOnlyOptions`).
+`STATISTICS XML` / `PROFILE`, `FORCEPLAN` and `REMOTE_PROC_TRANSACTIONS` do nothing else here and are kept only to be listed (`SimulatedDbConnection.ListedOnlyOptions`); `STATISTICS IO` / `TIME` report as [`session-options.md`](session-options.md#statistics-io) describes.
 
 ## `OPENTRAN`
 
@@ -82,6 +82,8 @@ A simulated database is always consistent, so each check reports a healthy one:
   `TABLERESULTS` returns the Msg 8997, 2593 and 8989 lines as rows of real's 23-column shape.
 - `CHECKFILEGROUP [( filegroup )]`: `CHECKDB` over the tables on one filegroup, without the Service Broker lines; an unknown filegroup is Msg 3027.
 - `CHECKTABLE ( table [, NOINDEX | index_id] )`: Msg 2536 and 2593 for the table, a `#temp` table by its padded internal name.
+  Under a database-scoped identity — `EXECUTE AS USER`, `dbo` included — it is Msg 916 state 2 after the permission check, naming the server principal as a refused `USE` does (a login, or a `WITHOUT LOGIN` user's `S-1-9-3-…` SID string), and the batch ends unless a `TRY` catches it: real's check reads an internal snapshot of the database, which that identity can't reach, while `WITH TABLOCK` takes locks instead and runs.
+  The other checks run under the same identity (probed 2026-09-28 against SQL Server 2025, with real's SID-derived name there where the simulator's is its own deterministic one).
 - `CHECKALLOC`: the heading, Msg 2538 / 8915 for the data file and 2539 / 8918 for the database, and Msg 8989.
 - `CHECKCATALOG`: Msg 2528 alone.
 - `ESTIMATEONLY` answers Msg 5281 instead of checking, `NO_INFOMSGS` or not.
@@ -103,7 +105,4 @@ A simulated database is always consistent, so each check reports a healthy one:
 ## Not modeled yet
 
 - `DBCC PAGE`, `IND`, `SHOWCONTIG`, `OUTPUTBUFFER`, `PROCCACHE`, `MEMORYSTATUS`, `PINTABLE` / `UNPINTABLE`, `FLUSHAUTHCACHE`, `TUPLEMOVER`, `CLONEDATABASE` and the other undocumented commands, the repair options, and `CHECKALLOC … WITH TABLERESULTS`.
-- The `STATISTICS IO` / `TIME` messages the `USEROPTIONS` switches would send ([`session-options.md`](session-options.md#not-modeled-yet)).
-- **A consistency check under `EXECUTE AS USER` is Msg 916 on real** — the checks read an internal database snapshot, which counts as another database, so a database-scoped impersonation (even a `db_owner` member) is refused at the check and the batch ends, while the same check `WITH TABLOCK`, which takes locks instead of a snapshot, runs (probed 2026-09-28 against SQL Server 2025).
-  The simulator runs the check, or raises its own DBCC permission error; the refusal names the user's SID-derived server principal (`S-1-9-3-…`), which the simulator has no counterpart for.
-- `ALTER DATABASE SCOPED CONFIGURATION CLEAR PROCEDURE_CACHE` still clears nothing ([`database-options.md`](database-options.md)).
+- `CHECKDB … WITH TABLOCK`'s Msg 5232 noting that the catalog and Service Broker checks were skipped.

@@ -12,6 +12,16 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException DbccStatementIncorrect(byte state = 3) =>
         new("Incorrect DBCC statement. Check the documentation for the correct DBCC syntax and options.", 2526, 16, state);
 
+    /// <summary>
+    /// Msg 916 state 2: <c>DBCC CHECKTABLE</c> under a database-scoped identity
+    /// (<c>EXECUTE AS USER</c>, <c>dbo</c> included), which reads an internal
+    /// snapshot of the database — another database to that identity — unless
+    /// <c>WITH TABLOCK</c> takes locks instead. Names the server principal as
+    /// the <c>USE</c> refusal does, and ends the batch unless caught.
+    /// </summary>
+    internal static SimulatedSqlException DbccSnapshotInaccessible(string principalName, string databaseName) =>
+        new($"The server principal \"{principalName}\" is not able to access the database \"{databaseName}\" under the current security context.", 916, 14, 2) { TerminatesBatch = true };
+
     /// <summary>Msg 195 state 4: a <c>DBCC … WITH</c> list naming a word that is no DBCC option at all.</summary>
     internal static SimulatedSqlException DbccOptionNotRecognized(string option) =>
         new($"'{option}' is not a recognized option.", 195, 15, 4);

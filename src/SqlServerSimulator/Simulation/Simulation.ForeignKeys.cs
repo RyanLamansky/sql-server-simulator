@@ -151,8 +151,12 @@ partial class Simulation
         }
 
         AwaitUncommittedKeyWriters(batch, fk.ReferencedTable, refStorageOrdinals, commons, probe);
-        return HeapSeekCache.For(fk.ReferencedTable.Heap)
+        var exists = HeapSeekCache.For(fk.ReferencedTable.Heap)
             .AnyRowMatches(fk.ReferencedTable.Heap, fk.ReferencedTable.StoredColumns, refStorageOrdinals, commons, probe);
+        // A lookup of the referenced key: no scan, and the page of the row it found.
+        if (batch.Connection.StatementIo?.Touch(fk.ReferencedTable) is { } io && exists)
+            io.LogicalReads++;
+        return exists;
     }
 
     // Maps a foreign key's full column ordinals to the heap's storage ordinals

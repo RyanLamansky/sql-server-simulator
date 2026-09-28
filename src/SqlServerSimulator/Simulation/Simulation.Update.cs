@@ -620,8 +620,8 @@ partial class Simulation
         // (positioned UPDATE leaves where null, so it keeps the full scan). The
         // loop re-runs WHERE below, so the seek only narrows the rows considered.
         var rowSource = where is not null
-            ? Selection.SeekMutationTarget(table, where, context.Batch) ?? ClusteredScan.RowsWithAddress(table)
-            : ClusteredScan.RowsWithAddress(table);
+            ? Selection.SeekMutationTarget(table, where, context.Batch) ?? ClusteredScan.RowsWithAddress(table, context.Connection.StatementIo)
+            : ClusteredScan.RowsWithAddress(table, context.Connection.StatementIo);
         // Skip mode commits nothing (CommitUpdate returns early), so the walk
         // is pure cost — and running WHERE / SET against live rows can raise a
         // runtime error (a division by zero, a conversion failure) on behalf of
@@ -987,7 +987,7 @@ partial class Simulation
         sources = Selection.PrepareMutationJoinSources(sources, joins, where, targetIndex, context.Batch);
 
         var targetAddresses = new Dictionary<byte[], (int Page, int Slot)>(ReferenceEqualityComparer.Instance);
-        sources[targetIndex] = WrapSourceWithAddressTracking(sources[targetIndex], table, targetAddresses);
+        sources[targetIndex] = WrapSourceWithAddressTracking(sources[targetIndex], table, targetAddresses, context.Connection.StatementIo);
 
         var seen = new HashSet<(int Page, int Slot)>();
         var affected = new List<(int PageIndex, int SlotIndex, SqlValue[] FullNew, SqlValue[]? FullOld)>();
@@ -1967,12 +1967,17 @@ partial class Simulation
     private static FromSource WrapSourceWithAddressTracking(
         FromSource original,
         HeapTable table,
-        Dictionary<byte[], (int Page, int Slot)> addressMap)
+        Dictionary<byte[], (int Page, int Slot)> addressMap,
+        IoStatistics? io)
     {
         IEnumerable<byte[]> RowsRecording()
         {
+            var counts = io?.Touch(table);
+            _ = counts?.ScanCount += 1;
+            var lastPage = -1;
             foreach (var (page, slot, bytes) in table.Heap.EnumerateRowsWithAddress())
             {
+                counts?.Enter(page, ref lastPage);
                 addressMap[bytes] = (page, slot);
                 yield return bytes;
             }

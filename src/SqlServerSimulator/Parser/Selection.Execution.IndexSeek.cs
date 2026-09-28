@@ -2183,7 +2183,7 @@ internal sealed partial class Selection
         out bool rangeExtended,
         out int candidateCount)
     {
-        if (!TryComputeEqualityCandidates(source, table, batch, outerResolver, equalities, bounds, out var candidates, out width, out rangeExtended))
+        if (!TryComputeEqualityCandidates(source, table, batch, outerResolver, equalities, bounds, out var candidates, out width, out rangeExtended, out var seeks))
         {
             seekRows = [];
             candidateCount = -1;
@@ -2194,8 +2194,8 @@ internal sealed partial class Selection
         if (snapshotXid is null && !plan.NoLockReader && !plan.SkipBlockedRows)
             AwaitUncommittedDeletesMatching(table, batch, outerResolver, equalities);
         seekRows = snapshotXid is { } sx
-            ? MaterializeSnapshotCandidates(table, batch, sx, candidates)
-            : MaterializeWithLockChecks(table, batch, plan, candidates, qualifier);
+            ? MaterializeSnapshotCandidates(table, batch, sx, candidates, seeks)
+            : MaterializeWithLockChecks(table, batch, plan, candidates, qualifier, seeks);
         return true;
     }
 
@@ -2263,11 +2263,13 @@ internal sealed partial class Selection
         Dictionary<int, RangeBoundExprs> bounds,
         out List<(int Page, int Slot)> candidates,
         out int width,
-        out bool rangeExtended)
+        out bool rangeExtended,
+        out int seeks)
     {
         candidates = [];
         width = 0;
         rangeExtended = false;
+        seeks = 0;
 
         var resolved = new Dictionary<int, (SqlType Common, SqlValue[] Probes)?>();
 
@@ -2321,6 +2323,14 @@ internal sealed partial class Selection
             commons[i] = common;
             probesPerColumn[i] = probes;
         }
+
+        // What STATISTICS IO counts as scans: one per probed key, none for the
+        // single lookup of a whole unique key or index, as real counts it.
+        seeks = 1;
+        foreach (var probes in probesPerColumn)
+            seeks *= probes.Length;
+        if (seeks == 1 && !bestContinues && (bestKeyOrdinals is { } whole ? whole.Length == bestLen : bestIndex!.IsUnique && bestIndex.KeyColumns.Length == bestLen))
+            seeks = 0;
 
         var cache = HeapSeekCache.For(table.Heap);
         if (bestContinues)
@@ -2577,7 +2587,7 @@ internal sealed partial class Selection
         var seen = new HashSet<(int, int)>();
         foreach (var (equalities, bounds) in planned)
         {
-            if (!TryComputeEqualityCandidates(source, table, batch, outerResolver, equalities, bounds, out var part, out _, out _))
+            if (!TryComputeEqualityCandidates(source, table, batch, outerResolver, equalities, bounds, out var part, out _, out _, out _))
                 return false;
             foreach (var address in part)
             {
@@ -2677,8 +2687,11 @@ internal sealed partial class Selection
     // qualifier, a tx-scoped row lock taken on a row it rejects is let go and
     // the row skipped (see RowLockQualifier).
     private static IEnumerable<byte[]> MaterializeWithLockChecks(
-        HeapTable table, BatchContext batch, DataLockPlan plan, List<(int Page, int Slot)> candidates, RowLockQualifier? qualifier = null)
+        HeapTable table, BatchContext batch, DataLockPlan plan, List<(int Page, int Slot)> candidates, RowLockQualifier? qualifier = null, int seeks = 1)
     {
+        var io = batch.Connection.StatementIo?.Touch(table);
+        _ = io?.ScanCount += seeks;
+        var lastPage = -1;
         // Hoisted per-row scaffolding for the qualifier, as the prefilter's.
         var tuple = new byte[]?[1];
         var qualifying = qualifier is not null && plan.RowMode is not null;
@@ -2704,6 +2717,7 @@ internal sealed partial class Selection
                 continue;
             if (!batch.TouchRowForRead(table, page, slot, plan) || table.Heap.ReadSlotBytes(page, slot) is not { } bytes)
                 continue;
+            io?.Enter(page, ref lastPage);
             if (qualifying)
             {
                 tuple[0] = bytes;
@@ -2875,20 +2889,20 @@ internal sealed partial class Selection
         var bounds = CollectRangeBounds(source, conjuncts, allowCorrelatedColumnValue: false);
 
         if (equalities.Count != 0
-            && TryComputeEqualityCandidates(source, table, batch, outerResolver: null, equalities, bounds, out var eqCandidates, out _, out _))
+            && TryComputeEqualityCandidates(source, table, batch, outerResolver: null, equalities, bounds, out var eqCandidates, out _, out _, out var eqSeeks))
         {
-            return MaterializeMutationCandidates(table, eqCandidates);
+            return MaterializeMutationCandidates(table, eqCandidates, batch, eqSeeks);
         }
 
         if (TryComputeUnionCandidates(
             source, table, batch, outerResolver: null, conjuncts, allowCorrelatedColumnValue: false, planSources: null,
             out var unionCandidates, out _))
         {
-            return MaterializeMutationCandidates(table, unionCandidates);
+            return MaterializeMutationCandidates(table, unionCandidates, batch, 1);
         }
 
         if (TryComputeRangeCandidates(source, table, batch, outerResolver: null, bounds, out var rangeCandidates))
-            return MaterializeMutationCandidates(table, rangeCandidates);
+            return MaterializeMutationCandidates(table, rangeCandidates, batch, 1);
 
         // No seekable equality or range conjunct: caller keeps its full scan.
         return null;
@@ -2936,8 +2950,8 @@ internal sealed partial class Selection
         return HasSeekableLeadingPrefix(table, equalities) ? Seek : null;
 
         IEnumerable<(int Page, int Slot, byte[] Bytes)> Seek(Func<MultiPartName, SqlValue> outerResolver) =>
-            TryComputeEqualityCandidates(source, table, batch, outerResolver, equalities, bounds, out var candidates, out _, out _)
-                ? MaterializeMutationCandidates(table, candidates)
+            TryComputeEqualityCandidates(source, table, batch, outerResolver, equalities, bounds, out var candidates, out _, out _, out var seeks)
+                ? MaterializeMutationCandidates(table, candidates, batch, seeks)
                 : [];
     }
 
@@ -2985,15 +2999,21 @@ internal sealed partial class Selection
     // live-key verify (the mutation loop's full-predicate re-check is the residual
     // filter, exactly as the query path leans on its residual WHERE).
     private static IEnumerable<(int Page, int Slot, byte[] Bytes)> MaterializeMutationCandidates(
-        HeapTable table, List<(int Page, int Slot)> candidates)
+        HeapTable table, List<(int Page, int Slot)> candidates, BatchContext batch, int seeks)
     {
+        var io = batch.Connection.StatementIo?.Touch(table);
+        _ = io?.ScanCount += seeks;
+        var lastPage = -1;
         var seen = new HashSet<(int, int)>();
         foreach (var (page, slot) in candidates)
         {
             if (!seen.Add((page, slot)) || table.Heap.IsSlotTombstoned(page, slot))
                 continue;
             if (table.Heap.ReadSlotBytes(page, slot) is { } bytes)
+            {
+                io?.Enter(page, ref lastPage);
                 yield return (page, slot, bytes);
+            }
         }
     }
 
@@ -3014,8 +3034,11 @@ internal sealed partial class Selection
     // The matched equality conjuncts stay in the residual WHERE, so any candidate
     // whose resolved version doesn't actually match the probe is filtered there.
     private static IEnumerable<byte[]> MaterializeSnapshotCandidates(
-        HeapTable table, BatchContext batch, long snapshotXid, List<(int Page, int Slot)> bucketCandidates)
+        HeapTable table, BatchContext batch, long snapshotXid, List<(int Page, int Slot)> bucketCandidates, int seeks = 1)
     {
+        var io = batch.Connection.StatementIo?.Touch(table);
+        _ = io?.ScanCount += seeks;
+        var lastPage = -1;
         var tx = batch.Connection.CurrentTransaction;
         var seen = new HashSet<(int, int)>();
 
@@ -3026,6 +3049,7 @@ internal sealed partial class Selection
             if (table.Heap.ReadSlotBytes(page, slot) is { } live
                 && Storage.VersionStore.ResolveVisibleVersion(table, (page, slot), live, snapshotXid, tx) is { } resolved)
             {
+                io?.Enter(page, ref lastPage);
                 yield return resolved;
             }
         }

@@ -265,6 +265,31 @@ public sealed class SimulatedDbConnection : DbConnection
     internal ListedOnlyOptions ListedOnlyOptions;
 
     /// <summary>
+    /// <c>SET STATISTICS IO</c> / <c>TIME</c>: while on, each statement is
+    /// followed by its Msg 3615 table lines / Msg 3612 execution times, and
+    /// each compile by a Msg 3613 (<see cref="StatementIo"/>,
+    /// <c>Simulation.StatisticsMessages</c>). A module body's <c>SET</c>
+    /// reverts when it returns.
+    /// </summary>
+    internal bool StatisticsIo, StatisticsTime;
+
+    /// <summary>
+    /// What the statement running in the innermost frame that reports for
+    /// itself has read, while <see cref="StatisticsIo"/> is on; null
+    /// otherwise, which is what every read path tests. A procedure, trigger
+    /// or dynamic-SQL statement installs its own for its duration and restores
+    /// its caller's; a function or view body inlines, adding to its caller's.
+    /// </summary>
+    internal Parser.IoStatistics? StatementIo;
+
+    /// <summary>
+    /// The time this session has spent in <c>WAITFOR</c>, in
+    /// <see cref="TimeSpan"/> ticks, which <c>STATISTICS TIME</c> takes out of
+    /// a statement's CPU time.
+    /// </summary>
+    internal long WaitedTicks;
+
+    /// <summary>
     /// Whether this connection serves a TDS session, whose response gives
     /// every statement a DONE token of its own, each naming the statement's
     /// kind (see <see cref="StatementDoneKind"/>). While set, the engine sends
@@ -421,6 +446,8 @@ public sealed class SimulatedDbConnection : DbConnection
         private readonly bool ansiNullDefaultOff = connection.AnsiNullDefaultOff;
         private readonly bool noExec = connection.NoExec;
         private readonly int deadlockPriority = connection.DeadlockPriority;
+        private readonly bool statisticsIo = connection.StatisticsIo;
+        private readonly bool statisticsTime = connection.StatisticsTime;
 
         public void Restore(SimulatedDbConnection connection)
         {
@@ -441,6 +468,8 @@ public sealed class SimulatedDbConnection : DbConnection
             connection.AnsiNullDefaultOff = this.ansiNullDefaultOff;
             connection.NoExec = this.noExec;
             connection.DeadlockPriority = this.deadlockPriority;
+            connection.StatisticsIo = this.statisticsIo;
+            connection.StatisticsTime = this.statisticsTime;
         }
     }
 

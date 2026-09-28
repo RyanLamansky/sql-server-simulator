@@ -321,6 +321,10 @@ partial class Simulation
                 // assignment) runs even when the iterator is partially consumed.
                 // An error that ends the body keeps what the body sent before it,
                 // which reaches the caller ahead of the error.
+                // STATISTICS TIME reports the body's compile on every call,
+                // ahead of what the body sends, at its last statement's line
+                // (probed 2026-09-28 against SQL Server 2025).
+                var compiles = connection.StatisticsTime && ReportsStatistics(outerBatch);
                 try
                 {
                     var parser = innerBatch.Parser;
@@ -334,6 +338,8 @@ partial class Simulation
                 }
                 finally
                 {
+                    if (compiles)
+                        outcomes.Insert(0, new SimulatedInfoOutcome(CompileTime(innerBatch, clock: null, innerBatch.LastTopLevelStatementLine + innerBatch.LineOffset, attributionName)));
                     connection.NestingLevel--;
                     endedUnderImplicitTransactions = connection.ImplicitTransactions;
                     connection.QuotedIdentifiers = savedQuotedIdentifiers;

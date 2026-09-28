@@ -87,6 +87,14 @@ internal sealed class BatchContext
     public readonly StatementContext CurrentStatement = new();
 
     /// <summary>
+    /// The line of the last top-level statement this batch's dispatch loop
+    /// reached, -1 for a <c>BEGIN TRY</c>: where <c>STATISTICS TIME</c>
+    /// reports the batch's compile (probed 2026-09-28 against SQL Server 2025).
+    /// Kept only while the option is on.
+    /// </summary>
+    public int LastTopLevelStatementLine;
+
+    /// <summary>
     /// Adopts <paramref name="outer"/>'s per-statement current-time freeze for
     /// a body that runs as part of the referencing statement rather than as
     /// statements of its own — a view body or an inline-TVF body, both of which
@@ -1892,6 +1900,9 @@ internal sealed class BatchContext
         // built, and a seeked source is a different enumerable that never runs
         // this one.
         batch.EnsureSerializableTableLock(table, plan);
+        var io = batch.Connection.StatementIo?.Touch(table);
+        _ = io?.ScanCount += 1;
+        var lastPage = -1;
         var snapshotXid = batch.ResolveSnapshotXidForRead(table);
         if (snapshotXid is null && !plan.NoLockReader && !plan.SkipBlockedRows)
             batch.AwaitUncommittedDeletes(table);
@@ -1905,12 +1916,16 @@ internal sealed class BatchContext
                 if (!seen.Add((pageIndex, slotIndex)) || table.Heap.IsSlotTombstoned(pageIndex, slotIndex))
                     continue;
                 if (batch.TouchRowForRead(table, pageIndex, slotIndex, plan) && table.Heap.ReadSlotBytes(pageIndex, slotIndex) is { } bytes)
+                {
+                    io?.Enter(pageIndex, ref lastPage);
                     yield return bytes;
+                }
             }
             yield break;
         }
         foreach (var (pageIndex, slotIndex, bytes) in table.Heap.EnumerateRowsWithAddress())
         {
+            io?.Enter(pageIndex, ref lastPage);
             if (snapshotXid is { } sx)
             {
                 var resolved = Storage.VersionStore.ResolveVisibleVersion(table, (pageIndex, slotIndex), bytes, sx, batch.Connection.CurrentTransaction);

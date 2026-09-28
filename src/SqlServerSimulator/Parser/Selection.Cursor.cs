@@ -895,8 +895,14 @@ internal sealed partial class Selection
         {
             var ordinals = CursorUniqueKeyOrdinals(table);
             var storedColumns = table.StoredColumns;
+            // A cursor's read lists its work table ahead of the table it reads.
+            var io = batch.Connection.StatementIo;
+            var counts = io?.Touch(table);
+            _ = counts?.ScanCount += 1;
+            var lastPage = -1;
             foreach (var (page, slot, bytes) in table.Heap.EnumerateRowsWithAddress())
             {
+                counts?.Enter(page, ref lastPage);
                 scan.Bytes.Add(bytes);
                 scan.Rids.Add((page, slot));
                 if (ordinals is not { } keyOrdinals)
@@ -909,6 +915,7 @@ internal sealed partial class Selection
                     key[k] = RowDecoder.DecodeColumn(storedColumns, bytes, keyOrdinals[k], table.Heap);
                 scan.UniqueKeys.Add(key);
             }
+            io?.UseWorktable();
             return;
         }
 

@@ -85,6 +85,8 @@ partial class Simulation
         var frames = batch.Connection.FramesEveryStatement && !batch.IsSkipping;
         if (frames)
             yield return StatementDone(batch, StatementDoneKind.BeginTry);
+        if (StructuralExecutionTimes(batch) is { } beginTryTimes)
+            yield return beginTryTimes;
 
         var outerInFlight = batch.InFlightError;
         var outerErrorSignaled = batch.ErrorSignaled;
@@ -150,6 +152,8 @@ partial class Simulation
             batch.ErrorSignaled = false;
             if (frames)
                 yield return StatementDone(batch, StatementDoneKind.BeginCatch);
+            if (StructuralExecutionTimes(batch, catchBegin.LineNumber) is { } catchTimes)
+                yield return catchTimes;
             batch.CatchDepth++;
             try
             {
@@ -206,7 +210,7 @@ partial class Simulation
         }
 
         // Consume END CATCH.
-        if (context.Token is not ReservedKeyword { Keyword: Keyword.End })
+        if (context.Token is not ReservedKeyword { Keyword: Keyword.End } endCatch)
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextRequired();
         if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.Catch })
@@ -214,7 +218,13 @@ partial class Simulation
         context.MoveNextOptional();
         if (frames && !batch.ReturnSignaled && batch.PendingGotoLabel is null)
             yield return StatementDone(batch, StatementDoneKind.EndCatch);
+        if (!batch.ReturnSignaled && batch.PendingGotoLabel is null && StructuralExecutionTimes(batch, endCatch.LineNumber) is { } endCatchTimes)
+            yield return endCatchTimes;
     }
+
+    /// <summary>True when the current token starts a <c>BEGIN TRY</c>.</summary>
+    private static bool IsBeginTry(ParserContext context) =>
+        context.Token is ReservedKeyword { Keyword: Keyword.Begin } && PeekAfterLead(context) is UnquotedString { ContextualKeyword: ContextualKeyword.Try };
 
     /// <summary>
     /// True when the current token is the start of an <c>END TRY</c> pair

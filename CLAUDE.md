@@ -326,7 +326,7 @@ Where an entry carries a second clause it is because that fact changes what you'
 - **Per-`Simulation` plan cache and token memo** — the two reuse layers over a repeated `CommandText`.
   Cached plans are **shared**, so per-execution state belongs on `StatementContext`, never on the plan → [`plan-cache.md`](docs/claude/plan-cache.md).
 - **Transactions** — statement atomicity, the undo log, BEGIN / COMMIT / ROLLBACK / SAVE, `SET XACT_ABORT`, `SET IMPLICIT_TRANSACTIONS`, and the rare transaction-*aborting* error class that unwinds the whole stack → [`transactions.md`](docs/claude/transactions.md).
-- **Session `SET` options** — which carry state, the parse-time pair against the run-time rest, how far a module body's `SET` reaches, `@@OPTIONS` / `ANSI_DEFAULTS` / `ANSI_NULL_DFLT_*` / `NOEXEC` / `PARSEONLY` / `DEADLOCK_PRIORITY`.
+- **Session `SET` options** — which carry state, the parse-time pair against the run-time rest, how far a module body's `SET` reaches, `@@OPTIONS` / `ANSI_DEFAULTS` / `ANSI_NULL_DFLT_*` / `NOEXEC` / `PARSEONLY` / `DEADLOCK_PRIORITY`, and the `STATISTICS IO` / `TIME` messages.
   A new option's state joins `SimulatedDbConnection.SessionOptionScope` so a body's `SET` reverts on return → [`session-options.md`](docs/claude/session-options.md).
 - **Locking, MVCC, SNAPSHOT / RCSI, deadlock and timeout, the lock DMVs, key and key-range locks anchored on index keys, per-statement escalation, application-lock siblings**.
   Every shared structure names a session by its one-way `SessionToken`, which is what lets an abandoned connection be collected and torn down → [`locking.md`](docs/claude/locking.md).
@@ -369,7 +369,7 @@ This is a trigger list: [`backlog.md`](docs/claude/backlog.md) carries the weigh
 Entries that raise a *real* SQL Server error deliberately are **not** here; they're coverage, and live in their feature's deep-dive.
 The feature docs' own **Not modeled yet** sections hold the smaller gaps.
 
-- **A few `SET <option>` toggles still parse and are discarded** — `STATISTICS IO` / `TIME`, the `SHOWPLAN_*` family, `ARITHIGNORE`, `FORCEPLAN` → [`session-options.md`](docs/claude/session-options.md#not-modeled-yet).
+- **A few `SET <option>` toggles still parse and are discarded** — `STATISTICS XML` / `PROFILE` and the `SHOWPLAN_*` family, which return no plans, `ARITHIGNORE`, `FORCEPLAN` → [`session-options.md`](docs/claude/session-options.md#not-modeled-yet).
   The same goes for most `ALTER DATABASE … SET` options → [`database-options.md`](docs/claude/database-options.md).
 - **Heap allocation tracking** (a flat page list, no IAM/PFS) → [`heap-storage.md`](docs/claude/heap-storage.md).
 - **A binder report's ORDER BY Msg 209** for a name two select items share, and a name only a run reaches → [`errors.md`](docs/claude/errors.md#not-modeled-yet-1).

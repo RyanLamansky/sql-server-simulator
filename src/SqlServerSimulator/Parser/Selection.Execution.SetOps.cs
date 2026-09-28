@@ -497,6 +497,7 @@ internal sealed partial class Selection
             if (seen.Add(DecodeRowToValues(rowBytes, schema)))
                 yield return rowBytes;
         }
+        batch.Connection.StatementIo?.UseWorktable();
     }
 
     private static IEnumerable<byte[]> IntersectRows(Selection left, Selection right, SqlType[] schema, BatchContext batch, Func<MultiPartName, SqlValue>? outer)
@@ -512,6 +513,7 @@ internal sealed partial class Selection
             if (rightSet.Contains(values) && emitted.Add(values))
                 yield return rowBytes;
         }
+        batch.Connection.StatementIo?.UseWorktable();
     }
 
     private static IEnumerable<byte[]> ExceptRows(Selection left, Selection right, SqlType[] schema, BatchContext batch, Func<MultiPartName, SqlValue>? outer)
@@ -527,6 +529,7 @@ internal sealed partial class Selection
             if (!rightSet.Contains(values) && emitted.Add(values))
                 yield return rowBytes;
         }
+        batch.Connection.StatementIo?.UseWorktable();
     }
 
     /// <summary>

@@ -536,3 +536,13 @@ internal sealed class LockCheckedScanRows(HeapTable table, DataLockPlan plan) : 
     public override IEnumerable<byte[]> For(BatchContext batch) =>
         BatchContext.WrapWithRowConflictChecks(table, batch, plan);
 }
+
+/// <summary>
+/// A scan that takes no per-row lock — a <c>NOLOCK</c> read, a table
+/// variable — counted in the executing statement's <c>STATISTICS IO</c>.
+/// </summary>
+internal sealed class UnlockedScanRows(HeapTable table) : PerExecutionRows
+{
+    public override IEnumerable<byte[]> For(BatchContext batch) =>
+        ClusteredScan.Rows(table, batch.Connection.StatementIo);
+}

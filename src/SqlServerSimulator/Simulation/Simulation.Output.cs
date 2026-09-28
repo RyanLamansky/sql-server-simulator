@@ -416,6 +416,7 @@ partial class Simulation
             var (newPage, newSlot) = this.Target.Heap.Insert(
                 RowEncoder.EncodeRow(this.Target.StoredColumns, targetValues, this.Target.Heap),
                 undoLog);
+            this.batch.Connection.StatementIo?.CountWrite(this.Target);
             if (Simulation.IsLockableTable(this.Target))
                 this.batch.AcquireRowLockTxScoped(this.Target, newPage, newSlot, LockMode.Exclusive, RowLockPurpose.Insert);
             this.Target.ChangeTracking?.RecordRow(this.batch, this.Target, targetValues, ChangeTrackingOperation.Insert);

@@ -94,4 +94,19 @@ public sealed class DbccPlanCacheTests
         }
         AreEqual(1, simulation.PlanCacheCount);
     }
+
+    [TestMethod]
+    public void ClearProcedureCache_RemovesOnlyTheDatabasesPlans()
+    {
+        var (simulation, connection) = Cached();
+        using (connection)
+        {
+            _ = Scalar(connection, "CREATE DATABASE other");
+            _ = Scalar(connection, "USE other; ALTER DATABASE SCOPED CONFIGURATION CLEAR PROCEDURE_CACHE");
+            AreEqual(2, simulation.PlanCacheCount);
+            _ = Scalar(connection, "USE simulated; ALTER DATABASE SCOPED CONFIGURATION CLEAR PROCEDURE_CACHE");
+        }
+        AreEqual(0, simulation.PlanCacheCount);
+        IsGreaterThan(0, simulation.TokenMemo.Count);
+    }
 }

@@ -231,8 +231,8 @@ partial class Simulation
         // cursor already fixed one row). The loop re-runs WHERE below, so the
         // seek only narrows the rows considered.
         var rowSource = where is not null
-            ? Selection.SeekMutationTarget(table, where, context.Batch) ?? ClusteredScan.RowsWithAddress(table)
-            : ClusteredScan.RowsWithAddress(table);
+            ? Selection.SeekMutationTarget(table, where, context.Batch) ?? ClusteredScan.RowsWithAddress(table, context.Connection.StatementIo)
+            : ClusteredScan.RowsWithAddress(table, context.Connection.StatementIo);
         // Skip mode commits nothing (CommitDelete returns early) — same reason
         // the UPDATE path drops its row source, including the runtime errors a
         // never-run statement's WHERE would otherwise raise while a module body
@@ -398,7 +398,7 @@ partial class Simulation
         sources = Selection.PrepareMutationJoinSources(sources, joins, where, targetIndex, context.Batch);
 
         var targetAddresses = new Dictionary<byte[], (int Page, int Slot)>(ReferenceEqualityComparer.Instance);
-        sources[targetIndex] = WrapSourceWithAddressTracking(sources[targetIndex], table, targetAddresses);
+        sources[targetIndex] = WrapSourceWithAddressTracking(sources[targetIndex], table, targetAddresses, context.Connection.StatementIo);
 
         var seen = new HashSet<(int Page, int Slot)>();
         var deleted = new List<(int PageIndex, int SlotIndex, SqlValue[]? FullOld)>();

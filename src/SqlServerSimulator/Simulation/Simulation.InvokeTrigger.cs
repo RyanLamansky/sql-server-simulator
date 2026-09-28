@@ -213,6 +213,11 @@ partial class Simulation
 
         var insertedPseudo = MaterializePseudoTable(pseudoColumns, "inserted", insertedRows ?? [], outerBatch);
         var deletedPseudo = MaterializePseudoTable(pseudoColumns, "deleted", deletedRows ?? [], outerBatch);
+        // An INSTEAD OF trigger's rows wait in a work table, which the firing
+        // statement lists and the body's reads of inserted / deleted scan
+        // (probed 2026-09-28 against SQL Server 2025).
+        insertedPseudo.ReadsAsWorktable = deletedPseudo.ReadsAsWorktable = true;
+        outerBatch.Connection.StatementIo?.UseWorktable();
         var mask = BuildColumnsUpdatedMask(parent as HeapTable, pseudoColumns.Length, action, updatedColumnOrdinals);
         RunTriggerBodies(outerBatch, targetDatabase, [matched], action, insertedPseudo, deletedPseudo, affectedRowCount, mask);
         return true;
@@ -415,6 +420,20 @@ partial class Simulation
                     OwnershipChainOwnerId = chainOwner,
                     ModuleObjectId = objectId,
                 };
+                // The firing statement's reads report ahead of the body, whose
+                // compile STATISTICS TIME reports first (probed 2026-09-28
+                // against SQL Server 2025).
+                var compileAt = -1;
+                if (ReportsStatistics(outerBatch) && (connection.StatisticsIo || connection.StatisticsTime))
+                {
+                    foreach (var queued in DrainPendingMessages(connection))
+                        (outerBatch.PendingTriggerOutcomes ??= []).Add(queued);
+                    QueueIoReport(outerBatch);
+                    foreach (var queued in DrainPendingMessages(connection))
+                        (outerBatch.PendingTriggerOutcomes ??= []).Add(queued);
+                    if (connection.StatisticsTime)
+                        compileAt = outerBatch.PendingTriggerOutcomes?.Count ?? 0;
+                }
                 var parser = innerBatch.Parser;
                 parser.MoveNextOptional();
                 foreach (var bodyOutcome in DispatchStatementsUntil(innerBatch, endKeyword: null))
@@ -428,6 +447,8 @@ partial class Simulation
                     // completes.
                     (outerBatch.PendingTriggerOutcomes ??= []).Add(bodyOutcome);
                 }
+                if (compileAt >= 0)
+                    (outerBatch.PendingTriggerOutcomes ??= []).Insert(compileAt, new SimulatedInfoOutcome(CompileTime(innerBatch, clock: null, innerBatch.LastTopLevelStatementLine + innerBatch.LineOffset, triggerName)));
                 // Real aborts the batch when any error of severity >= 11
                 // was raised while the body ran, even one the body's own
                 // TRY / CATCH swallowed — the swallow doesn't save it.

@@ -592,12 +592,16 @@ partial class Simulation
         {
             // Dynamic SQL is a batch of its own and compiles as one; an error
             // compiling it is the EXEC's own, and the caller carries on.
-            if (this.CompileBatch(CompileContextFor(innerBatch, dynCommand), key: null) is { } compileError)
+            var compileContext = CompileContextFor(innerBatch, dynCommand);
+            StatementClock? compileClock = connection.StatisticsTime && ReportsStatistics(outerBatch) ? StatementClock.Start(connection) : null;
+            if (this.CompileBatch(compileContext, key: null) is { } compileError)
             {
                 compileError.EndedCalledBatch = true;
                 throw compileError;
             }
             compiled = true;
+            if (compileClock is not null)
+                outcomes.Add(new SimulatedInfoOutcome(CompileTime(innerBatch, compileClock, compileContext.LastTopLevelStatementLine, innerBatch.ErrorProcedureName)));
 
             // An error that ends the batch keeps what the batch sent before
             // it, which reaches the caller ahead of the error.
