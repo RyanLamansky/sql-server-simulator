@@ -19,8 +19,15 @@ partial class Simulation
         if (context.Token is ReservedKeyword { Keyword: Keyword.Into })
             context.MoveNextRequired();
 
+        if (context.Token is ReservedKeyword { Keyword: Keyword.OpenQuery })
+        {
+            var (serverName, query) = Selection.ParseOpenQueryArguments(context);
+            var openQueryTarget = RemoteWrite.ForOpenQuery(context.Batch, serverName, query, RemoteWriteKind.Insert);
+            return ProcessRemoteInsert(context, openQueryTarget, top, new MultiPartName(openQueryTarget.Proxy.Name));
+        }
         var destinationName = BatchContext.ParseObjectName(context, acceptTableVariable: true);
-        context.Batch.RejectCrossServerMutation(destinationName);
+        if (RemoteWrite.ForTarget(context.Batch, destinationName, RemoteWriteKind.Insert) is { } remoteWrite)
+            return ProcessRemoteInsert(context, remoteWrite, top, destinationName);
         // A function body may write a table variable but nothing persistent
         // (Msg 443). An INSERT / MERGE target is always a written name, never a
         // FROM-clause alias, so the name alone settles it.
@@ -62,6 +69,41 @@ partial class Simulation
         // ProcessHeapInsert.
         _ = context.Batch.AcquireDataLockIfApplicable(destinationTable, targetHints, isWrite: true);
         return ProcessHeapInsert(destinationTable, context, top, destinationName);
+    }
+
+    /// <summary>
+    /// INSERT into a linked server's table, named four-part or through
+    /// <c>OPENQUERY</c>: the statement fills <paramref name="remoteWrite"/>'s
+    /// stand-in through the ordinary heap path and the server gets its rows
+    /// once it succeeds. The column list is read ahead for what the replay
+    /// sends, and an <c>OUTPUT</c> clause is Msg 405. Enters on the target
+    /// name's last token, or <c>OPENQUERY</c>'s closing parenthesis.
+    /// </summary>
+    private static SimulatedStatementOutcome ProcessRemoteInsert(ParserContext context, RemoteWrite remoteWrite, Selection.DmlTopLimit? top, MultiPartName destinationName)
+    {
+        context.MoveNextRequired();
+        Selection.ValidateDmlTargetHints(Selection.ParseOptionalTableHints(context, allowLegacyParenForm: false));
+        var checkpoint = context.SaveCheckpoint();
+        if (context.Token is Operator { Character: '(' })
+        {
+            var names = new List<string>();
+            while (context.GetNextRequired() is StringToken column)
+            {
+                names.Add(column.Value);
+                if (context.GetNextRequired() is not Operator { Character: ',' })
+                    break;
+            }
+            if (context.Token is Operator { Character: ')' })
+            {
+                context.MoveNextOptional();
+                remoteWrite.CheckInsertColumns(context.Batch, names);
+            }
+        }
+        if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Output })
+            throw SimulatedSqlException.RemoteDmlTargetWithOutput();
+        remoteWrite.InsertsDefaultValues = context.Token is ReservedKeyword { Keyword: Keyword.Default };
+        context.RestoreCheckpoint(checkpoint);
+        return ProcessHeapInsert(remoteWrite.Proxy, context, top, destinationName);
     }
 
     /// <summary>

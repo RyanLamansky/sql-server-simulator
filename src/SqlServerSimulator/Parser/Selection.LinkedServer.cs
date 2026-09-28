@@ -1,4 +1,3 @@
-using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using SqlServerSimulator.Parser.Tokens;
 using SqlServerSimulator.Storage;
@@ -65,22 +64,85 @@ partial class Selection
     /// per remote query" semantic of real SQL Server's linked-server
     /// pipeline.
     /// </summary>
-    [SuppressMessage("Security", "CA2100:Review SQL queries for security vulnerabilities", Justification = "The query string is built from identifiers that already passed parser validation as Name tokens (so they're well-formed SQL identifiers, not user-typed text); the leaf / schema / db segments are bracket-quoted with embedded ] escaping. The remote command runs against a sibling Simulation in the same process — there's no external SQL surface to inject against.")]
-    private static List<byte[]> StreamRemoteRows(LinkedServer server, string databaseName, string schemaName, string leafName)
+    private static List<byte[]> StreamRemoteRows(LinkedServer server, string databaseName, string schemaName, string leafName) =>
+        RemoteWrite.RunRemoteQuery(
+            server,
+            string.Create(CultureInfo.InvariantCulture, $"SELECT * FROM [{EscapeIdent(databaseName)}].[{EscapeIdent(schemaName)}].[{EscapeIdent(leafName)}]"),
+            databaseName,
+            browse: false) is { } result
+                ? [.. result.RowBytes]
+                : [];
+
+    /// <summary>
+    /// The FROM source over a <see cref="RemoteWrite"/>'s stand-in, for the
+    /// joined form of an UPDATE or DELETE whose target alias names a linked
+    /// server's table or an <c>OPENQUERY</c>. Enters past the alias, whose
+    /// caller consumed it; consumes any hints.
+    /// </summary>
+    private static FromSource RemoteTargetSource(ParserContext context, RemoteWrite remoteWrite, string? alias, string writtenName)
     {
-        using var conn = server.Target.CreateDbConnection();
-        conn.Open();
-        using var cmd = conn.CreateCommand();
-        cmd.CommandText = string.Create(
-            CultureInfo.InvariantCulture,
-            $"SELECT * FROM [{EscapeIdent(databaseName)}].[{EscapeIdent(schemaName)}].[{EscapeIdent(leafName)}]");
-        var rows = new List<byte[]>();
-        foreach (var outcome in server.Target.CreateResultSetsForCommand(cmd))
+        var proxy = remoteWrite.Proxy;
+        var columnNames = new string[proxy.Columns.Length];
+        for (var i = 0; i < columnNames.Length; i++)
+            columnNames[i] = proxy.Columns[i].Name;
+        _ = ParseOptionalTableHints(context);
+        return new FromSource(
+            qualifier: alias ?? proxy.Name,
+            columnNames: columnNames,
+            columns: proxy.Columns,
+            storedSchema: proxy.StoredColumns,
+            storageOrdinals: proxy.StorageOrdinals,
+            lobStore: proxy.Heap,
+            rows: ClusteredScan.Rows(proxy),
+            backingTable: proxy,
+            writtenObjectName: writtenName);
+    }
+
+    /// <summary>
+    /// A four-part name whose schema is <c>sys</c> or
+    /// <c>INFORMATION_SCHEMA</c> reads the server's catalog view of that name:
+    /// its columns are the ones the view answers with there, found by running
+    /// it once, as <c>OPENQUERY</c> finds its query's. Null when the name isn't
+    /// one or the server has no such view.
+    /// </summary>
+    private static FromSource? TryRemoteCatalogViewSource(ParserContext context, MultiPartName objectName)
+    {
+        if (!BuiltInToken.Equals(objectName[2], "sys") && !BuiltInToken.Equals(objectName[2], "INFORMATION_SCHEMA"))
+            return null;
+        var server = RemoteWrite.ResolveServer(context.Batch, objectName[0]);
+        var databaseName = string.IsNullOrEmpty(objectName[1]) ? Simulation.DefaultDatabaseName : objectName[1];
+        if (!server.Target.Databases.ContainsKey(databaseName))
+            return null;
+        context.Batch.HasSessionScopedReference = true;
+        if (!context.Batch.IsSkipping && context.Connection.CurrentTransaction is { IsDistributed: true })
+            RemoteWrite.RequireNoTransaction(context.Batch, server);
+        var query = string.Create(CultureInfo.InvariantCulture, $"SELECT * FROM [{EscapeIdent(databaseName)}].[{EscapeIdent(objectName[2])}].[{EscapeIdent(objectName.Leaf)}]");
+        SimulatedSqlResultSet? probe;
+        try
         {
-            if (outcome is SimulatedSqlResultSet rs)
-                rows.AddRange(rs.RowBytes);
+            probe = RemoteWrite.RunRemoteQuery(server, query, databaseName, browse: false);
         }
-        return rows;
+        catch (SimulatedSqlException error) when (error.Number == 208)
+        {
+            return null;
+        }
+        if (probe is null)
+            return null;
+        var plan = ForOpenQuery(server, query, probe.Schema, probe.ColumnNames);
+        var columns = new HeapColumn[plan.Schema.Length];
+        for (var i = 0; i < columns.Length; i++)
+            columns[i] = new HeapColumn(plan.ColumnNames[i], plan.Schema[i], maxLength: null, nullable: true);
+        var alias = ConsumeOptionalAlias(context);
+        _ = ParseOptionalTableHints(context);
+        return new FromSource(
+            qualifier: alias ?? objectName.Leaf,
+            columnNames: plan.ColumnNames,
+            columns: columns,
+            storedSchema: columns,
+            storageOrdinals: null,
+            lobStore: null,
+            rows: [],
+            lateralPlan: plan);
     }
 
     private static string EscapeIdent(string ident) => ident.Replace("]", "]]", StringComparison.Ordinal);
@@ -102,22 +164,7 @@ partial class Selection
     /// </summary>
     internal static Selection ParseOpenQuery(ParserContext context)
     {
-        if (context.GetNextRequired() is not Operator { Character: '(' })
-            throw SimulatedSqlException.SyntaxErrorNear(context);
-
-        if (context.GetNextRequired() is not Name serverToken)
-            throw SimulatedSqlException.SyntaxErrorNear(context);
-        var serverName = serverToken.Value;
-
-        if (context.GetNextRequired() is not Operator { Character: ',' })
-            throw SimulatedSqlException.SyntaxErrorNear(context);
-
-        if (context.GetNextRequired() is not Literal queryLiteral || queryLiteral.Value.Type.Category != SqlTypeCategory.String)
-            throw SimulatedSqlException.SyntaxErrorNear(context);
-        var queryText = queryLiteral.Value.AsString;
-
-        if (context.GetNextRequired() is not Operator { Character: ')' })
-            throw SimulatedSqlException.SyntaxErrorNear(context);
+        var (serverName, queryText) = ParseOpenQueryArguments(context);
         context.MoveNextOptional();
 
         // OPENQUERY reads external remote state, so its FROM-less-style
@@ -125,11 +172,37 @@ partial class Selection
         // remote. Disqualify the batch from plan-cache promotion.
         context.Batch.HasSessionScopedReference = true;
 
-        if (!context.Batch.Connection.Simulation.ActiveLinkedServers.TryGetValue(serverName, out var server))
-            throw SimulatedSqlException.LinkedServerNotFound(serverName);
+        var server = RemoteWrite.ResolveServer(context.Batch, serverName);
+        if (!context.Batch.IsSkipping && context.Connection.CurrentTransaction is { IsDistributed: true })
+            RemoteWrite.RequireNoTransaction(context.Batch, server);
 
         var (schema, columnNames) = DiscoverOpenQuerySchema(server, queryText);
         return ForOpenQuery(server, queryText, schema, columnNames);
+    }
+
+    /// <summary>
+    /// Reads <c>OPENQUERY</c>'s two arguments — a bare server identifier and a
+    /// bare string literal — entering on the <c>OPENQUERY</c> keyword and
+    /// leaving the cursor on the closing <c>)</c>. Anything else is Msg 102 at
+    /// the token that breaks the shape, before the server is looked up.
+    /// </summary>
+    internal static (string ServerName, string Query) ParseOpenQueryArguments(ParserContext context)
+    {
+        if (context.GetNextRequired() is not Operator { Character: '(' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+
+        if (context.GetNextRequired() is not Name serverToken)
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+
+        if (context.GetNextRequired() is not Operator { Character: ',' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+
+        if (context.GetNextRequired() is not Literal queryLiteral || queryLiteral.Value.Type.Category != SqlTypeCategory.String)
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+
+        if (context.GetNextRequired() is not Operator { Character: ')' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        return (serverToken.Value, queryLiteral.Value.AsString);
     }
 
     /// <summary>
@@ -159,7 +232,6 @@ partial class Selection
     /// exact real-server Msg for this case isn't probed, so the simulator
     /// names the condition rather than fabricating a number.
     /// </summary>
-    [SuppressMessage("Security", "CA2100:Review SQL queries for security vulnerabilities", Justification = "OPENQUERY's second argument is a pass-through query string by design — the caller intends it to run verbatim on the remote. The remote command runs against a sibling Simulation in the same process; there's no external SQL surface to inject against.")]
     private static (SqlType[] Schema, string[] ColumnNames) DiscoverOpenQuerySchema(LinkedServer server, string queryText)
     {
         // An all-whitespace / empty pass-through string reaches the remote
@@ -168,17 +240,9 @@ partial class Selection
         // message instead so every no-rowset payload surfaces the same way.
         if (string.IsNullOrWhiteSpace(queryText))
             throw OpenQueryNoResultSet(server.Name);
-
-        using var conn = server.Target.CreateDbConnection();
-        conn.Open();
-        using var cmd = conn.CreateCommand();
-        cmd.CommandText = queryText;
-        foreach (var outcome in server.Target.CreateResultSetsForCommand(cmd))
-        {
-            if (outcome is SimulatedSqlResultSet rs)
-                return (rs.Schema, rs.ColumnNames);
-        }
-        throw OpenQueryNoResultSet(server.Name);
+        return RemoteWrite.RunRemoteQuery(server, queryText, database: null, browse: false) is { } result
+            ? (result.Schema, result.ColumnNames)
+            : throw OpenQueryNoResultSet(server.Name);
     }
 
     private static NotSupportedException OpenQueryNoResultSet(string serverName) =>
@@ -190,18 +254,8 @@ partial class Selection
     /// connection disposes). Only the first result set is returned, matching
     /// OPENQUERY's semantics.
     /// </summary>
-    [SuppressMessage("Security", "CA2100:Review SQL queries for security vulnerabilities", Justification = "OPENQUERY's second argument is a pass-through query string by design — the caller intends it to run verbatim on the remote. The remote command runs against a sibling Simulation in the same process; there's no external SQL surface to inject against.")]
-    private static List<byte[]> StreamOpenQueryRows(LinkedServer server, string queryText)
-    {
-        using var conn = server.Target.CreateDbConnection();
-        conn.Open();
-        using var cmd = conn.CreateCommand();
-        cmd.CommandText = queryText;
-        foreach (var outcome in server.Target.CreateResultSetsForCommand(cmd))
-        {
-            if (outcome is SimulatedSqlResultSet rs)
-                return [.. rs.RowBytes];
-        }
-        return [];
-    }
+    private static List<byte[]> StreamOpenQueryRows(LinkedServer server, string queryText) =>
+        RemoteWrite.RunRemoteQuery(server, queryText, database: null, browse: false) is { } result
+            ? [.. result.RowBytes]
+            : [];
 }

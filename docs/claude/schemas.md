@@ -64,6 +64,8 @@ Skip-mode (inside an un-taken `IF` / `WHILE`) suppresses the switch.
 The session's own database is unaffected: `DB_NAME()` in the mutating statement still reads the session's, `@@ROWCOUNT` and `SCOPE_IDENTITY()` / `@@IDENTITY` flow back to the caller, and one transaction spans both databases (`ROLLBACK` and `ROLLBACK TRAN <savepoint>` undo the other database's write, since undo entries reference their `Heap` directly).
 Every shape here is probe-confirmed against SQL Server 2025.
 
+A four-part name reaches past the instance to a linked server — see [`linked-servers.md`](linked-servers.md#writes).
+
 What follows the *target* rather than the session, all keyed off `HeapTable.OwningDatabase` (stamped when the table enters a `Schema.HeapTables` dict) via `BatchContext.DatabaseFor`:
 
 - **The rowversion counter.**
@@ -84,9 +86,10 @@ Locks likewise: the `LockManager` is per-`Simulation` and its resources hang off
 
 **Not modeled yet**
 
-- **Four-part writes to a linked server** stay rejected by `BatchContext.RejectCrossServerMutation` — the remote's lock manager and undo log are its own, and that's the [`linked-servers.md`](linked-servers.md) gap, not this one.
 - **The database name in Msg 515 / 547 constraint messages** is still the literal `Simulation.DefaultDatabaseName`, so a violation in another database names `simulated` where real names the target (a pre-existing hardcode, unrelated to which database the write came from).
 - **The `OBJECT_*` scalars' metadata-visibility gate** reads the session's database rather than the one a three-part argument names; catalog-view visibility already follows the target.
+- **A view or procedure named through a three-part name binds its body in the session's database** rather than its own, so `SELECT * FROM otherdb.dbo.v` over `v`'s unqualified `t` is Msg 208, as is `EXEC otherdb.dbo.p` whose body writes one, where real binds both in `otherdb` and `DB_NAME()` inside the procedure reads it (probed 2026-09-28 against SQL Server 2025).
+  A linked server's remote session starts in the target's database, which is why writes through one and remote procedure calls don't meet this.
 - **`CREATE VIEW` / `PROCEDURE` / `FUNCTION` / `TRIGGER` with a db prefix** — real raises Msg 166 (`does not allow specifying the database name as a prefix`); the simulator doesn't enforce that yet.
 
 ## DROP SCHEMA
@@ -112,7 +115,7 @@ The base object is **not** resolved at creation: real binds it lazily, so a syno
 ### Resolution
 
 `BatchContext.TryRedirectThroughSynonym` is the shared redirect step behind `TryResolveTable` / `TryResolveView` / `TryResolveFunction`; each recurses on the base name so a schema-qualified (or 3-part cross-database) base routes.
-`ExpandSynonym` rewrites a name to its base ahead of resolution at the two EXEC entry points, and `RejectCrossServerMutation` expands before testing the server segment so a write through a synonym is gated on the base's server, not the synonym's.
+`ExpandSynonym` rewrites a name to its base ahead of resolution at the two EXEC entry points, and `RemoteWrite.ForTarget` expands before testing the server segment so a write through a synonym whose base is four-part lands on the linked server, as does an `EXEC` of one naming a remote procedure.
 Reference sites that ship, all probe-confirmed against real: FROM-source table / view, INSERT / UPDATE / DELETE / MERGE targets, `EXEC syn` (procedure base), `SELECT dbo.syn(1)` (scalar-function base), `FROM dbo.syn(1)` (TVF base), and cross-database bases for both reads and writes.
 
 - **Missing base at first use** → **Msg 5313** ("Synonym '<n>' refers to an invalid object."), the name rendered as written at the use site.

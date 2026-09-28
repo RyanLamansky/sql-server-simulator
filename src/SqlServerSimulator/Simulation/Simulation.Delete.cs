@@ -32,12 +32,27 @@ partial class Simulation
         if (context.Token is ReservedKeyword { Keyword: Keyword.From })
             context.MoveNextRequired();
 
-        var leadingIdent = BatchContext.ParseObjectName(context, acceptTableVariable: true);
-        context.Batch.RejectCrossServerMutation(leadingIdent);
+        MultiPartName leadingIdent;
+        RemoteWrite? remoteWrite;
+        if (context.Token is ReservedKeyword { Keyword: Keyword.OpenQuery })
+        {
+            var (serverName, query) = Selection.ParseOpenQueryArguments(context);
+            remoteWrite = RemoteWrite.ForOpenQuery(context.Batch, serverName, query, RemoteWriteKind.Delete);
+            leadingIdent = new MultiPartName(remoteWrite.Proxy.Name);
+        }
+        else
+        {
+            leadingIdent = BatchContext.ParseObjectName(context, acceptTableVariable: true);
+            remoteWrite = RemoteWrite.ForTarget(context.Batch, leadingIdent, RemoteWriteKind.Delete);
+        }
 
         View? leadingView = null;
         HeapTable? leadingTable;
-        if (TryResolveCteTarget(context, leadingIdent, out var resolvedView) || context.Batch.TryResolveView(leadingIdent, out resolvedView))
+        if (remoteWrite is not null)
+        {
+            leadingTable = remoteWrite.Proxy;
+        }
+        else if (TryResolveCteTarget(context, leadingIdent, out var resolvedView) || context.Batch.TryResolveView(leadingIdent, out resolvedView))
         {
             // An INSTEAD OF DELETE trigger takes the write whatever the
             // view's shape, reading the view's own rows.
@@ -60,6 +75,13 @@ partial class Simulation
         else
         {
             _ = context.Batch.TryResolveTable(leadingIdent, out leadingTable);
+            // An alias the FROM clause defines may name a linked server's
+            // table there.
+            if (leadingTable is null && leadingIdent.Count == 1)
+            {
+                context.Batch.CurrentStatement.RemoteWriteAlias = leadingIdent.Leaf;
+                context.Batch.CurrentStatement.RemoteWriteAliasKind = RemoteWriteKind.Delete;
+            }
         }
         context.MoveNextOptional();
         var targetHints = Selection.ParseOptionalTableHints(context, allowLegacyParenForm: false);
@@ -80,6 +102,12 @@ partial class Simulation
         // limitation in ParseUpdate. Through a view, DELETED takes the view's
         // columns, read off the base rows.
         OutputProjection? output = null;
+        if (remoteWrite is not null)
+        {
+            if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Output })
+                throw SimulatedSqlException.RemoteDmlTargetWithOutput();
+            remoteWrite.SingleStatement = remoteWrite.WrittenName is not null && context.Token is not ReservedKeyword { Keyword: Keyword.From };
+        }
         if (leadingTable is not null)
         {
             var viewShape = leadingView is not null && context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Output }

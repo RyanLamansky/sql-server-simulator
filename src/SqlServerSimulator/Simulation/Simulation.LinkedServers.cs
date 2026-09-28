@@ -163,10 +163,96 @@ partial class Simulation
     }
 
     /// <summary>
+    /// Body for <c>sp_serveroption (@server, @optname, @optvalue)</c>. The three
+    /// options a linked server's behavior reads — <c>rpc out</c>,
+    /// <c>data access</c> and <c>remote proc transaction promotion</c> — are
+    /// kept on the <see cref="LinkedServer"/>; real's other options are
+    /// accepted and discarded. A value is <c>true</c> / <c>on</c> or
+    /// <c>false</c> / <c>off</c>, any other (a number or NULL included) Msg
+    /// 15600, as is an option name real doesn't know; an unknown server is Msg
+    /// 15015 (probed 2026-09-28 against SQL Server 2025).
+    /// </summary>
+    private static IEnumerable<SimulatedStatementOutcome> InvokeSpServerOption(BatchContext batch)
+    {
+        var arguments = ParseExecArguments(batch.Parser, batch);
+        if (batch.IsSkipping)
+            yield break;
+
+        string[] positional = ["server", "optname", "optvalue"];
+        if (arguments.Count(arg => arg.Name is null) > positional.Length)
+            throw SimulatedSqlException.TooManyArgumentsToFunction("sp_serveroption");
+        SqlValue? server = null, optionName = null, optionValue = null;
+        var positionalIndex = 0;
+        foreach (var arg in arguments)
+        {
+            var name = arg.Name ?? positional[positionalIndex];
+            positionalIndex++;
+            switch (name)
+            {
+                case var n when BuiltInToken.Equals(n, "server"):
+                    server = arg.Value;
+                    break;
+                case var n when BuiltInToken.Equals(n, "optname"):
+                    optionName = arg.Value;
+                    break;
+                case var n when BuiltInToken.Equals(n, "optvalue"):
+                    optionValue = arg.Value;
+                    break;
+                default:
+                    throw SimulatedSqlException.NotAParameterForProcedure(name, "sp_serveroption");
+            }
+        }
+        if (server is null)
+            throw SimulatedSqlException.ProcedureExpectsParameter("sp_serveroption", "server");
+        if (optionName is null)
+            throw SimulatedSqlException.ProcedureExpectsParameter("sp_serveroption", "optname");
+        if (optionValue is null)
+            throw SimulatedSqlException.ProcedureExpectsParameter("sp_serveroption", "optvalue");
+
+        var serverName = server.Value.IsNull ? "(null)" : server.Value.CoerceTo(SqlType.SystemName).AsString;
+        if (!batch.Connection.Simulation.ActiveLinkedServers.TryGetValue(serverName, out var linkedServer))
+            throw SimulatedSqlException.LinkedServerDoesNotExist(serverName);
+
+        var option = optionName.Value.IsNull ? "" : optionName.Value.CoerceTo(SqlType.NVarchar).AsString.Trim();
+        var text = optionValue.Value.IsNull || optionValue.Value.Type.Category != SqlTypeCategory.String
+            ? ""
+            : optionValue.Value.AsString.Trim();
+        bool enabled;
+        if (BuiltInToken.Equals(text, "true") || BuiltInToken.Equals(text, "on"))
+            enabled = true;
+        else if (BuiltInToken.Equals(text, "false") || BuiltInToken.Equals(text, "off"))
+            enabled = false;
+        else
+            throw SimulatedSqlException.InvalidLinkedServerParameter("sys.sp_serveroption");
+
+        if (BuiltInToken.Equals(option, "rpc out"))
+            linkedServer.RpcOut = enabled;
+        else if (BuiltInToken.Equals(option, "data access"))
+            linkedServer.DataAccess = enabled;
+        else if (BuiltInToken.Equals(option, "remote proc transaction promotion"))
+            linkedServer.RemoteProcTransactionPromotion = enabled;
+        else if (!IsDiscardedServerOption(option))
+            throw SimulatedSqlException.InvalidLinkedServerParameter("sys.sp_serveroption");
+    }
+
+    /// <summary>
+    /// The <c>sp_serveroption</c> names real accepts that change nothing the
+    /// simulator models.
+    /// </summary>
+    private static bool IsDiscardedServerOption(string option)
+    {
+        foreach (var known in (string[])["collation compatible", "collation name", "connect timeout", "dist", "lazy schema validation", "pub", "query timeout", "rpc", "sub", "system", "use remote collation"])
+        {
+            if (BuiltInToken.Equals(option, known))
+                return true;
+        }
+        return false;
+    }
+
+    /// <summary>
     /// Parse-and-discard body for <c>sp_addlinkedsrvlogin</c> /
-    /// <c>sp_droplinkedsrvlogin</c> / <c>sp_serveroption</c>. The simulator
-    /// has no principal-mapping model and no per-server option semantics,
-    /// but real BACPACs and migration scripts often emit these alongside
+    /// <c>sp_droplinkedsrvlogin</c>. The simulator has no principal-mapping
+    /// model, but real BACPACs and migration scripts often emit these alongside
     /// <c>sp_addlinkedserver</c>; silently accepting them keeps those scripts
     /// running. Argument grammar is consumed (so a malformed call still
     /// raises through the standard EXEC arg parser) but the values are

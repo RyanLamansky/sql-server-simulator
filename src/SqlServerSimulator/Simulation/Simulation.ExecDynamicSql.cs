@@ -57,9 +57,33 @@ partial class Simulation
 
         RejectNonStringExecOperands(context);
         var sqlExpression = Expression.Parse(context);
+
+        // The arguments `?` placeholders bind, which only a linked server
+        // takes (`EXEC ('…', 1, @v OUTPUT) AT server`).
+        var arguments = new List<ProcArgument>();
+        while (context.Token is Operator { Character: ',' })
+        {
+            context.MoveNextRequired();
+            var argument = ParseExecArgument(context, batch, name: null);
+            if (argument.OutputSlot is null && context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Output or ContextualKeyword.Out })
+                throw SimulatedSqlException.OutputOnConstantArgument();
+            arguments.Add(argument);
+        }
         if (context.Token is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextOptional();
+        string? linkedServerName = null;
+        if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.At })
+        {
+            if (context.GetNextRequired() is not Name serverName)
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            linkedServerName = serverName.Value;
+            context.MoveNextOptional();
+        }
+        else if (arguments.Count > 0)
+        {
+            throw SimulatedSqlException.ExecuteArgumentsWithoutServer();
+        }
         var resultSets = ParseExecuteOptions(batch, insertExecSource);
 
         if (batch.IsSkipping)
@@ -78,7 +102,9 @@ partial class Simulation
             yield break; // dynamic SQL of NULL → no-op (matches real SQL Server's lenient handling)
 
         var sqlText = sqlValue.CoerceTo(VarcharSqlType.Get(-1, Collation.Baseline, Coercibility.CoercibleDefault)).AsString;
-        var dynamicBatch = ExecuteDynamicBatch(batch, sqlText, preDeclaredVariables: null);
+        var dynamicBatch = linkedServerName is null
+            ? ExecuteDynamicBatch(batch, sqlText, preDeclaredVariables: null)
+            : ExecuteAtLinkedServer(batch, linkedServerName, sqlText, arguments, insertExecSource);
         foreach (var outcome in resultSets is null ? dynamicBatch : ApplyResultSetsContract(dynamicBatch, resultSets))
             yield return outcome;
         batch.CurrentStatement.SuppressErrorReset = true;

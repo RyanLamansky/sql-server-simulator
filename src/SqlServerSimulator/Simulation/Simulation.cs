@@ -2919,6 +2919,8 @@ public sealed partial class Simulation
         batch.CurrentStatement.ChangeTrackingContext = null;
         batch.CurrentStatement.LockTallies = null;
         batch.CurrentStatement.EscalatedTables = null;
+        batch.CurrentStatement.RemoteWrite = null;
+        batch.CurrentStatement.RemoteWriteAlias = null;
 
         // WITH prefix applies to the immediately-following SELECT / INSERT /
         // UPDATE / DELETE / MERGE. ParseCteBindings sets context.CteBindings
@@ -3697,13 +3699,15 @@ public sealed partial class Simulation
         if (!context.MoveNext())
             return false;
         // DISTRIBUTED asks for a transaction the coordinator would enlist
-        // remote resources in. Nothing here is remote — a four-part write is
-        // refused outright — so the statement opens the ordinary local
+        // remote resources in. The statement opens the ordinary local
         // transaction, which is what real does until something actually
         // enlists: probe-confirmed that BEGIN DISTRIBUTED TRANSACTION matches
         // BEGIN TRANSACTION on @@TRANCOUNT, nesting either way, XACT_STATE,
-        // COMMIT / ROLLBACK and even the WITH MARK diagnostics.
-        if (context.Token is ReservedKeyword { Keyword: Keyword.Distributed } && !context.MoveNext())
+        // COMMIT / ROLLBACK and even the WITH MARK diagnostics. What differs is
+        // a linked server's read inside it, which then enlists too
+        // (SimulatedDbTransaction.IsDistributed).
+        var distributed = context.Token is ReservedKeyword { Keyword: Keyword.Distributed };
+        if (distributed && !context.MoveNext())
             return false;
         if (context.Token is not ReservedKeyword { Keyword: Keyword.Tran or Keyword.Transaction })
             return false;
@@ -3756,6 +3760,7 @@ public sealed partial class Simulation
 
             existing.TranCount++;
             existing.IsMarked |= marked;
+            existing.IsDistributed |= distributed;
         }
         else
         {
@@ -3769,6 +3774,7 @@ public sealed partial class Simulation
             {
                 IsMarked = marked,
                 Name = name,
+                IsDistributed = distributed,
             };
         }
         return true;
@@ -3950,6 +3956,28 @@ public sealed partial class Simulation
         return true;
     }
 
+    /// <summary>
+    /// Runs a write's parse-and-execute body, then — when its target is a
+    /// linked server's table — replays what it did there. A value too long for
+    /// a remote column is the provider's Msg 8152 at state 14 (probed
+    /// 2026-09-28 against SQL Server 2025), where a local one is Msg 2628.
+    /// </summary>
+    private static SimulatedStatementOutcome RunMutationBody(ParserContext context, Func<ParserContext, SimulatedStatementOutcome> body)
+    {
+        SimulatedStatementOutcome outcome;
+        try
+        {
+            outcome = body(context);
+        }
+        catch (SimulatedSqlException error) when (error.Number == 2628 && context.Batch.CurrentStatement.RemoteWrite is not null)
+        {
+            throw SimulatedSqlException.StringOrBinaryWouldBeTruncatedLegacy(14);
+        }
+        if (context.Batch.CurrentStatement.RemoteWrite is { } remoteWrite && !context.Batch.IsSkipping)
+            remoteWrite.Replay(context.Batch);
+        return outcome;
+    }
+
     private static SimulatedStatementOutcome RunMutation(ParserContext context, Func<ParserContext, SimulatedStatementOutcome> body)
     {
         context.Batch.CurrentStatement.WritesRows = true;
@@ -3997,7 +4025,7 @@ public sealed partial class Simulation
             : context.Connection.TriggerStatementVersionEntries;
         try
         {
-            var outcome = body(context);
+            var outcome = RunMutationBody(context, body);
             if (statementVersionEntries is { } autoCommitEntries)
             {
                 // FinalizePendingEntries clears the list, so capture whether

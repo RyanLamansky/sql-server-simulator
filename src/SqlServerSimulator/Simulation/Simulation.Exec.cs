@@ -189,6 +189,20 @@ partial class Simulation
             }
         }
 
+        // A four-part name calls a linked server's procedure.
+        if (batch.ExpandSynonym(procName) is { Count: 4 } remoteProcedure)
+        {
+            var remoteArguments = ParseExecArguments(context, batch);
+            var remoteResultSets = ParseExecuteOptions(batch, insertExecSource);
+            if (batch.IsSkipping)
+                yield break;
+            var remoteCall = InvokeRemoteProcedure(batch, remoteProcedure, remoteArguments, returnCodeVar, insertExecSource);
+            foreach (var outcome in remoteResultSets is null ? remoteCall : ApplyResultSetsContract(remoteCall, remoteResultSets))
+                yield return outcome;
+            batch.CurrentStatement.SuppressErrorReset = true;
+            yield break;
+        }
+
         // System procedures route to built-in handlers before generic
         // resolution. ResolveSystemProcedureName does the collation-aware
         // match and hands back the canonical as-declared name, so the
@@ -201,7 +215,7 @@ partial class Simulation
             null => null,
             "sp_addextendedproperty" => InvokeSpExtendedProperty(batch, ExtendedPropertyOp.Add),
             "sp_addlinkedserver" => InvokeSpAddLinkedServer(batch),
-            "sp_addlinkedsrvlogin" or "sp_droplinkedsrvlogin" or "sp_serveroption" => InvokeSpLinkedServerNoOp(batch),
+            "sp_addlinkedsrvlogin" or "sp_droplinkedsrvlogin" => InvokeSpLinkedServerNoOp(batch),
             "sp_addrolemember" => InvokeSpRoleMember(batch, isAdd: true),
             "sp_bindefault" => InvokeSpBind(batch, CalledName(procName), isRule: false),
             "sp_bindrule" => InvokeSpBind(batch, CalledName(procName), isRule: true),
@@ -243,6 +257,7 @@ partial class Simulation
             "sp_setapprole" => InvokeSpSetAppRole(batch),
             "sp_settriggerorder" => InvokeSpSetTriggerOrder(batch),
             "sp_server_info" => InvokeSpServerInfo(batch),
+            "sp_serveroption" => InvokeSpServerOption(batch),
             "sp_set_session_context" => InvokeSpSetSessionContext(batch),
             "sp_spaceused" => Uncounted(InvokeSpSpaceUsed(batch)),
             "sp_special_columns" or "sp_special_columns_100" => InvokeSpSpecialColumns(batch, systemProcName),

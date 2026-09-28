@@ -578,6 +578,8 @@ partial class Simulation
         ("sp_refreshsqlmodule" or "sp_refreshview", 15165) => (62, "sys.sp_refreshsqlmodule_internal"),
         ("sp_rename", 15225) => (637, null),
         ("sp_rename", 15248) => (269, null),
+        ("sp_serveroption", 15015) => (112, null),
+        ("sp_serveroption", 15600) => (225, null),
         ("sp_settriggerorder", 15165) => (142, null),
         ("sp_spaceused", 15009) => (153, null),
         ("sp_unbindefault", 15148) => (149, null),

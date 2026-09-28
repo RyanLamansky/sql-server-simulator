@@ -109,7 +109,8 @@ The simulator raises it while parsing the statement, which reaches the same plac
 ## `BEGIN DISTRIBUTED TRANSACTION`
 
 `BEGIN DISTRIBUTED { TRAN | TRANSACTION } [name | @var]` asks the coordinator for a transaction remote resources could enlist in.
-Nothing here is remote — a four-part write is refused outright (see [`linked-servers.md`](linked-servers.md)) — so the statement opens the ordinary local transaction, which is exactly what real does until something actually enlists.
+The statement opens the ordinary local transaction, which is exactly what real does until something actually enlists — and when a linked server does, the coordinator refuses out of the box (Msg 7391, or 3910 for a loopback; see [`linked-servers.md`](linked-servers.md#transactions)).
+What the keyword changes is which work enlists: under it a linked server's read does, where under an ordinary transaction only a write or a remote call does.
 Probe-confirmed against SQL Server 2025 (2026-08-08) that the two spellings match on `@@TRANCOUNT`, on nesting in either order, on `XACT_STATE()`, on `COMMIT` / `ROLLBACK`, and even on the `WITH MARK` diagnostics below; the parser shares `TryParseBeginTransaction` with the local form, consuming `DISTRIBUTED` and continuing.
 
 ## `WITH MARK`

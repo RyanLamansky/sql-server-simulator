@@ -52,8 +52,19 @@ partial class Simulation
         bindErrors?.SetBarriers(BindClause.SetTarget, BindClause.SetValue);
         context.MoveNextRequired();
         var top = Selection.ParseDmlTopClause(context);
-        var leadingIdent = BatchContext.ParseObjectName(context, acceptTableVariable: true);
-        context.Batch.RejectCrossServerMutation(leadingIdent);
+        MultiPartName leadingIdent;
+        RemoteWrite? remoteWrite;
+        if (context.Token is ReservedKeyword { Keyword: Keyword.OpenQuery })
+        {
+            var (serverName, query) = Selection.ParseOpenQueryArguments(context);
+            remoteWrite = RemoteWrite.ForOpenQuery(context.Batch, serverName, query, RemoteWriteKind.Update);
+            leadingIdent = new MultiPartName(remoteWrite.Proxy.Name);
+        }
+        else
+        {
+            leadingIdent = BatchContext.ParseObjectName(context, acceptTableVariable: true);
+            remoteWrite = RemoteWrite.ForTarget(context.Batch, leadingIdent, RemoteWriteKind.Update);
+        }
 
         // View target: route to base table with view-aware column lookups,
         // visibility filtering, and (optional) WITH CHECK OPTION enforcement.
@@ -63,7 +74,11 @@ partial class Simulation
         // source join, which the existing alias-form path can't represent.
         View? leadingView = null;
         HeapTable? leadingTable;
-        if (TryResolveCteTarget(context, leadingIdent, out var resolvedView) || context.Batch.TryResolveView(leadingIdent, out resolvedView))
+        if (remoteWrite is not null)
+        {
+            leadingTable = remoteWrite.Proxy;
+        }
+        else if (TryResolveCteTarget(context, leadingIdent, out var resolvedView) || context.Batch.TryResolveView(leadingIdent, out resolvedView))
         {
             // A multi-source body has no single base table to route to up
             // front — which base the statement writes is the SET list's to
@@ -87,6 +102,13 @@ partial class Simulation
             // the binding via alias-matching. Aliases are always single-segment,
             // so a multi-part name that fails to resolve is always Msg 208.
             _ = context.Batch.TryResolveTable(leadingIdent, out leadingTable);
+            // An alias the FROM clause defines may name a linked server's
+            // table there.
+            if (leadingTable is null && leadingIdent.Count == 1)
+            {
+                context.Batch.CurrentStatement.RemoteWriteAlias = leadingIdent.Leaf;
+                context.Batch.CurrentStatement.RemoteWriteAliasKind = RemoteWriteKind.Update;
+            }
         }
 
         context.MoveNextRequired();
@@ -259,6 +281,22 @@ partial class Simulation
         context.OuterTypeResolver = savedOuterTypeResolver;
         context.AggregateCollector = savedCollector;
         Selection.RefuseClauseAggregates(context.Batch, setAggregates, SimulatedSqlException.AggregateInSetList());
+
+        // A linked server's table: the SET list is what the replay writes,
+        // and real's provider refuses an OUTPUT clause outright.
+        if (context.Batch.CurrentStatement.RemoteWrite is { } remoteTarget)
+        {
+            var setNames = new List<string>();
+            foreach (var (columnName, _) in rawAssignments)
+            {
+                if (columnName is not null)
+                    setNames.Add(columnName);
+            }
+            remoteTarget.CheckSetColumns(context.Batch, setNames);
+            if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Output })
+                throw SimulatedSqlException.RemoteDmlTargetWithOutput();
+            remoteTarget.SingleStatement = remoteWrite is { WrittenName: not null } && context.Token is not ReservedKeyword { Keyword: Keyword.From };
+        }
 
         // An INSTEAD OF UPDATE trigger on a view takes the write, reading the
         // view's own rows; a multi-source view's SET list names the base

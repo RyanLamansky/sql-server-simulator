@@ -2966,6 +2966,14 @@ internal sealed partial class Selection
     private static FromSource ParseSingleFromSourceCore(ParserContext context, QueryScope scope)
     {
         var token = context.GetNextRequired();
+        // A nested DML source feeding a linked server's table is refused
+        // before its own grammar is judged; a parenthesized source reaches
+        // here through the join-group parse.
+        if (token is ReservedKeyword { Keyword: Keyword.Insert or Keyword.Update or Keyword.Delete or Keyword.Merge }
+            && context.Batch.CurrentStatement.RemoteWrite is not null)
+        {
+            throw SimulatedSqlException.RemoteDmlTargetWithOutput();
+        }
         // Every source but a derived table or VALUES — a table, view, CTE,
         // table variable, rowset function or catalog view — opens the
         // statement's transaction; a derived table opens it only through a
@@ -3074,22 +3082,46 @@ internal sealed partial class Selection
                 if (objectName.Count == 4)
                 {
                     context.Batch.BeginImplicitTransaction();
-                    if (!context.Batch.TryResolveLinkedServerTable(objectName, out var linkedServer, out var remoteTable, out var remoteDbName, out var remoteSchemaName))
-                        throw SimulatedSqlException.InvalidObjectName(objectName);
-                    var linkedColumnNames = new string[remoteTable.Columns.Length];
+
+                    // The alias an UPDATE or DELETE named as its target makes
+                    // this source the linked server's stand-in for the write.
+                    if (context.Batch.CurrentStatement.RemoteWriteAlias is { } targetAlias)
+                    {
+                        var aliasCheckpoint = context.SaveCheckpoint();
+                        var writtenAlias = ConsumeOptionalAlias(context);
+                        context.RestoreCheckpoint(aliasCheckpoint);
+                        if (writtenAlias is not null && context.CurrentDatabase.Collation.Equals(writtenAlias, targetAlias)
+                            && RemoteWrite.ForTarget(context.Batch, objectName, context.Batch.CurrentStatement.RemoteWriteAliasKind) is { } remoteTarget)
+                        {
+                            return RemoteTargetSource(context, remoteTarget, ConsumeOptionalAlias(context), objectName.ToString());
+                        }
+                    }
+
+                    if (!context.Batch.TryResolveLinkedServerTable(objectName, out var linkedServer, out var remoteName, out var remoteColumns, out var remoteDbName, out var remoteSchemaName))
+                    {
+                        if (TryRemoteCatalogViewSource(context, objectName) is { } catalogSource)
+                            return catalogSource;
+                        // Real checks the server's metadata compiling the
+                        // batch, so a branch the batch never takes raises it.
+                        throw SimulatedSqlException.RemoteTableNotFound(RemoteWrite.ResolveServer(context.Batch, objectName[0]), RemoteWrite.QuotedName(objectName));
+                    }
+                    _ = RemoteWrite.ResolveServer(context.Batch, objectName[0]);
+                    if (!context.Batch.IsSkipping && context.Connection.CurrentTransaction is { IsDistributed: true })
+                        RemoteWrite.RequireNoTransaction(context.Batch, linkedServer);
+                    var linkedColumnNames = new string[remoteColumns.Length];
                     for (var ci = 0; ci < linkedColumnNames.Length; ci++)
-                        linkedColumnNames[ci] = remoteTable.Columns[ci].Name;
+                        linkedColumnNames[ci] = remoteColumns[ci].Name;
                     var linkedAlias = ConsumeOptionalAlias(context);
                     _ = ParseOptionalTableHints(context);
                     return new FromSource(
-                        qualifier: linkedAlias ?? remoteTable.Name,
+                        qualifier: linkedAlias ?? remoteName,
                         columnNames: linkedColumnNames,
-                        columns: remoteTable.Columns,
-                        storedSchema: remoteTable.Columns,
+                        columns: remoteColumns,
+                        storedSchema: remoteColumns,
                         storageOrdinals: null,
                         lobStore: null,
                         rows: [],
-                        lateralPlan: Selection.ForLinkedServer(linkedServer, remoteDbName, remoteSchemaName, remoteTable.Name, remoteTable.Columns));
+                        lateralPlan: Selection.ForLinkedServer(linkedServer, remoteDbName, remoteSchemaName, remoteName, remoteColumns));
                 }
 
                 if (objectName.Count == 1
@@ -3569,6 +3601,21 @@ internal sealed partial class Selection
                 // (Msg 7202 on miss), and discovers the result-set schema by
                 // running the query once on the remote.
                 {
+                    // The alias an UPDATE or DELETE named as its target makes
+                    // this OPENQUERY the statement's write target.
+                    if (context.Batch.CurrentStatement.RemoteWriteAlias is { } openQueryTargetAlias)
+                    {
+                        var targetCheckpoint = context.SaveCheckpoint();
+                        var (targetServer, targetQuery) = ParseOpenQueryArguments(context);
+                        context.MoveNextOptional();
+                        if (ConsumeOptionalAliasInPlace(context) is { } writtenTargetAlias && context.CurrentDatabase.Collation.Equals(writtenTargetAlias, openQueryTargetAlias))
+                        {
+                            var openQueryTarget = RemoteWrite.ForOpenQuery(context.Batch, targetServer, targetQuery, context.Batch.CurrentStatement.RemoteWriteAliasKind);
+                            return RemoteTargetSource(context, openQueryTarget, writtenTargetAlias, openQueryTarget.Proxy.Name);
+                        }
+                        context.RestoreCheckpoint(targetCheckpoint);
+                    }
+
                     var openQueryPlan = ParseOpenQuery(context);
                     var openQueryAlias = ConsumeOptionalAliasInPlace(context);
                     // A column-alias list — `OPENQUERY(...) q(c1, c2)` — is not

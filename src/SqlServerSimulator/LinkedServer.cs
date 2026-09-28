@@ -10,7 +10,7 @@ namespace SqlServerSimulator;
 /// </summary>
 /// <remarks>
 /// <para>
-/// Reads (<c>SELECT</c>, <c>JOIN</c>, catalog views) traversing a
+/// Reads (<c>SELECT</c>, <c>JOIN</c>) traversing a
 /// <c>linkedserver.db.schema.t</c> reference open a fresh
 /// <see cref="SimulatedDbConnection"/> on <see cref="Target"/> and execute
 /// the remote portion as a <c>SELECT * FROM [db].[schema].[t]</c>
@@ -19,13 +19,10 @@ namespace SqlServerSimulator;
 /// modeled subset.
 /// </para>
 /// <para>
-/// Writes through a four-part name (<c>INSERT</c>, <c>UPDATE</c>,
-/// <c>DELETE</c>, <c>MERGE</c> targeting <c>linkedserver.db.schema.t</c>)
-/// raise <see cref="NotSupportedException"/> at parse time. Lock-
-/// manager and undo-log coordination across <see cref="Simulation"/>
-/// boundaries isn't modeled; this mirrors the existing
-/// <see cref="System.Data.IsolationLevel"/>-related deferral for
-/// <c>BEGIN DISTRIBUTED TRANSACTION</c>.
+/// Writes through a four-part name or an <c>OPENQUERY</c> target run
+/// against a local stand-in of the remote table and are then replayed on
+/// <see cref="Target"/> as parameterized statements inside one remote
+/// transaction (<c>Simulation.RemoteDml</c>).
 /// </para>
 /// </remarks>
 internal sealed class LinkedServer(string name, Simulation target, string srvProduct, string provider, string? dataSource, string? location, string? providerString, string? catalog, DateTime createDate)
@@ -72,4 +69,43 @@ internal sealed class LinkedServer(string name, Simulation target, string srvPro
     /// Server 2025).
     /// </summary>
     public bool IsSqlServerProduct => string.Equals(this.SrvProduct, "SQL Server", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// <c>sp_serveroption … 'rpc out'</c>: whether <c>EXEC … AT</c> and a
+    /// four-part procedure call may reach the server (Msg 7411 otherwise).
+    /// Seeded on for a <c>SQL Server</c> product only.
+    /// </summary>
+    public bool RpcOut = srvProduct.Equals("SQL Server", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// <c>sp_serveroption … 'data access'</c>: whether four-part names and
+    /// <c>OPENQUERY</c> may read or write through the server (Msg 7411
+    /// otherwise).
+    /// </summary>
+    public bool DataAccess = true;
+
+    /// <summary>
+    /// <c>sp_serveroption … 'remote proc transaction promotion'</c>: whether a
+    /// remote procedure call inside a local transaction enlists the server in
+    /// a distributed transaction.
+    /// </summary>
+    public bool RemoteProcTransactionPromotion = true;
+
+    /// <summary>
+    /// A loopback: the server names the <see cref="Simulation"/> that defines
+    /// it. Real refuses a distributed transaction over a loopback with Msg 3910
+    /// where a remote server's coordinator refuses it with Msg 7391.
+    /// </summary>
+    public bool IsLoopback(Simulation owner) => ReferenceEquals(this.Target, owner);
+
+    /// <summary>
+    /// The provider name real's linked-server messages quote: every SQL Server
+    /// provider name reports as the OLE DB driver SQL Server 2025 loads for it
+    /// (probed 2026-09-28 for <c>SQLNCLI</c>, <c>SQLNCLI11</c>,
+    /// <c>MSOLEDBSQL</c> and <c>MSOLEDBSQL19</c>).
+    /// </summary>
+    public string ProviderInMessages =>
+        this.Provider.StartsWith("SQLNCLI", StringComparison.OrdinalIgnoreCase) || this.Provider.StartsWith("MSOLEDBSQL", StringComparison.OrdinalIgnoreCase)
+            ? "MSOLEDBSQL19"
+            : this.Provider;
 }

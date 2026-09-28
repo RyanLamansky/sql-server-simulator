@@ -41,7 +41,7 @@ internal readonly struct MultiPartName
     private readonly byte omittedLeading;
 
     /// <summary>Whether the schema part was written empty (<c>db..t</c>) and filled in with the default.</summary>
-    private readonly bool schemaOmitted;
+    public readonly bool SchemaOmitted;
 
     /// <summary>
     /// Whether the leaf was written delimited (<c>[$node_id]</c>, <c>"$node_id"</c>),
@@ -82,7 +82,7 @@ internal readonly struct MultiPartName
         this.p4 = p4;
         this.Count = count;
         this.omittedLeading = omittedLeading;
-        this.schemaOmitted = schemaOmitted;
+        this.SchemaOmitted = schemaOmitted;
     }
 
     /// <summary>
@@ -103,8 +103,8 @@ internal readonly struct MultiPartName
     /// </summary>
     public string Written =>
         new string('.', this.omittedLeading)
-            + (this.schemaOmitted && this.Count == 3 ? $"{this.p1}..{this.p3}"
-                : this.schemaOmitted && this.Count == 4 ? $"{this.p1}.{this.p2}..{this.p4}"
+            + (this.SchemaOmitted && this.Count == 3 ? $"{this.p1}..{this.p3}"
+                : this.SchemaOmitted && this.Count == 4 ? $"{this.p1}.{this.p2}..{this.p4}"
                 : this.ToString());
 
     /// <summary>
@@ -113,7 +113,7 @@ internal readonly struct MultiPartName
     /// SQL Server 2025).
     /// </summary>
     public MultiPartName WithoutOmittedLeading() =>
-        new(this.p1, this.p2!, this.p3, this.p4, this.Count, 0, this.schemaOmitted);
+        new(this.p1, this.p2!, this.p3, this.p4, this.Count, 0, this.SchemaOmitted);
 
     /// <summary>
     /// Returns a new <see cref="MultiPartName"/> with <paramref name="next"/>

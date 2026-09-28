@@ -76,7 +76,8 @@ partial class Simulation
             context.MoveNextRequired();
 
         var destinationName = BatchContext.ParseObjectName(context, acceptTableVariable: true);
-        context.Batch.RejectCrossServerMutation(destinationName);
+        if (context.Batch.ExpandSynonym(destinationName).Count >= 4)
+            throw SimulatedSqlException.MergeTargetIsRemote();
 
         // View target: resolve via TryResolveView first (CTE bindings are
         // already shadowed at the source level, not the target). An updatable
@@ -678,7 +679,34 @@ partial class Simulation
             return (materialize, cteAlias, columnNames, sourceSchema, ctePlan.ColumnMasks);
         }
 
-        if (context.Batch.TryResolveView(objectName, out var resolvedView))
+        // A linked server's table reads through the same remote query a FROM
+        // source's four-part name does.
+        if (objectName.Count == 4)
+        {
+            if (!context.Batch.TryResolveLinkedServerTable(objectName, out var linkedServer, out var remoteName, out var remoteColumns, out var remoteDbName, out var remoteSchemaName))
+                throw SimulatedSqlException.RemoteTableNotFound(RemoteWrite.ResolveServer(context.Batch, objectName[0]), RemoteWrite.QuotedName(objectName));
+            _ = RemoteWrite.ResolveServer(context.Batch, objectName[0]);
+            if (!context.Batch.IsSkipping && context.Connection.CurrentTransaction is { IsDistributed: true })
+                RemoteWrite.RequireNoTransaction(context.Batch, linkedServer);
+            context.Batch.HasSessionScopedReference = true;
+            sourceSchema = new SqlType[remoteColumns.Length];
+            columnNames = new string[remoteColumns.Length];
+            for (var i = 0; i < remoteColumns.Length; i++)
+            {
+                sourceSchema[i] = remoteColumns[i].Type;
+                columnNames[i] = remoteColumns[i].Name;
+            }
+            var remoteSelection = Selection.ForLinkedServer(linkedServer, remoteDbName, remoteSchemaName, remoteName, remoteColumns);
+            materialize = batch =>
+            {
+                var rs = remoteSelection.Execute(batch);
+                var rows = new List<SqlValue[]>();
+                foreach (var rowBytes in rs.RowBytes)
+                    rows.Add(RowDecoder.DecodeRow(sourceSchema.AsSpan(), rowBytes));
+                return rows;
+            };
+        }
+        else if (context.Batch.TryResolveView(objectName, out var resolvedView))
         {
             var viewColumns = context.Batch.Connection.Simulation.BindViewColumns(context.Batch, resolvedView, objectName);
             sourceSchema = new SqlType[viewColumns.Length];

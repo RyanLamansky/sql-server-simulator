@@ -226,6 +226,23 @@ internal sealed class StatementContext
     public bool TransactedWrite;
 
     /// <summary>
+    /// The statement's write to a linked server's table, which runs against a
+    /// local stand-in and is replayed on the server once the statement's own
+    /// work succeeds (<see cref="RemoteWrite.Replay"/>).
+    /// </summary>
+    public RemoteWrite? RemoteWrite;
+
+    /// <summary>
+    /// The alias an UPDATE or DELETE names as its target ahead of a FROM
+    /// clause, so a four-part source carrying it becomes the statement's
+    /// <see cref="RemoteWrite"/> rather than a read.
+    /// </summary>
+    public string? RemoteWriteAlias;
+
+    /// <summary>The statement <see cref="RemoteWriteAlias"/> belongs to.</summary>
+    public RemoteWriteKind RemoteWriteAliasKind;
+
+    /// <summary>
     /// Set as the statement compiles something real opens a transaction for
     /// even when nothing is written — a FROM source other than a derived table
     /// or <c>VALUES</c>, a function or sequence object, a metadata, security

@@ -107,6 +107,14 @@ public sealed class SimulatedDbTransaction : DbTransaction
     internal bool IsMarked;
 
     /// <summary>
+    /// Set by <c>BEGIN DISTRIBUTED TRANSACTION</c>, at any nesting level: a
+    /// linked server's read then enlists in the transaction as a write always
+    /// does, which is what reaches the coordinator's refusal (probed 2026-09-28
+    /// against SQL Server 2025).
+    /// </summary>
+    internal bool IsDistributed;
+
+    /// <summary>
     /// The name the outermost <c>BEGIN TRAN</c> gave the transaction, or null.
     /// <c>ROLLBACK TRAN</c> naming it rolls the whole transaction back; a
     /// nested BEGIN's name is not recorded, so naming that one is Msg 6401.

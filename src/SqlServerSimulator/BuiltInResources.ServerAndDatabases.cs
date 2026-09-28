@@ -1778,9 +1778,10 @@ internal static partial class BuiltInResources
         var simulation = batch.Connection.Simulation;
 
         // Real's flags for its own row and a linked one (probed 2026-09-26
-        // against SQL Server 2025); sp_serveroption doesn't change them here.
+        // against SQL Server 2025); sp_serveroption sets the linked server's
+        // rpc out, data access and remote proc transaction promotion.
         SqlValue[] Row(int serverId, string name, string product, string provider, string? dataSource, string? location, string? providerString, string? catalog,
-            bool linked, bool remoteLoginAndRpcOut, DateTime modifyDate) =>
+            bool linked, bool remoteLogin, bool rpcOut, bool dataAccess, bool promotion, DateTime modifyDate) =>
         [
             SqlValue.FromInt32(serverId),
             SqlValue.FromSystemName(name),
@@ -1792,20 +1793,21 @@ internal static partial class BuiltInResources
             catalog is null ? nullSysName : SqlValue.FromSystemName(catalog),
             zero, zero,
             linked ? yes : no,
-            remoteLoginAndRpcOut ? yes : no,
-            remoteLoginAndRpcOut ? yes : no,
-            linked ? yes : no,
-            no, yes, nullSysName, no, no, no, no, no, no, yes,
+            remoteLogin ? yes : no,
+            rpcOut ? yes : no,
+            dataAccess ? yes : no,
+            no, yes, nullSysName, no, no, no, no, no, no,
+            promotion ? yes : no,
             SqlValue.FromDateTime(modifyDate),
             no,
         ];
 
-        yield return Row(0, "SIMULATED", "SQL Server", "SQLNCLI", "SIMULATED", null, null, null, linked: false, remoteLoginAndRpcOut: true, simulation.SeedDate);
+        yield return Row(0, "SIMULATED", "SQL Server", "SQLNCLI", "SIMULATED", null, null, null, linked: false, remoteLogin: true, rpcOut: true, dataAccess: false, promotion: true, simulation.SeedDate);
         var serverId = 1;
         foreach (var ls in simulation.ActiveLinkedServers.Values.OrderBy(s => s.Name, StringComparer.OrdinalIgnoreCase))
         {
             yield return Row(serverId++, ls.Name, ls.SrvProduct, ls.Provider, ls.DataSource, ls.Location, ls.ProviderString, ls.Catalog,
-                linked: true, remoteLoginAndRpcOut: ls.IsSqlServerProduct, ls.CreateDate);
+                linked: true, remoteLogin: ls.IsSqlServerProduct, ls.RpcOut, ls.DataAccess, ls.RemoteProcTransactionPromotion, ls.CreateDate);
         }
     }
 

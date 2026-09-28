@@ -2801,28 +2801,6 @@ internal sealed class BatchContext
     }
 
     /// <summary>
-    /// Throws <see cref="NotSupportedException"/> when <paramref name="name"/>
-    /// is a 4-part name targeting a linked server. Called from the DML parsers
-    /// that mutate state: three-part cross-database writes route to the named
-    /// database (the write charges that database's rowversion counter, version
-    /// store and triggers — see <see cref="DatabaseFor"/>), but a write across
-    /// a <see cref="Simulation"/> boundary is a separate step, since the
-    /// remote's lock manager and undo log are its own.
-    /// </summary>
-    public void RejectCrossServerMutation(MultiPartName name)
-    {
-        // A synonym is a name indirection, so the mutation's real target is its
-        // base — `INSERT syn` where `syn FOR srv.db.dbo.t` crosses the server
-        // boundary just as the spelled-out 4-part name would.
-        name = this.ExpandSynonym(name);
-        if (name.Count >= 4)
-        {
-            throw new NotSupportedException(
-                $"Cross-server write to '{name}' through a four-part linked-server reference isn't modeled. The simulator routes four-part-name reads (SELECT / JOIN) through the remote Simulation's full pipeline but defers INSERT / UPDATE / DELETE / MERGE — lock-manager coordination, undo-log scoping, and identity routing across Simulation boundaries are pending (paralleling the BEGIN DISTRIBUTED TRANSACTION stance). Open a SimulatedDbConnection on the target Simulation directly to mutate it.");
-        }
-    }
-
-    /// <summary>
     /// Resolves <paramref name="name"/> to the <see cref="Schema"/> a CREATE /
     /// DROP / TRUNCATE / SELECT-INTO / FROM target lives in. Returns false
     /// when the schema doesn't exist, when a 3-part name's db segment
@@ -3225,7 +3203,7 @@ internal sealed class BatchContext
     /// them into the remote-query SQL string.
     /// </summary>
     /// <remarks>
-    /// Looks up the remote <see cref="HeapTable"/> via direct access to
+    /// Looks up the remote table or view via direct access to
     /// <see cref="LinkedServer.Target"/>'s <see cref="Database.Schemas"/>
     /// dict — parse-time metadata stays in-process even though execution
     /// round-trips through the remote's public ADO.NET surface. Matches
@@ -3236,12 +3214,14 @@ internal sealed class BatchContext
     public bool TryResolveLinkedServerTable(
         MultiPartName name,
         [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out LinkedServer? linkedServer,
-        [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out HeapTable? remoteTable,
+        [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out string? remoteName,
+        [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out HeapColumn[]? remoteColumns,
         [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out string? remoteDatabaseName,
         [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out string? remoteSchemaName)
     {
         linkedServer = null;
-        remoteTable = null;
+        remoteName = null;
+        remoteColumns = null;
         remoteDatabaseName = null;
         remoteSchemaName = null;
         if (name.Count != 4)
@@ -3261,8 +3241,21 @@ internal sealed class BatchContext
         var schemaSegment = string.IsNullOrEmpty(name[2]) ? Database.DefaultSchemaName : name[2];
         if (!remoteDatabase.Schemas.TryGetValue(schemaSegment, out var remoteSchema))
             return false;
-        if (!remoteSchema.HeapTables.TryGetValue(name.Leaf, out remoteTable))
+        // A view reads as its projection does.
+        if (remoteSchema.HeapTables.TryGetValue(name.Leaf, out var remoteTable))
+        {
+            remoteName = remoteTable.Name;
+            remoteColumns = Array.FindAll(remoteTable.Columns, column => !column.IsHidden);
+        }
+        else if (remoteSchema.Views.TryGetValue(name.Leaf, out var remoteView))
+        {
+            remoteName = remoteView.Name;
+            remoteColumns = remoteView.OutputColumns;
+        }
+        else
+        {
             return false;
+        }
         remoteDatabaseName = dbSegment;
         remoteSchemaName = schemaSegment;
         return true;

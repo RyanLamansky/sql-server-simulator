@@ -351,7 +351,8 @@ Where an entry carries a second clause it is because that fact changes what you'
 - **Grammar-level rules** — new statement parsers, dispatch-loop separators, `QUOTED_IDENTIFIER` and its per-object capture, reserved-keyword gating, the trailing-token tightenings and the module batch-position pair → [`grammar.md`](docs/claude/grammar.md).
 - **sqllogictest as a differential oracle** — why a live server is the oracle and the corpus's own expected results are not, and the methodology traps that fabricate findings in *any* differential harness → [`sqllogictest.md`](docs/claude/sqllogictest.md).
 - **BACPAC import** — `Simulation.ImportBacpac`, `BacpacImportOptions`, the BCP wire format, `BacpacBuilder`, and the phase order a module body's own bind imposes → [`bacpac-loader.md`](docs/claude/bacpac-loader.md).
-- **Linked servers** — `AddRemoteSimulation`, `sp_addlinkedserver`, four-part FROM routing, `OPENQUERY`, `sys.servers` → [`linked-servers.md`](docs/claude/linked-servers.md).
+- **Linked servers** — `AddRemoteSimulation`, `sp_addlinkedserver`, `sp_serveroption`, four-part reads and writes, `OPENQUERY` as source and target, `EXEC … AT`, remote procedure calls, `sys.servers`.
+  A write runs locally against a stand-in of the remote table and replays on the remote inside one remote transaction; inside a local transaction it is real's out-of-the-box distributed-transaction refusal, never a commit → [`linked-servers.md`](docs/claude/linked-servers.md).
 - **TDS network endpoint** — `ListenLocalAsync` / `ListenNetworkAsync`, the SQLBatch / RPC / TM / BulkLoad families, API server cursors, attention, MARS, TDS 8.0, and the projection-nullability inference behind COLMETADATA's `fNullable`.
   Oracles are `*.Tests.SqlClient` + `*.Tests.Smo` → [`tds-endpoint.md`](docs/claude/tds-endpoint.md).
 
@@ -363,7 +364,6 @@ This is a trigger list: [`backlog.md`](docs/claude/backlog.md) carries the weigh
 Entries that raise a *real* SQL Server error deliberately are **not** here; they're coverage, and live in their feature's deep-dive.
 The feature docs' own **Not modeled yet** sections hold the smaller gaps.
 
-- **Cross-server DML** through a four-part name → `NotSupportedException` via `BatchContext.RejectCrossServerMutation` (cross-*database* DML ships) → [`linked-servers.md`](docs/claude/linked-servers.md), [`schemas.md`](docs/claude/schemas.md#cross-database-writes).
 - **A few `SET <option>` toggles still parse and are discarded** — `STATISTICS IO` / `TIME`, the `SHOWPLAN_*` family, `ARITHIGNORE`, `FORCEPLAN` → [`session-options.md`](docs/claude/session-options.md#not-modeled-yet).
   The same goes for most `ALTER DATABASE … SET` options → [`database-options.md`](docs/claude/database-options.md).
 - **Heap allocation tracking** (a flat page list, no IAM/PFS) → [`heap-storage.md`](docs/claude/heap-storage.md).

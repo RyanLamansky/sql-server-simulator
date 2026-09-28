@@ -523,8 +523,19 @@ internal sealed class Heap
     /// forward pointer, not a row, so they must never be decoded for LOB heads.
     /// Rollback resurrects both slots and re-registers the target.
     /// </remarks>
-    public void DeleteAt(int pageIndex, int slotIndex, UndoLog? undoLog = null, bool reclaimSuperseded = false) =>
+    public void DeleteAt(int pageIndex, int slotIndex, UndoLog? undoLog = null, bool reclaimSuperseded = false)
+    {
+        _ = this.TouchedSlots?.Add((pageIndex, slotIndex));
         this.DeleteAtCore(pageIndex, slotIndex, undoLog, reclaimSuperseded, journalEvent: true);
+    }
+
+    /// <summary>
+    /// When set, every visible address an <see cref="UpdateAt"/> or
+    /// <see cref="DeleteAt"/> writes — the stand-in heap a write to a linked
+    /// server's table runs against records which rows its statement reached,
+    /// an UPDATE setting a column to the value it already held included.
+    /// </summary>
+    public HashSet<(int PageIndex, int SlotIndex)>? TouchedSlots;
 
     // journalEvent is false for the forwarding-UPDATE path's internal old-target
     // delete — the old target is a superseded relocated payload, not the removal
@@ -582,6 +593,7 @@ internal sealed class Heap
         // so the seek journal records one Update at that address. Capture the
         // pre-UPDATE visible image before the mutation; the internal target
         // Insert / old-target Delete the relocating paths run are NOT journaled.
+        _ = this.TouchedSlots?.Add((pageIndex, slotIndex));
         var oldImage = this.seekJournalActive ? this.ReadSlotBytes(pageIndex, slotIndex) : null;
         var page = this.Pages[pageIndex];
         if (page.IsSlotForwarded(slotIndex))

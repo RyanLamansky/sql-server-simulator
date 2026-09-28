@@ -8,12 +8,11 @@ public class LinkedServerTests
     /// <summary>
     /// Two-step registration: <c>AddRemoteSimulation</c> binds the name, but
     /// the linked server isn't reachable from SQL text until
-    /// <c>sp_addlinkedserver</c> activates it. A four-part reference before
-    /// activation surfaces as Msg 208 (matches the simulator's existing
-    /// behavior for unknown linked servers — Msg 7202 isn't ported).
+    /// <c>sp_addlinkedserver</c> activates it, so a four-part reference before
+    /// activation names a server <c>sys.servers</c> lacks (Msg 7202).
     /// </summary>
     [TestMethod]
-    public void FourPartName_BeforeSpAddLinkedServer_Msg208()
+    public void FourPartName_BeforeSpAddLinkedServer_Msg7202()
     {
         var remote = new Simulation();
         _ = remote.ExecuteNonQuery("create table dbo.remote_t (id int not null primary key, val int not null); insert remote_t values (1, 10), (2, 20)");
@@ -21,7 +20,7 @@ public class LinkedServerTests
         var local = new Simulation();
         local.AddRemoteSimulation("OTHER", remote);
 
-        _ = local.AssertSqlError("select val from OTHER.simulated.dbo.remote_t where id = 1", 208);
+        _ = local.AssertSqlError("select val from OTHER.simulated.dbo.remote_t where id = 1", 7202);
     }
 
     [TestMethod]
@@ -79,7 +78,7 @@ public class LinkedServerTests
     }
 
     [TestMethod]
-    public void Insert_ThroughFourPartName_Rejected()
+    public void Insert_ThroughFourPartName_LandsOnRemote()
     {
         var remote = new Simulation();
         _ = remote.ExecuteNonQuery("create table dbo.remote_t (id int not null primary key)");
@@ -88,34 +87,36 @@ public class LinkedServerTests
         local.AddRemoteSimulation("OTHER", remote);
         _ = local.ExecuteNonQuery("exec sp_addlinkedserver 'OTHER'");
 
-        var ex = Throws<NotSupportedException>(() => local.ExecuteNonQuery("insert OTHER.simulated.dbo.remote_t values (99)"));
-        Contains("Cross-server write", ex.Message);
+        AreEqual(1, local.ExecuteNonQuery("insert OTHER.simulated.dbo.remote_t values (99)"));
+        AreEqual(99, remote.ExecuteScalar("select id from remote_t"));
     }
 
     [TestMethod]
-    public void Update_ThroughFourPartName_Rejected()
+    public void Update_ThroughFourPartName_LandsOnRemote()
     {
         var remote = new Simulation();
-        _ = remote.ExecuteNonQuery("create table dbo.remote_t (id int not null primary key, v int not null); insert remote_t values (1, 1)");
+        _ = remote.ExecuteNonQuery("create table dbo.remote_t (id int not null primary key, v int not null); insert remote_t values (1, 1), (2, 1)");
 
         var local = new Simulation();
         local.AddRemoteSimulation("OTHER", remote);
         _ = local.ExecuteNonQuery("exec sp_addlinkedserver 'OTHER'");
 
-        _ = Throws<NotSupportedException>(() => local.ExecuteNonQuery("update OTHER.simulated.dbo.remote_t set v = 2 where id = 1"));
+        AreEqual(1, local.ExecuteNonQuery("update OTHER.simulated.dbo.remote_t set v = 2 where id = 1"));
+        AreEqual(3, remote.ExecuteScalar("select sum(v) from remote_t"));
     }
 
     [TestMethod]
-    public void Delete_ThroughFourPartName_Rejected()
+    public void Delete_ThroughFourPartName_LandsOnRemote()
     {
         var remote = new Simulation();
-        _ = remote.ExecuteNonQuery("create table dbo.remote_t (id int not null primary key); insert remote_t values (1)");
+        _ = remote.ExecuteNonQuery("create table dbo.remote_t (id int not null primary key); insert remote_t values (1), (2)");
 
         var local = new Simulation();
         local.AddRemoteSimulation("OTHER", remote);
         _ = local.ExecuteNonQuery("exec sp_addlinkedserver 'OTHER'");
 
-        _ = Throws<NotSupportedException>(() => local.ExecuteNonQuery("delete from OTHER.simulated.dbo.remote_t where id = 1"));
+        AreEqual(1, local.ExecuteNonQuery("delete from OTHER.simulated.dbo.remote_t where id = 1"));
+        AreEqual(2, remote.ExecuteScalar("select id from remote_t"));
     }
 
     [TestMethod]
@@ -139,7 +140,7 @@ public class LinkedServerTests
 
         _ = local.ExecuteNonQuery("exec sp_dropserver 'OTHER'");
 
-        _ = local.AssertSqlError("select count(*) from OTHER.simulated.dbo.t", 208);
+        _ = local.AssertSqlError("select count(*) from OTHER.simulated.dbo.t", 7202);
     }
 
     [TestMethod]
@@ -151,7 +152,7 @@ public class LinkedServerTests
     }
 
     [TestMethod]
-    public void SpServerOption_ParseAndDiscard()
+    public void SpServerOption_DataAccessOn_KeepsReads()
     {
         var remote = new Simulation();
         _ = remote.ExecuteNonQuery("create table dbo.t (id int not null primary key); insert t values (1)");
@@ -229,35 +230,37 @@ public class LinkedServerTests
         AreEqual("My Source", local.ExecuteScalar("select data_source from sys.servers where name = 'OTHER'"));
     }
 
+    /// <summary>
+    /// A four-part catalog view reads the remote's catalog, not the local one.
+    /// </summary>
     [TestMethod]
-    public void FourPartName_ToRemoteCatalogView_FallsThroughToMsg208()
+    public void FourPartName_ToRemoteCatalogView_ReadsRemoteCatalog()
     {
         var remote = new Simulation();
-        _ = remote.ExecuteNonQuery("create table dbo.t (id int)");
+        _ = remote.ExecuteNonQuery("create table dbo.t (id int); create table dbo.u (id int)");
 
         var local = new Simulation();
         local.AddRemoteSimulation("OTHER", remote);
         _ = local.ExecuteNonQuery("exec sp_addlinkedserver 'OTHER'");
 
-        // Catalog views aren't reachable through four-part names yet; the
-        // lookup misses because sys.tables isn't a HeapTable in the remote's
-        // schema dict. Falls through to Msg 208 — documented gap.
-        _ = local.AssertSqlError("select count(*) from OTHER.simulated.sys.tables", 208);
+        AreEqual(2, local.ExecuteScalar("select count(*) from OTHER.simulated.sys.tables"));
+        AreEqual("u", local.ExecuteScalar("select TABLE_NAME from OTHER.simulated.INFORMATION_SCHEMA.TABLES where TABLE_NAME > 't'"));
     }
 
     [TestMethod]
-    public void FourPartName_MissingRemoteTable_Msg208()
+    public void FourPartName_MissingRemoteTable_Msg7314()
     {
         var remote = new Simulation();
         var local = new Simulation();
         local.AddRemoteSimulation("OTHER", remote);
         _ = local.ExecuteNonQuery("exec sp_addlinkedserver 'OTHER'");
 
-        _ = local.AssertSqlError("select * from OTHER.simulated.dbo.no_such_table", 208);
+        local.AssertSqlError("select * from OTHER.simulated.dbo.no_such_table", 7314,
+            "The OLE DB provider \"MSOLEDBSQL19\" for linked server \"OTHER\" does not contain the table \"\"simulated\".\"dbo\".\"no_such_table\"\". The table either does not exist or the current user does not have permissions on that table.");
     }
 
     [TestMethod]
-    public void Merge_ThroughFourPartName_Rejected()
+    public void Merge_ThroughFourPartName_Msg5315()
     {
         var remote = new Simulation();
         _ = remote.ExecuteNonQuery("create table dbo.remote_t (id int not null primary key)");
@@ -267,7 +270,7 @@ public class LinkedServerTests
         local.AddRemoteSimulation("OTHER", remote);
         _ = local.ExecuteNonQuery("exec sp_addlinkedserver 'OTHER'");
 
-        _ = Throws<NotSupportedException>(() => local.ExecuteNonQuery("merge OTHER.simulated.dbo.remote_t as t using dbo.src as s on s.id = t.id when matched then delete;"));
+        _ = local.AssertSqlError("merge OTHER.simulated.dbo.remote_t as t using dbo.src as s on s.id = t.id when matched then delete;", 5315);
     }
 
     /// <summary>
