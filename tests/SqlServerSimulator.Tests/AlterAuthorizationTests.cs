@@ -352,6 +352,44 @@ public sealed class AlterAuthorizationTests
         AreEqual("fired", sim.ExecuteScalar("execute as user = 'c'; delete v"));
     }
 
+    // A dbo-owned join view over a dbo table and a w-owned one.
+    private static Simulation BrokenJoinViewChain(string grants)
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            """
+            create user c without login; create user w without login;
+            create table a (id int primary key, n varchar(10)); create table b (id int primary key, aid int, q int);
+            insert a values (1, 'one'); insert b values (10, 1, 5);
+            alter authorization on b to w
+            """,
+            "create view jv as select b.id, b.aid, a.id as a_id, a.n, b.q from a join b on a.id = b.aid",
+            "grant select, insert, update on jv to c");
+        if (grants.Length > 0)
+            _ = sim.ExecuteNonQuery(grants);
+        return sim;
+    }
+
+    [TestMethod]
+    [DataRow("", "update jv set q = 6 where id = 10", 229, "The SELECT permission was denied on the object 'b'")]
+    [DataRow("grant select on b to c", "update jv set q = 6 where id = 10", 229, "The UPDATE permission was denied on the object 'b'")]
+    [DataRow("", "update jv set n = 'x'", 229, "The SELECT permission was denied on the object 'b'")]
+    [DataRow("grant select (aid) on b to c", "update jv set q = 6 where id = 10", 230, "The SELECT permission was denied on the column 'id' of the object 'b'")]
+    [DataRow("grant select on b to c", "insert jv (id, aid, q) values (20, 1, 7)", 229, "The INSERT permission was denied on the object 'b'")]
+    public void Chain_BrokenForDmlThroughAJoinView(string grants, string statement, int number, string message)
+    {
+        var ex = BrokenJoinViewChain(grants).AssertSqlError($"execute as user = 'c'; {statement}", number);
+        Contains(message, ex.Errors[0].Message);
+    }
+
+    [TestMethod]
+    [DataRow("grant select (id, aid) on b to c; grant update (q) on b to c", "update jv set q = 6 where id = 10")]
+    [DataRow("grant select (aid) on b to c", "update jv set n = 'x'")]
+    [DataRow("grant insert on b to c", "insert jv (id, aid, q) values (20, 1, 7)")]
+    [DataRow("", "insert jv (a_id, n) values (2, 'two')")]
+    public void Chain_BrokenForDmlThroughAJoinView_BaseGrantAdmits(string grants, string statement)
+        => AreEqual(1, BrokenJoinViewChain(grants).ExecuteScalar($"execute as user = 'c'; {statement} select @@rowcount"));
+
     [TestMethod]
     public void Chain_IntactThroughAView_NeedsNoBaseGrant()
     {

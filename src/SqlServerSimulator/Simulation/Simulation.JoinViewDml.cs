@@ -37,8 +37,41 @@ partial class Simulation
 
         public readonly JoinSpec[] Joins = profiles[0].Joins;
 
+        /// <summary>
+        /// Per bottom source, the chain of the join view that source reads,
+        /// built when a written column descends into it — the level stack a
+        /// join view over a join view nests.
+        /// </summary>
+        public readonly JoinViewChain?[] Nested = new JoinViewChain?[profiles[0].Sources.Length];
+
         /// <summary>Name the DML errors report — the view the statement named.</summary>
         public readonly string TargetName = $"{views[^1].Schema.Name}.{views[^1].Name}";
+
+        /// <summary>
+        /// The heap a write along <paramref name="path"/> reaches: one bottom
+        /// source index per nested chain, outermost first.
+        /// </summary>
+        public HeapTable? TableAt(int[] path)
+        {
+            var chain = this;
+            for (var depth = 0; depth < path.Length - 1; depth++)
+                chain = chain.Nested[path[depth]]!;
+            return chain.Sources[path[^1]].BackingTable;
+        }
+
+        /// <summary>Whether any view on <paramref name="path"/>'s chains carries <c>WITH CHECK OPTION</c>.</summary>
+        public bool HasCheckOptionAlong(int[] path)
+        {
+            var chain = this;
+            for (var depth = 0; ; depth++)
+            {
+                if (HighestCheckOptionLevel(chain) >= 0)
+                    return true;
+                if (depth == path.Length - 1)
+                    return false;
+                chain = chain.Nested[path[depth]]!;
+            }
+        }
     }
 
     /// <summary>
@@ -46,12 +79,14 @@ partial class Simulation
     /// the listed view column names pre-resolved to base-table columns (the
     /// column list has to be read before the target table is known, so it is
     /// scanned once and replayed here), plus the chained
-    /// <c>WITH CHECK OPTION</c> predicate when some level carries one.
+    /// <c>WITH CHECK OPTION</c> predicate when some level carries one, and the
+    /// shape an <c>OUTPUT</c> clause binds <c>INSERTED</c> to.
     /// </summary>
-    private sealed class JoinViewInsertPlan(Dictionary<string, HeapColumn> columns, Func<SqlValue[], BatchContext, bool>? checkOption)
+    private sealed class JoinViewInsertPlan(Dictionary<string, HeapColumn> columns, Func<SqlValue[], BatchContext, bool>? checkOption, Func<ViewOutputShape> outputShape)
     {
         public readonly Dictionary<string, HeapColumn> Columns = columns;
         public readonly Func<SqlValue[], BatchContext, bool>? CheckOption = checkOption;
+        public readonly Func<ViewOutputShape> OutputShape = outputShape;
     }
 
     /// <summary>
@@ -160,38 +195,125 @@ partial class Simulation
     /// — the derived column may sit at any level and real still reports the
     /// one written).
     /// </summary>
-    private static (int SourceIndex, int ColumnIndex) DescendToBaseColumn(BatchContext batch, JoinViewChain chain, string columnName)
+    private static (int[] Path, int ColumnIndex) DescendToBaseColumn(BatchContext batch, JoinViewChain chain, string columnName)
     {
         var collation = batch.CurrentDatabase.Collation;
+        var path = new List<int>();
+        var current = chain;
         var name = columnName;
-        var level = chain.Views.Length - 1;
+        var level = current.Views.Length - 1;
         while (true)
         {
-            var ordinal = IndexOfViewOutputColumn(collation, chain.Views[level], name);
+            var ordinal = IndexOfViewOutputColumn(collation, current.Views[level], name);
             if (ordinal < 0)
                 throw SimulatedSqlException.InvalidColumnName(name);
-            if (UnwrapDirectRef(chain.Profiles[level].Projections[ordinal]) is not { ReferencedName: { } referenced })
+            if (UnwrapDirectRef(current.Profiles[level].Projections[ordinal]) is not { ReferencedName: { } referenced })
                 throw SimulatedSqlException.ViewDmlTouchesDerivedField(chain.TargetName);
-            if (level == 0)
+            if (level > 0)
             {
-                var found = Selection.FindSourceColumn(chain.Sources, referenced);
-                return found.SourceIndex < 0
-                    ? throw SimulatedSqlException.InvalidColumnName(referenced)
-                    : found;
+                name = referenced.Leaf;
+                level--;
+                continue;
             }
-            name = referenced.Leaf;
-            level--;
+
+            var (sourceIndex, columnIndex) = Selection.FindSourceColumn(current.Sources, referenced);
+            if (sourceIndex < 0)
+                throw SimulatedSqlException.InvalidColumnName(referenced);
+            path.Add(sourceIndex);
+
+            // A source that is itself a join view flattens into the write:
+            // the column descends through that view's own level stack.
+            if (current.Sources[sourceIndex] is not { BackingTable: null, BackingView: { BaseTable: null, IsJoinUpdatable: true } inner })
+                return ([.. path], columnIndex);
+            current = current.Nested[sourceIndex] ??= BuildJoinViewChain(batch, inner);
+            name = current.Views[^1].OutputColumns[columnIndex].Name;
+            level = current.Views.Length - 1;
         }
     }
 
     /// <summary>
-    /// <c>WITH CHECK OPTION</c> for a chained multi-source write: whether the
-    /// written base row still surfaces through the level that carries the
-    /// option — it must find a join partner and pass every WHERE from the
-    /// bottom up. Re-runs the join with the target source narrowed to that one
-    /// row, so a row that changed which partner it matches is judged on its
-    /// new partner (real accepts exactly that — probe-confirmed), and an
-    /// INSERT is judged on the row it is about to write.
+    /// The bottom sources of <paramref name="chain"/> for a write whose target
+    /// lies along <paramref name="path"/> from <paramref name="depth"/>: at
+    /// the innermost chain the target source goes through
+    /// <paramref name="wrapTarget"/>; at every chain above it the nested join
+    /// view's slot is replaced by that view's rows, computed from the inner
+    /// chain's own tuples, each encoded row recorded against the inner tuple
+    /// it came from in <paramref name="rowMaps"/> at its depth — which is how a
+    /// tuple of the outer view leads back to the base row it shows.
+    /// </summary>
+    private static FromSource[] SourcesAlongPath(
+        BatchContext batch,
+        JoinViewChain chain,
+        int[] path,
+        int depth,
+        Func<FromSource, FromSource> wrapTarget,
+        Dictionary<byte[], byte[]?[]>[] rowMaps)
+    {
+        var sources = (FromSource[])chain.Sources.Clone();
+        var slot = path[depth];
+        if (depth == path.Length - 1)
+        {
+            sources[slot] = wrapTarget(sources[slot]);
+            return sources;
+        }
+
+        var inner = chain.Nested[slot]!;
+        var innerSources = SourcesAlongPath(batch, inner, path, depth + 1, wrapTarget, rowMaps);
+        var rowMap = rowMaps[depth] = new(ReferenceEqualityComparer.Instance);
+        var original = sources[slot];
+
+        byte[]?[] tuple = [];
+        SqlValue resolveTuple(MultiPartName name) => ResolveAcrossMutationTuple(innerSources, tuple, name, batch);
+        var (resolvers, belowRuntimes) = BuildChainResolvers(batch, inner, resolveTuple);
+        var topLevel = inner.Views.Length - 1;
+        var rows = new List<byte[]>();
+        foreach (var candidate in Selection.EnumerateJoinedRows(innerSources, inner.Joins, batch, outerResolver: null))
+        {
+            tuple = candidate;
+            if (!ChainLevelsPass(inner, belowRuntimes, topLevel))
+                continue;
+            var values = new SqlValue[original.Columns.Length];
+            for (var i = 0; i < values.Length; i++)
+                values[i] = resolvers[topLevel](new MultiPartName(inner.Views[topLevel].OutputColumns[i].Name));
+            var bytes = RowEncoder.EncodeRow(original.Columns, values);
+            rowMap[bytes] = (byte[]?[])candidate.Clone();
+            rows.Add(bytes);
+        }
+
+        sources[slot] = new FromSource(
+            qualifier: original.Qualifier,
+            columnNames: original.ColumnNames,
+            columns: original.Columns,
+            storedSchema: original.Columns,
+            storageOrdinals: null,
+            lobStore: null,
+            rows: rows,
+            backingTable: null,
+            unaliasedName: original.UnaliasedName);
+        return sources;
+    }
+
+    /// <summary>
+    /// The innermost chain's target-slot bytes an outer tuple shows along
+    /// <paramref name="path"/>, or null when a level's slot is NULL-extended.
+    /// </summary>
+    private static byte[]? TargetBytesAlongPath(byte[]?[] tuple, int[] path, Dictionary<byte[], byte[]?[]>[] rowMaps)
+    {
+        var bytes = tuple[path[0]];
+        for (var depth = 0; depth < path.Length - 1 && bytes is not null; depth++)
+            bytes = rowMaps[depth][bytes][path[depth + 1]];
+        return bytes;
+    }
+
+    /// <summary>
+    /// <c>WITH CHECK OPTION</c> for a write along <paramref name="path"/>:
+    /// the written row, standing in for its target source, must surface
+    /// through the outermost chain carrying the option, up through that
+    /// chain's highest option-bearing level. The join is re-run with the target
+    /// source narrowed to that one row, so a row that changed which partner it
+    /// matches is judged on its new partner (real accepts exactly that —
+    /// probe-confirmed), and an INSERT is judged on the row it is about to
+    /// write.
     /// </summary>
     /// <remarks>
     /// The probe row is encoded with no LOB store, which keeps every value
@@ -200,35 +322,39 @@ partial class Simulation
     /// is the encoder's 65535-byte var-offset cap rather than the heap's
     /// off-row spill.
     /// </remarks>
-    private static bool ChainRowRemainsVisible(
-        BatchContext batch,
-        JoinViewChain chain,
-        FromSource[] sources,
-        int targetIndex,
-        HeapTable table,
-        SqlValue[] newValues,
-        int throughLevel)
+    private static bool PathRowRemainsVisible(BatchContext batch, JoinViewChain chain, int[] path, HeapTable table, SqlValue[] newValues)
     {
-        var original = sources[targetIndex];
-        var probeSources = (FromSource[])sources.Clone();
-        probeSources[targetIndex] = new FromSource(
-            qualifier: original.Qualifier,
-            columnNames: original.ColumnNames,
-            columns: original.Columns,
-            storedSchema: original.StoredSchema,
-            storageOrdinals: original.StorageOrdinals,
-            lobStore: null,
-            rows: [RowEncoder.EncodeRow(table.StoredColumns, ProjectStoredValues(table, newValues))],
-            backingTable: original.BackingTable,
-            unaliasedName: original.UnaliasedName);
+        var depth = 0;
+        while (HighestCheckOptionLevel(chain) < 0)
+        {
+            chain = chain.Nested[path[depth]]!;
+            depth++;
+        }
+        var remaining = path[depth..];
+        var rowMaps = new Dictionary<byte[], byte[]?[]>[remaining.Length - 1];
+        var probeRow = RowEncoder.EncodeRow(table.StoredColumns, ProjectStoredValues(table, newValues));
+        var sources = SourcesAlongPath(
+            batch, chain, remaining, 0,
+            original => new FromSource(
+                qualifier: original.Qualifier,
+                columnNames: original.ColumnNames,
+                columns: original.Columns,
+                storedSchema: original.StoredSchema,
+                storageOrdinals: original.StorageOrdinals,
+                lobStore: null,
+                rows: [probeRow],
+                backingTable: original.BackingTable,
+                unaliasedName: original.UnaliasedName),
+            rowMaps);
 
+        var throughLevel = HighestCheckOptionLevel(chain);
         byte[]?[] tuple = [];
-        SqlValue resolveTuple(MultiPartName name) => ResolveAcrossMutationTuple(probeSources, tuple, name, batch);
+        SqlValue resolveTuple(MultiPartName name) => ResolveAcrossMutationTuple(sources, tuple, name, batch);
         var (_, belowRuntimes) = BuildChainResolvers(batch, chain, resolveTuple);
-        foreach (var candidate in Selection.EnumerateJoinedRows(probeSources, chain.Joins, batch, outerResolver: null))
+        foreach (var candidate in Selection.EnumerateJoinedRows(sources, chain.Joins, batch, outerResolver: null))
         {
             tuple = candidate;
-            if (candidate[targetIndex] is not null && ChainLevelsPass(chain, belowRuntimes, throughLevel))
+            if (TargetBytesAlongPath(candidate, remaining, rowMaps) is not null && ChainLevelsPass(chain, belowRuntimes, throughLevel))
                 return true;
         }
         return false;
@@ -266,34 +392,125 @@ partial class Simulation
         var listedNames = ScanInsertColumnNames(context);
         context.RestoreCheckpoint(checkpoint);
 
-        var targetIndex = -1;
+        int[]? path = null;
         var baseOrdinals = new int[listedNames.Count];
         for (var i = 0; i < listedNames.Count; i++)
         {
-            var (sourceIndex, columnIndex) = DescendToBaseColumn(batch, chain, listedNames[i]);
-            if (targetIndex >= 0 && targetIndex != sourceIndex)
+            var (columnPath, columnIndex) = DescendToBaseColumn(batch, chain, listedNames[i]);
+            if (path is not null && !path.AsSpan().SequenceEqual(columnPath))
                 throw SimulatedSqlException.ViewUpdateAffectsMultipleTables(viewName);
-            targetIndex = sourceIndex;
+            path = columnPath;
             baseOrdinals[i] = columnIndex;
         }
 
-        var table = chain.Sources[targetIndex].BackingTable
+        var table = chain.TableAt(path!)
             ?? throw SimulatedSqlException.ViewUpdateAffectsMultipleTables(viewName);
 
         var columns = new Dictionary<string, HeapColumn>(batch.CurrentDatabase.Collation);
         for (var i = 0; i < listedNames.Count; i++)
             columns[listedNames[i]] = table.Columns[baseOrdinals[i]];
 
-        var checkLevel = HighestCheckOptionLevel(chain);
         var plan = new JoinViewInsertPlan(
             columns,
-            checkLevel < 0
-                ? null
-                : (row, rowBatch) => ChainRowRemainsVisible(rowBatch, chain, chain.Sources, targetIndex, table, row, checkLevel));
+            chain.HasCheckOptionAlong(path!)
+                ? (row, rowBatch) => PathRowRemainsVisible(rowBatch, chain, path!, table, row)
+                : null,
+            () => path!.Length == 1
+                ? JoinViewOutputShape(batch, ViewColumnsFor(batch, destinationView, destinationName), chain, chain.Sources, path[0], table, tuplesByRow: null)
+                : throw JoinOverJoinViewOutputNotModeled(destinationView));
 
         _ = batch.AcquireDataLockIfApplicable(table, default, isWrite: true);
+        // A base table with another owner than the view breaks the chain,
+        // and an INSERT checks only its own write there (probed 2026-09-27
+        // against SQL Server 2025).
+        if (!batch.IsSkipping)
+            PermissionEnforcement.CheckBrokenChainWrite(batch, "INSERT", destinationView, table);
         return ProcessHeapInsert(table, context, top, destinationName, destinationView, plan);
     }
+
+    /// <summary>
+    /// The broken ownership chain an UPDATE through a join view crosses: every
+    /// base table whose owner isn't the view's is checked for SELECT on the
+    /// columns the statement reads of it — its join and filter columns, and
+    /// the ones the <c>WHERE</c> and <c>SET</c> values reach through the view
+    /// — and the written table for UPDATE on the columns assigned (probed
+    /// 2026-09-27 against SQL Server 2025, column-grain both ways). Only the
+    /// outermost chain's own base tables are gathered.
+    /// </summary>
+    private static void CheckJoinViewBrokenChains(
+        BatchContext batch,
+        JoinViewChain chain,
+        HeapTable table,
+        List<string> readViewColumns,
+        List<(int Ordinal, Expression Expr)> assignments)
+    {
+        if (batch.IsSkipping)
+            return;
+        var view = chain.Views[^1];
+        var reads = new ColumnReadTarget?[chain.Sources.Length];
+        void AddBottom(MultiPartName name)
+        {
+            var (sourceIndex, columnIndex) = Selection.FindSourceColumn(chain.Sources, name);
+            if (sourceIndex >= 0 && chain.Sources[sourceIndex].BackingTable is { } backing)
+                _ = (reads[sourceIndex] ??= new ColumnReadTarget(backing)).Ordinals.Add(columnIndex + 1);
+        }
+
+        var collation = batch.CurrentDatabase.Collation;
+        void AddViewColumn(int level, string columnName)
+        {
+            var ordinal = IndexOfViewOutputColumn(collation, chain.Views[level], columnName);
+            if (ordinal < 0)
+                return;
+            chain.Profiles[level].Projections[ordinal].VisitColumnReferences(name =>
+            {
+                if (level == 0)
+                    AddBottom(name);
+                else
+                    AddViewColumn(level - 1, name.Leaf);
+            });
+        }
+
+        foreach (var join in chain.Joins)
+            join.OnPredicate?.VisitOperandExpressions(operand => operand.VisitColumnReferences(AddBottom));
+        for (var level = 0; level < chain.Views.Length; level++)
+        {
+            var below = level - 1;
+            foreach (var excluder in chain.Profiles[level].Excluders)
+            {
+                excluder.VisitOperandExpressions(operand => operand.VisitColumnReferences(name =>
+                {
+                    if (below < 0)
+                        AddBottom(name);
+                    else
+                        AddViewColumn(below, name.Leaf);
+                }));
+            }
+        }
+        foreach (var columnName in readViewColumns)
+            AddViewColumn(chain.Views.Length - 1, columnName);
+
+        foreach (var read in reads)
+        {
+            if (read is not null)
+                PermissionEnforcement.CheckBrokenChainTableColumns(batch, Permission.Select, view, read);
+        }
+
+        var assigned = new ColumnReadTarget(table);
+        foreach (var (ordinal, _) in assignments)
+        {
+            if (ordinal >= 0)
+                _ = assigned.Ordinals.Add(ordinal + 1);
+        }
+        PermissionEnforcement.CheckBrokenChainTableColumns(batch, Permission.Update, view, assigned);
+    }
+
+    /// <summary>
+    /// OUTPUT through a join view whose written table sits under a nested join
+    /// view, which isn't built: <c>INSERTED</c> would have to be computed up
+    /// through the nested view from the written row alone.
+    /// </summary>
+    private static NotSupportedException JoinOverJoinViewOutputNotModeled(View view) =>
+        new($"OUTPUT through '{view.Name}', a join view whose written table another join view it reads supplies, isn't modeled.");
 
     /// <summary>
     /// Reads an INSERT's parenthesized column list for its names alone, with

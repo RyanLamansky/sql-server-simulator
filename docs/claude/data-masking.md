@@ -74,7 +74,7 @@ The sinks, each applying its plan's masks for the executing principal:
 - `INSERT … VALUES ((SELECT masked …))`, which stores `default()` of the value's type whatever the column's function;
 - `UPDATE … SET`, which stores the masked value of its expression at the target column's type — `SET s = s + '!'` overwrites the column with its own mask, `SET plain = LEFT(s, 2)` stores `xxxx` into a `varchar(20)` — and through a view masks each view column as its base column;
 - `MERGE`'s `UPDATE SET` and `INSERT VALUES`, whose values for one target column meet as a `CASE`'s arms do: a bare source column stores its function, any other expression over one `default()`, and an unmasked value written by another action beside a masked one is masked too (`UPDATE SET s = s + src.x` with `INSERT VALUES (src.id, src.x)` stores `xxxx` both ways); its `OUTPUT` masks the source's columns as the source query projects them;
-- `OUTPUT` `INSERTED` / `DELETED`, to the client and into an `INTO` target;
+- `OUTPUT` `INSERTED` / `DELETED`, to the client and into an `INTO` target — through a view, each view column as the view reads it;
 - `SELECT @v = …`, `SET @v = …` and `DECLARE @v = …`: through the column's function when the variable is declared as the value's own type, else `default()` of the variable's type (`varchar(40)` keeps `jXXX@XXXX.com`, `varchar(20)` reads `xxxx`).
 
 A correlated subquery or an `APPLY` body projecting an enclosing query's masked column masks it as a direct reference would (`SELECT (SELECT t.s)` keeps `s`'s function, `CROSS APPLY (SELECT UPPER(t.s))` reads `default()`): `ParserContext.OuterMaskResolver` chains the enclosing scopes' masks beside their column types.

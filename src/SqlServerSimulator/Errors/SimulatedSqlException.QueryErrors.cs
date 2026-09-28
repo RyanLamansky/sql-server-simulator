@@ -1355,6 +1355,51 @@ partial class SimulatedSqlException
         new($"EXECUTE statement failed because its WITH RESULT SETS clause specified type '{declaredTypeName}' for column #{columnNumber} in result set #{setNumber}, and the corresponding type sent at run time was '{runtimeTypeName}'; there is no conversion between the two types.", 11538, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 404: an <c>OUTPUT</c> clause names an
+    /// <c>INSERTED</c> column of a view that the write can't produce — one
+    /// reading a base table the statement isn't writing through a join view,
+    /// or any column under an <c>INSTEAD OF UPDATE</c> trigger on the view.
+    /// The column is named as the view defines it, lowercase <c>inserted</c>
+    /// whatever the statement wrote (probed 2026-09-27 against SQL Server
+    /// 2025).
+    /// </summary>
+    internal static SimulatedSqlException OutputColumnOfUnmodifiedBaseTable(string viewColumnName) =>
+        new($"The column reference \"inserted.{viewColumnName}\" is not allowed because it refers to a base table that is not being modified in this statement.", 404, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 414: an UPDATE naming a view with an
+    /// <c>INSTEAD OF UPDATE</c> trigger carries a <c>FROM</c> clause (probed
+    /// 2026-09-27 against SQL Server 2025, joining the view to a table).
+    /// </summary>
+    internal static SimulatedSqlException InsteadOfViewInJoinedUpdate(string viewName) =>
+        new($"UPDATE is not allowed because the statement updates view \"{viewName}\" which participates in a join and has an INSTEAD OF UPDATE trigger.", 414, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 5316: a MERGE's target carries INSTEAD OF
+    /// triggers for some of the actions its WHEN clauses perform but not all
+    /// (probed 2026-09-27 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException MergeInsteadOfTriggerOnSomeActions(string writtenTarget) =>
+        new($"The target '{writtenTarget}' of the MERGE statement has an INSTEAD OF trigger on some, but not all, of the actions specified in the MERGE statement. In a MERGE statement, if any action has an enabled INSTEAD OF trigger on the target, then all actions must have enabled INSTEAD OF triggers.", 5316, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 11533: <c>WITH RESULT SETS (AS OBJECT name)</c>
+    /// named no table, view or table-valued function — echoed as written, and
+    /// a three-part name is refused whatever it names. Real's wording opens
+    /// with <c>Type</c> even though the clause names an object (probed
+    /// 2026-09-27 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException ResultSetsInvalidObjectName(string writtenName) =>
+        new($"Type '{writtenName}' is not a valid object name for result set definition.", 11533, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 11534: <c>WITH RESULT SETS (AS TYPE name)</c>
+    /// named no table type (probed 2026-09-27 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException ResultSetsInvalidTableType(string writtenName) =>
+        new($"Type '{writtenName}' is invalid or not a table type.", 11534, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 11553: a <c>WITH RESULT SETS</c> column
     /// declared <c>NOT NULL</c> received a NULL at run time. Raised per row as
     /// the result set streams, so rows preceding the offending one reach the

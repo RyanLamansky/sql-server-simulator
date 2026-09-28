@@ -39,10 +39,14 @@ partial class Simulation
         HeapTable? leadingTable;
         if (TryResolveCteTarget(context, leadingIdent, out var resolvedView) || context.Batch.TryResolveView(leadingIdent, out resolvedView))
         {
-            if (HasInsteadOfTrigger(context.Batch, resolvedView, TriggerActions.Delete)
-                && resolvedView.BaseTable is null)
+            // An INSTEAD OF DELETE trigger takes the write whatever the
+            // view's shape, reading the view's own rows.
+            if (HasInsteadOfTrigger(context.Batch, resolvedView, TriggerActions.Delete))
             {
-                throw new NotSupportedException($"INSTEAD OF DELETE through a non-updatable view ('{resolvedView.Schema.Name}.{resolvedView.Name}') isn't modeled. Updatable single-base views work; join / aggregate / DISTINCT views are deferred.");
+                context.MoveNextOptional();
+                var insteadOfHints = Selection.ParseOptionalTableHints(context, allowLegacyParenForm: false);
+                Selection.ValidateDmlTargetHints(insteadOfHints);
+                return ExecuteInsteadOfViewDelete(context, leadingIdent, resolvedView, top, insteadOfHints.Serializable);
             }
             if (resolvedView.BaseTable is not { } baseTable)
             {
@@ -73,15 +77,16 @@ partial class Simulation
         // OUTPUT requires a known target. INSERTED isn't a valid qualifier
         // in DELETE OUTPUT (probe-confirmed Msg 4104). Alias-form multi-
         // source DELETE with OUTPUT isn't modeled — see the matching
-        // limitation in ParseUpdate. DELETE OUTPUT through a view is also
-        // rejected (the DELETED.* would need view-output-column rebinding).
+        // limitation in ParseUpdate. Through a view, DELETED takes the view's
+        // columns, read off the base rows.
         OutputProjection? output = null;
-        if (leadingView is not null && context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Output })
-            throw new NotSupportedException($"DELETE … OUTPUT through a view ('{leadingView.Schema.Name}.{leadingView.Name}') isn't modeled. Target the underlying table directly when OUTPUT is required.");
         if (leadingTable is not null)
         {
-            output = TryParseOutputClauseForMutation(context, leadingTable, allowInserted: false, allowDeleted: true);
-            RejectClientOutputOnTriggeredTarget(context.Batch, leadingTable, TriggerActions.Delete, leadingIdent.ToString(), output is { HasTarget: false });
+            var viewShape = leadingView is not null && context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Output }
+                ? SingleBaseViewOutputShape(context.Batch, leadingView, leadingIdent, leadingTable)
+                : null;
+            output = TryParseOutputClauseForMutation(context, leadingTable, allowInserted: false, allowDeleted: true, viewShape);
+            RejectClientOutputOnTriggeredTarget(context.Batch, leadingTable, TriggerActions.Delete, leadingView is null ? leadingIdent.ToString() : leadingTable.Name, output is { HasTarget: false });
         }
         else if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Output })
         {
@@ -447,11 +452,13 @@ partial class Simulation
 
         if (insteadOfActive)
         {
+            // OUTPUT INTO's rows land before the body runs (probed 2026-09-27
+            // against SQL Server 2025); to the client it is Msg 334.
+            var outputRows = output is null ? null : ProjectDeleteOutput(deleted, output);
             FireInsteadOfDeleteTrigger(context, table, sourceView, deleted);
-            if (output is null || output.HasTarget)
-                return new SimulatedNonQuery(deleted.Count);
-            var rows = ProjectDeleteOutput(deleted, output);
-            return new SimulatedSqlResultSet(output.Schema, output.ColumnNames, rows, deleted.Count);
+            return output is null || output.HasTarget
+                ? new SimulatedNonQuery(deleted.Count)
+                : new SimulatedSqlResultSet(output.Schema, output.ColumnNames, outputRows!, deleted.Count);
         }
 
         var undoLog = table.IsTableVariable ? context.Batch.CurrentTableVarUndoLog : context.Batch.CurrentUndoLog;

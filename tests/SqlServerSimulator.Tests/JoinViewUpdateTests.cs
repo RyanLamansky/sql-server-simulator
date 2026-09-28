@@ -247,11 +247,33 @@ public sealed class JoinViewUpdateTests
         Assert.AreEqual(2, simulation.ExecuteScalar<int>("select count(*) from dbo.many where val = 0"));
     }
 
-    /// <summary>OUTPUT through a view still isn't modeled, join view included.</summary>
+    /// <summary>
+    /// OUTPUT names the view's columns: DELETED reads each row's join as it
+    /// stood, the other base table's columns included.
+    /// </summary>
     [TestMethod]
-    public void OutputThroughAJoinViewIsNotSupported()
-        => _ = Assert.Throws<NotSupportedException>(
-            () => Seeded().ExecuteNonQuery("update dbo.v set val = 1 output inserted.val where mid = 11"));
+    public void OutputReadsTheViewsColumns()
+    {
+        using var reader = Seeded().ExecuteReader("update dbo.v set val = val + 1 output inserted.mid, inserted.val, deleted.val, deleted.name where mid = 11");
+        Assert.IsTrue(reader.Read());
+        Assert.AreEqual(11, reader.GetInt32(0));
+        Assert.AreEqual(101, reader.GetInt32(1));
+        Assert.AreEqual(100, reader.GetInt32(2));
+        Assert.AreEqual("a", reader.GetString(3));
+        Assert.IsFalse(reader.Read());
+    }
+
+    /// <summary>
+    /// INSERTED can't name a column of the base table the statement isn't
+    /// writing — Msg 404, one per column, with the view's own spelling.
+    /// </summary>
+    [TestMethod]
+    public void OutputInsertedOfTheOtherTableIsMsg404()
+    {
+        var ex = Seeded().AssertSqlError("update dbo.v set val = 1 output INSERTED.NAME, inserted.n where mid = 11", 404);
+        Assert.AreEqual("The column reference \"inserted.name\" is not allowed because it refers to a base table that is not being modified in this statement.", ex.Errors[0].Message);
+        Assert.AreEqual(2, ex.Errors.Count);
+    }
 
     /// <summary>An unknown column name in the SET list reports against the view's own columns.</summary>
     [TestMethod]

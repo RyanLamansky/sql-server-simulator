@@ -40,6 +40,27 @@ partial class Simulation
     /// </remarks>
     private static SimulatedStatementOutcome ParseMerge(ParserContext context)
     {
+        var start = context.SaveCheckpoint();
+        if (ParseMerge(context, readsViewRows: null) is { } outcome)
+            return outcome;
+        // A view whose INSTEAD OF triggers cover none of the actions this
+        // MERGE takes is written through after all.
+        context.RestoreCheckpoint(start);
+        return ParseMerge(context, readsViewRows: false)!;
+    }
+
+    /// <summary>
+    /// <see cref="ParseMerge(ParserContext)"/>'s body. A view target is read
+    /// one of two ways: through its base table, or — when its <c>INSTEAD OF</c>
+    /// triggers take every action the statement performs, or when it has no
+    /// base table to write — as the rows it yields, matched and acted on under
+    /// its own column names (<paramref name="readsViewRows"/>; null guesses
+    /// from whether the view has any <c>INSTEAD OF</c> trigger). Returns null
+    /// when the guess proves wrong once the <c>WHEN</c> clauses have named the
+    /// actions, and the caller parses again the other way.
+    /// </summary>
+    private static SimulatedStatementOutcome? ParseMerge(ParserContext context, bool? readsViewRows)
+    {
         // Real binds the source, then ON, stopping there when ON fails; then
         // the insert column list, every WHEN condition, and every action
         // (probed 2026-09-27: an ON miss reports alone, and `… UPDATE SET x1 =
@@ -62,17 +83,28 @@ partial class Simulation
         // mutation; a non-updatable view raises Msg 4403 / Msg 4405 the same
         // way INSERT / UPDATE / DELETE through view do.
         View? sourceView = null;
+        View? viewRowsTarget = null;
         HeapTable destinationTable;
         if (TryResolveCteTarget(context, destinationName, out var resolvedView) || context.Batch.TryResolveView(destinationName, out resolvedView))
         {
-            sourceView = resolvedView;
-            destinationTable = resolvedView.BaseTable
-                ?? throw (resolvedView.RejectionReason == ViewUpdatabilityRejection.MultipleSources
-                    ? SimulatedSqlException.ViewUpdateAffectsMultipleTables(destinationName.ToString())
-                    : SimulatedSqlException.CannotUpdateNonUpdatableView(destinationName.ToString()));
-            // A MERGE matches against the rows the view yields, so its row
-            // limit or window applies to every action.
-            RejectRowSelectiveMergeTarget(context, resolvedView, destinationName);
+            if (readsViewRows ?? ((resolvedView.BaseTable is null && !resolvedView.IsJoinUpdatable) || HasAnyInsteadOfTrigger(context.Batch, resolvedView)))
+            {
+                // The view's own rows, under its own column names, stand in
+                // for the target; nothing is written to them.
+                viewRowsTarget = resolvedView;
+                destinationTable = ViewShapedTable(context.Batch, resolvedView, ViewColumnsFor(context.Batch, resolvedView, destinationName));
+            }
+            else
+            {
+                sourceView = resolvedView;
+                destinationTable = resolvedView.BaseTable
+                    ?? throw (resolvedView.RejectionReason == ViewUpdatabilityRejection.MultipleSources
+                        ? SimulatedSqlException.ViewUpdateAffectsMultipleTables(destinationName.ToString())
+                        : SimulatedSqlException.CannotUpdateNonUpdatableView(destinationName.ToString()));
+                // A MERGE matches against the rows the view yields, so its row
+                // limit or window applies to every action.
+                RejectRowSelectiveMergeTarget(context, resolvedView, destinationName);
+            }
         }
         else
         {
@@ -84,7 +116,7 @@ partial class Simulation
         }
         if (destinationTable.IsTableValuedParameter)
             throw SimulatedSqlException.TableValuedParameterIsReadOnly(destinationName.Leaf);
-        FunctionBodyShape.NoteTableWrite(context.Batch, "MERGE", destinationTable);
+        FunctionBodyShape.NoteTableWrite(context.Batch, "MERGE", viewRowsTarget is null ? destinationTable : null);
 
         // MERGE target hints: hint-then-alias placement
         // (probe-confirmed: `MERGE INTO t WITH (TABLOCK) AS x USING …` works,
@@ -118,6 +150,7 @@ partial class Simulation
         // when the target is a view (so `MERGE INTO vbase … ON vbase.col …`
         // works), otherwise the base table's name.
         var defaultTargetName = sourceView?.Name ?? destinationTable.Name;
+        var triggerTarget = (SchemaObject?)viewRowsTarget ?? (SchemaObject?)sourceView ?? destinationTable;
         var targetAlias = context.Token switch
         {
             UnquotedString { ContextualKeyword: ContextualKeyword.Using } => defaultTargetName,
@@ -180,8 +213,24 @@ partial class Simulation
         // WHEN clauses.
         var whenClauses = ParseMergeWhenClauses(context, destinationTable, sourceView, targetAlias, defaultTargetName, sourceAlias, sourceColumnNames, sourceSchema);
 
+        // Which actions INSTEAD OF triggers take is settled while compiling:
+        // some but not all of the statement's is Msg 5316.
+        var insteadOfActions = MergeInsteadOfActions(context.Batch, triggerTarget, whenClauses, destinationName);
+        if (viewRowsTarget is not null && !insteadOfActions)
+        {
+            if (viewRowsTarget.BaseTable is not null)
+                return null;
+            throw RefuseMergeIntoNonUpdatableView(viewRowsTarget, destinationTable, whenClauses, destinationName);
+        }
+
         // OUTPUT.
-        var output = TryParseMergeOutputClause(context, destinationTable, sourceView, sourceAlias, sourceColumnNames, sourceSchema, sourceMasks);
+        var output = TryParseMergeOutputClause(
+            context, destinationTable, sourceAlias, sourceColumnNames, sourceSchema, sourceMasks,
+            viewRowsTarget is not null
+                ? new ViewOutputShape(destinationTable.Columns, read: null, insertedRefused: static _ => true)
+                : sourceView is not null && context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Output }
+                ? SingleBaseViewOutputShape(context.Batch, sourceView, destinationName, destinationTable)
+                : null);
 
         if (context.Batch.Connection.Simulation.DeclaresDataMasks && !context.Batch.IsSkipping)
             SettleMergeWriteMasks(context.Batch, destinationTable, sourceView, targetAlias, defaultTargetName, targetColumns, sourceAlias, sourceColumnNames, sourceMasks, whenClauses);
@@ -192,14 +241,17 @@ partial class Simulation
         // name from the statement.
         if (output is { HasTarget: false })
         {
-            var mergeTarget = context.Batch.CurrentDatabase.Collation.Equals(targetAlias, defaultTargetName)
+            // Written through a view, the base table's triggers refuse it and
+            // the message names that table, as for the other statements.
+            var mergeTarget = sourceView is not null ? destinationTable.Name
+                : context.Batch.CurrentDatabase.Collation.Equals(targetAlias, defaultTargetName)
                 ? destinationName.ToString()
                 : targetAlias;
             foreach (var clause in whenClauses)
             {
                 RejectClientOutputOnTriggeredTarget(
                     context.Batch,
-                    (SchemaObject?)sourceView ?? destinationTable,
+                    (SchemaObject?)viewRowsTarget ?? destinationTable,
                     clause.Action switch
                     {
                         MergeActionKind.Insert => TriggerActions.Insert,
@@ -216,8 +268,74 @@ partial class Simulation
         if (context.Token is not Operator { Character: ';' })
             throw SimulatedSqlException.MergeMustBeTerminated();
         if (!context.Batch.IsSkipping)
-            CheckMergePermissions(context.Batch, destinationName, (SchemaObject?)sourceView ?? destinationTable, whenClauses);
-        return ExecuteMerge(context, destinationTable, sourceView, targetAlias, materializeSource, sourceAlias, sourceColumnNames, sourceSchema, onPredicate, whenClauses, output, serializableHint);
+            CheckMergePermissions(context.Batch, destinationName, triggerTarget, whenClauses);
+        if (viewRowsTarget is not null && !context.Batch.IsSkipping)
+        {
+            foreach (var row in ReadViewRows(context.Batch, viewRowsTarget, destinationTable.Columns))
+                _ = destinationTable.Heap.Insert(RowEncoder.EncodeRow(destinationTable.StoredColumns, ProjectStoredValues(destinationTable, row), destinationTable.Heap), undoLog: null);
+        }
+        return ExecuteMerge(context, destinationTable, sourceView, targetAlias, materializeSource, sourceAlias, sourceColumnNames, sourceSchema, onPredicate, whenClauses, output, serializableHint, viewRowsTarget);
+    }
+
+    /// <summary>Whether the view carries an INSTEAD OF trigger for any action.</summary>
+    private static bool HasAnyInsteadOfTrigger(BatchContext batch, View view) =>
+        HasInsteadOfTrigger(batch, view, TriggerActions.Insert)
+        || HasInsteadOfTrigger(batch, view, TriggerActions.Update)
+        || HasInsteadOfTrigger(batch, view, TriggerActions.Delete);
+
+    private static bool HasMergeAction(List<WhenClause> whenClauses, MergeActionKind action) =>
+        whenClauses.Exists(clause => clause.Action == action);
+
+    /// <summary>
+    /// Whether <c>INSTEAD OF</c> triggers on <paramref name="target"/> take
+    /// the actions the statement's <c>WHEN</c> clauses perform: every one of
+    /// them, or none. Some but not all is <strong>Msg 5316</strong>, raised
+    /// while compiling — an un-taken branch's MERGE ends its batch, and a
+    /// <c>DISABLE TRIGGER</c> earlier in the same batch hasn't run yet
+    /// (probed 2026-09-27 against SQL Server 2025, for a table and a view).
+    /// </summary>
+    private static bool MergeInsteadOfActions(BatchContext batch, SchemaObject target, List<WhenClause> whenClauses, MultiPartName writtenName)
+    {
+        var any = false;
+        var all = true;
+        foreach (var (kind, action) in (ReadOnlySpan<(MergeActionKind, TriggerActions)>)[(MergeActionKind.Insert, TriggerActions.Insert), (MergeActionKind.Update, TriggerActions.Update), (MergeActionKind.Delete, TriggerActions.Delete)])
+        {
+            if (!HasMergeAction(whenClauses, kind))
+                continue;
+            var covered = HasInsteadOfTrigger(batch, target, action);
+            any |= covered;
+            all &= covered;
+        }
+        return any && !all ? throw SimulatedSqlException.MergeInsteadOfTriggerOnSomeActions(writtenName.ToString()) : any;
+    }
+
+    /// <summary>
+    /// A MERGE into a view real can't write through, with no INSTEAD OF
+    /// trigger to take it: once its <c>WHEN</c> clauses have bound against the
+    /// view's columns, one naming a derived column — an <c>UPDATE SET</c>
+    /// target, or an <c>INSERT</c> column, listed or implied — is
+    /// <strong>Msg 4406</strong>, and otherwise the view's own refusal stands
+    /// (probed 2026-09-27 against SQL Server 2025).
+    /// </summary>
+    private static SimulatedSqlException RefuseMergeIntoNonUpdatableView(View view, HeapTable viewRows, List<WhenClause> whenClauses, MultiPartName writtenName)
+    {
+        if (view.DerivedOutputColumns is { } derived)
+        {
+            foreach (var clause in whenClauses)
+            {
+                var derivedTarget = clause.Action switch
+                {
+                    MergeActionKind.Update => clause.Assignments!.Exists(assignment => assignment.Ordinal >= 0 && derived[assignment.Ordinal]),
+                    MergeActionKind.Insert => Array.Exists(clause.InsertColumns!, column => derived[Array.IndexOf(viewRows.Columns, column)]),
+                    _ => false,
+                };
+                if (derivedTarget)
+                    return SimulatedSqlException.ViewDmlTouchesDerivedField(writtenName.ToString());
+            }
+        }
+        return view.RejectionReason == ViewUpdatabilityRejection.MultipleSources
+            ? SimulatedSqlException.ViewUpdateAffectsMultipleTables(writtenName.ToString())
+            : SimulatedSqlException.CannotUpdateNonUpdatableView(writtenName.ToString());
     }
 
     /// <summary>
@@ -1117,21 +1235,16 @@ partial class Simulation
     private static OutputProjection? TryParseMergeOutputClause(
         ParserContext context,
         HeapTable destinationTable,
-        View? sourceView,
         string sourceAlias,
         string[] sourceColumnNames,
         SqlType[] sourceSchema,
-        DataMask?[]? sourceMasks)
+        DataMask?[]? sourceMasks,
+        ViewOutputShape? view)
     {
         if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.Output })
             return null;
-        // OUTPUT through a view is not modeled — matches the existing pattern
-        // for UPDATE / INSERT / DELETE OUTPUT through view. INSERTED.* /
-        // DELETED.* projection through view OutputColumns + BaseColumnOrdinals
-        // remains deferred.
-        if (sourceView is not null)
-            throw new NotSupportedException($"MERGE … OUTPUT through a view ('{sourceView.Schema.Name}.{sourceView.Name}') isn't modeled. Target the underlying table directly when OUTPUT is required.");
 
+        var targetColumns = view?.Columns ?? destinationTable.Columns;
         var expressions = new List<Expression>();
         var columnNames = new List<string>();
 
@@ -1139,10 +1252,10 @@ partial class Simulation
         {
             if (BuiltInToken.EqualsAny(name.ImmediateQualifier, "INSERTED", "DELETED"))
             {
-                for (var i = 0; i < destinationTable.Columns.Length; i++)
+                for (var i = 0; i < targetColumns.Length; i++)
                 {
-                    if (context.Batch.CurrentDatabase.Collation.Equals(destinationTable.Columns[i].Name, name.Leaf))
-                        return destinationTable.Columns[i].Type;
+                    if (context.Batch.CurrentDatabase.Collation.Equals(targetColumns[i].Name, name.Leaf))
+                        return view?.Admit(i, BuiltInToken.Equals(name.ImmediateQualifier, "INSERTED")) ?? targetColumns[i].Type;
                 }
             }
             else if (context.Batch.CurrentDatabase.Collation.Equals(name.ImmediateQualifier, sourceAlias))
@@ -1186,9 +1299,9 @@ partial class Simulation
                 string[]? cols = null;
                 if (BuiltInToken.EqualsAny(starQualifier, "INSERTED", "DELETED"))
                 {
-                    cols = new string[destinationTable.Columns.Length];
-                    for (var i = 0; i < destinationTable.Columns.Length; i++)
-                        cols[i] = destinationTable.Columns[i].Name;
+                    cols = new string[targetColumns.Length];
+                    for (var i = 0; i < targetColumns.Length; i++)
+                        cols[i] = targetColumns[i].Name;
                 }
                 else if (context.Batch.CurrentDatabase.Collation.Equals(starQualifier, sourceAlias))
                 {
@@ -1218,16 +1331,34 @@ partial class Simulation
         while (context.Token is Operator { Character: ',' });
 
         var schema = new SqlType[expressions.Count];
-        for (var i = 0; i < expressions.Count; i++)
-            schema[i] = IsMergeActionRef(expressions[i]) ? NVarcharSqlType.Get(10, context.Batch.CurrentDatabase.Collation, Coercibility.CoercibleDefault) : expressions[i].GetSqlType(context.Batch, ResolveOutputType);
+        try
+        {
+            for (var i = 0; i < expressions.Count; i++)
+                schema[i] = IsMergeActionRef(expressions[i]) ? NVarcharSqlType.Get(10, context.Batch.CurrentDatabase.Collation, Coercibility.CoercibleDefault) : expressions[i].GetSqlType(context.Batch, ResolveOutputType);
+        }
+        catch (SimulatedSqlException error) when (view?.Refusals is { Count: > 0 } refusals)
+        {
+            refusals.Add(error);
+        }
 
         // MERGE reaches the same INTO parser the other three statements use;
         // its own projection type predated that and never grew the branch.
-        var outputTarget = TryParseOutputIntoTarget(context, expressions.Count, destinationTable.Name);
+        // Its errors follow the clause's Msg 404s (probed 2026-09-27).
+        OutputTarget? outputTarget;
+        try
+        {
+            outputTarget = TryParseOutputIntoTarget(context, expressions.Count, destinationTable.Name);
+        }
+        catch (SimulatedSqlException error) when (view?.Refusals is { Count: > 0 } refusals)
+        {
+            refusals.Add(error);
+            outputTarget = null;
+        }
+        view?.ThrowRefusals();
 
         return new OutputProjection(
             [.. expressions], [.. columnNames], schema, destinationTable,
-            (sourceAlias, sourceColumnNames, sourceSchema), context.Batch, outputTarget, sourceMasks);
+            (sourceAlias, sourceColumnNames, sourceSchema), context.Batch, outputTarget, sourceMasks, view);
     }
 
     /// <summary>
@@ -1293,7 +1424,8 @@ partial class Simulation
         BooleanExpression onPredicate,
         List<WhenClause> whenClauses,
         OutputProjection? output,
-        bool serializableHint)
+        bool serializableHint,
+        View? viewRowsTarget)
     {
         // Skip mode commits nothing (CommitMerge returns early), so the match
         // walk is pure cost — and running the ON predicate / WHEN actions
@@ -1560,7 +1692,7 @@ partial class Simulation
         {
             // INSTEAD OF INSERT fires against the view when applicable;
             // otherwise the action targets the base table directly.
-            var insteadOfInsertTarget = (SchemaObject?)sourceView ?? destinationTable;
+            var insteadOfInsertTarget = (SchemaObject?)viewRowsTarget ?? (SchemaObject?)sourceView ?? destinationTable;
             for (var si = 0; si < sourceRows.Count && !ActionCapReached(); si++)
             {
                 if (sourceMatched[si])
@@ -1577,7 +1709,7 @@ partial class Simulation
         }
 
         // Phase C: commit mutations.
-        return CommitMerge(context, destinationTable, sourceView, pendingInserts, pendingUpdates, pendingDeletes, output, outputOrder, whenClauses);
+        return CommitMerge(context, destinationTable, sourceView, pendingInserts, pendingUpdates, pendingDeletes, output, outputOrder, whenClauses, viewRowsTarget);
     }
 
     /// <summary>
@@ -1822,7 +1954,8 @@ partial class Simulation
         List<(int Page, int Slot, SqlValue[] OldValues, SqlValue[]? SourceValues)> pendingDeletes,
         OutputProjection? output,
         List<(int Key, MergeActionKind Kind, int Index)>? outputOrder,
-        List<WhenClause> whenClauses)
+        List<WhenClause> whenClauses,
+        View? viewRowsTarget)
     {
         if (context.Batch.IsSkipping)
             return new SimulatedNonQuery(0);
@@ -1850,7 +1983,7 @@ partial class Simulation
         // values. Real SQL Server allows a mixed MERGE where, say, INSERT
         // routes through INSTEAD OF while UPDATE writes to the heap normally
         // — each action is decided independently.
-        var insteadOfTarget = (SchemaObject?)sourceView ?? destinationTable;
+        var insteadOfTarget = (SchemaObject?)viewRowsTarget ?? (SchemaObject?)sourceView ?? destinationTable;
         var insteadOfInsert = pendingInserts.Count > 0 && HasInsteadOfTrigger(context.Batch, insteadOfTarget, TriggerActions.Insert);
         var insteadOfUpdate = pendingUpdates.Count > 0 && HasInsteadOfTrigger(context.Batch, insteadOfTarget, TriggerActions.Update);
         var insteadOfDelete = pendingDeletes.Count > 0 && HasInsteadOfTrigger(context.Batch, insteadOfTarget, TriggerActions.Delete);

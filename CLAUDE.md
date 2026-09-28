@@ -366,7 +366,7 @@ The feature docs' own **Not modeled yet** sections hold the smaller gaps.
 - **Most `SET <option>` toggles parse and are discarded** (`Simulation.Set.cs`); the ones with semantic effect are handled by name there.
   The same goes for most `ALTER DATABASE … SET` options → [`database-options.md`](docs/claude/database-options.md).
 - **Heap allocation tracking** (a flat page list, no IAM/PFS) → [`heap-storage.md`](docs/claude/heap-storage.md).
-- **Programmable-object gaps**: CLR procedures / TVFs / aggregates / UDTs, logon triggers, INSTEAD OF UPDATE/DELETE on non-updatable views, a join view over a join view, MERGE into or OUTPUT through views, and `WITH RESULT SETS`' shorthand forms → [`programmable.md`](docs/claude/programmable.md), [`clr-assemblies.md`](docs/claude/clr-assemblies.md), [`triggers.md`](docs/claude/triggers.md).
+- **Programmable-object gaps**: CLR procedures / TVFs / aggregates / UDTs, logon triggers, and MERGE into a join view → [`programmable.md`](docs/claude/programmable.md), [`clr-assemblies.md`](docs/claude/clr-assemblies.md), [`triggers.md`](docs/claude/triggers.md).
 - **`ALTER COLUMN … ADD | DROP PERSISTED`** → [`alter-table.md`](docs/claude/alter-table.md).
 - **Filegroup placement** — a table or index `ON [fg]` isn't recorded (only a partition scheme's placement is) → [`partitioning.md`](docs/claude/partitioning.md#not-modeled-yet).
 - **`FORCESEEK`'s plan-infeasibility refusal** (Msg 8622) → [`query-hints.md`](docs/claude/query-hints.md#not-enforced).

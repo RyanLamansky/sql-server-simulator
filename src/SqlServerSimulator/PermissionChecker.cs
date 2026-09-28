@@ -536,6 +536,18 @@ internal static class PermissionEnforcement
     }
 
     /// <summary>
+    /// The column-grain broken-chain check for a write through a join view:
+    /// <paramref name="columns"/> are already the base table's, gathered from
+    /// what the statement and the view's joins and filters read of it, or the
+    /// columns it assigns. An empty set checks nothing.
+    /// </summary>
+    internal static void CheckBrokenChainTableColumns(BatchContext batch, Permission permission, Schemas.View view, ColumnReadTarget columns)
+    {
+        if (columns.Ordinals.Count > 0 && TryResolveBrokenChain(batch, view, columns.Securable, out var database, out var principalId))
+            CheckColumnGrants(database, principalId, permission, columns);
+    }
+
+    /// <summary>
     /// True when a write through <paramref name="module"/> into
     /// <paramref name="target"/> must be checked on the target: the owners
     /// differ and the caller, resolved in the target's database, isn't

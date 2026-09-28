@@ -1,6 +1,7 @@
 using SqlServerSimulator.Parser;
 using SqlServerSimulator.Parser.Expressions;
 using SqlServerSimulator.Parser.Tokens;
+using SqlServerSimulator.Schemas;
 using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator;
@@ -122,15 +123,15 @@ partial class Simulation
 
     /// <summary>
     /// Parses one result-set definition: the parenthesized
-    /// <c>(column_name data_type [COLLATE …] [NULL | NOT NULL], …)</c> list.
-    /// The <c>AS OBJECT</c> / <c>AS TYPE</c> / <c>AS FOR XML</c> shorthands
-    /// real also accepts here aren't built yet.
+    /// <c>(column_name data_type [COLLATE …] [NULL | NOT NULL], …)</c> list,
+    /// or one of the <c>AS OBJECT</c> / <c>AS TYPE</c> / <c>AS FOR XML</c>
+    /// shorthands (<see cref="ParseResultSetShorthand"/>).
     /// </summary>
     private static ResultSetShape ParseResultSetShape(BatchContext batch)
     {
         var context = batch.Parser;
         if (context.Token is ReservedKeyword { Keyword: Keyword.As })
-            throw new NotSupportedException("WITH RESULT SETS: the AS OBJECT / AS TYPE / AS FOR XML result-set definition forms aren't modeled; use the explicit column list.");
+            return ParseResultSetShorthand(batch);
         if (context.Token is not Operator { Character: '(' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextRequired();
@@ -240,6 +241,95 @@ partial class Simulation
         context.MoveNextOptional();
 
         return new ResultSetShape([.. names], [.. types], [.. bareTypeNames], [.. typeNames], [.. maxLengths], [.. nullability], [.. reportsNumeric]);
+    }
+
+    /// <summary>
+    /// The three shorthand result-set definitions, cursor on their <c>AS</c>
+    /// (probed 2026-09-27 against SQL Server 2025): <c>AS OBJECT</c> takes the
+    /// columns of a table, view or table-valued function — identity and
+    /// computed columns included, each column's own nullability standing as
+    /// the declared one — and <c>AS TYPE</c> those of a table type; either
+    /// name has at most two parts, and one that names nothing of the kind is
+    /// <strong>Msg 11533</strong> / <strong>11534</strong> echoing it as
+    /// written, a three-part name included. <c>AS FOR XML</c> declares the one
+    /// <c>ntext</c> column a <c>FOR XML</c> query sends, under the same name.
+    /// </summary>
+    private static ResultSetShape ParseResultSetShorthand(BatchContext batch)
+    {
+        var context = batch.Parser;
+        HeapColumn[] columns;
+        switch (context.GetNextRequired())
+        {
+            case ReservedKeyword { Keyword: Keyword.For }:
+                if (context.GetNextRequired() is not UnquotedString { ContextualKeyword: ContextualKeyword.Xml })
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                context.MoveNextRequired();
+                columns = [new HeapColumn(Selection.ForXmlColumnName, SqlType.NText, maxLength: null, nullable: true)];
+                break;
+            case UnquotedString { ContextualKeyword: ContextualKeyword.Object }:
+                {
+                    context.MoveNextRequired();
+                    var name = BatchContext.ParseObjectName(context);
+                    context.MoveNextRequired();
+                    columns = ResultSetObjectColumns(batch, name) ?? throw SimulatedSqlException.ResultSetsInvalidObjectName(name.ToString());
+                    break;
+                }
+            case UnquotedString { ContextualKeyword: ContextualKeyword.Type }:
+                {
+                    context.MoveNextRequired();
+                    var name = BatchContext.ParseObjectName(context);
+                    context.MoveNextRequired();
+                    columns = name.Count <= 2 && batch.TryResolveTableType(name, out var tableType)
+                        ? tableType.Columns
+                        : throw SimulatedSqlException.ResultSetsInvalidTableType(name.ToString());
+                    break;
+                }
+            default:
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+        }
+
+        var names = new string[columns.Length];
+        var types = new SqlType[columns.Length];
+        var bareTypeNames = new string[columns.Length];
+        var typeNames = new string[columns.Length];
+        var maxLengths = new int?[columns.Length];
+        var nullability = new bool[columns.Length];
+        var reportsNumeric = new bool[columns.Length];
+        for (var i = 0; i < columns.Length; i++)
+        {
+            var column = columns[i];
+            names[i] = column.Name;
+            types[i] = column.Type;
+            reportsNumeric[i] = column.SpelledNumeric;
+            bareTypeNames[i] = column.TypeName;
+            typeNames[i] = column.Type.ToString()!;
+            maxLengths[i] = column.MaxLength;
+            nullability[i] = column.Nullable;
+        }
+        return new ResultSetShape(names, types, bareTypeNames, typeNames, maxLengths, nullability, reportsNumeric);
+    }
+
+    /// <summary>
+    /// The columns <c>AS OBJECT</c> reads off a table, view or table-valued
+    /// function; null when the name, of at most two parts, resolves to none.
+    /// </summary>
+    private static HeapColumn[]? ResultSetObjectColumns(BatchContext batch, MultiPartName name)
+    {
+        if (name.Count > 2)
+            return null;
+        if (batch.TryResolveView(name, out var view))
+            return view.OutputColumns;
+        if (batch.TryResolveTable(name, out var table) && !BatchContext.IsTableVariableName(table.Name))
+            return table.Columns;
+        var qualified = name.Count == 1 ? new MultiPartName(Database.DefaultSchemaName).WithAddedPart(name.Leaf) : name;
+        return batch.TryResolveFunction(qualified, out var function)
+            ? function switch
+            {
+                InlineTableValuedFunction inline => inline.OutputColumns,
+                MultiStatementTableValuedFunction multiStatement => multiStatement.OutputColumns,
+                _ => null,
+            }
+            : null;
     }
 
     /// <summary>

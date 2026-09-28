@@ -419,6 +419,7 @@ A login that owns a database connects to it as `dbo`, can't also be given a user
 A procedure, scalar function or DML trigger body records its module's effective owner (`BatchContext.OwnershipChainOwnerId`; a trigger's is its table's), and a same-database reference whose object has a different owner is checked against the caller as though no module intervened — Msg 229 naming the base object, with the module's Procedure attribution.
 A view or inline TVF, inlined into the referencing statement, checks its body's other-owner reads once at invocation (`PermissionEnforcement.CheckModuleBodyReads`), and DML through a single-table updatable view checks the base table after the view when the two owners differ — even from a module body whose reference to the view is chained.
 `INSERT` and `DELETE` check the write object-grain (`CheckBrokenChainWrite`); `UPDATE`'s SELECT and UPDATE and `DELETE`'s SELECT are column-grain on the base columns the view's columns read (`CheckBrokenChainColumns`, Msg 230 naming the base column); `MERGE` checks SELECT and each action's permission object-grain.
+Through a **join view** every other-owner base table is checked for SELECT on the columns the statement reads of it — its join and filter columns included, so an UPDATE writing the other table still needs SELECT on the join column — and the written table for UPDATE column-grain; an INSERT checks only INSERT on the table written (`CheckJoinViewBrokenChains`).
 Under an `INSTEAD OF` trigger an `INSERT` checks nothing on the base, while an `UPDATE` or `DELETE` still needs SELECT on every base column for the pseudo-tables.
 All probed 2026-09-27 against SQL Server 2025, which raises the SELECT denial and the write denial together where the simulator raises the first.
 
@@ -433,7 +434,7 @@ A `WITHOUT LOGIN` owner's or creator's `SYSTEM_USER` under `EXECUTE AS OWNER` / 
 
 **Not modeled yet.**
 The `ALTER AUTHORIZATION` classes past the eight above raise `NotSupportedException`.
-DML through a **multi-table (join) view** checks no broken chain to its base tables — real checks SELECT on each other-owner base table the join reads, and the write permission on the one it writes (probed 2026-09-27 against SQL Server 2025).
+Through a join view over a join view, only the outer view's own base tables are checked.
 A chain through **nested views** compares only the outermost view's owner with the base table's, where real compares each link.
 Server-scope DDL triggers aren't modeled, so `ALTER AUTHORIZATION ON DATABASE` raises no `ALTER_AUTHORIZATION_SERVER` event.
 

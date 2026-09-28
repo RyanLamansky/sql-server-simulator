@@ -489,9 +489,9 @@ public sealed class ModuleBodyBindingTests
         var sim = WithFixture();
         sim.ExecuteBatches(
             "create view dbo.vbt as select id, nm from dbo.bt",
-            // OUTPUT through a view is the unmodeled shape here; it binds
-            // cleanly and only the execution finds the gap.
-            "create procedure dbo.punmodeled as delete dbo.vbt output deleted.id");
+            // A multi-source DELETE through a view is the unmodeled shape
+            // here; it binds cleanly and only the execution finds the gap.
+            "create procedure dbo.punmodeled as delete dbo.vbt from dbo.bt");
         AreEqual(1, ObjectCount(sim, "punmodeled"));
         _ = Throws<NotSupportedException>(() => sim.ExecuteNonQuery("exec dbo.punmodeled"));
     }

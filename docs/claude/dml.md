@@ -337,6 +337,7 @@ Probe-confirmed schema-inference rules:
 
 | Probed Msg | When raised |
 |---|---|
+| **5316** | The target has an INSTEAD OF trigger for some of the actions the WHEN clauses perform but not all — see [`triggers.md`](triggers.md#instead-of-on-views). |
 | **5324** | A WHEN MATCHED or WHEN NOT MATCHED BY SOURCE clause with `AND` appeared after the unconditional clause in the same family. |
 | **8672** | A target row matched more than one source row, and the WHEN MATCHED clause that fired chose UPDATE. DELETE is forgiving (multiple matches collapse to one delete — probe-confirmed). |
 | **10710** | WHEN NOT MATCHED [BY TARGET] clause specified UPDATE or DELETE (only INSERT is legal). |
@@ -418,5 +419,5 @@ EF Core's `ExecuteUpdate` / `ExecuteDelete` for batched single-statement DML emi
 ### Not modeled
 
 - `WHEN NOT MATCHED BY SOURCE` with `THEN INSERT` — Msg 10711 (parsing rejects).
-- MERGE into a view ships for a single-base updatable view (`MergeViewTests`); `OUTPUT` through a view target raises `NotSupportedException`, and a join-view target is Msg 4405 where real accepts one naming a single base table — see [`programmable.md`](programmable.md#dml-through-a-join-view).
+- MERGE into a view ships for a single-base updatable view (`MergeViewTests`), its `OUTPUT` reading the view's columns, and for any view whose INSTEAD OF triggers take its actions; a join-view target without one is Msg 4405 where real accepts actions landing in one base table — see [`programmable.md`](programmable.md#dml-through-a-join-view).
 - Multi-statement WHEN-clause bodies (real SQL Server only allows the one DML action per WHEN — same restriction here).

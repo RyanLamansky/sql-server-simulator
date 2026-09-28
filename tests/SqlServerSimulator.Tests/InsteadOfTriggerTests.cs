@@ -350,7 +350,7 @@ public sealed class InsteadOfTriggerTests
     }
 
     [TestMethod]
-    public void InsteadOfUpdateOnNonUpdatableView_RaisesNotSupported()
+    public void InsteadOfUpdateOnJoinView_SpanningBothTables_RoutesToTheTrigger()
     {
         using var connection = new Simulation().CreateOpenConnection();
         _ = connection.CreateCommand("""
@@ -358,10 +358,13 @@ public sealed class InsteadOfTriggerTests
             create table t2 (id int primary key, label nvarchar(10));
             """).ExecuteNonQuery();
         _ = connection.CreateCommand("create view v_join as select t1.id, t1.v, t2.label from t1 join t2 on t1.id = t2.id").ExecuteNonQuery();
-        _ = connection.CreateCommand("create trigger tr_vj on v_join instead of update as select 1").ExecuteNonQuery();
+        _ = connection.CreateCommand("create trigger tr_vj on v_join instead of update as select i.v, i.label, d.v from inserted i join deleted d on d.id = i.id").ExecuteNonQuery();
         _ = connection.CreateCommand("insert t1 values (1, 10); insert t2 values (1, 'a')").ExecuteNonQuery();
-        _ = Throws<NotSupportedException>(() =>
-            _ = connection.CreateCommand("update v_join set v = 99").ExecuteNonQuery());
+        using var reader = connection.CreateCommand("update v_join set v = 99, label = 'b'").ExecuteReader();
+        IsTrue(reader.Read());
+        AreEqual(99, reader.GetInt32(0));
+        AreEqual("b", reader.GetString(1));
+        AreEqual(10, reader.GetInt32(2));
     }
 
     // === MERGE routing through INSTEAD OF ===
@@ -389,43 +392,163 @@ public sealed class InsteadOfTriggerTests
     }
 
     [TestMethod]
-    public void Merge_MixedInsteadOfAndAfter_BothRouteCorrectly()
+    public void Merge_InsteadOfOnSomeActionsButNotAll_Msg5316()
     {
-        // INSERT has INSTEAD OF; UPDATE has AFTER. Mixed MERGE routes
-        // each action independently — INSERT through trigger, UPDATE
-        // through heap + AFTER trigger.
+        // INSERT has INSTEAD OF, UPDATE doesn't: real refuses the MERGE while
+        // compiling rather than routing each action its own way.
         using var connection = Seeded();
         _ = connection.CreateCommand("insert t (v) values (10)").ExecuteNonQuery();
-        _ = connection.CreateCommand("""
-            create trigger tr_t_io on t instead of insert
-            as insert audit_log(action) values ('IO_INS')
-            """).ExecuteNonQuery();
-        _ = connection.CreateCommand("""
-            create trigger tr_t_after on t after update
-            as insert audit_log(action) values ('AFTER_UPD')
-            """).ExecuteNonQuery();
-        _ = connection.CreateCommand("""
-            merge t using (values (1, 999), (2, 888)) as s(id, v) on t.id = s.id
-            when matched then update set v = s.v
-            when not matched then insert (v) values (s.v);
-            """).ExecuteNonQuery();
-
-        // The (id=2) source row INSERTs → INSTEAD OF (no heap write).
-        // The (id=1) source row matches → real UPDATE (heap written) → AFTER fires.
-        var actions = new List<string>();
-        using var reader = connection.CreateCommand("select action from audit_log").ExecuteReader();
-        while (reader.Read()) actions.Add(reader.GetString(0));
-        Assert.Contains("IO_INS", actions);
-        Assert.Contains("AFTER_UPD", actions);
-
-        // Heap reflects only the UPDATE.
-        var ids = new List<int>();
-        using var r2 = connection.CreateCommand("select id from t order by id").ExecuteReader();
-        while (r2.Read()) ids.Add(r2.GetInt32(0));
-        CollectionAssert.AreEqual(new[] { 1 }, ids);
-        var newV = (int)connection.CreateCommand("select v from t").ExecuteScalar()!;
-        AreEqual(999, newV);
+        _ = connection.CreateCommand("create trigger tr_t_io on t instead of insert as insert audit_log(action) values ('IO_INS')").ExecuteNonQuery();
+        var ex = Throws<SimulatedSqlException>(() => connection.CreateCommand("""
+            if 1 = 0
+                merge t using (values (1, 999), (2, 888)) as s(id, v) on t.id = s.id
+                when matched then update set v = s.v
+                when not matched then insert (v) values (s.v);
+            """).ExecuteNonQuery());
+        AreEqual(5316, ex.Number);
+        Assert.StartsWith("The target 't' of the MERGE statement has an INSTEAD OF trigger on some, but not all,", ex.Message);
+        AreEqual(10, connection.CreateCommand("select v from t").ExecuteScalar());
     }
+
+    [TestMethod]
+    public void Merge_InsteadOfCoversOnlyActionsUsed_Runs()
+        => AreEqual("ins", new Simulation().ExecuteBatchesScalar(
+            "create table t (id int primary key, v int)",
+            "create trigger tr on t instead of insert as select 'ins'",
+            "merge t using (values (1, 5)) as s(id, v) on t.id = s.id when not matched then insert values (s.id, s.v);"));
+
+    // === INSTEAD OF UPDATE / DELETE on views real can't write through ===
+
+    [TestMethod]
+    public void InsteadOfUpdateOnAggregateView_PseudoTablesAreTheViewsRows()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table t (g int, a int); insert t values (1, 1), (1, 2), (2, 5)",
+            "create view v as select g, sum(a) as s, count(*) as c from t group by g",
+            "create trigger tr on v instead of update as select d.s, i.s, i.c, @@rowcount from deleted d join inserted i on i.g = d.g");
+        using var reader = sim.ExecuteReader("update v set s = s + 100 where g = 1");
+        IsTrue(reader.Read());
+        AreEqual(3, reader.GetInt32(0));
+        AreEqual(103, reader.GetInt32(1));
+        AreEqual(2, reader.GetInt32(2));
+        AreEqual(1, reader.GetInt32(3));
+        IsFalse(reader.Read());
+    }
+
+    [TestMethod]
+    public void InsteadOfUpdateOnAView_FiresWhenNoRowQualifies()
+        => AreEqual(0, new Simulation().ExecuteBatchesScalar(
+            "create table t (g int, a int); insert t values (1, 1)",
+            "create view v as select g, sum(a) as s from t group by g",
+            "create trigger tr on v instead of update as select count(*) from inserted",
+            "update v set s = 0 where g = 99"));
+
+    [TestMethod]
+    public void InsteadOfUpdateOnADistinctView_UpdatesEachDistinctRow()
+        => AreEqual(30, new Simulation().ExecuteBatchesScalar(
+            "create table t (a int); insert t values (1), (1), (2)",
+            "create view v as select distinct a from t",
+            "create trigger tr on v instead of update as select sum(a) from inserted",
+            "update v set a = a * 10"));
+
+    [TestMethod]
+    public void InsteadOfUpdate_VariableAssignmentInTheSetList()
+        => AreEqual(8, new Simulation().ExecuteBatchesScalar(
+            "create table t (g int, a int); insert t values (1, 1)",
+            "create view v as select g, sum(a) as s from t group by g",
+            "create trigger tr on v instead of update as declare @unused int",
+            "declare @x int = 7; update v set @x = s = @x + 1; select @x"));
+
+    [TestMethod]
+    public void InsteadOfUpdate_UpdateFunctionReadsTheViewsColumns()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table t (id int primary key, a int); insert t values (1, 3)",
+            "create view v as select id, a, a * 2 as dbl from t",
+            "create trigger tr on v instead of update as select case when update(dbl) then 1 else 0 end, case when update(a) then 1 else 0 end, columns_updated()");
+        using var reader = sim.ExecuteReader("update v set dbl = 100");
+        IsTrue(reader.Read());
+        AreEqual(1, reader.GetInt32(0));
+        AreEqual(0, reader.GetInt32(1));
+        CollectionAssert.AreEqual(new byte[] { 4 }, (byte[])reader.GetValue(2));
+    }
+
+    [TestMethod]
+    public void InsteadOfUpdate_WhereAndSetMayNameADerivedColumn()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table t (id int primary key, a int); insert t values (1, 3), (2, 4)",
+            "create view v as select id, a, a * 2 as dbl from t",
+            "create trigger tr on v instead of update as select id, a, dbl from inserted");
+        using var reader = sim.ExecuteReader("update v set dbl = 100 where dbl = 8");
+        IsTrue(reader.Read());
+        AreEqual(2, reader.GetInt32(0));
+        AreEqual(4, reader.GetInt32(1));
+        AreEqual(100, reader.GetInt32(2));
+        IsFalse(reader.Read());
+    }
+
+    [TestMethod]
+    public void InsteadOfUpdate_SetLeavesADerivedColumnAtItsOldValue()
+        => AreEqual(6, new Simulation().ExecuteBatchesScalar(
+            "create table t (id int primary key, a int); insert t values (1, 3)",
+            "create view v as select id, a, a * 2 as dbl from t",
+            "create trigger tr on v instead of update as select dbl from inserted",
+            "update v set a = 5"));
+
+    [TestMethod]
+    public void InsteadOfUpdate_JoinedFrom_Msg414()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table t (g int, a int); create table k (g int)",
+            "create view v as select g, sum(a) as s from t group by g",
+            "create trigger tr on v instead of update as select 1");
+        sim.AssertSqlError("update v set s = 9 from v join k on v.g = k.g", 414,
+            "UPDATE is not allowed because the statement updates view \"v\" which participates in a join and has an INSTEAD OF UPDATE trigger.");
+    }
+
+    [TestMethod]
+    public void InsteadOfUpdate_UnknownSetColumn_Msg207()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table t (g int, a int)",
+            "create view v as select g, sum(a) as s from t group by g",
+            "create trigger tr on v instead of update as select 1");
+        _ = sim.AssertSqlError("update v set zz = 1", 207);
+    }
+
+    [TestMethod]
+    public void InsteadOfDeleteOnAggregateView_DeletedIsTheViewsRows()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table t (g int, a int); insert t values (1, 1), (1, 2), (2, 5)",
+            "create view v as select g, sum(a) as s from t group by g",
+            "create trigger tr on v instead of delete as delete t from t join deleted d on t.g = d.g");
+        _ = sim.ExecuteNonQuery("delete v where s > 2");
+        AreEqual(0, sim.ExecuteScalar("select count(*) from t"));
+    }
+
+    [TestMethod]
+    public void InsteadOfDeleteOnAUnionView_OutputInto()
+        => AreEqual(1, new Simulation().ExecuteBatchesScalar(
+            "create table t (a int); create table u (a int); create table log (a int); insert t values (1); insert u values (2)",
+            "create view v as select a from t union all select a from u",
+            "create trigger tr on v instead of delete as declare @unused int",
+            "delete v output deleted.a into log where a = 1; select a from log"));
+
+    [TestMethod]
+    public void InsteadOfDeleteOnAJoinView_DeletedCarriesBothTablesColumns()
+        => AreEqual("one", new Simulation().ExecuteBatchesScalar(
+            "create table a (id int primary key, n varchar(10)); create table b (id int primary key, aid int, q int); insert a values (1, 'one'); insert b values (10, 1, 5), (11, 1, 6)",
+            "create view jv as select b.id, a.n, b.q from a join b on a.id = b.aid",
+            "create trigger tr on jv instead of delete as select n from deleted where q = 6",
+            "delete jv where q = 6"));
 
     // === DROP cascade ===
 

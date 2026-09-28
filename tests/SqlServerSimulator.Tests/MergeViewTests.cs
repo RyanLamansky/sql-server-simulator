@@ -282,16 +282,81 @@ public sealed class MergeViewTests
     }
 
     [TestMethod]
-    public void OutputThroughView_RaisesNotSupported()
+    public void OutputThroughView_ReadsTheViewsColumns()
     {
         var sim = new Simulation();
         sim.ExecuteBatches(
-            "create table base_t (id int primary key, v int)",
-            "create view v_base as select id, v from base_t");
-        _ = Throws<NotSupportedException>(() => sim.ExecuteNonQuery("""
-            merge into v_base using (values(1, 10)) src(id, v) on v_base.id = src.id
-            when not matched then insert (id, v) values (src.id, src.v) output inserted.id;
-            """));
+            "create table base_t (id int primary key, v int, s varchar(5)); insert base_t values (1, 10, 'x')",
+            "create view v_base as select id, v as x, s, v * 2 as dbl from base_t");
+        using var reader = sim.ExecuteReader("""
+            merge v_base as tg using (values (1, 11), (3, 33)) as src(id, x) on tg.id = src.id
+            when matched then update set x = src.x
+            when not matched then insert (id, x) values (src.id, src.x)
+            output $action, inserted.*, deleted.dbl;
+            """);
+        AreEqual("x", reader.GetName(2));
+        IsTrue(reader.Read());
+        AreEqual("UPDATE", reader.GetString(0));
+        AreEqual(22, reader.GetInt32(4));
+        AreEqual(20, reader.GetInt32(5));
+        IsTrue(reader.Read());
+        AreEqual("INSERT", reader.GetString(0));
+        AreEqual(66, reader.GetInt32(4));
+        IsTrue(reader.IsDBNull(5));
+    }
+
+    [TestMethod]
+    public void DerivedSetTargetInANonUpdatableView_Msg4406()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table t (id int primary key, a int); insert t values (1, 10)",
+            "create view v as select id, sum(a) as s from t group by id");
+        _ = sim.AssertSqlError("merge v using (values (1, 5)) as src(id, a) on v.id = src.id when matched then update set s = src.a;", 4406);
+        _ = sim.AssertSqlError("merge v using (values (1, 5)) as src(id, a) on v.id = src.id when not matched then insert values (src.id, src.a);", 4406);
+        _ = sim.AssertSqlError("merge v using (values (1, 5)) as src(id, a) on v.id = src.id when matched then update set id = src.id;", 4403);
+    }
+
+    [TestMethod]
+    public void InsteadOfTriggersOnANonUpdatableView_TakeTheMerge()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table t (id int primary key, a int); insert t values (1, 10)",
+            "create view v as select id, sum(a) as s from t group by id",
+            "create trigger tu on v instead of update as select i.s, d.s from inserted i join deleted d on d.id = i.id");
+        using var reader = sim.ExecuteReader("merge v using (values (1, 5)) as src(id, a) on v.id = src.id when matched then update set s = src.a;");
+        IsTrue(reader.Read());
+        AreEqual(5, reader.GetInt32(0));
+        AreEqual(10, reader.GetInt32(1));
+    }
+
+    [TestMethod]
+    public void InsteadOfPseudoTables_CarryDerivedColumns()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table t (id int primary key, a int); insert t values (1, 10)",
+            "create view v as select id, a, a + 1 as b from t",
+            "create trigger td on v instead of delete as select b from deleted");
+        AreEqual(11, sim.ExecuteScalar("merge v using (values (1)) as src(id) on v.id = src.id when matched then delete;"));
+    }
+
+    [TestMethod]
+    public void OutputInsertedUnderAnInsteadOfTrigger_Msg404()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table t (id int primary key, a int); create table log (id int, a int)",
+            "create view v as select id, a from t",
+            "create trigger ti on v instead of insert as select 1");
+        var ex = sim.AssertSqlError("""
+            merge v using (values (2, 6)) as src(id, a) on v.id = src.id
+            when not matched then insert (id, a) values (src.id, src.a)
+            output inserted.* into log (id);
+            """, 404);
+        AreEqual(3, ex.Errors.Count);
+        AreEqual(121, ex.Errors[2].Number);
     }
 
     [TestMethod]

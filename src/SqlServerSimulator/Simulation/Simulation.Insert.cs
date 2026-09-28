@@ -92,7 +92,7 @@ partial class Simulation
 
     private static SimulatedStatementOutcome ProcessViewInsertCore(View destinationView, ParserContext context, Selection.DmlTopLimit? top, MultiPartName destinationName) =>
         HasInsteadOfTrigger(context.Batch, destinationView, TriggerActions.Insert)
-            ? ProcessInsteadOfInsertOnView(destinationView, context, top)
+            ? ProcessInsteadOfInsertOnView(destinationView, context, top, destinationName)
             : destinationView.BaseTable is { } baseTable
                 ? ProcessHeapInsert(baseTable, context, top, destinationName, destinationView)
                 : destinationView.IsJoinUpdatable
@@ -109,7 +109,7 @@ partial class Simulation
     /// any actual heap writes; this path simply fires the trigger and
     /// returns the would-be affected row count.
     /// </summary>
-    private static SimulatedNonQuery ProcessInsteadOfInsertOnView(View destinationView, ParserContext context, Selection.DmlTopLimit? top)
+    private static SimulatedNonQuery ProcessInsteadOfInsertOnView(View destinationView, ParserContext context, Selection.DmlTopLimit? top, MultiPartName destinationName)
     {
         var viewColumns = destinationView.OutputColumns;
 
@@ -143,8 +143,18 @@ partial class Simulation
             destinationColumns = viewColumns;
         }
 
+        // OUTPUT reads the rows the trigger is handed, and its INTO rows land
+        // before the body runs (probed 2026-09-27 against SQL Server 2025);
+        // to the client it is Msg 334, as for any triggered target.
+        OutputProjection? output = null;
         if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Output })
-            throw new NotSupportedException($"INSERT … OUTPUT through a view ('{destinationView.Schema.Name}.{destinationView.Name}') isn't modeled. Target the underlying table directly when OUTPUT is required.");
+        {
+            var shapeColumns = ViewColumnsFor(context.Batch, destinationView, destinationName);
+            output = TryParseOutputClause(
+                context, destinationView.BaseTable ?? ViewShapedTable(context.Batch, destinationView, shapeColumns), sourceColumnNames: null,
+                new ViewOutputShape(shapeColumns, read: null, insertedRefused: null));
+            RejectClientOutputOnTriggeredTarget(context.Batch, destinationView, TriggerActions.Insert, destinationName.ToString(), output is { HasTarget: false });
+        }
 
         var sourceRows = context.Token switch
         {
@@ -184,6 +194,7 @@ partial class Simulation
                 rowValues[ordinal] = CoerceForInsert(sourceRow[i], targetColumn);
             }
             insertedRows.Add(rowValues);
+            _ = output?.ProjectRow(insertedValues: rowValues, deletedValues: null);
         }
 
         _ = context.Batch.Connection.Simulation.TryFireInsteadOfTrigger(
@@ -329,12 +340,17 @@ partial class Simulation
                 : [.. destinationTable.Columns.Where(IsImplicitInsertColumn)];
         }
 
-        if (destinationView is not null && context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Output })
-            throw new NotSupportedException($"INSERT … OUTPUT through a view ('{destinationView.Schema.Name}.{destinationView.Name}') isn't modeled. Target the underlying table directly when OUTPUT is required.");
-
-        var output = TryParseOutputClause(context, destinationTable, sourceColumnNames: null);
+        // Through a view, INSERTED takes the view's columns, read off the row
+        // written — through a join view only those reading the written table.
+        var viewShape = destinationView is not null && context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Output }
+            ? joinViewPlan?.OutputShape() ?? SingleBaseViewOutputShape(context.Batch, destinationView, destinationName, destinationTable)
+            : null;
+        var output = TryParseOutputClause(context, destinationTable, sourceColumnNames: null, viewShape);
+        // Through a view it is the base table's triggers that refuse OUTPUT
+        // to the client, and the message names that table (probed 2026-09-27
+        // against SQL Server 2025).
         RejectClientOutputOnTriggeredTarget(
-            context.Batch, (SchemaObject?)destinationView ?? destinationTable, TriggerActions.Insert, destinationName.ToString(), output is { HasTarget: false });
+            context.Batch, destinationTable, TriggerActions.Insert, destinationView is null ? destinationName.ToString() : destinationTable.Name, output is { HasTarget: false });
 
         // OUTPUT combined with an INSERT … EXEC source is rejected outright
         // (Msg 483) — probe-confirmed. The check runs regardless of skip

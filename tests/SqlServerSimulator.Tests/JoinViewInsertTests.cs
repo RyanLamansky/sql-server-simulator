@@ -187,23 +187,13 @@ public sealed class JoinViewInsertTests
         Assert.AreEqual(3, simulation.ExecuteScalar<int>("select count(*) from dbo.many"));
     }
 
-    /// <summary>OUTPUT through a view still isn't modeled, join view included.</summary>
+    /// <summary>INSERTED reads the view's columns off the row written.</summary>
     [TestMethod]
-    public void OutputThroughAJoinViewInsertIsNotSupported()
-        => _ = Assert.Throws<NotSupportedException>(
-            () => Seeded().ExecuteNonQuery("insert dbo.v (mid, one_id, val) output inserted.val values (71, 1, 5)"));
+    public void OutputReadsTheWrittenRow()
+        => Assert.AreEqual(5, Seeded().ExecuteScalar<int>("insert dbo.v (mid, one_id, val) output inserted.val values (71, 1, 5)"));
 
-    /// <summary>
-    /// A join view reading another join view flattens on real but not here:
-    /// the target source is a view rather than a heap, so both verbs stay
-    /// Msg 4405 — see docs/claude/programmable.md.
-    /// </summary>
+    /// <summary>INSERTED.* reaches the other base table's columns, so it is Msg 404.</summary>
     [TestMethod]
-    public void JoinViewOverAJoinViewIsStillMsg4405()
-    {
-        var simulation = Seeded();
-        _ = simulation.ExecuteNonQuery("create view dbo.vjj as select v.mid as jid, v.val as jval, o2.n as j2n from dbo.v v join dbo.one o2 on o2.id = v.oid");
-        _ = simulation.AssertSqlError("insert dbo.vjj (jid, jval) values (81, 1)", 4405);
-        _ = simulation.AssertSqlError("update dbo.vjj set jval = 1 where jid = 11", 4405);
-    }
+    public void OutputInsertedStarIsMsg404()
+        => _ = Seeded().AssertSqlError("insert dbo.v (mid, one_id, val) output inserted.* values (71, 1, 5)", 404);
 }

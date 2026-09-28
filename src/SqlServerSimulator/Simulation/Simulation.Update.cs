@@ -65,23 +65,13 @@ partial class Simulation
         HeapTable? leadingTable;
         if (TryResolveCteTarget(context, leadingIdent, out var resolvedView) || context.Batch.TryResolveView(leadingIdent, out resolvedView))
         {
-            // INSTEAD OF UPDATE on a view replaces the heap-write path; the
-            // trigger body is responsible for any base-table mutations. The
-            // simulator supports this only when the view is updatable (the
-            // single-base path) so INSERTED / DELETED can be projected from
-            // a heap row through the view's column map. INSTEAD OF UPDATE
-            // on a non-updatable (join / aggregate) view is documented as
-            // a deferred shape in CLAUDE.md.
-            if (HasInsteadOfTrigger(context.Batch, resolvedView, TriggerActions.Update)
-                && resolvedView.BaseTable is null)
-            {
-                throw new NotSupportedException($"INSTEAD OF UPDATE through a non-updatable view ('{resolvedView.Schema.Name}.{resolvedView.Name}') isn't modeled. Updatable single-base views work; join / aggregate / DISTINCT views are deferred.");
-            }
             // A multi-source body has no single base table to route to up
             // front — which base the statement writes is the SET list's to
             // say — so it leaves `leadingTable` null and the join-view path
-            // below picks up once the SET list has parsed.
-            if (resolvedView.BaseTable is null && !resolvedView.IsJoinUpdatable)
+            // below picks up once the SET list has parsed. An INSTEAD OF
+            // UPDATE trigger takes the write whatever the view's shape.
+            if (resolvedView.BaseTable is null && !resolvedView.IsJoinUpdatable
+                && !HasInsteadOfTrigger(context.Batch, resolvedView, TriggerActions.Update))
             {
                 context.MoveNextOptional();
                 throw RefuseNonUpdatableViewWrite(context, resolvedView, leadingIdent, isUpdate: true);
@@ -245,22 +235,30 @@ partial class Simulation
 
         context.OuterTypeResolver = savedOuterTypeResolver;
 
+        // An INSTEAD OF UPDATE trigger on a view takes the write, reading the
+        // view's own rows; a multi-source view's SET list names the base
+        // table it writes, so its OUTPUT binds only once that is known.
+        if (leadingView is not null && HasInsteadOfTrigger(context.Batch, leadingView, TriggerActions.Update))
+            return ExecuteInsteadOfViewUpdate(context, leadingIdent, leadingView, rawAssignments, top, targetHints.Serializable);
+        if (leadingView is { BaseTable: null } joinView)
+            return ExecuteJoinViewUpdate(context, leadingIdent, joinView, rawAssignments, top);
+
         // OUTPUT requires a known target. If leading-ident resolved to a
         // table, parse OUTPUT now (existing single-table OUTPUT path). For
         // the alias-form multi-source case, OUTPUT support would require
         // deferring its parse until after FROM has identified the target —
         // not modeled today (EF Core 10 doesn't combine OUTPUT with multi-
         // source ExecuteUpdate, and the simulator raises NotSupportedException
-        // when this combination is attempted). OUTPUT through a view is
-        // also rejected — the projected INSERTED.* / DELETED.* would need
-        // view-output-column rebinding, which isn't modeled.
+        // when this combination is attempted). Through a view, INSERTED /
+        // DELETED take the view's columns, read off the base rows.
         OutputProjection? output = null;
-        if (leadingView is not null && context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Output })
-            throw new NotSupportedException($"UPDATE … OUTPUT through a view ('{leadingView.Schema.Name}.{leadingView.Name}') isn't modeled. Target the underlying table directly when OUTPUT is required.");
         if (leadingTable is not null)
         {
-            output = TryParseOutputClauseForMutation(context, leadingTable, allowInserted: true, allowDeleted: true);
-            RejectClientOutputOnTriggeredTarget(context.Batch, leadingTable, TriggerActions.Update, leadingIdent.ToString(), output is { HasTarget: false });
+            var viewShape = leadingView is not null && context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Output }
+                ? SingleBaseViewOutputShape(context.Batch, leadingView, leadingIdent, leadingTable)
+                : null;
+            output = TryParseOutputClauseForMutation(context, leadingTable, allowInserted: true, allowDeleted: true, viewShape);
+            RejectClientOutputOnTriggeredTarget(context.Batch, leadingTable, TriggerActions.Update, leadingView is null ? leadingIdent.ToString() : leadingTable.Name, output is { HasTarget: false });
         }
         else if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Output })
         {
@@ -273,11 +271,6 @@ partial class Simulation
                 ? throw new NotSupportedException($"Multi-source UPDATE through a view ('{leadingView.Schema.Name}.{leadingView.Name}') isn't modeled — the alias-form FROM clause can't compose with the view's visibility predicate. Target the underlying table directly.")
                 : ExecuteJoinedUpdate(context, leadingIdent, leadingTable, rawAssignments, output, top);
         }
-
-        // Through a multi-source view the SET list is what names the base
-        // table, so the write routes only once it has parsed.
-        if (leadingView is { BaseTable: null } joinView)
-            return ExecuteJoinViewUpdate(context, leadingIdent, joinView, rawAssignments, top);
 
         var table = leadingTable ?? throw (BatchContext.IsTableVariableName(leadingIdent.Leaf)
             ? SimulatedSqlException.MustDeclareTableVariable(leadingIdent.Leaf)
@@ -993,7 +986,12 @@ partial class Simulation
             // real runs the body with empty INSERTED / DELETED and @@ROWCOUNT
             // 0, and UPDATE(col) still reports the SET-clause columns
             // (probe-confirmed for UPDATE / DELETE / INSERT…SELECT / MERGE).
-            FireAfterUpdateTriggers(context, table, affected, updatedColumnOrdinals);
+            // An INSTEAD OF UPDATE trigger runs over the empty set the same
+            // way (probed 2026-09-27 against SQL Server 2025).
+            if (insteadOfActive)
+                FireInsteadOfUpdateTrigger(context, table, sourceView, affected);
+            else
+                FireAfterUpdateTriggers(context, table, affected, updatedColumnOrdinals);
             return output is null ? new SimulatedNonQuery(0) : new SimulatedSqlResultSet(output.Schema, output.ColumnNames, Array.Empty<byte[]>(), 0);
         }
 
@@ -1009,10 +1007,13 @@ partial class Simulation
 
         if (insteadOfActive)
         {
+            // OUTPUT INTO's rows land before the body runs (probed 2026-09-27
+            // against SQL Server 2025); to the client it is Msg 334.
+            var outputRows = output is null ? null : ProjectMutationOutput(affected, output);
             FireInsteadOfUpdateTrigger(context, table, sourceView, affected);
             return output is null || output.HasTarget
                 ? new SimulatedNonQuery(affected.Count)
-                : new SimulatedSqlResultSet(output.Schema, output.ColumnNames, ProjectMutationOutput(affected, output), affected.Count);
+                : new SimulatedSqlResultSet(output.Schema, output.ColumnNames, outputRows!, affected.Count);
         }
 
         EnforceKeyConstraintsForUpdate(table, affected, context.Batch);

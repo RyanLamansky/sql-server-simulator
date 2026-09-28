@@ -23,9 +23,7 @@ Database-scope DDL triggers (`CREATE TRIGGER … ON DATABASE`) fire on the DDL t
   The heap-write phase is skipped; identity allocation is skipped (INSERTED's identity column shows the type's typed default — 0 for int — rather than the next sequential value); NOT NULL / CHECK / key constraints are not enforced on the suppressed write; AFTER triggers on the same action don't fire.
   DEFAULT-clause evaluation and computed columns still run so INSERTED carries the would-be values (probe-confirmed).
   Parent can be a heap table or a view.
-- **INSTEAD OF on views** — the primary real-world use case: makes a non-updatable view (join / aggregate / etc.) writable.
-  INSERTED / DELETED are shaped to the view's `OutputColumns`; for an updatable view the simulator projects base-table rows through `View.BaseColumnOrdinals` (derived projection slots = typed NULL) so UPDATE / DELETE INSTEAD OF can build the pseudo-tables from base heap rows.
-  INSTEAD OF UPDATE / DELETE on a *non-updatable* view (no `BaseTable`) raises `NotSupportedException` — the would-be-affected row enumeration requires executing the view's selection and tracking row identity, which is a follow-up.
+- **INSTEAD OF on views** — the primary real-world use case: makes a non-updatable view (join / aggregate / etc.) writable → [INSTEAD OF on views](#instead-of-on-views).
 - **At most one INSTEAD OF per action per target** (Msg 2111, probe-confirmed verbatim).
   A second INSTEAD OF trigger whose Actions overlap an existing one raises at CREATE TRIGGER time.
   ALTER / CREATE OR ALTER replacing the same trigger by name is permitted (the self-collision is excluded from the check).
@@ -58,9 +56,8 @@ Database-scope DDL triggers (`CREATE TRIGGER … ON DATABASE`) fire on the DDL t
 - **AFTER triggers fire on a zero-row DML** — an UPDATE / DELETE matching nothing, an `INSERT … SELECT` producing nothing, and a MERGE with no source rows all still run the body, with empty `INSERTED` / `DELETED` and `@@ROWCOUNT` 0 (probe-confirmed for all four shapes).
   `UPDATE(col)` still reports the SET-clause columns there, because the reading is a property of the statement rather than of the rows.
 - **Nesting and recursion gating** — `RECURSIVE_TRIGGERS` (per database) and the `nested triggers` server option decide whether a trigger fires while other triggers are running; see [Nesting and recursion options](#nesting-and-recursion-options).
-- **MERGE routing through INSTEAD OF** — each WHEN branch's action is dispatched independently.
-  A MERGE against a target with INSTEAD OF INSERT routes the `WHEN NOT MATCHED THEN INSERT` branch through the trigger (no heap write, no identity allocation, no constraint check); a mixed MERGE with INSTEAD OF INSERT + no INSTEAD OF UPDATE routes the INSERT branch through the trigger and the UPDATE branch through the heap normally.
-  Per-action key validation excludes pending operations that bypass the heap.
+- **MERGE routing through INSTEAD OF** — the actions a MERGE's `WHEN` clauses perform must all have an INSTEAD OF trigger on the target, or none: some but not all is **Msg 5316**, raised while compiling, so an un-taken branch's MERGE ends its batch and a `DISABLE TRIGGER` earlier in the same batch hasn't run yet when it's judged (probed 2026-09-27 against SQL Server 2025, table and view).
+  A covered action routes through its trigger (no heap write, no identity allocation, no constraint check), and one the triggers don't reach writes normally.
 
 ## Implementation map
 
@@ -75,8 +72,8 @@ Database-scope DDL triggers (`CREATE TRIGGER … ON DATABASE`) fire on the DDL t
   Both predicates route through `CanFireTrigger`, so a trigger the nesting rules suppress reads as absent.
   `MaterializePseudoTable` takes a `HeapColumn[]` directly so the same machinery works for table parents (parent's `Columns`) and view parents (view's `OutputColumns`).
 - **DML hooks**: `Simulation.Insert.cs` (INSERT + INSERT … SELECT + INSERT … OUTPUT) detects INSTEAD OF on either the destination view or the destination table and either routes through `ProcessInsteadOfInsertOnView` (for view targets — view INSERT may include non-updatable views) or threads an `insteadOfActive` flag through `ProcessHeapInsert` (for table targets, which skips identity allocation, constraint enforcement, and heap write).
-  `Simulation.Update.cs` and `Simulation.Delete.cs` thread the per-target INSTEAD OF detection through their `CommitUpdate` / `CommitDelete` helpers; for view targets with INSTEAD OF, INSERTED / DELETED are projected through `View.BaseColumnOrdinals` via a `ProjectThroughView` helper.
-  `Simulation.Merge.cs` detects per-action INSTEAD OF at the top of `CommitMerge` and routes each pending list (inserts, updates, deletes) independently through trigger-fire or heap-write paths.
+  `Simulation.Update.cs` and `Simulation.Delete.cs` route a view target with INSTEAD OF to `Simulation.InsteadOfView.cs` and thread the table-target detection through their `CommitUpdate` / `CommitDelete` helpers.
+  `Simulation.Merge.cs` settles Msg 5316 once the `WHEN` clauses parse, and `CommitMerge` routes each pending list (inserts, updates, deletes) through trigger-fire or heap-write paths.
 - **Connection state**: [`SimulatedDbConnection.FiringTriggers`](../../src/SqlServerSimulator/SimulatedDbConnection.cs) (the in-flight trigger stack the gating reads) + `TriggerNestLevel` (surfaced by `TRIGGER_NESTLEVEL()`).
 - **Gating**: `Simulation.CanFireTrigger` — the one predicate behind both nesting rules, called from `FireTriggers`' match loop, `TryFireInsteadOfTrigger`'s, and `HasTrigger`.
 
@@ -139,6 +136,22 @@ Probe-confirmed rules, two of which the message text doesn't say:
 Every one of them tests the same `OutputProjection.HasTarget`, so `OUTPUT … INTO` is the escape on all four — including MERGE, which only gained it when the projections converged (see [`dml.md`](dml.md)).
 
 This is the rule behind EF Core's `HasTrigger` annotation: declaring a trigger makes EF abandon its `OUTPUT INSERTED` emit shape, because that shape is illegal against a triggered table.
+
+## INSTEAD OF on views
+
+INSERTED / DELETED are the view's own columns, derived ones computed as the view computes them (probed 2026-09-27 against SQL Server 2025).
+
+- **INSERT** hands the trigger the statement's rows shaped to the view, unspecified columns NULL.
+- **UPDATE and DELETE read the view itself** (`Simulation.InsteadOfView.cs`), whatever its shape — an aggregate, `DISTINCT`, a set operation, a join, or an updatable view alike: the `WHERE` picks the view's rows and may name a derived column, those rows are `DELETED`, and for an UPDATE the rows with the `SET` list applied are `INSERTED`.
+  A `SET` may target a derived column, and a column it leaves alone keeps its old value — a derived column isn't recomputed from the new ones.
+  `UPDATE(col)` / `COLUMNS_UPDATED()` read the view's column positions, `@@ROWCOUNT` is the rows picked, and the trigger fires even when none qualify.
+  An UPDATE with a `FROM` clause is **Msg 414**.
+  A positioned UPDATE / DELETE (`WHERE CURRENT OF`) through an updatable view keeps the base-row path, where a derived column reads NULL in the pseudo-tables.
+- **MERGE** into a view whose INSTEAD OF triggers take its actions matches against the view's rows under its column names, and hands the triggers view-shaped rows the same way (`Simulation.Merge.cs`, the view-rows target).
+  A MERGE into a view real can't write through, with no trigger to take it, binds its `WHEN` clauses against the view's columns first: a derived `UPDATE SET` target or `INSERT` column — listed or implied — is Msg 4406, anything else the view's Msg 4403 / 4405.
+- **OUTPUT**: to the client it is Msg 334 as on any triggered target; `OUTPUT … INTO` lands its rows before the body runs.
+  INSERT's `INSERTED` reads the rows handed to the trigger, `DELETED` reads the view's rows, and `INSERTED` under an UPDATE — or under any MERGE into a triggered view, an INSERT-only one included — is **Msg 404** per column, the would-be row never being formed.
+  A table target with an INSTEAD OF UPDATE / DELETE trigger writes its `OUTPUT … INTO` rows too, and fires on an UPDATE matching no row.
 
 ## Firing order
 
@@ -331,9 +344,6 @@ For a statement whose body runs to end of batch (`CREATE VIEW` / `PROCEDURE` / `
 
 ## Not modeled
 
-- **INSTEAD OF UPDATE / DELETE on non-updatable views** — INSTEAD OF INSERT on any view ships; INSTEAD OF UPDATE / DELETE on an updatable (single-base, no DISTINCT / JOIN / aggregate) view ships.
-  INSTEAD OF UPDATE / DELETE on a join / aggregate / DISTINCT view raises `NotSupportedException` — implementing it requires executing the view's selection to enumerate would-be-affected rows, which loses heap-row identity and bypasses the existing visibility-filter machinery.
-  Deferred.
 - **Logon / server triggers** (`ON ALL SERVER`) — only DML triggers and database-scope DDL triggers ship.
 - **`@@NESTLEVEL` independence** — the simulator collapses UDF / procedure / trigger depth into a single counter (`SimulatedDbConnection.NestingLevel`).
   `TRIGGER_NESTLEVEL()` reads its own dedicated `TriggerNestLevel` counter, so it's accurate, but `@@NESTLEVEL` (not modeled at all) wouldn't have the right value if added.

@@ -101,7 +101,8 @@ partial class Simulation
         ParserContext context,
         HeapTable table,
         bool allowInserted,
-        bool allowDeleted)
+        bool allowDeleted,
+        ViewOutputShape? view = null)
     {
         if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.Output })
             return null;
@@ -112,7 +113,7 @@ partial class Simulation
         context.Batch.BindErrors?.EnterClause(context.Token, BindClause.Output);
         try
         {
-            return ParseOutputClauseBody(context, table, allowInserted, allowDeleted);
+            return ParseOutputClauseBody(context, table, allowInserted, allowDeleted, view);
         }
         finally
         {
@@ -125,8 +126,10 @@ partial class Simulation
         ParserContext context,
         HeapTable table,
         bool allowInserted,
-        bool allowDeleted)
+        bool allowDeleted,
+        ViewOutputShape? view)
     {
+        var columns = view?.Columns ?? table.Columns;
         var expressions = new List<Expression>();
         var names = new List<string>();
         do
@@ -138,9 +141,9 @@ partial class Simulation
                 var deletedRef = BuiltInToken.Equals(starQualifier, "DELETED");
                 if ((insertedRef && !allowInserted) || (deletedRef && !allowDeleted) || (!insertedRef && !deletedRef))
                     throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound($"{starQualifier}.*");
-                var columnNameList = new string[table.Columns.Length];
-                for (var i = 0; i < table.Columns.Length; i++)
-                    columnNameList[i] = table.Columns[i].Name;
+                var columnNameList = new string[columns.Length];
+                for (var i = 0; i < columns.Length; i++)
+                    columnNameList[i] = columns[i].Name;
                 AppendStarExpansion(starQualifier, columnNameList, expressions, names);
                 context.MoveNextOptional();
                 continue;
@@ -180,10 +183,10 @@ partial class Simulation
             if (!insertedRef && !deletedRef)
                 throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(reference.ToString());
 
-            for (var i = 0; i < table.Columns.Length; i++)
+            for (var i = 0; i < columns.Length; i++)
             {
-                if (context.Batch.CurrentDatabase.Collation.Equals(table.Columns[i].Name, reference.Leaf))
-                    return table.Columns[i].Type;
+                if (context.Batch.CurrentDatabase.Collation.Equals(columns[i].Name, reference.Leaf))
+                    return view?.Admit(i, insertedRef) ?? columns[i].Type;
             }
             // A pseudo-table's unknown column is Msg 207 on the leaf (probed
             // 2026-09-24 against SQL Server 2025).
@@ -191,10 +194,18 @@ partial class Simulation
         }
 
         var schema = new SqlType[expressions.Count];
-        for (var i = 0; i < expressions.Count; i++)
-            schema[i] = expressions[i].GetSqlType(context.Batch, ResolveOutputType);
+        try
+        {
+            for (var i = 0; i < expressions.Count; i++)
+                schema[i] = expressions[i].GetSqlType(context.Batch, ResolveOutputType);
+        }
+        catch (SimulatedSqlException error) when (view?.Refusals is { Count: > 0 } refusals)
+        {
+            refusals.Add(error);
+        }
+        view?.ThrowRefusals();
 
-        return new OutputProjection([.. expressions], [.. names], schema, table, source: null, context.Batch, outputTarget);
+        return new OutputProjection([.. expressions], [.. names], schema, table, source: null, context.Batch, outputTarget, view: view);
     }
 
     /// <summary>
@@ -407,7 +418,8 @@ partial class Simulation
     /// <param name="context">Parser state, positioned on the token after the column-list closer.</param>
     /// <param name="destinationTable">The INSERT target — supplies the columns reachable through <c>INSERTED</c>.</param>
     /// <param name="sourceColumnNames">For MERGE only: the source alias's column names. <see langword="null"/> for plain INSERT.</param>
-    private static OutputProjection? TryParseOutputClause(ParserContext context, HeapTable destinationTable, (string SourceAlias, string[] SourceColumns, SqlType[] SourceTypes)? sourceColumnNames)
+    /// <param name="view">The shape <c>INSERTED</c> takes when the INSERT writes through a view; null for a table.</param>
+    private static OutputProjection? TryParseOutputClause(ParserContext context, HeapTable destinationTable, (string SourceAlias, string[] SourceColumns, SqlType[] SourceTypes)? sourceColumnNames, ViewOutputShape? view = null)
     {
         if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.Output })
             return null;
@@ -417,7 +429,7 @@ partial class Simulation
         context.Batch.BindErrors?.EnterClause(context.Token, BindClause.Output);
         try
         {
-            return ParseInsertOutputClauseBody(context, destinationTable, sourceColumnNames);
+            return ParseInsertOutputClauseBody(context, destinationTable, sourceColumnNames, view);
         }
         finally
         {
@@ -426,8 +438,9 @@ partial class Simulation
     }
 
     /// <summary>Body of <see cref="TryParseOutputClause"/>.</summary>
-    private static OutputProjection? ParseInsertOutputClauseBody(ParserContext context, HeapTable destinationTable, (string SourceAlias, string[] SourceColumns, SqlType[] SourceTypes)? sourceColumnNames)
+    private static OutputProjection? ParseInsertOutputClauseBody(ParserContext context, HeapTable destinationTable, (string SourceAlias, string[] SourceColumns, SqlType[] SourceTypes)? sourceColumnNames, ViewOutputShape? view)
     {
+        var columns = view?.Columns ?? destinationTable.Columns;
         var expressions = new List<Expression>();
         var columnNames = new List<string>();
 
@@ -440,10 +453,10 @@ partial class Simulation
                 throw SimulatedSqlException.InvalidColumnName(name);
             if (BuiltInToken.Equals(name.ImmediateQualifier, "INSERTED"))
             {
-                for (var i = 0; i < destinationTable.Columns.Length; i++)
+                for (var i = 0; i < columns.Length; i++)
                 {
-                    if (context.Batch.CurrentDatabase.Collation.Equals(destinationTable.Columns[i].Name, name.Leaf))
-                        return destinationTable.Columns[i].Type;
+                    if (context.Batch.CurrentDatabase.Collation.Equals(columns[i].Name, name.Leaf))
+                        return view?.Admit(i, inserted: true) ?? columns[i].Type;
                 }
                 throw SimulatedSqlException.InvalidColumnName(new MultiPartName(name.Leaf));
             }
@@ -465,9 +478,9 @@ partial class Simulation
             {
                 if (BuiltInToken.Equals(starQualifier, "INSERTED"))
                 {
-                    var cols = new string[destinationTable.Columns.Length];
-                    for (var i = 0; i < destinationTable.Columns.Length; i++)
-                        cols[i] = destinationTable.Columns[i].Name;
+                    var cols = new string[columns.Length];
+                    for (var i = 0; i < columns.Length; i++)
+                        cols[i] = columns[i].Name;
                     AppendStarExpansion(starQualifier, cols, expressions, columnNames);
                 }
                 else
@@ -499,10 +512,18 @@ partial class Simulation
         var outputTarget = TryParseOutputIntoTarget(context, expressions.Count, destinationTable.Name);
 
         var schema = new SqlType[expressions.Count];
-        for (var i = 0; i < expressions.Count; i++)
-            schema[i] = expressions[i].GetSqlType(context.Batch, ResolveOutputType);
+        try
+        {
+            for (var i = 0; i < expressions.Count; i++)
+                schema[i] = expressions[i].GetSqlType(context.Batch, ResolveOutputType);
+        }
+        catch (SimulatedSqlException error) when (view?.Refusals is { Count: > 0 } refusals)
+        {
+            refusals.Add(error);
+        }
+        view?.ThrowRefusals();
 
-        return new OutputProjection(expressions, [.. columnNames], schema, destinationTable, sourceColumnNames, context.Batch, outputTarget);
+        return new OutputProjection(expressions, [.. columnNames], schema, destinationTable, sourceColumnNames, context.Batch, outputTarget, view: view);
     }
 
     /// <summary>
@@ -519,9 +540,16 @@ partial class Simulation
         (string SourceAlias, string[] SourceColumns, SqlType[] SourceTypes)? source,
         BatchContext batch,
         OutputTarget? outputTarget,
-        DataMask?[]? sourceMasks = null)
+        DataMask?[]? sourceMasks = null,
+        ViewOutputShape? view = null)
     {
         public readonly SqlType[] Schema = schema;
+
+        /// <summary>
+        /// The columns <c>INSERTED</c> / <c>DELETED</c> name: the target
+        /// table's, or through a view the view's own.
+        /// </summary>
+        private readonly HeapColumn[] columns = view?.Columns ?? destinationTable.Columns;
         public readonly string[] ColumnNames = columnNames;
         private readonly BatchContext batch = batch;
 
@@ -536,8 +564,8 @@ partial class Simulation
             batch,
             [.. expressions],
             name => BuiltInToken.Equals(name.ImmediateQualifier, "INSERTED") || BuiltInToken.Equals(name.ImmediateQualifier, "DELETED")
-                ? Array.FindIndex(destinationTable.Columns, column => batch.CurrentDatabase.Collation.Equals(column.Name, name.Leaf)) is var ordinal and >= 0
-                    ? DataMask.ForTableColumn(destinationTable, ordinal)
+                ? Array.FindIndex(view?.Columns ?? destinationTable.Columns, column => batch.CurrentDatabase.Collation.Equals(column.Name, name.Leaf)) is var ordinal and >= 0
+                    ? view is not null ? view.Columns[ordinal].DerivedMask : DataMask.ForTableColumn(destinationTable, ordinal)
                     : null
                 : source is var (sourceAlias, sourceColumns, _) && batch.CurrentDatabase.Collation.Equals(name.ImmediateQualifier, sourceAlias)
                     && Array.FindIndex(sourceColumns, column => batch.CurrentDatabase.Collation.Equals(column, name.Leaf)) is var sourceOrdinal and >= 0
@@ -563,7 +591,9 @@ partial class Simulation
         // so an expression that fails for the row raises here rather than
         // having failed the write.
         private SqlValue ReadOutputColumn(SqlValue[] row, int ordinal) =>
-            destinationTable.Columns[ordinal] is { Computed: not null, IsPersisted: false }
+            view is not null
+                ? view.Read is { } read ? read(row, ordinal) : row[ordinal]
+                : destinationTable.Columns[ordinal] is { Computed: not null, IsPersisted: false }
                 ? EvaluateComputedColumn(destinationTable, row, ordinal, this.batch)
                 : row[ordinal];
 
@@ -599,18 +629,18 @@ partial class Simulation
             {
                 if (BuiltInToken.Equals(name.ImmediateQualifier, "INSERTED"))
                 {
-                    for (var i = 0; i < destinationTable.Columns.Length; i++)
+                    for (var i = 0; i < this.columns.Length; i++)
                     {
-                        if (this.batch.CurrentDatabase.Collation.Equals(destinationTable.Columns[i].Name, name.Leaf))
-                            return insertedValues is null ? SqlValue.Null(destinationTable.Columns[i].Type) : this.ReadOutputColumn(insertedValues, i);
+                        if (this.batch.CurrentDatabase.Collation.Equals(this.columns[i].Name, name.Leaf))
+                            return insertedValues is null ? SqlValue.Null(this.columns[i].Type) : this.ReadOutputColumn(insertedValues, i);
                     }
                 }
                 else if (BuiltInToken.Equals(name.ImmediateQualifier, "DELETED"))
                 {
-                    for (var i = 0; i < destinationTable.Columns.Length; i++)
+                    for (var i = 0; i < this.columns.Length; i++)
                     {
-                        if (this.batch.CurrentDatabase.Collation.Equals(destinationTable.Columns[i].Name, name.Leaf))
-                            return deletedValues is null ? SqlValue.Null(destinationTable.Columns[i].Type) : this.ReadOutputColumn(deletedValues, i);
+                        if (this.batch.CurrentDatabase.Collation.Equals(this.columns[i].Name, name.Leaf))
+                            return deletedValues is null ? SqlValue.Null(this.columns[i].Type) : this.ReadOutputColumn(deletedValues, i);
                     }
                 }
                 else if (source is var (sourceAlias, sourceCols, sourceTypes)

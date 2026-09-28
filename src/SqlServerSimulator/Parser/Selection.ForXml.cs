@@ -11,7 +11,7 @@ partial class Selection
     /// The fixed single-column name SQL Server assigns a top-level FOR XML
     /// result set (a GUID-shaped sentinel; consumers concatenate the chunks).
     /// </summary>
-    private const string ForXmlColumnName = "XML_F52E2B61-18A1-11d1-B105-00805F49916B";
+    internal const string ForXmlColumnName = "XML_F52E2B61-18A1-11d1-B105-00805F49916B";
 
     /// <summary>The xsi namespace declared when <c>ELEMENTS XSINIL</c> emits nil elements.</summary>
     internal const string XsiNamespace = "http://www.w3.org/2001/XMLSchema-instance";

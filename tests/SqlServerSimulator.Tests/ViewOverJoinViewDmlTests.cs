@@ -193,14 +193,13 @@ public sealed class ViewOverJoinViewDmlTests
         Assert.AreEqual(1, simulation.ExecuteScalar<int>("select val from dbo.many where id = 12"));
     }
 
-    /// <summary>OUTPUT through a view still isn't modeled, chained ones included.</summary>
+    /// <summary>OUTPUT through the chain reads the top view's columns.</summary>
     [TestMethod]
-    public void OutputThroughTheChainIsNotSupported()
+    public void OutputThroughTheChainReadsTheTopView()
     {
-        _ = Assert.Throws<NotSupportedException>(
-            () => Seeded().ExecuteNonQuery("update dbo.vtop set tval = 1 output inserted.tval where tmid = 11"));
-        _ = Assert.Throws<NotSupportedException>(
-            () => Seeded().ExecuteNonQuery("insert dbo.vtop (tmid, tone, tval) output inserted.tval values (31, 1, 5)"));
+        Assert.AreEqual(1, Seeded().ExecuteScalar<int>("update dbo.vtop set tval = 1 output inserted.tval where tmid = 11"));
+        Assert.AreEqual("a", Seeded().ExecuteScalar("update dbo.vtop set tval = 1 output deleted.tname where tmid = 11"));
+        Assert.AreEqual(5, Seeded().ExecuteScalar<int>("insert dbo.vtop (tmid, tone, tval) output inserted.tval values (31, 1, 5)"));
     }
 
     /// <summary>
@@ -217,5 +216,68 @@ public sealed class ViewOverJoinViewDmlTests
             "create view dbo.vaggtop as select one_id as aid, c from dbo.vagg");
         var ex = simulation.AssertSqlError("update dbo.vaggtop set aid = 1 where aid = 1", 4403);
         Assert.AreEqual("Cannot update the view or function 'dbo.vaggtop' because it contains aggregates, or a DISTINCT or GROUP BY clause, or PIVOT or UNPIVOT operator.", ex.Errors[0].Message);
+    }
+
+    private static Simulation WithJoinOverJoin()
+    {
+        var simulation = Seeded();
+        _ = simulation.ExecuteNonQuery("create view dbo.vjj as select v.mid as jid, v.one_id as jone, v.val as jval, v.name as jname, o2.id as o2id, o2.n as j2n from dbo.v v join dbo.one o2 on o2.id = v.oid");
+        return simulation;
+    }
+
+    /// <summary>
+    /// A join view reading another join view flattens: a SET list naming one
+    /// base table's columns writes it, through either level's join.
+    /// </summary>
+    [TestMethod]
+    public void JoinViewOverAJoinView_UpdateWritesTheNamedBaseTable()
+    {
+        var simulation = WithJoinOverJoin();
+        Assert.AreEqual(1, simulation.ExecuteNonQuery("update dbo.vjj set jval = 7 where jid = 11"));
+        Assert.AreEqual(7, simulation.ExecuteScalar<int>("select val from dbo.many where id = 11"));
+        _ = simulation.ExecuteNonQuery("update dbo.vjj set j2n = 99 where jid = 21");
+        Assert.AreEqual(99, simulation.ExecuteScalar<int>("select n from dbo.one where id = 2"));
+        _ = simulation.ExecuteNonQuery("update dbo.vjj set jname = 'z' where jid = 21");
+        Assert.AreEqual("z", simulation.ExecuteScalar("select name from dbo.one where id = 2"));
+    }
+
+    /// <summary>A base row several join tuples show takes the SET once.</summary>
+    [TestMethod]
+    public void JoinViewOverAJoinView_RowSeenTwiceUpdatesOnce()
+    {
+        var simulation = WithJoinOverJoin();
+        _ = simulation.ExecuteNonQuery("update dbo.vjj set jname = jname + '!' where jone = 1");
+        Assert.AreEqual("a!", simulation.ExecuteScalar("select name from dbo.one where id = 1"));
+    }
+
+    /// <summary>An INSERT's column list picks the base table, defaults filling the rest.</summary>
+    [TestMethod]
+    public void JoinViewOverAJoinView_InsertWritesTheNamedBaseTable()
+    {
+        var simulation = WithJoinOverJoin();
+        Assert.AreEqual(1, simulation.ExecuteNonQuery("insert dbo.vjj (jid, jone, jval) values (81, 1, 5)"));
+        Assert.AreEqual("dflt", simulation.ExecuteScalar("select note from dbo.many where id = 81"));
+    }
+
+    /// <summary>Targets in two base tables, and any DELETE, stay Msg 4405, naming the view as written.</summary>
+    [TestMethod]
+    public void JoinViewOverAJoinView_SpanningOrDeletingIsMsg4405()
+    {
+        var simulation = WithJoinOverJoin();
+        simulation.AssertSqlError("update vjj set jval = 1, j2n = 1", 4405, "View or function 'vjj' is not updatable because the modification affects multiple base tables.");
+        _ = simulation.AssertSqlError("update dbo.vjj set jval = 1, jname = 'x'", 4405);
+        _ = simulation.AssertSqlError("delete dbo.vjj", 4405);
+    }
+
+    /// <summary>WITH CHECK OPTION on the outer view judges the row through the inner view's filter.</summary>
+    [TestMethod]
+    public void JoinViewOverAJoinView_CheckOptionSeesTheInnerFilter()
+    {
+        var simulation = Seeded();
+        simulation.ExecuteBatches(
+            "create view dbo.vpos as select o.id as oid, m.id as mid, m.val from dbo.one o join dbo.many m on m.one_id = o.id where m.val > 0",
+            "create view dbo.vchk as select p.mid, p.val, o2.n from dbo.vpos p join dbo.one o2 on o2.id = p.oid with check option");
+        _ = simulation.AssertSqlError("update dbo.vchk set val = -1 where mid = 11", 550);
+        Assert.AreEqual(1, simulation.ExecuteNonQuery("update dbo.vchk set val = 5 where mid = 11"));
     }
 }

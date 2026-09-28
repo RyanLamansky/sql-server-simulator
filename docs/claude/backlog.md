@@ -339,17 +339,12 @@ Entries are verified against the simulator, so one that no longer reproduces is 
   `ParserContext.PendingBindError` already defers the GROUP BY clause's own binding error for exactly this reason; the FROM clause's object resolution has no equivalent, and giving it one runs against the parse-and-execute-in-one-pass design the simulator is built on — see [`grammar.md`](grammar.md#trailing-token-tightening).
 - **Non-Framework CLR assemblies load** — real resolves every `AssemblyRef` against a fixed .NET Framework catalog and raises **Msg 6503** otherwise (probe-confirmed for .NET 10 and for .NET Standard 2.0); the simulator runs on .NET so all of them bind, which is also what lets the tests emit a fixture assembly without a Framework toolchain.
   → [`clr-assemblies.md`](clr-assemblies.md#divergences).
-- **A join view over a join view is Msg 4405** for the INSERT or UPDATE naming one base table that real accepts, flattening both levels (probe-confirmed).
-  A chain of *single-source* levels above one join view ships; a level reading several sources of its own doesn't, because the target source is then a view rather than a heap and there is no `(page, slot)` address behind the row the write would claim.
-  Recursing the level walk into that source's own sources is the work.
-  → [`programmable.md`](programmable.md#dml-through-a-join-view).
-- **MERGE into a join view is Msg 4405** where real accepts a `WHEN NOT MATCHED THEN INSERT` whose column list names a single base table's columns and writes that table (probe-confirmed).
-  MERGE reads `View.RejectionReason` up front; routing it wants the per-action column lists to pick the target the way INSERT's does.
+- **MERGE into a join view is Msg 4405** where real accepts actions that all land in one base table, a `DELETE` removing from the table the other actions write or, alone, from the first table in the view's `FROM` (probed 2026-09-27).
+  MERGE's executor matches against one heap's rows; a join view wants its tuples as the target rows and each action translated back to its base row.
   → [`programmable.md`](programmable.md#dml-through-a-join-view).
 - **`clr strict security` is a `sp_configure` option nothing reads** — real refuses `CREATE ASSEMBLY` of an unsigned SAFE / EXTERNAL_ACCESS assembly with **Msg 10343** while the option is 1; the simulator registers and validates the option but never consults it, and the Msg 10343 factory was removed as dead code rather than left as an unreferenced promise.
-- **A broken ownership chain through a join view or a nested view goes unchecked** — DML through a multi-table view checks nothing on its base tables, where real checks SELECT on each other-owner base table the join reads and the write on the one it writes (probed 2026-09-27 against SQL Server 2025).
-  A chain of single-table views compares only the outermost view's owner with the base table's, so a middle link with another owner is missed.
-  The join-view path (`Simulation.JoinViewDml.cs`) already walks the levels; the check wants each level's owner compared with the next → [`permissions.md`](permissions.md#ownership).
+- **A broken ownership chain through a nested view goes unchecked** — a chain of single-table views compares only the outermost view's owner with the base table's, so a middle link with another owner is missed, and a join view over a join view checks only its own base tables (probed 2026-09-27 against SQL Server 2025 for the single-level join view, which ships).
+  The check wants each level's owner compared with the next → [`permissions.md`](permissions.md#ownership).
 - **An `sp_executesql` declaration string that is itself a query** (`N'select 2'`, the transposed-arguments shape) is Msg 156 at its first keyword here, where real reads `(select 2)` as a complete parenthesized expression and reports the text after it as **Msg 4124** (probed 2026-09-25).
   The declaration parse otherwise follows real's `(<declarations>)` reading: a list that ends early is Msg 102 near its closing `)`, and text after a complete list is Msg 4124.
 

@@ -406,11 +406,110 @@ public sealed class WithResultSetsTests
     }
 
     [TestMethod]
-    public void AsObjectForm_IsNotModeled()
+    public void AsObject_TakesATablesColumnsAndTypes()
+    {
+        var sim = WithProcedure("select 1, 2, 3");
+        _ = sim.ExecuteNonQuery("create table dbo.shape (id int identity, x bigint, c as x * 2)");
+        using var reader = sim.ExecuteReader("exec dbo.p with result sets (as object dbo.shape)");
+        AreEqual("id", reader.GetName(0));
+        AreEqual("x", reader.GetName(1));
+        AreEqual("c", reader.GetName(2));
+    }
+
+    [TestMethod]
+    public void AsObject_ProjectsThroughTheObjectsTypes()
+    {
+        var sim = WithProcedure("select 1 as a, 'hello' as b");
+        _ = sim.ExecuteNonQuery("create table shape (n bigint not null, s varchar(3))");
+        using var reader = sim.ExecuteReader("exec p with result sets (as object shape)");
+        IsTrue(reader.Read());
+        AreEqual("n", reader.GetName(0));
+        AreEqual(typeof(long), reader.GetFieldType(0));
+        AreEqual("hel", reader.GetString(1));
+    }
+
+    [TestMethod]
+    public void AsObject_ReadsAViewAndATableValuedFunction()
+    {
+        var sim = WithProcedure("select 1, 2");
+        sim.ExecuteBatches(
+            "create table t (a int, b int)",
+            "create view v as select a, b + 1 as c from t",
+            "create function f() returns table as return (select 1 as q, 2 as r)");
+        AreEqual("c", sim.ExecuteReader("exec p with result sets (as object v)").GetName(1));
+        AreEqual("r", sim.ExecuteReader("exec p with result sets (as object f)").GetName(1));
+    }
+
+    [TestMethod]
+    public void AsObject_NotNullColumn_RefusesANull_Msg11553()
+    {
+        var sim = WithProcedure("select cast(null as int)");
+        _ = sim.ExecuteNonQuery("create table t (a int not null)");
+        _ = sim.AssertSqlError("exec p with result sets (as object t)", 11553);
+    }
+
+    [TestMethod]
+    public void AsObject_ColumnCountMismatch_Msg11537()
+    {
+        var sim = WithProcedure("select 1, 2");
+        _ = sim.ExecuteNonQuery("create table t (a int)");
+        _ = sim.AssertSqlError("exec p with result sets (as object t)", 11537);
+    }
+
+    [TestMethod]
+    public void AsObject_UnknownName_Msg11533()
+        => WithProcedure().AssertSqlError("exec p with result sets (as object nope)", 11533, "Type 'nope' is not a valid object name for result set definition.");
+
+    [TestMethod]
+    public void AsObject_ThreePartName_Msg11533()
     {
         var sim = WithProcedure();
-        var ex = Throws<NotSupportedException>(() => sim.ExecuteScalar("exec dbo.p with result sets (as object dbo.shape)"));
-        Contains("AS OBJECT", ex.Message);
+        _ = sim.ExecuteNonQuery("create table t (a int, b varchar(5))");
+        sim.AssertSqlError("exec p with result sets (as object simulated.dbo.t)", 11533, "Type 'simulated.dbo.t' is not a valid object name for result set definition.");
+    }
+
+    [TestMethod]
+    public void AsType_TakesATableTypesColumns()
+    {
+        var sim = WithProcedure("select 7 as x, 'abcdef' as y");
+        _ = sim.ExecuteNonQuery("create type tt as table (Alpha int, b varchar(3) not null)");
+        using var reader = sim.ExecuteReader("exec p with result sets (as type dbo.tt)");
+        IsTrue(reader.Read());
+        AreEqual("Alpha", reader.GetName(0));
+        AreEqual("abc", reader.GetString(1));
+    }
+
+    [TestMethod]
+    public void AsType_UnknownName_Msg11534()
+        => WithProcedure().AssertSqlError("exec p with result sets (as type nope)", 11534, "Type 'nope' is invalid or not a table type.");
+
+    [TestMethod]
+    public void AsForXml_NamesTheXmlColumn()
+    {
+        var sim = WithProcedure("select 1 as a for xml raw");
+        using var reader = sim.ExecuteReader("exec p with result sets (as for xml)");
+        IsTrue(reader.Read());
+        AreEqual("XML_F52E2B61-18A1-11d1-B105-00805F49916B", reader.GetName(0));
+        AreEqual("ntext", reader.GetDataTypeName(0));
+        AreEqual("<row a=\"1\"/>", reader.GetString(0));
+    }
+
+    [TestMethod]
+    public void AsForXml_OverAnInt_Msg11538()
+        => WithProcedure("select 1 as a").AssertSqlError("exec p with result sets (as for xml)", 11538);
+
+    [TestMethod]
+    public void Shorthands_MixWithExplicitDefinitions()
+    {
+        var sim = WithProcedure("begin select 1, 2; select 3 as z; select 1 as a for xml path; end");
+        _ = sim.ExecuteNonQuery("create table t (a int, b int)");
+        using var reader = sim.ExecuteReader("exec p with result sets (as object t, (z bigint), as for xml)");
+        AreEqual("b", reader.GetName(1));
+        IsTrue(reader.NextResult());
+        AreEqual(typeof(long), reader.GetFieldType(0));
+        IsTrue(reader.NextResult());
+        IsTrue(reader.Read());
+        AreEqual("<row><a>1</a></row>", reader.GetString(0));
     }
 
     [TestMethod]

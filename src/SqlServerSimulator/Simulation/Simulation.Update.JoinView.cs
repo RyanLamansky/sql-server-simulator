@@ -45,10 +45,18 @@ partial class Simulation
     {
         var batch = context.Batch;
         var chain = BuildJoinViewChain(batch, view);
-        var sources = chain.Sources;
-        var (targetIndex, assignments) = ResolveJoinViewSetTargets(batch, chain, rawAssignments);
-        var table = sources[targetIndex].BackingTable
-            ?? throw SimulatedSqlException.ViewUpdateAffectsMultipleTables(chain.TargetName);
+        var (path, assignments) = ResolveJoinViewSetTargets(batch, chain, rawAssignments, targetName.ToString());
+        var table = chain.TableAt(path)
+            ?? throw SimulatedSqlException.ViewUpdateAffectsMultipleTables(targetName.ToString());
+
+        // The target source is wrapped to record each row's heap address; a
+        // target under a nested join view is reached through that view's
+        // rows, which only a statement that runs computes.
+        var targetAddresses = new Dictionary<byte[], (int Page, int Slot)>(ReferenceEqualityComparer.Instance);
+        var rowMaps = new Dictionary<byte[], byte[]?[]>[path.Length - 1];
+        var sources = batch.IsSkipping
+            ? chain.Sources
+            : SourcesAlongPath(batch, chain, path, 0, original => WrapSourceWithAddressTracking(original, table, targetAddresses), rowMaps);
 
         BindDeferredXmlMutators(context, table, rawAssignments, targetName.ToString());
         FunctionBodyShape.NoteTableWrite(batch, "UPDATE", table);
@@ -64,6 +72,24 @@ partial class Simulation
         foreach (var (_, expr) in rawAssignments)
             UnresolvedCollation.RequireAssignable(expr.GetSqlType(batch, typeResolver));
 
+        // OUTPUT binds against the view's columns now that the SET list has
+        // named the table written; INSERTED may name only the columns reading
+        // nothing else (Msg 404), while DELETED reads each row's own join
+        // tuple as it stood.
+        OutputProjection? output = null;
+        Dictionary<SqlValue[], byte[]?[]>? tuplesByRow = null;
+        if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Output })
+        {
+            if (path.Length > 1)
+                throw JoinOverJoinViewOutputNotModeled(view);
+            tuplesByRow = new(ReferenceEqualityComparer.Instance);
+            var shape = JoinViewOutputShape(batch, ViewColumnsFor(batch, view, targetName), chain, sources, path[0], table, tuplesByRow);
+            output = TryParseOutputClauseForMutation(context, table, allowInserted: true, allowDeleted: true, shape);
+            RejectClientOutputOnTriggeredTarget(batch, table, TriggerActions.Update, table.Name, output is { HasTarget: false });
+        }
+        if (context.Token is ReservedKeyword { Keyword: Keyword.From })
+            throw new NotSupportedException($"Multi-source UPDATE through a view ('{view.Schema.Name}.{view.Name}') isn't modeled — the alias-form FROM clause can't compose with the view's visibility predicate. Target the underlying table directly.");
+
         BooleanExpression? where = null;
         PositionedCursorTarget? positionedCursor = null;
         if (context.Token is ReservedKeyword { Keyword: Keyword.Where })
@@ -76,9 +102,11 @@ partial class Simulation
         }
 
         CheckUpdatePermissions(context, targetName, table, view, rawAssignments, where);
-
-        var targetAddresses = new Dictionary<byte[], (int Page, int Slot)>(ReferenceEqualityComparer.Instance);
-        sources[targetIndex] = WrapSourceWithAddressTracking(sources[targetIndex], table, targetAddresses);
+        var readViewColumns = new List<string>();
+        where?.VisitOperandExpressions(operand => operand.VisitColumnReferences(name => readViewColumns.Add(name.Leaf)));
+        foreach (var (_, expr) in rawAssignments)
+            expr.VisitColumnReferences(name => readViewColumns.Add(name.Leaf));
+        CheckJoinViewBrokenChains(batch, chain, table, readViewColumns, assignments);
 
         var seen = new HashSet<(int Page, int Slot)>();
         var affected = new List<(int PageIndex, int SlotIndex, SqlValue[] FullNew, SqlValue[]? FullOld)>();
@@ -92,7 +120,7 @@ partial class Simulation
         var resolveOutput = resolvers[^1];
         var runtime = new RuntimeContext(resolveOutput, batch);
         var topLevel = chain.Views.Length - 1;
-        var checkLevel = HighestCheckOptionLevel(chain);
+        var checksOption = chain.HasCheckOptionAlong(path);
 
         // Skip mode commits nothing, so the walk is pure cost — and running
         // the body's WHERE / the SET list against live rows can raise on
@@ -111,7 +139,7 @@ partial class Simulation
             if (!ChainLevelsPass(chain, belowRuntimes, topLevel))
                 continue;
 
-            var targetBytes = candidate[targetIndex];
+            var targetBytes = TargetBytesAlongPath(candidate, path, rowMaps);
             if (targetBytes is null)
                 continue;
             if (!targetAddresses.TryGetValue(targetBytes, out var address))
@@ -130,12 +158,16 @@ partial class Simulation
             batch.BumpRowStamp();
             var newValues = ComputeUpdatedRow(context, table, fullValues, assignments, resolveOutput);
 
-            if (checkLevel >= 0 && !ChainRowRemainsVisible(batch, chain, sources, targetIndex, table, newValues, checkLevel))
+            if (checksOption && !PathRowRemainsVisible(batch, chain, path, table, newValues))
                 throw SimulatedSqlException.ViewCheckOptionViolation();
 
-            // The view's own INSTEAD OF triggers were refused up front, so
-            // the only one that can claim the write is the base table's.
-            var oldSnapshotNeeded = HasAfterTrigger(batch, table, TriggerActions.Update)
+            if (tuplesByRow is { } recordedTuples)
+                recordedTuples[fullValues] = (byte[]?[])candidate.Clone();
+
+            // The view's own INSTEAD OF triggers took their own path, so the
+            // only one that can claim the write is the base table's.
+            var oldSnapshotNeeded = output is not null
+                || HasAfterTrigger(batch, table, TriggerActions.Update)
                 || HasInsteadOfTrigger(batch, table, TriggerActions.Update)
                 || table.SystemVersioning is not null
                 || table.IncomingForeignKeys.Count > 0;
@@ -144,7 +176,7 @@ partial class Simulation
 
         ApplyDmlTopCap(top, affected, batch);
 
-        return CommitUpdate(context, table, affected, output: null, [.. SetColumnOrdinals(assignments)]);
+        return CommitUpdate(context, table, affected, output, [.. SetColumnOrdinals(assignments)]);
     }
 
     /// <summary>
@@ -156,13 +188,14 @@ partial class Simulation
     /// it — so a list whose earlier pair already spans two base tables reports
     /// 4405 even when a later entry names a derived column (probe-confirmed).
     /// </summary>
-    private static (int TargetIndex, List<(int Ordinal, Expression Expr)> Assignments) ResolveJoinViewSetTargets(
+    private static (int[] Path, List<(int Ordinal, Expression Expr)> Assignments) ResolveJoinViewSetTargets(
         BatchContext batch,
         JoinViewChain chain,
-        List<(string? ColumnName, Expression Expr)> rawAssignments)
+        List<(string? ColumnName, Expression Expr)> rawAssignments,
+        string writtenName)
     {
         var assignments = new List<(int Ordinal, Expression Expr)>(rawAssignments.Count);
-        var targetIndex = -1;
+        int[]? path = null;
 
         foreach (var (columnName, expr) in rawAssignments)
         {
@@ -171,19 +204,19 @@ partial class Simulation
                 assignments.Add((-1, expr));
                 continue;
             }
-            var (sourceIndex, columnIndex) = DescendToBaseColumn(batch, chain, columnName);
-            if (targetIndex >= 0 && targetIndex != sourceIndex)
-                throw SimulatedSqlException.ViewUpdateAffectsMultipleTables(chain.TargetName);
-            targetIndex = sourceIndex;
+            var (columnPath, columnIndex) = DescendToBaseColumn(batch, chain, columnName);
+            if (path is not null && !path.AsSpan().SequenceEqual(columnPath))
+                throw SimulatedSqlException.ViewUpdateAffectsMultipleTables(writtenName);
+            path = columnPath;
 
-            if (chain.Sources[sourceIndex].BackingTable is { } backing)
+            if (chain.TableAt(columnPath) is { } backing)
                 RejectUnmodifiableSetTarget(backing, columnIndex, batch.DatabaseFor(backing));
             assignments.Add((columnIndex, expr));
         }
 
-        return targetIndex < 0
-            ? throw SimulatedSqlException.ViewUpdateAffectsMultipleTables(chain.TargetName)
-            : (targetIndex, assignments);
+        return path is null
+            ? throw SimulatedSqlException.ViewUpdateAffectsMultipleTables(writtenName)
+            : (path, assignments);
     }
 
     private static int IndexOfViewOutputColumn(Collation collation, View view, string columnName)

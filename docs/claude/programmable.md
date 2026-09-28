@@ -427,6 +427,13 @@ DELETE never fires Msg 550 (a row leaving the view is fine).
   Msg 4405 and Msg 4406 are both raised as the **left-to-right walk of the list meets them**, so a derived target beside a single other one reports 4406 whichever order they appear in, and only a list whose earlier pair already spans two base tables reports 4405 ahead of a derived column behind it (probe-confirmed on both verbs).
 - **Msg 550**: WITH CHECK OPTION violation (covers chain spans).
 
+**OUTPUT through a view** (probed 2026-09-27 against SQL Server 2025): `INSERTED` / `DELETED` are the **view's** columns, in its order and under its names — `INSERTED.*` expands to them, a base column the view renamed or doesn't project is Msg 207, and the view's own name as a qualifier is Msg 4104.
+A derived column is computed from the written row (`Simulation.ViewOutput.cs` runs each level's projection down the chain to the base row), and only when the clause names it: `OUTPUT inserted.id` succeeds where `OUTPUT inserted.q` over a `10 / a` column raises Msg 8134 and rolls the statement back.
+A masked column masks as the view reads it, to the client and into an `INTO` target.
+The base table's AFTER triggers refuse an `OUTPUT` without `INTO` (Msg 334), and the message names that **base table**, not the view.
+Through a join view `INSERTED` may name only columns reading nothing but the table written — a column of the other table, or one derived from both, is **Msg 404** (`The column reference "inserted.n" is not allowed because it refers to a base table that is not being modified in this statement.`, the view's own spelling, lowercase `inserted` whatever was written), one per column and ahead of any Msg 207 the clause also raises — while `DELETED` reads each row's join as it stood, the other table's columns included.
+Under an `INSTEAD OF` trigger the rows are the trigger's pseudo-table rows — see [`triggers.md`](triggers.md#instead-of-on-views).
+
 **Catalog surface**: unchanged — `INFORMATION_SCHEMA.VIEWS.IS_UPDATABLE` stays hardcoded `'NO'` (probe-confirmed real SQL Server always reports `'NO'` here regardless of actual updatability, so the existing surface is correct).
 
 **No-WITH-CHECK-OPTION quirk** (probe-confirmed): a filtered view without WITH CHECK OPTION accepts INSERTs that produce rows outside its WHERE, and UPDATEs that move rows out of view.
@@ -434,8 +441,6 @@ The row lands in the base; the view's WHERE only filters reads.
 The simulator preserves this — `VisibilityCheck` gates UPDATE/DELETE *row selection* (which rows to mutate), not INSERT acceptance.
 
 **Fidelity gaps**:
-- **OUTPUT through a view** raises `NotSupportedException` for INSERT / UPDATE / DELETE.
-  Would need view-output-column rebinding for INSERTED.* / DELETED.* projection.
 - **A derived view column read in an `UPDATE … SET` value** — `UPDATE v SET o = s2` where `s2` is `s + ''` in the view — is Msg 207 here; real reads it (probed 2026-09-27 against SQL Server 2025).
 - **Multi-source UPDATE / DELETE** (alias-form `UPDATE alias SET ... FROM ...` where the alias resolves to a view) raises `NotSupportedException` — the alias-form FROM clause can't compose with the view's visibility predicate in the existing joined-update infrastructure.
 - **WHERE referencing a derived upstream column** (a chained view's WHERE that references an expression-projected column from the level below) marks the view as not-updatable with `ViewUpdatabilityRejection.UnsupportedShape` → Msg 4403 at DML.
@@ -486,11 +491,22 @@ Through an outer-join view the preserved side is writable on a NULL-extended row
 Only the **highest** CHECK OPTION level is evaluated, since visibility there implies visibility at every level below.
 The probe row is encoded with no LOB store, which keeps every value inline and allocates no off-row chain for a row that may never be written; its ceiling is the encoder's 65535-byte var-offset cap.
 
+**A join view over a join view flattens.**
+A bottom source that is itself a join view nests its own `JoinViewChain` (`JoinViewChain.Nested`), and `DescendToBaseColumn` carries a written column down through it, so a target is a **path** of source indexes, outermost chain first.
+The write runs over the outer chain's tuples with each nested view's slot replaced by that view's rows, computed from its own tuples and recorded against them (`SourcesAlongPath`), which is how an outer tuple leads back to the base row's `(page, slot)`; a base row several outer tuples show still takes the SET once.
+`WITH CHECK OPTION` re-runs the outermost chain carrying one with the written row standing in at the bottom, so an inner view's filter judges it.
+Targets on two paths are Msg 4405, and DELETE stays Msg 4405 (all probed 2026-09-27 against SQL Server 2025).
+
+**A broken ownership chain is checked per base table**: every base table whose owner isn't the view's is checked for SELECT on the columns the statement reads of it — its join and filter columns and whatever the `WHERE` and `SET` values reach through the view — and the written one for UPDATE on the columns assigned, both column-grain; an INSERT checks only its INSERT on the written table (probed 2026-09-27 against SQL Server 2025) → [`permissions.md`](permissions.md#ownership).
+
 **Positioned DML follows for free.** `WHERE CURRENT OF` through a join-view cursor binds via the identity slot the cursor stamped with that view, so a single-base positioned UPDATE writes through, a SET list spanning both base tables is Msg 4405, a positioned DELETE is Msg 4405, and naming the base table under the view is Msg 16933 — see [`cursors.md`](cursors.md#where-current-of).
 
-**Not modeled yet**: a level that reads **several sources of its own** — a join view over a join view — is Msg 4405, where real flattens both levels and accepts an INSERT or UPDATE naming one base table.
-The target source there is a view rather than a heap, so there is no `(page, slot)` address behind the row the write would claim; reaching one means recursing the level walk into that source's own sources.
-**MERGE** into a join view is Msg 4405 off `RejectionReason` for the same statement real accepts (a `WHEN NOT MATCHED THEN INSERT` naming one base table's columns — probe-confirmed).
+**Not modeled yet**:
+- **MERGE** into a join view is Msg 4405 for statements real accepts (probed 2026-09-27 against SQL Server 2025): every action must land in one base table — an `UPDATE SET` and an `INSERT` column list naming one table's columns, or a split across two being Msg 4405 — and a `DELETE` removes the row from the table the other actions write, or with no other action from the **first table in the view's `FROM`**.
+  The MERGE executor matches against one heap's rows, so a join view needs its tuples as the target rows and each action translated back to the base row they came from.
+- A bottom source that is a **single-table view or a derived table** (`FROM (SELECT … FROM a) d JOIN b`) is Msg 4405, where real writes through it (probed for the derived table).
+- `OUTPUT` through a join view whose written table sits under a **nested** join view raises `NotSupportedException`.
+- The broken-chain check gathers only the outermost chain's own base tables, and real reports the SELECT and the write denials together where the simulator raises the first.
 
 ## Stored procedures
 `CREATE [OR ALTER] PROCEDURE schema.name [(@p type [= default] [OUTPUT], ...)] [WITH options] AS body` lives in `Schema.Procedures`.
@@ -603,6 +619,13 @@ The `WITH` is claimed only when an execute option follows it, so a CTE behind an
   The doubled parentheses are load-bearing: a single set still writes `((…))`, and a bare `(…)` fails at the first column name.
   Omitted nullability means nullable.
 
+**The shorthand definitions** stand in for a column list and mix freely with it (probed 2026-09-27 against SQL Server 2025):
+- `AS OBJECT name` takes a table's, view's or table-valued function's columns — identity and computed ones included — with each column's own nullability as the declared one, so a `NOT NULL` column refuses a NULL with Msg 11553.
+  A `#temp` table qualifies.
+- `AS TYPE name` takes a table type's columns.
+- `AS FOR XML` declares the one `ntext` column a `FOR XML` query sends, under the same `XML_F52E2B61-…` name; anything not implicitly convertible to `ntext` is Msg 11538.
+- A name of more than two parts, or one naming nothing of the kind, is **Msg 11533** (`AS OBJECT` — real's wording opens with `Type` anyway) or **Msg 11534** (`AS TYPE`), echoing the name as written.
+
 **Where it applies**: the procedure form, `EXEC (@sql)`, and `sp_executesql`, including the `@rc =` return-code and implicit-`EXEC` shapes.
 Not the system procedures (`sp_help`, `sp_tables`, …), whose arg parsers don't reach the option list.
 `INSERT … EXEC` **rejects** the clause with Msg 102 — real does too, and reports the token one late (`'SETS'`, not `'WITH'`), which the simulator mirrors.
@@ -628,7 +651,6 @@ Msg 11536 is the exception — it belongs to the `EXECUTE` statement itself and 
 All of them are catchable by `TRY` / `CATCH`.
 
 **Not modeled yet**:
-- The `AS OBJECT <table>` / `AS TYPE <table_type>` / `AS FOR XML` result-set definition shorthands → `NotSupportedException`.
 - **`rowversion`** rides the binary family in the implicit-conversion matrix; real treats `timestamp` more narrowly than `varbinary` there (it declines `nvarchar` and `sql_variant`).
 - A pair the gate **allows** but `SqlValue.CoerceTo` hasn't built raises that path's own error rather than converting — `money` / `float` → `varbinary`, `money` ↔ `float`, `<string>` → `image` / `hierarchyid`, `varbinary` → `datetime`.
   The same gaps show for a plain `CAST`, so they close there, not here.
