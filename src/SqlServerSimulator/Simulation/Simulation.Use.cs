@@ -31,7 +31,22 @@ partial class Simulation
         context.MoveNextOptional();
 
         if (batch.IsSkipping)
+        {
+            // The walk that compiles a batch before it runs binds what follows
+            // a USE in the database the USE names, as real's compile does
+            // (probed 2026-09-28 against SQL Server 2025: `USE a; INSERT t …`
+            // sent from database b binds a's t); CompileBatch puts the session
+            // back afterwards. A database that doesn't exist while the batch
+            // compiles ends the walk, leaving the rest to bind as it runs.
+            if (batch.CompilingForRun)
+            {
+                if (context.Connection.Simulation.Databases.TryGetValue(nameToken.Value, out var compileTarget))
+                    context.Connection.CurrentDatabase = compileTarget;
+                else
+                    batch.BatchAborted = true;
+            }
             return;
+        }
 
         SwitchDatabase(context.Connection, nameToken.Value);
         // Sent even when the database doesn't change (probed 2026-09-23).

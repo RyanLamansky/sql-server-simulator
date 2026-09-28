@@ -108,14 +108,21 @@ public sealed class BatchCompilationTests
         AreEqual(1, Scalar(connection, "select count(*) from sys.columns where object_id = object_id('t') and name = 'a'"));
     }
 
+    /// <summary>
+    /// The statements after a <c>USE</c> compile in the database it names,
+    /// before any of the batch runs (probed 2026-09-28 against SQL Server
+    /// 2025).
+    /// </summary>
     [TestMethod]
-    public void UsedDatabase_DoesNotChangeTheCompileContext()
+    public void UsedDatabase_IsWhereTheRestCompiles()
     {
-        var (_, connection) = Open();
-        var ex = Fails(connection, "print 'first'; use master; select b from t");
+        var (_, connection) = Open("create table t (a int); create database other");
+        _ = Scalar(connection, "use other; create table t (b int); use simulated");
+        var ex = Fails(connection, "print 'first'; use other; select a from t");
         AreEqual(207, ex.Number);
         IsEmpty(Messages(ex));
         AreEqual("simulated", Scalar(connection, "select db_name()"));
+        AreEqual("other", Scalar(connection, "use other; select db_name() from t right join (values (1)) v (x) on b = x"));
     }
 
     /// <summary>

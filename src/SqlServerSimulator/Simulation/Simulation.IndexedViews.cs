@@ -218,6 +218,9 @@ partial class Simulation
 #pragma warning restore CA2100
         var variables = new Dictionary<string, VariableSlot>(BatchContext.VariableNameComparer);
         var dummyFrame = new UdfFrame(SqlType.Int32);
+        // A write through a three-part name maintains the view in its own
+        // database.
+        var moduleScope = ModuleDatabaseScope.Enter(connection, view.Schema.Database, bindsIdentity: false);
         // The view body re-parses under the view's own creation-time
         // QUOTED_IDENTIFIER capture, not the mutating session's — same rule
         // as InvokeViewCore, and the reason a QI-OFF session can still have
@@ -252,6 +255,7 @@ partial class Simulation
             connection.QuotedIdentifiers = savedQuotedIdentifiers;
             connection.AnsiNulls = savedAnsiNulls;
             connection.NestingLevel--;
+            moduleScope.Exit();
         }
     }
 

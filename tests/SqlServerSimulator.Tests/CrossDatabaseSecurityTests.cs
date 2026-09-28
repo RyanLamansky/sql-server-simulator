@@ -226,6 +226,21 @@ public sealed class CrossDatabasePermissionTests
         AreEqual(7, sim.ExecuteScalar("use home; exec dbo.p_owner"));
     }
 
+    /// <summary>
+    /// A module reached through a three-part name mints its frame in its own
+    /// database, whose TRUSTWORTHY flag is the one that counts — not the
+    /// session's.
+    /// </summary>
+    [TestMethod]
+    public void ModuleOwnerFrame_ReachedThreePart_ReadsItsOwnDatabasesTrustworthy()
+    {
+        var sim = OwnerFrameFixture();
+        _ = sim.ExecuteNonQuery("alter database home set trustworthy on");
+        AreEqual(7, sim.ExecuteScalar("use away; exec home.dbo.p_owner"));
+        _ = sim.ExecuteNonQuery("alter database home set trustworthy off; alter database away set trustworthy on");
+        _ = sim.AssertSqlError("use away; exec home.dbo.p_owner", 916);
+    }
+
     [TestMethod]
     public void ModuleOwnerFrame_RestrictedCaller_Raises916Too()
     {
@@ -843,6 +858,83 @@ public sealed class CrossDatabasePermissionTests
         var ex = Throws<SimulatedSqlException>(() => connection.ChangeDatabase("away"));
         AreEqual(916, ex.Number);
         AreEqual("home", connection.CreateCommand("select db_name()").ExecuteScalar());
+    }
+
+    // ---- a module named three-part runs as the login's user in its database ----
+
+    /// <summary>
+    /// Creates <c>away.dbo.p</c> over <paramref name="body"/>, then runs
+    /// <paramref name="grants"/> in <c>away</c>.
+    /// </summary>
+    private static void CreateAwayProcedure(Simulation sim, string body, params ReadOnlySpan<string> grants) =>
+        sim.ExecuteBatches(["use away", $"create procedure p as {body}", .. grants]);
+
+    [TestMethod]
+    public void AwayProcedure_RunsAsTheLoginsUserThere()
+    {
+        var sim = TwoDatabaseFixture();
+        CreateAwayUser(sim);
+        CreateAwayProcedure(sim, "select concat(db_name(), '|', user_name(), '|', suser_sname(), '|', count(*)) from remote", "grant execute on p to awayuser");
+        using var connection = ConnectAsApp(sim);
+        AreEqual("away|awayuser|app|1", connection.CreateCommand("exec away.dbo.p").ExecuteScalar());
+        AreEqual("homeuser", connection.CreateCommand("select user_name()").ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void AwayProcedure_WithoutExecuteGrant_Raises229AttributedToIt()
+    {
+        var sim = TwoDatabaseFixture();
+        CreateAwayUser(sim);
+        CreateAwayProcedure(sim, "select 1");
+        using var connection = ConnectAsApp(sim);
+        var ex = Throws<SimulatedSqlException>(() => connection.CreateCommand("exec away.dbo.p").ExecuteScalar());
+        AreEqual(229, ex.Number);
+        AreEqual("away.dbo.p", ex.Procedure);
+    }
+
+    [TestMethod]
+    public void AwayProcedure_LoginWithNoUserThere_Raises916AtTheCall()
+    {
+        var sim = TwoDatabaseFixture();
+        CreateAwayProcedure(sim, "select 1");
+        using var connection = ConnectAsApp(sim);
+        var ex = Throws<SimulatedSqlException>(() => connection.CreateCommand("select 0;\nexec away.dbo.p").ExecuteNonQuery());
+        AreEqual(916, ex.Number);
+        AreEqual("", ex.Procedure);
+        AreEqual(2, ex.LineNumber);
+    }
+
+    [TestMethod]
+    public void AwayProcedure_GuestWithConnect_RunsAsGuest()
+    {
+        var sim = TwoDatabaseFixture();
+        CreateAwayProcedure(sim, "select user_name()", "grant connect to guest; grant execute on p to guest");
+        using var connection = ConnectAsApp(sim);
+        AreEqual("guest", connection.CreateCommand("exec away.dbo.p").ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void AwayProcedure_ReachingBackIntoTheSessionsDatabase_ChecksTheCallersRights()
+    {
+        var sim = TwoDatabaseFixture();
+        CreateAwayUser(sim);
+        _ = sim.ExecuteNonQuery("use home; create table dbo.secret (id int)");
+        CreateAwayProcedure(sim, "select count(*) from home.dbo.secret", "grant execute on p to awayuser");
+        using var connection = ConnectAsApp(sim);
+        var ex = Throws<SimulatedSqlException>(() => connection.CreateCommand("exec away.dbo.p").ExecuteScalar());
+        AreEqual("The SELECT permission was denied on the object 'secret', database 'home', schema 'dbo'.", ex.Message);
+        AreEqual("away.dbo.p", ex.Procedure);
+    }
+
+    [TestMethod]
+    public void AwayProcedure_DynamicSqlBreaksTheChainInItsDatabase()
+    {
+        var sim = TwoDatabaseFixture();
+        CreateAwayUser(sim);
+        CreateAwayProcedure(sim, "exec ('select count(*) from remote')", "grant execute on p to awayuser");
+        using var connection = ConnectAsApp(sim);
+        var ex = Throws<SimulatedSqlException>(() => connection.CreateCommand("exec away.dbo.p").ExecuteScalar());
+        AreEqual("The SELECT permission was denied on the object 'remote', database 'away', schema 'dbo'.", ex.Message);
     }
 }
 

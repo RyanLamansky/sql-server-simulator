@@ -850,6 +850,15 @@ internal sealed class BatchContext
     public int? OwnershipChainOwnerId;
 
     /// <summary>
+    /// The object id of the procedure, scalar or multi-statement function, or
+    /// trigger whose body this batch runs — what <c>@@PROCID</c> reads there
+    /// (probed 2026-09-28 against SQL Server 2025, whose <c>OBJECT_NAME(@@PROCID)</c>
+    /// names each of the four, and reads NULL in an inline function). Zero
+    /// elsewhere.
+    /// </summary>
+    public int ModuleObjectId;
+
+    /// <summary>
     /// Leaf names (<c>#foo</c>) of local temp tables created while this batch's
     /// body executed. Non-null only for a module body — a procedure, trigger,
     /// or dynamic-SQL (<c>EXEC</c> / <c>sp_executesql</c>) scope — where SQL
@@ -3230,12 +3239,10 @@ internal sealed class BatchContext
         if (!simulation.ActiveLinkedServers.TryGetValue(name[0], out linkedServer))
             return false;
 
-        // Empty middle segments fall back to defaults the same way 3-part
-        // intra-Simulation references do: missing db → remote's default
-        // database; missing schema → remote's per-database DefaultSchemaName.
-        var dbSegment = string.IsNullOrEmpty(name[1])
-            ? (linkedServer.Target.Databases.Keys.FirstOrDefault() ?? Simulation.DefaultDatabaseName)
-            : name[1];
+        // Empty middle segments fall back to defaults: missing db → the
+        // database a fresh session of the server starts in; missing schema →
+        // the remote's per-database DefaultSchemaName.
+        var dbSegment = string.IsNullOrEmpty(name[1]) ? linkedServer.SessionDatabaseName : name[1];
         if (!linkedServer.Target.Databases.TryGetValue(dbSegment, out var remoteDatabase))
             return false;
         var schemaSegment = string.IsNullOrEmpty(name[2]) ? Database.DefaultSchemaName : name[2];
@@ -3256,6 +3263,7 @@ internal sealed class BatchContext
         {
             return false;
         }
+        remoteColumns = RemoteWrite.ProviderColumns(linkedServer, name, remoteColumns);
         remoteDatabaseName = dbSegment;
         remoteSchemaName = schemaSegment;
         return true;

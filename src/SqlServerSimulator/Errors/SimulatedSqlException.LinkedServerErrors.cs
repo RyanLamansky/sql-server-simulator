@@ -151,6 +151,48 @@ partial class SimulatedSqlException
             : (messages, new SimulatedSqlException(string.Join(Environment.NewLine, errors.Select(error => error.Message)), System.Runtime.InteropServices.CollectionsMarshal.AsSpan(errors)) { diagnosticsResolved = true, TerminatesBatch = endsBatch });
     }
 
+    /// <summary>
+    /// Msg 9514: a distributed query meets an <c>xml</c> column, which the
+    /// provider can't carry — a four-part name's table or view that has one,
+    /// named as written (<c>lb.db.dbo.t</c>) and reported at line 12 wherever
+    /// the statement sits, or a rowset that returns one, which
+    /// <c>OPENQUERY</c> reports as <c>OPENQUERY</c> at its statement's line and
+    /// <c>EXEC … AT</c> or a remote procedure call as <c>IROWSET</c> at line 1,
+    /// ending the batch.
+    /// </summary>
+    internal static SimulatedSqlException XmlInDistributedQuery(string remoteObject) =>
+        new($"Xml data type is not supported in distributed queries. Remote object '{remoteObject}' has xml column(s).", 9514, 16, 1);
+
+    /// <inheritdoc cref="XmlInDistributedQuery"/>
+    internal static SimulatedSqlException XmlInRemoteCallRowset() =>
+        new SimulatedSqlException("Xml data type is not supported in distributed queries. Remote object 'IROWSET' has xml column(s).", 9514, 16, 1) { TerminatesBatch = true }.PinLine(1);
+
+    /// <summary>
+    /// Msg 7325: a four-part name's table or view has a CLR-typed column —
+    /// <c>geography</c>, <c>geometry</c> or <c>hierarchyid</c> — which only a
+    /// pass-through query reaches; <paramref name="quotedName"/> is each
+    /// written segment after the server's in double quotes.
+    /// </summary>
+    internal static SimulatedSqlException ClrTypeInDistributedQuery(string quotedName) =>
+        new($"Objects exposing columns with CLR types are not allowed in distributed queries. Please use a pass-through query to access remote object '{quotedName}'.", 7325, 16, 1);
+
+    /// <summary>
+    /// Msg 7357: a four-part name's table or view exposes no column to the
+    /// provider — every one it has is <c>json</c>, which the provider doesn't
+    /// list; <paramref name="quotedName"/> as <see cref="ClrTypeInDistributedQuery"/>'s.
+    /// </summary>
+    internal static SimulatedSqlException RemoteObjectHasNoColumns(LinkedServer server, string quotedName) =>
+        new($"Cannot process the object \"{quotedName}\". The OLE DB provider \"{server.ProviderInMessages}\" for linked server \"{server.Name}\" indicates that either the object has no columns or the current user does not have permissions on that object.", 7357, 16, 2);
+
+    /// <summary>
+    /// Msg 7346: a row a four-part name reads carries a value the provider
+    /// exposes but can't convert — a non-NULL <c>vector</c>, which it lists as
+    /// <c>varbinary</c>. Raised as the row is reached, after the rows before
+    /// it, and ends the batch.
+    /// </summary>
+    internal static SimulatedSqlException RemoteRowDataNotConvertible(LinkedServer server) =>
+        new($"Cannot get the data of the row from the OLE DB provider \"{server.ProviderInMessages}\" for linked server \"{server.Name}\". Could not convert the data value due to reasons other than sign mismatch or overflow.", 7346, 16, 2) { TerminatesBatch = true };
+
     /// <summary>Msg 179: an <c>OUTPUT</c> argument to <c>EXEC … AT</c> that isn't a variable.</summary>
     internal static SimulatedSqlException OutputOnConstantArgument() =>
         new("Cannot use the OUTPUT option when passing a constant to a stored procedure.", 179, 15, 1);

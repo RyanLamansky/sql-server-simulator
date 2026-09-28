@@ -49,6 +49,9 @@ partial class Simulation
         var errors = new List<SimulatedSqlException>();
         compileBatch.CurrentStatement.UtcNow = DateTime.UtcNow;
         compileBatch.CompilingForRun = true;
+        // A USE the walk meets switches the database it binds in.
+        var connection = compileBatch.Connection;
+        var enteredDatabase = connection.CurrentDatabase;
         try
         {
             _ = this.BindWithoutRunning(compileBatch, errors);
@@ -56,6 +59,10 @@ partial class Simulation
         catch (SimulatedSqlException parsePhase)
         {
             return parsePhase;
+        }
+        finally
+        {
+            connection.CurrentDatabase = enteredDatabase;
         }
 
         if (errors.Count > 0)

@@ -6,9 +6,10 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// Backs both <c>SCOPE_IDENTITY()</c> and <c>@@IDENTITY</c>: returns the
 /// executing connection's last-inserted identity value as
 /// <c>numeric(38, 0)</c>, or NULL when the most recent INSERT didn't touch
-/// an identity column. The two T-SQL surfaces differ in scope on real SQL
-/// Server (SCOPE_IDENTITY is per scope, @@IDENTITY is per session); the
-/// simulator collapses both to <see cref="SimulatedDbConnection.LastIdentity"/>.
+/// an identity column — the current scope's
+/// (<see cref="SimulatedDbConnection.ScopeIdentity"/>) for
+/// <c>SCOPE_IDENTITY()</c>, the session's
+/// (<see cref="SimulatedDbConnection.LastIdentity"/>) for <c>@@IDENTITY</c>.
 /// </summary>
 /// <remarks>
 /// Reads <see cref="RuntimeContext.Batch"/>'s connection at evaluation
@@ -20,6 +21,9 @@ internal sealed class LastIdentityExpression : Expression
 {
     private static readonly SqlType ResultType = SqlType.GetDecimal(38, 0);
 
+    /// <summary>Whether this is <c>SCOPE_IDENTITY()</c> rather than <c>@@IDENTITY</c>.</summary>
+    private readonly bool scoped;
+
     public LastIdentityExpression()
     {
     }
@@ -28,16 +32,17 @@ internal sealed class LastIdentityExpression : Expression
     {
         if (context.Token is not Tokens.Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
+        this.scoped = true;
     }
 
     public override SqlValue Run(RuntimeContext runtime) =>
-        runtime.Batch.Connection.LastIdentity is decimal v
+        (this.scoped ? runtime.Batch.Connection.ScopeIdentity : runtime.Batch.Connection.LastIdentity) is decimal v
             ? SqlValue.FromDecimal(ResultType, v)
             : SqlValue.Null(ResultType);
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => ResultType;
 
-    internal override string DebugDisplay() => "SCOPE_IDENTITY()";
+    internal override string DebugDisplay() => this.scoped ? "SCOPE_IDENTITY()" : "@@IDENTITY";
 
     internal override void Describe(NodeShape shape) { }
 }

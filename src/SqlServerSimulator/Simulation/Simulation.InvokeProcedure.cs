@@ -75,7 +75,9 @@ partial class Simulation
                 PermissionEnforcement.CheckObject(outerBatch, procedure.Schema.Database, "EXECUTE", procedure.ObjectId, procedure.SchemaId,
                     procedure.Name, procedure.Schema.Name, procedure: attributionName);
             }
-            catch (SimulatedSqlException denied)
+            // A login with no user in the procedure's database is refused at
+            // the calling statement instead, unattributed (probed 2026-09-28).
+            catch (SimulatedSqlException denied) when (denied.Number != 916)
             {
                 denied.PreserveDiagnostics(1, attributionName);
                 throw;
@@ -231,15 +233,6 @@ partial class Simulation
         // CommandText, so we skip the dispatch entirely — the proc behaves
         // as if a no-op body ran (default RETURN code 0, no result sets,
         // no output-param mutations).
-        // Module WITH EXECUTE AS: push the impersonation frame around the body
-        // (OWNER / SELF → dbo, CALLER → no-op, a named user → that principal,
-        // Msg 15517 here if missing). The frame is active while the body
-        // materializes below (eager) so its scalars observe the impersonated
-        // identity; it unwinds on body exit — the empty-body branch below and
-        // the non-empty branch's finally each revert to this depth.
-        var savedImpersonationDepth = connection.Security.ImpersonationDepth;
-        PushProcedureExecuteAsFrame(connection, procedure, outerBatch.CurrentDatabase);
-
         var procFrame = new ProcFrame(procedure.Name);
         List<SimulatedStatementOutcome> outcomes = [];
         SimulatedSqlException? bodyError = null;
@@ -249,98 +242,119 @@ partial class Simulation
         // (probed 2026-09-28 against SQL Server 2025).
         var endedUnderImplicitTransactions = connection.ImplicitTransactions;
         BatchContext? innerBatch = null;
-        if (procedure.ClrEntry is { } clrEntry)
+        // The body binds and runs in the procedure's own database, which is
+        // the session's unless the call named it with a three-part name.
+        var moduleScope = ModuleDatabaseScope.Enter(connection, procedure.Schema.Database);
+        var identityScope = IdentityScope.Enter(connection);
+        try
         {
-            connection.Security.RevertTo(savedImpersonationDepth);
-            enteredTranCount = connection.CurrentTransaction?.TranCount ?? 0;
-            bodyError = RunClrProcedure(outerBatch, procedure, clrEntry, variables, procFrame, outcomes, attributionName);
-        }
-        else if (string.IsNullOrEmpty(procedure.BodyText))
-        {
-            connection.Security.RevertTo(savedImpersonationDepth);
-        }
-        else
-        {
-            using var bodyCommand = new SimulatedDbCommand(this, connection);
-#pragma warning disable CA2100 // procedure.BodyText is the simulator's own captured body span
-            bodyCommand.CommandText = procedure.BodyText;
-#pragma warning restore CA2100
-
-            // The body parses under the QUOTED_IDENTIFIER captured at CREATE, not
-            // the caller's. Swapping the session flag (rather than seeding the
-            // child parser) is what carries it to everything else that reads the
-            // connection — dynamic SQL, the plan-cache key, the Msg 1934 gates.
-            // Restored in the finally below; see docs/claude/grammar.md.
-            var savedQuotedIdentifiers = connection.QuotedIdentifiers;
-            connection.QuotedIdentifiers = procedure.UsesQuotedIdentifier;
-            var savedAnsiNulls = connection.AnsiNulls;
-            connection.AnsiNulls = procedure.UsesAnsiNulls;
-            innerBatch = new BatchContext(bodyCommand, variables, procFrame, tableVariables)
+            // Module WITH EXECUTE AS: push the impersonation frame around the body
+            // (OWNER / SELF → dbo, CALLER → no-op, a named user → that principal,
+            // Msg 15517 here if missing). The frame is active while the body
+            // materializes below (eager) so its scalars observe the impersonated
+            // identity; it unwinds on body exit — the empty-body branch below and
+            // the non-empty branch's finally each revert to this depth.
+            var savedImpersonationDepth = connection.Security.ImpersonationDepth;
+            PushProcedureExecuteAsFrame(connection, procedure, procedure.Schema.Database);
+            if (procedure.ClrEntry is { } clrEntry)
             {
-                // Body errors report a line relative to the whole CREATE
-                // statement (probe-confirmed) and the invocation's spelling of
-                // the procedure's name.
-                LineOffset = procedure.BodyLineOffset,
-                ErrorProcedureName = attributionName,
-                ContinueOnError = ContinuesCalledBatch(outerBatch),
-                OwnershipChainOwnerId = Ownership.EffectiveOwnerId(procedure.Schema.Database, procedure),
-            };
-            // Seed cursor parameters as unallocated cursor variables in the
-            // child frame; the body SETs and OPENs a cursor on each.
-            foreach (var param in procedure.Parameters)
-            {
-                if (param.IsCursor)
-                    innerBatch.CursorVariables[param.Name] = null;
+                connection.Security.RevertTo(savedImpersonationDepth);
+                enteredTranCount = connection.CurrentTransaction?.TranCount ?? 0;
+                bodyError = RunClrProcedure(outerBatch, procedure, clrEntry, variables, procFrame, outcomes, attributionName);
             }
-            connection.NestingLevel++;
-            // SET TEXTSIZE issued inside a proc body reverts at proc exit
-            // (probe-confirmed 2026-07-19), like the standard SET options;
-            // the body's result sets keep their production-time cap via the
-            // dispatch loop's per-statement ClientTextSize stamp.
-            var savedTextSize = connection.TextSize;
-            // SET NOCOUNT reverts at proc exit the same way (probe-confirmed);
-            // the counts the body's own statements reported were already
-            // stamped as it produced them.
-            var savedNoCount = connection.NoCount;
-            // XACT_ABORT / ROWCOUNT / DATEFIRST revert the same way, and unlike
-            // the six ANSI toggles the body's own SET does take effect while it
-            // runs (probe-confirmed for all three).
-            var savedOptions = new SimulatedDbConnection.SessionOptionScope(connection);
-            enteredTranCount = connection.CurrentTransaction?.TranCount ?? 0;
-            // Materialize outcomes to a list so the try/finally cleanup
-            // (NestingLevel decrement, OUTPUT param writeback, return-code
-            // assignment) runs even when the iterator is partially consumed.
-            // An error that ends the body keeps what the body sent before it,
-            // which reaches the caller ahead of the error.
-            try
+            else if (string.IsNullOrEmpty(procedure.BodyText))
             {
-                var parser = innerBatch.Parser;
-                parser.MoveNextOptional();
-                foreach (var outcome in DispatchStatementsUntil(innerBatch, endKeyword: null))
-                    outcomes.Add(outcome);
-            }
-            catch (SimulatedSqlException ex)
-            {
-                bodyError = ex;
-            }
-            finally
-            {
-                connection.NestingLevel--;
-                endedUnderImplicitTransactions = connection.ImplicitTransactions;
-                connection.QuotedIdentifiers = savedQuotedIdentifiers;
-                connection.AnsiNulls = savedAnsiNulls;
-                connection.TextSize = savedTextSize;
-                connection.NoCount = savedNoCount;
-                savedOptions.Restore(connection);
-                // Local temp tables the body created are dropped at proc exit
-                // (SQL Server's module-scoped lifetime — so a re-entrant call
-                // re-creates them without a Msg 2714 collision).
-                innerBatch.DropScopedTempTables();
-                // Unwind the module's EXECUTE AS frame on body exit (including
-                // a body error), before control and the OUTPUT / return-code
-                // writeback return to the caller's security context.
                 connection.Security.RevertTo(savedImpersonationDepth);
             }
+            else
+            {
+                using var bodyCommand = new SimulatedDbCommand(this, connection);
+#pragma warning disable CA2100 // procedure.BodyText is the simulator's own captured body span
+                bodyCommand.CommandText = procedure.BodyText;
+#pragma warning restore CA2100
+
+                // The body parses under the QUOTED_IDENTIFIER captured at CREATE, not
+                // the caller's. Swapping the session flag (rather than seeding the
+                // child parser) is what carries it to everything else that reads the
+                // connection — dynamic SQL, the plan-cache key, the Msg 1934 gates.
+                // Restored in the finally below; see docs/claude/grammar.md.
+                var savedQuotedIdentifiers = connection.QuotedIdentifiers;
+                connection.QuotedIdentifiers = procedure.UsesQuotedIdentifier;
+                var savedAnsiNulls = connection.AnsiNulls;
+                connection.AnsiNulls = procedure.UsesAnsiNulls;
+                innerBatch = new BatchContext(bodyCommand, variables, procFrame, tableVariables)
+                {
+                    // Body errors report a line relative to the whole CREATE
+                    // statement (probe-confirmed) and the invocation's spelling of
+                    // the procedure's name.
+                    LineOffset = procedure.BodyLineOffset,
+                    ErrorProcedureName = attributionName,
+                    ContinueOnError = ContinuesCalledBatch(outerBatch),
+                    OwnershipChainOwnerId = Ownership.EffectiveOwnerId(procedure.Schema.Database, procedure),
+                    ModuleObjectId = procedure.ObjectId,
+                };
+                // Seed cursor parameters as unallocated cursor variables in the
+                // child frame; the body SETs and OPENs a cursor on each.
+                foreach (var param in procedure.Parameters)
+                {
+                    if (param.IsCursor)
+                        innerBatch.CursorVariables[param.Name] = null;
+                }
+                connection.NestingLevel++;
+                // SET TEXTSIZE issued inside a proc body reverts at proc exit
+                // (probe-confirmed 2026-07-19), like the standard SET options;
+                // the body's result sets keep their production-time cap via the
+                // dispatch loop's per-statement ClientTextSize stamp.
+                var savedTextSize = connection.TextSize;
+                // SET NOCOUNT reverts at proc exit the same way (probe-confirmed);
+                // the counts the body's own statements reported were already
+                // stamped as it produced them.
+                var savedNoCount = connection.NoCount;
+                // XACT_ABORT / ROWCOUNT / DATEFIRST revert the same way, and unlike
+                // the six ANSI toggles the body's own SET does take effect while it
+                // runs (probe-confirmed for all three).
+                var savedOptions = new SimulatedDbConnection.SessionOptionScope(connection);
+                enteredTranCount = connection.CurrentTransaction?.TranCount ?? 0;
+                // Materialize outcomes to a list so the try/finally cleanup
+                // (NestingLevel decrement, OUTPUT param writeback, return-code
+                // assignment) runs even when the iterator is partially consumed.
+                // An error that ends the body keeps what the body sent before it,
+                // which reaches the caller ahead of the error.
+                try
+                {
+                    var parser = innerBatch.Parser;
+                    parser.MoveNextOptional();
+                    foreach (var outcome in DispatchStatementsUntil(innerBatch, endKeyword: null))
+                        outcomes.Add(outcome);
+                }
+                catch (SimulatedSqlException ex)
+                {
+                    bodyError = ex;
+                }
+                finally
+                {
+                    connection.NestingLevel--;
+                    endedUnderImplicitTransactions = connection.ImplicitTransactions;
+                    connection.QuotedIdentifiers = savedQuotedIdentifiers;
+                    connection.AnsiNulls = savedAnsiNulls;
+                    connection.TextSize = savedTextSize;
+                    connection.NoCount = savedNoCount;
+                    savedOptions.Restore(connection);
+                    // Local temp tables the body created are dropped at proc exit
+                    // (SQL Server's module-scoped lifetime — so a re-entrant call
+                    // re-creates them without a Msg 2714 collision).
+                    innerBatch.DropScopedTempTables();
+                    // Unwind the module's EXECUTE AS frame on body exit (including
+                    // a body error), before control and the OUTPUT / return-code
+                    // writeback return to the caller's security context.
+                    connection.Security.RevertTo(savedImpersonationDepth);
+                }
+            }
+        }
+        finally
+        {
+            identityScope.Exit(IdentityScopeKind.Procedure);
+            moduleScope.Exit();
         }
 
         // Writeback: any OUTPUT-marked argument copies the child batch's

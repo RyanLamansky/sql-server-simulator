@@ -237,12 +237,8 @@ partial class Simulation
         var connection = outerBatch.Connection;
 
         // Save the outer caller's SCOPE_IDENTITY / @@IDENTITY anchor.
-        // Real SQL Server scopes SCOPE_IDENTITY per stored-context-scope —
-        // a trigger's identity inserts don't leak to the caller's
-        // SCOPE_IDENTITY (probe-confirmed). The simulator collapses
-        // SCOPE_IDENTITY and @@IDENTITY into one slot, so save/restore
-        // around the trigger fires preserves the outer caller's view.
-        var outerScopeIdentity = connection.LastIdentity;
+        // The bodies are a scope of their own for SCOPE_IDENTITY.
+        var identityScope = IdentityScope.Enter(connection);
 
         // Publish the firing statement's atomic scope for the duration of the
         // bodies, so every mutation underneath — the body's own statements and
@@ -281,7 +277,7 @@ partial class Simulation
             connection.TriggerStatementVersionEntries = outerTriggerVersionEntries;
         }
 
-        connection.LastIdentity = outerScopeIdentity;
+        identityScope.Exit(IdentityScopeKind.Trigger);
     }
 
     /// <summary>
@@ -342,10 +338,8 @@ partial class Simulation
         var savedBodyErrorRaised = connection.TriggerBodyErrorRaised;
         var savedTransactionEnded = connection.TriggerTransactionEnded;
         // The body resolves names in the trigger's own database — the session's
-        // unless the firing statement wrote through a three-part name. Not a
-        // USE: the switch is invisible to the firing batch, which resumes in
-        // its own database when the body returns.
-        var savedDatabase = connection.CurrentDatabase;
+        // unless the firing statement wrote through a three-part name.
+        var moduleScope = default(ModuleDatabaseScope);
         // A trigger body parses under the QUOTED_IDENTIFIER captured at its
         // CREATE, not the firing session's (probe-confirmed). Swapping the
         // session flag rather than seeding the child parser directly is what
@@ -373,7 +367,7 @@ partial class Simulation
         BatchContext? innerBatch = null;
         try
         {
-            connection.CurrentDatabase = bodyDatabase;
+            moduleScope = ModuleDatabaseScope.Enter(connection, bodyDatabase);
             connection.QuotedIdentifiers = usesQuotedIdentifier;
             connection.AnsiNulls = usesAnsiNulls;
             connection.NestingLevel++;
@@ -405,6 +399,7 @@ partial class Simulation
                     ErrorProcedureName = triggerName,
                     ContinueOnError = ContinuesCalledBatch(outerBatch),
                     OwnershipChainOwnerId = chainOwner,
+                    ModuleObjectId = objectId,
                 };
                 var parser = innerBatch.Parser;
                 parser.MoveNextOptional();
@@ -439,7 +434,7 @@ partial class Simulation
         }
         finally
         {
-            connection.CurrentDatabase = savedDatabase;
+            moduleScope.Exit();
             connection.QuotedIdentifiers = savedQuotedIdentifiers;
             connection.AnsiNulls = savedAnsiNulls;
             connection.NoCount = savedNoCount;

@@ -12,7 +12,9 @@ public class OpenQueryTests
 
         var local = new Simulation();
         local.AddRemoteSimulation("RMT", remote);
-        _ = local.ExecuteNonQuery("exec sp_addlinkedserver 'RMT', 'SQL Server'");
+        // The catalog is where the pass-through queries' unqualified names
+        // bind; without one a session starts in master.
+        _ = local.ExecuteNonQuery("exec sp_addlinkedserver 'RMT', 'SQL Server', @catalog = 'simulated'");
         return local;
     }
 

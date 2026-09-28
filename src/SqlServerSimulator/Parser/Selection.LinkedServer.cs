@@ -50,7 +50,7 @@ partial class Selection
             columnNames,
             hasOrderBy: false,
             hasTopOrOffsetOrFetch: false,
-            rowSource: (_, _) => StreamRemoteRows(server, databaseName, schemaName, leafName));
+            rowSource: (_, _) => StreamRemoteRows(server, databaseName, schemaName, leafName, columns));
     }
 
     /// <summary>
@@ -64,14 +64,41 @@ partial class Selection
     /// per remote query" semantic of real SQL Server's linked-server
     /// pipeline.
     /// </summary>
-    private static List<byte[]> StreamRemoteRows(LinkedServer server, string databaseName, string schemaName, string leafName) =>
-        RemoteWrite.RunRemoteQuery(
+    private static IEnumerable<byte[]> StreamRemoteRows(LinkedServer server, string databaseName, string schemaName, string leafName, HeapColumn[] columns)
+    {
+        if (RemoteWrite.RunRemoteQuery(
             server,
-            string.Create(CultureInfo.InvariantCulture, $"SELECT * FROM [{EscapeIdent(databaseName)}].[{EscapeIdent(schemaName)}].[{EscapeIdent(leafName)}]"),
+            string.Create(CultureInfo.InvariantCulture, $"SELECT {RemoteWrite.ColumnList(columns)} FROM [{EscapeIdent(databaseName)}].[{EscapeIdent(schemaName)}].[{EscapeIdent(leafName)}]"),
             databaseName,
-            browse: false) is { } result
-                ? [.. result.RowBytes]
-                : [];
+            browse: false) is not { } result)
+        {
+            return [];
+        }
+        List<byte[]> rows = [.. result.RowBytes];
+        return Array.Exists(result.Schema, static type => type is VectorSqlType) ? ExposeVectors(server, result.Schema, columns, rows) : rows;
+    }
+
+    /// <summary>
+    /// The rows of a read whose <c>vector</c> columns the provider lists as
+    /// <c>varbinary</c> (<see cref="RemoteWrite.ProviderColumns"/>): a NULL one
+    /// reads as NULL, and the first row holding a value is Msg 7346, after the
+    /// rows ahead of it (probed 2026-09-28 against SQL Server 2025, where only a
+    /// query that projects the column reaches it — here any read does).
+    /// </summary>
+    private static IEnumerable<byte[]> ExposeVectors(LinkedServer server, SqlType[] fetched, HeapColumn[] columns, List<byte[]> rows)
+    {
+        var exposed = Array.ConvertAll(columns, static column => column.Type);
+        foreach (var bytes in rows)
+        {
+            var values = RowDecoder.DecodeRow(fetched, bytes);
+            for (var i = 0; i < values.Length; i++)
+            {
+                if (fetched[i] is VectorSqlType)
+                    values[i] = values[i].IsNull ? SqlValue.Null(exposed[i]) : throw SimulatedSqlException.RemoteRowDataNotConvertible(server);
+            }
+            yield return RowEncoder.EncodeRow(exposed, values);
+        }
+    }
 
     /// <summary>
     /// The FROM source over a <see cref="RemoteWrite"/>'s stand-in, for the
@@ -110,7 +137,7 @@ partial class Selection
         if (!BuiltInToken.Equals(objectName[2], "sys") && !BuiltInToken.Equals(objectName[2], "INFORMATION_SCHEMA"))
             return null;
         var server = RemoteWrite.ResolveServer(context.Batch, objectName[0]);
-        var databaseName = string.IsNullOrEmpty(objectName[1]) ? Simulation.DefaultDatabaseName : objectName[1];
+        var databaseName = string.IsNullOrEmpty(objectName[1]) ? server.SessionDatabaseName : objectName[1];
         if (!server.Target.Databases.ContainsKey(databaseName))
             return null;
         context.Batch.HasSessionScopedReference = true;
@@ -241,7 +268,7 @@ partial class Selection
         if (string.IsNullOrWhiteSpace(queryText))
             throw OpenQueryNoResultSet(server.Name);
         return RemoteWrite.RunRemoteQuery(server, queryText, database: null, browse: false) is { } result
-            ? (result.Schema, result.ColumnNames)
+            ? (RemoteWrite.RequireNoXmlColumn(result.Schema, "OPENQUERY"), result.ColumnNames)
             : throw OpenQueryNoResultSet(server.Name);
     }
 

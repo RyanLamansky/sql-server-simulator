@@ -236,7 +236,8 @@ The report follows real's two phases:
 
 A statement naming an object that doesn't exist when the batch compiles — a table the batch itself creates, a `#temp` a `SELECT … INTO` makes — binds when it runs, so the statements before it have run by then.
 Skip mode's placeholder source is that deferral, and a binder error in a statement over one defers with it (`StatementContext.BindsDeferredSource`).
-Everything else binds against the schema as the batch found it, which is where real's familiar same-batch traps come from: `ALTER TABLE t ADD b …; SELECT b FROM t` is Msg 207 with the column never added, a type created and used in one batch is Msg 2715, a table dropped and re-created with other columns binds its old definition, and `USE` doesn't change the database the rest of the batch compiles in.
+Everything else binds against the schema as the batch found it, which is where real's familiar same-batch traps come from: `ALTER TABLE t ADD b …; SELECT b FROM t` is Msg 207 with the column never added, a type created and used in one batch is Msg 2715, and a table dropped and re-created with other columns binds its old definition.
+A `USE` does move the walk: what follows it binds in the database it names, which `CompileBatch` puts back once the walk ends, and a `USE` naming a database that doesn't exist when the batch compiles ends the walk there (probed 2026-09-28 against SQL Server 2025).
 A variable whose `DECLARE` names a missing type is declared anyway, so later references bind rather than raising Msg 137.
 Two statements creating one `#` / `##` table — `CREATE TABLE` or `SELECT … INTO`, even from opposite IF branches or with a `DROP` between — are Msg 2714 state 1 while compiling (`BatchContext.NoteTempTableCreation`), so nothing runs and a module body doing it is refused at `CREATE` (probed 2026-09-24 and 2026-09-26).
 

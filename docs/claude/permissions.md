@@ -307,8 +307,10 @@ A login with no user there gets Msg 916 and the session stays put; a missing dat
 
 `USE` runs the same gate, so a `TRUSTWORTHY` source lets an impersonating session switch where a non-trustworthy one gets Msg 916 (probe-confirmed).
 
-**Divergences.**
-The `TRUSTWORTHY` flag and the authenticator's owner are read off the **session's** current database, which is the token's home for a direct `EXECUTE AS USER` and for every same-database module; a module invoked through a three-part name carries a frame made in *its* database, and real would read both there.
+The `TRUSTWORTHY` flag and the authenticator's owner are read off the session's current database, which is the token's home: the session's own for a direct `EXECUTE AS USER`, and the module's for a module's frame, since a body reached through a three-part name runs in its own database.
+
+**A module reached through a three-part name runs as the login's user in its database** — `USER_NAME()` reads that user, or `guest` where `GRANT CONNECT TO guest` enabled it, and a login with no user there is Msg 916 at the calling statement (probed 2026-09-28 against SQL Server 2025).
+The body's same-database references then chain as they would for a caller in that database, and a reference back into the session's database is a cross-database one — see [`schemas.md`](schemas.md#modules-reached-through-a-three-part-name).
 
 ### Reference provenance: synonyms
 

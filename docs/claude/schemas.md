@@ -72,7 +72,7 @@ What follows the *target* rather than the session, all keyed off `HeapTable.Owni
   A cross-database INSERT / UPDATE of a `rowversion` column advances the target's `@@DBTS` and leaves the session's where it was — probed both directions.
   Rollback doesn't give the stamp back, matching the identity / rowversion log-bypass rule ([`transactions.md`](transactions.md)).
 - **Trigger dispatch.**
-  Matching triggers are found in the target's schemas, and each body runs with the connection's current database switched to the target's for its duration (restored in a `finally`, invisible to the firing batch).
+  Matching triggers are found in the target's schemas, and each body runs in the target's database as every module does — see [below](#modules-reached-through-a-three-part-name).
   So `DB_NAME()` inside the body reads the target — probe-confirmed — and the body's unqualified writes land there; reaching back to the firing session's database is itself a three-part write.
 - **Object-id allocation** for a table created by a three-part `CREATE TABLE` / `SELECT … INTO`, so its `sys.tables` row carries an id from the database it lives in.
 - **The version store.**
@@ -86,11 +86,26 @@ Locks likewise: the `LockManager` is per-`Simulation` and its resources hang off
 
 **Not modeled yet**
 
-- **The database name in Msg 515 / 547 constraint messages** is still the literal `Simulation.DefaultDatabaseName`, so a violation in another database names `simulated` where real names the target (a pre-existing hardcode, unrelated to which database the write came from).
 - **The `OBJECT_*` scalars' metadata-visibility gate** reads the session's database rather than the one a three-part argument names; catalog-view visibility already follows the target.
-- **A view or procedure named through a three-part name binds its body in the session's database** rather than its own, so `SELECT * FROM otherdb.dbo.v` over `v`'s unqualified `t` is Msg 208, as is `EXEC otherdb.dbo.p` whose body writes one, where real binds both in `otherdb` and `DB_NAME()` inside the procedure reads it (probed 2026-09-28 against SQL Server 2025).
-  A linked server's remote session starts in the target's database, which is why writes through one and remote procedure calls don't meet this.
+- **A computed column's database-reading built-ins** (`DB_NAME()`, a one-part `OBJECT_ID`) read the session's database when a cross-database statement evaluates the column, where real reads the table's (probed 2026-09-28 against SQL Server 2025: `c AS DB_NAME()` reads the target, while a `DEFAULT (DB_NAME())` reads the session's, as here).
 - **`CREATE VIEW` / `PROCEDURE` / `FUNCTION` / `TRIGGER` with a db prefix** — real raises Msg 166 (`does not allow specifying the database name as a prefix`); the simulator doesn't enforce that yet.
+
+## Modules reached through a three-part name
+
+A procedure, function, view or trigger binds and runs in the database that owns it, whatever database the session is in — reached as `otherdb.dbo.p`, through a synonym for one, from a view that reads one, or fired by a cross-database write.
+Probed 2026-09-28 against SQL Server 2025 for every module kind:
+
+- **What follows the module:** unqualified names (tables, procedures, functions — a nested `EXEC inner_p` finds `otherdb`'s), `DB_NAME()`, `OBJECT_ID` / `OBJECT_NAME(@@PROCID)`, the catalog views, a table the body creates, and dynamic SQL the body runs.
+  A view's or inline function's body reads its own database too, while the referencing statement's own expressions around it — `SELECT DB_NAME(), * FROM otherdb.dbo.v`, an `UPDATE otherdb.dbo.v SET d = DB_NAME()` — read the session's.
+  A cross-database write's CHECK function and sequence default bind in the target, while a `DEFAULT (DB_NAME())` reads the session's.
+- **What stays the session's:** `@@ROWCOUNT`, the transaction, `#temp` tables, and `SCOPE_IDENTITY()` / `@@IDENTITY`, which scope per module as they do in one database.
+- **Identity:** a login that doesn't bypass permission checks runs the body as its user in the module's database (`USER_NAME()` reads it, or `guest` where `GRANT CONNECT TO guest` enabled it), so the body's same-database references chain from there, a reference back into the session's database is checked as a cross-database one, and dynamic SQL is checked as that user.
+  A login with no user there is Msg 916 at the calling statement, unattributed, where a missing `EXECUTE` grant is Msg 229 attributed to the module.
+- **Attribution:** an error in the body names the procedure as the call spells it (`otherdb.dbo.p`).
+
+`ModuleDatabaseScope` is the switch: an eagerly run body (a procedure, trigger, scalar or multi-statement function) enters it around the body, and a view or inline function, whose rows the referencing statement pulls lazily, enters it around each step of its enumeration so the statement's own expressions evaluate between steps in the session's database.
+It isn't a `USE` — no message is sent and the caller resumes where it was.
+A login that is `dbo` in the module's database but not in the session's runs the body under the `dbo` bypass, which also waves through the body's references back into the session's database; how real checks that reach wasn't probed.
 
 ## DROP SCHEMA
 `DROP SCHEMA [IF EXISTS] <name>` removes an entry from `Database.Schemas`.

@@ -88,6 +88,8 @@ partial class Simulation
         }
 
         var udfFrame = new UdfFrame(function.ReturnType);
+        // The body binds and runs in the function's own database.
+        var moduleScope = ModuleDatabaseScope.Enter(connection, function.Schema.Database);
         // The body parses under the QUOTED_IDENTIFIER captured at CREATE, not
         // the caller's. Swapping the session flag (rather than seeding the
         // child parser) is what carries it to everything else that reads the
@@ -101,16 +103,17 @@ partial class Simulation
         // statement (probe-confirmed: real reports the SELECT's line, no
         // procedure) — so this frame leaves the exception unresolved.
         var functionOwner = Ownership.EffectiveOwnerId(function.Schema.Database, function);
-        var innerBatch = new BatchContext(bodyCommand, variables, udfFrame) { SuppressDiagnosticsResolution = true, CalledFunctionBody = true, OwnershipChainOwnerId = functionOwner };
+        var innerBatch = new BatchContext(bodyCommand, variables, udfFrame) { SuppressDiagnosticsResolution = true, CalledFunctionBody = true, OwnershipChainOwnerId = functionOwner, ModuleObjectId = function.ObjectId };
         connection.NestingLevel++;
         // Module WITH EXECUTE AS: push the impersonation frame around the body
         // (OWNER → the owner, SELF → the creator, CALLER → no-op, a named user →
         // that principal), so the body's identity scalars observe the
         // impersonated principal.
         var savedImpersonationDepth = connection.Security.ImpersonationDepth;
-        PushModuleExecuteAsFrame(connection, function.ExecuteAsClause, function.ExecuteAsPrincipalId, outerBatch.CurrentDatabase, functionOwner);
+        var identityScope = IdentityScope.Enter(connection);
         try
         {
+            PushModuleExecuteAsFrame(connection, function.ExecuteAsClause, function.ExecuteAsPrincipalId, function.Schema.Database, functionOwner);
             var parser = innerBatch.Parser;
             parser.MoveNextOptional();
             foreach (var _ in DispatchStatementsUntil(innerBatch, endKeyword: null))
@@ -126,6 +129,8 @@ partial class Simulation
             connection.QuotedIdentifiers = savedQuotedIdentifiers;
             connection.AnsiNulls = savedAnsiNulls;
             connection.Security.RevertTo(savedImpersonationDepth);
+            identityScope.Exit(IdentityScopeKind.Function);
+            moduleScope.Exit();
         }
 
         // The returned value is cut to the declared width as an assignment

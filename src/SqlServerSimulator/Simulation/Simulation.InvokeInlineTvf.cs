@@ -68,7 +68,12 @@ partial class Simulation
             }
         }
 
-        return InvokeInlineTvfCore(outerBatch, function, argValues, isDefault, writtenName);
+        // The body binds and runs in the function's own database, one row at a
+        // time, since the referencing statement consumes it lazily.
+        var rows = InvokeInlineTvfCore(outerBatch, function, argValues, isDefault, writtenName);
+        return ReferenceEquals(function.Schema.Database, connection.CurrentDatabase)
+            ? rows
+            : ModuleDatabaseScope.Enumerate(connection, function.Schema.Database, rows);
     }
 
     private IEnumerable<byte[]> InvokeInlineTvfCore(

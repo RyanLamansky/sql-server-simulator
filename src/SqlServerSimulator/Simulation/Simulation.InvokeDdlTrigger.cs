@@ -216,7 +216,7 @@ partial class Simulation
         _ = RunMutation(batch.Parser, _ =>
         {
             var connection = batch.Connection;
-            var outerScopeIdentity = connection.LastIdentity;
+            var identityScope = IdentityScope.Enter(connection);
             var outerTriggerLog = connection.TriggerStatementUndoLog;
             var outerTriggerVersionEntries = connection.TriggerStatementVersionEntries;
             connection.TriggerStatementUndoLog = batch.CurrentUndoLog;
@@ -244,7 +244,7 @@ partial class Simulation
                 connection.TriggerStatementUndoLog = outerTriggerLog;
                 connection.TriggerStatementVersionEntries = outerTriggerVersionEntries;
             }
-            connection.LastIdentity = outerScopeIdentity;
+            identityScope.Exit(IdentityScopeKind.Trigger);
             return new SimulatedNonQuery(0);
         });
     }

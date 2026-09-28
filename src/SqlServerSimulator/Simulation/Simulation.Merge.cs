@@ -2280,7 +2280,7 @@ partial class Simulation
         if (!insteadOfInsert && destinationTable.IdentityOrdinal >= 0 && pendingInserts.Count > 0)
         {
             var lastId = pendingInserts[^1].NewValues[destinationTable.IdentityOrdinal];
-            context.Connection.LastIdentity = lastId.IsNull ? null : lastId.CoerceTo(SqlType.BigInt).AsInt64;
+            context.Connection.RecordInsertIdentity(lastId.IsNull ? null : lastId.CoerceTo(SqlType.BigInt).AsInt64);
         }
 
         // Build OUTPUT result, in the order the match phase keyed the actions.

@@ -125,7 +125,7 @@ internal sealed class RemoteWrite
         if (name.SchemaOmitted)
             throw SimulatedSqlException.RemoteSchemaOrCatalogInvalid(server);
         var target = server.Target;
-        var databaseName = string.IsNullOrEmpty(name[1]) ? Simulation.DefaultDatabaseName : name[1];
+        var databaseName = string.IsNullOrEmpty(name[1]) ? server.SessionDatabaseName : name[1];
         if (!target.Databases.TryGetValue(databaseName, out var database) || !database.Schemas.TryGetValue(name[2], out var schema))
             throw SimulatedSqlException.RemoteTableNotFound(server, QuotedName(name));
 
@@ -146,6 +146,7 @@ internal sealed class RemoteWrite
         {
             throw SimulatedSqlException.RemoteTableNotFound(server, QuotedName(name));
         }
+        remoteColumns = ProviderColumns(server, name, remoteColumns);
 
         batch.HasSessionScopedReference = true;
         if (!batch.IsSkipping)
@@ -163,7 +164,7 @@ internal sealed class RemoteWrite
         };
         batch.CurrentStatement.RemoteWrite = write;
         if (kind != RemoteWriteKind.Insert && !batch.IsSkipping)
-            write.Load($"SELECT * FROM {write.TargetText}", database.Name);
+            write.Load($"SELECT {ColumnList(remoteColumns)} FROM {write.TargetText}", database.Name);
         return write;
     }
 
@@ -186,6 +187,7 @@ internal sealed class RemoteWrite
 
         var result = RunRemoteQuery(server, query, database: null, browse: true)
             ?? throw new NotSupportedException($"OPENQUERY pass-through query on linked server '{server.Name}' returned no result set. Only queries that produce a result set are supported.");
+        _ = RequireNoXmlColumn(result.Schema, "OPENQUERY");
         var browse = result.Browse;
         if (browse is not { Tables.Length: 1 })
         {
@@ -201,7 +203,7 @@ internal sealed class RemoteWrite
         }
 
         var visible = VisibleColumnCount(result);
-        var baseTable = ResolveBrowseTable(server.Target, browse.Tables[0]);
+        var baseTable = ResolveBrowseTable(server, browse.Tables[0]);
         var remoteColumns = new HeapColumn?[visible];
         var proxyColumns = new HeapColumn[visible];
         for (var i = 0; i < visible; i++)
@@ -374,10 +376,7 @@ internal sealed class RemoteWrite
     [SuppressMessage("Security", "CA2100:Review SQL queries for security vulnerabilities", Justification = "The query is the caller's own pass-through text or a SELECT over identifiers the parser validated, bracket-escaped; it runs against a sibling in-process Simulation.")]
     internal static SimulatedSqlResultSet? RunRemoteQuery(LinkedServer server, string query, string? database, bool browse)
     {
-        using var connection = server.Target.CreateDbConnection();
-        connection.Open();
-        if (database is not null)
-            connection.ChangeDatabase(database);
+        using var connection = server.OpenSession(database);
         connection.NoBrowseTable = browse;
         using var command = connection.CreateCommand();
         command.CommandText = query;
@@ -441,6 +440,12 @@ internal sealed class RemoteWrite
         {
             var fetched = RowDecoder.DecodeRow(result.Schema, bytes);
             var full = fetched.AsSpan(0, width).ToArray();
+            // A vector stands in as the varbinary the provider lists it as.
+            for (var i = 0; i < width; i++)
+            {
+                if (full[i].Type is VectorSqlType && proxy.Columns[i].Type is VarbinarySqlType exposedType)
+                    full[i] = full[i].IsNull ? SqlValue.Null(exposedType) : SqlValue.FromVarbinary(exposedType, full[i].AsVectorBytes);
+            }
             var image = RowEncoder.EncodeRow(proxy.StoredColumns, Simulation.ProjectStoredValues(proxy, full), proxy.Heap);
             var address = proxy.Heap.Insert(image);
             this.originals[address] = fetched;
@@ -464,14 +469,11 @@ internal sealed class RemoteWrite
             _ => this.DeleteStatements(),
         };
         if (this.Kind == RemoteWriteKind.Insert)
-            batch.Connection.LastIdentity = null;
+            batch.Connection.RecordInsertIdentity(null);
         if (statements.Count == 0)
             return;
 
-        using var connection = this.Server.Target.CreateDbConnection();
-        connection.Open();
-        if (this.DatabaseName is not null)
-            connection.ChangeDatabase(this.DatabaseName);
+        using var connection = this.Server.OpenSession(this.DatabaseName);
         using var transaction = connection.BeginTransaction();
         try
         {
@@ -738,10 +740,15 @@ internal sealed class RemoteWrite
             any = true;
             var name = Bracket(column.Name);
             var parameter = "@P" + parameters.Count.ToString(CultureInfo.InvariantCulture);
-            parameters.Add(original[i]);
+            // A text, image or vector column matches on its bytes, through the
+            // MAX type it converts to.
+            var bytesOf = MatchedAsBytes(this.fetchedSchema[i]);
+            parameters.Add(bytesOf is null || original[i].IsNull ? original[i] : original[i].CoerceTo(bytesOf));
             _ = this.fetchedSchema[i].PairClass is TypePairClass.AnsiString or TypePairClass.UnicodeString
                 ? text.Append("(CONVERT(varbinary(max), ").Append(name).Append(") = CONVERT(varbinary(max), ").Append(parameter).Append(')')
-                : text.Append('(').Append(name).Append(" = ").Append(parameter);
+                : bytesOf is not null
+                    ? text.Append("(CONVERT(varbinary(max), CONVERT(").Append(bytesOf.SqlServerName).Append("(max), ").Append(name).Append(")) = CONVERT(varbinary(max), ").Append(parameter).Append(')')
+                    : text.Append('(').Append(name).Append(" = ").Append(parameter);
             _ = text.Append(" OR (").Append(name).Append(" IS NULL AND ").Append(parameter).Append(" IS NULL))");
         }
         if (!any)
@@ -764,9 +771,21 @@ internal sealed class RemoteWrite
         parameters.Add(value);
     }
 
-    // What real's = and IS NULL can match a row by.
+    // What a row is found again by: every column = can compare, and the
+    // text, image and vector ones by their bytes (MatchedAsBytes) — where real
+    // positions its cursor by bookmark, which finds a row whatever its types.
     private static bool IsComparable(SqlType type) => type.PairClass is not (
-        TypePairClass.Text or TypePairClass.Image or TypePairClass.Xml or TypePairClass.Spatial or TypePairClass.Vector or TypePairClass.Json);
+        TypePairClass.Xml or TypePairClass.Spatial or TypePairClass.HierarchyId or TypePairClass.Json);
+
+    // The MAX type a column = can't compare converts to for its bytes to be
+    // compared, or null for one = compares.
+    private static SqlType? MatchedAsBytes(SqlType type) => type switch
+    {
+        ImageSqlType => SqlType.VarbinaryMax,
+        NTextSqlType or VectorSqlType => SqlType.NVarcharMax,
+        TextSqlType => SqlType.VarcharMax,
+        _ => null,
+    };
 
     private static HeapTable BuildProxy(string name, HeapColumn?[] remoteColumns, HeapColumn[] columns, Database remoteDatabase)
     {
@@ -812,15 +831,74 @@ internal sealed class RemoteWrite
 
     // The table a browse-mode result names, as the server resolves it from a
     // fresh session.
-    private static HeapTable? ResolveBrowseTable(Simulation target, string[] parts)
+    private static HeapTable? ResolveBrowseTable(LinkedServer server, string[] parts)
     {
-        var databaseName = parts.Length >= 3 && parts[^3].Length > 0 ? parts[^3] : Simulation.DefaultDatabaseName;
+        var target = server.Target;
+        var databaseName = parts.Length >= 3 && parts[^3].Length > 0 ? parts[^3] : server.SessionDatabaseName;
         var schemaName = parts.Length >= 2 && parts[^2].Length > 0 ? parts[^2] : Database.DefaultSchemaName;
         return target.Databases.TryGetValue(databaseName, out var database)
             && database.Schemas.TryGetValue(schemaName, out var schema)
             && schema.HeapTables.TryGetValue(parts[^1], out var table)
                 ? table
                 : null;
+    }
+
+    /// <summary>
+    /// The columns the provider exposes for a four-part name's table or view,
+    /// as SQL Server 2025's MSOLEDBSQL does (probed 2026-09-28): an <c>xml</c>
+    /// column anywhere refuses the object (Msg 9514), as does a CLR-typed one
+    /// (Msg 7325); a <c>json</c> column isn't listed, and an object left with
+    /// none is Msg 7357; and a <c>vector</c> column is listed as the
+    /// <c>varbinary</c> its storage form fits, whose values a read can't
+    /// convert (Msg 7346). Raised while the statement
+    /// compiles, so nothing in the batch runs.
+    /// </summary>
+    internal static HeapColumn[] ProviderColumns(LinkedServer server, MultiPartName written, HeapColumn[] columns)
+    {
+        List<HeapColumn>? exposed = null;
+        for (var i = 0; i < columns.Length; i++)
+        {
+            var column = columns[i];
+            switch (column.Type.PairClass)
+            {
+                case TypePairClass.Xml:
+                    throw SimulatedSqlException.XmlInDistributedQuery(written.ToString()).PinLine(12);
+                case TypePairClass.Spatial or TypePairClass.HierarchyId:
+                    throw SimulatedSqlException.ClrTypeInDistributedQuery(QuotedName(written));
+                case TypePairClass.Json:
+                    exposed ??= [.. columns.AsSpan(0, i)];
+                    continue;
+                case TypePairClass.Vector:
+                    exposed ??= [.. columns.AsSpan(0, i)];
+                    var length = ((VectorSqlType)column.Type).ByteLength;
+                    exposed.Add(new HeapColumn(column.Name, VarbinarySqlType.Get(length), length, column.Nullable));
+                    continue;
+            }
+            exposed?.Add(column);
+        }
+        if (exposed is null)
+            return columns;
+        return exposed.Count > 0 ? [.. exposed] : throw SimulatedSqlException.RemoteObjectHasNoColumns(server, QuotedName(written));
+    }
+
+    /// <summary>
+    /// <paramref name="schema"/>, a rowset a linked server returned, unless it
+    /// has an <c>xml</c> column, which the provider refuses with Msg 9514 naming
+    /// <paramref name="remoteObject"/> — <c>OPENQUERY</c> for a pass-through
+    /// query's (probed 2026-09-28 against SQL Server 2025).
+    /// </summary>
+    internal static SqlType[] RequireNoXmlColumn(SqlType[] schema, string remoteObject) =>
+        Array.Exists(schema, static type => type.PairClass == TypePairClass.Xml)
+            ? throw SimulatedSqlException.XmlInDistributedQuery(remoteObject)
+            : schema;
+
+    /// <summary>A projection of <paramref name="columns"/> by name, bracketed.</summary>
+    internal static string ColumnList(HeapColumn[] columns)
+    {
+        var text = new StringBuilder();
+        foreach (var column in columns)
+            _ = (text.Length > 0 ? text.Append(", ") : text).Append(Bracket(column.Name));
+        return text.ToString();
     }
 
     internal static string Bracket(string identifier) => "[" + identifier.Replace("]", "]]", StringComparison.Ordinal) + "]";

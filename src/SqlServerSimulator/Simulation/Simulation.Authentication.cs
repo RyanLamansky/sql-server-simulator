@@ -88,12 +88,16 @@ partial class Simulation
     /// Whether the seeded <c>guest</c> principal is accessible in
     /// <paramref name="target"/> — the databases <c>HAS_DBACCESS</c> reports
     /// <c>1</c> for guest: <c>master</c> / <c>tempdb</c> / <c>msdb</c>. Guest is
-    /// inaccessible in the <c>model</c> template and in every user database, so
-    /// an unmapped login is refused there.
+    /// inaccessible in the <c>model</c> template, and in a user database until
+    /// <c>GRANT CONNECT TO guest</c> enables it there (probed 2026-09-28
+    /// against SQL Server 2025: a login with no user then runs a procedure
+    /// reached by a three-part name as <c>guest</c>), so an unmapped login is
+    /// refused there.
     /// </summary>
     private static bool IsGuestAccessible(Database target) =>
-        SystemDatabaseNames.Contains(target.Name)
-        && !BuiltInToken.Comparer.Equals(target.Name, ModelDatabaseName);
+        (SystemDatabaseNames.Contains(target.Name) && !BuiltInToken.Comparer.Equals(target.Name, ModelDatabaseName))
+        || (target.Principals.TryGetValue("guest", out var guest)
+            && PermissionChecker.IsGranted(target, guest.PrincipalId, Permission.Connect, PermissionChecker.ClassDatabase, 0, 0));
 
     /// <summary>
     /// Builds the connect-time <see cref="SessionSecurityContext"/> for an

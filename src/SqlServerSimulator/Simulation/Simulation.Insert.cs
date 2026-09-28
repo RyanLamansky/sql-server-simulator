@@ -763,7 +763,7 @@ partial class Simulation
         // perturb the session's identity history. INSTEAD OF mode doesn't
         // perturb SCOPE_IDENTITY either (no allocation happened).
         if (!context.Batch.IsSkipping && !insteadOfActive)
-            context.Connection.LastIdentity = lastIdentityValue;
+            context.Connection.RecordInsertIdentity(lastIdentityValue);
 
         // Trigger fire: INSTEAD OF replaces the would-be DML; AFTER fires
         // post-heap-write. Bodies throwing propagate up; the parent

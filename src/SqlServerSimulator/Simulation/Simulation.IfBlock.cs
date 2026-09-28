@@ -415,9 +415,8 @@ partial class Simulation
     }
 
     /// <summary>
-    /// Dispatches a <c>RETURN</c> statement. In batch context (the only
-    /// context the simulator currently supports — stored procs and scalar
-    /// functions still aren't modeled), only the bare form is legal: a
+    /// Dispatches a <c>RETURN</c> statement. Outside a procedure or scalar
+    /// function body only the bare form is legal: a
     /// value-form <c>RETURN &lt;expr&gt;</c> raises <c>Msg 178</c> at parse
     /// time regardless of skip mode (compile-time check, same pattern as
     /// <c>BREAK</c>'s Msg 135 from an un-taken IF). Bare RETURN sets
@@ -445,7 +444,8 @@ partial class Simulation
     /// starting keywords) leave RETURN bare.
     /// </para>
     /// </remarks>
-    private static void ParseReturnStatement(BatchContext batch)
+    /// <returns>Whether the statement carried a value.</returns>
+    private static bool ParseReturnStatement(BatchContext batch)
     {
         var context = batch.Parser;
         context.MoveNextOptional(); // consume RETURN
@@ -503,7 +503,7 @@ partial class Simulation
                 }
                 batch.ReturnSignaled = true;
             }
-            return;
+            return true;
         }
 
         // The bare form is the one a scalar function may never use: every
@@ -517,6 +517,7 @@ partial class Simulation
 
         if (!batch.IsSkipping)
             batch.ReturnSignaled = true;
+        return false;
     }
 
     /// <summary>

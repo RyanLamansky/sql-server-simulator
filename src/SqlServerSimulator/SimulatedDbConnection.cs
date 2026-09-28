@@ -977,18 +977,39 @@ public sealed class SimulatedDbConnection : DbConnection
     internal bool SuppressDdlTriggers;
 
     /// <summary>
-    /// Last identity value produced by an INSERT on this connection — the
-    /// source for both <c>SCOPE_IDENTITY()</c> and <c>@@IDENTITY</c>. SQL
-    /// Server scopes these per session/scope; the simulator collapses both
-    /// to a single per-connection slot.
+    /// <c>@@IDENTITY</c>: the last identity value an INSERT on this session
+    /// produced, in any scope but a function's. Cleared (set to <c>null</c>)
+    /// by an INSERT that doesn't generate or accept one, except that a trigger
+    /// generating none leaves its firing statement's value in place — see
+    /// <see cref="IdentityScope"/>.
     /// </summary>
-    /// <remarks>
-    /// Cleared (set to <c>null</c>) by every INSERT that doesn't generate
-    /// or accept an identity value — matching SQL Server's behavior of
-    /// resetting <c>SCOPE_IDENTITY()</c> and <c>@@IDENTITY</c> when the
-    /// most recent statement didn't touch an identity column.
-    /// </remarks>
     internal decimal? LastIdentity;
+
+    /// <summary>
+    /// <c>SCOPE_IDENTITY()</c>: <see cref="LastIdentity"/> as the current
+    /// scope — the batch, a procedure, trigger or function body, a dynamic-SQL
+    /// batch — last set it; each scope starts at <c>null</c> and its caller
+    /// reads its own value again when it returns (<see cref="IdentityScope"/>).
+    /// </summary>
+    internal decimal? ScopeIdentity;
+
+    /// <summary>
+    /// How many INSERTs on this session have produced an identity value — what
+    /// tells <see cref="IdentityScope"/> whether a trigger produced one.
+    /// </summary>
+    internal long IdentityGenerations;
+
+    /// <summary>
+    /// Records an INSERT's identity outcome in both <see cref="LastIdentity"/>
+    /// and <see cref="ScopeIdentity"/>: its last identity value, or
+    /// <c>null</c> when it produced none.
+    /// </summary>
+    internal void RecordInsertIdentity(decimal? value)
+    {
+        this.LastIdentity = this.ScopeIdentity = value;
+        if (value is not null)
+            this.IdentityGenerations++;
+    }
 
     /// <summary>
     /// T-SQL cursors declared on this session, keyed case-insensitively by

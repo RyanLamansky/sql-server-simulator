@@ -111,6 +111,9 @@ partial class Simulation
             checkConstraints: function.CheckConstraints,
             isTableVariable: true);
 
+        // The body binds and runs in the function's own database; it has run
+        // to completion before the first row is handed back.
+        var moduleScope = ModuleDatabaseScope.Enter(connection, function.Schema.Database);
         // The body parses under the QUOTED_IDENTIFIER captured at CREATE, not
         // the caller's. Swapping the session flag (rather than seeding the
         // child parser) is what carries it to everything else that reads the
@@ -126,9 +129,10 @@ partial class Simulation
         // confirmed: even a multi-statement TVF's mid-body error surfaces the
         // referencing SELECT's line, no procedure), so this frame leaves the
         // exception unresolved for the enclosing statement to stamp.
-        var innerBatch = new BatchContext(bodyCommand, variables) { SuppressDiagnosticsResolution = true, CalledFunctionBody = true };
+        var innerBatch = new BatchContext(bodyCommand, variables) { SuppressDiagnosticsResolution = true, CalledFunctionBody = true, ModuleObjectId = function.ObjectId };
         innerBatch.TableVariables[function.ReturnVariableName] = returnTable;
         connection.NestingLevel++;
+        var identityScope = IdentityScope.Enter(connection);
         try
         {
             var parser = innerBatch.Parser;
@@ -146,6 +150,8 @@ partial class Simulation
             connection.NestingLevel--;
             connection.QuotedIdentifiers = savedQuotedIdentifiers;
             connection.AnsiNulls = savedAnsiNulls;
+            identityScope.Exit(IdentityScopeKind.Function);
+            moduleScope.Exit();
         }
 
         // Yield the accumulated @r rows. Iterating the table-variable's Heap

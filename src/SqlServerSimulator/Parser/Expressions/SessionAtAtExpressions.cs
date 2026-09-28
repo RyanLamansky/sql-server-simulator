@@ -81,26 +81,15 @@ internal sealed class DbTsExpression : Expression
 }
 
 /// <summary>
-/// Backs <c>@@PROCID</c>: returns the executing module's
-/// <c>object_id</c> as <see cref="SqlType.Int32"/>. Outside a procedure /
-/// UDF / trigger body the simulator returns <c>0</c> — real SQL Server
-/// returns a transient compiled-plan id which isn't meaningful to
-/// reproduce. Inside a procedure body, returns the procedure's
-/// <c>object_id</c> looked up via the current
-/// <see cref="ProcFrame.ProcedureName"/>.
+/// Backs <c>@@PROCID</c>: the executing module's <c>object_id</c>
+/// (<see cref="BatchContext.ModuleObjectId"/>) as <see cref="SqlType.Int32"/>.
+/// Outside a procedure / function / trigger body the simulator returns
+/// <c>0</c> — real SQL Server returns a transient compiled-plan id which
+/// isn't meaningful to reproduce.
 /// </summary>
 internal sealed class ProcIdExpression : Expression
 {
-    public override SqlValue Run(RuntimeContext runtime)
-    {
-        var frame = runtime.Batch.ProcFrame;
-        if (frame is null)
-            return SqlValue.FromInt32(0);
-        var name = new MultiPartName(frame.ProcedureName);
-        return runtime.Batch.TryResolveProcedure(name, out var proc) && proc is { ObjectId: var id }
-            ? SqlValue.FromInt32(id)
-            : SqlValue.FromInt32(0);
-    }
+    public override SqlValue Run(RuntimeContext runtime) => SqlValue.FromInt32(runtime.Batch.ModuleObjectId);
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
 

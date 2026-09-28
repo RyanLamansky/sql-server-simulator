@@ -3231,14 +3231,17 @@ public sealed partial class Simulation
 
             case ReservedKeyword { Keyword: Keyword.Return }:
                 {
-                    // RETURN is a statement of its own for @@ROWCOUNT (probed
-                    // 2026-09-26 against SQL Server 2025); a function's body
-                    // returns into its caller's statement instead. Read the
-                    // skip state first: the RETURN itself starts skipping.
+                    // RETURN is a statement of its own for @@ROWCOUNT, counting
+                    // one row when it carries a procedure's return status and
+                    // none when bare, which is what the caller reads after
+                    // the procedure (probed 2026-09-28 against SQL Server
+                    // 2025); a function's body returns into its caller's
+                    // statement instead. Read the skip state first: the RETURN
+                    // itself starts skipping.
                     var returnRuns = !batch.IsSkipping;
-                    ParseReturnStatement(batch);
+                    var carriesStatus = ParseReturnStatement(batch);
                     if (returnRuns && batch.UdfFrame is null && !batch.CalledFunctionBody)
-                        connection.LastStatementRowCount = 0;
+                        connection.LastStatementRowCount = carriesStatus ? 1 : 0;
                 }
                 break;
 

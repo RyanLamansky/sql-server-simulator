@@ -31,11 +31,21 @@ partial class Simulation
     /// projection isn't known before that). Null for an ordinary reference; a
     /// body whose shape can't take them keeps running unchanged.
     /// </param>
+    /// <remarks>
+    /// The body binds and runs in the view's own database, one row at a time,
+    /// since the referencing statement consumes it lazily.
+    /// </remarks>
     internal IEnumerable<byte[]> InvokeView(
-        BatchContext outerBatch, View view, int columnCount, List<BooleanExpression>? pushedPredicates = null) =>
-        outerBatch.Connection.NestingLevel >= SimulatedDbConnection.MaxNestingLevel
-            ? throw SimulatedSqlException.MaximumNestingLevelExceeded()
-            : InvokeViewCore(outerBatch, view, columnCount, pushedPredicates);
+        BatchContext outerBatch, View view, int columnCount, List<BooleanExpression>? pushedPredicates = null)
+    {
+        var connection = outerBatch.Connection;
+        if (connection.NestingLevel >= SimulatedDbConnection.MaxNestingLevel)
+            throw SimulatedSqlException.MaximumNestingLevelExceeded();
+        var rows = InvokeViewCore(outerBatch, view, columnCount, pushedPredicates);
+        return ReferenceEquals(view.Schema.Database, connection.CurrentDatabase)
+            ? rows
+            : ModuleDatabaseScope.Enumerate(connection, view.Schema.Database, rows);
+    }
 
     /// <summary>
     /// The columns a reference to <paramref name="view"/> reads, settled the
@@ -151,6 +161,8 @@ partial class Simulation
         bodyCommand.CommandText = view.BodyText;
 #pragma warning restore CA2100
         var variables = new Dictionary<string, VariableSlot>(BatchContext.VariableNameComparer);
+        // The body binds in the view's own database.
+        var moduleScope = ModuleDatabaseScope.Enter(connection, view.Schema.Database, bindsIdentity: false);
         // The captured settings go on before the child batch exists, since
         // it reads QUOTED_IDENTIFIER as it is built.
         var savedQuotedIdentifiers = connection.QuotedIdentifiers;
@@ -173,6 +185,7 @@ partial class Simulation
             connection.AnsiNulls = savedAnsiNulls;
             if (releaseStatementSchemaLocks)
                 innerBatch.ReleaseStatementSchemaLocks();
+            moduleScope.Exit();
         }
     }
 

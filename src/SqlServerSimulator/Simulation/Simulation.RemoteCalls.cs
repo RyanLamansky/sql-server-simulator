@@ -39,8 +39,11 @@ partial class Simulation
                 outputs.Add((parameter, slot));
         }
 
-        foreach (var outcome in RunRemoteCall(batch, server, remoteText, parameters, database: null, procedure: null))
+        var outcomes = RunRemoteCall(batch, server, remoteText, parameters, database: null, procedure: null, out var refusal);
+        foreach (var outcome in outcomes)
             yield return outcome;
+        if (refusal is not null)
+            throw refusal;
         foreach (var (parameter, slot) in outputs)
             slot.Value = (parameter.OutputSqlValue ?? SqlValue.Null(slot.DeclaredType)).CoerceTo(slot.DeclaredType);
     }
@@ -100,8 +103,11 @@ partial class Simulation
         // The session starts in the procedure's database, where real runs its
         // body whatever database the call arrives in.
         var database = procName[1].Length > 0 ? procName[1] : null;
-        foreach (var outcome in RunRemoteCall(batch, server, text.ToString(), parameters, database, written.ToString()))
+        var outcomes = RunRemoteCall(batch, server, text.ToString(), parameters, database, written.ToString(), out var refusal);
+        foreach (var outcome in outcomes)
             yield return outcome;
+        if (refusal is not null)
+            throw refusal;
         foreach (var (parameter, slot) in outputs)
             slot.Value = (parameter.OutputSqlValue ?? SqlValue.Null(slot.DeclaredType)).CoerceTo(slot.DeclaredType);
         if (returnCodeVar is not null)
@@ -155,30 +161,39 @@ partial class Simulation
     /// Runs <paramref name="text"/> in a fresh session of the server — starting
     /// in <paramref name="database"/> when one is given — and hands back what
     /// it produced, materialized before the session closes; the caller's
-    /// <c>@@ROWCOUNT</c> reads the server's last count. The server's batch runs
+    /// <c>@@ROWCOUNT</c> reads the last count the server reported. The server's batch runs
     /// on past an error as a batch of its own does, and the error reaches the
     /// client in its place among the results, relayed and attributed to
     /// <paramref name="procedure"/> when a procedure call raised it — outside
     /// the caller's control flow, which no <c>TRY</c> of the caller's catches
-    /// (probed 2026-09-28 against SQL Server 2025).
+    /// (probed 2026-09-28 against SQL Server 2025). A rowset with an
+    /// <c>xml</c> column stops the call at <paramref name="refusal"/>, which
+    /// the caller raises after the outcomes ahead of it.
     /// </summary>
     [SuppressMessage("Security", "CA2100:Review SQL queries for security vulnerabilities", Justification = "EXEC … AT sends the caller's own text by design; a procedure call's text is built from bracket-escaped identifiers. It runs against a sibling in-process Simulation.")]
-    private static List<SimulatedStatementOutcome> RunRemoteCall(BatchContext batch, LinkedServer server, string text, List<SimulatedDbParameter> parameters, string? database, string? procedure)
+    private static List<SimulatedStatementOutcome> RunRemoteCall(BatchContext batch, LinkedServer server, string text, List<SimulatedDbParameter> parameters, string? database, string? procedure, out SimulatedSqlException? refusal)
     {
+        refusal = null;
         var outcomes = new List<SimulatedStatementOutcome>();
-        using var connection = server.Target.CreateDbConnection();
-        connection.Open();
-        if (database is not null)
-            connection.ChangeDatabase(database);
+        // The caller's @@ROWCOUNT reads the last count the provider saw: the
+        // rows of the last rowset, or the last DML count, NOCOUNT or not and
+        // whatever RETURN, DECLARE or SET followed, or 0 after an error; a
+        // call that reported none of these leaves it as it was (probed
+        // 2026-09-28 against SQL Server 2025).
+        int? lastCount = null;
+        using var connection = server.OpenSession(database);
         using var command = connection.CreateCommand();
         command.CommandText = text;
         foreach (var parameter in parameters)
             _ = command.Parameters.Add(parameter);
         foreach (var outcome in server.Target.CreateResultSetsForCommand(command))
         {
+            if (refusal is not null)
+                break;
             switch (outcome)
             {
                 case SimulatedErrorOutcome failure:
+                    lastCount = 0;
                     // The provider hands back no rowset for the statement that
                     // failed.
                     if (outcomes is [.., SimulatedSqlResultSet { RecordsAffected: <= 0 } failed] && !failed.RowBytes.Any())
@@ -197,18 +212,28 @@ partial class Simulation
                     outcomes.Insert(outcomes.Count - 1, new SimulatedInfoOutcome(
                         new SimulatedError(entry.Class, entry.LineNumber, entry.Message, entry.Number, procedure ?? entry.Procedure, entry.Server, entry.Source, state: 1)));
                     break;
+                // The provider refuses a rowset with an xml column, which ends
+                // the batch after what the server sent ahead of it.
+                case SimulatedSqlResultSet result when Array.Exists(result.Schema, static type => type.PairClass == TypePairClass.Xml):
+                    refusal = SimulatedSqlException.XmlInRemoteCallRowset();
+                    break;
                 case SimulatedSqlResultSet result:
-                    outcomes.Add(new SimulatedSqlResultSet(result.Schema, result.ColumnNames, [.. result.RowBytes], result.RecordsAffected)
+                    byte[][] rows = [.. result.RowBytes];
+                    outcomes.Add(new SimulatedSqlResultSet(result.Schema, result.ColumnNames, rows, result.RecordsAffected)
                     {
                         ColumnNullability = result.ColumnNullability,
                     });
+                    lastCount = rows.Length;
                     break;
                 default:
+                    if (outcome is SimulatedNonQuery { RecordsAffected: >= 0 } counted)
+                        lastCount = counted.RecordsAffected;
                     outcomes.Add(outcome);
                     break;
             }
         }
-        batch.Connection.LastStatementRowCount = connection.LastStatementRowCount;
+        if (lastCount is int count)
+            batch.Connection.LastStatementRowCount = count;
         return outcomes;
     }
 

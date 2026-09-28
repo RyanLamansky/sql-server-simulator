@@ -588,9 +588,12 @@ Output parameter values populate AFTER reader close — probe-confirmed: real SQ
 **Recursion**: each proc call increments `SimulatedDbConnection.NestingLevel`; entering a body at the cap raises Msg 217 (verbatim same wording as scalar UDFs / views).
 `@@NESTLEVEL` reads the counter as int.
 
-**`@@PROCID`**: returns the current procedure's / function's `object_id` as `int` when inside a `ProcFrame` / `UdfFrame`, else `0`.
-Reads `BatchContext.ProcFrame?.Procedure.ObjectId ?? BatchContext.UdfFrame?.Function.ObjectId ?? 0`.
+**`@@PROCID`**: the `object_id` of the procedure, scalar or multi-statement function, or trigger whose body is running (`BatchContext.ModuleObjectId`), else `0` — so `OBJECT_NAME(@@PROCID)` names each of the four and reads NULL in an inline function, whose body runs inside its caller's statement (probed 2026-09-28 against SQL Server 2025).
 Used by tooling that introspects the calling proc from inside its own body (e.g. logging procs that record their own `OBJECT_NAME(@@procid)`).
+
+**A procedure ending in `RETURN`** leaves its caller's `@@ROWCOUNT` at what the `RETURN` counted: one row when it carries a status (`RETURN 0`, `RETURN @x`, `RETURN (SELECT …)`), none when bare, and the last statement's count when the body runs off its end (probed 2026-09-28 against SQL Server 2025).
+
+**A module reached through a three-part name** binds and runs in its own database — see [`schemas.md`](schemas.md#modules-reached-through-a-three-part-name).
 
 **`CommandType.StoredProcedure` entrypoint**: `SimulatedDbCommand.CommandType` accepts `StoredProcedure`; on execute, `CreateResultSetsForCommand` short-circuits the parser path and routes directly to `InvokeProcedure` with arguments translated from `DbParameterCollection`.
 Each `DbParameter` binds to a proc parameter by name (the `@` prefix is stripped if present); `ParameterDirection.Output` / `InputOutput` writeback paths and the optional `ParameterDirection.ReturnValue` capture mirror the EXEC-text behavior.

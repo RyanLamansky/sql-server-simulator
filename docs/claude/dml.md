@@ -226,7 +226,8 @@ Used by tooling watermarking via the "current high water" pattern (sync delta fr
 
 ## Identity helpers (`@@IDENTITY` / `SCOPE_IDENTITY` / `IDENT_CURRENT` / `IDENT_INCR` / `IDENT_SEED`)
 Per-column identity allocation routes through `HeapTable.IdentityState`.
-The session-state scalars (`@@IDENTITY`, `SCOPE_IDENTITY()`) read from `SimulatedDbConnection.LastIdentity`; `IDENT_CURRENT(name)` reads the named table's last-allocated value directly.
+`@@IDENTITY` reads the session's `SimulatedDbConnection.LastIdentity` and `SCOPE_IDENTITY()` the current scope's `ScopeIdentity`, both set by every INSERT — to its last identity value, or NULL when it produced none — and `IDENT_CURRENT(name)` reads the named table's last-allocated value directly.
+A procedure, trigger, function or dynamic-SQL body is a scope of its own (`IdentityScope`): it starts at NULL and its caller reads its own `SCOPE_IDENTITY()` again afterwards, while `@@IDENTITY` reads the body's — save that a trigger producing no identity value leaves its firing statement's in place, and a function's INSERT touches neither (probed 2026-09-28 against SQL Server 2025).
 `IDENT_INCR(name)` / `IDENT_SEED(name)` (`Parser/Expressions/IdentSeedIncrement.cs`) return the declared step / start of the named table's identity column, or NULL when the table lacks one or the name doesn't resolve.
 All three name-arg scalars accept a 1-/2-/3-part dotted runtime string via the same `TryParseObjectName` helper `OBJECT_ID` uses.
 Result type is `numeric(38, 0)` matching real SQL Server's projection (covers tinyint/smallint/int/bigint columns uniformly).
@@ -417,7 +418,7 @@ Default column name is `$action`.
 ### Triggers + identity
 
 Each MERGE invocation fires its triggers AFTER all queued mutations apply (matching real SQL Server's "statement-after" semantic).
-Identity counter advances per insert as expected; `SCOPE_IDENTITY` (and `@@IDENTITY` collapsed onto the same slot) holds the last inserted row's identity at MERGE completion.
+Identity counter advances per insert as expected; `SCOPE_IDENTITY` and `@@IDENTITY` hold the last inserted row's identity at MERGE completion.
 Trigger bodies see the post-MERGE state in INSERTED/DELETED.
 
 ### EF Core reach

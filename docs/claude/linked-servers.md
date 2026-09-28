@@ -66,7 +66,8 @@ Divergences:
 
 The replay's shape follows what real's provider sends, which a remote trigger's firings reveal:
 an INSERT goes **row by row** (a two-row insert fires the trigger twice), an UPDATE or DELETE with no FROM clause as **one statement** (one firing for all its rows, and one with none when it matched nothing), and a joined one, like every `OPENQUERY` write, **row by row** through a cursor.
-Rows are found again by the key browse mode reports — the primary key, a unique constraint or index, else a `rowversion` column — and on a table with none by matching every comparable column, one row at a time (`UPDATE TOP (1)`), so duplicate rows are touched one each.
+Rows are found again by the key browse mode reports — the primary key, a unique constraint or index, else a `rowversion` column — and on a table with none by matching every column, one row at a time (`UPDATE TOP (1)`), so duplicate rows are touched one each.
+A `text`, `ntext`, `image` or `vector` column, which `=` can't compare, matches on its bytes through the MAX type it converts to; real positions its cursor by bookmark instead, which finds a keyless row whatever its types (probed 2026-09-28).
 
 What real reports, all modeled:
 - `@@ROWCOUNT` counts the write's rows; `SCOPE_IDENTITY()` and `@@IDENTITY` read NULL after it, whatever identity the server drew — even after a remote INSERT of no rows, and over an earlier local identity.
@@ -85,8 +86,20 @@ What real reports, all modeled:
 - Each `?` in `EXEC … AT`'s text outside a string, comment or bracketed name binds the next argument, a character one sent as `nvarchar`; an `OUTPUT` constant is Msg 179, and arguments without `AT` are Msg 102 at state 3.
 - The server's batch runs on past an error, as a batch of its own does, and the error reaches the client in its place among the results, relayed in reverse as a write's is — but **outside the caller's control flow**: no `TRY` of the caller's catches it, and the caller's batch carries on.
   A procedure call's errors name the procedure as the call spelled it, without the server (`ep0.dbo.p`).
-- A procedure call's session starts in the procedure's database; `EXEC … AT`'s starts where a fresh session does.
+- A procedure call's session starts in the procedure's database; `EXEC … AT`'s, like `OPENQUERY`'s, starts in the server's `@catalog` when `sp_addlinkedserver` named one, else in the login's default database — `master`, as real's `sa` has it (`LinkedServer.SessionDatabaseName`, which a name omitting its database segment reads too).
+- The caller's `@@ROWCOUNT` reads the last count the call reported — the rows of its last rowset or its last DML count, whatever `RETURN`, `DECLARE` or `SET` followed and `NOCOUNT` or not — 0 after an error, and stays as it was when the call reported none.
 - Both need the server's `rpc out` option (Msg 7411 `… not configured for RPC.`), which `sp_addlinkedserver` turns on for a `SQL Server` product only; `INSERT … EXEC … AT` feeds a local insert.
+
+## Types the provider can't carry
+
+What the provider exposes of a four-part name's table or view (`RemoteWrite.ProviderColumns`), for reads and writes alike, probed 2026-09-28:
+
+- An **`xml`** column anywhere in it refuses the object with Msg 9514 naming it as written (`lb.db.dbo.t`), reported at line 12 wherever the statement sits, while the batch compiles — so nothing in the batch runs.
+  A rowset with one is refused too: `OPENQUERY`'s as Msg 9514 naming `OPENQUERY` at its statement's line, and `EXEC … AT`'s or a remote procedure call's naming `IROWSET` at line 1, after what the call sent ahead of it, ending the batch.
+- A **CLR-typed** column — `geography`, `geometry`, `hierarchyid` — refuses the object with Msg 7325, which a pass-through query avoids: `OPENQUERY` and `EXEC … AT` return those values.
+- A **`json`** column isn't listed: `SELECT *` leaves it out, naming it is Msg 207, and an object whose only columns are `json` is Msg 7357.
+  Through a pass-through query it reads as `varchar`.
+- A **`vector(n)`** column is listed as `varbinary(8 + 4n)`, its storage form's length; a NULL reads as NULL and a value is Msg 7346, raised as its row is reached and ending the batch, while a write whose statement doesn't set the column works.
 
 ## Server options
 
@@ -113,14 +126,13 @@ Committing across two `Simulation`s would need a coordinator that real's default
 ## Divergences
 
 - **The replay isn't the statement real sends**: the simulator ships values it computed locally, where real ships a remotable single-table UPDATE's text for the server to evaluate — so a nondeterministic expression (`NEWID()`, `GETDATE()`) is evaluated by the local server, not the remote one.
-- **A remote session's database**: a fresh remote session starts in the remote `Simulation`'s default database (`simulated`), where real's starts in the login's default (`master` for `sa`) — visible to `DB_NAME()` inside `EXEC … AT`.
-- **`@@ROWCOUNT` after a remote procedure ending in `RETURN n`** reads 0, following the simulator's local rule, where real keeps the procedure's last count.
+- **A `vector` value read through a four-part name** is Msg 7346 whenever a fetched row holds one, where real raises it only for a query that projects the column — `SELECT id`, `COUNT(*)` and `WHERE v IS NOT NULL` read on real, since its provider fetches only what the query names.
+- **A `varbinary` value written into a remote `vector` column** is refused by the server's own conversion, which is Msg 206 here and Msg 13609 on real, whose provider sends it differently.
 
 ## Not modeled yet
 
 - **Predicate / projection pushdown**: every four-part-name read pulls the full remote table, and so does a write's stand-in.
 - **LOB columns**: the remote projection uses the type-only `RowEncoder.EncodeRow` overload (no LOB store), so a MAX payload large enough to overflow the 65535-byte var-section cap raises during encoding on the remote.
-- **A keyless remote table with no comparable column** (only `xml`, spatial, `text` / `image`, `json` or `vector` columns) can't have its rows found again, so an UPDATE or DELETE through one raises `NotSupportedException`.
 - **`@@SERVERNAME`** isn't routed — the local-server row in `sys.servers` uses the constant `"SIMULATED"` for `name` regardless of any host-configured value.
 - **`EXEC … AT DATA_SOURCE`** and `OPENROWSET` / `OPENDATASOURCE` (see [`backlog.md`](backlog.md)).
 

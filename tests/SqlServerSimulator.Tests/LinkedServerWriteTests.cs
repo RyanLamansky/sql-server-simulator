@@ -205,14 +205,14 @@ public class LinkedServerWriteTests
     public void OpenQuery_AsWriteTarget()
     {
         var (local, remote) = Linked("create table t (id int primary key, v int); insert t values (1, 1), (2, 2)");
-        _ = local.ExecuteNonQuery("insert openquery(OTHER, 'select id, v from t') values (3, 3)");
-        _ = local.ExecuteNonQuery("update openquery(OTHER, 'select id, v from t') set v = 9 where id = 2");
-        _ = local.ExecuteNonQuery("delete openquery(OTHER, 'select id, v from t where id = 1')");
+        _ = local.ExecuteNonQuery("insert openquery(OTHER, 'select id, v from simulated.dbo.t') values (3, 3)");
+        _ = local.ExecuteNonQuery("update openquery(OTHER, 'select id, v from simulated.dbo.t') set v = 9 where id = 2");
+        _ = local.ExecuteNonQuery("delete openquery(OTHER, 'select id, v from simulated.dbo.t where id = 1')");
         AreEqual("2:9,3:3", remote.ExecuteScalar("select string_agg(concat(id, ':', v), ',') within group (order by id) from t"));
     }
 
     [TestMethod]
-    [DataRow("update openquery(OTHER, 'select count(*) c from t') set c = 1")]
+    [DataRow("update openquery(OTHER, 'select count(*) c from simulated.dbo.t') set c = 1")]
     [DataRow("delete openquery(OTHER, 'select 1 x')")]
     public void OpenQuery_NoUpdatableCursor_Msg16955(string sql)
     {
@@ -239,7 +239,7 @@ public class LinkedServerWriteTests
     public void ExecAt_RemoteDml_SetsRowCount()
     {
         var (local, remote) = Linked("create table t (id int)");
-        AreEqual(2, local.ExecuteScalar("exec ('insert t values (1), (2)') at OTHER; select @@rowcount"));
+        AreEqual(2, local.ExecuteScalar("exec ('insert simulated.dbo.t values (1), (2)') at OTHER; select @@rowcount"));
         AreEqual(2, remote.ExecuteScalar("select count(*) from t"));
     }
 
@@ -254,7 +254,7 @@ public class LinkedServerWriteTests
         var (local, remote) = Linked("create table t (id int)");
         _ = local.ExecuteNonQuery("create table l (id int)");
         _ = local.AssertSqlError("""
-            begin try exec ('select 1/0; insert t values (1)') at OTHER end try
+            begin try exec ('select 1/0; insert simulated.dbo.t values (1)') at OTHER end try
             begin catch insert l values (1) end catch;
             insert l values (2)
             """, 8134);
@@ -277,7 +277,7 @@ public class LinkedServerWriteTests
     {
         var (local, remote) = Linked("create table t (id int primary key, v int); insert t values (1, 1), (2, 2)");
         _ = local.ExecuteNonQuery("create table l (id int); insert l values (2)");
-        AreEqual(1, local.ExecuteNonQuery("update q set v = 9 from openquery(OTHER, 'select id, v from t') q join l on l.id = q.id"));
+        AreEqual(1, local.ExecuteNonQuery("update q set v = 9 from openquery(OTHER, 'select id, v from simulated.dbo.t') q join l on l.id = q.id"));
         AreEqual(10, remote.ExecuteScalar("select sum(v) from t"));
     }
 
@@ -425,4 +425,105 @@ public class LinkedServerWriteTests
     [TestMethod]
     public void ReadInLocalTransaction_NeedsNoPromotion()
         => AreEqual(0, Linked("create table t (id int)").Local.ExecuteScalar("begin tran; select count(*) from OTHER.simulated.dbo.t; commit"));
+
+    [TestMethod]
+    public void RemoteSession_StartsInMasterOrTheCatalog()
+    {
+        var (local, _) = Linked("create database cat");
+        _ = local.ExecuteNonQuery("exec sp_serveroption 'OTHER', 'rpc out', 'true'");
+        AreEqual("master", local.ExecuteScalar("exec ('select db_name()') at OTHER"));
+        AreEqual("master", local.ExecuteScalar("select d from openquery(OTHER, 'select db_name() d')"));
+        _ = local.ExecuteNonQuery("exec sp_dropserver 'OTHER'; exec sp_addlinkedserver 'OTHER', 'SQL Server', @catalog = 'cat'");
+        AreEqual("cat", local.ExecuteScalar("select d from openquery(OTHER, 'select db_name() d')"));
+    }
+
+    [TestMethod]
+    [DataRow("exec OTHER.simulated.dbo.p_ret", 3)]
+    [DataRow("exec ('select a from simulated.dbo.t; return') at OTHER", 3)]
+    [DataRow("exec ('select a from simulated.dbo.t; declare @x int = 5') at OTHER", 3)]
+    [DataRow("exec ('declare @x int') at OTHER", 2)]
+    [DataRow("exec ('select a from nowhere') at OTHER", 0)]
+    public void RemoteCall_RowCountIsTheLastCountReported(string call, int expected)
+    {
+        var (local, remote) = Linked("create table t (a int); insert t values (1), (2), (3)");
+        _ = remote.ExecuteNonQuery("create procedure p_ret as begin select a from t; return 7; end");
+        _ = local.ExecuteNonQuery("exec sp_serveroption 'OTHER', 'rpc out', 'true'");
+        _ = local.ExecuteNonQuery("create table rc (n int)");
+        // The server's error reaches the client after the caller's batch ran on.
+        try
+        {
+            _ = local.ExecuteNonQuery($"select 1 union all select 2; {call}; insert rc select @@rowcount");
+        }
+        catch (SimulatedSqlException error) when (error.Number == 208)
+        {
+        }
+        AreEqual(expected, local.ExecuteScalar("select n from rc"));
+    }
+
+    [TestMethod]
+    [DataRow("create table t (x xml, a int)", "select 1; select a from OTHER.simulated.dbo.t", 9514, "Xml data type is not supported in distributed queries. Remote object 'OTHER.simulated.dbo.t' has xml column(s).")]
+    [DataRow("create table t (x xml, a int)", "delete OTHER.simulated.dbo.t", 9514, "Xml data type is not supported in distributed queries. Remote object 'OTHER.simulated.dbo.t' has xml column(s).")]
+    [DataRow("create table t (g geography, a int)", "select a from OTHER.simulated.dbo.t", 7325, "Objects exposing columns with CLR types are not allowed in distributed queries. Please use a pass-through query to access remote object '\"simulated\".\"dbo\".\"t\"'.")]
+    [DataRow("create table t (h hierarchyid)", "update OTHER.simulated.dbo.t set h = null", 7325, "Objects exposing columns with CLR types are not allowed in distributed queries. Please use a pass-through query to access remote object '\"simulated\".\"dbo\".\"t\"'.")]
+    [DataRow("create table t (j json)", "select * from OTHER.simulated.dbo.t", 7357, "Cannot process the object \"\"simulated\".\"dbo\".\"t\"\". The OLE DB provider \"MSOLEDBSQL19\" for linked server \"OTHER\" indicates that either the object has no columns or the current user does not have permissions on that object.")]
+    [DataRow("", "select * from openquery(OTHER, 'select cast(''<a/>'' as xml) x')", 9514, "Xml data type is not supported in distributed queries. Remote object 'OPENQUERY' has xml column(s).")]
+    public void ProviderRefusesTheColumnsItCannotCarry(string remoteSetup, string sql, int number, string message)
+        => Linked(remoteSetup).Local.AssertSqlError(sql, number, message);
+
+    /// <summary>
+    /// A four-part name's xml column is reported at line 12 wherever the
+    /// statement sits, and refuses the whole batch while it compiles.
+    /// </summary>
+    [TestMethod]
+    public void XmlColumn_RefusesTheBatchAtLine12()
+    {
+        var (local, _) = Linked("create table t (x xml, a int)");
+        _ = local.ExecuteNonQuery("create table l (a int)");
+        var error = local.AssertSqlError("insert l values (1);\nselect a from OTHER.simulated.dbo.t", 9514);
+        AreEqual(12, error.LineNumber);
+        AreEqual(0, local.ExecuteScalar("select count(*) from l"));
+    }
+
+    [TestMethod]
+    public void RemoteCallRowsetWithXml_EndsTheBatch()
+    {
+        var (local, _) = Linked("");
+        _ = local.ExecuteNonQuery("exec sp_serveroption 'OTHER', 'rpc out', 'true'; create table l (a int)");
+        local.AssertSqlError("exec ('select cast(''<a/>'' as xml) x') at OTHER; insert l values (1)", 9514, "Xml data type is not supported in distributed queries. Remote object 'IROWSET' has xml column(s).");
+        AreEqual(0, local.ExecuteScalar("select count(*) from l"));
+    }
+
+    [TestMethod]
+    public void JsonColumn_IsNotListed()
+    {
+        var (local, remote) = Linked("create table t (id int primary key, j json, a int); insert t values (1, '{}', 1)");
+        AreEqual("id,a", local.ExecuteScalar("select * into #x from OTHER.simulated.dbo.t; select string_agg(name, ',') within group (order by column_id) from tempdb.sys.columns where object_id = object_id('tempdb..#x')"));
+        _ = local.AssertSqlError("select j from OTHER.simulated.dbo.t", 207);
+        _ = local.ExecuteNonQuery("update OTHER.simulated.dbo.t set a = 2");
+        AreEqual(2, remote.ExecuteScalar("select a from t"));
+    }
+
+    [TestMethod]
+    public void VectorColumn_ListsAsVarbinaryWhoseValuesCannotBeRead()
+    {
+        var (local, _) = Linked("create table t (id int primary key, v vector(3)); insert t values (1, null)");
+        AreEqual("varbinary 20", local.ExecuteScalar("select * into #x from OTHER.simulated.dbo.t; select concat(type_name(system_type_id), ' ', max_length) from tempdb.sys.columns where object_id = object_id('tempdb..#x') and name = 'v'"));
+        _ = Linked("create table t (id int primary key, v vector(3)); insert t values (1, '[1,2,3]')").Local
+            .AssertSqlError("select * from OTHER.simulated.dbo.t", 7346);
+    }
+
+    /// <summary>
+    /// A keyless table whose only columns are text, image or vector has its
+    /// rows found again by their bytes, where real positions by bookmark.
+    /// </summary>
+    [TestMethod]
+    public void KeylessLobAndVectorRows_AreFoundAgain()
+    {
+        var (local, remote) = Linked("create table t (x text, i image); insert t values ('a', 0x01), ('a', 0x01), ('A', 0x01)");
+        AreEqual(1, local.ExecuteNonQuery("update top (1) OTHER.simulated.dbo.t set i = 0x02"));
+        AreEqual("a:0x02,a:0x01,A:0x01", remote.ExecuteScalar("select string_agg(concat(cast(x as varchar(5)), ':', convert(varchar(10), cast(i as varbinary(5)), 1)), ',') from t"));
+        var (vectorLocal, vectorRemote) = Linked("create table t (v vector(2)); insert t values ('[1,2]'), ('[3,4]')");
+        AreEqual(2, vectorLocal.ExecuteNonQuery("delete OTHER.simulated.dbo.t"));
+        AreEqual(0, vectorRemote.ExecuteScalar("select count(*) from t"));
+    }
 }

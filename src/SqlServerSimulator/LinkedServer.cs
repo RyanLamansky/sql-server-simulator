@@ -60,6 +60,29 @@ internal sealed class LinkedServer(string name, Simulation target, string srvPro
     /// <summary>The <c>@catalog</c> arg, surfaced via <c>sys.servers.catalog</c>.</summary>
     public readonly string? Catalog = catalog;
 
+    /// <summary>
+    /// Opens a fresh session of the server in <paramref name="database"/>, or
+    /// where the provider's session starts when none is named
+    /// (<see cref="SessionDatabaseName"/>): the
+    /// <c>@catalog</c> database, else the login's default database —
+    /// <c>master</c>, as real's <c>sa</c> login has it (probed 2026-09-28
+    /// against SQL Server 2025, where <c>DB_NAME()</c> inside <c>EXEC … AT</c>
+    /// and <c>OPENQUERY</c> reads the catalog when one is set).
+    /// </summary>
+    public SimulatedDbConnection OpenSession(string? database)
+    {
+        var connection = this.Target.CreateDbConnection();
+        connection.Open();
+        connection.ChangeDatabase(database ?? this.SessionDatabaseName);
+        return connection;
+    }
+
+    /// <summary>
+    /// The database a fresh session of the server starts in, which a name
+    /// omitting its database segment (<c>srv..dbo.t</c>) reads too.
+    /// </summary>
+    public string SessionDatabaseName => this.Catalog ?? Simulation.MasterDatabaseName;
+
     /// <summary>When <c>sp_addlinkedserver</c> ran, surfaced via <c>sys.servers.modify_date</c>.</summary>
     public readonly DateTime CreateDate = createDate;
 

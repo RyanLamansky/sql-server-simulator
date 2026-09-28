@@ -583,6 +583,8 @@ partial class Simulation
         // As for a procedure, a batch ending under SET IMPLICIT_TRANSACTIONS ON
         // raises no Msg 266.
         var endedUnderImplicitTransactions = connection.ImplicitTransactions;
+        // A batch of its own is a scope of its own for SCOPE_IDENTITY.
+        var identityScope = IdentityScope.Enter(connection);
         List<SimulatedStatementOutcome> outcomes = [];
         SimulatedSqlException? batchError = null;
         var compiled = false;
@@ -617,6 +619,7 @@ partial class Simulation
             // sp_MSforeachdb's `USE [?]` idiom run each command against its
             // own database without leaving the session there.
             connection.CurrentDatabase = enteredDatabase;
+            identityScope.Exit(IdentityScopeKind.Procedure);
             connection.NoCount = enteredNoCount;
             endedUnderImplicitTransactions = connection.ImplicitTransactions;
             enteredOptions.Restore(connection);
