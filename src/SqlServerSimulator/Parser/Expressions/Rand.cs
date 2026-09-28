@@ -40,6 +40,17 @@ internal sealed class Rand : Expression
         // instance across executions, each of which must draw a fresh value
         // (matching real SQL Server rolling per statement execution) while
         // every row within one execution reuses this call site's value.
+        // A seed that reads the row reseeds per row: RAND(b) over b = 1, 2, 3
+        // answers RAND(1), RAND(2), RAND(3) (probed 2026-09-28 against SQL
+        // Server 2025), so only a row-independent call site freezes.
+        if (this.seed is not null && !this.seed.IsRowIndependent)
+        {
+            var rowSeed = this.seed.Run(runtime);
+            return rowSeed.IsNull
+                ? SqlValue.Null(SqlType.Float)
+                : SqlValue.FromDouble(runtime.Batch.Connection.Rand.Seed(ScalarArguments.CoerceToInt(rowSeed)));
+        }
+
         var frame = runtime.Batch.CurrentStatement;
         if (frame.StatementScopedValues is { } scoped && scoped.TryGetValue(this, out var frozen))
             return frozen;

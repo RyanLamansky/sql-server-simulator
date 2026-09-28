@@ -1,7 +1,8 @@
 # `sys.*` and `INFORMATION_SCHEMA.*` catalog views
 
 `Simulation.CatalogViews` is a process-static dict of virtual catalog-view projections keyed by fully-qualified name (`"sys.tables"`, `"INFORMATION_SCHEMA.COLUMNS"`, etc.) so one resolver serves both namespaces without per-schema dispatch.
-Each `CatalogView` carries a fixed `HeapColumn[]` schema and a `Func<BatchContext, IEnumerable<SqlValue[]>>` row generator that runs against live `Database` / `Schema` / `HeapTable` metadata; rows aren't cached, so CREATE / DROP / TRUNCATE changes made earlier in the same batch are visible on the next read.
+Each `CatalogView` carries a fixed `HeapColumn[]` schema and a `Func<BatchContext, IEnumerable<SqlValue[]>>` row generator that runs against live `Database` / `Schema` / `HeapTable` metadata.
+The schema-metadata views keep their generated rows across statements until something changes what they project ([the row cache](#cross-statement-row-cache-and-indexes)); every other view generates per read, so a change made earlier in the same batch is visible on the next read either way.
 The FROM-source parser detects catalog views via `BatchContext.TryResolveCatalogView` (case-insensitive on the qualifier, 2-part or `<currentDb>.qualifier.<view>` 3-part), wraps the view in `Selection.ForCatalogView`, and threads it as the `FromSource.LateralPlan` — so each Execute re-runs the generator.
 The `RowEncoder.EncodeRow(HeapColumn[], SqlValue[])` overload bridges the SqlValue-array generator output into the byte stream the FromSource consumes.
 
@@ -21,17 +22,20 @@ The strategy is guarded by `JoinStrategyTests.CatalogView_EquiJoin_TakesHashPath
 The complementary win — not materializing the non-selected objects' rows in the first place — is the predicate pushdown below.
 
 **Predicate pushdown (perf).**
-When a *pushdown-aware* catalog view is a FROM source and some top-level AND-conjunct is `<key> = <comparand>` — where `<key>` is one of the view's eligible columns (qualified to that source, or unqualified when it's the sole source) and `<comparand>` holds one value for the whole execution — the comparand is evaluated once per execution and passed to the view's `FilteredRowGenerator` so it enumerates only the matching object, one table's columns instead of every table's.
+When a *pushdown-aware* catalog view is a FROM source and some top-level AND-conjunct is `<key> = <comparand>` — where `<key>` is one of the view's eligible columns (qualified to that source, or unqualified when it's the sole source) and `<comparand>` holds one value for the whole execution — the comparand is evaluated once per execution and seeks the view's cached rows through a hash index on that column ([the row cache](#cross-statement-row-cache-and-indexes)), or, where the read can't be served from the cache, is passed to the view's `FilteredRowGenerator` so it enumerates only the matching object, one table's columns instead of every table's.
 This is what real does too: its plan for the same query is an index seek on the underlying base table (`sysschobjs` / `sysiscols` / `syscolpars`) carrying OUTER REFERENCES, never a scan — real's catalog views are views over *indexed storage*, where the simulator's are projected on demand, and the pushdown is what stands in for the index.
 This closes the last dominant term in SMO's per-column property-bag: at 200 user tables × 20 columns, the per-table `sys.columns` query drops from ~11.6 ms/query to ~0.08 ms/query (~143×).
 Purely an optimization: the enclosing SELECT keeps applying the **full WHERE as a residual filter**, so the generator-side key match can only over-produce, never drop a row the predicate keeps.
 
 - **Contract.**
-  Detection is in `Selection.Execution.cs::DetectCatalogPushdowns`, run in `BuildSqlProjection` after the comma-join rewrite; it rebuilds each pushed source's `LateralPlan` via `Selection.ForCatalogView(view, db, column, comparand)`.
+  Detection is in `Selection.Execution.cs::DetectCatalogPushdowns`, run in `BuildSqlProjection` after the comma-join rewrite; it rebuilds each pushed source's `LateralPlan` via `Selection.ForCatalogView(view, db, column, comparands)`, marked `FromSource.CatalogSeek` so the materialization pass knows its rows are a subset.
   The decision is compiled into the shared plan; the comparand *value* is resolved per execution (a variable / parameter that differs between runs re-evaluates each time — plan-cache safe).
   It composes with materialize-once: the pushed-down plan is what the `MaterializeUncorrelatedDeferredSources` pass runs once.
 - **Which conjuncts count.** WHERE conjuncts, plus the ON conjuncts of **inner** joins — for an inner join the two are interchangeable, so an ON equality narrows the generator exactly as safely.
-  An outer join's ON is excluded, and so is any source reachable only through one: dropping rows from a null-supplying side turns matched rows into null-extended ones, which the residual filter cannot undo.
+  An `IN` list or OR of equalities over one key column seeks each value, merged back into the view's order.
+  A WHERE conjunct never narrows a source reachable only through an outer join: dropping rows from a null-supplying side turns matched rows into null-extended ones, which the residual filter cannot undo.
+  A LEFT join's **own** ON conjunct reading only its right side does narrow that side — a right row failing it can match no left row, and the join re-checks the whole ON regardless — but only where that ON has no equi-join key, since a key lets the join probe the whole view's persisted index, which a narrowed copy loses.
+  Where several conjuncts qualify, the best-ranked column wins.
 - **Which sources count.** Any pushdown-aware source, not just the leftmost.
   A view reached through an inner join that keeps a full scan is not a missing optimization but the dominant cost of the whole query, because the scan repeats per execution of the enclosing body.
 - **Constant for one execution** is the comparand test (`Selection.Execution.cs::IsConstantForOneExecution`), and it admits two shapes.
@@ -43,16 +47,18 @@ Purely an optimization: the enclosing SELECT keeps applying the **full WHERE as 
   Real derives the same seek; without it the joined side stays a full scan and dominates whatever the direct seek saved.
   One hop only, and only between two pushdown-aware sources on a pushdown column each.
 - **NULL comparand** (`= NULL`, or `OBJECT_ID` of a missing object) yields no rows — `col = NULL` is UNKNOWN for every candidate, which is exactly what the residual filter would give.
-- **Eligible views × keys** (`CatalogView.PushdownColumns` / `FilteredRowGenerator`, registered via the `SysP` helper): `sys.columns` / `sys.all_columns` (`object_id` — the headline), `sys.indexes` (`object_id`), `sys.index_columns` (`object_id`), `sys.parameters` / `sys.all_parameters` (`object_id`), `sys.extended_properties` (`major_id`).
-  Each generator skips a non-matching object's inner loop instead of materializing then discarding it.
+- **Eligible views × keys.**
+  A cacheable view seeks on its ranked `CatalogView.SeekColumns`: the object-id family (`object_id`, `major_id`, `parent_object_id`, `referenced_object_id`, `constraint_object_id`, `parent_id`), then name columns (`name`, `*_NAME`), then the other `*_id` columns and `type`.
+  Flags and other low-cardinality columns aren't offered: a seek on one returns most of the view and costs a join the whole-view index it would otherwise probe.
+  Past the cache, the views with a filtered generator (`CatalogView.PushdownColumns` / `FilteredRowGenerator`, registered via the `SysP` helper) still narrow on their keyed column: `sys.columns` / `sys.all_columns` (`object_id`), `sys.indexes` (`object_id`), `sys.index_columns` (`object_id`), `sys.parameters` / `sys.all_parameters` (`object_id`), `sys.extended_properties` (`major_id`); each skips a non-matching object's inner loop instead of materializing then discarding it, and any other pushed column reads the whole view.
   A 3-part cross-database reference (`otherdb.sys.columns`) pushes through the same seam (the generator's target database rides `FromSource.BackingCatalogDatabase`).
 - **Diagnostics.**
-  `CatalogPushdownDiagnostics.Sink` (opt-in `[ThreadStatic]`, mirroring `IndexSeekDiagnostics`) records `Seek(view.column)` on a narrowed scan, `SeekEmpty(view.column)` on a NULL comparand, and `Scan(view)` when an eligible view runs its full generator.
+  `CatalogPushdownDiagnostics.Sink` (opt-in `[ThreadStatic]`, mirroring `IndexSeekDiagnostics`) records `Seek(view.column)` on a narrowed scan, `SeekEmpty(view.column)` on a NULL comparand, `Scan(view)` when a view runs its full generator, `CacheBuild(view)` / `CacheHit(view)` for the row cache, and `IndexJoin(view)` when a hash join probes a cached rowset's index.
   `CatalogPushdownTests` (internal) asserts the path fired (or correctly didn't); `CatalogPushdownResultTests` (public) asserts result parity.
-- **Residual gaps** (correctness-neutral — they only leave the full-scan cost in place): name-equality (`WHERE name = …`) isn't pushed; `sys.objects` / `sys.all_objects` aren't pushed (a catalog `object_id` there can be a constraint id nested under a non-matching parent table, so a table-level skip would be unsound and a per-row filter saves little — the view already emits one row per object); `sys.foreign_keys` (two candidate key columns) is unpushed; the transitive hop is one level and doesn't chain across three sources.
+- **Residual gaps** (correctness-neutral — they only leave the full-scan cost in place): the transitive hop is one level and doesn't chain across three sources; an equality on an expression over a column (`SCHEMA_NAME(t.schema_id) = @s`) isn't a seek.
 
 **Statement-scoped materialization (perf).**
-A catalog view that *isn't* narrowed to a seek is still projected only once per statement: the first read that drains the sequence to completion stores the encoded rows on `StatementContext.CatalogViewRows`, keyed by view and target database, and every later read in the same statement is served from there.
+A catalog view the row cache can't serve and that *isn't* narrowed to a seek is still projected only once per statement: the first read that drains the sequence to completion stores the encoded rows on `StatementContext.CatalogViewRows`, keyed by view and target database, and every later read in the same statement is served from there.
 The statement is the right scope because that is the span over which a metadata view's content is fixed — DDL runs as its own statement, and the session identity the visibility filter reads can't change mid-statement either.
 Only a **fully drained** sequence is stored, so a `TOP 1` or `EXISTS` read keeps streaming and stops early instead of paying to materialize the whole view.
 The **dynamic management views are excluded** (`CatalogView.StableWithinStatement`, off the `dm_` prefix): they report live runtime state — locks held, sessions connected, page counts — that a statement moves as it runs, so a read of one has to see it as it stands.
@@ -689,6 +695,55 @@ The **configuration** is live — `ALTER DATABASE … SET QUERY_STORE` retains e
 
 **The knowing divergence** is that a database can report its store READ_WRITE while every capture view stays empty — a state real never reaches, since a real store in that state fills `sys.query_store_query` within an interval.
 The alternative, holding the state at OFF, is self-consistent but reports the wrong default for a 2025 database; matching real's default was the call.
+
+## Cross-statement row cache and indexes
+
+Real's catalog views read indexed base tables (`sysschobjs`, `syscolpars`, `sysiscols`), so an equality or a join on a catalog column is an index seek there; the simulator projects its views from live metadata, and before this cache every execution projected every object in the database again.
+`Simulation.CatalogRows` (`Schemas/CatalogRowCache.cs`) keeps the encoded rows of the **cacheable** views (`CatalogView.Cacheable`, listed in `BuiltInResources.RowCache.cs`: the object, column, index, constraint, type, module and `INFORMATION_SCHEMA` views) per target database, in the view's own order, and builds hash indexes over them on demand.
+The rows are exactly what the generator yields, so output and order are unchanged by construction.
+
+**Where the rows go.**
+A whole-view read is handed the cached rowset — no generation, no copy — and the materialization pass marks such a source `FromSource.CatalogRows`, so `HashEquiJoin` probes the rowset's persisted index on the join key (`CatalogRowSet.IndexOn`, keyed by column ordinals and the promoted key types the join would coerce to) instead of building one per execution.
+A pushed-down equality or `IN` list seeks the rowset through a single-column index (`CatalogRowSet.Seek`), keyed as `bigint` for an integer pair and as `nvarchar(max)` under the comparison's resolved collation for a string pair; any other type pairing reads the whole rowset and leaves the residual predicate to decide, since a seek may over-produce but never drop a row.
+An index is built once per rowset and persists across statements with it.
+
+**When a read may be served.**
+Only where the cached rows are what the view would generate for this reader: never for `tempdb` (whose listing includes the reader's own `#temp` tables), never for a database another simulation holds, and never for a session whose metadata visibility filters the view (`BuiltInResources.ReadsUnfiltered`) — those read through the generator exactly as before.
+The read-permission check runs on every read, cached or not.
+
+**Invalidation.**
+Every rowset belongs to a generation of `CatalogRowCache.Invalidate` calls, and a read under a later one starts a fresh generation.
+`Simulation.BumpSchemaVersion` invalidates, so every CREATE / ALTER / DROP, `sp_rename`, a rolled-back DDL (the undo log's schema-change entry bumps), and a bacpac import do.
+The statements that change what a cacheable view projects without passing the DDL arm invalidate for themselves: `SELECT … INTO` (a new table), `ENABLE` / `DISABLE TRIGGER` (`is_disabled`), `UPDATE STATISTICS` (`no_recompute`), and every system procedure except the read-only ones `Simulation.LeavesCatalogUnchanged` lists (so the rules-and-defaults binders, the extended-property procedures, `sp_settriggerorder` and `sp_refreshview` invalidate, and a procedure added later invalidates until it is listed).
+A view with one column ordinary DML moves carries a `CatalogView.LiveStamp`, read on every hit: `sys.identity_columns`' stamp is every identity column's last value, so an insert regenerates that view alone.
+The views whose DML-moved state has no cheap stamp stay out — `sys.partitions` (row counts, including per-partition shares), `sys.sequences` (`current_value`) — as do the principal, permission and role views and the dynamic management views.
+**Debug builds regenerate each cached view on its first hit per statement and throw on any difference**, so a missing invalidation fails whichever test exposes it; the whole suite runs under that audit.
+
+**Measured** (2026-09-28, in-process against the live SQL Server 2025 reference over TDS, a generated 300-table database across three schemas with 3,145 columns, primary keys, unique constraints, nonclustered indexes, foreign keys, defaults, checks, 30 views and 20 procedures; median of five warm runs; `×30` runs the per-table query for 30 different tables):
+
+| Query | Before | After | Live |
+|---|---:|---:|---:|
+| SMO `db.Tables` list | 4.0 ms | 1.4 ms | 3.0 ms |
+| SMO table properties ×30 | 1,387 ms | 400 ms | 307 ms |
+| SMO table properties, whole database | 131 ms | 70 ms | 30 ms |
+| SMO index properties ×30 | 47,694 ms | 80 ms | 128 ms |
+| SMO column properties ×30 | 2,023 ms | 59 ms | 17 ms |
+| SMO column property bag ×30 | 1,973 ms | 65 ms | 28 ms |
+| SMO column property bag, whole database | 278 ms | 109 ms | 146 ms |
+| EF Core migrations `HasTables` | 5.6 ms | 0.06 ms | 0.47 ms |
+| EF Core scaffolding: tables | 119 ms | 4.3 ms | 15 ms |
+| EF Core scaffolding: columns | 67 ms | 21 ms | 66 ms |
+| EF Core scaffolding: indexes | 24 ms | 8.9 ms | 12 ms |
+| EF Core scaffolding: foreign keys | 9.2 ms | 1.4 ms | 7.8 ms |
+| `INFORMATION_SCHEMA` foreign-key inventory | 4.5 ms | 1.5 ms | 1,177 ms |
+| Constraint inventory (the four-branch `UNION ALL`) | 153 ms | 25 ms | 45 ms |
+| `sys.columns ⋈ sys.types` for one table ×30 | 2.3 ms | 0.6 ms | 8.4 ms |
+
+The SMO queries are the ones SMO 172 sent while enumerating tables, columns, indexes, foreign keys and checks, captured from the reference's plan cache; the EF Core ones are the provider's own migration and scaffolding text.
+Overall the set went from 53.9 s to 0.85 s against the reference's 2.0 s (0.8 s without its one slow `INFORMATION_SCHEMA` query).
+The worst per-table SMO query was a `LEFT JOIN` to `sys.all_objects` on a computed name, a nested loop over every object per index row; with the table narrowed by its name seek it loops over three rows.
+The constraint-inventory query that motivated the cache, re-measured on the Insite.Commerce import, went from ~310 ms to ~125 ms against the reference's ~68 ms.
+What remains of the per-table ratios is ordinary per-statement cost — name resolution and projection over forty-odd columns — rather than anything catalog-specific.
 
 ## Expression dependencies
 

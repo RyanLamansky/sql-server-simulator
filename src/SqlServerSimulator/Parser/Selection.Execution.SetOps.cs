@@ -298,6 +298,12 @@ internal sealed partial class Selection
         }, intoTarget: left.IntoTarget, destColumnSchema: combinedDestSchema)
         {
             IsBareConstantRow = isBareConstantRows,
+            // A set operation reads its branches' rows as a whole, so a branch
+            // that draws per call is drawn once per branch row on real, whatever
+            // reads the result (probed 2026-09-28 against SQL Server 2025).
+            VolatileColumns = left.VolatileColumns is not null || right.VolatileColumns is not null
+                ? VolatileProjection.Fixed
+                : null,
             // The combined result takes the first branch's output names, so it
             // takes that branch's projections — and the FROM scope they read —
             // too; a top-level ORDER BY resolves names against both (see
@@ -697,6 +703,7 @@ internal sealed partial class Selection
             AutoColumnSource = inner.AutoColumnSource,
             AutoColumnOrdinal = inner.AutoColumnOrdinal,
             ColumnMasks = inner.ColumnMasks,
+            VolatileColumns = inner.VolatileColumns,
         };
     }
 }

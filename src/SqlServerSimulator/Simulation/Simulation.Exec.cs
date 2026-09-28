@@ -24,6 +24,27 @@ partial class Simulation
         or "xp_instance_regread" or "xp_msver" or "xp_qv");
 
     /// <summary>
+    /// Whether a system procedure only reads, so running it leaves the cached
+    /// catalog rows (<see cref="CatalogRows"/>) valid. Every other one — the
+    /// binders, the extended-property and trigger-order procedures,
+    /// <c>sp_refreshview</c>, and whatever joins them later — invalidates the
+    /// cache when it finishes. <c>sp_executesql</c> and the
+    /// <c>sp_MSforeach*</c> pair run ordinary statements, each of which
+    /// invalidates for itself.
+    /// </summary>
+    private static bool LeavesCatalogUnchanged(string systemProcName) => systemProcName is
+        "sp_column_privileges" or "sp_columns" or "sp_columns_100" or "sp_databases" or "sp_datatype_info"
+        or "sp_datatype_info_100" or "sp_depends" or "sp_describe_first_result_set" or "sp_describe_undeclared_parameters"
+        or "sp_executesql" or "sp_fkeys" or "sp_getapplock" or "sp_help" or "sp_helpconstraint" or "sp_helpdb"
+        or "sp_helpfile" or "sp_helpindex" or "sp_helprotect" or "sp_helpstats" or "sp_helptext" or "sp_helptrigger"
+        or "sp_helpuser" or "sp_MSforeachdb" or "sp_MSforeachtable" or "sp_pkeys" or "sp_releaseapplock"
+        or "sp_server_info" or "sp_set_session_context" or "sp_spaceused" or "sp_special_columns"
+        or "sp_special_columns_100" or "sp_sproc_columns" or "sp_sproc_columns_100" or "sp_statistics"
+        or "sp_statistics_100" or "sp_stored_procedures" or "sp_table_privileges" or "sp_tablecollations_100"
+        or "sp_tables" or "sp_who" or "sp_who2" or "sp_xml_preparedocument" or "sp_xml_removedocument"
+        or "xp_instance_regread" or "xp_msver" or "xp_qv";
+
+    /// <summary>
     /// <c>EXEC @v</c>: the procedure named by a character-string variable,
     /// parsed the way a written name is and reported as the string spells it —
     /// probe-confirmed against SQL Server 2025 (2026-09-23), system procedures
@@ -290,8 +311,16 @@ partial class Simulation
             var framesScope = batch.Connection.FramesEveryStatement && !batch.IsSkipping && !insertExecSource && systemProcName != "sp_executesql";
             if (framesScope)
                 yield return new SimulatedProcScopeBoundary(isEnter: true);
-            foreach (var outcome in AttributedToSystemProcedure(systemProc, systemProcName!, CalledName(procName)))
-                yield return outcome;
+            try
+            {
+                foreach (var outcome in AttributedToSystemProcedure(systemProc, systemProcName!, CalledName(procName)))
+                    yield return outcome;
+            }
+            finally
+            {
+                if (!batch.IsSkipping && !LeavesCatalogUnchanged(systemProcName!))
+                    this.CatalogRows.Invalidate();
+            }
             if (framesScope)
                 yield return ScopeExit(batch, 0);
             // A system procedure that finishes answers 0 to `EXEC @rc = …`

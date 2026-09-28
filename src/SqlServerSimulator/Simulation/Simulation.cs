@@ -862,6 +862,13 @@ public sealed partial class Simulation
     internal long SchemaVersion;
 
     /// <summary>
+    /// The cacheable catalog views' rows, kept across statements and indexed
+    /// on demand; every <see cref="BumpSchemaVersion"/> invalidates it, as does
+    /// each non-DDL statement that changes what one of those views projects.
+    /// </summary>
+    internal readonly CatalogRowCache CatalogRows = new();
+
+    /// <summary>
     /// Set once any column in the simulation is declared or altered
     /// <c>MASKED</c>, and never cleared: until then a query's compile skips the
     /// Dynamic Data Masking walk over its projection outright
@@ -1003,10 +1010,14 @@ public sealed partial class Simulation
     /// <summary>
     /// Increments <see cref="SchemaVersion"/>, signaling that any cached
     /// <see cref="Selection"/> parsed under the prior version is potentially
-    /// stale. Called by the Create / Drop / Alter dispatch arm and by
-    /// <c>ImportBacpac</c>.
+    /// stale, and invalidates <see cref="CatalogRows"/>. Called by the
+    /// Create / Drop / Alter dispatch arm and by <c>ImportBacpac</c>.
     /// </summary>
-    internal void BumpSchemaVersion() => Interlocked.Increment(ref this.SchemaVersion);
+    internal void BumpSchemaVersion()
+    {
+        _ = Interlocked.Increment(ref this.SchemaVersion);
+        this.CatalogRows.Invalidate();
+    }
 
     /// <summary>
     /// Allocates the next session id (SPID) for a freshly-constructed
@@ -1555,6 +1566,9 @@ public sealed partial class Simulation
                 batch.CurrentStatement.StatementScopedValues = null;
                 batch.CurrentStatement.SubqueryResults = null;
                 batch.CurrentStatement.CatalogViewRows = null;
+#if DEBUG
+                batch.CurrentStatement.AuditedCatalogRowSets = null;
+#endif
                 batch.CurrentStatement.ComputedUniqueKeys = null;
                 batch.CurrentStatement.LockTallies = null;
                 batch.CurrentStatement.EscalatedTables = null;
@@ -3103,6 +3117,9 @@ public sealed partial class Simulation
         batch.CurrentStatement.StatementScopedValues = null;
         batch.CurrentStatement.SubqueryResults = null;
         batch.CurrentStatement.CatalogViewRows = null;
+#if DEBUG
+        batch.CurrentStatement.AuditedCatalogRowSets = null;
+#endif
         batch.CurrentStatement.AutocommitTransactionId = 0;
         batch.CurrentStatement.ChangeTrackingContext = null;
         batch.CurrentStatement.LockTallies = null;
@@ -3409,7 +3426,11 @@ public sealed partial class Simulation
                 _ = TryParseUpdateStatistics(context);
                 context.RejectTrailingToken();
                 if (!batch.IsSkipping)
+                {
                     connection.LastStatementRowCount = 0;
+                    // NORECOMPUTE surfaces in sys.stats.
+                    this.CatalogRows.Invalidate();
+                }
                 break;
 
             case ReservedKeyword { Keyword: Keyword.Update }:
@@ -3671,10 +3692,17 @@ public sealed partial class Simulation
             case ReservedKeyword { Keyword: Keyword.Grant } when RejectingTrailingToken(context, TryParseGrantRevokeDeny(context, PermissionStatementKind.Grant)):
             case ReservedKeyword { Keyword: Keyword.Revoke } when RejectingTrailingToken(context, TryParseGrantRevokeDeny(context, PermissionStatementKind.Revoke)):
             case ReservedKeyword { Keyword: Keyword.Deny } when RejectingTrailingToken(context, TryParseGrantRevokeDeny(context, PermissionStatementKind.Deny)):
+                if (!batch.IsSkipping)
+                    connection.LastStatementRowCount = 0;
+                break;
             case UnquotedString { ContextualKeyword: ContextualKeyword.Disable } when TryParseEnableOrDisableTrigger(context, disable: true):
             case UnquotedString { ContextualKeyword: ContextualKeyword.Enable } when TryParseEnableOrDisableTrigger(context, disable: false):
                 if (!batch.IsSkipping)
+                {
                     connection.LastStatementRowCount = 0;
+                    // A trigger's is_disabled surfaces in sys.triggers.
+                    this.CatalogRows.Invalidate();
+                }
                 break;
             case ReservedKeyword { Keyword: Keyword.Set } when TryParseSet(context, out var assignsVariable):
                 // SET @v = expr sets @@ROWCOUNT to 1; setting a session option

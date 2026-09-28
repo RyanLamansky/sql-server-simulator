@@ -123,14 +123,23 @@ public sealed class MutationJoinStrategyTests
             "update t set v = isnull(d.total, -1) from t left join (select id, sum(w) as total from s group by id) d on d.id = t.id"));
 
     /// <summary>
-    /// A per-call-varying built-in inside the body declines the reuse — real
-    /// re-draws <c>NEWID()</c> per target row — so that source keeps its
-    /// per-outer-row execution and the level stays a nested loop.
+    /// A <c>NEWID()</c> column the reader re-draws per target row leaves the
+    /// body's own rows fixed, so the source still materializes and hashes.
     /// </summary>
     [TestMethod]
-    public void UpdateFromDerivedTableDrawingNewid_KeepsTheNestedLoop()
-        => Contains("Inner:NestedLoops", JoinTrace(
+    public void UpdateFromDerivedTableDrawingNewid_HashesTheMaterializedSource()
+        => Contains("Inner:HashMatch(keys=1,residual=0)", JoinTrace(
             "update t set v = d.w from t join (select id, w, newid() as g from s) d on d.id = t.id"));
+
+    /// <summary>
+    /// A draw reading a body column declines the reuse — real re-draws it per
+    /// target row — so that source keeps its per-outer-row execution and the
+    /// level stays a nested loop.
+    /// </summary>
+    [TestMethod]
+    public void UpdateFromDerivedTableDrawingRowReadingNewid_KeepsTheNestedLoop()
+        => Contains("Inner:NestedLoops", JoinTrace(
+            "update t set v = d.w from t join (select id, w, concat(w, newid()) as g from s) d on d.id = t.id"));
 
     /// <summary>
     /// <c>CROSS APPLY</c>'s right side is lateral by construction, so the pass

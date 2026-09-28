@@ -6,6 +6,14 @@ namespace SqlServerSimulator.Parser;
 partial class Selection
 {
     /// <summary>
+    /// How this plan's per-call-varying projection columns reach a query that
+    /// reads it as a derived table, CTE or <c>VALUES</c> source; null when no
+    /// column draws per call, or for a plan whose body isn't known here (a
+    /// set operation, a function).
+    /// </summary>
+    internal VolatileProjection? VolatileColumns;
+
+    /// <summary>
     /// Wraps a view reference (<c>FROM schema.view</c>) as a
     /// <see cref="Selection"/> suitable for use as a
     /// <see cref="FromSource.LateralPlan"/>. Each execution re-parses the
@@ -73,6 +81,7 @@ partial class Selection
             // grouping reaches the key collection and then declines the push.
             PushdownIsGrouped = view.RejectionReason
                 is ViewUpdatabilityRejection.Aggregate or ViewUpdatabilityRejection.GroupBy,
+            VolatileColumns = view.VolatileColumns,
         };
     }
 }

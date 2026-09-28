@@ -227,6 +227,7 @@ partial class Simulation
                 : null,
             IsRowLimited = IsRowLimitedBody(bodySelection),
             IsWindowed = IsWindowedBody(bodySelection),
+            VolatileColumns = bodySelection.VolatileColumns,
         };
         var replacedBases = replaced?.ReferencedBaseTables;
         if (replaced is not null)

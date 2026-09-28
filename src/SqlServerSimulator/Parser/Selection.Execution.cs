@@ -717,31 +717,84 @@ internal sealed partial class Selection
     /// and projected through <see cref="Expression.Run(RuntimeContext)"/>.
     /// </summary>
     /// <summary>
-    /// Finds a WHERE equality that can be pushed into the leftmost catalog-view
-    /// source's row generator. Eligible when <c>sources[0]</c> is a
-    /// pushdown-aware catalog view and some top-level AND-conjunct is
-    /// <c>&lt;key&gt; = &lt;comparand&gt;</c> (either operand order) where the key
-    /// is one of the view's <see cref="Schemas.CatalogView.PushdownColumns"/>
-    /// qualified to this source, and the comparand is row-independent (reads no
-    /// column, so it evaluates to one value for the whole scan). Returns the
-    /// source, the canonical key-column name, and the comparand; null when
-    /// nothing qualifies. Only the leftmost source is considered — a catalog view
-    /// deeper in a JOIN keeps its full scan.
+    /// <paramref name="expressions"/> with each bare reference to a source
+    /// column that source re-draws per row (<see cref="FromSource.VolatileRefresh"/>)
+    /// replaced by the expression that draws it — a body passing a nested
+    /// body's drawn column through draws it too, as real merges the two.
     /// </summary>
-    private static List<(int Index, string Column, Expression Comparand)> DetectCatalogPushdowns(
+    private static List<Expression> PassThroughDrawnColumns(List<Expression> expressions, FromSource[] sources)
+    {
+        List<Expression>? substituted = null;
+        for (var i = 0; i < expressions.Count; i++)
+        {
+            if (Unaliased(expressions[i]) is not Reference reference)
+                continue;
+            var (s, c) = FindSourceColumnOfAnyKind(sources, reference.ReferencedName);
+            if (s < 0 || sources[s].VolatileRefresh is not { } drawn)
+                continue;
+            var at = Array.IndexOf(drawn.Ordinals, c);
+            if (at < 0)
+                continue;
+            substituted ??= [.. expressions];
+            substituted[i] = drawn.Expressions[at];
+        }
+        return substituted ?? expressions;
+    }
+
+    /// <summary>
+    /// Whether an ORDER BY key reads a per-call-varying projection — written
+    /// out, by ordinal, or by the select-list alias of such a column — which is
+    /// what makes a <c>TOP</c> / <c>OFFSET</c> body draw the value itself.
+    /// </summary>
+    private static bool OrderKeysDrawPerCall(List<OrderBySpec> orderBy, List<Expression> expressions, string[] outputColumnNames)
+    {
+        foreach (var spec in orderBy)
+        {
+            var key = spec.IsOrdinal
+                ? (spec.Ordinal >= 1 && spec.Ordinal <= expressions.Count ? expressions[spec.Ordinal - 1] : null)
+                : spec.Expr;
+            if (key is not null && VolatileProjection.DrawsPerCall(key))
+                return true;
+            if (spec is { MayNameAlias: true, Expr: { } written } && Unparenthesized(written) is Reference { ReferencedName: { ImmediateQualifier: null } name })
+            {
+                for (var i = 0; i < outputColumnNames.Length && i < expressions.Count; i++)
+                {
+                    if (BuiltInToken.Equals(outputColumnNames[i], name.Leaf) && VolatileProjection.DrawsPerCall(expressions[i]))
+                        return true;
+                }
+            }
+        }
+        return false;
+
+        static Expression Unparenthesized(Expression expression) =>
+            expression is Parenthesized { Wrapped: var inner } ? Unparenthesized(inner) : expression;
+    }
+
+    /// <summary>
+    /// Finds, per catalog-view source, an equality that can narrow it to a seek:
+    /// a top-level AND-conjunct <c>&lt;key&gt; = &lt;comparand&gt;</c> (either
+    /// operand order), or the equality family of an <c>IN</c> list over one key,
+    /// where the key is one of the source's seekable columns
+    /// (<see cref="SeekColumnsOf"/>) and every comparand holds one value for the
+    /// execution (<see cref="IsConstantForOneExecution"/>). Where several
+    /// conjuncts qualify, the best-ranked column wins. Returns each narrowed
+    /// source with its column and comparands; the caller rebuilds its plan
+    /// through the pushdown-carrying <c>ForCatalogView</c>.
+    /// </summary>
+    private static List<(int Index, string Column, Expression[] Comparands)> DetectCatalogPushdowns(
         FromSource[] sources,
         JoinSpec[] joins,
         List<BooleanExpression> excluders)
     {
-        List<(int, string, Expression)> found = [];
+        List<(int, string, Expression[])> found = [];
         if (sources.Length == 0)
             return found;
 
         // WHERE conjuncts, plus the ON conjuncts of inner joins — for an inner
         // join the two are interchangeable, so an ON equality narrows the
         // generator exactly as safely as a WHERE one. An outer join's ON is
-        // deliberately excluded: dropping rows from the null-supplying side
-        // turns matched rows into null-extended ones, and the residual
+        // deliberately excluded here: dropping rows from the null-supplying
+        // side turns matched rows into null-extended ones, and the residual
         // predicate that makes every other narrowing safe cannot undo that.
         var conjuncts = new List<BooleanExpression>();
         foreach (var excluder in excluders)
@@ -759,13 +812,32 @@ internal sealed partial class Selection
         var singleSource = sources.Length == 1;
         for (var index = 0; index < sources.Length; index++)
         {
-            if (!innerJoined[index]
-                || sources[index].BackingCatalogView is not { PushdownColumns: { } pushColumns, FilteredRowGenerator: not null })
+            if (!innerJoined[index] || SeekColumnsOf(sources[index]) is not { } pushColumns)
+                continue;
+            if (MatchBestConjunct(conjuncts, sources, index, singleSource, pushColumns) is { } direct)
+                found.Add((index, direct.Column, direct.Comparands));
+        }
+
+        // A LEFT join's own ON conjunct that reads only its right side and a
+        // constant narrows that side exactly: a right row failing it can match
+        // no left row, and the join re-checks the whole ON regardless. Taken
+        // only where the ON has no equi-join key, since a key lets the join
+        // probe the whole view's persisted index, which a narrowed copy loses.
+        for (var level = 1; level < sources.Length; level++)
+        {
+            var join = joins[level - 1];
+            if (join is not { Kind: JoinKind.Left, GroupCount: 1, OnPredicate: { } on }
+                || innerJoined[level]
+                || SeekColumnsOf(sources[level]) is not { } pushColumns)
             {
                 continue;
             }
-            if (MatchAnyConjunct(conjuncts, sources, index, singleSource, pushColumns) is { } direct)
-                found.Add((index, direct.Column, direct.Comparand));
+            var onConjuncts = new List<BooleanExpression>();
+            on.CollectConjuncts(onConjuncts);
+            if (onConjuncts.Exists(conjunct => TryExtractEquiKey(conjunct, sources, level, out _)))
+                continue;
+            if (MatchBestConjunct(onConjuncts, sources, level, singleSource: false, pushColumns) is { } own)
+                found.Add((level, own.Column, own.Comparands));
         }
 
         // Transitive closure, one hop, which is the shape real derives: given
@@ -774,45 +846,105 @@ internal sealed partial class Selection
         // by the outer value rather than seeking one and scanning the other.
         // Without this the joined side stays a full scan and dominates
         // everything the direct pushdown saved.
-        foreach (var (index, column, comparand) in found.ToArray())
+        foreach (var (index, column, comparands) in found.ToArray())
         {
+            if (!innerJoined[index])
+                continue;
             for (var other = 0; other < sources.Length; other++)
             {
                 if (other == index || !innerJoined[other]
                     || found.Exists(f => f.Item1 == other)
-                    || sources[other].BackingCatalogView is not { PushdownColumns: { } otherColumns, FilteredRowGenerator: not null })
+                    || SeekColumnsOf(sources[other]) is not { } otherColumns)
                 {
                     continue;
                 }
                 if (LinksSameColumn(conjuncts, sources, index, column, other, otherColumns) is { } linked)
-                    found.Add((other, linked, comparand));
+                    found.Add((other, linked, comparands));
             }
         }
         return found;
     }
 
     /// <summary>
-    /// The first conjunct of the form
-    /// <c>&lt;sources[index].&lt;pushColumn&gt;&gt; = &lt;execution-constant&gt;</c>,
-    /// in either operand order.
+    /// The columns a pushed-down equality may narrow <paramref name="source"/>
+    /// on, best first: every ranked seek column of a cacheable catalog view,
+    /// else the columns a view's filtered generator keys; null for a source
+    /// that isn't a catalog view or offers neither.
     /// </summary>
-    private static (string Column, Expression Comparand)? MatchAnyConjunct(
+    private static string[]? SeekColumnsOf(FromSource source) => source.BackingCatalogView switch
+    {
+        { SeekColumns: { } ranked } => ranked,
+        { PushdownColumns: { } keyed, FilteredRowGenerator: not null } => keyed,
+        _ => null,
+    };
+
+    /// <summary>
+    /// The conjunct keying <c>sources[index]</c> on its best-ranked column of
+    /// <paramref name="pushColumns"/> against execution constants — an equality
+    /// in either operand order, or an <c>IN</c> list / OR-of-equalities whose
+    /// every member equates that one column. Ties go to the earlier conjunct.
+    /// </summary>
+    private static (string Column, Expression[] Comparands)? MatchBestConjunct(
         List<BooleanExpression> conjuncts,
         FromSource[] sources,
         int index,
         bool singleSource,
         string[] pushColumns)
     {
+        (string Column, Expression[] Comparands)? best = null;
+        var bestRank = int.MaxValue;
         foreach (var conjunct in conjuncts)
         {
-            if (!conjunct.TryGetEqualityOperands(out var left, out var right))
+            (string Column, Expression[] Comparands)? match = null;
+            if (conjunct.TryGetEqualityOperands(out var left, out var right))
+            {
+                if ((MatchPushdownKey(left, right, sources, index, singleSource, pushColumns)
+                    ?? MatchPushdownKey(right, left, sources, index, singleSource, pushColumns)) is { } single)
+                {
+                    match = (single.Column, [single.Comparand]);
+                }
+            }
+            else if (conjunct.TryGetEqualityFamily(out var pairs))
+            {
+                match = MatchPushdownFamily(pairs, sources, index, singleSource, pushColumns);
+            }
+            if (match is not { } found)
                 continue;
-            if (MatchPushdownKey(left, right, sources, index, singleSource, pushColumns) is { } forward)
-                return forward;
-            if (MatchPushdownKey(right, left, sources, index, singleSource, pushColumns) is { } reversed)
-                return reversed;
+            var rank = Array.IndexOf(pushColumns, found.Column);
+            if (rank < bestRank)
+            {
+                best = found;
+                bestRank = rank;
+            }
         }
-        return null;
+        return best;
+    }
+
+    // Every member of an IN list / OR-of-equalities equating the same push
+    // column of sources[index] with an execution constant: that column and the
+    // constants, in written order; else null.
+    private static (string Column, Expression[] Comparands)? MatchPushdownFamily(
+        List<(Expression Left, Expression Right)> pairs,
+        FromSource[] sources,
+        int index,
+        bool singleSource,
+        string[] pushColumns)
+    {
+        string? column = null;
+        var comparands = new Expression[pairs.Count];
+        for (var i = 0; i < pairs.Count; i++)
+        {
+            var (left, right) = pairs[i];
+            if ((MatchPushdownKey(left, right, sources, index, singleSource, pushColumns)
+                ?? MatchPushdownKey(right, left, sources, index, singleSource, pushColumns)) is not { } member
+                || (column is not null && !ReferenceEquals(column, member.Column)))
+            {
+                return null;
+            }
+            column = member.Column;
+            comparands[i] = member.Comparand;
+        }
+        return column is null ? null : (column, comparands);
     }
 
     /// <summary>
@@ -1159,7 +1291,7 @@ internal sealed partial class Selection
         // the shared plan); the comparand's value is resolved per execution. The
         // full WHERE still runs as a residual filter, so this can only narrow the
         // generator output, never change the result.
-        foreach (var (pushIndex, pushColumn, pushComparand) in DetectCatalogPushdowns(sources, joins, fromClause.Excluders))
+        foreach (var (pushIndex, pushColumn, pushComparands) in DetectCatalogPushdowns(sources, joins, fromClause.Excluders))
         {
             var pushSource = sources[pushIndex];
             sources[pushIndex] = new FromSource(
@@ -1170,11 +1302,13 @@ internal sealed partial class Selection
                 storageOrdinals: pushSource.StorageOrdinals,
                 lobStore: pushSource.LobStore,
                 rows: pushSource.Rows,
-                lateralPlan: ForCatalogView(pushSource.BackingCatalogView!, pushSource.BackingCatalogDatabase!, pushColumn, pushComparand),
+                lateralPlan: ForCatalogView(pushSource.BackingCatalogView!, pushSource.BackingCatalogDatabase!, pushColumn, pushComparands),
                 materializeOnce: true,
                 backingCatalogView: pushSource.BackingCatalogView,
                 backingCatalogDatabase: pushSource.BackingCatalogDatabase,
-                unaliasedName: pushSource.UnaliasedName);
+                writtenObjectName: pushSource.WrittenObjectName,
+                unaliasedName: pushSource.UnaliasedName,
+                catalogSeek: true);
         }
 
         var orderBy = fromClause.OrderBy;
@@ -1721,6 +1855,8 @@ internal sealed partial class Selection
         self = selection;
         selection.ColumnNullability = columnNullability;
         selection.ProjectionExpressions = [.. expressions];
+        var drawnProjection = PassThroughDrawnColumns(expressions, sources);
+        selection.VolatileColumns = VolatileProjection.Of(drawnProjection, distinct || OrderKeysDrawPerCall(orderBy, drawnProjection, outputColumnNames));
         selection.ColumnIntegerLiteralDigits = LiteralDigitsOf(expressions);
         selection.ColumnIsUntypedNull = UntypedNullsOf(expressions, sources);
         selection.ColumnReportsNumeric = ColumnReportsNumericOf(expressions, outputSchema);
@@ -2355,17 +2491,21 @@ internal sealed partial class Selection
     /// silently freeze the first row's argument values instead.
     /// </para>
     /// <para>
-    /// A per-call-varying built-in inside the plan declines the reuse, the same
+    /// A per-call-varying built-in inside the plan keeps the reuse only where
+    /// the plan says how its draws reach this reader
+    /// (<see cref="VolatileColumns"/>): a body that reads the value itself
+    /// (DISTINCT, an ORDER BY key under TOP) draws once per body row on real
+    /// too, and a body whose every drawing column is re-drawn per output row
+    /// (<see cref="FromSource.VolatileRefresh"/>) reads the same however often
+    /// it runs. Any other plan that drew — its body unknown here, or a draw
+    /// reading a body column — declines through the same
     /// <see cref="SimulatedDbConnection.VolatileEvaluations"/> gate the
     /// uncorrelated-subquery memo applies (see
-    /// <see cref="UncorrelatedSubqueryCache"/>): probe-confirmed against SQL
-    /// Server 2025, a one-row <c>(SELECT TOP 1 NEWID() AS g FROM …)</c> joined
-    /// to a ten-row left side yields ten distinct values there, so replaying one
-    /// draw would be a fidelity regression. The declining source keeps its
-    /// per-row execution and the probing execution's rows are discarded —
-    /// <c>NEXT VALUE FOR</c>, the other counter-bumping built-in, is Msg 11719
-    /// on real inside any of these bodies, so the discarded execution's only
-    /// reachable side effect is an unobservable extra <c>NEWID()</c> draw.
+    /// <see cref="UncorrelatedSubqueryCache"/>), keeping its per-row execution;
+    /// the probing execution's rows are discarded — <c>NEXT VALUE FOR</c>, the
+    /// other counter-bumping built-in, is Msg 11719 on real inside any of these
+    /// bodies, so the discarded execution's only reachable side effect is an
+    /// unobservable extra <c>NEWID()</c> draw.
     /// </para>
     /// </remarks>
     private static FromSource[] MaterializeUncorrelatedDeferredSources(
@@ -2376,10 +2516,29 @@ internal sealed partial class Selection
         {
             if (sources[i].LateralPlan is not { } plan || !MaterializesOncePerEnumeration(sources, joins, i))
                 continue;
+            // A whole cacheable catalog view is its cached rowset, handed over
+            // as is so a hash join can probe the rowset's persisted index.
+            if (sources[i] is { BackingCatalogView: { Cacheable: true } view, BackingCatalogDatabase: { } catalogDatabase, CatalogSeek: false })
+            {
+                PermissionEnforcement.CheckCatalogViewRead(batch, view, catalogDatabase);
+                if (CachedCatalogRows(view, batch, catalogDatabase) is { } set)
+                {
+                    rewritten ??= (FromSource[])sources.Clone();
+                    rewritten[i] = sources[i].WithMaterializedRows(set.Rows, set);
+                    continue;
+                }
+            }
             var volatileEvaluationsAtStart = batch.Connection.VolatileEvaluations;
             var materialized = new List<byte[]>(plan.Execute(batch, outerResolver).RowBytes);
-            if (batch.Connection.VolatileEvaluations != volatileEvaluationsAtStart)
+            // A body that draws its values once, or whose every drawing column
+            // the reader re-draws per output row, reads the same whatever
+            // re-runs it; only an unknown or partly re-drawable body keeps its
+            // per-row execution.
+            if (batch.Connection.VolatileEvaluations != volatileEvaluationsAtStart
+                && plan.VolatileColumns is not ({ FixesValues: true } or { Complete: true }))
+            {
                 continue;
+            }
             rewritten ??= (FromSource[])sources.Clone();
             rewritten[i] = sources[i].WithMaterializedRows(materialized);
         }

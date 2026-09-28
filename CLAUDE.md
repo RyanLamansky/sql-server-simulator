@@ -108,7 +108,7 @@ Three coercion paths: `SqlValue.Coerce` (runtime values), `SqlType.Promote` (sta
 `Parse → Selection`, `Execute → SimulatedSqlResultSet`.
 Correlated subqueries re-run the plan per outer row via `outerResolver` (execute) / `outerTypeResolver` (parse), both walking arbitrary depth via `ParserContext.OuterTypeResolver` + the runtime arg.
 **Derived tables in FROM are always deferred** (`FromSource.LateralPlan`), matching SQL Server's "any FROM derived table can correlate" — needed because outer refs in WHERE/ON resolve through `Run`, not `GetSqlType`.
-A deferred source whose rows can't change across one enumeration — any **non-leftmost, non-APPLY** `LateralPlan` source (derived table / CTE / view / generator), plus every catalog view — is executed once per enumeration by `MaterializeUncorrelatedDeferredSources` instead of once per left-side row, which also makes it hash-join-eligible; APPLY and a `NEWID()`-drawing plan keep per-row execution — see [`joins.md`](docs/claude/joins.md#deferred-sources-materialize-once-per-enumeration).
+A deferred source whose rows can't change across one enumeration — any **non-leftmost, non-APPLY** `LateralPlan` source (derived table / CTE / view / generator), plus every catalog view — is executed once per enumeration by `MaterializeUncorrelatedDeferredSources` instead of once per left-side row, which also makes it hash-join-eligible; APPLY keeps per-row execution, and a `NEWID()` a body projects is re-drawn per output row by the reader, as real merges the body — see [`joins.md`](docs/claude/joins.md#deferred-sources-materialize-once-per-enumeration).
 
 ### Multi-source rows
 `FromSource[]`; enumeration rows are `byte[]?[]`, one slot per source, null = NULL-filled outer-join side.
@@ -277,7 +277,7 @@ Where an entry carries a second clause it is because that fact changes what you'
   Whether an inner plan runs once per statement or once per outer row is decided by a **runtime probe**, not by parse-time inspection → [`subqueries.md`](docs/claude/subqueries.md).
 - **Outer-scope correlation from the select list, and aggregate ownership across scopes** — the FROM clause binds before the select list, which is SQL Server's binder order rather than the written one, and an aggregate reading only an enclosing query's columns belongs to that query wherever it is written → [`query.md`](docs/claude/query.md#outer-scope-correlation-in-the-select-list).
 - **JOIN / APPLY** — every join kind, comma-FROM, the hash-vs-nested-loop choice, WHERE pushdown and the narrowed-source-first reorder.
-  A deferred FROM source that can't change across one enumeration is materialized once; APPLY and a `NEWID()`-drawing plan aren't → [`joins.md`](docs/claude/joins.md).
+  A deferred FROM source that can't change across one enumeration is materialized once; APPLY isn't, and a body's `NEWID()` column is re-drawn per output row → [`joins.md`](docs/claude/joins.md).
 - **`PIVOT` / `UNPIVOT`** — both attach as a postfix wrapper on the derived-table `LateralPlan` seam → [`pivot.md`](docs/claude/pivot.md).
 - **UPDATE / DELETE / INSERT…SELECT / SELECT…INTO / MERGE / OUTPUT**, plus rowversion, the identity helpers and `@@ROWCOUNT` → [`dml.md`](docs/claude/dml.md).
 - **Variables, control flow, TRY/CATCH + THROW + ERROR_\*, `@@ERROR` / `@@TRANCOUNT` / `XACT_STATE`, WAITFOR, PRINT, GOTO, batch compilation, statement errors inside procedure and dynamic-SQL bodies**.
@@ -293,7 +293,8 @@ Where an entry carries a second clause it is because that fact changes what you'
   An unresolved column splits by *what* failed: a bad qualifier is Msg 4104 on the whole name, everything else Msg 207 on the leaf.
   A module body runs in the database that owns it, entered through `ModuleDatabaseScope`, which a new module-invocation path must enter too → [`schemas.md`](docs/claude/schemas.md).
 - **System metadata surfaces** — the `sys.*` / `INFORMATION_SCHEMA.*` views, `OBJECTPROPERTY`, the `sp_help` family, `sp_describe_first_result_set`, `sp_who`, `sp_configure`, and the expression-dependency surfaces.
-  All six dependency surfaces project from one walk of stored definition **text**, which is what reproduces real's name-based refresh rules → [`catalog-views.md`](docs/claude/catalog-views.md).
+  All six dependency surfaces project from one walk of stored definition **text**, which is what reproduces real's name-based refresh rules.
+  The metadata views' rows persist **across statements** (`Simulation.CatalogRows`), so a new path that changes what one projects must invalidate that cache → [`catalog-views.md`](docs/claude/catalog-views.md).
 - **Scalar UDFs / TVFs / views / stored procs / dynamic SQL, the `ALTER` / `CREATE OR ALTER` path, `WITH RESULT SETS`, `WITH SCHEMABINDING`, DML through views**.
   A module body **binds at CREATE** — every binder error at once, in source order — while a missing object still defers → [`programmable.md`](docs/claude/programmable.md).
 - **CLR assemblies** — `CREATE` / `DROP ASSEMBLY`, `EXTERNAL NAME` scalar and table-valued functions, procedures, triggers and `CREATE AGGREGATE`, CLR user-defined types (`CREATE TYPE … EXTERNAL NAME`), the context connection, `Simulation.EnableClr`, static SAFE verification.

@@ -13,10 +13,11 @@ namespace SqlServerSimulator;
 /// not be leftmost, the comparand may name an enclosing query's column (the
 /// correlated case, which real also plans as a seek), and an equality chained
 /// through an inner join carries the comparand to the far side. A NULL
-/// comparand must short-circuit to no rows (<c>SeekEmpty</c>), and shapes that
-/// can't push — an OR-combined predicate, an outer join's null-supplying side,
-/// a comparand naming a source of this same query, no eligible conjunct — must
-/// run the full generator (<c>Scan</c>). The pushdown is
+/// comparand must short-circuit to no rows (<c>SeekEmpty</c>), an <c>IN</c> list
+/// or OR of equalities on one column seeks each value, a LEFT join's own ON
+/// narrows its right side, and shapes that can't push — a WHERE conjunct on an
+/// outer join's null-supplying side, a comparand naming a source of this same
+/// query, no eligible conjunct — must read the whole view. The pushdown is
 /// result-transparent — the full WHERE re-applies as a residual filter — so the
 /// correctness suite passes either way; these read the opt-in
 /// <see cref="CatalogPushdownDiagnostics"/> trace to assert the path directly and
@@ -137,12 +138,20 @@ public sealed class CatalogPushdownTests
     }
 
     [TestMethod]
-    public void ColumnsOrPredicate_DoesNotPush()
+    public void ColumnsOrPredicate_SeeksEachValue()
     {
         var (trace, rows) = Run("select name from sys.columns c where c.object_id = object_id('dbo.t2') or c.object_id = object_id('dbo.t3') order by object_id, column_id");
-        Contains("Scan(columns)", trace);
-        DoesNotContain("Seek(columns.object_id)", trace);
+        Contains("Seek(columns.object_id)", trace);
         // Union of t2 (c, d, e) and t3 (f) columns.
+        HasCount(4, rows);
+    }
+
+    [TestMethod]
+    public void MixedColumnOrPredicate_DoesNotPush()
+    {
+        var (trace, rows) = Run("select name from sys.columns c where c.object_id = object_id('dbo.t2') or c.name = 'f' order by object_id, column_id");
+        DoesNotContain("Seek(columns.object_id)", trace);
+        DoesNotContain("Seek(columns.name)", trace);
         HasCount(4, rows);
     }
 
@@ -165,18 +174,35 @@ public sealed class CatalogPushdownTests
     }
 
     [TestMethod]
-    public void CatalogViewOnOuterJoinNullSupplyingSide_DoesNotPush()
+    public void CatalogViewOnOuterJoinNullSupplyingSide_WhereDoesNotPush()
     {
-        // A LEFT JOIN's right side is the one case an ON equality may NOT be
-        // pushed: dropping rows there turns matched rows into null-extended
-        // ones, and the residual predicate that makes every other narrowing
-        // safe cannot put them back.
+        // A WHERE equality may NOT narrow a LEFT JOIN's right side: dropping
+        // rows there turns matched rows into null-extended ones, and the
+        // residual predicate that makes every other narrowing safe cannot put
+        // them back.
         var (trace, rows) = Run("""
-            select c.name from t2 left join sys.columns c on c.object_id = object_id('dbo.t2')
-            order by c.column_id
+            insert t2 values (1, null, null);
+            select c.name from t2 left join sys.columns c on c.object_id = t2.c
+            where c.object_id = object_id('dbo.t2')
             """);
         DoesNotContain("Seek(columns.object_id)", trace);
         IsEmpty(rows);
+    }
+
+    [TestMethod]
+    public void CatalogViewOnOuterJoinNullSupplyingSide_OwnOnSeeks()
+    {
+        // The LEFT join's own ON conjunct reading only its right side narrows
+        // that side exactly: a right row failing it matches no left row, and
+        // the join re-checks the whole ON regardless — so a left row still
+        // null-extends when nothing matches.
+        var (trace, rows) = Run("""
+            insert t2 values (1, null, null), (2, null, null);
+            select c.name from t2 left join sys.columns c on c.object_id = object_id('dbo.t3') and t2.c = 1
+            order by t2.c
+            """);
+        Contains("Seek(columns.object_id)", trace);
+        CollectionAssert.AreEqual(new object?[] { "f", null }, rows);
     }
 
     [TestMethod]
@@ -231,7 +257,7 @@ public sealed class CatalogPushdownTests
                 inner join sys.columns b on a.object_id = b.object_id and a.column_id = b.column_id + 1
             """);
         DoesNotContain("Seek(columns.object_id)", trace);
-        Contains("Scan(columns)", trace);
+        Contains("IndexJoin(columns)", trace);
     }
 
     [TestMethod]
@@ -298,10 +324,18 @@ public sealed class CatalogPushdownTests
     }
 
     [TestMethod]
-    public void NoEligibleConjunct_Scans()
+    public void NameEquality_Seeks()
     {
-        var (trace, _) = Run("select name from sys.columns where name = 'a'");
-        Contains("Scan(columns)", trace);
-        DoesNotContain("Seek(columns.object_id)", trace);
+        var (trace, rows) = Run("select name from sys.columns where name = 'A'");
+        Contains("Seek(columns.name)", trace);
+        CollectionAssert.AreEqual(new object?[] { "a" }, rows);
+    }
+
+    [TestMethod]
+    public void NoEligibleConjunct_ReadsTheWholeView()
+    {
+        var (trace, rows) = Run("select name from sys.columns where is_nullable = 1 order by name");
+        DoesNotContain("Seek(", string.Join(",", trace));
+        CollectionAssert.AreEqual(new object?[] { "b", "d", "e" }, rows);
     }
 }

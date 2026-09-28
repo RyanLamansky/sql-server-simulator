@@ -97,6 +97,8 @@ partial class Simulation
             throw SimulatedSqlException.ThereIsAlreadyAnObject(leaf);
         if (!(isLocalTemp ? batch.Connection.TryAddTempTable(destTable) : destination.TryAdd(leaf, destTable)))
             throw SimulatedSqlException.ThereIsAlreadyAnObject(leaf);
+        // The new table joins the catalog views without passing the DDL arm.
+        batch.Connection.Simulation.CatalogRows.Invalidate();
         // A local temp created via SELECT INTO inside a module body is dropped
         // when that module exits (probe-confirmed, same as CREATE TABLE #t).
         if (isLocalTemp)

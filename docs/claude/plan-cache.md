@@ -36,6 +36,7 @@ Bump sites:
 - `sp_addlinkedserver` / `sp_dropserver` (changes the active linked-server table, which four-part-name FROM clauses resolve against at parse time).
 
 Non-DDL statements that touch principal / permission / extended-property / trigger-enable state don't bump — cached SELECT plans don't depend on those for parse-time validity.
+Every bump also invalidates the catalog row cache, which the non-DDL metadata changes invalidate on their own — see [`catalog-views.md`](catalog-views.md#cross-statement-row-cache-and-indexes).
 
 ## Clearing: `DBCC FREEPROCCACHE`
 

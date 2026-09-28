@@ -47,7 +47,10 @@ internal sealed class FromSource(
     bool lateralIsQueryBody = false,
     string? writtenObjectName = null,
     string? xmlReceiverName = null,
-    MultiPartName? unaliasedName = null)
+    MultiPartName? unaliasedName = null,
+    bool catalogSeek = false,
+    CatalogRowSet? catalogRows = null,
+    VolatileProjection? volatileRefresh = null)
 {
     public readonly string? Qualifier = qualifier;
 
@@ -275,7 +278,7 @@ internal sealed class FromSource(
     /// <see cref="CatalogView.PushdownColumns"/> / <see cref="CatalogView.FilteredRowGenerator"/>)
     /// from here to decide whether a WHERE equality can be pushed into the
     /// generator, then rebuilds <see cref="LateralPlan"/> via the pushdown-carrying
-    /// <see cref="Selection.ForCatalogView(CatalogView,Database,string,Expression)"/>.
+    /// <see cref="Selection.ForCatalogView(CatalogView,Database,string,Expression[])"/>.
     /// </summary>
     public readonly CatalogView? BackingCatalogView = backingCatalogView;
 
@@ -287,6 +290,31 @@ internal sealed class FromSource(
     /// Null whenever <see cref="BackingCatalogView"/> is.
     /// </summary>
     public readonly Database? BackingCatalogDatabase = backingCatalogDatabase;
+
+    /// <summary>
+    /// True when <see cref="LateralPlan"/> is a catalog view's pushed-down seek
+    /// rather than the whole view, so its rows are a subset
+    /// <see cref="CatalogRows"/> can't stand for.
+    /// </summary>
+    public readonly bool CatalogSeek = catalogSeek;
+
+    /// <summary>
+    /// The cached rowset whose rows <see cref="Rows"/> is, exactly and in
+    /// order — set per execution by the materialization pass for an unfiltered
+    /// read of a cacheable catalog view, so the hash equi-join can probe the
+    /// rowset's persisted index instead of building one. Null for every other
+    /// source, including a copy whose rows were narrowed.
+    /// </summary>
+    public readonly CatalogRowSet? CatalogRows = catalogRows;
+
+    /// <summary>
+    /// The columns a joined reader re-draws per output row, taken from the
+    /// query body this source reads (<see cref="Selection.VolatileColumns"/>) — null
+    /// when there are none, or when the body draws its values once itself.
+    /// Kept through materialization, which drops <see cref="LateralPlan"/>.
+    /// </summary>
+    public readonly VolatileProjection? VolatileRefresh = volatileRefresh
+        ?? (lateralPlan?.VolatileColumns is { FixesValues: false, Ordinals.Length: > 0 } drawn ? drawn : null);
 
     /// <summary>
     /// Builds a placeholder source for a table that failed to resolve while a
@@ -327,7 +355,7 @@ internal sealed class FromSource(
             backingCatalogView: this.BackingCatalogView, backingCatalogDatabase: this.BackingCatalogDatabase,
             viaSynonym: this.ViaSynonym, autoElementName: this.AutoElementName,
             lateralIsQueryBody: this.LateralIsQueryBody, writtenObjectName: this.WrittenObjectName,
-            xmlReceiverName: this.XmlReceiverName, unaliasedName: this.UnaliasedName);
+            xmlReceiverName: this.XmlReceiverName, unaliasedName: this.UnaliasedName, catalogSeek: this.CatalogSeek, volatileRefresh: this.VolatileRefresh);
 
     /// <summary>
     /// Returns a copy of this source reading <paramref name="rows"/> — the same
@@ -345,7 +373,7 @@ internal sealed class FromSource(
             backingCatalogView: this.BackingCatalogView, backingCatalogDatabase: this.BackingCatalogDatabase,
             viaSynonym: this.ViaSynonym, autoElementName: this.AutoElementName,
             lateralIsQueryBody: this.LateralIsQueryBody, writtenObjectName: this.WrittenObjectName,
-            xmlReceiverName: this.XmlReceiverName, unaliasedName: this.UnaliasedName);
+            xmlReceiverName: this.XmlReceiverName, unaliasedName: this.UnaliasedName, catalogSeek: this.CatalogSeek, volatileRefresh: this.VolatileRefresh);
 
     /// <summary>
     /// Returns a copy of this source with its deferred <see cref="LateralPlan"/>
@@ -353,14 +381,16 @@ internal sealed class FromSource(
     /// clearing <see cref="LateralPlan"/> and <see cref="MaterializeOnce"/> so
     /// downstream join planning treats it as a plain re-enumerable row source.
     /// Column metadata, qualifier, and storage layout are preserved unchanged.
+    /// <paramref name="catalogRows"/> is the cached catalog rowset the list
+    /// is, when it is one (see <see cref="CatalogRows"/>).
     /// </summary>
-    public FromSource WithMaterializedRows(List<byte[]> rows) =>
+    public FromSource WithMaterializedRows(List<byte[]> rows, CatalogRowSet? catalogRows = null) =>
         new(this.Qualifier, this.ColumnNames, this.Columns, this.StoredSchema,
             this.StorageOrdinals, this.LobStore, rows,
             lateralPlan: null, backingTable: this.BackingTable, backingView: this.BackingView,
             heapPlan: this.HeapPlan, materializeOnce: false, viaSynonym: this.ViaSynonym,
             autoElementName: this.AutoElementName, writtenObjectName: this.WrittenObjectName,
-            xmlReceiverName: this.XmlReceiverName, unaliasedName: this.UnaliasedName);
+            xmlReceiverName: this.XmlReceiverName, unaliasedName: this.UnaliasedName, catalogRows: catalogRows, volatileRefresh: this.VolatileRefresh);
 }
 
 /// <summary>

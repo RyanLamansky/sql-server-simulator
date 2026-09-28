@@ -262,6 +262,7 @@ Two kinds of source qualify:
 
 - A **`MaterializeOnce` catalog view**, wherever it sits: its generator takes no outer resolver, so it can't correlate.
   This removes both the per-outer-row re-generation and the O(L × R) loop from catalog multi-joins (SMO's per-column property-bag query) — see [`catalog-views.md`](catalog-views.md) for the correlation-safety contract and measured improvement.
+  A whole cacheable view is handed over as its cached rowset (`FromSource.CatalogRows`) rather than copied, and `HashEquiJoin` then probes the rowset's persisted index instead of building one — see [`catalog-views.md`](catalog-views.md#cross-statement-row-cache-and-indexes).
 - Any **non-leftmost, non-APPLY source with a `LateralPlan`** — a derived table, a CTE reference, a view, or a generator.
   SQL Server requires `APPLY` for laterality, so none of them can read a sibling FROM source.
   Each *can* read an enclosing statement's row, but that row is fixed for one execution of this `Selection` (the enclosing query re-executes the whole plan per enclosing row), so every re-execution within one enumeration would return identical rows.
@@ -272,15 +273,25 @@ The leftmost slot of a parenthesized join group is skipped for the same reason (
 A **generator-backed source** — a TVF, `VALUES`, `OPENJSON` / `OPENXML`, `STRING_SPLIT`, a linked-server query, `xml.nodes()` — qualifies on the same terms, because its arguments provably read no sibling: naming one is Msg 4104 (the section above), and everything else they can read (a literal, a variable, an enclosing scope's column) is fixed for one execution of this plan.
 Measured on WWI, `Sales.Invoices` (70,510 rows) joined to `GENERATE_SERIES(1, 20)` on an equi key: **160.9 ms / 83.9 MB → 24.5 ms / 9.7 MB**, since materializing is also what lets `TryPlanEquiJoin` hash the level instead of re-running the generator per left row.
 
-**A per-call-varying built-in declines the reuse.**
-`SimulatedDbConnection.VolatileEvaluations` is sampled around the materializing execution — the same gate the uncorrelated-subquery memo applies, see [`subqueries.md`](subqueries.md) — and a plan that drew a `NEWID()` keeps its per-row execution however uncorrelated it is.
-Probe-confirmed against SQL Server 2025: a one-row `(SELECT TOP 1 NEWID() AS g FROM …)` joined to a ten-row left side yields ten distinct values there under CROSS JOIN, INNER JOIN, LEFT JOIN and a CTE reference alike, so replaying one draw would be a fidelity regression.
+**A per-call-varying built-in is drawn where real draws it.**
+Real merges a body projecting `NEWID()` or `CRYPT_GEN_RANDOM` into the query reading it and draws the value once per row that query produces — wherever the source sits, the leftmost slot and a CTE read twice included — unless the body reads the value itself (probed 2026-09-28 against SQL Server 2025).
+A body reads it under `DISTINCT` over a FROM, as an `ORDER BY` key under `TOP` / `OFFSET`, in a set operation, and as a multi-row `VALUES`; there the value is drawn once per body row and every reader sees that draw, leftmost or not.
+Everything else merges: a FROM-less body, `TOP` without an order on the drawn column, `WHERE`, `GROUP BY`, aggregates, window functions, a single-row `VALUES`, a view (whose volatility CREATE VIEW records, the body not being parsed until a reference runs), and a body passing a nested body's drawn column through.
+
+The parse records this on the body as `Selection.VolatileColumns`, and each source reading it carries the drawn columns as `FromSource.VolatileRefresh`.
+`EnumerateJoinedRows` re-draws them into a fresh row for every output tuple of a multi-source read, so two references to one column within a row agree and each row reads its own value; a single-source read is left alone, since each body row is one output row there.
+Because the reader supplies the fresh values, the body's own rows are the same however often it runs, and the materialization keeps its reuse; so does a body that draws its values once.
+Only a plan whose body isn't known here, or one whose drawn column reads a body column (`CONCAT(b, NEWID())`, which can't be re-evaluated outside the body), declines through `SimulatedDbConnection.VolatileEvaluations` — sampled around the materializing execution, the same gate the uncorrelated-subquery memo applies, see [`subqueries.md`](subqueries.md) — and keeps its per-row execution.
 `RAND()` needs no gate — both engines freeze it for the statement.
 The declining source's probing execution is discarded; `NEXT VALUE FOR`, the other counter-bumping built-in, is Msg 11719 on real inside any of these bodies, so the discarded execution's only reachable side effect is an unobservable extra `NEWID()` draw.
 
+**Divergences.**
+A drawn column reading a body column keeps the body's draw in the leftmost slot, where real re-draws it per output row (`(SELECT CAST(b AS varchar(3)) + CAST(NEWID() AS varchar(36)) AS s FROM m) d CROSS JOIN n` reads 30 distinct values there over 3 × 10 rows, 3 here).
+And an `APPLY` body `TOP 1 … ORDER BY` a non-drawn column draws once on real (`n OUTER APPLY (SELECT TOP 1 NEWID() AS g FROM m ORDER BY b)` reads one value over ten rows) where the simulator re-runs it per row — the same body under `CROSS JOIN` merges on real, so the rule there is the optimizer's choice of plan rather than the body's shape.
+
 Measured on the WWI report shape `Customers JOIN (SELECT CustomerID, SUM(…) FROM Invoices JOIN InvoiceLines … GROUP BY CustomerID) agg ON …`: **77.6 s → 170 ms** (0.8× the live server), the CTE spelling of the same query **78.8 s → 165 ms**, and the same query written derived-table-first unchanged at ~148 ms.
 
-A joined UPDATE / DELETE takes this pass too, through `Selection.PrepareMutationJoinSources` — the same gates, the same volatility decline, and no reorder — see [`dml.md`](dml.md#joined-row-sources).
+A joined UPDATE / DELETE takes this pass too, through `Selection.PrepareMutationJoinSources` — the same gates, the same volatility rule, and no reorder — see [`dml.md`](dml.md#joined-row-sources).
 It declines in skip mode: a skipped statement commits nothing, so the pass is pure cost there and the materializing execution would run a body on behalf of a statement that never runs.
 
 **Divergence — a body that raises is evaluated even when the left side is empty.**

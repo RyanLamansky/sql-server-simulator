@@ -96,7 +96,37 @@ internal sealed partial class Selection
         // allocation profile).
         SqlValue resolve(MultiPartName name) => ResolveAcrossTuple(sources, tuple, name, batch, outerResolver, memo);
 
-        return EnumerateFoldRange(sources, joins, 0, sources.Length, tuple, batch, resolve, outerResolver);
+        var rows = EnumerateFoldRange(sources, joins, 0, sources.Length, tuple, batch, resolve, outerResolver);
+        if (sources.Length > 1)
+        {
+            foreach (var source in sources)
+            {
+                if (source.VolatileRefresh is not null)
+                    return RedrawVolatileColumns(rows, sources, batch);
+            }
+        }
+        return rows;
+    }
+
+    /// <summary>
+    /// Draws each joined source's per-call-varying columns afresh for every
+    /// output row, as real does for a body it merges into the reading query
+    /// (see <see cref="VolatileProjection"/>): the row a source produced may
+    /// pair with many rows of the others, and each pairing reads its own
+    /// value. A single-source read is left alone, since there each body row is
+    /// one output row already.
+    /// </summary>
+    private static IEnumerable<byte[]?[]> RedrawVolatileColumns(IEnumerable<byte[]?[]> rows, FromSource[] sources, BatchContext batch)
+    {
+        foreach (var tuple in rows)
+        {
+            for (var s = 0; s < sources.Length; s++)
+            {
+                if (sources[s].VolatileRefresh is { } drawn && tuple[s] is { } row)
+                    tuple[s] = drawn.Refresh(row, sources[s].StoredSchema, batch);
+            }
+            yield return tuple;
+        }
     }
 
     /// <summary>
@@ -513,11 +543,17 @@ internal sealed partial class Selection
     /// before hashing so bucket equality matches the <c>=</c> operator's
     /// promote-then-compare semantics exactly.
     /// </summary>
-    private sealed class EquiKey(Reference left, Reference right, SqlType common)
+    private sealed class EquiKey(Reference left, Reference right, SqlType common, int rightOrdinal)
     {
         public readonly Reference Left = left;
         public readonly Reference Right = right;
         public readonly SqlType Common = common;
+
+        /// <summary>
+        /// The column <see cref="Right"/> names within the level's own source —
+        /// what a cached catalog rowset's index is keyed by.
+        /// </summary>
+        public readonly int RightOrdinal = rightOrdinal;
     }
 
     /// <summary>
@@ -592,7 +628,7 @@ internal sealed partial class Selection
             return false;
         }
 
-        key = new EquiKey(leftRef, rightRef, common);
+        key = new EquiKey(leftRef, rightRef, common, FindSourceColumn(sources, rightRef.ReferencedName).ColumnIndex);
         return true;
     }
 
@@ -928,35 +964,31 @@ internal sealed partial class Selection
         // repeated key twice, which profiling put at a third of a 228k-row
         // build's CPU. Both row lists are sized from the backing table's row
         // count where there is one, which retires the doubling copies.
-        var expectedRows = right.BackingTable?.Heap.RowCount ?? 0;
-        var rightRows = expectedRows > 0 ? new List<byte[]>(expectedRows) : [];
-        var next = expectedRows > 0 ? new List<int>(expectedRows) : [];
-        var buckets = new Dictionary<SqlValueKey, (int Head, int Tail)>();
         var keyScratch = new SqlValue[plan.Keys.Length];
-        foreach (var row in right.RowsFor(batch))
+        List<byte[]> rightRows;
+        List<int> next;
+        Dictionary<SqlValueKey, (int Head, int Tail)> buckets;
+        // A whole cached catalog view carries an index built once per
+        // generation of its rowset, keyed exactly as this build would key it.
+        if (right.CatalogRows is { } cachedCatalog)
         {
-            tuple[level] = row;
-            var ordinal = rightRows.Count;
-            rightRows.Add(row);
-            next.Add(-1);
-            if (TryComputeKeyInto(plan.Keys, runtime, rightSide: true, keyScratch, out var buildKey))
+            var ordinals = new int[plan.Keys.Length];
+            var keyTypes = new SqlType[plan.Keys.Length];
+            for (var k = 0; k < plan.Keys.Length; k++)
             {
-                ref var chain = ref System.Runtime.InteropServices.CollectionsMarshal.GetValueRefOrAddDefault(buckets, buildKey, out var existed);
-                if (existed)
-                {
-                    next[chain.Tail] = ordinal;
-                    chain.Tail = ordinal;
-                }
-                else
-                {
-                    // The dictionary now holds the scratch array as its key;
-                    // take a fresh one so the next row doesn't overwrite it.
-                    chain = (ordinal, ordinal);
-                    keyScratch = new SqlValue[plan.Keys.Length];
-                }
+                ordinals[k] = plan.Keys[k].RightOrdinal;
+                keyTypes[k] = plan.Keys[k].Common;
             }
+            var index = cachedCatalog.IndexOn(ordinals, keyTypes);
+            CatalogPushdownDiagnostics.Sink?.Add($"IndexJoin({cachedCatalog.View.Name})");
+            rightRows = cachedCatalog.Rows;
+            next = index.Next;
+            buckets = index.Buckets;
         }
-        tuple[level] = null;
+        else
+        {
+            (rightRows, next, buckets) = BuildHashSide(right, plan, tuple, level, batch, runtime);
+        }
 
         // Only RIGHT / FULL read the matched bitmap; INNER / LEFT would pay a
         // write per emitted row for something nothing looks at.
@@ -999,6 +1031,46 @@ internal sealed partial class Selection
             yield return tuple;
         }
         tuple[level] = null;
+    }
+
+    /// <summary>
+    /// The build side of <see cref="HashEquiJoin"/>: every row of
+    /// <paramref name="right"/> in order, and each key's rows as a forward
+    /// chain over their ordinals.
+    /// </summary>
+    private static (List<byte[]> Rows, List<int> Next, Dictionary<SqlValueKey, (int Head, int Tail)> Buckets) BuildHashSide(
+        FromSource right, EquiJoinPlan plan, byte[]?[] tuple, int level, BatchContext batch, RuntimeContext runtime)
+    {
+        var expectedRows = right.BackingTable?.Heap.RowCount ?? 0;
+        var rightRows = expectedRows > 0 ? new List<byte[]>(expectedRows) : [];
+        var next = expectedRows > 0 ? new List<int>(expectedRows) : [];
+        var buckets = new Dictionary<SqlValueKey, (int Head, int Tail)>();
+        var keyScratch = new SqlValue[plan.Keys.Length];
+        foreach (var row in right.RowsFor(batch))
+        {
+            tuple[level] = row;
+            var ordinal = rightRows.Count;
+            rightRows.Add(row);
+            next.Add(-1);
+            if (TryComputeKeyInto(plan.Keys, runtime, rightSide: true, keyScratch, out var buildKey))
+            {
+                ref var chain = ref System.Runtime.InteropServices.CollectionsMarshal.GetValueRefOrAddDefault(buckets, buildKey, out var existed);
+                if (existed)
+                {
+                    next[chain.Tail] = ordinal;
+                    chain.Tail = ordinal;
+                }
+                else
+                {
+                    // The dictionary now holds the scratch array as its key;
+                    // take a fresh one so the next row doesn't overwrite it.
+                    chain = (ordinal, ordinal);
+                    keyScratch = new SqlValue[plan.Keys.Length];
+                }
+            }
+        }
+        tuple[level] = null;
+        return (rightRows, next, buckets);
     }
 
     /// <summary>

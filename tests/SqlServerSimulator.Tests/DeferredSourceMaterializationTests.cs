@@ -313,13 +313,13 @@ public sealed class DeferredSourceMaterializationTests
         AreEqual(1134, command.ExecuteScalar());
     }
 
-    // ---- the per-call-varying built-in declines --------------------------
+    // ---- per-call-varying built-ins ---------------------------------------
 
     /// <summary>
     /// Probe-confirmed against SQL Server 2025: a one-row
     /// <c>(SELECT TOP 1 NEWID() …)</c> joined to a ten-row left side yields ten
-    /// distinct values there, so the draw declines the reuse and the plan keeps
-    /// running per left row.
+    /// distinct values there, so the reader re-draws the column per row rather
+    /// than replaying the body's one draw.
     /// </summary>
     [TestMethod]
     public void NewIdInDerivedTable_KeepsDrawingPerLeftRow()
@@ -328,7 +328,7 @@ public sealed class DeferredSourceMaterializationTests
             join (select top 1 1 as grp, newid() as g from ten) d on d.grp = o.grp
             """));
 
-    /// <summary>The same draw inside a CTE body declines identically.</summary>
+    /// <summary>The same draw inside a CTE body re-draws identically.</summary>
     [TestMethod]
     public void NewIdInCteBody_KeepsDrawingPerLeftRow()
         => AreEqual(10, WithTenRows().ExecuteScalar("""
@@ -338,7 +338,7 @@ public sealed class DeferredSourceMaterializationTests
 
     /// <summary>
     /// The CROSS JOIN spelling of the same shape — no ON predicate to hash on,
-    /// so this pins the nested-loop path's own gate.
+    /// so this pins the nested-loop path.
     /// </summary>
     [TestMethod]
     public void NewIdInDerivedTable_UnderCrossJoin_KeepsDrawingPerLeftRow()
@@ -362,6 +362,78 @@ public sealed class DeferredSourceMaterializationTests
     public void NewIdUnderCrossApply_KeepsDrawingPerLeftRow()
         => AreEqual(10, WithTenRows().ExecuteScalar(
             "select count(distinct a.g) from ten o cross apply (select top 1 newid() as g from ten) a"));
+
+    /// <summary>
+    /// Real merges a body projecting <c>NEWID()</c> into its reader and draws
+    /// once per row the reader produces, so the leftmost source re-draws too,
+    /// where it runs only once (probed 2026-09-28 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select count(distinct d.g) from (select newid() as g) d cross join ten o")]
+    [DataRow("select count(distinct d.g) from (select top 1 newid() as g from ten) d join ten o on 1 = 1")]
+    [DataRow("select count(distinct d.g) from (select top 1 newid() as g from ten) d left join ten o on o.id > 0")]
+    [DataRow("with d as (select newid() as g) select count(distinct d.g) from d cross join ten o")]
+    [DataRow("select count(distinct d.g) from (values (newid())) d(g) cross join ten o")]
+    [DataRow("select count(distinct d.s) from (select cast(newid() as varchar(36)) + 'x' as s) d cross join ten o")]
+    [DataRow("select count(distinct d.c) from (select crypt_gen_random(8) as c) d cross join ten o")]
+    [DataRow("select count(distinct d2.g) from (select g from (select newid() as g) d1) d2 cross join ten o")]
+    [DataRow("select count(distinct x.g) from ten o cross apply (select newid() as g) x")]
+    [DataRow("select count(*) from (select d.g from (select newid() as g) d cross join ten o group by d.g) z")]
+    public void NewIdInAMergedBody_DrawsPerReaderRow(string query)
+        => AreEqual(10, WithTenRows().ExecuteScalar(query));
+
+    /// <summary>Each reference to a CTE draws its own values.</summary>
+    [TestMethod]
+    public void NewIdInACteReadTwice_DrawsPerReferencePerRow()
+        => AreEqual("10|10", WithTenRows().ExecuteScalar("""
+            with d as (select newid() as g)
+            select concat(count(distinct d1.g), '|', count(distinct d2.g)) from d d1 cross join d d2 cross join ten o
+            """));
+
+    /// <summary>Two references to one drawn column within a row read one value.</summary>
+    [TestMethod]
+    public void NewIdReadTwiceInARow_AgreesWithItself()
+        => AreEqual(10, WithTenRows().ExecuteScalar(
+            "select sum(case when d.g = d.g then 1 else 0 end) from (select newid() as g) d cross join ten o"));
+
+    /// <summary>A view's drawn column merges into its reader the same way.</summary>
+    [TestMethod]
+    public void NewIdInAView_DrawsPerReaderRow()
+    {
+        var sim = WithTenRows();
+        sim.ExecuteBatches("create view vg as select newid() as g");
+        AreEqual(10, sim.ExecuteScalar("select count(distinct v.g) from vg v cross join ten o"));
+    }
+
+    /// <summary>
+    /// A body that reads the value itself draws once per body row and every
+    /// reader sees that draw, leftmost or not: a DISTINCT, an ORDER BY key
+    /// under TOP, a set operation, a multi-row VALUES (probed 2026-09-28
+    /// against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select count(distinct d.g) from ten o cross join (select distinct newid() as g from (values (1), (2)) v(x)) d", 2)]
+    [DataRow("select count(distinct d.g) from (select distinct newid() as g from (values (1), (2)) v(x)) d cross join ten o", 2)]
+    [DataRow("select count(distinct d.g) from ten o cross join (select top 2 newid() as g from ten order by g) d", 2)]
+    [DataRow("select count(distinct d.g) from ten o cross join (select top 1 id, newid() as g from ten order by newid()) d", 1)]
+    [DataRow("select count(distinct d.g) from ten o cross join (select newid() as g union all select newid()) d", 2)]
+    [DataRow("select count(distinct d.g) from (values (newid()), (newid())) d(g) cross join ten o", 2)]
+    public void NewIdTheBodyReads_IsDrawnOncePerBodyRow(string query, int expected)
+        => AreEqual(expected, WithTenRows().ExecuteScalar(query));
+
+    /// <summary>
+    /// <c>RAND</c> seeded from the row reseeds per row: each row answers its
+    /// seed's value (probed 2026-09-28 against SQL Server 2025), where a
+    /// row-independent call site freezes one value for the statement.
+    /// </summary>
+    [TestMethod]
+    public void RandSeededFromTheRow_AnswersEachSeed()
+        => AreEqual("3|1", WithTenRows().ExecuteScalar("""
+            select concat(
+                (select count(distinct rand(id)) from ten where id <= 3),
+                '|',
+                (select count(distinct r) from (select rand(id) as r from ten where id <= 3) d where r = rand(1)))
+            """));
 
     private static Simulation WithTenRows()
     {

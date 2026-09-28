@@ -229,14 +229,25 @@ public sealed class JoinStrategyTests
             CaptureStrategies("select a.id from a cross apply (select id from b where b.a_id = a.id) d"));
 
     /// <summary>
-    /// A <c>NEWID()</c> draw declines the reuse (real re-draws per row), so the
-    /// source stays deferred and the join stays on the nested loop rather than
-    /// silently freezing one draw into a hash build.
+    /// A <c>NEWID()</c> column the reader re-draws per output row leaves the
+    /// body's own rows fixed for the enumeration, so the source still
+    /// materializes and hashes.
     /// </summary>
     [TestMethod]
-    public void NewIdInDerivedTable_StaysNestedLoops()
-        => Contains("Inner:NestedLoops",
+    public void RedrawnNewIdInDerivedTable_MaterializesAndHashes()
+        => Contains("Inner:HashMatch(keys=1,residual=0)",
             CaptureStrategies("select a.id from a join (select top 1 a_id, newid() as g from b) d on d.a_id = a.id"));
+
+    /// <summary>
+    /// A draw whose expression reads a body column can't be re-drawn by the
+    /// reader, so that body declines the reuse (real re-draws per row) and the
+    /// join stays on the nested loop rather than freezing one draw into a hash
+    /// build.
+    /// </summary>
+    [TestMethod]
+    public void RowReadingNewIdInDerivedTable_StaysNestedLoops()
+        => Contains("Inner:NestedLoops",
+            CaptureStrategies("select a.id from a join (select top 1 a_id, concat(a_id, newid()) as g from b) d on d.a_id = a.id"));
 
     /// <summary>
     /// A rowset function under a plain JOIN can no longer read a sibling (that

@@ -337,9 +337,10 @@ internal sealed partial class Selection
     /// Executing the resulting plan invokes the view's generator with the
     /// live <see cref="BatchContext"/>, encodes each row's
     /// <see cref="SqlValue"/> array via <c>RowEncoder.EncodeRow</c>, and
-    /// streams the bytes. Re-executes on each call so changes made earlier
-    /// in the same batch (CREATE TABLE, CREATE SCHEMA, DROP TABLE) appear
-    /// immediately.
+    /// streams the bytes — or, for a view <see cref="CatalogRowCache"/> can
+    /// serve, hands back its cached rows. Either way a change made earlier in
+    /// the same batch (CREATE TABLE, CREATE SCHEMA, DROP TABLE) appears in the
+    /// next read, since each such change invalidates the cache.
     /// </summary>
     internal static Selection ForCatalogView(CatalogView view, Database targetDatabase)
     {
@@ -349,22 +350,64 @@ internal sealed partial class Selection
             columnNames,
             hasOrderBy: false,
             hasTopOrOffsetOrFetch: false,
-            rowSource: (batch, _) =>
-            {
-                var statement = batch.CurrentStatement;
-                var key = (view, targetDatabase);
-                if (statement.CatalogViewRows is { } memo && memo.TryGetValue(key, out var cached))
-                {
-                    CatalogPushdownDiagnostics.Sink?.Add($"CachedScan({view.Name})");
-                    return cached;
-                }
-                CatalogPushdownDiagnostics.Sink?.Add($"Scan({view.Name})");
-                PermissionEnforcement.CheckCatalogViewRead(batch, view, targetDatabase);
-                var gated = BuiltInResources.ApplyDmvGate(view, batch, view.RowGenerator(batch, targetDatabase));
-                var rows = BuiltInResources.ApplyMetadataFilter(view, batch, targetDatabase, gated);
-                var encoded = rows.Select(values => RowEncoder.EncodeRow(view.Columns, view.Conform(values)));
-                return view.StableWithinStatement ? RememberWhenFullyDrained(statement, key, encoded) : encoded;
-            });
+            rowSource: (batch, _) => ScanCatalogView(view, targetDatabase, batch, checkedRead: false));
+    }
+
+    /// <summary>
+    /// Every row of <paramref name="view"/> over <paramref name="targetDatabase"/>:
+    /// this statement's earlier drained read of it, else the cached rowset, else
+    /// a fresh generation (remembered for the rest of the statement once fully
+    /// drained). <paramref name="checkedRead"/> says the caller already ran the
+    /// view's read-permission check.
+    /// </summary>
+    private static IEnumerable<byte[]> ScanCatalogView(CatalogView view, Database targetDatabase, BatchContext batch, bool checkedRead)
+    {
+        var statement = batch.CurrentStatement;
+        var key = (view, targetDatabase);
+        if (statement.CatalogViewRows is { } memo && memo.TryGetValue(key, out var cached))
+        {
+            CatalogPushdownDiagnostics.Sink?.Add($"CachedScan({view.Name})");
+            return cached;
+        }
+        if (!checkedRead)
+        {
+            PermissionEnforcement.CheckCatalogViewRead(batch, view, targetDatabase);
+            if (CachedCatalogRows(view, batch, targetDatabase) is { } set)
+                return set.Rows;
+        }
+        CatalogPushdownDiagnostics.Sink?.Add($"Scan({view.Name})");
+        var gated = BuiltInResources.ApplyDmvGate(view, batch, view.RowGenerator(batch, targetDatabase));
+        var rows = BuiltInResources.ApplyMetadataFilter(view, batch, targetDatabase, gated);
+        var encoded = rows.Select(values => RowEncoder.EncodeRow(view.Columns, view.Conform(values)));
+        return view.StableWithinStatement ? RememberWhenFullyDrained(statement, key, encoded) : encoded;
+    }
+
+    /// <summary>
+    /// The <see cref="CatalogRowCache"/> rowset serving a read of
+    /// <paramref name="view"/> over <paramref name="targetDatabase"/>, or null
+    /// when this read has to generate: the view isn't
+    /// <see cref="CatalogView.Cacheable"/>, the target is <c>tempdb</c> (whose
+    /// listing includes the reader's own <c>#temp</c> tables) or a database this
+    /// simulation doesn't hold, or the session's metadata visibility filters the
+    /// view. The caller has already run the view's read-permission check.
+    /// </summary>
+    internal static CatalogRowSet? CachedCatalogRows(CatalogView view, BatchContext batch, Database targetDatabase)
+    {
+        if (!view.Cacheable || targetDatabase.Name == Simulation.TempdbDatabaseName)
+            return null;
+        var simulation = batch.Connection.Simulation;
+        return simulation.Databases.TryGetValue(targetDatabase.Name, out var held) && ReferenceEquals(held, targetDatabase)
+            && BuiltInResources.ReadsUnfiltered(view, batch, targetDatabase)
+            ? simulation.CatalogRows.GetOrBuild(view, targetDatabase, batch, GenerateCatalogRows)
+            : null;
+    }
+
+    private static List<byte[]> GenerateCatalogRows(CatalogView view, BatchContext batch, Database database)
+    {
+        var rows = new List<byte[]>();
+        foreach (var values in view.RowGenerator(batch, database))
+            rows.Add(RowEncoder.EncodeRow(view.Columns, view.Conform(values)));
+        return rows;
     }
 
     /// <summary>
@@ -392,21 +435,27 @@ internal sealed partial class Selection
 
     /// <summary>
     /// Predicate-pushdown variant of <see cref="ForCatalogView(CatalogView,Database)"/>:
-    /// the WHERE equality <c>&lt;pushdownColumn&gt; = &lt;comparand&gt;</c> is
-    /// evaluated once per execution (the comparand is row-independent, so a column
-    /// resolver is never consulted) and handed to the view's
-    /// <see cref="CatalogView.FilteredRowGenerator"/> so it enumerates only
-    /// matching objects. The enclosing SELECT keeps applying the full WHERE as a
-    /// residual filter, so this only narrows the generator's output — never the
-    /// result. A NULL comparand yields no rows (<c>= NULL</c> is UNKNOWN for every
-    /// candidate). The comparand's value is resolved per execution (variables /
-    /// parameters differ between runs), keeping the compiled plan shareable across
-    /// sessions.
+    /// the WHERE equality <c>&lt;pushdownColumn&gt; = &lt;comparand&gt;</c> — or
+    /// the equality family of an <c>IN</c> list, one comparand per member — is
+    /// evaluated once per execution (each comparand holds one value for the
+    /// execution, so a column resolver is never consulted for this source) and
+    /// seeks the view's cached rows (<see cref="CatalogRowSet.Seek"/>), or, where
+    /// the read can't be served from the cache, narrows the view's
+    /// <see cref="CatalogView.FilteredRowGenerator"/> on a column it keys. The
+    /// enclosing SELECT keeps applying the full WHERE as a residual filter, so
+    /// this only narrows the source — never the result. Comparands that are all
+    /// NULL yield no rows (<c>= NULL</c> is UNKNOWN for every candidate). The
+    /// values are resolved per execution (variables / parameters differ between
+    /// runs), keeping the compiled plan shareable across sessions.
     /// </summary>
-    internal static Selection ForCatalogView(CatalogView view, Database targetDatabase, string pushdownColumn, Expression comparand)
+    internal static Selection ForCatalogView(CatalogView view, Database targetDatabase, string pushdownColumn, Expression[] comparands)
     {
         var (schema, columnNames) = CatalogViewShape(view);
-        var filteredGenerator = view.FilteredRowGenerator!;
+        var ordinal = Array.FindIndex(view.Columns, column => BuiltInToken.Equals(column.Name, pushdownColumn));
+        var filteredGenerator = comparands.Length == 1
+            && view.PushdownColumns is { } keyed && Array.Exists(keyed, column => BuiltInToken.Equals(column, pushdownColumn))
+            ? view.FilteredRowGenerator
+            : null;
         return new Selection(
             schema,
             columnNames,
@@ -414,21 +463,37 @@ internal sealed partial class Selection
             hasTopOrOffsetOrFetch: false,
             rowSource: (batch, outerResolver) =>
             {
-                // The comparand may name an enclosing query's column — the
+                // A comparand may name an enclosing query's column — the
                 // correlated `WHERE ic.object_id = t.object_id` of a CROSS
                 // APPLY or subquery body. That is one value for the whole of
                 // this execution, which is exactly what the seek needs, and it
                 // is how real plans the same query: a correlated catalog read
                 // is an index seek carrying OUTER REFERENCES, never a scan.
-                var value = comparand.Run(new RuntimeContext(
-                    outerResolver ?? (name => throw SimulatedSqlException.ColumnReferenceNotAllowed(name)), batch));
+                var runtime = new RuntimeContext(
+                    outerResolver ?? (name => throw SimulatedSqlException.ColumnReferenceNotAllowed(name)), batch);
+                var values = new SqlValue[comparands.Length];
+                var allNull = true;
+                for (var i = 0; i < comparands.Length; i++)
+                {
+                    values[i] = comparands[i].Run(runtime);
+                    allNull &= values[i].IsNull;
+                }
                 CatalogPushdownDiagnostics.Sink?.Add(
-                    value.IsNull ? $"SeekEmpty({view.Name}.{pushdownColumn})" : $"Seek({view.Name}.{pushdownColumn})");
-                var filter = new CatalogFilter(pushdownColumn, value);
+                    allNull ? $"SeekEmpty({view.Name}.{pushdownColumn})" : $"Seek({view.Name}.{pushdownColumn})");
                 PermissionEnforcement.CheckCatalogViewRead(batch, view, targetDatabase);
-                var gated = BuiltInResources.ApplyDmvGate(view, batch, filteredGenerator(batch, targetDatabase, filter));
+                if (CachedCatalogRows(view, batch, targetDatabase) is { } set)
+                    return set.Seek(ordinal, values);
+                // Past the cache, a column the view's own filtered generator
+                // keys narrows that; any other seek reads the whole view, which
+                // the residual predicate then filters.
+                if (filteredGenerator is null && !allNull)
+                    return ScanCatalogView(view, targetDatabase, batch, checkedRead: true);
+                var generated = filteredGenerator is not null
+                    ? filteredGenerator(batch, targetDatabase, new CatalogFilter(pushdownColumn, values[0]))
+                    : [];
+                var gated = BuiltInResources.ApplyDmvGate(view, batch, generated);
                 var rows = BuiltInResources.ApplyMetadataFilter(view, batch, targetDatabase, gated);
-                return rows.Select(values => RowEncoder.EncodeRow(view.Columns, view.Conform(values)));
+                return rows.Select(row => RowEncoder.EncodeRow(view.Columns, view.Conform(row)));
             });
     }
 
@@ -458,7 +523,13 @@ internal sealed partial class Selection
         new(schema, columnNames,
             hasOrderBy: false,
             hasTopOrOffsetOrFetch: false,
-            rowSource: (batch, outerResolver) => EnumerateValuesRows(schema, tuples, batch, outerResolver));
+            rowSource: (batch, outerResolver) => EnumerateValuesRows(schema, tuples, batch, outerResolver))
+        {
+            // One row merges into its reader like a FROM-less SELECT; a longer
+            // list is a constant scan whose values are drawn once each (probed
+            // 2026-09-28 against SQL Server 2025).
+            VolatileColumns = VolatileProjection.Of([.. tuples.SelectMany(tuple => tuple)], fixesValues: tuples.Count > 1),
+        };
 
     private static IEnumerable<byte[]> EnumerateValuesRows(SqlType[] schema, List<Expression[]> tuples, BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver)
     {
@@ -5085,6 +5156,7 @@ internal sealed partial class Selection
             : null)
         {
             ProjectionExpressions = [.. expressions],
+            VolatileColumns = VolatileProjection.Of(expressions, fixesValues: false),
             IsBareConstantRow = !containsSubquery && topCount is null && offsetCount is null && fetchCount is null
                 && excluders.TrueForAll(excluder => ConstantFolding.TryFoldPredicate(excluder, parseBatch.Parser, out var folded) && folded == true),
             // An empty scope, not an unknown one: as the first branch of a

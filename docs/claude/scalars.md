@@ -445,10 +445,10 @@ This is the *argument* rule; the slots these types can't reach at all — sortin
   Integer input is implicitly stringified and re-parsed (so `ISDATE(20260512)` = 1 via `'20260512'` matching `yyyyMMdd`; `ISDATE(1)` = 0 because `'1'` parses to year 1 < 1753).
   Float / decimal / non-integer-non-string types always return 0.
 - **`RAND([seed])`** returns `float`.
-  The defining behavior is the **runtime-constant** rule: a given `RAND(...)` call site produces ONE value reused across every row of the query — distinct call sites in the same projection each get their own constant.
-  The simulator implements this by caching the first-evaluation result on the `Rand` expression instance; a fresh parse (each batch / statement) gets a fresh cache.
-  Seeded form: any numeric / string-convertible seed coerces to `float`; the int passed to `new Random(int)` is XOR-folded from the 64-bit double's bits so small integer seeds (`1` vs `999999`) don't collapse to the same hash (their mantissas live in the high bits which a naive int cast would discard).
-  Determinism per seed is preserved but the values aren't byte-identical to SQL Server's undocumented seed algorithm.
+  The defining behavior is the **runtime-constant** rule: a call site that reads no row — `RAND()`, or a literal or variable seed — produces ONE value reused across every row of the query, and distinct call sites in the same projection each get their own.
+  The freeze lives in the executing statement's frame (`StatementContext.StatementScopedValues`), so a plan-cached statement draws afresh per execution.
+  A seed that reads the row reseeds per row instead: `RAND(b)` over `b` = 1, 2, 3 answers `RAND(1)`, `RAND(2)`, `RAND(3)` (probed 2026-09-28 against SQL Server 2025).
+  The generator is real's own (`RandGenerator` documents the reverse-engineered algorithm), so a seeded call answers real's value.
   NULL seed → NULL output.
 - **`CRYPT_GEN_RANDOM(length [, seed])`** draws fresh bytes per row as `varbinary(8000)`, unlike `RAND`'s per-site constant.
   It takes only an `int` length and a `varbinary` seed, stricter than the shared integer-argument seam (`tinyint` is Msg 8116 too), and a non-empty seed shorter than the length answers NULL as an out-of-range length does (probed 2026-09-26 against SQL Server 2025).

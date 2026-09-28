@@ -123,6 +123,14 @@ internal static partial class BuiltInResources
             : key.IsNameKeyed ? FilterByName(rows, key, targetDatabase, principalId)
             : FilterByObjectId(rows, key, targetDatabase, principalId);
 
+    /// <summary>
+    /// Whether <see cref="ApplyMetadataFilter"/> would hand this read every row
+    /// unchanged — raising Msg 916 as that filter would for a login with no
+    /// user in <paramref name="targetDatabase"/>.
+    /// </summary>
+    internal static bool ReadsUnfiltered(CatalogView view, BatchContext batch, Database targetDatabase) =>
+        FilteringPrincipal(view, batch, targetDatabase) is null || view.MetadataKey is null;
+
     // An unfiltered view of the session's own database asks nothing of the
     // principal, so it short-circuits ahead of the closure build; the
     // cross-database form still resolves it, because that resolution is what

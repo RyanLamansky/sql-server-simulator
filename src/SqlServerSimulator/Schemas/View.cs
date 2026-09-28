@@ -207,6 +207,14 @@ internal sealed class View(
     /// </summary>
     public bool IsWindowed;
 
+    /// <summary>
+    /// The body's per-call-varying projection columns
+    /// (<see cref="Parser.Selection.VolatileColumns"/>), settled at CREATE —
+    /// the body itself isn't parsed until a reference executes, and a reader
+    /// joining to the view re-draws them per output row.
+    /// </summary>
+    public Parser.VolatileProjection? VolatileColumns;
+
     /// <summary>The parsed body of a CTE target, which has no stored text to re-parse; null for a stored view.</summary>
     public Parser.Selection? UnstoredBody;
 

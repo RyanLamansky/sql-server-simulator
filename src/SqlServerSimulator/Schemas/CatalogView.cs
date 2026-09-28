@@ -172,6 +172,29 @@ internal sealed class CatalogView(
     public readonly bool StableWithinStatement = !name.StartsWith("dm_", StringComparison.Ordinal);
 
     /// <summary>
+    /// Whether <see cref="CatalogRowCache"/> may keep this view's rows across
+    /// statements — true only for views projecting nothing but schema metadata
+    /// whose every change invalidates the cache. Set once at registration by
+    /// <c>BuiltInResources</c>.
+    /// </summary>
+    internal bool Cacheable;
+
+    /// <summary>
+    /// For a <see cref="Cacheable"/> view, the columns a pushed-down equality
+    /// may seek on, best first; null otherwise. Set alongside
+    /// <see cref="Cacheable"/>.
+    /// </summary>
+    internal string[]? SeekColumns;
+
+    /// <summary>
+    /// For a <see cref="Cacheable"/> view with a column ordinary DML moves, the
+    /// state that column projects, read cheaply from the database; a cached
+    /// rowset stamped with a different value is regenerated. Null for a view
+    /// whose rows only DDL changes.
+    /// </summary>
+    internal Func<Database, Int128[]>? LiveStamp;
+
+    /// <summary>
     /// This view with <paramref name="extras"/> declared after its own
     /// columns, each carrying the same value on every row — the columns real
     /// lists that answer alike for every object the simulator can hold.

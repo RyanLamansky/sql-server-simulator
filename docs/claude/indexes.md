@@ -279,6 +279,11 @@ What it buys is the join's own strategy switch: a driving table cut to a handful
 Measured (WWI, `Sales.Orders JOIN Sales.OrderLines` with a one-week `BETWEEN` on the unindexed `OrderDate` — the shape real also has no index for): **77.3 ms → 26.6 ms** (~2.9×) and 59.2 MB → 8.4 MB allocated, against ~64 ms on live SQL Server.
 A year-wide range on the same shape (38% of the table, so the filter keeps filtering but the join still hashes) went 92.0 → 74.4 ms.
 
+### Catalog views: the row cache's indexes
+
+The catalog views have no heap and no `HeapSeekCache`; their seek counterpart is the cross-statement row cache, whose per-column hash indexes a pushed-down equality or `IN` list seeks and whose join-key indexes a hash join probes in place of its own build — see [`catalog-views.md`](catalog-views.md#cross-statement-row-cache-and-indexes).
+Like the seek cache, an index outlives the statement that built it, and is dropped with its rowset when the metadata it covers changes.
+
 ### ORDER BY elimination
 
 A `SELECT` from a single base table whose ORDER BY matches the **key order of some index / key** skips the buffer-and-sort entirely: `TryApplyOrderedScan` (traced `OrderedScan(table)`) enumerates the matching ordered view (the same `SortedSet<SqlValueKey>` the equality / range seeks build, ascending or — for an all-DESC order — reversed) and routes to the streaming projector.

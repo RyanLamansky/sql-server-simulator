@@ -94,6 +94,15 @@ internal sealed class StatementContext
     /// </summary>
     public Dictionary<(Schemas.CatalogView View, Database Database), byte[][]>? CatalogViewRows;
 
+#if DEBUG
+    /// <summary>
+    /// The cached catalog rowsets this statement has already checked against a
+    /// fresh generation (<see cref="Schemas.CatalogRowCache"/>), so the Debug
+    /// audit runs once per rowset per statement rather than once per read.
+    /// </summary>
+    public HashSet<Schemas.CatalogRowSet>? AuditedCatalogRowSets;
+#endif
+
     /// <summary>
     /// UTC timestamp captured at the top of each top-level statement and
     /// consumed by the current-time scalar functions (<c>GETDATE</c>,

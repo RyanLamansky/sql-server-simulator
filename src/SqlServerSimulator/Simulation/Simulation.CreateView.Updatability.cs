@@ -531,6 +531,7 @@ partial class Simulation
                 DerivedOutputColumns = baseTable is null && rejection != ViewUpdatabilityRejection.MultipleSources ? DerivedOutputColumnsOf(body) : null,
                 IsRowLimited = IsRowLimitedBody(body),
                 IsWindowed = IsWindowedBody(body),
+                VolatileColumns = body.VolatileColumns,
                 UnstoredBody = body,
             };
         }
