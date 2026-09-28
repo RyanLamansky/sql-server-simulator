@@ -95,9 +95,33 @@ internal sealed class FunctionBodyShape
     /// </summary>
     public static void NoteSideEffect(BatchContext batch, string operatorName, byte state)
     {
-        if (batch.FunctionBodyShape is { } shape)
-            shape.Violations.Add((batch.CurrentStatement.StartLine, SimulatedSqlException.SideEffectingOperatorInFunction(operatorName, state)));
+        if (batch.FunctionBodyShape is not { } shape)
+            return;
+        if (shape.ContextConnection)
+        {
+            // A built-in is refused under another operator's name there, which
+            // isn't modeled; it runs.
+            if (state == BuiltInOperatorState)
+                return;
+            state = ContextConnectionState;
+        }
+
+        shape.Violations.Add((batch.CurrentStatement.StartLine, SimulatedSqlException.SideEffectingOperatorInFunction(operatorName, state)));
     }
+
+    /// <summary>
+    /// Real's state on Msg 443 for a statement a SQLCLR function runs on its
+    /// context connection, whatever the operator (probed 2026-09-28 against
+    /// SQL Server 2025).
+    /// </summary>
+    public const byte ContextConnectionState = 2;
+
+    /// <summary>
+    /// True when the walk checks a command a SQLCLR function runs on its
+    /// context connection rather than a T-SQL function body: only Msg 443
+    /// applies there, at <see cref="ContextConnectionState"/>.
+    /// </summary>
+    public bool ContextConnection;
 
     /// <summary>
     /// Records a DML statement's write. A write to a <em>table variable</em> is

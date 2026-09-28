@@ -61,6 +61,12 @@ partial class Simulation
             case ReservedKeyword { Keyword: Keyword.Save }:
                 FunctionBodyShape.NoteSideEffect(batch, "SAVEPOINT", FunctionBodyShape.StatementOperatorState);
                 break;
+            case ReservedKeyword { Keyword: Keyword.Create } when shape.ContextConnection && NextIsTable(batch):
+                // A SQLCLR function's context connection refuses a table's
+                // creation as the side effect it is (probed 2026-09-28 against
+                // SQL Server 2025).
+                FunctionBodyShape.NoteSideEffect(batch, "CREATE TABLE", FunctionBodyShape.StatementOperatorState);
+                break;
             default:
                 break;
         }
@@ -71,6 +77,17 @@ partial class Simulation
         if (!isTransparentBlock && shape.ConditionalDepth == 0)
             shape.LastStatementIsReturn = isReturn;
         return opensConditional;
+    }
+
+    /// <summary>Whether the statement opening at <c>CREATE</c> creates a table.</summary>
+    private static bool NextIsTable(BatchContext batch)
+    {
+        var context = batch.Parser;
+        var checkpoint = context.SaveCheckpoint();
+        context.MoveNextOptional();
+        var isTable = context.Token is ReservedKeyword { Keyword: Keyword.Table };
+        context.RestoreCheckpoint(checkpoint);
+        return isTable;
     }
 
     /// <summary>

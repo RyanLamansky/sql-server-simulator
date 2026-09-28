@@ -152,6 +152,26 @@ internal abstract class ClrFunction(
     : UserDefinedFunction(schema, name, objectId, parameters, "", createDate)
 {
     public readonly ClrEntryPoint Entry = entry;
+
+    /// <summary>
+    /// Whether the method's <c>SqlFunction</c> attribute marks it
+    /// <c>DataAccessKind.Read</c> and <c>SystemDataAccessKind.Read</c>; either
+    /// lets it open the context connection, and the second alone reads only
+    /// the catalog through it.
+    /// </summary>
+    public readonly (bool User, bool System) DataAccess = entry.Method is { } method ? Clr.ClrAttributes.DataAccess(method) : default;
+
+    /// <summary>Whether the function may open the context connection.</summary>
+    public bool ReadsData => this.DataAccess.User || this.DataAccess.System;
+
+    /// <summary>
+    /// The state of the Msg 6522 a throw reports: 1 for a function that reads
+    /// data or takes a <c>max</c>-typed parameter, 2 otherwise (probed
+    /// 2026-09-28 against SQL Server 2025).
+    /// </summary>
+    public byte ThrowState => this.ReadsData || Array.Exists(this.Parameters, parameter => parameter.Type is NVarcharSqlType { length: SqlType.MaxLengthSentinel } or VarbinarySqlType { length: SqlType.MaxLengthSentinel })
+        ? (byte)1
+        : (byte)2;
 }
 
 /// <summary>

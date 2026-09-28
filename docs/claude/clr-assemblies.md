@@ -1,7 +1,8 @@
 # CLR assemblies and `EXTERNAL NAME` routines
 
 `CREATE ASSEMBLY` registers a .NET assembly from raw bytes; `CREATE FUNCTION` / `CREATE PROCEDURE` / `CREATE TRIGGER … AS EXTERNAL NAME` bind a scalar function, a table-valued function, a procedure or a trigger to a static method inside it, `CREATE AGGREGATE … EXTERNAL NAME` binds a user-defined aggregate to a class, and `CREATE TYPE … EXTERNAL NAME` a user-defined type.
-Behavior below was probed against the live SQL Server 2025 reference (17.0.4065.4) unless flagged otherwise; the procedure, table-valued function, aggregate, user-defined type and trigger behavior was probed 2026-09-28 with the same .NET Framework 4.8 classes `ClrFrameworkFixture` compiles.
+A routine reaches back into the calling session through the context connection, `new SqlConnection("context connection=true")`.
+Behavior below was probed against the live SQL Server 2025 reference (17.0.4065.4) unless flagged otherwise; the procedure, table-valued function, aggregate, user-defined type, trigger and context-connection behavior was probed 2026-09-28 with the same .NET Framework 4.8 classes `ClrFrameworkFixture` compiles.
 
 ## The `EnableClr` gate
 
@@ -55,9 +56,9 @@ A .NET Framework SQLCLR assembly references `System.Data, Version=4.0.0.0` for b
 .NET's own `System.Data` facade forwards the first family onward, but sends the second to `System.Data.SqlClient` — an assembly that doesn't exist — and has no `SqlContext` or `SqlPipe` at all.
 So every registered assembly loads into a `SqlAssemblyLoadContext` (`Clr/ClrHost.cs`) that answers two names itself:
 
-- **`Microsoft.SqlServer.Server`** is the `SqlServerSimulator.ClrShim` project: `SqlContext`, `SqlPipe`, `SqlDataRecord`, `SqlMetaData`, `SqlTriggerContext`, the routine attributes and their enums (`TriggerAction` with Framework's whole DDL roster), `IBinarySerialize` and `InvalidUdtException`, with Framework's member signatures for everything it carries (see Not modeled yet for what it doesn't).
+- **`Microsoft.SqlServer.Server`** is the `SqlServerSimulator.ClrShim` project: `SqlContext`, `SqlPipe`, `SqlDataRecord`, `SqlMetaData`, `SqlTriggerContext`, the routine attributes and their enums (`TriggerAction` with Framework's whole DDL roster), `IBinarySerialize` and `InvalidUdtException`, and the in-process provider's `System.Data.SqlClient` types — `SqlConnection`, `SqlCommand`, `SqlParameter` and its collection, `SqlDataReader`, `SqlTransaction`, `SqlException` / `SqlError` and `SqlInfoMessageEventArgs` — with Framework's member signatures for everything it carries (see Not modeled yet for what it doesn't).
   The simulator embeds its build as a resource and never references it, so none of its public types reach a consumer; its name matches the NuGet package's, so a .NET-targeted assembly built against that package lands on the same types.
-- **`System.Data`** is generated at first use: a manifest-only assembly whose every type is a forwarder — the runtime facade's own list, each entry pointed at the assembly it really resolves to, plus one per public type of the shim.
+- **`System.Data`** is generated at first use: a manifest-only assembly whose every type is a forwarder — the runtime facade's own list, each entry pointed at the assembly it really resolves to, plus one per public type of the shim, which is what sends a Framework assembly's `System.Data.SqlClient` references there rather than to the client assembly the facade names.
   Forwarding rather than copying is what keeps `SqlInt32` and friends the very types `ClrTypeMarshaller` handles.
 
 Both load once per process into a non-collectible context the collectible per-assembly contexts share, so `DROP ASSEMBLY` never unloads them, and nothing is built until an assembly referencing either name first loads.
@@ -81,6 +82,8 @@ The tests reach this path with a real Framework-shaped assembly: `ClrFrameworkFi
 | Mutable (non-`initonly`, non-`literal`) static field, SAFE only | **Msg 6211** |
 | Module MVID already registered under another name | **Msg 6285** |
 | Name already registered | **Msg 6246** |
+
+The C# compiler's lambda cache — `<>c.<>9__0_0`, a static field it never marks `initonly` — is exempt from Msg 6211: real registers a SAFE assembly holding one (probed 2026-09-28).
 
 `EXTERNAL_ACCESS` and `UNSAFE` opt out of the API restrictions, matching real's permission ladder; the malformed / reference / MVID / duplicate-name checks apply at every permission set.
 
@@ -122,7 +125,7 @@ A string return value or output parameter longer than its declared `nvarchar(n)`
 
 ## What a throw reports
 
-Anything a routine throws surfaces as **Msg 6522** — state 1 from a procedure, state 2 from a scalar function, a table-valued function's init method and an aggregate — and a throw from `FillRow` as **Msg 6260** state 1.
+Anything a routine throws surfaces as **Msg 6522** — state 1 from a procedure, state 2 from a scalar function, a table-valued function's init method and an aggregate, save a function marked to read data or taking a `max`-typed parameter, which is state 1 — and a throw from `FillRow` as **Msg 6260** state 1.
 The text carries the exception as the server's host writes it (`Clr/ClrExceptionReport.cs`): `type: message`, then the type alone, then an `   at …` line per frame, every line CRLF-ended, and an argument exception's parameter on a `Parameter name:` line of its own as .NET Framework words it.
 Only the frames a routine author can see are kept — the routine's assembly and the public members of the shim — so the reflection plumbing never shows, as the server's hosting frames never do.
 The optimizing JIT turns a routine's last call into a tail call, which removes the routine's own frame, so the report restores the method the simulator invoked as its last frame; a frame a tail call removed from between the two can't be recovered.
@@ -223,8 +226,37 @@ The trigger fires where a T-SQL one would (`Simulation.ClrTrigger.cs`, reached f
 
 `SqlContext.TriggerContext` describes the fire: `TriggerAction` is the DML verb or the DDL event type's number (`sys.trigger_event_types.type`, which is what Framework's enum numbers), `ColumnCount` the parent's column count (0 for DDL), `IsUpdatedColumn(i)` true for every column of an `INSERT` or `DELETE` and for the `SET` clause's of an `UPDATE`, out of range throwing `IndexOutOfRangeException` from the context's own frame, and `EventData` the DDL event's document (`null` for DML).
 `SqlContext.Pipe` sends as a procedure's does, save that a message reports **line 1**; a result set reaches the client among the firing statement's outcomes.
-A procedure reads a null `TriggerContext` and a function the no-data-access refusal, as `Pipe`.
+A procedure reads a null `TriggerContext` and a function the no-data-access refusal, as `Pipe`, save one marked to read data, which reads both as null.
 A throw is Msg 6522 state 1 at line 1 naming the trigger, followed by Msg 3621 at line 1, and ends the firing statement and batch and its transaction as a T-SQL body's error does (a TRY block catches it with `XACT_STATE()` 0).
+
+## The context connection
+
+`new SqlConnection("context connection=true")` opens the calling session to the routine: each command's text is a batch of its own there (`Simulation.ClrContextConnection`), inside the caller's transaction and security context, one level deeper in `@@NESTLEVEL` than the routine, with no procedure frame (a value-form `RETURN` is Msg 178).
+The keyword and its value are case-insensitive; any other keyword but `Type System Version` beside it is the provider's `InvalidOperationException`, and any other connection string is the code-access-security `SecurityException` in a `SAFE` assembly.
+Who may open it:
+
+- A procedure or trigger always; a function or a table-valued function's init method only when its `SqlFunction` attribute sets `DataAccess` or `SystemDataAccess` to `Read` — otherwise `Open` throws the no-data-access refusal — and `FillRow`, an aggregate and a type's members never.
+- A function marked so reads `SqlContext.Pipe` and `TriggerContext` as null; one marked `SystemDataAccessKind.Read` alone reads the catalog but no user table, view or function (**Msg 589** state 3), and a function's command that writes — DML to a table, `SELECT … INTO`, `CREATE TABLE`, the transaction statements, `PRINT` — is **Msg 443** at state 2.
+- One per routine at a time ("The context connection is already in use."), one reader at a time on it, and a command on a connection holding a `SqlTransaction` must name it; `PacketSize` and `WorkstationId` refuse, and an open connection reports the session's database, an empty data source and the server version.
+
+A command's outcomes follow the provider:
+
+- `ExecuteNonQuery` runs the whole batch — past a statement's error, as a client batch does — then throws what it met as one `SqlException` (first error's number, class, state and procedure, line 0), and answers the rows its statements changed, -1 when none did.
+- `ExecuteScalar` answers the first result set's first value, `DBNull` for a NULL and null for no row, and raises only the errors before that result set — and the one that cut it short before its first row.
+- `ExecuteReader` walks the result sets; the error cutting one short surfaces from the `Read` that runs out of rows, one between result sets from `NextResult`, and the batch's later result sets stay readable after either.
+  Each value's provider-specific form is its `SqlTypes` struct — a character string carrying its collation's locale — or its plain form for `date`, `time`, `datetime2` and `datetimeoffset`, and a `sql_variant` its base value's; a typed getter reads only its own column type (`InvalidCastException` otherwise), a NULL throws `SqlNullValueException`, and a read off a row "Invalid attempt to read when no data is present.".
+- What a command prints reaches only the connection's `InfoMessage` handlers, as one event per command; a CLR procedure a command calls sends its pipe output there too.
+- Parameters bind by name with or without their `@`; an untyped one takes its value's type (a string as `nvarchar` of its own length, a `decimal` at its own precision and scale), a sized one cuts a longer string or binary value, and output, input-output and return-value parameters come back in both forms.
+  `CommandType.StoredProcedure` runs `EXEC` of the named procedure.
+
+`SqlPipe.ExecuteAndSend` runs a command with everything it produces — result sets, row counts, messages, and its error ahead of the routine's own Msg 6522 — going to the client, and `SqlPipe.Send(SqlDataReader)` sends what a reader has left: the rows after the one it is on, then every later result set.
+
+A trigger's commands carry its frame, so they read `INSERTED`, `DELETED`, `EVENTDATA()` and `COLUMNS_UPDATED()` — which dynamic SQL inside them does not (Msg 208).
+The commands of one call share its `#temp` scope, database (`ChangeDatabase` is a `USE`) and `SET` options, all reverting when the routine returns.
+
+The transaction held when the routine was entered — an explicit one, or a trigger's firing statement — may not be ended inside it: a `ROLLBACK` is **Msg 3994** state 2 and a `COMMIT` that would end it **Msg 3990**, and either, or an error that would roll it back (`XACT_ABORT`, which a trigger runs under, or a batch-aborting conversion error), leaves it ended with `@@TRANCOUNT` unchanged.
+When the routine returns, an ended transaction is **Msg 3991** and a changed `@@TRANCOUNT` **Msg 3992**; when it throws, either is **Msg 6549** — 6522's report under its own wording, closed by "User transaction, if any, will be rolled back." — and each rolls the transaction back and ends the batch, or under a `TRY` leaves it uncommittable for the batch's end to report (Msg 3998).
+`SqlConnection.BeginTransaction` is `BEGIN TRANSACTION` in the session, nesting inside the caller's; a transaction the routine began with none held on entry rolls back quietly when it returns.
 
 ## Catalog surface
 
@@ -266,18 +298,23 @@ The strong-named case is unprobed.
 - **A CLR type's `Parse` failing while an `INSERT` writes a column is Msg 6522 state 2 here and state 1 on real**, which reports state 2 for the same failure in a `DECLARE` or `SET`.
 - **An aggregate's state never leaves memory.**
   One instance accumulates each whole group, so `Merge` is never called and a `Format.UserDefined` aggregate's `Read` / `Write` never run; real may serialize state between rows, which an aggregate that loses a field in `Write` would show.
+- **A context-connection error's report shows the provider's public frames only.**
+  Real's names `SqlConnection.OnError`, `SqlInternalConnectionSmi` and the rest of the in-process plumbing, which has no counterpart here.
+- **A function's context-connection command that writes is refused whole before any of it runs**, where real refuses the statement when it runs — which shows only through `ExecuteScalar`, which reads no further than its first result set.
+- **An untyped `decimal` parameter reports base type `decimal`** through `SQL_VARIANT_PROPERTY`, where real's reports `numeric`.
+- **A command's result sets are read to the end when it runs**, so a routine that writes between two `Read` calls can't change what the reader returns, as it could on real.
 - **`sp_describe_first_result_set`'s Msg 11515 comes from the metadata-only mode**, so a plain `SET FMTONLY ON` followed by `EXEC` of a CLR procedure raises it too; that shape is unprobed.
 - Auto-generated `assembly_id` values start at 65536 and increment, which is what a fresh database showed (probed 2026-09-28); a server that has seen other assemblies hands out later ids.
 - The `Microsoft.SqlServer.Types` system row reports a fixed SQL Server 2025 RTM `create_date` / `modify_date` rather than a resource-database build stamp.
 
 ## Not modeled yet
 
-- **The context connection**: `SqlPipe.ExecuteAndSend`, `SqlPipe.Send(SqlDataReader)` and `new SqlConnection("context connection=true")` all name `System.Data.SqlClient` types, which neither the shim nor .NET supplies, so a routine using them fails to load its method and reports Msg 6522 (a `TypeLoadException`).
-  This is also the only way a CLR trigger reads `INSERTED` / `DELETED`, which real serves it (probed 2026-09-28).
+- **Context-connection shapes**: a function's `SELECT` over a side-effecting built-in (real's Msg 443 names it `SELECT WITHOUT QUERY`) and its `EXEC sp_executesql` (Msg 557) run; `GetSchemaTable`, `ExecuteXmlReader`, the async methods and `FireInfoMessageEventOnUserErrors`; a `SqlTransaction` the server's own rollback ended; a type's members and an aggregate marked to read data; and the `hierarchyid` and spatial columns as their `Microsoft.SqlServer.Types` instances (a reader serves their bytes).
+- **Connections other than the context connection** from an `EXTERNAL_ACCESS` or `UNSAFE` assembly throw `NotSupportedException` inside Msg 6522 rather than connecting.
 - CLR type members beyond the modeled shapes: a member through a three-part column name, an `UPDATE … FROM` alias target's mutator, `SqlMethod(OnNullCall = false)` / `InvokeIfReceiverIsNull`, `SqlFacet` on a member, `ValidationMethodName`, and the `IsDeterministic` / `IsPrecise` flags a persisted computed column or index would read.
 - A CLR type as `sql_variant`'s base, in a partition function or an index's `INCLUDE`, an `ALTER ASSEMBLY` that re-shapes a registered class, and a client-side materialized instance (`GetValue` returns the bytes).
 - `OBJECT_ID(name, 'TA')` and the other CLR object-type codes as the filter argument.
-- `SqlMetaData`'s constructors taking a `SortOrder` or a UDT type, and a function marked `DataAccessKind.Read` reading `SqlContext.Pipe` (it gets the no-data-access refusal every function does).
+- `SqlMetaData`'s constructors taking a `SortOrder` or a UDT type.
 - The `SqlUserDefinedAggregate` flags `IsNullIfEmpty` / `IsInvariantTo*` and `MaxByteSize` — read by real's optimizer and serializer, ignored here.
 - `INSERT` into a CLR table-valued function reports Msg 208 where real reports its "derived table is not updatable" error, a gap shared with the T-SQL kinds.
 - Plain-CLR parameter and return forms real also accepts (`string`, `int?`, `SqlChars`, `SqlBytes`) — only the `System.Data.SqlTypes` family binds, save a procedure's `int` / `int?` status.

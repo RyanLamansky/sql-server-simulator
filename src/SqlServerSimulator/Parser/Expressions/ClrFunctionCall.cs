@@ -23,9 +23,11 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// when the routine opted into <c>RETURNS NULL ON NULL INPUT</c>.
 /// </para>
 /// <para>
-/// Anything the routine throws surfaces as Msg 6522 state 2, as does a
-/// string return value longer than the declared <c>nvarchar(n)</c>, matching
-/// real SQL Server's wrapper around a faulted user routine.
+/// Anything the routine throws surfaces as Msg 6522 at the function's
+/// <see cref="ClrFunction.ThrowState"/>, as does a string return value longer
+/// than the declared <c>nvarchar(n)</c>, matching real SQL Server's wrapper
+/// around a faulted user routine. A function marked to read data runs with a
+/// context connection (<see cref="Simulation.ClrContextConnection"/>).
 /// </para>
 /// </remarks>
 internal sealed class ClrFunctionCall(ClrScalarFunction function, Expression?[] arguments) : Expression
@@ -58,16 +60,31 @@ internal sealed class ClrFunctionCall(ClrScalarFunction function, Expression?[] 
             values[i] = ClrTypeMarshaller.ToClr(value, parameters[i].ParameterType);
         }
 
-        object? result;
+        var entry = this.function.Entry;
+        var contextConnection = entry.Assembly.UsesServerContext && this.function.ReadsData
+            ? new Simulation.ClrContextConnection(runtime.Batch, this.function.Name, entry.Assembly, pipe: null, triggerFrame: null, isFunction: true, restrictsUserData: !this.function.DataAccess.User)
+            : null;
+        object? result = null;
+        string? report = null;
+        SimulatedSqlException? ending;
         try
         {
-            using (this.function.Entry.Assembly.UsesServerContext ? ClrHost.Enter(pipe: null) : default(ClrHost.RoutineScope?))
-                result = this.function.Entry.Method!.Invoke(null, values);
+            using (entry.Assembly.UsesServerContext ? ClrHost.Enter(pipe: null, contextConnection: contextConnection) : default(ClrHost.RoutineScope?))
+                result = entry.Method!.Invoke(null, values);
         }
         catch (TargetInvocationException ex) when (ex.InnerException is not null)
         {
-            throw SimulatedSqlException.ClrRoutineThrew(this.function.Name, ClrExceptionReport.Describe(ex.InnerException, this.function.Entry.Method), state: 2);
+            report = ClrExceptionReport.Describe(ex.InnerException, entry.Method);
         }
+        finally
+        {
+            ending = contextConnection?.Leave(report);
+        }
+
+        if (report is not null)
+            throw ending ?? SimulatedSqlException.ClrRoutineThrew(this.function.Name, report, this.function.ThrowState);
+        if (ending is not null)
+            throw ending;
 
         var returned = ClrTypeMarshaller.FromClr(result, this.function.ReturnType);
         return ClrTypeMarshaller.OverflowedWidth(returned, this.function.ReturnType) is { } width

@@ -151,24 +151,37 @@ partial class Simulation
         }
 
         var pipe = new ClrProcedurePipe(outerBatch, attributionName, outcomes);
-        object? result;
+        object? result = null;
+        string? report = null;
+        SimulatedSqlException? ending;
         connection.NestingLevel++;
+        var contextConnection = entry.Assembly.UsesServerContext
+            ? new ClrContextConnection(outerBatch, procedure.Name, entry.Assembly, pipe, triggerFrame: null, isFunction: false)
+            : null;
         try
         {
-            using (entry.Assembly.UsesServerContext ? ClrHost.Enter(pipe.Sink) : default(ClrHost.RoutineScope?))
+            using (entry.Assembly.UsesServerContext ? ClrHost.Enter(pipe.Sink, contextConnection: contextConnection) : default(ClrHost.RoutineScope?))
                 result = method.Invoke(null, arguments);
         }
         catch (TargetInvocationException ex) when (ex.InnerException is not null)
         {
-            pipe.Settle(completed: false);
-            return Attributed(SimulatedSqlException.ClrRoutineThrew(procedure.Name, ClrExceptionReport.Describe(ex.InnerException, method), state: 1));
+            report = ClrExceptionReport.Describe(ex.InnerException, method);
         }
         finally
         {
             connection.NestingLevel--;
+            ending = contextConnection?.Leave(report);
+        }
+
+        if (report is not null)
+        {
+            pipe.Settle(completed: false);
+            return Attributed(ending ?? SimulatedSqlException.ClrRoutineThrew(procedure.Name, report, state: 1));
         }
 
         pipe.Settle(completed: true);
+        if (ending is not null)
+            return Attributed(ending);
 
         var written = new SqlValue?[clrParameters.Length];
         for (var i = 0; i < clrParameters.Length; i++)
@@ -209,7 +222,7 @@ partial class Simulation
     /// it ends, its column types built from the <c>SqlMetaData</c> the
     /// procedure declared.
     /// </summary>
-    private sealed class ClrProcedurePipe
+    internal sealed class ClrProcedurePipe
     {
         public readonly ClrPipeSink Sink;
 
@@ -236,6 +249,13 @@ partial class Simulation
             this.lineNumber = lineNumber;
             this.Sink = new ClrPipeSink(this.Message, this.Start, this.Row, this.End);
         }
+
+        /// <summary>
+        /// Adds what a context-connection command sent through
+        /// <c>SqlPipe.ExecuteAndSend</c> or <c>SqlPipe.Send(SqlDataReader)</c>,
+        /// as it came.
+        /// </summary>
+        public void Forward(SimulatedStatementOutcome outcome) => this.outcomes.Add(outcome);
 
         private void Message(string text) => this.outcomes.Add(new SimulatedInfoOutcome(new SimulatedError(
             @class: 0,

@@ -366,7 +366,15 @@ internal static class PermissionEnforcement
     /// </summary>
     internal static void CheckReadSources(BatchContext batch, List<ReferencedSecurable>? securables, Dictionary<int, ColumnReadTarget>? readColumns = null)
     {
-        if (securables is null || securables.Count == 0 || BypassesEverywhere(batch.Connection))
+        if (securables is null || securables.Count == 0)
+            return;
+        // A SQLCLR function marked SystemDataAccessKind.Read alone reads the
+        // catalog through its context connection but no user object — a
+        // table, a view or a function (probed 2026-09-28 against SQL Server
+        // 2025).
+        if (batch.RestrictsUserData && securables.Exists(securable => securable.ObjectId > 0))
+            throw SimulatedSqlException.RestrictedDataAccess();
+        if (BypassesEverywhere(batch.Connection))
             return;
         foreach (var s in securables)
         {

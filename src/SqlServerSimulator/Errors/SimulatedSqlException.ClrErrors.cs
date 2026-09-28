@@ -118,11 +118,64 @@ partial class SimulatedSqlException
     /// user's code and the public <c>Microsoft.SqlServer.Server</c> surface,
     /// each line CRLF-ended (see <see cref="Clr.ClrExceptionReport"/>). The
     /// state is 1 for a procedure and 2 for a function, a table-valued
-    /// function's init call and an aggregate (probed 2026-09-28 against SQL
-    /// Server 2025).
+    /// function's init call and an aggregate — save a function that may read
+    /// data or takes a <c>max</c>-typed parameter, whose throw is state 1
+    /// (probed 2026-09-28 against SQL Server 2025).
     /// </summary>
     internal static SimulatedSqlException ClrRoutineThrew(string routineName, string report, byte state) =>
         new($"A .NET Framework error occurred during execution of user-defined routine or aggregate \"{routineName}\": \r\n{report}.", 6522, 16, state);
+
+    /// <summary>
+    /// Mimics SQL Server error 6549: a CLR routine threw after its context
+    /// connection ended, or left changed, the transaction the caller held on
+    /// entry — 6522's report under a different wording, which the server
+    /// follows by rolling the transaction back (probed 2026-09-28 against SQL
+    /// Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException ClrRoutineThrewEndingTransaction(string routineName, string report) =>
+        new($"A .NET Framework error occurred during execution of user defined routine or aggregate '{routineName}': \r\n{report}. User transaction, if any, will be rolled back.", 6549, 16, 1) { TerminatesBatch = true };
+
+    /// <summary>
+    /// Mimics SQL Server error 3991: a CLR routine returned after its context
+    /// connection ended the transaction the caller held on entry — by a
+    /// refused <c>COMMIT</c> or <c>ROLLBACK</c>, or an error that ends a
+    /// transaction. The server rolls the transaction back and ends the batch.
+    /// </summary>
+    internal static SimulatedSqlException ClrContextTransactionEnded(string routineName) =>
+        new($"The context transaction which was active before entering user defined routine, trigger or aggregate \"{routineName}\" has been ended inside of it, which is not allowed. Change application logic to enforce strict transaction nesting.", 3991, 16, 1) { TerminatesBatch = true };
+
+    /// <summary>
+    /// Mimics SQL Server error 3992: a CLR routine returned with a different
+    /// <c>@@TRANCOUNT</c> from the one the caller's transaction had on entry.
+    /// The server rolls the transaction back and ends the batch.
+    /// </summary>
+    internal static SimulatedSqlException ClrTransactionCountChanged(string routineName, int entered, int left) =>
+        new($"Transaction count has been changed from {entered} to {left} inside of user defined routine, trigger or aggregate \"{routineName}\". This is not allowed and user transaction will be rolled back. Change application logic to enforce strict transaction nesting.", 3992, 16, 1) { TerminatesBatch = true };
+
+    /// <summary>
+    /// Mimics SQL Server error 3994: a CLR routine's context connection ran a
+    /// <c>ROLLBACK</c> of a transaction the routine didn't start. The
+    /// transaction counts as ended from then on.
+    /// </summary>
+    internal static SimulatedSqlException ClrRollbackRefused() =>
+        new("User defined routine, trigger or aggregate tried to rollback a transaction that is not started in that CLR level. An exception will be thrown to prevent execution of rest of the user defined routine, trigger or aggregate.", 3994, 16, 2);
+
+    /// <summary>
+    /// Mimics SQL Server error 3990: a CLR routine's context connection ran a
+    /// <c>COMMIT</c> that would end a transaction the routine didn't start.
+    /// The transaction counts as ended from then on.
+    /// </summary>
+    internal static SimulatedSqlException ClrCommitRefused() =>
+        new("Transaction is not allowed to commit inside of a user defined routine, trigger or aggregate because the transaction is not started in that CLR level. Change application logic to enforce strict transaction nesting.", 3990, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 589: a SQLCLR function marked
+    /// <c>SystemDataAccessKind.Read</c> but not <c>DataAccessKind.Read</c> read
+    /// a user object through its context connection (probed 2026-09-28
+    /// against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException RestrictedDataAccess() =>
+        new("This statement has attempted to access data whose access is restricted by the assembly.", 589, 16, 3);
 
     /// <summary>
     /// Mimics SQL Server error 6260: a CLR table-valued function's

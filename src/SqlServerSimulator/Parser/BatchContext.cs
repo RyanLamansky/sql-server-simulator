@@ -770,7 +770,10 @@ internal sealed class BatchContext
     /// (<see cref="OwnershipChainOwnerId"/>); a reference to an object with
     /// another owner breaks the chain and is checked anyway. Dynamic SQL (<c>EXEC('…')</c> / <c>sp_executesql</c>) breaks
     /// the chain: its <see cref="ProcFrame"/> carries
-    /// <see cref="Parser.ProcFrame.IsDynamicSql"/>, so checks re-engage. The
+    /// <see cref="Parser.ProcFrame.IsDynamicSql"/>, so checks re-engage, as
+    /// they do for a SQLCLR routine's context-connection command
+    /// (<see cref="IsContextConnectionCommand"/>) though it carries a trigger's
+    /// frame. The
     /// <c>dbo</c> bypass is a separate, cheaper short-circuit the enforcement
     /// helper applies on top of this.
     /// Also false while a module body is being bound at CREATE time
@@ -780,7 +783,7 @@ internal sealed class BatchContext
     /// </summary>
     public bool EnforcesPermissions =>
         !this.CreateTimeBinding
-        && this.UdfFrame is null && this.TriggerFrame is null
+        && this.UdfFrame is null && (this.TriggerFrame is null || this.IsContextConnectionCommand)
         && (this.ProcFrame is null || this.ProcFrame.IsDynamicSql);
 
     /// <summary>
@@ -1959,6 +1962,53 @@ internal sealed class BatchContext
         this.Variables = new Dictionary<string, VariableSlot>(BatchContext.VariableNameComparer);
         this.TriggerFrame = triggerFrame;
         this.Parser = new ParserContext(triggerBodyCommand, this);
+    }
+
+    /// <summary>
+    /// Constructs a batch for one command a SQLCLR routine runs on its context
+    /// connection. The command's parameters pre-seed
+    /// <paramref name="variables"/>; a trigger's routine passes its
+    /// <paramref name="triggerFrame"/>, so the command reads the firing
+    /// statement's <c>INSERTED</c> / <c>DELETED</c> and <c>EVENTDATA()</c>
+    /// as a T-SQL body does. No procedure frame is set: the text is a batch of
+    /// its own, where a value-form <c>RETURN</c> is Msg 178 (probed 2026-09-28
+    /// against SQL Server 2025).
+    /// </summary>
+    public BatchContext(SimulatedDbCommand contextCommand, Dictionary<string, VariableSlot> variables, TriggerFrame? triggerFrame)
+    {
+        this.Variables = variables;
+        this.TriggerFrame = triggerFrame;
+        this.IsContextConnectionCommand = true;
+        this.ForceTempTableScope = true;
+        this.Parser = new ParserContext(contextCommand, this);
+    }
+
+    /// <summary>
+    /// True for a command a SQLCLR routine runs on its context connection
+    /// (see the constructor taking one), which carries a trigger's frame for
+    /// its pseudo-tables but is checked for permissions as the caller's own
+    /// statement is.
+    /// </summary>
+    public readonly bool IsContextConnectionCommand;
+
+    /// <summary>
+    /// Set on a context-connection command of a SQLCLR function marked
+    /// <c>SystemDataAccessKind.Read</c> but not <c>DataAccessKind.Read</c>,
+    /// whose reads of a user object are Msg 589.
+    /// </summary>
+    public bool RestrictsUserData;
+
+    /// <summary>
+    /// Joins the temp-table scope <paramref name="scopeId"/> rather than
+    /// drawing one: every command one SQLCLR routine runs on its context
+    /// connection shares the routine's scope, so a <c>#temp</c> one command
+    /// creates is there for the next and goes when the routine returns
+    /// (probed 2026-09-28 against SQL Server 2025).
+    /// </summary>
+    public void JoinTempTableScope(int scopeId, List<HeapTable> scopedTempTables)
+    {
+        this.tempTableScopeId = scopeId;
+        this.ScopedTempTables = scopedTempTables;
     }
 
     private static Dictionary<string, VariableSlot> SeedVariables(SimulatedDbCommand command)

@@ -244,6 +244,12 @@ internal static class ClrAssemblyMetadata
                     continue;
                 if ((field.Attributes & (FieldAttributes.InitOnly | FieldAttributes.Literal)) != 0)
                     continue;
+                // The C# compiler's lambda cache — `<>c.<>9__0_0`, mutable
+                // and static — is exempt: real registers a SAFE assembly
+                // holding one (probed 2026-09-28 against SQL Server 2025).
+                // No source-declared name can start with `<`.
+                if (metadata.StringComparer.StartsWith(field.Name, "<") || metadata.StringComparer.StartsWith(typeDefinition.Name, "<"))
+                    continue;
 
                 throw SimulatedSqlException.AssemblyMutableStaticField(
                     verb,

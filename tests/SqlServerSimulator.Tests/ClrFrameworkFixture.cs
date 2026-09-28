@@ -9,9 +9,11 @@ namespace SqlServerSimulator;
 /// <c>mscorlib</c> and <c>System.Data, Version=4.0.0.0</c> and reaches
 /// <c>Microsoft.SqlServer.Server.SqlContext</c> / <c>SqlPipe</c> /
 /// <c>SqlDataRecord</c> / <c>SqlMetaData</c> and the routine attributes
-/// through the latter. The same classes registered on SQL Server 2025 are
-/// what the procedure, table-valued function, aggregate, user-defined type and
-/// trigger behavior was probed with (2026-09-28).
+/// through the latter, and the in-process provider's
+/// <c>System.Data.SqlClient</c> types for the context connection. The same
+/// classes registered on SQL Server 2025 are what the procedure,
+/// table-valued function, aggregate, user-defined type, trigger and context
+/// connection behavior was probed with (2026-09-28).
 /// </summary>
 /// <remarks>
 /// The repo keeps no binary fixtures, so the bytes are compiled once per test
@@ -54,7 +56,9 @@ internal static class ClrFrameworkFixture
         using System;
         using System.Collections;
         using System.Data;
+        using System.Data.SqlClient;
         using System.Data.SqlTypes;
+        using System.Globalization;
         using System.IO;
         using System.Text;
         using Microsoft.SqlServer.Server;
@@ -554,6 +558,189 @@ internal static class ClrFrameworkFixture
 
             [SqlFunction]
             public static SqlBoolean FuncTrig() { return new SqlBoolean(SqlContext.TriggerContext != null); }
+        }
+
+        public static class Ctx
+        {
+            static SqlConnection Open() { SqlConnection c = new SqlConnection("context connection=true"); c.Open(); return c; }
+
+            static void Send(string s) { SqlContext.Pipe.Send(s); }
+
+            static string Show(object o) { return o == null ? "(null)" : o is DBNull ? "DBNull" : o.GetType().Name + ":" + Convert.ToString(o, CultureInfo.InvariantCulture); }
+
+            [SqlProcedure]
+            public static void Scalar(SqlString sql) { using (SqlConnection c = Open()) { Send(Show(new SqlCommand(sql.Value, c).ExecuteScalar())); } }
+
+            [SqlProcedure]
+            public static void NonQuery(SqlString sql) { using (SqlConnection c = Open()) { Send("affected=" + new SqlCommand(sql.Value, c).ExecuteNonQuery()); } }
+
+            [SqlProcedure]
+            public static void Reader(SqlString sql)
+            {
+                using (SqlConnection c = Open())
+                using (SqlDataReader r = new SqlCommand(sql.Value, c).ExecuteReader())
+                {
+                    do
+                    {
+                        StringBuilder h = new StringBuilder("cols");
+                        for (int i = 0; i < r.FieldCount; i++)
+                            h.Append(' ').Append(r.GetName(i)).Append(':').Append(r.GetDataTypeName(i)).Append(':').Append(r.GetFieldType(i).Name).Append(':').Append(r.GetProviderSpecificFieldType(i).Name);
+                        Send(h.ToString());
+                        while (r.Read())
+                        {
+                            StringBuilder b = new StringBuilder("row");
+                            for (int i = 0; i < r.FieldCount; i++)
+                                b.Append(' ').Append(r.IsDBNull(i) ? "NULL" : Show(r.GetValue(i))).Append('/').Append(r.GetSqlValue(i).GetType().Name);
+                            Send(b.ToString());
+                        }
+                    } while (r.NextResult());
+                    Send("recs=" + r.RecordsAffected);
+                }
+            }
+
+            [SqlProcedure]
+            public static void Typed()
+            {
+                using (SqlConnection c = Open())
+                using (SqlDataReader r = new SqlCommand("select cast(1 as int), cast(2 as bigint), cast(1.5 as decimal(5,2)), 'v', cast('2020-01-02' as date), cast('12:34' as time), cast('<a/>' as xml), cast(null as int), cast(7 as sql_variant)", c).ExecuteReader())
+                {
+                    r.Read();
+                    Send(r.GetInt32(0) + " " + r.GetInt64(1) + " " + r.GetDecimal(2).ToString(CultureInfo.InvariantCulture) + " " + r.GetString(3) + " " + r.GetSqlString(3).LCID + " " + r.GetDateTime(4).ToString("s") + " " + r.GetTimeSpan(5) + " " + r.GetSqlXml(6).Value + " " + r.GetSqlInt32(7).IsNull + " " + Show(r.GetSqlValue(8)));
+                    try { r.GetInt32(7); } catch (SqlNullValueException e) { Send(e.Message); }
+                    try { r.GetString(0); } catch (InvalidCastException e) { Send(e.Message); }
+                }
+            }
+
+            [SqlProcedure]
+            public static void ExecSend(SqlString sql) { using (SqlConnection c = Open()) { SqlContext.Pipe.ExecuteAndSend(new SqlCommand(sql.Value, c)); Send("after"); } }
+
+            [SqlProcedure]
+            public static void SendReader(SqlString sql) { using (SqlConnection c = Open()) { SqlDataReader r = new SqlCommand(sql.Value, c).ExecuteReader(); r.Read(); SqlContext.Pipe.Send(r); r.Close(); } }
+
+            [SqlProcedure]
+            public static void Params(SqlInt32 a, out SqlInt32 b)
+            {
+                using (SqlConnection c = Open())
+                {
+                    SqlCommand cmd = new SqlCommand("set @o = @i * 2; set @s = replicate(N'z', 10); select sql_variant_property(@t, 'BaseType')", c);
+                    cmd.Parameters.AddWithValue("@i", a.Value);
+                    cmd.Parameters.AddWithValue("t", "hello");
+                    SqlParameter o = cmd.Parameters.Add("@o", SqlDbType.Int);
+                    o.Direction = ParameterDirection.Output;
+                    SqlParameter s = cmd.Parameters.Add("@s", SqlDbType.NVarChar, 4);
+                    s.Direction = ParameterDirection.Output;
+                    Send(Show(cmd.ExecuteScalar()) + " " + Show(o.Value) + " " + Show(o.SqlValue) + " " + Show(s.Value));
+                    b = (SqlInt32)o.SqlValue;
+                }
+            }
+
+            [SqlProcedure]
+            public static void StoredProc()
+            {
+                using (SqlConnection c = Open())
+                {
+                    SqlCommand cmd = new SqlCommand("dbo.tp", c);
+                    cmd.CommandType = CommandType.StoredProcedure;
+                    cmd.Parameters.AddWithValue("@a", 4);
+                    SqlParameter o = cmd.Parameters.Add("@b", SqlDbType.Int);
+                    o.Direction = ParameterDirection.Output;
+                    SqlParameter rv = cmd.Parameters.Add("@rv", SqlDbType.Int);
+                    rv.Direction = ParameterDirection.ReturnValue;
+                    Send("n=" + cmd.ExecuteNonQuery() + " b=" + Show(o.Value) + " rv=" + Show(rv.Value));
+                }
+            }
+
+            [SqlProcedure]
+            public static void TwoConns() { using (SqlConnection c = Open()) using (SqlConnection d = Open()) { } }
+
+            [SqlProcedure]
+            public static void TwoReaders() { using (SqlConnection c = Open()) using (SqlDataReader r = new SqlCommand("select 1", c).ExecuteReader()) { new SqlCommand("select 2", c).ExecuteScalar(); } }
+
+            [SqlProcedure]
+            public static void NonContext() { using (SqlConnection c = new SqlConnection("data source=.;integrated security=true")) { c.Open(); } }
+
+            [SqlProcedure]
+            public static void Catch(SqlString sql)
+            {
+                using (SqlConnection c = Open())
+                {
+                    try { new SqlCommand(sql.Value, c).ExecuteNonQuery(); Send("no error"); }
+                    catch (SqlException e) { Send("caught " + e.Number + " " + e.Class + " " + e.State + " " + e.LineNumber + " " + e.Message); }
+                    Send("then " + Show(new SqlCommand("select @@trancount", c).ExecuteScalar()));
+                }
+            }
+
+            [SqlProcedure]
+            public static void Messages() { using (SqlConnection c = Open()) { c.InfoMessage += delegate(object s, SqlInfoMessageEventArgs e) { Send("info: " + e.Message); }; new SqlCommand("print 'hello'; raiserror('ten', 10, 1)", c).ExecuteNonQuery(); } }
+
+            [SqlProcedure]
+            public static void Tran(SqlBoolean commit)
+            {
+                using (SqlConnection c = Open())
+                {
+                    SqlTransaction t = c.BeginTransaction();
+                    Send(Show(new SqlCommand("insert log values (42); select @@trancount", c, t).ExecuteScalar()));
+                    if (commit.Value) t.Commit(); else t.Rollback();
+                }
+            }
+
+            [SqlProcedure]
+            public static void Props()
+            {
+                using (SqlConnection c = new SqlConnection("context connection=true"))
+                {
+                    Send(c.State + " [" + c.Database + "]");
+                    c.Open();
+                    Send(c.State + " [" + c.Database + "] " + c.ServerVersion);
+                    c.ChangeDatabase("master");
+                    Send(Show(new SqlCommand("select db_name()", c).ExecuteScalar()));
+                }
+            }
+
+            [SqlFunction(DataAccess = DataAccessKind.Read)]
+            public static SqlInt32 FnRead(SqlString sql) { using (SqlConnection c = Open()) { return new SqlInt32((int)new SqlCommand(sql.Value, c).ExecuteScalar()); } }
+
+            [SqlFunction]
+            public static SqlInt32 FnNone(SqlString sql) { using (SqlConnection c = Open()) { return new SqlInt32((int)new SqlCommand(sql.Value, c).ExecuteScalar()); } }
+
+            [SqlFunction(SystemDataAccess = SystemDataAccessKind.Read)]
+            public static SqlInt32 FnSys(SqlString sql) { using (SqlConnection c = Open()) { return new SqlInt32((int)new SqlCommand(sql.Value, c).ExecuteScalar()); } }
+
+            [SqlFunction(DataAccess = DataAccessKind.Read)]
+            public static SqlInt32 FnWrite(SqlString sql) { using (SqlConnection c = Open()) { return new SqlInt32(new SqlCommand(sql.Value, c).ExecuteNonQuery()); } }
+
+            [SqlFunction(DataAccess = DataAccessKind.Read)]
+            public static SqlBoolean FnPipe() { return new SqlBoolean(SqlContext.Pipe == null && SqlContext.TriggerContext == null); }
+
+            [SqlFunction(DataAccess = DataAccessKind.Read, FillRowMethodName = "FillRow")]
+            public static IEnumerable TvfRead(SqlString sql)
+            {
+                ArrayList l = new ArrayList();
+                using (SqlConnection c = Open()) using (SqlDataReader r = new SqlCommand(sql.Value, c).ExecuteReader()) { while (r.Read()) l.Add(r.GetInt32(0)); }
+                return l;
+            }
+
+            public static void FillRow(object row, out SqlInt32 v) { v = new SqlInt32((int)row); }
+
+            public static void TrigCount()
+            {
+                using (SqlConnection c = Open())
+                {
+                    Send("ins=" + Show(new SqlCommand("select count(*) from inserted", c).ExecuteScalar()) + " del=" + Show(new SqlCommand("select count(*) from deleted", c).ExecuteScalar()));
+                }
+            }
+
+            public static void TrigSend() { using (SqlConnection c = Open()) { SqlContext.Pipe.ExecuteAndSend(new SqlCommand("select a from inserted order by a", c)); } }
+
+            public static void TrigLog() { using (SqlConnection c = Open()) { new SqlCommand("insert log select a from inserted", c).ExecuteNonQuery(); } }
+
+            public static void TrigNest() { using (SqlConnection c = Open()) { Send(Show(new SqlCommand("select @@nestlevel * 100 + @@trancount * 10 + trigger_nestlevel()", c).ExecuteScalar())); } }
+
+            public static void TrigRollback() { using (SqlConnection c = Open()) { new SqlCommand("rollback", c).ExecuteNonQuery(); } }
+
+            public static void TrigCatch() { using (SqlConnection c = Open()) { try { new SqlCommand("select 1/0", c).ExecuteNonQuery(); } catch (SqlException) { } } }
+
+            public static void TrigDdl() { using (SqlConnection c = Open()) { Send(Show(new SqlCommand("select eventdata().value('(/EVENT_INSTANCE/ObjectName)[1]', 'nvarchar(100)')", c).ExecuteScalar())); } }
         }
         """;
 }

@@ -2,8 +2,9 @@
 
   <!-- The Microsoft.SqlServer.Server surface a SQLCLR assembly calls into —
        SqlContext, SqlPipe, SqlDataRecord, SqlMetaData, the routine attributes
-       and IBinarySerialize — which .NET's own System.Data facade forwards to an
-       assembly that no longer exists. SqlServerSimulator embeds this build as a
+       and IBinarySerialize — and the in-process System.Data.SqlClient provider
+       its context connection uses, which .NET's own System.Data facade
+       forwards to an assembly that no longer exists. SqlServerSimulator embeds this build as a
        resource and loads it into the load context that hosts registered
        assemblies; it is never a compile-time reference of anything, so its
        public types reach no consumer. The assembly name matches the NuGet

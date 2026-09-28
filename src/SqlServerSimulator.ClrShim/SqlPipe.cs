@@ -1,4 +1,5 @@
 using System.Data;
+using System.Data.SqlClient;
 using System.Runtime.CompilerServices;
 
 namespace Microsoft.SqlServer.Server;
@@ -8,11 +9,12 @@ namespace Microsoft.SqlServer.Server;
 /// reached as <see cref="SqlContext.Pipe"/>. Every call hands its payload
 /// straight to the simulator's sink for the running procedure, and the guards
 /// raise the exceptions and texts the in-server pipe does (probed 2026-09-28
-/// against SQL Server 2025). <c>Send(SqlDataReader)</c> and
-/// <c>ExecuteAndSend(SqlCommand)</c> are absent: both types belong to the
-/// in-process data provider, which the simulator does not model. The public
-/// members are never inlined, so a stack trace a routine's exception carries
-/// names them as the server's does.
+/// against SQL Server 2025). <see cref="ExecuteAndSend"/> runs a
+/// context-connection command with everything it produces — result sets, row
+/// counts, messages and errors — going to the client, and
+/// <see cref="Send(SqlDataReader)"/> sends what a reader has left to read. The
+/// public members are never inlined, so a stack trace a routine's exception
+/// carries names them as the server's does.
 /// </summary>
 public sealed class SqlPipe
 {
@@ -45,6 +47,26 @@ public sealed class SqlPipe
         this.sink.Start(Describe(record.MetaData));
         this.sink.Row(record.SnapshotValues());
         this.sink.End();
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    public void Send(SqlDataReader reader)
+    {
+        if (reader is null)
+            throw new ArgumentNullException(nameof(reader));
+        if (this.sending is not null)
+            throw new InvalidOperationException("A result set is currently being sent to the pipe. End the current result set before calling Send.");
+        reader.SendRemaining();
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    public void ExecuteAndSend(SqlCommand command)
+    {
+        if (command is null)
+            throw new ArgumentNullException(nameof(command));
+        if (this.sending is not null)
+            throw new InvalidOperationException("A result set is currently being sent to the pipe. End the current result set before calling ExecuteAndSend.");
+        command.ExecuteToPipe();
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]

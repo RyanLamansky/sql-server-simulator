@@ -2424,15 +2424,16 @@ public sealed partial class Simulation
     /// and a negative <c>TOP</c>'s Msg 127, which ends the batch as every
     /// run-time severity-15 error does, still ends a writing statement first
     /// (probed 2026-09-26). A CLR routine's throw (Msg 6522) earns it too,
-    /// a CLR trigger's or a CLR type's <c>Parse</c> converting a written value
-    /// (probed 2026-09-28).
+    /// a CLR trigger's or a CLR type's <c>Parse</c> converting a written value,
+    /// as does a CLR trigger's context connection ending the firing
+    /// statement's transaction (Msg 6549, 3991, 3992; probed 2026-09-28).
     /// </summary>
     private static bool IsStatementTerminationNoticed(BatchContext batch, SimulatedSqlException error) =>
         error.Number == 1505
         || error.EndedColumnRewrite
         || ((!batch.BatchAborted || error.EndedTriggerBody || error.Number == 127)
             && batch.CurrentStatement.WritesRows
-            && error.Number is 127 or 220 or 232 or 513 or 515 or 547 or 550 or 2601 or 2627 or 2628 or 6522 or 8115 or 8134 or 8152 or 13921 or 16947);
+            && error.Number is 127 or 220 or 232 or 513 or 515 or 547 or 550 or 2601 or 2627 or 2628 or 3991 or 3992 or 6522 or 6549 or 8115 or 8134 or 8152 or 13921 or 16947);
 
     /// <summary>
     /// True for the parse-time error real SQL Server defers to bind time —
@@ -2519,6 +2520,19 @@ public sealed partial class Simulation
             || ex.Class is not ((>= 11 and <= 14) or 16)
             || ex.Number == 1205)
         {
+            return;
+        }
+
+        // Inside a SQLCLR routine the transaction held on entry is left ended
+        // rather than rolled back — @@TRANCOUNT holds until the routine
+        // returns, which settles it (probed 2026-09-28 against SQL Server
+        // 2025).
+        if (connection.ClrContext is { HasEntryTransaction: true } clrLevel && !ex.RaisedByRaiserror)
+        {
+            clrLevel.EntryTransactionEnded = true;
+            if (connection.CurrentTransaction is { } ended)
+                ended.Doomed = true;
+            ex.XactAbortPromoted = true;
             return;
         }
 
@@ -3612,6 +3626,14 @@ public sealed partial class Simulation
         var tx = context.Connection.CurrentTransaction
             ?? throw SimulatedSqlException.NoCorrespondingBeginCommit();
 
+        // A SQLCLR routine's context connection may commit only what it began
+        // (probed 2026-09-28 against SQL Server 2025).
+        if (context.Connection.ClrContext is { HasEntryTransaction: true } clrLevel && tx.TranCount <= clrLevel.EntryTranCount)
+        {
+            clrLevel.EntryTransactionEnded = true;
+            throw SimulatedSqlException.ClrCommitRefused();
+        }
+
         // A COMMIT is a log write, so a doomed transaction refuses it with
         // Msg 3930 exactly as a DML statement does (probe-confirmed) — real
         // names the message's own advice: roll back instead.
@@ -3653,11 +3675,23 @@ public sealed partial class Simulation
                     var tx = context.Connection.CurrentTransaction
                         ?? throw SimulatedSqlException.NoCorrespondingBeginRollback();
                     if (tx.Savepoints.TryGetValue(name, out var marker))
+                    {
                         tx.UndoLog.RollbackTo(marker);
+                    }
                     else if (string.Equals(tx.Name, name, StringComparison.Ordinal))
+                    {
+                        if (context.Connection.ClrContext is { HasEntryTransaction: true } namedLevel)
+                        {
+                            namedLevel.EntryTransactionEnded = true;
+                            throw SimulatedSqlException.ClrRollbackRefused();
+                        }
+
                         tx.Rollback();
+                    }
                     else
+                    {
                         throw SimulatedSqlException.CannotRollBackUnknownSavepoint(name);
+                    }
                     return true;
                 }
             }
@@ -3676,6 +3710,15 @@ public sealed partial class Simulation
         // firing statement's writes and the body's so far are undone, and what
         // the body writes afterwards commits on its own.
         var connection = context.Connection;
+        // A SQLCLR routine's context connection may not roll back a
+        // transaction held when the routine was entered (probed 2026-09-28
+        // against SQL Server 2025).
+        if (connection.ClrContext is { HasEntryTransaction: true } clrLevel)
+        {
+            clrLevel.EntryTransactionEnded = true;
+            throw SimulatedSqlException.ClrRollbackRefused();
+        }
+
         if (connection.CurrentTransaction is { } activeTx)
         {
             activeTx.Rollback();

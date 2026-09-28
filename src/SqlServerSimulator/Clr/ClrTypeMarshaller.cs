@@ -259,6 +259,165 @@ internal static class ClrTypeMarshaller
     }
 
     /// <summary>
+    /// The type a context-connection command's parameter declares: its
+    /// <see cref="SqlDbType"/> and size when set, and otherwise its value's —
+    /// a string as <c>nvarchar</c> of its own length (<c>max</c> past 4000), a
+    /// byte array as <c>varbinary</c> likewise past 8000, a
+    /// <see cref="decimal"/> at its own precision and scale, a NULL as
+    /// <c>nvarchar</c> (probed 2026-09-28 against SQL Server 2025). A sized
+    /// type with no size takes its value's length.
+    /// </summary>
+    public static SqlType ContextParameterType(SqlDbType dbType, bool typed, int size, byte precision, byte scale, object? value, Collation collation)
+    {
+        if (!typed)
+        {
+            return value switch
+            {
+                string text => Sized(SqlDbType.NVarChar, text.Length),
+                char[] chars => Sized(SqlDbType.NVarChar, chars.Length),
+                SqlString { IsNull: false } text => Sized(SqlDbType.NVarChar, text.Value.Length),
+                SqlChars { IsNull: false } chars => Sized(SqlDbType.NVarChar, (int)chars.Length),
+                byte[] bytes => Sized(SqlDbType.VarBinary, bytes.Length),
+                SqlBinary { IsNull: false } bytes => Sized(SqlDbType.VarBinary, bytes.Length),
+                SqlBytes { IsNull: false } bytes => Sized(SqlDbType.VarBinary, (int)bytes.Length),
+                decimal number => NaturalDecimal(new SqlDecimal(number)),
+                SqlDecimal { IsNull: false } number => NaturalDecimal(number),
+                DateTimeOffset => SqlType.GetDateTimeOffset(7),
+                TimeSpan => SqlType.GetTime(7),
+                _ => ColumnType(dbType, 1, 18, 0, collation),
+            };
+        }
+
+        return dbType switch
+        {
+            SqlDbType.Char or SqlDbType.NChar or SqlDbType.VarChar or SqlDbType.NVarChar or SqlDbType.Binary or SqlDbType.VarBinary
+                => Sized(dbType, size != 0 ? size : LengthOf(value)),
+            SqlDbType.Decimal when precision == 0 => value switch
+            {
+                decimal number => NaturalDecimal(new SqlDecimal(number)),
+                SqlDecimal { IsNull: false } number => NaturalDecimal(number),
+                _ => DecimalSqlType.Get(18, scale),
+            },
+            SqlDbType.DateTime2 or SqlDbType.Time or SqlDbType.DateTimeOffset => ColumnType(dbType, 0, 0, scale == 0 ? (byte)7 : scale, collation),
+            _ => ColumnType(dbType, size, precision, scale, collation),
+        };
+
+        SqlType Sized(SqlDbType sized, int length)
+        {
+            var limit = sized is SqlDbType.NChar or SqlDbType.NVarChar ? 4000 : 8000;
+            return ColumnType(sized, length < 0 || length > limit ? -1 : Math.Max(length, 1), 0, 0, collation);
+        }
+    }
+
+    private static DecimalSqlType NaturalDecimal(SqlDecimal value) =>
+        DecimalSqlType.Get(Math.Max(value.Precision, value.Scale), value.Scale);
+
+    private static int LengthOf(object? value) => value switch
+    {
+        string text => text.Length,
+        char[] chars => chars.Length,
+        SqlString { IsNull: false } text => text.Value.Length,
+        byte[] bytes => bytes.Length,
+        SqlBinary { IsNull: false } bytes => bytes.Length,
+        _ => 1,
+    };
+
+    /// <summary>
+    /// A context-connection parameter's value as <paramref name="type"/>, a
+    /// string or binary value first cut to <paramref name="size"/> when that
+    /// is set, as the provider cuts it before sending.
+    /// </summary>
+    public static SqlValue ContextParameterValue(object? value, SqlType type, int size)
+    {
+        if (size > 0)
+        {
+            value = value switch
+            {
+                string text when text.Length > size => text[..size],
+                SqlString { IsNull: false } text when text.Value.Length > size => new SqlString(text.Value[..size]),
+                byte[] bytes when bytes.Length > size => bytes[..size],
+                SqlBinary { IsNull: false } bytes when bytes.Length > size => new SqlBinary(bytes.Value[..size]),
+                _ => value,
+            };
+        }
+
+        return value switch
+        {
+            SqlDateTime { IsNull: false } moment => SqlValue.FromDateTime(moment.Value).CoerceTo(type),
+            SqlGuid { IsNull: false } guid => SqlValue.FromGuid(guid.Value).CoerceTo(type),
+            SqlBoolean { IsNull: false } flag => SqlValue.FromBoolean(flag.Value).CoerceTo(type),
+            SqlXml { IsNull: false } xml => SqlValue.FromXml(xml.Value).CoerceTo(type),
+            _ => FromRecordValue(value, type),
+        };
+    }
+
+    /// <summary>
+    /// A value as a context-connection reader serves it: its
+    /// <see cref="System.Data.SqlTypes"/> struct where it has one — a
+    /// character string carrying its collation's locale — and otherwise its
+    /// plain-CLR form (<c>date</c> and <c>datetime2</c> as
+    /// <see cref="DateTime"/>, <c>time</c> as <see cref="TimeSpan"/>), a
+    /// <c>sql_variant</c> as its base value's, and a NULL as the struct's own
+    /// <c>Null</c> or <see cref="DBNull"/> (probed 2026-09-28 against SQL
+    /// Server 2025).
+    /// </summary>
+    public static object? ToContextValue(SqlValue value, Collation fallback)
+    {
+        var type = value.Type;
+        if (type is SqlVariantSqlType)
+            return value.IsNull ? DBNull.Value : ToContextValue(value.AsVariantInner, fallback);
+        if (type is ClrUdtSqlType udt)
+            return value.IsNull ? DBNull.Value : udt.Udt.ToClr(value);
+        var (_, providerType) = ContextFieldTypes(type);
+        if (value.IsNull)
+            return typeof(INullable).IsAssignableFrom(providerType) ? NullOf(providerType) : DBNull.Value;
+        return type switch
+        {
+            DateSqlType => value.AsDate.ToDateTime(TimeOnly.MinValue),
+            DateTime2SqlType => value.AsDateTime2,
+            TimeSqlType => value.AsTime,
+            DateTimeOffsetSqlType => value.AsDateTimeOffset,
+            VectorSqlType => new SqlString(SimulatedDbDataReader.ClientString(value)),
+            JsonSqlType => new SqlString(value.AsString),
+            HierarchyIdSqlType or SpatialSqlType or RowVersionSqlType or ImageSqlType or BinarySqlType or VarbinarySqlType => new SqlBinary(value.AsBytes),
+            VarcharSqlType or NVarcharSqlType or CharSqlType or NCharSqlType or TextSqlType or NTextSqlType or SystemNameSqlType
+                => new SqlString(value.AsString, LocaleOf(type.Collation ?? fallback)),
+            _ => ToClr(value, providerType),
+        };
+    }
+
+    private static int LocaleOf(Collation collation) =>
+        Collation.TryGetMetrics(collation.Name, out var metrics) ? metrics.Lcid : 1033;
+
+    /// <summary>
+    /// A context-connection reader's <c>GetFieldType</c> and
+    /// <c>GetProviderSpecificFieldType</c> for a column of
+    /// <paramref name="type"/> (probed 2026-09-28 against SQL Server 2025).
+    /// </summary>
+    public static (Type FieldType, Type ProviderType) ContextFieldTypes(SqlType type) => type switch
+    {
+        Int32SqlType => (typeof(int), typeof(SqlInt32)),
+        BigIntSqlType => (typeof(long), typeof(SqlInt64)),
+        SmallIntSqlType => (typeof(short), typeof(SqlInt16)),
+        TinyIntSqlType => (typeof(byte), typeof(SqlByte)),
+        BitSqlType => (typeof(bool), typeof(SqlBoolean)),
+        FloatSqlType => (typeof(double), typeof(SqlDouble)),
+        RealSqlType => (typeof(float), typeof(SqlSingle)),
+        DecimalSqlType => (typeof(decimal), typeof(SqlDecimal)),
+        MoneySqlType or SmallMoneySqlType => (typeof(decimal), typeof(SqlMoney)),
+        DateTimeSqlType or SmallDateTimeSqlType => (typeof(DateTime), typeof(SqlDateTime)),
+        DateSqlType or DateTime2SqlType => (typeof(DateTime), typeof(DateTime)),
+        TimeSqlType => (typeof(TimeSpan), typeof(TimeSpan)),
+        DateTimeOffsetSqlType => (typeof(DateTimeOffset), typeof(DateTimeOffset)),
+        UniqueIdentifierSqlType => (typeof(Guid), typeof(SqlGuid)),
+        XmlSqlType => (typeof(string), typeof(SqlXml)),
+        SqlVariantSqlType => (typeof(object), typeof(object)),
+        ClrUdtSqlType udt => (udt.Udt.Type, udt.Udt.Type),
+        HierarchyIdSqlType or SpatialSqlType or RowVersionSqlType or ImageSqlType or BinarySqlType or VarbinarySqlType => (typeof(byte[]), typeof(SqlBinary)),
+        _ => (typeof(string), typeof(SqlString)),
+    };
+
+    /// <summary>
     /// A CLR type as the server's messages spell it: the C# keyword for a
     /// primitive, the simple name otherwise.
     /// </summary>

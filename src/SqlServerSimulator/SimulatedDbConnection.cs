@@ -784,6 +784,13 @@ public sealed class SimulatedDbConnection : DbConnection
     internal int TriggerNestLevel;
 
     /// <summary>
+    /// The context connection of the innermost SQLCLR routine running on this
+    /// session, whose entry transaction a <c>COMMIT</c> or <c>ROLLBACK</c> may
+    /// not end; <see langword="null"/> outside one.
+    /// </summary>
+    internal Simulation.ClrContextConnection? ClrContext;
+
+    /// <summary>
     /// The undo log of the statement that fired the trigger currently
     /// running on this connection, or <c>null</c> outside any trigger.
     /// A trigger body doesn't get an atomic scope of its own: real SQL Server

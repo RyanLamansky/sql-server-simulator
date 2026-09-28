@@ -248,6 +248,7 @@ partial class Simulation
         if (procedure.ClrEntry is { } clrEntry)
         {
             connection.Security.RevertTo(savedImpersonationDepth);
+            enteredTranCount = connection.CurrentTransaction?.TranCount ?? 0;
             bodyError = RunClrProcedure(outerBatch, procedure, clrEntry, variables, procFrame, outcomes, attributionName);
         }
         else if (string.IsNullOrEmpty(procedure.BodyText))

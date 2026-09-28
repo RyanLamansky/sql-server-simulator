@@ -289,7 +289,6 @@ Re-fetch <https://learn.microsoft.com/en-us/sql/t-sql/functions/functions> befor
 
 Blocked on a larger unmodeled parent feature (shipping a function here implies the parent ships too):
 
-- **The SQLCLR context connection** — every SQLCLR programmable kind ships over the `Microsoft.SqlServer.Server` load-context shim (see [`clr-assemblies.md`](clr-assemblies.md)); the context connection needs an in-process `System.Data.SqlClient` surface the shim doesn't carry, and it is also the only way a CLR trigger reads `INSERTED` / `DELETED`.
 - **ML scoring** (PREDICT surface not modeled) — PREDICT(MODEL = …, DATA = …).
 - **Ad-hoc data sources** — OPENROWSET (file/bulk + provider rowsets); OPENDATASOURCE (the inline four-part-name form; `OPENQUERY` ships — see [`linked-servers.md`](linked-servers.md), and `OPENXML` + the `sp_xml_preparedocument` / `sp_xml_removedocument` pair ship too — see [`xml.md`](xml.md#openxml)).
   Probed: real *parses* `OPENROWSET('MSDASQL', …)` then errors on disabled ad-hoc access (**Msg 7222**) and `OPENROWSET(BULK 'file', SINGLE_CLOB)` on the missing file (**Msg 4860**); the simulator doesn't parse the FROM-source form at all (Msg 102). Ad-hoc / external data access is a feature, not a syntax tweak — the parse-then-runtime-error shape depends on the whole external-data model.
@@ -353,6 +352,9 @@ Entries are verified against the simulator, so one that no longer reproduces is 
 Real bugs / limitations against shipped behavior — fixes are concrete work, not design decisions.
 
 - **A CLR routine's exceptions from .NET's own base library carry .NET's wording and frames**, and a CLR type's `Parse` failing under an `INSERT` column write is Msg 6522 state 2 where real says state 1 (probed 2026-09-28) → [`clr-assemblies.md`](clr-assemblies.md#divergences).
+- **A SQLCLR routine's context connection leaves a few of real's shapes unmodeled** — a function's command refused whole where real refuses the statement, `SELECT WITHOUT QUERY` / Msg 557, connections other than the context one from `EXTERNAL_ACCESS` / `UNSAFE`, and the provider's internal stack frames (probed 2026-09-28) → [`clr-assemblies.md`](clr-assemblies.md#the-context-connection).
+- **`INSERTED` / `DELETED` read without an `ORDER BY` come back in the order the statement wrote them**, where real read a multi-row `INSERT`'s in reverse, from a T-SQL and a CLR trigger alike (probed 2026-09-28 against SQL Server 2025) — an unordered result, but one a trigger that logs row by row shows.
+- **A `CREATE TRIGGER` whose name another object holds is Msg 2714 state 2 here and state 5 on real** (probed 2026-09-28 against SQL Server 2025, a procedure holding the name).
 - **A CLR aggregate's state never round-trips through `Write` / `Read`**, and `Merge` never runs — one in-memory instance accumulates each group, so an aggregate whose `IBinarySerialize` drops a field answers here where real may lose it; and a Msg 6522 / 6260 stack lists only the author-visible frames, real's own internal ones having no counterpart (probed 2026-09-28) → [`clr-assemblies.md`](clr-assemblies.md#divergences).
 
 - **A scalar UDF body's missing object is reported once** (probed 2026-09-26 against SQL Server 2025).

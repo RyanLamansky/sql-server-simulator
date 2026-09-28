@@ -24,8 +24,8 @@ partial class Simulation
     /// <c>Send(string)</c> is a class-0 state-2 message at line 1 naming the
     /// trigger, and a throw is Msg 6522 state 1 at line 1, which ends the
     /// firing statement as a T-SQL body's error does. <c>INSERTED</c> and
-    /// <c>DELETED</c> are reached only through the context connection, which
-    /// is not modeled.
+    /// <c>DELETED</c> are reached only through the context connection, whose
+    /// commands carry the trigger's frame.
     /// </remarks>
     private static void RunClrTrigger(BatchContext outerBatch, TriggerFrame frame, ClrEntryPoint entry, string triggerName)
     {
@@ -57,17 +57,30 @@ partial class Simulation
 
         var outcomes = new List<SimulatedStatementOutcome>();
         var pipe = new ClrProcedurePipe(outerBatch, triggerName, outcomes, lineNumber: 1);
-        SimulatedSqlException? failure = null;
+        var contextConnection = entry.Assembly.UsesServerContext
+            ? new ClrContextConnection(outerBatch, triggerName, entry.Assembly, pipe, frame, isFunction: false)
+            : null;
+        string? report = null;
+        SimulatedSqlException? failure;
         try
         {
-            using (entry.Assembly.UsesServerContext ? ClrHost.Enter(pipe.Sink, fired) : default(ClrHost.RoutineScope?))
+            using (entry.Assembly.UsesServerContext ? ClrHost.Enter(pipe.Sink, fired, contextConnection) : default(ClrHost.RoutineScope?))
                 _ = entry.Method!.Invoke(null, null);
-            pipe.Settle(completed: true);
         }
         catch (TargetInvocationException ex) when (ex.InnerException is not null)
         {
-            pipe.Settle(completed: false);
-            failure = SimulatedSqlException.ClrRoutineThrew(triggerName, ClrExceptionReport.Describe(ex.InnerException, entry.Method!), state: 1);
+            report = ClrExceptionReport.Describe(ex.InnerException, entry.Method!);
+        }
+        finally
+        {
+            failure = contextConnection?.Leave(report);
+        }
+
+        pipe.Settle(completed: report is null);
+        if (report is not null)
+            failure ??= SimulatedSqlException.ClrRoutineThrew(triggerName, report, state: 1);
+        if (failure is not null)
+        {
             failure.PreserveDiagnostics(1, triggerName);
             // The body runs under XACT_ABORT ON, as a T-SQL body does, so the
             // throw ends the firing batch and its transaction the way an

@@ -44,6 +44,28 @@ internal static class ClrAttributes
         return null;
     }
 
+    /// <summary>
+    /// Whether <paramref name="method"/>'s <c>SqlFunction</c> attribute sets
+    /// <c>DataAccess</c> and <c>SystemDataAccess</c> to <c>Read</c>.
+    /// </summary>
+    public static (bool User, bool System) DataAccess(MemberInfo method)
+    {
+        var access = (User: false, System: false);
+        if (Find(method, SqlFunction) is not { } attribute)
+            return access;
+        foreach (var argument in attribute.NamedArguments)
+        {
+            if (argument.TypedValue.Value is not int kind || kind == 0)
+                continue;
+            if (argument.MemberName == "DataAccess")
+                access.User = true;
+            else if (argument.MemberName == "SystemDataAccess")
+                access.System = true;
+        }
+
+        return access;
+    }
+
     /// <summary>The static method <paramref name="name"/> declares on <paramref name="type"/>, public or not.</summary>
     [UnconditionalSuppressMessage(
         "Trimming",

@@ -182,8 +182,9 @@ partial class Simulation
     /// Runs a CLR table-valued function for one call: evaluates the arguments
     /// in the caller's scope, calls the init method for the row objects, and
     /// yields each as the encoded row its <c>FillRow</c> method splits it
-    /// into. A throw from the init method is Msg 6522 state 2 naming the
-    /// function; a throw from <c>FillRow</c>, or an <c>nvarchar(n)</c> value
+    /// into. A throw from the init method is Msg 6522 at the function's
+    /// <see cref="ClrFunction.ThrowState"/> naming it, and only the init
+    /// method of a function marked to read data opens the context connection; a throw from <c>FillRow</c>, or an <c>nvarchar(n)</c> value
     /// longer than <c>n</c>, is Msg 6260 (probed 2026-09-28 against SQL
     /// Server 2025). A <see langword="null"/> collection is no rows.
     /// </summary>
@@ -216,16 +217,30 @@ partial class Simulation
         }
 
         var usesContext = function.Entry.Assembly.UsesServerContext;
-        object? rows;
+        var contextConnection = usesContext && function.ReadsData
+            ? new ClrContextConnection(outerBatch, function.Name, function.Entry.Assembly, pipe: null, triggerFrame: null, isFunction: true, restrictsUserData: !function.DataAccess.User)
+            : null;
+        object? rows = null;
+        string? report = null;
+        SimulatedSqlException? ending;
         try
         {
-            using (usesContext ? ClrHost.Enter(pipe: null) : default(ClrHost.RoutineScope?))
+            using (usesContext ? ClrHost.Enter(pipe: null, contextConnection: contextConnection) : default(ClrHost.RoutineScope?))
                 rows = method.Invoke(null, values);
         }
         catch (TargetInvocationException ex) when (ex.InnerException is not null)
         {
-            throw SimulatedSqlException.ClrRoutineThrew(function.Name, ClrExceptionReport.Describe(ex.InnerException, method), state: 2);
+            report = ClrExceptionReport.Describe(ex.InnerException, method);
         }
+        finally
+        {
+            ending = contextConnection?.Leave(report);
+        }
+
+        if (report is not null)
+            throw ending ?? SimulatedSqlException.ClrRoutineThrew(function.Name, report, function.ThrowState);
+        if (ending is not null)
+            throw ending;
 
         return EnumerateClrTableRows(function, rows switch
         {

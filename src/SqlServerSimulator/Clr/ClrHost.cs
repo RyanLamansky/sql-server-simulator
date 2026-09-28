@@ -16,10 +16,11 @@ namespace SqlServerSimulator.Clr;
 /// <remarks>
 /// <para>
 /// A .NET Framework SQLCLR assembly references <c>System.Data, Version=4.0.0.0</c>
-/// for both <c>System.Data.SqlTypes</c> and <c>Microsoft.SqlServer.Server</c>.
-/// .NET's own <c>System.Data</c> facade forwards the first family onward but
-/// sends the second to <c>System.Data.SqlClient</c>, which does not exist, and
-/// omits <c>SqlContext</c> / <c>SqlPipe</c> entirely. So every
+/// for <c>System.Data.SqlTypes</c>, <c>Microsoft.SqlServer.Server</c> and the
+/// in-process provider's <c>System.Data.SqlClient</c> types. .NET's own
+/// <c>System.Data</c> facade forwards the first family onward but sends the
+/// other two to a <c>System.Data.SqlClient</c> assembly that does not exist,
+/// and omits <c>SqlContext</c> / <c>SqlPipe</c> entirely. So every
 /// <see cref="SqlAssemblyLoadContext"/> answers <c>System.Data</c> with a
 /// substitute generated here — the facade's own forwarders, each pointed at
 /// the assembly it actually resolves to, plus one forwarder per public type of
@@ -39,6 +40,7 @@ namespace SqlServerSimulator.Clr;
 internal static class ClrHost
 {
     private const string ServerAssemblyName = "Microsoft.SqlServer.Server";
+    private const string SqlClientNamespace = "System.Data.SqlClient";
     private const string SystemDataAssemblyName = "System.Data";
 
     private static readonly Lazy<HostContext> host = new(() => new HostContext());
@@ -72,9 +74,11 @@ internal static class ClrHost
     /// A procedure or trigger passes its <paramref name="pipe"/>; a function,
     /// aggregate or type member passes <see langword="null"/> and its routine
     /// sees no pipe. A trigger also passes what its <c>SqlTriggerContext</c>
-    /// reports.
+    /// reports, and a routine that may read data the
+    /// <paramref name="contextConnection"/> its commands run through.
     /// </summary>
-    public static RoutineScope Enter(ClrPipeSink? pipe, (int Action, bool[] UpdatedColumns, string? EventData)? trigger = null) => new(host.Value, pipe, trigger);
+    public static RoutineScope Enter(ClrPipeSink? pipe, (int Action, bool[] UpdatedColumns, string? EventData)? trigger = null, Simulation.ClrContextConnection? contextConnection = null) =>
+        new(host.Value, pipe, trigger, contextConnection);
 
     /// <summary>The <see cref="Enter"/> / dispose pair around one routine call.</summary>
     public readonly struct RoutineScope : IDisposable
@@ -82,12 +86,15 @@ internal static class ClrHost
         private readonly HostContext context;
         private readonly object? previous;
 
-        internal RoutineScope(HostContext context, ClrPipeSink? pipe, (int Action, bool[] UpdatedColumns, string? EventData)? trigger)
+        internal RoutineScope(HostContext context, ClrPipeSink? pipe, (int Action, bool[] UpdatedColumns, string? EventData)? trigger, Simulation.ClrContextConnection? contextConnection)
         {
             this.context = context;
+            (Func<ContextCommand, ContextResult>, Action<object, int>, Func<string>, string, bool)? data = contextConnection is null
+                ? null
+                : (contextConnection.Execute, contextConnection.Send, contextConnection.DatabaseName, contextConnection.ServerVersion, contextConnection.Safe);
             this.previous = pipe is null
-                ? context.Enter(null, null, null, null, null)
-                : context.Enter(pipe.Message, pipe.Start, pipe.Row, pipe.End, trigger);
+                ? context.Enter(null, null, null, null, null, data)
+                : context.Enter(pipe.Message, pipe.Start, pipe.Row, pipe.End, trigger, data);
         }
 
         public void Dispose() => this.context.Exit(this.previous);
@@ -101,7 +108,14 @@ internal static class ClrHost
     {
         public readonly Assembly Server;
         public readonly Assembly SystemData;
-        public readonly Func<Action<string>?, Action<(string, SqlDbType, long, byte, byte)[]>?, Action<object?[]>?, Action?, (int, bool[], string?)?, object?> Enter;
+        public readonly Func<
+            Action<string>?,
+            Action<(string, SqlDbType, long, byte, byte)[]>?,
+            Action<object?[]>?,
+            Action?,
+            (int, bool[], string?)?,
+            (Func<ContextCommand, ContextResult>, Action<object, int>, Func<string>, string, bool)?,
+            object?> Enter;
         public readonly Action<object?> Exit;
 
         [UnconditionalSuppressMessage(
@@ -125,7 +139,14 @@ internal static class ClrHost
 
             var bridge = this.Server.GetType(ServerAssemblyName + ".SimulatorBridge", throwOnError: true)!;
             this.Enter = bridge.GetMethod("Enter", BindingFlags.Static | BindingFlags.NonPublic)!
-                .CreateDelegate<Func<Action<string>?, Action<(string, SqlDbType, long, byte, byte)[]>?, Action<object?[]>?, Action?, (int, bool[], string?)?, object?>>();
+                .CreateDelegate<Func<
+                    Action<string>?,
+                    Action<(string, SqlDbType, long, byte, byte)[]>?,
+                    Action<object?[]>?,
+                    Action?,
+                    (int, bool[], string?)?,
+                    (Func<ContextCommand, ContextResult>, Action<object, int>, Func<string>, string, bool)?,
+                    object?>>();
             this.Exit = bridge.GetMethod("Exit", BindingFlags.Static | BindingFlags.NonPublic)!.CreateDelegate<Action<object?>>();
         }
 
@@ -137,10 +158,10 @@ internal static class ClrHost
     /// Emits the substitute <c>System.Data</c>: a manifest-only assembly whose
     /// every type is a forwarder. The runtime's own facade supplies the list;
     /// each entry it can resolve forwards to the assembly the type really lives
-    /// in, and the <c>Microsoft.SqlServer.Server</c> namespace — whose facade
-    /// entries point at the missing client assembly — forwards to
-    /// <paramref name="server"/> instead, including the types the facade leaves
-    /// out.
+    /// in, and the <c>Microsoft.SqlServer.Server</c> and
+    /// <c>System.Data.SqlClient</c> namespaces — whose facade entries point at
+    /// the missing client assembly — forward to <paramref name="server"/>
+    /// instead, including the types the facade leaves out.
     /// </summary>
     [UnconditionalSuppressMessage(
         "Trimming",
@@ -163,13 +184,13 @@ internal static class ClrHost
         var types = new List<Type>();
         foreach (var type in forwarded)
         {
-            if (type is not null && type.Namespace != ServerAssemblyName)
+            if (type is not null && type.Namespace is not (ServerAssemblyName or SqlClientNamespace))
                 types.Add(type);
         }
 
         foreach (var type in server.GetExportedTypes())
         {
-            if (type.Namespace == ServerAssemblyName)
+            if (type.Namespace is ServerAssemblyName or SqlClientNamespace)
                 types.Add(type);
         }
 
