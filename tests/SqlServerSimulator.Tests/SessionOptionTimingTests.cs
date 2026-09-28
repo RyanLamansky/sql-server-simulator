@@ -44,4 +44,60 @@ public sealed class SessionOptionTimingTests
             set numeric_roundabort on; select @@options;
             set ansi_nulls off; select @@options
             """)));
+
+    /// <summary>
+    /// A procedure, trigger or dynamic-SQL body's SET of these options applies
+    /// inside the body and reverts when it returns — save ANSI_NULLS, which a
+    /// procedure body ignores for the setting it was created under (probed
+    /// 2026-09-28 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void ModuleBodySet_AppliesInsideAndReverts()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("""
+            create procedure p as begin
+                set ansi_warnings off; set ansi_padding off; set arithabort on;
+                set concat_null_yields_null off; set numeric_roundabort on; set ansi_nulls off;
+                select concat(@@options, ' ', null + 'a');
+            end
+            """);
+        using var reader = sim.CreateOpenConnection().CreateCommand("exec p; select @@options").ExecuteReader();
+        IsTrue(reader.Read());
+        AreEqual("9568 a", reader.GetValue(0));
+        IsTrue(reader.NextResult() && reader.Read());
+        AreEqual(5432, reader.GetValue(0));
+    }
+
+    [TestMethod]
+    public void DynamicSqlSet_OfAnsiNulls_AppliesToItsBatch()
+        => AreEqual("0 1 32", string.Join(",", Scalars("""
+            declare @r varchar(10)
+            exec sp_executesql N'set ansi_nulls off; set @r = concat(@@options & 32, '' '', case when null = null then 1 else 0 end)', N'@r varchar(10) output', @r output
+            select concat(@r, ' ', @@options & 32)
+            """)));
+
+    [TestMethod]
+    public void TriggerBodySet_Reverts()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table t (a int); create table l (o int)",
+            "create trigger tr on t after insert as begin set concat_null_yields_null off; insert l values (@@options & 4096); end");
+        AreEqual(4096, sim.ExecuteScalar("insert t values (1); select @@options & 4096"));
+        AreEqual(0, sim.ExecuteScalar("select o from l"));
+    }
+
+    /// <summary>
+    /// QUOTED_IDENTIFIER is settled as the batch parses, so every read of
+    /// <c>@@OPTIONS</c> in the batch sees what its last SET of the option left
+    /// — even the read written ahead of the SET (probed 2026-09-28 against SQL
+    /// Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select @@options & 256; set quoted_identifier off; select @@options & 256", "0,0")]
+    [DataRow("set quoted_identifier off; select @@options & 256; set quoted_identifier on; select @@options & 256", "256,256")]
+    [DataRow("select @@options & 256; if 1 = 0 set ansi_defaults off; select @@options & 256", "0,0")]
+    public void AtAtOptions_QuotedIdentifier_ReadsTheBatchsLastSet(string batch, string expected)
+        => AreEqual(expected, string.Join(",", Scalars(batch)));
 }

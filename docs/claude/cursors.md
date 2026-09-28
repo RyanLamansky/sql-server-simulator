@@ -323,6 +323,14 @@ The request the keywords **imply** counts as much as one spelled out, probe-conf
 It surfaces through the standard `InfoMessage` pipeline.
 A deferred body the cursor *can* follow warns about nothing, matching real: `DECLARE … DYNAMIC TYPE_WARNING` over a plain view is silent on both, and over a DISTINCT or TOP view fires on both (probe-confirmed).
 
+## `SET CURSOR_CLOSE_ON_COMMIT`
+
+With the option on, a `COMMIT` or `ROLLBACK` that ends a transaction closes every cursor opened inside it — static and cursor-variable cursors included — so a later `FETCH` is Msg 16917 and `CURSOR_STATUS` reads -1 (probed 2026-09-28 against SQL Server 2025).
+A cursor opened before the transaction began stays open, as does one when an inner `COMMIT` only decrements `@@TRANCOUNT`, when a rollback to a savepoint ends nothing, or when an auto-commit statement's own transaction ends.
+With the option off, neither `COMMIT` nor `ROLLBACK` closes anything, a dynamic or keyset cursor included.
+`Cursor.Open` records itself on the session's transaction (`SimulatedDbTransaction.OpenedCursors`), whose end closes the list when the option is on.
+`@@OPTIONS & 4` reports the option, `SET ANSI_DEFAULTS ON` turns it on, and a procedure's `SET` of it reverts on return — see [`session-options.md`](session-options.md).
+
 ## Divergences from SQL Server (documented, not byte-identical)
 
 - **A cursor over a generator source is forced STATIC** — a TVF, a catalog view, `VALUES`, `OPENJSON`, PIVOT, `.nodes()`, a linked server.

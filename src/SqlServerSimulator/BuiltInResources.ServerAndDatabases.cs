@@ -256,14 +256,15 @@ internal static partial class BuiltInResources
         // here — SQL-auth against master), and monitoring-flavored tooling
         // reads the session-option columns. Where the simulator genuinely
         // tracks session state the row reflects it live (quoted_identifier,
-        // arithabort, the ANSI bits, text_size, lock_timeout,
+        // arithabort, the ANSI bits, ansi_null_dflt_on, ansi_defaults,
+        // deadlock_priority, text_size, lock_timeout,
         // transaction_isolation_level, context_info, row_count = @@ROWCOUNT,
         // prev_error = @@ERROR, open_transaction_count, database_id,
         // host_name / program_name off the connection string or LOGIN7,
         // login_name / original_login_name and their derived SIDs); the
         // remainder are probe-confirmed fresh-session defaults from SQL Server
-        // 2025 (endpoint_id 4, group_id 2, client_version 7,
-        // ansi_null_dflt_on 1). status is 'running' for the querying session,
+        // 2025 (endpoint_id 4, group_id 2, client_version 7). status is
+        // 'running' for the querying session,
         // 'sleeping' for the rest.
         Sys("dm_exec_sessions",
         [
@@ -1481,15 +1482,15 @@ internal static partial class BuiltInResources
                 SqlValue.FromInt16(connection.DateFirst),
                 connection.QuotedIdentifiers ? bitOn : bitOff,
                 connection.Arithabort ? bitOn : bitOff,
-                bitOn,
-                bitOff,
+                connection.AnsiNullDefaultOn ? bitOn : bitOff,
+                AnsiDefaultsAllOn(connection) ? bitOn : bitOff,
                 connection.AnsiWarnings ? bitOn : bitOff,
                 connection.AnsiPadding ? bitOn : bitOff,
                 connection.AnsiNulls ? bitOn : bitOff,
                 connection.ConcatNullYieldsNull ? bitOn : bitOff,
                 SqlValue.FromInt16(SessionIsolationLevelId(connection)),
                 SqlValue.FromInt32(connection.LockTimeoutMillis),
-                zero,
+                SqlValue.FromInt32(connection.DeadlockPriority),
                 SqlValue.FromInt64(connection.LastStatementRowCount),
                 SqlValue.FromInt32(connection.LastErrorNumber),
                 SqlValue.FromInt32(connection.NestingLevel),
@@ -1537,6 +1538,15 @@ internal static partial class BuiltInResources
     /// probe-confirmed fresh-session defaults documented at the
     /// registration site.
     /// </summary>
+    /// <summary>
+    /// The <c>ansi_defaults</c> column: whether all seven options
+    /// <c>SET ANSI_DEFAULTS</c> sets are on — it reads 0 again once any one of
+    /// them is turned off (probed 2026-09-28 against SQL Server 2025).
+    /// </summary>
+    private static bool AnsiDefaultsAllOn(SimulatedDbConnection connection) =>
+        connection.AnsiNulls && connection.AnsiNullDefaultOn && connection.AnsiPadding && connection.AnsiWarnings
+        && connection.CursorCloseOnCommit && connection.ImplicitTransactions && connection.QuotedIdentifiers;
+
     private static IEnumerable<SqlValue[]> EnumerateSysDmExecSessions(Parser.BatchContext batch, Database database)
     {
         _ = database;
@@ -1589,16 +1599,15 @@ internal static partial class BuiltInResources
                 SqlValue.FromInt16(connection.DateFirst),
                 connection.QuotedIdentifiers ? bitOn : bitOff,
                 connection.Arithabort ? bitOn : bitOff,
-                bitOn,  // ansi_null_dflt_on — SET ANSI_NULL_DFLT_ON/OFF is
-                        // parse-and-discard, so no session field backs it
-                bitOff, // ansi_defaults
+                connection.AnsiNullDefaultOn ? bitOn : bitOff,
+                AnsiDefaultsAllOn(connection) ? bitOn : bitOff,
                 connection.AnsiWarnings ? bitOn : bitOff,
                 connection.AnsiPadding ? bitOn : bitOff,
                 connection.AnsiNulls ? bitOn : bitOff,
                 connection.ConcatNullYieldsNull ? bitOn : bitOff,
                 SqlValue.FromInt16(isolation),
                 SqlValue.FromInt32(connection.LockTimeoutMillis),
-                zero,
+                SqlValue.FromInt32(connection.DeadlockPriority),
                 SqlValue.FromInt64(connection.LastStatementRowCount),
                 SqlValue.FromInt32(connection.LastErrorNumber),
                 SqlValue.FromVarbinary(DeriveLoginSid(originalLogin)),

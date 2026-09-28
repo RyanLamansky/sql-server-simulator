@@ -65,6 +65,7 @@ Two mechanisms carry it:
 One gate sits further out, in `TryBuildPlanCacheKey`, so it suppresses the **lookup** as well as the promotion: the session must be at the default **READ COMMITTED**.
 A plan's FROM sources carry the lock acquisitions their parsing session made, so replaying one under a different isolation level would settle the wrong session's protection, or none at all — a SERIALIZABLE reader's key-range fence most visibly (see [`locking.md`](locking.md#key-range-locks)).
 A session at any other level re-parses per execution.
+The same gate holds `SET IMPLICIT_TRANSACTIONS`, `NOEXEC` and `PARSEONLY` off: each is settled while a statement parses — the transaction it opens, and whether it runs at all — so a replay would skip it (see [`session-options.md`](session-options.md)).
 
 ## Disqualifying state: `HasSessionScopedReference`
 

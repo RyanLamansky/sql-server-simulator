@@ -238,6 +238,10 @@ internal sealed class Cursor(
         this.CurrentRids = null;
         this.OnKeysetHole = false;
         this.IsOpen = true;
+        // SET CURSOR_CLOSE_ON_COMMIT closes, as the transaction ends, the
+        // cursors opened inside it (probed 2026-09-28 against SQL Server 2025).
+        if (batch.Connection.CurrentTransaction is { } transaction)
+            (transaction.OpenedCursors ??= []).Add(this);
 
         // SCROLL_LOCKS: take table-IX on every participating table for the
         // cursor's open lifetime (the per-row U locks ride the fetch position).
@@ -261,11 +265,11 @@ internal sealed class Cursor(
     /// <summary>CLOSE the cursor: release the materialized state and reset
     /// position. The cursor stays declared (re-OPEN-able). Raises Msg 16917
     /// (state 1) if not open.</summary>
-    public void Close(BatchContext batch)
+    public void Close(SimulatedDbConnection connection)
     {
         if (!this.IsOpen)
             throw SimulatedSqlException.CursorNotOpen(state: 1);
-        this.ReleaseScrollLocks(batch.Connection);
+        this.ReleaseScrollLocks(connection);
         this.staticRows = null;
         this.keysetIdentities = null;
         this.dynamicLast = null;

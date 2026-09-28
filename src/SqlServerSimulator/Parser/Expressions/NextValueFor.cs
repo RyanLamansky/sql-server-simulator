@@ -57,6 +57,7 @@ internal sealed class NextValueFor : Expression
             throw SimulatedSqlException.InvalidObjectName(sequenceName);
         }
         this.Sequence = resolved;
+        context.Batch.BeginImplicitTransaction();
         // Record the reference for any collector in scope (INSERT's Msg 11731
         // gate); collecting here catches a reference at any nesting depth.
         context.SequenceCollector?.Add(resolved);

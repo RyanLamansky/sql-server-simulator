@@ -308,7 +308,7 @@ public sealed class LockingTests
     {
         // Classic 2-cycle deadlock: A locks t1, B locks t2; then A asks
         // for t2 (blocks on B), B asks for t1 (cycle closes → Msg 1205
-        // on the requester per the always-the-requester policy).
+        // on the requester, both sessions at the same deadlock priority).
         var sim = new Simulation();
         _ = sim.ExecuteNonQuery("create table t1 (id int); create table t2 (id int); insert t1 values (1); insert t2 values (2)");
         using var connA = sim.CreateOpenConnection();
@@ -341,8 +341,8 @@ public sealed class LockingTests
         IsTrue(bStarted.Wait(ThreadStartTimeoutMs, TestContext.CancellationToken));
         await Task.WhenAll(taskA, taskB).WaitAsync(TimeSpan.FromSeconds(5), TestContext.CancellationToken);
 
-        // Exactly one connection was the victim — phase-1a policy is
-        // always-the-requester (the connection that closed the cycle).
+        // Exactly one connection was the victim — at equal deadlock
+        // priority, the connection that closed the cycle.
         IsTrue(aError is null ^ bError is null);
         var victim = aError ?? bError;
         IsNotNull(victim);

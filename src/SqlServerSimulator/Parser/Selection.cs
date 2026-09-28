@@ -679,6 +679,11 @@ internal sealed partial class Selection
             }
         }
 
+        // A user function a query calls opens an implicit transaction; a
+        // SELECT that only assigns variables and reads no FROM doesn't.
+        if (context.Batch.CurrentStatement.CallsUserFunction && !combined.IsAssignmentOnly)
+            context.Batch.BeginImplicitTransaction();
+
         return combined;
     }
 
@@ -2080,6 +2085,11 @@ internal sealed partial class Selection
                         return context.SaveCheckpoint();
                     case ReservedKeyword { Keyword: Keyword.Union or Keyword.Except or Keyword.Intersect } when parenDepth == 0:
                         return null;
+                    // A statement keyword outside parentheses starts the next
+                    // statement of a batch written without semicolons, whose
+                    // FROM isn't this one's.
+                    case ReservedKeyword { Keyword: Keyword.Select or Keyword.Insert or Keyword.Update or Keyword.Delete or Keyword.Merge or Keyword.Declare or Keyword.Set or Keyword.If or Keyword.While or Keyword.Exec or Keyword.Execute or Keyword.Print } when parenDepth == 0:
+                        return null;
                 }
 
                 previousWasDistinct = tokenIsDistinct;
@@ -2969,6 +2979,7 @@ internal sealed partial class Selection
                 // lookups since those are 1- to 3-part forms).
                 if (objectName.Count == 4)
                 {
+                    context.Batch.BeginImplicitTransaction();
                     if (!context.Batch.TryResolveLinkedServerTable(objectName, out var linkedServer, out var remoteTable, out var remoteDbName, out var remoteSchemaName))
                         throw SimulatedSqlException.InvalidObjectName(objectName);
                     var linkedColumnNames = new string[remoteTable.Columns.Length];
@@ -3070,6 +3081,11 @@ internal sealed partial class Selection
                         // 2026-08-08, GROUP BY containment and XQuery alike).
                         writtenObjectName: cteBinding.Name);
                 }
+
+                // Past a CTE the name is an object — a table, view, table
+                // variable, catalog view or function — which opens an implicit
+                // transaction.
+                context.Batch.BeginImplicitTransaction();
 
                 // Catalog views (sys.tables / sys.objects / sys.schemas)
                 // route to a virtual FromSource whose rows project from live
@@ -3322,6 +3338,7 @@ internal sealed partial class Selection
                 var tvName = BatchContext.ParseObjectName(context, acceptTableVariable: true);
                 if (!context.Batch.TryResolveTable(tvName, out var tvTable))
                     throw SimulatedSqlException.MustDeclareTableVariable(tvName.Leaf);
+                context.Batch.BeginImplicitTransaction();
                 var tvColumnNames = new string[tvTable.Columns.Length];
                 for (var ci = 0; ci < tvColumnNames.Length; ci++)
                     tvColumnNames[ci] = tvTable.Columns[ci].Name;

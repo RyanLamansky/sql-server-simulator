@@ -402,6 +402,49 @@ internal sealed class BatchContext
     public const long LoopIterationLimit = 100_000;
 
     /// <summary>
+    /// The <c>QUOTED_IDENTIFIER</c> setting a top-level batch's last
+    /// <c>SET</c> of it leaves, which <c>@@OPTIONS</c> reads anywhere in the
+    /// batch; null for a batch holding none (see
+    /// <c>Simulation.ScanParseTimeOptions</c>).
+    /// </summary>
+    public bool? QuotedIdentifiersAfterParse;
+
+    /// <summary>
+    /// Depth of <c>IF</c> / <c>WHILE</c> conditions being parsed, which open no
+    /// implicit transaction whatever they read (see
+    /// <see cref="BeginImplicitTransaction"/>).
+    /// </summary>
+    public int ConditionDepth;
+
+    /// <summary>
+    /// Opens the transaction <c>SET IMPLICIT_TRANSACTIONS ON</c> gives a
+    /// statement that reads or writes an object when none is open — called by
+    /// the sites that meet one: a FROM source naming a table, view, table
+    /// variable, catalog view or function, a DML target, object DDL and
+    /// <c>GRANT</c> / <c>DENY</c> / <c>REVOKE</c>, a cursor's
+    /// <c>DECLARE</c> / <c>OPEN</c> / <c>FETCH</c>, <c>NEXT VALUE FOR</c>, a
+    /// user function a query calls, and <c>BEGIN TRANSACTION</c>, which then
+    /// nests inside it. An <c>IF</c> / <c>WHILE</c> condition opens none, nor
+    /// does a built-in rowset function, a CTE or <c>VALUES</c> by itself
+    /// (probed 2026-09-28 against SQL Server 2025).
+    /// </summary>
+    public void BeginImplicitTransaction()
+    {
+        var connection = this.Connection;
+        if (!connection.ImplicitTransactions
+            || connection.CurrentTransaction is not null
+            || this.IsSkipping
+            || this.ConditionDepth > 0
+            || this.UdfFrame is not null
+            || connection.TriggerStatementUndoLog is not null)
+        {
+            return;
+        }
+        connection.CurrentTransaction = new SimulatedDbTransaction(connection.Simulation, connection, System.Data.IsolationLevel.Unspecified);
+        this.CurrentStatement.BeganImplicitTransaction = true;
+    }
+
+    /// <summary>
     /// Depth of nested IF / WHILE / BEGIN...END dispatches in this batch.
     /// Bumped by the body-dispatching parsers, decremented on exit. Used by
     /// the must-be-first-statement check on CREATE/ALTER
@@ -1711,12 +1754,28 @@ internal sealed class BatchContext
     private int LockTimeoutFor(HeapTable table)
         => this.noWaitTables.Count != 0 && this.noWaitTables.Contains(table) ? 0 : this.Connection.LockTimeoutMillis;
 
-    public bool IsSkipping =>
+    public bool IsSkipping => this.SkipsForControlFlow || this.NoExecActive;
+
+    /// <summary>
+    /// <see cref="IsSkipping"/> short of <see cref="NoExecActive"/>: the
+    /// statement sits where control flow doesn't reach — an un-taken branch,
+    /// past a <c>BREAK</c> / <c>RETURN</c> / pending <c>GOTO</c>, or in the
+    /// compile walk — which even <c>SET NOEXEC OFF</c> doesn't run from.
+    /// </summary>
+    public bool SkipsForControlFlow =>
         this.SkipModeFlag
         || this.LoopControl != LoopControl.None
         || this.ReturnSignaled
         || this.ErrorSignaled
         || this.PendingGotoLabel is not null;
+
+    /// <summary>
+    /// Mirrors <see cref="SimulatedDbConnection.NoExec"/> for this batch — set
+    /// from the session as a top-level batch starts and by the batch's own
+    /// <c>SET NOEXEC</c> — so every statement parses in skip mode without
+    /// running while the option is on.
+    /// </summary>
+    public bool NoExecActive;
 
     /// <summary>The connection executing this batch.</summary>
     public SimulatedDbConnection Connection => this.Parser.Connection;
@@ -1876,6 +1935,7 @@ internal sealed class BatchContext
 
     public BatchContext(SimulatedDbCommand command)
     {
+        this.NoExecActive = command.Connection!.NoExec;
         this.Variables = SeedVariables(command);
         this.Parser = new ParserContext(command, this);
         SeedTableVariablesFromStructuredParameters(this, command);
@@ -2539,6 +2599,7 @@ internal sealed class BatchContext
         }
         this.AcquireStatementLock(function.SchemaLock, LockMode.SchemaStability);
         this.CurrentStatement.MarkOpensTransaction();
+        this.CurrentStatement.CallsUserFunction = true;
         return true;
     }
 

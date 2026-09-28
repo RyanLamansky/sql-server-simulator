@@ -101,7 +101,7 @@ The **128-character identifier limit** (**Msg 103**, class 15 state 4) measures 
 The message quotes the first 128 characters of that undelimited body.
 Django's schema editor emits exactly-128-character table names for a long model's implicit m2m table, which is what surfaced the delimiter-counting version of the rule.
 
-`@@OPTIONS` (`Parser/Expressions/Value.cs` `FromAtAtOptions`) returns 5432 with **bit 256** tracking the parse-position QI setting — `@@OPTIONS & 256` is 256 under ON, 0 under OFF.
+`@@OPTIONS` returns 5432 on a fresh session, with **bit 256** tracking QI — `@@OPTIONS & 256` is 256 under ON, 0 under OFF — as the batch's last `SET` of it leaves the option, since the whole batch parses before any of it runs (see [`session-options.md`](session-options.md#when-a-set-applies)).
 The **plan cache** key (`PlanCacheKey`, `Simulation/Simulation.cs`) includes the `QuotedIdentifiers` bool, so the identical text `SELECT "abc"` caches separately under ON vs OFF and never replays the wrong reading.
 
 ## Scoping — parse-time, textual order
@@ -117,8 +117,8 @@ The application is **parse-time and NOT gated on skip-mode**, matching SQL Serve
 - **Procedure / function / trigger bodies ignore the `SET` entirely** (SQL Server's "ignored in a stored procedure" rule) — neither the body's own reading nor the session changes.
   A body's reading comes from the module's creation-time capture instead — see below.
 
-The other session options — `ANSI_NULLS`, `ANSI_PADDING`, `ANSI_WARNINGS`, `ARITHABORT`, `CONCAT_NULL_YIELDS_NULL`, `NUMERIC_ROUNDABORT` — are **run-time**: they apply when their `SET` executes, so the batch's compile walk and a never-taken branch leave them alone, and a statement ahead of the `SET` in its batch still runs under the old setting — its `NULL = NULL`, its string `+`, `SESSIONPROPERTY` and `@@OPTIONS` alike (probed 2026-09-26 against SQL Server 2025).
-`@@OPTIONS` assembles its bits from those, `NOCOUNT` and `XACT_ABORT` as the session holds them, with `QUOTED_IDENTIFIER` at its parse position and `ANSI_NULL_DFLT_ON` constant.
+The other session options — `ANSI_NULLS`, `ANSI_PADDING`, `ANSI_WARNINGS`, `ARITHABORT`, `CONCAT_NULL_YIELDS_NULL`, `NUMERIC_ROUNDABORT` among them — are **run-time**: they apply when their `SET` executes, so the batch's compile walk and a never-taken branch leave them alone, and a statement ahead of the `SET` in its batch still runs under the old setting — its `NULL = NULL`, its string `+`, `SESSIONPROPERTY` and `@@OPTIONS` alike (probed 2026-09-26 against SQL Server 2025).
+Their reach into module bodies and `@@OPTIONS`' full bit list are in [`session-options.md`](session-options.md).
 
 ## Per-object creation-time capture
 

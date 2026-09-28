@@ -41,8 +41,32 @@ A statement touches data when it writes rows, or when its compile meets any of t
 The rule is per statement: `IF EXISTS (SELECT * FROM t) SELECT XACT_STATE()` reads 0 in its body, an `IF` or `WHILE` condition reads its own, and a cursor's rows read the statement its query was declared in.
 A function body always reads 1, since its caller named the function; a procedure body's statements read their own.
 
-**Not modeled yet**: `SET IMPLICIT_TRANSACTIONS ON` is parsed and discarded, so a statement that touches data leaves no transaction open behind it, where real opens one that `@@TRANCOUNT` then reads 1 — a `SELECT` from a table, `#temp` table, table variable or catalog view included (probed 2026-09-28 against SQL Server 2025).
-A built-in outside the probed families reads 0.
+**Not modeled yet**: a built-in outside the probed families reads 0.
+
+## `SET IMPLICIT_TRANSACTIONS`
+
+With the option on and no transaction open, a statement that reads or writes an object opens a transaction that stays open after it — `@@TRANCOUNT` reads 1 — until a `COMMIT` or `ROLLBACK` ends it, and the next such statement opens another (probed 2026-09-28 against SQL Server 2025).
+The set that opens one is narrower than the one `XACT_STATE()` reads above: `BatchContext.BeginImplicitTransaction` is called by the sites that meet an object, not by the built-ins.
+- A FROM source naming a table, view, `#temp` table, table variable, catalog view, DMV or table-valued function; a CTE or derived table only through a source of its own, and a built-in rowset function (`OPENJSON`, `STRING_SPLIT`, `GENERATE_SERIES`) or `VALUES` not at all.
+- A write, a table variable's included; object DDL — `CREATE`, `ALTER`, `DROP` (a missing object's too), `TRUNCATE`, `UPDATE STATISTICS` — and `GRANT` / `DENY` / `REVOKE`, the database-level forms excepted.
+- A cursor's `DECLARE` (whatever its query reads), `OPEN` and `FETCH`; `NEXT VALUE FOR` anywhere.
+- A user function called by a query — a `SELECT` returning rows, or a subquery — where one called from a `SET`, a `DECLARE` initializer, a `PRINT` or a `SELECT` assigning variables with no FROM opens none.
+- `BEGIN TRANSACTION`, which opens the implicit transaction first and then nests in it: `@@TRANCOUNT` reads 2, and it takes two `COMMIT`s to end.
+
+An `IF` or `WHILE` condition opens none, whatever it reads (`BatchContext.ConditionDepth`), nor does an `EXEC` of a procedure or dynamic SQL by itself — the statements inside do their own opening.
+Opening happens before the statement runs, so the statement's own `@@TRANCOUNT` counts it: `INSERT … SELECT @@TRANCOUNT` stores 2, the write's own transaction on top.
+A statement that fails keeps the transaction it opened when its error ends only the statement (Msg 2627, Msg 515, Msg 8134, a missing object's `DROP`), and loses it to the rollback when its error rolls back (the string-conversion family, anything under `XACT_ABORT`); a compile error of a statement the batch deferred — a missing table's Msg 208 — takes back the transaction the statement opened, real opening it only once the statement compiled.
+
+The option scopes like `XACT_ABORT` — a body's `SET` applies inside it and reverts on return — and a procedure or dynamic batch that ends with the option on raises no Msg 266 for the transaction count it changed, whoever set it, while one that turned it off before returning does (probed 2026-09-28).
+`@@OPTIONS & 2` reports it; `SESSIONPROPERTY` doesn't.
+`SET ANSI_DEFAULTS ON` turns it on — see [`session-options.md`](session-options.md).
+While it is on, neither the plan cache nor the compiled-batch cache is consulted, since a replayed plan would skip the parse that opens the transaction.
+
+Over the wire the transaction is one SqlClient learns of from the server: `SqlConnection.BeginTransaction` nests inside it, a command without that `SqlTransaction` is then refused client-side, and the API commit ends only its own level — the same through SqlClient against real (probed 2026-09-28).
+
+**Not modeled yet**: the system procedures that read the catalog through queries of their own (`sp_help` and its family) open a transaction on real and none here.
+
+**Divergences**: in-process, `SimulatedDbConnection.BeginTransaction` over an open implicit (or SQL-text) transaction raises the parallel-transactions `InvalidOperationException`, where SqlClient nests.
 
 ## Database-level DDL inside a user transaction
 

@@ -88,6 +88,14 @@ internal sealed class SessionToken(int spid)
     /// </summary>
     public long WaitStartedTicks;
 
+    /// <summary>
+    /// Set under <c>LockManager</c>'s gate when another session's request
+    /// closed a deadlock cycle and this blocked session carries the lower
+    /// <c>SET DEADLOCK_PRIORITY</c>: its wait ends with Msg 1205 instead of the
+    /// requester's.
+    /// </summary>
+    public bool ChosenAsDeadlockVictim;
+
     /// <summary>Set while the session sleeps in a <c>WAITFOR</c>, which <c>sys.dm_exec_requests</c> reports as its wait.</summary>
     public bool InWaitFor;
 

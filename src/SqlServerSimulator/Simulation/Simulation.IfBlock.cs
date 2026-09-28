@@ -45,7 +45,7 @@ partial class Simulation
         var connection = context.Connection;
 
         context.MoveNextRequired(); // consume IF
-        var cond = BooleanExpression.Parse(context);
+        var cond = ParseCondition(batch);
 
         var bindError = BindCondition(cond, batch);
 
@@ -112,6 +112,24 @@ partial class Simulation
 
         if (bindError is not null)
             throw bindError;
+    }
+
+    /// <summary>
+    /// Parses an <c>IF</c> / <c>WHILE</c> condition, which opens no implicit
+    /// transaction whatever it reads (probed 2026-09-28 against SQL Server
+    /// 2025).
+    /// </summary>
+    private static BooleanExpression ParseCondition(BatchContext batch)
+    {
+        batch.ConditionDepth++;
+        try
+        {
+            return BooleanExpression.Parse(batch.Parser);
+        }
+        finally
+        {
+            batch.ConditionDepth--;
+        }
     }
 
     /// <summary>
@@ -252,7 +270,7 @@ partial class Simulation
         var connection = context.Connection;
 
         context.MoveNextRequired(); // consume WHILE
-        var cond = BooleanExpression.Parse(context);
+        var cond = ParseCondition(batch);
         var bindError = BindCondition(cond, batch);
 
         var bodyStart = context.SaveCheckpoint();

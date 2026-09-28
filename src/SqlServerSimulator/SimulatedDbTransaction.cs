@@ -200,6 +200,13 @@ public sealed class SimulatedDbTransaction : DbTransaction
     internal readonly List<PendingVersionEntry> PendingVersionEntries = [];
 
     /// <summary>
+    /// The cursors opened while this transaction was the session's, which
+    /// <c>SET CURSOR_CLOSE_ON_COMMIT ON</c> closes as it ends by commit or
+    /// rollback; null until one opens.
+    /// </summary>
+    internal List<Cursor>? OpenedCursors;
+
+    /// <summary>
     /// True once <see cref="Commit"/> or <see cref="Rollback"/> has run.
     /// Subsequent calls are no-ops; <see cref="Dispose"/> uses this to skip
     /// the implicit rollback that fires for a transaction left "open" at
@@ -223,6 +230,7 @@ public sealed class SimulatedDbTransaction : DbTransaction
         // history entries FinalizePendingEntries just stamped and are reclaimed
         // instead by RunGarbageCollection below once no snapshot needs them.
         this.UndoLog.Commit();
+        this.CloseCursorsOnEnd();
         ReleaseAllLocks();
         UnregisterActiveSnapshot();
         Storage.VersionStore.RunGarbageCollection(this.simulation, db);
@@ -240,6 +248,7 @@ public sealed class SimulatedDbTransaction : DbTransaction
         Storage.VersionStore.DiscardPendingEntries(this.PendingVersionEntries);
         this.UndoLog.Rollback();
         this.TranCount = 0;
+        this.CloseCursorsOnEnd();
         ReleaseAllLocks();
         UnregisterActiveSnapshot();
         Storage.VersionStore.RunGarbageCollection(this.simulation, db);
@@ -269,6 +278,23 @@ public sealed class SimulatedDbTransaction : DbTransaction
             this.finished = true;
         }
         base.Dispose(disposing);
+    }
+
+    /// <summary>
+    /// Under <c>SET CURSOR_CLOSE_ON_COMMIT ON</c>, closes the cursors this
+    /// transaction opened that are still open — static ones included — as a
+    /// <c>COMMIT</c> or <c>ROLLBACK</c> ends it; a rollback to a savepoint
+    /// leaves them (probed 2026-09-28 against SQL Server 2025).
+    /// </summary>
+    private void CloseCursorsOnEnd()
+    {
+        if (this.OpenedCursors is not { } cursors || !this.Connection.CursorCloseOnCommit)
+            return;
+        foreach (var cursor in cursors)
+        {
+            if (cursor.IsOpen)
+                cursor.Close(this.Connection);
+        }
     }
 
     private void UnregisterActiveSnapshot()

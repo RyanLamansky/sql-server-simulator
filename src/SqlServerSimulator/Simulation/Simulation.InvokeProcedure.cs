@@ -244,6 +244,10 @@ partial class Simulation
         List<SimulatedStatementOutcome> outcomes = [];
         SimulatedSqlException? bodyError = null;
         var enteredTranCount = 0;
+        // A body ending under SET IMPLICIT_TRANSACTIONS ON — the caller's or
+        // its own — raises no Msg 266 for the transaction count it changed
+        // (probed 2026-09-28 against SQL Server 2025).
+        var endedUnderImplicitTransactions = connection.ImplicitTransactions;
         BatchContext? innerBatch = null;
         if (procedure.ClrEntry is { } clrEntry)
         {
@@ -322,6 +326,7 @@ partial class Simulation
             finally
             {
                 connection.NestingLevel--;
+                endedUnderImplicitTransactions = connection.ImplicitTransactions;
                 connection.QuotedIdentifiers = savedQuotedIdentifiers;
                 connection.AnsiNulls = savedAnsiNulls;
                 connection.TextSize = savedTextSize;
@@ -394,7 +399,7 @@ partial class Simulation
             yield return outcome;
         if (bodyError is not null)
             ExceptionDispatchInfo.Throw(bodyError);
-        if ((connection.CurrentTransaction?.TranCount ?? 0) is var exitTranCount && exitTranCount != enteredTranCount)
+        if ((connection.CurrentTransaction?.TranCount ?? 0) is var exitTranCount && exitTranCount != enteredTranCount && !endedUnderImplicitTransactions)
             throw SimulatedSqlException.TransactionCountMismatch(enteredTranCount, exitTranCount, attributionName);
     }
 

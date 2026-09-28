@@ -554,6 +554,9 @@ partial class Simulation
         // leaves the caller's @@OPTIONS bit clear).
         var enteredOptions = new SimulatedDbConnection.SessionOptionScope(connection);
         var enteredTranCount = connection.CurrentTransaction?.TranCount ?? 0;
+        // As for a procedure, a batch ending under SET IMPLICIT_TRANSACTIONS ON
+        // raises no Msg 266.
+        var endedUnderImplicitTransactions = connection.ImplicitTransactions;
         List<SimulatedStatementOutcome> outcomes = [];
         SimulatedSqlException? batchError = null;
         var compiled = false;
@@ -589,6 +592,7 @@ partial class Simulation
             // own database without leaving the session there.
             connection.CurrentDatabase = enteredDatabase;
             connection.NoCount = enteredNoCount;
+            endedUnderImplicitTransactions = connection.ImplicitTransactions;
             enteredOptions.Restore(connection);
             // A temp table created by the dynamic batch is dropped when it
             // returns (SQL Server's module-scoped lifetime — so re-running the
@@ -616,7 +620,7 @@ partial class Simulation
         yield return new SimulatedProcScopeBoundary(isEnter: false);
         if (batchError is not null)
             ExceptionDispatchInfo.Throw(batchError);
-        if ((connection.CurrentTransaction?.TranCount ?? 0) is var exitTranCount && exitTranCount != enteredTranCount)
+        if ((connection.CurrentTransaction?.TranCount ?? 0) is var exitTranCount && exitTranCount != enteredTranCount && !endedUnderImplicitTransactions)
             throw SimulatedSqlException.TransactionCountMismatch(enteredTranCount, exitTranCount, procedure: "");
     }
 

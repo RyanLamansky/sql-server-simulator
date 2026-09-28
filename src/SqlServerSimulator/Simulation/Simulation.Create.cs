@@ -1463,6 +1463,23 @@ partial class Simulation
     }
 
     /// <summary>
+    /// What a <c>CREATE TABLE</c> column stating neither <c>NULL</c> nor
+    /// <c>NOT NULL</c> gets: the session's <c>ANSI_NULL_DFLT_ON</c> /
+    /// <c>ANSI_NULL_DFLT_OFF</c> when either is on, else the database's
+    /// <c>ANSI_NULL_DEFAULT</c> — tempdb's, off, for a <c>#temp</c> table. An
+    /// alias type's own nullability wins over it, and a table variable, a
+    /// table type and <c>ALTER TABLE … ADD</c> keep nullable (probed 2026-09-28
+    /// against SQL Server 2025).
+    /// </summary>
+    private static bool DefaultsColumnsToNull(ParserContext context, string tableName)
+    {
+        var connection = context.Connection;
+        return connection.AnsiNullDefaultOn
+            || (!connection.AnsiNullDefaultOff && !tableName.StartsWith('#')
+                && (context.Batch.CurrentDatabase.Switches & DatabaseSwitches.AnsiNullDefault) != 0);
+    }
+
+    /// <summary>
     /// Parses a single column definition starting at the column-name token
     /// and appends a <see cref="HeapColumn"/> entry to <paramref name="heapColumns"/>
     /// (or a <c>null</c> placeholder when the column is a non-persisted
@@ -1861,7 +1878,8 @@ partial class Simulation
         if (generatedAs != GeneratedAlwaysAsRow.None)
             nullable ??= false;
         nullable ??= aliasIsNullable;
-        var actualNullable = nullable ?? (identitySpec is null);
+        var actualNullable = nullable ?? (identitySpec is null
+            && (isTableVariable || isTableType || withValuesColumns is not null || DefaultsColumnsToNull(context, tableName)));
 
         if (inlineKeyKind is KeyConstraintKind kind)
             pendingKeys.Add((kind, inlineKeyName, [heapColumns.Count], inlineKeyClustered, inlineKeyOptions, []));

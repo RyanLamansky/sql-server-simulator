@@ -164,15 +164,15 @@ internal sealed class LockResource
 /// <see cref="SessionToken.CurrentExecutingThreadId"/> equals
 /// the caller's managed thread id. If found, the wait is short-circuited
 /// since that thread can't release the conflicting hold while it's also
-/// the requester. The caller is the victim (per "always-the-requester"
-/// policy).
+/// the requester. The caller is the victim.
 /// </para>
 /// <para>
 /// Cross-thread cycle detection: when an acquire would block, the
 /// detector walks the wait-for graph starting at each conflicting
 /// holder's <see cref="SessionToken.WaitingOnResource"/>. If any
-/// walk reaches the caller's connection, a cycle exists; caller becomes
-/// the victim. The walker reads <c>WaitingOnResource</c> + resource
+/// walk reaches the caller's connection, a cycle exists, and the session in
+/// it with the lowest <c>SET DEADLOCK_PRIORITY</c> becomes the victim, the
+/// caller on a tie. The walker reads <c>WaitingOnResource</c> + resource
 /// holders under the gate, so the snapshot is consistent.
 /// </para>
 /// </remarks>
@@ -315,6 +315,11 @@ internal sealed class LockManager
             {
                 while (true)
                 {
+                    // A requester elsewhere closed a cycle and chose this
+                    // waiting session over itself.
+                    if (owner.ChosenAsDeadlockVictim)
+                        return LockAcquireOutcome.Deadlocked;
+
                     if (TryGrant(resource, mode, owner))
                         return waited ? LockAcquireOutcome.GrantedAfterWait : LockAcquireOutcome.Granted;
 
@@ -326,9 +331,20 @@ internal sealed class LockManager
 
                     // Cross-thread cycle detection. Walk the wait-for graph
                     // from each conflicting holder; if any walk reaches the
-                    // caller, a cycle exists and the caller is the victim.
-                    if (WouldCreateCycle(resource, mode, owner))
-                        return LockAcquireOutcome.Deadlocked;
+                    // caller, a cycle exists, and its victim is the caller
+                    // unless a session in the cycle runs at a lower
+                    // DEADLOCK_PRIORITY — then that one's wait ends in
+                    // Msg 1205 and the caller waits on for its rollback.
+                    if (FindDeadlockVictim(resource, mode, owner) is { } victim)
+                    {
+                        if (ReferenceEquals(victim, owner))
+                            return LockAcquireOutcome.Deadlocked;
+                        if (!victim.ChosenAsDeadlockVictim)
+                        {
+                            victim.ChosenAsDeadlockVictim = true;
+                            Monitor.PulseAll(this.gate);
+                        }
+                    }
 
                     // Timeout==0 = fail-fast.
                     if (timeoutMillis == 0)
@@ -379,6 +395,7 @@ internal sealed class LockManager
                 {
                     owner.WaitingOnResource = null;
                     owner.WaitingForMode = null;
+                    owner.ChosenAsDeadlockVictim = false;
                 }
             }
         }
@@ -515,50 +532,70 @@ internal sealed class LockManager
     }
 
     /// <summary>
-    /// Walks the wait-for graph from each conflicting holder. Returns
-    /// true when a path leads back to <paramref name="caller"/>, which
-    /// is a textbook deadlock cycle (caller → resource → conflicting
-    /// holder → … → caller). Reads <see cref="LockResource.Holders"/>
-    /// and <see cref="SessionToken.WaitingOnResource"/> under
-    /// the manager's gate — consistent snapshot.
+    /// Walks the wait-for graph from each conflicting holder, looking for a
+    /// path that leads back to <paramref name="caller"/> — a textbook deadlock
+    /// cycle (caller → resource → conflicting holder → … → caller). Returns
+    /// <see langword="null"/> when there is none, else the cycle's victim: the
+    /// session in it with the lowest <c>SET DEADLOCK_PRIORITY</c>, the caller
+    /// on a tie (probed 2026-09-28 against SQL Server 2025). Reads
+    /// <see cref="LockResource.Holders"/> and
+    /// <see cref="SessionToken.WaitingOnResource"/> under the manager's gate —
+    /// consistent snapshot.
     /// </summary>
-    private static bool WouldCreateCycle(LockResource resource, LockMode mode, SessionToken caller)
+    private static SessionToken? FindDeadlockVictim(LockResource resource, LockMode mode, SessionToken caller)
     {
         var visited = new HashSet<SessionToken>(ReferenceEqualityComparer.Instance);
+        var path = new List<SessionToken>();
         foreach (var hold in resource.Holders)
         {
             if (ReferenceEquals(hold.Owner, caller))
                 continue;
             if (IsCompatible(hold.Mode, mode))
                 continue;
-            if (WalkBack(hold.Owner, caller, visited))
-                return true;
+            if (!WalkBack(hold.Owner, caller, visited, path))
+                continue;
+            var victim = caller;
+            var lowest = PriorityOf(caller);
+            foreach (var participant in path)
+            {
+                // A cycle already resolving through its chosen victim.
+                if (participant.ChosenAsDeadlockVictim)
+                    return participant;
+                if (PriorityOf(participant) is var priority && priority < lowest)
+                    (victim, lowest) = (participant, priority);
+            }
+            return victim;
         }
-        return false;
+        return null;
     }
+
+    private static int PriorityOf(SessionToken session) => session.TryResolveOwner()?.DeadlockPriority ?? 0;
 
     /// <summary>
     /// DFS step: is <paramref name="blocker"/> transitively waiting on a
     /// resource <paramref name="target"/> holds? Skips already-visited
     /// connections to break finite cycles in the walk (degenerate
-    /// cycles within the holder set itself).
+    /// cycles within the holder set itself). On success
+    /// <paramref name="path"/> holds the blockers the cycle runs through.
     /// </summary>
-    private static bool WalkBack(SessionToken blocker, SessionToken target, HashSet<SessionToken> visited)
+    private static bool WalkBack(SessionToken blocker, SessionToken target, HashSet<SessionToken> visited, List<SessionToken> path)
     {
         if (!visited.Add(blocker))
             return false;
         var waitsOn = blocker.WaitingOnResource;
         if (waitsOn is null)
             return false;
+        path.Add(blocker);
         foreach (var hold in waitsOn.Holders)
         {
             if (ReferenceEquals(hold.Owner, blocker))
                 continue;
             if (ReferenceEquals(hold.Owner, target))
                 return true;
-            if (WalkBack(hold.Owner, target, visited))
+            if (WalkBack(hold.Owner, target, visited, path))
                 return true;
         }
+        path.RemoveAt(path.Count - 1);
         return false;
     }
 

@@ -176,7 +176,7 @@ public sealed class LockResourceTests
         // marked as waiting on r1 (WaitingOnResource = r1). When this
         // thread asks for X on r2, the detector walks r2's holders → b →
         // b.WaitingOnResource = r1 → r1's holders → us, cycle closed.
-        // Caller (us) is the victim per the always-the-requester policy.
+        // Caller (us) is the victim, both sessions at the same deadlock priority.
         var sim = new Simulation();
         var r1 = new LockResource();
         var r2 = new LockResource();

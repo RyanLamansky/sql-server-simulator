@@ -406,12 +406,8 @@ internal sealed partial class TdsSession
         }
 
         var connection = this.connection!;
-        using (var closeCommand = connection.CreateCommand())
-        {
-            closeCommand.CommandText = " ";
-            if (api.Cursor.IsOpen)
-                api.Cursor.Close(new BatchContext(closeCommand));
-        }
+        if (api.Cursor.IsOpen)
+            api.Cursor.Close(connection);
         _ = connection.Cursors.Remove(api.InternalName);
 
         writer.WriteReturnStatus(0);

@@ -321,7 +321,9 @@ Where an entry carries a second clause it is because that fact changes what you'
 - **Heap page lifecycle** — reclamation / reuse, tail-only shrink, `DBCC SHRINKDATABASE` / `SHRINKFILE`, `Heap.RowCount`, and which callers may take the reused encode buffer → [`heap-storage.md`](docs/claude/heap-storage.md).
 - **Per-`Simulation` plan cache and token memo** — the two reuse layers over a repeated `CommandText`.
   Cached plans are **shared**, so per-execution state belongs on `StatementContext`, never on the plan → [`plan-cache.md`](docs/claude/plan-cache.md).
-- **Transactions** — statement atomicity, the undo log, BEGIN / COMMIT / ROLLBACK / SAVE, `SET XACT_ABORT`, and the rare transaction-*aborting* error class that unwinds the whole stack → [`transactions.md`](docs/claude/transactions.md).
+- **Transactions** — statement atomicity, the undo log, BEGIN / COMMIT / ROLLBACK / SAVE, `SET XACT_ABORT`, `SET IMPLICIT_TRANSACTIONS`, and the rare transaction-*aborting* error class that unwinds the whole stack → [`transactions.md`](docs/claude/transactions.md).
+- **Session `SET` options** — which carry state, the parse-time pair against the run-time rest, how far a module body's `SET` reaches, `@@OPTIONS` / `ANSI_DEFAULTS` / `ANSI_NULL_DFLT_*` / `NOEXEC` / `PARSEONLY` / `DEADLOCK_PRIORITY`.
+  A new option's state joins `SimulatedDbConnection.SessionOptionScope` so a body's `SET` reverts on return → [`session-options.md`](docs/claude/session-options.md).
 - **Locking, MVCC, SNAPSHOT / RCSI, deadlock and timeout, the lock DMVs, key-range locks, application-lock siblings**.
   Every shared structure names a session by its one-way `SessionToken`, which is what lets an abandoned connection be collected and torn down → [`locking.md`](docs/claude/locking.md).
 - **Application locks** — `sp_getapplock` / `sp_releaseapplock` / `APPLOCK_MODE` / `APPLOCK_TEST`, and EF's `__EFMigrationsLock` → [`app-locks.md`](docs/claude/app-locks.md).
@@ -364,7 +366,7 @@ The feature docs' own **Not modeled yet** sections hold the smaller gaps.
 - **Key-range locks past a sargable leading-key-prefix predicate** — other SERIALIZABLE reads take the whole-table S → [`locking.md`](docs/claude/locking.md#key-range-locks).
 - **An aggregate reading only an enclosing query's columns** where no collector can rehome it → `NotSupportedException` → [`query.md`](docs/claude/query.md#outer-scope-correlation-in-the-select-list).
 - **Cross-server DML** through a four-part name → `NotSupportedException` via `BatchContext.RejectCrossServerMutation` (cross-*database* DML ships) → [`linked-servers.md`](docs/claude/linked-servers.md), [`schemas.md`](docs/claude/schemas.md#cross-database-writes).
-- **Most `SET <option>` toggles parse and are discarded** (`Simulation.Set.cs`); the ones with semantic effect are handled by name there.
+- **A few `SET <option>` toggles still parse and are discarded** — `STATISTICS IO` / `TIME`, the `SHOWPLAN_*` family, `ARITHIGNORE`, `FORCEPLAN` → [`session-options.md`](docs/claude/session-options.md#not-modeled-yet).
   The same goes for most `ALTER DATABASE … SET` options → [`database-options.md`](docs/claude/database-options.md).
 - **Heap allocation tracking** (a flat page list, no IAM/PFS) → [`heap-storage.md`](docs/claude/heap-storage.md).
 - **`FORCESEEK`'s plan-infeasibility refusal** (Msg 8622) → [`query-hints.md`](docs/claude/query-hints.md#not-enforced).

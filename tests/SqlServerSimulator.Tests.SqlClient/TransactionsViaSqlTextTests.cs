@@ -112,4 +112,40 @@ public sealed class TransactionsViaSqlTextTests
         await using var count = new SqlCommand("select count(*) from t", connection);
         AreEqual(1, await count.ExecuteScalarAsync(TestContext.CancellationToken));
     }
+
+    /// <summary>
+    /// A transaction <c>SET IMPLICIT_TRANSACTIONS ON</c> opened is one SqlClient
+    /// learns of from the server: <c>BeginTransaction</c> nests inside it, a
+    /// command without its transaction is then refused client-side, and the
+    /// API's commit ends only its own level (probed 2026-09-28 against SQL
+    /// Server 2025 through the same calls).
+    /// </summary>
+    [TestMethod]
+    public async Task ImplicitTransaction_BeginTransactionNestsInIt()
+    {
+        var simulation = new Simulation();
+        Wire.ExecInProc(simulation, "create table t (id int); insert t values (1)");
+
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using (var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken))
+        {
+            await using (var open = new SqlCommand("set implicit_transactions on; insert t values (2); select @@trancount", connection))
+                AreEqual(1, await open.ExecuteScalarAsync(TestContext.CancellationToken));
+
+            var transaction = connection.BeginTransaction();
+            await using (var nested = new SqlCommand("select @@trancount", connection, transaction))
+                AreEqual(2, await nested.ExecuteScalarAsync(TestContext.CancellationToken));
+            await using (var bare = new SqlCommand("select @@trancount", connection))
+                _ = await ThrowsAsync<InvalidOperationException>(() => bare.ExecuteScalarAsync(TestContext.CancellationToken));
+
+            transaction.Commit();
+            await using var after = new SqlCommand("select @@trancount", connection);
+            AreEqual(1, await after.ExecuteScalarAsync(TestContext.CancellationToken));
+        }
+
+        // Closing the connection rolled the implicit transaction back.
+        await using var reopened = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+        await using var count = new SqlCommand("select count(*) from t", reopened);
+        AreEqual(1, await count.ExecuteScalarAsync(TestContext.CancellationToken));
+    }
 }

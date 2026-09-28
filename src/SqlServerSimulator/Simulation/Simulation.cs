@@ -1178,6 +1178,18 @@ public sealed partial class Simulation
         var enteredOptions = new SimulatedDbConnection.SessionOptionScope(batch.Connection);
         try
         {
+            // Under SET PARSEONLY ON the batch is checked for syntax alone and
+            // nothing runs.
+            if (ScanParseTimeOptions(command, batch))
+            {
+                if (this.CompileBatch(CompileContextFor(batch, command), key: null) is { Class: 15 } syntaxError)
+                {
+                    batch.Connection.LastErrorNumber = syntaxError.Number;
+                    yield return new SimulatedErrorOutcome(syntaxError);
+                }
+                yield break;
+            }
+
             // Nothing runs when the batch doesn't compile; the error is the
             // batch's whole response, raised at ExecuteReader like real's.
             if (this.CompileBatch(CompileContextFor(batch, command), cacheKey) is { } compileError)
@@ -1225,6 +1237,69 @@ public sealed partial class Simulation
             // cursors held.
             TeardownFrameCursors(batch);
         }
+    }
+
+    /// <summary>
+    /// Settles the two options a top-level batch applies while it parses, and
+    /// so for the whole batch whatever the order its statements run in: the
+    /// last <c>SET PARSEONLY</c> the batch holds decides whether any of it
+    /// runs — statements ahead of it included — and becomes the session's,
+    /// and the last <c>SET QUOTED_IDENTIFIER</c> (or <c>ANSI_DEFAULTS</c>) is
+    /// what the batch's <c>@@OPTIONS</c> reads, statements ahead of it included
+    /// (probed 2026-09-28 against SQL Server 2025). A batch creating a module
+    /// holds no batch-level SET — its body's are the module's. The scan runs
+    /// only for a batch whose text names one of the options.
+    /// </summary>
+    /// <returns>Whether <c>SET PARSEONLY</c> leaves the batch unrun.</returns>
+    private static bool ScanParseTimeOptions(SimulatedDbCommand command, BatchContext batch)
+    {
+        var connection = command.Connection!;
+        var text = command.CommandText;
+        if (!text.Contains("PARSEONLY", StringComparison.OrdinalIgnoreCase)
+            && !text.Contains("QUOTED_IDENTIFIER", StringComparison.OrdinalIgnoreCase)
+            && !text.Contains("ANSI_DEFAULTS", StringComparison.OrdinalIgnoreCase))
+        {
+            return connection.ParseOnly;
+        }
+
+        // A bare context: the batch's own seeds its parameters, table-valued
+        // ones included, which a scan mustn't consume.
+        var scan = new BatchContext(command, new Dictionary<string, VariableSlot>(BatchContext.VariableNameComparer)).Parser;
+        List<string> names = [];
+        var quotedIdentifiers = connection.QuotedIdentifiers;
+        try
+        {
+            if (!scan.MoveNext() || scan.Token is ReservedKeyword { Keyword: Keyword.Create or Keyword.Alter })
+                return connection.ParseOnly;
+            do
+            {
+                if (scan.Token is not ReservedKeyword { Keyword: Keyword.Set })
+                    continue;
+                names.Clear();
+                while (scan.MoveNext() && scan.Token is UnquotedString { Value: var name })
+                {
+                    names.Add(name);
+                    if (!scan.MoveNext() || scan.Token is not Operator { Character: ',' })
+                        break;
+                }
+                if (scan.Token is not ReservedKeyword { Keyword: Keyword.On or Keyword.Off } value)
+                    continue;
+                foreach (var name in names)
+                {
+                    if (name.Equals("PARSEONLY", StringComparison.OrdinalIgnoreCase))
+                        connection.ParseOnly = value.Keyword == Keyword.On;
+                    else if (IsQuotedIdentifierOption(name))
+                        quotedIdentifiers = value.Keyword == Keyword.On;
+                }
+            }
+            while (scan.MoveNext());
+        }
+        catch (SimulatedSqlException)
+        {
+            // A text that doesn't tokenize reports that from the compile.
+        }
+        batch.QuotedIdentifiersAfterParse = quotedIdentifiers;
+        return connection.ParseOnly;
     }
 
     /// <summary>
@@ -1331,6 +1406,9 @@ public sealed partial class Simulation
             : command.Connection is { CurrentDatabase: { } currentDb } connection
                 && connection.SessionIsolationLevel == System.Data.IsolationLevel.ReadCommitted
                 && !connection.NoBrowseTable
+                // A replayed plan opens no implicit transaction and runs under
+                // NOEXEC / PARSEONLY, each of which a parse settles.
+                && !connection.ImplicitTransactions && !connection.NoExec && !connection.ParseOnly
                 && BuildPlanCacheParameterSignature(command) is { } sig
                     ? new PlanCacheKey(command.CommandText, currentDb.Name, sig, connection.QuotedIdentifiers, connection.DateFormat, connection.AnsiNulls, connection.ConcatNullYieldsNull)
                     : null;
@@ -1909,6 +1987,8 @@ public sealed partial class Simulation
         batch.CurrentStatement.BindsDeferredSource = false;
         batch.CurrentStatement.ReadsPermanentObject = batch.CurrentStatement.ReadsTemporaryObject = false;
         batch.CurrentStatement.OpensTransaction = false;
+        batch.CurrentStatement.BeganImplicitTransaction = false;
+        batch.CurrentStatement.CallsUserFunction = false;
         batch.CurrentStatement.TransactionMark = null;
         batch.CurrentStatement.PendingDdlEvents = null;
         batch.CurrentStatement.DdlTriggerCreatedThisStatement = null;
@@ -2005,6 +2085,8 @@ public sealed partial class Simulation
                     }
                     throw refusal;
                 }
+                if (connection.ImplicitTransactions && connection.CurrentTransaction is null && OpensImplicitTransactionAsDdl(batch.Parser))
+                    batch.BeginImplicitTransaction();
                 foreach (var outcome in DispatchOneStatementCore(batch, requireSemicolonBeforeCte, atBatchStart))
                     outcomes.Add(outcome);
                 // Database-scope DDL triggers fire after the statement's own
@@ -2062,6 +2144,11 @@ public sealed partial class Simulation
                 // refuses to be caught, so the TRY-frame arm below skips it.
                 if (ex.AbortsTransaction)
                     connection.CurrentTransaction?.Rollback();
+                // Real opens an implicit transaction only once its statement
+                // compiled, so a compile error met here takes back the one the
+                // statement opened.
+                if (batch.CurrentStatement.BeganImplicitTransaction && IsDeferredCompileError(ex) && connection.CurrentTransaction is { TranCount: 1 } implicitTransaction)
+                    implicitTransaction.Rollback();
                 // SET XACT_ABORT ON generalizes that class conditionally: while
                 // the option is on, a run-time error that would ordinarily end
                 // only its own statement ends the batch and rolls the whole
@@ -2716,6 +2803,36 @@ public sealed partial class Simulation
                 return false;
             }
             return false;
+        }
+        finally
+        {
+            parser.RestoreCheckpoint(checkpoint);
+        }
+    }
+
+    /// <summary>
+    /// Whether the statement at <paramref name="parser"/>'s cursor is object
+    /// DDL or a permission statement — <c>CREATE</c>, <c>ALTER</c>,
+    /// <c>DROP</c>, <c>TRUNCATE</c>, <c>UPDATE STATISTICS</c>, <c>GRANT</c>,
+    /// <c>DENY</c>, <c>REVOKE</c> — which opens an implicit transaction before
+    /// it runs, a missing object's <c>DROP</c> included; the database-level
+    /// forms open none (probed 2026-09-28 against SQL Server 2025). Peeks
+    /// without moving the cursor.
+    /// </summary>
+    private static bool OpensImplicitTransactionAsDdl(ParserContext parser)
+    {
+        if (parser.Token is not ReservedKeyword { Keyword: var lead })
+            return false;
+        if (lead is Keyword.Grant or Keyword.Deny or Keyword.Revoke or Keyword.Truncate)
+            return true;
+        if (lead is not (Keyword.Create or Keyword.Alter or Keyword.Drop or Keyword.Update))
+            return false;
+        var checkpoint = parser.SaveCheckpoint();
+        try
+        {
+            return parser.MoveNext() && (lead == Keyword.Update
+                ? parser.Token is ReservedKeyword { Keyword: Keyword.Statistics }
+                : parser.Token is not ReservedKeyword { Keyword: Keyword.Database });
         }
         finally
         {
@@ -3563,6 +3680,10 @@ public sealed partial class Simulation
         if (marked && !named)
             throw SimulatedSqlException.TransactionNameRequiredForMark();
 
+        // Under SET IMPLICIT_TRANSACTIONS ON the statement opens the implicit
+        // transaction first and then nests in it, @@TRANCOUNT reading 2
+        // (probed 2026-09-28 against SQL Server 2025).
+        context.Batch.BeginImplicitTransaction();
         if (context.Connection.CurrentTransaction is { } existing)
         {
             if (marked && existing.IsMarked)
@@ -3777,6 +3898,8 @@ public sealed partial class Simulation
         context.Batch.CurrentStatement.TransactedWrite = true;
         if (!context.Batch.IsSkipping)
             RejectWriteInDoomedTransaction(context.Connection);
+        // A write opens an implicit transaction, a table variable's included.
+        context.Batch.BeginImplicitTransaction();
         var tx = context.Connection.CurrentTransaction;
         // Inside a trigger, join the firing statement's scope instead of
         // opening one: the parent statement and everything its triggers wrote

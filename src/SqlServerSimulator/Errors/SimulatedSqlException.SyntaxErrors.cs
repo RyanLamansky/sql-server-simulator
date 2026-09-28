@@ -378,6 +378,30 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException NullTreatmentNotSupported(string functionLowerName, string treatment) =>
         new($"The function '{functionLowerName}' does not support {treatment}.", 16208, 15, 1);
 
+    /// <summary>
+    /// Mimics SQL Server error 2755: <c>SET DEADLOCK_PRIORITY</c> given
+    /// anything but <c>LOW</c>, <c>NORMAL</c>, <c>HIGH</c> or an integer in
+    /// -10..10 — a literal or a variable's value alike (probed 2026-09-28
+    /// against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException DeadlockPriorityInvalid() =>
+        new("SET DEADLOCK_PRIORITY option is invalid. Valid options are {HIGH | NORMAL | LOW | [-10 ... 10] of type integer}.", 2755, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 1059: <c>SET PARSEONLY</c> inside a procedure,
+    /// trigger or function body, refused as the module is created (probed
+    /// 2026-09-28 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException ParseOnlyInModule() =>
+        new("Cannot set or reset the 'parseonly' option within a procedure or function.", 1059, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 2743: <c>SET CONTEXT_INFO</c> given a variable
+    /// holding NULL or a string (probed 2026-09-28 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException ContextInfoRequiresBinary() =>
+        new("SET CONTEXT_INFO option requires varbinary (128) NOT NULL parameter.", 2743, 16, 3);
+
     internal static SimulatedSqlException DateFirstOutOfRange(long value) =>
         new($"SET DATEFIRST {value.ToString(System.Globalization.CultureInfo.InvariantCulture)} is out of range.", 2742, 16, 1);
 

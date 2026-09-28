@@ -121,9 +121,7 @@ partial class Simulation
         if (IsQuotedIdentifierOption(firstName) && context.Token is ReservedKeyword { Keyword: var qiOnOff })
             ApplyQuotedIdentifierOption(context, qiOnOff == Keyword.On);
 
-        // Record the six ANSI/arithmetic session toggles SESSIONPROPERTY reads
-        // (ANSI_NULLS / ANSI_PADDING / ANSI_WARNINGS / ARITHABORT /
-        // CONCAT_NULL_YIELDS_NULL / NUMERIC_ROUNDABORT). Other OnOff options
+        // Record the on/off options the session keeps state for; the rest
         // no-op inside RecordSessionStateOption.
         if (firstKind == SetOptionKind.OnOff && context.Token is ReservedKeyword { Keyword: var onOff })
             RecordSessionStateOption(context, firstName, onOff == Keyword.On);
@@ -189,10 +187,10 @@ partial class Simulation
         }
 
         // XACT_ABORT promotes the statement-terminating run-time errors to
-        // batch-aborting, transaction-rolling ones. Unlike the six ANSI toggles
-        // above it applies inside a procedure / trigger / dynamic-SQL body —
-        // the body's SET binds for the body's duration and the invocation seam
-        // restores the caller's value (SimulatedDbConnection.SessionOptionScope).
+        // batch-aborting, transaction-rolling ones. A procedure / trigger /
+        // dynamic-SQL body's SET binds for the body's duration and the
+        // invocation seam restores the caller's value
+        // (SimulatedDbConnection.SessionOptionScope).
         if (firstName.Equals("XACT_ABORT", StringComparison.OrdinalIgnoreCase) && !context.Batch.IsSkipping
             && context.Token is ReservedKeyword { Keyword: var xactOnOff })
         {
@@ -232,14 +230,48 @@ partial class Simulation
             context.Connection.NoCount = nocountOnOff == Keyword.On || context.Connection.RunningLogonTriggers;
         }
 
+        // NOEXEC compiles each statement without running it. It applies as it
+        // runs, and SET NOEXEC OFF is the one statement that still runs under
+        // it (probed 2026-09-28 against SQL Server 2025).
+        if (firstName.Equals("NOEXEC", StringComparison.OrdinalIgnoreCase)
+            && context.Token is ReservedKeyword { Keyword: var noExecOnOff }
+            && !context.Batch.SkipsForControlFlow)
+        {
+            context.Connection.NoExec = context.Batch.NoExecActive = noExecOnOff == Keyword.On;
+        }
+
+        // PARSEONLY applies while the batch parses, governing the batch that
+        // sets it, so Simulation.ScanParseTimeOptions settles it ahead of the
+        // batch rather than here; a module body refuses it as the module is
+        // created.
+        if (firstName.Equals("PARSEONLY", StringComparison.OrdinalIgnoreCase)
+            && (context.Batch.UdfFrame is not null || context.Batch.TriggerFrame is not null || context.Batch.ProcFrame is { IsDynamicSql: false }))
+        {
+            throw SimulatedSqlException.ParseOnlyInModule();
+        }
+
+        if (firstName.Equals("DEADLOCK_PRIORITY", StringComparison.OrdinalIgnoreCase) && !context.Batch.IsSkipping)
+            context.Connection.DeadlockPriority = ReadDeadlockPriority(context, negativeInteger);
+
         // CONTEXT_INFO carries semantic effect: store the binary value,
         // right-padded / truncated to exactly 128 bytes (SQL Server's
-        // fixed buffer), surfaced by CONTEXT_INFO(). The literal-binary form
-        // is handled here; a `@var` value side isn't accepted by the SET
-        // value parser (parse-and-discard heritage) — that shape stays unmodeled.
+        // fixed buffer), surfaced by CONTEXT_INFO(). A variable's value
+        // converts to binary, a NULL or a string one refused with Msg 2743
+        // (probed 2026-09-28 against SQL Server 2025).
         if (firstName.Equals("CONTEXT_INFO", StringComparison.OrdinalIgnoreCase) && !context.Batch.IsSkipping)
         {
-            if (context.Token is Literal { Value: { IsNull: false } binary })
+            var assigned = context.Token switch
+            {
+                AtPrefixedString variable => context.Batch.GetVariableSlot(variable.Value).Value switch
+                {
+                    { IsNull: true } => throw SimulatedSqlException.ContextInfoRequiresBinary(),
+                    { Type: var held } when SqlType.IsStringCategory(held) => throw SimulatedSqlException.ContextInfoRequiresBinary(),
+                    var held => held.CoerceTo(SqlType.Varbinary),
+                },
+                Literal literal => literal.Value,
+                _ => SqlValue.Null(SqlType.Varbinary),
+            };
+            if (assigned is { IsNull: false } binary)
             {
                 var source = binary.AsBytes;
                 var buffer = new byte[128];
@@ -290,34 +322,56 @@ partial class Simulation
     }
 
     /// <summary>
-    /// Records one of the six ANSI/arithmetic session toggles
-    /// <c>SESSIONPROPERTY</c> reads onto the connection. Scoping mirrors
-    /// <see cref="ApplyQuotedIdentifierOption"/>: the write is suppressed inside
-    /// a procedure / function / trigger body and inside dynamic SQL (a non-null
-    /// <see cref="BatchContext.ProcFrame"/> covers the dynamic-SQL sentinel too),
-    /// so only a top-level <c>SET</c> persists to the session — matching how
-    /// real SQL Server scopes these options. Unlike QUOTED_IDENTIFIER these
-    /// apply when the SET runs, not while it parses: the batch's compile walk
-    /// and a never-taken IF branch leave them alone, so a statement ahead of the
-    /// SET in its batch still sees the old setting — its <c>NULL = NULL</c>,
-    /// its string <c>+</c>, <c>SESSIONPROPERTY</c> and <c>@@OPTIONS</c> alike
-    /// (probed 2026-09-26 against SQL Server 2025). Other recognized OnOff
-    /// options fall through the default arm and no-op — including XACT_ABORT,
-    /// whose write happens in the caller because it carries the opposite
-    /// module scoping (it applies inside a body and reverts on return).
+    /// Records an on/off session option onto the connection as the <c>SET</c>
+    /// runs, not while it parses: the batch's compile walk and a never-taken IF
+    /// branch leave it alone, so a statement ahead of the SET in its batch
+    /// still sees the old setting — its <c>NULL = NULL</c>, its string
+    /// <c>+</c>, <c>SESSIONPROPERTY</c> and <c>@@OPTIONS</c> alike (probed
+    /// 2026-09-26 against SQL Server 2025). Inside a procedure, trigger or
+    /// dynamic-SQL body the option applies for the body and reverts when it
+    /// returns (<see cref="SimulatedDbConnection.SessionOptionScope"/>), save
+    /// <c>ANSI_NULLS</c>, whose SET a procedure or trigger body ignores as it
+    /// does <c>QUOTED_IDENTIFIER</c>'s, the module running under the setting
+    /// captured when it was created (probed 2026-09-28). <c>ANSI_DEFAULTS</c>
+    /// sets its seven options together. Options with no session state here
+    /// fall through the default arm — including XACT_ABORT, whose write
+    /// happens in the caller.
     /// </summary>
     private static void RecordSessionStateOption(ParserContext context, string optionName, bool on)
     {
         var batch = context.Batch;
-        if (batch.IsSkipping || batch.UdfFrame is not null || batch.TriggerFrame is not null || batch.ProcFrame is not null)
+        if (batch.IsSkipping || batch.UdfFrame is not null)
             return;
         var connection = context.Connection;
+        var moduleBody = batch.TriggerFrame is not null || batch.ProcFrame is { IsDynamicSql: false };
         Span<char> upper = stackalloc char[optionName.Length];
         _ = optionName.AsSpan().ToUpperInvariant(upper);
         switch (upper)
         {
+            case "ANSI_DEFAULTS":
+                if (!moduleBody)
+                    connection.AnsiNulls = on;
+                connection.AnsiPadding = on;
+                connection.AnsiWarnings = on;
+                connection.CursorCloseOnCommit = on;
+                connection.ImplicitTransactions = on;
+                connection.AnsiNullDefaultOn = on;
+                if (on)
+                    connection.AnsiNullDefaultOff = false;
+                break;
             case "ANSI_NULLS":
-                connection.AnsiNulls = on;
+                if (!moduleBody)
+                    connection.AnsiNulls = on;
+                break;
+            case "ANSI_NULL_DFLT_OFF":
+                connection.AnsiNullDefaultOff = on;
+                if (on)
+                    connection.AnsiNullDefaultOn = false;
+                break;
+            case "ANSI_NULL_DFLT_ON":
+                connection.AnsiNullDefaultOn = on;
+                if (on)
+                    connection.AnsiNullDefaultOff = false;
                 break;
             case "ANSI_PADDING":
                 connection.AnsiPadding = on;
@@ -331,8 +385,15 @@ partial class Simulation
             case "CONCAT_NULL_YIELDS_NULL":
                 connection.ConcatNullYieldsNull = on;
                 break;
+            case "CURSOR_CLOSE_ON_COMMIT":
+                connection.CursorCloseOnCommit = on;
+                break;
+            case "IMPLICIT_TRANSACTIONS":
+                connection.ImplicitTransactions = on;
+                break;
             case "NO_BROWSETABLE":
-                connection.NoBrowseTable = on;
+                if (batch.ProcFrame is null && batch.TriggerFrame is null)
+                    connection.NoBrowseTable = on;
                 break;
             case "NUMERIC_ROUNDABORT":
                 connection.NumericRoundabort = on;
@@ -546,8 +607,8 @@ partial class Simulation
         // The variable form (`SET LANGUAGE @l`, `SET DATEFORMAT @f`) is legal
         // wherever a bare identifier is.
         SetOptionKind.Identifier => context.Token is Name or Literal or AtPrefixedString,
-        SetOptionKind.IntegerOrIdent => context.Token is Numeric or Name or Literal,
-        SetOptionKind.Binary => context.Token is Literal,
+        SetOptionKind.IntegerOrIdent => context.Token is Numeric or Name or Literal or AtPrefixedString,
+        SetOptionKind.Binary => context.Token is Literal or AtPrefixedString,
         _ => false,
     };
 
@@ -572,6 +633,41 @@ partial class Simulation
         },
         _ => null,
     };
+
+    /// <summary>
+    /// Reads <c>SET DEADLOCK_PRIORITY</c>'s value — <c>LOW</c> / <c>NORMAL</c>
+    /// / <c>HIGH</c>, an integer in -10..10, or a variable holding either,
+    /// a NULL variable reading as <c>NORMAL</c> — raising Msg 2755 for
+    /// anything else (probed 2026-09-28 against SQL Server 2025).
+    /// </summary>
+    private static int ReadDeadlockPriority(ParserContext context, bool negative)
+    {
+        var value = context.Token switch
+        {
+            AtPrefixedString variable => context.Batch.GetVariableSlot(variable.Value).Value,
+            Numeric { Value: var literal } => literal,
+            Literal { Value: var literal } => literal,
+            Name name => SqlValue.FromNVarchar(name.Value),
+            _ => throw SimulatedSqlException.DeadlockPriorityInvalid(),
+        };
+        if (value.IsNull)
+            return 0;
+        if (SqlType.IsCollatedString(value.Type))
+        {
+            var text = value.AsString.Trim();
+            return text.Equals("LOW", StringComparison.OrdinalIgnoreCase) ? -5
+                : text.Equals("NORMAL", StringComparison.OrdinalIgnoreCase) ? 0
+                : text.Equals("HIGH", StringComparison.OrdinalIgnoreCase) ? 5
+                : int.TryParse(text, System.Globalization.NumberStyles.AllowLeadingSign, System.Globalization.CultureInfo.InvariantCulture, out var parsed) && parsed is >= -10 and <= 10 ? parsed
+                : throw SimulatedSqlException.DeadlockPriorityInvalid();
+        }
+        if (!SqlType.IsIntegerCategory(value.Type))
+            throw SimulatedSqlException.DeadlockPriorityInvalid();
+        var priority = value.CoerceTo(SqlType.BigInt).AsInt64;
+        if (negative)
+            priority = -priority;
+        return priority is >= -10 and <= 10 ? (int)priority : throw SimulatedSqlException.DeadlockPriorityInvalid();
+    }
 
     /// <summary>
     /// Reads the identifier an Identifier-shape SET option was given, from a

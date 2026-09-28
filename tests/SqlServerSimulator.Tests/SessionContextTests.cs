@@ -85,6 +85,20 @@ public sealed class SessionContextTests
     public void ContextInfo_PaddedTo128AfterSet()
         => AreEqual(128, ExecuteScalar("set context_info 0x4869; select datalength(context_info())"));
 
+    // A variable's value converts to binary; a NULL or string one is Msg 2743
+    // (probed 2026-09-28 against SQL Server 2025).
+    [TestMethod]
+    [DataRow("declare @b varbinary(128) = 0x0102", "0x0102")]
+    [DataRow("declare @b int = 258", "0x00000102")]
+    public void ContextInfo_FromVariable(string declaration, string expectedPrefix)
+        => AreEqual(expectedPrefix, ExecuteScalar($"{declaration}; set context_info @b; select convert(varchar(12), substring(context_info(), 1, {(expectedPrefix.Length - 2) / 2}), 1)"));
+
+    [TestMethod]
+    [DataRow("declare @b varbinary(10)")]
+    [DataRow("declare @b varchar(10) = 'ab'")]
+    public void ContextInfo_FromNullOrStringVariable_RaisesMsg2743(string declaration)
+        => new Simulation().AssertSqlError($"{declaration}; set context_info @b", 2743, "SET CONTEXT_INFO option requires varbinary (128) NOT NULL parameter.");
+
     [TestMethod]
     public void ConnectionProperty_KnownAndUnknown()
     {

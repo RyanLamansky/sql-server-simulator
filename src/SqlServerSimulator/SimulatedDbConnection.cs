@@ -186,17 +186,19 @@ public sealed class SimulatedDbConnection : DbConnection
     /// reads it while parsing to decide whether <c>= NULL</c> is two-valued,
     /// each CREATE stamps it onto the object's <c>SchemaObject.UsesAnsiNulls</c>
     /// capture, and a module invocation swaps that capture in for its body.
-    /// Mutated by top-level <c>SET ANSI_NULLS ON|OFF</c> (including the comma-list
-    /// form); like <c>QUOTED_IDENTIFIER</c>, SETs inside a procedure / function /
-    /// trigger body or dynamic SQL don't write here.
+    /// Mutated by <c>SET ANSI_NULLS ON|OFF</c> (including the comma-list form)
+    /// as it runs; like <c>QUOTED_IDENTIFIER</c>, a SET inside a procedure /
+    /// function / trigger body doesn't write here, while one in dynamic SQL
+    /// applies to that batch and reverts with it (probed 2026-09-28 against SQL
+    /// Server 2025).
     /// </summary>
     internal bool AnsiNulls = true;
 
     /// <summary>
     /// Session-scoped <c>ANSI_PADDING</c> setting (default <see langword="true"/>),
     /// surfaced by <c>SESSIONPROPERTY('ANSI_PADDING')</c>. Parse-and-discard for
-    /// storage semantics; recorded so the option reads back. Scoping mirrors
-    /// <see cref="AnsiNulls"/>.
+    /// storage semantics; recorded so the option reads back. Scoping matches
+    /// <see cref="XactAbort"/>.
     /// </summary>
     internal bool AnsiPadding = true;
 
@@ -206,7 +208,7 @@ public sealed class SimulatedDbConnection : DbConnection
     /// truncates an over-long string silently, no Msg 8153 is sent, and — with
     /// <see cref="Arithabort"/> also off — a divide by zero or an overflow
     /// answers NULL (<c>BatchContext.AbsorbsArithmeticFault</c>). Scoping
-    /// mirrors <see cref="AnsiNulls"/>.
+    /// matches <see cref="XactAbort"/>.
     /// </summary>
     internal bool AnsiWarnings = true;
 
@@ -216,7 +218,7 @@ public sealed class SimulatedDbConnection : DbConnection
     /// (probe-confirmed), the one option of this family that defaults off.
     /// Surfaced by <c>SESSIONPROPERTY('ARITHABORT')</c>; on, it keeps a divide
     /// by zero or an overflow an error whatever <see cref="AnsiWarnings"/>
-    /// says. Scoping mirrors <see cref="AnsiNulls"/>.
+    /// says. Scoping matches <see cref="XactAbort"/>.
     /// </summary>
     internal bool Arithabort;
 
@@ -224,7 +226,7 @@ public sealed class SimulatedDbConnection : DbConnection
     /// Session-scoped <c>CONCAT_NULL_YIELDS_NULL</c> setting (default
     /// <see langword="true"/>), surfaced by
     /// <c>SESSIONPROPERTY('CONCAT_NULL_YIELDS_NULL')</c>, and captured while
-    /// parsing by each string <c>+</c>. Scoping mirrors <see cref="AnsiNulls"/>.
+    /// parsing by each string <c>+</c>. Scoping matches <see cref="XactAbort"/>.
     /// </summary>
     internal bool ConcatNullYieldsNull = true;
 
@@ -233,7 +235,7 @@ public sealed class SimulatedDbConnection : DbConnection
     /// <see langword="false"/>), surfaced by
     /// <c>SESSIONPROPERTY('NUMERIC_ROUNDABORT')</c>; when set, a lost
     /// fractional digit is Msg 8115 (<c>Cast.RejectRoundingUnderRoundAbort</c>).
-    /// Scoping mirrors <see cref="AnsiNulls"/>.
+    /// Scoping matches <see cref="XactAbort"/>.
     /// </summary>
     internal bool NumericRoundabort;
 
@@ -255,11 +257,68 @@ public sealed class SimulatedDbConnection : DbConnection
     /// transaction doomed instead
     /// (<see cref="SimulatedDbTransaction.Doomed"/>). It also decides whether a
     /// client attention (or an <c>ExecuteReader</c> caller's <c>Cancel()</c>)
-    /// rolls an open transaction back. Unlike the six ANSI toggles this one
-    /// applies inside a procedure / trigger / dynamic-SQL body and reverts when
-    /// that body returns — see <see cref="SessionOptionScope"/>.
+    /// rolls an open transaction back. A procedure / trigger / dynamic-SQL
+    /// body's own SET applies inside the body and reverts when it returns — see
+    /// <see cref="SessionOptionScope"/>.
     /// </summary>
     internal bool XactAbort;
+
+    /// <summary>
+    /// Session-scoped <c>IMPLICIT_TRANSACTIONS</c> setting (default
+    /// <see langword="false"/>, surfaced as <c>@@OPTIONS &amp; 2</c>). While on,
+    /// a statement that reads or writes an object opens a transaction when
+    /// none is open, which stays open until a <c>COMMIT</c> or
+    /// <c>ROLLBACK</c> — see <c>BatchContext.BeginImplicitTransaction</c>.
+    /// Scoping matches <see cref="XactAbort"/>, and a procedure or dynamic
+    /// batch ending with it on raises no Msg 266 for the transaction count it
+    /// changed (probed 2026-09-28 against SQL Server 2025).
+    /// </summary>
+    internal bool ImplicitTransactions;
+
+    /// <summary>
+    /// Session-scoped <c>CURSOR_CLOSE_ON_COMMIT</c> setting (default
+    /// <see langword="false"/>, surfaced as <c>@@OPTIONS &amp; 4</c>). While
+    /// on, ending a transaction by <c>COMMIT</c> or <c>ROLLBACK</c> closes
+    /// every cursor opened inside it. Scoping matches <see cref="XactAbort"/>
+    /// (probed 2026-09-28 against SQL Server 2025).
+    /// </summary>
+    internal bool CursorCloseOnCommit;
+
+    /// <summary>
+    /// Session-scoped <c>ANSI_NULL_DFLT_ON</c> / <c>ANSI_NULL_DFLT_OFF</c> pair
+    /// (<c>@@OPTIONS &amp; 1024</c> / <c>2048</c>): what a <c>CREATE TABLE</c>
+    /// column that states neither <c>NULL</c> nor <c>NOT NULL</c> gets. Setting
+    /// either on turns the other off, and with both off the database's
+    /// <c>ANSI_NULL_DEFAULT</c> option decides. A fresh SqlClient session has
+    /// <see cref="AnsiNullDefaultOn"/> set. Scoping matches
+    /// <see cref="XactAbort"/> (probed 2026-09-28 against SQL Server 2025).
+    /// </summary>
+    internal bool AnsiNullDefaultOn = true, AnsiNullDefaultOff;
+
+    /// <summary>
+    /// Session-scoped <c>SET NOEXEC</c>: while on, each statement compiles —
+    /// raising what compiling raises — but doesn't run, <c>SET NOEXEC OFF</c>
+    /// alone excepted. Scoping matches <see cref="XactAbort"/> (probed
+    /// 2026-09-28 against SQL Server 2025).
+    /// </summary>
+    internal bool NoExec;
+
+    /// <summary>
+    /// Session-scoped <c>SET PARSEONLY</c>: while on, a batch is only checked
+    /// for syntax — nothing binds and nothing runs. Applied while the batch
+    /// parses, as <c>QUOTED_IDENTIFIER</c> is, so it governs the whole batch
+    /// that sets it and a batch turning it off runs (probed 2026-09-28 against
+    /// SQL Server 2025).
+    /// </summary>
+    internal bool ParseOnly;
+
+    /// <summary>
+    /// Session-scoped <c>SET DEADLOCK_PRIORITY</c> in -10..10 (<c>LOW</c> -5,
+    /// <c>NORMAL</c> 0, <c>HIGH</c> 5), read by
+    /// <c>sys.dm_exec_sessions.deadlock_priority</c>. Scoping matches
+    /// <see cref="XactAbort"/>.
+    /// </summary>
+    internal int DeadlockPriority;
 
     /// <summary>
     /// Session-scoped <c>SET ROWCOUNT</c> cap: the maximum number of rows a
@@ -309,11 +368,12 @@ public sealed class SimulatedDbConnection : DbConnection
     internal bool RunningLogonTriggers;
 
     /// <summary>
-    /// The three session options a procedure / trigger / dynamic-SQL body may
-    /// change for its own duration only: real applies the change inside the
-    /// body and restores the caller's value when the body returns
-    /// (probe-confirmed against SQL Server 2025 for all three). Captured on
-    /// entry to a body and written back in the body's <c>finally</c>.
+    /// The session options a procedure / trigger / dynamic-SQL body may change
+    /// for its own duration only: real applies the change inside the body and
+    /// restores the caller's value when the body returns (probed against SQL
+    /// Server 2025 for each). <c>ANSI_NULLS</c> joins them for dynamic SQL,
+    /// a procedure or trigger body ignoring its own <c>SET</c> of it. Captured
+    /// on entry to a body and written back in the body's <c>finally</c>.
     /// </summary>
     internal readonly struct SessionOptionScope(SimulatedDbConnection connection)
     {
@@ -321,6 +381,18 @@ public sealed class SimulatedDbConnection : DbConnection
         private readonly long rowCountLimit = connection.RowCountLimit;
         private readonly byte dateFirst = connection.DateFirst;
         private readonly DateOrder dateFormat = connection.DateFormat;
+        private readonly bool ansiNulls = connection.AnsiNulls;
+        private readonly bool ansiPadding = connection.AnsiPadding;
+        private readonly bool ansiWarnings = connection.AnsiWarnings;
+        private readonly bool arithabort = connection.Arithabort;
+        private readonly bool concatNullYieldsNull = connection.ConcatNullYieldsNull;
+        private readonly bool numericRoundabort = connection.NumericRoundabort;
+        private readonly bool implicitTransactions = connection.ImplicitTransactions;
+        private readonly bool cursorCloseOnCommit = connection.CursorCloseOnCommit;
+        private readonly bool ansiNullDefaultOn = connection.AnsiNullDefaultOn;
+        private readonly bool ansiNullDefaultOff = connection.AnsiNullDefaultOff;
+        private readonly bool noExec = connection.NoExec;
+        private readonly int deadlockPriority = connection.DeadlockPriority;
 
         public void Restore(SimulatedDbConnection connection)
         {
@@ -328,6 +400,18 @@ public sealed class SimulatedDbConnection : DbConnection
             connection.RowCountLimit = this.rowCountLimit;
             connection.DateFirst = this.dateFirst;
             connection.DateFormat = this.dateFormat;
+            connection.AnsiNulls = this.ansiNulls;
+            connection.AnsiPadding = this.ansiPadding;
+            connection.AnsiWarnings = this.ansiWarnings;
+            connection.Arithabort = this.arithabort;
+            connection.ConcatNullYieldsNull = this.concatNullYieldsNull;
+            connection.NumericRoundabort = this.numericRoundabort;
+            connection.ImplicitTransactions = this.implicitTransactions;
+            connection.CursorCloseOnCommit = this.cursorCloseOnCommit;
+            connection.AnsiNullDefaultOn = this.ansiNullDefaultOn;
+            connection.AnsiNullDefaultOff = this.ansiNullDefaultOff;
+            connection.NoExec = this.noExec;
+            connection.DeadlockPriority = this.deadlockPriority;
         }
     }
 

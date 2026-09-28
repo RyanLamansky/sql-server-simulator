@@ -71,6 +71,7 @@ partial class Simulation
     {
         var context = batch.Parser;
         context.MoveNextRequired(); // consume CURSOR
+        batch.BeginImplicitTransaction();
 
         var reqKeyset = false;
         var reqDynamic = false;
@@ -269,7 +270,9 @@ partial class Simulation
         var reference = ReadCursorReference(context);
         if (batch.IsSkipping)
             return;
-        ResolveCursor(batch, reference).Open(batch);
+        var cursor = ResolveCursor(batch, reference);
+        batch.BeginImplicitTransaction();
+        cursor.Open(batch);
     }
 
     /// <summary>Parses and runs <c>CLOSE [GLOBAL] &lt;cursor&gt;</c> /
@@ -281,7 +284,7 @@ partial class Simulation
         var reference = ReadCursorReference(context);
         if (batch.IsSkipping)
             return;
-        ResolveCursor(batch, reference).Close(batch);
+        ResolveCursor(batch, reference).Close(batch.Connection);
     }
 
     /// <summary>
@@ -385,6 +388,7 @@ partial class Simulation
             yield break;
 
         var cursor = ResolveCursor(batch, reference);
+        batch.BeginImplicitTransaction();
 
         // The INTO-list cardinality check fires regardless of whether the
         // FETCH lands on a row (probe-confirmed Msg 16924).

@@ -735,12 +735,12 @@ These carry real per-session state on `SimulatedDbConnection` (not placeholder c
   Like real SQL Server the result is **`sql_variant`** with an inner base type of `int` (each option reads back 1 / 0).
   **Fresh-session defaults** (probe-confirmed against SQL Server 2025 on a SqlClient connection): every option is 1 **except `ARITHABORT` and `NUMERIC_ROUNDABORT`, which default 0**.
   The six ANSI toggles are recorded as live state on `SimulatedDbConnection` (`AnsiNulls` / `AnsiPadding` / `AnsiWarnings` / `Arithabort` / `ConcatNullYieldsNull` / `NumericRoundabort`) via their `SET` handlers (`RecordSessionStateOption` in `Simulation.Set.cs`, wired into both the single and comma-list `SET opt1, opt2, … ON|OFF` forms); `QUOTED_IDENTIFIER` reads the tracked `QuotedIdentifiers` state.
-  Recording follows the `QUOTED_IDENTIFIER` scoping rule — a top-level `SET` persists to the session, but a `SET` inside a procedure / function / trigger body or dynamic SQL does not write through.
-  **These six toggles remain parse-and-discard for their actual storage/arithmetic semantics** (the simulator doesn't model `= NULL` comparison, trailing-space padding-on-assign, or round-abort); the state exists only so the option reads back consistently.
+  A `SET` inside a procedure, trigger or dynamic-SQL body applies there and reverts on return, `ANSI_NULLS` aside, which a procedure or trigger body ignores — see [`session-options.md`](session-options.md#how-far-a-set-reaches).
+  `ANSI_PADDING` alone is recorded without its storage semantics: trailing-space padding on assignment isn't modeled.
   Names are case-insensitive; an unknown option name returns NULL.
 - **`CONTEXT_INFO()`** + **`SET CONTEXT_INFO <binary>`** — the legacy single 128-byte slot.
   NULL until set; once set, SQL Server stores exactly 128 bytes (right-padded / truncated), so `DATALENGTH(CONTEXT_INFO())` is always 128 afterward.
-  Only the literal-binary `SET` form is modeled — a `@var` value side isn't accepted by the SET value parser.
+  The value may be a binary literal or a variable, whose value converts to binary — an `int` as its four bytes — while a NULL or a string one is Msg 2743 (probed 2026-09-28 against SQL Server 2025).
 - **`CONNECTIONPROPERTY(name)`** — `sql_variant` (like real), reading the same transport `sys.dm_exec_connections` reports ([`catalog-views.md`](catalog-views.md)): `TCP` and the endpoints over the TDS endpoint, real's `Shared memory` shape in-process.
   Real's base types hold: `nvarchar` throughout, but a `varchar` `client_net_address` and a `smallint` `local_tcp_port` (probed 2026-09-25).
 - **`CURRENT_TRANSACTION_ID()`** — bigint from a server-wide counter: one id per user transaction, drawn at its BEGIN, and a fresh one for each autocommit statement that asks; `sys.dm_tran_current_transaction` / `dm_tran_active_transactions` / `dm_tran_session_transactions` list the same ids (probed 2026-09-25).

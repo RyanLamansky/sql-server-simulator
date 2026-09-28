@@ -347,9 +347,10 @@ Table variables / local temp tables / system tables bypass all data-lock acquisi
 When a conflict-driven wait would block, `LockManager.Acquire`:
 
 1. **Same-thread short-circuit**: if any conflicting holder's `CurrentExecutingThreadId` equals the caller's managed thread id, raise Msg 1205 immediately.
-2. **Cross-thread cycle walk**: `WouldCreateCycle` walks the wait-for graph starting at each conflicting holder.
+2. **Cross-thread cycle walk**: `FindDeadlockVictim` walks the wait-for graph starting at each conflicting holder.
    Each connection's `WaitingOnResource` is read consistently under the manager's gate.
-   If any walk reaches the caller's connection, a cycle exists; caller is the victim (always-the-requester policy).
+   If any walk reaches the caller's connection, a cycle exists, and its victim is the session in it with the lowest `SET DEADLOCK_PRIORITY`, the caller on a tie (probed 2026-09-28 against SQL Server 2025, whose tie picks the requester in the two-session shape).
+   A victim other than the caller is blocked in its own wait: it is flagged (`SessionToken.ChosenAsDeadlockVictim`) and woken, its wait ends with Msg 1205, and the caller waits on until the victim's rollback releases what it held.
 3. **Auto-rollback on Msg 1205**: `DispatchOneStatement` catches the exception, rolls back the connection's current transaction (releasing every held lock and waking the survivor), and propagates.
    Done BEFORE the TRY/CATCH frame check so both the propagating and TRY-captured paths observe the auto-rollback (probe-confirmed: `@@TRANCOUNT` reads 0 in the catch handler).
 

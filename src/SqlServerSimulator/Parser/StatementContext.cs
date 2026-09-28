@@ -211,6 +211,23 @@ internal sealed class StatementContext
     public bool OpensTransaction;
 
     /// <summary>
+    /// Set when the statement opened the session's transaction under
+    /// <c>SET IMPLICIT_TRANSACTIONS ON</c>; an error real raises compiling the
+    /// statement then takes the transaction back with it, since real opens it
+    /// only once the statement compiled.
+    /// </summary>
+    public bool BeganImplicitTransaction;
+
+    /// <summary>
+    /// Set as the statement calls a user function, which opens an implicit
+    /// transaction only once a query holding the call has parsed — a
+    /// <c>SET</c>, a <c>DECLARE</c> initializer or a <c>SELECT</c> assigning
+    /// variables with no FROM calls one outside any (probed 2026-09-28 against
+    /// SQL Server 2025).
+    /// </summary>
+    public bool CallsUserFunction;
+
+    /// <summary>
     /// The mark the statement's <c>XACT_STATE()</c> calls read, allocated by
     /// the first of them, so a mark met later in the statement's text — the
     /// FROM clause after the select list — still reaches them, and a cursor

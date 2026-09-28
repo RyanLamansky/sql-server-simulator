@@ -63,31 +63,38 @@ internal sealed class LangIdExpression : Expression
 
 /// <summary>
 /// Backs <c>@@OPTIONS</c>: the session's option bits as it holds them when the
-/// read runs — ANSI_WARNINGS 8, ANSI_PADDING 16, ANSI_NULLS 32, ARITHABORT 64,
-/// NOCOUNT 512, CONCAT_NULL_YIELDS_NULL 4096, NUMERIC_ROUNDABORT 8192 and
-/// XACT_ABORT 16384 — with QUOTED_IDENTIFIER (256) at the parse position, since
-/// that option is itself parse-time and the plan cache keys on it, and
-/// ANSI_NULL_DFLT_ON (1024) constant; a fresh session reads 5432 (probed
-/// 2026-09-26 against SQL Server 2025).
+/// read runs — IMPLICIT_TRANSACTIONS 2, CURSOR_CLOSE_ON_COMMIT 4,
+/// ANSI_WARNINGS 8, ANSI_PADDING 16, ANSI_NULLS 32, ARITHABORT 64,
+/// QUOTED_IDENTIFIER 256, NOCOUNT 512, ANSI_NULL_DFLT_ON 1024,
+/// ANSI_NULL_DFLT_OFF 2048, CONCAT_NULL_YIELDS_NULL 4096, NUMERIC_ROUNDABORT
+/// 8192 and XACT_ABORT 16384; a fresh session reads 5432 (probed 2026-09-26
+/// against SQL Server 2025). QUOTED_IDENTIFIER is settled while a batch
+/// parses, so a batch's read sees the value its last <c>SET</c> left, even one
+/// written after the read (probed 2026-09-28,
+/// <c>BatchContext.QuotedIdentifiersAfterParse</c>); a module or dynamic-SQL
+/// body, whose setting isn't the session's, reads the value it parsed under.
 /// </summary>
 internal sealed class OptionsExpression(ParserContext context) : Expression
 {
-    // ANSI_NULL_DFLT_ON, which SqlClient's login sets and the simulator doesn't
-    // otherwise track.
-    private const int AnsiNullDefaultOn = 1024;
-
-    // QUOTED_IDENTIFIER is settled while parsing, as the setting itself is.
-    private readonly int parsedOptions = AnsiNullDefaultOn | (context.QuotedIdentifiers ? 256 : 0);
+    // A module body runs under its captured QUOTED_IDENTIFIER, and a dynamic
+    // batch's SET of it leaves the session alone.
+    private readonly bool? parsedQuotedIdentifier = context.Batch.ProcFrame is null && context.Batch.TriggerFrame is null && context.Batch.UdfFrame is null
+        ? null
+        : context.QuotedIdentifiers;
 
     public override SqlValue Run(RuntimeContext runtime)
     {
         var connection = runtime.Batch.Connection;
-        return SqlValue.FromInt32(this.parsedOptions
+        return SqlValue.FromInt32((connection.ImplicitTransactions ? 2 : 0)
+            | (connection.CursorCloseOnCommit ? 4 : 0)
             | (connection.AnsiWarnings ? 8 : 0)
             | (connection.AnsiPadding ? 16 : 0)
             | (connection.AnsiNulls ? 32 : 0)
             | (connection.Arithabort ? 64 : 0)
+            | (this.parsedQuotedIdentifier ?? runtime.Batch.QuotedIdentifiersAfterParse ?? connection.QuotedIdentifiers ? 256 : 0)
             | (connection.NoCount ? 512 : 0)
+            | (connection.AnsiNullDefaultOn ? 1024 : 0)
+            | (connection.AnsiNullDefaultOff ? 2048 : 0)
             | (connection.ConcatNullYieldsNull ? 4096 : 0)
             | (connection.NumericRoundabort ? 8192 : 0)
             | (connection.XactAbort ? 16384 : 0));
@@ -99,5 +106,5 @@ internal sealed class OptionsExpression(ParserContext context) : Expression
 
     internal override string DebugDisplay() => "@@OPTIONS";
 
-    internal override void Describe(NodeShape shape) => shape.Local(this.parsedOptions);
+    internal override void Describe(NodeShape shape) => shape.Local(this.parsedQuotedIdentifier);
 }
