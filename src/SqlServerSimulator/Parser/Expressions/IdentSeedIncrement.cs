@@ -27,7 +27,7 @@ internal sealed class IdentSeedIncrement : Expression
 
     public override SqlValue Run(RuntimeContext runtime) =>
         IdentCurrent.IdentityOf(runtime, this.tableName) is { } identity
-            ? SqlValue.FromDecimal(ResultType, this.isSeed ? identity.Seed : identity.Increment)
+            ? SqlValue.FromDecimal(ResultType, IdentityState.ToDecimal38(this.isSeed ? identity.Seed : identity.Increment))
             : SqlValue.Null(ResultType);
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)

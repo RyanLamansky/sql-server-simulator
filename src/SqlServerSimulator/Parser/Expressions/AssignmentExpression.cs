@@ -35,7 +35,7 @@ internal sealed class AssignmentExpression(VariableSlot slot, Expression source)
     {
         var value = this.Source.Run(runtime);
         Cast.RejectRoundingUnderRoundAbort(value, this.Slot.DeclaredType, runtime.Batch);
-        var coerced = Cast.ApplyCoercion(value, this.Slot.DeclaredType, this.Slot.DeclaredMaxLength);
+        var coerced = SqlValue.NameVariantBase(value, Cast.ApplyCoercion(value, this.Slot.DeclaredType, this.Slot.DeclaredMaxLength), this.Source.ResultReportsNumeric);
         if (this.Mask is { } mask)
             coerced = DataMasking.ForAssignment(runtime.Batch, mask, value, coerced, this.Slot.DeclaredType);
         this.Slot.Assign(coerced);

@@ -87,8 +87,6 @@ internal readonly struct IdentitySpec
             throw SimulatedSqlException.IdentityInvalidIncrement(columnName, 2);
         if (!IdentityState.Fits(this.increment, type))
             throw SimulatedSqlException.IdentityInvalidIncrement(columnName, 1);
-        if (this.seed < long.MinValue || this.seed > long.MaxValue || this.increment < long.MinValue || this.increment > long.MaxValue)
-            throw new NotSupportedException("A decimal identity seed or increment beyond bigint's range is not modeled yet.");
-        return new IdentityState((long)this.seed, (long)this.increment, notForReplication);
+        return new IdentityState(this.seed, this.increment, notForReplication);
     }
 }

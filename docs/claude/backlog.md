@@ -225,51 +225,38 @@ Already listed elsewhere here and not repeated: parenthesized set-op branches.
 **Type-pair neighbors** — found by the type-pair probes and left open (probed 2026-09-23):
 
 - An alias type over numeric reads `decimal`, as does a numeric column's name in a type-pair message (raised while binding, before references are marked); everything else carries the name (see [`arithmetic.md`](arithmetic.md#numeric-vs-decimal-reported-type-name)).
-- `CHAR(0)` in `varchar` is a real, lowest-weight character under every non-binary SQL collation, but only the default collation's byte-exact body models it; the others (`SQL_Latin1_General_CP1_CS_AS`, `SQL_Latin1_General_CP1253_CI_AS` …) compare through ICU, which ignores it, and so does `LIKE` under the default collation — `'a' + CHAR(0) + 'b' LIKE 'ab'` is true here, false on real (probed 2026-09-26).
-- The one-way assignment rule (`Assign` grid, [`arithmetic.md`](arithmetic.md#type-pair-legality)) isn't applied to an `INSERT … EXEC` source, so a `datetime` result column reaching a `decimal` column converts here where real raises Msg 257 as the rows arrive (probed 2026-09-24).
-  A result set doesn't record which of its columns were a bare `NULL`, which the rule exempts, so the check needs that carried out of the procedure's `SELECT` first.
 
 **Message stream**: what's left — Msg 5703's localized wording and Msg 8153 over a constant `VALUES` grouping — is in [`errors.md`](errors.md#not-modeled-yet).
 
 **Batch compilation** ships ([`control-flow.md`](control-flow.md#batch-compilation)); what the sweep found past it:
 
 - The compile's remaining gaps (the walk stopping at a deferred DML target, procedure bodies compiled only at `CREATE`, an `INSERT … EXEC` body stopping at its first error) are listed in [`control-flow.md`](control-flow.md#not-modeled-yet).
-- A syntax error real recovers from and reports a second one after — `(select 1 a) d NATURAL JOIN (select 1 a) e` adds Msg 102 near `e` — reports only the first here.
+- Syntax-error recovery ([`errors.md`](errors.md#syntax-error-recovery)) restarts at statement keywords rather than walking real's grammar, so a restart the simulator's own parser reads differently diverges: `begin try end try begin catch select 1 end catch` on one line adds Msg 102 near the last `catch` on real and nothing here, and a Msg 178 after a misplaced `CREATE PROCEDURE` names the procedure on real and nothing here (probed 2026-09-28).
 
 **Wrong results**:
 
 - `STRING_AGG(s, CAST(',' AS varchar(2)))` over a table is Msg 8733 on real and aggregates here; over a `VALUES` source real accepts it too (probed 2026-09-24).
   What separates the two is plan-shaped rather than grammatical (probed 2026-09-27): the refusal needs a single table or view source and no `GROUP BY`, `HAVING`, `TOP`, `LIKE` filter or `OPTION (RECOMPILE)` — any of those, a derived table, a `#temp` table or a table variable accepts it — and it follows the value expression too (`UPPER(s)`, `LEFT(s, 10)`, `ISNULL(s, '')` accept; `s + ''`, `(s)`, `CAST(i AS varchar)`, `'x'` refuse), and a `CONVERT`, a `char(1)` or `varchar(max)` target and a `COLLATE` refuse like the `CAST`.
-  The shapes line up with simple parameterization's eligibility — a `CAST`'s literal turned into a parameter is no longer a literal — but `PARAMETERIZATION FORCED` doesn't make the accepted shapes refuse, so that reading isn't confirmed.
-- `LOWER` / `UPPER` use English case mapping under every collation; a Turkish collation's own mapping isn't modeled.
+  The shapes line up with simple parameterization's eligibility — a `CAST`'s literal turned into a parameter is no longer a literal — but `PARAMETERIZATION FORCED` doesn't make the accepted shapes refuse, and none of the refused statements leaves a parameterized plan in `sys.dm_exec_cached_plans` (probed 2026-09-28), so that reading isn't confirmed.
+  Probed 2026-09-28: the refusal survives `WHERE i = 1`, `WITHIN GROUP`, a table alias, `dbo.t`, `WITH (NOLOCK)`, a column alias and another statement in the batch, while `CHAR(13) + CHAR(10)`, `', ' + ' '`, `CONCAT(',', ' ')`, `CHAR(44)` and `SPACE(1)` are accepted over the same table.
+- Under a Windows collation real's `LIKE` passes over an ignored `CHAR(0)` in the subject rather than letting `_` take it — `'a' + CHAR(0) + 'b' LIKE 'a_b'` is false on real and true here (probed 2026-09-28).
+- Real accepts the hidden `Azeri_*_90` collations (they resolve and appear in `COLLATIONPROPERTY`) though `sys.fn_helpcollations()` doesn't list them; the simulator doesn't recognize them (probed 2026-09-28 against SQL Server 2025).
 
-**Real accepts, the simulator refuses**:
+**Same error, different number, state or class** (probed 2026-09-28):
 
-- A `decimal(p, 0)` identity seed or increment past `bigint`'s range (`NotSupportedException` here; the identity state is a `long`).
-
-**Smaller divergences found alongside** (probed 2026-09-24):
-
-- A stored `sql_variant` doesn't keep a decimal value's `decimal` / `numeric` name, so `SQL_VARIANT_PROPERTY(<variant>, 'BaseType')` reads `numeric` for a variant holding `CAST(… AS decimal)`, where real reads `decimal`; a direct argument reports its own spelling.
-
-**Same error, different number, state or class** (probed 2026-09-24):
-
-- Real follows a table hint the grammar refuses (`INSERT t (c) WITH (TABLOCK) …`, `MERGE t AS a WITH (…)`) with Msg 319 after its Msg 156, and an empty `BEGIN TRY … END TRY` with a second Msg 102 near `catch`.
-- `CREATE FUNCTION` with a refused parameter type is followed by Msg 178 on real, since the body's `RETURN` then parses outside a function.
+- A `timestamp` parameter to `CREATE FUNCTION` is Msg 2724 on real and accepted here, and a `READONLY` scalar parameter is Msg 346 on real and Msg 102 here.
 
 **Name resolution** (probed 2026-09-26):
 
-- A statement's binder report misses the Msg 209 real adds for an ORDER BY name two select items share — the residue of the whole-statement report in [`errors.md`](errors.md#a-statements-whole-binder-report) (probed 2026-09-27).
-  `GROUP BY ALL` isn't parsed yet (Msg 156 here), so a statement using it reports that instead of its names.
-
-**Describe surfaces** (probed 2026-09-27):
-
-- `JSON_VALUE` and `OPENJSON`'s `key` / `value` columns describe as a bare `nvarchar` where real reports `nvarchar(4000)` / `nvarchar(4000)` / `nvarchar(max)`, and `JSON_QUERY` over a literal as `nvarchar(max)` where real reports `nvarchar(4000)`: the results carry the unsized `nvarchar` type, and sizing them reaches their runtime values and collation, not just the describe text.
+- `GROUP BY ALL` isn't parsed yet (Msg 156 here), so a statement using it reports that instead of its names.
 
 **Built-in values** (probed 2026-09-26):
 
 - `DIFFERENCE` scores from a code of its own rather than the two `SOUNDEX` results — `'xc'` and `'x'` share `X000` yet score differently against `'abcd'` — and is asymmetric (`DIFFERENCE('x', '1')` is 0, `DIFFERENCE('1', 'x')` 3); here it compares the codes position by position, which matches real on most pairs but not all.
   A substring search of the second code in the first, with a first letter that doesn't suppress the next code, fits 342 of 400 random pairs; the rest weren't explained.
   A second pass (probed 2026-09-27) fit 3515 of 4000 random pairs and 5224 of a 6400-pair grid of every code over the digits 1–3, first letters A and E, with that rule and a non-letter-led string's code empty; where it still misses, a short code's zero padding scores as though two positions matched — `DIFFERENCE('a', 'abob')` (`A000`, `A100`) is 3 and `DIFFERENCE('ab', 'acoc')` (`A100`, `A220`) is 3.
+  A third pass (probed 2026-09-28, a 6561-pair grid over first letters A and B, zero to three of the digits 1–3 and the empty string) fits 6001 pairs with the *first* code's digits as the needle: equal codes score 4; otherwise a matching first letter scores 1, plus 3 when the first code's three padded digits occur in the second code's, else 2 when its last or first two do, else one per digit found searching left to right from the previous hit's own position (not past it).
+  Most misses have a repeated digit in the first code — `DIFFERENCE('aababab', 'babab')` (`A111`, `B110`) is 3 where the rule gives 2, `A112` against any `A12x` is 4 — and `DIFFERENCE('', x)` is 3 for a code with no digits, 2 for one or two and 0 for three, so padding and repeats are what the rule still gets wrong.
 - `REGEXP_COUNT` / `REGEXP_INSTR` / `REGEXP_SUBSTR` with a `datetime` pattern or start position kill the session on real (severity 21); here they are Msg 8116, which is the answer kept.
 
 ### Result-set serialization: `FOR XML` / `FOR JSON`

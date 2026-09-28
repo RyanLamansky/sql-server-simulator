@@ -57,7 +57,7 @@ partial class Simulation
         }
 
         var reseed = true;
-        long? newValue = null;
+        Int128? newValue = null;
         if (context.Token is Operator { Character: ',' })
         {
             switch ((context.GetNextRequired() as UnquotedString)?.ContextualKeyword)
@@ -126,17 +126,17 @@ partial class Simulation
             batch.AppendInfoError(@class: 0, state: 1, number: 2528, message: "DBCC execution completed. If DBCC printed error messages, contact your system administrator.");
         return true;
 
-        void Reseed(long value)
+        void Reseed(Int128 value)
         {
             context.Connection.CurrentTransaction?.UndoLog.RecordIdentityReseed(identity, identity.ReseedSnapshot());
             identity.Reseed(value);
         }
 
-        static string Render(long? value) => value?.ToString(CultureInfo.InvariantCulture) ?? "NULL";
+        static string Render(Int128? value) => value?.ToString(CultureInfo.InvariantCulture) ?? "NULL";
     }
 
     /// <summary>A reseed value: a number, signed or not, or a variable holding one.</summary>
-    private static long ParseReseedValue(ParserContext context, BatchContext batch)
+    private static Int128 ParseReseedValue(ParserContext context, BatchContext batch)
     {
         var negate = false;
         if (context.Token is Operator { Character: '-' or '+' } sign)
@@ -151,21 +151,21 @@ partial class Simulation
             _ => throw SimulatedSqlException.SyntaxErrorNear(context),
         };
         context.MoveNextRequired();
-        var number = value.IsNull ? 0 : value.CoerceTo(SqlType.BigInt).AsInt64;
+        var number = value.IsNull ? 0 : IdentityState.FromSqlValue(value);
         return negate ? -number : number;
     }
 
     /// <summary>The identity column's largest (or smallest) stored value, or null over no rows.</summary>
-    private static long? ColumnExtreme(HeapTable table, int ordinal, bool highest)
+    private static Int128? ColumnExtreme(HeapTable table, int ordinal, bool highest)
     {
-        long? extreme = null;
+        Int128? extreme = null;
         var storageOrdinal = table.StorageOrdinals[ordinal];
         foreach (var row in table.Heap.EnumerateRows())
         {
             var value = RowDecoder.DecodeColumn(table.StoredColumns, row, storageOrdinal, table.Heap);
             if (value.IsNull)
                 continue;
-            var number = value.CoerceTo(SqlType.BigInt).AsInt64;
+            var number = IdentityState.FromSqlValue(value);
             if (extreme is not { } current || (highest ? number > current : number < current))
                 extreme = number;
         }

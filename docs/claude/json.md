@@ -12,7 +12,7 @@ JSON booleans render as lowercase `'true'`/`'false'`; numbers as raw text via `J
 Object/array matches → NULL in lax, **Msg 13623** State 2 in strict.
 **A scalar string longer than 4000 chars** is SQL NULL in lax mode over a MAX document (probe-confirmed against SQL Server 2025: 4000 → value, 4001 → NULL) and is cut to its first 4000 characters over a bounded one (2026-09-23); either way the result stays within the bounded TDS length prefix, so a multi-KB extracted value can't overflow it.
 
-`JSON_QUERY(json, path)` returns `nvarchar(max)` — complement of `JSON_VALUE`.
+`JSON_QUERY(json, path)` returns `nvarchar(max)` over a MAX string document and `nvarchar(4000)` over any other text, a literal included (probed 2026-09-28 against SQL Server 2025) — complement of `JSON_VALUE`; the bound type is what its rows carry (`JsonQuery.resultType`).
 Object/array match → raw JSON text via `JsonElement.GetRawText` (preserves the input's whitespace shape).
 Scalar match → NULL in lax, Msg 13624 State 2 in strict.
 Missing path → NULL in lax, Msg 13608 in strict.
@@ -48,7 +48,7 @@ Both support `OVER (...)` windows — `PARTITION BY`, running `ORDER BY`, and ex
 The aggregators build the closing `]` / `}` onto a snapshot rather than mutating the running buffer, so repeated `Result()` calls across sliding-window frames stay correct.
 `DISTINCT` is not accepted by either.
 
-All the `nvarchar(max)` JSON producers (`JSON_QUERY`, `JSON_MODIFY`, `JSON_OBJECT`, `JSON_ARRAY`, `JSON_ARRAYAGG`, `JSON_OBJECTAGG`) are typed `SqlType.NVarcharMax` at both `GetSqlType` and `Run` — not the length-0 `SqlType.NVarchar` "size from value" form — except where a `json` input or `RETURNING json` makes them `json` (see [`json-type.md`](json-type.md#the-json-functions-over-a-json-document)).
+All the `nvarchar(max)` JSON producers (`JSON_QUERY` over a MAX document, `JSON_MODIFY`, `JSON_OBJECT`, `JSON_ARRAY`, `JSON_ARRAYAGG`, `JSON_OBJECTAGG`) are typed `SqlType.NVarcharMax` at both `GetSqlType` and `Run` — not the length-0 `SqlType.NVarchar` "size from value" form — except where a `json` input or `RETURNING json` makes them `json` (see [`json-type.md`](json-type.md#the-json-functions-over-a-json-document)).
 This is load-bearing over the TDS wire: a length-0 result over 32,767 chars overflows the codec's bounded 2-byte length prefix, whereas a MAX result streams as PLP.
 `JSON_VALUE` stays bounded (`nvarchar(4000)`) and is safe by its 4000-char cap.
 See [`tds-endpoint.md`](tds-endpoint.md) for the wire mechanism.
@@ -72,6 +72,7 @@ Specific mappings:
   Other strings — including `'{"x":1}'` literals — go through the quote-and-escape path, matching SQL Server's JSON-typed-input detection without needing an `SqlValue`-level marker bit.
 
 `OPENJSON(json [, doc_path]) [WITH (col TYPE [path] [AS JSON], …)]` — rowset-returning, structurally a new FromSource kind.
+The default schema is `key nvarchar(4000)` NOT NULL in `Latin1_General_BIN2` — so it compares and sorts binary — `value nvarchar(max)` and `type tinyint` NOT NULL, and no OPENJSON column is updatable (probed 2026-09-28 against SQL Server 2025).
 Without WITH: default schema `(key nvarchar, value nvarchar, type int)` — type codes 0=null/1=string/2=number/3=bool/4=array/5=object, unfolding the root one row per array element / object property.
 With WITH: column paths are root-relative — an **array root yields one row per element** (paths relative to the element), an **object root yields a single row** (paths relative to the root).
 Each column extracts via `$.<col-name>` (default) or explicit `'$path'`; primitive collections use `'$'`.

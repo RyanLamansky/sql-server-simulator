@@ -141,7 +141,9 @@ internal sealed class Cast : Expression
             coerced = AbsorbedOverflow(this.targetType);
         }
 
-        return RecollateStringResult(coerced, this.targetType, sourceValue.Type, dbCollation);
+        return this.targetType is SqlVariantSqlType
+            ? SqlValue.NameVariantBase(sourceValue, coerced, this.source.ResultReportsNumeric)
+            : RecollateStringResult(coerced, this.targetType, sourceValue.Type, dbCollation);
     }
 
     /// <summary>

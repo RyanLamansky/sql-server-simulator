@@ -207,4 +207,41 @@ public sealed class DescribeFirstResultSetTests
         using var reader = new Simulation().ExecuteReader("exec sp_describe_first_result_set N'select 1 a'");
         AreEqual("bit", reader.GetDataTypeName(reader.GetOrdinal("order_by_is_descending")));
     }
+
+    /// <summary>
+    /// JSON_VALUE is nvarchar(4000), JSON_QUERY nvarchar(4000) unless its
+    /// document is a MAX string, and OPENJSON's key a NOT NULL nvarchar(4000)
+    /// beside an nvarchar(max) value and a NOT NULL tinyint type, none of them
+    /// updatable (probed 2026-09-28 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void JsonResults_DescribeTheirSizes()
+    {
+        var sim = Seeded();
+        AreEqual(
+            "a null nvarchar(4000) 8000 - - computed 231 8000 | b null nvarchar(4000) 8000 - - computed 231 8000 | c null nvarchar(max) -1 - - computed 231 65535 | d null nvarchar(4000) 8000 - - computed 231 8000",
+            Describe(sim, "select json_value(v, '$.a') a, json_query(N'{\"a\":[1]}', '$.a') b, json_query(s, '$.a') c, json_query(v) d from da"));
+        AreEqual(
+            "key notnull nvarchar(4000) 8000 - - - 231 8000 | value null nvarchar(max) -1 - - - 231 65535 | type notnull tinyint 1 - - - 48 1",
+            Describe(sim, "select * from openjson(N'{\"a\":1}')"));
+    }
+
+    [TestMethod]
+    public void OpenJsonKey_ComparesBinary()
+        => AreEqual("A|b", new Simulation().ExecuteScalar("""
+            select string_agg([key], '|') within group (order by [key]) from openjson(N'{"b":1,"A":2,"a":3}') where [key] <> 'a'
+            """));
+
+    /// <summary>
+    /// The follow-up error reports the line of the error it follows, and a
+    /// missing object names the procedure on both (probed 2026-09-28).
+    /// </summary>
+    [TestMethod]
+    public void CompileErrors_FollowUpTakesTheirLine()
+    {
+        var ex = new Simulation().AssertSqlError("select 1;\n\nexec sp_describe_first_result_set N'select 1\nselect from'", 156);
+        AreEqual(2, ex.Errors[1].LineNumber);
+        ex = new Simulation().AssertSqlError("select 1;\n\nexec sp_describe_first_result_set N'select * from nosuch'", 208);
+        AreEqual("11529 1 sp_describe_first_result_set", $"{ex.Errors[1].Number} {ex.Errors[1].LineNumber} {ex.Errors[1].Procedure}");
+    }
 }

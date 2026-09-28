@@ -148,7 +148,7 @@ partial class Simulation
                 }
                 else
                 {
-                    identity.ObserveExplicit(sourceValues[i].CoerceTo(SqlType.BigInt).AsInt64);
+                    identity.ObserveExplicit(IdentityState.FromSqlValue(sourceValues[i]));
                 }
             }
             var length = RowEncoder.EncodeRowInto(destTable.StoredColumns, sourceValues, destTable.Heap, ref encoded);

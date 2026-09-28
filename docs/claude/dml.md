@@ -231,6 +231,7 @@ A procedure, trigger, function or dynamic-SQL body is a scope of its own (`Ident
 `IDENT_INCR(name)` / `IDENT_SEED(name)` (`Parser/Expressions/IdentSeedIncrement.cs`) return the declared step / start of the named table's identity column, or NULL when the table lacks one or the name doesn't resolve.
 All three name-arg scalars accept a 1-/2-/3-part dotted runtime string via the same `TryParseObjectName` helper `OBJECT_ID` uses.
 Result type is `numeric(38, 0)` matching real SQL Server's projection (covers tinyint/smallint/int/bigint columns uniformly).
+The counter is an `Int128`, since a `decimal(38, 0)` identity's seed, increment and values run past `bigint` — real generates, reseeds and reports them across the whole 38-digit range (probed 2026-09-28 against SQL Server 2025).
 
 `SET IDENTITY_INSERT <table> ON | OFF` (`Simulation.Set.cs`) sets / clears `SimulatedDbConnection.IdentityInsertTable`.
 ON validates the target: a table with no identity column raises **Msg 8106** (`TableHasNoIdentityForSet`, "Table 't' does not have the identity property. Cannot perform SET operation."); a second table while one is already held raises **Msg 8107** (`IdentityInsertAlreadyOn`) — both probe-confirmed against SQL Server 2025.
@@ -280,6 +281,8 @@ Probe-confirmed semantics (SQL Server 2025):
 - **Per-result-set column count** must match the target's column list — a mismatch (either direction) raises **Msg 213 St 7** (`InsertExecColumnCountMismatch`) — distinct from the SELECT arm's Msg 120/121, and distinct from OUTPUT INTO's Msg 213 St 1.
   Validated during the drain, before any heap write.
 - **Uncoercible values** surface the shared per-row coercion error (the simulator's Msg 245 conversion path — real SQL Server raises Msg 8114 for a dynamic value; the simulator's INSERT coercion path is Msg 245 for both INSERT…SELECT and INSERT…EXEC, a divergence).
+- **Each `SELECT` the executed body runs meets the target columns' one-way assignment rule** (the `Assign` grid, [`arithmetic.md`](arithmetic.md#type-pair-legality)) as it compiles — over no rows too, at the `SELECT`'s own line and procedure (Msg 257 state 3, Msg 206 state 2) — save a column that is a constant `NULL`, typed or not; the error ends the INSERT, rows of earlier result sets included, but not the caller's batch (probed 2026-09-28).
+  `SimulatedDbConnection.InsertExecTargetTypes` carries the target types into the body's dispatch loop (`Simulation.RequireInsertExecAssignable`).
 - **Nested INSERT…EXEC** (the executed proc / dynamic batch itself contains an `INSERT … EXEC`) raises **Msg 8164 St 1** "An INSERT EXEC statement cannot be nested." Guarded by `SimulatedDbConnection.InsertExecActive`, set while the outer drain runs and checked at the inner INSERT…EXEC entry.
 - **OUTPUT clause combined with INSERT…EXEC** raises **Msg 483 St 2** "The OUTPUT clause cannot be used in an INSERT...EXEC statement." — a structural check that fires regardless of skip state, before the source dispatch.
 - **`WITH RESULT SETS` on the EXEC source** raises **Msg 102** — real refuses the clause here, and reports the token one late (`'SETS'`, not `'WITH'`), which the simulator mirrors by consuming both words before raising.

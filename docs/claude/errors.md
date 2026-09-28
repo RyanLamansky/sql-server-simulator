@@ -55,7 +55,7 @@ Probed through SqlClient 7 against SQL Server 2025 (2026-09-23):
   `Message` joins every entry with `Environment.NewLine`, as SqlClient's does.
 - **Msg 3621** (`The statement has been terminated.`, class 0, state 0) follows an execution error that ends a row-writing statement — `INSERT`, `UPDATE`, `DELETE`, `MERGE`, `SELECT … INTO`, and `ALTER TABLE … ALTER COLUMN`'s rewrite — but not a compilation error (Msg 206 / 213 / 544), a `SELECT`'s own error, a batch-ending one (a conversion failure, anything under `XACT_ABORT ON`) or one a `TRY` / `CATCH` handles.
   Which numbers count is an explicit list (`Simulation.IsStatementTerminationNoticed`); it goes out after the error's DONE, which is why `NextResult` doesn't carry it.
-  An identity overflow takes **Msg 3606** (`Arithmetic overflow occurred.`, class 0, state 0) in its place (probed 2026-09-25 against SQL Server 2025).
+  An identity overflow takes **Msg 3606** (`Arithmetic overflow occurred.`, class 0, state 0) in its place (probed 2026-09-25 against SQL Server 2025); uncaught, the overflow ends the batch, and its 3606 then reports line 1 and no procedure (probed 2026-09-28).
 - **Msg 8153** (`Warning: Null value is eliminated by an aggregate or other SET operation.`) goes out once per statement whose aggregate skipped a NULL with `ANSI_WARNINGS` on, after the rows and before the statement's DONE — ahead of the body for an `IF` / `WHILE` condition.
   Every aggregate warns but `COUNT(*)`, `STRING_AGG` and the JSON aggregates, window aggregates and a scalar subquery's included; an `EXISTS` body's and a `PIVOT`'s don't.
 - **Msg 3607** (`Division by zero occurred.`) and **Msg 3606** (`Arithmetic overflow occurred.`), class 0 state 0, go out once each after the rows of a statement whose divide by zero or overflow answered NULL under `ARITHABORT OFF` with `ANSI_WARNINGS OFF` — a fresh session's `ARITHABORT` is off, so `SET ANSI_WARNINGS OFF` alone does it (probed 2026-09-25 against SQL Server 2025) — 3606 first whichever fault came first (probed 2026-09-26).
@@ -96,6 +96,7 @@ Real binds some shapes by expansion and reports an operand once per copy — `CO
 - A GROUP BY violation (Msg 8120 / 8121 / 8127) reports after its expression's own name errors and only when nothing ahead of the expression failed; an expression whose walk meets an unbindable name before its first violation reports none, one that found a violation first reports every violation it holds.
 - Msg 130 and Msg 147 report where they sit unless an error sorts ahead of them — the aggregate's own operand included (`WHERE COUNT(x1) > 1` is the Msg 207 alone).
 - Msg 8155 reports and binding goes on, the unnamed column simply unreadable.
+- An `ORDER BY` name two select items share — two aliases, the same column twice, `SELECT *, a`, a set operation's output — is Msg 209 in `ORDER BY`'s place, even when both read one column and under `DISTINCT` (no Msg 145 follows it); an ordinal, a qualified name or an expression over the name reads the source instead (probed 2026-09-28).
 
 **Lines**: each error reports its reference's own line (a GROUP BY violation its offending column's), except where real compiles the statement through simple parameterization, which reports every error at the statement's first line.
 That applies to a single-table `SELECT` / `UPDATE` / `DELETE` / `INSERT` carrying a parameterizable literal and none of the constructs that disqualify it — `BindErrorReport.IsSimplyParameterizable` lists them, a heuristic over the shapes probed — and never in a module body.
@@ -106,8 +107,15 @@ A `CATCH` reads a compile-time report's first entry through `ERROR_NUMBER()` and
 
 - **A type check inside a term whose names come after it** — `SELECT (a + d) + x1` — stops that term's typing at the check wherever a node other than an arithmetic operator raises it, so the term's later names go unreported.
   A type check in a node reading no column (`CAST('2020-01-01' AS date) + 1`) still ends the re-read, as does one raised outside the typing seams above.
-- **An ORDER BY name shared by two select items** (`SELECT x1, x1 … ORDER BY x1`) adds Msg 209 on real.
 - **A name only a run reaches** — one skip mode doesn't bind — reports alone.
+
+## Syntax-error recovery
+
+A batch whose parse fails reports the syntax errors real's parser finds past the first, never a binder error (probed 2026-09-28 against SQL Server 2025).
+Real recovers the way a yacc parser does: it restarts at the token it failed on, discards tokens that can't begin a statement, and reports a further Msg 102 / 156 only once three tokens have parsed since the last — `select 1 +; select 2 +;` reports both, `select 1 frm t; select * from where;` both, `select (1; select 2;` one.
+An error a grammar action raises rather than the token stream — Msg 319 for a `WITH` after an unterminated statement, Msg 111 for a module `CREATE` not first in its batch, Msg 178 for the valued `RETURN` its body then holds — is reported however soon it comes, so a table hint the grammar refuses (`INSERT t (c) WITH (TABLOCK) …`) is Msg 156 then the Msg 319 its `WITH` raises read as a common table expression.
+`Simulation.WithRecoveredSyntaxErrors` re-reads the batch from each restart point with the text before it blanked out (lines and positions stay as written), restarting only at a keyword, `;`, `THROW` or a `(` that opens a query, since real's grammar gives a bare name nothing to begin.
+It walks the simulator's own statement parser rather than real's grammar, so where that parser reads a restart differently the report diverges; see the backlog.
 
 ## Bind errors in a deferred statement are catchable here and aren't on real
 

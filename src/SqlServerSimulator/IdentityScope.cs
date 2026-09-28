@@ -27,8 +27,8 @@ internal enum IdentityScopeKind
 internal readonly struct IdentityScope
 {
     private readonly SimulatedDbConnection connection;
-    private readonly decimal? callerScopeIdentity;
-    private readonly decimal? callerIdentity;
+    private readonly Int128? callerScopeIdentity;
+    private readonly Int128? callerIdentity;
     private readonly long callerGenerations;
 
     private IdentityScope(SimulatedDbConnection connection)

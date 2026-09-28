@@ -288,4 +288,26 @@ public sealed class BatchCompilationTests
         _ = simulation.AssertSqlError("exec ('create table #t (a int); create table #t (a int)'); create table u (a int)", 2714);
         AreNotEqual(DBNull.Value, simulation.ExecuteScalar("select object_id('u')"));
     }
+
+    /// <summary>
+    /// Real's parser recovers from a syntax error and reports the ones after
+    /// it, holding back any met before three tokens have parsed again (probed
+    /// 2026-09-28 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select 1 +;\nselect 2 +;", "102@1 102@2")]
+    [DataRow("select 1 frm t;\nselect * from where;", "102@1 156@2")]
+    [DataRow("select * from (select 1 a) d NATURAL JOIN (select 1 a) e;", "102@1 102@1")]
+    [DataRow("select (1;\nselect 2;", "102@1")]
+    [DataRow("select from t;\nselect 3;", "156@1")]
+    [DataRow("select 1;\ninsert t (c) with (tablock) values (1);", "156@2 319@2")]
+    [DataRow("select 1;\nmerge t as a with (holdlock) using (select 1 c) s on a.c = s.c when not matched then insert values (s.c);", "156@2 319@2 102@2")]
+    [DataRow("select 1 with;", "319@1")]
+    public void SyntaxErrors_ReportThoseRecoveryReaches(string batch, string expected)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (c int)");
+        var ex = sim.AssertSqlError(batch, int.Parse(expected[..3], System.Globalization.CultureInfo.InvariantCulture));
+        AreEqual(expected, string.Join(" ", ex.Errors.Cast<SimulatedError>().Select(error => $"{error.Number}@{error.LineNumber}")));
+    }
 }

@@ -58,7 +58,10 @@ partial class Simulation
         }
         catch (SimulatedSqlException parsePhase)
         {
-            return parsePhase;
+            connection.CurrentDatabase = enteredDatabase;
+            return IsRecoverableSyntaxError(parsePhase) && compileBatch.Parser.Token is { } errorToken
+                ? this.WithRecoveredSyntaxErrors(compileBatch, parsePhase, errorToken)
+                : parsePhase;
         }
         finally
         {
@@ -101,5 +104,167 @@ partial class Simulation
         compile.ErrorProcedureName = executing.ErrorProcedureName;
         compile.ForceTempTableScope = executing.ForceTempTableScope;
         return compile;
+    }
+
+    /// <summary>The syntax errors real's parser recovers from and parses on past.</summary>
+    private static bool IsRecoverableSyntaxError(SimulatedSqlException error) => error.Number is 102 or 111 or 156 or 178 or 319;
+
+    /// <summary>
+    /// Whether <paramref name="error"/> is one the grammar's own actions raise
+    /// rather than a token the parser can't take — a module <c>CREATE</c> not
+    /// first in its batch (Msg 111), a valued <c>RETURN</c> outside a module
+    /// (Msg 178), a <c>WITH</c> after an unterminated statement (Msg 319) —
+    /// which recovery reports however few tokens have parsed since the last.
+    /// </summary>
+    private static bool IsGrammarActionError(SimulatedSqlException error) => error.Number is 111 or 178 or 319;
+
+    /// <summary>
+    /// <paramref name="first"/> followed by the syntax errors real's parser
+    /// reports past it. Real recovers the way a yacc parser does: it restarts
+    /// at the offending token, discarding tokens that can't begin anything,
+    /// and reports a further syntax error only once three tokens have parsed
+    /// since the last one — so <c>select 1 +; select 2 +;</c> reports both,
+    /// <c>(select 1 a) d NATURAL JOIN (select 1 a) e</c> adds Msg 102 near
+    /// <c>e</c>, and a table hint real refuses adds the Msg 319 its
+    /// <c>WITH</c> raises when read as a common table expression, which is
+    /// never held back (probed 2026-09-28 against SQL Server 2025). Each
+    /// restart parses the text from there on with everything before it
+    /// blanked out, so positions and lines stay as written.
+    /// </summary>
+    private SimulatedSqlException WithRecoveredSyntaxErrors(BatchContext compileBatch, SimulatedSqlException first, Parser.Token errorToken)
+    {
+        var text = compileBatch.Parser.Command.CommandText;
+        var connection = compileBatch.Connection;
+        var enteredDatabase = connection.CurrentDatabase;
+        var errors = new List<SimulatedSqlException> { first };
+        // A grammar action's error names a construct the parser read whole;
+        // the parser resumes past the token it stopped at.
+        var restart = IsGrammarActionError(first) ? errorToken.EndIndex : errorToken.StartIndex;
+        for (var attempts = 0; attempts < 64; attempts++)
+        {
+            restart = NextStatementStart(text, restart);
+            if (restart >= text.Length)
+                break;
+            var masked = string.Create(text.Length, (text, restart), static (span, state) =>
+            {
+                for (var i = 0; i < span.Length; i++)
+                    span[i] = i >= state.restart || state.text[i] is '\n' or '\r' ? state.text[i] : ' ';
+            });
+            using var command = new SimulatedDbCommand(this, connection);
+#pragma warning disable CA2100 // the batch's own text, blanked in part
+            command.CommandText = masked;
+#pragma warning restore CA2100
+            var variables = new Dictionary<string, VariableSlot>(compileBatch.Variables, BatchContext.VariableNameComparer);
+            var recovery = compileBatch.ProcFrame is { } frame
+                ? new BatchContext(command, variables, new ProcFrame(frame.ProcedureName, frame.IsDynamicSql))
+                : new BatchContext(command, variables);
+            recovery.LineOffset = compileBatch.LineOffset;
+            recovery.ErrorProcedureName = compileBatch.ErrorProcedureName;
+            recovery.CompilingForRun = true;
+            try
+            {
+                _ = this.BindWithoutRunning(recovery, []);
+                break;
+            }
+            catch (SimulatedSqlException next) when (IsRecoverableSyntaxError(next) && recovery.Parser.Token is { } at && at.StartIndex >= restart)
+            {
+                var parsed = TokensBetween(masked, restart, at.StartIndex);
+                // A WITH the parser restarts at reads as a common table
+                // expression after an unterminated statement, and fails as one.
+                var startsWithWith = masked.AsSpan(restart).StartsWith("with", StringComparison.OrdinalIgnoreCase)
+                    && (restart + 4 >= masked.Length || (!char.IsLetterOrDigit(masked[restart + 4]) && masked[restart + 4] != '_'));
+                var readAsCte = startsWithWith && parsed < 3;
+                if (readAsCte)
+                {
+                    next = SimulatedSqlException.CteRequiresPrecedingSemicolon();
+                    next.ResolveDiagnostics(Parser.Token.LineAt(masked, restart), compileBatch.LineOffset, compileBatch.ErrorProcedureName);
+                }
+                var reported = parsed >= 3 || IsGrammarActionError(next);
+                if (reported)
+                    errors.Add(next);
+                var resume = reported && !readAsCte ? at.StartIndex : at.EndIndex;
+                restart = resume > restart ? resume : at.EndIndex;
+            }
+            catch (SimulatedSqlException)
+            {
+                break;
+            }
+            catch (NotSupportedException)
+            {
+                break;
+            }
+            finally
+            {
+                connection.CurrentDatabase = enteredDatabase;
+            }
+        }
+        return errors.Count == 1 ? first : SimulatedSqlException.Aggregate(errors);
+    }
+
+    /// <summary>
+    /// The offset of the first token from <paramref name="from"/> on that can
+    /// begin a statement — a keyword, <c>(</c>, <c>;</c> or <c>THROW</c> —
+    /// the recovering parser discarding names and operators on the way.
+    /// </summary>
+    private static int NextStatementStart(string text, int from)
+    {
+        var index = from;
+        try
+        {
+            while (Parser.Tokenizer.NextToken(text, ref index, Collation.Baseline) is { } token)
+            {
+                switch (token)
+                {
+                    case Parser.Tokens.Whitespace or Parser.Tokens.Comment:
+                        continue;
+                    case Parser.Tokens.ReservedKeyword or Parser.Tokens.Operator { Character: ';' }:
+                    case Parser.Tokens.UnquotedString { Value: var word } when word.Equals("THROW", StringComparison.OrdinalIgnoreCase):
+                    case Parser.Tokens.Operator { Character: '(' } when OpensQuery(text, index):
+                        return token.StartIndex;
+                }
+            }
+        }
+        catch (SimulatedSqlException)
+        {
+        }
+        return text.Length;
+    }
+
+    /// <summary>
+    /// Whether the <c>(</c> just read opens a query — a statement can begin
+    /// with one only as <c>(SELECT …)</c>, however deeply nested.
+    /// </summary>
+    private static bool OpensQuery(string text, int index)
+    {
+        while (Parser.Tokenizer.NextToken(text, ref index, Collation.Baseline) is { } token)
+        {
+            switch (token)
+            {
+                case Parser.Tokens.Whitespace or Parser.Tokens.Comment or Parser.Tokens.Operator { Character: '(' }:
+                    continue;
+                default:
+                    return token is Parser.Tokens.ReservedKeyword { Keyword: Parser.Keyword.Select };
+            }
+        }
+        return false;
+    }
+
+    /// <summary>The tokens, whitespace and comments aside, between two offsets of <paramref name="text"/>.</summary>
+    private static int TokensBetween(string text, int from, int to)
+    {
+        var count = 0;
+        var index = from;
+        try
+        {
+            while (index < to && Parser.Tokenizer.NextToken(text, ref index, Collation.Baseline) is { } token)
+            {
+                if (token is not (Parser.Tokens.Whitespace or Parser.Tokens.Comment) && token.StartIndex < to)
+                    count++;
+            }
+        }
+        catch (SimulatedSqlException)
+        {
+        }
+        return count;
     }
 }

@@ -229,6 +229,11 @@ The projection-schema result type for `LEN` is always `int`; the other functions
 `REPLACE` runs the coerce per argument with the matching argument index in the Msg 8116 wording.
 `CHARINDEX`'s **haystack** (arg 2) coerces (`CHARINDEX('2', 12345) = 2`); the **needle** (arg 1) and **start** (arg 3) stay strict-int / strict-string respectively, matching real's Msg 8116 rejection.
 
+**`UPPER` / `LOWER` map by the argument's collation** (`CaseMap`), and none of real's tables is the modern Unicode one .NET's `TextInfo` applies (probed 2026-09-28 against SQL Server 2025, every BMP character under two dozen collations).
+There are three, chosen by the collation's version and the same under every suffix, binary included: the unversioned, `_90` and `SQL_` collations share one, `_100` has another and `_140` a third — `UPPER(N'µ')` is `µ` under the default collation and `Μ` under `Japanese_XJIS_140_CI_AS`, and `LOWER(NCHAR(4256))` (Georgian `Ⴀ`) is U+10D0 under the default and U+2D00 under `_100`.
+A Turkish collation of any version (`SQL_Latin1_General_CP1254_*` too) and an Azeri `_100` one map the dotted and dotless I the Turkish way (`UPPER(N'i')` is `İ`, `LOWER(N'I')` is `ı`) and differ in nothing else; Lithuanian's special casing isn't there, and a supplementary character never maps, under an `_SC` collation included.
+The tables are read off real and embedded as runs, so a new .NET Unicode version can't move them.
+
 ## ANSI string-syntax alternatives: `||` / `TRIM([side] chars FROM x)` / 2-arg `LTRIM`/`RTRIM` / `GREATEST` / `LEAST`
 Alternate / ANSI forms SQL Server 2025 accepts, each probed against the live reference.
 

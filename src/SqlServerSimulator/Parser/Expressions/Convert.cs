@@ -191,7 +191,9 @@ internal sealed class ConvertExpression : Expression
             coerced = Cast.AbsorbedOverflow(this.targetType);
         }
 
-        return Cast.RecollateStringResult(coerced, this.targetType, sourceValue.Type, dbCollation);
+        return this.targetType is SqlVariantSqlType
+            ? SqlValue.NameVariantBase(sourceValue, coerced, this.source.ResultReportsNumeric)
+            : Cast.RecollateStringResult(coerced, this.targetType, sourceValue.Type, dbCollation);
     }
 
     /// <summary>

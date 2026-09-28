@@ -494,4 +494,37 @@ public class OrderByTests
             values.Add($"{reader.GetValue(0)}");
         return values;
     }
+
+    /// <summary>
+    /// An ORDER BY name two select items share is ambiguous, even when both
+    /// read one column, and reports among the statement's other binder errors
+    /// (probed 2026-09-28 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select a x, b x from t order by x", "209")]
+    [DataRow("select a, a from t order by a", "209")]
+    [DataRow("select *, a from t order by a", "209")]
+    [DataRow("select a x, max(b) x from t group by a order by x", "209")]
+    [DataRow("select distinct a, a from t order by a", "209")]
+    [DataRow("select a, a from t union all select 1, 2 order by a", "209")]
+    [DataRow("select x1, a x, b x from t order by x, x2", "207 209 207")]
+    [DataRow("select x1, x1 from t order by x1", "207 207 209")]
+    public void OrderBy_NameSharedBySelectItems_IsAmbiguous(string sql, string numbers)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (a int, b int)");
+        var ex = sim.AssertSqlError(sql, int.Parse(numbers.Split(' ')[0], System.Globalization.CultureInfo.InvariantCulture));
+        AreEqual(numbers, string.Join(" ", ex.Errors.Cast<SimulatedError>().Select(error => error.Number)));
+    }
+
+    [TestMethod]
+    [DataRow("select a, a from t order by 1")]
+    [DataRow("select a, a from t order by t.a")]
+    [DataRow("select a, a from t order by a + 1")]
+    public void OrderBy_SharedNameNotReachedByName_Binds(string sql)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (a int, b int); insert t values (1, 2)");
+        AreEqual(1, sim.ExecuteScalar(sql));
+    }
 }

@@ -1432,14 +1432,26 @@ internal sealed partial class Selection
         // column `a`, whatever x is (probed 2026-09-26 against SQL Server
         // 2025: an unknown x is Msg 4104 over an empty table too).
         var orderTermMayNameAlias = false;
+        var orderTermAmbiguous = false;
         SqlType ResolveOrderByType(MultiPartName name)
         {
             if (orderTermMayNameAlias && name.ImmediateQualifier is null)
             {
                 for (var j = 0; j < outputColumnNames.Length; j++)
                 {
-                    if (BuiltInToken.Equals(outputColumnNames[j], name.Leaf))
-                        return outputSchema[j];
+                    if (!BuiltInToken.Equals(outputColumnNames[j], name.Leaf))
+                        continue;
+                    // A name two select items share is ambiguous, even when
+                    // both read the same column (probed 2026-09-28 against
+                    // SQL Server 2025: SELECT a, a … ORDER BY a is Msg 209).
+                    for (var k = j + 1; k < outputColumnNames.Length; k++)
+                    {
+                        if (!BuiltInToken.Equals(outputColumnNames[k], name.Leaf))
+                            continue;
+                        orderTermAmbiguous = true;
+                        throw SimulatedSqlException.AmbiguousColumnName(name.Leaf);
+                    }
+                    return outputSchema[j];
                 }
             }
 
@@ -1467,7 +1479,8 @@ internal sealed partial class Selection
                     : orderBy[i].Expr!.TypeCarryingTypeChecks(parseBatch, ResolveOrderByType);
                 // Real follows an unknown name under DISTINCT with DISTINCT's
                 // own complaint, the same as the throwing path below.
-                if (distinct && parseBatch.BindErrors is { } report && report.Count > recorded && report.SpanOf(orderBy[i].Expr) is { } term)
+                // An ambiguous name is its own complaint, DISTINCT or not.
+                if (distinct && !orderTermAmbiguous && parseBatch.BindErrors is { } report && report.Count > recorded && report.SpanOf(orderBy[i].Expr) is { } term)
                     report.Record(SimulatedSqlException.OrderByItemNotInSelectListWithDistinct(), term.End);
             }
             catch (SimulatedSqlException unknown) when (distinct && unknown.Number is 207 or 4104)

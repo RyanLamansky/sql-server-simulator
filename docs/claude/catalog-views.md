@@ -879,7 +879,8 @@ Everything a result set already carries (type, numeric spelling, nullability) fe
 Those give real's `is_identity_column` / `is_updateable` / `is_computed_column`: a grouped query's columns are never updateable, and an aggregate or window function is not "computed" where any other expression is.
 Where the result carries COLMETADATA flags, the updatable and computed answers read them instead, which trace a column through its source (probed 2026-09-26 against SQL Server 2025): a view's expression stays computed, a derived table's or CTE's doesn't, and an inline function's columns carry what its body's did — captured at `CREATE` — save that an identity column reads as updatable.
 `tds_type_id` follows COLMETADATA's token choice (the fixed-length token for a NOT NULL fixed-width type), with real's own lengths — 17 for decimal, 65535 for a MAX type, 8100 for xml.
-A compile error — the `@params` declaration list's included — is followed by **Msg 11501**, a missing object by **Msg 11529**.
+A compile error — the `@params` declaration list's included — is followed by **Msg 11501**, a missing object by **Msg 11529**; the follow-up reports the line of the error it follows, and a missing object's pair both name `sp_describe_first_result_set` as their procedure (probed 2026-09-28 against SQL Server 2025).
+An unsized string result describes as the width COLMETADATA carries for it — `nvarchar(4000)` / `varchar(8000)` — and `system_type_name` is itself an `nvarchar(128)`.
 FMTONLY also stops a FROM-less SELECT from baking its values at parse, so `CAST('a' AS int)` is described rather than raising Msg 245, as real describes it.
 
 `sys.dm_exec_describe_first_result_set(@tsql, @params, @browse_information_mode)` is the same engine as a system TVF (probed 2026-09-25): the first 35 columns match the procedure's (`system_type_name` declared `nvarchar(128)` rather than 256), and six `error_*` columns replace the four TDS ones.

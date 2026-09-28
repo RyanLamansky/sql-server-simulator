@@ -562,8 +562,20 @@ internal sealed partial class Selection
             }
 
             var term = spec.Expr!;
-            if (term is Expressions.Reference alias && OutputNameOrdinalOf(alias.ReferencedName, columnNames) >= 0)
+            if (term is Expressions.Reference alias && OutputNameOrdinalOf(alias.ReferencedName, columnNames) is var named and >= 0)
+            {
+                // A name two output columns share is ambiguous (probed
+                // 2026-09-28 against SQL Server 2025).
+                for (var k = named + 1; k < columnNames.Length; k++)
+                {
+                    if (BuiltInToken.Equals(columnNames[k], alias.ReferencedName.Leaf))
+                    {
+                        (errors ??= []).Add(SimulatedSqlException.AmbiguousColumnName(alias.ReferencedName.Leaf));
+                        break;
+                    }
+                }
                 continue;
+            }
 
             var bound = true;
             term.VisitColumnReferences(name =>

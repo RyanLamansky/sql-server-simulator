@@ -36,8 +36,8 @@ internal sealed class LastIdentityExpression : Expression
     }
 
     public override SqlValue Run(RuntimeContext runtime) =>
-        (this.scoped ? runtime.Batch.Connection.ScopeIdentity : runtime.Batch.Connection.LastIdentity) is decimal v
-            ? SqlValue.FromDecimal(ResultType, v)
+        (this.scoped ? runtime.Batch.Connection.ScopeIdentity : runtime.Batch.Connection.LastIdentity) is Int128 v
+            ? SqlValue.FromDecimal(ResultType, IdentityState.ToDecimal38(v))
             : SqlValue.Null(ResultType);
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => ResultType;

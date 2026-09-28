@@ -39,9 +39,17 @@ internal sealed class SqlVariantSqlType() : SqlType(SqlTypeCategory.Other, TypeP
 
     public override int GetVariableByteCount(SqlValue value) => ByteCount(value.AsVariantInner);
 
-    public override int Encode(SqlValue value, Span<byte> destination) => EncodeInner(value.AsVariantInner, destination);
+    public override int Encode(SqlValue value, Span<byte> destination)
+    {
+        var written = EncodeInner(value.AsVariantInner, destination);
+        if (value.VariantBaseIsDecimal)
+            destination[0] = KindDecimalNamedDecimal;
+        return written;
+    }
 
-    public override SqlValue Decode(ReadOnlySpan<byte> source) => SqlValue.FromVariant(DecodeInner(source));
+    public override SqlValue Decode(ReadOnlySpan<byte> source) => source[0] == KindDecimalNamedDecimal
+        ? SqlValue.FromVariantNamedDecimal(DecodeInner(source))
+        : SqlValue.FromVariant(DecodeInner(source));
 
     public override string ToString() => "sql_variant";
 
@@ -71,6 +79,7 @@ internal sealed class SqlVariantSqlType() : SqlType(SqlTypeCategory.Other, TypeP
     private const byte KindSysname = 21;
     private const byte KindBinary = 22;
     private const byte KindVarbinary = 23;
+    private const byte KindDecimalNamedDecimal = 24;
 
     // The set of storable inner types (everything except MAX / LOB / xml /
     // spatial / hierarchyid / rowversion) is enforced by the default arm of
@@ -211,7 +220,7 @@ internal sealed class SqlVariantSqlType() : SqlType(SqlTypeCategory.Other, TypeP
             case KindDateTime: return SqlType.DateTime.Decode(source.Slice(1, SqlType.DateTime.FixedLength));
             case KindSmallDateTime: return SqlType.SmallDateTime.Decode(source.Slice(1, SqlType.SmallDateTime.FixedLength));
             case KindGuid: return SqlType.UniqueIdentifier.Decode(source.Slice(1, SqlType.UniqueIdentifier.FixedLength));
-            case KindDecimal:
+            case KindDecimal or KindDecimalNamedDecimal:
                 var dec = SqlType.GetDecimal(source[1], source[2]);
                 return dec.Decode(source.Slice(3, dec.FixedLength));
             case KindTime:

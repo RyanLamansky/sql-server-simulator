@@ -880,6 +880,13 @@ public sealed class SimulatedDbConnection : DbConnection
     internal bool InsertExecActive;
 
     /// <summary>
+    /// The column types an <c>INSERT … EXEC</c> in progress writes, which each
+    /// <c>SELECT</c> the executed body runs is judged against as it compiles
+    /// (<c>Simulation.RequireInsertExecAssignable</c>); null otherwise.
+    /// </summary>
+    internal SqlType[]? InsertExecTargetTypes;
+
+    /// <summary>
     /// The triggers mid-fire on this connection, innermost last: each frame
     /// carries the trigger's ObjectId, whether it's an AFTER DML trigger and
     /// whether it's a DDL trigger (which <c>TRIGGER_NESTLEVEL</c> counts as
@@ -983,7 +990,7 @@ public sealed class SimulatedDbConnection : DbConnection
     /// generating none leaves its firing statement's value in place — see
     /// <see cref="IdentityScope"/>.
     /// </summary>
-    internal decimal? LastIdentity;
+    internal Int128? LastIdentity;
 
     /// <summary>
     /// <c>SCOPE_IDENTITY()</c>: <see cref="LastIdentity"/> as the current
@@ -991,7 +998,7 @@ public sealed class SimulatedDbConnection : DbConnection
     /// batch — last set it; each scope starts at <c>null</c> and its caller
     /// reads its own value again when it returns (<see cref="IdentityScope"/>).
     /// </summary>
-    internal decimal? ScopeIdentity;
+    internal Int128? ScopeIdentity;
 
     /// <summary>
     /// How many INSERTs on this session have produced an identity value — what
@@ -1004,7 +1011,7 @@ public sealed class SimulatedDbConnection : DbConnection
     /// and <see cref="ScopeIdentity"/>: its last identity value, or
     /// <c>null</c> when it produced none.
     /// </summary>
-    internal void RecordInsertIdentity(decimal? value)
+    internal void RecordInsertIdentity(Int128? value)
     {
         this.LastIdentity = this.ScopeIdentity = value;
         if (value is not null)

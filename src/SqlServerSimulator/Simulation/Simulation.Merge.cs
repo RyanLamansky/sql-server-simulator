@@ -1952,7 +1952,7 @@ partial class Simulation
             if (clause.WriteMasks?[ord] is { } mask)
                 raw = DataMasking.ForStorage(mask.Apply(raw, destinationTable.Columns[ord].Type));
             raw = EnforceMaxLength(raw, destinationTable.Columns[ord], destinationTable, context.Connection);
-            newValues[ord] = CoerceForWrite(raw, destinationTable.Columns[ord], context.Batch);
+            newValues[ord] = SqlValue.NameVariantBase(raw, CoerceForWrite(raw, destinationTable.Columns[ord], context.Batch), expr.ResultReportsNumeric);
             EnforceRule(destinationTable, newValues, ord, context.Batch);
         }
 
@@ -2048,13 +2048,12 @@ partial class Simulation
             if (clause.WriteMasks?[ordinal] is { } mask)
                 source = DataMasking.ForStorage(mask.Apply(source, targetColumn.Type));
             source = EnforceMaxLength(source, targetColumn, destinationTable, context.Connection);
-            var coerced = CoerceForWrite(source, targetColumn, context.Batch);
+            var coerced = SqlValue.NameVariantBase(source, CoerceForWrite(source, targetColumn, context.Batch), clause.InsertValues[i].ResultReportsNumeric);
             rowValues[ordinal] = coerced;
 
             if (ReferenceEquals(targetColumn, identityColumn))
             {
-                var explicitValue = coerced.CoerceTo(SqlType.BigInt).AsInt64;
-                identityColumn.Identity!.ObserveExplicit(explicitValue);
+                identityColumn.Identity!.ObserveExplicit(IdentityState.FromSqlValue(coerced));
             }
         }
 
@@ -2280,7 +2279,7 @@ partial class Simulation
         if (!insteadOfInsert && destinationTable.IdentityOrdinal >= 0 && pendingInserts.Count > 0)
         {
             var lastId = pendingInserts[^1].NewValues[destinationTable.IdentityOrdinal];
-            context.Connection.RecordInsertIdentity(lastId.IsNull ? null : lastId.CoerceTo(SqlType.BigInt).AsInt64);
+            context.Connection.RecordInsertIdentity(lastId.IsNull ? null : IdentityState.FromSqlValue(lastId));
         }
 
         // Build OUTPUT result, in the order the match phase keyed the actions.

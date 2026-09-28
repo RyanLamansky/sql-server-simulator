@@ -224,18 +224,18 @@ public sealed class MathScalarTests
     }
 
     // --- CEILING / FLOOR result type: precision preserved, scale dropped to 0
-    // (probe-confirmed against SQL Server 2025, 2026-07-22). The simulator
-    // reports "numeric" for every decimal family (documented divergence). ---
+    // (probe-confirmed against SQL Server 2025, 2026-07-22), keeping the
+    // operand's decimal / numeric name. ---
 
     [TestMethod]
-    [DataRow("ceiling(1.1)", 2, 0)]
-    [DataRow("ceiling(123.456)", 6, 0)]
-    [DataRow("floor(cast(-1.1 as decimal(2,1)))", 2, 0)]
-    [DataRow("ceiling(cast(1 as decimal(38,10)))", 38, 0)]
-    [DataRow("floor(cast(1 as decimal(18,4)))", 18, 0)]
-    public void CeilingFloor_DecimalResult_PrecisionPreservedScaleZero(string expr, int precision, int scale)
+    [DataRow("ceiling(1.1)", 2, 0, "numeric")]
+    [DataRow("ceiling(123.456)", 6, 0, "numeric")]
+    [DataRow("floor(cast(-1.1 as decimal(2,1)))", 2, 0, "decimal")]
+    [DataRow("ceiling(cast(1 as decimal(38,10)))", 38, 0, "decimal")]
+    [DataRow("floor(cast(1 as decimal(18,4)))", 18, 0, "decimal")]
+    public void CeilingFloor_DecimalResult_PrecisionPreservedScaleZero(string expr, int precision, int scale, string baseType)
     {
-        AreEqual("numeric", ExecuteScalar($"select sql_variant_property(cast({expr} as sql_variant), 'BaseType')"));
+        AreEqual(baseType, ExecuteScalar($"select sql_variant_property(cast({expr} as sql_variant), 'BaseType')"));
         AreEqual(precision, ExecuteScalar($"select sql_variant_property(cast({expr} as sql_variant), 'Precision')"));
         AreEqual(scale, ExecuteScalar($"select sql_variant_property(cast({expr} as sql_variant), 'Scale')"));
     }

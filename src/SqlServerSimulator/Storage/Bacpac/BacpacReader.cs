@@ -300,7 +300,7 @@ internal static class BacpacReader
 
         var rowCount = 0;
         var identityOrdinal = IdentityOrdinalOf(wireCols);
-        long? identityMax = null;
+        Int128? identityMax = null;
         // Both buffers are rewritten in full every iteration — the wire copy
         // covers every non-computed column and EvaluateComputedColumns covers
         // the rest — so one pair serves the whole stream.
@@ -329,7 +329,7 @@ internal static class BacpacReader
     {
         var rowCount = 0;
         var identityOrdinal = IdentityOrdinalOf(wireCols);
-        long? identityMax = null;
+        Int128? identityMax = null;
         // One row buffer for the whole stream — EncodeRow copies what it needs
         // into the row bytes, so no value outlives the iteration — and one
         // encoded-bytes buffer beside it, since Insert copies into the page.
@@ -369,12 +369,12 @@ internal static class BacpacReader
     /// per stream and applied once rather than observed per row, which keeps
     /// the counter's lock off the load loop.
     /// </summary>
-    private static void TrackIdentityMax(SqlValue value, ref long? runningMax)
+    private static void TrackIdentityMax(SqlValue value, ref Int128? runningMax)
     {
         if (value.IsNull)
             return;
-        var current = value.CoerceTo(SqlType.BigInt).AsInt64;
-        if (runningMax is not long seen || current > seen)
+        var current = IdentityState.FromSqlValue(value);
+        if (runningMax is not Int128 seen || current > seen)
             runningMax = current;
     }
 
@@ -385,9 +385,9 @@ internal static class BacpacReader
     /// insert into an imported table re-issues a key the data already holds —
     /// real's own import leaves <c>IDENT_CURRENT</c> at the loaded maximum.
     /// </summary>
-    private static void ObserveIdentityMax(HeapColumn column, long? loadedMax)
+    private static void ObserveIdentityMax(HeapColumn column, Int128? loadedMax)
     {
-        if (loadedMax is long value)
+        if (loadedMax is Int128 value)
             column.Identity!.ObserveExplicit(value);
     }
 

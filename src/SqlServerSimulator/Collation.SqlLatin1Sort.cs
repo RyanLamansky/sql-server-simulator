@@ -386,6 +386,8 @@ internal abstract partial class Collation
 
         internal override Collation ForVarcharStorage() => this.varcharBody ?? this;
 
+        internal override bool WeightsNul => this.varcharStorage;
+
         public override int Compare(string? x, string? y) =>
             x is null ? (y is null ? 0 : -1)
             : y is null ? 1

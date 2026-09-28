@@ -99,6 +99,11 @@ internal abstract partial class Collation : IComparer<string>, IEqualityComparer
     /// </summary>
     internal HashSet<string>? SystemProcedureLookup;
 
+    private CaseMap? caseMap;
+
+    /// <summary>The <c>UPPER</c> / <c>LOWER</c> mapping this collation applies; see <see cref="CaseMap"/>.</summary>
+    internal CaseMap CaseMapping() => this.caseMap ??= CaseMap.For(this);
+
     public abstract string Name { get; }
 
     /// <summary>
@@ -357,6 +362,38 @@ internal abstract partial class Collation : IComparer<string>, IEqualityComparer
     internal virtual Collation ForVarcharStorage() => this;
 
     /// <summary>
+    /// Whether <c>CHAR(0)</c> is a character of its own here — the lowest
+    /// weight, never ignored — as it is in <c>varchar</c> data under every
+    /// non-binary <c>SQL_</c> collation, where a Windows collation and all
+    /// Unicode data ignore it: <c>'a' + CHAR(0) + 'b'</c> sorts before
+    /// <c>'ab'</c>, isn't <c>LIKE 'ab'</c>, and <c>CHARINDEX</c> /
+    /// <c>REPLACE</c> find it (probed 2026-09-28 against SQL Server 2025).
+    /// </summary>
+    internal virtual bool WeightsNul => false;
+
+    /// <summary>
+    /// A comparison that weights <c>CHAR(0)</c> below every other character
+    /// over one, <paramref name="compare"/>, that ignores it: the text between
+    /// NULs compares piece by piece, and where one side runs out of pieces
+    /// first it is the lower.
+    /// </summary>
+    private protected static int CompareNulWeighted(ReadOnlySpan<char> x, ReadOnlySpan<char> y, Func<string, string, int> compare)
+    {
+        while (true)
+        {
+            var xEnd = x.IndexOf('\0');
+            var yEnd = y.IndexOf('\0');
+            var piece = compare(new string(xEnd < 0 ? x : x[..xEnd]), new string(yEnd < 0 ? y : y[..yEnd]));
+            if (piece != 0)
+                return piece;
+            if (xEnd < 0 || yEnd < 0)
+                return xEnd < 0 ? (yEnd < 0 ? 0 : -1) : 1;
+            x = x[(xEnd + 1)..];
+            y = y[(yEnd + 1)..];
+        }
+    }
+
+    /// <summary>
     /// True for collations whose name carries the <c>_SC_</c>
     /// (supplementary-character-aware) flag, or whose version implicitly
     /// implies it (v140+). Real SQL Server's text functions — <c>LEN</c>,
@@ -515,9 +552,18 @@ internal abstract partial class Collation : IComparer<string>, IEqualityComparer
 
         private readonly SurrogateMatching surrogateMatching;
 
-        internal CultureCollation(string name, string description, string cultureName, bool caseSensitive, bool accentInsensitive, bool kanaTypeSensitive, bool widthSensitive, Encoding storageEncoding, int ansiCodePage, bool isSupplementaryCharacterAware, SurrogateMatching surrogateMatching)
+        private readonly bool weightsNul;
+
+        private readonly CultureCollation? varcharBody;
+
+        // weightsNul builds the sibling a SQL_ name's varchar data takes,
+        // which weights CHAR(0) (see WeightsNul).
+        internal CultureCollation(string name, string description, string cultureName, bool caseSensitive, bool accentInsensitive, bool kanaTypeSensitive, bool widthSensitive, Encoding storageEncoding, int ansiCodePage, bool isSupplementaryCharacterAware, SurrogateMatching surrogateMatching, bool weightsNul = false)
         {
             this.name = name;
+            this.weightsNul = weightsNul;
+            if (!weightsNul && name.StartsWith("SQL_", StringComparison.OrdinalIgnoreCase))
+                this.varcharBody = new CultureCollation(name, description, cultureName, caseSensitive, accentInsensitive, kanaTypeSensitive, widthSensitive, storageEncoding, ansiCodePage, isSupplementaryCharacterAware, surrogateMatching, weightsNul: true);
             this.surrogateMatching = surrogateMatching;
             this.description = description;
             this.caseSensitive = caseSensitive;
@@ -558,12 +604,23 @@ internal abstract partial class Collation : IComparer<string>, IEqualityComparer
 
         internal override SurrogateMatching SurrogateMatching => this.surrogateMatching;
 
+        internal override bool WeightsNul => this.weightsNul;
+
+        internal override Collation ForVarcharStorage() => this.varcharBody ?? this;
+
         public override int Compare(string? x, string? y)
         {
             if (x is null)
                 return y is null ? 0 : -1;
             if (y is null)
                 return 1;
+            if (this.weightsNul && (x.Contains('\0', StringComparison.Ordinal) || y.Contains('\0', StringComparison.Ordinal)))
+                return CompareNulWeighted(x, y, this.CompareIgnoringNul);
+            return this.CompareIgnoringNul(x, y);
+        }
+
+        private int CompareIgnoringNul(string x, string y)
+        {
 
             // Hyphen and apostrophe are the two marks SQL Server's collations
             // weight only at a secondary level: at the primary level they sort
@@ -631,10 +688,19 @@ internal abstract partial class Collation : IComparer<string>, IEqualityComparer
         public override bool Equals(string? x, string? y) =>
             x is null
                 ? y is null
-                : y is not null && this.compareInfo.Compare(x, y, this.equalityOptions) == 0;
+                : y is not null && (this.weightsNul && (x.Contains('\0', StringComparison.Ordinal) || y.Contains('\0', StringComparison.Ordinal))
+                    ? CompareNulWeighted(x, y, (a, b) => this.compareInfo.Compare(a, b, this.equalityOptions)) == 0
+                    : this.compareInfo.Compare(x, y, this.equalityOptions) == 0);
 
-        public override int GetHashCode(string obj) =>
-            this.compareInfo.GetHashCode(obj, this.equalityOptions);
+        public override int GetHashCode(string obj)
+        {
+            if (!this.weightsNul || !obj.Contains('\0', StringComparison.Ordinal))
+                return this.compareInfo.GetHashCode(obj, this.equalityOptions);
+            var hash = new HashCode();
+            foreach (var range in obj.AsSpan().Split('\0'))
+                hash.Add(this.compareInfo.GetHashCode(obj.AsSpan()[range], this.equalityOptions));
+            return hash.ToHashCode();
+        }
     }
 
     /// <summary>

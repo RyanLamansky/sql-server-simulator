@@ -210,7 +210,7 @@ partial class Simulation
                 source = EnforceMaxLength(source, targetColumn, table, batch.Connection);
                 rowValues[ordinal] = CoerceForInsert(source, targetColumn);
                 if (ReferenceEquals(targetColumn, identityColumn))
-                    identityColumn!.Identity!.ObserveExplicit(rowValues[ordinal].CoerceTo(SqlType.BigInt).AsInt64);
+                    identityColumn!.Identity!.ObserveExplicit(IdentityState.FromSqlValue(rowValues[ordinal]));
             }
 
             if (identityColumn is not null && !keepIdentity)

@@ -113,4 +113,46 @@ public sealed class InsertExecTests
         => new Simulation().AssertSqlError(
             "create table #t (a int); insert #t output inserted.a exec('select 42')",
             483, "The OUTPUT clause cannot be used in an INSERT...EXEC statement.");
+
+    /// <summary>
+    /// Each SELECT the executed body runs meets the target columns' one-way
+    /// assignment rule as it compiles, over no rows too, at its own line in
+    /// the body; a constant NULL is exempt, and the error ends the INSERT but
+    /// not the caller's batch (probed 2026-09-28 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void AssignmentRule_JudgesEachResultSet()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table t (d decimal(10, 2))",
+            "create procedure p as begin select 1.5; select getdate() where 1 = 0; end");
+        var ex = sim.AssertSqlError("insert t exec p; select 1", 257);
+        AreEqual("3 1 p", $"{ex.Errors[0].State} {ex.Errors[0].LineNumber} {ex.Errors[0].Procedure}");
+        AreEqual(0, sim.ExecuteScalar("select count(*) from t"));
+    }
+
+    [TestMethod]
+    public void AssignmentRule_ContinuesTheCallersBatch()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (d date)");
+        using var connection = sim.CreateOpenConnection();
+        using var reader = connection.CreateCommand("""
+            begin try insert t exec ('select 1'); end try begin catch select error_number(); end catch
+            """).ExecuteReader();
+        IsTrue(reader.Read());
+        AreEqual(206, reader.GetInt32(0));
+    }
+
+    [TestMethod]
+    [DataRow("select null")]
+    [DataRow("select cast(null as datetime)")]
+    public void AssignmentRule_ExemptsAConstantNull(string body)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (d decimal(10, 2))");
+        _ = sim.ExecuteNonQuery($"insert t exec ('{body.Replace("'", "''", StringComparison.Ordinal)}')");
+        AreEqual(1, sim.ExecuteScalar("select count(*) from t"));
+    }
 }

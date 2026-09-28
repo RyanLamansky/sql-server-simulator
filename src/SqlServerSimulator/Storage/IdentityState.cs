@@ -16,11 +16,11 @@ namespace SqlServerSimulator.Storage;
 /// when no value has yet been generated.
 /// </para>
 /// </remarks>
-internal sealed class IdentityState(long seed, long increment, bool notForReplication = false)
+internal sealed class IdentityState(Int128 seed, Int128 increment, bool notForReplication = false)
 {
-    public readonly long Seed = seed;
+    public readonly Int128 Seed = seed;
 
-    public readonly long Increment = increment;
+    public readonly Int128 Increment = increment;
 
     /// <summary>
     /// True when the column was declared <c>IDENTITY(seed, increment) NOT FOR
@@ -32,7 +32,7 @@ internal sealed class IdentityState(long seed, long increment, bool notForReplic
     /// </summary>
     public readonly bool NotForReplication = notForReplication;
 
-    private long? highWaterMark;
+    private Int128? highWaterMark;
 
     /// <summary>
     /// The value the next row takes when nothing has been generated since
@@ -40,7 +40,7 @@ internal sealed class IdentityState(long seed, long increment, bool notForReplic
     /// <c>DBCC CHECKIDENT … RESEED</c> named another; real hands such a table
     /// the reseed value itself rather than the value after it.
     /// </summary>
-    private long? reseededStart;
+    private Int128? reseededStart;
 
     private readonly Lock gate = new();
 
@@ -48,7 +48,7 @@ internal sealed class IdentityState(long seed, long increment, bool notForReplic
     /// The value <c>IDENT_CURRENT</c> reports: the last generated/observed
     /// identity, or the seed when no value has yet been generated.
     /// </summary>
-    public long Current
+    public Int128 Current
     {
         get
         {
@@ -63,11 +63,11 @@ internal sealed class IdentityState(long seed, long increment, bool notForReplic
     /// outside <paramref name="columnType"/> — real leaves <c>IDENT_CURRENT</c>
     /// at the last value that fit (probed 2026-09-24 against SQL Server 2025).
     /// </summary>
-    public long GenerateNext(SqlType columnType)
+    public Int128 GenerateNext(SqlType columnType)
     {
         lock (this.gate)
         {
-            var next = this.highWaterMark is long last
+            var next = this.highWaterMark is Int128 last
                 ? checked(last + this.Increment)
                 : this.reseededStart ?? this.Seed;
             if (!Fits(next, columnType))
@@ -95,6 +95,31 @@ internal sealed class IdentityState(long seed, long increment, bool notForReplic
         _ => false,
     };
 
+    /// <summary>
+    /// <paramref name="value"/> as the identity column <paramref name="type"/>
+    /// carries it: an integer type's own value, or a scale-0 decimal.
+    /// </summary>
+    public static SqlValue ToSqlValue(Int128 value, SqlType type) => type is DecimalSqlType
+        ? SqlValue.FromDecimal(type, ToDecimal38(value))
+        : SqlValue.FromInt64((long)value).CoerceTo(type);
+
+    /// <summary><paramref name="value"/> as a scale-0 <see cref="Decimal38"/>, the form the <c>numeric(38, 0)</c> identity surfaces report.</summary>
+    public static Decimal38 ToDecimal38(Int128 value) => Decimal38.FromParts((UInt128)Int128.Abs(value), value < 0, 0);
+
+    /// <summary>
+    /// The integer an identity value of any identity type holds — the
+    /// inverse of <see cref="ToSqlValue"/>, for an explicit value written
+    /// under <c>IDENTITY_INSERT</c> or a reseed value; a fraction truncates.
+    /// </summary>
+    public static Int128 FromSqlValue(SqlValue value)
+    {
+        if (value.Type is not DecimalSqlType)
+            return value.CoerceTo(SqlType.BigInt).AsInt64;
+        var d = value.AsDecimal38;
+        var whole = (Int128)(d.Magnitude / Decimal38.Pow10[d.Scale]);
+        return d.IsNegative ? -whole : whole;
+    }
+
     private static Int128 PowerOfTen(int exponent)
     {
         Int128 power = 1;
@@ -108,11 +133,11 @@ internal sealed class IdentityState(long seed, long increment, bool notForReplic
     /// advances the high-water mark only when <paramref name="value"/> is
     /// past the current mark in the <see cref="Increment"/> direction.
     /// </summary>
-    public void ObserveExplicit(long value)
+    public void ObserveExplicit(Int128 value)
     {
         lock (this.gate)
         {
-            if (this.highWaterMark is not long current)
+            if (this.highWaterMark is not Int128 current)
             {
                 this.highWaterMark = value;
                 return;
@@ -129,7 +154,7 @@ internal sealed class IdentityState(long seed, long increment, bool notForReplic
     /// and the counter position. Returns <c>null</c> when no value has yet
     /// been generated.
     /// </summary>
-    internal long? Snapshot()
+    internal Int128? Snapshot()
     {
         lock (this.gate)
             return this.highWaterMark;
@@ -141,7 +166,7 @@ internal sealed class IdentityState(long seed, long increment, bool notForReplic
     /// undo entry to restore the snapshot on rollback. Distinct from
     /// <see cref="ObserveExplicit"/>, which only advances forward.
     /// </summary>
-    internal void Restore(long? value)
+    internal void Restore(Int128? value)
     {
         lock (this.gate)
         {
@@ -157,7 +182,7 @@ internal sealed class IdentityState(long seed, long increment, bool notForReplic
     /// truncated — a pending reseed value included, which only
     /// <c>IDENT_CURRENT</c> shows (probed 2026-09-24).
     /// </summary>
-    internal long? Reported
+    internal Int128? Reported
     {
         get
         {
@@ -167,14 +192,14 @@ internal sealed class IdentityState(long seed, long increment, bool notForReplic
     }
 
     /// <summary>Both halves of the position a reseed replaces, for its undo entry.</summary>
-    internal (long? HighWaterMark, long? ReseededStart) ReseedSnapshot()
+    internal (Int128? HighWaterMark, Int128? ReseededStart) ReseedSnapshot()
     {
         lock (this.gate)
             return (this.highWaterMark, this.reseededStart);
     }
 
     /// <summary>Puts back a <see cref="ReseedSnapshot"/>: a rolled-back reseed is undone.</summary>
-    internal void RestoreReseed((long? HighWaterMark, long? ReseededStart) snapshot)
+    internal void RestoreReseed((Int128? HighWaterMark, Int128? ReseededStart) snapshot)
     {
         lock (this.gate)
             (this.highWaterMark, this.reseededStart) = snapshot;
@@ -186,7 +211,7 @@ internal sealed class IdentityState(long seed, long increment, bool notForReplic
     /// itself when no row has been generated since the table was created or
     /// truncated (probed 2026-09-24 against SQL Server 2025).
     /// </summary>
-    internal void Reseed(long value)
+    internal void Reseed(Int128 value)
     {
         lock (this.gate)
         {

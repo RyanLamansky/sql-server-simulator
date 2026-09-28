@@ -83,21 +83,16 @@ internal sealed class CollateExpression(Expression inner, Collation collation, s
         var rewrapped = Rewrap(value.Type, this.ResolvedCollation);
         if (value.IsNull)
             return SqlValue.Null(rewrapped);
-        // When the postfix swaps to a collation with a different storage
-        // encoding (e.g. CP1252 → UTF-8 on the *_UTF8 collations), a fixed-
-        // length char(N) value carries a .NET string sized for the inner
-        // collation's byte budget but the outer encoder's fixed N-byte slot
-        // would overflow. Re-route through FromString so the new type's
-        // <see cref="SqlValue.NormalizeFixedLengthStringToByteCount"/> re-
-        // pads / re-truncates the .NET string for the new storage encoding.
-        // Variable-length varchar values size their destination buffer
-        // dynamically via GetVariableByteCount, so they don't need the same
-        // dance; their per-collation byte semantics fall under the broader
-        // CAST + postfix-COLLATE composition gap (see collations.md).
-        return rewrapped is CharSqlType
-            && value.Type.Collation!.StorageEncoding != rewrapped.Collation!.StorageEncoding
-                ? SqlValue.FromString(rewrapped, value.AsString)
-                : value.WithType(rewrapped);
+        if (rewrapped is not (CharSqlType or VarcharSqlType) || value.Type.Collation!.StorageEncoding == rewrapped.Collation!.StorageEncoding)
+            return value.WithType(rewrapped);
+        // Moving a non-Unicode string to a collation of another code page
+        // converts its characters there and then — best fit or '?' — so what
+        // reads it next (LOWER / UPPER included) sees the converted text
+        // (probed 2026-09-28 against SQL Server 2025). A fixed-length char(N)
+        // goes through FromString first so the new storage encoding re-pads /
+        // re-truncates it to its N bytes.
+        var moved = rewrapped is CharSqlType ? SqlValue.FromString(rewrapped, value.AsString) : value.WithType(rewrapped);
+        return RowEncoder.StorageForm(moved, rewrapped);
     }
 
     internal override string DebugDisplay() => $"{this.Inner.DebugDisplay()} COLLATE {this.ResolvedCollation.Name}";

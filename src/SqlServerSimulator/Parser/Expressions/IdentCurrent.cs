@@ -26,7 +26,7 @@ internal sealed class IdentCurrent : Expression
     public override SqlValue Run(RuntimeContext runtime)
     {
         var identity = IdentityOf(runtime, this.tableName);
-        return identity is null ? SqlValue.Null(ResultType) : SqlValue.FromDecimal(ResultType, identity.Current);
+        return identity is null ? SqlValue.Null(ResultType) : SqlValue.FromDecimal(ResultType, IdentityState.ToDecimal38(identity.Current));
     }
 
     /// <summary>

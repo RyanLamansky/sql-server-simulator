@@ -307,8 +307,8 @@ internal static partial class BuiltInResources
     /// use (each a sql_variant in real SQL Server). The stored value always
     /// fits the declared numeric type (enforced at column creation).
     /// </summary>
-    private static SqlValue IdentityVariant(long value, SqlType columnType) =>
-        SqlValue.FromVariant(SqlValue.FromInt64(value).CoerceTo(columnType));
+    private static SqlValue IdentityVariant(Int128 value, SqlType columnType) =>
+        SqlValue.FromVariant(IdentityState.ToSqlValue(value, columnType));
 
     /// <summary>
     /// Rows for <c>sys.sql_modules</c>: one per programmable module across

@@ -591,7 +591,10 @@ partial class Simulation
         // than waiting for a row to reach the per-row resolver (so an empty
         // table and a module body at CREATE report them too).
         var targetTypeResolver = Selection.TargetColumnTypeResolver(context.Batch, targetName, table, sourceView);
-        BindSetValues(context.Batch, table, assignments, targetTypeResolver);
+        BindSetValues(context.Batch, table, assignments, targetTypeResolver, name =>
+            sourceView is null
+            && Array.FindIndex(table.Columns, column => context.Batch.CurrentDatabase.Collation.Equals(column.Name, name.Leaf)) is var n and >= 0
+            && table.Columns[n].SpelledNumeric);
 
         BooleanExpression? where = null;
         PositionedCursorTarget? positionedCursor = null;
@@ -954,7 +957,8 @@ partial class Simulation
         // Compile-time bind of the predicate and the SET values — see
         // ExecuteUpdateAgainstTable for why.
         var tupleTypeResolver = Selection.ColumnTypeResolverFor(sources);
-        BindSetValues(context.Batch, table, assignments, tupleTypeResolver);
+        BindSetValues(context.Batch, table, assignments, tupleTypeResolver, name =>
+            Selection.TryResolveSourceColumn(sources, name) is { } id && sources[id.Source].Columns[id.Column].SpelledNumeric);
 
         BooleanExpression? where = null;
         if (context.Token is ReservedKeyword { Keyword: Keyword.Where })
@@ -1520,12 +1524,14 @@ partial class Simulation
     /// Binds each SET value against <paramref name="resolveColumnType"/>: an
     /// unresolved collation settles (Msg 456), and a column refuses a value it
     /// can't take without an explicit conversion (Msg 206 / 257, see
-    /// <see cref="AssignmentRules"/>).
+    /// <see cref="AssignmentRules"/>). A reference to a numeric-spelled column
+    /// is marked so a <c>sql_variant</c> target keeps the name.
     /// </summary>
-    private static void BindSetValues(BatchContext batch, HeapTable table, List<(int Ordinal, Expression Expr)> assignments, Func<MultiPartName, SqlType> resolveColumnType)
+    private static void BindSetValues(BatchContext batch, HeapTable table, List<(int Ordinal, Expression Expr)> assignments, Func<MultiPartName, SqlType> resolveColumnType, Func<MultiPartName, bool> isNumericColumn)
     {
         foreach (var (ordinal, expr) in assignments)
         {
+            Reference.MarkNumericSpelled(expr, isNumericColumn);
             // A statement read for its whole bind error report records a type
             // check here and binds the next value on; an error-typed value
             // takes any target.
@@ -1823,7 +1829,7 @@ partial class Simulation
             if (setMasks?[i] is { } mask)
                 raw = DataMasking.ForStorage(mask.Apply(raw, table.Columns[ordinal].Type));
             raw = EnforceMaxLength(raw, table.Columns[ordinal], table, context.Connection);
-            newValues[ordinal] = CoerceForWrite(raw, table.Columns[ordinal], context.Batch);
+            newValues[ordinal] = SqlValue.NameVariantBase(raw, CoerceForWrite(raw, table.Columns[ordinal], context.Batch), expr.ResultReportsNumeric);
             EnforceRule(table, newValues, ordinal, context.Batch);
         }
 

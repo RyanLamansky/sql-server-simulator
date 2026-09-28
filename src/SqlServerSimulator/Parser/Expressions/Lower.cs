@@ -1,5 +1,4 @@
 using SqlServerSimulator.Storage;
-using System.Diagnostics.CodeAnalysis;
 
 namespace SqlServerSimulator.Parser.Expressions;
 
@@ -14,8 +13,6 @@ internal sealed class Lower(ParserContext context) : Expression
 
     internal override bool ParallelSafe => this.source.ParallelSafe;
 
-    [SuppressMessage("Globalization", "CA1308:Normalize strings to uppercase",
-        Justification = "SQL LOWER lowercases user-facing data; the rule's normalization concern doesn't apply here.")]
     public override SqlValue Run(RuntimeContext runtime)
     {
         var raw = source.Run(runtime);
@@ -23,7 +20,7 @@ internal sealed class Lower(ParserContext context) : Expression
         if (raw.IsNull)
             return SqlValue.Null(StringScalars.ResolveResultType(raw.Type, runtime.Batch));
         var value = StringScalars.CoerceToVarchar(raw, runtime.Batch, "lower");
-        var lowered = StringScalars.CaseMapping.ToLower(value.AsString);
+        var lowered = (value.Type.Collation ?? Collation.Baseline).CaseMapping().ToLower(value.AsString);
         return SqlValue.FromString(value.Type, lowered);
     }
 

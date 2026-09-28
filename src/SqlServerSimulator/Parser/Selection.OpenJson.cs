@@ -24,12 +24,15 @@ internal sealed partial class Selection
 {
     /// <summary>
     /// Default schema columns when OPENJSON is invoked without a WITH
-    /// clause: <c>key nvarchar(4000)</c>, <c>value nvarchar(max)</c>,
-    /// <c>type int</c>. Type code mapping matches SQL Server's
-    /// documentation: 0=null, 1=string, 2=number, 3=true/false, 4=array,
-    /// 5=object.
+    /// clause: <c>key nvarchar(4000)</c> in <c>Latin1_General_BIN2</c> and
+    /// NOT NULL, <c>value nvarchar(max)</c>, <c>type tinyint</c> NOT NULL
+    /// (probed 2026-09-28 against SQL Server 2025). Type code mapping matches
+    /// SQL Server's documentation: 0=null, 1=string, 2=number, 3=true/false,
+    /// 4=array, 5=object.
     /// </summary>
-    private static readonly SqlType[] OpenJsonDefaultSchema = [SqlType.NVarchar, SqlType.NVarchar, SqlType.TinyInt];
+    private static readonly NVarcharSqlType OpenJsonKeyType = NVarcharSqlType.Get(4000, Collation.Get("Latin1_General_BIN2"), Coercibility.Implicit);
+    private static readonly SqlType[] OpenJsonDefaultSchema = [OpenJsonKeyType, SqlType.NVarcharMax, SqlType.TinyInt];
+    private static readonly bool[] OpenJsonDefaultNullability = [false, true, false];
     private static readonly string[] OpenJsonDefaultColumnNames = ["key", "value", "type"];
 
     /// <summary>
@@ -63,7 +66,12 @@ internal sealed partial class Selection
         return new Selection(schema, columnNames,
             hasOrderBy: false,
             hasTopOrOffsetOrFetch: false,
-            (batch, outerResolver) => EnumerateOpenJsonRows(jsonInput, docPath, withColumns, schema, batch, outerResolver));
+            (batch, outerResolver) => EnumerateOpenJsonRows(jsonInput, docPath, withColumns, schema, batch, outerResolver))
+        {
+            ColumnNullability = withColumns is null ? OpenJsonDefaultNullability : null,
+            // No OPENJSON column is updatable (probed 2026-09-28 against SQL Server 2025).
+            ColumnWireFlags = new byte[schema.Length],
+        };
     }
 
     private static IEnumerable<byte[]> EnumerateOpenJsonRows(
@@ -226,15 +234,14 @@ internal sealed partial class Selection
                 JsonValueKind.Object => 5,
                 _ => 0,
             };
-            var keyValue = SqlValue.FromNVarchar(key);
+            var keyValue = SqlValue.FromNVarchar(OpenJsonKeyType, key);
             var valueText = element.ValueKind switch
             {
-                JsonValueKind.Null => SqlValue.Null(SqlType.NVarchar),
-                JsonValueKind.String => SqlValue.FromNVarchar(element.GetString()!),
-                JsonValueKind.True => SqlValue.FromNVarchar("true"),
-                JsonValueKind.False => SqlValue.FromNVarchar("false"),
-                JsonValueKind.Number => SqlValue.FromNVarchar(element.GetRawText()),
-                _ => SqlValue.FromNVarchar(element.GetRawText()),
+                JsonValueKind.Null => SqlValue.Null(SqlType.NVarcharMax),
+                JsonValueKind.String => SqlValue.FromNVarchar(SqlType.NVarcharMax, element.GetString()!),
+                JsonValueKind.True => SqlValue.FromNVarchar(SqlType.NVarcharMax, "true"),
+                JsonValueKind.False => SqlValue.FromNVarchar(SqlType.NVarcharMax, "false"),
+                _ => SqlValue.FromNVarchar(SqlType.NVarcharMax, element.GetRawText()),
             };
             return RowEncoder.EncodeRow(schema, [keyValue, valueText, SqlValue.FromByte((byte)typeCode)]);
         }

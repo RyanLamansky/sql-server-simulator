@@ -36,6 +36,9 @@ internal sealed class JsonQuery : Expression
     /// </summary>
     private readonly bool arrayWrapper;
 
+    /// <summary>The result type the statement bound, which the rows carry.</summary>
+    private SqlType? resultType;
+
     public JsonQuery(ParserContext context)
     {
         this.jsonInput = Parse(context);
@@ -76,20 +79,21 @@ internal sealed class JsonQuery : Expression
     public override SqlValue Run(RuntimeContext runtime)
     {
         var jsonValue = this.jsonInput.Run(runtime);
+        var resultType = this.resultType ?? ResultType(jsonValue.Type);
         if (this.pathInput is null)
         {
-            return jsonValue.IsNull ? SqlValue.Null(ResultType(jsonValue.Type))
-                : this.arrayWrapper ? Wrap(jsonValue, JsonPath.Root)
-                : Extract(jsonValue, JsonPath.Root);
+            return jsonValue.IsNull ? SqlValue.Null(resultType)
+                : this.arrayWrapper ? Wrap(jsonValue, JsonPath.Root, resultType)
+                : Extract(jsonValue, JsonPath.Root, resultType);
         }
 
         var pathValue = JsonText.RequirePathValue(this.pathInput.Run(runtime), "JSON_QUERY");
         if (jsonValue.IsNull)
-            return SqlValue.Null(ResultType(jsonValue.Type));
+            return SqlValue.Null(resultType);
         var path = JsonPath.Parse(pathValue.AsString);
-        return this.arrayWrapper ? Wrap(jsonValue, path)
-            : path.IsAdvanced ? ExtractAdvanced(jsonValue, path)
-            : Extract(jsonValue, path);
+        return this.arrayWrapper ? Wrap(jsonValue, path, resultType)
+            : path.IsAdvanced ? ExtractAdvanced(jsonValue, path, resultType)
+            : Extract(jsonValue, path, resultType);
     }
 
     /// <summary>
@@ -101,7 +105,7 @@ internal sealed class JsonQuery : Expression
     /// spacing and each string is re-escaped the way the JSON builders write
     /// one (probed 2026-09-27 against SQL Server 2025).
     /// </summary>
-    private static SqlValue Wrap(SqlValue jsonValue, in JsonPath path)
+    private static SqlValue Wrap(SqlValue jsonValue, in JsonPath path, SqlType resultType)
     {
         JsonText.RejectTextAccessors(path, jsonValue.Type);
         var isJson = jsonValue.Type is JsonSqlType;
@@ -109,7 +113,7 @@ internal sealed class JsonQuery : Expression
         var nodes = new List<JsonElement>();
         using var doc = JsonText.SelectAdvanced(jsonValue.AsString, path, nodes, out var found, out var partial);
         if (!found || (strict && partial))
-            return strict ? throw SimulatedSqlException.JsonStrictPathNotFound(isJson ? (byte)5 : (byte)2) : SqlValue.Null(ResultType(jsonValue.Type));
+            return strict ? throw SimulatedSqlException.JsonStrictPathNotFound(isJson ? (byte)5 : (byte)2) : SqlValue.Null(resultType);
 
         var sb = new StringBuilder("[");
         for (var i = 0; i < nodes.Count; i++)
@@ -122,7 +126,7 @@ internal sealed class JsonQuery : Expression
                 _ = sb.Append(nodes[i].GetRawText());
         }
         var text = sb.Append(']').ToString();
-        return isJson ? SqlValue.FromJson(text) : SqlValue.FromNVarchar(SqlType.NVarcharMax, text);
+        return isJson ? SqlValue.FromJson(text) : SqlValue.FromString(resultType, text);
     }
 
     /// <summary>
@@ -131,7 +135,7 @@ internal sealed class JsonQuery : Expression
     /// Msg 13624 under <c>strict</c> (probed 2026-09-27 against SQL Server
     /// 2025). Over text, <c>last</c> and a list are refused outright.
     /// </summary>
-    private static SqlValue ExtractAdvanced(SqlValue jsonValue, in JsonPath path)
+    private static SqlValue ExtractAdvanced(SqlValue jsonValue, in JsonPath path, SqlType resultType)
     {
         JsonText.RejectTextAccessors(path, jsonValue.Type);
         var isJson = jsonValue.Type is JsonSqlType;
@@ -139,20 +143,20 @@ internal sealed class JsonQuery : Expression
         var nodes = new List<JsonElement>();
         using var doc = JsonText.SelectAdvanced(jsonValue.AsString, path, nodes, out var found, out var partial);
         if (!found || nodes.Count == 0 || (strict && partial))
-            return strict ? throw SimulatedSqlException.JsonStrictPathNotFound(isJson ? (byte)5 : (byte)2) : SqlValue.Null(ResultType(jsonValue.Type));
+            return strict ? throw SimulatedSqlException.JsonStrictPathNotFound(isJson ? (byte)5 : (byte)2) : SqlValue.Null(resultType);
         if (nodes.Count > 1)
-            return strict ? throw SimulatedSqlException.JsonObjectOrArrayNotFound(2) : SqlValue.Null(ResultType(jsonValue.Type));
+            return strict ? throw SimulatedSqlException.JsonObjectOrArrayNotFound(2) : SqlValue.Null(resultType);
         var subtree = JsonSubtree.Extract(nodes[0], path.Mode, strictScalarState: 2);
-        return subtree is null ? SqlValue.Null(ResultType(jsonValue.Type))
+        return subtree is null ? SqlValue.Null(resultType)
             : isJson ? SqlValue.FromJson(subtree)
-            : SqlValue.FromNVarchar(SqlType.NVarcharMax, subtree);
+            : SqlValue.FromString(resultType, subtree);
     }
 
     /// <summary>
     /// Walks <paramref name="path"/> over the parsed document and renders the
     /// matched object / array subtree.
     /// </summary>
-    private static SqlValue Extract(SqlValue jsonValue, JsonPath path)
+    private static SqlValue Extract(SqlValue jsonValue, JsonPath path, SqlType resultType)
     {
         var scan = JsonText.Scan(jsonValue.AsString);
         var result = JsonWalkResult.Exhausted;
@@ -163,28 +167,34 @@ internal sealed class JsonQuery : Expression
             if (result == JsonWalkResult.Resolved)
             {
                 var subtree = JsonSubtree.Extract(match, path.Mode, strictScalarState: 2);
-                return subtree is null ? SqlValue.Null(ResultType(jsonValue.Type))
+                return subtree is null ? SqlValue.Null(resultType)
                     : jsonValue.Type is JsonSqlType ? SqlValue.FromJson(subtree)
-                    : SqlValue.FromNVarchar(SqlType.NVarcharMax, subtree);
+                    : SqlValue.FromString(resultType, subtree);
             }
         }
 
         JsonText.RaiseUnresolved(scan, result, path.Mode, jsonValue.Type);
-        return SqlValue.Null(ResultType(jsonValue.Type));
+        return SqlValue.Null(resultType);
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
         JsonText.RequireDocumentAndPath(this.jsonInput, this.pathInput, batch, resolveColumnType, "json_query");
-        return ResultType(this.jsonInput.GetSqlType(batch, resolveColumnType));
+        return this.resultType = ResultType(this.jsonInput.GetSqlType(batch, resolveColumnType));
     }
 
     /// <summary>
     /// <c>json</c> over a <c>json</c> document — the subtree of a canonical
-    /// document is itself canonical — and <c>nvarchar(max)</c> over text
-    /// (probed 2026-09-26 against SQL Server 2025).
+    /// document is itself canonical — <c>nvarchar(max)</c> over a MAX string,
+    /// and <c>nvarchar(4000)</c> over any other text, a literal included
+    /// (probed 2026-09-26 and 2026-09-28 against SQL Server 2025).
     /// </summary>
-    private static SqlType ResultType(SqlType documentType) => documentType is JsonSqlType ? SqlType.Json : SqlType.NVarcharMax;
+    private static SqlType ResultType(SqlType documentType) => documentType switch
+    {
+        JsonSqlType => SqlType.Json,
+        VarcharSqlType { length: SqlType.MaxLengthSentinel } or NVarcharSqlType { length: SqlType.MaxLengthSentinel } => SqlType.NVarcharMax,
+        _ => SqlType.NVarchar,
+    };
 
     internal override string DebugDisplay() => this.pathInput is null
         ? $"JSON_QUERY({this.jsonInput.DebugDisplay()}{(this.arrayWrapper ? " WITH ARRAY WRAPPER" : "")})"

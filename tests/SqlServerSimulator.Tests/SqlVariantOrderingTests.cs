@@ -50,16 +50,11 @@ public sealed class SqlVariantOrderingTests
         return sim;
     }
 
-    /// <summary>
-    /// The decimal row reports BaseType <c>numeric</c> — the simulator's known
-    /// decimal-family naming divergence (real reports <c>decimal</c> for a
-    /// decimal-declared inner; see the backlog quirk). Ordering is unaffected.
-    /// </summary>
     private static readonly string[] ExpectedAscendingBaseTypes =
     [
         "uniqueidentifier", "varbinary", "binary",
         "nvarchar", "varchar", "char",
-        "smallmoney", "bit", "tinyint", "smallint", "int", "bigint", "numeric", "money",
+        "smallmoney", "bit", "tinyint", "smallint", "int", "bigint", "decimal", "money",
         "real", "float",
         "time", "date", "smalldatetime", "datetime", "datetime2", "datetimeoffset",
     ];

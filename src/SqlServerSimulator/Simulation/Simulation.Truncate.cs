@@ -110,7 +110,7 @@ partial class Simulation
         var oldForwardTargets = new HashSet<(int Page, int Slot)>(table.Heap.ForwardTargets);
         var oldFreeLobPages = table.Heap.SnapshotFreeLobPages();
 
-        var identitySnapshots = new List<(IdentityState State, long? HighWaterMark)>();
+        var identitySnapshots = new List<(IdentityState State, Int128? HighWaterMark)>();
         foreach (var column in table.Columns)
         {
             if (column.Identity is { } identity)

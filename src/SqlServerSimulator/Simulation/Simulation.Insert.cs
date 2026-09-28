@@ -464,7 +464,7 @@ partial class Simulation
             sourceRows = context.Token switch
             {
                 ReservedKeyword { Keyword: Keyword.Select } => ExecuteSelectSource(context, destinationColumns, hasExplicitColumnList, identityColumn, destinationTable),
-                ReservedKeyword { Keyword: Keyword.Exec or Keyword.Execute } => ExecuteExecSource(context, destinationColumns.Length),
+                ReservedKeyword { Keyword: Keyword.Exec or Keyword.Execute } => ExecuteExecSource(context, destinationColumns),
                 Operator { Character: '(' } => ExecuteParenthesizedSelectSource(context, destinationColumns, hasExplicitColumnList, identityColumn, destinationTable),
                 _ => throw SimulatedSqlException.SyntaxErrorNear(context),
             };
@@ -527,7 +527,7 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             sourceRows.Clear();
 
-        decimal? lastIdentityValue = null;
+        Int128? lastIdentityValue = null;
         var outputRows = output is null ? null : new List<byte[]>(sourceRows.Count);
         var hasInsertTriggers = !insteadOfActive && HasAfterTrigger(context.Batch, destinationTable, TriggerActions.Insert);
         var triggerRows = (hasInsertTriggers || insteadOfActive) ? new List<SqlValue[]>(sourceRows.Count) : null;
@@ -617,11 +617,13 @@ partial class Simulation
                 {
                     throw SimulatedSqlException.ClrTypeParseFoldedAtCompile(failure);
                 }
+                if (valueTuples is not null && targetColumn.Type is SqlVariantSqlType && source.Type is DecimalSqlType)
+                    coerced = SqlValue.NameVariantBase(source, coerced, ValuesColumnReportsNumeric(valueTuples, i, context.Batch));
                 rowValues[ordinal] = coerced;
 
                 if (ReferenceEquals(targetColumn, identityColumn))
                 {
-                    var explicitValue = coerced.CoerceTo(SqlType.BigInt).AsInt64;
+                    var explicitValue = IdentityState.FromSqlValue(coerced);
                     identityColumn.Identity!.ObserveExplicit(explicitValue);
                     lastIdentityValue = explicitValue;
                 }
@@ -1112,6 +1114,23 @@ partial class Simulation
     }
 
     /// <summary>
+    /// Whether <c>VALUES</c> column <paramref name="column"/> names its
+    /// decimal-family type <c>numeric</c>: a single row's cell says, and a
+    /// table constructor's column is named by its first decimal-family row,
+    /// as a set operation's is.
+    /// </summary>
+    private static bool ValuesColumnReportsNumeric(List<Expression[]> tuples, int column, BatchContext batch)
+    {
+        foreach (var tuple in tuples)
+        {
+            var cell = tuple[column];
+            if (tuples.Count == 1 || cell.GetSqlType(batch, NoColumnTypeResolver) is DecimalSqlType)
+                return cell.ResultReportsNumeric;
+        }
+        return false;
+    }
+
+    /// <summary>
     /// A multi-row <c>VALUES</c> list is a table constructor: each column takes
     /// the type its rows unify to, as a <c>UNION ALL</c>'s branches do, before
     /// converting to the target — so <c>INSERT t (varchar_col) VALUES (1),
@@ -1309,7 +1328,16 @@ partial class Simulation
         foreach (var rowBytes in resultSet.RowBytes)
         {
             var row = RowDecoder.DecodeRow(resultSet.Schema, rowBytes);
-            rows.Add(masking is null ? row : DataMasking.MaskRowForStorage(row, masking, resultSet.Schema));
+            if (masking is not null)
+                row = DataMasking.MaskRowForStorage(row, masking, resultSet.Schema);
+            // A decimal reaching a sql_variant column keeps the name its
+            // projection carries, so it is wrapped while that is known.
+            for (var i = 0; i < expectedColumnCount; i++)
+            {
+                if (destinationColumns[i].Type is SqlVariantSqlType && row[i] is { IsNull: false, Type: DecimalSqlType })
+                    row[i] = SqlValue.NameVariantBase(row[i], SqlValue.FromVariant(row[i]), resultSet.ColumnReportsNumeric is { } numeric && numeric[i]);
+            }
+            rows.Add(row);
         }
         return rows;
     }
@@ -1329,8 +1357,9 @@ partial class Simulation
     /// An <c>INSERT … EXEC</c> reached while another is draining on the same
     /// connection raises <strong>Msg 8164</strong> (nesting is disallowed).
     /// </summary>
-    private static List<SqlValue[]> ExecuteExecSource(ParserContext context, int expectedColumnCount)
+    private static List<SqlValue[]> ExecuteExecSource(ParserContext context, HeapColumn[] destinationColumns)
     {
+        var expectedColumnCount = destinationColumns.Length;
         var batch = context.Batch;
         var connection = batch.Connection;
         if (connection.InsertExecActive)
@@ -1338,6 +1367,7 @@ partial class Simulation
 
         var rows = new List<SqlValue[]>();
         connection.InsertExecActive = true;
+        connection.InsertExecTargetTypes = Array.ConvertAll(destinationColumns, column => column.Type);
         try
         {
             foreach (var outcome in connection.Simulation.ParseExec(batch, insertExecSource: true))
@@ -1357,8 +1387,53 @@ partial class Simulation
         finally
         {
             connection.InsertExecActive = false;
+            connection.InsertExecTargetTypes = null;
         }
         return rows;
+    }
+
+    /// <summary>
+    /// A <c>SELECT</c> whose rows an <c>INSERT … EXEC</c> takes meets the
+    /// target columns' one-way assignment rule as it compiles — over an empty
+    /// rowset too, at the <c>SELECT</c>'s own line inside the body — save a
+    /// column that is a constant <c>NULL</c>, typed or not (probed 2026-09-28
+    /// against SQL Server 2025).
+    /// </summary>
+    internal static void RequireInsertExecAssignable(Selection selection, SqlType[] targets, BatchContext batch)
+    {
+        if (selection.Schema.Length != targets.Length)
+            return;
+        for (var i = 0; i < targets.Length; i++)
+        {
+            if (selection.ColumnIsUntypedNull is { } untyped && untyped[i])
+                continue;
+            var projected = selection.ProjectionExpressions?[i] is Parser.Expressions.NamedExpression named ? named.Inner : selection.ProjectionExpressions?[i];
+            if (projected is { IsWrittenConstant: true } && IsNullConstant(projected, batch))
+                continue;
+            try
+            {
+                AssignmentRules.RequireAssignable(selection.Schema[i], targets[i]);
+            }
+            catch (SimulatedSqlException refused)
+            {
+                // It ends the executed body and the INSERT, never the
+                // caller's batch.
+                refused.EndedCalledBatch = true;
+                throw;
+            }
+        }
+
+        static bool IsNullConstant(Expression constant, BatchContext batch)
+        {
+            try
+            {
+                return constant.Run(new RuntimeContext(NoColumnResolver, batch)).IsNull;
+            }
+            catch (SimulatedSqlException)
+            {
+                return false;
+            }
+        }
     }
 
     /// <summary>

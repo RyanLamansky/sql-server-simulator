@@ -2356,6 +2356,16 @@ public sealed partial class Simulation
                     ? SimulatedSqlException.ArithmeticOverflowOccurredMessage(batch)
                     : SimulatedSqlException.StatementTerminatedMessage(batch, continuedError));
             }
+            else if (continuedError.IsIdentityOverflow && batch.BatchAborted)
+            {
+                // The overflow ends the batch and rolls back, and its Msg 3606
+                // then names no statement: line 1, outside any module (probed
+                // 2026-09-28 against SQL Server 2025).
+                var notice = SimulatedSqlException.ArithmeticOverflowOccurredMessage(batch);
+                notice.LineNumber = 1;
+                notice.Procedure = string.Empty;
+                yield return new SimulatedInfoOutcome(notice);
+            }
             yield break;
         }
 
@@ -3077,6 +3087,8 @@ public sealed partial class Simulation
                     }
                     if (batch.IsSkipping)
                         break;
+                    if (connection.InsertExecTargetTypes is { } insertExecTargets && !selection.IsAssignmentOnly)
+                        RequireInsertExecAssignable(selection, insertExecTargets, batch);
                     // Materialize rows up-front so @@ROWCOUNT reflects the
                     // statement's full row count for the next statement in
                     // the same batch (real SQL Server runs server-side and

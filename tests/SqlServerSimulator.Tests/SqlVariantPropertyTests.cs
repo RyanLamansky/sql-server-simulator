@@ -29,12 +29,48 @@ public sealed class SqlVariantPropertyTests
     public void BaseType_NVarcharLiteral_ReturnsNVarchar()
         => AreEqual("nvarchar", Scalar("select sql_variant_property(N'abc', 'BaseType')"));
 
-    // A decimal literal reports numeric — matches real's literal inference. The
-    // simulator has one decimal family, so CAST(... AS decimal) also reports
-    // numeric here (real would say decimal); documented divergence.
     [TestMethod]
     public void BaseType_DecimalLiteral_ReturnsNumeric()
         => AreEqual("numeric", Scalar("select sql_variant_property(1.5, 'BaseType')"));
+
+    /// <summary>
+    /// A stored variant keeps the name its source carried: a decimal column or
+    /// CAST reads decimal, a literal or numeric source numeric, and a table
+    /// constructor's column takes its first decimal row's name (probed
+    /// 2026-09-28 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void BaseType_StoredVariant_KeepsDecimalOrNumericName()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            create table s (d decimal(5, 2), n numeric(5, 2));
+            insert s values (1, 2);
+            create table t (id int, v sql_variant);
+            insert t values (1, cast(1.5 as decimal(5, 2)));
+            insert t values (2, 1.5);
+            insert t select 3, d from s;
+            insert t select 4, n from s;
+            insert t values (5, cast(1 as numeric(3, 0))), (6, cast(1 as decimal(3, 0)));
+            insert t values (7, null);
+            update t set v = n from s where id = 7;
+            insert t values (8, null);
+            update t set v = (select d from s) where id = 8;
+            insert t select 9, v from t where id = 1;
+            """);
+        AreEqual("decimal|numeric|decimal|numeric|numeric|numeric|numeric|decimal|decimal", simulation.ExecuteScalar(
+            "select string_agg(cast(sql_variant_property(v, 'BaseType') as varchar(10)), '|') within group (order by id) from t"));
+    }
+
+    [TestMethod]
+    [DataRow("declare @v sql_variant = cast(1.5 as decimal(5, 2)); select sql_variant_property(@v, 'BaseType')", "decimal")]
+    [DataRow("declare @v sql_variant = cast(1.5 as numeric(5, 2)); select sql_variant_property(@v, 'BaseType')", "numeric")]
+    [DataRow("declare @v sql_variant; set @v = cast(1 as decimal(3, 0)); select sql_variant_property(@v, 'BaseType')", "decimal")]
+    [DataRow("declare @v sql_variant; select @v = cast(1 as decimal(3, 0)); select sql_variant_property(@v, 'BaseType')", "decimal")]
+    [DataRow("select sql_variant_property(v, 'BaseType') from (select cast(cast(1 as decimal(3, 0)) as sql_variant) v) q", "decimal")]
+    [DataRow("select sql_variant_property(convert(sql_variant, 1.5), 'BaseType')", "numeric")]
+    public void BaseType_VariantFilledFromExpression_KeepsItsName(string sql, string expected)
+        => AreEqual(expected, Scalar(sql));
 
     [TestMethod]
     public void BaseType_Bit_ReturnsBit()

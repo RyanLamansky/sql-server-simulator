@@ -7,7 +7,7 @@ partial class Simulation
 {
     internal static readonly SqlType[] DescribeSchema =
     [
-        SqlType.Bit, SqlType.Int32, SqlType.SystemName, SqlType.Bit, SqlType.Int32, NVarcharSqlType.Get(256, Collation.Baseline, Coercibility.Implicit),
+        SqlType.Bit, SqlType.Int32, SqlType.SystemName, SqlType.Bit, SqlType.Int32, NVarcharSqlType.Get(128, Collation.Baseline, Coercibility.Implicit),
         SqlType.SmallInt, SqlType.TinyInt, SqlType.TinyInt, SqlType.SystemName, SqlType.Int32, SqlType.SystemName,
         SqlType.SystemName, SqlType.SystemName, NVarcharSqlType.Get(4000, Collation.Baseline, Coercibility.Implicit), SqlType.Int32, SqlType.SystemName, SqlType.SystemName,
         SqlType.SystemName, SqlType.Bit, SqlType.Bit, SqlType.Bit, SqlType.SystemName, SqlType.SystemName,
@@ -116,7 +116,21 @@ partial class Simulation
         {
             // A name that resolves only at run time is the metadata question
             // every path fails (Msg 11529); anything else is a compile error.
-            throw SimulatedSqlException.Aggregate([error, error.Number == 208 ? SimulatedSqlException.MetadataCouldNotBeDetermined() : SimulatedSqlException.BatchCouldNotBeAnalyzed()]);
+            // The follow-up reports the line of the error it follows, and a
+            // name miss, found while running the batch, names the procedure on
+            // both (probed 2026-09-28 against SQL Server 2025).
+            var followUp = error.Number == 208 ? SimulatedSqlException.MetadataCouldNotBeDetermined() : SimulatedSqlException.BatchCouldNotBeAnalyzed();
+            var last = error.Errors[^1];
+            if (error.Number == 208)
+            {
+                foreach (var entry in error.Errors)
+                {
+                    if (entry.Procedure.Length == 0)
+                        entry.Procedure = "sp_describe_first_result_set";
+                }
+            }
+            followUp.ResolveDiagnostics(0, last.LineNumber, error.Number == 208 ? "sp_describe_first_result_set" : last.Procedure);
+            throw SimulatedSqlException.Aggregate([error, followUp]);
         }
         finally
         {
@@ -135,7 +149,14 @@ partial class Simulation
 
     private static SqlValue[] DescribeColumn(SimulatedQueryResult result, int index)
     {
-        var type = result.Schema[index];
+        // An unsized string result describes as the width the wire reports
+        // for it (COLMETADATA's 8000 bytes).
+        var type = result.Schema[index] switch
+        {
+            NVarcharSqlType { length: 0 } unsized => NVarcharSqlType.Get(4000, unsized.Collation, unsized.Coercibility),
+            VarcharSqlType { length: 0 } unsized => VarcharSqlType.Get(8000, unsized.Collation, unsized.Coercibility),
+            var declared => declared,
+        };
         var numeric = type is DecimalSqlType && result.ColumnReportsNumeric is { } spelled && spelled[index];
         var nullable = result.ColumnNullability is not { } nullability || nullability[index];
         var origin = result.ColumnOrigins?[index];

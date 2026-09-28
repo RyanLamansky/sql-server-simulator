@@ -56,12 +56,13 @@ internal sealed class SqlVariantProperty : Expression
             return SqlValue.Null(SqlType.SqlVariant);
 
         var argument = this.valueArg.Run(runtime);
-        // A decimal-family argument that isn't a stored variant reports the
-        // name its expression carries — a decimal column or CAST reads
-        // decimal, a literal or numeric column numeric (probed 2026-09-24); a
-        // stored variant doesn't keep the name here, so it reads numeric.
-        var result = kind == PropertyKind.BaseType && argument is { IsNull: false, Type: DecimalSqlType }
-            ? SqlValue.FromSystemName(this.valueArg.ResultReportsNumeric ? "numeric" : "decimal")
+        // A decimal-family argument reports the name its expression carries —
+        // a decimal column or CAST reads decimal, a literal or numeric column
+        // numeric (probed 2026-09-24) — and a variant the name it kept from
+        // the expression that filled it.
+        var result = kind != PropertyKind.BaseType ? Compute(kind, argument)
+            : argument is { IsNull: false, Type: DecimalSqlType } ? SqlValue.FromSystemName(this.valueArg.ResultReportsNumeric ? "numeric" : "decimal")
+            : argument is { IsNull: false, Type: SqlVariantSqlType, VariantBaseIsDecimal: true } ? SqlValue.FromSystemName("decimal")
             : Compute(kind, argument);
         return result.IsNull ? SqlValue.Null(SqlType.SqlVariant) : SqlValue.FromVariant(result);
     }

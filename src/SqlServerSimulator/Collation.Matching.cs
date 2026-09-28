@@ -151,11 +151,17 @@ internal abstract partial class Collation
         matchLength = 0;
         if (this.LinguisticMatching is not { } linguistic)
             return false;
-        if (!linguistic.Info.IsPrefix(subject, run, linguistic.Options, out var length)
-            || !this.MatchIsExact(subject[..length], run, linguistic))
-        {
+        if (!linguistic.Info.IsPrefix(subject, run, linguistic.Options, out var length))
             return false;
+        // CompareInfo swallows a trailing CHAR(0) it gives no weight; where the
+        // collation weights it, the run stops short of it.
+        if (this.WeightsNul && !run.EndsWith('\0'))
+        {
+            while (length > 0 && subject[length - 1] == '\0')
+                length--;
         }
+        if (!this.MatchIsExact(subject[..length], run, linguistic))
+            return false;
 
         matchLength = length;
         return true;
@@ -171,6 +177,17 @@ internal abstract partial class Collation
         matchLength = 0;
         if (needle.IsEmpty)
             return -1;
+
+        // A needle holding CHAR(0) where the collation weights it: CompareInfo
+        // would read the NUL as nothing, so the search goes by code units.
+        if (this.WeightsNul && needle.Contains('\0'))
+        {
+            var exact = window.IndexOf(needle, this.CaseSensitive ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase);
+            if (exact < 0)
+                return -1;
+            matchLength = needle.Length;
+            return exact;
+        }
 
         if (this.LinguisticMatching is not { } linguistic)
         {
@@ -232,8 +249,21 @@ internal abstract partial class Collation
     /// (<c>CHARINDEX(N'E', N'café' COLLATE Latin1_General_CS_AI)</c> is 0 on
     /// SQL Server 2025). Only a case-sensitive collation pays the extra read.
     /// </summary>
-    private bool MatchIsExact(ReadOnlySpan<char> matched, ReadOnlySpan<char> needle, (CompareInfo Info, CompareOptions Options) linguistic) =>
-        !this.CaseSensitive || linguistic.Info.Compare(matched, needle, linguistic.Options) == 0;
+    /// <remarks>
+    /// Where the collation weights <c>CHAR(0)</c> (<see cref="WeightsNul"/>),
+    /// a hit that reached across one the needle doesn't hold — or skipped one
+    /// it does — isn't a match either.
+    /// </remarks>
+    private bool MatchIsExact(ReadOnlySpan<char> matched, ReadOnlySpan<char> needle, (CompareInfo Info, CompareOptions Options) linguistic)
+    {
+        if (this.WeightsNul && (matched.Contains('\0') || needle.Contains('\0')))
+        {
+            var info = linguistic.Info;
+            var options = linguistic.Options;
+            return CompareNulWeighted(matched, needle, (a, b) => info.Compare(a, b, options)) == 0;
+        }
+        return !this.CaseSensitive || linguistic.Info.Compare(matched, needle, linguistic.Options) == 0;
+    }
 
     /// <summary>Vectorized: U+0020..U+007E, the range the ordinal path is proven over.</summary>
     private static bool IsPrintableAscii(ReadOnlySpan<char> s) => s.IndexOfAnyExceptInRange(' ', '~') < 0;

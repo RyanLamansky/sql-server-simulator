@@ -194,6 +194,8 @@ The check runs at parse, which a plan-cache hit skips — so a cached plan has t
 `GetSqlType` propagates the same override through projection.
 A non-string operand — xml and a bare `NULL` included — raises Msg 447 while compiling, and it outranks an unknown collation name's Msg 448, which real raises only over a string (probed 2026-09-26 against SQL Server 2025).
 
+A `varchar` / `char` moved to a collation of another code page converts there and then — best fit, else `?` — so what reads it next sees the converted text: `LOWER(CAST(CHAR(192) AS varchar(1)) COLLATE SQL_Latin1_General_CP437_CI_AS)` is `a`, the `À` having become `A` at the `COLLATE` (probed 2026-09-28 against SQL Server 2025).
+
 Chained `expr COLLATE A COLLATE B` rejects with Msg 156 at parse time (probe-confirmed).
 Unknown collation name raises Msg 448 at parse time.
 
@@ -347,6 +349,9 @@ The override bakes four probe-extracted rank tables (DENSE_RANK over `CHAR(n)` /
   Expands `æ Æ ß` to their base letters at the primary level, with a **tertiary** so the ligature sorts just after its expansion (`'ae' < 'æ'`, `'ss' < 'ß'`).
   `œ Œ þ Þ` are single-weight letters here (no expansion).
   `CHAR(0)` is a character like any other, weighted below everything, and the controls weigh below the space; a shorter string compares as if space-padded, so a control sorts a string *before* its own prefix: `'a' + CHAR(0) + 'b' < 'ab'`, `'a' + CHAR(9) < 'a'`, `CHAR(0) <> ''` (probed 2026-09-26).
+  Every other non-binary `SQL_` collation's `varchar` data weights `CHAR(0)` the same way, and so does the matching seam under all of them, the default included — `LIKE 'ab'` doesn't match `'a' + CHAR(0) + 'b'`, `CHARINDEX` / `REPLACE` find the NUL (probed 2026-09-28).
+  Those collations compare through `CompareInfo`, which ignores it, so their `varchar` sibling (`ForVarcharStorage`, `Collation.WeightsNul`) compares the text between NULs piece by piece, and the matcher searches a NUL-bearing needle by code units and refuses a hit that crosses a NUL the needle lacks.
+  Unicode data and the Windows collations ignore `CHAR(0)` on real as well.
 - **nvarchar** (Unicode weights): control characters plus apostrophe, hyphen, en/em dash, and soft-hyphen are minimal-weight — ignored at the primary/secondary levels, consulted only to break a remaining tie (`'coop' < 'co-op'`, `'cant' < "can't"`, `'A' < "'A"`).
   Expands the full Latin ligature set `æ Æ œ Œ ß þ Þ` and treats a ligature as **equal** to its expansion (`'æ' = 'ae'`, `'ß' = 'ss'` — no tertiary).
 - **nvarchar — Thai block** (U+0E00–U+0E7F): extended onto the *same unified rank scale* as CP1252, from one combined `DENSE_RANK` over CP1252 ∪ Thai.
@@ -735,6 +740,9 @@ A `CAST` does **not** resolve a conflict — the cast result inherits the source
   Probe-confirmed against SQL Server 2025: real SQL Server effectively applies the postfix collation's byte budget at CAST time — `CAST(N'AéB' AS varchar(2)) COLLATE Latin1_General_100_CI_AS_SC_UTF8` returns `'A'` (1 byte), the simulator returns `'Aé'` (3 bytes).
   The fixed-length sibling `CAST(... AS char(N))` doesn't have this gap because `CollateExpression.Run` re-normalizes char(N) values through `FromString` when the storage encoding changes (the char(N) destination buffer is fixed at N bytes, so the regression would manifest as an encoder overflow; varchar sizes dynamically and only the truncation cutoff disagrees).
   Workaround: pin the UTF-8 collation directly on the CAST target via the column's declared collation, rather than as a postfix on a CAST output.
+  The postfix alone shows the same budget: a `varchar(1)` holding `€` moved to a UTF-8 collation, or holding `…` moved to `Japanese_XJIS_140_CI_AS` (code page 932), reads empty on real, where the character needs more bytes than the declaration has, and keeps the character here (probed 2026-09-28).
+- **Code page 874's best fit misses two characters.**
+  `CAST(CHAR(130) AS varchar(1)) COLLATE Thai_CI_AS` (`‚`, U+201A) best-fits to `,` on real and to `?` here, and `CHAR(132)` (`„`) to `"` (probed 2026-09-28 against SQL Server 2025).
 - **Pre-v100 collation sort divergence on supplementary chars at position 1+.**
   Probe-confirmed against SQL Server 2025: `SQL_Latin1_General_CP1_CI_AS` (the default) and `Latin1_General_CI_AS` (pre-v100) sort `Z+emoji` BEFORE `Z+U+E000` — code-unit order (high surrogate D83D < E000).
   The v100 family (`Latin1_General_100_CI_AS` and its SC sibling) sort the other way (codepoint U+1F600 > U+E000 → `Z+E000` first).

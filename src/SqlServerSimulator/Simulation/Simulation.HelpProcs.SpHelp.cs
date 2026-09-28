@@ -364,9 +364,9 @@ partial class Simulation
             [
                 SqlValue.FromSystemName(column?.Name ?? "No identity column defined."),
                 identity is null ? SqlValue.Null(HelpIdentityValueType)
-                    : SqlValue.FromDecimal(HelpIdentityValueType, identity.Seed),
+                    : SqlValue.FromDecimal(HelpIdentityValueType, IdentityState.ToDecimal38(identity.Seed)),
                 identity is null ? SqlValue.Null(HelpIdentityValueType)
-                    : SqlValue.FromDecimal(HelpIdentityValueType, identity.Increment),
+                    : SqlValue.FromDecimal(HelpIdentityValueType, IdentityState.ToDecimal38(identity.Increment)),
                 identity is null ? SqlValue.Null(SqlType.Int32)
                     : SqlValue.FromInt32(identity.NotForReplication ? 1 : 0),
             ],

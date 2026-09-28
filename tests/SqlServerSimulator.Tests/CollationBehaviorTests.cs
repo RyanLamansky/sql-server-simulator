@@ -275,4 +275,31 @@ public sealed class CollationBehaviorTests
         AreEqual("sql_latin1_general_cp1_ci_as", sim.ExecuteScalar(
             "SELECT collation_name FROM sys.columns WHERE name = 'c'"));
     }
+
+    /// <summary>
+    /// <c>CHAR(0)</c> in <c>varchar</c> data is the lowest-weight character
+    /// under every non-binary <c>SQL_</c> collation — for comparison, LIKE,
+    /// CHARINDEX and REPLACE alike — where Unicode data and a Windows
+    /// collation ignore it (probed 2026-09-28 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("SQL_Latin1_General_CP1_CI_AS", "0 0 1 0 1 1 2 2 1")]
+    [DataRow("SQL_Latin1_General_CP1_CS_AS", "0 0 1 0 1 1 2 2 2")]
+    [DataRow("SQL_Latin1_General_CP1253_CI_AS", "0 0 1 0 1 1 2 2 1")]
+    [DataRow("SQL_Latin1_General_CP850_CI_AS", "0 0 1 0 1 1 2 2 1")]
+    [DataRow("Latin1_General_100_CI_AS", "1 1 0 1 1 1 0 3 1")]
+    public void Nul_IsWeightedInVarcharUnderSqlCollations(string collation, string expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar($"""
+            declare @s varchar(10) = 'a' + char(0) + 'b';
+            select concat_ws(' ',
+                case when @s collate {collation} = 'ab' then 1 else 0 end,
+                case when @s collate {collation} like 'ab' then 1 else 0 end,
+                case when @s collate {collation} < 'ab' then 1 else 0 end,
+                case when ('a' + char(0)) collate {collation} = 'a' then 1 else 0 end,
+                case when @s collate {collation} like 'a%' then 1 else 0 end,
+                case when (N'a' + nchar(0) + N'b') collate {collation} = N'ab' then 1 else 0 end,
+                charindex(char(0), @s collate {collation}),
+                len(replace(@s collate {collation}, char(0), '')),
+                (select count(distinct v) from (values (@s collate {collation}), ('a' + char(0) + 'B')) d(v)))
+            """));
 }

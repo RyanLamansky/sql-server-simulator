@@ -462,4 +462,64 @@ public sealed class IdentityTests
     [DataRow("select ident_incr(null)")]
     public void IdentFunctions_OfNull_AreNull(string sql)
         => AreEqual(DBNull.Value, new Simulation().ExecuteScalar(sql));
+
+    // ---- identities past bigint (probed 2026-09-28 against SQL Server 2025) ----
+
+    [TestMethod]
+    public void DecimalIdentity_SeedPastBigInt_Generates()
+        => AreEqual("100000000000000000001|100000000000000000001|100000000000000000001|100000000000000000000|1", new Simulation().ExecuteScalar("""
+            create table t (id decimal(38, 0) identity(100000000000000000000, 1), x int);
+            insert t (x) values (1), (2);
+            select concat(max(id), '|', ident_current('t'), '|', scope_identity(), '|', ident_seed('t'), '|', ident_incr('t')) from t
+            """));
+
+    [TestMethod]
+    public void DecimalIdentity_IncrementPastBigInt_Generates()
+        => AreEqual(20000000000000000001m, new Simulation().ExecuteScalar("""
+            create table t (id numeric(30, 0) identity(1, 10000000000000000000), x int);
+            insert t (x) values (1), (2), (3);
+            select max(id) from t
+            """));
+
+    [TestMethod]
+    public void DecimalIdentity_ReseedAndExplicitPastBigInt_Advance()
+        => AreEqual(90000000000000000001m, new Simulation().ExecuteScalar("""
+            create table t (id decimal(25, 0) identity(1, 1), x int);
+            dbcc checkident('t', reseed, 50000000000000000000) with no_infomsgs;
+            insert t (x) values (1);
+            set identity_insert t on;
+            insert t (id, x) values (90000000000000000000, 2);
+            set identity_insert t off;
+            insert t (x) values (3);
+            select max(id) from t
+            """));
+
+    [TestMethod]
+    public void DecimalIdentity_NegativePastBigInt_Descends()
+        => AreEqual(-50000000000000000001m, new Simulation().ExecuteScalar("""
+            create table t (id decimal(25, 0) identity(-50000000000000000000, -1), x int);
+            insert t (x) values (1), (2);
+            select min(id) from t
+            """));
+
+    /// <summary>
+    /// An identity overflow ends the batch and rolls back its transaction,
+    /// and its Msg 3606 names no statement: line 1, outside any procedure
+    /// (probed 2026-09-28 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void IdentityOverflow_EndsBatchAndRollsBack()
+    {
+        var simulation = new Simulation();
+        using var connection = simulation.CreateOpenConnection();
+        _ = connection.CreateCommand("create table t (id tinyint identity(255, 1), x int); insert t (x) values (1)").ExecuteNonQuery();
+        var ex = Throws<SimulatedSqlException>(() => connection.CreateCommand("""
+            begin tran;
+            insert t (x) values (2);
+            select 'after'
+            """).ExecuteNonQuery());
+        AreEqual(8115, ex.Number);
+        AreEqual(1, ex.Errors[1].LineNumber);
+        AreEqual(0, connection.CreateCommand("select @@trancount").ExecuteScalar());
+    }
 }

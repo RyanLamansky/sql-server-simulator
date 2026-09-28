@@ -9,15 +9,10 @@ namespace SqlServerSimulator;
 partial class Simulation
 {
     /// <summary>
-    /// Coerces an auto-generated identity <see cref="long"/> to the column's
-    /// declared integer type, raising the IDENTITY-specific Msg 8115 if the
-    /// next value won't fit.
-    /// </summary>
-    /// <summary>
     /// Draws <paramref name="identityColumn"/>'s next identity value, raising
     /// Msg 8115 when it would pass the column type's range.
     /// </summary>
-    internal static long GenerateIdentity(HeapColumn identityColumn)
+    internal static Int128 GenerateIdentity(HeapColumn identityColumn)
     {
         try
         {
@@ -29,11 +24,17 @@ partial class Simulation
         }
     }
 
-    internal static SqlValue CoerceForIdentity(long value, HeapColumn identityColumn)
+    /// <summary>
+    /// Carries an identity value as <paramref name="identityColumn"/>'s
+    /// declared type, raising the IDENTITY-specific Msg 8115 if it won't fit.
+    /// </summary>
+    internal static SqlValue CoerceForIdentity(Int128 value, HeapColumn identityColumn)
     {
         try
         {
-            return SqlValue.FromInt64(value).CoerceTo(identityColumn.Type);
+            return IdentityState.Fits(value, identityColumn.Type)
+                ? IdentityState.ToSqlValue(value, identityColumn.Type)
+                : throw new OverflowException();
         }
         catch (OverflowException)
         {

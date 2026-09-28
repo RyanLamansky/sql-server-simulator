@@ -163,6 +163,35 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
     public static SqlValue FromVariant(SqlValue inner) =>
         inner.Type is SqlVariantSqlType ? inner : new(SqlType.SqlVariant, 0, inner, isNull: false);
 
+    /// <summary>
+    /// A variant wrapping a decimal-family <paramref name="inner"/> whose
+    /// base type is named <c>decimal</c> rather than <c>numeric</c> — the
+    /// name a variant keeps from the expression that filled it (see
+    /// <see cref="VariantBaseIsDecimal"/>).
+    /// </summary>
+    public static SqlValue FromVariantNamedDecimal(SqlValue inner) => new(SqlType.SqlVariant, 1, inner, isNull: false);
+
+    /// <summary>
+    /// Whether a variant holding a decimal-family value reports its base type
+    /// as <c>decimal</c>: real stores the name its source carried — a
+    /// <c>decimal</c> column or <c>CAST … AS decimal</c> keeps
+    /// <c>decimal</c>, a literal or <c>numeric</c> source <c>numeric</c>
+    /// (probed 2026-09-28 against SQL Server 2025). A variant whose source
+    /// name isn't known reads <c>numeric</c>.
+    /// </summary>
+    public bool VariantBaseIsDecimal => this.primitive == 1;
+
+    /// <summary>
+    /// <paramref name="converted"/>, <paramref name="source"/> just converted
+    /// to <c>sql_variant</c>, with the base type name the source expression
+    /// carries: a decimal-family source that doesn't report <c>numeric</c>
+    /// names <c>decimal</c>. Anything else passes through unchanged.
+    /// </summary>
+    public static SqlValue NameVariantBase(SqlValue source, SqlValue converted, bool sourceReportsNumeric) =>
+        !sourceReportsNumeric && source is { IsNull: false, Type: DecimalSqlType } && converted is { IsNull: false, Type: SqlVariantSqlType }
+            ? FromVariantNamedDecimal(converted.AsVariantInner)
+            : converted;
+
     /// <summary>Non-NULL SQL <c>sysname</c> value (encoded identically to <c>nvarchar</c>; identity preserved across system catalogs).</summary>
     public static SqlValue FromSystemName(string value)
     {

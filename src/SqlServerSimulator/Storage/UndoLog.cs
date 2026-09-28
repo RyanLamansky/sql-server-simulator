@@ -114,10 +114,10 @@ internal sealed class UndoLog
     /// (probed 2026-09-24 against SQL Server 2025) though a generated value
     /// never is.
     /// </summary>
-    public void RecordIdentityReseed(IdentityState state, (long? HighWaterMark, long? ReseededStart) snapshot) =>
+    public void RecordIdentityReseed(IdentityState state, (Int128? HighWaterMark, Int128? ReseededStart) snapshot) =>
         this.entries.Add(new IdentityReseed(state, snapshot));
 
-    public void RecordTruncation(Heap heap, List<HeapPage> oldPages, List<HeapLobPage> oldLobPages, HashSet<(int Page, int Slot)> oldForwardTargets, int[] oldFreeLobPages, (IdentityState State, long? HighWaterMark)[] identitySnapshots) =>
+    public void RecordTruncation(Heap heap, List<HeapPage> oldPages, List<HeapLobPage> oldLobPages, HashSet<(int Page, int Slot)> oldForwardTargets, int[] oldFreeLobPages, (IdentityState State, Int128? HighWaterMark)[] identitySnapshots) =>
         this.entries.Add(new HeapTruncation(heap, oldPages, oldLobPages, oldForwardTargets, oldFreeLobPages, identitySnapshots));
 
     /// <summary>
@@ -453,7 +453,7 @@ internal sealed class UndoLog
         }
     }
 
-    private sealed class IdentityReseed(IdentityState state, (long? HighWaterMark, long? ReseededStart) snapshot) : UndoEntry
+    private sealed class IdentityReseed(IdentityState state, (Int128? HighWaterMark, Int128? ReseededStart) snapshot) : UndoEntry
     {
         public override void Undo() => state.RestoreReseed(snapshot);
     }
@@ -536,7 +536,7 @@ internal sealed class UndoLog
     /// the simulator's general "identity bypasses the log" rule, which
     /// applies to INSERT only).
     /// </summary>
-    private sealed class HeapTruncation(Heap heap, List<HeapPage> oldPages, List<HeapLobPage> oldLobPages, HashSet<(int Page, int Slot)> oldForwardTargets, int[] oldFreeLobPages, (IdentityState State, long? HighWaterMark)[] identitySnapshots) : UndoEntry
+    private sealed class HeapTruncation(Heap heap, List<HeapPage> oldPages, List<HeapLobPage> oldLobPages, HashSet<(int Page, int Slot)> oldForwardTargets, int[] oldFreeLobPages, (IdentityState State, Int128? HighWaterMark)[] identitySnapshots) : UndoEntry
     {
         public override Heap? AffectedHeap => heap;
 
