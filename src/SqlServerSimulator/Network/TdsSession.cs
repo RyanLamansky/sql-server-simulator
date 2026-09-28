@@ -50,7 +50,6 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
     /// </summary>
     public void Dispose()
     {
-        this.transaction?.Dispose();
         this.connection?.Dispose();
         this.engineExecutionGate.Dispose();
         this.multiplexer?.Dispose();
@@ -158,6 +157,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                 await writer.FlushAsync(final: true, cancellationToken).ConfigureAwait(false);
                 return;
             }
+            this.connection.TransactionEvents = [];
             this.WriteLoginResponse(writer, transport.PacketSize, login.TdsVersion == Tds.Version8 ? Tds.Version8 : Tds.Version74);
             await writer.FlushAsync(final: true, cancellationToken).ConfigureAwait(false);
 
@@ -284,6 +284,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                     // Roll the transaction back only under XACT_ABORT ON, then
                     // send the single DONE_ATTN the client is waiting for.
                     this.ApplyCancellationTransactionSemantics();
+                    this.WriteTransactionEnvChanges(writer);
                     writer.WriteDone(Tds.DoneAttention, 0);
                 }
 
@@ -627,7 +628,10 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                 // de-dupes so exactly one site emits the DONE_ATTN.
                 var attention = Interlocked.Exchange(ref session.AttentionState, 0) == 1;
                 if (cancelled || attention)
+                {
+                    this.WriteTransactionEnvChanges(writer);
                     writer.WriteDone(Tds.DoneAttention, 0);
+                }
 
                 await writer.FlushAsync(final: true, cancellationToken).ConfigureAwait(false);
             }
@@ -731,7 +735,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
     /// </summary>
     private void WriteSessionEnvChangesIfAny(TdsTokenWriter writer)
     {
-        this.WriteTransactionEndIfAny(writer);
+        this.WriteTransactionEnvChanges(writer);
         var current = this.connection!.Database;
         if (this.databaseAtMessageStart is null || string.Equals(current, this.databaseAtMessageStart, StringComparison.Ordinal))
             return;
@@ -740,25 +744,58 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
     }
 
     /// <summary>
-    /// Notices a transaction the <em>engine</em> ended during this message — a
-    /// transaction-aborting error (Msg 8728) rolls the whole stack back, and so
-    /// do a deadlock victim and a SNAPSHOT update conflict — and drops the
-    /// session's handle on it, so the client's next commit or rollback finds
-    /// nothing to re-finish rather than a completed transaction.
+    /// Writes a transaction ENVCHANGE for each transaction the session began or
+    /// ended since the last call — by SQL text, a transaction-manager request,
+    /// an implicit transaction or the engine (an error that rolls it back, a
+    /// deadlock victim, a trigger's <c>ROLLBACK</c>) — as real does at the
+    /// point it happens: begin in the new-value field, commit or rollback in
+    /// the old-value field, under a descriptor unique across the server's
+    /// sessions — the transaction's own id (probed 2026-09-28 against SQL
+    /// Server 2025). Each call site sits
+    /// ahead of the next token the response writes, so an event lands where
+    /// real sends it, less the DONE real gives the statement that caused it.
     /// </summary>
-    /// <remarks>
-    /// The ENVCHANGE is what makes a manual-commit driver open the next
-    /// transaction, which is why real reports <c>@@TRANCOUNT</c> 1 rather than
-    /// 0 on the statement after the abort over ODBC where the same session over
-    /// sqlcmd reports 0 (probe-confirmed both ways, 2026-08-05).
-    /// </remarks>
-    private void WriteTransactionEndIfAny(TdsTokenWriter writer)
+    private void WriteTransactionEnvChanges(TdsTokenWriter writer, int limit = int.MaxValue)
     {
-        if (this.transaction is null)
+        if (this.connection?.TransactionEvents is not { Count: > 0 } events)
             return;
-        this.ForgetTransactionEndedByEngine();
-        if (this.transactionEndedByEngine)
-            writer.WriteEnvChangeTransaction(Tds.EnvRollbackTransaction, this.lastTransactionDescriptor);
+        var count = Math.Min(limit, events.Count);
+        for (var i = 0; i < count; i++)
+        {
+            var (transactionEvent, transaction) = events[i];
+            writer.WriteEnvChangeTransaction(
+                transactionEvent switch
+                {
+                    TransactionEvent.Begin => Tds.EnvBeginTransaction,
+                    TransactionEvent.Commit => Tds.EnvCommitTransaction,
+                    _ => Tds.EnvRollbackTransaction,
+                },
+                (ulong)transaction.TransactionId);
+        }
+        events.RemoveRange(0, count);
+    }
+
+    /// <summary>
+    /// How many transaction events are pending — taken before a lookahead
+    /// runs the next statement, so that statement's events wait for its own
+    /// tokens rather than going out ahead of the DONE of the one before it.
+    /// </summary>
+    private int PendingTransactionEventCount => this.connection?.TransactionEvents?.Count ?? 0;
+
+    /// <summary>
+    /// The pending transaction events that go out ahead of an outcome's first
+    /// token: all of them, except that a rollback the outcome's own error
+    /// caused goes out after that error, as real sends it (probed 2026-09-28
+    /// against SQL Server 2025).
+    /// </summary>
+    private int TransactionEventsAheadOf(SimulatedStatementOutcome outcome)
+    {
+        var count = this.PendingTransactionEventCount;
+        return count > 0
+            && outcome is SimulatedErrorOutcome or SimulatedSqlResultSet { EndedByError: true, ErrorCaught: false }
+            && this.connection!.TransactionEvents![count - 1].Event == TransactionEvent.Rollback
+                ? count - 1
+                : count;
     }
 
     /// <summary>
@@ -803,6 +840,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                 return true;
 
             var outcome = outcomes.Current;
+            this.WriteTransactionEnvChanges(writer, this.TransactionEventsAheadOf(outcome));
 
             // An informational message is an INFO token ahead of whatever the
             // next outcome writes, and carries no DONE of its own.
@@ -819,6 +857,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
             // EXEC('…'). The DONEPROC carries the usual more/final bit.
             if (outcome is SimulatedProcScopeBoundary boundary)
             {
+                var boundaryEvents = this.PendingTransactionEventCount;
                 hasOutcome = outcomes.MoveNext();
                 if (boundary.IsEnter)
                 {
@@ -828,6 +867,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
 
                 procScopeDepth--;
                 var procStatus = this.OutcomeDoneStatus(hasOutcome, trailingTokensFollow);
+                this.WriteTransactionEnvChanges(writer, boundaryEvents);
                 if ((procStatus & Tds.DoneMore) == 0)
                     this.WriteSessionEnvChangesIfAny(writer);
                 writer.WriteReturnStatus(0);
@@ -867,6 +907,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                     }
                 }
 
+                var queryEvents = this.PendingTransactionEventCount;
                 hasOutcome = AdvancePastClosingMessages();
                 // A statement whose own error cut its rows short sends that
                 // error ahead of the result set's DONE, as real does.
@@ -874,6 +915,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                 if (query is SimulatedSqlResultSet { EndedByError: true, ErrorCaught: false } && hasOutcome && outcomes.Current is SimulatedErrorOutcome cutShortError)
                 {
                     WriteErrors(writer, cutShortError.Exception);
+                    queryEvents = this.PendingTransactionEventCount;
                     hasOutcome = AdvancePastClosingMessages();
                     cutShort = true;
                 }
@@ -900,6 +942,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                     if (query.CountSuppressed != true)
                         queryStatus |= Tds.DoneCount;
                 }
+                this.WriteTransactionEnvChanges(writer, queryEvents);
                 if ((queryStatus & Tds.DoneMore) == 0)
                     this.WriteSessionEnvChangesIfAny(writer);
                 // CurCmd tells the client whether that count is rows returned
@@ -918,8 +961,10 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                 // then proceeds to the next outcome — real SQL Server's
                 // non-XACT_ABORT behavior for a failed statement mid-batch.
                 WriteErrors(writer, errorOutcome.Exception);
+                var errorEvents = this.PendingTransactionEventCount;
                 hasOutcome = AdvancePastClosingMessages();
                 var status = (ushort)(this.OutcomeDoneStatus(hasOutcome, trailingTokensFollow) | Tds.DoneError);
+                this.WriteTransactionEnvChanges(writer, errorEvents);
                 if ((status & Tds.DoneMore) == 0)
                     this.WriteSessionEnvChangesIfAny(writer);
                 writer.WriteDoneToken(effectiveDoneToken, status, 0);
@@ -936,11 +981,13 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                 // MoveNext below, and its own SET NOCOUNT would otherwise decide
                 // this statement's DONE.
                 var suppressCount = outcome.CountSuppressed == true;
+                var statementEvents = this.PendingTransactionEventCount;
                 hasOutcome = AdvancePastClosingMessages();
                 var status = this.OutcomeDoneStatus(hasOutcome, trailingTokensFollow);
                 if (affected >= 0 && !suppressCount)
                     status |= Tds.DoneCount;
 
+                this.WriteTransactionEnvChanges(writer, statementEvents);
                 if ((status & Tds.DoneMore) == 0)
                     this.WriteSessionEnvChangesIfAny(writer);
                 // Real keeps the row count in the token and only clears the
@@ -989,10 +1036,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
     {
         var connection = this.connection!;
         if (connection.XactAbort && connection.CurrentTransaction is { } tx)
-        {
             tx.EndRollback();
-            this.transaction = null;
-        }
     }
 
     /// <summary>
@@ -1017,6 +1061,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
         try
         {
             simulation.FireLogonTriggers(this.connection!, isPooled: true);
+            this.connection!.TransactionEvents = [];
             return true;
         }
         catch (SimulatedSqlException ex)
@@ -1038,7 +1083,6 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
         var clientHostName = previous.ClientHostName;
         var clientApplicationName = previous.ClientApplicationName;
         var loginName = previous.Security.OriginalLoginName;
-        this.transaction = null;
         previous.Dispose();
 
         var fresh = new SimulatedDbConnection(simulation, previous.Spid);

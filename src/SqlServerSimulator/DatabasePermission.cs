@@ -61,7 +61,7 @@ internal sealed class DatabasePermission(
 
     /// <summary>
     /// Raw permission text for an <see cref="SqlServerSimulator.Permission.Other"/>
-    /// row (e.g. <c>VIEW ANY COLUMN MASTER KEY DEFINITION</c>), stored
+    /// row (e.g. <c>CREATE QUEUE</c>), stored
     /// case-preserved and matched case-insensitively; <see langword="null"/> for a
     /// canonical row, whose name / type code come from <see cref="PermissionCatalog"/>.
     /// </summary>
@@ -95,7 +95,7 @@ internal sealed class DatabasePermission(
 
     /// <summary>
     /// First-letter-of-each-word type-code heuristic for off-catalog permission
-    /// names (e.g. <c>VIEW ANY COLUMN MASTER KEY DEFINITION</c> → <c>VACM</c>),
+    /// names (e.g. <c>ALTER ANY EXTERNAL LANGUAGE</c> → <c>AAEL</c>),
     /// right-padded with spaces to 4 chars. Accurate for most spelled-out names
     /// but won't byte-match real for every long name.
     /// </summary>

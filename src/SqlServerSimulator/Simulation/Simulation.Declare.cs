@@ -414,6 +414,8 @@ partial class Simulation
         // caller uses the skip signal, to avoid registering the function.
         var pendingIndexes = new List<PendingInlineIndex>();
         _ = TryParseTableVariableColumnsAndConstraints(context, fullName, out var columns, out var keyConstraints, out var checkConstraints, pendingIndexes);
+        var internalName = context.Connection.Simulation.AllocateTableVariableInternalName();
+        RenameAutoNamedConstraints(internalName, fullName, columns, keyConstraints, checkConstraints, checkTablePartLength: internalName.Length);
 
         var heapTable = new HeapTable(
             fullName,
@@ -423,7 +425,10 @@ partial class Simulation
             createDate: context.Batch.CurrentStatement.UtcNow,
             keyConstraints: keyConstraints,
             checkConstraints: checkConstraints,
-            isTableVariable: true);
+            isTableVariable: true)
+        {
+            InternalName = internalName,
+        };
         AddInlineIndexes(context.Batch, heapTable, fullName, pendingIndexes);
         // A re-executed DECLARE does not empty the table: real accumulates
         // across the loop's passes (probe-confirmed — three inserts in a

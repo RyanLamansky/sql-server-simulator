@@ -372,10 +372,8 @@ partial class Simulation
     /// The table name as Msg 2628 spells it: <c>database.schema.table</c>, a
     /// temp table qualified into <c>tempdb.dbo</c> by its padded internal name
     /// as for <see cref="QualifyForNullMessage"/>, and a table variable
-    /// likewise (probed 2026-09-28). Real names a table variable by its
-    /// internal name there, <c>#</c> and the eight hex digits of its negative
-    /// object id (<c>tempdb.dbo.#B9CBEB0A</c>); the simulator writes the
-    /// variable's own name in that slot.
+    /// likewise by its own, <c>#</c> and the eight hex digits of its negative
+    /// object id (<c>tempdb.dbo.#B9CBEB0A</c>; probed 2026-09-28).
     /// </summary>
     internal static string QualifyForTruncationMessage(HeapTable table) =>
         table.OwningDatabase is { } owner
@@ -440,11 +438,13 @@ partial class Simulation
                 continue;
             if (check.Predicate.Run(runtime) == false)
             {
+                // Real leaves a table variable's column out (probed
+                // 2026-09-28 against SQL Server 2025).
                 throw SimulatedSqlException.CheckConstraintViolation(
                     check.Name,
                     DatabaseNameFor(destinationTable),
                     SchemaQualifiedName(destinationTable, destinationTable.OwningDatabase),
-                    check.InlineColumn,
+                    destinationTable is { IsTableVariable: true, InternalName: not null } ? null : check.InlineColumn,
                     verb);
             }
         }

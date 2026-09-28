@@ -296,6 +296,20 @@ partial class Simulation
                 throw SimulatedSqlException.CannotFindObject(objectSecurableName.Value.Leaf);
             permMajorId = schema.SchemaId;
         }
+        else if (permClass == PermissionChecker.ClassObject
+            && !TryResolveSecurableObject(context.Batch, objectSecurableName!.Value, out _)
+            && context.Batch.TryResolveCatalogView(objectSecurableName.Value, out var catalogView, out var catalogDatabase)
+            && ReferenceEquals(catalogDatabase, database))
+        {
+            // A catalog view is a securable of the database it's read in, as
+            // the SELECT every database grants public on its system views is
+            // (probed 2026-09-28 against SQL Server 2025).
+            if (permissions.Exists(p => p.Columns is not null))
+                throw new NotSupportedException("A column-level permission on a catalog view is not supported.");
+            permMajorId = catalogView.ObjectId;
+            foreach (var (permName, _) in permissions)
+                ValidatePermissionAgainstObjectKind(permName, "V ");
+        }
         else if (permClass == PermissionChecker.ClassObject)
         {
             if (!TryResolveSecurableObject(context.Batch, objectSecurableName!.Value, out var obj))
@@ -315,15 +329,26 @@ partial class Simulation
 
         // Msg 4624: a grant / deny / revoke targeting sa / dbo / sys /
         // INFORMATION_SCHEMA / entity owner / self is a silent no-op delivered
-        // on the info-message channel (not catchable by TRY/CATCH).
+        // on the info-message channel at class 0 state 2 (not catchable by
+        // TRY/CATCH; probed 2026-09-28 against SQL Server 2025).
         var effectivePrincipalId = context.Connection.Security.Effective.DatabasePrincipalId;
         foreach (var granteeName in granteeNames)
         {
             if (IsProtectedGrantTarget(database, granteeName, effectivePrincipalId))
             {
-                context.Batch.AppendInfoError(@class: 16, state: 1, number: 4624,
+                context.Batch.AppendInfoError(@class: 0, state: 2, number: 4624,
                     message: "Cannot grant, deny, or revoke permissions to sa, dbo, entity owner, information_schema, sys, or yourself.");
                 return true;
+            }
+
+            // master and tempdb keep guest's seeded CONNECT.
+            if (kind != PermissionStatementKind.Grant
+                && permClass == PermissionChecker.ClassDatabase
+                && BuiltInToken.Equals(granteeName, "guest")
+                && BuiltInToken.EqualsAny(database.Name, MasterDatabaseName, TempdbDatabaseName)
+                && permissions.Exists(p => Permission.Resolve(p.Name) == Permission.Connect))
+            {
+                throw SimulatedSqlException.CannotDisableGuestAccess();
             }
         }
 
@@ -555,10 +580,11 @@ partial class Simulation
         switch (kind)
         {
             case PermissionStatementKind.Grant:
-                // GRANT replaces any prior GRANT / GRANT-WITH-GRANT row for
-                // this triple (a plain GRANT after a WITH GRANT OPTION
-                // downgrades W→G). DENY rows are untouched.
-                _ = database.Permissions.RemoveAll(p => Matches(p, PermissionState.Grant) || Matches(p, PermissionState.GrantWithGrantOption));
+                // A securable holds one row per grantee and permission, so
+                // GRANT replaces whatever state the triple had — a DENY
+                // included, and a plain GRANT after a WITH GRANT OPTION
+                // downgrades W→G (probed 2026-09-28 against SQL Server 2025).
+                _ = database.Permissions.RemoveAll(p => Matches(p, PermissionState.Grant) || Matches(p, PermissionState.GrantWithGrantOption) || Matches(p, PermissionState.Deny));
                 database.Permissions.Add(new DatabasePermission(
                     permClass, permMajorId, minorId, granteePrincipalId: granteeId,
                     grantorPrincipalId: grantorId, permission: permEnum,
@@ -566,9 +592,9 @@ partial class Simulation
                 break;
 
             case PermissionStatementKind.Deny:
-                // DENY replaces only a prior DENY row; G/W rows coexist with
-                // the D row (the checker gives D precedence).
-                _ = database.Permissions.RemoveAll(p => Matches(p, PermissionState.Deny));
+                // DENY likewise replaces the triple's GRANT as well as a prior
+                // DENY (probed 2026-09-28 against SQL Server 2025).
+                _ = database.Permissions.RemoveAll(p => Matches(p, PermissionState.Grant) || Matches(p, PermissionState.GrantWithGrantOption) || Matches(p, PermissionState.Deny));
                 database.Permissions.Add(new DatabasePermission(
                     permClass, permMajorId, minorId, granteePrincipalId: granteeId,
                     grantorPrincipalId: grantorId, permission: permEnum, state: PermissionState.Deny, permissionName: storedName));

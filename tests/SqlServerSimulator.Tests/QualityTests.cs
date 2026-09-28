@@ -79,6 +79,7 @@ public partial class QualityTests
                 nameof(SimulatedDbTransaction.IsolationLevel),
                 nameof(SimulatedDbTransaction.Commit),
                 nameof(SimulatedDbTransaction.Rollback),
+                nameof(SimulatedDbTransaction.Save),
                 nameof(SimulatedDbTransaction.Connection),
             ],
             [typeof(SimulatedDbDataReader)] = [

@@ -71,21 +71,13 @@ internal sealed class BatchContext
     public long? RcsiStatementSnapshotXid;
 
     /// <summary>
-    /// Routes a captured version entry to the active transaction's
-    /// <see cref="SimulatedDbTransaction.PendingVersionEntries"/> list if
-    /// any, otherwise to the statement-scoped
-    /// <see cref="CurrentStatementVersionEntries"/>. No-op when no list is
-    /// active (the caller already short-circuited via the
-    /// <see cref="VersionStore.IsVersioningEnabled"/> guard).
+    /// The list a captured version entry joins: the active transaction's
+    /// <see cref="SimulatedDbTransaction.PendingVersionEntries"/> if any,
+    /// otherwise the statement-scoped <see cref="CurrentStatementVersionEntries"/>,
+    /// or null when neither is active.
     /// </summary>
-    internal void AppendPendingVersionEntry(PendingVersionEntry entry)
-    {
-        var tx = this.Connection.CurrentTransaction;
-        if (tx is not null)
-            tx.PendingVersionEntries.Add(entry);
-        else
-            this.CurrentStatementVersionEntries?.Add(entry);
-    }
+    internal List<PendingVersionEntry>? ActivePendingVersionEntries() =>
+        this.Connection.CurrentTransaction?.PendingVersionEntries ?? this.CurrentStatementVersionEntries;
 
     /// <summary>
     /// Per-statement scratch frame, allocated once per batch and overwritten

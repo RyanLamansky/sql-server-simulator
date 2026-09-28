@@ -1,6 +1,3 @@
-using System.Net.Sockets;
-using System.Security.Cryptography;
-using System.Security.Cryptography.X509Certificates;
 using SqlServerSimulator.Network;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 
@@ -24,7 +21,7 @@ public sealed class TransactionManagerFBeginXactTests
     [TestMethod]
     public void Commit_WithFBeginXact_EmitsCommitThenBegin_WithFreshDescriptor()
     {
-        using var fixture = new TmFixture();
+        using var fixture = new TdsSessionFixture();
         _ = fixture.Run(Begin(isolation: 2));                 // opens tx (descriptor 1)
         var envs = EnvChanges(fixture.Run(CommitOrRollback(Tds.TmCommitTransaction, beginNext: true)));
 
@@ -38,7 +35,7 @@ public sealed class TransactionManagerFBeginXactTests
     [TestMethod]
     public void Rollback_WithFBeginXact_EmitsRollbackThenBegin()
     {
-        using var fixture = new TmFixture();
+        using var fixture = new TdsSessionFixture();
         _ = fixture.Run(Begin(isolation: 2));
         var envs = EnvChanges(fixture.Run(CommitOrRollback(Tds.TmRollbackTransaction, beginNext: true)));
 
@@ -52,7 +49,7 @@ public sealed class TransactionManagerFBeginXactTests
     [TestMethod]
     public void Commit_WithoutFBeginXact_EmitsCommitOnly()
     {
-        using var fixture = new TmFixture();
+        using var fixture = new TdsSessionFixture();
         _ = fixture.Run(Begin(isolation: 2));
         var envs = EnvChanges(fixture.Run(CommitOrRollback(Tds.TmCommitTransaction, beginNext: false)));
 
@@ -67,7 +64,7 @@ public sealed class TransactionManagerFBeginXactTests
         // The follow-on begin must open a real transaction: a subsequent commit
         // (without fBeginXact) finds it and doesn't raise "no corresponding
         // BEGIN TRANSACTION" (no ERROR token in the response).
-        using var fixture = new TmFixture();
+        using var fixture = new TdsSessionFixture();
         _ = fixture.Run(Begin(isolation: 2));
         _ = fixture.Run(CommitOrRollback(Tds.TmCommitTransaction, beginNext: true));   // commits tx1, opens tx2
         var response = fixture.Run(CommitOrRollback(Tds.TmCommitTransaction, beginNext: false)); // commits tx2
@@ -86,7 +83,7 @@ public sealed class TransactionManagerFBeginXactTests
         // transaction refusal is SqlClient's client-side rule, not the
         // server's. A manual-commit driver that lost track of a transaction the
         // engine ended sends exactly this, and it must not fault the session.
-        using var fixture = new TmFixture();
+        using var fixture = new TdsSessionFixture();
         _ = fixture.Run(Begin(isolation: 2));
         var response = fixture.Run(Begin(isolation: 2));
 
@@ -95,19 +92,21 @@ public sealed class TransactionManagerFBeginXactTests
     }
 
     [TestMethod]
-    public void CommitOrRollback_AfterTheEngineEndedTheTransaction_IsAccepted()
+    public void CommitOrRollback_AfterTheEngineEndedTheTransaction_IsRefused()
     {
-        // A transaction-aborting error (Msg 8728) rolls the whole stack back
-        // underneath the TM layer. The client hasn't heard yet, so its commit /
-        // rollback still arrives, and it must find nothing left to do rather
-        // than a completed transaction to re-finish.
-        foreach (var requestType in new[] { Tds.TmCommitTransaction, Tds.TmRollbackTransaction })
+        // A transaction-aborting error rolls the whole stack back underneath
+        // the TM layer and announces it with a rollback ENVCHANGE; a commit /
+        // rollback request arriving afterwards finds nothing open, which real
+        // refuses as Msg 3902 state 3 / Msg 3903 state 2 and opens nothing
+        // even under fBeginXact (probed 2026-09-28 against SQL Server 2025).
+        foreach (var (requestType, number, state) in new[] { (Tds.TmCommitTransaction, 3902, 3), (Tds.TmRollbackTransaction, 3903, 2) })
         {
-            using var fixture = new TmFixture();
+            using var fixture = new TdsSessionFixture();
             _ = fixture.Run(Begin(isolation: 2));
             fixture.EndTransactionInTheEngine();
-            var response = fixture.Run(CommitOrRollback(requestType, beginNext: false));
-            IsFalse(ContainsErrorToken(response), $"TM request {requestType} faulted after an engine-ended transaction");
+            var response = fixture.Run(CommitOrRollback(requestType, beginNext: true));
+            AreEqual((number, state), FirstError(response));
+            AreEqual(0, fixture.TranCount);
         }
     }
 
@@ -154,6 +153,13 @@ public sealed class TransactionManagerFBeginXactTests
         return result;
     }
 
+    // The first token must be an ERROR: number (int32) and state follow its length.
+    private static (int Number, int State) FirstError(byte[] response)
+    {
+        AreEqual(Tds.TokenError, response[0]);
+        return (System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(response.AsSpan(3, 4)), response[7]);
+    }
+
     private static bool ContainsErrorToken(byte[] response)
     {
         foreach (var b in response)
@@ -162,57 +168,5 @@ public sealed class TransactionManagerFBeginXactTests
                 return true;
         }
         return false;
-    }
-
-    // --- fixture ----------------------------------------------------------
-
-    private sealed class TmFixture : IDisposable
-    {
-        private readonly Socket socket = new(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
-        private readonly X509Certificate2 certificate;
-        private readonly TdsSession session;
-        private readonly SimulatedDbConnection connection;
-
-        public TmFixture()
-        {
-            using var rsa = RSA.Create(2048);
-            var request = new CertificateRequest("CN=sss-test", rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
-            // A cert the session only stores (no TLS handshake runs in-test);
-            // the validity window is nominal.
-            this.certificate = request.CreateSelfSigned(
-                new DateTimeOffset(2020, 1, 1, 0, 0, 0, TimeSpan.Zero),
-                new DateTimeOffset(2999, 1, 1, 0, 0, 0, TimeSpan.Zero));
-            var simulation = new Simulation();
-            this.session = new TdsSession(simulation, this.socket, this.certificate);
-            this.connection = simulation.CreateDbConnection();
-            this.connection.Open();
-        }
-
-        /// <summary>Session nesting depth as the engine sees it.</summary>
-        public int TranCount => this.connection.CurrentTransaction?.TranCount ?? 0;
-
-        /// <summary>
-        /// Ends the session's transaction the way a transaction-aborting error
-        /// does — through the engine, behind the TM layer's back.
-        /// </summary>
-        public void EndTransactionInTheEngine() => this.connection.CurrentTransaction?.Rollback();
-
-        public byte[] Run(TdsMessage message)
-        {
-            var stream = new MemoryStream();
-            var transport = new TdsPacketTransport(stream) { PacketSize = Tds.DefaultPacketSize };
-            var writer = new TdsTokenWriter(transport);
-            this.session.RunTransactionManagerRequestForTesting(this.connection, message, writer);
-            writer.FlushAsync(final: true, CancellationToken.None).AsTask().GetAwaiter().GetResult();
-            return stream.ToArray()[Tds.HeaderSize..];
-        }
-
-        public void Dispose()
-        {
-            this.connection.Dispose();
-            this.session.Dispose();
-            this.certificate.Dispose();
-            this.socket.Dispose();
-        }
     }
 }

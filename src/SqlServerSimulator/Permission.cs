@@ -4,8 +4,7 @@ namespace SqlServerSimulator;
 /// The canonical permission set the enforcement checker and the
 /// <c>sys.database_permissions.type</c> / <c>permission_name</c> projection know
 /// by name. <see cref="Other"/> is the sentinel for off-catalog names — the
-/// stored-but-never-checked long tail (e.g. <c>VIEW ANY COLUMN MASTER KEY
-/// DEFINITION</c>) — whose raw text rides on
+/// stored-but-never-checked long tail (e.g. <c>CREATE QUEUE</c>) — whose raw text rides on
 /// <see cref="DatabasePermission.PermissionName"/>; an <see cref="Other"/> request
 /// is never satisfied by any row, and an <see cref="Other"/> row never satisfies
 /// any check.
@@ -46,6 +45,8 @@ internal enum Permission : byte
     TakeOwnership,
     Unmask,
     Update,
+    ViewAnyColumnEncryptionKeyDefinition,
+    ViewAnyColumnMasterKeyDefinition,
     ViewAnyDefinition,
     ViewChangeTracking,
     ViewDatabasePerformanceState,
@@ -147,6 +148,8 @@ internal static class PermissionCatalog
         new("TAKE OWNERSHIP", "TO  ", PermissionCategory.None),     // TakeOwnership
         new("UNMASK", "UMSK", PermissionCategory.None),             // Unmask
         new("UPDATE", "UP  ", PermissionCategory.Write),            // Update
+        new("VIEW ANY COLUMN ENCRYPTION KEY DEFINITION", "VWCK", PermissionCategory.None), // ViewAnyColumnEncryptionKeyDefinition
+        new("VIEW ANY COLUMN MASTER KEY DEFINITION", "VWCM", PermissionCategory.None), // ViewAnyColumnMasterKeyDefinition
         new("VIEW ANY DEFINITION", "VWAD", PermissionCategory.None), // ViewAnyDefinition (server scope)
         new("VIEW CHANGE TRACKING", "VWCT", PermissionCategory.None), // ViewChangeTracking
         new("VIEW DATABASE PERFORMANCE STATE", "VDP ", PermissionCategory.None), // ViewDatabasePerformanceState
@@ -203,6 +206,8 @@ internal static class PermissionCatalog
                 "TAKE OWNERSHIP" => Permission.TakeOwnership,
                 "UNMASK" => Permission.Unmask,
                 "UPDATE" => Permission.Update,
+                "VIEW ANY COLUMN ENCRYPTION KEY DEFINITION" => Permission.ViewAnyColumnEncryptionKeyDefinition,
+                "VIEW ANY COLUMN MASTER KEY DEFINITION" => Permission.ViewAnyColumnMasterKeyDefinition,
                 "VIEW ANY DEFINITION" => Permission.ViewAnyDefinition,
                 "VIEW CHANGE TRACKING" => Permission.ViewChangeTracking,
                 "VIEW DATABASE PERFORMANCE STATE" => Permission.ViewDatabasePerformanceState,

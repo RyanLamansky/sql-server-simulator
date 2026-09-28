@@ -412,7 +412,10 @@ internal sealed class HeapTable : SchemaObject
 
     /// <summary>
     /// For a local temp table, its padded name inside <c>tempdb</c>
-    /// (<see cref="Simulation.AllocateTempTableInternalName"/>); null otherwise.
+    /// (<see cref="Simulation.AllocateTempTableInternalName"/>); for a table
+    /// variable, its <c>#</c>-and-hex name there
+    /// (<see cref="Simulation.AllocateTableVariableInternalName"/>); null
+    /// otherwise.
     /// </summary>
     public string? InternalName;
 
@@ -790,6 +793,15 @@ internal sealed class RowVersionChain
     /// (<c>Xmin &lt;= SX &lt; Xmax</c>) selects the appropriate entry.
     /// </summary>
     internal HistoricalVersion? Head;
+
+    /// <summary>
+    /// The pending-entry list of the unit — a transaction, or an auto-commit
+    /// statement — whose uncommitted write the live row holds, or null once
+    /// that write has committed or rolled back. A second write by the same
+    /// unit keeps the history entry its first one recorded, so the row's
+    /// history holds one version per committed transaction.
+    /// </summary>
+    internal List<PendingVersionEntry>? PendingEntries;
 }
 
 /// <summary>

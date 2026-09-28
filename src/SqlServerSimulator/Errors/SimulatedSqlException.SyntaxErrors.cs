@@ -275,10 +275,11 @@ partial class SimulatedSqlException
     /// <summary>
     /// Mimics SQL Server error 3902: a <c>COMMIT</c> was issued with no
     /// active transaction. Probe-confirmed against SQL Server 2025
-    /// (2026-05-08): Class 16, State 1, exact wording verbatim.
+    /// (2026-05-08): Class 16, State 1, exact wording verbatim — state 3 for a
+    /// transaction-manager commit request (probed 2026-09-28).
     /// </summary>
-    internal static SimulatedSqlException NoCorrespondingBeginCommit() =>
-        new("The COMMIT TRANSACTION request has no corresponding BEGIN TRANSACTION.", 3902, 16, 1);
+    internal static SimulatedSqlException NoCorrespondingBeginCommit(byte state = 1) =>
+        new("The COMMIT TRANSACTION request has no corresponding BEGIN TRANSACTION.", 3902, 16, state);
 
     /// <summary>
     /// Mimics SQL Server error 3609: a trigger body's <c>ROLLBACK</c> ended the
@@ -294,10 +295,11 @@ partial class SimulatedSqlException
     /// <summary>
     /// Mimics SQL Server error 3903: a <c>ROLLBACK</c> was issued with no
     /// active transaction. Probe-confirmed against SQL Server 2025
-    /// (2026-05-08): Class 16, State 1, exact wording verbatim.
+    /// (2026-05-08): Class 16, State 1, exact wording verbatim — state 2 for a
+    /// transaction-manager rollback request (probed 2026-09-28).
     /// </summary>
-    internal static SimulatedSqlException NoCorrespondingBeginRollback() =>
-        new("The ROLLBACK TRANSACTION request has no corresponding BEGIN TRANSACTION.", 3903, 16, 1);
+    internal static SimulatedSqlException NoCorrespondingBeginRollback(byte state = 1) =>
+        new("The ROLLBACK TRANSACTION request has no corresponding BEGIN TRANSACTION.", 3903, 16, state);
 
     /// <summary>
     /// Mimics SQL Server error 6401: <c>ROLLBACK TRANSACTION &lt;name&gt;</c>

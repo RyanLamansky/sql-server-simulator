@@ -786,6 +786,17 @@ public sealed class SimulatedDbConnection : DbConnection
 #pragma warning restore CA2213
 
     /// <summary>
+    /// The session's transaction beginnings and endings not yet reported to the
+    /// client, in order, which the TDS endpoint turns into transaction
+    /// ENVCHANGE tokens: real announces every transaction the session opens or
+    /// ends — by SQL text, a transaction-manager request, an implicit
+    /// transaction or the engine — and nothing for a nested level (probed
+    /// 2026-09-28 against SQL Server 2025). Null in process, where nothing
+    /// reads them, so recording costs one null check.
+    /// </summary>
+    internal List<(TransactionEvent Event, SimulatedDbTransaction Transaction)>? TransactionEvents;
+
+    /// <summary>
     /// Backs <c>@@ROWCOUNT</c>. Updated after each statement in
     /// <see cref="Simulation.CreateResultSetsForCommand"/>: DML mutations
     /// write their affected-row count; SELECT writes its produced-row count

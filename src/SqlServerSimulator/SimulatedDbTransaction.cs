@@ -21,6 +21,7 @@ public sealed class SimulatedDbTransaction : DbTransaction
         this.IsolationLevel = isolationLevel;
         this.TransactionId = simulation.AllocateTransactionId();
         this.target = this;
+        connection.TransactionEvents?.Add((TransactionEvent.Begin, this));
     }
 
     /// <summary>
@@ -72,7 +73,10 @@ public sealed class SimulatedDbTransaction : DbTransaction
     /// </summary>
     internal readonly long BeginEpoch = Interlocked.Increment(ref Heap.ModificationEpoch);
 
-    /// <summary>The id <c>CURRENT_TRANSACTION_ID()</c> and the transaction DMVs report, drawn at BEGIN.</summary>
+    /// <summary>
+    /// The id <c>CURRENT_TRANSACTION_ID()</c> and the transaction DMVs report,
+    /// drawn at BEGIN; the TDS endpoint's transaction ENVCHANGE descriptor too.
+    /// </summary>
     internal readonly long TransactionId;
 
     /// <summary>When the transaction began, <c>sys.dm_tran_active_transactions.transaction_begin_time</c>.</summary>
@@ -81,7 +85,7 @@ public sealed class SimulatedDbTransaction : DbTransaction
     /// <summary>
     /// Cross-statement undo log for this transaction. Statements executed
     /// while this is the connection's active transaction append entries
-    /// here; <see cref="Rollback"/> walks the log backwards. <see cref="Commit"/>
+    /// here; <see cref="Rollback()"/> walks the log backwards. <see cref="Commit"/>
     /// just discards it — committed writes are already in the heap.
     /// </summary>
     internal readonly UndoLog UndoLog = new();
@@ -137,22 +141,63 @@ public sealed class SimulatedDbTransaction : DbTransaction
     internal bool Doomed;
 
     /// <summary>
-    /// Savepoint name → log position at the time of <c>SAVE TRANSACTION</c>.
-    /// EF Core 10's <c>RelationalTransaction.CreateSavepoint</c> emits
+    /// The savepoints <c>SAVE TRANSACTION</c> or <see cref="Save"/> set, oldest
+    /// first. EF Core 10's <c>RelationalTransaction.CreateSavepoint</c> emits
     /// <c>SAVE TRANSACTION &lt;name&gt;</c> per SaveChanges call inside an
-    /// active <c>Database.BeginTransaction</c>, then on a failed save
-    /// emits <c>ROLLBACK TRANSACTION &lt;name&gt;</c> to undo just that
-    /// SaveChanges' writes. Names are case-insensitive (T-SQL identifiers);
-    /// re-saving the same name overwrites the prior marker (matches SQL
-    /// Server's documented behavior).
+    /// active <c>Database.BeginTransaction</c>, then on a failed save emits
+    /// <c>ROLLBACK TRANSACTION &lt;name&gt;</c> to undo just that SaveChanges'
+    /// writes. A stack, as real's: saving a name again stacks a second
+    /// savepoint beside the first rather than moving it, and a rollback to a
+    /// name returns to its newest savepoint and consumes it along with every
+    /// later one (probed 2026-09-28 against SQL Server 2025).
     /// </summary>
-    internal readonly Dictionary<string, int> Savepoints = new(StringComparer.OrdinalIgnoreCase);
+    private readonly List<Savepoint> savepoints = [];
+
+    /// <summary>One savepoint: the undo-log and pending-version positions it returns to.</summary>
+    private readonly struct Savepoint(string name, int undoPosition, int versionEntryCount)
+    {
+        public readonly string Name = name;
+
+        public readonly int UndoPosition = undoPosition;
+
+        public readonly int VersionEntryCount = versionEntryCount;
+    }
+
+    /// <summary>Sets a savepoint named <paramref name="name"/> at the transaction's current position.</summary>
+    internal void SetSavepoint(string name) =>
+        this.savepoints.Add(new Savepoint(name, this.UndoLog.Position, this.PendingVersionEntries.Count));
+
+    /// <summary>
+    /// Rolls the transaction back to the newest savepoint named
+    /// <paramref name="name"/> — compared case-insensitively — consuming it
+    /// and every savepoint set after it, and keeps the transaction and its
+    /// locks; false when no savepoint has the name. A doomed transaction can
+    /// only be rolled back whole (Msg 3931).
+    /// </summary>
+    internal bool TryRollbackToSavepoint(string name)
+    {
+        var index = this.savepoints.FindLastIndex(savepoint => string.Equals(savepoint.Name, name, StringComparison.OrdinalIgnoreCase));
+        if (index < 0)
+            return false;
+        if (this.Doomed)
+            throw SimulatedSqlException.UncommittableTransactionCannotRollBackToSavepoint();
+        var savepoint = this.savepoints[index];
+        this.savepoints.RemoveRange(index, this.savepoints.Count - index);
+        this.UndoLog.RollbackTo(savepoint.UndoPosition);
+        if (this.PendingVersionEntries.Count > savepoint.VersionEntryCount)
+        {
+            var undone = this.PendingVersionEntries.GetRange(savepoint.VersionEntryCount, this.PendingVersionEntries.Count - savepoint.VersionEntryCount);
+            this.PendingVersionEntries.RemoveRange(savepoint.VersionEntryCount, undone.Count);
+            VersionStore.DiscardPendingEntries(undone);
+        }
+        return true;
+    }
 
     /// <summary>
     /// Transaction-scoped lock holds: data X locks (acquired by DML
     /// targets while this transaction is active) and HOLDLOCK-upgraded
     /// S locks (acquired by reads that opted into "hold until tx end").
-    /// Released at <see cref="Commit"/> / <see cref="Rollback"/> /
+    /// Released at <see cref="Commit"/> / <see cref="Rollback()"/> /
     /// <see cref="Dispose"/> — matching SQL Server's "X locks released
     /// at transaction end under READ COMMITTED" rule, probe-confirmed.
     /// Savepoint partial-rollback does NOT release these (real SQL
@@ -220,7 +265,7 @@ public sealed class SimulatedDbTransaction : DbTransaction
     /// <see cref="VersionStore.FinalizePendingEntries"/> which
     /// stamps each entry with the commit Xid and propagates payloads into
     /// the per-table <see cref="HeapTable.RowVersions"/>;
-    /// <see cref="Rollback"/> hands the list to
+    /// <see cref="Rollback()"/> hands the list to
     /// <see cref="VersionStore.DiscardPendingEntries"/> which clears
     /// the in-flight writer marks without touching the heap (the undo log
     /// has already restored it).
@@ -241,7 +286,7 @@ public sealed class SimulatedDbTransaction : DbTransaction
     internal bool Ended;
 
     /// <summary>
-    /// True once the API's <see cref="Commit"/>, <see cref="Rollback"/> or
+    /// True once the API's <see cref="Commit"/>, <see cref="Rollback()"/> or
     /// dispose has run on this object, after which SqlClient's transaction is
     /// a zombie: <see cref="Connection"/> reads null and a second commit or
     /// rollback is refused.
@@ -280,6 +325,25 @@ public sealed class SimulatedDbTransaction : DbTransaction
         return this.nestedApiTransaction = new SimulatedDbTransaction(this, isolationLevel);
     }
 
+    /// <summary>
+    /// SqlClient's refusal of any use of a transaction past its end, which also
+    /// completes the object, so a later <see cref="Rollback()"/> is refused too.
+    /// </summary>
+    private void ZombieCheck()
+    {
+        if (!this.Zombied)
+            return;
+        this.apiCompleted = true;
+        throw new InvalidOperationException("This SqlTransaction has completed; it is no longer usable.");
+    }
+
+    /// <summary>SqlClient's refusal of a null or empty savepoint or transaction name.</summary>
+    private static void RejectEmptyName(string name)
+    {
+        if (string.IsNullOrEmpty(name))
+            throw new ArgumentException("Invalid transaction or invalid name for a point at which to save within the transaction.");
+    }
+
     /// <inheritdoc/>
     /// <remarks>
     /// Ends one nesting level when the transaction is nested deeper, as
@@ -287,8 +351,7 @@ public sealed class SimulatedDbTransaction : DbTransaction
     /// </remarks>
     public override void Commit()
     {
-        if (this.Zombied)
-            throw new InvalidOperationException("This SqlTransaction has completed; it is no longer usable.");
+        this.ZombieCheck();
         this.apiCompleted = true;
         if (this.target.TranCount > 1)
             this.target.TranCount--;
@@ -297,13 +360,90 @@ public sealed class SimulatedDbTransaction : DbTransaction
     }
 
     /// <inheritdoc/>
+    /// <remarks>
+    /// A transaction SQL text or the engine already ended is completed
+    /// silently by the first rollback, as SqlClient's is, where a commit, a
+    /// savepoint call or a second rollback is refused (probed 2026-09-28
+    /// against SQL Server 2025 through SqlClient 7).
+    /// </remarks>
     public override void Rollback()
     {
-        if (this.Zombied)
+        if (this.apiCompleted)
             throw new InvalidOperationException("This SqlTransaction has completed; it is no longer usable.");
         this.apiCompleted = true;
-        this.target.EndRollback();
+        if (!this.target.Ended)
+            this.target.EndRollback();
     }
+
+    /// <summary>
+    /// Sets a savepoint, as SqlClient's <c>SqlTransaction.Save</c> does: the
+    /// transaction-manager counterpart of <c>SAVE TRANSACTION</c>, which a
+    /// later <see cref="Rollback(string)"/> returns to.
+    /// </summary>
+    /// <param name="savepointName">The savepoint's name, at most 32 characters.</param>
+    /// <exception cref="ArgumentException"><paramref name="savepointName"/> is null or empty.</exception>
+    /// <exception cref="InvalidOperationException">The transaction has completed.</exception>
+    public override void Save(string savepointName)
+    {
+        this.ZombieCheck();
+        RejectEmptyName(savepointName);
+        this.target.SetSavepointByName(savepointName);
+    }
+
+    /// <summary>
+    /// The server half of a transaction-manager save request, shared by
+    /// <see cref="Save"/> and the TDS endpoint: a name past 32 characters is
+    /// Msg 103 at the request's own state, and a doomed transaction refuses
+    /// the log write with Msg 3930.
+    /// </summary>
+    internal void SetSavepointByName(string name)
+    {
+        if (name.Length > MaxNameLength)
+            throw SimulatedSqlException.TransactionNameTooLong(name, TransactionManagerNameState);
+        if (this.Doomed)
+            throw SimulatedSqlException.UncommittableTransactionCannotWrite();
+        this.SetSavepoint(name);
+    }
+
+    /// <summary>
+    /// Rolls back to the newest savepoint of that name, keeping the
+    /// transaction open, or — naming the transaction a <c>BEGIN TRANSACTION</c>
+    /// began — rolls the whole transaction back, as SqlClient's
+    /// <c>SqlTransaction.Rollback(string)</c> does.
+    /// </summary>
+    /// <param name="savepointName">The savepoint's or the transaction's name.</param>
+    /// <exception cref="ArgumentException"><paramref name="savepointName"/> is null or empty.</exception>
+    /// <exception cref="InvalidOperationException">The transaction has completed.</exception>
+    public override void Rollback(string savepointName)
+    {
+        this.ZombieCheck();
+        RejectEmptyName(savepointName);
+        this.target.RollbackByName(savepointName);
+    }
+
+    /// <summary>
+    /// The server half of a transaction-manager rollback request naming a
+    /// savepoint or the transaction, shared by <see cref="Rollback(string)"/>
+    /// and the TDS endpoint: a savepoint of that name wins over the
+    /// transaction's own, which rolls the whole transaction back, and any
+    /// other name is Msg 6401.
+    /// </summary>
+    internal void RollbackByName(string name)
+    {
+        if (name.Length > MaxNameLength)
+            throw SimulatedSqlException.TransactionNameTooLong(name, TransactionManagerNameState);
+        if (this.TryRollbackToSavepoint(name))
+            return;
+        if (!string.Equals(this.Name, name, StringComparison.Ordinal))
+            throw SimulatedSqlException.CannotRollBackUnknownSavepoint(name);
+        this.EndRollback(TransactionEvent.StatementRollback);
+    }
+
+    /// <summary>The longest transaction or savepoint name real accepts.</summary>
+    internal const int MaxNameLength = 32;
+
+    /// <summary>The state of Msg 103 for a name a transaction-manager request carries.</summary>
+    internal const byte TransactionManagerNameState = 30;
 
     /// <summary>
     /// Commits the transaction outright, whatever its nesting depth: the
@@ -326,13 +466,17 @@ public sealed class SimulatedDbTransaction : DbTransaction
         Storage.VersionStore.RunGarbageCollection(this.simulation, db);
         this.Owner.CurrentTransaction = null;
         this.Ended = true;
+        this.Owner.TransactionEvents?.Add((TransactionEvent.Commit, this));
     }
 
     /// <summary>
     /// Rolls the whole transaction back, whatever its nesting depth: a bare
     /// <c>ROLLBACK</c>, and every engine-initiated rollback.
+    /// <paramref name="cause"/> tells the TDS endpoint a <c>ROLLBACK</c>
+    /// statement's ending, which it reports where the statement ran, from the
+    /// engine's, which it reports after the error that caused it.
     /// </summary>
-    internal void EndRollback()
+    internal void EndRollback(TransactionEvent cause = TransactionEvent.Rollback)
     {
         var db = this.Owner.CurrentDatabase;
         Storage.VersionStore.DiscardPendingEntries(this.PendingVersionEntries);
@@ -344,11 +488,12 @@ public sealed class SimulatedDbTransaction : DbTransaction
         Storage.VersionStore.RunGarbageCollection(this.simulation, db);
         this.Owner.CurrentTransaction = null;
         this.Ended = true;
+        this.Owner.TransactionEvents?.Add((cause, this));
     }
 
     /// <summary>
     /// SqlClient's <c>SqlTransaction</c> auto-rolls-back on dispose if
-    /// neither <see cref="Commit"/> nor <see cref="Rollback"/> ran — the whole
+    /// neither <see cref="Commit"/> nor <see cref="Rollback()"/> ran — the whole
     /// transaction, a nested one's enclosing SQL-text transaction included.
     /// Mirrors the standard <c>using var tx = ...; ... tx.Commit();</c> pattern
     /// where an exception before the commit triggers implicit rollback.
@@ -389,7 +534,7 @@ public sealed class SimulatedDbTransaction : DbTransaction
     /// <summary>
     /// Releases every entry in <see cref="HeldLocks"/> in reverse
     /// acquisition order against the manager's gate. Called by
-    /// <see cref="Commit"/> / <see cref="Rollback"/> / dispose-implicit-
+    /// <see cref="Commit"/> / <see cref="Rollback()"/> / dispose-implicit-
     /// rollback. Safe to call multiple times (the list clears between
     /// calls). LIFO discipline matches structured-locking convention; the
     /// manager pulses every waiter on each release so order doesn't affect
@@ -411,4 +556,17 @@ public sealed class SimulatedDbTransaction : DbTransaction
         this.EscalatedTables.Clear();
         this.SharedEscalatedTables.Clear();
     }
+}
+
+/// <summary>A server transaction's beginning or ending, as the TDS endpoint reports it.</summary>
+internal enum TransactionEvent : byte
+{
+    Begin,
+    Commit,
+
+    /// <summary>A rollback the engine made, reported after the error that caused it.</summary>
+    Rollback,
+
+    /// <summary>A rollback a <c>ROLLBACK</c> statement or request made.</summary>
+    StatementRollback,
 }

@@ -13,7 +13,7 @@ namespace SqlServerSimulator;
 /// a database first. <c>USE &lt;db&gt;</c> / temp-table / cross-database
 /// features can graft on cleanly later.
 /// </summary>
-internal sealed class Database
+internal sealed partial class Database
 {
     /// <summary>The schema name an unqualified table reference resolves through.</summary>
     public const string DefaultSchemaName = "dbo";
@@ -27,6 +27,9 @@ internal sealed class Database
     /// principal scalars in place of a scattered literal <c>1</c>.
     /// </summary>
     public const int DboPrincipalId = 1;
+
+    /// <summary>Principal id of the <c>public</c> role (0), which every user belongs to.</summary>
+    public const int PublicPrincipalId = 0;
 
     /// <summary>Principal id of the <c>guest</c> user (2) — the fallback identity for a mapped login connecting to <c>master</c>.</summary>
     public const int GuestPrincipalId = 2;
@@ -112,7 +115,7 @@ internal sealed class Database
         // (probe-confirmed against sys.database_principals on 2026-05-14):
         // public=0, dbo=1, guest=2, INFORMATION_SCHEMA=3, sys=4.
         var seedDate = DateTime.UtcNow;
-        this.Principals["public"] = new DatabasePrincipal(0, "public", "R", "DATABASE_ROLE", isFixedRole: true, seedDate);
+        this.Principals["public"] = new DatabasePrincipal(PublicPrincipalId, "public", "R", "DATABASE_ROLE", isFixedRole: true, seedDate);
         this.Principals["dbo"] = new DatabasePrincipal(DboPrincipalId, "dbo", "S", "SQL_USER", isFixedRole: false, seedDate);
         this.Principals["guest"] = new DatabasePrincipal(GuestPrincipalId, "guest", "S", "SQL_USER", isFixedRole: false, seedDate);
         this.Principals["INFORMATION_SCHEMA"] = new DatabasePrincipal(InformationSchemaPrincipalId, "INFORMATION_SCHEMA", "S", "SQL_USER", isFixedRole: false, seedDate);
@@ -126,6 +129,7 @@ internal sealed class Database
         // capabilities.
         foreach (var (id, roleName) in FixedDatabaseRoles)
             this.Principals[roleName] = new DatabasePrincipal(id, roleName, "R", "DATABASE_ROLE", isFixedRole: true, seedDate);
+        this.SeedPermissions(name);
     }
 
     /// <summary>
@@ -493,10 +497,10 @@ internal sealed class Database
     public readonly ConcurrentDictionary<string, DatabasePrincipal> Principals;
 
     /// <summary>
-    /// Per-database permission grants/denies. Populated by
-    /// <c>GRANT</c> / <c>DENY</c>; drained by <c>REVOKE</c>; surfaced by
-    /// <c>sys.database_permissions</c>. The simulator has no permission
-    /// model; this list exists for catalog-view round-trip only.
+    /// Per-database permission grants/denies: the seed every database starts
+    /// with (<see cref="SeedPermissions"/>), then what <c>GRANT</c> / <c>DENY</c>
+    /// add and <c>REVOKE</c> drains; surfaced by <c>sys.database_permissions</c>
+    /// and read by the permission checker.
     /// </summary>
     public readonly List<DatabasePermission> Permissions = [];
 

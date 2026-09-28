@@ -198,15 +198,28 @@ partial class Simulation
 
     // Every object a class-1 permission can point at, keyed by object_id —
     // real's `join sys.all_objects obj on obj.object_id = sysp.major_id`,
-    // which drops a permission whose target no longer resolves.
+    // which drops a permission whose target no longer resolves. The catalog
+    // views carry the SELECT every database grants public on them (probed
+    // 2026-09-28 against SQL Server 2025).
     private static Dictionary<int, HelpProtectObject> HelpProtectObjectsById(Database database)
     {
         var objects = new Dictionary<int, HelpProtectObject>();
+        foreach (var (id, (schemaName, view)) in BuiltInResources.CatalogViewsById.Value)
+        {
+            var schemaId = schemaName == "INFORMATION_SCHEMA" ? Database.InformationSchemaId : Database.SysSchemaId;
+            objects[id] = new HelpProtectObject(schemaName, view.Name, schemaId, isTable: false, view.Columns);
+        }
         foreach (var schema in database.Schemas.Values)
         {
             foreach (var schemaObject in schema.SchemaObjects())
             {
-                objects[schemaObject.ObjectId] = new HelpProtectObject(schema.Name, schemaObject);
+                var columns = schemaObject switch
+                {
+                    HeapTable table => table.Columns,
+                    View view => view.OutputColumns,
+                    _ => null,
+                };
+                objects[schemaObject.ObjectId] = new HelpProtectObject(schema.Name, schemaObject.Name, schemaObject.SchemaId, schemaObject is HeapTable, columns);
             }
         }
 
@@ -221,8 +234,8 @@ partial class Simulation
         {
             if (permission.Class != PermissionChecker.ClassObject
                 || !objects.TryGetValue(permission.MajorId, out var target)
-                || (schemaId is { } id && target.Object.SchemaId != id)
-                || (targetName is not null && !database.Collation.Equals(target.Object.Name, targetName))
+                || (schemaId is { } id && target.SchemaId != id)
+                || (targetName is not null && !database.Collation.Equals(target.Name, targetName))
                 || (granteeId is { } grantee && permission.GranteePrincipalId != grantee)
                 || (grantorId is { } grantor && permission.GrantorPrincipalId != grantor))
             {
@@ -414,30 +427,28 @@ partial class Simulation
     };
 
     /// <summary>
-    /// The securable behind one class-1 permission row: its schema name plus
-    /// the object itself, which supplies the <c>sys.objects.type</c> the
-    /// <c>(New)</c> marker keys on and the column list the report expands to.
+    /// The securable behind one class-1 permission row — a schema object or a
+    /// catalog view: its schema and name, whether it is a base table (the
+    /// <c>sys.objects.type</c> the <c>(New)</c> marker keys on), and the
+    /// columns the report expands to.
     /// </summary>
-    private readonly struct HelpProtectObject(string schemaName, SchemaObject schemaObject)
+    private readonly struct HelpProtectObject(string schemaName, string name, int schemaId, bool isTable, HeapColumn[]? columns)
     {
         public readonly string SchemaName = schemaName;
 
-        public readonly SchemaObject Object = schemaObject;
+        public readonly string Name = name;
+
+        public readonly int SchemaId = schemaId;
 
         /// <summary>True for a base table, the only securable whose column set can still grow.</summary>
-        public bool IsTable => this.Object is HeapTable;
+        public readonly bool IsTable = isTable;
 
         /// <summary>
         /// The columns a column-level grant addresses, in the 1-based ordinal
         /// order <c>minor_id</c> stores (<c>Simulation.ResolveColumnMinorId</c>'s
         /// convention), or null for an object that carries none.
         /// </summary>
-        public HeapColumn[]? Columns => this.Object switch
-        {
-            HeapTable table => table.Columns,
-            View view => view.OutputColumns,
-            _ => null,
-        };
+        public readonly HeapColumn[]? Columns = columns;
 
         /// <summary>The name at a stored <c>minor_id</c>, or real's <c>.</c> placeholder when it doesn't resolve.</summary>
         public string ColumnName(int columnId)
@@ -467,7 +478,7 @@ partial class Simulation
         public readonly string StateName = HelpProtectStateName(permission.State);
         public readonly int ColumnId = columnId;
         public readonly string OwnerName = target is { } owner ? owner.SchemaName : ".";
-        public readonly string ObjectName = target is { } named ? named.Object.Name : ".";
+        public readonly string ObjectName = target is { } named ? named.Name : ".";
         public readonly int GranteeId = permission.GranteePrincipalId;
         public readonly int GrantorId = permission.GrantorPrincipalId;
         public readonly string GranteeName = HelpProtectPrincipalName(database, permission.GranteePrincipalId);

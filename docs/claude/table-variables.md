@@ -121,11 +121,10 @@ The defaulted value is coerced into the target column's type via the same `Coerc
 ## Fidelity gaps remaining
 
 - A table type's backing table lists none of its indexes in `sys.indexes` — not its PRIMARY KEY's, nor an inline `INDEX` — where real lists both under `sys.table_types.type_table_object_id`.
-- `@t` doesn't appear in `sys.tables` / `INFORMATION_SCHEMA.TABLES`.
-  Real SQL Server doesn't surface table variables there either, so this is fidelity-aligned.
-- Auto-generated constraint names follow the simulator's convention (`PK__@t__<16hex>` / `UQ__@t__<16hex>` / `CK__@t__<col>__<8hex>`) — same shape as regular tables.
-  Real SQL Server uses a tempdb-derived 8-char hex for the table portion (`PK__#A292BB6__…`), so the suffixes won't byte-match.
-  This is the documented general constraint-name quirk applied to `@t` specifically.
+- A table variable carries a name inside `tempdb` — `#` and eight hex digits of a negative object id, a fresh one per declaration, typed or not (`Simulation.AllocateTableVariableInternalName`) — which real's messages and system-named constraints use (probed 2026-09-28 against SQL Server 2025): Msg 2628 names the table `tempdb.dbo.#B1B3DE12`, a CHECK or DEFAULT keeps all nine characters (`CK__#B678932F__a__…`), a PRIMARY KEY or UNIQUE the first eight (`PK__#BA49241__…`), and Msg 547 names the table `@t` with no column, while Msg 515 and Msg 2627 keep `@t`.
+  Real draws the id from `tempdb`'s allocator, whose values carry the instance's history, so the digits match its shape, not its value; the constraint names' own hash suffixes follow the simulator's general constraint-name quirk.
+- `tempdb.sys.tables` doesn't list a table variable, where real lists it under that `#`-and-hex name.
+- A multi-statement TVF's return table is named `tempdb.dbo.@r` in Msg 2628 and its Msg 547 names `tempdb`, where real names the function (`db.dbo.f`) and its database (probed 2026-09-28).
 
 ## Architecture notes
 

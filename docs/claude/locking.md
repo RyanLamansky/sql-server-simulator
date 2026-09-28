@@ -527,6 +527,9 @@ Per-`HeapTable`: `ConcurrentDictionary<(int Page, int Slot), RowVersionChain> Ro
 - **UPDATE**: reads the existing chain at `oldRid` (if any) to inherit its `LiveXmin` + `Head`, builds a fresh `HistoricalVersion { Payload = oldPayload, Xmin = oldLiveXmin, Xmax = PendingXmax, Next = oldHead }`, creates chain at `newRid` with that HV at `Head` and `WriterTx = tx`.
   Commit replaces the pending Xmax with the real commit Xid, stamps `LiveXmin`, drops the abandoned old-slot chain.
   Rollback removes the new chain entirely (old chain stays).
+  A second write of a row by the same unit (`RowVersionChain.PendingEntries` names the transaction's, or an auto-commit statement's, pending list) pushes nothing: the history its first write recorded — or, for a row it inserted, the absence of any — is the pre-transaction state, so a row keeps one version per committed transaction and no snapshot ever sees an intermediate one, as real keeps one version per row per transaction (probed 2026-09-28 against SQL Server 2025: three UPDATEs of one row and one of another leave two rows in `sys.dm_tran_version_store`).
+  `PendingVersionEntry.PushedHistory` tells a rollback which entries pushed the pending version it must pop.
+  Measured over 300 transactions each updating 50 rows twice and once more, with a snapshot open: 199 ms against 400 ms before, the chains no longer growing per UPDATE; with no snapshot open, unchanged (130 ms).
 - **DELETE**: marks existing chain's `WriterTx = tx`; commit pushes pre-delete payload to `Head`, stamps `LiveXmin = commitXid` (the delete Xid), sets `IsDeletedLive`.
   Rollback clears `WriterTx`.
 
@@ -536,6 +539,7 @@ Capture is a no-op when neither flag is on for the database, when the table is a
 Each `SimulatedDbTransaction.PendingVersionEntries` accumulates captures across the tx; `Commit` hands the list to `VersionStore.FinalizePendingEntries` (allocates one commit Xid for the whole batch, walks each entry stamping chains), `Rollback` / implicit-Dispose hands it to `VersionStore.DiscardPendingEntries` (walks each entry undoing the in-flight mark).
 
 For auto-commit DML (no active tx), `RunMutation` allocates a fresh list on `BatchContext.CurrentStatementVersionEntries`, drains on success / discards on failure — same surface as the existing per-statement undo log.
+A rollback to a savepoint discards the entries written after it, as it undoes their heap writes.
 
 ### Reader-side visibility
 `BatchContext.ResolveSnapshotXidForRead(table)` returns:
@@ -576,15 +580,14 @@ Three DMVs cover version-store state, with column shapes probe-confirmed against
 `VersionStore.RunGarbageCollection(Database)` runs at every `SimulatedDbTransaction.Commit / Rollback / Dispose`.
 Walks every per-table `RowVersions` chain and drops trailing `HistoricalVersion` nodes whose `Xmax <= oldest_active_snapshot_xid` (no active SI transaction needs them anymore).
 When no SI tx is in flight, the cutoff is `Simulation.CurrentTransactionCommitId` so every finalized HV becomes collectible.
-Chains that lose their only HV AND aren't `IsDeletedLive` AND have no in-flight `WriterTx` get removed from the dict entirely; chains with non-null `WriterTx` are skipped (a `PendingXmax`-marked HV must not be disturbed mid-tx).
+Chains that lose their only HV AND aren't `IsDeletedLive` AND have no in-flight `WriterTx` AND whose `LiveXmin` every active snapshot has reached get removed from the dict entirely — a row inserted since an open snapshot keeps its history-less chain, which is what hides it from that snapshot; chains with non-null `WriterTx` are skipped (a `PendingXmax`-marked HV must not be disturbed mid-tx).
 
 The oldest active Xid comes from `Simulation.ActiveSnapshotTxs`, a `ConcurrentDictionary<SimulatedDbTransaction, byte>` populated at `BatchContext.ResolveSnapshotXidForRead` (first user-table read of an SI tx) and drained at tx finalization.
 RCSI per-statement snapshots don't register here — their sub-statement lifetime means the once-per-tx GC cadence won't observe them as load-bearing, and the short window of risk is bounded by statement execution time.
 
 ### Known MVCC limitations
-- **Multi-update-within-one-tx history collapse**: real SQL Server collapses intra-tx intermediate states (only the pre-tx + post-tx states are visible).
-  The simulator records every capture, so the chain has one HV per UPDATE rather than one per committed transaction.
-  Visibility outcome is identical for the common case (single UPDATE per tx); divergence surfaces only when a snapshot lands between intermediate states of a single tx.
+- **An update conflict over a changed key**: a SNAPSHOT transaction updating a row another transaction has since given a new key finds nothing to update, where real refuses it with Msg 3960 (probed 2026-09-28 against SQL Server 2025).
+- **`sys.dm_tran_version_store` timing**: real lists a version while its writer is still in flight and keeps it until its cleanup task runs, where the simulator lists only finalized versions and collects them at commit once no snapshot needs them.
 
 ## Table-level and schema-lock behaviors
 

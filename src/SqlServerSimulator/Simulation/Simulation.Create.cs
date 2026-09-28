@@ -2477,7 +2477,8 @@ partial class Simulation
         string tableName,
         IReadOnlyList<(string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition, bool NotForReplication)> pendingChecks,
         Database database,
-        DateTime createDate)
+        DateTime createDate,
+        int checkTablePartLength = 8)
     {
         if (pendingChecks.Count == 0)
             return [];
@@ -2487,7 +2488,7 @@ partial class Simulation
         {
             var pending = pendingChecks[c];
             var column = pending.InlineColumn ?? SingleCheckedColumn(database.Collation, pending.Predicate);
-            var name = pending.Name ?? AutoCheckName(tableName, column, c);
+            var name = pending.Name ?? AutoCheckName(tableName, column, c, checkTablePartLength);
             resolved[c] = new CheckConstraint(name, pending.Predicate, column, database.AllocateObjectId(), createDate)
             {
                 Definition = pending.Definition,
@@ -2507,14 +2508,14 @@ partial class Simulation
     /// hash of <c>tableName + column + index</c> driving the hex slot. Stable
     /// across runs but non-cryptographic.
     /// </summary>
-    private static string AutoCheckName(string tableName, string? inlineColumn, int declarationIndex)
+    private static string AutoCheckName(string tableName, string? inlineColumn, int declarationIndex, int tablePartLength = 8)
     {
         var h = Fnv1a32.Initial;
         h.MixTableSeed(tableName);
         if (inlineColumn is not null)
             h.Mix(inlineColumn);
         h.Mix((byte)declarationIndex);
-        return FormatAutoConstraintName("CK__", tableName, inlineColumn, h.Value);
+        return FormatAutoConstraintName("CK__", tableName, inlineColumn, h.Value, tablePartLength);
     }
 
     /// <summary>
@@ -2558,9 +2559,9 @@ partial class Simulation
     /// optional <c>&lt;column8&gt;__</c> middle segment when
     /// <paramref name="optionalColumn"/> is non-null.
     /// </summary>
-    internal static string FormatAutoConstraintName(string prefix, string tableName, string? optionalColumn, uint hash)
+    internal static string FormatAutoConstraintName(string prefix, string tableName, string? optionalColumn, uint hash, int tablePartLength = 8)
     {
-        var t8 = AutoNameTablePart(tableName);
+        var t8 = AutoNameTablePart(tableName, tablePartLength);
         return optionalColumn is null
             ? $"{prefix}{t8}__{hash:X8}"
             : $"{prefix}{t8}__{(optionalColumn.Length > 8 ? optionalColumn[..8] : optionalColumn)}__{hash:X8}";
@@ -3378,13 +3379,15 @@ partial class Simulation
     /// The table's part of a system-generated constraint name: its first eight
     /// characters, which for a local temp table come from its underscore-padded
     /// tempdb name (<c>PK__#t______…</c>; probed 2026-09-26 against SQL Server
-    /// 2025).
+    /// 2025). A table variable's CHECK and DEFAULT keep all nine characters of
+    /// its <c>#</c>-and-hex name where its keys keep eight
+    /// (<c>CK__#B5F13E88__…</c>, <c>PK__#B5F13E8__…</c>; probed 2026-09-28).
     /// </summary>
-    private static string AutoNameTablePart(string tableName)
+    private static string AutoNameTablePart(string tableName, int length = 8)
     {
         if (BatchContext.IsLocalTempName(tableName))
-            tableName = tableName.PadRight(8, '_');
-        return tableName.Length > 8 ? tableName[..8] : tableName;
+            tableName = tableName.PadRight(length, '_');
+        return tableName.Length > length ? tableName[..length] : tableName;
     }
 
     /// <summary>

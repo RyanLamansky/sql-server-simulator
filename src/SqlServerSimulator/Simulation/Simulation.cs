@@ -604,6 +604,23 @@ public sealed partial class Simulation
     internal string AllocateTempTableInternalName(string name) =>
         $"{name.PadRight(116, '_')}{Interlocked.Increment(ref this.tempTableCounter):X12}";
 
+    private long tableVariableCounter;
+
+    /// <summary>
+    /// The name a table variable carries inside <c>tempdb</c>, which Msg 2628
+    /// and its system-named constraints spell out: <c>#</c> and the eight hex
+    /// digits of its negative object id (<c>#B9CBEB0A</c>), a fresh one for
+    /// each declaration (probed 2026-09-28 against SQL Server 2025). Real
+    /// draws the id from <c>tempdb</c>'s allocator, whose values carry the
+    /// instance's history, so the digits match its shape, not its value.
+    /// </summary>
+    internal string AllocateTableVariableInternalName()
+    {
+        var sequence = (uint)Interlocked.Increment(ref this.tableVariableCounter);
+        var objectId = 0x8000_0000u | ((0x2100_0000u + (sequence * 999_983u)) & 0x7FFF_FFFFu);
+        return $"#{objectId:X8}";
+    }
+
     /// <summary>
     /// Reads the current value of the commit-id counter without advancing it.
     /// Used to stamp a snapshot at first read under SNAPSHOT isolation and at
@@ -2986,6 +3003,12 @@ public sealed partial class Simulation
                         IsGrouped = metadataSelection.IsGrouped,
                     };
                 }
+                else
+                {
+                    // SELECT … INTO closes with a DONE counting 0, as the
+                    // suppressed DML below does.
+                    yield return new SimulatedNonQuery(0) { CountSuppressed = false };
+                }
 
                 yield break;
             }
@@ -2993,21 +3016,22 @@ public sealed partial class Simulation
             // Parse the DML under skip mode so the cursor advances and syntax
             // errors still surface, but no heap write happens.
             batch.SkipModeFlag = true;
+            SimulatedStatementOutcome suppressed;
             try
             {
                 switch (fmtKeyword)
                 {
                     case Keyword.Insert:
-                        _ = RunMutation(context, ParseInsert);
+                        suppressed = RunMutation(context, ParseInsert);
                         break;
                     case Keyword.Update:
-                        _ = RunMutation(context, ParseUpdate);
+                        suppressed = RunMutation(context, ParseUpdate);
                         break;
                     case Keyword.Delete:
-                        _ = RunMutation(context, ParseDelete);
+                        suppressed = RunMutation(context, ParseDelete);
                         break;
                     default:
-                        _ = RunMutation(context, ParseMerge);
+                        suppressed = RunMutation(context, ParseMerge);
                         if (context.Token is not Operator { Character: ';' })
                             throw SimulatedSqlException.MergeMustBeTerminated();
                         break;
@@ -3017,6 +3041,14 @@ public sealed partial class Simulation
             {
                 batch.SkipModeFlag = false;
             }
+
+            // Real closes the suppressed statement with a DONE counting 0 —
+            // under NOCOUNT too — or, for an OUTPUT clause, with its empty
+            // result set (probed 2026-09-28 against SQL Server 2025).
+            connection.LastStatementRowCount = 0;
+            yield return suppressed is SimulatedSqlResultSet output
+                ? new SimulatedSqlResultSet(output.Schema, output.ColumnNames, new List<byte[]>())
+                : new SimulatedNonQuery(0) { CountSuppressed = false };
 
             yield break;
         }
@@ -3653,8 +3685,6 @@ public sealed partial class Simulation
     /// Returns false if the next token isn't <c>TRAN</c> / <c>TRANSACTION</c>
     /// (the <c>case … when</c> dispatch falls through to a syntax error).
     /// </summary>
-    private const int MaxTransactionNameLength = 32;
-
     /// <summary>
     /// The transaction or savepoint name under the cursor, refused past 32
     /// characters while compiling (Msg 103 state 2, probe-confirmed against
@@ -3663,7 +3693,7 @@ public sealed partial class Simulation
     private static string ParseTransactionName(ParserContext context)
     {
         var name = ((Name)context.Token!).Value;
-        return name.Length > MaxTransactionNameLength
+        return name.Length > SimulatedDbTransaction.MaxNameLength
             ? throw SimulatedSqlException.TransactionNameTooLong(name)
             : name;
     }
@@ -3684,7 +3714,7 @@ public sealed partial class Simulation
         // SAVE TRANSACTION writes a log record, so a doomed transaction
         // refuses it with Msg 3930 (probe-confirmed).
         RejectWriteInDoomedTransaction(context.Connection);
-        tx.Savepoints[name] = tx.UndoLog.Position;
+        tx.SetSavepoint(name);
         return true;
     }
 
@@ -3783,7 +3813,7 @@ public sealed partial class Simulation
             // one is refused past (probe-confirmed).
             var name = literalName;
             if (nameVariable is not null && context.Batch.GetVariableSlot(nameVariable).Value is { IsNull: false } held)
-                name = held.AsString.Length > MaxTransactionNameLength ? held.AsString[..MaxTransactionNameLength] : held.AsString;
+                name = held.AsString.Length > SimulatedDbTransaction.MaxNameLength ? held.AsString[..SimulatedDbTransaction.MaxNameLength] : held.AsString;
             context.Connection.CurrentTransaction = new SimulatedDbTransaction(
                 context.Simulation, context.Connection, System.Data.IsolationLevel.Unspecified)
             {
@@ -3908,24 +3938,17 @@ public sealed partial class Simulation
 
                     var tx = context.Connection.CurrentTransaction
                         ?? throw SimulatedSqlException.NoCorrespondingBeginRollback();
-                    if (tx.Savepoints.TryGetValue(name, out var marker))
-                    {
-                        tx.UndoLog.RollbackTo(marker);
-                    }
-                    else if (string.Equals(tx.Name, name, StringComparison.Ordinal))
-                    {
-                        if (context.Connection.ClrContext is { HasEntryTransaction: true } namedLevel)
-                        {
-                            namedLevel.EntryTransactionEnded = true;
-                            throw SimulatedSqlException.ClrRollbackRefused();
-                        }
-
-                        tx.EndRollback();
-                    }
-                    else
-                    {
+                    if (tx.TryRollbackToSavepoint(name))
+                        return true;
+                    if (!string.Equals(tx.Name, name, StringComparison.Ordinal))
                         throw SimulatedSqlException.CannotRollBackUnknownSavepoint(name);
+                    if (context.Connection.ClrContext is { HasEntryTransaction: true } namedLevel)
+                    {
+                        namedLevel.EntryTransactionEnded = true;
+                        throw SimulatedSqlException.ClrRollbackRefused();
                     }
+
+                    tx.EndRollback(TransactionEvent.StatementRollback);
                     return true;
                 }
             }
@@ -3955,7 +3978,7 @@ public sealed partial class Simulation
 
         if (connection.CurrentTransaction is { } activeTx)
         {
-            activeTx.EndRollback();
+            activeTx.EndRollback(TransactionEvent.StatementRollback);
             if (connection.TriggerNestLevel > 0)
             {
                 connection.TriggerStatementUndoLog = null;

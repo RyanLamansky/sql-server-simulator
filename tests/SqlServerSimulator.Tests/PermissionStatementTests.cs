@@ -33,7 +33,7 @@ public sealed class PermissionStatementTests
             create table t (id int);
             grant select on t to public
             """);
-        AreEqual(1, sim.ExecuteScalar("select count(*) from sys.database_permissions where permission_name = 'SELECT'"));
+        AreEqual(1, sim.ExecuteScalar("select count(*) from sys.database_permissions where permission_name = 'SELECT' and major_id = object_id('t')"));
     }
 
     [TestMethod]
@@ -157,7 +157,7 @@ public sealed class PermissionStatementTests
             create table t (id int);
             grant select, update, delete on t to public
             """);
-        AreEqual(3, sim.ExecuteScalar("select count(*) from sys.database_permissions where grantee_principal_id = 0 and class = 1"));
+        AreEqual(3, sim.ExecuteScalar("select count(*) from sys.database_permissions where grantee_principal_id = 0 and class = 1 and major_id = object_id('t')"));
     }
 
     /// <summary>

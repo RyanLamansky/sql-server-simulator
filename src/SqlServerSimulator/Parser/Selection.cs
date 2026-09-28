@@ -360,6 +360,7 @@ internal sealed partial class Selection
                     return cached;
                 }
                 CatalogPushdownDiagnostics.Sink?.Add($"Scan({view.Name})");
+                PermissionEnforcement.CheckCatalogViewRead(batch, view, targetDatabase);
                 var gated = BuiltInResources.ApplyDmvGate(view, batch, view.RowGenerator(batch, targetDatabase));
                 var rows = BuiltInResources.ApplyMetadataFilter(view, batch, targetDatabase, gated);
                 var encoded = rows.Select(values => RowEncoder.EncodeRow(view.Columns, view.Conform(values)));
@@ -425,6 +426,7 @@ internal sealed partial class Selection
                 CatalogPushdownDiagnostics.Sink?.Add(
                     value.IsNull ? $"SeekEmpty({view.Name}.{pushdownColumn})" : $"Seek({view.Name}.{pushdownColumn})");
                 var filter = new CatalogFilter(pushdownColumn, value);
+                PermissionEnforcement.CheckCatalogViewRead(batch, view, targetDatabase);
                 var gated = BuiltInResources.ApplyDmvGate(view, batch, filteredGenerator(batch, targetDatabase, filter));
                 var rows = BuiltInResources.ApplyMetadataFilter(view, batch, targetDatabase, gated);
                 return rows.Select(values => RowEncoder.EncodeRow(view.Columns, view.Conform(values)));

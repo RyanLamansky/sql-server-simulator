@@ -615,6 +615,15 @@ partial class SimulatedSqlException
         new("Cannot issue SAVE TRANSACTION when there is no active transaction.", 628, 16, 0);
 
     /// <summary>
+    /// Mimics SQL Server error 3931: a rollback to a savepoint inside a doomed
+    /// transaction, which can only be rolled back whole (probed 2026-09-28
+    /// against SQL Server 2025). Uncaught it ends the batch and rolls the
+    /// transaction back, as Msg 3930 does.
+    /// </summary>
+    internal static SimulatedSqlException UncommittableTransactionCannotRollBackToSavepoint() =>
+        new("The current transaction cannot be committed and cannot be rolled back to a savepoint. Roll back the entire transaction.", 3931, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 266: a procedure or dynamic batch returned
     /// with <c>@@TRANCOUNT</c> other than it entered with. Real raises it at
     /// line 0 against the module, where its caller can catch it (probed

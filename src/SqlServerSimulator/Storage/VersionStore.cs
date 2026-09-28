@@ -20,6 +20,14 @@ internal sealed class PendingVersionEntry
     internal (int Page, int Slot)? OldRid;
     internal byte[]? OldPayload;
     internal VersionWriteKind Kind;
+
+    /// <summary>
+    /// Whether this UPDATE's capture prepended the pending
+    /// <see cref="HistoricalVersion"/> that a rollback pops — false when an
+    /// earlier write of the same unit already recorded the row's pre-write
+    /// state.
+    /// </summary>
+    internal bool PushedHistory;
 }
 
 /// <summary>
@@ -89,6 +97,7 @@ internal static class VersionStore
             return;
 
         var tx = batch.Connection.CurrentTransaction;
+        var pendingEntries = batch.ActivePendingVersionEntries();
         var chain = table.RowVersions.GetOrAdd(newRid, static _ => new RowVersionChain());
         chain.WriterTx = tx;
 
@@ -100,30 +109,52 @@ internal static class VersionStore
         // commit Xid. Carrying the old slot's existing history forward
         // matches the chain semantics — multi-update timelines stay
         // walkable for older snapshots.
+        var pushedHistory = false;
         if (kind == VersionWriteKind.Update && oldPayload is not null && oldRid is { } oldRidValue)
         {
             var oldChain = GetExistingChain(table, oldRidValue);
-            var hv = new HistoricalVersion
+            if (oldChain is { PendingEntries: { } unit } && ReferenceEquals(unit, pendingEntries))
             {
-                Payload = oldPayload,
-                Xmin = oldChain?.LiveXmin ?? 0,
-                Xmax = PendingXmax,
-                Next = oldChain?.Head,
-            };
-            chain.Head = hv;
+                // The same unit already wrote this row, so the history it
+                // recorded then — or, for a row it inserted, the absence of
+                // any — is the row's state before the transaction, the only
+                // one a snapshot may see: real keeps one version per row per
+                // transaction and never exposes an intermediate one (probed
+                // 2026-09-28 against SQL Server 2025).
+                if (!ReferenceEquals(oldChain, chain))
+                {
+                    chain.Head = oldChain.Head;
+                    chain.LiveXmin = oldChain.LiveXmin;
+                }
+            }
+            else
+            {
+                chain.Head = new HistoricalVersion
+                {
+                    Payload = oldPayload,
+                    Xmin = oldChain?.LiveXmin ?? 0,
+                    Xmax = PendingXmax,
+                    Next = oldChain?.Head,
+                };
+                pushedHistory = true;
+            }
             // Old slot's chain stays until commit — Rollback removes the
             // entire new-slot chain (the slot didn't exist pre-tx) and the
             // old slot retains its prior visibility. Commit drops the old
             // slot since its data has already been carried forward.
         }
 
-        batch.AppendPendingVersionEntry(new PendingVersionEntry
+        if (pendingEntries is null)
+            return;
+        chain.PendingEntries = pendingEntries;
+        pendingEntries.Add(new PendingVersionEntry
         {
             Table = table,
             NewRid = newRid,
             OldRid = oldRid,
             OldPayload = oldPayload,
             Kind = kind,
+            PushedHistory = pushedHistory,
         });
     }
 
@@ -167,6 +198,7 @@ internal static class VersionStore
         foreach (var entry in entries)
         {
             var newChain = entry.Table.RowVersions.GetOrAdd(entry.NewRid, static _ => new RowVersionChain());
+            newChain.PendingEntries = null;
             switch (entry.Kind)
             {
                 case VersionWriteKind.Insert:
@@ -208,7 +240,7 @@ internal static class VersionStore
     }
 
     /// <summary>
-    /// Called from <see cref="SimulatedDbTransaction.Rollback"/> (or on
+    /// Called from <see cref="SimulatedDbTransaction.Rollback()"/> (or on
     /// statement-atomic mid-execution failure). Clears every pending
     /// entry's <see cref="RowVersionChain.WriterTx"/> mark so SI readers
     /// no longer see "uncommitted writer" on those slots; the heap rows
@@ -227,12 +259,20 @@ internal static class VersionStore
             if (!entry.Table.RowVersions.TryGetValue(entry.NewRid, out var chain))
                 continue;
             chain.WriterTx = null;
+            chain.PendingEntries = null;
             switch (entry.Kind)
             {
                 case VersionWriteKind.Insert:
                     // The chain was created by this tx's INSERT and has no
                     // pre-tx history — drop it entirely.
                     _ = entry.Table.RowVersions.TryRemove(entry.NewRid, out _);
+                    break;
+                case VersionWriteKind.Update when !entry.PushedHistory:
+                    // A later write of a row the unit already wrote pushed
+                    // nothing; a slot it moved the row into borrowed the
+                    // row's history and never held it before.
+                    if (entry.OldRid is { } movedFrom && !movedFrom.Equals(entry.NewRid))
+                        _ = entry.Table.RowVersions.TryRemove(entry.NewRid, out _);
                     break;
                 case VersionWriteKind.Update:
                     // Pop the pending HV the matching CaptureWrite prepended.
@@ -263,8 +303,9 @@ internal static class VersionStore
     /// transaction needs that version anymore. When no SI tx is in flight,
     /// the cutoff is <see cref="Simulation.CurrentTransactionCommitId"/>, so
     /// every finalized HV becomes collectible. Chains that lose their only
-    /// HV AND aren't marked deleted-live AND have no in-flight writer are
-    /// dropped from the dict entirely; chains that retain at least one
+    /// HV AND aren't marked deleted-live AND have no in-flight writer AND
+    /// whose live row every active snapshot sees are dropped from the dict
+    /// entirely; chains that retain at least one
     /// fully-visible-to-no-active-snapshot HV stay (later GC passes may
     /// shorten them further). Skips chains with non-null
     /// <see cref="RowVersionChain.WriterTx"/> — those have an in-flight
@@ -291,7 +332,10 @@ internal static class VersionStore
                     if (chain.WriterTx is not null)
                         continue;
                     chain.Head = TrimHistory(chain.Head, cutoff, table);
-                    if (chain.Head is null && !chain.IsDeletedLive)
+                    // A chain with no history left still hides its row from a
+                    // snapshot older than the row's commit — a row inserted
+                    // since — so it stays until every snapshot sees the row.
+                    if (chain.Head is null && !chain.IsDeletedLive && chain.LiveXmin <= cutoff)
                         _ = table.RowVersions.TryRemove(kv.Key, out _);
                 }
             }
@@ -377,7 +421,7 @@ internal static class VersionStore
     /// <summary>
     /// Pre-write conflict check for SNAPSHOT-isolation writers. Raises
     /// Msg 3960 (auto-rollback semantic — caller is responsible for
-    /// calling <see cref="SimulatedDbTransaction.Rollback"/> after the
+    /// calling <see cref="SimulatedDbTransaction.Rollback()"/> after the
     /// throw) when the live row at <paramref name="rid"/> was committed
     /// by a different transaction after the SI writer's snapshot. Returns
     /// silently when the row is safe to overwrite. No-op when not under

@@ -114,10 +114,10 @@ DENY <perm_list> [ON <securable>] TO <principal_list> [AS <grantor>]
 - `WITH GRANT OPTION` stores a **single `W` row** (not `G`+`W`).
 - `REVOKE GRANT OPTION FOR … [CASCADE]` downgrades `W`→`G` and (with CASCADE) removes the rows the grantee delegated; a plain `REVOKE` of a grantable row that has live delegations, without CASCADE, raises **Msg 4611**.
   Full `REVOKE … CASCADE` removes the whole delegation subtree (rows whose grantor is in the revoked-from set, transitively via `grantor_principal_id`).
-- `G` and `D` rows coexist for the same triple; a plain REVOKE removes both.
-- A GRANT / DENY / REVOKE targeting `sa` / `dbo` / `sys` / `INFORMATION_SCHEMA` / self silently no-ops and delivers **Msg 4624 on the info-message channel** (`SimulatedDbConnection.InfoMessage`) — not catchable by TRY/CATCH, no row stored.
+- A triple holds one row: `GRANT` replaces a `D` row and `DENY` a `G` / `W` one (probed 2026-09-28 against SQL Server 2025); a plain REVOKE removes whichever is there.
+- A GRANT / DENY / REVOKE targeting `sa` / `dbo` / `sys` / `INFORMATION_SCHEMA` / self silently no-ops and delivers **Msg 4624 on the info-message channel** at class 0 state 2 (`SimulatedDbConnection.InfoMessage`) — not catchable by TRY/CATCH, no row stored.
 - A non-dbo grantor must hold a `W` row on the **same securable** for the permission being granted or any permission that covers it (CONTROL-W on the object authorizes granting SELECT on it — probe M9); a **wider-scope** W row does NOT (schema-scope SELECT-W does not authorize an object-scope grant — probe M9b, so `HasGrantAuthority`'s covering walk stays within `(class, major_id)`). Missing authority surfaces the same Msg 15151 object-variant (permission errors leak as "cannot find the object").
-- `CREATE USER` auto-seeds a CONNECT grant (class 0, type `CO`, grantor dbo, state G).
+- `CREATE USER` auto-seeds a CONNECT grant (class 0, type `CO`, grantor dbo, state G); the grants every database starts with are in [Seeded grants](#seeded-grants).
 
 ### Enforcement (execution-time)
 
@@ -629,6 +629,16 @@ This is load-bearing for bacpac export: DacFx's `SqlRole` reverse-engineering fi
 
 **`sys.database_permissions`** (10-col probe-confirmed subset): `class` / `class_desc` / `major_id` / `minor_id` / `grantee_principal_id` / `grantor_principal_id` / `type` (4-char) / `permission_name` / `state` (1-char) / `state_desc`.
 
+### Seeded grants
+
+Every database starts with the grants real's does (probed 2026-09-28 against SQL Server 2025), seeded by `Database.SeedPermissions` and shared across databases since the rows are immutable: `public` holding `VIEW ANY COLUMN ENCRYPTION KEY DEFINITION` and `VIEW ANY COLUMN MASTER KEY DEFINITION`, `dbo` holding `CONNECT`, `guest` holding `CONNECT` in `master`, `tempdb` and `msdb`, and `public` holding `SELECT` on 232 system objects by real's fixed ids (`Database.PublicSelectSeedObjectIds`) — most of them catalog views, the rest system objects the simulator has no catalog for.
+`CREATE USER` adds the user's own `CONNECT`.
+The seed is ordinary state: `REVOKE` removes a row, `GRANT` and `DENY` replace one (a securable holds one row per grantee and permission, so `DENY` after `GRANT` leaves only the `D` row, and the reverse), `sp_helprotect` reports them (the catalog views as `sys` objects with column `(All)`), and `HAS_PERMS_BY_NAME` answers from them.
+Guest's access follows its `CONNECT` alone, and `master` and `tempdb` refuse to lose it (Msg 15182).
+
+A catalog view is a securable of the database it's read in, `GRANT` / `REVOKE` / `DENY` resolving `sys.<view>` to its id.
+A restricted principal's read of one is refused with Msg 229 naming the view in `mssqlsystemresource` when a `DENY` reaches it, or when the view is one the seed grants `public` and no grant reaches it any more — a revoked seed row refuses `sys.tables`, while a view outside the seed answers only to a `DENY`, since real grants those elsewhere (`PermissionChecker.CanReadCatalogView`).
+
 **`sys.database_role_members`** (2-col full row): `role_principal_id` / `member_principal_id`.
 
 **`sys.server_principals`** (14-col full probe-confirmed shape): `name` / `principal_id` / `sid` / `type` / `type_desc` / `is_disabled` / `create_date` / `modify_date` / `default_database_name` / `default_language_name` / `credential_id` / `owning_principal_id` / `is_fixed_role` / `tenant_id`.
@@ -681,6 +691,7 @@ Registered in `BuiltInResources.Security.cs` via the shared `EmptyCatalogRows`.
 | 15592 | `sp_unsetapprole` with no role set or an invalid cookie. |
 | 505 | `USE` / `ChangeDatabase` while an application role is active. |
 | 4624 | GRANT / DENY / REVOKE to sa / dbo / sys / INFORMATION_SCHEMA / self — **info channel**, not raised. |
+| 15182 | `REVOKE` / `DENY` of `CONNECT` from `guest` in `master` or `tempdb`. |
 
 All probe-confirmed against SQL Server 2025.
 
@@ -727,6 +738,7 @@ The current-principal / id scalars read the session's effective principal; `HAS_
 - **Column-level grants** ship for SELECT / UPDATE / REFERENCES reads and writes, on tables and views alike — see [Column-level grants](#column-level-grants). Residual gaps: **column-level INSERT** grants (INSERT stays object-grain) and the structural-visitor coverage gap for columns buried in some non-arithmetic function containers.
 - **Server-permission enforcement beyond the four gated points** — the `VIEW …STATE` permissions gate the modeled DMVs ([DMV server-state gating](#dmv-server-state-gating)), `IMPERSONATE` gates `EXECUTE AS LOGIN`, `VIEW DEFINITION` / `ALTER` / `IMPERSONATE` gate [server-principal metadata visibility](#server-principal-metadata-visibility), and `ALTER ANY LOGIN` gates [login DDL](#login-ddl-gating).
   Other server permissions (`CONNECT SQL` as a connect-time gate, `ALTER ANY DATABASE`, `CREATE ANY DATABASE`, …) are stored and projected but not separately enforced; `CONTROL SERVER` isn't modeled as its own permission (folded into the sysadmin bypass).
+- **`master`'s and `msdb`'s own seeded grants** — `EXECUTE` on the system procedures and the grants to principals the simulator doesn't carry; a grant naming a system procedure is refused in a user database on real and unresolved here.
 - **`sys.server_permissions` default rows** — real seeds `public` with `VIEW ANY DATABASE` (class 100) and per-endpoint `CONNECT` (class 105); the simulator seeds neither, and models no endpoint class.
   The observable behavior still matches, since `sys.databases` is unfiltered either way.
 - **Application-role edges** — DDL is gated on the `db_owner` / `db_ddladmin` capability rather than `ALTER ANY APPLICATION ROLE`; a pooled TDS reset clears the role instead of killing the session (real's Msg 596).

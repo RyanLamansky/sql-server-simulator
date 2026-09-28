@@ -184,4 +184,31 @@ public sealed class TransactionsViaSqlTextTests
         else
             _ = await ThrowsAsync<InvalidOperationException>(() => count.ExecuteScalarAsync(TestContext.CancellationToken));
     }
+
+    /// <summary>
+    /// A savepoint request's name past 32 characters is Msg 103 at state 30,
+    /// and a rollback to a savepoint consumes it (probed 2026-09-28 against
+    /// SQL Server 2025 through SqlClient 7).
+    /// </summary>
+    [TestMethod]
+    public async Task BeginTransactionApi_SavepointRequests_FollowTheServersRules()
+    {
+        var simulation = new Simulation();
+        Wire.ExecInProc(simulation, "create table t (id int)");
+
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+
+        var transaction = connection.BeginTransaction();
+        var tooLong = Throws<SqlException>(() => transaction.Save(new string('b', 33)));
+        AreEqual(103, tooLong.Number);
+        AreEqual(30, tooLong.State);
+        transaction.Save("mark");
+        transaction.Rollback("MARK");
+        AreEqual(6401, Throws<SqlException>(() => transaction.Rollback("mark")).Number);
+
+        await using var trancount = new SqlCommand("select @@trancount", connection, transaction);
+        AreEqual(1, await trancount.ExecuteScalarAsync(TestContext.CancellationToken));
+        transaction.Rollback();
+    }
 }

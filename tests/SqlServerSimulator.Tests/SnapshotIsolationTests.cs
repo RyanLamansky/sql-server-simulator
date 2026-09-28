@@ -335,4 +335,106 @@ public sealed class SnapshotIsolationTests
         AreEqual(2, fresh);
         _ = siConn.CreateCommand("commit").ExecuteNonQuery();
     }
+
+    // ---- one version per row per transaction (probed 2026-09-28 against SQL Server 2025) ----
+
+    private static Simulation SnapshotFixture()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            alter database current set allow_snapshot_isolation on;
+            create table t (id int not null primary key, v int);
+            insert t values (1, 100), (2, 100)
+            """);
+        return sim;
+    }
+
+    [TestMethod]
+    public void TwoUpdatesInOneTransaction_OlderSnapshotSeesThePreTransactionRow()
+    {
+        var sim = SnapshotFixture();
+        using var siConn = sim.CreateOpenConnection();
+        _ = siConn.CreateCommand("set transaction isolation level snapshot; begin tran; select v from t where id = 1").ExecuteScalar();
+        using (var writer = sim.CreateOpenConnection())
+            _ = writer.CreateCommand("begin tran; update t set v = 200 where id = 1; update t set v = 300 where id = 1; commit").ExecuteNonQuery();
+        AreEqual(100, siConn.CreateCommand("select v from t where id = 1").ExecuteScalar());
+        _ = siConn.CreateCommand("commit").ExecuteNonQuery();
+        AreEqual(300, sim.ExecuteScalar("select v from t where id = 1"));
+    }
+
+    [TestMethod]
+    public void TwoUpdatesInFlight_ConcurrentSnapshotSeesThePreTransactionRow()
+    {
+        var sim = SnapshotFixture();
+        using var writer = sim.CreateOpenConnection();
+        _ = writer.CreateCommand("begin tran; update t set v = 200 where id = 1; update t set v = 300 where id = 1").ExecuteNonQuery();
+        using var siConn = sim.CreateOpenConnection();
+        AreEqual(100, siConn.CreateCommand("set transaction isolation level snapshot; begin tran; select v from t where id = 1").ExecuteScalar());
+        _ = writer.CreateCommand("commit").ExecuteNonQuery();
+        AreEqual(100, siConn.CreateCommand("select v from t where id = 1").ExecuteScalar());
+        _ = siConn.CreateCommand("commit").ExecuteNonQuery();
+    }
+
+    [TestMethod]
+    public void InsertThenUpdateInOneTransaction_OlderSnapshotSeesNoRow()
+    {
+        var sim = SnapshotFixture();
+        using var siConn = sim.CreateOpenConnection();
+        _ = siConn.CreateCommand("set transaction isolation level snapshot; begin tran; select count(*) from t").ExecuteScalar();
+        using (var writer = sim.CreateOpenConnection())
+            _ = writer.CreateCommand("begin tran; insert t values (3, 1); update t set v = 2 where id = 3; commit").ExecuteNonQuery();
+        AreEqual(2, siConn.CreateCommand("select count(*) from t").ExecuteScalar());
+        _ = siConn.CreateCommand("commit").ExecuteNonQuery();
+    }
+
+    [TestMethod]
+    public void TwoUpdatesInOneTransaction_KeepOneVersionPerRow()
+    {
+        var sim = SnapshotFixture();
+        using var siConn = sim.CreateOpenConnection();
+        _ = siConn.CreateCommand("set transaction isolation level snapshot; begin tran; select v from t where id = 1").ExecuteScalar();
+        using (var writer = sim.CreateOpenConnection())
+        {
+            _ = writer.CreateCommand("""
+                begin tran;
+                update t set v = 200 where id = 1;
+                update t set v = 300 where id = 1;
+                update t set v = 400 where id = 1;
+                update t set v = 500 where id = 2;
+                commit
+                """).ExecuteNonQuery();
+        }
+        AreEqual(2, sim.ExecuteScalar("select count(*) from sys.dm_tran_version_store"));
+        _ = siConn.CreateCommand("commit").ExecuteNonQuery();
+    }
+
+    [TestMethod]
+    public void FailedLaterUpdate_KeepsTheFirstUpdatesHistory()
+    {
+        var sim = SnapshotFixture();
+        using var siConn = sim.CreateOpenConnection();
+        _ = siConn.CreateCommand("set transaction isolation level snapshot; begin tran; select v from t where id = 1").ExecuteScalar();
+        using (var writer = sim.CreateOpenConnection())
+        {
+            _ = writer.CreateCommand("begin tran; update t set v = 200 where id = 1").ExecuteNonQuery();
+            _ = Throws<SimulatedSqlException>(() => writer.CreateCommand("update t set v = v / 0 where id = 1").ExecuteNonQuery());
+            _ = writer.CreateCommand("commit").ExecuteNonQuery();
+        }
+        AreEqual(100, siConn.CreateCommand("select v from t where id = 1").ExecuteScalar());
+        _ = siConn.CreateCommand("commit").ExecuteNonQuery();
+        AreEqual(200, sim.ExecuteScalar("select v from t where id = 1"));
+    }
+
+    [TestMethod]
+    public void TwoUpdatesRolledBack_SnapshotAndLiveReadTheOriginal()
+    {
+        var sim = SnapshotFixture();
+        using var siConn = sim.CreateOpenConnection();
+        _ = siConn.CreateCommand("set transaction isolation level snapshot; begin tran; select v from t where id = 1").ExecuteScalar();
+        using (var writer = sim.CreateOpenConnection())
+            _ = writer.CreateCommand("begin tran; update t set v = 200 where id = 1; update t set v = 300 where id = 1; rollback").ExecuteNonQuery();
+        AreEqual(100, siConn.CreateCommand("select v from t where id = 1").ExecuteScalar());
+        _ = siConn.CreateCommand("commit").ExecuteNonQuery();
+        AreEqual(100, sim.ExecuteScalar("select v from t where id = 1"));
+    }
 }

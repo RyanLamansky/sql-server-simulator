@@ -7,8 +7,13 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException IdentifierTooLong(ReadOnlySpan<char> first128)
         => new($"The identifier that starts with '{first128}' is too long. Maximum length is 128.", 103, 15, 4);
 
-    internal static SimulatedSqlException TransactionNameTooLong(string name)
-        => new($"The identifier that starts with '{(name.Length > 128 ? name[..128] : name)}' is too long. Maximum length is 32.", 103, 15, 2);
+    /// <summary>
+    /// Mimics SQL Server error 103 for a transaction or savepoint name past 32
+    /// characters: state 2 from SQL text, state 30 from a transaction-manager
+    /// request (probed 2026-09-28 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException TransactionNameTooLong(string name, byte state = 2)
+        => new($"The identifier that starts with '{(name.Length > 128 ? name[..128] : name)}' is too long. Maximum length is 32.", 103, 15, state);
 
     internal static SimulatedSqlException InvalidColumnName(string name) => new($"Invalid column name '{name}'.", 207, 16, 1);
 

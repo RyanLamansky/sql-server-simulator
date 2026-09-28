@@ -10,7 +10,10 @@ A fourth arrives over the network: TDS Transaction Manager requests map onto the
   A cancel aborts the batch at a statement boundary, so already-committed statements' effects persist and un-run statements never fire; a single in-flight statement is not interrupted inside its row loop (materialization completes first — the reaction bound noted in [`tds-endpoint.md`](tds-endpoint.md#mid-stream-attention-cancel)), so it is not partial-rolled-back the way a mid-statement *error* is.
 - **Explicit txs**: `BEGIN TRAN` increments `TranCount`; only outermost `COMMIT` commits; `ROLLBACK` zeroes `TranCount` and walks the whole log.
   `SAVE TRAN <name>` + `ROLLBACK TRAN <name>` is the EF SaveChanges path inside an explicit tx.
-  `ROLLBACK TRAN <name>` naming the *outermost* `BEGIN TRAN`'s name rolls the whole transaction back; the name is matched case-sensitively (real refuses `outer1` for `Outer1` under a case-insensitive collation), while a savepoint name matches case-insensitively, and a nested `BEGIN TRAN`'s name is never recorded, so naming it is Msg 6401 (probed 2026-09-24).
+  Savepoints form a stack, as real's do (probed 2026-09-28 against SQL Server 2025): saving a name again stacks a second savepoint rather than moving the first, and `ROLLBACK TRAN <name>` returns to the newest of that name and consumes it with every later one, so repeating it reaches the older one and then Msg 6401.
+  A savepoint of the transaction's own name wins over it; `ROLLBACK TRAN <name>` naming the *outermost* `BEGIN TRAN`'s name otherwise rolls the whole transaction back; the name is matched case-sensitively (real refuses `outer1` for `Outer1` under a case-insensitive collation), while a savepoint name matches case-insensitively, and a nested `BEGIN TRAN`'s name is never recorded, so naming it is Msg 6401 (probed 2026-09-24).
+  A doomed transaction refuses a rollback to a savepoint with Msg 3931, which ends the batch and rolls back as Msg 3930 does.
+  A rollback to a savepoint also discards the version-store entries written after it.
   A name held in a variable is cut to 32 characters; a written one past 32 is Msg 103 while compiling, on every statement that takes one.
   How `BeginTransaction` meets a transaction SQL text opened is [its own section](#begintransaction-and-sql-text-transactions).
   `COMMIT`/`ROLLBACK` with no active tx → Msg 3902/3903.
@@ -76,13 +79,14 @@ The in-process surface follows what SqlClient 7 does against SQL Server 2025 (pr
   While a transaction `BeginTransaction` began or nested is pending, a command without it is refused with SqlClient's "requires the command to have a transaction" `InvalidOperationException` (`HoldsApiTransaction`).
   An API commit that ends only an inner level SQL text nested inside the API's own transaction leaves it pending, so the connection refuses both until SQL text ends it; one that ends the level it nested frees the connection.
 - **Completion.**
-  Once committed or rolled back through the API, or ended by SQL text or the engine, the object's `Connection` reads null and a further `Commit` / `Rollback` is SqlClient's "This SqlTransaction has completed" `InvalidOperationException`.
+  Once committed or rolled back through the API, or ended by SQL text or the engine, the object's `Connection` reads null and a further `Commit`, `Save` or `Rollback(name)` is SqlClient's "This SqlTransaction has completed" `InvalidOperationException`.
+  `Rollback()` is the exception, SqlClient's partial zombie: the first one after SQL text or the engine ended the transaction — a `ROLLBACK` or `COMMIT` statement, an `XACT_ABORT` error, a doomed transaction's Msg 3998, a trigger's or procedure's `ROLLBACK` — succeeds silently, whether or not a command ran in between, unless a `Commit` / `Save` / `Rollback(name)` came first (probed 2026-09-28 through SqlClient 7).
+- **Savepoints.**
+  `Save(name)` and `Rollback(name)` are SqlClient's transaction-manager save and named rollback, sharing the SQL-text savepoint stack: a null or empty name is SqlClient's own `ArgumentException`, a name past 32 characters Msg 103 at state 30 (state 2 from SQL text), an unknown one Msg 6401 with the transaction kept, and a name no savepoint carries but the transaction a `BEGIN TRANSACTION` named rolls it all back.
 - **Isolation.**
   An unspecified level begins at read committed, and the level a `BeginTransaction` requests — nested or not — becomes the session's and stays after the transaction ends, which is real's own behavior for the transaction-manager begin.
 
 Over the wire the server half is the TDS endpoint's (see [`tds-endpoint.md`](tds-endpoint.md#transaction-manager-requests)) and SqlClient supplies the rest itself.
-
-**Not modeled yet**: `Save` / `Rollback(name)` on the transaction object (`NotSupportedException`, where SqlClient's `SqlTransaction` sends a savepoint request); and SqlClient's one inconsistent case, where the API rollback of a transaction SQL text rolled back succeeds if a command ran on the connection in between and refuses otherwise — here it always refuses.
 
 ## Database-level DDL inside a user transaction
 

@@ -580,4 +580,63 @@ public sealed class TableVariableTests
             """);
         AreEqual(1, count);
     }
+
+    // ---- the table variable's name inside tempdb ----
+
+    [TestMethod]
+    public void Truncation_NamesTheInternalName()
+    {
+        var ex = new Simulation().AssertSqlError("declare @t table (a varchar(2)); insert @t values ('abc')", 2628);
+        MatchesRegex(@"^String or binary data would be truncated in table 'tempdb\.dbo\.#[0-9A-F]{8}', column 'a'\. Truncated value: 'ab'\.$", ex.Errors[0].Message);
+    }
+
+    [TestMethod]
+    public void Truncation_EachDeclarationGetsItsOwnName()
+    {
+        using var connection = new Simulation().CreateOpenConnection();
+        string Name(string variable)
+        {
+            try
+            {
+                _ = connection.CreateCommand($"declare {variable} table (a varchar(2)); insert {variable} values ('abc')").ExecuteNonQuery();
+            }
+            catch (SimulatedSqlException ex)
+            {
+                return ex.Errors[0].Message;
+            }
+            throw new AssertFailedException("Msg 2628 expected.");
+        }
+        AreNotEqual(Name("@t"), Name("@t"));
+    }
+
+    [TestMethod]
+    public void CheckViolation_NamesConstraintByInternalNameAndOmitsColumn()
+    {
+        var ex = new Simulation().AssertSqlError("declare @t table (a int check (a > 0)); insert @t values (-1)", 547);
+        MatchesRegex(@"^The INSERT statement conflicted with the CHECK constraint ""CK__#[0-9A-F]{8}__a__[0-9A-F]{8}""\. The conflict occurred in database ""tempdb"", table ""@t""\.$", ex.Errors[0].Message);
+    }
+
+    [TestMethod]
+    public void KeyViolation_TruncatesInternalNameToEight()
+    {
+        var ex = new Simulation().AssertSqlError("declare @t table (a int primary key); insert @t values (1), (1)", 2627);
+        MatchesRegex(@"^Violation of PRIMARY KEY constraint 'PK__#[0-9A-F]{7}__[0-9A-F]{16}'\. Cannot insert duplicate key in object 'dbo\.@t'\.", ex.Errors[0].Message);
+    }
+
+    [TestMethod]
+    public void NullViolation_KeepsWrittenName()
+        => new Simulation().AssertSqlError(
+            "declare @t table (a int not null); insert @t values (null)", 515,
+            "Cannot insert the value NULL into column 'a', table '@t'; column does not allow nulls. INSERT fails.");
+
+    [TestMethod]
+    public void TypedTableVariable_NamesTheInternalName()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create type tt as table (a varchar(2) check (a <> 'x'))");
+        var truncation = sim.AssertSqlError("declare @t tt; insert @t values ('abc')", 2628);
+        MatchesRegex(@"'tempdb\.dbo\.#[0-9A-F]{8}'", truncation.Errors[0].Message);
+        var check = sim.AssertSqlError("declare @t tt; insert @t values ('x')", 547);
+        MatchesRegex(@"""CK__#[0-9A-F]{8}__a__[0-9A-F]{8}""\. The conflict occurred in database ""tempdb"", table ""@t""\.$", check.Errors[0].Message);
+    }
 }

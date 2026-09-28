@@ -355,6 +355,34 @@ internal static class PermissionEnforcement
             : principalId;
 
     /// <summary>
+    /// Refuses a restricted session's read of a catalog view it may not read
+    /// (<see cref="PermissionChecker.CanReadCatalogView"/>) with Msg 229, which names the view in
+    /// <c>mssqlsystemresource</c>, where real keeps it. A <c>dbo</c> session pays
+    /// one flag read.
+    /// </summary>
+    internal static void CheckCatalogViewRead(BatchContext batch, Schemas.CatalogView view, Database target)
+    {
+        var security = batch.Connection.Security;
+        if (security.EffectiveIsDbo)
+            return;
+        int principalId;
+        if (ReferenceEquals(target, batch.CurrentDatabase))
+            principalId = security.Effective.DatabasePrincipalId;
+        else if (TryResolveCrossDatabasePrincipal(batch.Connection, target, out var principal))
+            principalId = principal.PrincipalId;
+        else
+            return;
+        if (principalId == Database.DboPrincipalId
+            || !BuiltInResources.CatalogViewsById.Value.TryGetValue(view.ObjectId, out var entry))
+        {
+            return;
+        }
+        var schemaId = entry.SchemaName == "INFORMATION_SCHEMA" ? Database.InformationSchemaId : Database.SysSchemaId;
+        if (!PermissionChecker.CanReadCatalogView(target, principalId, view.ObjectId, schemaId))
+            throw SimulatedSqlException.PermissionDenied("SELECT", view.Name, "mssqlsystemresource", entry.SchemaName);
+    }
+
+    /// <summary>
     /// Checks the read permission on every securable a <see cref="Parser.Selection"/>
     /// recorded; throws on the first denial. A SELECT read whose column ordinals
     /// were tracked (<paramref name="readColumns"/> — base tables and views alike)
@@ -867,6 +895,26 @@ internal static class PermissionChecker
     // per-login request while a class-101 DENY overrides it.
     internal const byte ClassServerPrincipal = 101;
 
+    /// <summary>
+    /// Whether <paramref name="principalId"/> may read the catalog view with id
+    /// <paramref name="viewId"/>: a <c>DENY SELECT</c> reaching it refuses, and
+    /// one of the system objects every database grants <c>public</c>
+    /// <c>SELECT</c> on (<see cref="Database.PublicSelectSeedObjectIdSet"/>)
+    /// needs that grant, or another, still standing — a <c>REVOKE</c> of the
+    /// seeded one refuses it (probed 2026-09-28 against SQL Server 2025). The
+    /// deny roles and data roles don't reach the catalog.
+    /// </summary>
+    internal static bool CanReadCatalogView(Database database, int principalId, int viewId, int schemaId)
+    {
+        var closure = BuildClosure(database, principalId);
+        var satisfiers = BuildSatisfiers(Permission.Select, ClassObject, viewId, schemaId, columnOrdinal: 0);
+        if (HasMatchingRow(database, closure, satisfiers, deny: true))
+            return false;
+        return !Database.PublicSelectSeedObjectIdSet.Contains(viewId)
+            || closure.Contains(DbOwner)
+            || HasMatchingRow(database, closure, satisfiers, deny: false);
+    }
+
     /// <summary>Whether the effective principal holds <paramref name="permission"/> on the described securable. An off-catalog (<see cref="Permission.Other"/>) request is never satisfied.</summary>
     internal static bool IsGranted(Database database, int principalId, Permission permission, byte securableClass, int majorId, int schemaId)
     {
@@ -1097,13 +1145,15 @@ internal static class PermissionChecker
     /// Whether a database-scope grant of this permission reveals every object's
     /// metadata — the object-applicable permissions do; the connect / create /
     /// impersonate permissions (notably the <c>CONNECT</c> every user is seeded)
-    /// do not, so they can't blanket-reveal the catalog.
+    /// and the column-encryption <c>VIEW ANY …</c> pair every database grants
+    /// <c>public</c> do not, so they can't blanket-reveal the catalog.
     /// </summary>
     private static bool RevealsObjectMetadata(Permission permission) => permission switch
     {
         Permission.Connect or Permission.CreateFunction or Permission.CreateProcedure
             or Permission.CreateSequence or Permission.CreateTable or Permission.CreateView
-            or Permission.Impersonate or Permission.Other => false,
+            or Permission.Impersonate or Permission.ViewAnyColumnEncryptionKeyDefinition
+            or Permission.ViewAnyColumnMasterKeyDefinition or Permission.Other => false,
         _ => true,
     };
 

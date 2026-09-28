@@ -288,8 +288,23 @@ internal sealed class HasPermsByName : Expression
                 securableClass = PermissionChecker.ClassDatabase;
                 break;
             case "OBJECT":
-                if (securableVal.IsNull || !TryResolveObjectByName(database, securableVal.CoerceTo(SqlType.NVarchar).AsString, out majorId, out schemaId))
+                if (securableVal.IsNull)
                     return SqlValue.Null(SqlType.Int32);
+                var objectName = securableVal.CoerceTo(SqlType.NVarchar).AsString;
+                if (!TryResolveObjectByName(database, objectName, out majorId, out schemaId))
+                {
+                    // A catalog view answers by its own read rule (probed
+                    // 2026-09-28 against SQL Server 2025).
+                    if (permission.Trim().Equals("SELECT", StringComparison.OrdinalIgnoreCase)
+                        && ObjectId.TryParseObjectName(objectName, out var parsed)
+                        && runtime.Batch.TryResolveCatalogView(parsed, out var catalogView, out var catalogDatabase)
+                        && BuiltInResources.CatalogViewsById.Value.TryGetValue(catalogView.ObjectId, out var entry))
+                    {
+                        var viewSchemaId = entry.SchemaName == "INFORMATION_SCHEMA" ? Database.InformationSchemaId : Database.SysSchemaId;
+                        return SqlValue.FromInt32(PermissionChecker.CanReadCatalogView(catalogDatabase, principalId, catalogView.ObjectId, viewSchemaId) ? 1 : 0);
+                    }
+                    return SqlValue.Null(SqlType.Int32);
+                }
                 securableClass = PermissionChecker.ClassObject;
                 break;
             case "SCHEMA":

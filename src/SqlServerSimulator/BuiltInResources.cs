@@ -8,6 +8,24 @@ internal static partial class BuiltInResources
 {
     public static readonly Lazy<FrozenDictionary<string, CatalogView>> CatalogViews = new(BuildCatalogViews);
 
+    /// <summary>
+    /// Every registered catalog view by its object id, with the schema it
+    /// lives in — what a permission row on one (class 1, a negative
+    /// <c>major_id</c>) resolves through.
+    /// </summary>
+    public static readonly Lazy<FrozenDictionary<int, (string SchemaName, CatalogView View)>> CatalogViewsById = new(BuildCatalogViewsById);
+
+    private static FrozenDictionary<int, (string SchemaName, CatalogView View)> BuildCatalogViewsById()
+    {
+        var byId = new Dictionary<int, (string SchemaName, CatalogView View)>();
+        foreach (var (key, view) in CatalogViews.Value)
+        {
+            var dot = key.IndexOf('.', StringComparison.Ordinal);
+            _ = byId.TryAdd(view.ObjectId, (dot < 0 ? "sys" : key[..dot], view));
+        }
+        return byId.ToFrozenDictionary();
+    }
+
     // Catalog-pinned types reused across catalog views — Latin1_General_CI_AS_KS_WS
     // at Implicit rank, matching what real SQL Server's catalog DDL pins
     // for _desc enum columns, permission_name, and the char(1)/char(2)

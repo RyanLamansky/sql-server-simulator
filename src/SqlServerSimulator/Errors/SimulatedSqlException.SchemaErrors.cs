@@ -2802,6 +2802,15 @@ partial class SimulatedSqlException
         new($"Cannot insert the value NULL into column '{columnName}', table '{qualifiedTableName}'; column does not allow nulls. UPDATE fails.", 515, 16, 2);
 
     /// <summary>
+    /// Mimics SQL Server error 15182: a <c>REVOKE</c> or <c>DENY</c> of
+    /// <c>CONNECT</c> from <c>guest</c> in <c>master</c> or <c>tempdb</c>,
+    /// whose guest access can't be turned off (probed 2026-09-28 against SQL
+    /// Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException CannotDisableGuestAccess() =>
+        new("Cannot disable access to the guest user in master or tempdb.", 15182, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 15151: an unknown principal name was referenced
     /// (GRANT/REVOKE/DENY ... TO &lt;unknown&gt;, ALTER ROLE ... ADD MEMBER &lt;unknown&gt;,
     /// CREATE USER ... FROM LOGIN &lt;unknown&gt;, etc.). Probe-confirmed wording.

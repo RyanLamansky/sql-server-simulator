@@ -644,12 +644,12 @@ partial class Simulation
         }
     }
 
-    private static string AutoDefaultName(string tableName, string columnName)
+    private static string AutoDefaultName(string tableName, string columnName, int tablePartLength = 8)
     {
         var h = Fnv1a32.Initial;
         h.MixTableSeed(tableName);
         h.Mix(columnName);
-        return FormatAutoConstraintName("DF__", tableName, columnName, h.Value);
+        return FormatAutoConstraintName("DF__", tableName, columnName, h.Value, tablePartLength);
     }
 
     /// <summary>

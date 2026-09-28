@@ -167,30 +167,34 @@ partial class Simulation
     /// <c>isTableVariable: true</c> branch).
     /// </remarks>
     /// <summary>
-    /// Real names a return table's unnamed constraints after the function —
+    /// Draws again, from <paramref name="ownerName"/>, the auto-names the
+    /// shared column-list parser drew from <paramref name="tableName"/>, for
+    /// the two tables real names otherwise than their errors do: a return
+    /// table's unnamed constraints are named after the function —
     /// <c>DF__mfz__d__…</c>, <c>PK__mfz__…</c> — though its errors name the
-    /// table <c>@r</c> (probed 2026-09-26 against SQL Server 2025), so the
-    /// auto-names the shared column-list parser drew from
-    /// <paramref name="tableName"/> are drawn again from
-    /// <paramref name="functionName"/>.
+    /// table <c>@r</c> (probed 2026-09-26 against SQL Server 2025), and a
+    /// table variable's after its <c>#</c>-and-hex name inside <c>tempdb</c>
+    /// (probed 2026-09-28), whose nine characters a CHECK and a DEFAULT keep
+    /// whole (<paramref name="checkTablePartLength"/>).
     /// </summary>
-    private static void NameReturnTableConstraintsAfterFunction(
-        string functionName, string tableName, HeapColumn[] columns, KeyConstraint[] keyConstraints, CheckConstraint[] checkConstraints)
+    private static void RenameAutoNamedConstraints(
+        string ownerName, string tableName, HeapColumn[] columns, KeyConstraint[] keyConstraints, CheckConstraint[] checkConstraints,
+        int checkTablePartLength = 8)
     {
         foreach (var column in columns)
         {
             if (column.DefaultConstraint is { IsSystemNamed: true } defaultConstraint)
-                defaultConstraint.Name = AutoDefaultName(functionName, column.Name);
+                defaultConstraint.Name = AutoDefaultName(ownerName, column.Name, checkTablePartLength);
         }
         foreach (var key in keyConstraints)
         {
             if (key.Name == AutoConstraintName(tableName, key.Kind, key.FullOrdinals, columns))
-                key.Name = AutoConstraintName(functionName, key.Kind, key.FullOrdinals, columns);
+                key.Name = AutoConstraintName(ownerName, key.Kind, key.FullOrdinals, columns);
         }
         for (var i = 0; i < checkConstraints.Length; i++)
         {
             if (checkConstraints[i].IsSystemNamed)
-                checkConstraints[i].Name = AutoCheckName(functionName, checkConstraints[i].InlineColumn, i);
+                checkConstraints[i].Name = AutoCheckName(ownerName, checkConstraints[i].InlineColumn, i, checkTablePartLength);
         }
     }
 
@@ -216,7 +220,7 @@ partial class Simulation
             returnTableIndexes);
         if (returnTableIndexes.Count > 0)
             throw new NotSupportedException("An inline INDEX on a multi-statement function's return table isn't modeled.");
-        NameReturnTableConstraintsAfterFunction(functionName.Leaf, "@" + returnVariableName, outputColumns, keyConstraints, checkConstraints);
+        RenameAutoNamedConstraints(functionName.Leaf, "@" + returnVariableName, outputColumns, keyConstraints, checkConstraints);
 
         // Optional WITH-clause (SCHEMABINDING is captured for
         // sys.sql_modules / OBJECTPROPERTY; ENCRYPTION parse-and-discards).

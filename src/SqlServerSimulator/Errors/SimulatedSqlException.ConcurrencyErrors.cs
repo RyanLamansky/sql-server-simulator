@@ -217,8 +217,9 @@ partial class SimulatedSqlException
     /// — the message embeds the offending table's two-part name and the
     /// containing database. The probed real server auto-rolls back the
     /// failing SI transaction (<c>@@TRANCOUNT</c> drops to 0); the simulator
-    /// matches that auto-rollback behavior.
+    /// matches that auto-rollback behavior. Uncaught it ends the batch
+    /// (probed 2026-09-28).
     /// </summary>
     internal static SimulatedSqlException SnapshotIsolationUpdateConflict(string qualifiedTableName, string databaseName) =>
-        new($"Snapshot isolation transaction aborted due to update conflict. You cannot use snapshot isolation to access table '{qualifiedTableName}' directly or indirectly in database '{databaseName}' to update, delete, or insert the row that has been modified or deleted by another transaction. Retry the transaction or change the isolation level for the update/delete statement.", 3960, 16, 2);
+        new($"Snapshot isolation transaction aborted due to update conflict. You cannot use snapshot isolation to access table '{qualifiedTableName}' directly or indirectly in database '{databaseName}' to update, delete, or insert the row that has been modified or deleted by another transaction. Retry the transaction or change the isolation level for the update/delete statement.", 3960, 16, 2) { TerminatesBatch = true };
 }

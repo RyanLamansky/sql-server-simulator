@@ -125,16 +125,23 @@ internal sealed class TableType(
     /// </summary>
     public HeapTable Clone(string fullName, BatchContext batch, bool isTableValuedParameter = false)
     {
+        // Real names a typed table variable's constraints, and the table in
+        // Msg 2628, by its name inside tempdb, as for DECLARE @t TABLE
+        // (probed 2026-09-28 against SQL Server 2025).
+        var internalName = batch.Connection.Simulation.AllocateTableVariableInternalName();
         var table = new HeapTable(
             fullName,
             this.Columns,
             batch.CurrentDatabase.AllocateObjectId(),
             schemaId: Database.DboSchemaId,
             createDate: batch.CurrentStatement.UtcNow,
-            keyConstraints: Simulation.ResolveKeyConstraints(fullName, this.Columns, this.PendingKeys, batch.CurrentDatabase, batch.CurrentStatement.UtcNow),
-            checkConstraints: Simulation.ResolveCheckConstraints(fullName, this.PendingChecks, batch.CurrentDatabase, batch.CurrentStatement.UtcNow),
+            keyConstraints: Simulation.ResolveKeyConstraints(internalName, this.Columns, this.PendingKeys, batch.CurrentDatabase, batch.CurrentStatement.UtcNow),
+            checkConstraints: Simulation.ResolveCheckConstraints(internalName, this.PendingChecks, batch.CurrentDatabase, batch.CurrentStatement.UtcNow, checkTablePartLength: internalName.Length),
             isTableVariable: true,
-            isTableValuedParameter: isTableValuedParameter);
+            isTableValuedParameter: isTableValuedParameter)
+        {
+            InternalName = internalName,
+        };
         Simulation.AddInlineIndexes(batch, table, fullName, this.PendingIndexes);
         return table;
     }

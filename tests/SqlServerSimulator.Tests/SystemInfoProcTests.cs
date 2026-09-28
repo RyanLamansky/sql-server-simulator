@@ -602,7 +602,7 @@ public sealed class SystemInfoProcTests
     [TestMethod]
     public void HelpProtect_ReportsObjectRowsThenStatementRows()
     {
-        var sets = Sets(ProtectFixture(), "exec sp_helprotect");
+        var sets = Sets(ProtectFixture(), "exec sp_helprotect null, 'pu1'");
         CollectionAssert.AreEqual(
             new[] { "Owner", "Object", "Grantee", "Grantor", "ProtectType", "Action", "Column" }, sets[0].Names);
         var rendered = sets[0].Rows.ConvertAll(ProtectRowText);
@@ -612,12 +612,25 @@ public sealed class SystemInfoProcTests
                 "dbo|pt|pu1|dbo|Deny|Delete|.",
                 "dbo|pt|pu1|dbo|Grant|Select|(All+New)",
                 "dbo|pt|pu1|dbo|Grant|Update|b",
-                "dbo|pt|pu2|dbo|Grant_WGO|Select|(All+New)",
                 ".|.|pu1|dbo|Grant|CONNECT|.",
                 ".|.|pu1|dbo|Grant|Create Table|.",
-                ".|.|pu2|dbo|Grant|CONNECT|.",
             },
             rendered);
+    }
+
+    [TestMethod]
+    public void HelpProtect_ReportsTheSeededGrants()
+    {
+        var rows = Sets(new Simulation(), "exec sp_helprotect")[0].Rows.ConvertAll(ProtectRowText);
+        Contains("sys|tables|public|dbo|Grant|Select|(All)", rows);
+        CollectionAssert.AreEqual(
+            new[]
+            {
+                ".|.|dbo|dbo|Grant|CONNECT|.",
+                ".|.|public|dbo|Grant|VIEW ANY COLUMN ENCRYPTION KEY DEFINITION|.",
+                ".|.|public|dbo|Grant|VIEW ANY COLUMN MASTER KEY DEFINITION|.",
+            },
+            rows[^3..]);
     }
 
     [TestMethod]
@@ -636,8 +649,8 @@ public sealed class SystemInfoProcTests
     public void HelpProtect_PermissionAreaSelectsTheStatementRowsOnly()
     {
         var rows = Sets(ProtectFixture(), "exec sp_helprotect null, null, null, 's'")[0].Rows;
-        HasCount(3, rows);
-        CollectionAssert.AreEqual(new[] { ".", ".", "." }, rows.ConvertAll(r => (string)r[1]!));
+        HasCount(6, rows);
+        CollectionAssert.AreEqual(new[] { ".", ".", ".", ".", ".", "." }, rows.ConvertAll(r => (string)r[1]!));
     }
 
     [TestMethod]
