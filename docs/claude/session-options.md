@@ -70,8 +70,7 @@ Takes `LOW` (-5), `NORMAL` (0), `HIGH` (5) or an integer in -10..10, from a lite
 ## Not modeled yet
 
 - `SET STATISTICS IO` / `TIME` report page counts and timings that depend on the engine's storage and the machine, and `STATISTICS XML` / `PROFILE` and the `SHOWPLAN_*` family return plans; all parse and are discarded, so no extra message or result set arrives and a `SHOWPLAN` batch runs where real only describes it.
-- `FORCEPLAN`, `QUERY_GOVERNOR_COST_LIMIT`, `REMOTE_PROC_TRANSACTIONS` and `DISABLE_DEF_CNST_CHK` parse and are discarded.
-- `DBCC USEROPTIONS`.
+- `FORCEPLAN`, `QUERY_GOVERNOR_COST_LIMIT`, `REMOTE_PROC_TRANSACTIONS` and `DISABLE_DEF_CNST_CHK` have no effect; `FORCEPLAN`, `REMOTE_PROC_TRANSACTIONS` and the `STATISTICS` switches are kept only for `DBCC USEROPTIONS` to list ([`dbcc.md`](dbcc.md#useroptions)), and not reverted when a module body that set them returns.
 
 ## Divergences
 

@@ -67,6 +67,20 @@ public sealed class SimulatedDbTransaction : DbTransaction
     internal bool BegunByApi;
 
     /// <summary>
+    /// Set when <c>SET IMPLICIT_TRANSACTIONS ON</c> opened this transaction,
+    /// which <c>DBCC OPENTRAN</c> names <c>implicit_transaction</c>.
+    /// </summary>
+    internal bool BegunImplicitly;
+
+    /// <summary>
+    /// The databases whose catalog this transaction has changed — a
+    /// <c>CREATE</c>, <c>ALTER</c> or <c>DROP</c> run inside it — which
+    /// <c>DBCC OPENTRAN</c> counts as written to. Locked on itself, since
+    /// another session reads it.
+    /// </summary>
+    internal readonly HashSet<Database> CatalogChanges = [];
+
+    /// <summary>
     /// The heap modification clock as this transaction began: a heap whose
     /// <c>LastModifiedEpoch</c> is at or past it changed while the transaction
     /// was open.

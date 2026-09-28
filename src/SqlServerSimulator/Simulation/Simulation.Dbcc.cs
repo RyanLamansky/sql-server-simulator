@@ -31,7 +31,7 @@ partial class Simulation
     /// Parses and executes the SHRINK family — <c>DBCC SHRINKDATABASE</c> /
     /// <c>DBCC SHRINKFILE</c> — peeking past the <c>DBCC</c> keyword. On any
     /// other subcommand it restores the cursor to <c>DBCC</c> (so
-    /// <see cref="TryParseDbcc"/> handles TRACEON / TRACEOFF) and returns false.
+    /// <see cref="ParseDbccCommand"/> handles it) and returns false.
     /// </summary>
     /// <remarks>
     /// Both forms reclaim memory by trimming fully-dead pages and freed LOB
@@ -43,14 +43,16 @@ partial class Simulation
     /// but doesn't compact to the live-row count, and so leaves interior dead
     /// pages reusable in place. A version-store GC pass runs first to release
     /// any history that no live snapshot still pins. SHRINKDATABASE produces no
-    /// result set (matching the real server, which reports nothing when there's
-    /// no file movement to describe); SHRINKFILE yields the documented per-file
-    /// row with sizes synthesized from the heap page totals, since the simulator
-    /// models a flat page list rather than physical database files.
+    /// result set but Msg 5201 for each file, as real reports a file with no
+    /// free space to give back; SHRINKFILE yields the documented per-file row
+    /// with sizes synthesized from the heap page totals, since the simulator
+    /// models a flat page list rather than physical database files. Msg 2528
+    /// closes both, and <c>WITH NO_INFOMSGS</c> silences everything, the row
+    /// included (probed 2026-09-28 against SQL Server 2025).
     /// </remarks>
-    private static bool TryParseShrink(ParserContext context, BatchContext batch, out SimulatedStatementOutcome? outcome)
+    private static bool TryParseShrink(ParserContext context, BatchContext batch, out List<SimulatedStatementOutcome> outcomes)
     {
-        outcome = null;
+        outcomes = [];
         var checkpoint = context.SaveCheckpoint();
         context.MoveNextRequired();
         var subcommand = (context.Token as UnquotedString)?.ContextualKeyword;
@@ -79,14 +81,20 @@ partial class Simulation
         if (context.Token is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
-        // Optional `WITH NO_INFOMSGS` — the lone WITH option for SHRINK; the
-        // simulator emits no info messages, so it's consumed and discarded.
+        // Optional `WITH NO_INFOMSGS` — the lone WITH option for SHRINK —
+        // silences SHRINKFILE's row as well as the messages.
+        var informational = true;
         var afterParen = context.SaveCheckpoint();
         context.MoveNextOptional();
         if (context.Token is ReservedKeyword { Keyword: Keyword.With })
+        {
             _ = context.GetNextRequired<Name>();
+            informational = false;
+        }
         else
+        {
             context.RestoreCheckpoint(afterParen);
+        }
 
         if (batch.IsSkipping)
             return true;
@@ -94,11 +102,21 @@ partial class Simulation
         var simulation = context.Connection.Simulation;
         var target = isFile
             ? context.Connection.CurrentDatabase
-            : ResolveShrinkDatabase(simulation, firstArg);
+            : ResolveShrinkDatabase(simulation, context.Connection.CurrentDatabase, firstArg);
 
         ShrinkDatabaseStorage(context.Connection.Simulation, target);
 
-        if (isFile)
+        if (!informational)
+            return true;
+        if (!isFile)
+        {
+            // The files' sizes are fixed, so neither ever has free space to give back.
+            var databaseId = SmallDatabaseId(simulation, target);
+            batch.AppendInfoError(@class: 0, state: 1, number: 5201, message: SimulatedSqlException.ShrinkSkippedFileText(1, databaseId));
+            batch.AppendInfoError(@class: 0, state: 2, number: 5201, message: SimulatedSqlException.ShrinkSkippedFileText(2, databaseId));
+            batch.AppendInfoError(@class: 0, state: 1, number: 2528, message: "DBCC execution completed. If DBCC printed error messages, contact your system administrator.");
+        }
+        else
         {
             var totalPages = TotalHeapPages(target);
             SqlValue[] row =
@@ -110,7 +128,8 @@ partial class Simulation
                 SqlValue.FromInt32(totalPages),
                 SqlValue.FromInt32(totalPages),
             ];
-            outcome = new SimulatedSqlResultSet(ShrinkFileSchema, ShrinkFileColumnNames, [RowEncoder.EncodeRow(ShrinkFileSchema, row)]);
+            outcomes.Add(new SimulatedSqlResultSet(ShrinkFileSchema, ShrinkFileColumnNames, [RowEncoder.EncodeRow(ShrinkFileSchema, row)]));
+            AfterDbccRows(batch, outcomes, SimulatedSqlException.DbccExecutionCompletedMessage(batch));
         }
 
         return true;
@@ -122,10 +141,11 @@ partial class Simulation
     /// <c>DBCC</c> keyword and restoring the cursor (returning false) on any
     /// other subcommand. Both argument forms real accepts are handled: a
     /// <c>N'...'</c> string literal whose content is a 1- / 2-part bracketed name
-    /// (DacFx's form) and a bare dotted identifier. Only <c>WITH HISTOGRAM</c> is
+    /// (DacFx's form) and a bare dotted identifier. Only <c>WITH HISTOGRAM</c>
+    /// (Msg 2528 after the rows) and <c>WITH HISTOGRAM, NO_INFOMSGS</c> are
     /// modeled; the no-WITH three-result-set form and every other WITH option
-    /// (STAT_HEADER / DENSITY_VECTOR / STATS_STREAM / NO_INFOMSGS combinations)
-    /// raise <see cref="NotSupportedException"/> naming the unmodeled option.
+    /// (STAT_HEADER / DENSITY_VECTOR / STATS_STREAM) raise
+    /// <see cref="NotSupportedException"/> naming the unmodeled option.
     /// </summary>
     /// <remarks>
     /// The named statistic is matched against the table's index-backed stats via
@@ -139,9 +159,9 @@ partial class Simulation
     /// (1 when there are no range rows, matching real's single-row convention).
     /// An empty table yields an empty (0-row) result set.
     /// </remarks>
-    private static bool TryParseShowStatistics(ParserContext context, BatchContext batch, out SimulatedStatementOutcome? outcome)
+    private static bool TryParseShowStatistics(ParserContext context, BatchContext batch, out List<SimulatedStatementOutcome> outcomes)
     {
-        outcome = null;
+        outcomes = [];
         var checkpoint = context.SaveCheckpoint();
         context.MoveNextRequired();
         if ((context.Token as UnquotedString)?.ContextualKeyword != ContextualKeyword.Show_Statistics)
@@ -172,10 +192,18 @@ partial class Simulation
         if (!BuiltInToken.Equals(option.Value, "HISTOGRAM"))
             throw new NotSupportedException($"DBCC SHOW_STATISTICS WITH {option.Value} isn't modeled; only WITH HISTOGRAM ships.");
 
+        var informational = true;
         var afterOption = context.SaveCheckpoint();
         if (context.MoveNext() && context.Token is Operator { Character: ',' })
-            throw new NotSupportedException("DBCC SHOW_STATISTICS WITH HISTOGRAM combined with other options isn't modeled; only a bare WITH HISTOGRAM ships.");
-        context.RestoreCheckpoint(afterOption);
+        {
+            if (context.GetNextRequired<Name>() is not { Value: var second } || !BuiltInToken.Equals(second, "NO_INFOMSGS"))
+                throw new NotSupportedException("DBCC SHOW_STATISTICS WITH HISTOGRAM combined with options other than NO_INFOMSGS isn't modeled.");
+            informational = false;
+        }
+        else
+        {
+            context.RestoreCheckpoint(afterOption);
+        }
 
         if (batch.IsSkipping)
             return true;
@@ -183,7 +211,9 @@ partial class Simulation
         if (!batch.TryResolveTable(tableName, out var table))
             throw SimulatedSqlException.CannotFindTableOrObject(tableText);
 
-        outcome = BuildHistogram(table, statName.Leaf);
+        outcomes.Add(BuildHistogram(table, statName.Leaf));
+        if (informational)
+            AfterDbccRows(batch, outcomes, SimulatedSqlException.DbccExecutionCompletedMessage(batch));
         return true;
     }
 
@@ -326,9 +356,9 @@ partial class Simulation
     /// bare / bracketed name routes through <see cref="Databases"/>
     /// (Msg 2520 on miss), a numeric database-id through the same
     /// <c>master</c>-is-1 / user-databases-from-5 convention
-    /// <see cref="DbId"/> uses.
+    /// <see cref="DbId"/> uses, 0 naming the current database.
     /// </summary>
-    private static Database ResolveShrinkDatabase(Simulation simulation, Token? firstArg)
+    private static Database ResolveShrinkDatabase(Simulation simulation, Database current, Token? firstArg)
     {
         switch (firstArg)
         {
@@ -336,6 +366,8 @@ partial class Simulation
                 return simulation.Databases.TryGetValue(name.Value, out var byName)
                     ? byName
                     : throw SimulatedSqlException.CouldNotFindDatabase(name.Value);
+            case Numeric { Value: { IsNull: false } idValue } when idValue.AsInt32 == 0:
+                return current;
             case Numeric { Value: { IsNull: false } idValue }:
                 var id = idValue.AsInt32;
                 foreach (var (db, pos) in DbId.DatabasesWithIds(simulation))
@@ -413,10 +445,6 @@ partial class Simulation
 
     private static readonly string[] InputBufferColumnNames = ["EventType", "Parameters", "EventInfo"];
 
-    private static readonly SqlType[] InputBufferSchema =
-    [
-        NVarcharSqlType.Get(30, Collation.Baseline, Coercibility.Implicit), SqlType.SmallInt, NVarcharSqlType.Get(4000, Collation.Baseline, Coercibility.Implicit),
-    ];
 
     /// <summary>
     /// Parses and executes <c>DBCC INPUTBUFFER(spid [, request_id]) [WITH NO_INFOMSGS]</c>:
@@ -488,8 +516,17 @@ partial class Simulation
         if (requestId != 0)
             throw SimulatedSqlException.InvalidSpidOrBatchId(spid, requestId);
 
-        outcome = new SimulatedSqlResultSet(InputBufferSchema, InputBufferColumnNames, [RowEncoder.EncodeRow(InputBufferSchema, [
-            row[0], row[1], row[2].IsNull ? SqlValue.Null(InputBufferSchema[2]) : SqlValue.FromNVarchar(row[2].AsString.Length > 4000 ? row[2].AsString[..4000] : row[2].AsString),
+        // Each string column is as wide as its value, as real sizes them.
+        var eventType = row[0].AsString;
+        var eventInfo = row[2].IsNull ? null : row[2].AsString.Length > 4000 ? row[2].AsString[..4000] : row[2].AsString;
+        SqlType[] schema =
+        [
+            NVarcharSqlType.Get(Math.Max(1, eventType.Length), Collation.Baseline, Coercibility.Implicit),
+            SqlType.SmallInt,
+            NVarcharSqlType.Get(Math.Max(1, eventInfo?.Length ?? 1), Collation.Baseline, Coercibility.Implicit),
+        ];
+        outcome = new SimulatedSqlResultSet(schema, InputBufferColumnNames, [RowEncoder.EncodeRow(schema, [
+            SqlValue.FromNVarchar(eventType), row[1], eventInfo is null ? SqlValue.Null(schema[2]) : SqlValue.FromNVarchar(eventInfo),
         ])]);
         if (informational)
             completion = batch.InfoMessage(@class: 0, state: 1, number: 2528, message: "DBCC execution completed. If DBCC printed error messages, contact your system administrator.");
@@ -497,39 +534,5 @@ partial class Simulation
 
         static int DbccIntegerArgument(SqlValue value, int position) =>
             !value.IsNull && SqlType.IsIntegerCategory(value.Type) ? value.CoerceTo(SqlType.Int32).AsInt32 : throw SimulatedSqlException.DbccParameterIsIncorrect(position);
-    }
-
-    /// <summary>
-    /// Parses <c>DBCC TRACEON(N)</c> / <c>DBCC TRACEOFF(N)</c>. The optional
-    /// <c>, -1</c> suffix that promotes the flag to global scope isn't modeled
-    /// — flags scope to <see cref="SimulatedDbConnection.TraceFlags"/> on the
-    /// executing connection, so concurrent connections don't share state.
-    /// </summary>
-    private static bool TryParseDbcc(ParserContext context)
-    {
-        context.MoveNextRequired();
-        bool turningOn;
-        switch ((context.Token as UnquotedString)?.ContextualKeyword)
-        {
-            case ContextualKeyword.TraceOn: turningOn = true; break;
-            case ContextualKeyword.TraceOff: turningOn = false; break;
-            default: return false;
-        }
-
-        if (context.GetNextRequired() is not Operator { Character: '(' })
-            return false;
-
-        if (context.GetNextRequired() is not Numeric { Value: { IsNull: false } numericValue })
-            return false;
-
-        if (context.GetNextRequired() is not Operator { Character: ')' })
-            return false;
-
-        if (context.Batch.IsSkipping)
-            return true;
-        var flag = numericValue.AsInt32;
-        var flags = context.Connection.TraceFlags;
-        _ = turningOn ? flags.Add(flag) : flags.Remove(flag);
-        return true;
     }
 }

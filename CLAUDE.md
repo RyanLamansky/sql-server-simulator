@@ -320,6 +320,8 @@ Where an entry carries a second clause it is because that fact changes what you'
   A partition is a **logical assignment** computed from the row's partition column, never a separate store, so every per-partition count reads the whole table → [`partitioning.md`](docs/claude/partitioning.md).
 - **Table hints (`WITH (NOLOCK …)`) and statement `OPTION (…)` hints**, including `FORCESEEK`'s nested form, the plans real refuses under `FORCESEEK` / `FORCESCAN` (Msg 8622, settled while the batch compiles) and the legacy no-`WITH` parenthesized form → [`query-hints.md`](docs/claude/query-hints.md).
 - **Heap page lifecycle** — reclamation / reuse, tail-only shrink, `DBCC SHRINKDATABASE` / `SHRINKFILE`, `Heap.RowCount`, and which callers may take the reused encode buffer → [`heap-storage.md`](docs/claude/heap-storage.md).
+- **DBCC and `CHECKPOINT`** — the cache commands, `USEROPTIONS`, `OPENTRAN`, `SQLPERF`, `LOGINFO`, the `TRACE*` trio, `HELP`, `CHECKCONSTRAINTS`, the consistency checks and table maintenance, with their messages, permissions and `@@ROWCOUNT` rules.
+  A `WITH` word that is no DBCC option stops the batch at compile, everything else raises as the statement runs → [`dbcc.md`](docs/claude/dbcc.md).
 - **Per-`Simulation` plan cache and token memo** — the two reuse layers over a repeated `CommandText`.
   Cached plans are **shared**, so per-execution state belongs on `StatementContext`, never on the plan → [`plan-cache.md`](docs/claude/plan-cache.md).
 - **Transactions** — statement atomicity, the undo log, BEGIN / COMMIT / ROLLBACK / SAVE, `SET XACT_ABORT`, `SET IMPLICIT_TRANSACTIONS`, and the rare transaction-*aborting* error class that unwinds the whole stack → [`transactions.md`](docs/claude/transactions.md).

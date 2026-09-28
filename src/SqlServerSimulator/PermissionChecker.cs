@@ -728,6 +728,11 @@ internal static class PermissionEnforcement
         !TryResolveScope(batch, database, out var principalId)
         || PermissionChecker.IsOwner(database, principalId);
 
+    /// <summary>Whether the effective principal is a <c>db_owner</c> or <c>db_backupoperator</c> member of <paramref name="database"/> (the <c>CHECKPOINT</c> gate). True for dbo / module bodies.</summary>
+    internal static bool IsOwnerOrBackupOperator(BatchContext batch, Database database) =>
+        !TryResolveScope(batch, database, out var principalId)
+        || PermissionChecker.IsOwnerOrBackupOperator(database, principalId);
+
     /// <summary>Whether the effective principal holds a database-scope permission in <paramref name="database"/> (CREATE TABLE gate, CONNECT, etc.). Always true for dbo / module bodies.</summary>
     internal static bool HasDatabasePermission(BatchContext batch, Database database, string permission) =>
         HasDatabasePermission(batch, database, Permission.Resolve(permission));
@@ -870,6 +875,7 @@ internal static class PermissionChecker
     private const int DbOwner = 16384;
     private const int DbSecurityAdmin = 16386;
     private const int DbDdlAdmin = 16387;
+    private const int DbBackupOperator = 16389;
     private const int DbDataReader = 16390;
     private const int DbDataWriter = 16391;
     private const int DbDenyDataReader = 16392;
@@ -1063,6 +1069,13 @@ internal static class PermissionChecker
     {
         var closure = BuildClosure(database, principalId);
         return closure.Contains(DbOwner) || closure.Contains(DbDdlAdmin);
+    }
+
+    /// <summary>Whether the principal is a (transitive) member of <c>db_owner</c> or <c>db_backupoperator</c>.</summary>
+    internal static bool IsOwnerOrBackupOperator(Database database, int principalId)
+    {
+        var closure = BuildClosure(database, principalId);
+        return closure.Contains(DbOwner) || closure.Contains(DbBackupOperator);
     }
 
     /// <summary>Whether the principal is a (transitive) member of <c>db_owner</c>.</summary>

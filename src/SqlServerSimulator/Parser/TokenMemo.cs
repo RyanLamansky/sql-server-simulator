@@ -42,7 +42,7 @@ internal sealed class TokenMemo
     /// How many entries <see cref="entries"/> holds, kept beside it because
     /// <see cref="ConcurrentDictionary{TKey, TValue}.Count"/> takes every one of
     /// the dictionary's locks, and a full memo asks on every fresh text.
-    /// Entries are never removed, so counting successful adds is exact.
+    /// Only <see cref="Clear"/> removes entries, decrementing as it does.
     /// </summary>
     private int count;
 
@@ -91,6 +91,20 @@ internal sealed class TokenMemo
     {
         if (this.HasCapacity && this.entries.TryAdd(key, tokens))
             _ = Interlocked.Increment(ref this.count);
+    }
+
+    /// <summary>
+    /// Forgets every stored sequence — <c>DBCC FREEPROCCACHE</c> emptying the
+    /// caches this one stands beside. Nothing can have gone stale, so this
+    /// only costs the next executions their tokenizing.
+    /// </summary>
+    public void Clear()
+    {
+        foreach (var key in this.entries.Keys)
+        {
+            if (this.entries.TryRemove(key, out _))
+                _ = Interlocked.Decrement(ref this.count);
+        }
     }
 }
 

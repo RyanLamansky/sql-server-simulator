@@ -76,4 +76,44 @@ public sealed class StatementDoneWireTests
         }
         AreEqual(5, await new SqlCommand("select 5", connection).ExecuteScalarAsync(TestContext.CancellationToken));
     }
+
+    /// <summary>
+    /// A DBCC command's rows close with their own counted DONE ahead of Msg
+    /// 2528, except <c>CHECKCONSTRAINTS</c>', which real closes uncounted after
+    /// it (probed 2026-09-28 against SQL Server 2025 through SqlClient's
+    /// <c>StatementCompleted</c> and <c>InfoMessage</c> order).
+    /// </summary>
+    [TestMethod]
+    public async Task DbccRows_CloseAheadOfTheCompletionMessage_SaveCheckConstraints()
+    {
+        var simulation = new Simulation();
+        Wire.ExecInProc(simulation, "create table t (v int constraint ck check (v > 0)); alter table t nocheck constraint ck; insert t values (-1)");
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+        var events = new List<string>();
+        connection.InfoMessage += (_, e) => events.Add($"msg {e.Errors[0].Number}");
+
+        (string Text, string[] Expected)[] cases =
+        [
+            ("dbcc useroptions; select 1", ["rows 12", "msg 2528", "rows 1"]),
+            ("dbcc checkconstraints(t) with all_constraints; select 1", ["msg 2528", "rows 1"]),
+        ];
+        foreach (var (text, expected) in cases)
+        {
+            events.Clear();
+            await using var command = new SqlCommand(text, connection);
+            command.StatementCompleted += (_, e) => events.Add($"rows {e.RecordCount}");
+            await using (var reader = await command.ExecuteReaderAsync(TestContext.CancellationToken))
+            {
+                do
+                {
+                    while (await reader.ReadAsync(TestContext.CancellationToken))
+                    {
+                    }
+                }
+                while (await reader.NextResultAsync(TestContext.CancellationToken));
+            }
+            CollectionAssert.AreEqual(expected, events, text);
+        }
+    }
 }

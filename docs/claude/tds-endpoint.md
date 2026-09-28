@@ -138,6 +138,7 @@ The rules the capture showed:
   An `sp_executesql` RPC whose statement failed and carried on returns 0, where the same body run by `EXEC` returns -6.
 - **Transaction ENVCHANGEs** go out ahead of the DONE of the statement that caused them, a procedure body's too though the body ran whole before its first outcome went out: each outcome carries the count of events recorded when its statement finished (`SimulatedStatementOutcome.TransactionEventMark`).
 - **A cursor `FETCH`** sends TABNAME and COLINFO after its COLMETADATA — each column's base table and name, an expression flagged as one, the trailing `ROWSTAT` hidden — which real sends with every fetch (`Selection.CursorBrowse`); a fetch reading no table sends COLINFO alone.
+- **A DBCC command's rows** close with a counted DONE of their own, Msg 2528 after it, then the statement's DONE; `CHECKCONSTRAINTS` sends Msg 2528 ahead of its rows' uncounted DONE instead (probed 2026-09-28 through SqlClient's `StatementCompleted` / `InfoMessage` order) → [`dbcc.md`](dbcc.md#the-statements-shape).
 - **`DROP LOGIN`** sends two RETURNSTATUS 0 tokens, from the procedures real runs inside it, and no DONE of its own.
 
 **Not modeled yet**: under `SET NOEXEC ON` real still sends each statement's DONE with its kind — the simulator sends none; `ALTER SCHEMA … TRANSFER`'s error DONE carries `0x00AA` where the statement otherwise sends none, and the simulator closes it with the batch's; a system procedure's own `RAISERROR` other than `sp_help`'s is assumed to return status 1.

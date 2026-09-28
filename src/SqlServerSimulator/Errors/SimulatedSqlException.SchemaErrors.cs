@@ -342,11 +342,12 @@ partial class SimulatedSqlException
     /// Mimics SQL Server error 2520: <c>DBCC SHRINKDATABASE(&lt;name&gt;)</c>
     /// names a database not present in this <see cref="Simulation"/>. Distinct
     /// from the <c>USE</c> path's Msg 911 — DBCC reports its own wording.
-    /// Probe-confirmed against SQL Server 2025: Class 16 State 12, the
-    /// "querying the sys.databases catalog view" suffix.
+    /// Probe-confirmed against SQL Server 2025: Class 16, the "querying the
+    /// sys.databases catalog view" suffix, state 12 from <c>SHRINKDATABASE</c>
+    /// and 5 from the other DBCC commands.
     /// </summary>
-    internal static SimulatedSqlException CouldNotFindDatabase(string databaseName) =>
-        new($"Could not find database '{databaseName}'. The database either does not exist, or was dropped before a statement tried to use it. Verify if the database exists by querying the sys.databases catalog view.", 2520, 16, 12);
+    internal static SimulatedSqlException CouldNotFindDatabase(string databaseName, byte state = 12) =>
+        new($"Could not find database '{databaseName}'. The database either does not exist, or was dropped before a statement tried to use it. Verify if the database exists by querying the sys.databases catalog view.", 2520, 16, state);
 
     /// <summary>
     /// Mimics SQL Server error 2501: <c>DBCC SHOW_STATISTICS</c> or
@@ -378,8 +379,8 @@ partial class SimulatedSqlException
     /// list names an option the command doesn't take. Probed 2026-09-25
     /// against SQL Server 2025 on <c>DBCC INPUTBUFFER … WITH TABLERESULTS</c>.
     /// </summary>
-    internal static SimulatedSqlException DbccWithOptionNotValid() =>
-        new("One or more WITH options specified are not valid for this command.", 2532, 16, 1);
+    internal static SimulatedSqlException DbccWithOptionNotValid(byte state = 1) =>
+        new("One or more WITH options specified are not valid for this command.", 2532, 16, state);
 
     /// <summary>
     /// Mimics SQL Server error 2571: a <c>DBCC</c> command the session lacks
@@ -387,8 +388,8 @@ partial class SimulatedSqlException
     /// <c>VIEW SERVER STATE</c>. Severity 14, state 10, probed 2026-09-25
     /// against SQL Server 2025.
     /// </summary>
-    internal static SimulatedSqlException DbccPermissionDenied(string userName, string command) =>
-        new($"User '{userName}' does not have permission to run DBCC {command}.", 2571, 14, 10);
+    internal static SimulatedSqlException DbccPermissionDenied(string userName, string command, byte state = 10) =>
+        new($"User '{userName}' does not have permission to run DBCC {command}.", 2571, 14, state);
 
     /// <summary>
     /// Mimics SQL Server error 7955: <c>DBCC INPUTBUFFER</c> of a session id

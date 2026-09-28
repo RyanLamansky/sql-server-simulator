@@ -6,7 +6,7 @@ The storage-layer basics (8KB pages, row encoding, LOB chains, flat page list) l
 A fully-dead interior page is reused in place but never removed from `Heap.Pages`, and a reclaimed slot keeps a 2-byte zero-extent directory entry — mid-list removal would break the stable `(page, slot)` addresses cursors, version Rids, and forward pointers depend on.
 
 `DBCC SHRINKDATABASE`/`SHRINKFILE` trim only the *trailing* run of dead/freed-LOB pages (`Heap.TrimTrailingDeadPages` / `TrimTrailingFreeLobPages`, after a version-store GC); interior dead + version-/lock-pinned tail pages stay.
-SHRINKDATABASE emits no result set; SHRINKFILE returns the per-file row with sizes from heap page totals (no physical file model).
+SHRINKDATABASE emits no result set, only a Msg 5201 per file saying it had no free space to give back; SHRINKFILE returns the per-file row with sizes from heap page totals (no physical file model) — the rest of the DBCC family is in [`dbcc.md`](dbcc.md).
 
 A versioning-on **autocommit** UPDATE/DELETE reclaims its superseded chains via a statement-end GC pass when no snapshot is open.
 

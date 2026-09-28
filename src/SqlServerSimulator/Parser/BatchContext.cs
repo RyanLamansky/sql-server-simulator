@@ -441,7 +441,7 @@ internal sealed class BatchContext
         {
             return;
         }
-        connection.CurrentTransaction = new SimulatedDbTransaction(connection.Simulation, connection, System.Data.IsolationLevel.Unspecified);
+        connection.CurrentTransaction = new SimulatedDbTransaction(connection.Simulation, connection, System.Data.IsolationLevel.Unspecified) { BegunImplicitly = true };
         this.CurrentStatement.BeganImplicitTransaction = true;
     }
 

@@ -64,6 +64,27 @@ internal sealed class UndoLog
     // skips the versioning pass.
     private bool recordsChangeTracking;
 
+    /// <summary>
+    /// Whether an entry changed a row of one of <paramref name="heaps"/>, or —
+    /// with <paramref name="temporaryTables"/> — created or dropped a temporary
+    /// table: what <c>DBCC OPENTRAN</c> asks of another session's transaction.
+    /// Walked by index, since that session may be appending meanwhile.
+    /// </summary>
+    public bool Changes(HashSet<Heap> heaps, bool temporaryTables)
+    {
+        for (var i = 0; i < this.entries.Count; i++)
+        {
+            var entry = this.entries[i];
+            if (entry.AffectedHeap is { } heap
+                ? heaps.Contains(heap)
+                : temporaryTables && entry is TempTableCreation or TempTableRemoval or LocalTempTableCreation or LocalTempTableRemoval)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
     public void RecordInsert(Heap heap, int pageIndex, int slotIndex) =>
         this.entries.Add(new SlotChange(heap, UndoKind.Insert, pageIndex, slotIndex, freeOnCommit: false));
 

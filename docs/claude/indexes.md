@@ -577,7 +577,7 @@ The **MIN value is always the first step and MAX the last**, matching real's his
 Step *placement* still diverges from real's sampled max-diff algorithm; the values are honest and self-consistent with `COUNT(*)` / `MIN` / `MAX`.
 An empty table yields a 0-row result set.
 Errors mirror real: unresolvable table → Msg 2501, unknown statistic → Msg 2767, NULL / unparseable argument → Msg 2560 (all probe-confirmed class/state).
-Only `WITH HISTOGRAM` is modeled — the no-`WITH` three-result-set form and every other option (`STAT_HEADER` / `DENSITY_VECTOR` / `STATS_STREAM` / `NO_INFOMSGS` combinations) raise `NotSupportedException` naming the option.
+Only `WITH HISTOGRAM` is modeled, Msg 2528 following the rows unless `NO_INFOMSGS` joins it — the no-`WITH` three-result-set form and every other option (`STAT_HEADER` / `DENSITY_VECTOR` / `STATS_STREAM`) raise `NotSupportedException` naming the option.
 `STATS_STREAM` (the serialized histogram blob SMO's `Statistic.Stream` reads) remains a deferred gap — see [`backlog.md`](backlog.md).
 
 ## EF Migrations integration

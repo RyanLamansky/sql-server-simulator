@@ -887,8 +887,8 @@ public sealed partial class Simulation
 
     /// <summary>
     /// How many keys <see cref="planCache"/> holds, counted on add rather than
-    /// read from the dictionary, whose <c>Count</c> takes all its locks. Keys
-    /// are never removed, so the count is exact.
+    /// read from the dictionary, whose <c>Count</c> takes all its locks. Only
+    /// <see cref="ClearPlanCache"/> removes keys, decrementing as it does.
     /// </summary>
     private int planCacheCount;
 
@@ -903,6 +903,20 @@ public sealed partial class Simulation
     /// pass. See <see cref="TokenMemo"/> for why it needs no invalidation.
     /// </summary>
     internal readonly TokenMemo TokenMemo = new();
+
+    /// <summary>
+    /// The trace flags <c>DBCC TRACEON( …, -1)</c> turned on server-wide, which
+    /// every session sees beside its own <see cref="SimulatedDbConnection.TraceFlags"/>.
+    /// Guarded by locking the set itself.
+    /// </summary>
+    internal readonly HashSet<int> GlobalTraceFlags = [];
+
+    /// <summary>Whether <paramref name="flag"/> is on server-wide.</summary>
+    internal bool IsGlobalTraceFlagOn(int flag)
+    {
+        lock (this.GlobalTraceFlags)
+            return this.GlobalTraceFlags.Contains(flag);
+    }
 
     /// <summary>Test-observable: total hits on the plan cache since
     /// construction. Incremented after a key match against a non-stale
@@ -1370,6 +1384,32 @@ public sealed partial class Simulation
             this.planCache[key] = entry;
         else if (this.PlanCacheCount < PlanCacheCapacity && this.planCache.TryAdd(key, entry))
             _ = Interlocked.Increment(ref this.planCacheCount);
+    }
+
+    /// <summary>
+    /// Empties the plan cache and the compiled-batch memo beside it — every
+    /// entry, or with <paramref name="sqlHandle"/> those whose command text it
+    /// hashes (<c>sys.dm_exec_requests.sql_handle</c>'s value) — and, for a
+    /// whole-cache clear, the token memo too, so the next execution of any text
+    /// tokenizes and parses afresh: <c>DBCC FREEPROCCACHE</c> and
+    /// <c>DBCC FREESYSTEMCACHE('ALL')</c>.
+    /// </summary>
+    internal void ClearPlanCache(byte[]? sqlHandle = null)
+    {
+        bool Matches(PlanCacheKey key) =>
+            sqlHandle is null || BuiltInResources.SqlHandleOf(key.CommandText).AsSpan().SequenceEqual(sqlHandle.AsSpan(0, BuiltInResources.SqlHandleLength));
+        foreach (var key in this.planCache.Keys)
+        {
+            if (Matches(key) && this.planCache.TryRemove(key, out _))
+                _ = Interlocked.Decrement(ref this.planCacheCount);
+        }
+        foreach (var key in this.compiledBatches.Keys)
+        {
+            if (Matches(key) && this.compiledBatches.TryRemove(key, out _))
+                _ = Interlocked.Decrement(ref this.compiledBatchCount);
+        }
+        if (sqlHandle is null)
+            this.TokenMemo.Clear();
     }
 
     /// <summary>
@@ -3570,15 +3610,19 @@ public sealed partial class Simulation
                     break;
                 }
 
-            case ReservedKeyword { Keyword: Keyword.Dbcc } when TryParseShrink(context, batch, out outcome):
-            case ReservedKeyword { Keyword: Keyword.Dbcc } when TryParseShowStatistics(context, batch, out outcome):
-            case ReservedKeyword { Keyword: Keyword.Dbcc } when TryParseCheckIdent(context, batch, out outcome):
-                if (!batch.IsSkipping)
-                {
-                    connection.LastStatementRowCount = 0;
-                    if (outcome is not null)
-                        yield return outcome;
-                }
+            case ReservedKeyword { Keyword: Keyword.Dbcc } when TryParseShrink(context, batch, out var shrinkOutcomes):
+                // SHRINK* and SHOW_STATISTICS leave @@ROWCOUNT alone (probed
+                // 2026-09-28 against SQL Server 2025).
+                foreach (var o in shrinkOutcomes)
+                    yield return o;
+                break;
+
+            case ReservedKeyword { Keyword: Keyword.Dbcc } when TryParseShowStatistics(context, batch, out var statisticsOutcomes):
+                foreach (var o in statisticsOutcomes)
+                    yield return o;
+                break;
+
+            case ReservedKeyword { Keyword: Keyword.Dbcc } when TryParseCheckIdent(context, batch, out _):
                 break;
 
             case ReservedKeyword { Keyword: Keyword.Dbcc } when TryParseInputBuffer(context, batch, out outcome, out var completion):
@@ -3586,10 +3630,20 @@ public sealed partial class Simulation
                 if (!batch.IsSkipping)
                 {
                     connection.LastStatementRowCount = 1;
-                    yield return outcome!;
+                    List<SimulatedStatementOutcome> produced = [outcome!];
                     if (completion is not null)
-                        yield return new SimulatedInfoOutcome(completion, followsRows: true);
+                        AfterDbccRows(batch, produced, completion);
+                    foreach (var o in produced)
+                        yield return o;
                 }
+                break;
+
+            case ReservedKeyword { Keyword: Keyword.Dbcc }:
+                foreach (var dbccOutcome in ParseDbccCommand(context, batch))
+                    yield return dbccOutcome;
+                break;
+
+            case ReservedKeyword { Keyword: Keyword.Checkpoint } when ParseCheckpoint(context, batch):
                 break;
 
             case ReservedKeyword { Keyword: Keyword.Create } when TryParseCreate(context):
@@ -3603,13 +3657,17 @@ public sealed partial class Simulation
                 {
                     BumpSchemaVersion();
                     connection.LastStatementRowCount = 0;
+                    if (connection.CurrentTransaction is { } ddlTransaction)
+                    {
+                        lock (ddlTransaction.CatalogChanges)
+                            _ = ddlTransaction.CatalogChanges.Add(connection.CurrentDatabase);
+                    }
                 }
                 break;
 
             case ReservedKeyword { Keyword: Keyword.Commit } when RejectingTrailingToken(context, TryParseCommit(context)):
             case ReservedKeyword { Keyword: Keyword.Save } when TryParseSavepoint(context):
             case ReservedKeyword { Keyword: Keyword.Rollback } when TryParseRollbackTransaction(context):
-            case ReservedKeyword { Keyword: Keyword.Dbcc } when TryParseDbcc(context):
             case ReservedKeyword { Keyword: Keyword.Grant } when RejectingTrailingToken(context, TryParseGrantRevokeDeny(context, PermissionStatementKind.Grant)):
             case ReservedKeyword { Keyword: Keyword.Revoke } when RejectingTrailingToken(context, TryParseGrantRevokeDeny(context, PermissionStatementKind.Revoke)):
             case ReservedKeyword { Keyword: Keyword.Deny } when RejectingTrailingToken(context, TryParseGrantRevokeDeny(context, PermissionStatementKind.Deny)):

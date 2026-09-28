@@ -37,6 +37,12 @@ Bump sites:
 
 Non-DDL statements that touch principal / permission / extended-property / trigger-enable state don't bump — cached SELECT plans don't depend on those for parse-time validity.
 
+## Clearing: `DBCC FREEPROCCACHE`
+
+`Simulation.ClearPlanCache` removes entries rather than staling them: `DBCC FREEPROCCACHE` (bare, or naming the `default` pool, which holds every plan here) and `DBCC FREESYSTEMCACHE('ALL' | 'SQL Plans')` empty the plan cache, the compiled-batch memo and the token memo, so the next execution of any text tokenizes, compiles and parses afresh.
+Given a `sql_handle` (the value `sys.dm_exec_requests.sql_handle` reports), `FREEPROCCACHE` removes the plan cache and compiled-batch entries whose command text hashes to it, and leaves the token memo alone.
+The `internal` pool and a plan handle name nothing, the simulator exposing no plans; `DbccPlanCacheTests` (Tests.Internal) pins each scope.
+
 ## Promotion happens inline in the SELECT arm
 
 The natural place for cache-add would be "after the dispatch loop, before the iterator returns".
@@ -140,7 +146,7 @@ Four rules keep a shared sequence honest — three of them found by things that 
 
 Tokens themselves are immutable: `Token` holds `(command, startIndex, length)` readonly, and the one mutable member in the hierarchy is `UnquotedString.ContextualKeyword`'s lazy classification, which is an idempotent pure function of the token's own span written to an enum field — a benign race whichever thread gets there first.
 
-Capacity is the plan cache's: 1024 entries, "first 1024 unique texts win", no LRU.
+Capacity is the plan cache's: 1024 entries, "first 1024 unique texts win", no LRU — until a [clear](#clearing-dbcc-freeproccache) empties it.
 
 ## The shared-plan contract: per-execution state lives per execution
 

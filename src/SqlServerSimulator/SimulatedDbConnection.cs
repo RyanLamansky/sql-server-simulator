@@ -259,6 +259,12 @@ public sealed class SimulatedDbConnection : DbConnection
     internal bool NoBrowseTable;
 
     /// <summary>
+    /// The <c>SET</c> switches that change nothing else here but that
+    /// <c>DBCC USEROPTIONS</c> lists while on.
+    /// </summary>
+    internal ListedOnlyOptions ListedOnlyOptions;
+
+    /// <summary>
     /// Whether this connection serves a TDS session, whose response gives
     /// every statement a DONE token of its own, each naming the statement's
     /// kind (see <see cref="StatementDoneKind"/>). While set, the engine sends
@@ -1118,9 +1124,8 @@ public sealed class SimulatedDbConnection : DbConnection
 
     /// <summary>
     /// Active session-scoped trace flags toggled via <c>DBCC TRACEON(N)</c>
-    /// / <c>DBCC TRACEOFF(N)</c>. The simulator doesn't model the separate
-    /// global scope; <c>WITH -1</c> isn't honored. Lives per connection so
-    /// concurrent connections don't trample each other's flags.
+    /// / <c>DBCC TRACEOFF(N)</c>; the server-wide ones a <c>-1</c> argument
+    /// turns on live in <see cref="Simulation.GlobalTraceFlags"/>.
     /// </summary>
     internal readonly HashSet<int> TraceFlags = [];
 
@@ -1136,6 +1141,7 @@ public sealed class SimulatedDbConnection : DbConnection
     /// </summary>
     internal bool IsVerboseTruncationActive() =>
         this.TraceFlags.Contains(460)
+        || this.Simulation.IsGlobalTraceFlagOn(460)
         || (this.CurrentDatabase.ScopedConfiguration.VerboseTruncationWarnings
             && this.CurrentDatabase.CompatibilityLevel >= CompatibilityLevel.Sql150);
 

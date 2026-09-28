@@ -409,6 +409,9 @@ partial class Simulation
             case "CURSOR_CLOSE_ON_COMMIT":
                 connection.CursorCloseOnCommit = on;
                 break;
+            case "FORCEPLAN":
+                RecordListedOnlyOption(context, ListedOnlyOptions.ForcePlan, on);
+                break;
             case "IMPLICIT_TRANSACTIONS":
                 connection.ImplicitTransactions = on;
                 break;
@@ -419,9 +422,21 @@ partial class Simulation
             case "NUMERIC_ROUNDABORT":
                 connection.NumericRoundabort = on;
                 break;
+            case "REMOTE_PROC_TRANSACTIONS":
+                RecordListedOnlyOption(context, ListedOnlyOptions.RemoteProcTransactions, on);
+                break;
             default:
                 break;
         }
+    }
+
+    /// <summary>Records a <see cref="ListedOnlyOptions"/> switch as it runs.</summary>
+    private static void RecordListedOnlyOption(ParserContext context, ListedOnlyOptions option, bool on)
+    {
+        if (context.Batch.IsSkipping || context.Batch.UdfFrame is not null)
+            return;
+        var connection = context.Connection;
+        connection.ListedOnlyOptions = on ? connection.ListedOnlyOptions | option : connection.ListedOnlyOptions & ~option;
     }
 
     /// <summary>
@@ -532,6 +547,15 @@ partial class Simulation
         if (subOption is not StringToken || onOff is not ReservedKeyword { Keyword: var statisticsOnOff and (Keyword.On or Keyword.Off) })
             return false;
         context.Batch.CurrentStatement.DoneKind = statisticsOnOff == Keyword.On ? StatementDoneKind.SetStatisticsOn : StatementDoneKind.SetStatisticsOff;
+        var listed = subOption.ToString() switch
+        {
+            var name when BuiltInToken.Equals(name, "IO") => ListedOnlyOptions.StatisticsIo,
+            var name when BuiltInToken.Equals(name, "PROFILE") => ListedOnlyOptions.StatisticsProfile,
+            var name when BuiltInToken.Equals(name, "TIME") => ListedOnlyOptions.StatisticsTime,
+            var name when BuiltInToken.Equals(name, "XML") => ListedOnlyOptions.StatisticsXml,
+            _ => ListedOnlyOptions.None,
+        };
+        RecordListedOnlyOption(context, listed, statisticsOnOff == Keyword.On);
         FunctionBodyShape.NoteSideEffect(
             context.Batch,
             statisticsOnOff == Keyword.On ? "SET STATISTICS ON" : "SET STATISTICS OFF",
@@ -1029,4 +1053,21 @@ partial class Simulation
         }
         return true;
     }
+}
+
+/// <summary>
+/// The <c>SET</c> switches the simulator keeps only so <c>DBCC USEROPTIONS</c>
+/// can list them: the <c>STATISTICS</c> family (whose messages and plans aren't
+/// built), <c>FORCEPLAN</c> and <c>REMOTE_PROC_TRANSACTIONS</c>.
+/// </summary>
+[Flags]
+internal enum ListedOnlyOptions
+{
+    None = 0,
+    StatisticsTime = 1 << 0,
+    StatisticsIo = 1 << 1,
+    StatisticsProfile = 1 << 2,
+    StatisticsXml = 1 << 3,
+    ForcePlan = 1 << 4,
+    RemoteProcTransactions = 1 << 5,
 }
