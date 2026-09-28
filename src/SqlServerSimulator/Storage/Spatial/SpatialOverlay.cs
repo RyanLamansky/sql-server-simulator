@@ -537,22 +537,27 @@ internal static class SpatialOverlay
     /// <summary>
     /// The crossing as real reports it: real doesn't round a crossing onto
     /// the grid, it computes it in floating point on the grid and maps that
-    /// back. The segment whose upper end is higher is followed from that end,
-    /// which reproduces real's last digits for an axis-aligned crossing and
-    /// for about half of oblique ones; the rest differ in the last one or two
-    /// digits.
+    /// back. Both segments are taken from their upper end in sweep order, and
+    /// the one whose upper end is higher is followed: <c>P = A + t·(B - A)</c>
+    /// with <c>t = ((C - A) × (D - C)) / ((B - A) × (D - C))</c>. Of eleven
+    /// formulations tried against 400 random crossings (probed 2026-09-28
+    /// against SQL Server 2025) — exact rational points, the determinant form,
+    /// fused multiply-adds, other choices of base segment and direction — this
+    /// one reproduces 78% to the last digit; no formulation tried explains the
+    /// rest, which differ by an ulp or two.
     /// </summary>
     private static (double X, double Y) ApproximateCrossing(Segment si, Segment sj)
     {
-        var topI = si.A.CompareTo(si.B) > 0 ? si.A : si.B;
-        var topJ = sj.A.CompareTo(sj.B) > 0 ? sj.A : sj.B;
-        var (follow, other, top) = topI.CompareTo(topJ) >= 0 ? (si, sj, topI) : (sj, si, topJ);
-        var bottom = follow.A == top ? follow.B : follow.A;
+        var (topI, bottomI) = si.A.CompareTo(si.B) > 0 ? (si.A, si.B) : (si.B, si.A);
+        var (topJ, bottomJ) = sj.A.CompareTo(sj.B) > 0 ? (sj.A, sj.B) : (sj.B, sj.A);
+        var ((top, bottom), (otherTop, otherBottom)) = topI.CompareTo(topJ) >= 0
+            ? ((topI, bottomI), (topJ, bottomJ))
+            : ((topJ, bottomJ), (topI, bottomI));
         double ax = top.X, ay = top.Y;
         double rx = bottom.X - ax, ry = bottom.Y - ay;
-        double qx = other.B.X - other.A.X, qy = other.B.Y - other.A.Y;
+        double qx = otherBottom.X - otherTop.X, qy = otherBottom.Y - otherTop.Y;
         var den = (rx * qy) - (ry * qx);
-        var t = (((other.A.X - ax) * qy) - ((other.A.Y - ay) * qx)) / den;
+        var t = (((otherTop.X - ax) * qy) - ((otherTop.Y - ay) * qx)) / den;
         return (ax + (t * rx), ay + (t * ry));
     }
 

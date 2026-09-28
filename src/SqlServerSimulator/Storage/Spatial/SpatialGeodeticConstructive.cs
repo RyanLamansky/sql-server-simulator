@@ -174,6 +174,18 @@ internal sealed class SpatialGeodeticConstructive
         return new SpatialShape(shape.Type, figures, children);
     }
 
+    /// <summary>
+    /// <c>MakeValid()</c> on the round earth: the planar rebuild of the
+    /// projected instance, mapped back and written in real's order.
+    /// </summary>
+    public static SpatialShape MakeValid(SpatialShape shape)
+    {
+        if (shape.IsEmpty)
+            return shape;
+        var projection = Over(shape);
+        return InRealOrder(projection.Map(SpatialSimplify.MakeValid(projection.Map(shape, forward: true)), forward: false));
+    }
+
     /// <summary><c>STConvexHull()</c> on the round earth: the planar hull of the projected vertices.</summary>
     public static SpatialShape ConvexHull(SpatialShape shape)
     {
@@ -182,5 +194,104 @@ internal sealed class SpatialGeodeticConstructive
         var projection = Over(shape);
         var hull = projection.Map(SpatialConstructive.ConvexHull(projection.Map(shape, forward: true)), forward: false);
         return hull.Type == SpatialShapeType.Point ? hull : Turn(SpatialConstructive.ConvexHull(Turn(hull, forward: true)), forward: false);
+    }
+}
+
+/// <summary>
+/// <c>geography</c>'s <c>STBuffer</c> / <c>BufferWithTolerance</c> for points.
+/// </summary>
+/// <remarks>
+/// Real draws a point's buffer as a circle in the gnomonic plane centred on
+/// the point, sized so the four arc ends — at 45°, 135°, 225° and 315° of the
+/// local east–north frame — lie exactly the distance away along the great
+/// elliptic arc, and starts the ring at the north-east one; the points between
+/// the arc ends sit on the planar circle, so they fall slightly short of the
+/// distance on a large buffer (probed 2026-09-28 against SQL Server 2025).
+/// Several points buffer separately and union.
+/// </remarks>
+internal static class SpatialGeodeticBuffer
+{
+    public static SpatialShape Buffer(SpatialShape shape, double distance, double tolerance, bool relative)
+    {
+        if (distance == 0)
+            return shape;
+        if (shape.IsEmpty || !(distance > 0))
+            return SpatialShape.Empty(SpatialShapeType.GeometryCollection);
+        var points = new List<SpatialCoordinate>();
+        if (!CollectPoints(shape, points))
+            throw new NotSupportedException("geography '.STBuffer' of a line or polygon is not modeled.");
+        var result = Circle(points[0], distance, tolerance, relative);
+        for (var i = 1; i < points.Count; i++)
+            result = SpatialGeodeticConstructive.Overlay(SpatialOverlayOperation.Union, result, Circle(points[i], distance, tolerance, relative));
+        return result;
+    }
+
+    private static bool CollectPoints(SpatialShape shape, List<SpatialCoordinate> points)
+    {
+        switch (shape.Type)
+        {
+            case SpatialShapeType.Point:
+                foreach (var figure in shape.Figures)
+                    points.AddRange(figure);
+                return true;
+            case SpatialShapeType.MultiPoint:
+            case SpatialShapeType.GeometryCollection:
+                foreach (var child in shape.Children)
+                {
+                    if (!CollectPoints(child, points))
+                        return false;
+                }
+                return true;
+            default:
+                return shape.IsEmpty;
+        }
+    }
+
+    private static SpatialShape Circle(SpatialCoordinate point, double distance, double tolerance, bool relative)
+    {
+        // The plane is the unit sphere's, reading latitude as a spherical
+        // angle — the frame real's round-earth envelope uses too.
+        var lat = double.DegreesToRadians(point.Y);
+        var lon = double.DegreesToRadians(point.X);
+        var center = new SpatialVector(Math.Cos(lat) * Math.Cos(lon), Math.Cos(lat) * Math.Sin(lon), Math.Sin(lat));
+        var axis = new SpatialVector(0, 0, 1);
+        var east = axis.Cross(center);
+        east = east.Length < 1e-12 ? new SpatialVector(0, 1, 0) : east.Normalized;
+        var north = center.Cross(east).Normalized;
+        var origin = SpatialShape.Leaf(SpatialShapeType.Point, [[new SpatialCoordinate(point.X, point.Y)]]);
+
+        SpatialCoordinate At(double e, double n)
+        {
+            var direction = center + (east * e) + (north * n);
+            return new SpatialCoordinate(
+                double.RadiansToDegrees(Math.Atan2(direction.Y, direction.X)),
+                double.RadiansToDegrees(Math.Atan2(direction.Z, direction.AxialRadius)));
+        }
+
+        // The planar radius whose north-east point lies the distance away.
+        var diagonal = Math.Sqrt(0.5);
+        double low = 0, high = Math.Tan(Math.Min(distance / SpatialEllipsoid.SemiMinor * 2, 1.4));
+        for (var i = 0; i < 200 && high - low > high * 1e-16; i++)
+        {
+            var mid = (low + high) / 2;
+            var probe = SpatialShape.Leaf(SpatialShapeType.Point, [[At(mid * diagonal, mid * diagonal)]]);
+            if (SpatialMeasures.GeographyDistance(origin, probe) < distance)
+                low = mid;
+            else
+                high = mid;
+        }
+        var radius = (low + high) / 2;
+        var allowance = relative ? tolerance : tolerance / distance;
+        var steps = 1;
+        while (steps < 1 << 20 && Math.Pow(Math.PI / 2 / steps, 2) / 8 > allowance)
+            steps *= 2;
+        var ring = new SpatialCoordinate[(4 * steps) + 1];
+        for (var i = 0; i < 4 * steps; i++)
+        {
+            var angle = (Math.PI / 4) + (i * Math.PI / 2 / steps);
+            ring[i] = At(radius * Math.Cos(angle), radius * Math.Sin(angle));
+        }
+        ring[^1] = ring[0];
+        return SpatialShape.Leaf(SpatialShapeType.Polygon, [ring]);
     }
 }

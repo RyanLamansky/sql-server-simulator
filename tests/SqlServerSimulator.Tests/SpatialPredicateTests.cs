@@ -479,4 +479,8 @@ public sealed class SpatialPredicateTests
                 (3, geometry::Parse('POLYGON((9 9,10 9,10 10,9 10,9 9))'));
             select count(*) from dbo.plots where shape.STIntersects(geometry::Parse('POINT(1.5 1.5)')) = 1
             """));
+
+    [TestMethod]
+    public void Intersects_CrossingRoundedOffBothLines_StillMeets() =>
+        IsTrue(Test("geometry::Parse('LINESTRING(9.6 13.9, 7.2 1.8)').STIntersects(geometry::Parse('LINESTRING(5.6 2.4, 10.6 4.9)'))"));
 }

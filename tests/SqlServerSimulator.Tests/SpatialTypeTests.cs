@@ -171,10 +171,10 @@ public sealed class SpatialTypeTests
         sim.ExecuteBatches(
             "create table dbo.loc (id int, g geography)",
             "insert dbo.loc values (1, geography::Parse('POINT(0 0)'))",
-            "create view dbo.v_hull as select id, g.STBuffer(1) as hull from dbo.loc");
+            "create view dbo.v_hull as select id, g.BufferWithCurves(1) as hull from dbo.loc");
         // View created successfully — the spatial method call parsed cleanly.
         AreEqual("v_hull", sim.ExecuteScalar("select name from sys.views where object_id = object_id('dbo.v_hull')"));
-        // ...but execute fails, since geography's round-earth buffer has no evaluation.
+        // ...but execute fails, since the curve-producing buffer has no evaluation.
         _ = Throws<NotSupportedException>(() => _ = sim.ExecuteScalar("select hull from dbo.v_hull"));
     }
 

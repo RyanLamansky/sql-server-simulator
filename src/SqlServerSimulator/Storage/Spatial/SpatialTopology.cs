@@ -221,7 +221,7 @@ internal static class SpatialTopology
     }
 
     /// <summary>The intersection of two transversal segments, or null when the denominator vanishes.</summary>
-    private static PlanarPoint? CrossingPoint(PlanarSegment s, PlanarSegment t)
+    public static PlanarPoint? CrossingPoint(PlanarSegment s, PlanarSegment t)
     {
         var sx = s.B.X - s.A.X;
         var sy = s.B.Y - s.A.Y;

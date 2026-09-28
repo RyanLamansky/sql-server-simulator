@@ -167,7 +167,13 @@ internal sealed class SpatialRelateOperand
     /// means the point is in the exterior; both true is reachable, since the
     /// component classes aren't normalized against each other.
     /// </summary>
-    public (bool Interior, bool Boundary) Locate(PlanarPoint p)
+    /// <summary>
+    /// Where a point lies relative to this operand. <paramref name="hosts"/>
+    /// names the segments a computed crossing lies on, which the orientation
+    /// test can't be trusted to confirm: the crossing is rounded to a double,
+    /// and the rounding can leave it a hair off both lines.
+    /// </summary>
+    public (bool Interior, bool Boundary) Locate(PlanarPoint p, List<PlanarSegment>? hosts = null)
     {
         var interior = false;
         var boundary = false;
@@ -179,7 +185,7 @@ internal sealed class SpatialRelateOperand
                 break;
             }
         }
-        if (SpatialTopology.OnAnySegment(p, this.LineSegments))
+        if (SpatialTopology.OnAnySegment(p, this.LineSegments) || Hosts(this.LineSegments, hosts))
         {
             if (this.LineBoundary.Contains(p))
                 boundary = true;
@@ -188,12 +194,27 @@ internal sealed class SpatialRelateOperand
         }
         if (this.RingSegments.Count > 0)
         {
-            if (SpatialTopology.OnAnySegment(p, this.RingSegments))
+            if (SpatialTopology.OnAnySegment(p, this.RingSegments) || Hosts(this.RingSegments, hosts))
                 boundary = true;
             else if (SpatialTopology.IsInsideRings(p, this.RingSegments))
                 interior = true;
         }
         return (interior, boundary);
+    }
+
+    private static bool Hosts(List<PlanarSegment> segments, List<PlanarSegment>? hosts)
+    {
+        if (hosts is null)
+            return false;
+        foreach (var host in hosts)
+        {
+            foreach (var segment in segments)
+            {
+                if (segment.A == host.A && segment.B == host.B)
+                    return true;
+            }
+        }
+        return false;
     }
 
     /// <summary>
@@ -314,12 +335,15 @@ internal static class SpatialRelate
             _ = nodes.Add(point);
         foreach (var point in right.Points)
             _ = nodes.Add(point);
-        NodeIntersections(segments, nodes);
+        var crossings = NodeIntersections(segments, nodes);
 
         foreach (var node in nodes)
-            Bump(cells, left.Locate(node), right.Locate(node), 0);
+        {
+            var hosts = crossings.GetValueOrDefault(node);
+            Bump(cells, left.Locate(node, hosts), right.Locate(node, hosts), 0);
+        }
 
-        foreach (var piece in Split(segments, nodes))
+        foreach (var piece in Split(segments, nodes, crossings))
         {
             var midpoint = piece.Midpoint;
             Bump(cells, left.Locate(midpoint), right.Locate(midpoint), 1);
@@ -360,11 +384,30 @@ internal static class SpatialRelate
         _ => [Exterior],
     };
 
-    /// <summary>Adds every pairwise meeting point of the input segments to the node set.</summary>
-    private static void NodeIntersections(List<PlanarSegment> segments, HashSet<PlanarPoint> nodes)
+    /// <summary>
+    /// Adds every pairwise meeting point of the input segments to the node set,
+    /// and returns the computed crossings with the two segments each lies on.
+    /// </summary>
+    private static Dictionary<PlanarPoint, List<PlanarSegment>> NodeIntersections(List<PlanarSegment> segments, HashSet<PlanarPoint> nodes)
     {
+        var crossings = new Dictionary<PlanarPoint, List<PlanarSegment>>();
         foreach (var (first, second) in SpatialTopology.CandidatePairs(segments))
-            SpatialTopology.CollectIntersections(segments[first], segments[second], nodes);
+        {
+            var s = segments[first];
+            var t = segments[second];
+            SpatialTopology.CollectIntersections(s, t, nodes);
+            if (SpatialTopology.ProperlyCross(s, t)
+                && !SpatialTopology.OnSegment(t.A, s) && !SpatialTopology.OnSegment(t.B, s)
+                && !SpatialTopology.OnSegment(s.A, t) && !SpatialTopology.OnSegment(s.B, t)
+                && SpatialTopology.CrossingPoint(s, t) is { } crossing)
+            {
+                if (!crossings.TryGetValue(crossing, out var hosts))
+                    crossings.Add(crossing, hosts = []);
+                hosts.Add(s);
+                hosts.Add(t);
+            }
+        }
+        return crossings;
     }
 
     /// <summary>
@@ -373,7 +416,7 @@ internal static class SpatialRelate
     /// piece, and the duplicate is dropped — a piece is a point set, not an
     /// occurrence.
     /// </summary>
-    private static List<PlanarSegment> Split(List<PlanarSegment> segments, HashSet<PlanarPoint> nodes)
+    private static List<PlanarSegment> Split(List<PlanarSegment> segments, HashSet<PlanarPoint> nodes, Dictionary<PlanarPoint, List<PlanarSegment>> crossings)
     {
         var ordered = nodes.ToArray();
         var pieces = new List<PlanarSegment>();
@@ -384,9 +427,10 @@ internal static class SpatialRelate
             onSegment.Clear();
             foreach (var node in ordered)
             {
-                if (node.X >= segment.MinX && node.X <= segment.MaxX
+                if ((node.X >= segment.MinX && node.X <= segment.MaxX
                     && node.Y >= segment.MinY && node.Y <= segment.MaxY
                     && SpatialTopology.OnSegment(node, segment))
+                    || (crossings.TryGetValue(node, out var hosts) && hosts.Exists(host => host.A == segment.A && host.B == segment.B)))
                 {
                     onSegment.Add(node);
                 }

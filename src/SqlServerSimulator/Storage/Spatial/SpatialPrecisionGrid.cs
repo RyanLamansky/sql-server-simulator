@@ -51,10 +51,8 @@ internal readonly struct GridPoint(long x, long y) : IEquatable<GridPoint>, ICom
 /// </remarks>
 internal sealed class SpatialPrecisionGrid
 {
-    private readonly double scaleX;
-    private readonly double scaleY;
-    private readonly long offsetX;
-    private readonly long offsetY;
+    private readonly GridAxis x;
+    private readonly GridAxis y;
     private readonly Dictionary<GridPoint, SpatialCoordinate> originals = [];
     private readonly Dictionary<GridPoint, (double X, double Y)> computed = [];
 
@@ -68,17 +66,43 @@ internal sealed class SpatialPrecisionGrid
 
     private SpatialPrecisionGrid(double minX, double maxX, double minY, double maxY)
     {
-        (this.scaleX, this.offsetX) = Axis(minX, maxX);
-        (this.scaleY, this.offsetY) = Axis(minY, maxY);
+        this.x = new GridAxis(minX, maxX);
+        this.y = new GridAxis(minY, maxY);
     }
 
-    private static (double Scale, long Offset) Axis(double min, double max)
+    /// <summary>
+    /// One axis of the grid. Where the centre's scaled value fits a double's
+    /// integers the grid is anchored on it rounded, <c>trunc(x·s - C + 0.5)</c>,
+    /// which is what real's last digits show; an extent far smaller than its
+    /// distance from the origin anchors on the centre itself instead, where
+    /// the grid step falls below the coordinates' own precision and every
+    /// vertex maps back to the nearest double — real's output there is plain
+    /// decimal arithmetic.
+    /// </summary>
+    private readonly struct GridAxis
     {
-        var range = max - min;
-        if (!(range > 0) || double.IsInfinity(range))
-            range = Math.Max(Math.Abs(min), 1);
-        var scale = 281474976710656.0 / range;
-        return (scale, (long)Math.Round((min + max) / 2 * scale));
+        private readonly double scale;
+        private readonly double step;
+        private readonly double centre;
+        private readonly double offset;
+        private readonly bool centred;
+
+        public GridAxis(double min, double max)
+        {
+            var range = max - min;
+            if (!(range > 0) || double.IsInfinity(range))
+                range = Math.Max(Math.Abs(min), 1);
+            this.scale = 281474976710656.0 / range;
+            this.step = range / 281474976710656.0;
+            this.centre = (min + max) / 2;
+            var scaledCentre = this.centre * this.scale;
+            this.centred = !(Math.Abs(scaledCentre) < 4503599627370496.0);
+            this.offset = this.centred ? 0 : Math.Round(scaledCentre);
+        }
+
+        public long Snap(double value) => (long)((this.centred ? (value - this.centre) * this.scale : (value * this.scale) - this.offset) + 0.5);
+
+        public double Back(double grid) => this.centred ? (grid * this.step) + this.centre : (grid * this.step) + (this.offset * this.step);
     }
 
     /// <summary>Builds the grid over the extent of every coordinate beneath the given shapes.</summary>
@@ -107,12 +131,10 @@ internal sealed class SpatialPrecisionGrid
     /// <summary>Snaps an input vertex, remembering its original coordinates for the way back.</summary>
     public GridPoint Snap(SpatialCoordinate coordinate)
     {
-        var point = new GridPoint(Round((coordinate.X * this.scaleX) - this.offsetX), Round((coordinate.Y * this.scaleY) - this.offsetY));
+        var point = new GridPoint(this.x.Snap(coordinate.X), this.y.Snap(coordinate.Y));
         _ = this.originals.TryAdd(point, new SpatialCoordinate(coordinate.X, coordinate.Y));
         return point;
     }
-
-    private static long Round(double scaled) => (long)(scaled + 0.5);
 
     /// <summary>
     /// Remembers the unrounded grid-space location of a computed vertex, which
@@ -123,14 +145,15 @@ internal sealed class SpatialPrecisionGrid
 
     /// <summary>
     /// Maps a grid vertex back to the plane: an input vertex exactly, a
-    /// computed one from its unrounded location through the scale, as
-    /// <c>X / s + C / s</c> — the grouping real's last digits follow.
+    /// computed one from its unrounded location through the step
+    /// <c>g = (max - min) / 2^48</c>, as <c>X·g + C·g</c> — the grouping
+    /// real's last digits follow.
     /// </summary>
     public SpatialCoordinate ToCoordinate(GridPoint point)
     {
         if (this.RestoreOriginals && this.originals.TryGetValue(point, out var original))
             return original;
-        var (x, y) = this.computed.TryGetValue(point, out var location) ? location : (point.X, point.Y);
-        return new SpatialCoordinate((x / this.scaleX) + (this.offsetX / this.scaleX), (y / this.scaleY) + (this.offsetY / this.scaleY));
+        var (gridX, gridY) = this.computed.TryGetValue(point, out var location) ? location : (point.X, point.Y);
+        return new SpatialCoordinate(this.x.Back(gridX), this.y.Back(gridY));
     }
 }

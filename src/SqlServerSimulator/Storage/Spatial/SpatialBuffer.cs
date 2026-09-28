@@ -13,23 +13,22 @@ namespace SqlServerSimulator.Storage.Spatial;
 /// ring turns contributes the arc between the two edges' offsets on the side
 /// that opens up; and a line's free end gets a cap of two arcs meeting
 /// straight ahead, each stopping a small angle δ short of the side offsets,
-/// with a straight chord bridging that last gap. δ is π/512 for an instance
-/// reaching ±4 to ±16 and doubles with every fourfold growth of that reach,
-/// the curve outline's own precision allowance.</para>
+/// with a straight chord bridging that last gap. δ is π/512 while the
+/// buffer's reach from the origin is 4 to 16 times the distance, and doubles
+/// with every fourfold growth of that ratio — the curve outline's own
+/// precision allowance.</para>
 /// <para>Each arc is split into a power-of-two count of equal steps, the
-/// fewest whose sagitta stays within the tolerance — <c>STBuffer</c> uses
-/// 0.001 of the distance, which is 32 steps a quarter turn. The accepted
-/// sagitta runs about 2.5% past the tolerance, which is where real's
-/// thresholds sit.</para>
+/// fewest whose deviation estimate <c>r·θ²/8</c> — the sagitta's leading
+/// term, not the sagitta itself — stays within the tolerance: every step-count
+/// threshold real shows sits on that estimate to eight digits (bisected
+/// 2026-09-28 against SQL Server 2025). <c>STBuffer</c> uses 0.001 of the
+/// distance, which is 32 steps a quarter turn.</para>
 /// <para>A negative distance erodes an area by the same pieces and yields
 /// empty for a point or a line; a zero distance returns the instance as it
 /// stands.</para>
 /// </remarks>
 internal static class SpatialBuffer
 {
-    /// <summary>The slack real's step-count thresholds show over the plain sagitta.</summary>
-    private const double ToleranceSlack = 1.0245;
-
     public static SpatialShape Buffer(SpatialShape shape, double distance, double tolerance, bool relative)
     {
         if (distance == 0)
@@ -37,12 +36,20 @@ internal static class SpatialBuffer
         if (shape.IsEmpty || double.IsNaN(distance))
             return SpatialShape.Empty(SpatialShapeType.GeometryCollection);
         var radius = Math.Abs(distance);
-        var allowance = (relative ? tolerance * radius : tolerance) * ToleranceSlack;
+        var allowance = relative ? tolerance * radius : tolerance;
         var (minX, maxX, minY, maxY) = SpatialConstructive.Extent(shape);
         var reach = Math.Max(Math.Max(Math.Abs(minX - radius), Math.Abs(maxX + radius)), Math.Max(Math.Abs(minY - radius), Math.Abs(maxY + radius)));
-        var builder = new PieceBuilder(radius, allowance, CapGap(reach));
+        var builder = new PieceBuilder(radius, allowance, CapGap(reach / radius));
         var areas = new List<SpatialShape>();
         builder.Collect(shape, areas, distance > 0);
+        if (builder.LowestArcCenter is { } center && builder.LowestArcBottom.CompareTo(builder.LowestCorner) < 0)
+        {
+            // The outline's lowest point lies inside an arc, and real starts
+            // the curve polygon's ring there — which splits that arc in two.
+            builder = new PieceBuilder(radius, allowance, CapGap(reach / radius)) { SplitCenter = center };
+            areas.Clear();
+            builder.Collect(shape, areas, distance > 0);
+        }
         if (distance < 0 && areas.Count == 0)
             return SpatialShape.Empty(SpatialShapeType.GeometryCollection);
 
@@ -69,7 +76,7 @@ internal static class SpatialBuffer
         return SpatialResultBuilder.Build(result, grid);
     }
 
-    /// <summary>The cap's short angle δ for an instance whose buffer reaches <paramref name="reach"/> from the origin.</summary>
+    /// <summary>The cap's short angle δ for a buffer reaching <paramref name="reach"/> distances from the origin.</summary>
     private static double CapGap(double reach)
     {
         var steps = Math.Floor(Math.Log2(Math.Sqrt(Math.Max(reach, double.Epsilon)) / 2));
@@ -112,6 +119,23 @@ internal static class SpatialBuffer
     private sealed class PieceBuilder(double radius, double allowance, double capGap)
     {
         public readonly List<SpatialCoordinate[]> Pieces = [];
+
+        /// <summary>The centre of the arc to split at the outline's lowest point, once a first pass has found it.</summary>
+        public SpatialCoordinate? SplitCenter;
+
+        /// <summary>The lowest bottom of any arc that passes through its own lowest point, in sweep order, and that arc's centre.</summary>
+        public (double Y, double X) LowestArcBottom = (double.PositiveInfinity, double.PositiveInfinity);
+
+        public SpatialCoordinate? LowestArcCenter;
+
+        /// <summary>The lowest vertex no arc produced — a band's corner, which is also where an arc meets it.</summary>
+        public (double Y, double X) LowestCorner = (double.PositiveInfinity, double.PositiveInfinity);
+
+        private void NoteCorner(SpatialCoordinate point)
+        {
+            if ((point.Y, point.X).CompareTo(this.LowestCorner) < 0)
+                this.LowestCorner = (point.Y, point.X);
+        }
 
         public void Collect(SpatialShape shape, List<SpatialShape> areas, bool grow)
         {
@@ -167,12 +191,58 @@ internal static class SpatialBuffer
         private int Steps(double sweep)
         {
             var steps = 1;
-            while (steps < 1 << 20 && radius * (1 - Math.Cos(Math.Abs(sweep) / (2 * steps))) > allowance)
+            while (steps < 1 << 20 && radius * Square(sweep / steps) / 8 > allowance)
                 steps *= 2;
             return steps;
         }
 
-        private void Arc(List<SpatialCoordinate> into, SpatialCoordinate center, double start, double sweep, bool includeStart)
+        /// <summary>
+        /// Linearizes one arc. The arc holding the outline's lowest point is
+        /// split there first — at the point nearest straight down of a lattice
+        /// of step <paramref name="lattice"/> anchored on
+        /// <paramref name="anchor"/>, which is where real's curve polygon starts
+        /// its ring — and each part gets its own step count. A cap's lattice is
+        /// its short angle δ from its forward direction, a join's is 1/256 of
+        /// its sweep from its start (probed over 72 cap directions and 30 joins
+        /// 2026-09-28 against SQL Server 2025).
+        /// </summary>
+        private void Arc(List<SpatialCoordinate> into, SpatialCoordinate center, double start, double sweep, bool includeStart, double anchor, double lattice)
+        {
+            if (Bottom(start, sweep) is { } bottom)
+            {
+                var point = (center.Y - radius, center.X);
+                if (point.CompareTo(this.LowestArcBottom) < 0)
+                {
+                    this.LowestArcBottom = point;
+                    this.LowestArcCenter = center;
+                }
+                if (this.SplitCenter is { } split && split.X == center.X && split.Y == center.Y)
+                {
+                    var at = anchor + (Math.Round((bottom - anchor) / lattice) * lattice);
+                    if ((at - start) * Math.Sign(sweep) > 0 && (start + sweep - at) * Math.Sign(sweep) > 0)
+                    {
+                        this.Linearize(into, center, start, at - start, includeStart);
+                        this.Linearize(into, center, at, start + sweep - at, includeStart: false);
+                        return;
+                    }
+                }
+            }
+            this.Linearize(into, center, start, sweep, includeStart);
+        }
+
+        /// <summary>The angle straight down, as it falls strictly inside the arc, or null when the arc doesn't reach it.</summary>
+        private static double? Bottom(double start, double sweep)
+        {
+            var low = Math.Min(start, start + sweep);
+            var high = Math.Max(start, start + sweep);
+            var down = -Math.PI / 2;
+            down += Math.Ceiling((low - down) / (2 * Math.PI)) * 2 * Math.PI;
+            return down > low && down < high ? down : null;
+        }
+
+        private static double Square(double value) => value * value;
+
+        private void Linearize(List<SpatialCoordinate> into, SpatialCoordinate center, double start, double sweep, bool includeStart)
         {
             var steps = this.Steps(sweep);
             for (var i = includeStart ? 0 : 1; i <= steps; i++)
@@ -186,7 +256,7 @@ internal static class SpatialBuffer
         {
             var ring = new List<SpatialCoordinate>();
             for (var quarter = 0; quarter < 4; quarter++)
-                this.Arc(ring, center, (-Math.PI / 2) + (quarter * Math.PI / 2), Math.PI / 2, includeStart: quarter == 0);
+                this.Linearize(ring, center, (-Math.PI / 2) + (quarter * Math.PI / 2), Math.PI / 2, includeStart: quarter == 0);
             ring[^1] = ring[0];
             this.Pieces.Add([.. ring]);
         }
@@ -205,10 +275,17 @@ internal static class SpatialBuffer
                 var a = points[i];
                 var b = points[(i + 1) % points.Count];
                 var (nx, ny) = Normal(a, b);
-                this.Pieces.Add(
+                // The segment's own ends sit on the band's short sides, so the
+                // fans of the joins and caps, which meet the band there, share
+                // those edges exactly rather than a snapped approximation of
+                // them that would leave slivers between the pieces.
+                SpatialCoordinate[] band =
                 [
-                    Offset(a, nx, ny, radius), Offset(b, nx, ny, radius), Offset(b, nx, ny, -radius), Offset(a, nx, ny, -radius), Offset(a, nx, ny, radius),
-                ]);
+                    Offset(a, nx, ny, radius), Offset(b, nx, ny, radius), b, Offset(b, nx, ny, -radius), Offset(a, nx, ny, -radius), a, Offset(a, nx, ny, radius),
+                ];
+                foreach (var corner in band)
+                    this.NoteCorner(corner);
+                this.Pieces.Add(band);
             }
             for (var i = closed ? 0 : 1; i < (closed ? points.Count : points.Count - 1); i++)
             {
@@ -250,7 +327,7 @@ internal static class SpatialBuffer
             // the offsets there swing through the turn angle.
             var start = turn > 0 ? Math.Atan2(-n1y, -n1x) : Math.Atan2(n1y, n1x);
             var fan = new List<SpatialCoordinate> { at };
-            this.Arc(fan, at, start, turn, includeStart: true);
+            this.Arc(fan, at, start, turn, includeStart: true, anchor: start, lattice: turn / 256);
             fan.Add(at);
             if (fan.Count >= 4)
                 this.Pieces.Add([.. fan]);
@@ -263,8 +340,8 @@ internal static class SpatialBuffer
             var ahead = Math.Atan2(end.Y - from.Y, end.X - from.X);
             var cap = new List<SpatialCoordinate> { end, Offset(end, nx, ny, -radius) };
             var quarter = (Math.PI / 2) - capGap;
-            this.Arc(cap, end, ahead - quarter, quarter, includeStart: true);
-            this.Arc(cap, end, ahead, quarter, includeStart: false);
+            this.Arc(cap, end, ahead - quarter, quarter, includeStart: true, anchor: ahead, lattice: capGap);
+            this.Arc(cap, end, ahead, quarter, includeStart: false, anchor: ahead, lattice: capGap);
             cap.Add(Offset(end, nx, ny, radius));
             cap.Add(end);
             this.Pieces.Add([.. cap]);

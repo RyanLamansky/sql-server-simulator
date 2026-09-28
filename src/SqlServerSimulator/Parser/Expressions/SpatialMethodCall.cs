@@ -311,6 +311,8 @@ internal sealed class SpatialMethodCall : Expression
             "BufferWithTolerance" => this.EvaluateBuffer(runtime, value, type, withTolerance: true),
             "EnvelopeAngle" => SpatialEnvelope.Angle(root) is { } angle ? SqlValue.FromDouble(angle) : SqlValue.Null(SqlType.Float),
             "EnvelopeCenter" => Component(value, type, PointOf(SpatialEnvelope.Center(root))),
+            // Without a spatial index, Filter is STIntersects (Microsoft's documented contract).
+            "Filter" => Predicate(runtime, value, geography, SpatialPredicateKind.Intersects),
             "HasM" => SqlValue.FromBoolean(root.AnyHasM),
             "HasZ" => SqlValue.FromBoolean(root.AnyHasZ),
             "InstanceOf" => EvaluateInstanceOf(runtime, root, geography),
@@ -319,9 +321,11 @@ internal sealed class SpatialMethodCall : Expression
             "M" => Ordinate(root, static p => p.M),
             // Real reports the lowest database compatibility level that can
             // read the instance; 100 for every shape the simulator models.
-            "MakeValid" => geography
-                ? throw new NotSupportedException("geography '.MakeValid' is not modeled.")
-                : value.IsPlanarValid ? SqlValue.FromSpatial(value, isGeography: false) : Constructed(value, SpatialSimplify.MakeValid(root)),
+            "MakeValid" => value.IsValidFor(geography)
+                ? SqlValue.FromSpatial(value, geography)
+                : geography
+                    ? SqlValue.FromSpatial(new SpatialGeometry(value.Srid, SpatialGeodeticConstructive.MakeValid(root)), isGeography: true)
+                    : Constructed(value, SpatialSimplify.MakeValid(root)),
             "MinDbCompatibilityLevel" => SqlValue.FromInt32(100),
             "NumRings" => root.Type == SpatialShapeType.Polygon ? SqlValue.FromInt32(root.Figures.Length) : SqlValue.Null(SqlType.Int32),
             "Reduce" => this.EvaluateReduce(runtime, value, type),
@@ -376,6 +380,7 @@ internal sealed class SpatialMethodCall : Expression
             "STWithin" => Predicate(runtime, value, geography, SpatialPredicateKind.Within),
             "STX" => Ordinate(root, static p => p.X),
             "STY" => Ordinate(root, static p => p.Y),
+            "ShortestLineTo" => this.EvaluateShortestLine(runtime, value, type),
             "ToString" => Text(runtime, SpatialWktWriter.Write(value, includeZM: true)),
             "Z" => Ordinate(root, static p => p.Z),
             _ => throw new NotSupportedException(
@@ -506,9 +511,22 @@ internal sealed class SpatialMethodCall : Expression
             if (!(tolerance > 0))
                 throw SimulatedSqlException.SpatialBufferToleranceNotValid(type.IsGeography, tolerance);
         }
+        return type.IsGeography
+            ? SqlValue.FromSpatial(new SpatialGeometry(value.Srid, SpatialGeodeticBuffer.Buffer(value.Root, distance, tolerance, relative)), isGeography: true)
+            : Constructed(value, SpatialBuffer.Buffer(value.Root, distance, tolerance, relative));
+    }
+
+    /// <summary>
+    /// <c>ShortestLineTo(other)</c>: NULL for a NULL, empty or
+    /// differently-referenced operand, an empty line where the two meet.
+    /// </summary>
+    private SqlValue EvaluateShortestLine(RuntimeContext runtime, SpatialGeometry value, SpatialSqlType type)
+    {
+        if (Operand(runtime, 0, value, type.IsGeography) is not { } other)
+            return SqlValue.Null(type);
         if (type.IsGeography)
-            throw new NotSupportedException($"geography '.{this.memberName}' is not modeled.");
-        return Constructed(value, SpatialBuffer.Buffer(value.Root, distance, tolerance, relative));
+            throw new NotSupportedException("geography '.ShortestLineTo' is not modeled.");
+        return SpatialConstructive.ShortestLine(value.Root, other.Root) is { } line ? Constructed(value, line) : SqlValue.Null(type);
     }
 
     /// <summary><c>Reduce(tolerance)</c>: NULL is Msg 6569 and a negative tolerance 24125.</summary>
@@ -517,9 +535,7 @@ internal sealed class SpatialMethodCall : Expression
         var tolerance = this.RequiredArgument(runtime, 0, type).CoerceTo(SqlType.Float).AsDouble;
         if (!(tolerance >= 0))
             throw SimulatedSqlException.SpatialReduceToleranceNotValid(type.IsGeography, tolerance);
-        return type.IsGeography
-            ? throw new NotSupportedException("geography '.Reduce' is not modeled.")
-            : Constructed(value, SpatialSimplify.Reduce(value.Root, tolerance));
+        return SqlValue.FromSpatial(new SpatialGeometry(value.Srid, SpatialSimplify.Reduce(value.Root, tolerance, type.IsGeography)), type.IsGeography);
     }
 
     /// <summary>An argument real refuses as NULL with Msg 6569, numbered from 1.</summary>

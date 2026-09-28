@@ -141,6 +141,85 @@ internal static class SpatialConstructive
     }
 
     /// <summary>
+    /// <c>ShortestLineTo(other)</c>: the segment from the receiver's point
+    /// nearest the other instance to the other's point nearest it, or an empty
+    /// line when the two meet. Ties go to the first pair found walking the
+    /// receiver's components in order and, for each, the other's — so of two
+    /// squares facing each other across a gap, the line runs between their
+    /// lowest facing corners (probed 2026-09-28 against SQL Server 2025). A
+    /// point's foot on a segment is <c>A + t·(B - A)</c>, whose last digit
+    /// real's text carries (<c>3.0000000000000004</c>).
+    /// </summary>
+    public static SpatialShape? ShortestLine(SpatialShape a, SpatialShape b)
+    {
+        if (a.IsEmpty || b.IsEmpty)
+            return null;
+        if (SpatialRelate.Evaluate(SpatialPredicateKind.Intersects, a, b))
+            return SpatialShape.Empty(SpatialShapeType.LineString);
+        var left = new List<(SpatialCoordinate A, SpatialCoordinate B)>();
+        var right = new List<(SpatialCoordinate A, SpatialCoordinate B)>();
+        Pieces(a, left);
+        Pieces(b, right);
+        var best = double.PositiveInfinity;
+        (SpatialCoordinate From, SpatialCoordinate To) line = default;
+        void Consider(SpatialCoordinate from, SpatialCoordinate to)
+        {
+            var dx = to.X - from.X;
+            var dy = to.Y - from.Y;
+            var squared = (dx * dx) + (dy * dy);
+            if (squared < best)
+            {
+                best = squared;
+                line = (from, to);
+            }
+        }
+        foreach (var (p, q) in left)
+        {
+            foreach (var (r, t) in right)
+            {
+                Consider(p, Foot(p, r, t));
+                if (q != p)
+                    Consider(q, Foot(q, r, t));
+                Consider(Foot(r, p, q), r);
+                if (t != r)
+                    Consider(Foot(t, p, q), t);
+            }
+        }
+        return SpatialShape.Leaf(SpatialShapeType.LineString, [[line.From, line.To]]);
+    }
+
+    /// <summary>Every isolated point (as a zero-length piece) and every edge beneath a shape, in figure order.</summary>
+    private static void Pieces(SpatialShape shape, List<(SpatialCoordinate A, SpatialCoordinate B)> pieces)
+    {
+        foreach (var figure in shape.Figures)
+        {
+            if (figure.Length == 1)
+            {
+                pieces.Add((Plain(figure[0]), Plain(figure[0])));
+                continue;
+            }
+            for (var i = 1; i < figure.Length; i++)
+                pieces.Add((Plain(figure[i - 1]), Plain(figure[i])));
+        }
+        foreach (var child in shape.Children)
+            Pieces(child, pieces);
+    }
+
+    private static SpatialCoordinate Plain(SpatialCoordinate point) => new(point.X, point.Y);
+
+    /// <summary>The point of segment <c>a b</c> nearest <paramref name="p"/>.</summary>
+    private static SpatialCoordinate Foot(SpatialCoordinate p, SpatialCoordinate a, SpatialCoordinate b)
+    {
+        var dx = b.X - a.X;
+        var dy = b.Y - a.Y;
+        var squared = (dx * dx) + (dy * dy);
+        if (squared == 0)
+            return a;
+        var t = (((p.X - a.X) * dx) + ((p.Y - a.Y) * dy)) / squared;
+        return t <= 0 ? a : t >= 1 ? b : new SpatialCoordinate(a.X + (t * dx), a.Y + (t * dy));
+    }
+
+    /// <summary>
     /// <c>STBoundary()</c>. A polygon's boundary is its rings as lines, each
     /// normalized the way an overlay writes a polygon's rings; a line's is the
     /// mod-2 set of its figures' endpoints; a point's is empty. A collection
@@ -282,11 +361,11 @@ internal static class SpatialSimplify
     /// way <see cref="MakeValid"/> does — probed against SQL Server 2025,
     /// 2026-09-28.
     /// </remarks>
-    public static SpatialShape Reduce(SpatialShape shape, double tolerance)
+    public static SpatialShape Reduce(SpatialShape shape, double tolerance, bool isGeography = false)
     {
         var leaves = new List<SpatialShape>();
         var collapsed = false;
-        Collect(shape, tolerance, leaves, ref collapsed);
+        Collect(shape, tolerance, leaves, ref collapsed, isGeography);
         SpatialShape result;
         if (shape.Type is SpatialShapeType.GeometryCollection or SpatialShapeType.MultiPoint or SpatialShapeType.MultiLineString or SpatialShapeType.MultiPolygon)
         {
@@ -310,10 +389,10 @@ internal static class SpatialSimplify
         {
             result = leaves.Count == 1 ? leaves[0] : shape;
         }
-        return collapsed ? MakeValid(result) : result;
+        return !collapsed ? result : isGeography ? SpatialGeodeticConstructive.MakeValid(result) : MakeValid(result);
     }
 
-    private static void Collect(SpatialShape shape, double tolerance, List<SpatialShape> leaves, ref bool collapsed)
+    private static void Collect(SpatialShape shape, double tolerance, List<SpatialShape> leaves, ref bool collapsed, bool isGeography)
     {
         switch (shape.Type)
         {
@@ -329,7 +408,7 @@ internal static class SpatialSimplify
                 var figures = new SpatialCoordinate[shape.Figures.Length][];
                 for (var i = 0; i < figures.Length; i++)
                 {
-                    figures[i] = shape.Type == SpatialShapeType.Point ? shape.Figures[i] : Simplify(shape.Figures[i], tolerance);
+                    figures[i] = shape.Type == SpatialShapeType.Point ? shape.Figures[i] : Simplify(shape.Figures[i], tolerance, isGeography);
                     if (shape.Type == SpatialShapeType.Polygon && figures[i].Length < 4)
                         collapsed = true;
                 }
@@ -337,12 +416,12 @@ internal static class SpatialSimplify
                 return;
             default:
                 foreach (var child in shape.Children)
-                    Collect(child, tolerance, leaves, ref collapsed);
+                    Collect(child, tolerance, leaves, ref collapsed, isGeography);
                 return;
         }
     }
 
-    private static SpatialCoordinate[] Simplify(SpatialCoordinate[] figure, double tolerance)
+    private static SpatialCoordinate[] Simplify(SpatialCoordinate[] figure, double tolerance, bool isGeography)
     {
         if (figure.Length < 3)
             return figure;
@@ -358,7 +437,7 @@ internal static class SpatialSimplify
             var distance = -1.0;
             for (var i = from + 1; i < to; i++)
             {
-                var d = SegmentDistance(figure[i], figure[from], figure[to]);
+                var d = isGeography ? ArcDistance(figure[i], figure[from], figure[to]) : SegmentDistance(figure[i], figure[from], figure[to]);
                 if (d > distance)
                 {
                     distance = d;
@@ -379,6 +458,12 @@ internal static class SpatialSimplify
         }
         return [.. result];
     }
+
+    /// <summary>A vertex's distance from the great elliptic arc between two others, metres — geography's Reduce measure.</summary>
+    private static double ArcDistance(SpatialCoordinate p, SpatialCoordinate a, SpatialCoordinate b) =>
+        SpatialMeasures.GeographyDistance(
+            SpatialShape.Leaf(SpatialShapeType.Point, [[p]]),
+            a.X == b.X && a.Y == b.Y ? SpatialShape.Leaf(SpatialShapeType.Point, [[a]]) : SpatialShape.Leaf(SpatialShapeType.LineString, [[a, b]]));
 
     private static double SegmentDistance(SpatialCoordinate p, SpatialCoordinate a, SpatialCoordinate b)
     {

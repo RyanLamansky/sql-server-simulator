@@ -385,4 +385,85 @@ public sealed class SpatialConstructiveTests
     public void Geography_CollectionAggregate_KeepsRowOrder() =>
         AreEqual("GEOMETRYCOLLECTION (POINT (1 1), POINT (2 2))",
             Eval("geography::CollectionAggregate(g).ToString() from (values (geography::Parse('POINT(1 1)')), (geography::Parse('POINT(2 2)'))) v(g)"));
+
+    [TestMethod]
+    public void Intersection_ObliqueCrossing_FollowsTheSegmentReachingHigherFromItsTop() =>
+        AreEqual("POINT (8.08558334826804 7.6052689520981449)",
+            Op("LINESTRING(12.3 2.5,0.0 17.4)", "STIntersection", "LINESTRING(4.2 4.3,19.6 17.4)"));
+
+    [TestMethod]
+    public void Intersection_FarFromTheOrigin_AnchorsTheGridOnTheCentre() =>
+        AreEqual("POLYGON ((1000000.0005 1000000.0005, 1000000.001 1000000.0005, 1000000.001 1000000.001, 1000000.0005 1000000.001, 1000000.0005 1000000.0005))",
+            Op("POLYGON((1000000 1000000, 1000000.001 1000000, 1000000.001 1000000.001, 1000000 1000000.001, 1000000 1000000))", "STIntersection",
+                "POLYGON((1000000.0005 1000000.0005, 1000000.0015 1000000.0005, 1000000.0015 1000000.0015, 1000000.0005 1000000.0015, 1000000.0005 1000000.0005))"));
+
+    [TestMethod]
+    public void Validity_TrailingRepeat_RefusedOnlyWhenReachedFromBelow()
+    {
+        IsTrue((bool)Eval("geometry::Parse('LINESTRING(15 7.5, 2 5, 2 5)').STIsValid()")!);
+        IsFalse((bool)Eval("geometry::Parse('LINESTRING(2 5, 15 7, 15 7)').STIsValid()")!);
+        IsTrue((bool)Eval("geometry::Parse('POLYGON((0 0, 2 0, 2 2, 0 2, 0 0, 0 0))').STIsValid()")!);
+        IsFalse((bool)Eval("geometry::Parse('POLYGON((2 2, 0 2, 0 0, 2 0, 2 2, 2 2))').STIsValid()")!);
+    }
+
+    [TestMethod]
+    public void Validity_RetraceJudgedOnTheGrid()
+    {
+        IsTrue((bool)Eval("geometry::Parse('LINESTRING(12 2, 6 16, 9 9)').STIsValid()")!);
+        IsFalse((bool)Eval("geometry::Parse('LINESTRING(0 0, 4 4, 2 2)').STIsValid()")!);
+    }
+
+    [TestMethod]
+    public void Union_LineValidOnTheGrid_NoLongerRaises() =>
+        AreEqual("GEOMETRYCOLLECTION (POINT (10 14), LINESTRING (15 7.5, 2 5))", Op("LINESTRING(15 7.5, 2 5, 2 5)", "STUnion", "POINT(10 14)"));
+
+    [TestMethod]
+    public void BufferWithTolerance_StepCount_FollowsTheSagittaEstimate()
+    {
+        AreEqual(9, Eval("geometry::Parse('POINT(0 0)').BufferWithTolerance(1, 0.3084, 1).STNumPoints()"));
+        AreEqual(5, Eval("geometry::Parse('POINT(0 0)').BufferWithTolerance(1, 0.3085, 1).STNumPoints()"));
+        AreEqual(19, Eval("geometry::Parse('LINESTRING(0 0, 10 0, 0 5)').BufferWithTolerance(1, 0.3, 1).STNumPoints()"));
+    }
+
+    [TestMethod]
+    public void Buffer_ObliqueLine_SplitsTheCapWhereTheRingStarts()
+    {
+        AreEqual(121, Eval("geometry::Parse('LINESTRING(0 9, 7 8)').STBuffer(2).STNumPoints()"));
+        AreEqual(6.998458355915315, (double)Eval("geometry::Parse('LINESTRING(0 9, 7 8)').STBuffer(2).STPointN(1).STX")!, 1e-12);
+    }
+
+    [TestMethod]
+    public void Geography_PointBuffer_StartsNorthEastOnTheCircle()
+    {
+        AreEqual(129, Eval("geography::Parse('POINT(-100.91 3.26)').STBuffer(20000).STNumPoints()"));
+        AreEqual(-100.78231301708725, (double)Eval("geography::Parse('POINT(-100.91 3.26)').STBuffer(20000).STPointN(1).Long")!, 1e-9);
+        AreEqual(3.3874558095025704, (double)Eval("geography::Parse('POINT(-100.91 3.26)').STBuffer(20000).STPointN(1).Lat")!, 1e-9);
+    }
+
+    [TestMethod]
+    public void Geography_Reduce_MeasuresInMetres()
+    {
+        AreEqual("LINESTRING (0 0, 2 0)", Text("geography::Parse('LINESTRING(0 0,1 0.001,2 0)').Reduce(1000)"));
+        AreEqual("LINESTRING (0 0, 1 0.001, 2 0)", Text("geography::Parse('LINESTRING(0 0,1 0.001,2 0)').Reduce(100)"));
+    }
+
+    [TestMethod]
+    public void Geography_MakeValid_ValidInstanceComesBackUntouched() =>
+        AreEqual("POLYGON ((0 0, 1 0, 1 1, 0 1, 0 0))", Text("geography::Parse('POLYGON((0 0,1 0,1 1,0 1,0 0))').MakeValid()"));
+
+    [TestMethod]
+    public void ShortestLineTo_RunsFromTheReceiverAndIsEmptyWhereTheyMeet()
+    {
+        AreEqual("LINESTRING (3 4, 0 0)", Op("POINT(3 4)", "ShortestLineTo", "POINT(0 0)"));
+        AreEqual("LINESTRING (4 1, 6 1)", Op("POLYGON((0 0,4 0,4 4,0 4,0 0))", "ShortestLineTo", "POLYGON((6 1,8 1,8 3,6 3,6 1))"));
+        AreEqual("LINESTRING EMPTY", Op("LINESTRING(0 0, 10 10)", "ShortestLineTo", "LINESTRING(0 10, 10 0)"));
+        IsNull(Op("POINT EMPTY", "ShortestLineTo", "POINT(1 1)"));
+    }
+
+    [TestMethod]
+    public void Filter_WithoutAnIndex_IsSTIntersects()
+    {
+        IsTrue((bool)Eval("geometry::Parse('POINT(0 0)').Filter(geometry::Parse('POINT(0 0)'))")!);
+        IsFalse((bool)Eval("geometry::Parse('POINT(0 0)').Filter(geometry::Parse('POINT(1 1)'))")!);
+    }
 }

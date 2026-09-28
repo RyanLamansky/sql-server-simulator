@@ -12,10 +12,11 @@ namespace SqlServerSimulator.Storage.Spatial;
 /// <list type="bullet">
 /// <item>A <b>Point</b> or <b>MultiPoint</b> is always valid, repeated
 /// coordinates included.</item>
-/// <item>A <b>LineString</b> is invalid when its last two vertices coincide,
-/// or when any two of its segments share a one-dimensional stretch. Crossing
-/// itself at a point is fine — that costs simplicity, not validity — and a
-/// repeated vertex anywhere but the end is fine too.</item>
+/// <item>A <b>LineString</b> is invalid when it ends on a repeat it reaches
+/// from above in sweep order, or when any two of its segments share a
+/// one-dimensional stretch on the precision grid. Crossing itself at a point
+/// is fine — that costs simplicity, not validity — and a repeated vertex
+/// anywhere but the end is fine too.</item>
 /// <item>A <b>MultiLineString</b> adds: no two members may share a
 /// one-dimensional stretch. Meeting at a point is fine.</item>
 /// <item>A <b>Polygon</b>'s rings must each enclose area and be simple, must
@@ -32,7 +33,62 @@ namespace SqlServerSimulator.Storage.Spatial;
 /// </remarks>
 internal static class SpatialValidator
 {
-    public static bool IsValid(SpatialShape shape)
+    /// <summary>
+    /// Judges the instance as real does: on the precision grid the
+    /// constructive operations use, spanning the instance's own extent. A
+    /// line that retraces itself exactly in its written coordinates can miss
+    /// itself by a grid step once snapped — the truncating rounding lifts a
+    /// vertex below the centre of an axis by one step — and real then finds
+    /// no overlap: <c>LINESTRING(12 2, 6 16, 9 9)</c> is valid while
+    /// <c>LINESTRING(0 0, 4 4, 2 2)</c> is not (probed 2026-09-28 against SQL
+    /// Server 2025).
+    /// </summary>
+    public static bool IsValid(SpatialShape shape) => IsValidSnapped(Snap(shape, SpatialPrecisionGrid.Over(shape)));
+
+    private static SpatialShape Snap(SpatialShape shape, SpatialPrecisionGrid grid)
+    {
+        var figures = new SpatialCoordinate[shape.Figures.Length][];
+        for (var i = 0; i < figures.Length; i++)
+        {
+            var figure = shape.Figures[i];
+            var snapped = new SpatialCoordinate[figure.Length];
+            for (var j = 0; j < figure.Length; j++)
+            {
+                var point = grid.Snap(figure[j]);
+                snapped[j] = new SpatialCoordinate(point.X, point.Y);
+            }
+            figures[i] = snapped;
+        }
+        var children = new SpatialShape[shape.Children.Length];
+        for (var i = 0; i < children.Length; i++)
+            children[i] = Snap(shape.Children[i], grid);
+        return new SpatialShape(shape.Type, figures, children);
+    }
+
+    /// <summary>
+    /// Whether a figure ends on a repeat real refuses. A repeated vertex is
+    /// harmless anywhere but the end, and there only when the figure arrives
+    /// at it from above in sweep order: <c>LINESTRING(15 7.5, 2 5, 2 5)</c> is
+    /// valid while <c>LINESTRING(2 5, 15 7, 15 7)</c> is not, and a ring
+    /// written from its top-right corner with its closing vertex doubled is
+    /// invalid where one written from its lowest corner is not (probed
+    /// 2026-09-28 against SQL Server 2025).
+    /// </summary>
+    private static bool EndsOnRefusedRepeat(SpatialCoordinate[] figure)
+    {
+        if (figure.Length < 2 || PlanarPoint.From(figure[^1]) != PlanarPoint.From(figure[^2]))
+            return false;
+        var last = figure[^1];
+        for (var i = figure.Length - 3; i >= 0; i--)
+        {
+            var point = figure[i];
+            if (point.X != last.X || point.Y != last.Y)
+                return last.Y > point.Y || (last.Y == point.Y && last.X > point.X);
+        }
+        return true;
+    }
+
+    private static bool IsValidSnapped(SpatialShape shape)
     {
         switch (shape.Type)
         {
@@ -57,7 +113,7 @@ internal static class SpatialValidator
         }
         foreach (var child in shape.Children)
         {
-            if (!IsValid(child))
+            if (!IsValidSnapped(child))
                 return false;
         }
         return true;
@@ -88,9 +144,7 @@ internal static class SpatialValidator
         {
             if (figure.Length == 0)
                 continue;
-            // A figure that stops on the vertex it already sits on is invalid,
-            // where the same repetition anywhere earlier in the run is not.
-            if (PlanarPoint.From(figure[^1]) == PlanarPoint.From(figure[^2]))
+            if (EndsOnRefusedRepeat(figure))
                 return false;
         }
         var segments = new List<PlanarSegment>();
@@ -167,6 +221,8 @@ internal static class SpatialValidator
         {
             if (figure.Length == 0)
                 continue;
+            if (EndsOnRefusedRepeat(figure))
+                return false;
             var ring = Collapse(figure);
             // Fewer than four surviving vertices, or a shoelace sum of zero,
             // means the ring bounds nothing.
