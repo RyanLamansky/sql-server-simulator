@@ -292,7 +292,7 @@ partial class Simulation
         values[table.StorageOrdinals[columnIndex]] = newValue;
         var lockable = IsLockableTable(table);
         if (lockable)
-            batch.AcquireRowLockTxScoped(table, address.PageIndex, address.SlotIndex, LockMode.Exclusive);
+            batch.AcquireRowLockTxScoped(table, address.PageIndex, address.SlotIndex, LockMode.Exclusive, RowLockPurpose.UpdatePreImage);
         if (table.ChangeTracking is { } tracking)
         {
             var keyOrdinals = TableChangeTracking.KeyOrdinals(table);

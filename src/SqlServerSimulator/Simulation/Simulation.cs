@@ -1492,6 +1492,8 @@ public sealed partial class Simulation
                 batch.CurrentStatement.SubqueryResults = null;
                 batch.CurrentStatement.CatalogViewRows = null;
                 batch.CurrentStatement.ComputedUniqueKeys = null;
+                batch.CurrentStatement.LockTallies = null;
+                batch.CurrentStatement.EscalatedTables = null;
                 batch.CurrentStatement.NullEliminated = false;
                 batch.CurrentStatement.OwesOverflowNotice = batch.CurrentStatement.OwesDivideByZeroNotice = false;
                 batch.RcsiStatementSnapshotXid = null;
@@ -2221,7 +2223,7 @@ public sealed partial class Simulation
                     // body but stops at a Msg 529, so a body whose first
                     // statement carries one reports it alone even when a later
                     // statement names a missing column (probed 2026-08-05).
-                    if (ex.Number == 529)
+                    if (ex.Number is 529 or 8622)
                         batch.BatchAborted = true;
                 }
                 else if (CaughtByTryFrame(batch, ex))
@@ -2763,7 +2765,7 @@ public sealed partial class Simulation
     private static bool IsDeferredCompileError(SimulatedSqlException ex)
         => IsBatchAbortingNameResolution(ex) || ex.Number is 4902 or 2705
             || ex.Number is 107 or 108 or 130 or 145 or 147 or 164 or 174 or 205 or 206 or 213 or 243 or 264 or 321 or 447 or 448 or 529
-                or 1011 or 1012 or 1013 or 4108 or 4115 or 5318 or 8117 or 8120 or 8121 or 8155;
+                or 1011 or 1012 or 1013 or 4108 or 4115 or 5318 or 8117 or 8120 or 8121 or 8155 or 8622;
 
     /// <summary>
     /// Whether a TRY frame catches <paramref name="ex"/> where it is raised:
@@ -2908,6 +2910,8 @@ public sealed partial class Simulation
         batch.CurrentStatement.CatalogViewRows = null;
         batch.CurrentStatement.AutocommitTransactionId = 0;
         batch.CurrentStatement.ChangeTrackingContext = null;
+        batch.CurrentStatement.LockTallies = null;
+        batch.CurrentStatement.EscalatedTables = null;
 
         // WITH prefix applies to the immediately-following SELECT / INSERT /
         // UPDATE / DELETE / MERGE. ParseCteBindings sets context.CteBindings

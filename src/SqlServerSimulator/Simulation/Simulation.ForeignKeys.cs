@@ -452,9 +452,9 @@ partial class Simulation
             var rewritten = RowEncoder.EncodeRow(childTable.StoredColumns, ProjectStoredValues(childTable, newRow), childTable.Heap);
             if (IsLockableTable(childTable))
             {
-                context.Batch.AcquireRowLockTxScoped(childTable, pageIndex, slotIndex, LockMode.Exclusive);
+                context.Batch.AcquireRowLockTxScoped(childTable, pageIndex, slotIndex, LockMode.Exclusive, RowLockPurpose.UpdatePreImage);
                 context.Batch.NoteSupersededRow(childTable, pageIndex, slotIndex);
-                context.Batch.ProbeKeyRangesForWrite(childTable, rewritten);
+                context.Batch.ProbeKeyLocksForUpdate(childTable, pageIndex, slotIndex, rewritten);
             }
             tracking?.RecordUpdate(context.Batch, childTable, keyOrdinals, oldClone, newRow, trackedColumns, ref keyMoves);
             childTable.Heap.UpdateAt(pageIndex, slotIndex, rewritten, undoLog, ReclaimSuperseded(childTable, context));
@@ -522,9 +522,9 @@ partial class Simulation
             var rewritten = RowEncoder.EncodeRow(childTable.StoredColumns, ProjectStoredValues(childTable, newRow), childTable.Heap);
             if (IsLockableTable(childTable))
             {
-                context.Batch.AcquireRowLockTxScoped(childTable, pageIndex, slotIndex, LockMode.Exclusive);
+                context.Batch.AcquireRowLockTxScoped(childTable, pageIndex, slotIndex, LockMode.Exclusive, RowLockPurpose.UpdatePreImage);
                 context.Batch.NoteSupersededRow(childTable, pageIndex, slotIndex);
-                context.Batch.ProbeKeyRangesForWrite(childTable, rewritten);
+                context.Batch.ProbeKeyLocksForUpdate(childTable, pageIndex, slotIndex, rewritten);
             }
             tracking?.RecordUpdate(context.Batch, childTable, keyOrdinals, oldClone, newRow, trackedColumns, ref keyMoves);
             childTable.Heap.UpdateAt(pageIndex, slotIndex, rewritten, undoLog, ReclaimSuperseded(childTable, context));

@@ -541,7 +541,8 @@ internal sealed class HeapTable : SchemaObject
     /// <summary>
     /// Count of connections currently holding a data-<see cref="LockMode.Exclusive"/>
     /// lock anywhere on this table (a per-row lock or the
-    /// <see cref="TableDataLock"/>). Maintained by <see cref="LockManager"/>
+    /// <see cref="TableDataLock"/>), or a <see cref="LockMode.RangeExclusiveExclusive"/>
+    /// key lock, whose key part refuses a reader's S as a row X does. Maintained by <see cref="LockManager"/>
     /// via <see cref="Interlocked"/> under its gate; read
     /// lock-free with <c>Volatile.Read</c> by the READ COMMITTED reader's
     /// per-row conflict check (<c>BatchContext.TouchRowForRead</c>). When
@@ -581,37 +582,30 @@ internal sealed class HeapTable : SchemaObject
     }
 
     /// <summary>
-    /// Lazily-interned key-range <see cref="LockResource"/>s keyed by the
-    /// <see cref="KeyRange"/> they cover — the phantom-prevention resources a
-    /// SERIALIZABLE / HOLDLOCK reader holds and every writer probes. Entries
-    /// leak once interned, the same way <see cref="RowLocks"/> does; the
-    /// <see cref="ActiveKeyRangeLocks"/> counter, not the dictionary's size,
-    /// is what tells a writer whether any probing is needed.
+    /// The key locks of each key and index that ever took one, keyed by the
+    /// <see cref="KeyConstraint"/> / <see cref="Index"/> instance — the
+    /// resources a SERIALIZABLE / HOLDLOCK reader's key and key-range locks
+    /// name, and every writer tests. Reached through
+    /// <see cref="KeyLockGroup.For"/>; the
+    /// <see cref="ActiveKeyRangeLocks"/> counter, not the dictionary's size, is
+    /// what tells a writer whether any testing is needed.
     /// </summary>
-    public readonly ConcurrentDictionary<KeyRange, LockResource> KeyRangeLocks = new();
+    public readonly ConcurrentDictionary<object, KeyLockGroup> KeyLockGroups = new(ReferenceEqualityComparer.Instance);
 
     /// <summary>
-    /// Count of range-mode holds live across this table's
-    /// <see cref="KeyRangeLocks"/>. Maintained by <see cref="LockManager"/>
-    /// via <see cref="Interlocked"/> under its gate and read lock-free with
-    /// <c>Volatile.Read</c> by the writer's per-row range probe: at zero, no
-    /// SERIALIZABLE reader holds an interval on this table, so the writer
-    /// skips decoding its row and touching the gate entirely.
+    /// Count of holds live across every <see cref="KeyLockGroups"/> anchor.
+    /// Maintained by <see cref="LockManager"/> via <see cref="Interlocked"/>
+    /// under its gate and read lock-free with <c>Volatile.Read</c> by the
+    /// writer's per-row test: at zero, nobody holds a key lock on this table,
+    /// so the writer skips decoding its row and touching the gate entirely.
     /// </summary>
     public int ActiveKeyRangeLocks;
 
     /// <summary>
-    /// Returns the <see cref="LockResource"/> covering <paramref name="range"/>,
-    /// allocating one (back-referenced to this table) on first reference.
-    /// </summary>
-    public LockResource GetOrCreateKeyRangeLock(KeyRange range) =>
-        this.KeyRangeLocks.GetOrAdd(range, static (_, t) => new LockResource { OwningTable = t }, this);
-
-    /// <summary>
-    /// Table-level data lock used when an INSERT / UPDATE / DELETE / MERGE
-    /// has escalated its per-row X locks to a single table-X (the escalation
-    /// threshold lives in <see cref="SimulatedDbTransaction.RowLockEscalationThreshold"/>),
-    /// or when <c>WITH (TABLOCK)</c> / <c>WITH (TABLOCKX)</c> was specified.
+    /// Table-level data lock: the intent lock every row-level read and write
+    /// takes, the S or X a statement's row and key locks escalate to (the
+    /// threshold lives in <see cref="Parser.LockEscalationTally"/>), and what
+    /// <c>WITH (TABLOCK)</c> / <c>WITH (TABLOCKX)</c> take directly.
     /// Distinct from <see cref="SchemaObject.SchemaLock"/> — the schema lock
     /// only takes Sch-S / Sch-M; this one takes IS / IX / SIX / S / U / X.
     /// </summary>

@@ -2111,7 +2111,7 @@ partial class Simulation
                 destinationTable.ChangeTracking?.RecordRow(context.Batch, destinationTable, oldValues, ChangeTrackingOperation.Delete);
                 if (lockableTable)
                 {
-                    context.Batch.AcquireRowLockTxScoped(destinationTable, page, slot, LockMode.Exclusive);
+                    context.Batch.AcquireRowLockTxScoped(destinationTable, page, slot, LockMode.Exclusive, RowLockPurpose.Delete);
                     context.Batch.NoteSupersededRow(destinationTable, page, slot);
                 }
                 destinationTable.Heap.DeleteAt(page, slot, undoLog, ReclaimSuperseded(destinationTable, context));
@@ -2129,9 +2129,9 @@ partial class Simulation
                 var rewritten = RowEncoder.EncodeRow(destinationTable.StoredColumns, ProjectStoredValues(destinationTable, newValues), destinationTable.Heap);
                 if (lockableTable)
                 {
-                    context.Batch.AcquireRowLockTxScoped(destinationTable, page, slot, LockMode.Exclusive);
+                    context.Batch.AcquireRowLockTxScoped(destinationTable, page, slot, LockMode.Exclusive, RowLockPurpose.UpdatePreImage);
                     context.Batch.NoteSupersededRow(destinationTable, page, slot);
-                    context.Batch.ProbeKeyRangesForWrite(destinationTable, rewritten);
+                    context.Batch.ProbeKeyLocksForUpdate(destinationTable, page, slot, rewritten);
                 }
                 destinationTable.Heap.UpdateAt(page, slot, rewritten, undoLog, ReclaimSuperseded(destinationTable, context));
             }
@@ -2144,7 +2144,7 @@ partial class Simulation
                 tracking?.RecordRow(context.Batch, destinationTable, newValues, ChangeTrackingOperation.Insert);
                 var (newPage, newSlot) = destinationTable.Heap.Insert(RowEncoder.EncodeRow(destinationTable.StoredColumns, ProjectStoredValues(destinationTable, newValues), destinationTable.Heap), undoLog);
                 if (lockableTable)
-                    context.Batch.AcquireRowLockTxScoped(destinationTable, newPage, newSlot, LockMode.Exclusive);
+                    context.Batch.AcquireRowLockTxScoped(destinationTable, newPage, newSlot, LockMode.Exclusive, RowLockPurpose.Insert);
             }
         }
 

@@ -66,6 +66,23 @@ internal sealed class Heap
     public long MutationGeneration;
 
     /// <summary>
+    /// A process-wide clock that advances once per transaction begun (see
+    /// <c>SimulatedDbTransaction.BeginEpoch</c>), so a heap's
+    /// <see cref="LastModifiedEpoch"/> orders against a transaction's start.
+    /// </summary>
+    internal static long ModificationEpoch;
+
+    /// <summary>
+    /// The <see cref="ModificationEpoch"/> as of this heap's latest row write:
+    /// at or past a transaction's begin epoch when the heap changed since that
+    /// transaction began. Real's READ COMMITTED read takes its row S only on a
+    /// page changed since the oldest open transaction began, which is what the
+    /// key-lock test asks of it (see <c>BatchContext.TestRowKeyLock</c>); the
+    /// simulator answers per heap rather than per page.
+    /// </summary>
+    public long LastModifiedEpoch;
+
+    /// <summary>
     /// Visible-row mutation kind recorded in the <see cref="seekJournal"/>.
     /// <see cref="Insert"/> carries the inserted image; <see cref="Delete"/>
     /// the pre-delete image; <see cref="Update"/> both (so a replay computes the
@@ -257,6 +274,7 @@ internal sealed class Heap
         var slotIndex = this.Pages[pageIndex].SlotCount - 1;
         this.RowCount++;
         this.MutationGeneration++;
+        this.LastModifiedEpoch = Volatile.Read(ref ModificationEpoch);
         undoLog?.RecordInsert(this, pageIndex, slotIndex);
         if (journalEvent && this.seekJournalActive)
             this.RecordSeekJournalEvent(SeekJournalKind.Insert, pageIndex, slotIndex, oldImage: null, newImage: row.ToArray());
@@ -515,6 +533,7 @@ internal sealed class Heap
     {
         var oldImage = journalEvent && this.seekJournalActive ? this.ReadSlotBytes(pageIndex, slotIndex) : null;
         this.MutationGeneration++;
+        this.LastModifiedEpoch = Volatile.Read(ref ModificationEpoch);
         var page = this.Pages[pageIndex];
         if (page.IsSlotForwarded(slotIndex))
         {
@@ -570,6 +589,7 @@ internal sealed class Heap
         else
             this.UpdateDirect(page, pageIndex, slotIndex, newRow, undoLog, reclaimSuperseded);
         this.MutationGeneration++;
+        this.LastModifiedEpoch = Volatile.Read(ref ModificationEpoch);
         if (oldImage is not null)
             this.RecordSeekJournalEvent(SeekJournalKind.Update, pageIndex, slotIndex, oldImage, newRow.ToArray());
     }

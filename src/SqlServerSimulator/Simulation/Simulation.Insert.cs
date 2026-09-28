@@ -38,8 +38,12 @@ partial class Simulation
         // simulator falls through to Msg 102 at the column-list / VALUES
         // dispatch since we don't call the hint parser for `@t`.
         context.MoveNextRequired();
+        Selection.TableHintInfo targetHints = default;
         if (!BatchContext.IsTableVariableName(destinationName.Leaf))
-            Selection.ValidateDmlTargetHints(Selection.ParseOptionalTableHints(context, allowLegacyParenForm: false));
+        {
+            targetHints = Selection.ParseOptionalTableHints(context, allowLegacyParenForm: false);
+            Selection.ValidateDmlTargetHints(targetHints);
+        }
 
         if (TryResolveCteTarget(context, destinationName, out var destinationView) || context.Batch.TryResolveView(destinationName, out destinationView))
             return ProcessViewInsert(destinationView, context, top, destinationName);
@@ -56,7 +60,7 @@ partial class Simulation
         // Phase 1b: acquire table-IX on the INSERT target (escalates to
         // table-X via TABLOCK*); row-X is taken per inserted row in
         // ProcessHeapInsert.
-        _ = context.Batch.AcquireDataLockIfApplicable(destinationTable, default, isWrite: true);
+        _ = context.Batch.AcquireDataLockIfApplicable(destinationTable, targetHints, isWrite: true);
         return ProcessHeapInsert(destinationTable, context, top, destinationName);
     }
 
@@ -681,11 +685,11 @@ partial class Simulation
                     // row-X on it yet would be visible to a READ COMMITTED
                     // reader for the whole wait.
                     if (IsLockableTable(destinationTable))
-                        context.Batch.ProbeKeyRangesForWrite(destinationTable, image);
+                        context.Batch.ProbeKeyLocksForInsert(destinationTable, image);
                     var (pageIndex, slotIndex) = destinationTable.Heap.Insert(image, destinationTable.IsTableVariable ? context.Batch.CurrentTableVarUndoLog : context.Batch.CurrentUndoLog);
                     if (IsLockableTable(destinationTable))
                     {
-                        context.Batch.AcquireRowLockTxScoped(destinationTable, pageIndex, slotIndex, LockMode.Exclusive);
+                        context.Batch.AcquireRowLockTxScoped(destinationTable, pageIndex, slotIndex, LockMode.Exclusive, RowLockPurpose.Insert);
                         Storage.VersionStore.CaptureWrite(context.Batch, destinationTable, (pageIndex, slotIndex), oldRid: null, oldPayload: null, Storage.VersionWriteKind.Insert);
                     }
                     destinationTable.ChangeTracking?.RecordRow(context.Batch, destinationTable, rowValues, Storage.ChangeTrackingOperation.Insert);

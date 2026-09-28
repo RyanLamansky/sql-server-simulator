@@ -58,9 +58,10 @@ internal static class LockDmvs
         var waitStatus = SqlValue.FromNVarchar("WAIT");
         var objectType = SqlValue.FromNVarchar("OBJECT");
         var ridType = SqlValue.FromNVarchar("RID");
-        // Real reports a key-range lock as resource_type KEY with a hash of the
-        // anchoring index key; the simulator names the interval itself (see
-        // KeyRange.ToString), so the type matches and the description doesn't.
+        // Real reports a key lock as resource_type KEY with a hash of the
+        // anchoring index key; the simulator prints the key itself (see
+        // KeyLockGroup.Describe), so the type matches and the description
+        // doesn't, save the infinity anchor's.
         var keyType = SqlValue.FromNVarchar("KEY");
 
         var waitsByResource = SnapshotWaiters(sim);
@@ -73,16 +74,25 @@ internal static class LockDmvs
                     yield return row;
                 foreach (var row in EmitRowsForResource(objectType, dbId, t.Name, t.ObjectId, t.TableDataLock, waitsByResource, grantStatus, waitStatus))
                     yield return row;
+                // A row of a clustered table is its clustered key, which is
+                // what real locks and reports as KEY; only a heap's row is a RID.
+                var rowType = KeyLockGroup.ClusteredOwner(t) is null ? ridType : keyType;
+                var folded = FoldRowLocksIntoKeyLocks(t);
                 foreach (var kv in t.RowLocks)
                 {
                     var desc = $"{kv.Key.PageIndex}:{kv.Key.SlotIndex}";
-                    foreach (var row in EmitRowsForResource(ridType, dbId, desc, t.ObjectId, kv.Value, waitsByResource, grantStatus, waitStatus))
+                    foreach (var row in EmitRowsForResource(rowType, dbId, desc, t.ObjectId, kv.Value, waitsByResource, grantStatus, waitStatus, folded))
                         yield return row;
                 }
-                foreach (var kv in t.KeyRangeLocks)
+                foreach (var group in t.KeyLockGroups.Values)
                 {
-                    foreach (var row in EmitRowsForResource(keyType, dbId, kv.Key.ToString(), t.ObjectId, kv.Value, waitsByResource, grantStatus, waitStatus))
+                    foreach (var row in EmitRowsForResource(keyType, dbId, KeyLockGroup.Describe(null), t.ObjectId, group.Infinity, waitsByResource, grantStatus, waitStatus, folded))
                         yield return row;
+                    foreach (var kv in group.Anchors)
+                    {
+                        foreach (var row in EmitRowsForResource(keyType, dbId, KeyLockGroup.Describe(kv.Key), t.ObjectId, kv.Value, waitsByResource, grantStatus, waitStatus, folded))
+                            yield return row;
+                    }
                 }
             }
             foreach (var v in schema.Views.Values)
@@ -207,7 +217,8 @@ internal static class LockDmvs
         LockResource resource,
         Dictionary<LockResource, List<SimulatedDbConnection>> waitersByResource,
         SqlValue grantStatus,
-        SqlValue waitStatus)
+        SqlValue waitStatus,
+        Dictionary<(LockResource, SessionToken, LockMode), LockMode?>? folded = null)
     {
         // Empty-resource fast path: nothing held or waiting → no rows.
         if (resource.Holders.Count == 0 && !waitersByResource.ContainsKey(resource))
@@ -217,13 +228,20 @@ internal static class LockDmvs
         // GRANT rows from current holders.
         foreach (var hold in resource.Holders)
         {
+            var mode = hold.Mode;
+            if (folded is not null && folded.TryGetValue((resource, hold.Owner, mode), out var reported))
+            {
+                if (reported is not { } shown)
+                    continue;
+                mode = shown;
+            }
             yield return new SqlValue[]
             {
                 typeVal,
                 dbIdVal,
                 descVal,
                 entityVal,
-                SqlValue.FromNVarchar(ModeAbbreviation(hold.Mode)),
+                SqlValue.FromNVarchar(ModeAbbreviation(mode)),
                 grantStatus,
                 SqlValue.FromInt32(hold.Owner.Spid),
             };
@@ -273,6 +291,71 @@ internal static class LockDmvs
     }
 
     /// <summary>
+    /// Real holds one lock per key per session, so a row lock and a key-range
+    /// lock one session holds on the same clustered key show as one row there,
+    /// in the mode that combines them — a SERIALIZABLE UPDATE's updated key
+    /// reads <c>RangeX-X</c>, an <c>UPDLOCK</c> read's <c>RangeS-U</c>. Here
+    /// they are two resources, so the view folds them: per (resource, owner,
+    /// mode) hold, null to leave the row lock out and a mode to report the key
+    /// lock in instead. Null when nothing folds.
+    /// </summary>
+    private static Dictionary<(LockResource, SessionToken, LockMode), LockMode?>? FoldRowLocksIntoKeyLocks(HeapTable table)
+    {
+        if (KeyLockGroup.ClusteredOwner(table) is not { } owner
+            || !table.KeyLockGroups.TryGetValue(owner, out var group)
+            || Volatile.Read(ref group.Holds) == 0)
+        {
+            return null;
+        }
+
+        Dictionary<(LockResource, SessionToken, LockMode), LockMode?>? folded = null;
+        // A row the session deleted left the row-lock dictionary with its slot,
+        // but real's key lock stays, converted to RangeX-X where a range was.
+        foreach (var (deleter, images) in table.SupersededKeyImages)
+        {
+            foreach (var (address, (image, _)) in images)
+            {
+                if (!table.Heap.IsSlotTombstoned(address.PageIndex, address.SlotIndex) || !group.TryReadKey(image, out var key) || group.Find(key) is not { } anchor)
+                    continue;
+                foreach (var keyHold in anchor.Holders.ToArray())
+                {
+                    if (ReferenceEquals(keyHold.Owner, deleter) && keyHold.Mode is LockMode.RangeSharedShared or LockMode.RangeSharedUpdate)
+                        (folded ??= [])[(anchor, deleter, keyHold.Mode)] = LockMode.RangeExclusiveExclusive;
+                }
+            }
+        }
+        foreach (var (address, rowLock) in table.RowLocks)
+        {
+            foreach (var rowHold in rowLock.Holders.ToArray())
+            {
+                var image = table.Heap.ReadSlotBytes(address.PageIndex, address.SlotIndex);
+                if (image is null && table.SupersededKeyImages.TryGetValue(rowHold.Owner, out var superseded) && superseded.TryGetValue(address, out var entry))
+                    image = entry.Image;
+                if (image is null || !group.TryReadKey(image, out var key) || group.Find(key) is not { } anchor)
+                    continue;
+                foreach (var keyHold in anchor.Holders.ToArray())
+                {
+                    if (!ReferenceEquals(keyHold.Owner, rowHold.Owner) || keyHold.Mode is not (LockMode.RangeSharedShared or LockMode.RangeSharedUpdate or LockMode.RangeExclusiveExclusive))
+                        continue;
+                    folded ??= [];
+                    folded[(rowLock, rowHold.Owner, rowHold.Mode)] = null;
+                    var combined = (keyHold.Mode, rowHold.Mode) switch
+                    {
+                        (_, LockMode.Exclusive) => LockMode.RangeExclusiveExclusive,
+                        (LockMode.RangeSharedShared, LockMode.Update) => LockMode.RangeSharedUpdate,
+                        _ => keyHold.Mode,
+                    };
+                    var slot = (anchor, keyHold.Owner, keyHold.Mode);
+                    if (combined != keyHold.Mode && (!folded.TryGetValue(slot, out var already) || already != LockMode.RangeExclusiveExclusive))
+                        folded[slot] = combined;
+                    break;
+                }
+            }
+        }
+        return folded;
+    }
+
+    /// <summary>
     /// Walks all schemas + heap tables to find the object / RID associated
     /// with <paramref name="resource"/>; falls back to a generic
     /// description when no association matches (rare — the resource is
@@ -295,10 +378,9 @@ internal static class LockDmvs
                         if (ReferenceEquals(kv.Value, resource))
                             return $"RID: {t.Name} {kv.Key.PageIndex}:{kv.Key.SlotIndex}";
                     }
-                    foreach (var kv in t.KeyRangeLocks)
+                    if (resource.KeyGroup is { } group && ReferenceEquals(group.Table, t))
                     {
-                        if (ReferenceEquals(kv.Value, resource))
-                            return $"KEY: {t.Name} {kv.Key}";
+                        return $"KEY: {t.Name} {KeyLockGroup.Describe(resource.AnchorKey)}";
                     }
                 }
             }

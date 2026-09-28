@@ -357,6 +357,7 @@ partial class Simulation
             where = Selection.ParseAndBindPredicate(context, Selection.ColumnTypeResolverFor(sources), sources, joins);
         }
         BindJoinPredicatesWhileReporting(context.Batch, joins, Selection.ColumnTypeResolverFor(sources));
+        Selection.ValidateForcedSeeks(context, sources, joins, where);
 
         // Skip mode has bound everything it needs; enumerating the join would
         // run its sources, a NEXT VALUE FOR among them.
@@ -478,7 +479,7 @@ partial class Simulation
                 historyRow[pc.EndOrdinal] = stampedNow;
                 var (newPage, newSlot) = historyTable.Heap.Insert(RowEncoder.EncodeRow(historyTable.StoredColumns, ProjectStoredValues(historyTable, historyRow), historyTable.Heap), undoLog);
                 if (IsLockableTable(historyTable))
-                    context.Batch.AcquireRowLockTxScoped(historyTable, newPage, newSlot, LockMode.Exclusive);
+                    context.Batch.AcquireRowLockTxScoped(historyTable, newPage, newSlot, LockMode.Exclusive, RowLockPurpose.Insert);
             }
         }
         var lockableTable = IsLockableTable(table);
@@ -490,7 +491,7 @@ partial class Simulation
             tracking?.RecordRow(context.Batch, table, fullOld ?? DecodeFullRow(table, table.Heap.ReadSlotBytes(pageIndex, slotIndex)!), ChangeTrackingOperation.Delete);
             if (lockableTable)
             {
-                context.Batch.AcquireRowLockTxScoped(table, pageIndex, slotIndex, LockMode.Exclusive);
+                context.Batch.AcquireRowLockTxScoped(table, pageIndex, slotIndex, LockMode.Exclusive, RowLockPurpose.Delete);
                 context.Batch.NoteSupersededRow(table, pageIndex, slotIndex);
             }
             var oldBytes = captureVersions ? table.Heap.ReadSlotBytes(pageIndex, slotIndex) : null;

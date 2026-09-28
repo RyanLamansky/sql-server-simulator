@@ -156,7 +156,7 @@ partial class Simulation
             // the row writes alongside the table creation entry.
             var (newPage, newSlot) = destTable.Heap.Insert(encoded.AsSpan(0, length), undoLog);
             if (IsLockableTable(destTable))
-                batch.AcquireRowLockTxScoped(destTable, newPage, newSlot, LockMode.Exclusive);
+                batch.AcquireRowLockTxScoped(destTable, newPage, newSlot, LockMode.Exclusive, RowLockPurpose.Insert);
             rowCount++;
         }
 

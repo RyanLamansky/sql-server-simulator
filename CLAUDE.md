@@ -317,14 +317,14 @@ Where an entry carries a second clause it is because that fact changes what you'
   A scan of a clustered table follows its **key order**, not write order, so an unordered result or a bare `TOP` over one reads by key → [`indexes.md`](docs/claude/indexes.md).
 - **Partitioning** — `CREATE` / `ALTER` / `DROP PARTITION FUNCTION` and `SCHEME`, `$PARTITION`, tables and indexes `ON scheme(column)`, the per-partition catalog, `TRUNCATE … WITH (PARTITIONS …)`, `ALTER TABLE … SWITCH`, and `ALTER DATABASE … ADD | REMOVE FILEGROUP`.
   A partition is a **logical assignment** computed from the row's partition column, never a separate store, so every per-partition count reads the whole table → [`partitioning.md`](docs/claude/partitioning.md).
-- **Table hints (`WITH (NOLOCK …)`) and statement `OPTION (…)` hints**, including `FORCESEEK`'s nested form and the legacy no-`WITH` parenthesized form → [`query-hints.md`](docs/claude/query-hints.md).
+- **Table hints (`WITH (NOLOCK …)`) and statement `OPTION (…)` hints**, including `FORCESEEK`'s nested form, the plans real refuses under `FORCESEEK` / `FORCESCAN` (Msg 8622, settled while the batch compiles) and the legacy no-`WITH` parenthesized form → [`query-hints.md`](docs/claude/query-hints.md).
 - **Heap page lifecycle** — reclamation / reuse, tail-only shrink, `DBCC SHRINKDATABASE` / `SHRINKFILE`, `Heap.RowCount`, and which callers may take the reused encode buffer → [`heap-storage.md`](docs/claude/heap-storage.md).
 - **Per-`Simulation` plan cache and token memo** — the two reuse layers over a repeated `CommandText`.
   Cached plans are **shared**, so per-execution state belongs on `StatementContext`, never on the plan → [`plan-cache.md`](docs/claude/plan-cache.md).
 - **Transactions** — statement atomicity, the undo log, BEGIN / COMMIT / ROLLBACK / SAVE, `SET XACT_ABORT`, `SET IMPLICIT_TRANSACTIONS`, and the rare transaction-*aborting* error class that unwinds the whole stack → [`transactions.md`](docs/claude/transactions.md).
 - **Session `SET` options** — which carry state, the parse-time pair against the run-time rest, how far a module body's `SET` reaches, `@@OPTIONS` / `ANSI_DEFAULTS` / `ANSI_NULL_DFLT_*` / `NOEXEC` / `PARSEONLY` / `DEADLOCK_PRIORITY`.
   A new option's state joins `SimulatedDbConnection.SessionOptionScope` so a body's `SET` reverts on return → [`session-options.md`](docs/claude/session-options.md).
-- **Locking, MVCC, SNAPSHOT / RCSI, deadlock and timeout, the lock DMVs, key-range locks, application-lock siblings**.
+- **Locking, MVCC, SNAPSHOT / RCSI, deadlock and timeout, the lock DMVs, key and key-range locks anchored on index keys, per-statement escalation, application-lock siblings**.
   Every shared structure names a session by its one-way `SessionToken`, which is what lets an abandoned connection be collected and torn down → [`locking.md`](docs/claude/locking.md).
 - **Application locks** — `sp_getapplock` / `sp_releaseapplock` / `APPLOCK_MODE` / `APPLOCK_TEST`, and EF's `__EFMigrationsLock` → [`app-locks.md`](docs/claude/app-locks.md).
 - **`vector`** — `vector(n)` storage, the JSON text form in both directions, the string-only conversions, the non-comparable refusals, `VECTOR_DISTANCE` / `VECTOR_NORM` / `VECTOR_NORMALIZE` / `VECTORPROPERTY` and the catalog surfaces.
@@ -363,13 +363,11 @@ This is a trigger list: [`backlog.md`](docs/claude/backlog.md) carries the weigh
 Entries that raise a *real* SQL Server error deliberately are **not** here; they're coverage, and live in their feature's deep-dive.
 The feature docs' own **Not modeled yet** sections hold the smaller gaps.
 
-- **Key-range locks past a sargable leading-key-prefix predicate** — other SERIALIZABLE reads take the whole-table S → [`locking.md`](docs/claude/locking.md#key-range-locks).
 - **An aggregate reading only an enclosing query's columns** where no collector can rehome it → `NotSupportedException` → [`query.md`](docs/claude/query.md#outer-scope-correlation-in-the-select-list).
 - **Cross-server DML** through a four-part name → `NotSupportedException` via `BatchContext.RejectCrossServerMutation` (cross-*database* DML ships) → [`linked-servers.md`](docs/claude/linked-servers.md), [`schemas.md`](docs/claude/schemas.md#cross-database-writes).
 - **A few `SET <option>` toggles still parse and are discarded** — `STATISTICS IO` / `TIME`, the `SHOWPLAN_*` family, `ARITHIGNORE`, `FORCEPLAN` → [`session-options.md`](docs/claude/session-options.md#not-modeled-yet).
   The same goes for most `ALTER DATABASE … SET` options → [`database-options.md`](docs/claude/database-options.md).
 - **Heap allocation tracking** (a flat page list, no IAM/PFS) → [`heap-storage.md`](docs/claude/heap-storage.md).
-- **`FORCESEEK`'s plan-infeasibility refusal** (Msg 8622) → [`query-hints.md`](docs/claude/query-hints.md#not-enforced).
 - **A binder report past a type check other than Msg 529**, and a few shapes' own errors within one (MERGE's Msg 5334, PIVOT's operand) → [`errors.md`](docs/claude/errors.md#not-modeled-yet-1).
 
 ## Quirks (modeled, not byte-identical to SQL Server)

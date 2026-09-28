@@ -58,6 +58,14 @@ internal sealed class FromSource(
     public bool ForPath;
 
     /// <summary>
+    /// The table hints of a base-table source written with <c>FORCESEEK</c>,
+    /// or with <c>FORCESCAN</c> beside an <c>INDEX</c> hint, which the query
+    /// is checked against once it has parsed (Msg 8622 when real's optimizer
+    /// can't honor them); null otherwise.
+    /// </summary>
+    public Selection.TableHintInfo? ForcedAccessPath;
+
+    /// <summary>
     /// The object this source names, spelled as the FROM clause wrote it and
     /// with any alias ignored — <c>g1</c>, <c>dbo.g1</c>, <c>@t</c>. Null for a
     /// source that has no object of its own (a derived table, a CTE, a table

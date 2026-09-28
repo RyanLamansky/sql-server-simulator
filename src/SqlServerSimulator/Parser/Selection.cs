@@ -1760,6 +1760,7 @@ internal sealed partial class Selection
                         topWithTies = false;
                     }
                     RejectMisplacedIdentityFunction(context, expressions, intoTarget);
+                    ValidateForcedSeeks(context, [.. sources], [.. joins], fromClause.Having is { } having ? [.. fromClause.Excluders, having] : fromClause.Excluders, expressions, scope.Position == QueryPosition.Subquery && expressions.Count == 1 ? expressions[0] : null);
                     ApplyShortestPath(context, scope, sources, joins, expressions, fromClause);
                     ExpandStars(context.Batch.CurrentDatabase.Collation, expressions, fromClause.Match?.StarOrder(sources) ?? sources);
                     JoinSpec[] joinArray = [.. joins];
@@ -3323,6 +3324,7 @@ internal sealed partial class Selection
                     unaliasedName: heapAlias is null ? FromSource.Resolved(objectName, context.Batch.CurrentDatabase) : null)
                 {
                     ForPath = forPath,
+                    ForcedAccessPath = heapHints.ForceSeek || (heapHints.ForceScan && heapHints.IndexArguments is { Count: > 0 }) ? heapHints : null,
                 };
 
             // Table-variable source: <c>FROM @t [alias]</c>. Routes through

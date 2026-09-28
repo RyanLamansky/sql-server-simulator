@@ -65,6 +65,13 @@ public sealed class SimulatedDbTransaction : DbTransaction
     /// </summary>
     internal bool BegunByApi;
 
+    /// <summary>
+    /// The heap modification clock as this transaction began: a heap whose
+    /// <c>LastModifiedEpoch</c> is at or past it changed while the transaction
+    /// was open.
+    /// </summary>
+    internal readonly long BeginEpoch = Interlocked.Increment(ref Heap.ModificationEpoch);
+
     /// <summary>The id <c>CURRENT_TRANSACTION_ID()</c> and the transaction DMVs report, drawn at BEGIN.</summary>
     internal readonly long TransactionId;
 
@@ -160,32 +167,19 @@ public sealed class SimulatedDbTransaction : DbTransaction
     internal readonly List<AppLockHold> TransactionAppLocks = [];
 
     /// <summary>
-    /// Per-table count of currently-held tx-scoped row locks (row-X, row-U,
-    /// row-S-tx-scoped). Bumped at every row-lock acquire site; when a
-    /// table's count exceeds <see cref="RowLockEscalationThreshold"/>, the
-    /// acquire site promotes to a single table-X (releasing every row lock
-    /// it had previously held on that table). Matches real SQL Server's
-    /// lock-escalation behavior at the same ~5000-locks-per-table threshold
-    /// (probe-confirmed: real SQL Server defaults to escalation enabled with
-    /// the threshold around 5000; the exact value can vary by version /
-    /// memory pressure).
-    /// </summary>
-    internal readonly Dictionary<HeapTable, int> RowLockCountsByTable = new(ReferenceEqualityComparer.Instance);
-
-    /// <summary>
-    /// Set of tables whose per-tx row locks have been escalated to a single
-    /// table-X. Once a table is in this set, subsequent row-X acquires on
-    /// it short-circuit (the table-X already covers them) until COMMIT /
-    /// ROLLBACK clears the state.
+    /// Tables whose row and key locks this transaction escalated to a single
+    /// table X; a later row or key lock there short-circuits, the table X
+    /// already covering it, until COMMIT / ROLLBACK clears the state.
     /// </summary>
     internal readonly HashSet<HeapTable> EscalatedTables = new(ReferenceEqualityComparer.Instance);
 
     /// <summary>
-    /// Row-count threshold above which a transaction's per-row X locks on
-    /// a single table get promoted to a single table-X. Matches real SQL
-    /// Server's ~5000 default; the simulator uses the same constant.
+    /// Tables whose S-family row and key locks this transaction escalated to
+    /// a single table S — a REPEATABLE READ or SERIALIZABLE read past the
+    /// threshold. A later S there short-circuits; a U or X still takes its
+    /// own lock.
     /// </summary>
-    internal const int RowLockEscalationThreshold = 5000;
+    internal readonly HashSet<HeapTable> SharedEscalatedTables = new(ReferenceEqualityComparer.Instance);
 
     /// <inheritdoc/>
     public override IsolationLevel IsolationLevel { get; }
@@ -406,7 +400,7 @@ public sealed class SimulatedDbTransaction : DbTransaction
         // their manager holds rode the HeldLocks entries above; only the
         // owner-view ledger needs clearing here.
         this.TransactionAppLocks.Clear();
-        this.RowLockCountsByTable.Clear();
         this.EscalatedTables.Clear();
+        this.SharedEscalatedTables.Clear();
     }
 }

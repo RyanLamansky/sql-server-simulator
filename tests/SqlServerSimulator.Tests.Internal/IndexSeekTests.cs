@@ -673,11 +673,13 @@ public sealed class IndexSeekTests
     }
 
     [TestMethod]
-    public void RepeatableReadHint_Declines()
+    public void RepeatableReadHint_Seeks()
     {
+        // A tx-scoped row lock seeks like any read: it keeps the lock on the
+        // rows it reads that qualify, as real's does, so narrowing the read is
+        // what matches real's footprint.
         var (trace, rows) = Run(TableT, "select val from t with (repeatableread) where id = 2");
-        Contains("Scan(t)", trace);
-        DoesNotContain("Seek(t)", trace);
+        Contains("Seek(t)", trace);
         HasCount(1, rows);
     }
 

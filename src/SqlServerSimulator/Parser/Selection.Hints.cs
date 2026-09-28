@@ -49,8 +49,11 @@ internal sealed partial class Selection
         /// <summary><c>INDEX</c>, whose argument list is captured for validation against the resolved table.</summary>
         Index,
 
-        /// <summary><c>FORCESEEK</c> / <c>FORCESCAN</c>, whose own nested argument shape is skipped.</summary>
-        ForcedAccessPath,
+        /// <summary><c>FORCESEEK</c>, whose nested index name and seek columns are captured.</summary>
+        ForceSeek,
+
+        /// <summary><c>FORCESCAN</c>, which takes no arguments.</summary>
+        ForceScan,
     }
 
     /// <summary>
@@ -83,8 +86,8 @@ internal sealed partial class Selection
         ["TABLOCKX"] = TableHintKind.TabLockX,
         ["NOEXPAND"] = TableHintKind.NoExpand,
         ["INDEX"] = TableHintKind.Index,
-        ["FORCESEEK"] = TableHintKind.ForcedAccessPath,
-        ["FORCESCAN"] = TableHintKind.ForcedAccessPath,
+        ["FORCESEEK"] = TableHintKind.ForceSeek,
+        ["FORCESCAN"] = TableHintKind.ForceScan,
         ["IGNORE_CONSTRAINTS"] = TableHintKind.Discard,
         ["IGNORE_TRIGGERS"] = TableHintKind.Discard,
         ["KEEPDEFAULTS"] = TableHintKind.Discard,
@@ -200,12 +203,10 @@ internal sealed partial class Selection
         public bool NoLock;
         /// <summary>
         /// <c>HOLDLOCK</c> / <c>SERIALIZABLE</c> — equivalent per SQL Server docs
-        /// ("Equivalent to SERIALIZABLE"). Acquires table-S tx-scoped, providing
-        /// phantom prevention at table granularity (the simulator approximates
-        /// SQL Server's key-range locks with a full table-S since no indexes
-        /// model range structure). Read in combination with <see cref="UpdLock"/>
-        /// or <see cref="XLock"/>, the row-mode wins but the lock is still
-        /// tx-scoped (which it would have been anyway).
+        /// ("Equivalent to SERIALIZABLE"). The read takes key-range locks on the
+        /// index keys its predicate reaches, as a SERIALIZABLE session's read
+        /// does. Read in combination with <see cref="UpdLock"/> or
+        /// <see cref="XLock"/>, the range mode follows the hint.
         /// </summary>
         public bool Serializable;
         /// <summary>
@@ -245,8 +246,8 @@ internal sealed partial class Selection
         /// hints. Tracked for Msg 1069 rejection on DML targets (real SQL
         /// Server forbids index hints on INSERT / UPDATE / DELETE / MERGE
         /// targets — they're only valid in a FROM clause or OPTION clause).
-        /// The simulator has no index dispatch so the hint is otherwise
-        /// parse-and-discard.
+        /// They choose no access path here; the plans real can't build under
+        /// them are refused (Msg 8622).
         /// </summary>
         public bool IndexHint;
         /// <summary>
@@ -267,6 +268,18 @@ internal sealed partial class Selection
         /// see <see cref="ValidateForceSeekColumns"/>.
         /// </summary>
         public List<string>? ForceSeekColumns;
+        /// <summary>
+        /// <c>FORCESEEK</c> — the read must seek, which real refuses with
+        /// Msg 8622 when no predicate offers one.
+        /// </summary>
+        public bool ForceSeek;
+        /// <summary><c>FORCESCAN</c> — refused beside <c>FORCESEEK</c> (Msg 10746).</summary>
+        public bool ForceScan;
+        /// <summary>
+        /// An <c>INDEX</c> hint was written, as opposed to the index a nested
+        /// <c>FORCESEEK</c> names — the two can't meet (Msg 10747).
+        /// </summary>
+        public bool IndexNamed;
     }
 
     /// <summary>
@@ -449,7 +462,11 @@ internal sealed partial class Selection
     }
 
     /// <summary>
-    /// Cross-hint combination validation. Msg 1047 fires when
+    /// Cross-hint combination validation. Msg 10746 refuses <c>FORCESEEK</c>
+    /// beside <c>FORCESCAN</c>, Msg 10747 a nested <c>FORCESEEK(ix(cols))</c>
+    /// beside an <c>INDEX</c> hint, Msg 10750 <c>FORCESCAN</c> beside more
+    /// than one index (probed 2026-09-28 against SQL Server 2025).
+    /// Msg 1047 fires when
     /// <c>NOLOCK</c> / <c>READUNCOMMITTED</c> appears alongside any locking
     /// hint that would require a real lock (UPDLOCK, XLOCK, HOLDLOCK,
     /// SERIALIZABLE, REPEATABLEREAD, TABLOCKX). Probe-confirmed against SQL
@@ -459,6 +476,12 @@ internal sealed partial class Selection
     /// </summary>
     private static void ValidateHintCombinations(TableHintInfo info)
     {
+        if (info.ForceSeek && info.ForceScan)
+            throw SimulatedSqlException.ForceScanWithForceSeek();
+        if (info.ForceSeekColumns is not null && info.IndexNamed)
+            throw SimulatedSqlException.ParameterizedForceSeekWithIndexHint();
+        if (info.ForceScan && info.IndexArguments is { Count: > 1 })
+            throw SimulatedSqlException.ForceScanWithSeveralIndexes();
         if (!info.NoLock)
             return;
         if (info.UpdLock || info.XLock || info.Serializable || info.Repeatable || info.TabLockX)
@@ -580,12 +603,20 @@ internal sealed partial class Selection
 
             case TableHintKind.Index:
                 info.IndexHint = true;
+                info.IndexNamed = true;
                 context.MoveNextRequired();
                 ConsumeIndexHintArguments(context, ref info);
                 return;
 
-            case TableHintKind.ForcedAccessPath:
+            case TableHintKind.ForceScan:
                 info.IndexHint = true;
+                info.ForceScan = true;
+                context.MoveNextRequired();
+                return;
+
+            case TableHintKind.ForceSeek:
+                info.IndexHint = true;
+                info.ForceSeek = true;
                 context.MoveNextRequired();
                 if (context.Token is Operator { Character: '(' })
                 {
@@ -594,19 +625,22 @@ internal sealed partial class Selection
                     // FROM-source call site validates its existence exactly as it
                     // does for INDEX(name); real raises the same Msg 308 for both.
                     // Then rewind so the payload skip below stays the single
-                    // consumer of the parenthesized run. FORCESCAN takes no
-                    // arguments, so it never enters here.
+                    // consumer of the parenthesized run.
                     var checkpoint = context.SaveCheckpoint();
                     context.MoveNextRequired();
                     if (context.Token is Name)
                     {
                         CaptureOneIndexArgument(context, ref info);
-                        // The index name may be followed by its own
-                        // parenthesized seek-column list. Capture the names so
-                        // the FROM-source call site can measure them against the
-                        // index's key columns (Msg 362 / 365).
+                        // The index name is followed by its own parenthesized
+                        // seek-column list, which real's grammar requires (a bare
+                        // FORCESEEK(ix) is Msg 102 on the closing parenthesis).
+                        // Capture the names so the FROM-source call site can
+                        // measure them against the index's key columns
+                        // (Msg 362 / 365).
                         if (context.MoveNext() && context.Token is Operator { Character: '(' })
                             CaptureForceSeekColumns(context, ref info);
+                        else
+                            throw SimulatedSqlException.SyntaxErrorNear(context);
                     }
                     context.RestoreCheckpoint(checkpoint);
 

@@ -1,6 +1,6 @@
 # Locking
 
-The model covers schema-stability locks (Sch-S / Sch-M) on every schema-bound object with the per-connection plumbing (SPID, `@@LOCK_TIMEOUT`, executing thread); **row-level data locks** under the full SQL Server 6-data-mode matrix (IS / IX / SIX / S / U / X) with transaction-scoped X retention, **SET TRANSACTION ISOLATION LEVEL** session state, and **escalation** to table-X past the per-tx-per-table threshold; **key-range locks** for SERIALIZABLE / HOLDLOCK phantom prevention; the **NOLOCK / HOLDLOCK / UPDLOCK / XLOCK / READPAST / NOWAIT / TABLOCK / TABLOCKX** hint semantics plus **REPEATABLE READ / SERIALIZABLE** isolation-level effects; auto-rollback on Msg 1205 with cross-thread waiter-graph cycle detection; and **hint-conflict detection** (Msg 1047 / 1065 / 1069).
+The model covers schema-stability locks (Sch-S / Sch-M) on every schema-bound object with the per-connection plumbing (SPID, `@@LOCK_TIMEOUT`, executing thread); **row-level data locks** under the full SQL Server 6-data-mode matrix (IS / IX / SIX / S / U / X) with transaction-scoped X retention, **SET TRANSACTION ISOLATION LEVEL** session state, and per-statement **escalation** to a table S or X at real's threshold; **key and key-range locks** anchored on index keys for SERIALIZABLE / HOLDLOCK phantom prevention; the **NOLOCK / HOLDLOCK / UPDLOCK / XLOCK / READPAST / NOWAIT / TABLOCK / TABLOCKX** hint semantics plus **REPEATABLE READ / SERIALIZABLE** isolation-level effects; auto-rollback on Msg 1205 with cross-thread waiter-graph cycle detection; and **hint-conflict detection** (Msg 1047 / 1065 / 1069).
 
 Observability comes from the **`sys.dm_tran_locks`** and **`sys.dm_os_waiting_tasks`** DMVs plus the **`@@LOCK_TIMEOUT`** / **`@@SPID`** scalars.
 Write-path coverage extends to **`ALTER PROCEDURE` / `ALTER TRIGGER` / `ALTER SEQUENCE`** Sch-M wiring, **alias-form `UPDATE` / `DELETE`** row-X acquire on the FROM-identified target, and row-X on history-table / cascade-FK / OUTPUT-INTO / SELECT INTO mutations.
@@ -13,13 +13,13 @@ User-visible behaviors:
 - `WITH (XLOCK)` takes row-X tx-scoped; a concurrent read of the same row blocks (the X-X conflict surfaces through the row-X probe).
 - `WITH (READPAST)` skips rows whose RID has a conflicting row-X holder instead of waiting.
 - `WITH (TABLOCK)` / `WITH (TABLOCKX)` skips row-level and takes table-S / table-X directly.
-- `SET TRANSACTION ISOLATION LEVEL SERIALIZABLE` / `WITH (SERIALIZABLE)` / `WITH (HOLDLOCK)` fences the key-space interval its predicate pins on the leading columns of some key or index and leaves the rest of the table free — two SERIALIZABLE transactions over disjoint key ranges don't block each other.
-  A composite key is fenced as a tuple, so `a = 1 AND b BETWEEN 2 AND 5` over a PK on `(a, b)` admits an insert of `(2, 3)` while blocking `(1, 3)`.
-  A read whose shape offers no such interval falls back to table-S — see [Key-range locks](#key-range-locks).
-- A SERIALIZABLE reader carrying `UPDLOCK` / `XLOCK` fences the same interval in `RangeS-U` / `RangeX-X`, the modes real reports there.
-- `SET TRANSACTION ISOLATION LEVEL REPEATABLE READ` / `WITH (REPEATABLEREAD)` acquires row-S tx-scoped per row read; concurrent INSERTs of *new* rows still succeed (RR doesn't prevent phantoms).
+- `SET TRANSACTION ISOLATION LEVEL SERIALIZABLE` / `WITH (SERIALIZABLE)` / `WITH (HOLDLOCK)` locks the index keys its predicate reaches plus the next key past them, each lock fencing the gap below its key, and leaves the rest of the table free — two SERIALIZABLE transactions over disjoint key ranges don't block each other.
+  A read whose shape offers no narrower interval locks every key of the clustered index plus the infinity anchor, and a heap scan takes table-S — see [Key-range locks](#key-range-locks).
+- A SERIALIZABLE reader carrying `UPDLOCK` / `XLOCK` takes the same keys in `RangeS-U` / `RangeX-X`, the modes real reports there.
+- `SET TRANSACTION ISOLATION LEVEL REPEATABLE READ` / `WITH (REPEATABLEREAD)` acquires row-S tx-scoped on each row it returns; concurrent INSERTs of *new* rows still succeed (RR doesn't prevent phantoms).
+- A tx-scoped row lock (RR, `UPDLOCK`, `XLOCK`) taken on a row the read's sargable predicate rejects is released again, as real's is, so the transaction keeps only the rows it returns.
 - `SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED` makes every read behave like `WITH (NOLOCK)` (dirty reads).
-- Per-tx row-lock count past 5000 escalates to table-X automatically.
+- A statement taking past real's escalation point on one table trades its row and key locks for a table S or X — see [Escalation](#escalation).
 
 ## Lock modes
 
@@ -30,19 +30,23 @@ Twelve modes across four orthogonal families:
 | Schema | `SchemaStability`, `SchemaModification` | Sch-S held during object use; Sch-M during DDL. |
 | Intent | `IntentShared`, `IntentExclusive`, `SharedIntentExclusive` | Table-level signal that some child (row) is held in S / X / both. |
 | Data   | `Shared`, `Update`, `Exclusive` | Read / read-with-intent-to-update / write. Held at row OR table level depending on hint / direction. |
-| Range  | `RangeSharedShared`, `RangeSharedUpdate`, `RangeExclusiveExclusive`, `RangeInsertNull` | Phantom prevention over a key-space interval — see [Key-range locks](#key-range-locks). |
+| Range  | `RangeSharedShared`, `RangeSharedUpdate`, `RangeExclusiveExclusive`, `RangeInsertNull` | Phantom prevention over the gap below an index key — see [Key-range locks](#key-range-locks). |
 
-The range family lives on its own resources (`HeapTable.KeyRangeLocks`) and never meets the other three, so its cells are settled ahead of the eight-mode table:
+The range family lives on key-lock anchors (`HeapTable.KeyLockGroups`), which also carry a plain S / U / X — a unique index's point lock, the instant X a writer tests an anchor with — so its cells are real's key-range matrix, settled ahead of the eight-mode table (rows requested, columns held):
 
 ```
-          RangeS-S RangeS-U RangeX-X RangeI-N
-RangeS-S  ✓        ✓        ✗        ✗
-RangeS-U  ✓        ✗        ✗        ✗
-RangeX-X  ✗        ✗        ✗        ✗
-RangeI-N  ✗        ✗        ✗        ✓
+          S  U  X  RangeS-S RangeS-U RangeI-N RangeX-X
+S         ✓  ✓  ✗  ✓        ✓        ✓        ✗
+U         ✓  ✗  ✗  ✓        ✗        ✓        ✗
+X         ✗  ✗  ✗  ✗        ✗        ✓        ✗
+RangeS-S  ✓  ✓  ✗  ✓        ✓        ✗        ✗
+RangeS-U  ✓  ✗  ✗  ✓        ✗        ✗        ✗
+RangeI-N  ✓  ✓  ✓  ✗        ✗        ✓        ✗
+RangeX-X  ✗  ✗  ✗  ✗        ✗        ✗        ✗
 ```
 
-Probe-confirmed cells: a second SERIALIZABLE reader of an overlapping interval proceeds (S-S × S-S), an overlapping `UPDLOCK` reader proceeds in both orders (S-S × S-U), a second `UPDLOCK` reader of the same interval waits (S-U × S-U), an `XLOCK` holder blocks a plain SERIALIZABLE reader (X-X × S-S), and a writer's insert into the interval blocks whichever of the three holds it (× I-N).
+A range mode's key part behaves as the S / U / X it names, and RangeI-N tests only the gap.
+Probe-confirmed cells: a second SERIALIZABLE reader of an overlapping range proceeds (S-S × S-S), an overlapping `UPDLOCK` reader proceeds in both orders (S-S × S-U), two `UPDLOCK` readers meeting on one key wait (S-U × S-U), an `XLOCK` holder blocks a plain SERIALIZABLE reader (X-X × S-S), an `UPDLOCK` read of a key another reader holds in RangeS-S proceeds (U × S-S), and a writer's insert into the gap blocks whichever of the three holds it (× I-N).
 
 Compatibility matrix for the other three families:
 
@@ -72,10 +76,10 @@ Reader (no TABLOCK*) selection:
 | Condition                              | Table mode | Row mode (per touched row)       |
 | -------------------------------------- | ---------- | -------------------------------- |
 | `WITH (NOLOCK)` / session RU           | bypass     | bypass (dirty read)              |
-| `WITH (XLOCK)`                         | IX tx      | X tx-scoped (plus a `RangeX-X` fence under SER / HOLDLOCK) |
-| `WITH (UPDLOCK)`                       | IX tx      | U tx-scoped (plus a `RangeS-U` fence under SER / HOLDLOCK) |
-| `WITH (HOLDLOCK)`/`WITH (SERIALIZABLE)`/ session SER | IS tx | none — a `RangeS-S` key range (or the table-S fallback) covers |
-| `WITH (REPEATABLEREAD)` / session RR   | IS         | S tx-scoped                      |
+| `WITH (XLOCK)`                         | IX tx      | X tx-scoped (plus `RangeX-X` key locks under SER / HOLDLOCK) |
+| `WITH (UPDLOCK)`                       | IX tx      | U tx-scoped (plus `RangeS-U` key locks under SER / HOLDLOCK) |
+| `WITH (HOLDLOCK)`/`WITH (SERIALIZABLE)`/ session SER | IS tx | none — `RangeS-S` key locks (or the heap's table-S) cover |
+| `WITH (REPEATABLEREAD)` / session RR   | IS tx      | S tx-scoped                      |
 | default RC                             | IS         | probe-only (no acquire)          |
 
 Writer selection:
@@ -103,8 +107,9 @@ Scope (when the lock releases) depends on the mode and surrounding transaction s
 | DDL site Sch-M                | Statement end                         |
 | Reader RC default IS          | Statement end                         |
 | Reader HOLDLOCK / SER table-IS | COMMIT / ROLLBACK (tx-scoped)        |
-| Reader HOLDLOCK / SER key range | COMMIT / ROLLBACK (tx-scoped)       |
-| Reader HOLDLOCK / SER table-S fallback | COMMIT / ROLLBACK (tx-scoped) |
+| Reader HOLDLOCK / SER key locks | COMMIT / ROLLBACK (tx-scoped)       |
+| Reader HOLDLOCK / SER heap table-S | COMMIT / ROLLBACK (tx-scoped)    |
+| Reader RR table-IS            | COMMIT / ROLLBACK                     |
 | Reader UPDLOCK / XLOCK IX     | COMMIT / ROLLBACK                     |
 | Reader RR / HOLDLOCK row-S    | COMMIT / ROLLBACK                     |
 | Writer IX (or X via TABLOCK*) | COMMIT / ROLLBACK                     |
@@ -184,126 +189,141 @@ The dict-lookup itself is thread-safe without taking the lock manager's gate; on
 `HeapTable.TableDataLock` is the table-level `LockResource` for IS / IX / SIX / S / U / X.
 Distinct from the inherited `SchemaObject.SchemaLock` which carries only Sch-S / Sch-M.
 
-`HeapTable.KeyRangeLocks` is the third store: `ConcurrentDictionary<KeyRange, LockResource>`, interned per interval and leaking the same way `RowLocks` does.
-`HeapTable.ActiveKeyRangeLocks` is the `Interlocked` companion the writer's fast path reads — the exact mirror of `ActiveDataWriters`, maintained by `LockManager` on every grant / final release of a range mode.
+`HeapTable.KeyLockGroups` is the third store: one `KeyLockGroup` per key constraint or index that ever took a key lock, each interning an anchor `LockResource` per key tuple (plus one infinity anchor), leaking the same way `RowLocks` does.
+`HeapTable.ActiveKeyRangeLocks` counts the holds live on those anchors and `KeyLockGroup.Holds` the holds per group — the `Interlocked` companions the writer's fast path reads, the exact mirror of `ActiveDataWriters`, maintained by `LockManager` on every grant / final release on an anchor.
 
 ## Key-range locks
 
 A SERIALIZABLE (or `HOLDLOCK`-hinted) reader has to make the rows it *didn't* read unappearable for the rest of its transaction.
-Real does that by locking index keys and letting each lock cover the gap below its key; the simulator locks the **key-space interval** the predicate names, which is what a `KeyRange` is: a tuple of storage ordinals, a promoted comparison type per ordinal, and a lower / upper bound tuple each optionally absent and each independently inclusive.
-Bound tuples compare **lexicographically**, and either may be *shorter* than the ordinal tuple — a bound that runs out pins only the components it names, so every deeper value sits inside it.
-That is the whole of the composite story: `a = 1` over a key on `(a, b)` is the one-component interval `[(1), (1)]`, `a = 1 AND b BETWEEN 2 AND 5` is `[(1,2), (1,5)]`, and `a = 1 AND b > 2` is `((1,2), (1)]` — every `b` above 2 under `a = 1`, and no other `a`.
+Real does that by locking index keys and letting each range lock cover the gap below its key down to the next lower key, and the simulator locks the same keys (`KeyLockGroup`): one anchor per key tuple of the index the read walks, plus an infinity anchor past the last key (real's `ffffffffffff`).
+The coverage of an anchor is never stored.
+A writer inserting a key asks the seek cache for the first key above it and tests that anchor, as real's insert tests the next key's lock, so a gap that widens or narrows between the reader's lock and the writer's insert is judged as it stands.
+
+A group's anchor tuple is the index key; a non-unique nonclustered index appends the clustered key columns it doesn't already name — real's row locator — so each entry of a duplicated value anchors separately.
+The table's clustered key is its **row group**: its anchors are a row's identity, so they meet every write of the row and a reader's own row lock.
+A nonclustered index's anchors meet only a write that changes a column the index row carries (key, `INCLUDE` or clustered key), since real's update of a column no index names takes no lock on that index.
 
 ### What the reader takes
 
-The table-level acquisition is only **IS** (or **IX** behind `UPDLOCK` / `XLOCK`), tx-scoped, and the phantom fence is settled later — the predicate that decides between an interval and the whole table isn't known when the FROM source resolves.
-`DataLockPlan.SerializableRangeMode` carries the obligation forward, naming the mode the fence has to be taken in — `RangeS-S` for a plain read, `RangeS-U` behind `UPDLOCK`, `RangeX-X` behind `XLOCK`, all three probe-confirmed against real.
+The table-level acquisition is only **IS** (or **IX** behind `UPDLOCK` / `XLOCK`), tx-scoped, and the phantom fence is settled later — the predicate that decides what to lock isn't known when the FROM source resolves.
+`DataLockPlan.SerializableRangeMode` carries the obligation forward, naming the mode the key locks are taken in — `RangeS-S` for a plain read, `RangeS-U` behind `UPDLOCK`, `RangeX-X` behind `XLOCK`, all three probe-confirmed against real.
 Exactly two places discharge it:
 
 - **`Selection.SettleSerializablePhantomFence`**, called from `MaybeApplyIndexSeek` once the WHERE conjuncts have been collected and *before* any candidate address is read.
-  It walks the table's keys then its indexes (so the choice doesn't ride on dictionary order), scoring each by how deep an **equality prefix** the conjuncts pin on it plus whether a range bound lands on the key column right after that prefix, and acquires the plan's range mode tx-scoped over the winning tuple interval.
-  The longest prefix wins, a bound continuation breaks a tie, and an `IN` list collapses to the hull of its values per column.
-  Only *top-level* conjuncts are read, so a cross-column `OR` pins no interval and falls back to the table-S below even though the read itself narrows to a [union of seeks](indexes.md#union-of-seeks-a-cross-column-or) — narrowing which rows a read touches never narrows what it fences.
-- **`BatchContext.EnsureSerializableTableLock`**, which takes table-S tx-scoped instead.
+  `ComputeKeyFence` walks the table's keys then its indexes (so the choice doesn't ride on dictionary order), scoring each by how deep an **equality prefix** the conjuncts pin on it plus whether a range bound lands on the key column right after that prefix; the longest prefix wins and a bound continuation breaks a tie.
+  An `IN` list reads one interval per value — per tuple of the cartesian product across a multi-column prefix, up to `KeyFenceProbeCap` of them, past which the hull of each column's values is read instead.
+  `BatchContext.AcquireKeyFence` then asks the seek cache (`HeapSeekCache.KeyLockAnchors`) for every key inside each interval and the first key past it — the infinity anchor when none follows — and locks them.
+  An interval pinning every column of a **unique** key by equality is the exception real makes on a hit: a plain key S (a row S for the clustered key); a miss locks the next key like any range.
+  Reading through a nonclustered index also takes the row S real's lookup takes on each row the index finds.
+- **`BatchContext.EnsureSerializableTableLock`**, for a read with no narrower interval — a whole-table scan, a non-sargable predicate, a predicate on an unindexed or non-leading column, a cross-column `OR`, an ordered scan — which locks the whole key space: every key of the clustered index plus the infinity anchor, or over a heap a table S (folding in the IS, which real reports converted).
   Reached from `WrapWithRowConflictChecks` (the un-narrowed scan's own iterator), from the ordered-scan path, and from `SettleSerializablePhantomFence` itself when no conjunct offers an interval.
   Idempotent per batch per table, since a source can be re-enumerated many times.
 
-The two are mutually exclusive **per source**, which `DataLockPlan.Fence` (a `PhantomFenceState` cell the plan's struct copies share) enforces: a source that claimed a range must not then have the table-S added on top by the scan wrapper, which would re-block the key space the range deliberately left free.
-That matters because an `UPDLOCK` / `XLOCK` reader keeps the whole-table scan — its tx-scoped row locks decline the seek — while still fencing only its own interval.
-The fence itself is *not* short-circuited on the cell: a correlated inner re-plans per outer row and each outer value names an interval of its own.
+The two are mutually exclusive **per source**, which `DataLockPlan.Fence` (a `PhantomFenceState` cell the plan's struct copies share) enforces: a source that locked its keys must not then have the whole key space added on top by the scan wrapper, which would re-block the keys the seek deliberately left free.
+The fence itself is *not* short-circuited on the cell: a correlated inner re-plans per outer row and each outer value names keys of its own — which is how a join's inner side, seeked per outer row, locks each outer value's keys.
+A key the session already holds in the mode is not taken again (`LockManager.IsHeldBy`), so a re-planned inner doesn't pile up held-lock entries.
 
-Soundness is the seek's own property: every conjunct considered is a top-level `AND` factor, so every row the query can ever return satisfies it, so every row that could become a phantom carries a key tuple inside the interval — which is why the fence stays sound even when the access path scans.
+Every conjunct considered is a top-level `AND` factor of the predicate, so every row the query can ever return satisfies it, so every row that could become a phantom carries a key inside one of the intervals — which is why the fence stays sound whichever access path the read then takes.
 A conjunct that can't be evaluated cleanly (NULL probe, cross-collation string, unpromotable pair) bounds the prefix there rather than narrowing the fence past what it can justify.
+
+After locking an anchor on the row group, the reader tests the anchored rows' own row locks in the mode's key part (`LockManager.KeyPartOf`) — real meets another session's X on the next key as a conflict on the key lock itself, and the simulator's writers hold their X on the row.
 
 ### What a SERIALIZABLE writer takes
 
-An UPDATE / DELETE under SERIALIZABLE — single-table or joined — or with a `HOLDLOCK` / `SERIALIZABLE` hint on its single-table target, fences its own WHERE too — `Selection.SettleSerializableWriteFence`, called before the target's rows are read.
-It collects the same top-level conjuncts the reader does and takes the winning interval in **`RangeX-X`**, so an insert into the range the writer named waits even where no row matched, while one outside it goes through.
-With no interval to take, a keyed table gets a **table S** on top of the writer's IX — real takes `RangeS-U` on every key and the infinity range there, which admits the same readers and refuses the same writers and inserters — and a keyless heap gets the **table X** real takes (all probed 2026-09-26).
-A MERGE under SERIALIZABLE or `WITH (HOLDLOCK)` fences per source row: the key its ON clause probes, in **`RangeS-U`** — real's mode for the upsert probe, and what makes two concurrent upserts of one missing key wait on each other rather than both insert.
-One with `WHEN NOT MATCHED BY SOURCE`, or whose ON pins no interval, takes the table fallback above.
+An UPDATE / DELETE under SERIALIZABLE — single-table or joined — or with a `HOLDLOCK` / `SERIALIZABLE` hint on its single-table target, locks the keys its own WHERE reaches in **`RangeX-X`** — `Selection.SettleSerializableWriteFence`, called before the target's rows are read — the next key included, so an insert into that span waits even where no row matched, while one past it goes through.
+A hit on a unique key takes only the row X the write itself takes, and no range, as real's does.
+With no interval to take, a clustered table gets **`RangeS-U`** on every key plus infinity — real's own shape for a scanning write — and a heap the **table X** real takes (all probed 2026-09-26 and 2026-09-28).
+A MERGE under SERIALIZABLE or `WITH (HOLDLOCK)` locks per source row the next key past the key its ON clause probes, in **`RangeS-U`** — real's mode for the upsert probe, and what makes two concurrent upserts of one missing key wait on each other rather than both insert — and a unique hit takes only its row X.
+One with `WHEN NOT MATCHED BY SOURCE`, or whose ON pins no interval, takes the whole-key-space fallback above.
+
+A key a transaction inserts into a gap it itself range-locks splits that gap, so the new key takes **`RangeX-X`** to keep the lower half fenced (`TestGapLock`), as real's HOLDLOCK MERGE's insert shows.
 
 ### What the writer probes
 
-`BatchContext.ProbeKeyRangesForWrite` runs on every writer **whatever its own isolation level** — fencing sessions that know nothing about the fence is the entire point.
-It reads `ActiveKeyRangeLocks` first and returns immediately at zero, so a database with no SERIALIZABLE reader pays nothing; otherwise it decodes one value per distinct ranged ordinal, assembles each range's own ordinal tuple out of them, and — for each range containing that tuple — acquires and immediately releases `RangeI-N`.
-That mirrors real's instant-duration insert-range mode: it exists to test the interval and never shows up in a lock snapshot taken after the write.
+`BatchContext.TestKeyLocksForWrite` and `ProbeKeyLocksForUpdate` run on every writer **whatever its own isolation level** — fencing sessions that know nothing about the fence is the entire point.
+They read `ActiveKeyRangeLocks` first and return immediately at zero, so a database with no SERIALIZABLE reader pays nothing; otherwise they walk only the groups somebody holds a lock in.
+What each write tests follows `RowLockPurpose`:
 
-Two hooks put it on every write path:
+- An **insert** tests the gap its key lands in: `RangeI-N`, acquired and immediately released, on the first key above it (`HeapSeekCache.NextKeyAbove`) — real's instant-duration insert-range mode, which never shows up in a lock snapshot taken after the write.
+- A **delete** tests the lock on each of its keys with an instant X.
+- An **update** tests its clustered key the same way on the pre-image; the rewrite site (`ProbeKeyLocksForUpdate`) then tests a nonclustered index's old key only when the update changes a column that index carries, and the gap each moved key lands in — a row moving *into* a fenced gap is a phantom the old image can't reveal.
 
-- Inside `AcquireRowLockTxScoped` when the mode is `Exclusive`, against the row's **live slot bytes**. Each site's ordering makes that the image that matters: an INSERT locks after the heap write, so it reads its new row; an UPDATE / DELETE locks before, so it reads the row it is about to supersede.
-- Explicitly against the **post-update image** at each `Heap.UpdateAt` site (`Simulation.Update`, MERGE's update branch, the two FK cascade rewrites) — a row moving *into* a fenced interval is a phantom the old image can't reveal, probe-confirmed to block on real.
+Two hooks put the tests on every write path:
 
-The main INSERT path probes once more, *before* the heap write rather than after: a wait on a range can last until the reader commits, and a row sitting in the heap with no row-X on it yet would be dirty-readable for that whole window.
+- Inside `AcquireRowLockTxScoped` when the purpose is a write, against the row's **live slot bytes**.
+  Each site's ordering makes that the image that matters: an INSERT locks after the heap write, so it reads its new row; an UPDATE / DELETE locks before, so it reads the row it is about to supersede.
+- Explicitly against the **post-update image** at each `Heap.UpdateAt` site (`Simulation.Update`, MERGE's update branch, the two FK cascade rewrites).
 
-Range waits go through `LockManager.Acquire` like everything else, so they enter the wait-for graph unchanged — two transactions each fencing one interval and inserting into the other's deadlock with Msg 1205, and `SET LOCK_TIMEOUT` yields Msg 1222.
-Same-owner holds are skipped by the conflict check, so a SERIALIZABLE transaction inserting into its own fenced interval isn't self-blocked.
+The main INSERT path tests once more, *before* the heap write rather than after: a wait on a range can last until the reader commits, and a row sitting in the heap with no row-X on it yet would be dirty-readable for that whole window.
+
+A reader tests too, against the clustered key of each row it locks: an `UPDLOCK` read's U meets another reader's `RangeS-U`, and a READ COMMITTED read's S meets a `RangeX-X` — but only once the table has changed since the holder's transaction began (`Heap.LastModifiedEpoch` against `SimulatedDbTransaction.BeginEpoch`), since real's READ COMMITTED read takes its S only on a page changed since the oldest open transaction began.
+Probed 2026-09-28: the `RangeX-X` behind an `XLOCK` read, or behind a DELETE that removed nothing, lets the read through, and the same lock refuses it once any write lands on the page — even one rolled back.
+Real's check is per page and the simulator's per heap, so on a table of many pages a write elsewhere refuses a read real would let through.
+A `RangeX-X` counts in `ActiveDataWriters`, which is what sends the READ COMMITTED reader off its lock-free fast path to test it.
+
+Key-lock waits go through `LockManager.Acquire` like everything else, so they enter the wait-for graph unchanged — two transactions each fencing one range and inserting into the other's deadlock with Msg 1205, and `SET LOCK_TIMEOUT` (or a `NOWAIT` hint on the table, an INSERT target's included) yields Msg 1222.
+Same-owner holds are skipped by the conflict check, so a SERIALIZABLE transaction inserting into its own fenced gap isn't self-blocked.
 
 ### Probed reference behavior
 
-Against SQL Server 2025 CU7, `sys.dm_tran_locks` under SERIALIZABLE:
+Against SQL Server 2025 CU7, `sys.dm_tran_locks` under SERIALIZABLE (probed 2026-09-26 and 2026-09-28), all reproduced:
 
 | Read                                        | What real takes                                              |
 | ------------------------------------------- | ------------------------------------------------------------ |
 | Equality **hit** on a unique index           | plain `KEY` **S** — uniqueness already forbids a second row at that key |
 | Equality **miss** on a unique index          | `RangeS-S` on the next key                                    |
-| Equality **hit** on a non-unique index       | `RangeS-S` on the matched key *and* the next one              |
-| `k > a AND k < b`                            | `RangeS-S` on every key in the interval plus the next one past it |
+| Equality **hit** on a non-unique index       | `RangeS-S` on each matching entry *and* the next one          |
+| `k BETWEEN a AND b`, `k > a AND k < b`       | `RangeS-S` on every key in the interval plus the next one past it |
 | `k > a` past the last key                    | `RangeS-S` on each matching key plus the infinity range (`ffffffffffff`) |
-| Whole-table scan / non-sargable predicate    | `RangeS-S` on every key plus infinity — the whole key space   |
-| Predicate on an unindexed heap               | object-level **S**                                            |
-| Same reads under REPEATABLE READ             | plain `KEY` S, no ranges                                      |
+| Any predicate over an empty table            | `RangeS-S` on the infinity range alone                        |
+| `k IN (…)`                                   | per value: a plain `KEY` S on a hit, the next key on a miss   |
+| Whole-table scan / non-sargable predicate / cross-column `OR` | `RangeS-S` on every key plus infinity — the whole key space |
+| Seek through a nonclustered index            | `RangeS-S` on the index entries plus the next, `KEY` S on each looked-up clustered row |
+| Predicate on a heap scanned                  | object-level **S**, no IS                                     |
+| Same reads under REPEATABLE READ             | plain `KEY` S on the rows returned, no ranges, IS kept        |
 | `WITH (HOLDLOCK)` under READ COMMITTED       | identical to SERIALIZABLE                                     |
-| `WITH (UPDLOCK)`                             | `RangeS-U` at the key, **IX** at the object, no key U beside it |
-| `WITH (XLOCK)`, and a SERIALIZABLE UPDATE / DELETE | `RangeX-X` at the key, IX at the object (the same write under READ COMMITTED takes plain `KEY` X) |
+| `WITH (UPDLOCK)`                             | `RangeS-U` at the keys, **IX** at the object, no key U beside it |
+| `WITH (XLOCK)`, and a SERIALIZABLE UPDATE / DELETE | `RangeX-X` at the keys, IX at the object (the same write under READ COMMITTED takes plain `KEY` X) |
+| A scanning SERIALIZABLE UPDATE               | `RangeS-U` on every key plus infinity, the updated key converted to `RangeX-X` |
 
-The uniqueness exemption is a **full-tuple** rule, probed on a composite key both ways: `a = 1 AND b = 2` hitting a unique `(a, b)` index takes plain `KEY` S, the same predicate against a non-unique one takes `RangeS-S` on the matched key plus the next.
-Composite reads otherwise follow the single-column shape — `a = 1` alone locks the three keys of the group plus the next key past it, `a = 1 AND b BETWEEN 2 AND 5` locks the three keys it spans, and a predicate on the **second** column alone locks every key plus infinity.
+Composite reads follow the single-column shape — `a = 2` locks the keys of the group plus the next key past it, so the gap reaches down to the last key of the group before, and a predicate on the **second** column alone locks every key plus infinity.
 
-And the blocking matrix, session A holding a SERIALIZABLE `BETWEEN` over an indexed key:
+And the blocking matrix, session A holding a SERIALIZABLE `k BETWEEN 15 AND 25` over keys 10 / 20 / 30 / 40:
 
 | Session B                                    | Real   |
 | -------------------------------------------- | ------ |
-| INSERT inside the interval                    | blocks |
-| INSERT outside it                             | proceeds |
-| UPDATE / DELETE of a row inside it            | blocks |
+| INSERT inside the interval, or between 10 and 30 | blocks |
+| INSERT past the next key (35)                 | proceeds |
+| UPDATE / DELETE of a row inside it, or of the next key's row | blocks |
 | UPDATE moving a row from outside *into* it    | blocks |
-| UPDATE of a row outside it                    | proceeds |
+| UPDATE of a row below it (10)                 | proceeds |
+| `UPDLOCK` read of the next key                | proceeds |
+| `XLOCK` read of the next key                  | blocks |
 | SERIALIZABLE SELECT of an overlapping interval | proceeds |
-| SERIALIZABLE SELECT of a disjoint interval    | proceeds |
+| SERIALIZABLE `UPDLOCK` SELECT sharing only the next key with an `UPDLOCK` holder | blocks |
 | Crossed intervals, each inserting into the other's | Msg 1205 |
 
-Over a composite `a = 1 AND b BETWEEN 2 AND 5` fence, `INSERT (1, 3)` blocks and `INSERT (2, 3)` proceeds — the leading component is what separates them, and it is exactly the separation the tuple interval reproduces.
-The same holds for the prefix-only `a = 1` fence: `(1, 100)` blocks and `(2, 5)` proceeds.
-A `RangeS-U` fence blocks an insert inside it and admits one outside, like `RangeS-S`.
+`KeyLockAnchorTests` holds the matrix row by row.
 
 ### Divergences
 
-- **Predicate-exact intervals, not real's key-anchored ones.**
-  Real's range is `(previous key, named key]`, so its coverage runs out to the neighbouring key on each side; the simulator's runs to the predicate's own bound.
-  Phantom protection is identical — a value real blocks but the simulator doesn't is by construction a value the reader's predicate excludes, so admitting it can't change any result the reader could re-read.
-  The observable difference is confined to that gap: probed, `WHERE k = 205` against keys 200 / 210 blocks an insert of 207 on real (207 falls in key 210's range) where the simulator admits it, and both block an insert of 205.
-  The tuple case is the same gap one component deeper: an `a = 1 AND b BETWEEN 2 AND 5` fence over keys `(1,2)` / `(1,5)` / `(1,9)` blocks an insert of `(1, 7)` on real (it falls in key `(1,9)`'s range) where the simulator admits it.
-- **A held range meets another reader's range only when the two intervals are *identical*.**
-  Ranges intern per interval in `HeapTable.KeyRangeLocks`, so two readers fencing overlapping-but-different intervals take different resources and never test each other's mode.
-  Containment is tested on the **write** path only, where `ProbeKeyRangesForWrite` walks every held range.
-  Reader-versus-reader that matters (`RangeS-U` × `RangeS-U`, `RangeX-X` × anything) therefore surfaces on the repeated-predicate shape and not on a merely overlapping one.
-- **An `IN` list fences its hull**, gaps between the listed values included — over-blocking rather than leaving a listed value unfenced.
-  Across a multi-column prefix the hull is taken per column, so the lexicographic interval spans the whole cartesian product and then some.
-- **The `UPDLOCK` / `XLOCK` row lock stays on top of the range**, where real folds the two into one key lock.
-  Range modes live on resources of their own here, so dropping the row-U / row-X would stop blocking the readers and writers that take a row lock without ever probing a range.
-- **A SERIALIZABLE writer fences one interval, not one range per key** — real range-locks each key the WHERE reaches plus the next, and converts a unique-equality hit to a plain `KEY` X; the simulator takes the one interval the WHERE names — so a key between the named one and its neighbor stays insertable, where real's next-key lock refuses it — and a table S where real takes `RangeS-U` on every key.
-- **`resource_description` names the interval**, e.g. `0:[15,25]` for one column and `0,1:[(1,2),(1,5)]` for a tuple — the ranged ordinals, then the interval in bracket notation with `*` for an unbounded side and for a component a shorter bound tuple leaves open.
-  Real prints a hash of the anchoring index key there, so the `resource_type` (`KEY`) and `request_mode` (`RangeS-S` / `RangeS-U` / `RangeX-X`) match and the description doesn't.
+- **The access path is the simulator's, not real's optimizer's.**
+  Real can scan a small table rather than seek it and then locks every key of the clustered index: probed, a nonclustered seek over four rows, a three-row `BETWEEN` over a 2000-row nonclustered index, a 300-row heap with a nonclustered index and an `EXISTS` driven from the inner table all ran as scans there, where the simulator seeks and locks only the keys the seek reaches.
+  Blocking follows the chosen path on both engines, so a shape real scans blocks more there.
+- **A nonclustered read takes its lookup row S even when the index covers the query**, where real's covering seek reads no base row — so an update of a column the query never read waits here and proceeds on real.
+  Taking it always keeps the non-covering case, the common one, from admitting a write real refuses.
+- **The `UPDLOCK` / `XLOCK` row lock stays on top of the key lock**, where real folds the two into one key lock; the readers and writers that take a row lock meet it there.
+  `sys.dm_tran_locks` folds them back (`LockDmvs.FoldRowLocksIntoKeyLocks`), reporting the one key lock in the combined mode — `RangeX-X` for a written key — as real does.
+- **`resource_description` prints the anchor key**, e.g. `(20)` or `(1,5)`; real prints a hash of it, so only the infinity anchor's `(ffffffffffff)` byte-matches.
 - **A non-default isolation level disables the plan cache.**
   A cached plan's FROM sources carry the lock acquisitions their parsing session made, so replaying one under a different level would settle the wrong session's protection, or none.
-  Anything but the default READ COMMITTED now skips both the plan-cache lookup and the promotion and re-parses per execution — see [`plan-cache.md`](plan-cache.md).
+  Anything but the default READ COMMITTED skips both the plan-cache lookup and the promotion and re-parses per execution — see [`plan-cache.md`](plan-cache.md).
 
 ## Lock-free read fast path
 
 Every grant / release / probe funnels through `LockManager`'s single gate, so under heavy concurrent reads a per-row gate acquisition would serialize the workers.
-The READ COMMITTED row-conflict check (`BatchContext.TouchRowForRead`) avoids the gate on the common path via `HeapTable.ActiveDataWriters` — an `Interlocked` count of connections currently holding a data-`Exclusive` lock anywhere on the table (a row-X or the table-X).
-`LockManager` increments it on an `Exclusive` grant and decrements on the final release of one, keyed by a `LockResource.OwningTable` back-reference set when the resource is interned.
+The READ COMMITTED row-conflict check (`BatchContext.TouchRowForRead`) avoids the gate on the common path via `HeapTable.ActiveDataWriters` — an `Interlocked` count of connections currently holding a data-`Exclusive` lock anywhere on the table (a row-X or the table-X), or a `RangeX-X` key lock.
+`LockManager` increments it on an `Exclusive` / `RangeX-X` grant and decrements on the final release of one, keyed by a `LockResource.OwningTable` back-reference set when the resource is interned.
 The reader:
 
 1. `Volatile.Read`s the count; if 0, no row is X-locked, so every row is committed-readable — return immediately, **no `RowLocks` intern, no gate**.
@@ -315,14 +335,16 @@ The `ActiveDataWriters` invariant (0 at rest, follows the X through commit / rol
 
 ## Escalation
 
-`SimulatedDbTransaction.RowLockCountsByTable` tracks the per-tx per-table row-lock count; `EscalatedTables` is the set of tables already escalated.
-When the count crosses `RowLockEscalationThreshold` (5000, matching real SQL Server's default), `BatchContext.EscalateToTableX`:
+Real escalates a statement's row and key locks on one table to a single table lock once that statement holds enough of them — counted per statement, not per transaction, and counting the table's intent lock and a page intent lock per page the rows sit on.
+Probed 2026-09-28 against SQL Server 2025: the first attempt comes at 6 250 locks in all (a SERIALIZABLE scan of a narrow table escalates at about 6 235 keys, an UPDATE at about 6 235 rows), two statements of 4 000 keys each in one transaction never escalate, and the mode is S when every lock is S-family (a REPEATABLE READ or SERIALIZABLE read) and X otherwise (an UPDATE, an `UPDLOCK` read with or without SERIALIZABLE).
 
-1. Acquires table-X tx-scoped on the table (may block if other connections hold conflicting locks; throws as usual on timeout / deadlock).
-2. Releases every entry in `tx.HeldLocks` that's a row-lock on the escalated table.
-3. Marks the table in `EscalatedTables` so subsequent row-X requests on the same table short-circuit (the table-X already covers).
+`BatchContext.CountLocksForEscalation` keeps the tally on the statement (`StatementContext.LockTallies`), with the page locks estimated from the heap's rows per page (`EstimatedLockTotal`); a row lock under a key lock the statement holds on the clustered key adds nothing, as real holds one lock per key.
+At the attempt point `TryEscalate`:
 
-`AcquireRowLockTxScoped` checks the escalated-set before acquiring; the short-circuit means escalation amortizes across long bulk-DML sequences.
+1. Tries the table S or X **without waiting** — real escalates only when the table lock is grantable at once, and otherwise keeps the fine-grained locks and tries again 1 250 locks later.
+2. Releases the row and key locks the table lock covers (every one for an X, the S-family ones for an S), and the table's intent lock the new mode subsumes.
+3. Marks the table (`SimulatedDbTransaction.EscalatedTables` / `SharedEscalatedTables`, or the statement's own set outside a transaction) so later row and key locks there short-circuit.
+
 A table set `LOCK_ESCALATION = DISABLE` (`HeapTable.LockEscalation`) never escalates; `AUTO` behaves as `TABLE`, even on a partitioned table, where real escalates to the partition — partition-level locks aren't modeled.
 
 ## Acquisition sites
@@ -371,10 +393,10 @@ The two deadlines keep their own errors: `SET LOCK_TIMEOUT` elapsing is Msg 1222
 | Hint                              | Effect                                         |
 | --------------------------------- | ---------------------------------------------- |
 | `NOLOCK` / `READUNCOMMITTED`      | Skip every acquisition (dirty read).           |
-| `HOLDLOCK` / `SERIALIZABLE`       | Take table-IS tx-scoped plus a `RangeS-S` key range over the predicate's interval, or table-S when there is no interval to take. |
-| `REPEATABLEREAD`                  | Take table-IS + row-S tx-scoped per row.       |
-| `UPDLOCK`                         | Take table-IX + row-U tx-scoped per row, plus a `RangeS-U` fence under SERIALIZABLE / `HOLDLOCK`. |
-| `XLOCK`                           | Take table-IX + row-X tx-scoped per row, plus a `RangeX-X` fence under SERIALIZABLE / `HOLDLOCK`. |
+| `HOLDLOCK` / `SERIALIZABLE`       | Take table-IS tx-scoped plus `RangeS-S` on the keys the predicate reaches and the next one, or on every key when it reaches no narrower interval; a heap takes table-S. |
+| `REPEATABLEREAD`                  | Take table-IS + row-S tx-scoped per row returned. |
+| `UPDLOCK`                         | Take table-IX + row-U tx-scoped per row returned, plus `RangeS-U` key locks under SERIALIZABLE / `HOLDLOCK`. |
+| `XLOCK`                           | Take table-IX + row-X tx-scoped per row returned, plus `RangeX-X` key locks under SERIALIZABLE / `HOLDLOCK`. |
 | `READPAST`                        | Skip rows another connection holds incompatibly instead of waiting — the row-X a writer holds, and the row-U / row-X the `UPDLOCK` / `XLOCK` pairing meets. |
 | `TABLOCK`                         | Reader: table-S; Writer: table-X. Skip row-level. |
 | `TABLOCKX`                        | Take table-X regardless of direction.          |
@@ -396,13 +418,14 @@ Per-isolation reader behavior:
 | ------------------ | -------------------------------------------------------------- |
 | `READ UNCOMMITTED` | Skip every conflict check (dirty read). Equivalent to NOLOCK on every read. |
 | `READ COMMITTED` (default) | Table-IS + per-row probe (wait on row-X holders, no row-S acquire). |
-| `REPEATABLE READ`  | Table-IS + row-S tx-scoped per row read.                       |
-| `SERIALIZABLE`     | Table-IS tx-scoped + a key-range lock per sargable predicate, table-S otherwise. `UPDLOCK` / `XLOCK` shift the table lock to IX and the range mode to `RangeS-U` / `RangeX-X`. |
+| `REPEATABLE READ`  | Table-IS tx-scoped + row-S tx-scoped per row returned.         |
+| `SERIALIZABLE`     | Table-IS tx-scoped + key-range locks on the keys the predicate reaches, every key otherwise, table-S over a heap. `UPDLOCK` / `XLOCK` shift the table lock to IX and the range mode to `RangeS-U` / `RangeX-X`. |
 | `SNAPSHOT`         | Parses-and-discards; behaves as READ COMMITTED. |
 
 ## Diagnostic DMVs
 
-- **`sys.dm_tran_locks`** — one row per held / waiting lock across every schema-bound `SchemaLock`, every `HeapTable.TableDataLock`, every per-row entry in `HeapTable.RowLocks`, and every interned interval in `HeapTable.KeyRangeLocks`.
+- **`sys.dm_tran_locks`** — one row per held / waiting lock across every schema-bound `SchemaLock`, every `HeapTable.TableDataLock`, every per-row entry in `HeapTable.RowLocks`, and every key-lock anchor in `HeapTable.KeyLockGroups`.
+  A row lock reports `KEY` on a clustered table, whose row real locks by its key, and `RID` on a heap; a row lock and a key-range lock one session holds on the same clustered key fold into one row in the combined mode (see [Divergences](#divergences)).
   Column subset: `resource_type` (`OBJECT` / `RID` / `KEY`), `resource_database_id`, `resource_description`, `resource_associated_entity_id` (`object_id`), `request_mode` (`Sch-S` / `Sch-M` / `IS` / `IX` / `SIX` / `S` / `U` / `X` / `RangeS-S` / `RangeS-U` / `RangeX-X` / `RangeI-N`), `request_status` (`GRANT` / `WAIT`), `request_session_id`.
   Row generator at `LockDmvs.EnumerateDmTranLocks`.
 - **`sys.dm_os_waiting_tasks`** — one row per currently-blocked connection: `session_id` (waiter's SPID), `wait_type` (`LCK_M_<mode>`), `resource_description`, `blocking_session_id` (one conflicting holder's SPID).
@@ -458,9 +481,6 @@ NOLOCK / READ UNCOMMITTED, READPAST and the snapshot readers don't wait.
 
 ## Granularity approximations
 
-- **Key-range granularity** — a range fences the leading-column tuple the predicate pins, so a non-sargable predicate, a predicate on an unindexed (or non-leading) column, and a whole-table scan all fall back to table-S.
-  Conservative — blocks more than real SQL Server but never incorrectly allows a phantom-creating insert.
-  Full account in [Key-range locks](#key-range-locks).
 - **Page-level locks (`PAGLOCK`)** — page granularity isn't modeled; the hint parses-and-discards.
   Locking is row-level by default, so the hint is a no-op semantically.
 - **`ALTER SCHEMA TRANSFER`** — Sch-M on the moved object isn't acquired.

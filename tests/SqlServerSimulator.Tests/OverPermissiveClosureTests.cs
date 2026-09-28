@@ -229,7 +229,7 @@ public sealed class OverPermissiveClosureTests
     {
         var sim = new Simulation();
         sim.ExecuteBatches("create table fs (a int)", "create index ix_ok on fs (a)", "insert fs values (1)");
-        AreEqual(1, sim.ExecuteScalar<int>($"select count(*) from fs with ({hint})"));
+        AreEqual(1, sim.ExecuteScalar<int>($"select count(*) from fs with ({hint}) where a = 1"));
     }
 
     /// <summary>

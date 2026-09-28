@@ -102,14 +102,19 @@ internal sealed partial class Selection
         // The seek narrows the row source, then routes each candidate through
         // the SAME per-row lock / conflict pipeline the full scan uses — so it
         // touches (and locks) only the seeked rows, matching a real index seek.
-        // tx-scoped row locks (REPEATABLE READ / UPDLOCK / XLOCK) keep the
-        // whole-table scan, which deliberately locks every row it reads to end
-        // of transaction — their phantom fence is settled above all the same,
-        // since a SERIALIZABLE reader carrying UPDLOCK / XLOCK owes one.
+        // A tx-scoped row lock (REPEATABLE READ / UPDLOCK / XLOCK) is let go
+        // again on a row the sargable conjuncts reject, as real's is, so what
+        // the transaction keeps is the rows it read that qualify, whether the
+        // read seeks or scans (probed 2026-09-28 against SQL Server 2025).
+        RowLockQualifier? qualifier = null;
         if (plan.RowTxScoped)
         {
-            IndexSeekDiagnostics.Sink?.Add($"Scan({table.Name})");
-            return sources;
+            if (batch.ResolveSnapshotXidForRead(table) is not null
+                || (qualifier = RowLockQualifier.For(source, conjuncts, outerResolver)) is null)
+            {
+                IndexSeekDiagnostics.Sink?.Add($"Scan({table.Name})");
+                return sources;
+            }
         }
 
         // A snapshot / RCSI reader sees the version visible at its snapshot, not
@@ -125,7 +130,7 @@ internal sealed partial class Selection
         var snapshotXid = batch.ResolveSnapshotXidForRead(table);
 
         if (equalities.Count != 0
-            && TrySeekByLongestPrefix(source, table, plan, batch, snapshotXid, outerResolver, equalities, bounds, out var seekRows, out var width, out var rangeExtended, out var equalityCandidates))
+            && TrySeekByLongestPrefix(source, table, plan, batch, snapshotXid, outerResolver, equalities, bounds, qualifier, out var seekRows, out var width, out var rangeExtended, out var equalityCandidates))
         {
             IndexSeekDiagnostics.Sink?.Add($"Seek({table.Name})");
             IndexSeekDiagnostics.Sink?.Add($"SeekWidth({table.Name},{width})");
@@ -152,14 +157,14 @@ internal sealed partial class Selection
             seekedCandidates = unionCandidates.Count;
             return SeekedSource(source, snapshotXid is { } unionSx
                 ? MaterializeSnapshotCandidates(table, batch, unionSx, unionCandidates)
-                : MaterializeWithLockChecks(table, batch, plan, unionCandidates));
+                : MaterializeWithLockChecks(table, batch, plan, unionCandidates, qualifier));
         }
 
         // No equality seek — try a range seek on a leading key column
         // (col > v / col BETWEEN lo AND hi / a one-sided bound). The matched
         // bound conjunct(s) stay in the residual WHERE, so the range only
         // narrows the candidate set.
-        if (TrySeekByRange(source, table, plan, batch, snapshotXid, outerResolver, bounds, out var rangeRows, out var rangeCandidates))
+        if (TrySeekByRange(source, table, plan, batch, snapshotXid, outerResolver, bounds, qualifier, out var rangeRows, out var rangeCandidates))
         {
             IndexSeekDiagnostics.Sink?.Add($"Seek({table.Name})");
             IndexSeekDiagnostics.Sink?.Add($"RangeSeek({table.Name})");
@@ -169,17 +174,63 @@ internal sealed partial class Selection
         }
 
         IndexSeekDiagnostics.Sink?.Add($"Scan({table.Name})");
-        return sources;
+        return qualifier is null ? sources : SeekedSource(source, QualifiedLockScan(table, batch, plan, qualifier));
+    }
+
+    /// <summary>
+    /// A tx-scoped row-lock read's sargable conjuncts, which decide whether the
+    /// lock a row just took is kept: real takes the lock to read the row and
+    /// lets it go again when the row doesn't qualify, so a REPEATABLE READ or
+    /// <c>UPDLOCK</c> scan holds only the rows it returns. Only the sargable
+    /// shapes are evaluated — deterministic over the row and fixed values, so
+    /// a row they reject is one the residual WHERE rejects too; a row failing
+    /// only a conjunct outside them keeps its lock, erring toward real's
+    /// stricter footprint rather than dropping a row it would have returned.
+    /// </summary>
+    private sealed class RowLockQualifier(FromSource source, BooleanExpression[] conjuncts, Func<MultiPartName, SqlValue>? outerResolver)
+    {
+        public readonly FromSource Source = source;
+        public readonly BooleanExpression[] Conjuncts = conjuncts;
+        public readonly Func<MultiPartName, SqlValue>? OuterResolver = outerResolver;
+
+        public static RowLockQualifier? For(FromSource source, List<BooleanExpression> conjuncts, Func<MultiPartName, SqlValue>? outerResolver)
+        {
+            List<BooleanExpression>? sargable = null;
+            FromSource[] one = [source];
+            foreach (var conjunct in conjuncts)
+            {
+                if (IsSourceLocalSargable(source, conjunct, one))
+                    (sargable ??= []).Add(conjunct);
+            }
+            return sargable is null ? null : new RowLockQualifier(source, [.. sargable], outerResolver);
+        }
+    }
+
+    // A tx-scoped row-lock read with nothing to seek on: every row in scan
+    // order, through the qualifying lock pipeline.
+    private static IEnumerable<byte[]> QualifiedLockScan(HeapTable table, BatchContext batch, DataLockPlan plan, RowLockQualifier qualifier)
+    {
+        if (!plan.SkipBlockedRows)
+            batch.AwaitUncommittedDeletes(table);
+        var addresses = ClusteredScan.Order(table);
+        if (addresses is null)
+        {
+            addresses = [];
+            foreach (var (page, slot, _) in table.Heap.EnumerateRowsWithAddress())
+                addresses.Add((page, slot));
+        }
+        foreach (var row in MaterializeWithLockChecks(table, batch, plan, addresses, qualifier))
+            yield return row;
     }
 
     /// <summary>
     /// Takes the phantom protection a SERIALIZABLE / <c>HOLDLOCK</c> reader is
-    /// still owed over <paramref name="table"/>: a key-range lock over the
-    /// tuple interval the sargable conjuncts pin on the leading columns of some
-    /// key / index, or — when no conjunct offers one — the whole-table S the
+    /// still owed over <paramref name="table"/>: the key locks of the
+    /// intervals the sargable conjuncts pin on the leading columns of some key
+    /// / index, or — when no conjunct offers one — the whole key space the
     /// scan path falls back to. A no-op for every other isolation level. The
     /// mode comes off the plan, so an <c>UPDLOCK</c> / <c>XLOCK</c> reader
-    /// fences the same interval in <c>RangeS-U</c> / <c>RangeX-X</c>.
+    /// locks the same keys in <c>RangeS-U</c> / <c>RangeX-X</c>.
     /// </summary>
     private static void SettleSerializablePhantomFence(
         FromSource source,
@@ -194,50 +245,70 @@ internal sealed partial class Selection
             return;
         // Deliberately not short-circuited on an already-settled fence: a
         // correlated inner re-plans per outer row, and each outer value names
-        // an interval of its own that has to be fenced too.
-        if (ComputeSerializableKeyRange(source, table, batch, outerResolver, equalities, bounds) is not { } range)
+        // keys of its own that have to be locked too.
+        if (ComputeKeyFence(source, table, batch, outerResolver, equalities, bounds) is not { } fence)
         {
             batch.EnsureSerializableTableLock(table, plan);
             return;
         }
 
-        if (plan.Fence is { } fence)
-            fence.Settled = true;
-        batch.AcquireKeyRangeLockTxScoped(table, range, mode);
+        if (plan.Fence is { } settled)
+            settled.Settled = true;
+        batch.AcquireKeyFence(table, fence.Group, fence.Commons, fence.Intervals, mode, KeyFenceKind.Read, lookupRows: mode == LockMode.RangeSharedShared);
     }
 
     /// <summary>
-    /// The key-space interval a SERIALIZABLE reader can fence instead of
-    /// locking the whole table, or <c>null</c> when no conjunct offers one.
+    /// The index and the intervals of its key space a SERIALIZABLE access
+    /// reads, as <see cref="ComputeKeyFence"/> settles them.
+    /// </summary>
+    private sealed class KeyFence(KeyLockGroup group, SqlType[] commons, List<KeyFenceInterval> intervals)
+    {
+        public readonly KeyLockGroup Group = group;
+
+        /// <summary>Per anchor ordinal, the type the bounds compare in.</summary>
+        public readonly SqlType[] Commons = commons;
+
+        public readonly List<KeyFenceInterval> Intervals = intervals;
+    }
+
+    /// <summary>
+    /// Most probe tuples an <c>IN</c> list's cartesian product fences one by
+    /// one; past it the fence takes the hull of each column's values instead.
+    /// </summary>
+    private const int KeyFenceProbeCap = 256;
+
+    /// <summary>
+    /// The index and key intervals a SERIALIZABLE access reads instead of the
+    /// whole table, or <c>null</c> when no conjunct offers one.
     /// <para>
     /// Soundness rests on the same property the seek does: every conjunct here
     /// is a top-level <c>AND</c> factor of the predicate, so every row the
     /// query can ever return satisfies it, so every row that could become a
-    /// phantom carries a key tuple inside the returned interval. Only a
-    /// <b>leading prefix</b> of some key / index qualifies — mirroring real,
-    /// which range-locks along an index and takes an object-level S when there
-    /// is no index to walk.
+    /// phantom carries a key inside one of the intervals. Only a <b>leading
+    /// prefix</b> of some key / index qualifies — mirroring real, which
+    /// range-locks along an index and locks the whole key space when there is
+    /// none to walk.
     /// </para>
     /// <para>
     /// The fence follows the equality prefix as deep as the conjuncts pin it
-    /// (<c>a = 1 AND b = 2</c> against a key on <c>(a, b)</c> fences the single
+    /// (<c>a = 1 AND b = 2</c> against a key on <c>(a, b)</c> reads the single
     /// tuple), and extends one column further when a range bound lands on the
     /// key column right after the prefix (<c>a = 1 AND b BETWEEN 2 AND 5</c>).
     /// A prefix the predicate stops short of stays open, so <c>a = 1</c> alone
-    /// fences every <c>b</c> under <c>a = 1</c> and nothing else. The longest
-    /// prefix across all keys / indexes wins, keys walked before indexes so a
-    /// tie doesn't ride on dictionary enumeration order, and a bound
-    /// continuation breaks a tie between equal prefixes.
+    /// reads every <c>b</c> under <c>a = 1</c>. The longest prefix across all
+    /// keys / indexes wins, keys walked before indexes so a tie doesn't ride
+    /// on dictionary enumeration order, and a bound continuation breaks a tie
+    /// between equal prefixes.
     /// </para>
     /// <para>
-    /// An <c>IN</c> list collapses to the hull of its values — one interval
-    /// spanning the lowest to the highest, gaps between them included, which
-    /// over-blocks rather than leaving a value unfenced. Across a multi-column
-    /// prefix the same hull is taken per column, so the lexicographic interval
-    /// spans the whole cartesian product and then some.
+    /// An <c>IN</c> list reads one interval per value — per tuple of the
+    /// cartesian product across a multi-column prefix — as real's seek does,
+    /// so the gaps between the listed values stay free (probed 2026-09-28
+    /// against SQL Server 2025). Past <see cref="KeyFenceProbeCap"/> tuples it
+    /// reads the hull of each column's values instead.
     /// </para>
     /// </summary>
-    private static KeyRange? ComputeSerializableKeyRange(
+    private static KeyFence? ComputeKeyFence(
         FromSource source,
         HeapTable table,
         BatchContext batch,
@@ -249,52 +320,48 @@ internal sealed partial class Selection
             return null;
 
         var resolved = new Dictionary<int, (SqlType Common, SqlValue[] Probes)?>();
-        int[]? bestOrdinals = null;
+        KeyLockGroup? best = null;
         var bestLength = 0;
         var bestContinues = false;
-        foreach (var ordinals in EnumerateKeyOrdinals(table))
+        foreach (var owner in EnumerateKeyOwners(table))
         {
+            if (KeyLockGroup.For(table, owner) is not { } group)
+                continue;
+            var ordinals = group.Ordinals;
+            var keyLength = group.KeyLength;
             var length = 0;
-            while (length < ordinals.Length && ResolveComponent(ordinals[length]) is not null)
+            while (length < keyLength && ResolveComponent(ordinals[length]) is not null)
                 length++;
-            var continues = length < ordinals.Length && bounds.ContainsKey(ordinals[length]);
+            var continues = length < keyLength && bounds.ContainsKey(ordinals[length]);
             if (length == 0 && !continues)
                 continue;
-            if (bestOrdinals is null || length > bestLength || (length == bestLength && continues && !bestContinues))
-                (bestOrdinals, bestLength, bestContinues) = (ordinals, length, continues);
+            if (best is null || length > bestLength || (length == bestLength && continues && !bestContinues))
+                (best, bestLength, bestContinues) = (group, length, continues);
         }
 
-        if (bestOrdinals is null)
+        if (best is null)
             return null;
 
-        var width = bestLength + (bestContinues ? 1 : 0);
-        var rangeOrdinals = bestOrdinals[..width];
-        var commons = new SqlType[width];
-        var lower = new List<SqlValue>(width);
-        var upper = new List<SqlValue>(width);
+        var commons = (SqlType[])best.Commons.Clone();
+        var probeSets = new SqlValue[bestLength][];
+        var tuples = 1L;
         for (var i = 0; i < bestLength; i++)
         {
-            var (common, probes) = resolved[rangeOrdinals[i]]!.Value;
+            var (common, probes) = resolved[best.Ordinals[i]]!.Value;
             commons[i] = common;
-            var low = probes[0];
-            var high = probes[0];
-            for (var p = 1; p < probes.Length; p++)
-            {
-                if (probes[p].CompareTo(low) < 0)
-                    low = probes[p];
-                if (probes[p].CompareTo(high) > 0)
-                    high = probes[p];
-            }
-
-            lower.Add(low);
-            upper.Add(high);
+            probeSets[i] = probes;
+            tuples *= probes.Length;
         }
 
+        var hasLower = false;
+        var hasUpper = false;
+        SqlValue lowerValue = default;
+        SqlValue upperValue = default;
         var lowerInclusive = true;
         var upperInclusive = true;
         if (bestContinues)
         {
-            var boundOrdinal = rangeOrdinals[bestLength];
+            var boundOrdinal = best.Ordinals[bestLength];
             var bound = bounds[boundOrdinal];
             // A NULL bound makes the conjunct UNKNOWN for every row present or
             // future, so the query's result is permanently empty and no insert
@@ -302,19 +369,11 @@ internal sealed partial class Selection
             // Either way the equality prefix behind it is still a sound fence,
             // so keep that and drop the continuation.
             if (EvaluateRangeBounds(bound, source.StoredSchema[boundOrdinal].Type, batch, outerResolver,
-                out var boundCommon, out var hasLower, out var lowerValue, out var hasUpper, out var upperValue) == BoundEval.Value)
+                out var boundCommon, out hasLower, out lowerValue, out hasUpper, out upperValue) == BoundEval.Value)
             {
                 commons[bestLength] = boundCommon;
-                if (hasLower)
-                {
-                    lower.Add(lowerValue);
-                    lowerInclusive = bound.LowerInclusive;
-                }
-                if (hasUpper)
-                {
-                    upper.Add(upperValue);
-                    upperInclusive = bound.UpperInclusive;
-                }
+                lowerInclusive = !hasLower || bound.LowerInclusive;
+                upperInclusive = !hasUpper || bound.UpperInclusive;
             }
             else if (bestLength == 0)
             {
@@ -322,17 +381,62 @@ internal sealed partial class Selection
             }
             else
             {
-                rangeOrdinals = rangeOrdinals[..bestLength];
-                Array.Resize(ref commons, bestLength);
+                hasLower = hasUpper = false;
             }
         }
 
-        return new KeyRange(rangeOrdinals, commons, [.. lower], lowerInclusive, [.. upper], upperInclusive);
+        var uniquePoint = best.IsUnique && bestLength == best.KeyLength;
+        var intervals = new List<KeyFenceInterval>();
+        if (tuples > KeyFenceProbeCap)
+        {
+            var low = new SqlValue[bestLength];
+            var high = new SqlValue[bestLength];
+            for (var i = 0; i < bestLength; i++)
+            {
+                low[i] = high[i] = probeSets[i][0];
+                foreach (var probe in probeSets[i])
+                {
+                    if (probe.CompareTo(low[i]) < 0)
+                        low[i] = probe;
+                    if (probe.CompareTo(high[i]) > 0)
+                        high[i] = probe;
+                }
+            }
+            intervals.Add(Interval(low, high, uniquePoint: false));
+            return new KeyFence(best, commons, intervals);
+        }
+
+        var tuple = new SqlValue[bestLength];
+        AddTuples(0);
+        return new KeyFence(best, commons, intervals);
+
+        void AddTuples(int column)
+        {
+            if (column == bestLength)
+            {
+                intervals.Add(Interval(tuple, tuple, uniquePoint));
+                return;
+            }
+            foreach (var probe in probeSets[column])
+            {
+                tuple[column] = probe;
+                AddTuples(column + 1);
+            }
+        }
+
+        // The interval a prefix tuple pins, continued by the range bound when
+        // there is one. A side with nothing to bound it stays open.
+        KeyFenceInterval Interval(SqlValue[] lowPrefix, SqlValue[] highPrefix, bool uniquePoint)
+        {
+            SqlValueKey? lower = hasLower ? new SqlValueKey([.. lowPrefix, lowerValue]) : lowPrefix.Length == 0 ? null : new SqlValueKey([.. lowPrefix]);
+            SqlValueKey? upper = hasUpper ? new SqlValueKey([.. highPrefix, upperValue]) : highPrefix.Length == 0 ? null : new SqlValueKey([.. highPrefix]);
+            return new KeyFenceInterval(lower, lowerInclusive, upper, upperInclusive, uniquePoint);
+        }
 
         // Resolves (and memoizes) the probe components for one column, null for
         // a column that can't anchor the fence — no stable-value equality, or a
-        // dropped probe (NULL, cross-collation, unpromotable) whose hull
-        // wouldn't span every value the residual predicate still admits. Either
+        // dropped probe (NULL, cross-collation, unpromotable) whose value the
+        // residual predicate might still admit through some other path. Either
         // bounds the prefix there rather than under-fencing.
         (SqlType Common, SqlValue[] Probes)? ResolveComponent(int storageOrdinal)
         {
@@ -348,6 +452,19 @@ internal sealed partial class Selection
 
             resolved[storageOrdinal] = component;
             return component;
+        }
+    }
+
+    // Every key constraint then every rowstore index of the table, the
+    // objects a key fence can walk.
+    private static IEnumerable<object> EnumerateKeyOwners(HeapTable table)
+    {
+        foreach (var key in table.KeyConstraints)
+            yield return key;
+        foreach (var index in table.Indexes)
+        {
+            if (!index.IsColumnstore && index.KeyColumns.Length != 0)
+                yield return index;
         }
     }
 
@@ -484,6 +601,7 @@ internal sealed partial class Selection
         long? snapshotXid,
         Func<MultiPartName, SqlValue>? outerResolver,
         Dictionary<int, RangeBoundExprs> bounds,
+        RowLockQualifier? qualifier,
         out IEnumerable<byte[]> seekRows,
         out int candidateCount)
     {
@@ -499,7 +617,7 @@ internal sealed partial class Selection
             AwaitUncommittedDeletesInRange(table, batch, outerResolver, bounds);
         seekRows = snapshotXid is { } sx
             ? MaterializeSnapshotCandidates(table, batch, sx, candidates)
-            : MaterializeWithLockChecks(table, batch, plan, candidates);
+            : MaterializeWithLockChecks(table, batch, plan, candidates, qualifier);
         return true;
     }
 
@@ -2059,6 +2177,7 @@ internal sealed partial class Selection
         Func<MultiPartName, SqlValue>? outerResolver,
         Dictionary<int, Expression[]> equalities,
         Dictionary<int, RangeBoundExprs> bounds,
+        RowLockQualifier? qualifier,
         out IEnumerable<byte[]> seekRows,
         out int width,
         out bool rangeExtended,
@@ -2076,7 +2195,7 @@ internal sealed partial class Selection
             AwaitUncommittedDeletesMatching(table, batch, outerResolver, equalities);
         seekRows = snapshotXid is { } sx
             ? MaterializeSnapshotCandidates(table, batch, sx, candidates)
-            : MaterializeWithLockChecks(table, batch, plan, candidates);
+            : MaterializeWithLockChecks(table, batch, plan, candidates, qualifier);
         return true;
     }
 
@@ -2554,10 +2673,25 @@ internal sealed partial class Selection
 
     // Yields each candidate row's bytes after running it through the reader's
     // per-row lock / conflict check (RC probe, READPAST skip, NOLOCK pass-through
-    // — exactly what the full scan applies, but only to the seeked rows).
+    // — exactly what the full scan applies, but only to the seeked rows). With a
+    // qualifier, a tx-scoped row lock taken on a row it rejects is let go and
+    // the row skipped (see RowLockQualifier).
     private static IEnumerable<byte[]> MaterializeWithLockChecks(
-        HeapTable table, BatchContext batch, DataLockPlan plan, List<(int Page, int Slot)> candidates)
+        HeapTable table, BatchContext batch, DataLockPlan plan, List<(int Page, int Slot)> candidates, RowLockQualifier? qualifier = null)
     {
+        // Hoisted per-row scaffolding for the qualifier, as the prefilter's.
+        var tuple = new byte[]?[1];
+        var qualifying = qualifier is not null && plan.RowMode is not null;
+        RuntimeContext runtime = default;
+        if (qualifying)
+        {
+            FromSource[] one = [qualifier!.Source];
+            var memo = new SourceColumnMemo();
+            var outer = qualifier!.OuterResolver;
+            SqlValue resolve(MultiPartName name) => ResolveAcrossTuple(one, tuple, name, batch, outer, memo);
+            runtime = new RuntimeContext(resolve, batch);
+        }
+
         // Dedup + tombstone-skip mirror the full scan's EnumerateRowsWithAddress
         // (which skips tombstoned / forward-target slots and yields each row once)
         // and neutralize the incrementally-maintained cache's only imprecision: a
@@ -2568,9 +2702,39 @@ internal sealed partial class Selection
         {
             if (!seen.Add((page, slot)) || table.Heap.IsSlotTombstoned(page, slot))
                 continue;
-            if (batch.TouchRowForRead(table, page, slot, plan) && table.Heap.ReadSlotBytes(page, slot) is { } bytes)
-                yield return bytes;
+            if (!batch.TouchRowForRead(table, page, slot, plan) || table.Heap.ReadSlotBytes(page, slot) is not { } bytes)
+                continue;
+            if (qualifying)
+            {
+                tuple[0] = bytes;
+                if (!Qualifies(qualifier!.Conjuncts, runtime))
+                {
+                    batch.ReleaseRowLockAcquisition(table, page, slot, plan.RowMode!.Value);
+                    continue;
+                }
+            }
+            yield return bytes;
         }
+        tuple[0] = null;
+    }
+
+    // Whether every conjunct answers TRUE for the row the runtime reads; one
+    // that raises leaves the decision to the residual WHERE, so the row stays.
+    private static bool Qualifies(BooleanExpression[] conjuncts, RuntimeContext runtime)
+    {
+        foreach (var conjunct in conjuncts)
+        {
+            try
+            {
+                if (conjunct.Run(runtime) != true)
+                    return false;
+            }
+            catch (SimulatedSqlException)
+            {
+                return true;
+            }
+        }
+        return true;
     }
 
     /// <summary>
@@ -2628,11 +2792,17 @@ internal sealed partial class Selection
         !batch.IsSkipping && (serializableHint || batch.Connection.SessionIsolationLevel == System.Data.IsolationLevel.Serializable)
             && !table.IsTableVariable && !BatchContext.IsLocalTempName(table.Name) && !Simulation.SystemHeapTables.Values.Contains(table);
 
-    // A keyed table's fallback is a table S — real takes RangeS-U on every key
-    // and the infinity range, which admits the same readers and refuses the
-    // same writers — and a keyless heap's the table X real takes.
-    private static void FenceWriterTable(HeapTable table, BatchContext batch) =>
-        batch.AcquireTransactionLock(table.TableDataLock, EnumerateKeyOrdinals(table).Any() ? LockMode.Shared : LockMode.Exclusive);
+    // A clustered table's fallback is RangeS-U on every key and the infinity
+    // anchor, real's own for a SERIALIZABLE UPDATE / DELETE that scans; a
+    // heap's is the table X real takes (probed 2026-09-28 against SQL Server
+    // 2025).
+    private static void FenceWriterTable(HeapTable table, BatchContext batch)
+    {
+        if (KeyLockGroup.RowGroupOf(table) is { } group)
+            batch.AcquireKeyFence(table, group, group.Commons, [KeyFenceInterval.Everything], LockMode.RangeSharedUpdate, KeyFenceKind.Write, lookupRows: false);
+        else
+            batch.AcquireTransactionLock(table.TableDataLock, LockMode.Exclusive);
+    }
 
     // Takes `mode` over the interval `predicate`'s top-level conjuncts pin on
     // one of the table's keys, reading a value side through `outerResolver`
@@ -2658,9 +2828,9 @@ internal sealed partial class Selection
         }
 
         var bounds = CollectRangeBounds(source, conjuncts, correlated);
-        if (ComputeSerializableKeyRange(source, table, batch, outerResolver, equalities, bounds) is not { } range)
+        if (ComputeKeyFence(source, table, batch, outerResolver, equalities, bounds) is not { } fence)
             return false;
-        batch.AcquireKeyRangeLockTxScoped(table, range, mode);
+        batch.AcquireKeyFence(table, fence.Group, fence.Commons, fence.Intervals, mode, KeyFenceKind.Write, lookupRows: false);
         return true;
     }
 

@@ -1455,6 +1455,19 @@ internal abstract class BooleanExpression : ExpressionNode
     }
 
     /// <summary>
+    /// Whether an index seek can answer this predicate on the source
+    /// <paramref name="probe"/> tests for — the question real's optimizer asks
+    /// before it refuses a <c>FORCESEEK</c> with Msg 8622. A comparison, an
+    /// <c>IN</c>, a <c>BETWEEN</c>, an <c>IS [NOT] NULL</c> or a <c>LIKE</c>
+    /// whose pattern doesn't lead with a wildcard seeks when one side is a
+    /// key-leading column and the other reads nothing of the source; an
+    /// <c>AND</c> seeks through any operand, an <c>OR</c> only through every
+    /// one, and <paramref name="negated"/> swaps the two as <c>NOT</c> does. A
+    /// predicate settled false while compiling needs no seek at all.
+    /// </summary>
+    internal virtual bool OffersSeek(Selection.ForceSeekProbe probe, bool negated) => negated ? this.IsNeverFalse : this.IsNeverTrue;
+
+    /// <summary>
     /// A predicate real SQL Server settled to a constant while compiling: its
     /// <see cref="Run"/> answers that constant and the written operands never
     /// evaluate. Two rules build one — a comparison against a NULL constant
@@ -1628,6 +1641,11 @@ internal abstract class BooleanExpression : ExpressionNode
                 operand.CollectConjuncts(sink);
         }
 
+        internal override bool OffersSeek(Selection.ForceSeekProbe probe, bool negated) =>
+            negated
+                ? Array.TrueForAll(operands, operand => operand.OffersSeek(probe, negated))
+                : Array.Exists(operands, operand => operand.OffersSeek(probe, negated));
+
         internal override bool IsFilteredIndexShape => Array.TrueForAll(operands, operand => operand.IsFilteredIndexShape);
 
         private protected override bool TryAppendFilterDefinition(StringBuilder sb, BatchContext batch)
@@ -1730,6 +1748,11 @@ internal abstract class BooleanExpression : ExpressionNode
                 operand.CollectDisjuncts(sink);
         }
 
+        internal override bool OffersSeek(Selection.ForceSeekProbe probe, bool negated) =>
+            negated
+                ? Array.Exists(operands, operand => operand.OffersSeek(probe, negated))
+                : Array.TrueForAll(operands, operand => operand.OffersSeek(probe, negated));
+
         // Flatten the OR chain into leaf equality pairs. Succeeds only when
         // EVERY operand is itself an equality family — a single equality
         // compare (one pair), a nested OR node (recursed via the virtual on
@@ -1771,6 +1794,8 @@ internal abstract class BooleanExpression : ExpressionNode
     internal sealed class IsNullExpression(Expression source, bool negated) : BooleanExpression
     {
         internal override bool ParallelSafe => source.ParallelSafe;
+
+        internal override bool OffersSeek(Selection.ForceSeekProbe probe, bool negated) => probe.IsSeekColumn(source);
 
         internal override bool IsWrittenConstant => source.IsWrittenConstant;
 
@@ -1822,6 +1847,8 @@ internal abstract class BooleanExpression : ExpressionNode
     private sealed class DistinctFromExpression(Expression left, Expression right, bool negated) : BooleanExpression
     {
         internal override bool ParallelSafe => this.OperandExpressionsParallelSafe;
+
+        internal override bool OffersSeek(Selection.ForceSeekProbe probe, bool negated) => probe.IsColumnAgainstValue(left, right);
 
         internal override bool IsWrittenConstant => left.IsWrittenConstant && right.IsWrittenConstant;
 
@@ -1878,6 +1905,9 @@ internal abstract class BooleanExpression : ExpressionNode
     /// </summary>
     private sealed class InExpression(Expression source, Expression[] candidates, bool negated, bool selfReferenced) : BooleanExpression
     {
+        internal override bool OffersSeek(Selection.ForceSeekProbe probe, bool negated) =>
+            probe.IsSeekColumn(source) && Array.TrueForAll(candidates, probe.IsValueSide);
+
         // Which operands read no column, settled on first use; see
         // ComparisonType for why a comparison cares.
         private bool? sourceIsConstant;
@@ -2053,6 +2083,12 @@ internal abstract class BooleanExpression : ExpressionNode
     {
         internal override bool ParallelSafe => this.OperandExpressionsParallelSafe;
 
+        // `v BETWEEN lo AND hi` is `lo <= v AND v <= hi`, so a column on
+        // either bound seeks too (`1 BETWEEN a AND b` seeks on `a`).
+        internal override bool OffersSeek(Selection.ForceSeekProbe probe, bool negated) =>
+            (probe.IsSeekColumn(value) && probe.IsValueSide(lower) && probe.IsValueSide(upper))
+            || (probe.IsValueSide(value) && (probe.IsColumnAgainstValue(lower, value) || probe.IsColumnAgainstValue(upper, value)));
+
         private readonly StringCoercionMemo subjectPromotion = new(), lowerPromotion = new(), upperPromotion = new();
 
         internal override bool IsWrittenConstant =>
@@ -2153,6 +2189,8 @@ internal abstract class BooleanExpression : ExpressionNode
     /// </summary>
     private sealed class InSubqueryExpression(Expression source, Selection inner, bool negated) : BooleanExpression
     {
+        internal override bool OffersSeek(Selection.ForceSeekProbe probe, bool negated) => probe.IsSeekColumn(source);
+
         public override bool? Run(RuntimeContext runtime)
         {
             var src = source.Run(runtime);
@@ -2490,6 +2528,8 @@ internal abstract class BooleanExpression : ExpressionNode
     /// </summary>
     private sealed class QuantifiedComparisonExpression(Expression left, ComparisonOp op, QuantifiedKind kind, Selection inner) : BooleanExpression
     {
+        internal override bool OffersSeek(Selection.ForceSeekProbe probe, bool negated) => probe.IsSeekColumn(left);
+
         public override bool? Run(RuntimeContext runtime)
         {
             var lhs = left.Run(runtime);
@@ -2581,6 +2621,8 @@ internal abstract class BooleanExpression : ExpressionNode
     /// </summary>
     private sealed class NotExpression(BooleanExpression inner) : BooleanExpression
     {
+        internal override bool OffersSeek(Selection.ForceSeekProbe probe, bool negated) => inner.OffersSeek(probe, !negated);
+
         internal override bool IsWrittenConstant => inner.IsWrittenConstant;
 
         // Three-valued NOT swaps the two verdicts and leaves UNKNOWN alone, so
@@ -2636,6 +2678,10 @@ internal abstract class BooleanExpression : ExpressionNode
             this.left = left;
             this.right = right;
         }
+
+        // Every comparison operator, `<>` included, seeks — a NOT over one
+        // flips the operator and seeks the same.
+        internal override bool OffersSeek(Selection.ForceSeekProbe probe, bool negated) => probe.IsColumnAgainstValue(this.left, this.right);
 
         internal override void Describe(NodeShape shape) => shape.Child(this.left).Child(this.right);
 
@@ -2966,6 +3012,14 @@ internal abstract class BooleanExpression : ExpressionNode
         private readonly LikeMatcher.Cache patterns = new(forPatIndex: false);
         private readonly Expression? escape = escape;
         private readonly bool negated = negated;
+
+        // A pattern seeks on its literal prefix, so one that leads with `%` or
+        // `_` has none to seek on; a pattern read from a variable or column is
+        // settled at run time, which real's plan leaves to a dynamic seek.
+        internal override bool OffersSeek(Selection.ForceSeekProbe probe, bool negated) =>
+            probe.IsSeekColumn(this.left) && probe.IsValueSide(this.right) && !probe.ConvertsColumn(this.left, this.right)
+            && (this.right is not Value { Constant: { IsNull: false, Type.Category: SqlTypeCategory.String } pattern }
+                || pattern.AsString is not ['%' or '_', ..]);
 
         public override bool? Run(RuntimeContext runtime)
         {

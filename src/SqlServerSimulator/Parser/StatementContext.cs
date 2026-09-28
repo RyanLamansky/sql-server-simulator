@@ -149,6 +149,23 @@ internal sealed class StatementContext
     public int StartLine;
 
     /// <summary>
+    /// Per table, the row and key locks this statement has taken there, which
+    /// is what real's lock escalation counts: a statement, not a transaction,
+    /// crossing the threshold escalates (probed 2026-09-28 against SQL Server
+    /// 2025 — two SERIALIZABLE reads of 4 000 keys each in one transaction
+    /// keep all 8 001 key locks). Cleared by the dispatch loop at the top of
+    /// each statement iteration.
+    /// </summary>
+    public Dictionary<Storage.HeapTable, LockEscalationTally>? LockTallies;
+
+    /// <summary>
+    /// Tables this statement escalated outside a transaction, with the table
+    /// mode taken — inside one the transaction records it, since the lock
+    /// outlives the statement there.
+    /// </summary>
+    public Dictionary<Storage.HeapTable, Storage.LockMode>? EscalatedTables;
+
+    /// <summary>
     /// Latched once an <c>IGNORE_DUP_KEY</c> index or constraint has made this
     /// statement skip a duplicate row, so the severity-0 Msg 3604 rides the
     /// info-message stream exactly once however many rows were dropped —
@@ -356,4 +373,40 @@ internal sealed class StatementContext
 internal sealed class StatementTransactionMark
 {
     public bool Opens;
+}
+
+/// <summary>
+/// One statement's lock count on one table, and when escalation is next
+/// attempted there.
+/// </summary>
+internal sealed class LockEscalationTally
+{
+    /// <summary>Row and key locks taken.</summary>
+    public int Count;
+
+    /// <summary>
+    /// The estimated lock total at which escalation is next tried — real's
+    /// first attempt comes at 6 250, and a refused one is retried every 1 250
+    /// locks after (probed 2026-09-28 against SQL Server 2025).
+    /// </summary>
+    public int NextAttempt = FirstAttempt;
+
+    /// <summary>
+    /// Whether any lock counted is a U or X (or a range mode with one as its
+    /// key part), which escalates to a table X rather than S.
+    /// </summary>
+    public bool Exclusive;
+
+    /// <summary>
+    /// Whether the statement holds key locks on the table's clustered key,
+    /// which its row locks sit under: real holds one lock per key, so a row
+    /// lock there adds nothing to the count.
+    /// </summary>
+    public bool RowsKeyLocked;
+
+    /// <summary>The estimated total real's first escalation attempt comes at.</summary>
+    public const int FirstAttempt = 6250;
+
+    /// <summary>How many more locks a refused attempt waits for.</summary>
+    public const int RetryInterval = 1250;
 }

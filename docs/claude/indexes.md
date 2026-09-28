@@ -148,9 +148,9 @@ Invalidation is the **rollback / TRUNCATE safety valve**: a rollback rewinds hea
 ALTER TABLE replaces the heap instance, so the new heap starts journal-free.
 Correctness rests on the heap staying the single source of truth: every matched equality conjunct remains a residual WHERE filter, so a stale bucket membership is only ever a harmless false-positive (the residual drops it; the materializer also de-dups and skips tombstoned slots), while the add side — insert / update-new-key — recomputes from live row bytes and so never drops a live candidate (the one thing that would change results).
 The seek isn't a free pass around concurrency control: under a lock-based plan it routes each seeked candidate row through the same `BatchContext.TouchRowForRead` lock / conflict pipeline the full scan uses, so it acquires locks on only the rows it touches (matching a real index seek's footprint).
+A tx-scoped row-lock plan (`REPEATABLE READ` / `UPDLOCK` / `XLOCK`) seeks too, and lets go of the lock on a candidate its sargable conjuncts reject, so the transaction keeps only the rows it returns, as real's does — see [`locking.md`](locking.md#key-range-locks).
 It **declines** — falling back to the full scan — for:
 
-- **tx-scoped row-lock plans** (`REPEATABLE READ` / `SERIALIZABLE` / `UPDLOCK` / `HOLDLOCK` …), where the scan deliberately locks every row it reads to end of transaction;
 - non-base-table sources (derived tables, table variables, `FOR SYSTEM_TIME`), a WHERE with no equality conjunct on any index's leading column (a range-only predicate is handled separately — see [Range seeks](#range-seeks)), and `NULL` / non-resolvable-collation value sides.
 
 ### Snapshot / RCSI seeks (version-aware materialization)
@@ -246,7 +246,7 @@ Two ordering rules make the choice deterministic rather than value-dependent:
 
 Everything downstream composes because this is just another way a source gets seeked: it rides the same snapshot / RCSI materializer and per-row lock pipeline, sits behind the same tx-scoped-row-lock decline, reports its deduped candidate count so a union on a **non-leftmost** joined source drives the join reorder like any other narrowing, and serves the **mutation** path through the same candidate core (`SeekMutationTarget`, so an UPDATE / DELETE whose WHERE is a cross-column OR seeks its target).
 MERGE's per-source target seek doesn't take it yet — `TryPrepareMergeTargetSeek` settles its structural question once for the whole statement (`HasSeekableLeadingPrefix` over the `ON` conjuncts) and would need the union's own plan hoisted out of the per-source delegate.
-The SERIALIZABLE phantom fence is settled from the *top-level* conjuncts before any candidate address is read and a disjunction pins no interval on any one key, so a fenced reader keeps the whole-table S while its read still narrows — narrowing which rows a read touches never narrows what it fences (see [`locking.md`](locking.md#what-the-reader-takes)).
+The SERIALIZABLE phantom fence is settled from the *top-level* conjuncts before any candidate address is read and a disjunction pins no interval on any one key, so a fenced reader locks the whole key space while its read still narrows — as real's does over a small table, whose optimizer scans rather than union two seeks (see [`locking.md`](locking.md#what-the-reader-takes)).
 
 Measured (WWI, `Sales.Orders`, `CustomerID = 90 OR SalespersonPersonID = 16`): ~39 ms → ~5.2 ms, against ~6.5 ms on live SQL Server.
 
@@ -682,4 +682,4 @@ The option rules follow the target, so an `ALTER INDEX` resolves its index befor
   The simulator's order is fixed and documented in `Simulation.IndexedViews.cs`.
 - **Indexed-view `sys.partitions` row**: real reports a `sys.partitions` / `sys.dm_db_partition_stats` row for a view index carrying the materialized row count; the simulator (which never materializes) omits view indexes from those page-count views.
   `sys.indexes` / `sys.index_columns` / `sys.stats` are populated.
-- **Index hints (`SELECT … WITH (INDEX = name)`)**: not modeled — query planner is single-strategy (full scan) regardless.
+- **Index hints (`SELECT … WITH (INDEX = name)`)** choose no access path — the read seeks or scans as it would unhinted, and the hint only settles which `FORCESEEK` / `FORCESCAN` plans real would refuse (see [`query-hints.md`](query-hints.md#enforced-rejections)).

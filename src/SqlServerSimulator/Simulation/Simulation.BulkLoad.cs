@@ -254,7 +254,7 @@ partial class Simulation
             var (pageIndex, slotIndex) = table.Heap.Insert(encoded.AsSpan(0, length), batch.CurrentUndoLog);
             if (IsLockableTable(table))
             {
-                batch.AcquireRowLockTxScoped(table, pageIndex, slotIndex, LockMode.Exclusive);
+                batch.AcquireRowLockTxScoped(table, pageIndex, slotIndex, LockMode.Exclusive, RowLockPurpose.Insert);
                 VersionStore.CaptureWrite(batch, table, (pageIndex, slotIndex), oldRid: null, oldPayload: null, VersionWriteKind.Insert);
             }
             table.ChangeTracking?.RecordRow(batch, table, rowValues, ChangeTrackingOperation.Insert);

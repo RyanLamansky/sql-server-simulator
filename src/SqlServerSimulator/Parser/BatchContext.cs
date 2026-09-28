@@ -268,6 +268,14 @@ internal sealed class BatchContext
     public bool CreateTimeBinding;
 
     /// <summary>
+    /// Set on the throwaway batch <c>Simulation.CompileBatch</c> walks ahead of
+    /// running a batch, as opposed to a module body binding at <c>CREATE</c>:
+    /// real's optimizer meets the first but not the second, so its refusals
+    /// (Msg 8622) are raised only here.
+    /// </summary>
+    public bool CompilingForRun;
+
+    /// <summary>
     /// Set on the batch a scalar function's or multi-statement TVF's body runs
     /// in when called: like a procedure's, it is as far as a batch-aborting
     /// name-resolution error reaches, so the calling statement fails and its
@@ -1054,12 +1062,13 @@ internal sealed class BatchContext
     /// <item>Read <c>XLOCK</c> / <c>UPDLOCK</c> → table-IX (intent to write).</item>
     /// <item>Read session <c>SERIALIZABLE</c> (no TABLOCK*) → table-IS
     /// tx-scoped, with phantom protection deferred to whoever consumes the
-    /// source: key-range locks over the predicate's interval when it is
-    /// sargable on an indexed leading column, table-S tx-scoped otherwise.
-    /// See <see cref="EnsureSerializableTableLock"/>.</item>
+    /// source: key-range locks on the keys the predicate reaches when it is
+    /// sargable on an indexed leading column, on every key otherwise, and a
+    /// table-S over a heap. See <see cref="EnsureSerializableTableLock"/>.</item>
     /// <item>Read session <c>READ UNCOMMITTED</c> / hint <c>NOLOCK</c> → no
     /// table-level lock acquired (dirty read).</item>
-    /// <item>Read default (RC / RR / HOLDLOCK hint) → table-IS.</item>
+    /// <item>Read default (RC / RR / HOLDLOCK hint) → table-IS, tx-scoped
+    /// under RR, whose row locks outlive the statement.</item>
     /// </list>
     /// </para>
     /// <para>
@@ -1068,10 +1077,10 @@ internal sealed class BatchContext
     /// <item>NOLOCK / RU isolation → no per-row lock; reader doesn't probe.</item>
     /// <item>RC reader → no row-S acquisition; reader probes each row for
     /// an incompatible row-X holder and waits (or skips with READPAST).</item>
-    /// <item>RR / HOLDLOCK reader → row-S tx-scoped per touched row.</item>
-    /// <item>SERIALIZABLE reader → no per-row acquire; the key ranges (or
-    /// the table-S fallback) cover both the rows read and the gaps between
-    /// them, since a writer probes its row's key against every held range
+    /// <item>RR reader → row-S tx-scoped per row it returns.</item>
+    /// <item>SERIALIZABLE reader → no per-row acquire; the key locks (or a
+    /// heap's table-S) cover both the rows read and the gaps between them,
+    /// since a writer tests its row's keys against every held key lock
     /// whatever its own isolation level.</item>
     /// <item>UPDLOCK reader → row-U tx-scoped per touched row.</item>
     /// <item>XLOCK reader → row-X tx-scoped per touched row.</item>
@@ -1198,9 +1207,14 @@ internal sealed class BatchContext
                 serializableRangeMode: LockMode.RangeSharedShared,
                 fence: new PhantomFenceState());
         }
-        // RC / RR reader.
-        this.AcquireStatementLock(table.TableDataLock, LockMode.IntentShared, hints.NoWait);
+        // RC / RR reader. A REPEATABLE READ keeps its IS as long as the row S
+        // locks under it, as real reports — it is what a TABLOCKX writer, which
+        // takes no row lock, meets.
         var rowTxScoped = hints.Repeatable || isolation == System.Data.IsolationLevel.RepeatableRead;
+        if (rowTxScoped)
+            this.AcquireTransactionLock(table.TableDataLock, LockMode.IntentShared, hints.NoWait);
+        else
+            this.AcquireStatementLock(table.TableDataLock, LockMode.IntentShared, hints.NoWait);
         // RR: acquire row-S tx-scoped per row.
         // RC default: probe-only (no acquire). Encoded as rowMode = null + noLockReader = false;
         // the row-touch helper distinguishes "null + noLockReader=false" (probe) from
@@ -1212,47 +1226,61 @@ internal sealed class BatchContext
     /// <summary>
     /// Acquires <paramref name="mode"/> on the row at
     /// <c>(pageIndex, slotIndex)</c> in <paramref name="table"/>, recording
-    /// against the active transaction (tx-scoped — every per-row data
-    /// lock in phase 1b is tx-scoped). Bumps the per-tx per-table row-lock
-    /// count; if the count crosses
-    /// <see cref="SimulatedDbTransaction.RowLockEscalationThreshold"/>,
-    /// the row lock is released and a single table-X is acquired in its
-    /// place (escalation). Subsequent per-row acquires on the same table
-    /// in the same tx short-circuit (the table-X already covers).
+    /// it against the active transaction (the statement, outside one), and
+    /// counts it toward the statement's lock escalation on the table. A row
+    /// the transaction or statement has already escalated past takes no lock
+    /// of its own. Before the row lock, a held key lock on the row's keys is
+    /// tested as <paramref name="purpose"/> says it must be.
     /// </summary>
-    public void AcquireRowLockTxScoped(HeapTable table, int pageIndex, int slotIndex, LockMode mode)
+    public void AcquireRowLockTxScoped(HeapTable table, int pageIndex, int slotIndex, LockMode mode, RowLockPurpose purpose = RowLockPurpose.Read)
     {
         var connection = this.Connection;
-        // A writer's row-X is the one point every DML path passes through with
-        // a RID in hand, so it is where the key-range probe hangs. The slot
-        // holds the image that matters at each site: an INSERT locks after the
-        // heap write (so it reads its new row), an UPDATE / DELETE locks
-        // before (so it reads the row it is about to supersede). An UPDATE's
-        // *new* image is probed separately at the rewrite site — a row moving
-        // INTO a held range is a phantom the old image can't reveal.
-        if (mode == LockMode.Exclusive && Volatile.Read(ref table.ActiveKeyRangeLocks) != 0
+        // Every DML path passes through here with a RID in hand, so it is
+        // where the key-lock tests hang. The slot holds the image that matters
+        // at each site: an INSERT locks after the heap write (so it reads its
+        // new row), an UPDATE / DELETE locks before (so it reads the row it is
+        // about to supersede). An UPDATE's new image is tested separately at
+        // the rewrite site — a row moving into a fenced gap is a phantom the
+        // old image can't reveal.
+        if (Volatile.Read(ref table.ActiveKeyRangeLocks) != 0
             && table.Heap.ReadSlotBytes(pageIndex, slotIndex) is { } liveImage)
         {
-            this.ProbeKeyRangesForWrite(table, liveImage);
+            if (purpose == RowLockPurpose.Read)
+                _ = this.TestRowKeyLock(table, liveImage, mode, skipIfBlocked: false);
+            else
+                this.TestKeyLocksForWrite(table, liveImage, purpose);
         }
-        if (connection.CurrentTransaction is { } tx && tx.EscalatedTables.Contains(table))
+        if (this.EscalatedModeOf(table) is { } escalated && (escalated == LockMode.Exclusive || mode == LockMode.Shared))
             return;
         var resource = table.GetOrCreateRowLock(pageIndex, slotIndex);
         connection.Simulation.LockManager.Acquire(resource, mode, connection.Session, this.LockTimeoutFor(table));
         if (connection.CurrentTransaction is { } activeTx)
-        {
             activeTx.HeldLocks.Add((resource, mode));
-            var counts = activeTx.RowLockCountsByTable;
-            _ = counts.TryGetValue(table, out var prev);
-            counts[table] = prev + 1;
-            // LOCK_ESCALATION = DISABLE keeps the row locks, however many.
-            if (counts[table] > SimulatedDbTransaction.RowLockEscalationThreshold && table.LockEscalation != 1 && !activeTx.EscalatedTables.Contains(table))
-                EscalateToTableX(table, activeTx);
-        }
         else
-        {
             this.StatementSchemaLocks.Add((resource, mode));
-        }
+        this.CountLocksForEscalation(table, 1, exclusive: mode != LockMode.Shared, rowLock: true);
+    }
+
+    /// <summary>
+    /// Gives back the most recent acquisition of <paramref name="mode"/> on the
+    /// row at <paramref name="pageIndex"/> / <paramref name="slotIndex"/> — the
+    /// lock a tx-scoped read took on a row that turned out not to qualify,
+    /// which real releases rather than keeping to the transaction's end. A
+    /// row the read took no lock on (the table escalated) gives back nothing.
+    /// </summary>
+    public void ReleaseRowLockAcquisition(HeapTable table, int pageIndex, int slotIndex, LockMode mode)
+    {
+        if (!table.RowLocks.TryGetValue((pageIndex, slotIndex), out var resource))
+            return;
+        var connection = this.Connection;
+        var held = connection.CurrentTransaction?.HeldLocks ?? this.StatementSchemaLocks;
+        var index = held.LastIndexOf((resource, mode));
+        if (index < 0)
+            return;
+        held.RemoveAt(index);
+        connection.Simulation.LockManager.Release(resource, mode, connection.Session);
+        if (this.CurrentStatement.LockTallies is { } tallies && tallies.TryGetValue(table, out var tally) && !tally.RowsKeyLocked)
+            tally.Count--;
     }
 
     /// <summary>
@@ -1267,7 +1295,7 @@ internal sealed class BatchContext
     public void NoteSupersededRow(HeapTable table, int pageIndex, int slotIndex)
     {
         var connection = this.Connection;
-        if (connection.CurrentTransaction is { } tx && tx.EscalatedTables.Contains(table))
+        if (this.EscalatedModeOf(table) == LockMode.Exclusive)
             return;
         // Every caller has just taken the row X through AcquireRowLockTxScoped,
         // whose only way out without it is the escalation checked above; the
@@ -1384,152 +1412,428 @@ internal sealed class BatchContext
     }
 
     /// <summary>
-    /// Promotes a transaction's accumulated per-row tx-scoped locks on
-    /// <paramref name="table"/> into a single table-X. Releases every
-    /// row-lock entry the transaction holds on this table; acquires
-    /// table-X tx-scoped; marks the table as escalated so future row-lock
-    /// requests short-circuit. Matches real SQL Server's escalation
-    /// behavior at ~5000 row-locks-per-table.
+    /// The table lock this transaction — or, outside one, this statement —
+    /// escalated <paramref name="table"/>'s row and key locks to, or null.
     /// </summary>
-    private void EscalateToTableX(HeapTable table, SimulatedDbTransaction tx)
+    private LockMode? EscalatedModeOf(HeapTable table)
     {
-        var connection = this.Connection;
-        var manager = connection.Simulation.LockManager;
-        // Acquire table-X first; if this throws (timeout / deadlock), the
-        // partial state stays consistent — escalation didn't happen, the
-        // already-held row locks remain.
-        manager.Acquire(table.TableDataLock, LockMode.Exclusive, connection.Session, connection.LockTimeoutMillis);
-        tx.HeldLocks.Add((table.TableDataLock, LockMode.Exclusive));
-        _ = tx.EscalatedTables.Add(table);
-        // Now release every row-lock entry on this table.
-        for (var i = tx.HeldLocks.Count - 1; i >= 0; i--)
+        if (this.Connection.CurrentTransaction is { } tx)
         {
-            var (resource, mode) = tx.HeldLocks[i];
-            // Skip the table-X we just appended; release row-level locks
-            // owned by this table. Row locks live in table.RowLocks dict;
-            // identify by reference.
-            if (ReferenceEquals(resource, table.TableDataLock))
-                continue;
-            if (!IsRowLockOf(table, resource))
-                continue;
-            manager.Release(resource, mode, connection.Session);
-            tx.HeldLocks.RemoveAt(i);
+            if (tx.EscalatedTables.Count != 0 && tx.EscalatedTables.Contains(table))
+                return LockMode.Exclusive;
+            return tx.SharedEscalatedTables.Count != 0 && tx.SharedEscalatedTables.Contains(table) ? LockMode.Shared : null;
         }
-        tx.RowLockCountsByTable[table] = 0;
-    }
-
-    private static bool IsRowLockOf(HeapTable table, LockResource resource)
-    {
-        foreach (var kv in table.RowLocks)
-        {
-            if (ReferenceEquals(kv.Value, resource))
-                return true;
-        }
-        return false;
+        return this.CurrentStatement.EscalatedTables is { } escalated && escalated.TryGetValue(table, out var mode) ? mode : null;
     }
 
     /// <summary>
-    /// Tables this batch has already fallen back to a whole-table S lock on
-    /// for SERIALIZABLE phantom protection. Purely an idempotency guard: the
-    /// fallback is decided per materialization, and a source can be
-    /// re-enumerated many times (a correlated subquery's inner side), so
-    /// without this the same tx-scoped S would be re-acquired per pass and
-    /// pile up re-entrance counts in the transaction's held-lock list.
+    /// Counts <paramref name="added"/> more row or key locks this statement
+    /// took on <paramref name="table"/>, and escalates them to one table lock
+    /// once the estimated total reaches the next attempt point — S when every
+    /// lock counted is S-family, X otherwise, as real's escalation of a
+    /// REPEATABLE READ scan, a SERIALIZABLE scan, an <c>UPDLOCK</c> scan and
+    /// an UPDATE shows (probed 2026-09-28 against SQL Server 2025). A table
+    /// set <c>LOCK_ESCALATION = DISABLE</c> keeps its locks however many.
+    /// </summary>
+    private void CountLocksForEscalation(HeapTable table, int added, bool exclusive, bool rowLock = false, bool rowsKeyLocked = false)
+    {
+        if (table.LockEscalation == 1)
+            return;
+        var tallies = this.CurrentStatement.LockTallies ??= new(ReferenceEqualityComparer.Instance);
+        if (!tallies.TryGetValue(table, out var tally))
+            tallies[table] = tally = new LockEscalationTally();
+        tally.Exclusive |= exclusive;
+        tally.RowsKeyLocked |= rowsKeyLocked;
+        if (added == 0 || (rowLock && tally.RowsKeyLocked))
+            return;
+        tally.Count += added;
+        var estimated = EstimatedLockTotal(table, tally.Count);
+        if (estimated >= tally.NextAttempt && !this.TryEscalate(table, tally.Exclusive))
+            tally.NextAttempt = estimated + LockEscalationTally.RetryInterval;
+    }
+
+    /// <summary>
+    /// Real's escalation counts every lock the statement holds on the table:
+    /// its row or key locks, the table's own intent lock, and the intent lock
+    /// on each page those rows sit on. Pages aren't locked here, so their
+    /// share is estimated from the heap's rows per page — which is what puts
+    /// a SERIALIZABLE scan of a narrow table over real's threshold at about
+    /// 6 235 keys rather than 6 250 (probed 2026-09-28 against SQL Server
+    /// 2025).
+    /// </summary>
+    private static int EstimatedLockTotal(HeapTable table, int locks)
+    {
+        var heap = table.Heap;
+        var rows = heap.RowCount;
+        var pages = heap.Pages.Count;
+        var pageLocks = rows <= 0 ? 0 : Math.Min(pages, (((long)locks * pages) + rows - 1) / rows);
+        return (int)Math.Min(int.MaxValue, locks + 1 + pageLocks);
+    }
+
+    /// <summary>
+    /// Replaces the row and key locks this transaction (or statement) holds on
+    /// <paramref name="table"/> with one table S or X. Real escalates only when
+    /// the table lock is grantable at once, and otherwise keeps the fine-grained
+    /// locks and tries again later, so this never waits: false means refused.
+    /// The table's intent lock folds into the escalated mode, as real reports
+    /// a single OBJECT S / X afterwards.
+    /// </summary>
+    private bool TryEscalate(HeapTable table, bool exclusive)
+    {
+        var connection = this.Connection;
+        var manager = connection.Simulation.LockManager;
+        var mode = exclusive ? LockMode.Exclusive : LockMode.Shared;
+        if (manager.TryAcquire(table.TableDataLock, mode, connection.Session, 0) is not (LockAcquireOutcome.Granted or LockAcquireOutcome.GrantedAfterWait))
+            return false;
+
+        var tx = connection.CurrentTransaction;
+        var held = tx?.HeldLocks ?? this.StatementSchemaLocks;
+        held.Add((table.TableDataLock, mode));
+        ReleaseEscalated(held, table, mode, manager, connection.Session);
+        if (tx is not null)
+            ReleaseEscalated(this.StatementSchemaLocks, table, mode, manager, connection.Session);
+
+        if (tx is null)
+            (this.CurrentStatement.EscalatedTables ??= new(ReferenceEqualityComparer.Instance))[table] = mode;
+        else if (exclusive)
+            _ = tx.EscalatedTables.Add(table);
+        else
+            _ = tx.SharedEscalatedTables.Add(table);
+        return true;
+    }
+
+    // Drops the holds a table lock in `mode` covers from `held`: every row and
+    // key lock on the table an X covers, only the S-family ones an S does, and
+    // the table's intent lock the escalated mode subsumes.
+    private static void ReleaseEscalated(List<(LockResource Resource, LockMode Mode)> held, HeapTable table, LockMode mode, LockManager manager, SessionToken session)
+    {
+        var exclusive = mode == LockMode.Exclusive;
+        for (var i = held.Count - 1; i >= 0; i--)
+        {
+            var (resource, heldMode) = held[i];
+            var covered = ReferenceEquals(resource, table.TableDataLock)
+                ? heldMode == LockMode.IntentShared || (exclusive && heldMode == LockMode.IntentExclusive)
+                : ReferenceEquals(resource.OwningTable, table)
+                    && (exclusive || heldMode is LockMode.Shared or LockMode.RangeSharedShared);
+            if (!covered)
+                continue;
+            manager.Release(resource, heldMode, session);
+            held.RemoveAt(i);
+        }
+    }
+
+    /// <summary>
+    /// Tables this batch has already fenced whole for SERIALIZABLE phantom
+    /// protection. Purely an idempotency guard: the fallback is decided per
+    /// materialization, and a source can be re-enumerated many times (a
+    /// correlated subquery's inner side), so without this the whole key space
+    /// would be walked and re-covered per pass.
     /// </summary>
     private readonly HashSet<HeapTable> serializableTableFallbacks = new(ReferenceEqualityComparer.Instance);
 
     /// <summary>
     /// Discharges a SERIALIZABLE / <c>HOLDLOCK</c> reader's outstanding
-    /// phantom protection by taking table-S tx-scoped — the fallback for every
-    /// read whose shape the key-range path can't cover (a whole-table scan, a
-    /// non-sargable predicate, a predicate on an unindexed column, a
-    /// multi-source or view-backed source). Real degenerates the same way:
-    /// probed, a SERIALIZABLE scan of a heap takes an OBJECT S, and a
-    /// non-sargable predicate over an indexed table range-locks every key plus
-    /// the infinity range, which covers the same value space.
+    /// phantom protection for a read whose shape offers no narrower interval
+    /// (a whole-table scan, a non-sargable predicate, a predicate on an
+    /// unindexed or non-leading column, a cross-column <c>OR</c>): the whole
+    /// key space. Over a clustered table that is every key of the clustered
+    /// index plus the infinity anchor in the plan's range mode, as real's scan
+    /// takes; over a heap it is a table S, real's OBJECT S for a heap scan
+    /// (probed 2026-09-28 against SQL Server 2025).
     /// <para>
     /// A no-op for every other plan, for a source whose fence is already
-    /// settled (a key range the seek path claimed covers the same obligation
-    /// more narrowly), and for a table whose fallback this batch already took.
+    /// settled (the keys the seek path locked cover the same obligation more
+    /// narrowly), and for a table this batch already fenced whole.
     /// </para>
     /// </summary>
     public void EnsureSerializableTableLock(HeapTable table, in DataLockPlan plan)
     {
-        if (plan.SerializableRangeMode is null || plan.Fence is not { Settled: false } fence)
+        if (plan.SerializableRangeMode is not { } mode || plan.Fence is not { Settled: false } fence)
             return;
         fence.Settled = true;
         if (!this.serializableTableFallbacks.Add(table))
             return;
-        this.AcquireTransactionLock(table.TableDataLock, LockMode.Shared);
+        if (KeyLockGroup.RowGroupOf(table) is { } group)
+            this.AcquireKeyFence(table, group, group.Commons, [KeyFenceInterval.Everything], mode, KeyFenceKind.Read, lookupRows: false);
+        else
+            this.AcquireSerializableTableS(table);
     }
 
     /// <summary>
-    /// Acquires <paramref name="mode"/> on <paramref name="table"/>'s
-    /// <paramref name="range"/> for the rest of the transaction — a
-    /// SERIALIZABLE reader's phantom fence over one interval of one column's
-    /// key space.
+    /// A heap's SERIALIZABLE fence: table S, folding in the IS the read took
+    /// when its source resolved, which real reports converted to the one
+    /// OBJECT S.
     /// </summary>
-    public void AcquireKeyRangeLockTxScoped(HeapTable table, KeyRange range, LockMode mode) =>
-        this.AcquireTransactionLock(table.GetOrCreateKeyRangeLock(range), mode);
+    private void AcquireSerializableTableS(HeapTable table)
+    {
+        this.AcquireTransactionLock(table.TableDataLock, LockMode.Shared, this.noWaitTables.Contains(table));
+        var connection = this.Connection;
+        var held = connection.CurrentTransaction?.HeldLocks ?? this.StatementSchemaLocks;
+        var index = held.IndexOf((table.TableDataLock, LockMode.IntentShared));
+        if (index >= 0)
+        {
+            connection.Simulation.LockManager.Release(table.TableDataLock, LockMode.IntentShared, connection.Session);
+            held.RemoveAt(index);
+        }
+    }
 
     /// <summary>
-    /// Blocks the caller until no other connection holds a key range covering
-    /// <paramref name="image"/>'s values for that range's ordinal tuple. Runs
-    /// on every writer whatever its own isolation level — a range lock's whole
-    /// purpose is to fence writers that know nothing about it — and mirrors
-    /// real's RangeI-N: an instant-duration mode taken only to test the
-    /// interval and released the moment it is granted, so it never shows up in
+    /// Takes the key locks a SERIALIZABLE access of <paramref name="group"/>'s
+    /// index over <paramref name="intervals"/> takes, in <paramref name="mode"/>:
+    /// every key inside each interval and the first key past it, the infinity
+    /// anchor when none follows — real's next-key locking, which is what fences
+    /// the gap below each key and past the read's end (probed 2026-09-28
+    /// against SQL Server 2025). An interval naming one full key of a unique
+    /// index is the exception real makes when it finds that key: a reader
+    /// takes a plain key lock there (a row S for the clustered key), a writer
+    /// nothing past its own row X; a miss locks the next key like any range.
+    /// <para>
+    /// Bounds are compared in <paramref name="commons"/>, the types the
+    /// predicate promoted the key columns to. A clustered key's anchors are
+    /// also tested against another session's lock on the anchored row, which
+    /// real meets as the key lock itself; <paramref name="lookupRows"/> takes
+    /// the row S real's lookup from a nonclustered index takes on each row it
+    /// reads. Past the escalation threshold the whole read escalates instead.
+    /// </para>
+    /// </summary>
+    public void AcquireKeyFence(
+        HeapTable table, KeyLockGroup group, SqlType[] commons, List<KeyFenceInterval> intervals, LockMode mode, KeyFenceKind kind, bool lookupRows)
+    {
+        var keyPart = LockManager.KeyPartOf(mode);
+        if (this.EscalatedModeOf(table) is { } escalated && (escalated == LockMode.Exclusive || keyPart == LockMode.Shared))
+            return;
+
+        var heap = table.Heap;
+        var cache = HeapSeekCache.For(heap);
+        var requests = new List<(SqlValueKey? Key, LockMode Mode, (int Page, int Slot)[] Rids, bool Lookup)>();
+        var cap = LockEscalationTally.FirstAttempt;
+        var capped = false;
+        foreach (var interval in intervals)
+        {
+            var anchors = cache.KeyLockAnchors(heap, table.StoredColumns, heap, group.Ordinals, commons,
+                interval.Lower, interval.LowerInclusive, interval.Upper, interval.UpperInclusive, capped ? int.MaxValue : cap);
+            if (anchors is null)
+            {
+                // Too many keys to lock one by one: escalate if that can be
+                // granted, else lock them all after all.
+                if (table.LockEscalation != 1 && this.TryEscalate(table, keyPart != LockMode.Shared))
+                    return;
+                capped = true;
+                anchors = cache.KeyLockAnchors(heap, table.StoredColumns, heap, group.Ordinals, commons,
+                    interval.Lower, interval.LowerInclusive, interval.Upper, interval.UpperInclusive, int.MaxValue)!;
+            }
+
+            if (interval.UniquePoint && anchors.Count == 2)
+            {
+                // The one key a unique equality can find.
+                var (_, rids) = anchors[0];
+                if (kind == KeyFenceKind.Read && mode == LockMode.RangeSharedShared && group.IsRowGroup)
+                {
+                    foreach (var (page, slot) in rids)
+                        this.AcquireRowLockTxScoped(table, page, slot, LockMode.Shared);
+                }
+                else if (kind == KeyFenceKind.Read && !group.IsRowGroup)
+                {
+                    requests.Add((anchors[0].Key, keyPart, rids, lookupRows));
+                }
+                continue;
+            }
+
+            for (var i = 0; i < anchors.Count; i++)
+                requests.Add((anchors[i].Key, mode, anchors[i].Rids, lookupRows && !group.IsRowGroup && i < anchors.Count - 1));
+        }
+
+        var connection = this.Connection;
+        var manager = connection.Simulation.LockManager;
+        var session = connection.Session;
+        var noWait = this.noWaitTables.Count != 0 && this.noWaitTables.Contains(table);
+        var acquired = 0;
+        foreach (var (key, requestMode, rids, lookup) in requests)
+        {
+            var resource = group.GetOrCreate(key is { } k ? Normalize(group, k) : null);
+            if (!manager.IsHeldBy(resource, requestMode, session))
+            {
+                this.AcquireTransactionLock(resource, requestMode, noWait);
+                acquired++;
+            }
+
+            if (group.IsRowGroup)
+            {
+                var rowMode = LockManager.KeyPartOf(requestMode);
+                foreach (var rid in rids)
+                {
+                    if (table.RowLocks.TryGetValue(rid, out var rowLock) && manager.HasIncompatibleHolderOtherThan(rowLock, rowMode, session))
+                    {
+                        manager.Acquire(rowLock, rowMode, session, this.LockTimeoutFor(table));
+                        manager.Release(rowLock, rowMode, session);
+                    }
+                }
+            }
+            else if (lookup)
+            {
+                foreach (var (page, slot) in rids)
+                    this.AcquireRowLockTxScoped(table, page, slot, LockMode.Shared);
+            }
+        }
+
+        this.CountLocksForEscalation(table, acquired, exclusive: keyPart != LockMode.Shared, rowsKeyLocked: group.IsRowGroup);
+    }
+
+    // An anchor found through a seek-cache entry keyed in the predicate's
+    // promoted types, restated in the column types every writer's test reads
+    // its row in — a widening, so narrowing back is exact.
+    private static SqlValueKey Normalize(KeyLockGroup group, SqlValueKey key)
+    {
+        var restated = false;
+        for (var i = 0; i < key.ComponentCount && !restated; i++)
+            restated = !key.ComponentAt(i).Type.Equals(group.Commons[i]);
+        if (!restated)
+            return key;
+        var components = new SqlValue[key.ComponentCount];
+        for (var i = 0; i < components.Length; i++)
+            components[i] = key.ComponentAt(i).CoerceTo(group.Commons[i]);
+        return new SqlValueKey(components);
+    }
+
+    /// <summary>
+    /// Tests the key lock another session may hold on the clustered key of
+    /// the row <paramref name="image"/> is, against a row lock in
+    /// <paramref name="mode"/> — a reader's S meeting a writer's
+    /// <c>RangeX-X</c>, an <c>UPDLOCK</c> reader's U meeting another's
+    /// <c>RangeS-U</c> — waiting it out, or reporting false for a
+    /// <c>READPAST</c> reader to skip the row.
+    /// </summary>
+    private bool TestRowKeyLock(HeapTable table, byte[] image, LockMode mode, bool skipIfBlocked, bool unlockedWhenClean = false)
+    {
+        if (KeyLockGroup.ClusteredOwner(table) is not { } owner
+            || !table.KeyLockGroups.TryGetValue(owner, out var group)
+            || Volatile.Read(ref group.Holds) == 0
+            || !group.TryReadKey(image, out var key)
+            || group.Find(key) is not { } resource)
+        {
+            return true;
+        }
+        if (unlockedWhenClean
+            && !this.Connection.Simulation.LockManager.HasIncompatibleHolderOtherThan(
+                resource, mode, this.Connection.Session, holder => ChangedWhileOpen(table, holder)))
+        {
+            return true;
+        }
+        return this.TestKeyLock(table, resource, mode, skipIfBlocked);
+    }
+
+    // Whether the table changed since the holder's transaction began — or the
+    // holder is a statement running outside one — which is when real's READ
+    // COMMITTED read takes the S that meets its lock.
+    private static bool ChangedWhileOpen(HeapTable table, SessionToken holder) =>
+        holder.TryResolveOwner()?.CurrentTransaction is not { } transaction
+        || Volatile.Read(ref table.Heap.LastModifiedEpoch) >= transaction.BeginEpoch;
+
+    // Waits until no other session holds `resource` incompatibly with `mode`
+    // — an instant-duration acquire, never held — or, for a READPAST reader,
+    // reports that it would have to.
+    private bool TestKeyLock(HeapTable table, LockResource resource, LockMode mode, bool skipIfBlocked)
+    {
+        var connection = this.Connection;
+        var manager = connection.Simulation.LockManager;
+        if (!manager.HasIncompatibleHolderOtherThan(resource, mode, connection.Session))
+            return true;
+        if (skipIfBlocked)
+            return false;
+        manager.Acquire(resource, mode, connection.Session, this.LockTimeoutFor(table));
+        manager.Release(resource, mode, connection.Session);
+        return true;
+    }
+
+    // A write's tests against every index somebody holds a key lock in: an
+    // insert tests the gap its key lands in, a delete the lock on its key,
+    // and an update's pre-image only the clustered key's (the rewrite site
+    // tests a nonclustered index once it knows the update touches it).
+    private void TestKeyLocksForWrite(HeapTable table, byte[] image, RowLockPurpose purpose)
+    {
+        foreach (var group in table.KeyLockGroups.Values)
+        {
+            if (Volatile.Read(ref group.Holds) == 0
+                || (purpose == RowLockPurpose.UpdatePreImage && !group.IsRowGroup)
+                || !group.TryReadKey(image, out var key))
+            {
+                continue;
+            }
+            if (purpose == RowLockPurpose.Insert)
+                this.TestGapLock(table, group, key);
+            else if (group.Find(key) is { } resource)
+                _ = this.TestKeyLock(table, resource, LockMode.Exclusive, skipIfBlocked: false);
+        }
+    }
+
+    // Real's insert-range test: RangeI-N, instant, on the first key above the
+    // one being written — the anchor whose range the new key lands in — or on
+    // the infinity anchor past the last key. A key written into a gap this
+    // session itself range-locks splits that gap, so the new key takes
+    // RangeX-X to keep the lower half fenced, as real's does (probed
+    // 2026-09-28 against SQL Server 2025: a HOLDLOCK MERGE's insert).
+    private void TestGapLock(HeapTable table, KeyLockGroup group, SqlValueKey key)
+    {
+        var next = HeapSeekCache.For(table.Heap).NextKeyAbove(table.Heap, table.StoredColumns, table.Heap, group.Ordinals, group.Commons, key);
+        if (group.Find(next) is not { } resource)
+            return;
+        _ = this.TestKeyLock(table, resource, LockMode.RangeInsertNull, skipIfBlocked: false);
+        var connection = this.Connection;
+        var manager = connection.Simulation.LockManager;
+        if (!manager.HoldsRangeMode(resource, connection.Session))
+            return;
+        var split = group.GetOrCreate(key);
+        if (!manager.IsHeldBy(split, LockMode.RangeExclusiveExclusive, connection.Session))
+            this.AcquireTransactionLock(split, LockMode.RangeExclusiveExclusive);
+    }
+
+    /// <summary>
+    /// Blocks the caller until no other session's key lock fences the gap a
+    /// new row <paramref name="image"/> lands in, on any index. Runs on every
+    /// writer whatever its own isolation level — a range lock's whole purpose
+    /// is to fence writers that know nothing about it — and mirrors real's
+    /// RangeI-N: an instant-duration mode on the next key, taken only to test
+    /// the gap and released the moment it is granted, so it never shows up in
     /// a lock snapshot taken after the write.
     /// <para>
-    /// Costs nothing when no range is held anywhere on the table (the
-    /// <see cref="HeapTable.ActiveKeyRangeLocks"/> read), and one column decode
-    /// per distinct ranged ordinal otherwise.
+    /// Costs nothing when no key lock is held anywhere on the table (the
+    /// <see cref="HeapTable.ActiveKeyRangeLocks"/> read).
     /// </para>
     /// </summary>
     /// <exception cref="SimulatedSqlException">
     /// Msg 1222 on lock timeout, Msg 1205 when waiting would close a cycle.
     /// </exception>
-    public void ProbeKeyRangesForWrite(HeapTable table, byte[] image)
+    public void ProbeKeyLocksForInsert(HeapTable table, byte[] image)
     {
-        if (Volatile.Read(ref table.ActiveKeyRangeLocks) == 0)
+        if (Volatile.Read(ref table.ActiveKeyRangeLocks) != 0)
+            this.TestKeyLocksForWrite(table, image, RowLockPurpose.Insert);
+    }
+
+    /// <summary>
+    /// The rewrite site's half of an UPDATE's key-lock tests, called with the
+    /// row at <paramref name="pageIndex"/> / <paramref name="slotIndex"/> still
+    /// holding its old image, once the new one is known: a nonclustered index whose row the update touches — its key
+    /// moves, or a column it carries changes — has its old key's lock tested,
+    /// and any index whose key moves has the gap the new key lands in tested,
+    /// since a row moving into a fenced gap is a phantom its old image can't
+    /// reveal. An update touching no column of an index takes nothing there,
+    /// as on real (probed 2026-09-28 against SQL Server 2025).
+    /// </summary>
+    public void ProbeKeyLocksForUpdate(HeapTable table, int pageIndex, int slotIndex, byte[] newImage)
+    {
+        if (Volatile.Read(ref table.ActiveKeyRangeLocks) == 0 || table.Heap.ReadSlotBytes(pageIndex, slotIndex) is not { } oldImage)
             return;
-        var connection = this.Connection;
-        var manager = connection.Simulation.LockManager;
-        var schema = table.StoredColumns;
-        Dictionary<int, SqlValue>? decoded = null;
-        SqlValue[] probe = [];
-        foreach (var (range, resource) in table.KeyRangeLocks)
+        foreach (var group in table.KeyLockGroups.Values)
         {
-            var ordinals = range.Ordinals;
-            if (probe.Length < ordinals.Length)
-                probe = new SqlValue[ordinals.Length];
-            var decodable = true;
-            for (var i = 0; i < ordinals.Length; i++)
-            {
-                var ordinal = ordinals[i];
-                if ((uint)ordinal >= (uint)schema.Length)
-                {
-                    decodable = false;
-                    break;
-                }
-                decoded ??= [];
-                if (!decoded.TryGetValue(ordinal, out var value))
-                {
-                    value = RowDecoder.DecodeColumn(schema, image, ordinal, table.Heap);
-                    decoded[ordinal] = value;
-                }
-                probe[i] = value;
-            }
-
-            if (!decodable
-                || !range.Contains(probe.AsSpan(0, ordinals.Length))
-                || !manager.HasIncompatibleHolderOtherThan(resource, LockMode.RangeInsertNull, connection.Session))
-            {
+            if (Volatile.Read(ref group.Holds) == 0)
                 continue;
-            }
-
-            manager.Acquire(resource, LockMode.RangeInsertNull, connection.Session, connection.LockTimeoutMillis);
-            manager.Release(resource, LockMode.RangeInsertNull, connection.Session);
+            var hadOld = group.TryReadKey(oldImage, out var oldKey);
+            var hasNew = group.TryReadKey(newImage, out var newKey);
+            var moved = hadOld != hasNew || (hadOld && !oldKey.Equals(newKey));
+            if (!group.IsRowGroup && hadOld && (moved || group.RowChanges(oldImage, newImage)) && group.Find(oldKey) is { } held)
+                _ = this.TestKeyLock(table, held, LockMode.Exclusive, skipIfBlocked: false);
+            if (moved && hasNew)
+                this.TestGapLock(table, group, newKey);
         }
     }
 
@@ -1547,7 +1851,7 @@ internal sealed class BatchContext
     {
         // Reaching here means nothing narrowed the source to an index seek, so
         // a SERIALIZABLE reader is about to scan the whole table and its
-        // phantom fence has to be the whole-table S. Deliberately inside the
+        // phantom fence has to be the whole key space. Deliberately inside the
         // iterator body: the seek decision is made after the FROM source is
         // built, and a seeked source is a different enumerable that never runs
         // this one.
@@ -1683,8 +1987,11 @@ internal sealed class BatchContext
             // doesn't serve here — it counts row-X grants only, and the holder
             // this pair most often meets is another UPDLOCK reader's row-U.
             if (plan.SkipBlockedRows
-                && table.RowLocks.TryGetValue((pageIndex, slotIndex), out var held)
-                && this.Connection.Simulation.LockManager.HasIncompatibleHolderOtherThan(held, mode, this.Connection.Session))
+                && ((table.RowLocks.TryGetValue((pageIndex, slotIndex), out var held)
+                        && this.Connection.Simulation.LockManager.HasIncompatibleHolderOtherThan(held, mode, this.Connection.Session))
+                    || (Volatile.Read(ref table.ActiveKeyRangeLocks) != 0
+                        && table.Heap.ReadSlotBytes(pageIndex, slotIndex) is { } image
+                        && !this.TestRowKeyLock(table, image, mode, skipIfBlocked: true))))
             {
                 return false;
             }
@@ -1705,6 +2012,19 @@ internal sealed class BatchContext
         // no conflicting writer had started.
         if (Volatile.Read(ref table.ActiveDataWriters) == 0)
             return true;
+        // A RangeX-X counts as a writer too: a SERIALIZABLE UPDATE's lock on
+        // the key past its range refuses this read though no row X is there —
+        // when the table changed while the holder's transaction was open,
+        // which is when real's READ COMMITTED takes its S at all (probed
+        // 2026-09-28 against SQL Server 2025: the same lock behind an XLOCK
+        // read, or a DELETE that removed nothing, lets the read through until
+        // a write lands).
+        if (Volatile.Read(ref table.ActiveKeyRangeLocks) != 0
+            && table.Heap.ReadSlotBytes(pageIndex, slotIndex) is { } keyedImage
+            && !this.TestRowKeyLock(table, keyedImage, LockMode.Shared, plan.SkipBlockedRows, unlockedWhenClean: true))
+        {
+            return false;
+        }
         // A writer is somewhere on the table; check this specific row. Use a
         // non-interning lookup — a row with no holder interned can't be in
         // conflict, so reading it through costs no allocation and no gate.

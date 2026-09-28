@@ -50,10 +50,10 @@ internal readonly struct DataLockPlan(
     /// The range mode a SERIALIZABLE / <c>HOLDLOCK</c> reader still owes
     /// phantom protection in, or <c>null</c> for every other reader. The
     /// table-level acquisition made so far doesn't cover it, so whoever
-    /// consumes the source settles it — the index-seek path by claiming a
-    /// <see cref="Storage.KeyRange"/> over the predicate's interval in this
-    /// mode, every other path by falling back to the table-S the whole-scan
-    /// case needs (<c>BatchContext.EnsureSerializableTableLock</c>).
+    /// consumes the source settles it — the index-seek path by locking the
+    /// keys the predicate's interval reaches in this mode, every other path by
+    /// falling back to the whole key space a scan reaches, or the table S a
+    /// heap scan takes (<c>BatchContext.EnsureSerializableTableLock</c>).
     /// <para>
     /// <c>RangeS-S</c> for a plain SERIALIZABLE read, <c>RangeS-U</c> when it
     /// carries <c>UPDLOCK</c> and <c>RangeX-X</c> when it carries
@@ -67,9 +67,9 @@ internal readonly struct DataLockPlan(
     /// non-null exactly when <see cref="SerializableRangeMode"/> is. The plan
     /// is a struct copied into <c>FromSource.HeapPlan</c> and into the row
     /// wrapper, so the reference is what makes the two see one another's work:
-    /// a source that claimed a key range must not then have the whole-table S
-    /// added on top by the scan wrapper, which would re-block the key space the
-    /// range deliberately left free.
+    /// a source that locked the keys its predicate reaches must not then have
+    /// the whole key space added on top by the scan wrapper, which would
+    /// re-block the keys the seek deliberately left free.
     /// </summary>
     public readonly PhantomFenceState? Fence = fence;
 
@@ -96,10 +96,76 @@ internal readonly struct DataLockPlan(
 internal sealed class PhantomFenceState
 {
     /// <summary>
-    /// Set once this source's fence — a key range or the whole-table S — is
+    /// Set once this source's fence — its keys, the whole key space or a table S — is
     /// held. Read by <c>BatchContext.EnsureSerializableTableLock</c>, whose
     /// fallback is otherwise reached from the scan wrapper even for a source
     /// the index-seek path already fenced with a range.
     /// </summary>
     public bool Settled;
+}
+
+/// <summary>
+/// Why a row lock is being taken, which decides what a held key lock on the
+/// row's keys means to it: a read tests only the clustered key's lock in its
+/// own mode; an insert tests the gap its keys land in (real's RangeI-N on the
+/// next key); a delete tests the lock on each of its keys; an update's
+/// pre-image tests the clustered key's lock alone, leaving a nonclustered
+/// index to the rewrite site, which knows whether the update touches it.
+/// </summary>
+internal enum RowLockPurpose
+{
+    /// <summary>A reader's S / U / X on a row it reads.</summary>
+    Read,
+
+    /// <summary>A new row's X, taken after it lands.</summary>
+    Insert,
+
+    /// <summary>The X on a row about to be deleted.</summary>
+    Delete,
+
+    /// <summary>The X on a row about to be rewritten, taken on its old image.</summary>
+    UpdatePreImage,
+}
+
+/// <summary>
+/// Who takes a key fence, which decides how a hit on a unique key is locked:
+/// a reader takes the plain key lock real takes there, a writer — an UPDATE,
+/// a DELETE, a MERGE's probe — nothing past the X its write takes (probed
+/// 2026-09-28 against SQL Server 2025).
+/// </summary>
+internal enum KeyFenceKind
+{
+    /// <summary>A SERIALIZABLE / HOLDLOCK read.</summary>
+    Read,
+
+    /// <summary>A SERIALIZABLE UPDATE / DELETE / MERGE.</summary>
+    Write,
+}
+
+/// <summary>
+/// One interval of an index's key space a fence reads: the bounds (tuples
+/// possibly shorter than the key, compared in the types the predicate
+/// promoted the key columns to), and
+/// whether it pins every column of a unique key by equality — the shape real
+/// locks with a plain key lock on a hit.
+/// </summary>
+internal readonly struct KeyFenceInterval(SqlValueKey? lower, bool lowerInclusive, SqlValueKey? upper, bool upperInclusive, bool uniquePoint)
+{
+    /// <summary>Lower bound, or null for an open side.</summary>
+    public readonly SqlValueKey? Lower = lower;
+
+    /// <summary>Whether <see cref="Lower"/> is inside the interval.</summary>
+    public readonly bool LowerInclusive = lowerInclusive;
+
+    /// <summary>Upper bound, or null for an open side.</summary>
+    public readonly SqlValueKey? Upper = upper;
+
+    /// <summary>Whether <see cref="Upper"/> is inside the interval.</summary>
+    public readonly bool UpperInclusive = upperInclusive;
+
+    /// <summary>Whether the interval is one full key of a unique index.</summary>
+    public readonly bool UniquePoint = uniquePoint;
+
+    /// <summary>The whole key space — what a scan reaches.</summary>
+    public static readonly KeyFenceInterval Everything = new(null, false, null, false, false);
 }

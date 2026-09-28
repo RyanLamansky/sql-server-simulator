@@ -257,7 +257,7 @@ public sealed class QueryHintTests
         => AreEqual(3, new Simulation().ExecuteScalar("""
             create table t (id int primary key);
             insert t values (1), (2), (3);
-            select count(*) from t with (forceseek)
+            select count(*) from t with (forceseek) where id > 0
             """));
 
     [TestMethod]
@@ -789,7 +789,7 @@ public sealed class QueryHintTests
 
     [TestMethod]
     public void ForceSeek_WholeKey_IsAccepted()
-        => AreEqual(1, new Simulation().ExecuteScalar($"{SeekTable} select count(*) from t with (forceseek(ix_ab(a, b))) where a = 1"));
+        => AreEqual(1, new Simulation().ExecuteScalar($"{SeekTable} select count(*) from t with (forceseek(ix_ab(a, b))) where a = 1 and b > 0"));
 
     [TestMethod]
     public void ForceSeek_MissingIndex_ReportsMsg308()
@@ -846,6 +846,6 @@ public sealed class QueryHintTests
         => AreEqual(1, new Simulation().ExecuteScalar($"{SeekTable} select count(*) from t with (forceseek(ix_ab(A))) where a = 1"));
 
     [TestMethod]
-    public void ForceSeek_WithoutTheNestedForm_StaysParseAndDiscard()
-        => AreEqual(1, new Simulation().ExecuteScalar($"{SeekTable} select count(*) from t with (forceseek)"));
+    public void ForceSeek_WithoutTheNestedForm_SeeksAnyLeadingKey()
+        => AreEqual(1, new Simulation().ExecuteScalar($"{SeekTable} select count(*) from t with (forceseek) where a = 1"));
 }

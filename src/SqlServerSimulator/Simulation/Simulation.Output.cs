@@ -403,7 +403,7 @@ partial class Simulation
                 RowEncoder.EncodeRow(this.Target.StoredColumns, targetValues, this.Target.Heap),
                 undoLog);
             if (Simulation.IsLockableTable(this.Target))
-                this.batch.AcquireRowLockTxScoped(this.Target, newPage, newSlot, LockMode.Exclusive);
+                this.batch.AcquireRowLockTxScoped(this.Target, newPage, newSlot, LockMode.Exclusive, RowLockPurpose.Insert);
             this.Target.ChangeTracking?.RecordRow(this.batch, this.Target, targetValues, ChangeTrackingOperation.Insert);
         }
     }

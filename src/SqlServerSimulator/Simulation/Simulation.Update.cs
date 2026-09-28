@@ -903,6 +903,7 @@ partial class Simulation
             where = Selection.ParseAndBindPredicate(context, tupleTypeResolver, sources, joins);
         }
         BindJoinPredicatesWhileReporting(context.Batch, joins, tupleTypeResolver);
+        Selection.ValidateForcedSeeks(context, sources, joins, where);
 
         // Skip mode has bound everything it needs; enumerating the join would
         // run its sources, a NEXT VALUE FOR among them.
@@ -1093,15 +1094,16 @@ partial class Simulation
             tracking?.RecordUpdate(context.Batch, table, keyOrdinals, fullOld ?? DecodeFullRow(table, table.Heap.ReadSlotBytes(pageIndex, slotIndex)!), fullNew, trackedColumns, ref keyMoves);
             if (lockableTable)
             {
-                context.Batch.AcquireRowLockTxScoped(table, pageIndex, slotIndex, LockMode.Exclusive);
+                context.Batch.AcquireRowLockTxScoped(table, pageIndex, slotIndex, LockMode.Exclusive, RowLockPurpose.UpdatePreImage);
                 context.Batch.NoteSupersededRow(table, pageIndex, slotIndex);
             }
             var newImage = RowEncoder.EncodeRow(table.StoredColumns, ProjectStoredValues(table, fullNew), table.Heap);
-            // The row-X above probed the key ranges the row is leaving; a key
-            // change can also carry it INTO a range some SERIALIZABLE reader
-            // holds, which only the post-update image reveals.
+            // The row-X above tested the clustered key the row is leaving; a
+            // nonclustered index the update touches, and a key change carrying
+            // the row INTO a gap some SERIALIZABLE reader fences, are only
+            // judged once the post-update image is known.
             if (lockableTable)
-                context.Batch.ProbeKeyRangesForWrite(table, newImage);
+                context.Batch.ProbeKeyLocksForUpdate(table, pageIndex, slotIndex, newImage);
             table.Heap.UpdateAt(pageIndex, slotIndex, newImage, undoLog, ReclaimSuperseded(table, context));
             if (lockableTable && oldBytesPerAffected is not null)
                 Storage.VersionStore.CaptureWrite(context.Batch, table, (pageIndex, slotIndex), (pageIndex, slotIndex), oldBytesPerAffected[i], Storage.VersionWriteKind.Update);
@@ -1169,7 +1171,7 @@ partial class Simulation
             historyRow[period.EndOrdinal] = stampedNow;
             var (newPage, newSlot) = historyTable.Heap.Insert(RowEncoder.EncodeRow(historyTable.StoredColumns, ProjectStoredValues(historyTable, historyRow), historyTable.Heap), undoLog);
             if (lockableHistory)
-                context.Batch.AcquireRowLockTxScoped(historyTable, newPage, newSlot, LockMode.Exclusive);
+                context.Batch.AcquireRowLockTxScoped(historyTable, newPage, newSlot, LockMode.Exclusive, RowLockPurpose.Insert);
         }
     }
 

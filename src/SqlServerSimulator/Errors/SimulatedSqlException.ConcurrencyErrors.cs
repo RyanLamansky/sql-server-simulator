@@ -160,6 +160,40 @@ partial class SimulatedSqlException
             1);
 
     /// <summary>
+    /// Msg 8622 — a <c>FORCESEEK</c> (or an <c>INDEX</c> hint beside one) that
+    /// no predicate of the query can seek on: no predicate at all, one on an
+    /// unindexed or non-leading column, one wrapping the column in a function,
+    /// a <c>LIKE</c> leading with a wildcard, an <c>OR</c> with an unseekable
+    /// branch, a heap or columnstore table. Raised while the batch compiles, so
+    /// no statement runs and no <c>TRY</c> in the batch catches it (probed
+    /// 2026-09-28 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException ForceSeekPlanInfeasible() =>
+        new("Query processor could not produce a query plan because of the hints defined in this query. Resubmit the query without specifying any hints and without using SET FORCEPLAN.", 8622, 16, 1);
+
+    /// <summary>
+    /// Msg 10746 — <c>FORCESCAN</c> and <c>FORCESEEK</c> on one table
+    /// (probed 2026-09-28 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException ForceScanWithForceSeek() =>
+        new("The FORCESCAN hint is specified simultaneously with the FORCESEEK hint. Remove one of the hints and resubmit the query.", 10746, 15, 1);
+
+    /// <summary>
+    /// Msg 10747 — a nested <c>FORCESEEK(ix (col, …))</c> beside an
+    /// <c>INDEX</c> hint on the same table (probed 2026-09-28 against SQL
+    /// Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException ParameterizedForceSeekWithIndexHint() =>
+        new("The parameterized FORCESEEK hint cannot be simultaneously used with INDEX hints or a non-parameterized FORCESEEK hint on the same object. Use either INDEX hints and a non-parameterized FORCESEEK hint or use a parameterized FORCESEEK hint without INDEX hints for each table or view.", 10747, 15, 1);
+
+    /// <summary>
+    /// Msg 10750 — <c>FORCESCAN</c> beside an <c>INDEX</c> hint naming more
+    /// than one index (probed 2026-09-28 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException ForceScanWithSeveralIndexes() =>
+        new("The FORCESCAN hint cannot be used with more than one INDEX hint. Remove the extra INDEX hints and resubmit the query.", 10750, 15, 1);
+
+    /// <summary>
     /// Msg 3952 — raised when a session whose
     /// <see cref="SimulatedDbConnection.SessionIsolationLevel"/> is
     /// <see cref="System.Data.IsolationLevel.Snapshot"/> accesses a user

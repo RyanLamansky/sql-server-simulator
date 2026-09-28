@@ -9,7 +9,7 @@ namespace SqlServerSimulator;
 /// back to when it isn't. The payoff case is
 /// <see cref="SerializableEquality_ConcurrentInsertOutsideRange_DoesNotBlock"/>
 /// — two SERIALIZABLE transactions over disjoint key ranges of one table no
-/// longer serialize on a whole-table S.
+/// longer serialize on the whole key space.
 /// </summary>
 [TestClass]
 // Same scheduling caveat as LockingTests: every blocking assertion here hands
@@ -87,10 +87,10 @@ public sealed class KeyRangeLockTests
     [TestMethod]
     public async Task SerializableEquality_ConcurrentInsertOutsideRange_DoesNotBlock()
     {
-        // The payoff: a SERIALIZABLE reader whose predicate is `k = 20` fences
-        // the single value 20, not the table. A writer landing anywhere else in
+        // The payoff: a SERIALIZABLE reader whose predicate is `k = 20` takes a
+        // plain key lock on 20, not the table. A writer landing anywhere else in
         // the key space proceeds while that transaction is still open — under
-        // the whole-table S this replaced, it would have waited for the commit.
+        // a table S it would have waited for the commit.
         var sim = KeyedTable();
         using var reader = sim.CreateOpenConnection();
         using var writer = sim.CreateOpenConnection();
@@ -132,12 +132,14 @@ public sealed class KeyRangeLockTests
     [TestMethod]
     public async Task SerializableBetween_InsertOutsideTheRange_DoesNotBlock()
     {
+        // The read locks keys 20 and 30 — 30 as the key past the range — so it
+        // fences (10, 30]; 35 lies past the last key it locked.
         var sim = KeyedTable();
         using var reader = sim.CreateOpenConnection();
         using var writer = sim.CreateOpenConnection();
 
         _ = reader.CreateCommand("set transaction isolation level serializable; begin tran; select count(*) from t where k between 15 and 25").ExecuteScalar();
-        await AssertProceeds(writer, "insert t values (26, 9)");
+        await AssertProceeds(writer, "insert t values (35, 9)");
 
         _ = reader.CreateCommand("rollback tran").ExecuteNonQuery();
     }
@@ -214,7 +216,7 @@ public sealed class KeyRangeLockTests
         using var writer = sim.CreateOpenConnection();
 
         _ = reader.CreateCommand("set transaction isolation level serializable; begin tran; select count(*) from t where k between 15 and 25").ExecuteScalar();
-        await AssertProceeds(writer, "update t set v = 99 where k = 30");
+        await AssertProceeds(writer, "update t set v = 99 where k = 10");
 
         _ = reader.CreateCommand("rollback tran").ExecuteNonQuery();
     }
@@ -236,11 +238,10 @@ public sealed class KeyRangeLockTests
     }
 
     [TestMethod]
-    public async Task SerializablePredicateOnUnindexedColumn_FallsBackToWholeTable()
+    public async Task SerializablePredicateOnUnindexedColumn_FencesTheWholeKeySpace()
     {
-        // `v` leads no key or index, so there is no key space to fence along —
-        // real takes an object-level S here too (probed on a heap). The
-        // fallback blocks a writer anywhere in the table.
+        // `v` leads no key or index, so the read locks every key and the
+        // infinity anchor, as real's scan does. An insert anywhere waits.
         var sim = KeyedTable();
         using var reader = sim.CreateOpenConnection();
         using var writer = sim.CreateOpenConnection();
@@ -250,14 +251,14 @@ public sealed class KeyRangeLockTests
     }
 
     [TestMethod]
-    public async Task SerializableCrossColumnOr_NarrowsTheReadButStillFencesTheWholeTable()
+    public async Task SerializableCrossColumnOr_NarrowsTheReadButStillFencesTheWholeKeySpace()
     {
         // `a = 1 OR b = 2` narrows the read to a union of two seeks, one per
         // disjunct. The fence is settled from the top-level conjuncts before any
         // candidate is read, and a disjunction pins no interval on any one key —
-        // so it stays the whole-table S and a writer anywhere in the table
-        // waits. Narrowing which rows a read touches must never narrow what it
-        // fences.
+        // so it locks every key, as real's scan of a small table does, and an
+        // insert anywhere waits. Narrowing which rows a read touches must never
+        // narrow what it fences.
         var sim = new Simulation();
         _ = sim.ExecuteNonQuery("""
             create table two (id int not null primary key, a int not null, b int not null);
@@ -274,7 +275,7 @@ public sealed class KeyRangeLockTests
     }
 
     [TestMethod]
-    public async Task SerializableWholeTableScan_FallsBackToWholeTable()
+    public async Task SerializableWholeTableScan_FencesTheWholeKeySpace()
     {
         var sim = KeyedTable();
         using var reader = sim.CreateOpenConnection();
@@ -311,7 +312,7 @@ public sealed class KeyRangeLockTests
         using var writer = sim.CreateOpenConnection();
 
         _ = reader.CreateCommand("begin tran; select count(*) from t with (holdlock) where k between 15 and 25").ExecuteScalar();
-        await AssertProceeds(writer, "insert t values (26, 9)");
+        await AssertProceeds(writer, "insert t values (35, 9)");
         await AssertBlocksUntil(reader, writer, "insert t values (22, 8)", "rollback tran");
     }
 
@@ -335,12 +336,13 @@ public sealed class KeyRangeLockTests
         using var reader = sim.CreateOpenConnection();
         _ = reader.CreateCommand("set transaction isolation level serializable; begin tran; select count(*) from t where k between 15 and 25").ExecuteScalar();
 
-        AreEqual(1, reader.CreateCommand("""
+        // Real's shape: the key inside the range and the key past it.
+        AreEqual(2, reader.CreateCommand("""
             select count(*) from sys.dm_tran_locks
             where resource_type = 'KEY' and request_mode = 'RangeS-S' and request_status = 'GRANT'
             """).ExecuteScalar());
-        AreEqual("0:[15,25]", reader.CreateCommand("""
-            select resource_description from sys.dm_tran_locks where resource_type = 'KEY'
+        AreEqual("(20)|(30)", reader.CreateCommand("""
+            select string_agg(resource_description, '|') within group (order by resource_description) from sys.dm_tran_locks where resource_type = 'KEY'
             """).ExecuteScalar());
 
         _ = reader.CreateCommand("rollback tran").ExecuteNonQuery();
@@ -443,7 +445,7 @@ public sealed class KeyRangeLockTests
         _ = reader.CreateCommand("begin tran").ExecuteNonQuery();
         _ = reader.CreateCommand("select count(*) from t where k between 15 and 25").ExecuteScalar();
 
-        await AssertProceeds(writer, "insert t values (26, 9)");
+        await AssertProceeds(writer, "insert t values (35, 9)");
         await AssertBlocksUntil(reader, writer, "insert t values (22, 8)", "rollback tran");
     }
 
@@ -479,17 +481,17 @@ public sealed class KeyRangeLockTests
     }
 
     [TestMethod]
-    public async Task CompositeFullTupleEquality_FencesExactlyThatTuple()
+    public async Task CompositeFullTupleEquality_FencesTheGapTheMissingTupleSitsIn()
     {
-        // `a = 1 AND b = 3` matches nothing, so only the fence makes the
-        // phantom impossible — and it is the single tuple, not the whole `a = 1`
-        // group.
+        // `a = 1 AND b = 3` matches nothing, so the fence is the lock on the
+        // next key, (1, 5), which covers the gap down to (1, 2) — the whole of
+        // it, as on real, and not the rest of the `a = 1` group.
         var sim = CompositeKeyedTable();
         using var reader = sim.CreateOpenConnection();
         using var writer = sim.CreateOpenConnection();
 
         AreEqual(0, reader.CreateCommand("set transaction isolation level serializable; begin tran; select count(*) from ck where a = 1 and b = 3").ExecuteScalar());
-        await AssertProceeds(writer, "insert ck values (1, 4, 902)");
+        await AssertProceeds(writer, "insert ck values (1, 6, 902)");
         await AssertBlocksUntil(reader, writer, "insert ck values (1, 3, 903)", "rollback tran");
     }
 
@@ -522,11 +524,10 @@ public sealed class KeyRangeLockTests
     }
 
     [TestMethod]
-    public async Task PredicateOnTheSecondKeyColumnOnly_FallsBackToWholeTable()
+    public async Task PredicateOnTheSecondKeyColumnOnly_FencesTheWholeKeySpace()
     {
-        // No leading bound, so there is no prefix to fence — real degenerates
-        // to range-locking every key plus infinity, which is the whole key
-        // space the table-S covers here.
+        // No leading bound, so there is no prefix to fence — the read locks
+        // every key plus infinity, as real's does.
         var sim = CompositeKeyedTable();
         using var reader = sim.CreateOpenConnection();
         using var writer = sim.CreateOpenConnection();
@@ -536,14 +537,14 @@ public sealed class KeyRangeLockTests
     }
 
     [TestMethod]
-    public void DmTranLocks_ProjectsACompositeRange_WithTheTupleInterval()
+    public void DmTranLocks_ProjectsACompositeRange_AsTheKeysItSpansAndTheNextKey()
     {
         var sim = CompositeKeyedTable();
         using var reader = sim.CreateOpenConnection();
         _ = reader.CreateCommand("set transaction isolation level serializable; begin tran; select count(*) from ck where a = 1 and b between 2 and 5").ExecuteScalar();
 
-        AreEqual("0,1:[(1,2),(1,5)]", reader.CreateCommand("""
-            select resource_description from sys.dm_tran_locks
+        AreEqual("(1,2)|(1,5)|(1,9)", reader.CreateCommand("""
+            select string_agg(resource_description, '|') within group (order by resource_description) from sys.dm_tran_locks
             where resource_type = 'KEY' and request_mode = 'RangeS-S'
             """).ExecuteScalar());
 
@@ -560,7 +561,7 @@ public sealed class KeyRangeLockTests
         using var reader = sim.CreateOpenConnection();
         _ = reader.CreateCommand("set transaction isolation level serializable; begin tran; select v from t with (updlock) where k between 15 and 25").ExecuteScalar();
 
-        AreEqual(1, reader.CreateCommand("""
+        AreEqual(2, reader.CreateCommand("""
             select count(*) from sys.dm_tran_locks
             where resource_type = 'KEY' and request_mode = 'RangeS-U' and request_status = 'GRANT'
             """).ExecuteScalar());
@@ -576,7 +577,7 @@ public sealed class KeyRangeLockTests
         using var reader = sim.CreateOpenConnection();
         _ = reader.CreateCommand("set transaction isolation level serializable; begin tran; select v from t with (xlock) where k between 15 and 25").ExecuteScalar();
 
-        AreEqual(1, reader.CreateCommand("""
+        AreEqual(2, reader.CreateCommand("""
             select count(*) from sys.dm_tran_locks
             where resource_type = 'KEY' and request_mode = 'RangeX-X' and request_status = 'GRANT'
             """).ExecuteScalar());
@@ -593,7 +594,8 @@ public sealed class KeyRangeLockTests
         using var reader = sim.CreateOpenConnection();
         _ = reader.CreateCommand("begin tran; select v from t with (updlock) where k between 15 and 25").ExecuteScalar();
 
-        AreEqual(0, reader.CreateCommand("select count(*) from sys.dm_tran_locks where resource_type = 'KEY'").ExecuteScalar());
+        AreEqual(0, reader.CreateCommand("select count(*) from sys.dm_tran_locks where request_mode like 'Range%'").ExecuteScalar());
+        AreEqual("KEY U", reader.CreateCommand("select concat(resource_type, ' ', request_mode) from sys.dm_tran_locks where request_mode = 'U'").ExecuteScalar());
 
         _ = reader.CreateCommand("rollback tran").ExecuteNonQuery();
     }
@@ -607,7 +609,7 @@ public sealed class KeyRangeLockTests
         using var reader = sim.CreateOpenConnection();
         _ = reader.CreateCommand("begin tran; select v from t with (updlock, holdlock) where k between 15 and 25").ExecuteScalar();
 
-        AreEqual(1, reader.CreateCommand("""
+        AreEqual(2, reader.CreateCommand("""
             select count(*) from sys.dm_tran_locks where resource_type = 'KEY' and request_mode = 'RangeS-U'
             """).ExecuteScalar());
 
@@ -622,7 +624,7 @@ public sealed class KeyRangeLockTests
         using var writer = sim.CreateOpenConnection();
 
         _ = reader.CreateCommand("set transaction isolation level serializable; begin tran; select v from t with (updlock) where k between 15 and 25").ExecuteScalar();
-        await AssertProceeds(writer, "insert t values (26, 9)");
+        await AssertProceeds(writer, "insert t values (35, 9)");
         await AssertBlocksUntil(reader, writer, "insert t values (22, 8)", "rollback tran");
     }
 
@@ -680,17 +682,16 @@ public sealed class KeyRangeLockTests
     }
 
     [TestMethod]
-    public async Task SerializableUpdLockOnAnUnindexedColumn_FallsBackToWholeTable()
+    public async Task SerializableUpdLockOnAnUnindexedColumn_LocksEveryKey()
     {
-        // No key space to fence, so the fence is the whole-table S the plain
-        // SERIALIZABLE reader falls back to — real range-locks every key plus
-        // infinity here, which covers the same value space.
+        // No interval to narrow to, so the read locks the whole key space —
+        // every key plus the infinity anchor, in RangeS-U, as real's scan does.
         var sim = KeyedTable();
         using var reader = sim.CreateOpenConnection();
         using var writer = sim.CreateOpenConnection();
 
         _ = reader.CreateCommand("set transaction isolation level serializable; begin tran; select k from t with (updlock) where v = 2").ExecuteScalar();
-        AreEqual(0, reader.CreateCommand("select count(*) from sys.dm_tran_locks where resource_type = 'KEY'").ExecuteScalar());
+        AreEqual(4, reader.CreateCommand("select count(*) from sys.dm_tran_locks where resource_type = 'KEY' and request_mode = 'RangeS-U'").ExecuteScalar());
         await AssertBlocksUntil(reader, writer, "insert t values (999, 9)", "rollback tran");
     }
 
@@ -711,18 +712,19 @@ public sealed class KeyRangeLockTests
     }
 
     /// <summary>
-    /// A SERIALIZABLE UPDATE / DELETE fences the interval its WHERE pins in
-    /// <c>RangeX-X</c>, so an insert into it — even where no row matched —
-    /// waits while one outside it goes through; the same statement under READ
-    /// COMMITTED fences nothing. Probed 2026-09-26 against SQL Server 2025.
+    /// A SERIALIZABLE UPDATE / DELETE locks the keys its WHERE reaches and the
+    /// next one in <c>RangeX-X</c>, so an insert into that span — even where
+    /// no row matched — waits while one past it goes through; the same
+    /// statement under READ COMMITTED fences nothing. Probed 2026-09-26 and
+    /// 2026-09-28 against SQL Server 2025.
     /// </summary>
     [TestMethod]
-    [DataRow("update t set v = v where k between 15 and 25")]
-    [DataRow("update t set v = v where k = 22")]
-    [DataRow("delete t where k > 15 and k < 25")]
-    [DataRow("update a set v = a.v from t a join t b on a.k = b.k where a.k between 15 and 25")]
-    [DataRow("delete a from t a join t b on a.k = b.k where a.k > 15 and a.k < 25")]
-    public void SerializableWriter_FencesItsInterval(string write)
+    [DataRow("update t set v = v where k between 15 and 25", 2)]
+    [DataRow("update t set v = v where k = 22", 1)]
+    [DataRow("delete t where k > 15 and k < 25", 2)]
+    [DataRow("update a set v = a.v from t a join t b on a.k = b.k where a.k between 15 and 25", 2)]
+    [DataRow("delete a from t a join t b on a.k = b.k where a.k > 15 and a.k < 25", 2)]
+    public void SerializableWriter_FencesItsInterval(string write, int keysLocked)
     {
         var sim = KeyedTable();
         using var holder = sim.CreateOpenConnection();
@@ -733,7 +735,7 @@ public sealed class KeyRangeLockTests
 
         AreEqual(1222, Throws<SimulatedSqlException>(() => writer.CreateCommand("insert t values (22, 9)").ExecuteNonQuery()).Number);
         AreEqual(1, writer.CreateCommand("insert t values (40, 9)").ExecuteNonQuery());
-        AreEqual(1, holder.CreateCommand(
+        AreEqual(keysLocked, holder.CreateCommand(
             "select count(*) from sys.dm_tran_locks where request_session_id = @@spid and resource_type = 'KEY' and request_mode = 'RangeX-X'").ExecuteScalar());
 
         _ = holder.CreateCommand("rollback").ExecuteNonQuery();

@@ -271,24 +271,25 @@ public sealed class LockResourceTests
     }
 
     [TestMethod]
-    public void RangeModes_CompatibilityMatrix_MatchesTheProbedCells()
+    public void RangeModes_CompatibilityMatrix_IsRealsKeyRangeMatrix()
     {
-        // RangeS-S coexists with a second reader's RangeS-S and with RangeS-U
-        // (probed: a SERIALIZABLE reader and an overlapping UPDLOCK reader both
-        // proceed). Everything else in the family conflicts, except two writers
-        // probing the same interval with RangeI-N.
-        IsTrue(LockManager.IsCompatible(LockMode.RangeSharedShared, LockMode.RangeSharedShared));
-        IsTrue(LockManager.IsCompatible(LockMode.RangeSharedShared, LockMode.RangeSharedUpdate));
-        IsTrue(LockManager.IsCompatible(LockMode.RangeSharedUpdate, LockMode.RangeSharedShared));
-        IsTrue(LockManager.IsCompatible(LockMode.RangeInsertNull, LockMode.RangeInsertNull));
-
-        IsFalse(LockManager.IsCompatible(LockMode.RangeSharedShared, LockMode.RangeInsertNull));
-        IsFalse(LockManager.IsCompatible(LockMode.RangeInsertNull, LockMode.RangeSharedShared));
-        IsFalse(LockManager.IsCompatible(LockMode.RangeSharedUpdate, LockMode.RangeSharedUpdate));
-        IsFalse(LockManager.IsCompatible(LockMode.RangeSharedUpdate, LockMode.RangeInsertNull));
-        IsFalse(LockManager.IsCompatible(LockMode.RangeExclusiveExclusive, LockMode.RangeSharedShared));
-        IsFalse(LockManager.IsCompatible(LockMode.RangeSharedShared, LockMode.RangeExclusiveExclusive));
-        IsFalse(LockManager.IsCompatible(LockMode.RangeExclusiveExclusive, LockMode.RangeExclusiveExclusive));
+        // Rows requested, columns held: S U X RangeS-S RangeS-U RangeI-N RangeX-X.
+        LockMode[] modes = [LockMode.Shared, LockMode.Update, LockMode.Exclusive, LockMode.RangeSharedShared, LockMode.RangeSharedUpdate, LockMode.RangeInsertNull, LockMode.RangeExclusiveExclusive];
+        string[] grid =
+        [
+            "YYNYYYN",
+            "YNNYNYN",
+            "NNNNNYN",
+            "YYNYYNN",
+            "YNNYNNN",
+            "YYYNNYN",
+            "NNNNNNN",
+        ];
+        for (var requested = 0; requested < modes.Length; requested++)
+        {
+            for (var held = 0; held < modes.Length; held++)
+                AreEqual(grid[requested][held] == 'Y', LockManager.IsCompatible(modes[held], modes[requested]), $"{modes[requested]} requested over {modes[held]} held");
+        }
     }
 
     [TestMethod]
@@ -306,49 +307,49 @@ public sealed class LockResourceTests
     }
 
     [TestMethod]
-    public void ActiveKeyRangeLocks_TracksAHeldRange_ResetsAtCommit()
+    public void ActiveKeyRangeLocks_TracksHeldKeyLocks_ResetsAtCommit()
     {
-        // The writer's per-row range probe keys off this per-table count the
+        // The writer's per-row key-lock test keys off this per-table count the
         // way the reader's fast path keys off ActiveDataWriters: at zero the
         // writer skips decoding its row and never touches the gate. A leak
         // here costs every writer a decode per mutation forever after.
         var sim = new Simulation();
-        ExecuteNonQuery(sim, "create table t (k int not null primary key, v int)");
+        ExecuteNonQuery(sim, "create table t (k int not null primary key, v int); insert t values (3, 0), (9, 0)");
         using var conn = sim.CreateDbConnection();
         conn.Open();
         var table = conn.CurrentDatabase.Schemas["dbo"].HeapTables["t"];
         AreEqual(0, table.ActiveKeyRangeLocks);
         ExecuteNonQuery(conn, "set transaction isolation level serializable; begin tran; select count(*) from t where k between 1 and 5");
-        AreEqual(1, table.ActiveKeyRangeLocks);
+        // Key 3 inside the interval, key 9 past it.
+        AreEqual(2, table.ActiveKeyRangeLocks);
         ExecuteNonQuery(conn, "commit tran");
         AreEqual(0, table.ActiveKeyRangeLocks);
-        IsEmpty(table.KeyRangeLocks.Values.SelectMany(static r => r.Holders));
+        IsEmpty(table.KeyLockGroups.Values.SelectMany(static g => g.Anchors.Values.Append(g.Infinity)).SelectMany(static r => r.Holders));
     }
 
     [TestMethod]
-    public void ActiveKeyRangeLocks_StaysZero_WhenTheReaderFallsBackToTheTableLock()
+    public void ActiveKeyRangeLocks_StaysZero_OverAHeapScan()
     {
-        // No index leads `v`, so there is no key space to fence and the reader
-        // takes the whole-table S instead — no range resource is interned.
+        // A heap has no key to walk, so its SERIALIZABLE scan takes the table
+        // S real takes — no key lock is interned.
         var sim = new Simulation();
-        ExecuteNonQuery(sim, "create table t (k int not null primary key, v int)");
+        ExecuteNonQuery(sim, "create table t (k int, v int); insert t values (1, 3)");
         using var conn = sim.CreateDbConnection();
         conn.Open();
         var table = conn.CurrentDatabase.Schemas["dbo"].HeapTables["t"];
         ExecuteNonQuery(conn, "set transaction isolation level serializable; begin tran; select count(*) from t where v = 3");
         AreEqual(0, table.ActiveKeyRangeLocks);
-        IsEmpty(table.KeyRangeLocks);
+        IsEmpty(table.KeyLockGroups);
         Contains(LockMode.Shared, table.TableDataLock.Holders.Select(static h => h.Mode));
-        ExecuteNonQuery(conn, "rollback tran");
+        DoesNotContain(LockMode.IntentShared, table.TableDataLock.Holders.Select(static h => h.Mode));
     }
 
     [TestMethod]
     public void SerializableUpdLockRead_TakesRangeSU_AndKeepsItsRowU()
     {
-        // Real folds the two into one key lock; range modes live on resources
-        // of their own here, so the row-U stays on top of the RangeS-U — which
-        // is what keeps blocking the readers and writers that take a row lock
-        // without ever probing a range.
+        // Real folds the two into one key lock; the row-U here stays on top of
+        // the RangeS-U, since the readers and writers that take a row lock meet
+        // it there.
         var sim = new Simulation();
         ExecuteNonQuery(sim, "create table t (k int not null primary key, v int); insert t values (2, 20)");
         using var conn = sim.CreateDbConnection();
@@ -356,10 +357,11 @@ public sealed class LockResourceTests
         var table = conn.CurrentDatabase.Schemas["dbo"].HeapTables["t"];
         ExecuteNonQuery(conn, "set transaction isolation level serializable; begin tran; select v from t with (updlock) where k between 1 and 5");
 
-        AreEqual(1, table.ActiveKeyRangeLocks);
+        // Key 2 and the infinity anchor past it.
+        AreEqual(2, table.ActiveKeyRangeLocks);
         Contains(
             LockMode.RangeSharedUpdate,
-            table.KeyRangeLocks.Values.SelectMany(static r => r.Holders).Select(static h => h.Mode));
+            table.KeyLockGroups.Values.SelectMany(static g => g.Anchors.Values).SelectMany(static r => r.Holders).Select(static h => h.Mode));
         Contains(LockMode.Update, table.RowLocks.Values.SelectMany(static r => r.Holders).Select(static h => h.Mode));
         Contains(LockMode.IntentExclusive, table.TableDataLock.Holders.Select(static h => h.Mode));
         DoesNotContain(LockMode.Shared, table.TableDataLock.Holders.Select(static h => h.Mode));
@@ -369,88 +371,41 @@ public sealed class LockResourceTests
     }
 
     [TestMethod]
-    public void KeyRange_Contains_HonorsBoundInclusivityAndRejectsNull()
+    public void KeyLockAnchor_InternsInTheColumnType_WhateverTheProbeWasPromotedTo()
     {
-        var open = SingleColumn(
-            hasLower: true, SqlValue.FromInt32(10), lowerInclusive: false,
-            hasUpper: true, SqlValue.FromInt32(20), upperInclusive: false);
-        IsFalse(Covers(open, SqlValue.FromInt32(10)));
-        IsTrue(Covers(open, SqlValue.FromInt32(15)));
-        IsFalse(Covers(open, SqlValue.FromInt32(20)));
-        IsFalse(Covers(open, SqlValue.Null(SqlType.Int32)));
-
-        var closed = SingleColumn(
-            hasLower: true, SqlValue.FromInt32(10), lowerInclusive: true,
-            hasUpper: true, SqlValue.FromInt32(20), upperInclusive: true);
-        IsTrue(Covers(closed, SqlValue.FromInt32(10)));
-        IsTrue(Covers(closed, SqlValue.FromInt32(20)));
-        IsFalse(Covers(closed, SqlValue.FromInt32(21)));
-
-        // An open-ended upper is the infinity range past the last key.
-        var tail = SingleColumn(
-            hasLower: true, SqlValue.FromInt32(10), lowerInclusive: false,
-            hasUpper: false, default, upperInclusive: false);
-        IsTrue(Covers(tail, SqlValue.FromInt32(int.MaxValue)));
-        IsFalse(Covers(tail, SqlValue.FromInt32(10)));
-    }
-
-    [TestMethod]
-    public void KeyRange_Contains_ComparesTheTupleLexicographically()
-    {
-        // `a = 1 AND b between 2 and 5` over a key on (a, b): the interval runs
-        // from (1,2) to (1,5), so a second-column value inside the interval but
-        // under a different leading value is outside it.
-        var closed = Tuple(
-            [SqlValue.FromInt32(1), SqlValue.FromInt32(2)], lowerInclusive: true,
-            [SqlValue.FromInt32(1), SqlValue.FromInt32(5)], upperInclusive: true);
-        IsTrue(Covers(closed, SqlValue.FromInt32(1), SqlValue.FromInt32(3)));
-        IsTrue(Covers(closed, SqlValue.FromInt32(1), SqlValue.FromInt32(2)));
-        IsFalse(Covers(closed, SqlValue.FromInt32(1), SqlValue.FromInt32(6)));
-        IsFalse(Covers(closed, SqlValue.FromInt32(2), SqlValue.FromInt32(3)));
-        IsFalse(Covers(closed, SqlValue.FromInt32(0), SqlValue.FromInt32(3)));
-        IsFalse(Covers(closed, SqlValue.Null(SqlType.Int32), SqlValue.FromInt32(3)));
-        AreEqual("0,1:[(1,2),(1,5)]", closed.ToString());
-    }
-
-    [TestMethod]
-    public void KeyRange_Contains_TreatsAShorterBoundTupleAsOpenBelowIt()
-    {
-        // `a = 1 AND b > 2`: the lower bound names both columns, the upper only
-        // the first, so every b above 2 under a = 1 is inside and no other a is.
-        var halfOpen = Tuple(
-            [SqlValue.FromInt32(1), SqlValue.FromInt32(2)], lowerInclusive: false,
-            [SqlValue.FromInt32(1)], upperInclusive: true);
-        IsTrue(Covers(halfOpen, SqlValue.FromInt32(1), SqlValue.FromInt32(int.MaxValue)));
-        IsFalse(Covers(halfOpen, SqlValue.FromInt32(1), SqlValue.FromInt32(2)));
-        IsFalse(Covers(halfOpen, SqlValue.FromInt32(2), SqlValue.FromInt32(3)));
-        AreEqual("0,1:((1,2),(1,*)]", halfOpen.ToString());
-    }
-
-    [TestMethod]
-    public void KeyRange_InternsByIntervalNotByType()
-    {
-        // Two ranges whose bounds compare equal are one resource, so the same
-        // predicate parsed twice reuses the interned LockResource instead of
-        // minting one per parse.
+        // A bigint probe over an int key reads the seek cache in bigint; the
+        // anchor it locks is restated in int, so a writer's test — which reads
+        // its row in the column type — finds the same resource.
         var sim = new Simulation();
-        ExecuteNonQuery(sim, "create table t (k int not null primary key)");
+        ExecuteNonQuery(sim, "create table t (k int not null primary key); insert t values (20), (30)");
         using var conn = sim.CreateDbConnection();
         conn.Open();
         var table = conn.CurrentDatabase.Schemas["dbo"].HeapTables["t"];
-        var a = new KeyRange([0], [SqlType.Int32], [SqlValue.FromInt32(1)], true, [SqlValue.FromInt32(5)], true);
-        var b = new KeyRange([0], [SqlType.BigInt], [SqlValue.FromInt32(1)], true, [SqlValue.FromInt32(5)], true);
-        AreSame(table.GetOrCreateKeyRangeLock(a), table.GetOrCreateKeyRangeLock(b));
-        AreEqual("0:[1,5]", a.ToString());
+        ExecuteNonQuery(conn, "set transaction isolation level serializable; begin tran; select count(*) from t where k > cast(25 as bigint); select count(*) from t where k between 21 and 29");
+        var group = table.KeyLockGroups.Values.Single();
+        HasCount(1, group.Anchors);
+        AreSame(SqlType.Int32, group.Anchors.Keys.Single().ComponentAt(0).Type);
+        ExecuteNonQuery(conn, "rollback tran");
     }
 
-    private static KeyRange SingleColumn(
-        bool hasLower, SqlValue lower, bool lowerInclusive, bool hasUpper, SqlValue upper, bool upperInclusive) =>
-        new([0], [SqlType.Int32], hasLower ? [lower] : [], lowerInclusive, hasUpper ? [upper] : [], upperInclusive);
-
-    private static KeyRange Tuple(SqlValue[] lower, bool lowerInclusive, SqlValue[] upper, bool upperInclusive) =>
-        new([0, 1], [SqlType.Int32, SqlType.Int32], lower, lowerInclusive, upper, upperInclusive);
-
-    private static bool Covers(KeyRange range, params SqlValue[] probe) => range.Contains(probe);
+    [TestMethod]
+    public void KeyLockGroup_OfANonUniqueIndex_AppendsTheClusteredKey()
+    {
+        // Real's nonclustered entry carries the row locator, so each row of a
+        // duplicated value is an anchor of its own.
+        var sim = new Simulation();
+        ExecuteNonQuery(sim, "create table t (k int not null primary key, c int, index ic (c)); create unique index uc on t (c) where c > 0");
+        using var conn = sim.CreateDbConnection();
+        conn.Open();
+        var table = conn.CurrentDatabase.Schemas["dbo"].HeapTables["t"];
+        var nonUnique = KeyLockGroup.For(table, table.Indexes.Single(static i => i.Name == "ic"))!;
+        CollectionAssert.AreEqual(new[] { 1, 0 }, nonUnique.Ordinals);
+        AreEqual(1, nonUnique.KeyLength);
+        IsFalse(nonUnique.IsRowGroup);
+        var unique = KeyLockGroup.For(table, table.Indexes.Single(static i => i.Name == "uc"))!;
+        CollectionAssert.AreEqual(new[] { 1 }, unique.Ordinals);
+        IsTrue(KeyLockGroup.RowGroupOf(table)!.IsRowGroup);
+    }
 
     private static void ExecuteNonQuery(Simulation sim, string sql)
     {
@@ -606,28 +561,40 @@ public sealed class LockResourceTests
     }
 
     [TestMethod]
-    public void RowLockEscalation_Above5000_PromotesToTableX()
+    public void RowLockEscalation_OneStatementPastTheThreshold_PromotesToTableX()
     {
-        // Insert >5000 rows in one transaction; the per-row X acquisitions
-        // bump the per-tx per-table count past the threshold, triggering
-        // promotion to a single table-X. After commit, the table-X is
-        // released and the per-row dict entries are no longer tracked
-        // against any tx.
+        // One statement taking past real's first escalation attempt (about
+        // 6 250 locks with the pages counted) trades its row X locks for a
+        // single table X; after commit nothing is held.
         var sim = new Simulation();
         ExecuteNonQuery(sim, "create table t (id int)");
         using var conn = sim.CreateDbConnection();
         conn.Open();
         var table = conn.CurrentDatabase.Schemas["dbo"].HeapTables["t"];
-        ExecuteNonQuery(conn, "begin tran");
-        for (var i = 0; i < SimulatedDbTransaction.RowLockEscalationThreshold + 2; i++)
-            ExecuteNonQuery(conn, $"insert t values ({i})");
-        // After escalation, the active transaction holds table-X on this
-        // table; row-lock count is zeroed.
+        ExecuteNonQuery(conn, "begin tran; insert t select value from generate_series(1, 6500)");
         var tx = conn.CurrentTransaction;
         IsNotNull(tx);
         Contains(table, tx.EscalatedTables);
+        IsEmpty(table.RowLocks.Values.SelectMany(static r => r.Holders));
         ExecuteNonQuery(conn, "commit tran");
         IsEmpty(table.TableDataLock.Holders);
+    }
+
+    [TestMethod]
+    public void RowLockEscalation_CountsPerStatement_NotPerTransaction()
+    {
+        // Two statements of 4 000 rows each stay under the threshold one at a
+        // time, as real's escalation counts a statement's locks.
+        var sim = new Simulation();
+        ExecuteNonQuery(sim, "create table t (id int)");
+        using var conn = sim.CreateDbConnection();
+        conn.Open();
+        var table = conn.CurrentDatabase.Schemas["dbo"].HeapTables["t"];
+        ExecuteNonQuery(conn, "begin tran; insert t select value from generate_series(1, 4000); insert t select value from generate_series(1, 4000)");
+        var tx = conn.CurrentTransaction;
+        IsNotNull(tx);
+        DoesNotContain(table, tx.EscalatedTables);
+        ExecuteNonQuery(conn, "commit tran");
     }
 
     [TestMethod]
@@ -638,9 +605,7 @@ public sealed class LockResourceTests
         using var conn = sim.CreateDbConnection();
         conn.Open();
         var table = conn.CurrentDatabase.Schemas["dbo"].HeapTables["t"];
-        ExecuteNonQuery(conn, "begin tran");
-        for (var i = 0; i < SimulatedDbTransaction.RowLockEscalationThreshold + 2; i++)
-            ExecuteNonQuery(conn, $"insert t values ({i})");
+        ExecuteNonQuery(conn, "begin tran; insert t select value from generate_series(1, 6500)");
         var tx = conn.CurrentTransaction;
         IsNotNull(tx);
         DoesNotContain(table, tx.EscalatedTables);

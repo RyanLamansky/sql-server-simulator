@@ -48,6 +48,7 @@ partial class Simulation
 
         var errors = new List<SimulatedSqlException>();
         compileBatch.CurrentStatement.UtcNow = DateTime.UtcNow;
+        compileBatch.CompilingForRun = true;
         try
         {
             _ = this.BindWithoutRunning(compileBatch, errors);

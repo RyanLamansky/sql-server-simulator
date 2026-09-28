@@ -1,8 +1,7 @@
-# Query hints — table & OPTION clauses (parse-and-discard)
+# Query hints — table & OPTION clauses
 
-Parse-and-discard support for SQL Server's hint grammar.
-The simulator doesn't model locking / isolation / planner choices / indexes, so all recognized hint shapes are accepted and ignored.
-The value of shipping this is grammar compatibility: applications with `WITH (NOLOCK)` hints in their schema / raw SQL don't trip `Msg 102` on parse.
+SQL Server's hint grammar, with the refusals real raises over it.
+The locking hints drive the lock manager ([`locking.md`](locking.md#hint-surface)); the access-path hints (`INDEX`, `FORCESEEK`, `FORCESCAN`) choose no access path here but are checked for the plans real refuses — see [Enforced rejections](#enforced-rejections); the rest parse and are discarded.
 
 Implementation lives in [`src/SqlServerSimulator/Parser/Selection.Hints.cs`](../../src/SqlServerSimulator/Parser/Selection.Hints.cs).
 
@@ -164,6 +163,15 @@ Every other recognized OPTION hint is a pure no-op.
   more names than the index has key columns is **Msg 365** (checked first, so a list that is both too long and misspelled reports the count), and the first name that isn't the key column at its position is **Msg 362** naming it.
   An `INCLUDE`d column, a key column out of order and an unknown name all land on Msg 362 alike; the match is collation-driven, and both messages name the **base table** rather than the alias the query wrote (probe-confirmed).
   A key constraint is a legal target too, its `StorageOrdinals` mapped back to the declared column names.
+- **`FORCESEEK` a plan can't honor** — **Msg 8622**, raised by `ValidateForcedSeeks` once the query's predicates have parsed, with real's refusal as its model (probed 2026-09-28 against SQL Server 2025).
+  A hinted source needs some predicate an index seek can answer (`BooleanExpression.OffersSeek`): a top-level conjunct of the WHERE, the HAVING or any join's ON that compares a key-leading column — through a conversion that stays in the column's type family — against a side reading nothing of the source, an `IN`, a `BETWEEN` (a column on either bound counts), `IS [NOT] NULL`, a `LIKE` whose constant pattern doesn't lead with `%` or `_`, an `OR` every branch of which seeks, a `NOT` of any of those; or, for a one-column subquery, its select-list column, which an enclosing `IN` seeks on.
+  A predicate settled false while compiling needs no seek.
+  Refused: no predicate at all, an unindexed or non-leading column, a column in a function or arithmetic, a cast to a string, a `varchar` column under a SQL collation against a Unicode value, a column compared with its own table's, a join or `CROSS JOIN` whose inner side offers nothing, a heap or columnstore-only table.
+  An index named beside the hint (`FORCESEEK(ix(…))`, `INDEX(ix)`, `INDEX(1)` for the clustered one) narrows the keys to that one and `INDEX(0)` to none, and a seek-column list needs a predicate on every column it names.
+  `FORCESCAN` beside an `INDEX` naming only nonclustered indexes is refused too when the query reads a column those indexes don't carry, the lookup being a seek.
+  It is a compile error: it ends the batch before any statement runs, and a `TRY` in the batch doesn't catch it; a statement over a table the batch creates meets it when it runs, and a procedure body at its execution rather than at `CREATE`; a binder error earlier in the batch keeps it from being reported, and a batch reports only the first.
+  `ForceSeekPlanTests` holds the probed shapes both ways.
+- **Hint combinations real's optimizer refuses outright** (class 15, raised with the hint list): **Msg 10746** for `FORCESEEK` beside `FORCESCAN`, **Msg 10747** for a nested `FORCESEEK(ix(…))` beside an `INDEX` hint, **Msg 10750** for `FORCESCAN` beside more than one index, and a bare `FORCESEEK(ix)` without its column list is **Msg 102** on the closing parenthesis (probed 2026-09-28).
 - **The legacy no-`WITH` parenthesized form** splits on the alias, matching real.
   With an alias written, the parens are unambiguously a hint list and an unknown name is Msg 321.
   Without one they are an **argument list**: real binds them first, so each name inside reports its own **Msg 207** — the source is not in scope for its own arguments, so even a name the table carries is unresolvable — and the run closes with **Msg 215** (`Parameters supplied for object 't' which is not a function. If the parameters are intended as a table hint, a WITH keyword is required.`), all of it arriving as one multi-error exception the way a client sees it.
@@ -173,9 +181,7 @@ Every other recognized OPTION hint is a pure no-op.
 
 ## Not enforced
 
-- **FORCESEEK plan rejection** (`Msg 8622`, level 16 state 1, compile-time and so uncatchable) — fires on real SQL Server when the planner can't honor the directive; the simulator validates the hint's names and seek columns (Msg 308 / 362 / 365) and then reads normally, since it has no plan to declare infeasible.
-  Probed 2026-08-08 against SQL Server 2025: real refuses a `FORCESEEK` with **no predicate at all**, one whose only predicate is on an **unindexed** column, and one whose **named** index no predicate touches the keys of; it accepts an equality, a range, an `IN`, a `<>`, an `OR` mixing an indexed with an unindexed column, and a join `ON` equality.
-  Closing it wants the seek planner's sargability analysis lifted from execution to compile time — the accepting cases are what make a cheaper rule over-raise.
+- **A table hint on a view** — real carries `FORCESEEK` through to the view's base tables, so `SELECT … FROM v WITH (FORCESEEK) WHERE d = 1` over an unindexed `d` is Msg 8622 there (probed 2026-09-28); the simulator doesn't carry a hint into a view body, so the read runs.
 - **`INDEX = (value-list)` equals-form** — probe-confirmed that real SQL Server raises `Msg 102` on the equals-with-multiple-values form anyway (the docs notwithstanding), so the simulator's "= takes one literal" rule matches by parsing as well.
 
 `FROM t NOLOCK` without parens is *not* a deprecated hint shape — it parses as the bare-alias form (`FROM t <alias>`) on both real SQL Server and the simulator.

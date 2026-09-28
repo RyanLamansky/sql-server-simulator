@@ -178,6 +178,40 @@ internal sealed class HeapSeekCache
     }
 
     /// <summary>
+    /// The keys a SERIALIZABLE read of the interval between the (possibly
+    /// shorter-than-the-key) bounds locks, in ascending order with each key's
+    /// row addresses: every key inside it, then the first key past its upper
+    /// bound — real's next-key lock — with a null key standing for the
+    /// infinity position when no key follows. Returns null once more than
+    /// <paramref name="cap"/> keys are in hand, the caller's signal that the
+    /// read would escalate. A null bound leaves that side open.
+    /// </summary>
+    public List<(SqlValueKey? Key, (int Page, int Slot)[] Rids)>? KeyLockAnchors(
+        Heap heap, HeapColumn[] schema, Heap? lobStore, int[] ordinals, SqlType[] commons,
+        SqlValueKey? lower, bool lowerInclusive, SqlValueKey? upper, bool upperInclusive, int cap)
+    {
+        lock (this.gate)
+        {
+            var entry = this.ResolveEntry(heap, schema, lobStore, ordinals, commons, traced: false);
+            return entry.Anchors(ordinals.Length, lower, lowerInclusive, upper, upperInclusive, cap);
+        }
+    }
+
+    /// <summary>
+    /// The first key strictly above <paramref name="probe"/>, or null when none
+    /// is — the anchor whose range an insert of <paramref name="probe"/> lands
+    /// in, real's next-key test.
+    /// </summary>
+    public SqlValueKey? NextKeyAbove(Heap heap, HeapColumn[] schema, Heap? lobStore, int[] ordinals, SqlType[] commons, SqlValueKey probe)
+    {
+        lock (this.gate)
+        {
+            var entry = this.ResolveEntry(heap, schema, lobStore, ordinals, commons, traced: false);
+            return entry.NextAbove(ordinals.Length, probe, inclusive: true);
+        }
+    }
+
+    /// <summary>
     /// True when some live row's <paramref name="ordinals"/> tuple equals
     /// <paramref name="probeKey"/>. The foreign-key parent-existence check: seek
     /// narrows the candidates, then each is verified against its live bytes so a
@@ -572,6 +606,84 @@ internal sealed class HeapSeekCache
             }
 
             return this.sortedKeys;
+        }
+
+        // See HeapSeekCache.KeyLockAnchors. An entry widened past the requested
+        // arity holds longer tuples; each is cut back to the anchor's width,
+        // and the ascending walk puts the pieces of one anchor side by side, so
+        // they merge as they come.
+        public List<(SqlValueKey? Key, (int Page, int Slot)[] Rids)>? Anchors(
+            int arity, SqlValueKey? lower, bool lowerInclusive, SqlValueKey? upper, bool upperInclusive, int cap)
+        {
+            var sorted = this.EnsureSorted();
+            var result = new List<(SqlValueKey? Key, (int Page, int Slot)[] Rids)>();
+            if (sorted.Count != 0)
+            {
+                var lowerKey = lower ?? sorted.Min;
+                var upperKey = upper ?? sorted.Max;
+                if (KeyTupleComparer.Instance.Compare(lowerKey, upperKey) <= 0)
+                {
+                    SqlValueKey? pending = null;
+                    List<(int Page, int Slot)> pendingRids = [];
+                    foreach (var key in sorted.GetViewBetween(lowerKey, upperKey))
+                    {
+                        if (lower is { } lk && !lowerInclusive && KeyTupleComparer.Instance.Compare(key, lk) == 0)
+                            continue;
+                        if (upper is { } uk && !upperInclusive && KeyTupleComparer.Instance.Compare(key, uk) == 0)
+                            continue;
+                        var anchor = key.ComponentCount > arity ? key.Prefix(arity) : key;
+                        if (pending is not { } open || !open.Equals(anchor))
+                        {
+                            if (pending is { } done)
+                                result.Add((done, [.. pendingRids]));
+                            if (result.Count >= cap)
+                                return null;
+                            pending = anchor;
+                            pendingRids.Clear();
+                        }
+                        if (this.Buckets.TryGetValue(key, out var bucket))
+                            pendingRids.AddRange(bucket);
+                    }
+                    if (pending is { } last)
+                        result.Add((last, [.. pendingRids]));
+                }
+            }
+
+            var next = upper is { } bound ? this.NextAbove(arity, bound, upperInclusive) : null;
+            result.Add((next, next is { } nextKey ? this.RidsOf(nextKey) : []));
+            return result;
+        }
+
+        // The first key above `bound` under the ragged-arity comparer, cut to
+        // `arity` — past every key sharing its components when `inclusive`
+        // says the bound itself was inside the read, at or past it otherwise —
+        // or null when none is.
+        public SqlValueKey? NextAbove(int arity, SqlValueKey bound, bool inclusive)
+        {
+            var sorted = this.EnsureSorted();
+            if (sorted.Count == 0 || KeyTupleComparer.Instance.Compare(bound, sorted.Max) > 0)
+                return null;
+            foreach (var key in sorted.GetViewBetween(bound, sorted.Max))
+            {
+                var c = KeyTupleComparer.Instance.Compare(key, bound);
+                if (c > 0 || (c == 0 && !inclusive))
+                    return key.ComponentCount > arity ? key.Prefix(arity) : key;
+            }
+            return null;
+        }
+
+        // Every row address whose key starts with `prefix`.
+        private (int Page, int Slot)[] RidsOf(SqlValueKey prefix)
+        {
+            if (prefix.ComponentCount == this.Ordinals.Length)
+                return this.Buckets.TryGetValue(prefix, out var bucket) ? [.. bucket] : [];
+            List<(int Page, int Slot)> rids = [];
+            foreach (var key in this.EnsureSorted().GetViewBetween(prefix, prefix))
+            {
+                if (this.Buckets.TryGetValue(key, out var bucket))
+                    rids.AddRange(bucket);
+            }
+            return [.. rids];
         }
 
         // Single-column range seek: the in-range keys of a one-column entry,
