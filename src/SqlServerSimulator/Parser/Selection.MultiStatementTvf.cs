@@ -44,4 +44,28 @@ partial class Selection
             rowSource: (outerBatch, outerResolver) =>
                 outerBatch.Connection.Simulation.InvokeMultiStatementTvf(outerBatch, outerResolver, function, arguments));
     }
+
+    /// <summary>
+    /// Wraps a CLR table-valued function call as a <see cref="Selection"/> for
+    /// <see cref="FromSource.LateralPlan"/>, shaped like
+    /// <see cref="ForMultiStatementTvf"/>: each execution evaluates the
+    /// arguments in the outer scope and streams the rows the function's
+    /// <c>FillRow</c> method produces, typed by its declared result table.
+    /// </summary>
+    internal static Selection ForClrTvf(ClrTableValuedFunction function, Expression?[] arguments)
+    {
+        var schema = new SqlType[function.OutputColumns.Length];
+        var columnNames = new string[function.OutputColumns.Length];
+        for (var i = 0; i < function.OutputColumns.Length; i++)
+        {
+            schema[i] = function.OutputColumns[i].Type;
+            columnNames[i] = function.OutputColumns[i].Name;
+        }
+        return new Selection(
+            schema,
+            columnNames,
+            hasOrderBy: false,
+            hasTopOrOffsetOrFetch: false,
+            rowSource: (outerBatch, outerResolver) => Simulation.InvokeClrTableFunction(outerBatch, outerResolver, function, arguments));
+    }
 }

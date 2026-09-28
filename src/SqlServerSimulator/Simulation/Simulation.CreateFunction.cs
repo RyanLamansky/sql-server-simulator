@@ -113,9 +113,23 @@ partial class Simulation
         return context.Token switch
         {
             AtPrefixedString => ParseMultiStatementTvfTail(context, schema, functionName, parameters, isAlter, createOrAlter),
+            ReservedKeyword { Keyword: Keyword.Table } when NextIsOpenParen(context) => ParseClrTableFunctionTail(context, schema, functionName, parameters, isAlter, createOrAlter),
             ReservedKeyword { Keyword: Keyword.Table } => ParseInlineTvfTail(context, schema, functionName, parameters, isAlter, createOrAlter),
             _ => ParseScalarTail(context, schema, functionName, parameters, isAlter, createOrAlter),
         };
+    }
+
+    /// <summary>
+    /// Whether the token after the cursor is <c>(</c> — which after
+    /// <c>RETURNS TABLE</c> opens a CLR function's result-table declaration.
+    /// Leaves the cursor where it was.
+    /// </summary>
+    private static bool NextIsOpenParen(ParserContext context)
+    {
+        var checkpoint = context.SaveCheckpoint();
+        var next = context.GetNextOptional();
+        context.RestoreCheckpoint(checkpoint);
+        return next is Operator { Character: '(' };
     }
 
     /// <summary>

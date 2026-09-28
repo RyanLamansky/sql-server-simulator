@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The Microsoft.SqlServer.Server surface a SQLCLR assembly calls into —
+       SqlContext, SqlPipe, SqlDataRecord, SqlMetaData, the routine attributes
+       and IBinarySerialize — which .NET's own System.Data facade forwards to an
+       assembly that no longer exists. SqlServerSimulator embeds this build as a
+       resource and loads it into the load context that hosts registered
+       assemblies; it is never a compile-time reference of anything, so its
+       public types reach no consumer. The assembly name matches the NuGet
+       package's, so a .NET-targeted SQLCLR assembly built against that package
+       lands on these same types. -->
+  <PropertyGroup>
+    <AssemblyName>Microsoft.SqlServer.Server</AssemblyName>
+    <RootNamespace>Microsoft.SqlServer.Server</RootNamespace>
+    <!-- The public surface mirrors .NET Framework's System.Data member for
+         member; its documentation is Microsoft's. -->
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+  </PropertyGroup>
+
+</Project>

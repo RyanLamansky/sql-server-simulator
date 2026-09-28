@@ -785,6 +785,17 @@ internal sealed partial class Selection
                             if (orderByList.Count == 0 && win.Frame is null)
                             {
                                 var aggregator = Aggregator.Create(aggregate, operandType, resultType, batch: batch);
+                                // A CLR aggregate reads every argument, not the
+                                // operand alone, and takes no frame.
+                                if (aggregator is Aggregators.ClrAggregator clrAggregator)
+                                {
+                                    foreach (var i in indices)
+                                        clrAggregator.AccumulateRow(aggregate, runtimeAt(i));
+                                    var clrResult = clrAggregator.Result();
+                                    foreach (var i in indices)
+                                        results[i] = clrResult;
+                                    continue;
+                                }
                                 foreach (var i in indices)
                                 {
                                     var operandValue = aggregate.Operand is null

@@ -23,6 +23,7 @@ internal enum Permission : byte
     Authenticate,
     Connect,
     Control,
+    CreateAggregate,
     CreateAnyDatabase,
     CreateAssembly,
     CreateFullTextCatalog,
@@ -123,6 +124,7 @@ internal static class PermissionCatalog
         new("AUTHENTICATE", "AUTH", PermissionCategory.None),       // Authenticate
         new("CONNECT", "CO  ", PermissionCategory.None),            // Connect
         new("CONTROL", "CL  ", PermissionCategory.None),            // Control
+        new("CREATE AGGREGATE", "CRAG", PermissionCategory.Ddl),    // CreateAggregate
         new("CREATE ANY DATABASE", "CRDB", PermissionCategory.None), // CreateAnyDatabase (server scope)
         new("CREATE ASSEMBLY", "CRAS", PermissionCategory.Ddl),     // CreateAssembly
         new("CREATE FULLTEXT CATALOG", "CRFT", PermissionCategory.Ddl), // CreateFullTextCatalog
@@ -175,6 +177,7 @@ internal static class PermissionCatalog
                 "AUTHENTICATE" => Permission.Authenticate,
                 "CONNECT" => Permission.Connect,
                 "CONTROL" => Permission.Control,
+                "CREATE AGGREGATE" => Permission.CreateAggregate,
                 "CREATE ANY DATABASE" => Permission.CreateAnyDatabase,
                 "CREATE ASSEMBLY" => Permission.CreateAssembly,
                 "CREATE FULLTEXT CATALOG" => Permission.CreateFullTextCatalog,

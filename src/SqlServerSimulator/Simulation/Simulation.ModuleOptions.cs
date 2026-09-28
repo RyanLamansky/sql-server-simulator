@@ -24,6 +24,14 @@ partial class Simulation
         public bool NativeCompilation;
         public bool ReturnsNullOnNullInput;
         public string? ExecuteAs;
+
+        /// <summary>
+        /// The first option written that a CLR module refuses —
+        /// <c>ENCRYPTION</c>, <c>RECOMPILE</c> or <c>NATIVE_COMPILATION</c> —
+        /// for the <c>EXTERNAL NAME</c> tail to report once it knows the
+        /// module is one.
+        /// </summary>
+        public string? RefusedByExternalModule;
     }
 
     /// <summary>
@@ -145,6 +153,8 @@ partial class Simulation
                 throw SimulatedSqlException.OptionNotRecognized(name);
             if (InvalidOptionState(host, name) is { } state)
                 throw SimulatedSqlException.InvalidOptionForCreateStatement(statement, state);
+            if (name is "ENCRYPTION" or "RECOMPILE" or "NATIVE_COMPILATION")
+                options.RefusedByExternalModule ??= name;
             switch (name)
             {
                 case "ENCRYPTION":

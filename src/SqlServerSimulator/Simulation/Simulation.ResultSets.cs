@@ -327,6 +327,7 @@ partial class Simulation
             {
                 InlineTableValuedFunction inline => inline.OutputColumns,
                 MultiStatementTableValuedFunction multiStatement => multiStatement.OutputColumns,
+                ClrTableValuedFunction clr => clr.OutputColumns,
                 _ => null,
             }
             : null;

@@ -1,7 +1,7 @@
 # CLR assemblies and `EXTERNAL NAME` routines
 
-`CREATE ASSEMBLY` registers a .NET assembly from raw bytes; `CREATE FUNCTION … AS EXTERNAL NAME` binds a scalar function to a static method inside it.
-Behavior below was probed against the live SQL Server 2025 reference (17.0.4065.4) unless flagged otherwise.
+`CREATE ASSEMBLY` registers a .NET assembly from raw bytes; `CREATE FUNCTION` / `CREATE PROCEDURE … AS EXTERNAL NAME` bind a scalar function, a table-valued function or a procedure to a static method inside it, and `CREATE AGGREGATE … EXTERNAL NAME` binds a user-defined aggregate to a class.
+Behavior below was probed against the live SQL Server 2025 reference (17.0.4065.4) unless flagged otherwise; the procedure, table-valued function and aggregate behavior was probed 2026-09-28 with the same .NET Framework 4.8 source `ClrFrameworkFixture` compiles.
 
 ## The `EnableClr` gate
 
@@ -24,6 +24,10 @@ That pairing is what lets mssql-django's `enable_clr()` run: it reads `clr enabl
 CREATE ASSEMBLY <name> [AUTHORIZATION <owner>] FROM 0x<hex> [WITH PERMISSION_SET = { SAFE | EXTERNAL_ACCESS | UNSAFE }]
 DROP ASSEMBLY [IF EXISTS] <name> [, …] [WITH NO DEPENDENTS]
 CREATE FUNCTION <name> (<params>) RETURNS <type> AS EXTERNAL NAME <assembly>.<class>.<method>
+CREATE FUNCTION <name> (<params>) RETURNS TABLE (<columns>) [ORDER (<columns>)] [WITH <options>] AS EXTERNAL NAME <assembly>.<class>.<method>
+CREATE PROCEDURE <name> [<params>] [WITH <options>] AS EXTERNAL NAME <assembly>.<class>.<method>
+CREATE AGGREGATE <name> (<params>) RETURNS <type> EXTERNAL NAME <assembly>.<class>
+DROP AGGREGATE [IF EXISTS] <name> [, …]
 ```
 
 `PERMISSION_SET` defaults to `SAFE`.
@@ -31,6 +35,8 @@ CREATE FUNCTION <name> (<params>) RETURNS <type> AS EXTERNAL NAME <assembly>.<cl
 `FROM '<path>'` raises `NotSupportedException`: the simulator has no server-side filesystem.
 
 The class segment is commonly bracketed (`asm.[Namespace.Class].Method`) because a namespace-qualified name contains dots; the object-name parser keeps a bracketed segment whole, so both spellings resolve.
+
+`CREATE AGGREGATE` is the odd one out: its parameter list needs its parentheses (`@v int` bare is Msg 102), `EXTERNAL NAME` follows `RETURNS` with no `AS` (Msg 156 at `AS`), and it names a class alone — a method segment is Msg 102 at its dot.
 
 Assemblies are **database-scoped**, living in `Database.Assemblies` rather than on a `Schema`, and carry an `assembly_id` rather than an `object_id`.
 User assembly ids start at 65536 (real was observed handing out 65538 for a first user assembly).
@@ -41,10 +47,24 @@ User assembly ids start at 65536 (real was observed handing out 65538 for a firs
 The executable form is materialized lazily on first use into a dedicated **collectible** `AssemblyLoadContext`; `DROP ASSEMBLY` unloads it, so a `DROP` / re-`CREATE` cycle under the same name starts from a clean context rather than resurrecting the old types.
 Unloading is cooperative — the CLR reclaims the context once no managed references survive — so correctness never depends on it completing.
 
-**Never read custom attributes off a loaded SQLCLR assembly.**
-A .NET Framework-built SQLCLR assembly decorates its routines with `Microsoft.SqlServer.Server.SqlFunctionAttribute`, which type-forwards to `System.Data.SqlClient` — an assembly that does not exist on modern .NET, so any `GetCustomAttributes` call throws `FileNotFoundException`.
-Binding goes through the `EXTERNAL NAME` triple instead, which names type and method directly and needs no attribute resolution.
-This is load-bearing: it is the single reason a Framework 2.0 assembly runs on .NET 10 at all.
+## The load-context shim
+
+A .NET Framework SQLCLR assembly references `System.Data, Version=4.0.0.0` for both `System.Data.SqlTypes` and `Microsoft.SqlServer.Server`.
+.NET's own `System.Data` facade forwards the first family onward, but sends the second to `System.Data.SqlClient` — an assembly that doesn't exist — and has no `SqlContext` or `SqlPipe` at all.
+So every registered assembly loads into a `SqlAssemblyLoadContext` (`Clr/ClrHost.cs`) that answers two names itself:
+
+- **`Microsoft.SqlServer.Server`** is the `SqlServerSimulator.ClrShim` project: `SqlContext`, `SqlPipe`, `SqlDataRecord`, `SqlMetaData`, `SqlTriggerContext`, the routine attributes and their enums, `IBinarySerialize` and `InvalidUdtException`, with Framework's member signatures for everything it carries (see Not modeled yet for what it doesn't).
+  The simulator embeds its build as a resource and never references it, so none of its public types reach a consumer; its name matches the NuGet package's, so a .NET-targeted assembly built against that package lands on the same types.
+- **`System.Data`** is generated at first use: a manifest-only assembly whose every type is a forwarder — the runtime facade's own list, each entry pointed at the assembly it really resolves to, plus one per public type of the shim.
+  Forwarding rather than copying is what keeps `SqlInt32` and friends the very types `ClrTypeMarshaller` handles.
+
+Both load once per process into a non-collectible context the collectible per-assembly contexts share, so `DROP ASSEMBLY` never unloads them, and nothing is built until an assembly referencing either name first loads.
+The shim reaches the simulator through one internal bridge (`SimulatorBridge.Enter` / `Exit`) bound by reflection, passing only framework types; the routine's context is thread-static there, opened around every call into an assembly that references either name.
+
+With the attribute types resolvable, binding reads `SqlFunction(FillRowMethodName = …)` and `SqlUserDefinedAggregate(Format.…)` as `CustomAttributeData`, matched by full name and never instantiated.
+
+The tests reach this path with a real Framework-shaped assembly: `ClrFrameworkFixture` compiles its C# 7.3 source through Roslyn against the .NET Framework 4.8 reference assemblies the test project copies into `net48ref/`, the same source the probes registered on SQL Server.
+`ClrAssemblyFixture`'s emitted .NET-targeted assemblies cover the scalar binding and the static verification.
 
 ## Static verification
 
@@ -64,6 +84,7 @@ This is load-bearing: it is the single reason a Framework 2.0 assembly runs on .
 
 The denylist is **type-level, not namespace-level**, for `System.IO` / `System.Reflection` / `System.Runtime.InteropServices`: every compiled assembly carries `System.Reflection.Assembly*Attribute` and `ComVisibleAttribute` type references from its own custom attributes, so denying those namespaces wholesale would reject ordinary assemblies — including `regex_clr.dll`.
 Whole-namespace prefixes are denied only where no attribute traffic exists (`System.Net`, `System.Reflection.Emit`, `System.Runtime.Loader`, `Microsoft.Win32`, `System.Diagnostics.Process`, `System.Security.Permissions`).
+`System.Environment` is admitted for a like reason: every C# iterator method compiles to a class whose `GetEnumerator` reads `Environment.CurrentManagedThreadId`, and an iterator is the ordinary way to write a table-valued function's init method, which real registers as `SAFE`.
 
 **This is defense in depth, not a sandbox.**
 A metadata denylist cannot stop a determined assembly — string-driven reflection and unlisted APIs remain reachable — and .NET offers no in-process isolation to fall back on.
@@ -75,7 +96,7 @@ Strict and one-to-one, matching real (probe-confirmed that `varchar` does **not*
 
 | T-SQL | CLR |
 | --- | --- |
-| `nvarchar` / `nchar` (any length, incl. MAX) | `SqlString` |
+| `nvarchar` / `nchar` (any length, incl. MAX) | `SqlString` (`nchar` probed as a table-valued function column) |
 | `int` / `bigint` / `smallint` / `tinyint` | `SqlInt32` / `SqlInt64` / `SqlInt16` / `SqlByte` |
 | `bit` | `SqlBoolean` |
 | `float` / `real` | `SqlDouble` / `SqlSingle` |
@@ -90,19 +111,67 @@ Every row round-trips a value in and back out, `ClrAssemblyTests.ClrFunction_Typ
 The two pairs sharing a CLR type (`money` / `smallmoney`, `datetime` / `smalldatetime`, `varbinary` / `binary`) are separate rows there because the *declared* T-SQL type is what the return conversion reads.
 
 Binding happens at CREATE time so the diagnostics fire there rather than at first call, matching real: **Msg 6528** (unknown assembly), **Msg 6505** (unknown type, state 2), **Msg 6506** (unknown method — real's text has no terminating period), **Msg 6550** (arity mismatch), **Msg 6551** (return type), **Msg 6552** (parameter type, state 3).
+A CLR module's errors at CREATE name it as their procedure, save an aggregate's, which name none.
 
 NULL arguments marshal to the CLR struct's own `Null` sentinel, not to a CLR `null` — a SQLCLR routine is expected to test `IsNull` itself.
 Real only short-circuits NULL input when the routine opted into `RETURNS NULL ON NULL INPUT`, which the simulator does not accept on a CLR routine.
 
-Anything the routine throws surfaces as **Msg 6522**, carrying the exception type and message.
+A string return value or output parameter longer than its declared `nvarchar(n)` is not cut: real raises the server's own `TruncationException` inside Msg 6522 (Msg 6260 from `FillRow`), sized in bytes.
+
+## What a throw reports
+
+Anything a routine throws surfaces as **Msg 6522** — state 1 from a procedure, state 2 from a scalar function, a table-valued function's init method and an aggregate — and a throw from `FillRow` as **Msg 6260** state 1.
+The text carries the exception as the server's host writes it (`Clr/ClrExceptionReport.cs`): `type: message`, then the type alone, then an `   at …` line per frame, every line CRLF-ended, and an argument exception's parameter on a `Parameter name:` line of its own as .NET Framework words it.
+Only the frames a routine author can see are kept — the routine's assembly and the public members of the shim — so the reflection plumbing never shows, as the server's hosting frames never do.
+The optimizing JIT turns a routine's last call into a tail call, which removes the routine's own frame, so the report restores the method the simulator invoked as its last frame; a frame a tail call removed from between the two can't be recovered.
+
+## Procedures
+
+`CREATE PROCEDURE … AS EXTERNAL NAME` binds after the assembly / class / method lookups: the parameter count (Msg 6550), the return type — `void`, `int`, `int?` or `SqlInt32`, else **Msg 6567** — then each parameter, where an `OUTPUT` parameter must be a CLR `ref` / `out` one and the reverse (**Msg 6580** followed by the Msg 6552 its type would raise).
+`WITH EXECUTE AS` is accepted; `RECOMPILE`, `ENCRYPTION` and `NATIVE_COMPILATION` are **Msg 155** state 37.
+`ALTER` of a T-SQL procedure into a CLR one is **Msg 6530** naming the leaf, and the reverse the ordinary Msg 2010; the same pair holds between T-SQL and CLR functions.
+A CLR procedure takes no group number: `CREATE PROCEDURE p;2 … EXTERNAL NAME` creates `p` itself, which then answers to any `EXEC p;N` — though a name already taken is Msg 2714 at state 51 there.
+
+A call binds its arguments as a T-SQL procedure's do, save that a conversion failure is Msg 8114 at state 1 rather than 5.
+What the procedure sends through `SqlContext.Pipe` joins the call's outcomes in order:
+
+- `Send(string)` is an informational message at class 0, **state 2**, line 0, naming the procedure as the call spelled it; over 4000 characters, or NULL, the pipe throws.
+- `Send(SqlDataRecord)` and `SendResultsStart` / `SendResultsRow` / `SendResultsEnd` are result sets typed by the record's `SqlMetaData`, character columns in the database collation.
+  The pipe's misuse refusals (a row before its start, a message while a result set is open) throw its own exceptions and texts.
+- A result set left open when the procedure returns is sent then; one the procedure throws out of is sent with the rows it had and cut short by the error, and not at all when it had none.
+
+`SqlDataRecord` accepts each typed setter only for the column types it can write and `SetValue` only a value whose CLR type one of them takes — an `int` into a `bigint` column is `InvalidCastException` — while a string or binary value longer than its column is cut silently, and a decimal with more scale than its column drops the extra digits rather than rounding.
+`ref` / `out` values write back only when the procedure returns, to the caller's variable at its own width; the return value is the status, 0 for `void`.
+A CLR procedure feeds `INSERT … EXEC` and `EXEC … WITH RESULT SETS` like a T-SQL one, and `sp_describe_first_result_set` refuses it with **Msg 11515**.
+
+## Table-valued functions
+
+`RETURNS TABLE (<columns>)` declares the result; the method named returns the rows as an `IEnumerable` or an `IEnumerator` (else Msg 6551), and the method its `SqlFunction(FillRowMethodName = …)` names splits each row object into one `out` parameter per column.
+Before any binding the result table refuses what a streamed row can't carry: `varchar` / `char` / `text` / `ntext` / `image` (**Msg 6514** state 3), `IDENTITY` (6514 state 2), `timestamp` / `rowversion` (6514 state 1, named in capitals), `NOT NULL`, `DEFAULT` and a column `CHECK` (**Msg 6526**), and a key (**Msg 6525**); `WITH SCHEMABINDING` is Msg 487.
+Then: no `FillRowMethodName` is **Msg 10306**, a missing method Msg 6506, a `FillRow` whose parameter count isn't one more than the column count **Msg 6208**, and the first column whose `out` parameter doesn't bind to its type **Msg 6258**.
+The `ORDER (…)` clause parses and has no effect.
+The function is called from `FROM` and `APPLY` like the T-SQL kinds, one-part names included, `DEFAULT` arguments reading the declared default; a NULL collection is no rows.
+
+## Aggregates
+
+`CREATE AGGREGATE` binds the class, reporting in order: a missing class (**Msg 6556**), a class without `SqlUserDefinedAggregate` (**Msg 6255**), a `Format.Native` class holding a reference-type field (**Msg 6225**), the first of `Init` / `Accumulate` / `Merge` / `Terminate` that is missing or misshaped (**Msg 6558**, an `Accumulate` of another arity and a `Terminate` of another type than `RETURNS` included), then an `Accumulate` parameter whose type doesn't bind (Msg 6552 as `CREATE for "…"`).
+Msgs 6556 and 6558 are followed by **Msg 6597**; a parameter default is **Msg 10726**.
+`CREATE AGGREGATE` / `DROP AGGREGATE` fire no DDL trigger event.
+
+An aggregate lives among the schema's functions — one namespace, Msg 2714 on a clash — but answers only to `DROP AGGREGATE` (`DROP FUNCTION` is Msg 3705 either way round, a missing name Msg 3701 as `aggregate function`) and `EXEC` of it is **Msg 2809**.
+A call must be schema-qualified (a one-part name is Msg 195) and take the declared argument count (Msg 174); it may lead with `DISTINCT` or `ALL`, runs under `GROUP BY` and `HAVING` and in a window of `PARTITION BY` alone (an `ORDER BY` there is Msg 156), and obeys the ordinary aggregate binding rules (Msg 130, 147, 8120).
+Each group gets a fresh instance, `Init`, one `Accumulate` per row — NULLs included, with no Msg 8153 — and `Terminate`, which an empty input still reaches.
 
 ## Catalog surface
 
 - **`sys.assemblies`** — one row per registered assembly plus the `Microsoft.SqlServer.Types` system row real always carries (assembly_id 1, principal_id 4, `UNSAFE_ACCESS`, `is_user_defined` 0).
   That system row is what `sys.assembly_types` joins against; before CLR shipped, this view was empty and that join yielded nothing.
 - **`sys.assembly_files`** — the verbatim bytes plus SHA-256 / SHA-512 digests. Real also carries a row for the system assembly; the simulator has no bytes to project for it, so only user assemblies appear.
-- **`sys.assembly_modules`** — one row per bound routine (`assembly_class` / `assembly_method`). `null_on_null_input` is constant 0; `execute_as_principal_id` NULL.
-- **`sys.objects`** — a CLR scalar function is type `FS` / `CLR_SCALAR_FUNCTION`, with **no** `sys.sql_modules` row (probe-confirmed).
+- **`sys.assembly_modules`** — one row per bound routine (`assembly_class` / `assembly_method`), an aggregate's method NULL. `null_on_null_input` is constant 0; `execute_as_principal_id` NULL.
+- **`sys.objects`** — `FS` / `CLR_SCALAR_FUNCTION`, `FT` / `CLR_TABLE_VALUED_FUNCTION`, `PC` / `CLR_STORED_PROCEDURE` and `AF` / `AGGREGATE_FUNCTION`, none with a `sys.sql_modules` row or an `OBJECT_DEFINITION` (probe-confirmed).
+- **`sys.parameters`** — a CLR module's parameters report their declared defaults (`has_default_value` 1, the constant in `default_value`) where a T-SQL module's never do; a scalar function and an aggregate carry the nameless output row 0 for their return type.
+- **`sys.columns` / `INFORMATION_SCHEMA.ROUTINE_COLUMNS`** — a table-valued function's declared columns. **`INFORMATION_SCHEMA.ROUTINES`** — `ROUTINE_BODY` `EXTERNAL`, an aggregate's `DATA_TYPE` its return type.
+- **`sp_help`** — `assembly stored procedure` (with real's leading space), `assembly table function` with its column set, `aggregate function` with its return row.
 - **`ASSEMBLYPROPERTY(name, property)`** → `sql_variant`. Supports `CLRName`, `PublicKey`, `Culture`, `VersionMajor` / `VersionMinor` / `VersionBuild` / `VersionRevision`, `SimpleName`, `Architecture`, `MvID`. Unknown assembly or property → NULL.
 
 `clr_name`'s embedded version reads `0.0.0.0` for an unsigned assembly even though `VersionMajor` and friends report the real manifest version off the same bytes — probe-confirmed against `regex_clr.dll`, whose manifest says `1.0.5100.29893` while real projects `regex_clr, version=0.0.0.0, culture=neutral, publickeytoken=null, processorarchitecture=msil`.
@@ -123,16 +192,22 @@ The strong-named case is unprobed.
   The simulator defaults to compat 170 but does not reserve the keyword, so it accepts the unbracketed form at every level — over-permissive at 170, matching at ≤160.
   Closing this belongs with the native `REGEXP_LIKE` predicate, which is tracked separately in [`backlog.md`](backlog.md).
 - **`PERMISSION_SET` is recorded, not enforced at run time.** It selects which static checks run at registration; it cannot confine a loaded assembly (see above).
+- **A reported stack holds only the frames the simulator can see as the author's.**
+  Real also shows its own internal frames — `SqlMetaData.Construct`, `System.Data.SqlServer.Internal.ClrLevelContext` — which have no counterpart, and the shim's public frames are named after its own members, which match Framework's only where the member is the one that throws.
+- **An aggregate's state never leaves memory.**
+  One instance accumulates each whole group, so `Merge` is never called and a `Format.UserDefined` aggregate's `Read` / `Write` never run; real may serialize state between rows, which an aggregate that loses a field in `Write` would show.
+- **`sp_describe_first_result_set`'s Msg 11515 comes from the metadata-only mode**, so a plain `SET FMTONLY ON` followed by `EXEC` of a CLR procedure raises it too; that shape is unprobed.
 - Auto-generated `assembly_id` values start at 65536 and increment; they won't match a real server's.
 - The `Microsoft.SqlServer.Types` system row reports a fixed SQL Server 2025 RTM `create_date` / `modify_date` rather than a resource-database build stamp.
 
 ## Not modeled yet
 
-- **CLR stored procedures, table-valued functions, aggregates, and UDTs.**
-  These reference `Microsoft.SqlServer.Server.SqlContext` / `SqlPipe` / `SqlDataRecord` / `SqlMetaData`, which lived in .NET Framework's `System.Data.dll` and are absent from .NET's facade — a routine using them fails to load unless the load context supplies a substitute `System.Data` that type-forwards `SqlTypes` onward and adds the missing namespace.
-  Scalar functions need no such shim, which is why they ship first.
-  The procedure parser has no `AS EXTERNAL NAME` form at all, so `CREATE PROCEDURE … AS EXTERNAL NAME` raises Msg 102 at `EXTERNAL`.
-- Plain-CLR parameter and return forms real also accepts (`string`, `int?`, `SqlChars`, `SqlBytes`) — only the `System.Data.SqlTypes` family binds.
+- **CLR user-defined types** (`CREATE TYPE … EXTERNAL NAME`) and **CLR triggers** — `SqlContext.TriggerContext` is always NULL.
+- **The context connection**: `SqlPipe.ExecuteAndSend`, `SqlPipe.Send(SqlDataReader)` and `new SqlConnection("context connection=true")` all name `System.Data.SqlClient` types, which neither the shim nor .NET supplies, so a routine using them fails to load its method and reports Msg 6522.
+- `SqlMetaData`'s constructors taking a `SortOrder` or a UDT type, and a function marked `DataAccessKind.Read` reading `SqlContext.Pipe` (it gets the no-data-access refusal every function does).
+- The `SqlUserDefinedAggregate` flags `IsNullIfEmpty` / `IsInvariantTo*` and `MaxByteSize` — read by real's optimizer and serializer, ignored here.
+- `INSERT` into a CLR table-valued function reports Msg 208 where real reports its "derived table is not updatable" error, a gap shared with the T-SQL kinds.
+- Plain-CLR parameter and return forms real also accepts (`string`, `int?`, `SqlChars`, `SqlBytes`) — only the `System.Data.SqlTypes` family binds, save a procedure's `int` / `int?` status.
 - `ALTER ASSEMBLY`, `CREATE ASSEMBLY … FROM '<path>'`, assembly `AUTHORIZATION`, `sp_add_trusted_assembly`, and assembly signing / `clr strict security` enforcement.
 - BACPAC round-trip of `SqlAssembly` model elements.
 - Out-of-process execution.

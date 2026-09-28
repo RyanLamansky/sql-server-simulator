@@ -418,6 +418,10 @@ partial class Simulation
                 // empty-named row at Param_order 0 (probe-confirmed).
                 if (function is ScalarFunction scalar)
                     Add("", scalar.ReturnType, null, 0, scalar.ReturnAliasType);
+                else if (function is ClrScalarFunction clrScalar)
+                    Add("", clrScalar.ReturnType, null, 0, null);
+                else if (function is ClrAggregateFunction aggregate)
+                    Add("", aggregate.ReturnType, null, 0, null);
                 for (var i = 0; i < function.Parameters.Length; i++)
                     Add("@" + function.Parameters[i].Name, function.Parameters[i].Type, null, i + 1, function.Parameters[i].AliasType);
                 break;

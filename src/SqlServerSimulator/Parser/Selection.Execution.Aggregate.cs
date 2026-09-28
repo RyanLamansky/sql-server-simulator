@@ -429,6 +429,11 @@ internal sealed partial class Selection
                 // reads, the arm holding it being unreachable.
                 if (aggregate.OperandUnreachable)
                     continue;
+                if (state.Aggregators[i] is Aggregators.ClrAggregator clrAggregator)
+                {
+                    clrAggregator.AccumulateRow(aggregate, rowRuntime);
+                    continue;
+                }
                 if (aggregate.Kind == AggregateKind.StringAgg && state.Aggregators[i] is Aggregators.StringAggAggregator stringAgg)
                 {
                     var separatorValue = aggregate.Separator!.Run(rowRuntime);

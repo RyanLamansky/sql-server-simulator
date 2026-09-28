@@ -208,7 +208,7 @@ internal static partial class ModuleDeterminism
     /// property for.
     /// </summary>
     internal static int? Evaluate(Database database, SchemaObject module) =>
-        module is View or UserDefinedFunction ? (IsDeterministic(database, module, []) ? 1 : 0) : null;
+        module is View or (UserDefinedFunction and not ClrAggregateFunction) ? (IsDeterministic(database, module, []) ? 1 : 0) : null;
 
     /// <summary>
     /// Answers <c>IsSchemaBound</c>: 1 / 0 for the schema-bindable module
@@ -282,7 +282,7 @@ internal static partial class ModuleDeterminism
             // A CLR function's determinism comes from its method's
             // SqlFunction(IsDeterministic:) attribute, which isn't modeled;
             // report the attribute's own default.
-            case ClrScalarFunction:
+            case ClrFunction:
                 return false;
             case UserDefinedFunction function:
                 if (!function.IsSchemaBound)

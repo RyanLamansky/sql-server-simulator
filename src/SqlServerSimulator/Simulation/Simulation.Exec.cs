@@ -283,11 +283,27 @@ partial class Simulation
         var writtenName = procName.ToString();
         procName = batch.ExpandSynonym(procName);
         if (!batch.TryResolveProcedure(procName, out var procedure))
-            throw SimulatedSqlException.CouldNotFindStoredProcedure(procName.WithoutOmittedLeading().Written);
-        if (groupNumber > 1)
+        {
+            // An aggregate is the one function kind EXEC names by kind
+            // (probed 2026-09-28 against SQL Server 2025).
+            throw batch.TryResolveFunction(procName, out var function) && function is Schemas.ClrAggregateFunction
+                ? SimulatedSqlException.ExecOfAggregate(function.Name)
+                : SimulatedSqlException.CouldNotFindStoredProcedure(procName.WithoutOmittedLeading().Written);
+        }
+        if (groupNumber > 1 && procedure.ClrEntry is null)
         {
             procedure = procedure.Numbered?.GetValueOrDefault(groupNumber)
                 ?? throw SimulatedSqlException.CouldNotFindStoredProcedure(procName.WithoutOmittedLeading().Written);
+        }
+
+        // Only the procedure's code knows what a CLR procedure returns, so a
+        // metadata-only run (sp_describe_first_result_set) can't answer it
+        // (probed 2026-09-28 against SQL Server 2025).
+        if (procedure.ClrEntry is not null && batch.Connection.FmtOnly)
+        {
+            var statementEnd = context.Token?.StartIndex ?? context.Command.CommandText.Length;
+            throw SimulatedSqlException.DescribeFirstResultSetClrProcedure(
+                context.Command.CommandText[batch.CurrentStatement.StartIndex..statementEnd].TrimEnd());
         }
 
         var invocation = this.InvokeProcedure(

@@ -84,6 +84,7 @@ partial class Simulation
             UnquotedString { ContextualKeyword: ContextualKeyword.Sequence } => DropTargetKind.Sequence,
             ReservedKeyword { Keyword: Keyword.Default } => DropTargetKind.Default,
             ReservedKeyword { Keyword: Keyword.Rule } => DropTargetKind.Rule,
+            Name { Value: var word } when word.Equals("AGGREGATE", StringComparison.OrdinalIgnoreCase) => DropTargetKind.Aggregate,
             _ => DropTargetKind.None,
         };
         if (targetKind == DropTargetKind.None)
@@ -106,6 +107,9 @@ partial class Simulation
             {
                 case DropTargetKind.Function:
                     DropOneFunction(context, name, ifExists);
+                    break;
+                case DropTargetKind.Aggregate:
+                    DropOneFunction(context, name, ifExists, aggregate: true);
                     break;
                 case DropTargetKind.View:
                     DropOneView(context, name, ifExists);
@@ -158,7 +162,7 @@ partial class Simulation
         return true;
     }
 
-    private enum DropTargetKind { None, Table, Function, View, Procedure, Type, Sequence, Trigger, Schema, Default, Rule }
+    private enum DropTargetKind { None, Table, Function, View, Procedure, Type, Sequence, Trigger, Schema, Default, Rule, Aggregate }
 
     /// <summary>
     /// Parses <c>DROP DATABASE [IF EXISTS] name[, name...]</c>. Each name is a
@@ -626,18 +630,26 @@ partial class Simulation
     /// participate in the undo log — same asymmetry as regular CREATE TABLE /
     /// DROP TABLE (only temp-table DDL is transactional).
     /// </summary>
-    private static void DropOneFunction(ParserContext context, MultiPartName name, bool ifExists)
+    /// <summary>
+    /// Drops one function — or, for <c>DROP AGGREGATE</c>
+    /// (<paramref name="aggregate"/>), one CLR aggregate, which shares the
+    /// function namespace but answers only to its own <c>DROP</c> (Msg 3705
+    /// either way round, probed 2026-09-28 against SQL Server 2025).
+    /// </summary>
+    private static void DropOneFunction(ParserContext context, MultiPartName name, bool ifExists, bool aggregate = false)
     {
         if (context.Batch.IsSkipping)
             return;
         var schema = context.Batch.TryResolveSchema(name, out var resolved) ? resolved : null;
         if (schema is not null)
-            RejectDropOfOtherKind(schema, name, "FUNCTION");
+            RejectDropOfOtherKind(schema, name, aggregate ? "AGGREGATE" : "FUNCTION");
         if (schema is null || !schema.Functions.TryGetValue(name.Leaf, out var existing))
         {
             if (ifExists)
                 return;
-            throw SimulatedSqlException.CannotDropFunctionDoesNotExist(name.ToString());
+            throw aggregate
+                ? SimulatedSqlException.CannotDropAggregateDoesNotExist(name.ToString())
+                : SimulatedSqlException.CannotDropFunctionDoesNotExist(name.ToString());
         }
 
         // A read-only database refuses the drop, but only once the object
@@ -652,7 +664,8 @@ partial class Simulation
             throw SimulatedSqlException.CannotDropFunctionDoesNotExist(name.ToString());
         if (removed is not null)
             RecordSlotUndo(context, schema.Functions, name.Leaf, removed);
-        RecordDdlEvent(context, "DROP_FUNCTION", schema.Name, name.Leaf, "FUNCTION");
+        if (!aggregate)
+            RecordDdlEvent(context, "DROP_FUNCTION", schema.Name, name.Leaf, "FUNCTION");
     }
 
     private static void DropOneTable(ParserContext context, MultiPartName name, bool ifExists)

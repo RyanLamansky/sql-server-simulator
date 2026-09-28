@@ -69,6 +69,13 @@ internal static class ClrAssemblyMetadata
     /// wholesale would reject ordinary, harmless assemblies.
     /// </para>
     /// <para>
+    /// <c>System.Environment</c> is absent for the same reason: every C#
+    /// iterator method (<c>yield return</c>) compiles to a class whose
+    /// <c>GetEnumerator</c> reads <c>Environment.CurrentManagedThreadId</c>,
+    /// and an iterator is the ordinary way to write a CLR table-valued
+    /// function's init method — one real SQL Server registers as <c>SAFE</c>.
+    /// </para>
+    /// <para>
     /// <strong>This is defense in depth, not a sandbox.</strong> A metadata
     /// denylist cannot stop a determined assembly — string-driven reflection
     /// and unlisted APIs remain reachable — and .NET offers no in-process
@@ -80,7 +87,6 @@ internal static class ClrAssemblyMetadata
         [
             "System.Activator",
             "System.AppDomain",
-            "System.Environment",
             "System.IO.Directory",
             "System.IO.DirectoryInfo",
             "System.IO.DriveInfo",

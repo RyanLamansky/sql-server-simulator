@@ -199,7 +199,9 @@ internal sealed class ObjectProperty : Expression
         // SSS003: the Span<char> case-fold avoids the temp-string alloc.
         Span<char> upper = stackalloc char[property.Length];
         var name = upper[..property.AsSpan().ToUpperInvariant(upper)];
-        var executes = obj is Procedure or View or Trigger or UserDefinedFunction;
+        // A CLR table-valued function or aggregate reports 0 for IsExecuted
+        // (probed 2026-09-28 against SQL Server 2025).
+        var executes = obj is Procedure or View or Trigger or (UserDefinedFunction and not (ClrTableValuedFunction or ClrAggregateFunction));
         var trigger = obj as Trigger;
         return name switch
         {
@@ -284,7 +286,7 @@ internal sealed class ObjectProperty : Expression
             // determinism exactly when it is schema-bound.
             "ISSYSTEMVERIFIED" => obj is View or UserDefinedFunction ? ModuleDeterminism.EvaluateSchemaBound(obj) : null,
             "ISTABLE" or "ISUSERTABLE" => Flag(obj is HeapTable),
-            "ISTABLEFUNCTION" => Flag(obj is InlineTableValuedFunction or MultiStatementTableValuedFunction),
+            "ISTABLEFUNCTION" => Flag(obj is InlineTableValuedFunction or MultiStatementTableValuedFunction or ClrTableValuedFunction),
             "ISTRIGGER" => Flag(obj is Trigger),
             "ISVIEW" => Flag(obj is View),
             "OWNERID" => FindOwningSchema(database, obj) is null ? null : Ownership.EffectiveOwnerId(database, obj),
@@ -325,7 +327,7 @@ internal sealed class ObjectProperty : Expression
     /// </summary>
     private static int? TableTriggerCount(Database database, SchemaObject obj, TriggerActions action)
     {
-        if (obj is InlineTableValuedFunction or MultiStatementTableValuedFunction)
+        if (obj is InlineTableValuedFunction or MultiStatementTableValuedFunction or ClrTableValuedFunction)
             return 0;
         if (obj is not HeapTable)
             return null;
@@ -389,7 +391,7 @@ internal sealed class ObjectProperty : Expression
             : ((first ? trigger.FirstForActions : trigger.LastForActions) & action) != 0 ? 1 : 0;
 
     private static bool IsSqlModule(SchemaObject obj) =>
-        obj is Procedure or View or Trigger or ScalarFunction or InlineTableValuedFunction or MultiStatementTableValuedFunction;
+        obj is Procedure { ClrEntry: null } or View or Trigger or ScalarFunction or InlineTableValuedFunction or MultiStatementTableValuedFunction;
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
@@ -414,7 +416,7 @@ internal sealed class ObjectProperty : Expression
     {
         var table = obj as HeapTable;
         var fullText = table?.FullTextIndex;
-        if (table is null && obj is not (InlineTableValuedFunction or MultiStatementTableValuedFunction))
+        if (table is null && obj is not (InlineTableValuedFunction or MultiStatementTableValuedFunction or ClrTableValuedFunction))
         {
             // An indexed view answers the full-text members, all off.
             return obj is View { Indexes.Count: > 0 } && upperName is "TABLEFULLTEXTBACKGROUNDUPDATEINDEXON" or "TABLEFULLTEXTCATALOGID"

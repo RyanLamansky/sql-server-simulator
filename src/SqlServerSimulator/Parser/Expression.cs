@@ -706,6 +706,8 @@ internal abstract class Expression : ExpressionNode
                             return UserFunctionCall.ParseCall(scalarFn, context);
                         case ClrScalarFunction clrFn:
                             return ClrFunctionCall.ParseCall(clrFn, context);
+                        case ClrAggregateFunction clrAggregate:
+                            return AggregateExpression.ParseClr(clrAggregate, reference.ReferencedName, context);
                     }
                 }
                 // Skip mode: real SQL Server defers user-function binding, so

@@ -30,9 +30,12 @@ internal static class QuantifiedCall
         // A schema-qualified name is a user-defined aggregate, which takes a
         // whole argument list, and an absent one is Msg 208 while binding —
         // even when the name is a scalar function, since only an aggregate
-        // answers here. No CLR aggregate is modeled, so none is ever found.
+        // answers here.
         if (name.Count >= 2)
         {
+            // A CLR aggregate reads its own quantifier.
+            if (context.Batch.TryResolveFunction(name, out var function) && function is Schemas.ClrAggregateFunction)
+                return null;
             context.MoveNextRequired();
             _ = Expression.Parse(context);
             while (context.Token is Operator { Character: ',' })

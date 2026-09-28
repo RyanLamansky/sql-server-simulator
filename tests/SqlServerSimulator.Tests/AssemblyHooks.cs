@@ -15,5 +15,9 @@ public static class AssemblyHooks
             return;
 
         Assert.AreEqual(1, new Simulation().ExecuteScalar<int>("select 1"));
+
+        // The SQLCLR fixture compiles once through Roslyn, which every CLR
+        // routine test would otherwise queue behind.
+        GC.KeepAlive(ClrFrameworkFixture.CreateAssembly);
     }
 }

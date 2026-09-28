@@ -215,7 +215,9 @@ partial class Simulation
             // as the call runs (probe-confirmed against SQL Server 2025).
             if (!boundIsDefault[i] && !boundIsUntypedNull[i])
                 AssignmentRules.RequireAssignable(boundValues[i]!.Value.Type, param.Type);
-            var coerced = BindParameterValue(boundValues[i]!.Value, param.Type, param.DeclaredMaxLength, attributionName);
+            // A CLR procedure's conversion failure carries state 1 (probed
+            // 2026-09-28 against SQL Server 2025).
+            var coerced = BindParameterValue(boundValues[i]!.Value, param.Type, param.DeclaredMaxLength, attributionName, procedure.ClrEntry is null ? (byte)5 : (byte)1);
             variables[param.Name] = new VariableSlot(param.Type, declaredMaxLength: param.DeclaredMaxLength, coerced, parameter: null) { SpelledNumeric = param.SpelledNumeric };
         }
 
@@ -243,7 +245,12 @@ partial class Simulation
         SimulatedSqlException? bodyError = null;
         var enteredTranCount = 0;
         BatchContext? innerBatch = null;
-        if (string.IsNullOrEmpty(procedure.BodyText))
+        if (procedure.ClrEntry is { } clrEntry)
+        {
+            connection.Security.RevertTo(savedImpersonationDepth);
+            bodyError = RunClrProcedure(outerBatch, procedure, clrEntry, variables, procFrame, outcomes, attributionName);
+        }
+        else if (string.IsNullOrEmpty(procedure.BodyText))
         {
             connection.Security.RevertTo(savedImpersonationDepth);
         }
@@ -358,8 +365,11 @@ partial class Simulation
             }
             if (param.IsOutput && boundOutputSlots[i] is { } callerSlot)
             {
+                // Written back as SET assigns the caller's variable, so a
+                // string wider than it is cut to its width (probed 2026-09-28
+                // against SQL Server 2025).
                 var finalValue = variables[param.Name].Value;
-                callerSlot.Value = finalValue.CoerceTo(callerSlot.DeclaredType);
+                callerSlot.Value = Parser.Expressions.Cast.ApplyCoercion(finalValue.CoerceTo(callerSlot.DeclaredType), callerSlot.DeclaredType, callerSlot.DeclaredMaxLength);
             }
         }
 
@@ -413,7 +423,7 @@ partial class Simulation
     /// both reported at line 0 and attributed to <paramref name="procedure"/>
     /// (empty for <c>sp_executesql</c>).
     /// </summary>
-    internal static SqlValue BindParameterValue(SqlValue value, SqlType target, int? declaredMaxLength, string procedure)
+    internal static SqlValue BindParameterValue(SqlValue value, SqlType target, int? declaredMaxLength, string procedure, byte conversionState = 5)
     {
         try
         {
@@ -430,7 +440,7 @@ partial class Simulation
         }
         catch (Exception ex) when (ex is OverflowException || (ex is SimulatedSqlException sql && Parser.Expressions.Cast.IsConversionFailure(sql.Number)))
         {
-            var converting = SimulatedSqlException.ConvertingDataTypeError(value.Type, SimulatedSqlException.FamilyRootName(target));
+            var converting = SimulatedSqlException.ConvertingDataTypeError(value.Type, SimulatedSqlException.FamilyRootName(target), conversionState);
             converting.PreserveDiagnostics(0, procedure);
             throw converting;
         }

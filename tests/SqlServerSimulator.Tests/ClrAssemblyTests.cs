@@ -344,4 +344,324 @@ public class ClrAssemblyTests
         _ = sim.AssertSqlError(
             "create function dbo.Echo(@v date) returns date as external name sim_safe.UserDefinedFunctions.EchoSqlDateTime", 6551);
     }
+
+    private static List<(string Message, byte State, string Procedure)> ExecuteCollectingMessages(Simulation sim, string commandText)
+    {
+        using var connection = (SimulatedDbConnection)sim.CreateOpenConnection();
+        var messages = new List<(string, byte, string)>();
+        connection.InfoMessage += (_, e) =>
+        {
+            foreach (var error in e.Errors)
+                messages.Add((error.Message, error.State, error.Procedure));
+        };
+        using var command = connection.CreateCommand(commandText);
+        _ = command.ExecuteNonQuery();
+        return messages;
+    }
+
+    [TestMethod]
+    [Description("A .NET Framework assembly referencing System.Data 4.0 loads, and its SqlContext answers inside a function by refusing the pipe, as real does.")]
+    public void FrameworkAssembly_ScalarFunction_SeesNoPipe()
+    {
+        var sim = ClrFrameworkFixture.Simulation(
+            "create function dbo.lg(@n int) returns nvarchar(3) as external name simclr.Funcs.Long",
+            "create function dbo.pn() returns bit as external name simclr.Funcs.PipeIsNull");
+        AreEqual("yy", sim.ExecuteScalar("select dbo.lg(2)"));
+        var ex = sim.AssertSqlError("select dbo.pn()", 6522);
+        AreEqual(2, ex.State);
+        Contains("System.InvalidOperationException: Data access is not allowed in this context.", ex.Message);
+    }
+
+    [TestMethod]
+    [Description("An nvarchar(n) return value longer than n is the server's TruncationException, not a silent cut.")]
+    public void FrameworkAssembly_ScalarReturnTooLong_RaisesTruncation()
+        => ClrFrameworkFixture.Simulation("create function dbo.lg(@n int) returns nvarchar(3) as external name simclr.Funcs.Long")
+            .AssertSqlError("select dbo.lg(5)", 6522,
+                "A .NET Framework error occurred during execution of user-defined routine or aggregate \"lg\": \r\n"
+                + "System.Data.SqlServer.TruncationException: Trying to convert return value or output parameter of size 10 bytes to a T-SQL type with a smaller size limit of 6 bytes.\r\n"
+                + "System.Data.SqlServer.TruncationException: \r\n"
+                + "   at System.Data.SqlServer.Internal.CXVariantBase.StringToWSTR(String pstrValue, Int64 cbMaxLength, Int32 iOffset, EPadding ePad)\r\n.");
+
+    [TestMethod]
+    [Description("SqlContext.Pipe.Send(string) is a class-0 state-2 message naming the procedure as the call spelled it.")]
+    public void ClrProcedure_PipeSendString_IsMessage()
+    {
+        var sim = ClrFrameworkFixture.Simulation("create procedure dbo.hello as external name simclr.Procs.Hello");
+        var messages = ExecuteCollectingMessages(sim, "exec DBO.HELLO");
+        HasCount(1, messages);
+        AreEqual(("hello from clr", (byte)2, "DBO.HELLO"), messages[0]);
+    }
+
+    [TestMethod]
+    [Description("An OUTPUT parameter binds to an out argument, and an int return is the procedure's status.")]
+    public void ClrProcedure_OutputAndReturnStatus()
+        => AreEqual(507, ClrFrameworkFixture.Simulation(
+                "create procedure dbo.addout @a int, @b int, @sum int output as external name simclr.Procs.AddOut")
+            .ExecuteScalar("declare @s int, @r int; exec @r = dbo.addout 2, 3, @s output; select @s * 100 + @r"));
+
+    [TestMethod]
+    [Description("A ref argument sees the caller's value — NULL as the SqlString.Null sentinel — and its new value writes back.")]
+    public void ClrProcedure_RefParameter_RoundTrips()
+    {
+        var sim = ClrFrameworkFixture.Simulation("create procedure dbo.rp @s nvarchar(20) output as external name simclr.Procs.RefParam");
+        AreEqual("hi!", sim.ExecuteScalar("declare @x nvarchar(20) = N'hi'; exec dbo.rp @x output; select @x"));
+        AreEqual("was null", sim.ExecuteScalar("declare @x nvarchar(20); exec dbo.rp @x output; select @x"));
+    }
+
+    [TestMethod]
+    [Description("An output value wider than its nvarchar(n) parameter is the TruncationException, and the caller's variable keeps its value.")]
+    public void ClrProcedure_OutputTooLong_RaisesAndLeavesVariable()
+    {
+        var sim = ClrFrameworkFixture.Simulation("create procedure dbo.rp @s nvarchar(3) output as external name simclr.Procs.RefParam");
+        var ex = sim.AssertSqlError("declare @x nvarchar(20) = N'abc'; exec dbo.rp @x output", 6522);
+        Contains("of size 8 bytes to a T-SQL type with a smaller size limit of 6 bytes", ex.Message);
+        AreEqual("abc", sim.ExecuteScalar("declare @x nvarchar(20) = N'abc'; begin try exec dbo.rp @x output end try begin catch end catch; select @x"));
+    }
+
+    [TestMethod]
+    [Description("SendResultsStart / Row / End deliver a result set typed by the SqlMetaData the procedure declared.")]
+    public void ClrProcedure_SendResults_TypedResultSet()
+    {
+        var sim = ClrFrameworkFixture.Simulation("create procedure dbo.rws @n int as external name simclr.Procs.Rows");
+        using var reader = sim.ExecuteReader("exec dbo.rws 2");
+        AreEqual("n,d,s,m", string.Join(",", Enumerable.Range(0, reader.FieldCount).Select(reader.GetName)));
+        AreEqual("int,decimal,varchar,nvarchar", string.Join(",", Enumerable.Range(0, reader.FieldCount).Select(reader.GetDataTypeName)));
+        IsTrue(reader.Read());
+        AreEqual((1, 0.25m, "r1", "max1"), (reader.GetInt32(0), reader.GetDecimal(1), reader.GetString(2), reader.GetString(3)));
+        IsTrue(reader.Read());
+        AreEqual((2, 0.50m, "r2", true), (reader.GetInt32(0), reader.GetDecimal(1), reader.GetString(2), reader.IsDBNull(3)));
+        IsFalse(reader.Read());
+    }
+
+    [TestMethod]
+    [Description("A CLR procedure's result sets feed INSERT … EXEC like a T-SQL one's.")]
+    public void ClrProcedure_InsertExec_Collects()
+        => AreEqual(3, ClrFrameworkFixture.Simulation(
+                "create procedure dbo.rws @n int as external name simclr.Procs.Rows",
+                "create table t (n int, d decimal(10,2), s varchar(20), m nvarchar(max))")
+            .ExecuteScalar("insert t exec dbo.rws 3; select count(*) from t"));
+
+    [TestMethod]
+    [Description("Messages and result sets arrive in the order the procedure sent them; a result set left open is sent when the procedure returns.")]
+    public void ClrProcedure_MessagesAndOpenResultSet_InOrder()
+    {
+        var sim = ClrFrameworkFixture.Simulation(
+            "create procedure dbo.mixed as external name simclr.Procs.Mixed",
+            "create procedure dbo.open_set as external name simclr.Procs.StartNoEnd");
+        AreEqual(42, sim.ExecuteScalar("exec dbo.mixed"));
+        AreEqual(5, sim.ExecuteScalar("exec dbo.open_set"));
+        var messages = ExecuteCollectingMessages(sim, "exec dbo.mixed");
+        AreEqual("before,after", string.Join(",", messages.Select(message => message.Message)));
+    }
+
+    [TestMethod]
+    [Description("A throw is Msg 6522 state 1 at line 0, reported with the exception's type, message and stack as the server hosts it.")]
+    public void ClrProcedure_Throw_RaisesMsg6522WithStack()
+    {
+        var sim = ClrFrameworkFixture.Simulation("create procedure dbo.throws as external name simclr.Procs.Throws");
+        var ex = sim.AssertSqlError("exec dbo.throws", 6522);
+        AreEqual((1, 0, "dbo.throws"), (ex.State, ex.LineNumber, ex.Procedure));
+        AreEqual(
+            "A .NET Framework error occurred during execution of user-defined routine or aggregate \"throws\": \r\n"
+            + "System.InvalidOperationException: proc boom\r\nSystem.InvalidOperationException: \r\n   at Procs.Throws()\r\n.",
+            ex.Errors[0].Message);
+    }
+
+    [TestMethod]
+    [Description("The pipe's own refusals carry its frame and the procedure's, as the server's do.")]
+    public void ClrProcedure_PipeMisuse_ReportsPipeFrame()
+    {
+        var ex = ClrFrameworkFixture.Simulation("create procedure dbo.x as external name simclr.Procs.RowWithoutStart")
+            .AssertSqlError("exec dbo.x", 6522);
+        Contains(
+            "System.InvalidOperationException: Result set has not been initiated.  Call SendResultSetStart before calling SendResultsRow.\r\n"
+            + "System.InvalidOperationException: \r\n"
+            + "   at Microsoft.SqlServer.Server.SqlPipe.SendResultsRow(SqlDataRecord record)\r\n"
+            + "   at Procs.RowWithoutStart()\r\n.",
+            ex.Errors[0].Message);
+    }
+
+    [TestMethod]
+    [Description("SqlDataRecord.SetValue takes only the CLR types its column's typed setter would: an int into a bigint column is InvalidCastException.")]
+    public void ClrProcedure_SetValueWrongKind_Refused()
+        => Contains(
+            "System.InvalidCastException: Specified cast is not valid.",
+            ClrFrameworkFixture.Simulation("create procedure dbo.x as external name simclr.Procs.SetValueWrongKind")
+                .AssertSqlError("exec dbo.x", 6522).Message);
+
+    [TestMethod]
+    [Description("Rows sent before a throw reach the client ahead of the error.")]
+    public void ClrProcedure_ThrowAfterRows_KeepsRows()
+    {
+        var sim = ClrFrameworkFixture.Simulation("create procedure dbo.x as external name simclr.Procs.ThrowAfterRows");
+        using var reader = sim.ExecuteReader("exec dbo.x");
+        IsTrue(reader.Read());
+        AreEqual(1, reader.GetInt32(0));
+        AreEqual(6522, Throws<SimulatedSqlException>(() => reader.Read()).Number);
+    }
+
+    [TestMethod]
+    [Description("OUTPUT on one side of the binding and by-value on the other is Msg 6580 followed by Msg 6552.")]
+    [DataRow("create procedure dbo.x @a int, @b int, @sum int as external name simclr.Procs.AddOut", 6580, 6552)]
+    [DataRow("create procedure dbo.x @a int output as external name simclr.Procs.ByValue", 6580, 6552)]
+    [DataRow("create procedure dbo.x as external name simclr.Procs.ReturnsString", 6567, 0)]
+    [DataRow("create procedure dbo.x @a int as external name simclr.Procs.Hello", 6550, 0)]
+    [DataRow("create procedure dbo.x @a bigint as external name simclr.Procs.ByValue", 6552, 0)]
+    [DataRow("create procedure dbo.x with recompile as external name simclr.Procs.Hello", 155, 0)]
+    public void ClrProcedure_BindingErrors(string create, int first, int second)
+    {
+        var ex = ClrFrameworkFixture.Simulation().AssertSqlError(create, first);
+        AreEqual(second == 0 ? 1 : 2, ex.Errors.Count);
+        if (second != 0)
+            AreEqual(second, ex.Errors[1].Number);
+    }
+
+    [TestMethod]
+    [Description("A T-SQL body can't replace a CLR procedure (Msg 2010), nor a CLR binding a T-SQL one (Msg 6530).")]
+    public void ClrProcedure_AlterAcrossKinds_Refused()
+    {
+        var sim = ClrFrameworkFixture.Simulation(
+            "create procedure dbo.clr as external name simclr.Procs.Hello",
+            "create procedure dbo.tsql as select 1 a");
+        _ = sim.AssertSqlError("alter procedure dbo.clr as select 1 a", 2010);
+        _ = sim.AssertSqlError("alter procedure dbo.tsql as external name simclr.Procs.Hello", 6530);
+    }
+
+    [TestMethod]
+    [Description("A CLR procedure is PC in sys.objects, has an assembly_modules row and no sql_modules one, and reports its parameters' defaults.")]
+    public void ClrProcedure_Catalog()
+    {
+        var sim = ClrFrameworkFixture.Simulation("create procedure dbo.addout @a int, @b int = 4, @sum int output as external name simclr.Procs.AddOut");
+        AreEqual("PC|CLR_STORED_PROCEDURE", sim.ExecuteScalar("select rtrim(type) + '|' + type_desc from sys.objects where name = 'addout'"));
+        AreEqual("Procs.AddOut", sim.ExecuteScalar("select assembly_class + '.' + assembly_method from sys.assembly_modules"));
+        AreEqual(0, sim.ExecuteScalar("select count(*) from sys.sql_modules where object_id = object_id('dbo.addout')"));
+        AreEqual(4, sim.ExecuteScalar("select cast(default_value as int) from sys.parameters where object_id = object_id('dbo.addout') and has_default_value = 1"));
+        AreEqual("EXTERNAL", sim.ExecuteScalar("select routine_body from information_schema.routines where routine_name = 'addout'"));
+        AreEqual("1|1|", sim.ExecuteScalar("select concat(objectproperty(object_id('dbo.addout'), 'IsProcedure'), '|', objectproperty(object_id('dbo.addout'), 'IsExecuted'), '|', objectproperty(object_id('dbo.addout'), 'IsEncrypted'))"));
+        _ = sim.AssertSqlError("drop assembly simclr", 6590);
+    }
+
+    [TestMethod]
+    [Description("sp_describe_first_result_set can't see into a CLR procedure (Msg 11515).")]
+    public void ClrProcedure_DescribeFirstResultSet_Refused()
+        => Contains("invokes a CLR procedure", ClrFrameworkFixture.Simulation("create procedure dbo.x @n int as external name simclr.Procs.Rows")
+            .AssertSqlError("exec sp_describe_first_result_set N'exec dbo.x 1'", 11515).Message);
+
+    [TestMethod]
+    [Description("A CLR table-valued function's rows come from its FillRow method, NULLs included, and it takes part in FROM and APPLY.")]
+    public void ClrTableFunction_Rows()
+    {
+        var sim = ClrFrameworkFixture.Simulation(
+            "create function dbo.series(@c int) returns table (n int, label nvarchar(20)) as external name simclr.Tvfs.Series");
+        AreEqual("1:item 1,2:,3:item 3", sim.ExecuteScalar("select string_agg(concat(n, ':', label), ',') within group (order by n) from dbo.series(3)"));
+        AreEqual(0, sim.ExecuteScalar("select count(*) from dbo.series(null)"));
+        AreEqual(3, sim.ExecuteScalar("select count(*) from (values (1), (2)) t(v) cross apply dbo.series(t.v)"));
+    }
+
+    [TestMethod]
+    [Description("An iterator method (yield return) is the ordinary init method, and loads under SAFE.")]
+    public void ClrTableFunction_Iterator()
+        => AreEqual("a||b", ClrFrameworkFixture.Simulation(
+                "create function dbo.split(@s nvarchar(max), @sep nvarchar(10)) returns table (part nvarchar(100)) as external name simclr.Tvfs.Split")
+            .ExecuteScalar("select string_agg(part, '|') from dbo.split(N'a,,b', N',')"));
+
+    [TestMethod]
+    [Description("A throw from the init method is Msg 6522 state 2; one from FillRow is Msg 6260.")]
+    public void ClrTableFunction_Throws()
+    {
+        var sim = ClrFrameworkFixture.Simulation(
+            "create function dbo.fi(@c int) returns table (n int, label nvarchar(20)) as external name simclr.Tvfs.ThrowsInInit",
+            "create function dbo.ff(@c int) returns table (n int) as external name simclr.Tvfs.ThrowsInFill");
+        AreEqual(2, sim.AssertSqlError("select * from dbo.fi(1)", 6522).State);
+        Contains("System.ArgumentException: fill boom", sim.AssertSqlError("select * from dbo.ff(1)", 6260).Message);
+    }
+
+    [TestMethod]
+    [Description("CREATE refuses a result table a streaming function can't return, and a FillRow that doesn't fit it.")]
+    [DataRow("(n int, label varchar(20))", "Series", 6514)]
+    [DataRow("(n int not null, label nvarchar(20))", "Series", 6526)]
+    [DataRow("(n int primary key, label nvarchar(20))", "Series", 6525)]
+    [DataRow("(n int)", "Series", 6208)]
+    [DataRow("(n bigint, label nvarchar(20))", "Series", 6258)]
+    [DataRow("(n int)", "NoFill", 10306)]
+    public void ClrTableFunction_CreateErrors(string table, string method, int error)
+        => _ = ClrFrameworkFixture.Simulation().AssertSqlError(
+            $"create function dbo.f(@c int) returns table {table} as external name simclr.Tvfs.{method}", error);
+
+    [TestMethod]
+    [Description("A CLR table-valued function is FT, with its declared columns in sys.columns.")]
+    public void ClrTableFunction_Catalog()
+    {
+        var sim = ClrFrameworkFixture.Simulation(
+            "create function dbo.series(@c int = 2) returns table (n int, label nvarchar(20)) as external name simclr.Tvfs.Series");
+        AreEqual("FT", sim.ExecuteScalar("select type from sys.objects where name = 'series'"));
+        AreEqual("n,label", sim.ExecuteScalar("select string_agg(name, ',') within group (order by column_id) from sys.columns where object_id = object_id('dbo.series')"));
+        AreEqual(2, sim.ExecuteScalar("select count(*) from dbo.series(default)"));
+    }
+
+    [TestMethod]
+    [Description("A CLR aggregate accumulates per group, NULLs reaching Accumulate, and an empty input still calls Terminate.")]
+    public void ClrAggregate_GroupBy()
+    {
+        var sim = ClrFrameworkFixture.Simulation(
+            "create aggregate dbo.sumsq (@v int) returns bigint external name simclr.SumSquares",
+            "create aggregate dbo.countall (@v nvarchar(10)) returns int external name simclr.CountAll");
+        AreEqual("1:13,2:16,3:", sim.ExecuteScalar(
+            "select string_agg(concat(g, ':', s), ',') within group (order by g) from (select g, dbo.sumsq(v) s from (values (1, 2), (1, 3), (2, null), (2, 4), (3, null)) t(g, v) group by g) x"));
+        AreEqual(3, sim.ExecuteScalar("select dbo.countall(v) from (values (N'a'), (null), (N'b')) t(v)"));
+        AreEqual(0, sim.ExecuteScalar("select dbo.countall(v) from (values (N'a')) t(v) where 1 = 0"));
+    }
+
+    [TestMethod]
+    [Description("A Format.UserDefined aggregate takes several arguments and DISTINCT, and runs over a partition window.")]
+    public void ClrAggregate_MultipleArgumentsDistinctAndWindow()
+    {
+        var sim = ClrFrameworkFixture.Simulation(
+            "create aggregate dbo.concat (@v nvarchar(100), @sep nvarchar(5)) returns nvarchar(max) external name simclr.Concat",
+            "create aggregate dbo.sumsq (@v int) returns bigint external name simclr.SumSquares");
+        AreEqual("a|b", sim.ExecuteScalar("select dbo.concat(v, N'|') from (select top 10 v from (values (N'a'), (N'b')) t(v) order by v) x"));
+        AreEqual("a", sim.ExecuteScalar("select dbo.concat(distinct v, N',') from (values (N'a'), (N'a')) t(v)"));
+        AreEqual(13L, sim.ExecuteScalar("select top 1 dbo.sumsq(v) over (partition by g) from (values (1, 2), (1, 3), (2, 5)) t(g, v) order by v"));
+        _ = sim.AssertSqlError("select dbo.sumsq(v) over (order by v) from (values (1)) t(v)", 156);
+    }
+
+    [TestMethod]
+    [Description("A throw from Accumulate is Msg 6522 state 2 naming the aggregate.")]
+    public void ClrAggregate_Throw()
+    {
+        var ex = ClrFrameworkFixture.Simulation("create aggregate dbo.aggthrows (@v int) returns int external name simclr.AggThrows")
+            .AssertSqlError("select dbo.aggthrows(v) from (values (1), (3)) t(v)", 6522);
+        AreEqual(2, ex.State);
+        Contains("\"aggthrows\": \r\nSystem.InvalidOperationException: agg boom\r\n", ex.Message);
+    }
+
+    [TestMethod]
+    [Description("CREATE AGGREGATE checks the class against the aggregate contract.")]
+    [DataRow("dbo.a (@v int) returns int external name simclr.NoMerge", 6558)]
+    [DataRow("dbo.a (@v int) returns int external name simclr.NoAttr", 6255)]
+    [DataRow("dbo.a (@v int) returns int external name simclr.NativeWithRef", 6225)]
+    [DataRow("dbo.a (@v int) returns int external name simclr.Nope", 6556)]
+    [DataRow("dbo.a (@v bigint) returns bigint external name simclr.SumSquares", 6552)]
+    [DataRow("dbo.a (@v int) returns int external name simclr.SumSquares", 6558)]
+    [DataRow("dbo.a (@v int = 1) returns bigint external name simclr.SumSquares", 10726)]
+    [DataRow("dbo.a (@v int) returns bigint as external name simclr.SumSquares", 156)]
+    public void ClrAggregate_CreateErrors(string rest, int error)
+        => _ = ClrFrameworkFixture.Simulation().AssertSqlError("create aggregate " + rest, error);
+
+    [TestMethod]
+    [Description("An aggregate is AF, answers to DROP AGGREGATE only, can't be EXECuted, and needs its schema at the call site.")]
+    public void ClrAggregate_CatalogAndNameRules()
+    {
+        var sim = ClrFrameworkFixture.Simulation("create aggregate dbo.sumsq (@v int) returns bigint external name simclr.SumSquares");
+        AreEqual("AF|AGGREGATE_FUNCTION", sim.ExecuteScalar("select rtrim(type) + '|' + type_desc from sys.objects where name = 'sumsq'"));
+        AreEqual(1, sim.ExecuteScalar("select count(*) from sys.assembly_modules where assembly_class = 'SumSquares' and assembly_method is null"));
+        AreEqual("0|", sim.ExecuteScalar("select concat(objectproperty(object_id('dbo.sumsq'), 'IsExecuted'), '|', objectproperty(object_id('dbo.sumsq'), 'IsDeterministic'))"));
+        _ = sim.AssertSqlError("select sumsq(v) from (values (1)) t(v)", 195);
+        _ = sim.AssertSqlError("select dbo.sumsq(v, v) from (values (1)) t(v)", 174);
+        _ = sim.AssertSqlError("exec dbo.sumsq 1", 2809);
+        _ = sim.AssertSqlError("drop function dbo.sumsq", 3705);
+        _ = sim.ExecuteNonQuery("drop aggregate dbo.sumsq");
+        _ = sim.AssertSqlError("drop aggregate dbo.sumsq", 3701);
+        _ = sim.ExecuteNonQuery("drop aggregate if exists dbo.sumsq; drop assembly simclr");
+    }
 }

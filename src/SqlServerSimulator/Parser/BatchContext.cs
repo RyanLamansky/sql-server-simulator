@@ -2496,7 +2496,7 @@ internal sealed class BatchContext
     public bool TryResolveTableValuedFunction(MultiPartName name, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out UserDefinedFunction? function) =>
         (this.TryResolveFunction(name, out function)
             || (name.Count == 1 && this.TryResolveFunction(new MultiPartName(Database.DefaultSchemaName).WithAddedPart(name.Leaf), out function)))
-        && function is InlineTableValuedFunction or MultiStatementTableValuedFunction;
+        && function is InlineTableValuedFunction or MultiStatementTableValuedFunction or ClrTableValuedFunction;
 
     /// <summary>
     /// Resolves <paramref name="name"/> to a registered <see cref="View"/>.

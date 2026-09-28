@@ -129,7 +129,7 @@ internal sealed class ColumnProperty : Expression
         var site = owner switch
         {
             HeapTable => ColumnSite.Table,
-            InlineTableValuedFunction or MultiStatementTableValuedFunction => ColumnSite.FunctionResult,
+            InlineTableValuedFunction or MultiStatementTableValuedFunction or ClrTableValuedFunction => ColumnSite.FunctionResult,
             View or null => ColumnSite.View,
             _ => ColumnSite.Table,
         };
@@ -163,6 +163,7 @@ internal sealed class ColumnProperty : Expression
             View view => view.OutputColumns,
             InlineTableValuedFunction inline => inline.OutputColumns,
             MultiStatementTableValuedFunction multiStatement => multiStatement.OutputColumns,
+            ClrTableValuedFunction clr => clr.OutputColumns,
             null => CatalogViewColumns(id),
             _ => null,
         };

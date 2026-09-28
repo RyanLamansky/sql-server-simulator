@@ -35,6 +35,16 @@
 
   <ItemGroup>
     <ProjectReference Include="..\SqlServerSimulator.Analyzers\SqlServerSimulator.Analyzers.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
+    <!-- Built, never referenced: its output is embedded below and loaded only
+         into the load context that hosts CREATE ASSEMBLY assemblies (see
+         Clr/ClrHost.cs), so none of its public types reach a consumer. -->
+    <ProjectReference Include="..\SqlServerSimulator.ClrShim\SqlServerSimulator.ClrShim.csproj" OutputItemType="ClrShimAssembly" ReferenceOutputAssembly="false" PrivateAssets="all" />
   </ItemGroup>
+
+  <Target Name="EmbedClrShimAssembly" AfterTargets="ResolveProjectReferences">
+    <ItemGroup>
+      <EmbeddedResource Include="@(ClrShimAssembly)" LogicalName="Microsoft.SqlServer.Server.dll" />
+    </ItemGroup>
+  </Target>
 
 </Project>

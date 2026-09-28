@@ -60,7 +60,7 @@ dotnet build
 dotnet test
 ```
 
-Projects live under `src/` (`SqlServerSimulator`, `SqlServerSimulator.EFCore`, `SqlServerSimulator.Analyzers`, `Example`) and `tests/`; the sln and both props files stay at the repo root, so `dotnet build` / `dotnet test` run from the root unchanged.
+Projects live under `src/` (`SqlServerSimulator`, `SqlServerSimulator.EFCore`, `SqlServerSimulator.Analyzers`, `SqlServerSimulator.ClrShim` — built and embedded in the simulator's dll, never referenced — and `Example`) and `tests/`; the sln and both props files stay at the repo root, so `dotnet build` / `dotnet test` run from the root unchanged.
 `tools/` holds local tooling, in the sln under a `tools` folder so CI compiles it but outside the analyzer and test gates — [`tools/sqllogictest/`](tools/sqllogictest/README.md) is the differential sweep whose in-process replay (`./tools/sqllogictest/replay.sh`, about a minute) catches regressions across millions of generated queries the committed suites never write; run it before committing a change to parsing, binding or expression evaluation.
 Shared build settings live in the root `Directory.Build.props` (TargetFramework, nullable, warnings-as-errors, `EnforceCodeStyleInBuild=true` — so `dotnet build` runs the IDE / SSS / MSTEST analyzers and fails on violations); package versions are centralized in `Directory.Packages.props` (NuGet CPM), with deliberate per-project divergences as visible `VersionOverride`s (Tests.Smo pins SqlClient 5.1.x, SMO's supported line, while Tests.SqlClient tests the current 7.x — the reason those two projects stay separate).
 Csprojs carry only per-project content.
@@ -295,7 +295,8 @@ Where an entry carries a second clause it is because that fact changes what you'
   All six dependency surfaces project from one walk of stored definition **text**, which is what reproduces real's name-based refresh rules → [`catalog-views.md`](docs/claude/catalog-views.md).
 - **Scalar UDFs / TVFs / views / stored procs / dynamic SQL, the `ALTER` / `CREATE OR ALTER` path, `WITH RESULT SETS`, `WITH SCHEMABINDING`, DML through views**.
   A module body **binds at CREATE** — every binder error at once, in source order — while a missing object still defers → [`programmable.md`](docs/claude/programmable.md).
-- **CLR assemblies** — `CREATE` / `DROP ASSEMBLY`, external-name scalar routines, `Simulation.EnableClr`, static SAFE verification → [`clr-assemblies.md`](docs/claude/clr-assemblies.md).
+- **CLR assemblies** — `CREATE` / `DROP ASSEMBLY`, `EXTERNAL NAME` scalar and table-valued functions, procedures and `CREATE AGGREGATE`, `Simulation.EnableClr`, static SAFE verification.
+  A registered assembly's `System.Data` and `Microsoft.SqlServer.Server` references resolve to a load-context shim, the embedded `SqlServerSimulator.ClrShim` build → [`clr-assemblies.md`](docs/claude/clr-assemblies.md).
 - **`#foo` / `##foo` routing, DROP TABLE, TRUNCATE TABLE** → [`temp-tables.md`](docs/claude/temp-tables.md).
 - **`DECLARE @t TABLE`, table-variable DML, `OUTPUT … INTO`** — the column features ship; real's own `DECLARE` grammar refuses named constraints and FKs → [`table-variables.md`](docs/claude/table-variables.md).
 - **`CREATE TYPE … AS TABLE`, TVP params + `READONLY`, ADO.NET TVP** → [`table-valued-parameters.md`](docs/claude/table-valued-parameters.md).
@@ -366,7 +367,7 @@ The feature docs' own **Not modeled yet** sections hold the smaller gaps.
 - **Most `SET <option>` toggles parse and are discarded** (`Simulation.Set.cs`); the ones with semantic effect are handled by name there.
   The same goes for most `ALTER DATABASE … SET` options → [`database-options.md`](docs/claude/database-options.md).
 - **Heap allocation tracking** (a flat page list, no IAM/PFS) → [`heap-storage.md`](docs/claude/heap-storage.md).
-- **Programmable-object gaps**: CLR procedures / TVFs / aggregates / UDTs, logon triggers, and MERGE into a join view → [`programmable.md`](docs/claude/programmable.md), [`clr-assemblies.md`](docs/claude/clr-assemblies.md), [`triggers.md`](docs/claude/triggers.md).
+- **Programmable-object gaps**: CLR UDTs and triggers, the SQLCLR context connection, logon triggers, and MERGE into a join view → [`programmable.md`](docs/claude/programmable.md), [`clr-assemblies.md`](docs/claude/clr-assemblies.md), [`triggers.md`](docs/claude/triggers.md).
 - **`ALTER COLUMN … ADD | DROP PERSISTED`** → [`alter-table.md`](docs/claude/alter-table.md).
 - **Filegroup placement** — a table or index `ON [fg]` isn't recorded (only a partition scheme's placement is) → [`partitioning.md`](docs/claude/partitioning.md#not-modeled-yet).
 - **`FORCESEEK`'s plan-infeasibility refusal** (Msg 8622) → [`query-hints.md`](docs/claude/query-hints.md#not-enforced).

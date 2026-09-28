@@ -112,11 +112,157 @@ partial class SimulatedSqlException
         new($"{statement} for \"{routineName}\" failed because T-SQL and CLR types for parameter \"{parameterName}\" do not match.", 6552, 16, 3);
 
     /// <summary>
-    /// Mimics SQL Server error 6522: the CLR routine threw. Real SQL Server
-    /// appends the exception type, message and stack trace; the simulator
-    /// reproduces the type-and-message head, which is the part callers assert
-    /// on.
+    /// Mimics SQL Server error 6522: a CLR routine or aggregate threw. The text
+    /// carries the exception the way the server's host reports it — the
+    /// <c>type: message</c> line, the type again, and the stack's frames in the
+    /// user's code and the public <c>Microsoft.SqlServer.Server</c> surface,
+    /// each line CRLF-ended (see <see cref="Clr.ClrExceptionReport"/>). The
+    /// state is 1 for a procedure and 2 for a function, a table-valued
+    /// function's init call and an aggregate (probed 2026-09-28 against SQL
+    /// Server 2025).
     /// </summary>
-    internal static SimulatedSqlException ClrRoutineThrew(string routineName, Exception inner) =>
-        new($"A .NET Framework error occurred during execution of user-defined routine or aggregate \"{routineName}\": {Environment.NewLine}{inner.GetType().FullName}: {inner.Message}.", 6522, 16, 1);
+    internal static SimulatedSqlException ClrRoutineThrew(string routineName, string report, byte state) =>
+        new($"A .NET Framework error occurred during execution of user-defined routine or aggregate \"{routineName}\": \r\n{report}.", 6522, 16, state);
+
+    /// <summary>
+    /// Mimics SQL Server error 6260: a CLR table-valued function's
+    /// <c>FillRow</c> method threw, or produced a value its column cannot hold.
+    /// The report has 6522's shape.
+    /// </summary>
+    internal static SimulatedSqlException ClrFillRowThrew(string report) =>
+        new($"An error occurred while getting new row from user defined Table Valued Function : \r\n{report}.", 6260, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 6567: <c>CREATE PROCEDURE … EXTERNAL NAME</c>
+    /// bound a method whose return type is not one a procedure's status can
+    /// come from.
+    /// </summary>
+    internal static SimulatedSqlException ClrProcedureReturnType() =>
+        new("CREATE PROCEDURE failed because a CLR Procedure may only be defined on CLR methods that return either SqlInt32, System.Int32, System.Nullable<System.Int32>, void.", 6567, 16, 2);
+
+    /// <summary>
+    /// Mimics SQL Server error 6580: a parameter is <c>OUTPUT</c> on one side
+    /// of the binding and passed by value on the other. Real follows it with
+    /// Msg 6552 for the same parameter.
+    /// </summary>
+    internal static SimulatedSqlException ClrOutputDeclarationMismatch(int ordinal) =>
+        new($"Declarations do not match for parameter {ordinal}. .NET Framework reference and T-SQL OUTPUT parameter declarations must match.", 6580, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 155 state 37: a CLR procedure's <c>WITH</c>
+    /// clause named an option only a T-SQL body takes.
+    /// </summary>
+    internal static SimulatedSqlException ExternalProcedureOptionRefused(string option) =>
+        new($"'{option}' is not a recognized CREATE PROCEDURE option.", 155, 15, 37);
+
+    /// <summary>
+    /// Mimics SQL Server error 6530: <c>ALTER</c> would turn a T-SQL module
+    /// into a CLR one. The reverse is Msg 2010.
+    /// </summary>
+    internal static SimulatedSqlException ClrAlterIncompatible(string name) =>
+        new($"Cannot perform alter on '{name}' because it is an incompatible object type.", 6530, 16, 3);
+
+    /// <summary>
+    /// Mimics SQL Server error 10306: the method a CLR table-valued function
+    /// binds carries no <c>SqlFunctionAttribute.FillRowMethodName</c>.
+    /// </summary>
+    internal static SimulatedSqlException ClrTvfMissingFillRow() =>
+        new("The SqlFunctionAttribute of the Init method for a CLR table-valued function must set the FillRowMethodName property.", 10306, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 6208: a <c>FillRow</c> method's parameter count
+    /// is not one more than the declared column count.
+    /// </summary>
+    internal static SimulatedSqlException ClrFillRowParameterCount() =>
+        new("CREATE FUNCTION failed because the parameter count for the FillRow method should be one more than the SQL declaration for the table valued CLR function.", 6208, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 6258: a <c>FillRow</c> out parameter does not
+    /// bind to its declared column's type. Real's text has no space before the
+    /// function name.
+    /// </summary>
+    internal static SimulatedSqlException ClrFillRowColumnMismatch(string functionName, int column) =>
+        new($"Function signature of \"FillRow\" method (as designated by SqlFunctionAttribute.FillRowMethodName) does not match SQL declaration for table valued CLR function'{functionName}' due to column {column}.", 6258, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 6514: a CLR table-valued function's result
+    /// table declares a column kind a streaming function cannot return —
+    /// the ANSI string types and the legacy large-object types (state 3),
+    /// <c>IDENTITY</c> (state 2) and <c>timestamp</c> (state 1, named in
+    /// capitals).
+    /// </summary>
+    internal static SimulatedSqlException ClrTvfColumnKindRefused(string kind, string columnName, byte state) =>
+        new($"Cannot use '{kind}' column in the result table of a streaming user-defined function (column '{columnName}').", 6514, 16, state);
+
+    /// <summary>
+    /// Mimics SQL Server error 6526: a CLR table-valued function's result
+    /// table declares <c>NOT NULL</c> or a <c>DEFAULT</c> on a column.
+    /// </summary>
+    internal static SimulatedSqlException ClrTvfColumnConstraintRefused(string constraint, string columnName) =>
+        new($"Cannot use '{constraint}' constraint in the result table of a streaming user-defined function (column '{columnName}').", 6526, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 6525: a CLR table-valued function's result
+    /// table declares a table-level constraint.
+    /// </summary>
+    internal static SimulatedSqlException ClrTvfTableConstraintRefused(string constraint) =>
+        new($"Cannot use '{constraint}' constraint in the result table of a streaming user-defined function.", 6525, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 6556: <c>CREATE AGGREGATE</c> named a class the
+    /// assembly does not contain. Real follows it with Msg 6597.
+    /// </summary>
+    internal static SimulatedSqlException ClrAggregateTypeNotFound(string typeName, string assemblyName) =>
+        new($"CREATE AGGREGATE failed because it could not find type '{typeName}' in assembly '{assemblyName}'.", 6556, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 6597, the closing line real sends after a
+    /// <c>CREATE AGGREGATE</c> failure it has already described.
+    /// </summary>
+    internal static SimulatedSqlException ClrAggregateFailed() =>
+        new("CREATE AGGREGATE failed.", 6597, 16, 2);
+
+    /// <summary>
+    /// Mimics SQL Server error 6255: the aggregate's class does not carry
+    /// <c>SqlUserDefinedAggregateAttribute</c>.
+    /// </summary>
+    internal static SimulatedSqlException ClrAggregateMissingAttribute(string typeName) =>
+        new($"CREATE AGGREGATE failed because type \"{typeName}\" does not conform to the UDAGG specification: missing custom attribute \"Microsoft.SqlServer.Server.SqlUserDefinedAggregateAttribute\".", 6255, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 6558: the aggregate's class lacks one of the
+    /// four contract methods or declares it with the wrong shape — a
+    /// <c>Terminate</c> returning another type than the declared one, or an
+    /// <c>Accumulate</c> taking another number of arguments. Real follows it
+    /// with Msg 6597.
+    /// </summary>
+    internal static SimulatedSqlException ClrAggregateMethodNonConforming(string typeName, string methodName) =>
+        new($"CREATE AGGREGATE failed because type '{typeName}' does not conform to UDAGG specification due to method '{methodName}'.", 6558, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 6225: a <c>Format.Native</c> aggregate declares
+    /// a field that is not of a blittable value type.
+    /// </summary>
+    internal static SimulatedSqlException ClrNativeFormatField(string assemblyName, string typeName, string fieldName, string fieldType) =>
+        new($"Type \"{assemblyName}.{typeName}\" is marked for native serialization, but field \"{fieldName}\" of type \"{assemblyName}.{typeName}\" is of type \"{fieldType}\" which is a non-value type. Native serialization types can only have fields of blittable types. If you wish to have a field of any other type, consider using different kind of serialization format, such as User Defined Serialization.", 6225, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 10726: a user-defined aggregate's parameter
+    /// declares a default.
+    /// </summary>
+    internal static SimulatedSqlException ClrAggregateDefaultParameter() =>
+        new("User defined aggregates do not support default parameters.", 10726, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 2809: <c>EXEC</c> named a CLR aggregate.
+    /// </summary>
+    internal static SimulatedSqlException ExecOfAggregate(string name) =>
+        new($"The request for procedure '{name}' failed because '{name}' is a aggregate function object.", 2809, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 11515: <c>sp_describe_first_result_set</c> met
+    /// a CLR procedure, whose result sets only its code knows.
+    /// </summary>
+    internal static SimulatedSqlException DescribeFirstResultSetClrProcedure(string statement) =>
+        new($"The metadata could not be determined because statement '{statement}' invokes a CLR procedure.  Consider using the WITH RESULT SETS clause to explicitly describe the result set.", 11515, 16, 1);
 }

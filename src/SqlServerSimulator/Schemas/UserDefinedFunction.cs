@@ -132,46 +132,110 @@ internal sealed class ScalarFunction(
 }
 
 /// <summary>
-/// A scalar function whose body is a method in a registered
-/// <see cref="SqlAssembly"/> rather than T-SQL —
-/// <c>CREATE FUNCTION … RETURNS &lt;type&gt; AS EXTERNAL NAME
-/// assembly.[Class].Method</c>. Surfaces in <c>sys.objects</c> as type
-/// <c>FS</c> and in <c>sys.assembly_modules</c>; it has no
-/// <c>sys.sql_modules</c> row, matching real SQL Server.
+/// A function whose body is code in a registered <see cref="SqlAssembly"/>
+/// rather than T-SQL — the CLR scalar, table-valued and aggregate kinds. None
+/// has a <c>sys.sql_modules</c> row; each has a <c>sys.assembly_modules</c>
+/// one naming its <see cref="Entry"/>.
 /// </summary>
 /// <remarks>
-/// The bound <see cref="System.Reflection.MethodInfo"/> is resolved once at
-/// CREATE time so the
-/// Msg 6505 / 6506 / 6550 / 6551 / 6552 binding errors fire there rather than
-/// at first call, matching real SQL Server.
+/// The entry point is resolved once at CREATE time so the binding errors
+/// (Msg 6505 / 6506 / 6550 / 6551 / 6552 and each kind's own) fire there
+/// rather than at first call, matching real SQL Server.
 /// </remarks>
+internal abstract class ClrFunction(
+    Schema schema,
+    string name,
+    int objectId,
+    UdfParameter[] parameters,
+    ClrEntryPoint entry,
+    DateTime createDate)
+    : UserDefinedFunction(schema, name, objectId, parameters, "", createDate)
+{
+    public readonly ClrEntryPoint Entry = entry;
+}
+
+/// <summary>
+/// A CLR scalar function — <c>CREATE FUNCTION … RETURNS &lt;type&gt; AS
+/// EXTERNAL NAME assembly.[Class].Method</c>. Surfaces in <c>sys.objects</c>
+/// as type <c>FS</c>.
+/// </summary>
 internal sealed class ClrScalarFunction(
     Schema schema,
     string name,
     int objectId,
     UdfParameter[] parameters,
     SqlType returnType,
-    SqlAssembly assembly,
-    string className,
-    string methodName,
-    System.Reflection.MethodInfo method,
+    ClrEntryPoint entry,
     DateTime createDate)
-    : UserDefinedFunction(schema, name, objectId, parameters, "", createDate)
+    : ClrFunction(schema, name, objectId, parameters, entry, createDate)
 {
     public override string ObjectTypeCode => "FS";
     public override string ObjectTypeDescription => "CLR_SCALAR_FUNCTION";
 
     public readonly SqlType ReturnType = returnType;
-    public readonly SqlAssembly Assembly = assembly;
+}
 
-    /// <summary>The type half of the <c>EXTERNAL NAME</c> triple, as written.</summary>
-    public readonly string ClassName = className;
+/// <summary>
+/// A CLR table-valued function — <c>CREATE FUNCTION … RETURNS TABLE (cols)
+/// [ORDER (…)] AS EXTERNAL NAME assembly.[Class].Method</c>, where the method
+/// returns the rows as an <see cref="System.Collections.IEnumerable"/> (or an
+/// <see cref="System.Collections.IEnumerator"/>) and the method its
+/// <c>SqlFunction(FillRowMethodName = …)</c> names splits each row object into
+/// the columns' <c>out</c> parameters. Called from a FROM clause like the
+/// T-SQL kinds; surfaces in <c>sys.objects</c> as type <c>FT</c>.
+/// </summary>
+internal sealed class ClrTableValuedFunction(
+    Schema schema,
+    string name,
+    int objectId,
+    UdfParameter[] parameters,
+    HeapColumn[] outputColumns,
+    ClrEntryPoint entry,
+    System.Reflection.MethodInfo fillRow,
+    DateTime createDate)
+    : ClrFunction(schema, name, objectId, parameters, entry, createDate)
+{
+    public override string ObjectTypeCode => "FT";
+    public override string ObjectTypeDescription => "CLR_TABLE_VALUED_FUNCTION";
 
-    /// <summary>The method half of the <c>EXTERNAL NAME</c> triple, as written.</summary>
-    public readonly string MethodName = methodName;
+    /// <summary>The declared result table's columns, all nullable.</summary>
+    public readonly HeapColumn[] OutputColumns = outputColumns;
 
-    /// <summary>The bound method, resolved and signature-checked at CREATE time.</summary>
-    public readonly System.Reflection.MethodInfo Method = method;
+    /// <summary>The bound <c>FillRow</c> method: the row object, then one <c>out</c> parameter per column.</summary>
+    public readonly System.Reflection.MethodInfo FillRow = fillRow;
+}
+
+/// <summary>
+/// A CLR user-defined aggregate — <c>CREATE AGGREGATE name (@p type, …)
+/// RETURNS type EXTERNAL NAME assembly.[Class]</c>. The class carries
+/// <c>SqlUserDefinedAggregate</c> and the <c>Init</c> / <c>Accumulate</c> /
+/// <c>Merge</c> / <c>Terminate</c> contract; one instance accumulates one
+/// group. Called as a schema-qualified aggregate; surfaces in
+/// <c>sys.objects</c> as type <c>AF</c>.
+/// </summary>
+internal sealed class ClrAggregateFunction(
+    Schema schema,
+    string name,
+    int objectId,
+    UdfParameter[] parameters,
+    SqlType returnType,
+    ClrEntryPoint entry,
+    System.Reflection.MethodInfo init,
+    System.Reflection.MethodInfo accumulate,
+    System.Reflection.MethodInfo terminate,
+    DateTime createDate)
+    : ClrFunction(schema, name, objectId, parameters, entry, createDate)
+{
+    public override string ObjectTypeCode => "AF";
+    public override string ObjectTypeDescription => "AGGREGATE_FUNCTION";
+
+    public readonly SqlType ReturnType = returnType;
+
+    public readonly System.Reflection.MethodInfo Init = init;
+
+    public readonly System.Reflection.MethodInfo Accumulate = accumulate;
+
+    public readonly System.Reflection.MethodInfo Terminate = terminate;
 }
 
 /// <summary>

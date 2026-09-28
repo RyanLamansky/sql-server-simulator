@@ -155,6 +155,9 @@ partial class Simulation
         // (or whatever the outer dispatch considers the statement boundary).
         var commandText = context.Command.CommandText;
         context.MoveNextOptional();
+        if (context.Token is ReservedKeyword { Keyword: Keyword.External })
+            return ParseClrProcedureTail(context, schema, procName, groupNumber, parameters, executeAsClause, options.RefusedByExternalModule, isAlter, createOrAlter);
+
         // Empty body is legal — `CREATE PROC p AS` with nothing after AS
         // succeeds in real SQL Server. The body capture below produces an
         // empty string, which the per-call invocation handles cleanly.
@@ -214,6 +217,10 @@ partial class Simulation
         var replaced = (Procedure?)ResolveModuleAlterTarget(
             context, schema, procName, isAlter, createOrAlter,
             schema.Procedures.TryGetValue(procName.Leaf, out var existing) ? existing : null);
+        // A T-SQL body can't replace a CLR procedure (probed 2026-09-28
+        // against SQL Server 2025); the reverse is the CLR tail's Msg 6530.
+        if (replaced is { ClrEntry: not null })
+            throw SimulatedSqlException.CannotAlterIncompatibleObjectType(procName);
 
         var procedure = new Procedure(
             schema,

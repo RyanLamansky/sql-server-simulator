@@ -23,8 +23,9 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// when the routine opted into <c>RETURNS NULL ON NULL INPUT</c>.
 /// </para>
 /// <para>
-/// Anything the routine throws surfaces as Msg 6522, matching real SQL
-/// Server's wrapper around a faulted user routine.
+/// Anything the routine throws surfaces as Msg 6522 state 2, as does a
+/// string return value longer than the declared <c>nvarchar(n)</c>, matching
+/// real SQL Server's wrapper around a faulted user routine.
 /// </para>
 /// </remarks>
 internal sealed class ClrFunctionCall(ClrScalarFunction function, Expression?[] arguments) : Expression
@@ -45,7 +46,7 @@ internal sealed class ClrFunctionCall(ClrScalarFunction function, Expression?[] 
         if (!runtime.Batch.Connection.Simulation.EnableClr)
             throw SimulatedSqlException.ClrExecutionDisabled();
 
-        var parameters = this.function.Method.GetParameters();
+        var parameters = this.function.Entry.Method!.GetParameters();
         var values = new object[parameters.Length];
         for (var i = 0; i < parameters.Length; i++)
         {
@@ -60,14 +61,18 @@ internal sealed class ClrFunctionCall(ClrScalarFunction function, Expression?[] 
         object? result;
         try
         {
-            result = this.function.Method.Invoke(null, values);
+            using (this.function.Entry.Assembly.UsesServerContext ? ClrHost.Enter(pipe: null) : default(ClrHost.RoutineScope?))
+                result = this.function.Entry.Method!.Invoke(null, values);
         }
         catch (TargetInvocationException ex) when (ex.InnerException is not null)
         {
-            throw SimulatedSqlException.ClrRoutineThrew(this.function.Name, ex.InnerException);
+            throw SimulatedSqlException.ClrRoutineThrew(this.function.Name, ClrExceptionReport.Describe(ex.InnerException, this.function.Entry.Method), state: 2);
         }
 
-        return ClrTypeMarshaller.FromClr(result, this.function.ReturnType);
+        var returned = ClrTypeMarshaller.FromClr(result, this.function.ReturnType);
+        return ClrTypeMarshaller.OverflowedWidth(returned, this.function.ReturnType) is { } width
+            ? throw SimulatedSqlException.ClrRoutineThrew(this.function.Name, ClrExceptionReport.Truncation(returned.AsString.Length, width), state: 2)
+            : returned;
     }
 
     internal override string DebugDisplay() =>

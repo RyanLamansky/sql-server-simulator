@@ -1414,30 +1414,40 @@ internal static partial class BuiltInResources
         }
     }
 
-    /// <summary>Rows for <c>sys.assembly_modules</c> — one per CLR routine.</summary>
+    /// <summary>
+    /// Rows for <c>sys.assembly_modules</c> — one per CLR routine: the
+    /// functions of every kind and the procedures. An aggregate names a class
+    /// alone, so its <c>assembly_method</c> is NULL (probed 2026-09-28 against
+    /// SQL Server 2025).
+    /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateAssemblyModules(Database database)
     {
         foreach (var schema in database.Schemas.Values)
         {
             foreach (var function in schema.Functions.Values)
             {
-                if (function is not ClrScalarFunction clr)
-                    continue;
+                if (function is ClrFunction clr)
+                    yield return AssemblyModuleRow(clr.ObjectId, clr.Entry);
+            }
 
-                yield return
-                [
-                    SqlValue.FromInt32(clr.ObjectId),
-                    SqlValue.FromInt32(clr.Assembly.AssemblyId),
-                    SqlValue.FromNVarchar(clr.ClassName),
-                    SqlValue.FromNVarchar(clr.MethodName),
-                    // Real reports 0 here for a routine created without
-                    // RETURNS NULL ON NULL INPUT (probe-confirmed); the
-                    // simulator doesn't accept that option on a CLR routine, so
-                    // the column is constant.
-                    SqlValue.FromBoolean(false),
-                    SqlValue.Null(SqlType.Int32),
-                ];
+            foreach (var procedure in schema.Procedures.Values)
+            {
+                if (procedure.ClrEntry is { } entry)
+                    yield return AssemblyModuleRow(procedure.ObjectId, entry);
             }
         }
     }
+
+    private static SqlValue[] AssemblyModuleRow(int objectId, ClrEntryPoint entry) =>
+    [
+        SqlValue.FromInt32(objectId),
+        SqlValue.FromInt32(entry.Assembly.AssemblyId),
+        SqlValue.FromNVarchar(entry.ClassName),
+        entry.MethodName is null ? SqlValue.Null(SqlType.NVarchar) : SqlValue.FromNVarchar(entry.MethodName),
+        // Real reports 0 here for a routine created without RETURNS NULL ON
+        // NULL INPUT (probe-confirmed); the simulator doesn't accept that
+        // option on a CLR routine, so the column is constant.
+        SqlValue.FromBoolean(false),
+        SqlValue.Null(SqlType.Int32),
+    ];
 }

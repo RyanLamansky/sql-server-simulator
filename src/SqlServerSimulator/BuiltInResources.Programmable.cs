@@ -1155,9 +1155,11 @@ internal static partial class BuiltInResources
                         SqlValue.FromByte(scale),
                         SqlValue.FromBoolean(param.IsOutput),
                         falseBit,
+                        // Only a CLR module reports its parameters' defaults
+                        // (probed 2026-09-28 against SQL Server 2025).
+                        proc.ClrEntry is not null && param.Default is not null ? trueBit : falseBit,
                         falseBit,
-                        falseBit,
-                        nullDefault,
+                        proc.ClrEntry is not null && param.Default is { } procDefault ? ClrDefaultValue(batch, procDefault) : nullDefault,
                         zeroInt,
                         SqlValue.FromBoolean(isTvp),
                         trueBit,
@@ -1173,16 +1175,25 @@ internal static partial class BuiltInResources
                 var fnObjectId = SqlValue.FromInt32(fn.ObjectId);
                 // Scalar UDFs get a synthetic parameter_id=0 return-type row;
                 // inline TVFs don't (their TABLE shape lives in sys.columns).
-                if (fn is ScalarFunction scalarFn)
+                // A CLR scalar function and an aggregate carry the same row
+                // (probed 2026-09-28 against SQL Server 2025).
+                var (returnType, returnSpelledNumeric, returnAlias) = fn switch
+                {
+                    ScalarFunction scalar => (scalar.ReturnType, scalar.ReturnSpelledNumeric, scalar.ReturnAliasType),
+                    ClrScalarFunction clrScalar => (clrScalar.ReturnType, false, null),
+                    ClrAggregateFunction aggregate => (aggregate.ReturnType, false, null),
+                    _ => (null, false, null),
+                };
+                if (returnType is not null)
                 {
                     var (returnMaxLength, returnPrecision, returnScale) =
-                        GetSysColumnMetadata(new HeapColumn(string.Empty, scalarFn.ReturnType, maxLength: null, nullable: true));
+                        GetSysColumnMetadata(new HeapColumn(string.Empty, returnType, maxLength: null, nullable: true));
                     yield return [
                         fnObjectId,
                         emptyName,
                         SqlValue.FromInt32(0),
-                        SqlValue.FromByte(SpelledTypeId(scalarFn.ReturnType, scalarFn.ReturnSpelledNumeric)),
-                        SqlValue.FromInt32(scalarFn.ReturnAliasType?.UserTypeId ?? (SpelledTypeId(scalarFn.ReturnType, scalarFn.ReturnSpelledNumeric) is 108 ? 108 : scalarFn.ReturnType.UserTypeId)),
+                        SqlValue.FromByte(SpelledTypeId(returnType, returnSpelledNumeric)),
+                        SqlValue.FromInt32(returnAlias?.UserTypeId ?? (SpelledTypeId(returnType, returnSpelledNumeric) is 108 ? 108 : returnType.UserTypeId)),
                         SqlValue.FromInt16(returnMaxLength),
                         SqlValue.FromByte(returnPrecision),
                         SqlValue.FromByte(returnScale),
@@ -1194,8 +1205,8 @@ internal static partial class BuiltInResources
                         zeroInt,
                         falseBit,
                         trueBit,
-                        VectorDims(scalarFn.ReturnType),
-                        VectorDesc(scalarFn.ReturnType),
+                        VectorDims(returnType),
+                        VectorDesc(returnType),
                     ];
                 }
                 for (var i = 0; i < fn.Parameters.Length; i++)
@@ -1214,9 +1225,9 @@ internal static partial class BuiltInResources
                         SqlValue.FromByte(scale),
                         falseBit,
                         falseBit,
+                        fn is ClrFunction && p.Default is not null ? trueBit : falseBit,
                         falseBit,
-                        falseBit,
-                        nullDefault,
+                        fn is ClrFunction && p.Default is { } fnDefault ? ClrDefaultValue(batch, fnDefault) : nullDefault,
                         zeroInt,
                         falseBit,
                         trueBit,
@@ -1226,6 +1237,16 @@ internal static partial class BuiltInResources
                 }
             }
         }
+    }
+
+    /// <summary>
+    /// A CLR module parameter's declared default as <c>sys.parameters.default_value</c>
+    /// reports it — the constant, as <c>sql_variant</c>.
+    /// </summary>
+    private static SqlValue ClrDefaultValue(Parser.BatchContext batch, Parser.Expression defaultExpression)
+    {
+        var value = defaultExpression.Run(new Parser.RuntimeContext(_ => throw SimulatedSqlException.MustDeclareScalarVariable(""), batch));
+        return value.IsNull ? SqlValue.Null(SqlType.SqlVariant) : SqlValue.FromVariant(value);
     }
 
     /// <summary>
@@ -1365,6 +1386,7 @@ internal static partial class BuiltInResources
                     {
                         InlineTableValuedFunction inline => inline.OutputColumns,
                         MultiStatementTableValuedFunction multiStatement => multiStatement.OutputColumns,
+                        ClrTableValuedFunction clr => clr.OutputColumns,
                         _ => [],
                     };
                     var functionName = SqlValue.FromSystemName(fn.Name);
@@ -1526,7 +1548,7 @@ internal static partial class BuiltInResources
                 nullSysName, nullSysName, nullSysName,
                 SqlValue.Null(SqlType.BigInt),
                 nullSysName,
-                SqlValue.FromNVarchar(routine is ClrScalarFunction ? "EXTERNAL" : "SQL"),
+                SqlValue.FromNVarchar(routine is ClrFunction or Procedure { ClrEntry: not null } ? "EXTERNAL" : "SQL"),
                 RoutineDefinition(definition),
                 nullSysName, nullNVarchar, nullNVarchar,
                 ModuleDeterminism.Evaluate(database, routine) == 1 ? yes : no,
@@ -1548,9 +1570,13 @@ internal static partial class BuiltInResources
                 yield return Row(schemaName, proc, isProcedure: true, null, false, proc.DefinitionText);
             foreach (var fn in schema.Functions.Values.OrderBy(f => f.ObjectId))
             {
-                yield return fn is ScalarFunction scalar
-                    ? Row(schemaName, fn, isProcedure: false, scalar.ReturnType, scalar.ReturnSpelledNumeric, fn.DefinitionText)
-                    : Row(schemaName, fn, isProcedure: false, null, false, fn.DefinitionText);
+                yield return fn switch
+                {
+                    ScalarFunction scalar => Row(schemaName, fn, isProcedure: false, scalar.ReturnType, scalar.ReturnSpelledNumeric, fn.DefinitionText),
+                    ClrScalarFunction clrScalar => Row(schemaName, fn, isProcedure: false, clrScalar.ReturnType, false, null),
+                    ClrAggregateFunction aggregate => Row(schemaName, fn, isProcedure: false, aggregate.ReturnType, false, null),
+                    _ => Row(schemaName, fn, isProcedure: false, null, false, fn.DefinitionText),
+                };
             }
         }
     }

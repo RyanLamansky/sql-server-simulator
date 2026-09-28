@@ -121,6 +121,7 @@ internal abstract class Aggregator
         AggregateKind.Product => new ProductAggregator(resultType, aggregate.Distinct),
         AggregateKind.ApproxPercentileCont or AggregateKind.ApproxPercentileDisc
             => new PercentileAggregator(resultType, aggregate.Kind == AggregateKind.ApproxPercentileCont, aggregate.OrderBy![0].Descending),
+        AggregateKind.ClrAggregate => new ClrAggregator(aggregate.ClrFunction!, aggregate.Distinct),
         _ => throw new NotSupportedException($"Aggregator for {aggregate.Kind} not implemented yet."),
     };
 

@@ -17,6 +17,10 @@
     <PackageVersion Include="Microsoft.EntityFrameworkCore.Proxies" Version="10.0.2" />
     <PackageVersion Include="Microsoft.EntityFrameworkCore.SqlServer" Version="10.0.2" />
     <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="18.3.0" />
+    <!-- The .NET Framework 4.8 reference assemblies SqlServerSimulator.Tests
+         compiles its SQLCLR fixture against, so the fixture has the shape real
+         SQL Server hosts. -->
+    <PackageVersion Include="Microsoft.NETFramework.ReferenceAssemblies.net48" Version="1.0.3" />
     <PackageVersion Include="Microsoft.SqlServer.SqlManagementObjects" Version="172.76.0" />
     <PackageVersion Include="Microsoft.SqlServer.Types" Version="160.1000.6" />
     <PackageVersion Include="MSTest.TestAdapter" Version="4.1.0" />

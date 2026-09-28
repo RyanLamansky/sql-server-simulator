@@ -584,6 +584,10 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException CannotDropFunctionDoesNotExist(string name) =>
         new($"Cannot drop the function '{name}', because it does not exist or you do not have permission.", 3701, 11, 5);
 
+    /// <summary>Mimics SQL Server error 3701 for <c>DROP AGGREGATE</c> naming no aggregate.</summary>
+    internal static SimulatedSqlException CannotDropAggregateDoesNotExist(string name) =>
+        new($"Cannot drop the aggregate function '{name}', because it does not exist or you do not have permission.", 3701, 11, 5);
+
     /// <summary>
     /// Mimics SQL Server error 3701 with the <c>view</c> wording variant.
     /// Real SQL Server reuses Msg 3701 across DROP TABLE / FUNCTION / VIEW /

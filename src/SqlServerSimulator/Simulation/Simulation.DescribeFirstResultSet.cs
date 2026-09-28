@@ -100,9 +100,14 @@ partial class Simulation
                     first = result;
                     break;
                 }
+
+                // A CLR procedure ahead of the first result set ends the
+                // question outright, however the batch runs on past errors.
+                if (outcome is SimulatedErrorOutcome { Exception.Number: 11515 } unanswerable)
+                    throw unanswerable.Exception.CopyOfError();
             }
         }
-        catch (SimulatedSqlException error)
+        catch (SimulatedSqlException error) when (error.Number != 11515)
         {
             // A name that resolves only at run time is the metadata question
             // every path fails (Msg 11529); anything else is a compile error.

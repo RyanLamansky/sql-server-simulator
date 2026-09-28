@@ -289,7 +289,9 @@ Re-fetch <https://learn.microsoft.com/en-us/sql/t-sql/functions/functions> befor
 
 Blocked on a larger unmodeled parent feature (shipping a function here implies the parent ships too):
 
-- **CLR procedures / TVFs / aggregates / UDTs** — CLR *scalar functions* ship (see [`clr-assemblies.md`](clr-assemblies.md)); the rest reference `Microsoft.SqlServer.Server.SqlContext` / `SqlPipe` / `SqlDataRecord` / `SqlMetaData`, which lived in .NET Framework's `System.Data.dll` and are absent from .NET's facade, so they need a substitute `System.Data` injected into the load context that type-forwards `SqlTypes` onward and supplies the missing namespace. That shim is the whole cost; scalar functions needed none, which is why they shipped first.
+- **CLR UDTs, CLR triggers and the SQLCLR context connection** — CLR scalar and table-valued functions, procedures and aggregates ship over the `Microsoft.SqlServer.Server` load-context shim (see [`clr-assemblies.md`](clr-assemblies.md)).
+  A UDT is the largest remainder: a `SqlType` backed by the assembly's class, its `Format.Native` / `IBinarySerialize` storage, `Parse` / `ToString` conversions and `col.Method()` / `Type::Static()` calls.
+  The context connection needs an in-process `System.Data.SqlClient` surface the shim doesn't carry.
 - **ML scoring** (PREDICT surface not modeled) — PREDICT(MODEL = …, DATA = …).
 - **Ad-hoc data sources** — OPENROWSET (file/bulk + provider rowsets); OPENDATASOURCE (the inline four-part-name form; `OPENQUERY` ships — see [`linked-servers.md`](linked-servers.md), and `OPENXML` + the `sp_xml_preparedocument` / `sp_xml_removedocument` pair ship too — see [`xml.md`](xml.md#openxml)).
   Probed: real *parses* `OPENROWSET('MSDASQL', …)` then errors on disabled ad-hoc access (**Msg 7222**) and `OPENROWSET(BULK 'file', SINGLE_CLOB)` on the missing file (**Msg 4860**); the simulator doesn't parse the FROM-source form at all (Msg 102). Ad-hoc / external data access is a feature, not a syntax tweak — the parse-then-runtime-error shape depends on the whole external-data model.
@@ -351,6 +353,8 @@ Entries are verified against the simulator, so one that no longer reproduces is 
 ## Fidelity gaps in shipped behavior
 
 Real bugs / limitations against shipped behavior — fixes are concrete work, not design decisions.
+
+- **A CLR aggregate's state never round-trips through `Write` / `Read`**, and `Merge` never runs — one in-memory instance accumulates each group, so an aggregate whose `IBinarySerialize` drops a field answers here where real may lose it; and a Msg 6522 / 6260 stack lists only the author-visible frames, real's own internal ones having no counterpart (probed 2026-09-28) → [`clr-assemblies.md`](clr-assemblies.md#divergences).
 
 - **A scalar UDF body's missing object is reported once** (probed 2026-09-26 against SQL Server 2025).
   A statement calling a non-schema-bound scalar UDF whose body names a missing object gets Msg 208 **twice** on real, where the simulator raises only the second; a multi-statement TVF raises only the caller's on both.

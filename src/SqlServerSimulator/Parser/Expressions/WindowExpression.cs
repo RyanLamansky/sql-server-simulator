@@ -777,6 +777,19 @@ internal sealed class WindowExpression : Expression
         if (TryParseWindowReference(context, frameRejectingFunction: null) is { } reference)
             return RegisterNamedWindowReference(context, new WindowExpression(WindowKind.Aggregate, [], [], aggregate), reference);
 
+        // A CLR aggregate's window takes a partition and nothing more: an
+        // ORDER BY is Msg 156 at the keyword (probed 2026-09-28 against SQL
+        // Server 2025).
+        if (aggregate.Kind == AggregateKind.ClrAggregate)
+        {
+            var partitionBy = ParseOptionalPartitionBy(context);
+            if (context.Token is ReservedKeyword { Keyword: Keyword.Order } orderKeyword)
+                throw SimulatedSqlException.SyntaxErrorNearKeyword(orderKeyword);
+            return context.Token is not Operator { Character: ')' }
+                ? throw SimulatedSqlException.SyntaxErrorNear(context)
+                : Register(context, new WindowExpression(WindowKind.Aggregate, partitionBy, [], aggregate));
+        }
+
         // COUNT(*) / COUNT_BIG(*) — the two aggregates that carry no operand —
         // may frame an unordered partition; every other aggregate takes
         // Msg 10756. Probe-confirmed against SQL Server 2025:

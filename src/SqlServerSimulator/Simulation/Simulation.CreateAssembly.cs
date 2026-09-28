@@ -165,14 +165,7 @@ partial class Simulation
         bool isAlter,
         bool createOrAlter)
     {
-        if (context.GetNextRequired() is not Name nameWord || !nameWord.Value.Equals("NAME", StringComparison.OrdinalIgnoreCase))
-            throw SimulatedSqlException.SyntaxErrorNear(context);
-
-        context.MoveNextRequired();
-        var externalName = BatchContext.ParseObjectName(context);
-        if (externalName.Count != 3)
-            throw SimulatedSqlException.SyntaxErrorNear(context);
-        context.MoveNextOptional();
+        var externalName = ParseExternalName(context, 3);
 
         if (context.Batch.IsSkipping)
             return true;
@@ -181,23 +174,10 @@ partial class Simulation
             context, "CREATE FUNCTION", functionName, schema, isAlter, createOrAlter,
             schema.Functions.GetValueOrDefault(functionName.Leaf));
 
-        var replaced = ResolveFunctionAlterTarget<ClrScalarFunction>(context, schema, functionName, isAlter, createOrAlter);
+        var replaced = ResolveClrFunctionAlterTarget<ClrScalarFunction>(context, schema, functionName, isAlter, createOrAlter);
 
-        var database = context.CurrentDatabase;
-        var assemblyName = externalName[0];
-        var className = externalName[1];
-        var methodName = externalName[2];
-
-        if (!database.Assemblies.TryGetValue(assemblyName, out var assembly))
-            throw SimulatedSqlException.AssemblyNotFoundInDatabase(assemblyName, database.Name);
-
-        if (!context.Batch.Connection.Simulation.EnableClr)
-            throw SimulatedSqlException.ClrExecutionDisabled();
-
-        var type = assembly.Load().GetType(className)
-            ?? throw SimulatedSqlException.ClrTypeNotFound(className, assemblyName);
-        var method = type.GetMethod(methodName, BindingFlags.Public | BindingFlags.Static)
-            ?? throw SimulatedSqlException.ClrMethodNotFound(methodName, className, assemblyName);
+        var (assembly, type) = ResolveClrClass(context, externalName[0], externalName[1]);
+        var method = ResolveClrMethod(type, externalName[2], externalName[1], assembly.Name);
 
         var methodParameters = method.GetParameters();
         if (methodParameters.Length != parameters.Count)
@@ -215,13 +195,10 @@ partial class Simulation
         var clrFunction = new ClrScalarFunction(
             schema,
             functionName.Leaf,
-            replaced?.ObjectId ?? database.AllocateObjectId(),
+            replaced?.ObjectId ?? context.CurrentDatabase.AllocateObjectId(),
             [.. parameters],
             returnType,
-            assembly,
-            className,
-            methodName,
-            method,
+            new ClrEntryPoint(assembly, externalName[1], externalName[2], type, method),
             replaced?.CreateDate ?? context.Batch.CurrentStatement.UtcNow)
         {
             IsSchemaBound = isSchemaBound,
@@ -231,6 +208,69 @@ partial class Simulation
         schema.Functions[functionName.Leaf] = clrFunction;
         RecordSlotUndo(context, schema.Functions, functionName.Leaf, replaced);
         return true;
+    }
+
+    /// <summary>
+    /// Reads the <c>NAME assembly.[class].method</c> after <c>EXTERNAL</c>,
+    /// leaving the cursor after it. Cursor on entry: the <c>EXTERNAL</c> word.
+    /// Any other number of parts is Msg 102 at the last one.
+    /// </summary>
+    private static MultiPartName ParseExternalName(ParserContext context, int parts)
+    {
+        if (context.GetNextRequired() is not Name nameWord || !nameWord.Value.Equals("NAME", StringComparison.OrdinalIgnoreCase))
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+
+        context.MoveNextRequired();
+        var externalName = BatchContext.ParseObjectName(context);
+        if (externalName.Count != parts)
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        context.MoveNextOptional();
+        return externalName;
+    }
+
+    /// <summary>
+    /// Finds the registered assembly (Msg 6528) and the class inside it (Msg
+    /// 6505) an <c>EXTERNAL NAME</c> clause names, loading the assembly — which
+    /// the host must have enabled CLR for (Msg 6263).
+    /// </summary>
+    [System.Diagnostics.CodeAnalysis.UnconditionalSuppressMessage(
+        "Trimming",
+        "IL2026:RequiresUnreferencedCode",
+        Justification = "Assembly.GetType resolves against bytes supplied at run time by CREATE ASSEMBLY; the type name comes from the EXTERNAL NAME clause, and trimming cannot reach into an assembly outside the application's static closure.")]
+    private static (SqlAssembly Assembly, Type Type) ResolveClrClass(ParserContext context, string assemblyName, string className, bool forAggregate = false)
+    {
+        var database = context.CurrentDatabase;
+        if (!database.Assemblies.TryGetValue(assemblyName, out var assembly))
+            throw SimulatedSqlException.AssemblyNotFoundInDatabase(assemblyName, database.Name);
+
+        if (!context.Batch.Connection.Simulation.EnableClr)
+            throw SimulatedSqlException.ClrExecutionDisabled();
+
+        var type = assembly.Load().GetType(className);
+        return type is not null
+            ? (assembly, type)
+            : throw (forAggregate
+                ? SimulatedSqlException.Aggregate([SimulatedSqlException.ClrAggregateTypeNotFound(className, assemblyName), SimulatedSqlException.ClrAggregateFailed()])
+                : SimulatedSqlException.ClrTypeNotFound(className, assemblyName));
+    }
+
+    /// <summary>
+    /// The public static method an <c>EXTERNAL NAME</c> clause names (Msg 6506
+    /// when there is none), preferring the first overload.
+    /// </summary>
+    [System.Diagnostics.CodeAnalysis.UnconditionalSuppressMessage(
+        "Trimming",
+        "IL2070:DynamicallyAccessedMembers",
+        Justification = "The type comes from an assembly registered from bytes at run time, outside the application's static closure, so trimming cannot affect its members.")]
+    private static MethodInfo ResolveClrMethod(Type type, string methodName, string className, string assemblyName)
+    {
+        foreach (var method in type.GetMethods(BindingFlags.Public | BindingFlags.Static))
+        {
+            if (method.Name == methodName)
+                return method;
+        }
+
+        throw SimulatedSqlException.ClrMethodNotFound(methodName, className, assemblyName);
     }
 
     /// <summary>
@@ -299,8 +339,9 @@ partial class Simulation
     }
 
     /// <summary>
-    /// The name of the first CLR routine bound to <paramref name="assembly"/>,
-    /// or <see langword="null"/> when nothing references it.
+    /// The name of the first CLR module bound to <paramref name="assembly"/> —
+    /// a function of any kind or a procedure — or <see langword="null"/> when
+    /// nothing references it.
     /// </summary>
     private static string? FindClrDependent(Database database, SqlAssembly assembly)
     {
@@ -308,8 +349,14 @@ partial class Simulation
         {
             foreach (var function in schema.Functions.Values)
             {
-                if (function is ClrScalarFunction clr && clr.Assembly == assembly)
+                if (function is ClrFunction clr && clr.Entry.Assembly == assembly)
                     return clr.Name;
+            }
+
+            foreach (var procedure in schema.Procedures.Values)
+            {
+                if (procedure.ClrEntry?.Assembly == assembly)
+                    return procedure.Name;
             }
         }
 

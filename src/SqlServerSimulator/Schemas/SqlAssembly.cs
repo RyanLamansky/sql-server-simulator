@@ -37,14 +37,11 @@ internal enum AssemblyPermissionSet : byte
 /// than resurrecting the old types.
 /// </para>
 /// <para>
-/// <strong>Never read custom attributes off the loaded assembly.</strong> A
-/// SQLCLR assembly built against .NET Framework decorates its routines with
-/// <c>Microsoft.SqlServer.Server.SqlFunctionAttribute</c>, which type-forwards
-/// to <c>System.Data.SqlClient</c> — an assembly that does not exist on
-/// modern .NET, so any <c>GetCustomAttributes</c> call throws
-/// <see cref="FileNotFoundException"/>. Method binding goes through the
-/// <c>EXTERNAL NAME</c> triple instead, which names the type and method
-/// directly and needs no attribute resolution.
+/// The context is a <see cref="SqlAssemblyLoadContext"/>, which answers the
+/// assembly's <c>System.Data</c> and <c>Microsoft.SqlServer.Server</c>
+/// references from <see cref="ClrHost"/> — that substitution is what lets a
+/// .NET Framework assembly reach <c>SqlContext</c>, <c>SqlPipe</c> and the
+/// routine attributes on .NET.
 /// </para>
 /// </remarks>
 internal sealed class SqlAssembly(
@@ -83,6 +80,14 @@ internal sealed class SqlAssembly(
     public readonly string ClrName = ClrAssemblyMetadata.BuildClrName(content);
 
     private readonly Lock loadLock = new();
+
+    /// <summary>
+    /// Whether the loaded assembly references <c>System.Data</c> or
+    /// <c>Microsoft.SqlServer.Server</c>, and so may read <c>SqlContext</c>: a
+    /// call into it opens a <see cref="ClrHost.Enter"/> scope. Set by
+    /// <see cref="Load"/>.
+    /// </summary>
+    public bool UsesServerContext;
     private AssemblyLoadContext? loadContext;
     private Assembly? loaded;
 
@@ -101,10 +106,11 @@ internal sealed class SqlAssembly(
             if (this.loaded is not null)
                 return this.loaded;
 
-            var context = new AssemblyLoadContext($"SqlAssembly:{this.Name}", isCollectible: true);
+            var context = new SqlAssemblyLoadContext($"SqlAssembly:{this.Name}");
             try
             {
                 this.loaded = context.LoadFromStream(new MemoryStream(this.Content, writable: false));
+                this.UsesServerContext = Array.Exists(this.loaded.GetReferencedAssemblies(), ClrHost.Hosts);
             }
             catch
             {

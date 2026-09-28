@@ -707,6 +707,7 @@ internal static partial class BuiltInResources
                 {
                     InlineTableValuedFunction inline => (inline.OutputColumns, false),
                     MultiStatementTableValuedFunction multiStatement => (multiStatement.OutputColumns, true),
+                    ClrTableValuedFunction clr => (clr.OutputColumns, true),
                     _ => ([], false),
                 };
                 var fnObjectId = SqlValue.FromInt32(fn.ObjectId);

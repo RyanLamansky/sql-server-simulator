@@ -553,6 +553,7 @@ partial class Simulation
         ("sp_bindrule", 15107) => (162, null),
         ("sp_bindrule", 15148) => (225, null),
         ("sp_configure", 15123) => (62, null),
+        ("sp_describe_first_result_set", 11515) => (1, null),
         ("sp_depends", 15009) => (25, null),
         ("sp_fkeys", 15252) => (20, null),
         ("sp_help", 15009) => (79, null),
@@ -875,6 +876,7 @@ internal sealed class HelpTarget
             View v => v.OutputColumns,
             InlineTableValuedFunction f => f.OutputColumns,
             MultiStatementTableValuedFunction f => f.OutputColumns,
+            ClrTableValuedFunction f => f.OutputColumns,
             _ => null,
         };
     }

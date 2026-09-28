@@ -3165,13 +3165,19 @@ internal sealed partial class Selection
                         var tvfArgs = InArgumentScope(context, scope, () => Expressions.UserFunctionCall.ParseFunctionArguments(function, context));
                         // ParseFunctionArguments leaves the cursor on the closing `)`.
                         var tvfAlias = ConsumeOptionalAlias(context);
-                        var outputColumns = function is InlineTableValuedFunction inline
-                            ? inline.OutputColumns
-                            : ((MultiStatementTableValuedFunction)function).OutputColumns;
+                        var outputColumns = function switch
+                        {
+                            InlineTableValuedFunction inline => inline.OutputColumns,
+                            ClrTableValuedFunction clr => clr.OutputColumns,
+                            _ => ((MultiStatementTableValuedFunction)function).OutputColumns,
+                        };
                         _ = RecordSecurableRead(context, function, objectName);
-                        var lateralPlan = function is InlineTableValuedFunction inlineTvf
-                            ? Selection.ForInlineTvf(inlineTvf, tvfArgs, objectName)
-                            : Selection.ForMultiStatementTvf((MultiStatementTableValuedFunction)function, tvfArgs);
+                        var lateralPlan = function switch
+                        {
+                            InlineTableValuedFunction inlineTvf => Selection.ForInlineTvf(inlineTvf, tvfArgs, objectName),
+                            ClrTableValuedFunction clrTvf => Selection.ForClrTvf(clrTvf, tvfArgs),
+                            _ => Selection.ForMultiStatementTvf((MultiStatementTableValuedFunction)function, tvfArgs),
+                        };
                         return new FromSource(
                             qualifier: tvfAlias ?? function.Name,
                             columnNames: [.. outputColumns.Select(c => c.Name)],

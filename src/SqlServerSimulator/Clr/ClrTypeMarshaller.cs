@@ -1,3 +1,4 @@
+using System.Data;
 using System.Data.SqlTypes;
 using SqlServerSimulator.Storage;
 
@@ -32,7 +33,7 @@ internal static class ClrTypeMarshaller
     /// </summary>
     public static bool Matches(SqlType sqlType, Type clrType) => sqlType switch
     {
-        NVarcharSqlType => clrType == typeof(SqlString),
+        NVarcharSqlType or NCharSqlType => clrType == typeof(SqlString),
         Int32SqlType => clrType == typeof(SqlInt32),
         BigIntSqlType => clrType == typeof(SqlInt64),
         SmallIntSqlType => clrType == typeof(SqlInt16),
@@ -147,4 +148,108 @@ internal static class ClrTypeMarshaller
         : clrType == typeof(SqlGuid) ? SqlGuid.Null
         : clrType == typeof(SqlXml) ? SqlXml.Null
         : throw new NotSupportedException($"CLR type '{clrType.FullName}' is not a modeled SQLCLR parameter type.");
+
+    /// <summary>
+    /// The declared width, in characters, that <paramref name="value"/>
+    /// overflows as the return value or output parameter of a CLR routine
+    /// declaring <paramref name="declared"/>, or <see langword="null"/> when it
+    /// fits. Real refuses such a value with a TruncationException rather than
+    /// cutting it (probed 2026-09-28 against SQL Server 2025).
+    /// </summary>
+    public static int? OverflowedWidth(SqlValue value, SqlType declared) =>
+        !value.IsNull && declared is NVarcharSqlType { length: > 0 } nvarchar && value.AsString.Length > nvarchar.length
+            ? nvarchar.length
+            : null;
+
+    /// <summary>
+    /// The T-SQL type of a column a CLR procedure declared through
+    /// <c>SqlMetaData</c>, character columns taking
+    /// <paramref name="collation"/> (the database's).
+    /// </summary>
+    public static SqlType ColumnType(SqlDbType dbType, long maxLength, byte precision, byte scale, Collation collation)
+    {
+        var length = maxLength < 0 ? SqlType.MaxLengthSentinel : (int)maxLength;
+        return dbType switch
+        {
+            SqlDbType.BigInt => SqlType.BigInt,
+            SqlDbType.Binary => BinarySqlType.Get(length),
+            SqlDbType.Bit => SqlType.Bit,
+            SqlDbType.Char => CharSqlType.Get(length, collation, Coercibility.CoercibleDefault),
+            SqlDbType.Date => SqlType.Date,
+            SqlDbType.DateTime => SqlType.DateTime,
+            SqlDbType.DateTime2 => SqlType.GetDateTime2(scale),
+            SqlDbType.DateTimeOffset => SqlType.GetDateTimeOffset(scale),
+            SqlDbType.Decimal => DecimalSqlType.Get(precision, scale),
+            SqlDbType.Float => SqlType.Float,
+            SqlDbType.Image => SqlType.Image,
+            SqlDbType.Int => SqlType.Int32,
+            SqlDbType.Money => SqlType.Money,
+            SqlDbType.NChar => NCharSqlType.Get(length, collation, Coercibility.CoercibleDefault),
+            SqlDbType.NText => SqlType.NText,
+            SqlDbType.NVarChar => NVarcharSqlType.Get(length, collation, Coercibility.CoercibleDefault),
+            SqlDbType.Real => SqlType.Real,
+            SqlDbType.SmallDateTime => SqlType.SmallDateTime,
+            SqlDbType.SmallInt => SqlType.SmallInt,
+            SqlDbType.SmallMoney => SqlType.SmallMoney,
+            SqlDbType.Text => SqlType.Text,
+            SqlDbType.Time => SqlType.GetTime(scale),
+            SqlDbType.Timestamp => SqlType.RowVersion,
+            SqlDbType.TinyInt => SqlType.TinyInt,
+            SqlDbType.UniqueIdentifier => SqlType.UniqueIdentifier,
+            SqlDbType.VarBinary => VarbinarySqlType.Get(length),
+            SqlDbType.VarChar => VarcharSqlType.Get(length, collation, Coercibility.CoercibleDefault),
+            SqlDbType.Variant => SqlType.SqlVariant,
+            SqlDbType.Xml => SqlType.Xml,
+            _ => throw new NotSupportedException($"A SqlMetaData column of type {dbType} is not modeled."),
+        };
+    }
+
+    /// <summary>
+    /// Converts a value a routine stored in a <c>SqlDataRecord</c> — a plain
+    /// CLR value or a <see cref="System.Data.SqlTypes"/> struct — to
+    /// <paramref name="target"/>, the type of the column it fills. A decimal
+    /// with more fractional digits than its column drops the extra ones
+    /// rather than rounding (probed 2026-09-28 against SQL Server 2025: 1.5
+    /// sent as <c>decimal(18, 0)</c> reads 1).
+    /// </summary>
+    public static SqlValue FromRecordValue(object? value, SqlType target)
+    {
+        if (value is null or DBNull or INullable { IsNull: true })
+            return SqlValue.Null(target);
+
+        if (target is DecimalSqlType { scale: var targetScale } && value is decimal or SqlDecimal)
+        {
+            var exact = value is decimal plain ? new SqlDecimal(plain) : (SqlDecimal)value;
+            if (exact.Scale > targetScale)
+                value = SqlDecimal.AdjustScale(exact, targetScale - exact.Scale, fRound: false);
+        }
+
+        var natural = value switch
+        {
+            string text => SqlValue.FromNVarchar(text),
+            char character => SqlValue.FromNVarchar(character.ToString()),
+            int number => SqlValue.FromInt32(number),
+            long number => SqlValue.FromInt64(number),
+            short number => SqlValue.FromInt16(number),
+            byte number => SqlValue.FromByte(number),
+            bool flag => SqlValue.FromBoolean(flag),
+            double number => SqlValue.FromDouble(number),
+            float number => SqlValue.FromSingle(number),
+            decimal number => SqlValue.FromDecimal(DecimalSqlType.Get(Decimal38.MaxPrecision, number.Scale), number),
+            DateTime moment => SqlValue.FromDateTime2(SqlType.GetDateTime2(7), moment),
+            DateTimeOffset moment => SqlValue.FromDateTimeOffset(SqlType.GetDateTimeOffset(7), moment),
+            TimeSpan time => SqlValue.FromTime(SqlType.GetTime(7), time),
+            Guid guid => SqlValue.FromGuid(guid),
+            byte[] bytes => SqlValue.FromVarbinary(bytes),
+            SqlString text => SqlValue.FromNVarchar(text.Value),
+            SqlDecimal number => FromClr(number, DecimalSqlType.Get(Math.Max(number.Precision, (byte)1), number.Scale)),
+            SqlMoney money => SqlValue.FromMoney(SqlType.Money, money.Value),
+            SqlBinary bytes => SqlValue.FromVarbinary(bytes.Value),
+            SqlBytes bytes => SqlValue.FromVarbinary(bytes.Value),
+            SqlChars chars => SqlValue.FromNVarchar(new string(chars.Value)),
+            INullable => FromClr(value, SqlType.SqlVariant),
+            _ => throw new InvalidCastException($"A value of type {value.GetType().FullName} cannot be sent in a SqlDataRecord."),
+        };
+        return natural.CoerceTo(target);
+    }
 }

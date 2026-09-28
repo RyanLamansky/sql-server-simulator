@@ -52,8 +52,16 @@ internal sealed class Procedure(
     /// </summary>
     public readonly int BodyLineOffset = bodyLineOffset;
 
-    public override string ObjectTypeCode => "P ";
-    public override string ObjectTypeDescription => "SQL_STORED_PROCEDURE";
+    public override string ObjectTypeCode => this.ClrEntry is null ? "P " : "PC";
+    public override string ObjectTypeDescription => this.ClrEntry is null ? "SQL_STORED_PROCEDURE" : "CLR_STORED_PROCEDURE";
+
+    /// <summary>
+    /// The bound method of a CLR procedure (<c>AS EXTERNAL NAME</c>), which
+    /// runs in place of a body; <see langword="null"/> for a T-SQL procedure.
+    /// A CLR procedure's <see cref="BodyText"/> is empty and it has no
+    /// <c>sys.sql_modules</c> row.
+    /// </summary>
+    public ClrEntryPoint? ClrEntry;
 
     /// <summary>
     /// Declared parameters in source order. Each carries name, type, optional

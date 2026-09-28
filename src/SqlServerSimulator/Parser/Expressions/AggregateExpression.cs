@@ -26,6 +26,9 @@ internal enum AggregateKind
     Product,
     ApproxPercentileCont,
     ApproxPercentileDisc,
+
+    /// <summary>A CLR user-defined aggregate; see <see cref="AggregateExpression.ClrFunction"/>.</summary>
+    ClrAggregate,
 }
 
 /// <summary>
@@ -84,7 +87,7 @@ internal sealed class AggregateExpression : Expression
     internal SqlValue ObserveInput(SqlValue value, RuntimeContext runtime)
     {
         if (value.IsNull && this.WarnsOnNullInput && !this.CountsRowsOnly && this.Operand is not null
-            && this.Kind is not (AggregateKind.StringAgg or AggregateKind.JsonArrayAgg or AggregateKind.JsonObjectAgg))
+            && this.Kind is not (AggregateKind.StringAgg or AggregateKind.JsonArrayAgg or AggregateKind.JsonObjectAgg or AggregateKind.ClrAggregate))
         {
             runtime.Batch.CurrentStatement.NullEliminated = true;
         }
@@ -141,6 +144,19 @@ internal sealed class AggregateExpression : Expression
     /// </summary>
     public bool ReturningJson;
 
+    /// <summary>
+    /// For <see cref="AggregateKind.ClrAggregate"/>, the aggregate called;
+    /// null for every other kind.
+    /// </summary>
+    public Schemas.ClrAggregateFunction? ClrFunction;
+
+    /// <summary>
+    /// For <see cref="AggregateKind.ClrAggregate"/>, every argument in order —
+    /// <see cref="Operand"/> is the first — since a CLR aggregate's
+    /// <c>Accumulate</c> may take several.
+    /// </summary>
+    public Expression[]? ClrArguments;
+
     private AggregateExpression(AggregateKind kind, Expression? operand, bool distinct, Expression? separator)
     {
         this.Kind = kind;
@@ -176,6 +192,7 @@ internal sealed class AggregateExpression : Expression
         AggregateKind.Product => "product",
         AggregateKind.ApproxPercentileCont => "approx_percentile_cont",
         AggregateKind.ApproxPercentileDisc => "approx_percentile_disc",
+        AggregateKind.ClrAggregate => "aggregate",
         _ => throw new InvalidOperationException($"Unknown aggregate kind {kind}."),
     };
 
@@ -329,8 +346,77 @@ internal sealed class AggregateExpression : Expression
         AggregateKind.Avg => DeriveAvgResultType(this.RejectDistinctLob(this.Operand!.GetSqlType(batch, resolveColumnType))),
         AggregateKind.Product => DeriveProductResultType(this.RejectDistinctLob(this.Operand!.GetSqlType(batch, resolveColumnType))),
         AggregateKind.ApproxPercentileCont or AggregateKind.ApproxPercentileDisc => this.BindApproxPercentile(batch, resolveColumnType),
+        AggregateKind.ClrAggregate => this.BindClrArguments(batch, resolveColumnType),
         _ => throw new InvalidOperationException($"Unknown aggregate kind {this.Kind}."),
     };
+
+    /// <summary>
+    /// A CLR aggregate's arguments each bind to their declared parameter's
+    /// type as an assignment would; the result is the declared
+    /// <c>RETURNS</c> type.
+    /// </summary>
+    private SqlType BindClrArguments(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        var function = this.ClrFunction!;
+        for (var i = 0; i < this.ClrArguments!.Length; i++)
+            _ = AssignmentRules.ArgumentType(this.ClrArguments[i], function.Parameters[i].Type, batch, resolveColumnType);
+        return function.ReturnType;
+    }
+
+    /// <summary>
+    /// Parses a CLR aggregate's call — <c>schema.name([DISTINCT | ALL] arg,
+    /// …)</c> — entered with the cursor on the token after <c>(</c> and left on
+    /// the closing <c>)</c>. Real reads NULL inputs into <c>Accumulate</c> and
+    /// raises no Msg 8153 for them, and a wrong argument count is Msg 174
+    /// naming the call as written (probed 2026-09-28 against SQL Server 2025).
+    /// </summary>
+    internal static AggregateExpression ParseClr(Schemas.ClrAggregateFunction function, MultiPartName written, ParserContext context)
+    {
+        context.SecurableSink?.Add(new ReferencedSecurable(function.Schema.Database, function.ObjectId, function.SchemaId, function.Name, function.Schema.Name, "EXECUTE"));
+        var savedRejection = context.EnterNextValueForScope(NextValueForScope.Aggregate);
+        try
+        {
+            var distinct = false;
+            switch (context.Token)
+            {
+                case ReservedKeyword { Keyword: Keyword.Distinct }:
+                    distinct = true;
+                    context.MoveNextRequired();
+                    break;
+                case ReservedKeyword { Keyword: Keyword.All }:
+                    context.MoveNextRequired();
+                    break;
+            }
+
+            var aggregatesBefore = context.AggregatesParsed;
+            var subqueriesBefore = context.SubqueriesParsed;
+            List<Expression> arguments = [];
+            if (context.Token is not Operator { Character: ')' })
+            {
+                while (true)
+                {
+                    arguments.Add(Expression.Parse(context));
+                    if (context.Token is not Operator { Character: ',' })
+                        break;
+                    context.MoveNextRequired();
+                }
+            }
+            if (context.Token is not Operator { Character: ')' })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            if (arguments.Count != function.Parameters.Length)
+                throw SimulatedSqlException.FunctionRequiresNArguments(written.ToString(), function.Parameters.Length);
+            ValidateOperand(context, AggregateKind.ClrAggregate, arguments[0], aggregatesBefore, subqueriesBefore);
+            return Register(context, new AggregateExpression(AggregateKind.ClrAggregate, arguments[0], distinct, separator: null)
+            {
+                ClrFunction = function,
+                ClrArguments = [.. arguments],
+            });
+        }
+        finally
+        {
+            context.NextValueForRejection = savedRejection;
+        }
+    }
 
     /// <summary>
     /// The operand rule of an aggregate that reads only some types, settled
@@ -760,6 +846,7 @@ internal sealed class AggregateExpression : Expression
             AggregateKind.Product => "PRODUCT",
             AggregateKind.ApproxPercentileCont => "APPROX_PERCENTILE_CONT",
             AggregateKind.ApproxPercentileDisc => "APPROX_PERCENTILE_DISC",
+            AggregateKind.ClrAggregate => $"{this.ClrFunction!.Schema.Name}.{this.ClrFunction.Name}",
             _ => this.Kind.ToString(),
         };
         if (this.Kind == AggregateKind.JsonObjectAgg)
@@ -767,6 +854,8 @@ internal sealed class AggregateExpression : Expression
         var distinct = this.Distinct ? "DISTINCT " : "";
         var operand = this.Operand?.DebugDisplay() ?? "*";
         var separator = this.Separator is null ? "" : $", {this.Separator.DebugDisplay()}";
+        if (this.ClrArguments is { } clrArguments)
+            separator = string.Concat(clrArguments.Skip(1).Select(argument => ", " + argument.DebugDisplay()));
         return $"{name}({distinct}{operand}{separator})";
     }
 
@@ -775,5 +864,9 @@ internal sealed class AggregateExpression : Expression
         _ = shape.Local(this.Kind).Local(this.Distinct).Local(this.JsonNulls).Local(this.ReturningJson).Child(this.KeyExpression).Child(this.Operand).Child(this.Separator).Local(this.OrderBy?.Count ?? -1);
         foreach (var item in this.OrderBy ?? [])
             _ = shape.Local(item.Descending).Local(item.Ordinal).Child(item.Expr);
+        // A CLR aggregate's first argument is its Operand, reported above.
+        _ = shape.Local(this.ClrFunction);
+        for (var i = 1; i < (this.ClrArguments?.Length ?? 0); i++)
+            _ = shape.Child(this.ClrArguments![i]);
     }
 }

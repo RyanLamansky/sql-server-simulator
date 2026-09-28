@@ -69,6 +69,8 @@ partial class Simulation
                 return Simulation.TryParseCreateStatistics(context);
             case Name assemblyWord when assemblyWord.Value.Equals("ASSEMBLY", StringComparison.OrdinalIgnoreCase):
                 return TryParseCreateAssembly(context);
+            case Name aggregateWord when aggregateWord.Value.Equals("AGGREGATE", StringComparison.OrdinalIgnoreCase):
+                return TryParseCreateAggregate(context);
             case ReservedKeyword { Keyword: Keyword.Or }:
                 // CREATE OR ALTER {PROCEDURE|TRIGGER|VIEW|FUNCTION} — modern
                 // upsert syntax.
