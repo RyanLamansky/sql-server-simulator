@@ -194,6 +194,7 @@ internal static class CatalogViewObjectIds
         ["sys.trigger_event_types"] = -895863199,
         ["sys.trigger_events"] = -415,
         ["sys.triggers"] = -412,
+        ["sys.type_assembly_usages"] = -483,
         ["sys.types"] = -423,
         ["sys.vector_indexes"] = -685,
         ["sys.views"] = -387,

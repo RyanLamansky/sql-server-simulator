@@ -47,7 +47,7 @@ internal sealed class ClrFunctionCall(ClrScalarFunction function, Expression?[] 
             throw SimulatedSqlException.ClrExecutionDisabled();
 
         var parameters = this.function.Entry.Method!.GetParameters();
-        var values = new object[parameters.Length];
+        var values = new object?[parameters.Length];
         for (var i = 0; i < parameters.Length; i++)
         {
             var argExpr = this.arguments[i];

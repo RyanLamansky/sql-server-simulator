@@ -180,6 +180,17 @@ partial class Simulation
                 break;
             }
 
+            // A CLR user-defined type column's property, field or mutator
+            // method: `SET col.X = …` or `SET col.Mutate(…)`.
+            if (setTarget.Count == 2 && context.Token is Operator { Character: '(' or '=' }
+                && ClrTypeColumn(context, leadingTable, setTarget[0]) is { } clrColumnType)
+            {
+                rawAssignments.Add((setTarget[0], ClrTypeMutation.Parse(new Reference(leadingIdent.WithAddedPart(setTarget[0])), setTarget[0], clrColumnType, columnName, context)));
+                if (context.Token is Operator { Character: ',' })
+                    continue;
+                break;
+            }
+
             if (setTarget.Count == 2 && XmlMethodCall.IsKnownMethodName(columnName) && context.Token is Operator { Character: '(' })
             {
                 rawAssignments.Add(ParseXmlMutatorSetClause(context, leadingIdent, leadingTable, setTarget[0], columnName));
@@ -431,6 +442,24 @@ partial class Simulation
     /// method takes a path and a value where xml's takes one XML-DML string.
     /// The cursor stays on the <c>(</c>.
     /// </summary>
+    /// <summary>
+    /// The CLR user-defined type of <paramref name="targetTable"/>'s column
+    /// <paramref name="columnName"/>, or <see langword="null"/>.
+    /// </summary>
+    private static ClrUdtSqlType? ClrTypeColumn(ParserContext context, HeapTable? targetTable, string columnName)
+    {
+        if (targetTable is null || !context.Simulation.EnableClr)
+            return null;
+        var collation = context.CurrentDatabase.Collation;
+        foreach (var column in targetTable.Columns)
+        {
+            if (collation.Equals(column.Name, columnName))
+                return column.Type as ClrUdtSqlType;
+        }
+
+        return null;
+    }
+
     private static bool IsJsonMutatorTarget(ParserContext context, HeapTable? targetTable, string columnName)
     {
         if (targetTable is not null)

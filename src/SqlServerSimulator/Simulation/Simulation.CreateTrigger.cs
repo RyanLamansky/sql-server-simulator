@@ -1,3 +1,4 @@
+using SqlServerSimulator.Clr;
 using SqlServerSimulator.Parser;
 using SqlServerSimulator.Parser.Tokens;
 using SqlServerSimulator.Schemas;
@@ -132,17 +133,13 @@ partial class Simulation
 
         var commandText = context.Command.CommandText;
         context.MoveNextOptional();
-        var bodyStart = context.Token?.StartIndex ?? commandText.Length;
-        var bodyEnd = commandText.Length;
-        while (context.Token is not null)
-        {
-            bodyEnd = context.Token.EndIndex;
-            context.MoveNextOptional();
-        }
-        var bodyText = commandText[bodyStart..bodyEnd];
+        var (bodyStart, bodyText, externalName) = ReadTriggerBody(context, commandText);
 
         if (context.Batch.IsSkipping)
             return true;
+
+        if (externalName is not null && options.Encryption)
+            throw SimulatedSqlException.ClrTriggerEncryption();
 
         // Resolve the parent. INSTEAD OF accepts a heap table or a view;
         // AFTER accepts a heap table only (Msg 8197 on view target,
@@ -176,21 +173,25 @@ partial class Simulation
         // resolution above. The stand-in trigger exists only to carry the
         // parent into the frame (which is what `UPDATE(col)` resolves against)
         // and never reaches the schema, so it takes no object id.
-        var pseudoColumns = parent is View bindView ? bindView.OutputColumns : ((HeapTable)parent).Columns;
-        var bindTrigger = new Trigger(
-            triggerSchema, triggerName.Leaf, objectId: 0, parent, actions, timing, bodyText,
-            createDate: context.Batch.CurrentStatement.UtcNow);
         var bodyLineOffset = CountNewlines(commandText, 0, bodyStart);
-        context.Simulation.BindTriggerBodyAtCreate(
-            context,
-            triggerName.Leaf,
-            new TriggerFrame(
-                bindTrigger,
-                MaterializePseudoTable(pseudoColumns, "inserted", [], context.Batch),
-                MaterializePseudoTable(pseudoColumns, "deleted", [], context.Batch),
-                columnsUpdatedMask: []),
-            bodyText,
-            bodyLineOffset);
+        var clrEntry = externalName is { } dmlExternalName ? BindClrTrigger(context, dmlExternalName) : null;
+        if (clrEntry is null)
+        {
+            var pseudoColumns = parent is View bindView ? bindView.OutputColumns : ((HeapTable)parent).Columns;
+            var bindTrigger = new Trigger(
+                triggerSchema, triggerName.Leaf, objectId: 0, parent, actions, timing, bodyText,
+                createDate: context.Batch.CurrentStatement.UtcNow);
+            context.Simulation.BindTriggerBodyAtCreate(
+                context,
+                triggerName.Leaf,
+                new TriggerFrame(
+                    bindTrigger,
+                    MaterializePseudoTable(pseudoColumns, "inserted", [], context.Batch),
+                    MaterializePseudoTable(pseudoColumns, "deleted", [], context.Batch),
+                    columnsUpdatedMask: []),
+                bodyText,
+                bodyLineOffset);
+        }
 
         // At most one INSTEAD OF trigger per action per target (Msg 2111).
         // ALTER / CREATE OR ALTER replacing an existing trigger by the
@@ -246,6 +247,7 @@ partial class Simulation
             throw SimulatedSqlException.InvalidObjectName(triggerName);
         if (existed && (isAlter || createOrAlter) && !ReferenceEquals(existing!.Parent, parent))
             throw SimulatedSqlException.CannotAlterTriggerOnDifferentObject(triggerName, parentName);
+        RejectClrTriggerKindChange(existed ? existing : null, clrEntry, triggerName);
         // A DML trigger is not a grantable securable of its own — real gates
         // both verbs on ALTER of the parent table / view (probe-confirmed).
         // Creating reports Msg 2104 naming the trigger as written; replacing an
@@ -273,7 +275,8 @@ partial class Simulation
             createDate: existed ? existing!.CreateDate : context.Batch.CurrentStatement.UtcNow,
             bodyLineOffset: bodyLineOffset)
         {
-            DefinitionText = options.Encryption ? null : BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, isAlter, createOrAlter),
+            DefinitionText = options.Encryption || clrEntry is not null ? null : BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, isAlter, createOrAlter),
+            ClrEntry = clrEntry,
             ExecuteAsClause = executeAsClause,
             ExecuteAsPrincipalId = ResolveExecuteAsPrincipalId(context, executeAsClause),
             UsesQuotedIdentifier = context.QuotedIdentifiers,
@@ -450,32 +453,32 @@ partial class Simulation
         // through end of batch, slice the raw text for sys.sql_modules.
         var commandText = context.Command.CommandText;
         context.MoveNextOptional();
-        var bodyStart = context.Token?.StartIndex ?? commandText.Length;
-        var bodyEnd = commandText.Length;
-        while (context.Token is not null)
-        {
-            bodyEnd = context.Token.EndIndex;
-            context.MoveNextOptional();
-        }
-        var bodyText = commandText[bodyStart..bodyEnd];
+        var (bodyStart, bodyText, externalName) = ReadTriggerBody(context, commandText);
 
         if (context.Batch.IsSkipping)
             return true;
+
+        if (externalName is not null && options.Encryption)
+            throw SimulatedSqlException.ClrTriggerEncryption();
 
         // Bind the body ahead of the collision gates, same ordering the DML
         // form uses. A DDL body has no INSERTED / DELETED, so the frame only
         // carries the stand-in trigger and an empty EVENTDATA document; the
         // stand-in never reaches the database and takes no object id.
         var bodyLineOffset = CountNewlines(commandText, 0, bodyStart);
-        context.Simulation.BindTriggerBodyAtCreate(
-            context,
-            triggerName.Leaf,
-            new TriggerFrame(
-                new DdlTrigger(triggerName.Leaf, objectId: 0, triggerSchema.SchemaId, eventTypes, bodyText,
-                    createDate: context.Batch.CurrentStatement.UtcNow, bodyLineOffset),
-                eventData: ""),
-            bodyText,
-            bodyLineOffset);
+        var clrEntry = externalName is { } ddlExternalName ? BindClrTrigger(context, ddlExternalName) : null;
+        if (clrEntry is null)
+        {
+            context.Simulation.BindTriggerBodyAtCreate(
+                context,
+                triggerName.Leaf,
+                new TriggerFrame(
+                    new DdlTrigger(triggerName.Leaf, objectId: 0, triggerSchema.SchemaId, eventTypes, bodyText,
+                        createDate: context.Batch.CurrentStatement.UtcNow, bodyLineOffset),
+                    eventData: ""),
+                bodyText,
+                bodyLineOffset);
+        }
 
         // DDL triggers live in their own per-database dict, but the NAME
         // collision check still applies against the per-schema shared
@@ -488,6 +491,7 @@ partial class Simulation
             throw SimulatedSqlException.ThereIsAlreadyAnObject(triggerName.Leaf, state: 2);
         if (isAlter && !existed)
             throw SimulatedSqlException.InvalidObjectName(triggerName);
+        RejectClrTriggerKindChange(existed ? existing : null, clrEntry, triggerName);
         // A database-scope DDL trigger is gated on ALTER ANY DATABASE DDL
         // TRIGGER instead of a parent object's ALTER (probe-confirmed).
         if (!PermissionEnforcement.HasDatabasePermission(context.Batch, context.CurrentDatabase, Permission.AlterAnyDatabaseDdlTrigger))
@@ -507,7 +511,8 @@ partial class Simulation
             createDate: existed ? existing!.CreateDate : context.Batch.CurrentStatement.UtcNow,
             bodyLineOffset: bodyLineOffset)
         {
-            DefinitionText = options.Encryption ? null : BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, isAlter, createOrAlter),
+            DefinitionText = options.Encryption || clrEntry is not null ? null : BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, isAlter, createOrAlter),
+            ClrEntry = clrEntry,
             UsesQuotedIdentifier = context.QuotedIdentifiers,
             UsesAnsiNulls = context.Batch.Connection.AnsiNulls,
         };
@@ -541,4 +546,66 @@ partial class Simulation
         return false;
     }
 
+
+    /// <summary>
+    /// Reads a trigger's body after <c>AS</c> to the end of the batch: the
+    /// T-SQL text, or for a CLR trigger the <c>EXTERNAL NAME
+    /// assembly.class.method</c> triple and no text. Cursor on entry: the first
+    /// token after <c>AS</c>.
+    /// </summary>
+    private static (int BodyStart, string BodyText, MultiPartName? ExternalName) ReadTriggerBody(ParserContext context, string commandText)
+    {
+        if (context.Token is ReservedKeyword { Keyword: Keyword.External })
+        {
+            var externalName = ParseExternalName(context, 3);
+            if (context.Token is not null)
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            return (commandText.Length, "", externalName);
+        }
+
+        var bodyStart = context.Token?.StartIndex ?? commandText.Length;
+        var bodyEnd = commandText.Length;
+        while (context.Token is not null)
+        {
+            bodyEnd = context.Token.EndIndex;
+            context.MoveNextOptional();
+        }
+        return (bodyStart, commandText[bodyStart..bodyEnd], null);
+    }
+
+    /// <summary>
+    /// Binds a CLR trigger's method: the assembly, class and method lookups
+    /// (Msg 6528 / 6505 / 6506), then a method that returns a value (Msg 6500)
+    /// or takes parameters (Msg 6531) — probed 2026-09-28 against SQL Server
+    /// 2025.
+    /// </summary>
+    private static ClrEntryPoint BindClrTrigger(ParserContext context, MultiPartName externalName)
+    {
+        var (assembly, type) = ResolveClrClass(context, externalName[0], externalName[1]);
+        var method = ResolveClrMethod(type, externalName[2], externalName[1], assembly.Name);
+        if (method.ReturnType != typeof(void))
+            throw SimulatedSqlException.ClrTriggerReturnType(externalName[2], externalName[1], assembly.Name, ClrTypeMarshaller.DisplayName(method.ReturnType));
+        if (method.GetParameters().Length != 0)
+            throw SimulatedSqlException.ClrTriggerTakesParameters(externalName[2], externalName[1], assembly.Name);
+        return new ClrEntryPoint(assembly, externalName[1], externalName[2], type, method);
+    }
+
+    /// <summary>
+    /// <c>ALTER</c> can't turn a T-SQL trigger into a CLR one (Msg 6530) or the
+    /// reverse (Msg 2010).
+    /// </summary>
+    private static void RejectClrTriggerKindChange(SchemaObject? existing, ClrEntryPoint? replacement, MultiPartName triggerName)
+    {
+        var (wasTrigger, existingEntry) = existing switch
+        {
+            Trigger dml => (true, dml.ClrEntry),
+            DdlTrigger ddl => (true, ddl.ClrEntry),
+            _ => (false, null),
+        };
+        if (!wasTrigger || (existingEntry is null) == (replacement is null))
+            return;
+        throw replacement is not null
+            ? SimulatedSqlException.ClrAlterIncompatible(triggerName.Leaf)
+            : SimulatedSqlException.CannotAlterIncompatibleObjectType(triggerName);
+    }
 }

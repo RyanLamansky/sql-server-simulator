@@ -38,7 +38,7 @@ Database-scope DDL triggers (`CREATE TRIGGER … ON DATABASE`) fire on the DDL t
   A **scalar UDF in the SET** evaluates per row, and a set-based `INSERT … SELECT FROM INSERTED JOIN <gate>` writes one row per inserted row — carrying INSERTED's values, which are the rows as written rather than as a later statement in the same body leaves them.
   The body's own UPDATEs dispatch the parent's AFTER UPDATE trigger once per statement over that statement's DELETED set, a no-op self-assignment included.
 - **Multiple triggers per table** — every enabled AFTER trigger matching the firing action runs, ordered by `sp_settriggerorder` at the two ends (see [Firing order](#firing-order)).
-  Unpinned triggers follow the per-schema dictionary's enumeration, which is **not** guaranteed to be creation order and isn't asserted anywhere; SQL Server leaves the middle unspecified too.
+  Unpinned triggers fire in creation (object id) order, which SQL Server documents as unspecified but was observed to follow (probed 2026-09-28 against SQL Server 2025).
   At most one INSTEAD OF per action per target.
 - **TRIGGER_NESTLEVEL()** — the current trigger nesting depth (0 outside any trigger, 1 at top-level DML's first trigger fire, 2+ when nested); with an object id, how many frames on the stack are that trigger's, and with a type and category only frames of that kind, a DDL trigger counting as AFTER (probed 2026-09-26 against SQL Server 2025).
   One-arg form (filter by trigger object id) deferred.
@@ -56,6 +56,7 @@ Database-scope DDL triggers (`CREATE TRIGGER … ON DATABASE`) fire on the DDL t
 - **AFTER triggers fire on a zero-row DML** — an UPDATE / DELETE matching nothing, an `INSERT … SELECT` producing nothing, and a MERGE with no source rows all still run the body, with empty `INSERTED` / `DELETED` and `@@ROWCOUNT` 0 (probe-confirmed for all four shapes).
   `UPDATE(col)` still reports the SET-clause columns there, because the reading is a property of the statement rather than of the rows.
 - **Nesting and recursion gating** — `RECURSIVE_TRIGGERS` (per database) and the `nested triggers` server option decide whether a trigger fires while other triggers are running; see [Nesting and recursion options](#nesting-and-recursion-options).
+- **CLR triggers** — `AS EXTERNAL NAME assembly.class.method`, DML (AFTER and INSTEAD OF) and DDL, fire where a T-SQL body would and read `SqlContext.TriggerContext` instead of `INSERTED` / `DELETED` → [`clr-assemblies.md`](clr-assemblies.md#triggers).
 - **MERGE routing through INSTEAD OF** — the actions a MERGE's `WHEN` clauses perform must all have an INSTEAD OF trigger on the target, or none: some but not all is **Msg 5316**, raised while compiling, so an un-taken branch's MERGE ends its batch and a `DISABLE TRIGGER` earlier in the same batch hasn't run yet when it's judged (probed 2026-09-27 against SQL Server 2025, table and view).
   A covered action routes through its trigger (no heap write, no identity allocation, no constraint check), and one the triggers don't reach writes normally.
 
@@ -159,7 +160,7 @@ INSERTED / DELETED are the view's own columns, derived ones computed as the view
 Named and positional argument forms both bind, `@order` / `@stmttype` are case-insensitive, and the name may be bare or schema-qualified.
 `@namespace` (DATABASE / SERVER scope, for DDL triggers) is accepted and ignored — DDL-trigger ordering isn't modeled, and a DDL trigger's name doesn't resolve here.
 
-Only the two ends are ordered: `First` runs first, `Last` runs last, and everything between keeps the dictionary's arbitrary order, which real leaves unspecified as well.
+Only the two ends are pinned: `First` runs first, `Last` runs last, and everything between runs in creation (object id) order, which real documents as unspecified but was observed to follow (probed 2026-09-28 against SQL Server 2025).
 Ordering is **per action** and independent — pinning a multi-action trigger first for INSERT leaves its UPDATE position alone — and `@order = 'None'` clears both slots for that action.
 `ALTER TRIGGER` replaces the object and so resets its order (probe-confirmed).
 
@@ -188,7 +189,7 @@ The body runs inside the DML executor, which returns a single outcome, so the se
 `RunTriggerBodies` buffers them on `BatchContext.PendingTriggerOutcomes`, with the body's messages and the errors it ran past, in the order the body sent them, and `DispatchOneStatement` drains that ahead of the statement's own outcome.
 The body's row counts travel the same way, ahead of the firing statement's own: real sends each body statement's count, so `ExecuteNonQuery` over an `INSERT` of two rows whose trigger writes two more returns 4 and raises `StatementCompleted` for both, unless the body (or the session, which it inherits) sets `NOCOUNT` — EF Core's trigger-safe shape does (probed 2026-09-26 against SQL Server 2025).
 
-Order across several triggers isn't asserted anywhere: SQL Server leaves it unspecified without `sp_settriggerorder`, which isn't modeled.
+Several triggers contribute theirs in their firing order (see [Firing order](#firing-order)).
 
 **This is why a trigger body shouldn't SELECT.** A body of `SELECT 1` interleaves an extra result set with whatever the caller expected, and that breaks EF Core's trigger-safe `SaveChanges` shape (`SET NOCOUNT ON; INSERT …; SELECT [Id] …`) on real SQL Server just as it does here — verified against SQL Server 2025, which returns four result sets for a two-entity batch under such a trigger.
 `EFCoreTriggers.HasTrigger_SaveChanges_RetrievesGeneratedIdentity` used exactly that body and passed only while the simulator was dropping body result sets; its trigger is now a no-op.

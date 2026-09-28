@@ -25,8 +25,15 @@ internal sealed class DdlTrigger(
     int bodyLineOffset)
     : SchemaObject(name, objectId, schemaId, createDate)
 {
-    public override string ObjectTypeCode => "TR";
-    public override string ObjectTypeDescription => "SQL_TRIGGER";
+    public override string ObjectTypeCode => this.ClrEntry is null ? "TR" : "TA";
+    public override string ObjectTypeDescription => this.ClrEntry is null ? "SQL_TRIGGER" : "CLR_TRIGGER";
+
+    /// <summary>
+    /// The method a CLR trigger (<c>AS EXTERNAL NAME</c>) runs in place of a
+    /// T-SQL body, whose text is then empty; <see langword="null"/> for a
+    /// T-SQL trigger.
+    /// </summary>
+    public ClrEntryPoint? ClrEntry;
 
     /// <summary>
     /// The set of DDL event types this trigger fires on, as written:

@@ -60,21 +60,37 @@ internal sealed class TriggerFrame
     /// </summary>
     public readonly string? DdlEventData;
 
+    /// <summary>
+    /// The DML verb that fired this body, which a CLR trigger reads as
+    /// <c>SqlTriggerContext.TriggerAction</c>; <see cref="TriggerActions.None"/>
+    /// in a DDL body and while a body binds at CREATE.
+    /// </summary>
+    public readonly TriggerActions FiringAction;
+
+    /// <summary>
+    /// The number of the DDL event that fired this body
+    /// (<c>sys.trigger_event_types.type</c>), which a CLR trigger reads as
+    /// <c>SqlTriggerContext.TriggerAction</c>; 0 in a DML body.
+    /// </summary>
+    public readonly int DdlEventType;
+
     /// <summary>DML trigger fire.</summary>
-    public TriggerFrame(Trigger trigger, HeapTable? inserted, HeapTable? deleted, byte[] columnsUpdatedMask)
+    public TriggerFrame(Trigger trigger, HeapTable? inserted, HeapTable? deleted, byte[] columnsUpdatedMask, TriggerActions firingAction = TriggerActions.None)
     {
         this.Trigger = trigger;
         this.Inserted = inserted;
         this.Deleted = deleted;
         this.ColumnsUpdatedMask = columnsUpdatedMask;
+        this.FiringAction = firingAction;
     }
 
     /// <summary>Database-scope DDL trigger fire.</summary>
-    public TriggerFrame(DdlTrigger ddlTrigger, string eventData)
+    public TriggerFrame(DdlTrigger ddlTrigger, string eventData, int eventType = 0)
     {
         this.DdlTrigger = ddlTrigger;
         this.DdlEventData = eventData;
         this.ColumnsUpdatedMask = [];
+        this.DdlEventType = eventType;
     }
 
     /// <summary>

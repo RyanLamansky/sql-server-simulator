@@ -334,7 +334,7 @@ partial class Simulation
             var padded = type is CharSqlType or VarcharSqlType or BinarySqlType
                 or VarbinarySqlType or SqlVariantSqlType or VectorSqlType;
             var fixedLenNullInSource = type is CharSqlType or VarcharSqlType
-                or BinarySqlType or VarbinarySqlType or VectorSqlType;
+                or BinarySqlType or VarbinarySqlType or VectorSqlType or ClrUdtSqlType;
             rows.Add([
                 SqlValue.FromSystemName(column.Name),
                 SqlValue.FromSystemName(column.AliasType?.Name ?? (column.SpelledNumeric ? column.TypeName : HelpTypeName(type))),
@@ -487,7 +487,10 @@ partial class Simulation
         return
         [
             SqlValue.FromSystemName(alias.Name),
-            SqlValue.FromSystemName(alias.SpelledNumeric ? "numeric" : HelpTypeName(alias.UnderlyingType)),
+            // A CLR type has no storage type to name (probed 2026-09-28).
+            alias.UnderlyingType is ClrUdtSqlType
+                ? SqlValue.Null(SqlType.SystemName)
+                : SqlValue.FromSystemName(alias.SpelledNumeric ? "numeric" : HelpTypeName(alias.UnderlyingType)),
             SqlValue.FromInt16((short)maxLength),
             SqlValue.FromInt32(precision),
             scale is { } s ? SqlValue.FromInt32(s) : SqlValue.Null(SqlType.Int32),
@@ -581,6 +584,8 @@ partial class Simulation
             JsonSqlType => (-1, 0, null),
             HierarchyIdSqlType => (892, 892, null),
             SpatialSqlType => (-1, -1, null),
+            // A CLR type's Prec is its MaxByteSize too (probed 2026-09-28).
+            ClrUdtSqlType udt => (udt.Udt.MaxByteSize, udt.Udt.MaxByteSize, null),
             VectorSqlType vector => (vector.ByteLength, vector.ByteLength, null),
             _ => (0, 0, null),
         };

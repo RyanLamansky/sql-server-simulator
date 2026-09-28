@@ -1094,6 +1094,8 @@ partial class Simulation
             SqlVariantSqlType => FormatKeyValue(value.AsVariantInner),
             _ when value.Type == SqlType.UniqueIdentifier => value.AsGuid.ToString("D", CultureInfo.InvariantCulture),
             _ when value.Type == SqlType.HierarchyId => $"0x{Convert.ToHexStringLower(value.AsHierarchyIdBytes)}",
+            // A CLR type's serialized bytes, in upper case (probed 2026-09-28).
+            ClrUdtSqlType => $"0x{Convert.ToHexString(value.AsClrUdtBytes)}",
             VarbinarySqlType or BinarySqlType or ImageSqlType or RowVersionSqlType =>
                 $"0x{Convert.ToHexStringLower(value.AsBytes)}",
             _ => value.CoerceTo(SqlType.NVarchar).AsString,

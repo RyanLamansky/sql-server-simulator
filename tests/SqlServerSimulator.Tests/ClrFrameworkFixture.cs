@@ -9,9 +9,9 @@ namespace SqlServerSimulator;
 /// <c>mscorlib</c> and <c>System.Data, Version=4.0.0.0</c> and reaches
 /// <c>Microsoft.SqlServer.Server.SqlContext</c> / <c>SqlPipe</c> /
 /// <c>SqlDataRecord</c> / <c>SqlMetaData</c> and the routine attributes
-/// through the latter. The same source registered on SQL Server 2025 is what
-/// the procedure, table-valued function and aggregate behavior was probed
-/// with (2026-09-28).
+/// through the latter. The same classes registered on SQL Server 2025 are
+/// what the procedure, table-valued function, aggregate, user-defined type and
+/// trigger behavior was probed with (2026-09-28).
 /// </summary>
 /// <remarks>
 /// The repo keeps no binary fixtures, so the bytes are compiled once per test
@@ -274,6 +274,286 @@ internal static class ClrFrameworkFixture
             public void Accumulate(SqlInt32 v) { }
             public void Merge(NativeWithRef other) { }
             public SqlInt32 Terminate() { return new SqlInt32(0); }
+        }
+
+        [Serializable]
+        [SqlUserDefinedType(Format.Native, IsByteOrdered = true)]
+        public struct Point : INullable
+        {
+            private int x;
+            private int y;
+            private bool isNull;
+            public bool IsNull { get { return isNull; } }
+            public static Point Null { get { Point p = new Point(); p.isNull = true; return p; } }
+            public override string ToString() { return isNull ? "NULL" : x + "," + y; }
+            public static Point Parse(SqlString s)
+            {
+                if (s.IsNull) return Null;
+                string[] parts = s.Value.Split(',');
+                Point p = new Point();
+                p.x = int.Parse(parts[0]);
+                p.y = int.Parse(parts[1]);
+                return p;
+            }
+            public int X { get { return x; } set { x = value; } }
+            public int Y { get { return y; } set { y = value; } }
+            public SqlDouble Distance() { return new SqlDouble(Math.Sqrt((double)x * x + (double)y * y)); }
+            public SqlDouble DistanceTo(Point other) { double dx = x - other.x, dy = y - other.y; return new SqlDouble(Math.Sqrt(dx * dx + dy * dy)); }
+            public static Point Make(SqlInt32 x, SqlInt32 y) { Point p = new Point(); p.x = x.Value; p.y = y.Value; return p; }
+            public static SqlString Describe() { return new SqlString("points"); }
+            [SqlMethod(IsMutator = true, OnNullCall = false)]
+            public void Scale(SqlInt32 factor) { x *= factor.Value; y *= factor.Value; }
+            public SqlString Boom() { throw new InvalidOperationException("point boom"); }
+        }
+
+        [Serializable]
+        [SqlUserDefinedType(Format.Native)]
+        public struct Unordered : INullable
+        {
+            private int v;
+            private bool isNull;
+            public bool IsNull { get { return isNull; } }
+            public static Unordered Null { get { Unordered u = new Unordered(); u.isNull = true; return u; } }
+            public override string ToString() { return v.ToString(); }
+            public static Unordered Parse(SqlString s) { if (s.IsNull) return Null; Unordered u = new Unordered(); u.v = int.Parse(s.Value); return u; }
+            public int V { get { return v; } }
+        }
+
+        [Serializable]
+        [SqlUserDefinedType(Format.Native, IsByteOrdered = true)]
+        public struct Wide : INullable
+        {
+            private byte b;
+            private short s;
+            private int i;
+            private long l;
+            private bool f;
+            private float r;
+            private double d;
+            private sbyte sb;
+            private ushort us;
+            private uint ui;
+            private ulong ul;
+            private bool isNull;
+            public bool IsNull { get { return isNull; } }
+            public static Wide Null { get { Wide w = new Wide(); w.isNull = true; return w; } }
+            public override string ToString() { return b + "|" + s + "|" + i + "|" + l + "|" + f + "|" + r.ToString("R") + "|" + d.ToString("R") + "|" + sb + "|" + us + "|" + ui + "|" + ul; }
+            public static Wide Parse(SqlString str)
+            {
+                if (str.IsNull) return Null;
+                string[] p = str.Value.Split('|');
+                Wide w = new Wide();
+                w.b = byte.Parse(p[0]); w.s = short.Parse(p[1]); w.i = int.Parse(p[2]); w.l = long.Parse(p[3]); w.f = bool.Parse(p[4]);
+                w.r = float.Parse(p[5]); w.d = double.Parse(p[6]); w.sb = sbyte.Parse(p[7]); w.us = ushort.Parse(p[8]); w.ui = uint.Parse(p[9]); w.ul = ulong.Parse(p[10]);
+                return w;
+            }
+        }
+
+        public struct Inner { public int a; public short b; }
+
+        [Serializable]
+        [SqlUserDefinedType(Format.Native)]
+        public struct SqlFields : INullable
+        {
+            private SqlInt32 a;
+            private SqlDouble b;
+            private SqlBoolean c;
+            private Inner inner;
+            private SqlMoney m;
+            private SqlDateTime dt;
+            private SqlByte sb;
+            private SqlInt16 s16;
+            private SqlInt64 s64;
+            private SqlSingle ss;
+            private bool isNull;
+            public bool IsNull { get { return isNull; } }
+            public static SqlFields Null { get { SqlFields w = new SqlFields(); w.isNull = true; return w; } }
+            public override string ToString() { return (a.IsNull ? "null" : a.Value.ToString()) + "|" + (m.IsNull ? "null" : m.Value.ToString()) + "|" + inner.b; }
+            public static SqlFields Parse(SqlString str)
+            {
+                SqlFields w = new SqlFields();
+                if (str.Value == "nulls") return w;
+                w.a = new SqlInt32(1); w.b = new SqlDouble(2.5); w.c = SqlBoolean.True;
+                w.inner.a = 5; w.inner.b = -3; w.m = new SqlMoney(12.5m); w.dt = new SqlDateTime(2020, 1, 2, 3, 4, 5);
+                w.sb = new SqlByte(7); w.s16 = new SqlInt16(-2); w.s64 = new SqlInt64(9); w.ss = new SqlSingle(1.5f);
+                return w;
+            }
+        }
+
+        [Serializable]
+        [SqlUserDefinedType(Format.UserDefined, MaxByteSize = 20)]
+        public class Label : INullable, IBinarySerialize
+        {
+            private string text;
+            private bool isNull;
+            public bool IsNull { get { return isNull; } }
+            public static Label Null { get { Label l = new Label(); l.isNull = true; return l; } }
+            public override string ToString() { return isNull ? "NULL" : text; }
+            public static Label Parse(SqlString s) { if (s.IsNull) return Null; Label l = new Label(); l.text = s.Value; return l; }
+            public void Read(BinaryReader r) { text = r.ReadString(); }
+            public void Write(BinaryWriter w) { w.Write(text); }
+            public int Length { get { return text.Length; } }
+            public SqlString Upper() { return new SqlString(text.ToUpperInvariant()); }
+        }
+
+        [Serializable]
+        [SqlUserDefinedType(Format.UserDefined, MaxByteSize = -1)]
+        public class BigBlob : INullable, IBinarySerialize
+        {
+            private string text;
+            private bool isNull;
+            public bool IsNull { get { return isNull; } }
+            public static BigBlob Null { get { BigBlob l = new BigBlob(); l.isNull = true; return l; } }
+            public override string ToString() { return isNull ? "NULL" : text; }
+            public static BigBlob Parse(SqlString s) { if (s.IsNull) return Null; BigBlob l = new BigBlob(); l.text = s.Value; return l; }
+            public void Read(BinaryReader r) { text = r.ReadString(); }
+            public void Write(BinaryWriter w) { w.Write(text); }
+        }
+
+        [Serializable]
+        [SqlUserDefinedType(Format.Native)]
+        public struct UdtNoParse : INullable
+        {
+            private int v;
+            public bool IsNull { get { return false; } }
+            public static UdtNoParse Null { get { return new UdtNoParse(); } }
+            public override string ToString() { return v.ToString(); }
+        }
+
+        [Serializable]
+        [SqlUserDefinedType(Format.Native)]
+        public struct UdtNoNull : INullable
+        {
+            private int v;
+            public bool IsNull { get { return false; } }
+            public override string ToString() { return v.ToString(); }
+            public static UdtNoNull Parse(SqlString s) { return new UdtNoNull(); }
+        }
+
+        [Serializable]
+        [SqlUserDefinedType(Format.Native)]
+        public struct UdtNotNullable
+        {
+            private int v;
+            public static UdtNotNullable Null { get { return new UdtNotNullable(); } }
+            public override string ToString() { return v.ToString(); }
+            public static UdtNotNullable Parse(SqlString s) { return new UdtNotNullable(); }
+        }
+
+        [Serializable]
+        [SqlUserDefinedType(Format.Native)]
+        public struct UdtNativeRef : INullable
+        {
+            private string v;
+            public bool IsNull { get { return false; } }
+            public static UdtNativeRef Null { get { return new UdtNativeRef(); } }
+            public override string ToString() { return v; }
+            public static UdtNativeRef Parse(SqlString s) { return new UdtNativeRef(); }
+        }
+
+        [Serializable]
+        [SqlUserDefinedType(Format.Native)]
+        public struct UdtNativeDecimal : INullable
+        {
+            private decimal v;
+            public bool IsNull { get { return false; } }
+            public static UdtNativeDecimal Null { get { return new UdtNativeDecimal(); } }
+            public override string ToString() { return v.ToString(); }
+            public static UdtNativeDecimal Parse(SqlString s) { return new UdtNativeDecimal(); }
+        }
+
+        [Serializable]
+        [SqlUserDefinedType(Format.Native)]
+        public class UdtNativeClass : INullable
+        {
+            private int v;
+            public bool IsNull { get { return false; } }
+            public static UdtNativeClass Null { get { return new UdtNativeClass(); } }
+            public override string ToString() { return v.ToString(); }
+            public static UdtNativeClass Parse(SqlString s) { return new UdtNativeClass(); }
+        }
+
+        [Serializable]
+        [SqlUserDefinedType(Format.UserDefined, MaxByteSize = 10)]
+        public struct UdtNoSerialize : INullable
+        {
+            private int v;
+            public bool IsNull { get { return false; } }
+            public static UdtNoSerialize Null { get { return new UdtNoSerialize(); } }
+            public override string ToString() { return v.ToString(); }
+            public static UdtNoSerialize Parse(SqlString s) { return new UdtNoSerialize(); }
+        }
+
+        [Serializable]
+        public struct UdtNoAttr : INullable
+        {
+            private int v;
+            public bool IsNull { get { return false; } }
+            public static UdtNoAttr Null { get { return new UdtNoAttr(); } }
+            public override string ToString() { return v.ToString(); }
+            public static UdtNoAttr Parse(SqlString s) { return new UdtNoAttr(); }
+        }
+
+        [Serializable]
+        [SqlUserDefinedType(Format.UserDefined)]
+        public class UdtNoMax : INullable, IBinarySerialize
+        {
+            public bool IsNull { get { return false; } }
+            public static UdtNoMax Null { get { return new UdtNoMax(); } }
+            public override string ToString() { return "x"; }
+            public static UdtNoMax Parse(SqlString s) { return new UdtNoMax(); }
+            public void Read(BinaryReader r) { }
+            public void Write(BinaryWriter w) { }
+        }
+
+        public static class UdtFuncs
+        {
+            [SqlFunction]
+            public static SqlInt32 PointSum(Point p) { return p.IsNull ? SqlInt32.Null : new SqlInt32(p.X + p.Y); }
+
+            [SqlFunction]
+            public static Point MakePoint(SqlInt32 x, SqlInt32 y) { return Point.Make(x, y); }
+        }
+
+        public static class Trig
+        {
+            public static void Report()
+            {
+                SqlTriggerContext tc = SqlContext.TriggerContext;
+                StringBuilder sb = new StringBuilder();
+                sb.Append("action=").Append(tc.TriggerAction).Append(" cols=").Append(tc.ColumnCount).Append(" upd=");
+                for (int i = 0; i < tc.ColumnCount; i++) sb.Append(tc.IsUpdatedColumn(i) ? '1' : '0');
+                SqlContext.Pipe.Send(sb.ToString());
+            }
+
+            public static void Throws() { throw new InvalidOperationException("trigger boom"); }
+
+            public static void Rows()
+            {
+                SqlDataRecord rec = new SqlDataRecord(new SqlMetaData("n", SqlDbType.Int));
+                rec.SetInt32(0, 7);
+                SqlContext.Pipe.Send(rec);
+            }
+
+            public static void Ddl()
+            {
+                SqlTriggerContext tc = SqlContext.TriggerContext;
+                SqlContext.Pipe.Send("action=" + tc.TriggerAction + " cols=" + tc.ColumnCount + " event=" + (tc.EventData.Value.Contains("<EventType>CREATE_TABLE</EventType>") ? "create_table" : "other"));
+            }
+
+            public static void EventDataOnDml() { SqlContext.Pipe.Send(SqlContext.TriggerContext.EventData == null ? "null" : "not null"); }
+
+            public static void BadColumn() { SqlContext.Pipe.Send(SqlContext.TriggerContext.IsUpdatedColumn(99).ToString()); }
+
+            public static int ReturnsInt() { return 1; }
+
+            public static void TakesArg(SqlInt32 a) { }
+
+            [SqlProcedure]
+            public static void ProcReadsTrigger() { SqlContext.Pipe.Send("proc trig=" + (SqlContext.TriggerContext != null)); }
+
+            [SqlFunction]
+            public static SqlBoolean FuncTrig() { return new SqlBoolean(SqlContext.TriggerContext != null); }
         }
         """;
 }

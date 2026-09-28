@@ -108,12 +108,13 @@ internal abstract partial class SqlType
 
     /// <summary>
     /// True for the types real can't compare, sort or group at all: the
-    /// always-LOB types <see cref="IsLob"/> marks, and <c>vector</c>, which
-    /// is stored in-row but has no ordering either. The DISTINCT, set-operator,
+    /// always-LOB types <see cref="IsLob"/> marks, <c>vector</c>, which is
+    /// stored in-row but has no ordering either, and a CLR user-defined type
+    /// not marked <c>IsByteOrdered</c>. The DISTINCT, set-operator,
     /// sort, grouping and hash-key gates read this rather than
     /// <see cref="IsLob"/>.
     /// </summary>
-    public bool IsIncomparable => this.IsLob || this is VectorSqlType;
+    public bool IsIncomparable => this.IsLob || this is VectorSqlType or ClrUdtSqlType { Udt.IsByteOrdered: false };
 
     /// <summary>
     /// The three deprecated always-LOB types, which carry rejections the other
@@ -245,6 +246,7 @@ internal abstract partial class SqlType
         SpatialSqlType => 240,
         XmlSqlType => 241,
         JsonSqlType => 244,
+        ClrUdtSqlType => 240,
         _ => throw new NotSupportedException($"No SystemTypeId defined for {this}."),
     };
 
@@ -261,6 +263,7 @@ internal abstract partial class SqlType
         : this == Geometry ? 129
         : this == Geography ? 130
         : this is VectorSqlType ? 255
+        : this is ClrUdtSqlType udt ? udt.Udt.UserTypeId
         : this.SystemTypeId;
 
     /// <summary>True for SQL integer-family types (bit, tinyint, smallint, int, bigint).</summary>

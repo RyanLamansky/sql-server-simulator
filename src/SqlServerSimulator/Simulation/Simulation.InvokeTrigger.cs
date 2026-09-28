@@ -50,10 +50,7 @@ partial class Simulation
     {
         // Find matching AFTER triggers across all schemas of the target's own
         // database, which is the session's only until a three-part name names
-        // another. Relative order is whatever the schema dict enumerates — not
-        // necessarily creation order, and nothing depends on it: SQL Server
-        // leaves multi-trigger order unspecified too, without
-        // sp_settriggerorder.
+        // another; the order they fire in is settled below.
         var targetDatabase = outerBatch.DatabaseFor(targetTable);
         var matching = new List<Trigger>();
         foreach (var schema in targetDatabase.Schemas.Values)
@@ -77,17 +74,22 @@ partial class Simulation
             return;
 
         // sp_settriggerorder pins at most one trigger to each end for this
-        // action; everything else keeps the dictionary's own order, which is
-        // as unspecified here as it is on real.
+        // action; everything else fires in creation (object id) order, which
+        // real documents as unspecified but was observed to follow (probed
+        // 2026-09-28 against SQL Server 2025).
         if (matching.Count > 1)
         {
-            matching.Sort((x, y) => TriggerOrderRank(x, action).CompareTo(TriggerOrderRank(y, action)));
+            matching.Sort((x, y) =>
+            {
+                var byRank = TriggerOrderRank(x, action).CompareTo(TriggerOrderRank(y, action));
+                return byRank != 0 ? byRank : x.ObjectId.CompareTo(y.ObjectId);
+            });
         }
 
         var insertedPseudo = MaterializePseudoTable(targetTable.Columns, "inserted", insertedRows ?? [], outerBatch);
         var deletedPseudo = MaterializePseudoTable(targetTable.Columns, "deleted", deletedRows ?? [], outerBatch);
         var mask = BuildColumnsUpdatedMask(targetTable, targetTable.Columns.Length, action, updatedColumnOrdinals);
-        RunTriggerBodies(outerBatch, targetDatabase, matching, insertedPseudo, deletedPseudo, affectedRowCount, mask);
+        RunTriggerBodies(outerBatch, targetDatabase, matching, action, insertedPseudo, deletedPseudo, affectedRowCount, mask);
     }
 
     /// <summary>
@@ -206,7 +208,7 @@ partial class Simulation
         var insertedPseudo = MaterializePseudoTable(pseudoColumns, "inserted", insertedRows ?? [], outerBatch);
         var deletedPseudo = MaterializePseudoTable(pseudoColumns, "deleted", deletedRows ?? [], outerBatch);
         var mask = BuildColumnsUpdatedMask(parent as HeapTable, pseudoColumns.Length, action, updatedColumnOrdinals);
-        RunTriggerBodies(outerBatch, targetDatabase, [matched], insertedPseudo, deletedPseudo, affectedRowCount, mask);
+        RunTriggerBodies(outerBatch, targetDatabase, [matched], action, insertedPseudo, deletedPseudo, affectedRowCount, mask);
         return true;
     }
 
@@ -220,6 +222,7 @@ partial class Simulation
         BatchContext outerBatch,
         Database targetDatabase,
         List<Trigger> triggers,
+        TriggerActions action,
         HeapTable insertedPseudo,
         HeapTable deletedPseudo,
         int affectedRowCount,
@@ -255,7 +258,7 @@ partial class Simulation
                 RunOneTriggerBody(
                     outerBatch,
                     targetDatabase,
-                    new TriggerFrame(trigger, insertedPseudo, deletedPseudo, columnsUpdatedMask),
+                    new TriggerFrame(trigger, insertedPseudo, deletedPseudo, columnsUpdatedMask, action),
                     trigger.BodyText,
                     trigger.BodyLineOffset,
                     trigger.Name,
@@ -414,6 +417,10 @@ partial class Simulation
                     throw SimulatedSqlException.ErrorRaisedDuringTriggerExecution();
                 if (connection.TriggerTransactionEnded)
                     throw SimulatedSqlException.TransactionEndedInTrigger(frame.Trigger is null ? (byte)2 : (byte)1);
+            }
+            else if ((frame.Trigger?.ClrEntry ?? frame.DdlTrigger?.ClrEntry) is { } clrEntry)
+            {
+                RunClrTrigger(outerBatch, frame, clrEntry, triggerName);
             }
         }
         catch (SimulatedSqlException ex)

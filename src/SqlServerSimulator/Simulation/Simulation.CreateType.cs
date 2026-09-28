@@ -61,6 +61,8 @@ partial class Simulation
         {
             case ReservedKeyword { Keyword: Keyword.From }:
                 return TryParseCreateAliasType(context, schema, typeName);
+            case ReservedKeyword { Keyword: Keyword.External }:
+                return ParseCreateClrType(context, schema, typeName);
             case ReservedKeyword { Keyword: Keyword.As }:
                 break;
             default:

@@ -384,6 +384,23 @@ internal abstract class Expression : ExpressionNode
                         }
                         else if (afterDot is Name name)
                         {
+                            // A member of a CLR user-defined type binds off the
+                            // receiver's type, ahead of the name-driven
+                            // dispatches below, whose method names (ToString,
+                            // value …) a CLR class may declare too. Such types
+                            // exist only where the host enabled CLR.
+                            if (context.Simulation.EnableClr && ClrTypeMemberCall.ReceiverType(expression, context) is { } clrType)
+                            {
+                                expression = ClrTypeMemberCall.ParseInstance(expression, clrType, name.Value, context);
+                                continue;
+                            }
+
+                            // A CLR member's value of a system type has no
+                            // members (probed 2026-09-28 against SQL Server
+                            // 2025).
+                            if (expression is ClrTypeMemberCall scalarMember)
+                                throw SimulatedSqlException.CannotCallMethodsOn(SimulatedSqlException.FamilyRootName(scalarMember.GetSqlType(context.Batch, static name => throw SimulatedSqlException.InvalidColumnName(name))));
+
                             // Hierarchyid instance-method shape:
                             // <expr>.MethodName(args). When the method-name
                             // matches the closed accept-list AND the next
@@ -538,10 +555,20 @@ internal abstract class Expression : ExpressionNode
                             }
                             throw SimulatedSqlException.SyntaxErrorNear(context);
                         }
-                        if (expression is not Reference colonRef || colonRef.ReferencedName.Count != 1)
+                        if (expression is not Reference colonRef || colonRef.ReferencedName.Count is not (1 or 2))
                             throw SimulatedSqlException.SyntaxErrorNear(context);
                         var typeName = colonRef.ReferencedName.Leaf;
                         context.MoveNextRequired();
+                        // A CLR user-defined type's static members, through
+                        // its one- or two-part name; any other name is no
+                        // type (probed 2026-09-28 against SQL Server 2025).
+                        if (context.Batch.TryResolveAliasType(colonRef.ReferencedName, out var clrAlias) && clrAlias.UnderlyingType is ClrUdtSqlType staticType)
+                        {
+                            expression = ClrTypeMemberCall.ParseStatic(staticType, context);
+                            continue;
+                        }
+                        if (colonRef.ReferencedName.Count != 1)
+                            throw SimulatedSqlException.SyntaxErrorNear(context);
                         var typePrefixCollation = context.Batch.CurrentDatabase.Collation;
                         expression = typePrefixCollation.Equals(typeName, "hierarchyid")
                             ? HierarchyIdStaticCall.Parse(context)
@@ -549,7 +576,7 @@ internal abstract class Expression : ExpressionNode
                                 ? SpatialStaticCall.Parse(SqlType.Geography, context)
                                 : typePrefixCollation.Equals(typeName, "geometry")
                                     ? SpatialStaticCall.Parse(SqlType.Geometry, context)
-                                    : throw SimulatedSqlException.SyntaxErrorNear(context);
+                                    : throw SimulatedSqlException.CannotFindDataTypeInCast(typeName, state: 4);
                         continue;
                     }
                 case Operator { Character: '(' }:

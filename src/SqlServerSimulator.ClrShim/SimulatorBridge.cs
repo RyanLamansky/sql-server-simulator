@@ -15,18 +15,24 @@ internal static class SimulatorBridge
 
     /// <summary>
     /// Opens a routine's context on this thread and returns the one it
-    /// shadows, to hand back to <see cref="Exit"/>. A procedure passes the
-    /// four pipe callbacks; a function or aggregate passes
-    /// <see langword="null"/> for them and gets no pipe.
+    /// shadows, to hand back to <see cref="Exit"/>. A procedure or trigger
+    /// passes the four pipe callbacks; a function or aggregate passes
+    /// <see langword="null"/> for them and gets no pipe. A trigger also
+    /// passes what its <see cref="SqlTriggerContext"/> reports: the action
+    /// (a DML verb or the DDL event type's number), whether each column
+    /// counts as updated, and a DDL event's <c>EVENTDATA()</c> document.
     /// </summary>
     internal static object? Enter(
         Action<string>? message,
         Action<(string Name, SqlDbType Type, long MaxLength, byte Precision, byte Scale)[]>? start,
         Action<object?[]>? row,
-        Action? end)
+        Action? end,
+        (int Action, bool[] UpdatedColumns, string? EventData)? trigger)
     {
         var previous = Current;
-        Current = new Frame(message is null ? null : new SqlPipe(new Sink(message, start!, row!, end!)));
+        Current = new Frame(
+            message is null ? null : new SqlPipe(new Sink(message, start!, row!, end!)),
+            trigger is { } fired ? new SqlTriggerContext((TriggerAction)fired.Action, fired.UpdatedColumns, fired.EventData) : null);
         return previous;
     }
 
@@ -38,9 +44,11 @@ internal static class SimulatorBridge
     /// </summary>
     internal static void Exit(object? previous) => Current = (Frame?)previous;
 
-    internal sealed class Frame(SqlPipe? pipe)
+    internal sealed class Frame(SqlPipe? pipe, SqlTriggerContext? trigger)
     {
         public readonly SqlPipe? Pipe = pipe;
+
+        public readonly SqlTriggerContext? Trigger = trigger;
     }
 
     internal sealed class Sink(

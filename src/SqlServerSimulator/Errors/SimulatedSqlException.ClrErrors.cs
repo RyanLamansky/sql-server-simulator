@@ -87,8 +87,8 @@ partial class SimulatedSqlException
     /// <c>EXTERNAL NAME</c> clause does not exist on the type. Real SQL
     /// Server's text has no terminating period.
     /// </summary>
-    internal static SimulatedSqlException ClrMethodNotFound(string methodName, string typeName, string assemblyName) =>
-        new($"Could not find method '{methodName}' for type '{typeName}' in assembly '{assemblyName}'", 6506, 16, 1);
+    internal static SimulatedSqlException ClrMethodNotFound(string methodName, string typeName, string assemblyName, byte state = 1) =>
+        new($"Could not find method '{methodName}' for type '{typeName}' in assembly '{assemblyName}'", 6506, 16, state);
 
     /// <summary>
     /// Mimics SQL Server error 6550: the T-SQL parameter list and the CLR
@@ -265,4 +265,150 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException DescribeFirstResultSetClrProcedure(string statement) =>
         new($"The metadata could not be determined because statement '{statement}' invokes a CLR procedure.  Consider using the WITH RESULT SETS clause to explicitly describe the result set.", 11515, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 6500: the method a CLR trigger's
+    /// <c>EXTERNAL NAME</c> binds returns a value.
+    /// </summary>
+    internal static SimulatedSqlException ClrTriggerReturnType(string methodName, string className, string assemblyName, string returnType) =>
+        new($"CREATE TRIGGER failed because method '{methodName}' of class '{className}' in assembly '{assemblyName}' returns {returnType}, but CLR Triggers must return void.", 6500, 16, 0);
+
+    /// <summary>
+    /// Mimics SQL Server error 6531: the method a CLR trigger's
+    /// <c>EXTERNAL NAME</c> binds declares parameters.
+    /// </summary>
+    internal static SimulatedSqlException ClrTriggerTakesParameters(string methodName, string className, string assemblyName) =>
+        new($"CREATE TRIGGER failed because the function '{methodName}' of class '{className}' of assembly '{assemblyName}' takes one or more parameters but CLR Triggers do not accept parameters.", 6531, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 10324: <c>WITH ENCRYPTION</c> on a CLR trigger.
+    /// </summary>
+    internal static SimulatedSqlException ClrTriggerEncryption() =>
+        new("WITH ENCRYPTION option of CREATE TRIGGER is only applicable to T-SQL triggers and not to CLR triggers.", 10324, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 6267: <c>CREATE TYPE … EXTERNAL NAME</c> names
+    /// an assembly the database doesn't hold.
+    /// </summary>
+    internal static SimulatedSqlException AssemblyNotFoundForType(string assemblyName) =>
+        new($"Assembly \"{assemblyName}\" does not exist, or the user does not have permission to reference it.", 6267, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 6556: <c>CREATE TYPE … EXTERNAL NAME</c> names
+    /// a class the assembly lacks; followed by Msg 6597.
+    /// </summary>
+    internal static SimulatedSqlException ClrTypeClassNotFound(string className, string assemblyName) =>
+        new($"CREATE TYPE failed because it could not find type '{className}' in assembly '{assemblyName}'.", 6556, 16, 1);
+
+    /// <summary>Mimics SQL Server error 6597, closing a failed <c>CREATE TYPE</c>'s binding errors.</summary>
+    internal static SimulatedSqlException ClrCreateTypeFailed() =>
+        new("CREATE TYPE failed.", 6597, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 6255: a CLR type's class carries no
+    /// <c>SqlUserDefinedTypeAttribute</c>.
+    /// </summary>
+    internal static SimulatedSqlException ClrUdtMissingAttribute(string className) =>
+        new($"CREATE TYPE failed because type \"{className}\" does not conform to the UDT specification: missing custom attribute \"Microsoft.SqlServer.Server.SqlUserDefinedTypeAttribute\".", 6255, 16, 2);
+
+    /// <summary>
+    /// Mimics SQL Server error 6222: a <c>Format.Native</c> type holds a value
+    /// type native serialization can't carry.
+    /// </summary>
+    internal static SimulatedSqlException ClrNativeFieldInvalid(string qualifiedClass, string fieldName) =>
+        new($"Type \"{qualifiedClass}\" is marked for native serialization, but field \"{fieldName}\" of type \"{qualifiedClass}\" is not valid for native serialization.", 6222, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 6229: a <c>Format.Native</c> class isn't
+    /// <c>LayoutKind.Sequential</c>.
+    /// </summary>
+    internal static SimulatedSqlException ClrNativeNotSequential(string qualifiedClass) =>
+        new($"Type \"{qualifiedClass}\" is marked for native serialization. It is not marked with \"LayoutKind.Sequential\". Native serialization requires the type to be marked with \"LayoutKind.Sequential\".", 6229, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 6226: a <c>Format.UserDefined</c> type doesn't
+    /// implement <c>IBinarySerialize</c>.
+    /// </summary>
+    internal static SimulatedSqlException ClrUdtNotBinarySerialize(string qualifiedClass) =>
+        new($"Type \"{qualifiedClass}\" is marked for user-defined serialization, but does not implement the \"System.Data.Microsoft.SqlServer.Server.IBinarySerialize\" interface.", 6226, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 6244: a <c>Format.UserDefined</c> type's
+    /// <c>MaxByteSize</c> is outside -1 and 1–8000.
+    /// </summary>
+    internal static SimulatedSqlException ClrUdtSizeOutOfRange(int size, string qualifiedClass) =>
+        new($"The size ({size}) for \"{qualifiedClass}\" is not in the valid range. Size must be -1 or a number between 1 and 8000.", 6244, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 6577: a CLR type's class doesn't implement
+    /// <c>INullable</c>; followed by Msg 6597.
+    /// </summary>
+    internal static SimulatedSqlException ClrUdtNotNullable(string className) =>
+        new($"CREATE TYPE failed because type '{className}' does not conform to CLR type specification due to interface 'INullable'.", 6577, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server errors 6557 (a missing static <c>Null</c>, state 7)
+    /// and 6558 (a missing static <c>Parse</c>, state 1); followed by Msg 6597.
+    /// </summary>
+    internal static SimulatedSqlException ClrUdtNonConforming(string className, string memberKind, string memberName, byte state) =>
+        new($"CREATE TYPE failed because type '{className}' does not conform to UDT specification due to {memberKind} '{memberName}'.", memberKind == "field" ? 6557 : 6558, 16, state);
+
+    /// <summary>
+    /// Mimics SQL Server error 8188: the class is already registered as
+    /// another type. It ends the batch (probed 2026-09-28 against SQL Server
+    /// 2025).
+    /// </summary>
+    internal static SimulatedSqlException ClrTypeAlreadyMapped(string className, string assemblyName) =>
+        new($"There is already a SQL type for assembly type \"{className}\" on assembly \"{assemblyName}\". Only one SQL type can be mapped to a given assembly type. CREATE TYPE fails.", 8188, 16, 1) { TerminatesBatch = true };
+
+    /// <summary>
+    /// Mimics SQL Server error 6598: <c>DROP ASSEMBLY</c> while a CLR type
+    /// still maps one of its classes.
+    /// </summary>
+    internal static SimulatedSqlException DropAssemblyReferencedByType(string assemblyName, string typeName) =>
+        new($"DROP ASSEMBLY failed because '{assemblyName}' is referenced by CLR type '{typeName}'.", 6598, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 6235: bytes converted to a <c>Format.Native</c>
+    /// type aren't the layout's width. It ends the batch (probed 2026-09-28
+    /// against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException ClrUdtLengthMismatch(int length, int fixedLength, string typeName) =>
+        new($"Data serialization error. Length ({length}) is {(length < fixedLength ? "less" : "greater")} than fixed length ({fixedLength}) for type '{typeName}'.", 6235, 16, 1) { TerminatesBatch = true };
+
+    /// <summary>
+    /// Mimics SQL Server error 6584: <c>type::member</c> named an instance
+    /// property or field.
+    /// </summary>
+    internal static SimulatedSqlException ClrPropertyNotStatic(string memberName, string typeName, string assemblyName) =>
+        new($"Property or field '{memberName}' for type '{typeName}' in assembly '{assemblyName}' is not static", 6584, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 6200: a mutator method called where a value is
+    /// only read.
+    /// </summary>
+    internal static SimulatedSqlException ClrMutatorInReadOnlyContext(string methodName, string typeName, string assemblyName) =>
+        new($"Method \"{methodName}\" of type \"{typeName}\" in assembly \"{assemblyName}\" is marked as a mutator. Mutators cannot be used in the read-only portion of the query.", 6200, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 6201: a <c>SET</c> calls a method not marked
+    /// <c>IsMutator</c>.
+    /// </summary>
+    internal static SimulatedSqlException ClrNotMutator(string methodName, string typeName, string assemblyName) =>
+        new($"Method \"{methodName}\" of type \"{typeName}\" in assembly \"{assemblyName}\" is not marked as a mutator. Only mutators can be used to update the value of a CLR type.", 6201, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 5302: a mutator or property assignment on a
+    /// NULL CLR type value. It ends the batch (probed 2026-09-28 against SQL
+    /// Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException ClrMutatorOnNull(string memberName, string target) =>
+        new($"Mutator '{memberName}' on '{target}' cannot be called on a null value.", 5302, 16, 1) { TerminatesBatch = true };
+
+    /// <summary>
+    /// Mimics SQL Server error 6207: a CLR type converted to a <c>binary(n)</c>
+    /// wider than its value.
+    /// </summary>
+    internal static SimulatedSqlException ClrUdtToPaddedBinary(string typeName) =>
+        new($"Error converting {typeName} to fixed length binary type. The result would be padded and cannot be converted back.", 6207, 16, 1);
 }

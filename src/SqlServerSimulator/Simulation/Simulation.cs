@@ -2423,14 +2423,16 @@ public sealed partial class Simulation
     /// <c>CREATE INDEX</c> or a constraint built it, though it ends the batch,
     /// and a negative <c>TOP</c>'s Msg 127, which ends the batch as every
     /// run-time severity-15 error does, still ends a writing statement first
-    /// (probed 2026-09-26).
+    /// (probed 2026-09-26). A CLR routine's throw (Msg 6522) earns it too,
+    /// a CLR trigger's or a CLR type's <c>Parse</c> converting a written value
+    /// (probed 2026-09-28).
     /// </summary>
     private static bool IsStatementTerminationNoticed(BatchContext batch, SimulatedSqlException error) =>
         error.Number == 1505
         || error.EndedColumnRewrite
         || ((!batch.BatchAborted || error.EndedTriggerBody || error.Number == 127)
             && batch.CurrentStatement.WritesRows
-            && error.Number is 127 or 220 or 232 or 513 or 515 or 547 or 550 or 2601 or 2627 or 2628 or 8115 or 8134 or 8152 or 13921 or 16947);
+            && error.Number is 127 or 220 or 232 or 513 or 515 or 547 or 550 or 2601 or 2627 or 2628 or 6522 or 8115 or 8134 or 8152 or 13921 or 16947);
 
     /// <summary>
     /// True for the parse-time error real SQL Server defers to bind time —

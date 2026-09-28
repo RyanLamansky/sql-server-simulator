@@ -69,10 +69,12 @@ internal static class ClrHost
 
     /// <summary>
     /// Opens a routine's <c>SqlContext</c> on this thread; dispose to close it.
-    /// A procedure passes its <paramref name="pipe"/>; a function or aggregate
-    /// passes <see langword="null"/> and its routine sees no pipe.
+    /// A procedure or trigger passes its <paramref name="pipe"/>; a function,
+    /// aggregate or type member passes <see langword="null"/> and its routine
+    /// sees no pipe. A trigger also passes what its <c>SqlTriggerContext</c>
+    /// reports.
     /// </summary>
-    public static RoutineScope Enter(ClrPipeSink? pipe) => new(host.Value, pipe);
+    public static RoutineScope Enter(ClrPipeSink? pipe, (int Action, bool[] UpdatedColumns, string? EventData)? trigger = null) => new(host.Value, pipe, trigger);
 
     /// <summary>The <see cref="Enter"/> / dispose pair around one routine call.</summary>
     public readonly struct RoutineScope : IDisposable
@@ -80,12 +82,12 @@ internal static class ClrHost
         private readonly HostContext context;
         private readonly object? previous;
 
-        internal RoutineScope(HostContext context, ClrPipeSink? pipe)
+        internal RoutineScope(HostContext context, ClrPipeSink? pipe, (int Action, bool[] UpdatedColumns, string? EventData)? trigger)
         {
             this.context = context;
             this.previous = pipe is null
-                ? context.Enter(null, null, null, null)
-                : context.Enter(pipe.Message, pipe.Start, pipe.Row, pipe.End);
+                ? context.Enter(null, null, null, null, null)
+                : context.Enter(pipe.Message, pipe.Start, pipe.Row, pipe.End, trigger);
         }
 
         public void Dispose() => this.context.Exit(this.previous);
@@ -99,7 +101,7 @@ internal static class ClrHost
     {
         public readonly Assembly Server;
         public readonly Assembly SystemData;
-        public readonly Func<Action<string>?, Action<(string, SqlDbType, long, byte, byte)[]>?, Action<object?[]>?, Action?, object?> Enter;
+        public readonly Func<Action<string>?, Action<(string, SqlDbType, long, byte, byte)[]>?, Action<object?[]>?, Action?, (int, bool[], string?)?, object?> Enter;
         public readonly Action<object?> Exit;
 
         [UnconditionalSuppressMessage(
@@ -123,7 +125,7 @@ internal static class ClrHost
 
             var bridge = this.Server.GetType(ServerAssemblyName + ".SimulatorBridge", throwOnError: true)!;
             this.Enter = bridge.GetMethod("Enter", BindingFlags.Static | BindingFlags.NonPublic)!
-                .CreateDelegate<Func<Action<string>?, Action<(string, SqlDbType, long, byte, byte)[]>?, Action<object?[]>?, Action?, object?>>();
+                .CreateDelegate<Func<Action<string>?, Action<(string, SqlDbType, long, byte, byte)[]>?, Action<object?[]>?, Action?, (int, bool[], string?)?, object?>>();
             this.Exit = bridge.GetMethod("Exit", BindingFlags.Static | BindingFlags.NonPublic)!.CreateDelegate<Action<object?>>();
         }
 

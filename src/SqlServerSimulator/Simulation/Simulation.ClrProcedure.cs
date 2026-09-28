@@ -216,21 +216,30 @@ partial class Simulation
         private readonly BatchContext batch;
         private readonly string attributionName;
         private readonly List<SimulatedStatementOutcome> outcomes;
+        private readonly int lineNumber;
         private SqlType[]? schema;
         private string[]? names;
         private List<SqlValue[]>? rows;
 
-        public ClrProcedurePipe(BatchContext batch, string attributionName, List<SimulatedStatementOutcome> outcomes)
+        /// <param name="batch">The calling batch.</param>
+        /// <param name="attributionName">The module name a message names.</param>
+        /// <param name="outcomes">Where messages and result sets land.</param>
+        /// <param name="lineNumber">
+        /// The line a message reports: 0 from a procedure, 1 from a trigger
+        /// (probed 2026-09-28 against SQL Server 2025).
+        /// </param>
+        public ClrProcedurePipe(BatchContext batch, string attributionName, List<SimulatedStatementOutcome> outcomes, int lineNumber = 0)
         {
             this.batch = batch;
             this.attributionName = attributionName;
             this.outcomes = outcomes;
+            this.lineNumber = lineNumber;
             this.Sink = new ClrPipeSink(this.Message, this.Start, this.Row, this.End);
         }
 
         private void Message(string text) => this.outcomes.Add(new SimulatedInfoOutcome(new SimulatedError(
             @class: 0,
-            lineNumber: 0,
+            lineNumber: this.lineNumber,
             message: text,
             number: 0,
             procedure: this.attributionName,

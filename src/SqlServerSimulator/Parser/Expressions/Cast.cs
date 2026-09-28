@@ -128,7 +128,7 @@ internal sealed class Cast : Expression
             RejectRoundingUnderRoundAbort(sourceValue, this.targetType, runtime.Batch);
             coerced = ApplyCoercion(sourceValue, this.targetType, this.targetMaxLength, ResultCollation(this.targetType, sourceValue.Type, dbCollation));
         }
-        catch (SimulatedSqlException ex) when (this.tryMode && (IsConversionFailure(ex.Number) || IsVectorConversionFailure(ex.Number)))
+        catch (SimulatedSqlException ex) when (this.tryMode && (IsConversionFailure(ex.Number) || IsVectorConversionFailure(ex.Number) || (ex.Number == 6522 && this.targetType is ClrUdtSqlType)))
         {
             coerced = SqlValue.Null(this.targetType);
         }
@@ -246,6 +246,7 @@ internal sealed class Cast : Expression
 
     private static string ConversionName(SqlType type, Expression? source, BatchContext batch) =>
         type is HierarchyIdSqlType or SpatialSqlType ? $"{batch.CurrentDatabase.Name}.sys.{type.SqlServerName}"
+        : type is ClrUdtSqlType udt ? udt.Udt.QualifiedName
         : type is DecimalSqlType ? SqlType.OperandName(type, source)
         : SimulatedSqlException.FamilyRootName(type);
 
@@ -344,15 +345,23 @@ internal sealed class Cast : Expression
                 typeName = part;
                 context.MoveNextRequired();
             }
+            if (parts.Count == 2 && context.Batch.TryResolveAliasType(new MultiPartName(parts[0]).WithAddedPart(parts[1]), out var qualifiedAlias)
+                && qualifiedAlias.UnderlyingType is ClrUdtSqlType)
+            {
+                return context.Token is Operator { Character: '(' } ? throw SimulatedSqlException.SyntaxErrorNear(context) : (qualifiedAlias.UnderlyingType, null);
+            }
             if (parts.Count != 2 || !string.Equals(parts[0], "sys", StringComparison.OrdinalIgnoreCase))
             {
                 var written = string.Join('.', parts);
                 throw SimulatedSqlException.CannotFindDataTypeInCast(written, state: context.Batch.TryResolveAliasType(new MultiPartName(parts[0]).WithAddedPart(parts[1]), out _) ? (byte)2 : (byte)1);
             }
         }
-        else if (context.Batch.TryResolveAliasType(new MultiPartName(typeName.Value), out _))
+        else if (context.Batch.TryResolveAliasType(new MultiPartName(typeName.Value), out var alias))
         {
-            throw SimulatedSqlException.CannotFindDataTypeInCast(typeName.Value, state: 2);
+            // A CLR user-defined type is the one kind of user type CAST takes.
+            return alias.UnderlyingType is ClrUdtSqlType
+                ? (context.Token is Operator { Character: '(' } ? throw SimulatedSqlException.SyntaxErrorNear(context) : (alias.UnderlyingType, null))
+                : throw SimulatedSqlException.CannotFindDataTypeInCast(typeName.Value, state: 2);
         }
 
         if (context.Token is Operator { Character: '(' })
@@ -496,6 +505,12 @@ internal sealed class Cast : Expression
         // A CLR type converts to and from a character string or a binary and
         // nothing else, another CLR type included (probed 2026-09-25 against
         // SQL Server 2025).
+        // A user-defined one converts to and from xml too, through the
+        // class's XML serialization (probed 2026-09-28).
+        if (source is ClrUdtSqlType)
+            return !IsCharacterOrBinary(target) && target is not XmlSqlType;
+        if (target is ClrUdtSqlType)
+            return !IsCharacterOrBinary(source) && source is not XmlSqlType;
         if (source is HierarchyIdSqlType or SpatialSqlType)
             return !IsCharacterOrBinary(target);
         if (target is HierarchyIdSqlType or SpatialSqlType)

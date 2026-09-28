@@ -674,7 +674,13 @@ partial class SimulatedSqlException
     /// pair surface as Msg 206 from the comparison/arithmetic path.
     /// </summary>
     internal static SimulatedSqlException ExplicitConversionNotAllowed(SqlType source, SqlType target) =>
-        ExplicitConversionNotAllowed(FamilyRootName(source), FamilyRootName(target));
+        ExplicitConversionNotAllowed(ExplicitConversionName(source), ExplicitConversionName(target));
+
+    // A CLR user-defined type is named database.schema.type here, where the
+    // implicit-conversion and operator errors use its bare name (probed
+    // 2026-09-28 against SQL Server 2025).
+    private static string ExplicitConversionName(SqlType type) =>
+        type is ClrUdtSqlType udt ? udt.Udt.QualifiedName : FamilyRootName(type);
 
     /// <summary>
     /// <see cref="ExplicitConversionNotAllowed(SqlType, SqlType)"/> over

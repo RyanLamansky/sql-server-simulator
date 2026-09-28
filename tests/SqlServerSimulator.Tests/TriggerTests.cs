@@ -1207,4 +1207,30 @@ public sealed class TriggerTests
         AreEqual("2", simulation.ExecuteScalar("select string_agg(cast(n as varchar), ',') from note"));
         AreEqual(0, simulation.ExecuteScalar("select @@trancount"));
     }
+
+    [TestMethod]
+    [Description("An INSERT … SELECT producing no rows still fires the AFTER trigger, over an empty INSERTED.")]
+    public void AfterInsert_ZeroRowInsertSelect_Fires()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            "create table t (a int); create table note (n int)",
+            "create trigger tr on t after insert as insert note select count(*) from inserted");
+        _ = simulation.ExecuteNonQuery("insert t select a from t where a = 99");
+        AreEqual("0", simulation.ExecuteScalar("select string_agg(cast(n as varchar), ',') from note"));
+    }
+
+    [TestMethod]
+    [Description("Unpinned AFTER triggers fire in creation order, whatever their names.")]
+    public void AfterTriggers_Unpinned_FireInCreationOrder()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            "create table t (a int); create table note (id int identity, n varchar(10))",
+            "create trigger zz on t after insert as insert note (n) values ('zz')",
+            "create trigger aa on t after insert as insert note (n) values ('aa')",
+            "create trigger mm on t after insert as insert note (n) values ('mm')");
+        _ = simulation.ExecuteNonQuery("insert t values (1)");
+        AreEqual("zz,aa,mm", simulation.ExecuteScalar("select string_agg(n, ',') within group (order by id) from note"));
+    }
 }

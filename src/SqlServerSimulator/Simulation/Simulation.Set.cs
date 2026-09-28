@@ -722,6 +722,19 @@ partial class Simulation
     /// </summary>
     private static bool TryParseSetInstanceMember(ParserContext context, AtPrefixedString variableToken, VariableSlot slot)
     {
+        // A CLR user-defined type's property, field or mutator method.
+        if (slot.DeclaredType is ClrUdtSqlType clrType)
+        {
+            if (context.GetNextRequired() is not Name clrMember)
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            context.MoveNextRequired();
+            var mutation = ClrTypeMutation.Parse(new VariableReference(variableToken, context), $"@{variableToken.Value}", clrType, clrMember.Value, context);
+            if (context.Batch.IsSkipping)
+                return true;
+            slot.Assign(mutation.Run(new RuntimeContext(NoColumnResolver, context.Batch)));
+            return true;
+        }
+
         var checkpoint = context.SaveCheckpoint();
         if (slot.DeclaredType is JsonSqlType
             && context.GetNextRequired() is Name jsonMethod

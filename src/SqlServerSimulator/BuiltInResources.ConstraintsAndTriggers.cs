@@ -447,11 +447,13 @@ internal static partial class BuiltInResources
         _ = batch;
         var trueBit = SqlValue.FromBoolean(true);
         var falseBit = SqlValue.FromBoolean(false);
-        // 'TR' / 'SQL_TRIGGER' — matches Trigger.ObjectTypeCode /
-        // Trigger.ObjectTypeDescription, kept as local constants here to
-        // avoid one SqlValue allocation per row.
+        // 'TR' / 'SQL_TRIGGER' and 'TA' / 'CLR_TRIGGER' — matches
+        // Trigger.ObjectTypeCode / Trigger.ObjectTypeDescription, kept as
+        // local constants here to avoid one SqlValue allocation per row.
         var triggerType = SqlValue.FromChar(charTwo, "TR");
         var triggerTypeDesc = SqlValue.FromNVarchar("SQL_TRIGGER");
+        var clrTriggerType = SqlValue.FromChar(charTwo, "TA");
+        var clrTriggerTypeDesc = SqlValue.FromNVarchar("CLR_TRIGGER");
         var parentClassDatabase = SqlValue.FromByte(0);
         var parentClassDatabaseDesc = SqlValue.FromNVarchar("DATABASE");
         var parentIdZero = SqlValue.FromInt32(0);
@@ -465,8 +467,8 @@ internal static partial class BuiltInResources
                     parentClassObjectColumn,
                     parentClassObjectColumnDesc,
                     SqlValue.FromInt32(trigger.Parent.ObjectId),
-                    triggerType,
-                    triggerTypeDesc,
+                    trigger.ClrEntry is null ? triggerType : clrTriggerType,
+                    trigger.ClrEntry is null ? triggerTypeDesc : clrTriggerTypeDesc,
                     SqlValue.FromDateTime(trigger.CreateDate),
                     SqlValue.FromDateTime(trigger.ModifyDate),
                     falseBit,
@@ -488,8 +490,8 @@ internal static partial class BuiltInResources
                 parentClassDatabase,
                 parentClassDatabaseDesc,
                 parentIdZero,
-                triggerType,
-                triggerTypeDesc,
+                ddl.ClrEntry is null ? triggerType : clrTriggerType,
+                ddl.ClrEntry is null ? triggerTypeDesc : clrTriggerTypeDesc,
                 SqlValue.FromDateTime(ddl.CreateDate),
                 SqlValue.FromDateTime(ddl.ModifyDate),
                 falseBit,
@@ -1435,6 +1437,18 @@ internal static partial class BuiltInResources
                 if (procedure.ClrEntry is { } entry)
                     yield return AssemblyModuleRow(procedure.ObjectId, entry);
             }
+
+            foreach (var trigger in schema.Triggers.Values)
+            {
+                if (trigger.ClrEntry is { } entry)
+                    yield return AssemblyModuleRow(trigger.ObjectId, entry);
+            }
+        }
+
+        foreach (var ddl in database.DdlTriggers.Values)
+        {
+            if (ddl.ClrEntry is { } entry)
+                yield return AssemblyModuleRow(ddl.ObjectId, entry);
         }
     }
 

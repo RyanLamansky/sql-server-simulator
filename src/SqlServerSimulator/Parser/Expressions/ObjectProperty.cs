@@ -391,7 +391,7 @@ internal sealed class ObjectProperty : Expression
             : ((first ? trigger.FirstForActions : trigger.LastForActions) & action) != 0 ? 1 : 0;
 
     private static bool IsSqlModule(SchemaObject obj) =>
-        obj is Procedure { ClrEntry: null } or View or Trigger or ScalarFunction or InlineTableValuedFunction or MultiStatementTableValuedFunction;
+        obj is Procedure { ClrEntry: null } or View or Trigger { ClrEntry: null } or ScalarFunction or InlineTableValuedFunction or MultiStatementTableValuedFunction;
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {

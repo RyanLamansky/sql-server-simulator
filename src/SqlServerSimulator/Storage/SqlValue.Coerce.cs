@@ -40,6 +40,8 @@ internal readonly partial struct SqlValue
             return this.CoerceJson(target);
         if (target is VectorSqlType || this.Type is VectorSqlType)
             return this.CoerceVector(target);
+        if (target is ClrUdtSqlType || this.Type is ClrUdtSqlType)
+            return this.CoerceClrUdt(target);
 
         // sql_variant wraps any base value (CAST(x AS sql_variant),
         // ISNULL(variant, x) coercing the fallback); coercing a variant to a
@@ -2274,5 +2276,51 @@ internal readonly partial struct SqlValue
             _ => int.MaxValue,
         };
         return text.Length > width ? throw SimulatedSqlException.JsonTargetTooSmall() : FromString(target, text);
+    }
+
+    /// <summary>
+    /// The conversions a CLR user-defined type takes part in (probed
+    /// 2026-09-28 against SQL Server 2025): a character string reaches it
+    /// through the class's <c>Parse</c> and leaves it through its
+    /// <c>ToString()</c>; <c>xml</c> is the class's XML serialization both
+    /// ways; a binary string is its serialized bytes both ways,
+    /// save that a <c>binary(n)</c> wider than the value is Msg 6207. A value
+    /// the class reports <c>IsNull</c> for is SQL NULL. Everything else was
+    /// refused while compiling.
+    /// </summary>
+    private SqlValue CoerceClrUdt(SqlType target)
+    {
+        if (target is ClrUdtSqlType udtTarget)
+        {
+            if (this.Type is XmlSqlType)
+                return udtTarget.Udt.FromXmlText(this.AsString);
+            if (SqlType.IsCollatedString(this.Type))
+                return udtTarget.Udt.ParseText(this.AsString);
+            if (this.Type is VarbinarySqlType or BinarySqlType)
+            {
+                var bytes = this.AsBytes;
+                return udtTarget.Udt.Deserialize(bytes) is System.Data.SqlTypes.INullable { IsNull: true }
+                    ? Null(target)
+                    : FromClrUdt(udtTarget, bytes);
+            }
+        }
+        else if (this.Type is ClrUdtSqlType udtSource)
+        {
+            if (target is XmlSqlType)
+                return FromXml(udtSource.Udt.ToXmlText(this));
+            if (SqlType.IsCollatedString(target))
+                return FromString(target, udtSource.Udt.ToText(this));
+            if (target is VarbinarySqlType)
+                return FromVarbinary(this.AsClrUdtBytes);
+            if (target is BinarySqlType fixedTarget)
+            {
+                var bytes = this.AsClrUdtBytes;
+                return fixedTarget.length > bytes.Length
+                    ? throw SimulatedSqlException.ClrUdtToPaddedBinary($"{udtSource.Udt.Schema.Name}.{udtSource.Udt.Name}")
+                    : FromBinary(fixedTarget, bytes);
+            }
+        }
+
+        throw SimulatedSqlException.ExplicitConversionNotAllowed(this.Type, target);
     }
 }

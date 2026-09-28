@@ -269,6 +269,9 @@ partial class SqlType
         if (operation is TypePairOperation.Unify or TypePairOperation.Assign && leftType is VectorSqlType leftVector && rightType is VectorSqlType rightVector)
             return leftVector == rightVector ? null : SimulatedSqlException.VectorDimensionsMismatch(leftVector.dimensions, rightVector.dimensions, 1);
 
+        if ((leftType is ClrUdtSqlType || rightType is ClrUdtSqlType) && ClrUdtPairError(operation, left, right, operatorName) is { } udtError)
+            return udtError;
+
         if ((operation is TypePairOperation.Unify or TypePairOperation.Compare
                 && (IsMaxLengthVariantPair(leftType, rightType) || IsMaxLengthVariantPair(rightType, leftType)))
             || (operation == TypePairOperation.Assign && IsMaxLengthVariantPair(leftType, rightType)))
@@ -440,4 +443,35 @@ partial class SqlType
 
     private static string OperandName(TypePairOperand operand) =>
         operand.ReportsNumeric && operand.Type is DecimalSqlType ? "numeric" : OperandName(operand.Type, operand.Source);
+
+    /// <summary>
+    /// What the grids can't say about a CLR user-defined type, which shares
+    /// <c>hierarchyid</c>'s row and column (probed 2026-09-28 against SQL
+    /// Server 2025): two different CLR types clash naming both
+    /// schema-qualified, one against <c>hierarchyid</c> clashes by bare
+    /// names — an assignment naming its source first, the other operations
+    /// their right operand — and a type not marked <c>IsByteOrdered</c> can't
+    /// be compared with itself (Msg 403).
+    /// </summary>
+    private static SimulatedSqlException? ClrUdtPairError(TypePairOperation operation, TypePairOperand left, TypePairOperand right, string operatorName)
+    {
+        var leftType = left.Type;
+        var rightType = right.Type;
+        if (leftType == rightType)
+        {
+            return operation == TypePairOperation.Compare && leftType is ClrUdtSqlType { Udt.IsByteOrdered: false } unordered
+                ? SimulatedSqlException.InvalidOperatorForDataType(operatorName, unordered.Udt.Name)
+                : null;
+        }
+
+        if (leftType.PairClass != TypePairClass.HierarchyId || rightType.PairClass != TypePairClass.HierarchyId)
+            return null;
+
+        static string Name(SqlType type, bool qualify) =>
+            type is ClrUdtSqlType udt && qualify ? $"{udt.Udt.Schema.Name}.{udt.Udt.Name}" : type.ToString()!;
+        var qualify = leftType is ClrUdtSqlType && rightType is ClrUdtSqlType;
+        return operation == TypePairOperation.Assign
+            ? SimulatedSqlException.OperandTypeClash(Name(leftType, qualify), Name(rightType, qualify))
+            : SimulatedSqlException.OperandTypeClash(Name(rightType, qualify), Name(leftType, qualify));
+    }
 }

@@ -414,6 +414,7 @@ partial class Simulation
                 (-4, "image", 2147483647, 2147483647, 2147483647),
             SpatialSqlType => (-4, null, 2147483647, 2147483647, 2147483647),
             HierarchyIdSqlType => (-4, null, 892, 892, 892),
+            ClrUdtSqlType udt => (-4, null, udt.Udt.MaxByteSize, udt.Udt.MaxByteSize, udt.Udt.MaxByteSize),
             _ => null,
         };
         if (downlevel is { } mapped)
@@ -539,6 +540,7 @@ partial class Simulation
         GeographySqlType => "geography",
         GeometrySqlType => "geometry",
         HierarchyIdSqlType => "hierarchyid",
+        ClrUdtSqlType udt => udt.Udt.Name,
         _ => throw new NotSupportedException($"sp_columns_100 does not model {type} columns."),
     };
 
@@ -550,6 +552,7 @@ partial class Simulation
         GeographySqlType => "Microsoft.SqlServer.Types.SqlGeography, " + SqlServerTypesAssembly,
         GeometrySqlType => "Microsoft.SqlServer.Types.SqlGeometry, " + SqlServerTypesAssembly,
         HierarchyIdSqlType => "Microsoft.SqlServer.Types.SqlHierarchyId, " + SqlServerTypesAssembly,
+        ClrUdtSqlType udt => udt.Udt.AssemblyQualifiedName,
         _ => null,
     };
 
@@ -598,6 +601,7 @@ partial class Simulation
             SqlVariantSqlType => (0, 8000, null, 8000),
             SpatialSqlType => (0, 0, null, 0),
             HierarchyIdSqlType => (892, 892, null, 892),
+            ClrUdtSqlType udt => (udt.Udt.MaxByteSize, udt.Udt.MaxByteSize, null, udt.Udt.MaxByteSize),
             _ => throw new NotSupportedException($"sp_columns_100 does not model {col.Type} columns."),
         };
 
@@ -645,7 +649,7 @@ partial class Simulation
             _ when type == SqlType.Image => (34, 34),
             XmlSqlType => (0, 0),
             SqlVariantSqlType => (39, 39),
-            SpatialSqlType or HierarchyIdSqlType => (23, 23),
+            SpatialSqlType or HierarchyIdSqlType or ClrUdtSqlType => (23, 23),
             CharSqlType or NCharSqlType => (47, 39),
             VarcharSqlType or NVarcharSqlType => (39, 39),
             _ when type == SqlType.SystemName => (39, 39),

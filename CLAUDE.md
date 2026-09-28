@@ -295,7 +295,7 @@ Where an entry carries a second clause it is because that fact changes what you'
   All six dependency surfaces project from one walk of stored definition **text**, which is what reproduces real's name-based refresh rules → [`catalog-views.md`](docs/claude/catalog-views.md).
 - **Scalar UDFs / TVFs / views / stored procs / dynamic SQL, the `ALTER` / `CREATE OR ALTER` path, `WITH RESULT SETS`, `WITH SCHEMABINDING`, DML through views**.
   A module body **binds at CREATE** — every binder error at once, in source order — while a missing object still defers → [`programmable.md`](docs/claude/programmable.md).
-- **CLR assemblies** — `CREATE` / `DROP ASSEMBLY`, `EXTERNAL NAME` scalar and table-valued functions, procedures and `CREATE AGGREGATE`, `Simulation.EnableClr`, static SAFE verification.
+- **CLR assemblies** — `CREATE` / `DROP ASSEMBLY`, `EXTERNAL NAME` scalar and table-valued functions, procedures, triggers and `CREATE AGGREGATE`, CLR user-defined types (`CREATE TYPE … EXTERNAL NAME`), `Simulation.EnableClr`, static SAFE verification.
   A registered assembly's `System.Data` and `Microsoft.SqlServer.Server` references resolve to a load-context shim, the embedded `SqlServerSimulator.ClrShim` build → [`clr-assemblies.md`](docs/claude/clr-assemblies.md).
 - **`#foo` / `##foo` routing, DROP TABLE, TRUNCATE TABLE** → [`temp-tables.md`](docs/claude/temp-tables.md).
 - **`DECLARE @t TABLE`, table-variable DML, `OUTPUT … INTO`** — the column features ship; real's own `DECLARE` grammar refuses named constraints and FKs → [`table-variables.md`](docs/claude/table-variables.md).
@@ -367,7 +367,7 @@ The feature docs' own **Not modeled yet** sections hold the smaller gaps.
 - **Most `SET <option>` toggles parse and are discarded** (`Simulation.Set.cs`); the ones with semantic effect are handled by name there.
   The same goes for most `ALTER DATABASE … SET` options → [`database-options.md`](docs/claude/database-options.md).
 - **Heap allocation tracking** (a flat page list, no IAM/PFS) → [`heap-storage.md`](docs/claude/heap-storage.md).
-- **Programmable-object gaps**: CLR UDTs and triggers, the SQLCLR context connection, logon triggers, and MERGE into a join view → [`programmable.md`](docs/claude/programmable.md), [`clr-assemblies.md`](docs/claude/clr-assemblies.md), [`triggers.md`](docs/claude/triggers.md).
+- **Programmable-object gaps**: the SQLCLR context connection (so a CLR trigger can't read `INSERTED` / `DELETED`), logon triggers, and MERGE into a join view → [`programmable.md`](docs/claude/programmable.md), [`clr-assemblies.md`](docs/claude/clr-assemblies.md), [`triggers.md`](docs/claude/triggers.md).
 - **`ALTER COLUMN … ADD | DROP PERSISTED`** → [`alter-table.md`](docs/claude/alter-table.md).
 - **Filegroup placement** — a table or index `ON [fg]` isn't recorded (only a partition scheme's placement is) → [`partitioning.md`](docs/claude/partitioning.md#not-modeled-yet).
 - **`FORCESEEK`'s plan-infeasibility refusal** (Msg 8622) → [`query-hints.md`](docs/claude/query-hints.md#not-enforced).

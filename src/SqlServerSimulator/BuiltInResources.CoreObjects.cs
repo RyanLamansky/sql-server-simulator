@@ -841,6 +841,9 @@ internal static partial class BuiltInResources
             // vector(n): its storage length, the 8-byte header plus four bytes
             // an element (probed 2026-09-26).
             VectorSqlType vector => ((short)vector.ByteLength, 0, 0),
+            // A CLR user-defined type: its MaxByteSize, -1 for unlimited
+            // (probed 2026-09-28).
+            ClrUdtSqlType udt => ((short)udt.Udt.MaxByteSize, 0, 0),
             _ => throw new NotSupportedException($"No sys.columns metadata for {t}."),
         };
     }

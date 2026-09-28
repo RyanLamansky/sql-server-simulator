@@ -517,6 +517,14 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     public FromSource[]? ScopeSources;
 
     /// <summary>
+    /// The columns a <c>CREATE TABLE</c> list has declared so far, by name,
+    /// while the list parses and the host enabled CLR — how a computed column
+    /// or a CHECK tells a CLR type column's member (<c>p.X</c>) from a
+    /// two-part column name, with no query scope to ask.
+    /// </summary>
+    public Func<MultiPartName, SqlType?>? DeclaredColumnTypes;
+
+    /// <summary>
     /// The Dynamic Data Masking counterpart of <see cref="OuterTypeResolver"/>:
     /// the mask an enclosing query's column reads through, so a correlated
     /// subquery or an <c>APPLY</c> body projecting it masks as a direct

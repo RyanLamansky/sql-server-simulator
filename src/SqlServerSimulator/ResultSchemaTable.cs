@@ -168,6 +168,7 @@ internal static class ResultSchemaTable
         JsonSqlType => new(int.MaxValue, 255, 255, typeof(string), SqlDbType.VarChar, typeof(SqlString), "json", isLong: true),
         HierarchyIdSqlType => new(892, 255, 255, null, SqlDbType.Udt, null, $"{databaseName}.sys.hierarchyid", udtName: Network.TdsTypeCodec.HierarchyIdAssemblyQualifiedName),
         SpatialSqlType spatial => new(-1, 255, 255, null, SqlDbType.Udt, null, $"{databaseName}.sys.{spatial.SqlServerName}", udtName: Network.TdsTypeCodec.SpatialAssemblyQualifiedName(spatial)),
+        ClrUdtSqlType udt => new(udt.Udt.MaxByteSize, 255, 255, null, SqlDbType.Udt, null, udt.Udt.QualifiedName, udtName: udt.Udt.AssemblyQualifiedName),
         _ => new(-1, 255, 255, type.ClrType, SqlDbType.Variant, null, type.SqlServerName),
     };
 

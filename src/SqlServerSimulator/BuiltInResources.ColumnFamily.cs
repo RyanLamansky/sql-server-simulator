@@ -365,6 +365,9 @@ internal static partial class BuiltInResources
             }
         }
         foreach (var ddlTrigger in database.DdlTriggers.Values.OrderBy(t => t.ObjectId))
-            yield return Row(ddlTrigger);
+        {
+            if (SchemaObject.IsSqlModule(ddlTrigger))
+                yield return Row(ddlTrigger);
+        }
     }
 }

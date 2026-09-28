@@ -1269,6 +1269,38 @@ partial class Simulation
         List<PendingInlineIndex>? pendingIndexes = null,
         List<PendingEdgeConstraint>? pendingEdgeConstraints = null)
     {
+        // A computed column or CHECK reading a CLR type column's member
+        // (`x AS p.X`, `CHECK (p.Y > 0)`) binds the member off the column's
+        // declared type, which only the list parsed so far knows.
+        if (!context.Simulation.EnableClr)
+            return ParseColumnListBody(context, tableName, isTableVariable, isTableType, heapColumns, pendingKeys, pendingChecks, pendingComputed, pendingPeriod, pendingForeignKeys, pendingIndexes, pendingEdgeConstraints);
+        var collation = context.CurrentDatabase.Collation;
+        var saved = context.DeclaredColumnTypes;
+        context.DeclaredColumnTypes = name => name.Count == 1 ? heapColumns.Find(column => column is not null && collation.Equals(column.Name, name.Leaf))?.Type : null;
+        try
+        {
+            return ParseColumnListBody(context, tableName, isTableVariable, isTableType, heapColumns, pendingKeys, pendingChecks, pendingComputed, pendingPeriod, pendingForeignKeys, pendingIndexes, pendingEdgeConstraints);
+        }
+        finally
+        {
+            context.DeclaredColumnTypes = saved;
+        }
+    }
+
+    private static bool ParseColumnListBody(
+        ParserContext context,
+        string tableName,
+        bool isTableVariable,
+        bool isTableType,
+        List<HeapColumn?> heapColumns,
+        List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals, bool? Clustered, IndexOptions Options, bool[] Descending)> pendingKeys,
+        List<(string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition, bool NotForReplication)> pendingChecks,
+        List<(int Index, string Name, Expression Expression, bool Persisted, bool Nullable, string Definition)> pendingComputed,
+        List<(string StartCol, string EndCol)>? pendingPeriod,
+        List<PendingForeignKey>? pendingForeignKeys,
+        List<PendingInlineIndex>? pendingIndexes,
+        List<PendingEdgeConstraint>? pendingEdgeConstraints)
+    {
         var identityCount = 0;
         // A node or edge table's internal columns arrive already in the list.
         var leadingColumns = heapColumns.Count;
@@ -2696,7 +2728,7 @@ partial class Simulation
                     throw SimulatedSqlException.ComputedColumnPkRequiresPersisted(column.Name, tableName);
                 // A vector or json key is refused with the constraint's own Msg
                 // 1750 after it (probed 2026-09-26 against SQL Server 2025).
-                if (column.Type is VectorSqlType or JsonSqlType)
+                if (column.Type is VectorSqlType or JsonSqlType or ClrUdtSqlType { Udt.IsByteOrdered: false })
                     throw SimulatedSqlException.FollowedByConstraintNotCreated(SimulatedSqlException.KeyColumnInvalidType(column.Name, tableName), state: 0);
                 if (column.IsLob)
                     throw SimulatedSqlException.KeyColumnInvalidType(column.Name, tableName);

@@ -47,6 +47,7 @@ internal static class ClrTypeMarshaller
         VarbinarySqlType or BinarySqlType => clrType == typeof(SqlBinary),
         UniqueIdentifierSqlType => clrType == typeof(SqlGuid),
         XmlSqlType => clrType == typeof(SqlXml),
+        ClrUdtSqlType udt => clrType == udt.Udt.Type,
         _ => false,
     };
 
@@ -56,7 +57,9 @@ internal static class ClrTypeMarshaller
     /// NULL maps to the type's own <c>Null</c> sentinel, so the routine sees
     /// <c>IsNull</c> rather than a CLR <see langword="null"/>.
     /// </summary>
-    public static object ToClr(SqlValue value, Type clrType) => value.IsNull
+    public static object? ToClr(SqlValue value, Type clrType) => value.Type is ClrUdtSqlType udt
+        ? udt.Udt.ToClr(value)
+        : value.IsNull
         ? NullOf(clrType)
         : clrType == typeof(SqlString) ? new SqlString(value.AsString)
             : clrType == typeof(SqlInt32) ? new SqlInt32(value.AsInt32)
@@ -78,7 +81,9 @@ internal static class ClrTypeMarshaller
     /// Converts the method's return value back into a <see cref="SqlValue"/> of
     /// the routine's declared <c>RETURNS</c> type.
     /// </summary>
-    public static SqlValue FromClr(object? result, SqlType returnType) => result is null or INullable { IsNull: true }
+    public static SqlValue FromClr(object? result, SqlType returnType) => returnType is ClrUdtSqlType udt
+        ? udt.Udt.FromClr(result)
+        : result is null or INullable { IsNull: true }
         ? SqlValue.Null(returnType)
         : result switch
         {
@@ -252,4 +257,27 @@ internal static class ClrTypeMarshaller
         };
         return natural.CoerceTo(target);
     }
+
+    /// <summary>
+    /// A CLR type as the server's messages spell it: the C# keyword for a
+    /// primitive, the simple name otherwise.
+    /// </summary>
+    public static string DisplayName(Type type) => Type.GetTypeCode(type) switch
+    {
+        TypeCode.Boolean => "bool",
+        TypeCode.Byte => "byte",
+        TypeCode.Char => "char",
+        TypeCode.Decimal => "decimal",
+        TypeCode.Double => "double",
+        TypeCode.Int16 => "short",
+        TypeCode.Int32 => "int",
+        TypeCode.Int64 => "long",
+        TypeCode.SByte => "sbyte",
+        TypeCode.Single => "float",
+        TypeCode.String => "string",
+        TypeCode.UInt16 => "ushort",
+        TypeCode.UInt32 => "uint",
+        TypeCode.UInt64 => "ulong",
+        _ => type == typeof(object) ? "object" : type.Name,
+    };
 }

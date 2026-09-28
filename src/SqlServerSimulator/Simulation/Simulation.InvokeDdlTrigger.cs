@@ -80,7 +80,7 @@ partial class Simulation
         var end = Math.Min(batch.Parser.Token?.StartIndex ?? commandText.Length, commandText.Length);
         var statementText = end > start ? commandText[start..end].TrimEnd() : string.Empty;
 
-        List<(DdlTrigger Trigger, string EventData)>? fires = null;
+        List<(DdlTrigger Trigger, string EventData, int EventType)>? fires = null;
         foreach (var info in events)
         {
             foreach (var trigger in database.DdlTriggers.Values.OrderBy(t => t.ObjectId))
@@ -89,7 +89,7 @@ partial class Simulation
                     continue;
                 if (trigger.IsDisabled || !trigger.Covers(info.EventType) || !CanFireDdlTrigger(batch, trigger))
                     continue;
-                (fires ??= []).Add((trigger, BuildDdlEventData(batch, info, statementText)));
+                (fires ??= []).Add((trigger, BuildDdlEventData(batch, info, statementText), TriggerEventTypes.TryResolve(info.EventType, out var eventType) ? eventType.Type : 0));
             }
         }
         if (fires is null)
@@ -105,12 +105,12 @@ partial class Simulation
             connection.TriggerStatementVersionEntries = batch.CurrentStatementVersionEntries;
             try
             {
-                foreach (var (trigger, eventData) in fires)
+                foreach (var (trigger, eventData, eventType) in fires)
                 {
                     RunOneTriggerBody(
                         batch,
                         database,
-                        new TriggerFrame(trigger, eventData),
+                        new TriggerFrame(trigger, eventData, eventType),
                         trigger.BodyText,
                         trigger.BodyLineOffset,
                         trigger.Name,

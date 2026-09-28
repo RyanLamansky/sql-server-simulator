@@ -218,8 +218,8 @@ partial class SimulatedSqlException
     /// what a property belonging to the other spatial type produces
     /// (<c>Lat</c> on <c>geometry</c>, <c>STX</c> on <c>geography</c>).
     /// </summary>
-    internal static SimulatedSqlException ClrPropertyNotFound(string member, string clrTypeName) =>
-        new($"Could not find property or field '{member}' for type '{clrTypeName}' in assembly 'Microsoft.SqlServer.Types'.", 6592, 16, 3);
+    internal static SimulatedSqlException ClrPropertyNotFound(string member, string clrTypeName, string assemblyName = "Microsoft.SqlServer.Types") =>
+        new($"Could not find property or field '{member}' for type '{clrTypeName}' in assembly '{assemblyName}'.", 6592, 16, 3);
 
     /// <summary>
     /// Mimics SQL Server error 6506: a CLR-type method was called that the type

@@ -201,7 +201,7 @@ partial class Simulation
             outerBatch);
         var method = function.Entry.Method!;
         var clrParameters = method.GetParameters();
-        var values = new object[clrParameters.Length];
+        var values = new object?[clrParameters.Length];
         for (var i = 0; i < clrParameters.Length; i++)
         {
             var parameter = function.Parameters[i];

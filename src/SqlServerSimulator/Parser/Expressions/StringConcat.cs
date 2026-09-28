@@ -89,7 +89,7 @@ internal sealed class StringConcat : Expression
             // (probed 2026-09-26 against SQL Server 2025).
             if (type is VectorSqlType)
                 (vectorRefusals ??= []).Add(SimulatedSqlException.InvalidArgumentDataType(type.SqlServerName, i + 1, LowercaseName(this.kind), 9));
-            if (type is XmlSqlType or JsonSqlType or SqlVariantSqlType or ImageSqlType)
+            if (type is XmlSqlType or JsonSqlType or SqlVariantSqlType or ImageSqlType or ClrUdtSqlType)
                 unconvertible ??= type;
             anyNational |= SqlType.IsNationalStringCategory(type);
             anyMax |= IsMaxForm(type);
@@ -104,8 +104,9 @@ internal sealed class StringConcat : Expression
         if (vectorRefusals is not null)
             throw vectorRefusals.Count == 1 ? vectorRefusals[0] : SimulatedSqlException.Aggregate(vectorRefusals);
         // Every argument converts to the result's string family, and an xml,
-        // json, sql_variant or image one can't (probed 2026-09-25 against SQL
-        // Server 2025: Msg 257 naming varchar or nvarchar, Msg 206 for image).
+        // json, sql_variant, image or CLR-type one can't (probed 2026-09-25
+        // and, for a CLR type, 2026-09-28 against SQL Server 2025: Msg 257
+        // naming varchar or nvarchar, Msg 206 for image).
         if (unconvertible is not null)
         {
             var target = anyNational ? "nvarchar" : "varchar";

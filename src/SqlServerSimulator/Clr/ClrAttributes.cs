@@ -12,6 +12,8 @@ internal static class ClrAttributes
 {
     public const string SqlFunction = "Microsoft.SqlServer.Server.SqlFunctionAttribute";
     public const string SqlUserDefinedAggregate = "Microsoft.SqlServer.Server.SqlUserDefinedAggregateAttribute";
+    public const string SqlUserDefinedType = "Microsoft.SqlServer.Server.SqlUserDefinedTypeAttribute";
+    public const string SqlMethod = "Microsoft.SqlServer.Server.SqlMethodAttribute";
 
     /// <summary>The attribute named <paramref name="attributeName"/> on <paramref name="member"/>, or <see langword="null"/>.</summary>
     public static CustomAttributeData? Find(MemberInfo member, string attributeName)

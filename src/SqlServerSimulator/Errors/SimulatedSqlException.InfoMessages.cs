@@ -32,7 +32,8 @@ partial class SimulatedSqlException
         // column rewrite a value it can't convert, the notice reports line 1,
         // whatever line the statement was on (probed 2026-09-26 against SQL
         // Server 2025).
-        if (error is { Number: 1505 } or { EndedColumnRewrite: true })
+        // A CLR trigger's throw reports it at the trigger's line 1 as well.
+        if (error is { Number: 1505 } or { EndedColumnRewrite: true } or { Number: 6522, EndedTriggerBody: true })
             message.LineNumber = 1;
         return message;
     }

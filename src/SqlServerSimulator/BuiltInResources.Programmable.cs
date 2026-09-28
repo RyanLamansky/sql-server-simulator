@@ -582,6 +582,15 @@ internal static partial class BuiltInResources
             new("is_table_type", SqlType.Bit, null, false),
         ], EnumerateAssemblyTypes);
 
+        // sys.type_assembly_usages: which assembly each CLR type lives in —
+        // the three system types in Microsoft.SqlServer.Types (1), then the
+        // user-defined ones (probed 2026-09-28 against SQL Server 2025).
+        Sys("type_assembly_usages",
+        [
+            new("user_type_id", SqlType.Int32, null, false),
+            new("assembly_id", SqlType.Int32, null, false),
+        ], static (_, database) => EnumerateTypeAssemblyUsages(database));
+
         // sys.function_order_columns: ordered-set aggregate order columns
         // aren't modeled, so it ships empty with the full probe-confirmed
         // shape (SQL Server 2025, 2026-07-16).
@@ -661,12 +670,11 @@ internal static partial class BuiltInResources
     /// whose <c>sys.types.is_assembly_type</c> already reads 1. They belong to
     /// the sys schema (schema_id 4) and the Microsoft.SqlServer.Types assembly
     /// (assembly_id 1); <c>is_user_defined</c> is 0 (system-shipped), matching
-    /// SQL Server 2025. No user-defined CLR types are modeled.
+    /// SQL Server 2025 — followed by the database's CLR user-defined types.
     /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateAssemblyTypes(Parser.BatchContext batch, Database database)
     {
         _ = batch;
-        _ = database;
         var sysSchemaId = SqlValue.FromInt32(Database.SysSchemaId);
         var nullPrincipal = SqlValue.Null(SqlType.Int32);
         var nullCollation = SqlValue.Null(SqlType.SystemName);
@@ -704,6 +712,56 @@ internal static partial class BuiltInResources
         yield return Row("hierarchyid", 128, 892, "Microsoft.SqlServer.Types.SqlHierarchyId", true);
         yield return Row("geometry", 129, -1, "Microsoft.SqlServer.Types.SqlGeometry", false);
         yield return Row("geography", 130, -1, "Microsoft.SqlServer.Types.SqlGeography", false);
+
+        // The CLR user-defined types, after the system three (probed
+        // 2026-09-28 against SQL Server 2025).
+        foreach (var schema in database.Schemas.Values)
+        {
+            foreach (var alias in schema.AliasTypes.Values.OrderBy(a => a.UserTypeId))
+            {
+                if (alias.UnderlyingType is not ClrUdtSqlType { Udt: var udt })
+                    continue;
+                yield return [
+                    SqlValue.FromSystemName(alias.Name),
+                    systemTypeId,
+                    SqlValue.FromInt32(alias.UserTypeId),
+                    SqlValue.FromInt32(schema.SchemaId),
+                    Ownership.PrincipalIdValue(alias.OwnerPrincipalId),
+                    SqlValue.FromInt16((short)udt.MaxByteSize),
+                    zeroByte,
+                    zeroByte,
+                    nullCollation,
+                    trueBit,
+                    trueBit,
+                    trueBit,
+                    zeroInt,
+                    zeroInt,
+                    SqlValue.FromInt32(udt.Assembly.AssemblyId),
+                    SqlValue.FromNVarchar(udt.ClassName),
+                    SqlValue.FromBoolean(udt.IsByteOrdered),
+                    SqlValue.FromBoolean(udt.IsFixedLength),
+                    nullProgId,
+                    SqlValue.FromNVarchar(udt.AssemblyQualifiedName),
+                    falseBit,
+                ];
+            }
+        }
+    }
+
+    private static IEnumerable<SqlValue[]> EnumerateTypeAssemblyUsages(Database database)
+    {
+        var systemAssembly = SqlValue.FromInt32(1);
+        yield return [SqlValue.FromInt32(128), systemAssembly];
+        yield return [SqlValue.FromInt32(129), systemAssembly];
+        yield return [SqlValue.FromInt32(130), systemAssembly];
+        foreach (var schema in database.Schemas.Values)
+        {
+            foreach (var alias in schema.AliasTypes.Values.OrderBy(a => a.UserTypeId))
+            {
+                if (alias.UnderlyingType is ClrUdtSqlType { Udt.Assembly: var assembly })
+                    yield return [SqlValue.FromInt32(alias.UserTypeId), SqlValue.FromInt32(assembly.AssemblyId)];
+            }
+        }
     }
 
     /// <summary>
@@ -805,7 +863,7 @@ internal static partial class BuiltInResources
                     trueBit,
                     falseBit,
                     alias.IsNullable ? trueBit : falseBit,
-                    falseBit,
+                    alias.UnderlyingType is ClrUdtSqlType ? trueBit : falseBit,
                     SqlValue.FromInt16(maxLength),
                     SqlValue.FromByte(precision),
                     SqlValue.FromByte(scale),
@@ -1470,6 +1528,7 @@ internal static partial class BuiltInResources
             // carry such columns).
             XmlSqlType or JsonSqlType or SpatialSqlType => (-1, -1, null, null, null, null),
             HierarchyIdSqlType => (892, 892, null, null, null, null),
+            ClrUdtSqlType udt => (udt.Udt.MaxByteSize, udt.Udt.MaxByteSize, null, null, null, null),
             SqlVariantSqlType => (0, 0, null, null, null, null),
             VectorSqlType vector => (vector.ByteLength, vector.ByteLength, null, null, null, null),
             _ => throw new NotSupportedException($"No INFORMATION_SCHEMA.COLUMNS metadata for {t}."),

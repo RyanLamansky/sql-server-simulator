@@ -103,8 +103,8 @@ partial class Simulation
                 throw SimulatedSqlException.IndexColumnMissing(columnNames[i]);
             // Statistics take the same determinism / precision gate an index
             // key does — real's Msg 2729 / 2799 both name "index or statistics".
-            if (table.Columns[ordinal].Type is VectorSqlType or JsonSqlType)
-                throw SimulatedSqlException.VectorKeyColumnInvalid(table.Columns[ordinal].Name, table.Name, table.Columns[ordinal].Type is JsonSqlType ? (byte)3 : (byte)4);
+            if (table.Columns[ordinal].Type is VectorSqlType or JsonSqlType or ClrUdtSqlType { Udt.IsByteOrdered: false })
+                throw SimulatedSqlException.VectorKeyColumnInvalid(table.Columns[ordinal].Name, table.Name, table.Columns[ordinal].Type switch { JsonSqlType => 3, VectorSqlType => 4, _ => 1 });
             RejectComputedKeyColumnNotIndexable(context.Batch, table, table.Columns[ordinal], statisticsName, viaConstraint: false);
             ordinals[i] = ordinal;
         }

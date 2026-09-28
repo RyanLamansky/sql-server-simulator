@@ -50,7 +50,7 @@ internal sealed class ClrAggregator : Aggregator
     {
         if (this.seen is not null && !this.seen.Add(new SqlValueKey((SqlValue[])arguments.Clone())))
             return;
-        var values = new object[arguments.Length];
+        var values = new object?[arguments.Length];
         for (var i = 0; i < values.Length; i++)
             values[i] = ClrTypeMarshaller.ToClr(arguments[i], this.parameters[i].ParameterType);
         _ = this.Call(this.function.Accumulate, values);
@@ -82,7 +82,7 @@ internal sealed class ClrAggregator : Aggregator
             : result;
     }
 
-    private object? Call(MethodInfo method, object[] arguments)
+    private object? Call(MethodInfo method, object?[] arguments)
     {
         try
         {

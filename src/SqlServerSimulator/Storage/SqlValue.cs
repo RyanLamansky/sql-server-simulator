@@ -559,6 +559,17 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
     /// <see cref="AsHierarchyId"/> / <c>ToString()</c> can't decode it. The caller
     /// transfers ownership of the array.
     /// </summary>
+    /// <summary>
+    /// Non-NULL value of a CLR user-defined type, as its serialized bytes. The
+    /// array is held by reference; callers shouldn't mutate it after
+    /// construction.
+    /// </summary>
+    public static SqlValue FromClrUdt(ClrUdtSqlType type, byte[] bytes)
+    {
+        ArgumentNullException.ThrowIfNull(bytes);
+        return new(type, 0, bytes, isNull: false);
+    }
+
     public static SqlValue FromHierarchyIdBytes(byte[] ordPathBytes)
     {
         ArgumentNullException.ThrowIfNull(ordPathBytes);
@@ -789,6 +800,13 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
             : HierarchyIdOrdPath.DecodeCanonical((byte[])this.reference!);
 
     /// <summary>Returns the raw canonical OrdPath bytes backing a hierarchyid value (zero-copy). Throws if NULL or not a hierarchyid value.</summary>
+    /// <summary>A CLR user-defined type's serialized bytes.</summary>
+    public byte[] AsClrUdtBytes => this.IsNull
+        ? throw new InvalidOperationException("Value is NULL.")
+        : this.Type is not ClrUdtSqlType
+            ? throw new InvalidOperationException($"Value is {this.Type}, not a CLR user-defined type.")
+            : (byte[])this.reference!;
+
     public byte[] AsHierarchyIdBytes => this.IsNull
         ? throw new InvalidOperationException("Value is NULL.")
         : this.Type != SqlType.HierarchyId
@@ -897,6 +915,10 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
         // hierarchyid surfaces as its raw OrdPath bytes via untyped accessors —
         // the same buffer a real server stores and sends over the UDT wire.
         var t when t == SqlType.HierarchyId => this.AsHierarchyIdBytes,
+        // A CLR user-defined type surfaces as its serialized bytes: the class
+        // lives in the simulator's own load context, where a caller can't
+        // reach it.
+        ClrUdtSqlType => this.AsClrUdtBytes,
         DecimalSqlType => this.AsDecimal,
         var t when t == SqlType.Float => this.AsDouble,
         var t when t == SqlType.Real => this.AsSingle,
@@ -1047,6 +1069,11 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
                     // OrdPath's defining property: unsigned bytewise order equals
                     // depth-first tree order, so hierarchyid comparison is a memcmp.
                     HierarchyIdSqlType => this.AsHierarchyIdBytes.AsSpan().SequenceCompareTo(other.AsHierarchyIdBytes),
+                    // A byte-ordered CLR type's serialization sorts as its
+                    // values do, which is what the flag promises; an unordered
+                    // one never reaches here, its comparisons refused at
+                    // compile time.
+                    ClrUdtSqlType => this.AsClrUdtBytes.AsSpan().SequenceCompareTo(other.AsClrUdtBytes),
                     // sql_variant orders by datatype-family rank, then value
                     // within the family (probe-confirmed; see SqlVariantOrdering).
                     SqlVariantSqlType => SqlVariantOrdering.Compare(this.AsVariantInner, other.AsVariantInner),
@@ -1199,6 +1226,7 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
         _ when this.Type == SqlType.Money || this.Type == SqlType.SmallMoney => this.AsMoneyDecimal38.ToString(),
         SqlVariantSqlType => this.AsVariantInner.AsCurrentType(),
         VectorSqlType => $"'{VectorSqlType.Format(this.AsVectorBytes)}'",
+        ClrUdtSqlType => $"0x{Convert.ToHexString(this.AsClrUdtBytes)}",
         JsonSqlType => $"'{this.reference}'",
         _ => "?",
     };

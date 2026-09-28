@@ -84,7 +84,8 @@ partial class SimulatedSqlException
         new("Constraints of type CHECK cannot be created on columns of type vector.", 1760, 16, 0);
 
     /// <summary>
-    /// Msg 1978: a vector column (state 4) or a json column (state 3) named as
+    /// Msg 1978: a vector column (state 4), a json column (state 3) or a CLR
+    /// type column not marked <c>IsByteOrdered</c> (state 1) named as
     /// a key of a <c>CREATE INDEX</c> or <c>CREATE STATISTICS</c> — where a key
     /// constraint takes Msg 1919 instead.
     /// </summary>

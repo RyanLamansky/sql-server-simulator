@@ -330,6 +330,8 @@ partial class Simulation
 
             if (checkDependents && FindClrDependent(database, assembly) is string dependent)
                 throw SimulatedSqlException.DropAssemblyHasDependent(name, dependent);
+            if (FindClrTypeDependent(database, assembly) is string dependentType)
+                throw SimulatedSqlException.DropAssemblyReferencedByType(name, dependentType);
 
             if (database.Assemblies.TryRemove(name, out var removed))
                 removed.Unload();
@@ -340,26 +342,31 @@ partial class Simulation
 
     /// <summary>
     /// The name of the first CLR module bound to <paramref name="assembly"/> —
-    /// a function of any kind or a procedure — or <see langword="null"/> when
-    /// nothing references it.
+    /// a function of any kind, a procedure or a trigger, the earliest created
+    /// as real names it — or <see langword="null"/> when nothing references it.
     /// </summary>
     private static string? FindClrDependent(Database database, SqlAssembly assembly)
     {
+        SchemaObject? first = null;
+        void Consider(SchemaObject module, ClrEntryPoint? entry)
+        {
+            if (entry?.Assembly == assembly && (first is null || module.ObjectId < first.ObjectId))
+                first = module;
+        }
+
         foreach (var schema in database.Schemas.Values)
         {
             foreach (var function in schema.Functions.Values)
-            {
-                if (function is ClrFunction clr && clr.Entry.Assembly == assembly)
-                    return clr.Name;
-            }
-
+                Consider(function, (function as ClrFunction)?.Entry);
             foreach (var procedure in schema.Procedures.Values)
-            {
-                if (procedure.ClrEntry?.Assembly == assembly)
-                    return procedure.Name;
-            }
+                Consider(procedure, procedure.ClrEntry);
+            foreach (var trigger in schema.Triggers.Values)
+                Consider(trigger, trigger.ClrEntry);
         }
 
-        return null;
+        foreach (var ddl in database.DdlTriggers.Values)
+            Consider(ddl, ddl.ClrEntry);
+
+        return first?.Name;
     }
 }

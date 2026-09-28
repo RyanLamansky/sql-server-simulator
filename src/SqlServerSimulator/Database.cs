@@ -569,11 +569,10 @@ internal sealed class Database
     /// </summary>
     public readonly ConcurrentDictionary<string, SqlAssembly> Assemblies = new(StringComparer.OrdinalIgnoreCase);
 
-    // Real SQL Server hands user assemblies ids well above the system range
-    // (the shipped Microsoft.SqlServer.Types is 1; a first user assembly was
-    // observed at 65538). Starting the counter at 65536 keeps user ids in the
-    // same band without pretending to reproduce the exact seed.
-    private int nextAssemblyId = 65536;
+    // Real SQL Server hands a fresh database's first user assembly id 65536
+    // (the shipped Microsoft.SqlServer.Types is 1; probed 2026-09-28), so the
+    // counter sits one below it.
+    private int nextAssemblyId = 65535;
 
     /// <summary>Allocates the next <c>sys.assemblies.assembly_id</c>.</summary>
     public int AllocateAssemblyId() => Interlocked.Increment(ref this.nextAssemblyId);

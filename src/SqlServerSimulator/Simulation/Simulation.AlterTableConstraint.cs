@@ -499,7 +499,7 @@ partial class Simulation
             var col = table.Columns[fullOrdinals[i]];
             // A vector or json key is refused with the constraint's own Msg 1750
             // after it (probed 2026-09-26 against SQL Server 2025).
-            if (col.Type is VectorSqlType or JsonSqlType)
+            if (col.Type is VectorSqlType or JsonSqlType or ClrUdtSqlType { Udt.IsByteOrdered: false })
                 throw SimulatedSqlException.FollowedByConstraintNotCreated(SimulatedSqlException.KeyColumnInvalidType(col.Name, table.Name), state: 0);
             if (col.IsLob)
                 throw SimulatedSqlException.KeyColumnInvalidType(col.Name, table.Name);

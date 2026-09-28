@@ -711,8 +711,9 @@ partial class Simulation
 
         // Trigger fire: INSTEAD OF replaces the would-be DML; AFTER fires
         // post-heap-write. Bodies throwing propagate up; the parent
-        // statement's undo log unwinds the heap inserts.
-        if (triggerRows is { Count: > 0 })
+        // statement's undo log unwinds the heap inserts. An INSERT … SELECT
+        // producing no rows still fires, with an empty INSERTED.
+        if (triggerRows is not null && !context.Batch.IsSkipping)
         {
             context.Connection.LastStatementRowCount = triggerRows.Count;
             if (insteadOfActive)

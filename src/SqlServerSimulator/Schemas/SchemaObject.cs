@@ -173,5 +173,5 @@ internal abstract class SchemaObject(string name, int objectId, int schemaId, Da
     /// (probe-confirmed) and <c>sp_helptext</c> answers Msg 15197 for it.
     /// </summary>
     public static bool IsSqlModule(SchemaObject? obj) =>
-        obj is Procedure { ClrEntry: null } or View or Trigger or (UserDefinedFunction and not ClrFunction);
+        obj is Procedure { ClrEntry: null } or View or Trigger { ClrEntry: null } or DdlTrigger { ClrEntry: null } or (UserDefinedFunction and not ClrFunction);
 }

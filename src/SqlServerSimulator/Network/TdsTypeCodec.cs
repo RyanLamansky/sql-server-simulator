@@ -478,6 +478,18 @@ internal static class TdsTypeCodec
                 writer.WriteBVarchar(spatial.SqlServerName);
                 writer.WriteUsVarchar(SpatialAssemblyQualifiedName(spatial));
                 break;
+            case ClrUdtSqlType udt:
+                // UDTTYPE (MS-TDS 2.2.5.5.2) for a CLR user-defined type: its
+                // MaxByteSize (0xFFFF for unlimited), the type's own database /
+                // schema / name and its assembly-qualified class name, which a
+                // client loads to materialize the value.
+                writer.WriteByte(0xF0);
+                writer.WriteUInt16(udt.Udt.MaxByteSize < 0 ? (ushort)0xFFFF : (ushort)udt.Udt.MaxByteSize);
+                writer.WriteBVarchar(udt.Udt.Schema.Database.Name);
+                writer.WriteBVarchar(udt.Udt.Schema.Name);
+                writer.WriteBVarchar(udt.Udt.Name);
+                writer.WriteUsVarchar(udt.Udt.AssemblyQualifiedName);
+                break;
             case HierarchyIdSqlType:
                 // UDTTYPE (MS-TDS 2.2.5.5.2), the same shape as the spatial arm
                 // above but with hierarchyid's fixed 892-byte max size (not the
@@ -736,6 +748,12 @@ internal static class TdsTypeCodec
                     writer.WriteUInt64(ulong.MaxValue);
                 else
                     WritePlpChunks(writer, value.AsHierarchyIdBytes);
+                break;
+            case ClrUdtSqlType:
+                if (value.IsNull)
+                    writer.WriteUInt64(ulong.MaxValue);
+                else
+                    WritePlpChunks(writer, value.AsClrUdtBytes);
                 break;
             case TextSqlType tx:
                 WriteLegacyLob(writer, value.IsNull ? null : TdsCollationCodec.For(tx.Collation).WireEncoding.GetBytes(value.AsString));
