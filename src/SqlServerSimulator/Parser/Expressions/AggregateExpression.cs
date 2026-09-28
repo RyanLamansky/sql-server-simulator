@@ -1,3 +1,4 @@
+using SqlServerSimulator.Parser.Aggregators;
 using SqlServerSimulator.Parser.Tokens;
 using SqlServerSimulator.Storage;
 
@@ -29,6 +30,13 @@ internal enum AggregateKind
 
     /// <summary>A CLR user-defined aggregate; see <see cref="AggregateExpression.ClrFunction"/>.</summary>
     ClrAggregate,
+
+    /// <summary>
+    /// One of the four aggregates the spatial types expose as static methods —
+    /// <c>geometry::UnionAggregate(col)</c> and its siblings; see
+    /// <see cref="AggregateExpression.SpatialMethod"/>.
+    /// </summary>
+    SpatialAggregate,
 }
 
 /// <summary>
@@ -99,7 +107,7 @@ internal sealed class AggregateExpression : Expression
     internal SqlValue ObserveInput(SqlValue value, RuntimeContext runtime)
     {
         if (value.IsNull && this.WarnsOnNullInput && !this.CountsRowsOnly && this.Operand is not null
-            && this.Kind is not (AggregateKind.StringAgg or AggregateKind.JsonArrayAgg or AggregateKind.JsonObjectAgg or AggregateKind.ClrAggregate))
+            && this.Kind is not (AggregateKind.StringAgg or AggregateKind.JsonArrayAgg or AggregateKind.JsonObjectAgg or AggregateKind.ClrAggregate or AggregateKind.SpatialAggregate))
         {
             runtime.Batch.CurrentStatement.NullEliminated = true;
         }
@@ -169,6 +177,12 @@ internal sealed class AggregateExpression : Expression
     /// </summary>
     public Expression[]? ClrArguments;
 
+    /// <summary>For <see cref="AggregateKind.SpatialAggregate"/>, which of the four it is.</summary>
+    public SpatialAggregateMethod SpatialMethod;
+
+    /// <summary>For <see cref="AggregateKind.SpatialAggregate"/>, the spatial type the aggregate belongs to and returns.</summary>
+    public SpatialSqlType? SpatialType;
+
     private AggregateExpression(AggregateKind kind, Expression? operand, bool distinct, Expression? separator)
     {
         this.Kind = kind;
@@ -204,7 +218,7 @@ internal sealed class AggregateExpression : Expression
         AggregateKind.Product => "product",
         AggregateKind.ApproxPercentileCont => "approx_percentile_cont",
         AggregateKind.ApproxPercentileDisc => "approx_percentile_disc",
-        AggregateKind.ClrAggregate => "aggregate",
+        AggregateKind.ClrAggregate or AggregateKind.SpatialAggregate => "aggregate",
         _ => throw new InvalidOperationException($"Unknown aggregate kind {kind}."),
     };
 
@@ -363,6 +377,7 @@ internal sealed class AggregateExpression : Expression
         AggregateKind.Product => DeriveProductResultType(this.RejectDistinctLob(this.Operand!.GetSqlType(batch, resolveColumnType))),
         AggregateKind.ApproxPercentileCont or AggregateKind.ApproxPercentileDisc => this.BindApproxPercentile(batch, resolveColumnType),
         AggregateKind.ClrAggregate => this.BindClrArguments(batch, resolveColumnType),
+        AggregateKind.SpatialAggregate => this.BindSpatialOperand(batch, resolveColumnType),
         _ => throw new InvalidOperationException($"Unknown aggregate kind {this.Kind}."),
     };
 
@@ -371,6 +386,17 @@ internal sealed class AggregateExpression : Expression
     /// type as an assignment would; the result is the declared
     /// <c>RETURNS</c> type.
     /// </summary>
+    /// <summary>
+    /// A spatial aggregate's operand binds like a CLR parameter of the
+    /// aggregate's own type — a string converts, an <c>int</c> is Msg 206 —
+    /// and the result is that type.
+    /// </summary>
+    private SpatialSqlType BindSpatialOperand(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        _ = AssignmentRules.ArgumentType(this.Operand!, this.SpatialType!, batch, resolveColumnType);
+        return this.SpatialType!;
+    }
+
     private SqlType BindClrArguments(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
         var function = this.ClrFunction!;
@@ -426,6 +452,48 @@ internal sealed class AggregateExpression : Expression
             {
                 ClrFunction = function,
                 ClrArguments = [.. arguments],
+            });
+        }
+        finally
+        {
+            context.NextValueForRejection = savedRejection;
+        }
+    }
+
+    /// <summary>
+    /// Parses a spatial aggregate's call — <c>geometry::UnionAggregate(arg)</c>
+    /// and its siblings — entered with the cursor on the token after <c>(</c>
+    /// and left on the closing <c>)</c>. Like a CLR aggregate it reads NULL
+    /// inputs silently (no Msg 8153), and a wrong argument count is Msg 174
+    /// naming the method as written.
+    /// </summary>
+    internal static AggregateExpression ParseSpatial(SpatialSqlType type, SpatialAggregateMethod method, string written, ParserContext context)
+    {
+        var savedRejection = context.EnterNextValueForScope(NextValueForScope.Aggregate);
+        try
+        {
+            var aggregatesBefore = context.AggregatesParsed;
+            var subqueriesBefore = context.SubqueriesParsed;
+            List<Expression> arguments = [];
+            if (context.Token is not Operator { Character: ')' })
+            {
+                while (true)
+                {
+                    arguments.Add(Expression.Parse(context));
+                    if (context.Token is not Operator { Character: ',' })
+                        break;
+                    context.MoveNextRequired();
+                }
+            }
+            if (context.Token is not Operator { Character: ')' })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            if (arguments.Count != 1)
+                throw SimulatedSqlException.FunctionRequiresNArguments(written, 1);
+            ValidateOperand(context, AggregateKind.SpatialAggregate, arguments[0], aggregatesBefore, subqueriesBefore);
+            return Register(context, new AggregateExpression(AggregateKind.SpatialAggregate, arguments[0], distinct: false, separator: null)
+            {
+                SpatialMethod = method,
+                SpatialType = type,
             });
         }
         finally

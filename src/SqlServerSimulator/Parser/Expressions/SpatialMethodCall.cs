@@ -18,11 +18,12 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// <para>Structural members — the accessors, counts, component extractors and
 /// text/binary renderings — evaluate here, as do all three measures and the
 /// topological surface of both spatial types, <c>geometry</c>'s
-/// <c>STCentroid</c> / <c>STPointOnSurface</c> / <c>STIsSimple</c> and
-/// <c>geography</c>'s <c>EnvelopeAngle</c> / <c>EnvelopeCenter</c>. The
-/// constructive operations parse cleanly (so CREATE VIEW / CREATE PROCEDURE
-/// bodies referencing them store verbatim) and raise
-/// <see cref="NotSupportedException"/> at <see cref="Run"/>.</para>
+/// <c>STCentroid</c> / <c>STPointOnSurface</c> / <c>STIsSimple</c>,
+/// <c>geography</c>'s <c>EnvelopeAngle</c> / <c>EnvelopeCenter</c>, and the
+/// constructive operations. The members whose evaluation isn't built parse
+/// cleanly (so CREATE VIEW / CREATE PROCEDURE bodies referencing them store
+/// verbatim) and raise <see cref="NotSupportedException"/> at
+/// <see cref="Run"/>.</para>
 /// </remarks>
 internal sealed class SpatialMethodCall : Expression
 {
@@ -136,7 +137,7 @@ internal sealed class SpatialMethodCall : Expression
         ["STTouches"] = new(MemberForm.Method, MemberScope.GeometryOnly, ResultKind.Boolean, ValidityGate.Required),
         ["STWithin"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Boolean, ValidityGate.Required),
 
-        // Methods — parse-only; the remaining measures and the constructive operations.
+        // Methods — the constructive operations, and the members that only parse.
         ["AsGml"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Text),
         ["BufferWithCurves"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Spatial, ValidityGate.Required),
         ["BufferWithTolerance"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Spatial, ValidityGate.Required),
@@ -307,6 +308,7 @@ internal sealed class SpatialMethodCall : Expression
         {
             "AsBinaryZM" => SqlValue.FromVarbinary(SpatialWkb.Write(value, includeZM: true)),
             "AsTextZM" => Text(runtime, SpatialWktWriter.Write(value, includeZM: true)),
+            "BufferWithTolerance" => this.EvaluateBuffer(runtime, value, type, withTolerance: true),
             "EnvelopeAngle" => SpatialEnvelope.Angle(root) is { } angle ? SqlValue.FromDouble(angle) : SqlValue.Null(SqlType.Float),
             "EnvelopeCenter" => Component(value, type, PointOf(SpatialEnvelope.Center(root))),
             "HasM" => SqlValue.FromBoolean(root.AnyHasM),
@@ -317,25 +319,37 @@ internal sealed class SpatialMethodCall : Expression
             "M" => Ordinate(root, static p => p.M),
             // Real reports the lowest database compatibility level that can
             // read the instance; 100 for every shape the simulator models.
+            "MakeValid" => geography
+                ? throw new NotSupportedException("geography '.MakeValid' is not modeled.")
+                : value.IsPlanarValid ? SqlValue.FromSpatial(value, isGeography: false) : Constructed(value, SpatialSimplify.MakeValid(root)),
             "MinDbCompatibilityLevel" => SqlValue.FromInt32(100),
             "NumRings" => root.Type == SpatialShapeType.Polygon ? SqlValue.FromInt32(root.Figures.Length) : SqlValue.Null(SqlType.Int32),
+            "Reduce" => this.EvaluateReduce(runtime, value, type),
             "ReorientObject" => SqlValue.FromSpatial(new SpatialGeometry(value.Srid, Reorient(root)), geography),
             "RingN" => Component(value, type, RingAt(root, Index(runtime, geography, IndexKind.Ring), interiorOnly: false)),
             "STArea" => SqlValue.FromDouble(geography ? SpatialMeasures.GeographyArea(root) : SpatialMeasures.Area(root)),
             "STAsBinary" => SqlValue.FromVarbinary(SpatialWkb.Write(value, includeZM: false)),
             "STAsText" => Text(runtime, SpatialWktWriter.Write(value, includeZM: false)),
+            "STBoundary" => Constructed(value, SpatialConstructive.Boundary(root)),
+            "STBuffer" => this.EvaluateBuffer(runtime, value, type, withTolerance: false),
             "STCentroid" => Component(value, type, PointOf(SpatialCentroid.Centroid(root))),
             "STContains" => Predicate(runtime, value, geography, SpatialPredicateKind.Contains),
+            "STConvexHull" => geography
+                ? SqlValue.FromSpatial(new SpatialGeometry(value.Srid, SpatialGeodeticConstructive.ConvexHull(root)), isGeography: true)
+                : Constructed(value, SpatialConstructive.ConvexHull(root)),
             "STCrosses" => Predicate(runtime, value, geography, SpatialPredicateKind.Crosses),
+            "STDifference" => this.EvaluateOverlay(runtime, value, type, SpatialOverlayOperation.Difference),
             "STDimension" => SqlValue.FromInt32(root.Dimension),
             "STDisjoint" => Predicate(runtime, value, geography, SpatialPredicateKind.Disjoint),
             "STDistance" => EvaluateDistance(runtime, value, geography),
             "STEndPoint" => Component(value, type, EndpointOf(root, first: false)),
+            "STEnvelope" => Constructed(value, SpatialConstructive.Envelope(root)),
             "STEquals" => Predicate(runtime, value, geography, SpatialPredicateKind.Equals),
             "STExteriorRing" => Component(value, type, RingAt(root, 1, interiorOnly: false)),
             "STGeometryN" => Component(value, type, GeometryAt(root, Index(runtime, geography, IndexKind.Geometry))),
             "STGeometryType" => Text(runtime, GeometryTypeName(root.Type)),
             "STInteriorRingN" => Component(value, type, RingAt(root, Index(runtime, geography, IndexKind.Ring) + 1, interiorOnly: true)),
+            "STIntersection" => this.EvaluateOverlay(runtime, value, type, SpatialOverlayOperation.Intersection),
             "STIntersects" => Predicate(runtime, value, geography, SpatialPredicateKind.Intersects),
             "STIsClosed" => SqlValue.FromBoolean(IsClosed(root)),
             "STIsEmpty" => SqlValue.FromBoolean(root.IsEmpty),
@@ -356,7 +370,9 @@ internal sealed class SpatialMethodCall : Expression
             "STRelate" => EvaluateRelate(runtime, value, geography),
             "STSrid" => SqlValue.FromInt32(value.Srid),
             "STStartPoint" => Component(value, type, EndpointOf(root, first: true)),
+            "STSymDifference" => this.EvaluateOverlay(runtime, value, type, SpatialOverlayOperation.SymmetricDifference),
             "STTouches" => Predicate(runtime, value, geography, SpatialPredicateKind.Touches),
+            "STUnion" => this.EvaluateOverlay(runtime, value, type, SpatialOverlayOperation.Union),
             "STWithin" => Predicate(runtime, value, geography, SpatialPredicateKind.Within),
             "STX" => Ordinate(root, static p => p.X),
             "STY" => Ordinate(root, static p => p.Y),
@@ -380,6 +396,20 @@ internal sealed class SpatialMethodCall : Expression
                 ? SpatialGeodeticRelate.Evaluate(kind, value.Root, other.Root)
                 : SpatialRelate.Evaluate(kind, value.Root, other.Root))
             : SqlValue.Null(SqlType.Bit);
+    }
+
+    /// <summary>
+    /// One of the four set operations. A NULL or differently-referenced
+    /// operand yields NULL, as it does for the predicates; the result carries
+    /// the receiver's SRID.
+    /// </summary>
+    private SqlValue EvaluateOverlay(RuntimeContext runtime, SpatialGeometry value, SpatialSqlType type, SpatialOverlayOperation operation)
+    {
+        if (Operand(runtime, 0, value, type.IsGeography) is not { } other)
+            return SqlValue.Null(type);
+        return type.IsGeography
+            ? SqlValue.FromSpatial(new SpatialGeometry(value.Srid, SpatialGeodeticConstructive.Overlay(operation, value.Root, other.Root)), isGeography: true)
+            : Constructed(value, SpatialConstructive.Overlay(operation, value.Root, other.Root));
     }
 
     /// <summary>
@@ -457,6 +487,51 @@ internal sealed class SpatialMethodCall : Expression
                 ? SpatialMeasures.GeographyDistance(root, otherRoot)
                 : SpatialMeasures.PlanarDistance(root, otherRoot));
     }
+
+    /// <summary>
+    /// <c>STBuffer(distance)</c> and <c>BufferWithTolerance(distance,
+    /// tolerance, relative)</c>. Every argument refuses NULL with Msg 6569, and
+    /// a tolerance that isn't positive is 24108. <c>STBuffer</c> is the
+    /// tolerant form at 0.001 relative to the distance.
+    /// </summary>
+    private SqlValue EvaluateBuffer(RuntimeContext runtime, SpatialGeometry value, SpatialSqlType type, bool withTolerance)
+    {
+        var distance = this.RequiredArgument(runtime, 0, type).CoerceTo(SqlType.Float).AsDouble;
+        var tolerance = 0.001;
+        var relative = true;
+        if (withTolerance)
+        {
+            tolerance = this.RequiredArgument(runtime, 1, type).CoerceTo(SqlType.Float).AsDouble;
+            relative = this.RequiredArgument(runtime, 2, type).CoerceTo(SqlType.Bit).AsBoolean;
+            if (!(tolerance > 0))
+                throw SimulatedSqlException.SpatialBufferToleranceNotValid(type.IsGeography, tolerance);
+        }
+        if (type.IsGeography)
+            throw new NotSupportedException($"geography '.{this.memberName}' is not modeled.");
+        return Constructed(value, SpatialBuffer.Buffer(value.Root, distance, tolerance, relative));
+    }
+
+    /// <summary><c>Reduce(tolerance)</c>: NULL is Msg 6569 and a negative tolerance 24125.</summary>
+    private SqlValue EvaluateReduce(RuntimeContext runtime, SpatialGeometry value, SpatialSqlType type)
+    {
+        var tolerance = this.RequiredArgument(runtime, 0, type).CoerceTo(SqlType.Float).AsDouble;
+        if (!(tolerance >= 0))
+            throw SimulatedSqlException.SpatialReduceToleranceNotValid(type.IsGeography, tolerance);
+        return type.IsGeography
+            ? throw new NotSupportedException("geography '.Reduce' is not modeled.")
+            : Constructed(value, SpatialSimplify.Reduce(value.Root, tolerance));
+    }
+
+    /// <summary>An argument real refuses as NULL with Msg 6569, numbered from 1.</summary>
+    private SqlValue RequiredArgument(RuntimeContext runtime, int index, SpatialSqlType type)
+    {
+        var argument = index < this.arguments.Length ? this.arguments[index].Run(runtime) : SqlValue.Null(SqlType.Float);
+        return argument.IsNull ? throw SimulatedSqlException.SpatialParameterNotNull(type.IsGeography, this.memberName, index + 1) : argument;
+    }
+
+    /// <summary>A constructed <c>geometry</c> result, carrying the receiver's SRID.</summary>
+    private static SqlValue Constructed(SpatialGeometry value, SpatialShape shape) =>
+        SqlValue.FromSpatial(new SpatialGeometry(value.Srid, shape), isGeography: false);
 
     private static SqlValue Text(RuntimeContext runtime, string value) =>
         SqlValue.FromNVarchar(NVarcharSqlType.Get(-1, runtime.Batch.CurrentDatabase.Collation, Coercibility.CoercibleDefault), value);

@@ -4,7 +4,8 @@ Spatial values are parsed instances, stored in SQL Server's own UDT serializatio
 WKT parsing (with real's validation failures), canonical WKT rendering, per-value SRID, Z / M ordinates, EMPTY instances, the OGC binary encodings, the constructor family and the whole structural member surface all ship.
 So do all three measures for both spatial types — area, length and distance, planar and round-earth — and the whole topological surface of both: `geometry`'s eight predicates plus `STRelate`, `geography`'s six, `STIsValid` for each, and the Msg 24144 gate an invalid instance puts on most instance methods.
 So do the derived-point members each type carries alone — `geometry`'s `STCentroid` / `STPointOnSurface` / `STIsSimple` and `geography`'s `EnvelopeAngle` / `EnvelopeCenter`.
-What doesn't yet is the constructive operations (`STUnion` / `STBuffer` / …), which parse cleanly and raise `NotSupportedException` at execute — see [Not modeled yet](#not-modeled-yet).
+So do the [constructive operations](#constructive-operations): the four set operations for both types, `geometry`'s envelope, hull, boundary, buffers, `Reduce` and `MakeValid`, `geography`'s hull, and the four spatial aggregates.
+The rest — `geography`'s buffers, the curve forms and a handful of members — parse cleanly and raise `NotSupportedException` at execute; see [Not modeled yet](#not-modeled-yet).
 
 The sole AW spatial column (`Person.Address.SpatialLocation`, geography) loads as a first-class spatial-typed column rather than degrading to `varbinary(MAX)`.
 
@@ -45,7 +46,8 @@ The reader accepts the full 2D/Z/M grammar: all seven shape kinds, `EMPTY` at an
 Labels match as a **prefix**, not as a greedy word — which is why `POINTX(1 2)` reports a missing `(` rather than an unknown label, exactly as real does.
 
 The writer emits real's canonical spelling: a space between label and body (`POINT (1 2)`), `", "` between coordinates and between members, `EMPTY` for a shape with no coordinates, and Multi\* members without their own label.
-Ordinates use .NET's round-trip `"R"` form under the invariant culture, which is what real emits — `1.50` → `1.5`, `1e10` → `10000000000`, `1e30` → `1E+30`, `0.000001` → `1E-06`.
+Ordinates use .NET Framework's round-trip `"R"` form under the invariant culture, which is what real emits — `1.50` → `1.5`, `1e10` → `10000000000`, `1e30` → `1E+30`, `0.000001` → `1E-06`.
+That form is fifteen significant digits when they round-trip and seventeen otherwise, which modern .NET's `"R"` (the shortest round-tripping form) is not: a computed vertex prints `4.0000000000000071` on real, where the shortest form is `4.000000000000007`.
 
 `ToString()` and `AsTextZM()` carry Z and M; `STAsText()` drops them.
 A point whose Z is absent but whose M is present writes the Z slot as the literal `NULL` (`POINT (1 2 NULL 4)`), the same spelling the reader accepts.
@@ -119,7 +121,7 @@ Real enforces all three, and so does the simulator:
 
 **Properties** (no argument list): `STSrid`, `STX` / `STY` (geometry), `Lat` / `Long` (geography), `Z`, `M`, `HasZ`, `HasM`.
 
-**Methods that evaluate**: `ToString`, `STAsText`, `AsTextZM`, `STAsBinary`, `AsBinaryZM`, `STGeometryType`, `STDimension`, `STNumPoints`, `STPointN`, `STStartPoint`, `STEndPoint`, `STIsClosed`, `STIsEmpty`, `STIsRing`, `STNumGeometries`, `STGeometryN`, `STExteriorRing`, `STNumInteriorRing`, `STInteriorRingN`, `NumRings` / `RingN` (geography), `InstanceOf`, `MinDbCompatibilityLevel`, `ReorientObject`, plus the measures, the [topological predicates](#topological-predicates-the-de-9im-engine) and `STIsValid`, `geometry`'s [`STCentroid` / `STPointOnSurface`](#representative-points-stcentroid-and-stpointonsurface) and [`STIsSimple`](#simplicity--stissimple), and `geography`'s [`EnvelopeAngle` / `EnvelopeCenter`](#the-bounding-cap-envelopecenter-and-envelopeangle).
+**Methods that evaluate**: `ToString`, `STAsText`, `AsTextZM`, `STAsBinary`, `AsBinaryZM`, `STGeometryType`, `STDimension`, `STNumPoints`, `STPointN`, `STStartPoint`, `STEndPoint`, `STIsClosed`, `STIsEmpty`, `STIsRing`, `STNumGeometries`, `STGeometryN`, `STExteriorRing`, `STNumInteriorRing`, `STInteriorRingN`, `NumRings` / `RingN` (geography), `InstanceOf`, `MinDbCompatibilityLevel`, `ReorientObject`, plus the measures, the [topological predicates](#topological-predicates-the-de-9im-engine) and `STIsValid`, `geometry`'s [`STCentroid` / `STPointOnSurface`](#representative-points-stcentroid-and-stpointonsurface) and [`STIsSimple`](#simplicity--stissimple), `geography`'s [`EnvelopeAngle` / `EnvelopeCenter`](#the-bounding-cap-envelopecenter-and-envelopeangle), and the [constructive operations](#constructive-operations).
 
 The catalog carries a fourth column beside form / scope / result: whether the member refuses a stored-but-invalid instance, which is the [Msg 24144 gate](#validity--stisvalid-and-msg-24144).
 `STIsValid` itself is a member of **both** spatial types, unlike `STIsSimple` / `STTouches` / `STCrosses` / `STRelate` / `STCentroid` / `STPointOnSurface` / `STEnvelope`, which are `geometry`-only, and `EnvelopeAngle` / `EnvelopeCenter` / `NumRings` / `RingN` / `ReorientObject`, which are `geography`-only — naming one on the wrong receiver is **Msg 6506**, real's CLR method-not-found error, since the method genuinely isn't on that class.
@@ -174,6 +176,7 @@ Everything through the `24nnn: ` message is reproduced verbatim.
 - `Point(x, y, srid)` — coordinates in the type's own order: `(x, y)` for geometry, `(latitude, longitude)` for geography, both spelled in WKT's (longitude, latitude) order on the way out.
 
 Argument counts are checked at parse time as real checks them — **Msg 174**, severity 15, naming the function with the *caller's* casing (unlike the built-in function path, which lowercases).
+`UnionAggregate`, `EnvelopeAggregate`, `CollectionAggregate` and `ConvexHullAggregate` parse as [aggregates](#the-spatial-aggregates) instead.
 Every other static method raises `NotSupportedException` at Run.
 
 ## Parser — `Simulation/Simulation.Spatial.cs`
@@ -534,6 +537,118 @@ Simplicity is what validity stops short of: a self-crossing `LINESTRING` is a va
 
 Diffed against SQL Server 2025 over the same 32-shape sweep as the [representative points](#representative-points-stcentroid-and-stpointonsurface) — exact on every one.
 
+## Constructive operations
+
+The set operations, the envelope, hull and boundary, the buffers, `Reduce`, `MakeValid` and the four spatial aggregates all compute on real's precision grid over one planar overlay engine, with `geography` reaching the same engine through a projection.
+The code is `Storage/Spatial/SpatialPrecisionGrid.cs`, `SpatialOverlay.cs`, `SpatialResultBuilder.cs`, `SpatialConstructive.cs`, `SpatialBuffer.cs` and `SpatialGeodeticConstructive.cs`.
+Every rule below was probed against SQL Server 2025 on 2026-09-28, most of them by diffing thousands of randomly generated cases.
+
+### The precision grid
+
+Real snaps every coordinate onto an integer grid of 2^48 steps per axis across the operands' combined extent, computes there, and maps the result back.
+Each axis has its own scale `s = 2^48 / (max - min)` and an integer offset `C = round(centre · s)`, and a coordinate lands at `trunc(x·s - C + 0.5)`.
+That truncation is not a rounding: a scaled value below the centre with any fraction lands one step high, which is why a vertex the operation computed below the middle of the extent drifts up by one grid step — `STDifference` cutting a 10-unit square along x = 0 reports the cut at `4.2632564145606011E-14`, one step of a 12-unit extent.
+
+A result vertex that is one of the inputs' own vertices comes back as that vertex's original coordinates, which is what keeps untouched corners exact.
+A vertex the operation computed comes back through `X / s + C / s`, and real does not round a crossing onto the grid first: it computes the crossing in floating point on the grid and maps that value back, so `LINESTRING(0 0,10 10)` crossing `LINESTRING(0 10,10 0)` lands at `5.0000000000000178`, half a grid step off the centre.
+The simulator follows the segment whose upper end is higher from that end, which reproduces the last digits of every axis-aligned crossing and of about half the oblique ones; the rest differ in the last one or two digits (see [Divergences](#divergences-1)).
+`MakeValid` and the buffers restore nothing: every vertex they write has been through the grid.
+
+### The overlay engine
+
+Both operands flatten into isolated points, line segments and polygon rings on the grid, and the segments are noded against each other.
+A segment splits wherever a vertex lies exactly on it, and is re-routed through the grid point of every rounded crossing whose unit square it passes through — snap rounding, which leaves no two edges crossing except at a shared vertex however the rounding falls.
+Real doesn't join a line ending a hair off another, and splitting only at exactly coincident vertices matches that.
+
+Each edge of the arrangement is then labelled with whether each operand's area holds its two sides, by even-odd parity along a ray cast from the edge's midpoint, a ring running along the edge itself flipping the parity between the sides.
+A ring edge an operand's rounding folds back over itself cancels out of that parity rather than counting twice.
+A collection whose polygon members might overlap has them unioned into one area first, and their rings still node the arrangement, so a result ring keeps a vertex wherever a member's edge met it, as real's does.
+
+The operation then reads its result off the labels: an edge with the result's area on exactly one side is boundary, an edge on a line component survives by the operation's rule, and a node survives as a point where only points meet.
+Intersection keeps whatever lies in both operands' closures, so two squares sharing an edge intersect in that edge and two touching at a corner in that point.
+
+### Output order
+
+Real writes its components in **descending sweep order** of each component's lowest vertex, where lowest means least y and then least x — so `MULTIPOINT ((1 2), (2 1))` lists the higher point first, and of two polygons the one reaching lower comes last.
+Inside a polygon the rings run the other way: each ring starts at its own lowest vertex, the shell counter-clockwise and each hole clockwise, and the holes are listed lowest first.
+A single kind of component yields that kind or its Multi form; mixed kinds yield a `GEOMETRYCOLLECTION` of the components; nothing at all yields `GEOMETRYCOLLECTION EMPTY`.
+Z and M are dropped.
+
+A line's **direction** comes from the sweep that builds it, not from the input, and no endpoint rule describes it.
+Nodes are visited from the top of the sweep order down, and each run of edges grows downward:
+
+- At a node, the edges arriving from above pair up among themselves in the sweep order of their far ends, the edges leading down pair up likewise, and a leftover of each kind pair with each other — so at a `+` the north edge pairs with the east and the south with the west, and at a `T` the two lower edges pair while the stem ends its own run.
+- A pair leading down starts a run whose tail follows the edge at the smaller angle from the +x axis; an unpaired edge leading down starts a run at its tail.
+- A pair arriving from above joins two runs: a tail meeting a head concatenates them as they stand, and two like ends put the run arriving at the larger angle first.
+- Every node where a line edge meets anything stays a vertex, so a point on a line becomes one of its vertices.
+
+The rule reproduces the direction of all 122 untouched polylines in a random sweep, including the ones whose direction no endpoint or orientation rule explains, and the pairing at crossings.
+
+### Envelope, hull and boundary
+
+`STEnvelope()` is the bounding rectangle from its lower-left corner, counter-clockwise.
+An axis the instance doesn't span widens by `2e-8` of the coordinate either way (`1e-8` at zero), so a point's envelope is `POLYGON ((0.99999998 1.99999996, 1.00000002 1.99999996, …))`.
+
+`STConvexHull()` is a Graham scan on the precision grid, pivoting on the vertex reaching furthest right (then lowest) and starting the ring there; the rest sort counter-clockwise around it, only the furthest of any lining up with the pivot is kept, and a vertex lying exactly on a hull edge stays.
+On the grid that last rule only bites where an edge stays exactly straight after snapping — an axis-parallel one — which is why real keeps a midpoint on a diagonal hull edge and drops one on a vertical edge through the pivot.
+Two distinct vertices hull to a line from the pivot, one to a point.
+All 200 hulls of a random integer point sweep match real byte for byte.
+
+`STBoundary()` of a polygon is its rings as lines, each written the way an overlay writes that polygon's ring, all in descending order; of a line, the mod-2 endpoint set in the order the sweep writes the lines, each line's start before its end; of a point, empty.
+A collection holding an area answers with the boundary of the union of its members, so a line crossing into a polygon ends where it meets the ring.
+
+### Buffers
+
+`STBuffer(d)` is `BufferWithTolerance(d, 0.001, 1)`, and real builds a buffer as `BufferWithCurves` does and then linearizes it:
+
+- A point becomes four quarter arcs starting at the bottom.
+- A segment contributes the band either side of it, and a vertex where a line or ring turns contributes the arc between its edges' offsets on the side that opens up.
+- A line's free end gets a cap of two arcs meeting straight ahead, each stopping an angle δ short of the side offsets, with a straight chord bridging the gap: δ is π/512 for an instance whose buffer reaches between about ±4 and ±16 from the origin, and doubles with every fourfold growth of that reach.
+- Each arc splits into a power-of-two count of equal steps — the fewest whose sagitta stays within the tolerance, which real accepts up to about 2.5% past it — so a point's buffer has 128 sides at the default tolerance whatever the distance, 8 at a tolerance of 0.1 and 256 at 0.0001.
+  `relative` scales the tolerance by the distance.
+
+A zero distance returns the instance as it stands, unnormalized; a negative one erodes an area by the same pieces and empties a point or a line.
+A tolerance that isn't positive is **Msg 6522** carrying 24108, and a NULL argument to either form is **Msg 6569**.
+
+### Reduce and MakeValid
+
+`Reduce(tolerance)` is Douglas–Peucker on every line and ring, measuring a vertex's distance to the *segment* between the kept ends and keeping it only when that distance exceeds the tolerance — so a tolerance of 0 still drops an exactly collinear vertex, and a vertex beyond the end of the chord survives a tolerance a line distance would have let go.
+A ring is anchored at its first vertex, a collection of one kind comes back as that kind's Multi form, and a ring that collapses below four vertices leaves the result to `MakeValid`.
+A negative tolerance is **Msg 6522** carrying 24125.
+
+`MakeValid()` returns a valid instance untouched and rebuilds an invalid one through the overlay: each polygon's area is the even-odd parity of its rings, so a bow-tie splits into its two triangles and an overlapping multipolygon keeps only what one member covers; every ring also stands as a line, so the stretch of a ring enclosing nothing survives as a line; and lines are noded where they cross or retrace.
+
+### The spatial aggregates
+
+`geometry::UnionAggregate(col)` and its siblings parse as aggregates — a static method name followed by one argument — and bind like a CLR parameter of the type, so a string converts and an `int` is **Msg 206**.
+They skip NULL without the Msg 8153 warning, answer NULL for a group with no non-NULL row or whose rows don't share one SRID, and refuse an invalid row with Msg 6522 naming the aggregate's own class (`GeometryUnionAggregate`) rather than the type.
+`UnionAggregate` folds `STUnion` over the rows in arrival order, so a lone row still comes back normalized; `EnvelopeAggregate` and `ConvexHullAggregate` read every row's vertices at once; `CollectionAggregate` gathers the rows as members, flattening a collection row by one level.
+
+### Round earth
+
+`geography`'s set operations and hull run the planar engine on a **gnomonic projection** centred on the normalized sum of the operands' directions.
+A `geography` edge is cut from the ellipsoid by the plane through its ends and the centre, and the gnomonic projection maps every such plane onto a straight line, so the planar crossings are the arcs' crossings: `POLYGON((0 0,10 0,10 10,0 10,0 0))` meets the square from (5 5) at latitude 10.0374 on longitude 5, where the top edge bows north of its written latitude.
+Input vertices come back as written; a computed vertex unprojects to geodetic latitude.
+
+Real writes a `geography` result in the order of a plane turned so that its sweep runs west to east and then north to south: a ring starts at its westernmost, then northernmost vertex, and a hull pivots on its southernmost, then westernmost one.
+The turn is a rotation, so a ring's direction — and with it which side a `geography` ring encloses — is kept.
+The simulator orders the finished result by re-reading it through the planar engine in that turned frame.
+
+### Agreement with real
+
+Randomly generated cases diffed against SQL Server 2025 (2026-09-28), counting an exact text match and a match within 1e-9 of the largest coordinate with the same structure:
+
+| Corpus | Exact | Within tolerance |
+| --- | --- | --- |
+| 3,000 set operations over mixed points, lines, polygons, multis and collections | 80.1% | 99.6% |
+| 2,000 set operations between polygons, holes and concave rings included | 83.8% | 99.8% |
+| 1,500 envelopes, hulls and boundaries | 98.6% | 99.6% |
+| 300 `Reduce` calls | 99.0% | 99.3% |
+| 300 buffers of points, lines and polygons | 20.7% | 60.7% |
+| 400 `geography` set operations | 50.0% | 71.3% |
+
+Nearly every case outside tolerance falls in a class under [Divergences](#divergences-1).
+
 ## Where a spatial column can't go
 
 Neither type is comparable, so both are refused in every slot that orders, groups or dedups: **Msg 249** in `ORDER BY` / `GROUP BY` (the one message in the family that names the offending clause), **Msg 421** under `DISTINCT`, **Msg 5335** as an operand of `UNION` / `INTERSECT` / `EXCEPT`, and **Msg 6210** followed by **Msg 8117** from `MAX` / `MIN`.
@@ -560,7 +675,8 @@ A dotted name that binds neither way reports **Msg 207** where real reports **Ms
 
 - **`STRelate`'s matrix on `geography`** — the round-earth engine computes the nine cells but nothing reads them out, since real exposes no `STRelate` there to compare a matrix against.
   The six predicates are masks over it; a `geography`-shaped `STRelate` would need a probe oracle that doesn't exist.
-- **Constructive operations** — `STUnion` / `STIntersection` / `STDifference` / `STSymDifference` / `STBuffer` / `STConvexHull` / `STBoundary` / `STEnvelope` / `MakeValid` / `Reduce` / `Filter` / `ShortestLineTo` / `BufferWithTolerance` / `BufferWithCurves` / `CurveToLineWithTolerance`.
+- **The remaining constructive members** — `geography`'s `STBuffer` / `BufferWithTolerance` (a round-earth buffer), `Reduce`, `MakeValid` and `EnvelopeAggregate` (whose answer is a curve polygon), the curve-producing `BufferWithCurves` and `CurveToLineWithTolerance` for both types, `Filter`, and `ShortestLineTo`.
+- **`geography` constructive operations across much of the globe** — the gnomonic projection holds less than a hemisphere, so operands reaching 80° or more from their common centre, and a polygon whose ring encloses more than a hemisphere, raise `NotSupportedException`.
 - **A spatial column's property form outside a query scope** — see [The property form of a spatial column](#the-property-form-of-a-spatial-column) for what ships and what an UPDATE's SET list, a CHECK constraint and a computed column still read as a two-part column name.
 - **Curved shapes and FULLGLOBE** — `CIRCULARSTRING` / `COMPOUNDCURVE` / `CURVEPOLYGON` / `FULLGLOBE` are recognized labels (real accepts them, so reporting them as unknown would be the wrong error) that raise `NotSupportedException` naming the kind.
 - **GML** — `AsGml` / `STAsGML`, and the `GeomFromGml` constructors.
@@ -602,6 +718,19 @@ A dotted name that binds neither way reports **Msg 207** where real reports **Ms
   Quantified end-to-end by importing a simulator-exported WWI-Standard bacpac into the live reference and byte-comparing against the original database: **189 of 190 `Countries.Border` values byte-identical**, the single divergent row being WWI's one stored-invalid Border.
   All 5,000 sampled `Cities.Location` points byte-identical.
   Real also *validates on deserialize*: handing it a payload whose `isValid` bit claims validity for a shape that isn't raises a bare `System.FormatException` inside Msg 6522, which the decoder doesn't reproduce either.
+- **The last digits of an oblique crossing.**
+  Real computes a crossing in floating point on the grid with an arithmetic the probes don't pin down; the simulator's formula reproduces every axis-aligned crossing and about half of the oblique ones, and the rest differ by one or two units in the last place — the whole of the "within tolerance" share in [Agreement with real](#agreement-with-real).
+- **A crossing landing on a vertex.**
+  Where one operand's edge passes exactly through another's vertex, real's floating-point crossing can land a few units off that vertex and keep both as separate vertices a hair apart, where the simulator's exact test finds the one vertex.
+  A sliver a few grid steps wide that real keeps as a polygon is a line or nothing here for the same reason.
+- **Oblique buffer caps and the buffers' last digits.**
+  Real splits a cap's arc again where the curve outline's lowest point falls on it, which only matters when a line isn't axis-parallel; the simulator splits caps at the side offsets and straight ahead only, so an oblique cap's vertices differ.
+  Real's buffer vertices also come back through more than one grid, which the simulator's single grid reproduces for axis-parallel outlines and not in general.
+- **A collection's boundary** takes some of its ring vertices through the grid on real, where the simulator restores them.
+- **`geography`'s last digits and the order of a mixed collection.**
+  Real's round-earth crossings carry noise of about 1e-13 degrees, and its sweep plane is not quite the turned longitude / latitude frame: a line climbing steeply north-east runs the other way round, and a `GEOMETRYCOLLECTION` lists lines before polygons more often than the frame predicts.
+- **Validity edge cases reach the constructive operations.**
+  Real judges some line figures valid that the planar validator refuses — `LINESTRING(15 7.5, 2 5, 2 5)` is valid on real while `LINESTRING(0 0, 2 0, 2 0)` is not, and a retrace written in decimal coordinates can survive the grid — so an operation real answers can raise 24144 here.
 - **Msg 6522 omits the .NET stack-frame block** — see [The Msg 6522 wrapper](#the-msg-6522-wrapper).
 - **The in-process reader surfaces a spatial column as its WKT** (`SqlType.ClrType` is `string`), where real SqlClient hands back the UDT bytes (or a `SqlGeography` when `Microsoft.SqlServer.Types` is loaded).
   The TDS path is faithful — it writes the serialization.

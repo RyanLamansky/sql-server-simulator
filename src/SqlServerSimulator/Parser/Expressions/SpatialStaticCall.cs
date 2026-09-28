@@ -1,3 +1,4 @@
+using SqlServerSimulator.Parser.Aggregators;
 using SqlServerSimulator.Parser.Tokens;
 using SqlServerSimulator.Storage;
 using SqlServerSimulator.Storage.Spatial;
@@ -53,7 +54,7 @@ internal sealed class SpatialStaticCall : Expression
     /// surface eagerly; non-recognized static methods construct a placeholder
     /// instance whose <see cref="Run"/> throws.
     /// </summary>
-    public static SpatialStaticCall Parse(SpatialSqlType type, ParserContext context)
+    public static Expression Parse(SpatialSqlType type, ParserContext context)
     {
         var methodName = context.Token is Name name
             ? name.Value
@@ -61,6 +62,11 @@ internal sealed class SpatialStaticCall : Expression
         context.MoveNextRequired();
         if (context.Token is not Operator { Character: '(' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
+        if (AggregateMethod(methodName) is { } aggregate)
+        {
+            context.MoveNextRequired();
+            return AggregateExpression.ParseSpatial(type, aggregate, methodName, context);
+        }
 
         var args = new List<Expression>();
         context.MoveNextRequired();
@@ -79,6 +85,16 @@ internal sealed class SpatialStaticCall : Expression
             ? throw SimulatedSqlException.FunctionRequiresNArguments(methodName, required)
             : new SpatialStaticCall(type, methodName, [.. args]);
     }
+
+    /// <summary>The aggregate a static method name calls, if it is one of the four.</summary>
+    private static SpatialAggregateMethod? AggregateMethod(string method) => method switch
+    {
+        "CollectionAggregate" => SpatialAggregateMethod.Collection,
+        "ConvexHullAggregate" => SpatialAggregateMethod.ConvexHull,
+        "EnvelopeAggregate" => SpatialAggregateMethod.Envelope,
+        "UnionAggregate" => SpatialAggregateMethod.Union,
+        _ => null,
+    };
 
     /// <summary>
     /// Argument count each constructor demands, checked at parse time the way

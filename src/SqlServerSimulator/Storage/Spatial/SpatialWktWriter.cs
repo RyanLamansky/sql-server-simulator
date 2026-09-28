@@ -133,5 +133,18 @@ internal static class SpatialWktWriter
             _ = builder.Append(' ').Append(Format(point.M.Value));
     }
 
-    private static string Format(double value) => value.ToString("R", CultureInfo.InvariantCulture);
+    /// <summary>
+    /// .NET Framework's <c>"R"</c>, which is what real's spatial library
+    /// formats with: fifteen significant digits when they round-trip, else
+    /// seventeen. Modern .NET's <c>"R"</c> picks the shortest round-tripping
+    /// form instead, which differs for a value needing sixteen digits —
+    /// <c>4.0000000000000071</c> rather than <c>4.000000000000007</c>.
+    /// </summary>
+    internal static string Format(double value)
+    {
+        var shortForm = value.ToString("G15", CultureInfo.InvariantCulture);
+        return double.Parse(shortForm, CultureInfo.InvariantCulture) == value
+            ? shortForm
+            : value.ToString("G17", CultureInfo.InvariantCulture);
+    }
 }

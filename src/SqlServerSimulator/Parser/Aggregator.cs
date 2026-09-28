@@ -122,6 +122,7 @@ internal abstract class Aggregator
         AggregateKind.ApproxPercentileCont or AggregateKind.ApproxPercentileDisc
             => new PercentileAggregator(resultType, aggregate.Kind == AggregateKind.ApproxPercentileCont, aggregate.OrderBy![0].Descending),
         AggregateKind.ClrAggregate => new ClrAggregator(aggregate.ClrFunction!, aggregate.Distinct),
+        AggregateKind.SpatialAggregate => new SpatialAggregator(aggregate.SpatialMethod, aggregate.SpatialType!),
         _ => throw new NotSupportedException($"Aggregator for {aggregate.Kind} not implemented yet."),
     };
 

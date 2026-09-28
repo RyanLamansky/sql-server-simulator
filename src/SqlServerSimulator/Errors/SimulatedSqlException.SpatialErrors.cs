@@ -211,6 +211,42 @@ partial class SimulatedSqlException
         "This operation cannot be completed because the instance is not valid. Use MakeValid to convert the instance to a valid instance. "
         + "Note that MakeValid may cause the points of a geometry instance to shift slightly.");
 
+    /// <summary>24108 — <c>BufferWithTolerance</c> was handed a tolerance that isn't positive.</summary>
+    internal static SimulatedSqlException SpatialBufferToleranceNotValid(bool isGeography, double tolerance) => SpatialFailure(
+        isGeography, SpatialOutOfRange, 24108,
+        $"The tolerance ({Storage.Spatial.SpatialWktWriter.Format(tolerance)}) passed to BufferWithTolerance is not valid. Tolerances must be positive numbers.",
+        parameterName: "tolerance");
+
+    /// <summary>24125 — <c>Reduce</c> was handed a negative tolerance.</summary>
+    internal static SimulatedSqlException SpatialReduceToleranceNotValid(bool isGeography, double tolerance) => SpatialFailure(
+        isGeography, SpatialOutOfRange, 24125,
+        $"The tolerance ({Storage.Spatial.SpatialWktWriter.Format(tolerance)}) passed to Reduce is not valid. Tolerances must be positive numbers.",
+        parameterName: "tolerance");
+
+    /// <summary>
+    /// Msg 6569 — a spatial method parameter that refuses NULL was handed one.
+    /// Real numbers the parameter from 1 and names the method as
+    /// <c>type::Method</c>.
+    /// </summary>
+    internal static SimulatedSqlException SpatialParameterNotNull(bool isGeography, string method, int parameter) => new(
+        $"'{(isGeography ? "geography" : "geometry")}::{method}' failed because parameter {parameter.ToString(CultureInfo.InvariantCulture)} is not allowed to be null.",
+        6569,
+        16,
+        1);
+
+    /// <summary>
+    /// 24144 raised from inside one of the spatial aggregates, which real
+    /// reports under the aggregate's own class name —
+    /// <c>GeometryUnionAggregate</c>, <c>GeographyCollectionAggregate</c> and
+    /// so on — rather than the type's.
+    /// </summary>
+    internal static SimulatedSqlException SpatialAggregateInstanceNotValid(string aggregateName) => ClrTypeFailure(
+        aggregateName, SpatialArgument,
+        "24144: This operation cannot be completed because the instance is not valid. Use MakeValid to convert the instance to a valid instance. "
+        + "Note that MakeValid may cause the points of a geometry instance to shift slightly.",
+        parameterName: null,
+        state: 1);
+
     /// <summary>
     /// Mimics SQL Server error 6592: a CLR-type member was read without an
     /// argument list where the type exposes no such property — which is what a
