@@ -43,9 +43,9 @@ public sealed class ConcreteAdoSurfaceTests
         using var connection = OpenConcrete();
         using var transaction = connection.BeginTransaction();
         AreSame(connection, transaction.Connection);
-        // SqlClient reports the level as the caller passed it, and the no-argument
-        // overload passes Unspecified rather than naming the session's default.
-        AreEqual(IsolationLevel.Unspecified, transaction.IsolationLevel);
+        // SqlClient begins an unspecified level at read committed and reports
+        // it so (probed 2026-09-28 through SqlClient 7).
+        AreEqual(IsolationLevel.ReadCommitted, transaction.IsolationLevel);
         transaction.Rollback();
     }
 

@@ -398,7 +398,7 @@ internal static class VersionStore
             return;
         // Row was modified by another tx after my snapshot. Probe-confirmed
         // auto-rollback: the SI tx terminates with @@TRANCOUNT = 0.
-        connection.CurrentTransaction?.Rollback();
+        connection.CurrentTransaction?.EndRollback();
         throw SimulatedSqlException.SnapshotIsolationUpdateConflict($"{Database.DefaultSchemaName}.{table.Name}", batch.DatabaseFor(table).Name);
     }
 

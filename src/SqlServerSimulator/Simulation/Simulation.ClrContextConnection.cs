@@ -193,7 +193,7 @@ partial class Simulation
             if (!this.HasEntryTransaction)
             {
                 // A transaction the routine began and left open goes quietly.
-                current?.Rollback();
+                current?.EndRollback();
                 return null;
             }
 
@@ -209,7 +209,7 @@ partial class Simulation
             if (connection.OpenTryFrames > 0 && current is not null)
                 current.Doomed = true;
             else
-                current?.Rollback();
+                current?.EndRollback();
             return report is not null ? SimulatedSqlException.ClrRoutineThrewEndingTransaction(this.routineName, report)
                 : ended ? SimulatedSqlException.ClrContextTransactionEnded(this.routineName)
                 : SimulatedSqlException.ClrTransactionCountChanged(this.routineName, this.EntryTranCount, left);

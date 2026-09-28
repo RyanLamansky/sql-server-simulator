@@ -1,3 +1,5 @@
+using SqlServerSimulator.Storage;
+
 namespace SqlServerSimulator.Parser;
 
 /// <summary>
@@ -189,6 +191,13 @@ internal sealed class StatementContext
     /// (see <c>Simulation.IsStatementTerminationNoticed</c>).
     /// </summary>
     public bool WritesRows;
+
+    /// <summary>
+    /// The shape of the result set a row-writing statement's <c>OUTPUT</c>
+    /// clause returns to the client, recorded as the clause parses; null when
+    /// it has none or directs its rows <c>INTO</c> a table.
+    /// </summary>
+    public (SqlType[] Schema, string[] Names)? ClientOutputShape;
 
     /// <summary>
     /// Set while a statement writing a table (not a table variable) runs,

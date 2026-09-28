@@ -92,6 +92,10 @@ partial class Simulation
             var savedFmtOnly = connection.FmtOnly;
             var savedDeduction = UndeclaredParameterDeduction.Current;
             connection.FmtOnly = true;
+            // Opens no IMPLICIT_TRANSACTIONS transaction, as describing the
+            // first result set doesn't.
+            var savedImplicitTransactions = connection.ImplicitTransactions;
+            connection.ImplicitTransactions = false;
             UndeclaredParameterDeduction.Current = deduction;
             try
             {
@@ -114,6 +118,7 @@ partial class Simulation
             finally
             {
                 connection.FmtOnly = savedFmtOnly;
+                connection.ImplicitTransactions = savedImplicitTransactions;
                 UndeclaredParameterDeduction.Current = savedDeduction;
             }
         }

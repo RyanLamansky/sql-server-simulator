@@ -37,6 +37,12 @@ internal sealed partial class TdsSession
     private bool transactionEndedByEngine;
 
     /// <summary>
+    /// Whether the last begin request nested inside a transaction already
+    /// open, rather than beginning one.
+    /// </summary>
+    private bool beganNested;
+
+    /// <summary>
     /// Drops the session's handle on a transaction the engine has already
     /// finished, remembering that it existed. Idempotent, and a no-op for the
     /// ordinary case where the session's transaction is still the connection's.
@@ -52,10 +58,13 @@ internal sealed partial class TdsSession
     /// <summary>
     /// Nests a Transaction Manager begin on an already-open transaction, the
     /// way real's <c>BEGIN TRANSACTION</c> nests: one more level to unwind, and
-    /// only the outermost commit commits.
+    /// only the outermost commit commits. A requested isolation level still
+    /// applies to the session (probed 2026-09-28 against SQL Server 2025).
     /// </summary>
-    private static SimulatedDbTransaction NestTransaction(SimulatedDbTransaction open)
+    private SimulatedDbTransaction NestTransaction(SimulatedDbTransaction open, IsolationLevel isolationLevel)
     {
+        if (isolationLevel != IsolationLevel.Unspecified)
+            this.connection!.SessionIsolationLevel = isolationLevel;
         open.TranCount++;
         return open;
     }
@@ -99,14 +108,14 @@ internal sealed partial class TdsSession
                         this.lastTmIsolation = offset < payload.Length ? payload[offset] : (byte)0;
                         this.ForgetTransactionEndedByEngine();
                         // A begin arriving while a transaction is already open
-                        // nests on real — @@TRANCOUNT rises, the isolation of
-                        // the outer one stands. The parallel-transaction
+                        // nests on real — @@TRANCOUNT rises. The parallel-transaction
                         // refusal is SqlClient's own client-side rule, not the
                         // server's, and a manual-commit driver that lost track
                         // of an engine-ended transaction does send one.
-                        this.transaction = this.connection!.CurrentTransaction is { } open
-                            ? NestTransaction(open)
-                            : this.connection.BeginTransaction(MapIsolationLevel(this.lastTmIsolation));
+                        this.beganNested = this.connection!.CurrentTransaction is not null;
+                        this.transaction = this.connection.CurrentTransaction is { } open
+                            ? this.NestTransaction(open, MapIsolationLevel(this.lastTmIsolation))
+                            : this.connection.StartTransaction(MapIsolationLevel(this.lastTmIsolation));
                         this.transactionEndedByEngine = false;
                         writer.WriteEnvChangeTransaction(Tds.EnvBeginTransaction, ++this.lastTransactionDescriptor);
                         writer.WriteDone(Tds.DoneFinal, 0);
@@ -127,10 +136,26 @@ internal sealed partial class TdsSession
                         if (this.transaction is null && !this.transactionEndedByEngine)
                             throw new InvalidOperationException("The Transaction Manager commit request has no corresponding BEGIN TRANSACTION.");
 
-                        this.transaction?.Commit();
+                        // The request ends one nesting level, and the
+                        // transaction only with the last. Real reports the
+                        // commit unless the transaction the request began
+                        // outermost stays open, nested deeper by SQL text since
+                        // — which leaves SqlClient holding it pending (probed
+                        // 2026-09-28 against SQL Server 2025 through SqlClient 7).
+                        var reportsCommit = true;
+                        if (this.transaction is { TranCount: > 1 } nested)
+                        {
+                            nested.TranCount--;
+                            reportsCommit = this.beganNested;
+                        }
+                        else
+                        {
+                            this.transaction?.EndCommit();
+                        }
                         this.transaction = null;
                         this.transactionEndedByEngine = false;
-                        writer.WriteEnvChangeTransaction(Tds.EnvCommitTransaction, this.lastTransactionDescriptor);
+                        if (reportsCommit)
+                            writer.WriteEnvChangeTransaction(Tds.EnvCommitTransaction, this.lastTransactionDescriptor);
                         this.BeginFollowOnTransactionIfRequested(beginNext, writer);
                         writer.WriteDone(Tds.DoneFinal, 0);
                         break;
@@ -151,7 +176,7 @@ internal sealed partial class TdsSession
                             if (this.transaction is null && !this.transactionEndedByEngine)
                                 throw new InvalidOperationException("The Transaction Manager rollback request has no corresponding BEGIN TRANSACTION.");
 
-                            this.transaction?.Rollback();
+                            this.transaction?.EndRollback();
                             this.transaction = null;
                             this.transactionEndedByEngine = false;
                             writer.WriteEnvChangeTransaction(Tds.EnvRollbackTransaction, this.lastTransactionDescriptor);
@@ -229,7 +254,7 @@ internal sealed partial class TdsSession
     {
         if (!beginNext)
             return;
-        this.transaction = this.connection!.BeginTransaction(MapIsolationLevel(this.lastTmIsolation));
+        this.transaction = this.connection!.StartTransaction(MapIsolationLevel(this.lastTmIsolation));
         writer.WriteEnvChangeTransaction(Tds.EnvBeginTransaction, ++this.lastTransactionDescriptor);
     }
 
@@ -249,7 +274,7 @@ internal sealed partial class TdsSession
         3 => IsolationLevel.RepeatableRead,
         4 => IsolationLevel.Serializable,
         5 => IsolationLevel.Snapshot,
-        _ => IsolationLevel.ReadCommitted,
+        _ => IsolationLevel.Unspecified,
     };
 
     /// <summary>

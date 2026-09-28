@@ -1384,9 +1384,9 @@ partial class Simulation
         }
         view?.ThrowRefusals();
 
-        return new OutputProjection(
+        return NoteClientOutput(context.Batch, new OutputProjection(
             [.. expressions], [.. columnNames], schema, destinationTable,
-            (sourceAlias, sourceColumnNames, sourceSchema), context.Batch, outputTarget, sourceMasks, view);
+            (sourceAlias, sourceColumnNames, sourceSchema), context.Batch, outputTarget, sourceMasks, view));
     }
 
     /// <summary>

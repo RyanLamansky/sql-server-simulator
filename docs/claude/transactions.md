@@ -12,7 +12,7 @@ A fourth arrives over the network: TDS Transaction Manager requests map onto the
   `SAVE TRAN <name>` + `ROLLBACK TRAN <name>` is the EF SaveChanges path inside an explicit tx.
   `ROLLBACK TRAN <name>` naming the *outermost* `BEGIN TRAN`'s name rolls the whole transaction back; the name is matched case-sensitively (real refuses `outer1` for `Outer1` under a case-insensitive collation), while a savepoint name matches case-insensitively, and a nested `BEGIN TRAN`'s name is never recorded, so naming it is Msg 6401 (probed 2026-09-24).
   A name held in a variable is cut to 32 characters; a written one past 32 is Msg 103 while compiling, on every statement that takes one.
-  Parallel `BeginTransaction` → `InvalidOperationException`.
+  How `BeginTransaction` meets a transaction SQL text opened is [its own section](#begintransaction-and-sql-text-transactions).
   `COMMIT`/`ROLLBACK` with no active tx → Msg 3902/3903.
 - `@@TRANCOUNT` reads connection depth as int.
 - **Identity counters and the database-scoped rowversion counter bypass the log** — both advance through rollback.
@@ -51,6 +51,8 @@ The set that opens one is narrower than the one `XACT_STATE()` reads above: `Bat
 - A write, a table variable's included; object DDL — `CREATE`, `ALTER`, `DROP` (a missing object's too), `TRUNCATE`, `UPDATE STATISTICS` — and `GRANT` / `DENY` / `REVOKE`, the database-level forms excepted.
 - A cursor's `DECLARE` (whatever its query reads), `OPEN` and `FETCH`; `NEXT VALUE FOR` anywhere.
 - A user function called by a query — a `SELECT` returning rows, or a subquery — where one called from a `SET`, a `DECLARE` initializer, a `PRINT` or a `SELECT` assigning variables with no FROM opens none.
+- A system procedure written in T-SQL over the catalog — the `sp_help` family, the ODBC catalog set, `sp_rename`, `sp_who`, `sp_configure`, the extended-property and bind procedures — even when it then fails, as `sp_help` of a missing object does.
+  The ones that run no catalog query of their own open none: `sp_describe_first_result_set` and `sp_describe_undeclared_parameters` (which run nothing, where a `SET FMTONLY ON` query does open one), the application-lock, session-context, XML-document, role-member, application-role and linked-server procedures, and the `xp_` ones; `sp_executesql` leaves it to the statements it runs, and a call missing a parameter (Msg 201) never starts (`Simulation.OpensImplicitTransaction`).
 - `BEGIN TRANSACTION`, which opens the implicit transaction first and then nests in it: `@@TRANCOUNT` reads 2, and it takes two `COMMIT`s to end.
 
 An `IF` or `WHILE` condition opens none, whatever it reads (`BatchContext.ConditionDepth`), nor does an `EXEC` of a procedure or dynamic SQL by itself — the statements inside do their own opening.
@@ -62,11 +64,25 @@ The option scopes like `XACT_ABORT` — a body's `SET` applies inside it and rev
 `SET ANSI_DEFAULTS ON` turns it on — see [`session-options.md`](session-options.md).
 While it is on, neither the plan cache nor the compiled-batch cache is consulted, since a replayed plan would skip the parse that opens the transaction.
 
-Over the wire the transaction is one SqlClient learns of from the server: `SqlConnection.BeginTransaction` nests inside it, a command without that `SqlTransaction` is then refused client-side, and the API commit ends only its own level — the same through SqlClient against real (probed 2026-09-28).
+`BeginTransaction` nests inside the transaction the option opened, as it does in one `BEGIN TRANSACTION` opened — see the next section.
 
-**Not modeled yet**: the system procedures that read the catalog through queries of their own (`sp_help` and its family) open a transaction on real and none here.
+## `BeginTransaction` and SQL-text transactions
 
-**Divergences**: in-process, `SimulatedDbConnection.BeginTransaction` over an open implicit (or SQL-text) transaction raises the parallel-transactions `InvalidOperationException`, where SqlClient nests.
+The in-process surface follows what SqlClient 7 does against SQL Server 2025 (probed 2026-09-28), which over the wire is SqlClient's own client-side bookkeeping on top of the server's transaction-manager requests:
+- **Nesting.**
+  Over a transaction SQL text opened — `BEGIN TRANSACTION` or `IMPLICIT_TRANSACTIONS` — `BeginTransaction` nests one level (`SimulatedDbTransaction.Nest`): `@@TRANCOUNT` rises, the API commit ends only that level, and the API rollback or a dispose rolls the whole transaction back.
+  Over one it began itself, or while a nested one is still pending, it is SqlClient's parallel-transactions `InvalidOperationException`.
+- **Pending.**
+  While a transaction `BeginTransaction` began or nested is pending, a command without it is refused with SqlClient's "requires the command to have a transaction" `InvalidOperationException` (`HoldsApiTransaction`).
+  An API commit that ends only an inner level SQL text nested inside the API's own transaction leaves it pending, so the connection refuses both until SQL text ends it; one that ends the level it nested frees the connection.
+- **Completion.**
+  Once committed or rolled back through the API, or ended by SQL text or the engine, the object's `Connection` reads null and a further `Commit` / `Rollback` is SqlClient's "This SqlTransaction has completed" `InvalidOperationException`.
+- **Isolation.**
+  An unspecified level begins at read committed, and the level a `BeginTransaction` requests — nested or not — becomes the session's and stays after the transaction ends, which is real's own behavior for the transaction-manager begin.
+
+Over the wire the server half is the TDS endpoint's (see [`tds-endpoint.md`](tds-endpoint.md#transaction-manager-requests)) and SqlClient supplies the rest itself.
+
+**Not modeled yet**: `Save` / `Rollback(name)` on the transaction object (`NotSupportedException`, where SqlClient's `SqlTransaction` sends a savepoint request); and SqlClient's one inconsistent case, where the API rollback of a transaction SQL text rolled back succeeds if a command ran on the connection in between and refuses otherwise — here it always refuses.
 
 ## Database-level DDL inside a user transaction
 

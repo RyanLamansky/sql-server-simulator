@@ -355,11 +355,8 @@ partial class Simulation
     /// <c>tempdb.dbo</c>, and a table variable is named bare.
     /// </summary>
     /// <remarks>
-    /// Real writes a temp table's <em>internal</em> name — the declared name
-    /// padded with underscores to a fixed width plus a per-session numeric
-    /// suffix. The simulator names it <c>tempdb.dbo.#t</c>: the database and
-    /// schema are what identify the table for a reader, and the padding
-    /// encodes a session-local identity nothing consumes.
+    /// A local temp table is named by its padded internal name
+    /// (<see cref="HeapTable.InternalName"/>).
     /// </remarks>
     private static string QualifyForNullMessage(HeapTable table)
     {
@@ -367,21 +364,22 @@ partial class Simulation
             return table.Name;
         if (table.OwningDatabase is { } owner)
             return QualifyTableName(table, owner);
-        return $"{TempdbDatabaseName}.{Database.DefaultSchemaName}.{table.Name}";
+        return $"{TempdbDatabaseName}.{Database.DefaultSchemaName}.{table.InternalName ?? table.Name}";
     }
 
     /// <summary>
     /// The table name as Msg 2628 spells it: <c>database.schema.table</c>, a
-    /// temp table qualified into <c>tempdb.dbo</c> as for
-    /// <see cref="QualifyForNullMessage"/>, and a table variable likewise
-    /// (probed 2026-09-23). Real names a table variable by its internal
-    /// hashed name there (<c>tempdb.dbo.#B9CBEB0A</c>); the simulator writes
-    /// the variable's own name in that slot.
+    /// temp table qualified into <c>tempdb.dbo</c> by its padded internal name
+    /// as for <see cref="QualifyForNullMessage"/>, and a table variable
+    /// likewise (probed 2026-09-28). Real names a table variable by its
+    /// internal name there, <c>#</c> and the eight hex digits of its negative
+    /// object id (<c>tempdb.dbo.#B9CBEB0A</c>); the simulator writes the
+    /// variable's own name in that slot.
     /// </summary>
     internal static string QualifyForTruncationMessage(HeapTable table) =>
         table.OwningDatabase is { } owner
             ? QualifyTableName(table, owner)
-            : $"{TempdbDatabaseName}.{Database.DefaultSchemaName}.{table.Name}";
+            : $"{TempdbDatabaseName}.{Database.DefaultSchemaName}.{table.InternalName ?? table.Name}";
 
     /// <summary>
     /// The database name the constraint-violation messages (the Msg 547
@@ -393,11 +391,14 @@ partial class Simulation
         table.OwningDatabase?.Name ?? TempdbDatabaseName;
 
     /// <summary>
-    /// The <c>schema.table</c> half of the same messages.
+    /// The <c>schema.table</c> half of the same messages; a local <c>#temp</c>
+    /// table and a table variable go by their bare written names, where a
+    /// <c>##</c> table is <c>dbo</c>-qualified (probed 2026-09-28 against SQL
+    /// Server 2025).
     /// </summary>
     internal static string SchemaQualifiedName(HeapTable table, Database? database) =>
         database is null
-            ? $"{Database.DefaultSchemaName}.{table.Name}"
+            ? table.IsTableVariable || table.InternalName is not null ? table.Name : $"{Database.DefaultSchemaName}.{table.Name}"
             : QualifyTableName(table, database)[(database.Name.Length + 1)..];
 
     /// <summary>

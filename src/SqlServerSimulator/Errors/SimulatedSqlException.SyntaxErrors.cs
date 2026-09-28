@@ -389,11 +389,11 @@ partial class SimulatedSqlException
 
     /// <summary>
     /// Mimics SQL Server error 1059: <c>SET PARSEONLY</c> inside a procedure,
-    /// trigger or function body, refused as the module is created (probed
-    /// 2026-09-28 against SQL Server 2025).
+    /// trigger or function body, refused as the module is created at line 0
+    /// wherever the <c>SET</c> sits (probed 2026-09-28 against SQL Server 2025).
     /// </summary>
     internal static SimulatedSqlException ParseOnlyInModule() =>
-        new("Cannot set or reset the 'parseonly' option within a procedure or function.", 1059, 15, 1);
+        new SimulatedSqlException("Cannot set or reset the 'parseonly' option within a procedure or function.", 1059, 15, 1).PinLine(0);
 
     /// <summary>
     /// Mimics SQL Server error 2743: <c>SET CONTEXT_INFO</c> given a variable

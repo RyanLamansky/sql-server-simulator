@@ -123,10 +123,10 @@ partial class Simulation
                             if (connection.LogonUnitCommitted)
                             {
                                 leftOpen.TranCount = 1;
-                                leftOpen.Commit();
+                                leftOpen.EndCommit();
                                 continue;
                             }
-                            leftOpen.Rollback();
+                            leftOpen.EndRollback();
                             throw SimulatedSqlException.TransactionEndedInTrigger(2);
                         }
                     }
@@ -150,11 +150,11 @@ partial class Simulation
                 if (ended.Number == 3609)
                 {
                     leftOpen.TranCount = 1;
-                    leftOpen.Commit();
+                    leftOpen.EndCommit();
                 }
                 else
                 {
-                    leftOpen.Rollback();
+                    leftOpen.EndRollback();
                 }
             }
         }

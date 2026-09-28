@@ -112,7 +112,7 @@ public sealed class SimulatedDbCommand : DbCommand
             if (transaction.simulation != this.simulation)
                 throw new NotSupportedException("Simulated DbCommands cannot switch to different simulations.");
 
-            if (transaction.Connection != this.Connection)
+            if (transaction.Owner != this.Connection)
                 throw new NotSupportedException("Simulated DbCommands cannot switch to different connections.");
 
             field = transaction;
@@ -348,6 +348,10 @@ public sealed class SimulatedDbCommand : DbCommand
             };
             throw new InvalidOperationException($"{method} requires an open and available Connection. The connection's current state is {state}.");
         }
+        // SqlClient's own client-side rule: while a transaction BeginTransaction
+        // began or nested is pending, a command must carry it.
+        if (this.Transaction is null && connection.CurrentTransaction is { HoldsApiTransaction: true })
+            throw new InvalidOperationException($"{method} requires the command to have a transaction when the connection assigned to the command is in a pending local transaction.  The Transaction property of the command has not been initialized.");
     }
 
     /// <summary>Strongly-typed shadow over <see cref="DbCommand.CreateParameter"/>.</summary>

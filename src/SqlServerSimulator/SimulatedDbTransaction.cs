@@ -17,11 +17,53 @@ public sealed class SimulatedDbTransaction : DbTransaction
     internal SimulatedDbTransaction(Simulation simulation, SimulatedDbConnection connection, IsolationLevel isolationLevel)
     {
         this.simulation = simulation;
-        this.Connection = connection;
+        this.Owner = connection;
         this.IsolationLevel = isolationLevel;
         this.TransactionId = simulation.AllocateTransactionId();
+        this.target = this;
     }
+
+    /// <summary>
+    /// The object <c>BeginTransaction</c> returns while a transaction begun by
+    /// SQL text — <c>BEGIN TRANSACTION</c> or <c>IMPLICIT_TRANSACTIONS</c> — is
+    /// open: it nests one level inside <paramref name="enlisted"/>, as
+    /// SqlClient's transaction-manager begin does.
+    /// </summary>
+    private SimulatedDbTransaction(SimulatedDbTransaction enlisted, IsolationLevel isolationLevel)
+    {
+        this.simulation = enlisted.simulation;
+        this.Owner = enlisted.Owner;
+        this.IsolationLevel = isolationLevel;
+        this.TransactionId = enlisted.TransactionId;
+        this.target = enlisted;
+    }
+
     internal readonly Simulation simulation;
+
+    /// <summary>The session the transaction belongs to, whatever state it is in.</summary>
+    internal readonly SimulatedDbConnection Owner;
+
+    /// <summary>
+    /// The server transaction the API's commit and rollback act on: this one,
+    /// or for a transaction <c>BeginTransaction</c> nested inside one SQL text
+    /// began, that one.
+    /// </summary>
+    private readonly SimulatedDbTransaction target;
+
+    /// <summary>
+    /// The nested API transaction (see <see cref="Nest"/>) opened inside this
+    /// one and not yet committed or rolled back through the API, which a
+    /// second <c>BeginTransaction</c> refuses to run beside.
+    /// </summary>
+#pragma warning disable CA2213 // An alias of an object the caller of BeginTransaction owns and disposes.
+    private SimulatedDbTransaction? nestedApiTransaction;
+#pragma warning restore CA2213
+
+    /// <summary>
+    /// Set when <c>BeginTransaction</c> began this transaction, as opposed to
+    /// SQL text.
+    /// </summary>
+    internal bool BegunByApi;
 
     /// <summary>The id <c>CURRENT_TRANSACTION_ID()</c> and the transaction DMVs report, drawn at BEGIN.</summary>
     internal readonly long TransactionId;
@@ -149,31 +191,15 @@ public sealed class SimulatedDbTransaction : DbTransaction
     public override IsolationLevel IsolationLevel { get; }
 
     /// <inheritdoc/>
-    protected override DbConnection DbConnection => this.Connection;
-
-#pragma warning disable CA2213 // Disposable fields should be disposed — the transaction is owned by the connection, not vice versa.
-    /// <summary>Strongly-typed shadow over <see cref="DbTransaction.Connection"/>.</summary>
-    public new SimulatedDbConnection Connection { get; }
-#pragma warning restore CA2213
+    // Null once completed, as the public Connection reads.
+    protected override DbConnection DbConnection => this.Connection!;
 
     /// <summary>
-    /// The session's <see cref="SimulatedDbConnection.SessionIsolationLevel"/>
-    /// value captured before this transaction overrode it (when the
-    /// caller passed an explicit non-<see cref="IsolationLevel.Unspecified"/>
-    /// level to <c>BeginTransaction</c>). Restored on
-    /// <see cref="Commit"/> / <see cref="Rollback"/> / dispose so the
-    /// session-wide setting survives the transaction's lifetime.
+    /// Strongly-typed shadow over <see cref="DbTransaction.Connection"/>: null
+    /// once the transaction has been committed or rolled back, through this
+    /// object or by SQL text, as SqlClient's reads.
     /// </summary>
-    internal IsolationLevel PreviousSessionIsolationLevel;
-
-    /// <summary>
-    /// Whether <see cref="SimulatedDbConnection"/>'s BeginDbTransaction
-    /// actually overrode the session iso (true) or left it untouched
-    /// (false — caller passed <see cref="IsolationLevel.Unspecified"/>).
-    /// Drives the restore step on <see cref="Commit"/> / <see cref="Rollback"/>
-    /// / dispose.
-    /// </summary>
-    internal bool OverrodeSessionIsolation;
+    public new SimulatedDbConnection? Connection => this.Zombied ? null : this.Owner;
 
     /// <summary>
     /// Stable per-transaction snapshot timestamp used by SNAPSHOT-isolation
@@ -207,22 +233,83 @@ public sealed class SimulatedDbTransaction : DbTransaction
     internal List<Cursor>? OpenedCursors;
 
     /// <summary>
-    /// True once <see cref="Commit"/> or <see cref="Rollback"/> has run.
-    /// Subsequent calls are no-ops; <see cref="Dispose"/> uses this to skip
-    /// the implicit rollback that fires for a transaction left "open" at
-    /// disposal time (matches SqlClient's <c>SqlTransaction</c> behavior).
+    /// True once the transaction has ended, by commit or rollback from SQL
+    /// text, the API or the engine.
     /// </summary>
-    private bool finished;
+    internal bool Ended;
+
+    /// <summary>
+    /// True once the API's <see cref="Commit"/>, <see cref="Rollback"/> or
+    /// dispose has run on this object, after which SqlClient's transaction is
+    /// a zombie: <see cref="Connection"/> reads null and a second commit or
+    /// rollback is refused.
+    /// </summary>
+#pragma warning disable IDE0032 // Set by the three API calls; a property would hide that it is plain state.
+    private bool apiCompleted;
+#pragma warning restore IDE0032
+
+    /// <summary>
+    /// Whether this object is past use through the API: completed through it,
+    /// or its transaction ended some other way — a <c>COMMIT</c> or
+    /// <c>ROLLBACK</c> in SQL text, an error that rolled it back (probed
+    /// 2026-09-28 against SQL Server 2025 through SqlClient 7).
+    /// </summary>
+    private bool Zombied => this.apiCompleted || this.target.Ended;
+
+    /// <summary>
+    /// Whether <c>BeginTransaction</c> must refuse to open another transaction
+    /// beside this open one: SqlClient refuses while the transaction it began
+    /// or nested is still pending on the connection, including one whose
+    /// commit through the API ended only an inner level of it, but nests
+    /// inside a transaction SQL text began.
+    /// </summary>
+    internal bool HoldsApiTransaction => this.BegunByApi || this.nestedApiTransaction is { Zombied: false };
+
+    /// <summary>
+    /// Opens the API transaction <c>BeginTransaction</c> returns inside this
+    /// SQL-text one: <c>@@TRANCOUNT</c> rises by one, the API commit ends only
+    /// that level, the API rollback ends the whole transaction, and a requested
+    /// isolation level applies to the session from here on (probed 2026-09-28
+    /// against SQL Server 2025 through SqlClient 7).
+    /// </summary>
+    internal SimulatedDbTransaction Nest(IsolationLevel isolationLevel)
+    {
+        this.TranCount++;
+        return this.nestedApiTransaction = new SimulatedDbTransaction(this, isolationLevel);
+    }
 
     /// <inheritdoc/>
+    /// <remarks>
+    /// Ends one nesting level when the transaction is nested deeper, as
+    /// SqlClient's commit request does; either way this object is completed.
+    /// </remarks>
     public override void Commit()
     {
-        if (this.finished)
+        if (this.Zombied)
             throw new InvalidOperationException("This SqlTransaction has completed; it is no longer usable.");
-        this.TranCount--;
-        if (this.TranCount > 0)
-            return;
-        var db = this.Connection.CurrentDatabase;
+        this.apiCompleted = true;
+        if (this.target.TranCount > 1)
+            this.target.TranCount--;
+        else
+            this.target.EndCommit();
+    }
+
+    /// <inheritdoc/>
+    public override void Rollback()
+    {
+        if (this.Zombied)
+            throw new InvalidOperationException("This SqlTransaction has completed; it is no longer usable.");
+        this.apiCompleted = true;
+        this.target.EndRollback();
+    }
+
+    /// <summary>
+    /// Commits the transaction outright, whatever its nesting depth: the
+    /// outermost <c>COMMIT</c>, and the engine's own commits.
+    /// </summary>
+    internal void EndCommit()
+    {
+        var db = this.Owner.CurrentDatabase;
         Storage.VersionStore.FinalizePendingEntries(this.PendingVersionEntries, this.simulation);
         // Commit() (vs the former discard-only Clear) reclaims the off-row LOB
         // chains superseded by this tx's committed UPDATE/DELETEs in the
@@ -230,21 +317,22 @@ public sealed class SimulatedDbTransaction : DbTransaction
         // history entries FinalizePendingEntries just stamped and are reclaimed
         // instead by RunGarbageCollection below once no snapshot needs them.
         this.UndoLog.Commit();
+        this.TranCount = 0;
         this.CloseCursorsOnEnd();
         ReleaseAllLocks();
         UnregisterActiveSnapshot();
         Storage.VersionStore.RunGarbageCollection(this.simulation, db);
-        RestoreSessionIsolation();
-        this.Connection.CurrentTransaction = null;
-        this.finished = true;
+        this.Owner.CurrentTransaction = null;
+        this.Ended = true;
     }
 
-    /// <inheritdoc/>
-    public override void Rollback()
+    /// <summary>
+    /// Rolls the whole transaction back, whatever its nesting depth: a bare
+    /// <c>ROLLBACK</c>, and every engine-initiated rollback.
+    /// </summary>
+    internal void EndRollback()
     {
-        if (this.finished)
-            throw new InvalidOperationException("This SqlTransaction has completed; it is no longer usable.");
-        var db = this.Connection.CurrentDatabase;
+        var db = this.Owner.CurrentDatabase;
         Storage.VersionStore.DiscardPendingEntries(this.PendingVersionEntries);
         this.UndoLog.Rollback();
         this.TranCount = 0;
@@ -252,30 +340,23 @@ public sealed class SimulatedDbTransaction : DbTransaction
         ReleaseAllLocks();
         UnregisterActiveSnapshot();
         Storage.VersionStore.RunGarbageCollection(this.simulation, db);
-        RestoreSessionIsolation();
-        this.Connection.CurrentTransaction = null;
-        this.finished = true;
+        this.Owner.CurrentTransaction = null;
+        this.Ended = true;
     }
 
     /// <summary>
     /// SqlClient's <c>SqlTransaction</c> auto-rolls-back on dispose if
-    /// neither <see cref="Commit"/> nor <see cref="Rollback"/> ran. Mirrors
-    /// the standard <c>using var tx = ...; ... tx.Commit();</c> pattern
+    /// neither <see cref="Commit"/> nor <see cref="Rollback"/> ran — the whole
+    /// transaction, a nested one's enclosing SQL-text transaction included.
+    /// Mirrors the standard <c>using var tx = ...; ... tx.Commit();</c> pattern
     /// where an exception before the commit triggers implicit rollback.
     /// </summary>
     protected override void Dispose(bool disposing)
     {
-        if (disposing && !this.finished)
+        if (disposing && !this.Zombied)
         {
-            var db = this.Connection.CurrentDatabase;
-            Storage.VersionStore.DiscardPendingEntries(this.PendingVersionEntries);
-            this.UndoLog.Rollback();
-            ReleaseAllLocks();
-            UnregisterActiveSnapshot();
-            Storage.VersionStore.RunGarbageCollection(this.simulation, db);
-            RestoreSessionIsolation();
-            this.Connection.CurrentTransaction = null;
-            this.finished = true;
+            this.apiCompleted = true;
+            this.target.EndRollback();
         }
         base.Dispose(disposing);
     }
@@ -288,25 +369,19 @@ public sealed class SimulatedDbTransaction : DbTransaction
     /// </summary>
     private void CloseCursorsOnEnd()
     {
-        if (this.OpenedCursors is not { } cursors || !this.Connection.CursorCloseOnCommit)
+        if (this.OpenedCursors is not { } cursors || !this.Owner.CursorCloseOnCommit)
             return;
         foreach (var cursor in cursors)
         {
             if (cursor.IsOpen)
-                cursor.Close(this.Connection);
+                cursor.Close(this.Owner);
         }
     }
 
     private void UnregisterActiveSnapshot()
     {
         if (this.SnapshotXid is not null)
-            _ = this.simulation.ActiveSnapshotTxs.TryRemove(this.Connection.Session, out _);
-    }
-
-    private void RestoreSessionIsolation()
-    {
-        if (this.OverrodeSessionIsolation)
-            this.Connection.SessionIsolationLevel = this.PreviousSessionIsolationLevel;
+            _ = this.simulation.ActiveSnapshotTxs.TryRemove(this.Owner.Session, out _);
     }
 
     /// <summary>
@@ -324,7 +399,7 @@ public sealed class SimulatedDbTransaction : DbTransaction
         for (var i = this.HeldLocks.Count - 1; i >= 0; i--)
         {
             var (resource, mode) = this.HeldLocks[i];
-            manager.Release(resource, mode, this.Connection.Session);
+            manager.Release(resource, mode, this.Owner.Session);
         }
         this.HeldLocks.Clear();
         // Transaction-owned application locks release with the transaction —

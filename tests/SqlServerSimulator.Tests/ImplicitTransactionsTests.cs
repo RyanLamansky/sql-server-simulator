@@ -59,6 +59,18 @@ public sealed class ImplicitTransactionsTests
     [DataRow("exec sp_executesql N'select 1'", 0)]
     [DataRow("print 'x'", 0)]
     [DataRow("set nocount on", 0)]
+    [DataRow("exec sp_help 't'", 1)]
+    [DataRow("exec sp_helptext 'p'", 1)]
+    [DataRow("exec sp_columns 't'", 1)]
+    [DataRow("exec sp_tables", 1)]
+    [DataRow("exec sp_who", 1)]
+    [DataRow("exec sp_addextendedproperty 'x', 'v', 'schema', 'dbo', 'table', 't'", 1)]
+    [DataRow("exec sp_rename 't', 't2'", 1)]
+    [DataRow("exec sp_describe_first_result_set N'select * from t'", 0)]
+    [DataRow("exec sp_describe_undeclared_parameters N'select * from t where a = @p'", 0)]
+    [DataRow("exec sp_getapplock 'r', 'Shared', 'Session'", 0)]
+    [DataRow("exec sp_set_session_context 'k', 1", 0)]
+    [DataRow("exec xp_msver", 0)]
     public void Statement_OpensTransaction(string statement, int expectedTranCount)
     {
         using var connection = Seeded().CreateOpenConnection();
@@ -189,5 +201,15 @@ public sealed class ImplicitTransactionsTests
         AreEqual(1, Run(connection, "declare @n int = (select count(*) from t); select @@trancount"));
         IsFalse((bool)Run(connection, "rollback; set implicit_transactions off; select ansi_defaults from sys.dm_exec_sessions where session_id = @@spid")!);
         AreEqual(4096, Run(connection, "set ansi_defaults off; select @@options"));
+    }
+
+    [TestMethod]
+    [Description("A system procedure call whose arguments don't bind never starts, so it opens nothing.")]
+    public void SystemProcedureMissingItsParameter_OpensNothing()
+    {
+        using var connection = Seeded().CreateOpenConnection();
+        _ = Run(connection, "set implicit_transactions on");
+        AreEqual(201, Throws<SimulatedSqlException>(() => Run(connection, "exec sp_helptext")).Number);
+        AreEqual(0, Run(connection, "select @@trancount"));
     }
 }

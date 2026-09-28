@@ -205,7 +205,7 @@ partial class Simulation
         }
         view?.ThrowRefusals();
 
-        return new OutputProjection([.. expressions], [.. names], schema, table, source: null, context.Batch, outputTarget, view: view);
+        return NoteClientOutput(context.Batch, new OutputProjection([.. expressions], [.. names], schema, table, source: null, context.Batch, outputTarget, view: view));
     }
 
     /// <summary>
@@ -523,7 +523,19 @@ partial class Simulation
         }
         view?.ThrowRefusals();
 
-        return new OutputProjection(expressions, [.. columnNames], schema, destinationTable, sourceColumnNames, context.Batch, outputTarget, view: view);
+        return NoteClientOutput(context.Batch, new OutputProjection(expressions, [.. columnNames], schema, destinationTable, sourceColumnNames, context.Batch, outputTarget, view: view));
+    }
+
+    /// <summary>
+    /// Records a client-bound <c>OUTPUT</c> clause's shape on the statement, so
+    /// an error a <c>TRY</c> frame catches can still end it with the empty
+    /// result set real sends (see <c>CaughtWriteCount</c>).
+    /// </summary>
+    private static OutputProjection NoteClientOutput(BatchContext batch, OutputProjection projection)
+    {
+        if (!projection.HasTarget)
+            batch.CurrentStatement.ClientOutputShape = (projection.Schema, projection.ColumnNames);
+        return projection;
     }
 
     /// <summary>

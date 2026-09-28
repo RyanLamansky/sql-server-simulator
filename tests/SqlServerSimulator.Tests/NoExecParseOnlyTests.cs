@@ -83,6 +83,14 @@ public sealed class NoExecParseOnlyTests
     }
 
     [TestMethod]
-    public void ParseOnly_InAProcedure_RaisesMsg1059()
-        => _ = new Simulation().AssertSqlError("create procedure p as set parseonly on", 1059);
+    [DataRow("create procedure p as set parseonly on", "p")]
+    [DataRow("-- lead\ncreate procedure p as\nselect 1\nset parseonly off", "p")]
+    [DataRow("create function f() returns int as\nbegin\n  set parseonly on\n  return 1\nend", "f")]
+    [Description("Real reports it at line 0 wherever the SET sits (probed 2026-09-28 against SQL Server 2025).")]
+    public void ParseOnly_InAModule_RaisesMsg1059_AtLineZero(string sql, string procedure)
+    {
+        var error = new Simulation().AssertSqlError(sql, 1059);
+        AreEqual(0, error.LineNumber);
+        AreEqual(procedure, error.Procedure);
+    }
 }

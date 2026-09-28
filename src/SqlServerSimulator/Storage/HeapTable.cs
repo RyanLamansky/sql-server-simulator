@@ -411,6 +411,12 @@ internal sealed class HeapTable : SchemaObject
     public int TempScopeId;
 
     /// <summary>
+    /// For a local temp table, its padded name inside <c>tempdb</c>
+    /// (<see cref="Simulation.AllocateTempTableInternalName"/>); null otherwise.
+    /// </summary>
+    public string? InternalName;
+
+    /// <summary>
     /// The <see cref="Database"/> this table is registered in, stamped when it
     /// enters a <see cref="Schema.HeapTables"/> dict. Null for the tables that
     /// belong to no database — temp tables, table variables, table-valued

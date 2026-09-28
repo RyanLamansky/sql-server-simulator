@@ -816,7 +816,7 @@ partial class Simulation
             }
             if (where is not null && where.Run(new RuntimeContext(Resolve, batch)) != true)
                 continue;
-            batch.Connection.CurrentTransaction?.Rollback();
+            batch.Connection.CurrentTransaction?.EndRollback();
             throw SimulatedSqlException.SnapshotIsolationUpdateConflict($"{Database.DefaultSchemaName}.{table.Name}", batch.DatabaseFor(table).Name);
         }
     }

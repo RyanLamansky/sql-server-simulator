@@ -590,6 +590,20 @@ public sealed partial class Simulation
     /// </summary>
     internal long AllocateTransactionId() => Interlocked.Increment(ref this.transactionIdCounter);
 
+    private long tempTableCounter;
+
+    /// <summary>
+    /// The name a local <c>#temp</c> table carries inside <c>tempdb</c>, which
+    /// the messages naming the table (Msg 515, Msg 2628) spell out: the written
+    /// name padded with underscores to 116 characters, then twelve hex digits
+    /// of a server-wide counter that every local temp table's creation
+    /// advances, 128 characters in all (probed 2026-09-28 against SQL Server
+    /// 2025). Real's counter carries the instance's history, so the digits
+    /// match its shape, not its value.
+    /// </summary>
+    internal string AllocateTempTableInternalName(string name) =>
+        $"{name.PadRight(116, '_')}{Interlocked.Increment(ref this.tempTableCounter):X12}";
+
     /// <summary>
     /// Reads the current value of the commit-id counter without advancing it.
     /// Used to stamp a snapshot at first read under SNAPSHOT isolation and at
@@ -1211,7 +1225,7 @@ public sealed partial class Simulation
                 yield return message;
             if (batch.Connection.CurrentTransaction is { Doomed: true } doomed)
             {
-                doomed.Rollback();
+                doomed.EndRollback();
                 var endOfBatch = SimulatedSqlException.UncommittableTransactionAtEndOfBatch();
                 endOfBatch.ResolveDiagnostics(1, batch.LineOffset, batch.ErrorProcedureName);
                 yield return new SimulatedErrorOutcome(endOfBatch);
@@ -1983,6 +1997,7 @@ public sealed partial class Simulation
         batch.CurrentStatement.NullEliminated = false;
         batch.CurrentStatement.OwesOverflowNotice = batch.CurrentStatement.OwesDivideByZeroNotice = false;
         batch.CurrentStatement.WritesRows = false;
+        batch.CurrentStatement.ClientOutputShape = null;
         batch.CurrentStatement.TransactedWrite = false;
         batch.CurrentStatement.BindsDeferredSource = false;
         batch.CurrentStatement.ReadsPermanentObject = batch.CurrentStatement.ReadsTemporaryObject = false;
@@ -2136,19 +2151,19 @@ public sealed partial class Simulation
                 // Done BEFORE the TRY-frame check so both the propagating
                 // path and the TRY-caught path observe the same rollback.
                 if (ex.Class == 13)
-                    connection.CurrentTransaction?.Rollback();
+                    connection.CurrentTransaction?.EndRollback();
                 // The transaction-aborting error class does the same, for the
                 // same reason and at the same point: real rolls the whole
                 // stack back (@@TRANCOUNT 2 reads 0 afterwards, not 1) before
                 // the error reaches anyone. Unlike the deadlock victim it also
                 // refuses to be caught, so the TRY-frame arm below skips it.
                 if (ex.AbortsTransaction)
-                    connection.CurrentTransaction?.Rollback();
+                    connection.CurrentTransaction?.EndRollback();
                 // Real opens an implicit transaction only once its statement
                 // compiled, so a compile error met here takes back the one the
                 // statement opened.
-                if (batch.CurrentStatement.BeganImplicitTransaction && IsDeferredCompileError(ex) && connection.CurrentTransaction is { TranCount: 1 } implicitTransaction)
-                    implicitTransaction.Rollback();
+                if (batch.CurrentStatement.BeganImplicitTransaction && (IsDeferredCompileError(ex) || ex.Number == 201) && connection.CurrentTransaction is { TranCount: 1 } implicitTransaction)
+                    implicitTransaction.EndRollback();
                 // SET XACT_ABORT ON generalizes that class conditionally: while
                 // the option is on, a run-time error that would ordinarily end
                 // only its own statement ends the batch and rolls the whole
@@ -2273,6 +2288,14 @@ public sealed partial class Simulation
         {
             foreach (var outcome in ProducedOutcomes(batch, outcomes))
                 yield return outcome;
+            // A module or dynamic batch's failing write reports its count at
+            // its own level when a TRY frame further out is what catches it.
+            if (!batch.IsSkipping && !batch.CreateTimeBinding && connection.OpenTryFrames > 0
+                && !propagated.AbortsTransaction && !propagated.IsAttention
+                && CaughtWriteCount(batch) is { } count)
+            {
+                yield return count;
+            }
             ExceptionDispatchInfo.Throw(propagated);
         }
 
@@ -2336,6 +2359,7 @@ public sealed partial class Simulation
 
         if (caught is not null)
         {
+            var caughtCount = batch.IsSkipping ? null : CaughtWriteCount(batch);
             // First error in this TRY body wins; subsequent throws while
             // already-signaled (from skip-mode parsers that still hit
             // runtime errors) silently swallow — the captured first error
@@ -2384,6 +2408,8 @@ public sealed partial class Simulation
                 parser.MoveNextOptional();
             foreach (var outcome in ProducedOutcomes(batch, outcomes))
                 yield return outcome;
+            if (caughtCount is not null)
+                yield return caughtCount;
             yield break;
         }
 
@@ -2477,6 +2503,28 @@ public sealed partial class Simulation
         }
         foreach (var outcome in outcomes)
             yield return outcome;
+    }
+
+    /// <summary>
+    /// The count a row-writing statement reports when its error is caught by a
+    /// <c>TRY</c> frame: 0, sent ahead of the <c>CATCH</c> block's own output
+    /// and suppressed by <c>NOCOUNT</c> like any other, where an uncaught error
+    /// ends the statement with no count at all (probed 2026-09-28 against SQL
+    /// Server 2025). Each failing write on the way out reports its own, so an
+    /// <c>INSERT</c> whose trigger's <c>UPDATE</c> failed reports two.
+    /// A statement whose <c>OUTPUT</c> clause returns rows reports through the
+    /// empty result set instead. Null for any other statement.
+    /// </summary>
+    private static SimulatedStatementOutcome? CaughtWriteCount(BatchContext batch)
+    {
+        var statement = batch.CurrentStatement;
+        if (!statement.WritesRows)
+            return null;
+        SimulatedStatementOutcome count = statement.ClientOutputShape is var (schema, names)
+            ? new SimulatedSqlResultSet(schema, names, Array.Empty<byte[]>(), 0) { EndedByError = true, ErrorCaught = true }
+            : new SimulatedNonQuery(0);
+        count.CountSuppressed = batch.Connection.NoCount;
+        return count;
     }
 
     /// <summary>Real's Msg 8153, closing the statement whose aggregate skipped a NULL.</summary>
@@ -2638,7 +2686,7 @@ public sealed partial class Simulation
         if (ex.RaisedByRaiserror)
             return;
         ex.XactAbortPromoted = true;
-        connection.CurrentTransaction?.Rollback();
+        connection.CurrentTransaction?.EndRollback();
     }
 
     /// <summary>
@@ -3788,7 +3836,7 @@ public sealed partial class Simulation
             // in aborts the batch with Msg 3609 when it returns, as a ROLLBACK
             // does; one the body began over an auto-commit unit is its own.
             var endsFiringTransaction = connection.TriggerNestLevel > 0 && ReferenceEquals(connection.TriggerStatementUndoLog, tx.UndoLog);
-            tx.Commit();
+            tx.EndCommit();
             if (endsFiringTransaction)
             {
                 connection.TriggerStatementUndoLog = null;
@@ -3840,7 +3888,7 @@ public sealed partial class Simulation
                             throw SimulatedSqlException.ClrRollbackRefused();
                         }
 
-                        tx.Rollback();
+                        tx.EndRollback();
                     }
                     else
                     {
@@ -3875,7 +3923,7 @@ public sealed partial class Simulation
 
         if (connection.CurrentTransaction is { } activeTx)
         {
-            activeTx.Rollback();
+            activeTx.EndRollback();
             if (connection.TriggerNestLevel > 0)
             {
                 connection.TriggerStatementUndoLog = null;

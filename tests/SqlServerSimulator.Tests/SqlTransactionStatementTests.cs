@@ -157,20 +157,25 @@ public sealed class SqlTransactionStatementTests
         // API tx.Commit() → TRANCOUNT 0, persists writes.
         using var conn = NewSeededConnection();
         using var tx = conn.BeginTransaction();
-        AreEqual(1, conn.CreateCommand("select @@trancount").ExecuteScalar());
-
         using var cmd = conn.CreateCommand();
         cmd.Transaction = tx;
+        object? TranCount()
+        {
+            cmd.CommandText = "select @@trancount";
+            return cmd.ExecuteScalar();
+        }
+        AreEqual(1, TranCount());
+
         cmd.CommandText = "begin transaction";
         _ = cmd.ExecuteNonQuery();
-        AreEqual(2, conn.CreateCommand("select @@trancount").ExecuteScalar());
+        AreEqual(2, TranCount());
 
         cmd.CommandText = "insert t values (1, 10)";
         _ = cmd.ExecuteNonQuery();
 
         cmd.CommandText = "commit";
         _ = cmd.ExecuteNonQuery();
-        AreEqual(1, conn.CreateCommand("select @@trancount").ExecuteScalar());
+        AreEqual(1, TranCount());
 
         tx.Commit();
         AreEqual(0, conn.CreateCommand("select @@trancount").ExecuteScalar());

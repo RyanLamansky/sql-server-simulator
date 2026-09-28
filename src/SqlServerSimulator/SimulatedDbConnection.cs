@@ -688,6 +688,7 @@ public sealed class SimulatedDbConnection : DbConnection
             this.Shadow(visible);
         }
         this.TempTables[table.Name] = table;
+        table.InternalName = this.Simulation.AllocateTempTableInternalName(table.Name);
         return true;
     }
 
@@ -759,16 +760,18 @@ public sealed class SimulatedDbConnection : DbConnection
     internal int NextPreparedXmlHandle() => Interlocked.Add(ref this.lastPreparedXmlHandle, 2);
 
     /// <summary>
-    /// The single active explicit transaction on this connection, or null if
-    /// none. SqlClient rejects parallel transactions on the same connection
-    /// (probe-confirmed: <c>InvalidOperationException: SqlConnection does
-    /// not support parallel transactions.</c>); the simulator mirrors that.
+    /// The session's open transaction, however it began — SQL text, the API
+    /// or <c>IMPLICIT_TRANSACTIONS</c> — or null if none; a nested
+    /// <c>BeginTransaction</c> adds a level to it rather than replacing it
+    /// (<see cref="SimulatedDbTransaction.Nest"/>).
     /// Statements executed via this connection consult this field through
     /// <see cref="Simulation.RunMutation"/> — when set, mutations append to
     /// the transaction's <see cref="UndoLog"/> so an eventual
-    /// <see cref="SimulatedDbTransaction.Rollback"/> can unwind them.
+    /// <see cref="SimulatedDbTransaction.EndRollback"/> can unwind them.
     /// </summary>
+#pragma warning disable CA2213 // Ended by EndRollback on dispose; its API object is the caller's to dispose.
     internal SimulatedDbTransaction? CurrentTransaction;
+#pragma warning restore CA2213
 
     /// <summary>
     /// Backs <c>@@ROWCOUNT</c>. Updated after each statement in
@@ -1218,7 +1221,7 @@ public sealed class SimulatedDbConnection : DbConnection
         // connection closes. The transaction's own dispose handles the
         // explicit using-pattern; this branch covers raw Close() without
         // disposing the transaction first.
-        this.CurrentTransaction?.Rollback();
+        this.CurrentTransaction?.EndRollback();
         this.ReleaseSessionAppLocks();
         this.state = ConnectionState.Closed;
     }
@@ -1247,7 +1250,7 @@ public sealed class SimulatedDbConnection : DbConnection
         else
         {
             this.Session.Reclaimed = true;
-            this.CurrentTransaction?.Dispose();
+            this.CurrentTransaction?.EndRollback();
             this.executionCancellation.Dispose();
             this.ReleaseSessionAppLocks();
             // Local temp tables auto-drop at session close. Clearing the dict
@@ -1351,26 +1354,39 @@ public sealed class SimulatedDbConnection : DbConnection
     }
 
     /// <inheritdoc/>
+    /// <remarks>
+    /// Mirrors SqlClient over SQL Server 2025 (probed 2026-09-28 through
+    /// SqlClient 7): an unspecified level begins at read committed, a
+    /// transaction SQL text began is nested into rather than refused, and the
+    /// level stays the session's after the transaction ends.
+    /// </remarks>
     protected override DbTransaction BeginDbTransaction(IsolationLevel isolationLevel)
     {
-        if (this.CurrentTransaction is not null)
+        if (this.CurrentTransaction is { HoldsApiTransaction: true })
             throw new InvalidOperationException("SqlConnection does not support parallel transactions.");
-        // Explicit iso level on BeginTransaction overrides the session-wide
-        // default for the duration of this transaction; restored on
-        // Commit/Rollback/Dispose. Unspecified keeps the existing session
-        // value. Matches SqlClient's "the transaction inherits the session
-        // iso unless an override is specified at BeginTransaction time"
-        // behavior.
-        var previousIsolation = this.SessionIsolationLevel;
+        if (isolationLevel == IsolationLevel.Unspecified)
+            isolationLevel = IsolationLevel.ReadCommitted;
+        if (this.CurrentTransaction is { } open)
+        {
+            this.SessionIsolationLevel = isolationLevel;
+            return open.Nest(isolationLevel);
+        }
+        var tx = this.StartTransaction(isolationLevel);
+        tx.BegunByApi = true;
+        return tx;
+    }
+
+    /// <summary>
+    /// Opens a transaction the way a transaction-manager begin request does:
+    /// a requested level applies to the session and outlives the transaction,
+    /// as it does on real, where the session reads it after the commit or
+    /// rollback too (probed 2026-09-28 against SQL Server 2025).
+    /// </summary>
+    internal SimulatedDbTransaction StartTransaction(IsolationLevel isolationLevel)
+    {
         if (isolationLevel != IsolationLevel.Unspecified)
             this.SessionIsolationLevel = isolationLevel;
-        var tx = new SimulatedDbTransaction(this.Simulation, this, isolationLevel)
-        {
-            PreviousSessionIsolationLevel = previousIsolation,
-            OverrodeSessionIsolation = isolationLevel != IsolationLevel.Unspecified,
-        };
-        this.CurrentTransaction = tx;
-        return tx;
+        return this.CurrentTransaction = new SimulatedDbTransaction(this.Simulation, this, isolationLevel);
     }
 
     /// <inheritdoc/>

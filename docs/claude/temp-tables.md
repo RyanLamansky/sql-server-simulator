@@ -49,7 +49,9 @@ Lifecycle, cross-conn isolation, and Msg 208 from other sessions all probe-confi
 `tempdb`'s catalog views and metadata scalars list the session's `#temp` tables and every `##` table under `dbo`, as real does, so the common probes work: `tempdb.sys.columns WHERE object_id = OBJECT_ID('tempdb..#t')`, `tempdb.INFORMATION_SCHEMA.COLUMNS`, `COL_LENGTH('tempdb..#t', 'c')`, `OBJECT_NAME(id, DB_ID('tempdb'))` (probed 2026-09-24 against SQL Server 2025).
 The views read them through `BuiltInResources.CatalogTables`, which appends them to `tempdb.dbo`'s own tables, and a temp table's id comes from `tempdb`'s counter so the two can't collide there.
 
-**Divergences**: real pads a `#temp`'s catalog name with underscores to 128 characters around a 12-digit per-table suffix (`#t_____…_000000000005`), where it keeps its written name here; real also lists other sessions' `#temp` tables, which don't appear here; and `EXEC tempdb..sp_help '#t'` is Msg 15009 here where real describes the table.
+A `#temp` table's messages — Msg 515, Msg 2628 — name it as real does, by its name inside `tempdb`: the written name padded with underscores to 116 characters and twelve hex digits of a server-wide counter each local temp table's creation advances (`HeapTable.InternalName`, probed 2026-09-28), real's counter carrying its instance's history where this one starts at 1; a constraint conflict (Msg 547) names it bare, `table "#t"`.
+
+**Divergences**: the catalog views and `OBJECT_NAME` list a `#temp` by its written name, where real lists that padded name; real also lists other sessions' `#temp` tables, which don't appear here; and `EXEC tempdb..sp_help '#t'` is Msg 15009 here where real describes the table.
 
 ## Global temp tables (`##foo`)
 Instance-wide `ConcurrentDictionary<string, HeapTable> GlobalTempTables` on `Simulation`; routed by `BatchContext.TryResolveTable` via `IsGlobalTempName` (leading `##`, length ≥ 2 — bare `##` is a valid name, probe-confirmed).

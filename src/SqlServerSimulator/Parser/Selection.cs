@@ -5182,9 +5182,10 @@ internal sealed partial class Selection
     /// Builds the <c>database.schema.table</c> qualified name a Msg 13544 /
     /// 13599 rejection message wants. Temp tables aren't tracked under
     /// <c>Database.Schemas</c>, so the schema lookup falls back to
-    /// <c>dbo</c> with the host database name <c>tempdb</c> — real SQL
-    /// Server pads temp-table names with their internal allocation suffix
-    /// (<c>#X____...___…000000000148</c>) which the simulator doesn't carry.
+    /// <c>dbo</c> with the host database name <c>tempdb</c>. Real SQL Server
+    /// likely writes a temp table's padded internal name here
+    /// (<see cref="HeapTable.InternalName"/>), as it does in Msg 2628, but
+    /// these two messages weren't probed for it, so the written name stays.
     /// </summary>
     private static string QualifiedNameFor(ParserContext context, HeapTable heapTable)
     {

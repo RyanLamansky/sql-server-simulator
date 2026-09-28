@@ -990,7 +990,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
         var connection = this.connection!;
         if (connection.XactAbort && connection.CurrentTransaction is { } tx)
         {
-            tx.Rollback();
+            tx.EndRollback();
             this.transaction = null;
         }
     }

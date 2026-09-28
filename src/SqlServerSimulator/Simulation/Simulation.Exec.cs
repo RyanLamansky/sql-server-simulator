@@ -7,6 +7,23 @@ namespace SqlServerSimulator;
 partial class Simulation
 {
     /// <summary>
+    /// Whether a system procedure opens the <c>IMPLICIT_TRANSACTIONS</c>
+    /// transaction as it starts: those real writes in T-SQL over the catalog
+    /// do, their first query opening it — the <c>sp_help</c> family, the ODBC
+    /// catalog set, <c>sp_rename</c>, the extended-property and bind
+    /// procedures — while the ones below run no query of their own, and
+    /// <c>sp_executesql</c> leaves it to the statements it runs (probed
+    /// 2026-09-28 against SQL Server 2025). A call whose arguments don't bind
+    /// (Msg 201) never starts, so it takes the transaction back.
+    /// </summary>
+    private static bool OpensImplicitTransaction(string systemProcName) => systemProcName is not (
+        "sp_addlinkedserver" or "sp_addlinkedsrvlogin" or "sp_addrolemember" or "sp_describe_first_result_set"
+        or "sp_describe_undeclared_parameters" or "sp_droplinkedsrvlogin" or "sp_droprolemember" or "sp_dropserver"
+        or "sp_executesql" or "sp_getapplock" or "sp_releaseapplock" or "sp_serveroption" or "sp_set_session_context"
+        or "sp_setapprole" or "sp_unsetapprole" or "sp_xml_preparedocument" or "sp_xml_removedocument"
+        or "xp_instance_regread" or "xp_msver" or "xp_qv");
+
+    /// <summary>
     /// <c>EXEC @v</c>: the procedure named by a character-string variable,
     /// parsed the way a written name is and reported as the string spells it —
     /// probe-confirmed against SQL Server 2025 (2026-09-23), system procedures
@@ -251,6 +268,8 @@ partial class Simulation
         };
         if (systemProc is not null)
         {
+            if (OpensImplicitTransaction(systemProcName!))
+                batch.BeginImplicitTransaction();
             foreach (var outcome in AttributedToSystemProcedure(systemProc, systemProcName!, CalledName(procName)))
                 yield return outcome;
             // A system procedure that finishes answers 0 to `EXEC @rc = …`

@@ -20,7 +20,7 @@ Two clocks, probed against SQL Server 2025:
 A procedure, trigger or dynamic-SQL body's `SET` applies inside the body and reverts when the body returns, the caller's value restored by `SimulatedDbConnection.SessionOptionScope` at each invocation seam and around a parameterized ad-hoc command (which SqlClient sends as `sp_executesql`).
 That holds for `ANSI_PADDING`, `ANSI_WARNINGS`, `ARITHABORT`, `CONCAT_NULL_YIELDS_NULL`, `NUMERIC_ROUNDABORT`, `ANSI_NULL_DFLT_ON` / `_OFF`, `IMPLICIT_TRANSACTIONS`, `CURSOR_CLOSE_ON_COMMIT`, `NOEXEC`, `DEADLOCK_PRIORITY`, `XACT_ABORT`, `ROWCOUNT`, `DATEFIRST`, `DATEFORMAT`, `NOCOUNT` and `TEXTSIZE` (probed 2026-09-28: a procedure setting five of the ANSI toggles reads `@@OPTIONS` 9568 inside and the caller 5432 after).
 `ANSI_NULLS` and `QUOTED_IDENTIFIER` are the exceptions: a procedure or trigger body ignores its own `SET` of them, running under the setting captured when the module was created, while dynamic SQL applies them to its own batch.
-`PARSEONLY` in a procedure, trigger or function body refuses the `CREATE` with Msg 1059.
+`PARSEONLY` in a procedure, trigger or function body refuses the `CREATE` with Msg 1059, at line 0 wherever the `SET` sits (probed 2026-09-28).
 
 ## `@@OPTIONS`, `SESSIONPROPERTY` and `sys.dm_exec_sessions`
 

@@ -148,4 +148,40 @@ public sealed class TransactionsViaSqlTextTests
         await using var count = new SqlCommand("select count(*) from t", reopened);
         AreEqual(1, await count.ExecuteScalarAsync(TestContext.CancellationToken));
     }
+
+    /// <summary>
+    /// A commit request ends one nesting level. It reports the commit when the
+    /// begin request nested inside a SQL-text transaction, so SqlClient runs
+    /// the next command without a transaction; when the request's own
+    /// transaction stays open, nested deeper by SQL text, it doesn't, and
+    /// SqlClient holds that transaction pending (probed 2026-09-28 against SQL
+    /// Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow(true)]
+    [DataRow(false)]
+    public async Task CommitRequestEndingOneLevel_ReportsTheCommitOnlyForANestedBegin(bool apiNested)
+    {
+        var simulation = new Simulation();
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+        if (apiNested)
+        {
+            await using var begin = new SqlCommand("begin tran", connection);
+            _ = await begin.ExecuteNonQueryAsync(TestContext.CancellationToken);
+        }
+        var transaction = connection.BeginTransaction();
+        if (!apiNested)
+        {
+            await using var begin = new SqlCommand("begin tran", connection, transaction);
+            _ = await begin.ExecuteNonQueryAsync(TestContext.CancellationToken);
+        }
+        transaction.Commit();
+
+        await using var count = new SqlCommand("select @@trancount", connection);
+        if (apiNested)
+            AreEqual(1, await count.ExecuteScalarAsync(TestContext.CancellationToken));
+        else
+            _ = await ThrowsAsync<InvalidOperationException>(() => count.ExecuteScalarAsync(TestContext.CancellationToken));
+    }
 }

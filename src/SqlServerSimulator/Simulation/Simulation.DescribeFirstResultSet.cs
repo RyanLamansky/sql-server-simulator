@@ -83,6 +83,11 @@ partial class Simulation
         var connection = batch.Connection;
         var savedFmtOnly = connection.FmtOnly;
         connection.FmtOnly = true;
+        // Describing runs nothing, so it opens no IMPLICIT_TRANSACTIONS
+        // transaction (probed 2026-09-28 against SQL Server 2025), where a
+        // SET FMTONLY ON query does.
+        var savedImplicitTransactions = connection.ImplicitTransactions;
+        connection.ImplicitTransactions = false;
         SimulatedQueryResult? first = null;
         try
         {
@@ -116,6 +121,7 @@ partial class Simulation
         finally
         {
             connection.FmtOnly = savedFmtOnly;
+            connection.ImplicitTransactions = savedImplicitTransactions;
         }
 
         var rows = new List<SqlValue[]>();
