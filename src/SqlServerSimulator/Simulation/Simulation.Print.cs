@@ -44,6 +44,8 @@ partial class Simulation
             expression = Expression.Parse(context);
             if (context.ScalarOnlyColumnReference is not null)
                 throw Expression.ScalarOnlyOperandError(context);
+            if (Parser.Expressions.XmlMethodCall.AppearsIn(expression))
+                throw SimulatedSqlException.XmlMethodNotAllowedInContext();
         }
         finally
         {

@@ -110,15 +110,22 @@ partial class Simulation
                         {
                             foreach (var outcome in outcomes)
                             {
-                                if (outcome is SimulatedSqlResultSet)
+                                if (outcome is SimulatedSqlResultSet && !connection.LogonUnitCommitted)
                                     throw SimulatedSqlException.LogonTriggerReturnedResultSet();
                             }
                             batch.PendingTriggerOutcomes = null;
                         }
                         // A transaction a body opened and left open ends the
-                        // trigger as a ROLLBACK does.
+                        // trigger as a ROLLBACK does — unless the login's unit
+                        // already committed, when it commits too.
                         if (connection.CurrentTransaction is { } leftOpen)
                         {
+                            if (connection.LogonUnitCommitted)
+                            {
+                                leftOpen.TranCount = 1;
+                                leftOpen.Commit();
+                                continue;
+                            }
                             leftOpen.Rollback();
                             throw SimulatedSqlException.TransactionEndedInTrigger(2);
                         }
@@ -132,6 +139,25 @@ partial class Simulation
                 return new SimulatedNonQuery(0);
             });
         }
+        catch (SimulatedSqlException ended) when (connection.LogonUnitCommitted)
+        {
+            // Once a body committed the login's unit nothing refuses it: not
+            // the Msg 3609 that COMMIT earns, a later error, a result set nor a
+            // transaction left open, which commits (probed 2026-09-28 against
+            // SQL Server 2025). Any of them ends the remaining bodies.
+            if (connection.CurrentTransaction is { } leftOpen)
+            {
+                if (ended.Number == 3609)
+                {
+                    leftOpen.TranCount = 1;
+                    leftOpen.Commit();
+                }
+                else
+                {
+                    leftOpen.Rollback();
+                }
+            }
+        }
         catch (SimulatedSqlException)
         {
             var refusal = SimulatedSqlException.LogonFailedDueToTrigger(loginName);
@@ -144,6 +170,7 @@ partial class Simulation
             connection.NoCount = savedNoCount;
             connection.Language = savedLanguage;
             connection.RunningLogonTriggers = false;
+            connection.LogonUnitCommitted = false;
         }
     }
 

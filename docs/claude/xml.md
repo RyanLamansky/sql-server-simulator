@@ -88,6 +88,9 @@ CREATE XML INDEX name ON table(col)
 - **`.modify()`** — the mutator, a separate sublanguage; see [`.modify()` — XML-DML](#modify--xml-dml) below.
   Reaching `XmlMethodCall` for it means it was written in a value position, which is **Msg 8137**.
 - `GetSqlType`: `.value()`→resolved target type, `.exist()`→bit, `.nodes()` / `.query()`→xml.
+- **Where a method may not appear**, each settled while compiling so nothing earlier in the batch runs (probed 2026-09-28 against SQL Server 2025): a `PRINT` operand is **Msg 2722**, a `CHECK` constraint **Msg 423** + 1750, a computed column **Msg 435** — **Msg 424** on a table variable or a multi-statement function's return table.
+  Each wants a scalar UDF wrapping the call, which is accepted everywhere.
+  `SET`, `DECLARE`'s initializer, `IF` / `WHILE`, `RETURN`, `TOP`, `OFFSET` and a `DEFAULT` all take one; `RAISERROR` / `THROW` / `EXEC` arguments, `EXEC (…)` and `WAITFOR` refuse the dotted call as Msg 102 on both engines.
 - A non-literal `xquery` / type argument raises `NotSupportedException` (dynamic XQuery isn't modeled).
 
 ## XQuery-subset evaluator

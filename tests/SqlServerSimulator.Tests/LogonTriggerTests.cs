@@ -144,6 +144,27 @@ public sealed class LogonTriggerTests
     public void TransactionLeftOpen_RefusesTheLogin()
         => _ = AssertRefused(WithTrigger("begin tran; " + Insert("'x'")));
 
+    /// <summary>
+    /// A <c>COMMIT</c> commits the unit the login runs in: <c>@@TRANCOUNT</c>
+    /// reads 0 after it, what the body wrote before and after it stays, and
+    /// nothing that follows refuses the login.
+    /// </summary>
+    [TestMethod]
+    [DataRow("", "before:1:1;after:0:0")]
+    [DataRow("commit;", "before:1:1;after:0:0")]
+    [DataRow("rollback;", "before:1:1;after:0:0")]
+    [DataRow("throw 50001, 'nope', 1;", "before:1:1;after:0:0")]
+    [DataRow("raiserror('r16', 16, 1);", "before:1:1;after:0:0")]
+    [DataRow("select 1 as x;", "before:1:1;after:0:0")]
+    [DataRow("begin tran; insert simulated.dbo.logon_log (s) values ('open');", "before:1:1;after:0:0;open")]
+    public void Commit_LetsTheLoginStand(string then, string expected)
+        => AreEqual(expected, FiredWith(
+            "declare @t int = @@trancount, @x int = xact_state(); "
+            + Insert("concat('before:', @t, ':', @x)")
+            + " commit; select @t = @@trancount, @x = xact_state(); "
+            + Insert("concat('after:', @t, ':', @x)")
+            + " " + then));
+
     [TestMethod]
     public void Print_ReachesNoClient()
     {

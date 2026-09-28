@@ -308,6 +308,8 @@ partial class Simulation
 
         foreach (var pc in pendingComputed)
         {
+            if (Parser.Expressions.XmlMethodCall.AppearsIn(pc.Expression))
+                throw SimulatedSqlException.XmlMethodInComputedColumn(pc.Name, table.Name, "ALTER TABLE", tableVariable: false);
             // Same PERSISTED gate CREATE TABLE applies, under ALTER's own verb
             // (probe-confirmed Msg 1934 "ALTER TABLE failed …").
             if (pc.Persisted && IncorrectSetOptionNames(batch.Parser) is { } setOptions)

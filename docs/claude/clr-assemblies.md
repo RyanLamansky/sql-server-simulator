@@ -213,6 +213,8 @@ The type shares `hierarchyid`'s row and column of the type-pair grids, which rea
 - The result types map as the SQLCLR routines' do, plain CLR primitives included; a string is `nvarchar(4000)` — longer is the server's truncation error inside Msg 6522 at **state 1** — and a CLR type is itself.
 - A NULL receiver reads NULL without calling in; a NULL argument of a CLR type passes its `Null` instance.
 - A throw is Msg 6522 state 2 naming the type.
+  `Parse` failing over a written constant is state 1 where real meets it folding the constant as the batch compiles, which it does for a statement naming permanent tables or views and no `#temp` table or table variable — `CAST('bad' AS Point)` or `'bad'` written to a column of the type, anywhere a top-level constant folds; a variable's or a column's value, a statement naming no table, a temporary object or only a catalog view, and a constant inside a subquery stay state 2 (probed 2026-09-28 against SQL Server 2025).
+  `ConstantFolding.FoldsClrParseFailure` restates it at the sites that run a statement's constants up front.
 
 `SET @v.Property = …`, `SET @v.Mutator(…)`, `UPDATE t SET col.Property = …` and `UPDATE t SET col.Mutator(…)` (`Parser/Expressions/ClrTypeMutation.cs`) deserialize the value, assign or call, and store the result; a method not marked `SqlMethod(IsMutator = true)` is **Msg 6201**, and a NULL receiver **Msg 5302** naming the member and the receiver as written, which ends the batch.
 
@@ -295,7 +297,6 @@ The strong-named case is unprobed.
 - **A CLR routine's own exceptions match real's; ones .NET's base library raises carry .NET's wording and frames.**
   A `FormatException` from `int.Parse` reads `The input string 'x' was not in a correct format.` where Framework's reads `Input string was not in a correct format.`, and a stack real reports through `System.Number` shows only the author's frames here; real's own marshalling frames (`SqlBytes.Write`, `XmlSerializer` internals) never show.
   Code in a registered class also runs under the host's culture, so a `DateTime.ToString()` there can render differently (ICU's narrow no-break space before `AM`).
-- **A CLR type's `Parse` failing while an `INSERT` writes a column is Msg 6522 state 2 here and state 1 on real**, which reports state 2 for the same failure in a `DECLARE` or `SET`.
 - **An aggregate's state never leaves memory.**
   One instance accumulates each whole group, so `Merge` is never called and a `Format.UserDefined` aggregate's `Read` / `Write` never run; real may serialize state between rows, which an aggregate that loses a field in `Write` would show.
 - **A context-connection error's report shows the provider's public frames only.**

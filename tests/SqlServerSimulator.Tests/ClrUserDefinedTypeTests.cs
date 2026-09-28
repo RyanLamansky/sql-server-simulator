@@ -293,4 +293,28 @@ public class ClrUserDefinedTypeTests
         IsTrue(help.Read());
         AreEqual("Point|True|9|9", $"{help["Type_name"]}|{help["Storage_type"] is DBNull}|{help["Length"]}|{help["Prec"]}");
     }
+
+    [TestMethod]
+    [Description("Parse failing over a written constant in a statement real compiles with its batch — one naming permanent tables alone — is Msg 6522 state 1; at run time it is state 2.")]
+    [DataRow("insert t (p) values ('bad')", 1)]
+    [DataRow("insert t (p) values (cast('bad' as Point))", 1)]
+    [DataRow("insert t (p) select 'bad'", 1)]
+    [DataRow("insert t (s) select cast(cast('bad' as Point) as nvarchar(10))", 1)]
+    [DataRow("update t set p = 'bad'", 1)]
+    [DataRow("delete t where p = cast('bad' as Point)", 1)]
+    [DataRow("select cast('bad' as Point) from t", 1)]
+    [DataRow("select id from t where cast('bad' as Point) is null", 1)]
+    [DataRow("select cast('bad' as Point) from v", 1)]
+    [DataRow("declare @p Point = 'bad'", 2)]
+    [DataRow("select cast('bad' as Point)", 2)]
+    [DataRow("select cast(s as Point) from t", 2)]
+    [DataRow("declare @v nvarchar(10) = 'bad'; insert t (p) values (@v)", 2)]
+    [DataRow("declare @tv table (p Point); insert @tv values ('bad')", 2)]
+    [DataRow("declare @tv table (id int); insert @tv values (1); insert t (p) select 'bad' from @tv", 2)]
+    [DataRow("select (select cast('bad' as Point)) from t", 2)]
+    [DataRow("select top (1) cast('bad' as Point) from sys.objects", 2)]
+    public void Parse_Throw_StateFollowsTheFold(string statement, int state)
+        => AreEqual(state, Types(
+            "create table t (id int, p Point, s nvarchar(100)); insert t (id, s) values (1, 'bad')",
+            "create view v as select id, s from t").AssertSqlError(statement, 6522).State);
 }

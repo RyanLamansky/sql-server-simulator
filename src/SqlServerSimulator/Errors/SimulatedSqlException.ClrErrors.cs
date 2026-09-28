@@ -126,6 +126,15 @@ partial class SimulatedSqlException
         new($"A .NET Framework error occurred during execution of user-defined routine or aggregate \"{routineName}\": \r\n{report}.", 6522, 16, state);
 
     /// <summary>
+    /// A CLR type's <c>Parse</c> failure (<see cref="IsClrTypeParseFailure"/>)
+    /// met while real folds a written constant as its batch compiles, which it
+    /// reports at state 1 rather than the run-time failure's 2 (probed
+    /// 2026-09-28 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException ClrTypeParseFoldedAtCompile(SimulatedSqlException failure) =>
+        new(failure.Errors[0].Message, 6522, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 6549: a CLR routine threw after its context
     /// connection ended, or left changed, the transaction the caller held on
     /// entry — 6522's report under a different wording, which the server

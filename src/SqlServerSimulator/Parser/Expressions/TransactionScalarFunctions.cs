@@ -20,10 +20,16 @@ internal sealed class XactState : Expression
             throw SimulatedSqlException.FunctionRequiresNArguments("xact_state", 0);
     }
 
+    /// <remarks>
+    /// With no user transaction it reads 1 inside the unit a trigger body runs
+    /// in and inside a statement writing a table, table variables included —
+    /// the transaction real opens for it (probed 2026-09-28 against SQL Server
+    /// 2025).
+    /// </remarks>
     public override SqlValue Run(RuntimeContext runtime) => SqlValue.FromInt16(
-        runtime.Batch.Connection.CurrentTransaction is not { TranCount: > 0 } transaction ? (short)0
-            : transaction.Doomed ? (short)-1
-            : (short)1);
+        runtime.Batch.Connection.CurrentTransaction is { TranCount: > 0 } transaction ? (transaction.Doomed ? (short)-1 : (short)1)
+            : runtime.Batch.Connection.TriggerStatementUndoLog is not null || runtime.Batch.CurrentStatement.WritesRows ? (short)1
+            : (short)0);
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.SmallInt;
 

@@ -1200,7 +1200,13 @@ internal sealed partial class Selection
             percent = true;
             context.MoveNextRequired();
         }
-        return new DmlTopLimit(expression, percent);
+        var limit = new DmlTopLimit(expression, percent);
+        // A written constant is judged while compiling, so its error ends the
+        // batch with no Msg 3621 (probed 2026-09-28 against SQL Server 2025:
+        // `TOP (-1)`, `TOP (1.5)`, `TOP (101) PERCENT`).
+        if (expression.IsWrittenConstant)
+            _ = ResolveDmlTopCap(limit, int.MaxValue, context.Batch);
+        return limit;
     }
 
     /// <summary>
@@ -1214,6 +1220,22 @@ internal sealed partial class Selection
     /// against SQL Server 2025.
     /// </summary>
     internal static int ResolveDmlTopCap(DmlTopLimit limit, int candidateCount, BatchContext batch)
+    {
+        try
+        {
+            return ResolveDmlTopCapCore(limit, candidateCount, batch);
+        }
+        catch (SimulatedSqlException ex) when (!limit.Expression.IsWrittenConstant)
+        {
+            // A value read while running reports at the statement's first line,
+            // where a class-15 error otherwise takes the parser's current one.
+            foreach (var error in ex.Errors)
+                error.LineNumber = batch.CurrentStatement.StartLine;
+            throw;
+        }
+    }
+
+    private static int ResolveDmlTopCapCore(DmlTopLimit limit, int candidateCount, BatchContext batch)
     {
         var resolved = limit.Expression.Run(new RuntimeContext(name => throw SimulatedSqlException.ColumnReferenceNotAllowed(name), batch));
         if (limit.Percent)

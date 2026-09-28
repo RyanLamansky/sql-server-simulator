@@ -208,6 +208,8 @@ partial class Simulation
 
         foreach (var pending in pendingComputed)
         {
+            if (Parser.Expressions.XmlMethodCall.AppearsIn(pending.Expression))
+                throw SimulatedSqlException.XmlMethodInComputedColumn(pending.Name, tableName.Leaf, "CREATE TABLE", tableVariable: false);
             var resolvedType = pending.Expression.GetSqlType(context.Batch, ResolveComputedReference);
             var inferredNullable = pending.Expression.ResultIsNullable(
                 new NullabilityContext(context.Batch, ResolveComputedReferenceNullable, ResolveComputedReference));
@@ -2407,6 +2409,8 @@ partial class Simulation
         IReadOnlyList<HeapColumn?> columns,
         BooleanExpression predicate)
     {
+        if (Parser.Expressions.XmlMethodCall.AppearsIn(predicate))
+            throw SimulatedSqlException.XmlMethodInCheckConstraint(tableName);
         predicate.VisitOperandExpressions(op =>
             op.VisitColumnReferences(name =>
             {

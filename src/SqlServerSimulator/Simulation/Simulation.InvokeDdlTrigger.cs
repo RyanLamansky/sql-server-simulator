@@ -121,16 +121,29 @@ partial class Simulation
         if (database.DdlTriggers.IsEmpty && serverTriggers.Length == 0)
             return;
 
-        // The statement's own source text, which every event this statement
+        // The statement's source text, which every event this statement
         // raised reports as CommandText (probe-confirmed: both DROP_TABLE
-        // events of `DROP TABLE a, b` carry the whole statement). The end is
-        // the next token's start — the dispatch loop hasn't consumed past the
-        // statement — or end of batch for a body-to-end-of-batch statement
-        // such as CREATE VIEW.
+        // events of `DROP TABLE a, b` carry the whole statement), over the
+        // extent real takes for its kind (see CommandTextExtentOf). The
+        // statement's end is the next token's start — the dispatch loop hasn't
+        // consumed past the statement — or end of batch for a
+        // body-to-end-of-batch statement such as CREATE VIEW.
         var commandText = batch.Parser.Command.CommandText;
         var start = Math.Min(statement.StartIndex, commandText.Length);
         var end = Math.Min(batch.Parser.Token?.StartIndex ?? commandText.Length, commandText.Length);
-        var statementText = end > start ? commandText[start..end].TrimEnd() : string.Empty;
+        var extent = end > start ? CommandTextExtentOf(commandText[start..end]) : CommandTextExtent.Statement;
+        switch (extent)
+        {
+            case CommandTextExtent.Batch:
+                start = 0;
+                end = commandText.Length;
+                break;
+            case CommandTextExtent.ThroughSeparator:
+                end = Math.Min(NextStatementStart(batch.Parser), commandText.Length);
+                break;
+        }
+        string Shaped(string text) => extent == CommandTextExtent.Statement ? text.TrimEnd().TrimEnd(';').TrimEnd() : text;
+        var statementText = end > start ? Shaped(commandText[start..end]) : string.Empty;
 
         // Server-scope triggers run ahead of the database's own for the same
         // event (probed 2026-09-28 against SQL Server 2025), and a server-level
@@ -141,7 +154,7 @@ partial class Simulation
             var eventType = TriggerEventTypes.TryResolve(info.EventType, out var resolved) ? resolved.Type : 0;
             string? eventData = null;
             var text = info.MaskStart >= start && info.MaskEnd <= end && info.MaskStart < info.MaskEnd
-                ? string.Concat(commandText.AsSpan(start, info.MaskStart - start), "'******'", commandText.AsSpan(info.MaskEnd, end - info.MaskEnd)).TrimEnd()
+                ? Shaped(string.Concat(commandText.AsSpan(start, info.MaskStart - start), "'******'", commandText.AsSpan(info.MaskEnd, end - info.MaskEnd)))
                 : statementText;
             if (serverTriggers.Length != 0)
             {
@@ -330,5 +343,86 @@ partial class Simulation
             };
         }
         _ = builder.Append("</").Append(name).Append('>');
+    }
+
+    /// <summary>
+    /// How much source a DDL event's <c>CommandText</c> carries, which real
+    /// settles by statement kind (probed 2026-09-28 against SQL Server 2025).
+    /// </summary>
+    private enum CommandTextExtent
+    {
+        /// <summary>The statement's own tokens, without its <c>;</c>.</summary>
+        Statement,
+
+        /// <summary>
+        /// Everything up to the next statement's first token, or to the end of
+        /// the batch: the <c>;</c>, whitespace and comments between included.
+        /// </summary>
+        ThroughSeparator,
+
+        /// <summary>The whole batch, leading comments and whitespace included.</summary>
+        Batch,
+    }
+
+    /// <summary>
+    /// The <see cref="CommandTextExtent"/> real reports for the statement
+    /// <paramref name="statement"/> begins, read off its leading words: a
+    /// module a batch holds alone — <c>CREATE</c> / <c>ALTER</c> of a view,
+    /// procedure, function or trigger, and <c>CREATE DEFAULT</c> /
+    /// <c>RULE</c> / <c>SCHEMA</c> — reports the batch; the principal and
+    /// permission statements and a handful of later kinds report through their
+    /// separator; tables, indexes, statistics, databases and the remaining
+    /// <c>DROP</c>s report the statement alone.
+    /// </summary>
+    private static CommandTextExtent CommandTextExtentOf(string statement)
+    {
+        var words = statement.Split((char[]?)null, 6, StringSplitOptions.RemoveEmptyEntries);
+        bool Is(int index, string word) => index < words.Length && string.Equals(words[index], word, StringComparison.OrdinalIgnoreCase);
+
+        if (Is(0, "GRANT") || Is(0, "DENY") || Is(0, "REVOKE"))
+            return CommandTextExtent.ThroughSeparator;
+        var create = Is(0, "CREATE");
+        var alter = Is(0, "ALTER");
+        var drop = Is(0, "DROP");
+        var kind = create && Is(1, "OR") && Is(2, "ALTER") ? 3 : 1;
+        if ((create || alter) && (Is(kind, "VIEW") || Is(kind, "PROC") || Is(kind, "PROCEDURE") || Is(kind, "FUNCTION") || Is(kind, "TRIGGER")))
+            return CommandTextExtent.Batch;
+        if (create && (Is(1, "DEFAULT") || Is(1, "RULE") || Is(1, "SCHEMA")))
+            return CommandTextExtent.Batch;
+        return Is(1, "LOGIN") || Is(1, "ROLE") || Is(1, "APPLICATION")
+            || ((create || alter) && (Is(1, "USER") || Is(1, "SEQUENCE")))
+            || ((create || drop) && Is(1, "TYPE"))
+            || (create && (Is(1, "SYNONYM") || (Is(1, "XML") && Is(2, "SCHEMA"))))
+            || (drop && Is(1, "SCHEMA"))
+            || (alter && (Is(1, "AUTHORIZATION") || (Is(1, "DATABASE") && Is(2, "SCOPED"))))
+            || (Is(1, "PARTITION") && (Is(2, "SCHEME") || (create && Is(2, "FUNCTION"))))
+            || (Is(1, "FULLTEXT") && Is(2, "CATALOG"))
+            ? CommandTextExtent.ThroughSeparator
+            : CommandTextExtent.Statement;
+    }
+
+    /// <summary>
+    /// Where the statement after the one just parsed begins: past the
+    /// <c>;</c> separators the cursor sits on, or the end of the batch.
+    /// </summary>
+    private static int NextStatementStart(ParserContext context)
+    {
+        var checkpoint = context.SaveCheckpoint();
+        try
+        {
+            while (context.Token is Parser.Tokens.Operator { Character: ';' })
+                context.MoveNextOptional();
+            return context.Token?.StartIndex ?? context.Command.CommandText.Length;
+        }
+        catch (SimulatedSqlException)
+        {
+            // Text the tokenizer refuses lies past the separators; the
+            // dispatch loop reports it in its own place.
+            return context.Token?.StartIndex ?? context.Command.CommandText.Length;
+        }
+        finally
+        {
+            context.RestoreCheckpoint(checkpoint);
+        }
     }
 }

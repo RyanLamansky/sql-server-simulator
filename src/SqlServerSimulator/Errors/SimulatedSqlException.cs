@@ -274,6 +274,13 @@ public sealed partial class SimulatedSqlException : DbException
     /// </summary>
     private bool diagnosticsResolved;
 
+    /// <summary>
+    /// Set on the Msg 6522 a CLR type's <c>Parse</c> raises converting a
+    /// string, which a compile-time fold restates (see
+    /// <see cref="ClrTypeParseFoldedAtCompile"/>).
+    /// </summary>
+    internal bool IsClrTypeParseFailure;
+
     /// <summary>Set by <see cref="PinLine"/>: the line holds wherever the error is caught.</summary>
     private bool linePinned;
 

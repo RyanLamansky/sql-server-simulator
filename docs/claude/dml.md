@@ -97,11 +97,11 @@ The materialization's one divergence, inherited from the read path, is in [`join
 Its WHERE names the *view's* output columns and resolves through the per-level chain resolvers, not against the base `FromSource[]` — so the seek's name resolution against a base source could bind a view column name to a same-named base column, which is a correctness question rather than a perf one.
 The materialization half is sound there, but the chain's `WITH CHECK OPTION` probe re-enumerates the same sources per affected row, so the seam is two call sites rather than one.
 
-## `TOP (expr) [PERCENT]` on UPDATE / DELETE / INSERT
+## `TOP (expr) [PERCENT]` on UPDATE / DELETE / INSERT / MERGE
 
 `TOP` caps the number of rows a DML statement affects — SSMS's "Edit Top 200 Rows" commits every cell edit as `UPDATE TOP (200) <t> SET … WHERE <22 concurrency predicates>`.
 Parsed by `Selection.ParseDmlTopClause` (a leading-clause helper threaded into `ParseUpdate` / `ParseDelete` / `ParseInsert`) and applied post-collection by `Simulation.ApplyDmlTopCap`, which trims the affected/deleted/source-row list to the cap `Selection.ResolveDmlTopCap` computes.
-Placement: after the verb, before the target — `UPDATE TOP (n) t …`, `DELETE TOP (n) [FROM] t …`, `INSERT TOP (n) [INTO] t …`.
+Placement: after the verb, before the target — `UPDATE TOP (n) t …`, `DELETE TOP (n) [FROM] t …`, `INSERT TOP (n) [INTO] t …`, `MERGE TOP (n) [INTO] t …`.
 Which rows the cap keeps is arbitrary scan order (tests assert only the COUNT).
 
 Probe-confirmed semantics (SQL Server 2025):
@@ -122,10 +122,15 @@ Probe-confirmed semantics (SQL Server 2025):
 - **Interactions.**
   `OUTPUT` emits exactly the capped set; `@@ROWCOUNT` reflects the cap.
   `UPDATE TOP … ORDER BY` is Msg 156 on the reference (ORDER BY isn't part of the DML grammar) — the simulator raises Msg 102 at the trailing `ORDER` for the same effect (no ORDER BY acceptance on DML).
-- **Validation timing divergence.**
-  Real SQL Server rejects a bad literal at compile time (before any scan); the simulator resolves + validates the value after collecting candidate rows but before any heap write, so the error still surfaces with zero rows changed — observably identical for a single statement.
+- **Validation timing.**
+  A written constant is judged while compiling, so `TOP (-1)`, `TOP (1.5)` or `TOP (101) PERCENT` reports alone, with no Msg 3621 (probed 2026-09-28 against SQL Server 2025); `ParseDmlTopClause` checks it.
+  A variable or subquery is read as the statement runs, and its error reports at the statement's first line with a Msg 3621 after it — real attributes that Msg 3621 to line 1, which the simulator doesn't reproduce.
   `ResolveDmlTopCap` is always called when a limit is present (even at zero candidates) so the value errors fire regardless of match count.
+- **`TOP (1) WITH TIES`** is Msg 156 on both engines; real follows it with Msg 319, the simulator doesn't.
 - **INSERT TOP** caps the inserted-row count across `VALUES` (multiple tuples), `SELECT`, and `EXEC` sources — applied to the buffered `sourceRows` list in `ProcessHeapInsert` (and the view / INSTEAD OF paths).
+- **MERGE TOP** caps the actions taken, not the joined rows: a row every WHEN clause declines costs nothing, and PERCENT is a share of the actions the statement would take.
+  Which actions come first is the plan's choice on real — over the same four-row target a `TOP (1)` deleted an unmatched target row where `TOP (2)` inserted and updated instead (probed 2026-09-28 against SQL Server 2025) — so the simulator takes them in the order its OUTPUT lists them (see [Execution](#execution)), the one real's source-driven plan follows; for two small heaps real drove from the smaller side and took the target's first row instead.
+  Nothing past the cap is evaluated, so a later row's Msg 8672 or conversion error never raises, as on real.
 - **`SET ROWCOUNT n` caps a DML statement the same way**, and the two compose as a minimum — `ApplyDmlTopCap` reads the session value beside the written `TOP`, so `INSERT` / `UPDATE` / `DELETE` all take it at one seam and `MERGE` at its own.
   See [`query.md`](query.md#set-rowcount-n).
 
@@ -353,12 +358,13 @@ A view target is written through its base table when it has one; a view with non
 `Simulation.Merge.cs:ExecuteMerge` is a single-pass walk:
 
 1. **Materialize source** once into `List<SqlValue[]>` via the parse-time `Func<BatchContext, List<SqlValue[]>>` materializer.
-   `VALUES`-form evaluates the tuple expressions; `SELECT`-form runs `Selection.Execute` and decodes via `RowDecoder`; the bare-table / view form iterates the underlying heap or view selection respectively, then runs `EvaluateComputedColumns` per row so source-side computed columns are observable from the ON predicate / SET / INSERT projections.
+   `VALUES`-form evaluates the tuple expressions; `SELECT`-form runs `Selection.Execute` and decodes via `RowDecoder`; the bare-table / view form reads the table in scan order (clustered-key order when it has one) or runs the view selection respectively, then runs `EvaluateComputedColumns` per row so source-side computed columns are observable from the ON predicate / SET / INSERT projections.
 2. **Phase A — matching**: per target row, the source rows it matches; ON operands resolve through a combined resolver wired to both the target alias (and the target's own name) and the source alias.
    Multiple-match collection feeds the Msg 8672 guard.
    For each target with ≥ 1 match, walk WHEN MATCHED clauses; first clause whose `AND` is satisfied (or absent) wins.
    For each target with 0 matches, walk WHEN NOT MATCHED BY SOURCE clauses the same way.
    Action gets queued (`pendingInserts` / `pendingUpdates` / `pendingDeletes`) along with the `(page, slot)` address + pre-update and post-update row snapshots.
+   Under a `TOP` or `SET ROWCOUNT` cap each candidate row becomes a `MergeStep` instead, keyed as OUTPUT orders them, and the steps run in key order after phase B until the cap is met.
    Three strategies settle this phase — see [Match strategies](#match-strategies).
 3. **Phase B — unmatched sources**: for each source row that didn't match any target, the single WHEN NOT MATCHED BY TARGET clause's AND condition is evaluated; if true, queue an INSERT.
 4. **Phase C — commit**: PK / UNIQUE validation runs on the union of pending inserts + updates via `EnforceKeyConstraintsForUpdate` (inserts use sentinel `(-1, i)` addresses).
@@ -421,5 +427,5 @@ EF Core's `ExecuteUpdate` / `ExecuteDelete` for batched single-statement DML emi
 ### Not modeled
 
 - `WHEN NOT MATCHED BY SOURCE` with `THEN INSERT` — Msg 10711 (parsing rejects).
-- MERGE into a view ships for a single-base updatable view (`MergeViewTests`), its `OUTPUT` reading the view's columns, and for any view whose INSTEAD OF triggers take its actions; a join-view target without one is Msg 4405 where real accepts actions landing in one base table — see [`programmable.md`](programmable.md#dml-through-a-join-view).
+- MERGE into a view ships for a single-base updatable view (`MergeViewTests`), its `OUTPUT` reading the view's columns, for any view whose INSTEAD OF triggers take its actions, and for a join view whose actions each land in one base table — see [`programmable.md`](programmable.md#dml-through-a-join-view).
 - Multi-statement WHEN-clause bodies (real SQL Server only allows the one DML action per WHEN — same restriction here).

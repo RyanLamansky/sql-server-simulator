@@ -130,4 +130,13 @@ public class ClrTriggerTests
         AreEqual("proc trig=False", ExecuteCollectingMessages(sim, "exec p").Single().Message);
         Contains("Data access is not allowed in this context.", sim.AssertSqlError("select dbo.f()", 6522).Message);
     }
+
+    [TestMethod]
+    [Description("A CLR trigger over a taken name is Msg 2714 at state 5, where a T-SQL one's is state 2.")]
+    [DataRow("create procedure x as select 1")]
+    [DataRow("create table x (a int)")]
+    [DataRow("create trigger x on t after update as select 1")]
+    public void Create_NameTaken_State5(string holder)
+        => AreEqual(5, ClrFrameworkFixture.Simulation("create table t (a int)", holder)
+            .AssertSqlError("create trigger x on t after insert as external name simclr.Trig.Report", 2714).State);
 }

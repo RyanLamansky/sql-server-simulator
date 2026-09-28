@@ -226,7 +226,7 @@ public sealed class ServerTriggerTests
         using var connection = (SimulatedDbConnection)simulation.CreateOpenConnection();
         var messages = new List<string>();
         connection.InfoMessage += (_, e) => messages.Add(e.Message);
-        _ = connection.CreateCommand("create trigger st on all server for create_table as print concat('server ', db_name(), ' ', eventdata().value('(/EVENT_INSTANCE/DatabaseName)[1]', 'sysname'))").ExecuteNonQuery();
+        _ = connection.CreateCommand("create trigger st on all server for create_table as begin declare @d sysname = eventdata().value('(/EVENT_INSTANCE/DatabaseName)[1]', 'sysname'); print concat('server ', db_name(), ' ', @d) end").ExecuteNonQuery();
         _ = connection.CreateCommand("create trigger dt on database for create_table as print 'database'").ExecuteNonQuery();
         _ = connection.CreateCommand("create table t1 (a int)").ExecuteNonQuery();
         AreEqual("server master simulated|database", string.Join("|", messages));

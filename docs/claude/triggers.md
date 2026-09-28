@@ -11,7 +11,7 @@ Server-scope triggers (`CREATE TRIGGER … ON ALL SERVER`) — logon triggers an
 
 ## What's modeled
 
-- **CREATE / ALTER / CREATE OR ALTER TRIGGER** — same upsert pattern as procedures (ObjectId preserved across ALTER), and the same replacement gates: **Msg 2010** when the name holds another object kind, **Msg 2110** when it holds a trigger on a different parent, **Msg 208** when it holds nothing (bare ALTER), **Msg 2714** on a plain CREATE over a taken name, and **Msg 166** for a database-qualified trigger name — see [`programmable.md`](programmable.md#replacing-a-module--alter--create-or-alter).
+- **CREATE / ALTER / CREATE OR ALTER TRIGGER** — same upsert pattern as procedures (ObjectId preserved across ALTER), and the same replacement gates: **Msg 2010** when the name holds another object kind, **Msg 2110** when it holds a trigger on a different parent, **Msg 208** when it holds nothing (bare ALTER), **Msg 2714** on a plain CREATE over a taken name (state 2, or state 5 for a CLR trigger; probed 2026-09-28 against SQL Server 2025), and **Msg 166** for a database-qualified trigger name — see [`programmable.md`](programmable.md#replacing-a-module--alter--create-or-alter).
   A missing `ON` target reports its Msg 8197 ahead of all of them.
 - **DROP TRIGGER [IF EXISTS] name [, ...]** — comma-list form supported via the shared DROP parser.
 - **DISABLE / ENABLE TRIGGER { name | ALL } ON parent** — toggles `Trigger.IsDisabled`.
@@ -33,6 +33,7 @@ Server-scope triggers (`CREATE TRIGGER … ON ALL SERVER`) — logon triggers an
 - **INSERTED / DELETED pseudo-tables** — bare 1-part names resolve through the new `TriggerFrame.Inserted` / `TriggerFrame.Deleted` slots ahead of the schema / temp-table dispatch.
   Both pseudo-tables are always materialized (matching real SQL Server): an INSERT trigger sees an empty `deleted`, a DELETE trigger sees an empty `inserted`, an UPDATE trigger sees both populated.
   Pseudo-tables are `HeapTable` instances flagged `IsTableVariable` so writes don't touch the regular transaction undo log; columns are shared by reference from the parent table (for table parents) or the view's `OutputColumns` (for view parents).
+  Read without an `ORDER BY`, an AFTER trigger's pseudo-tables yield the rows in the **reverse** of the order the statement wrote them and an INSTEAD OF trigger's in that order (probed 2026-09-28 against SQL Server 2025 across heap and keyed targets, `INSERT … VALUES` / `SELECT`, `UPDATE`, `DELETE`, `MERGE`, a cursor, `TOP (1)` and a thousand rows) — unordered on both engines, but a body that logs row by row shows it.
 - **The joined shapes a production body is written in** — a body rarely reads one row.
   It reaches its own parent table through an alias and *joins* the pseudo-table: `UPDATE n SET n.tag = dbo.f(n.tag) FROM t n JOIN INSERTED i ON n.id = i.id`, the same family as the aliased `DELETE <alias> FROM …` form.
   An **OR in that join's ON clause** (`ON n.id = i.id OR n.id = i.parent_id`) is the idiom for reaching an inserted row *and* the row it names as parent, and it drives only from the INSERTED rows a `WHERE` leaves standing.
@@ -214,6 +215,9 @@ A DML trigger body fired by an auto-commit statement runs inside that statement'
 A `ROLLBACK` in the body ends it — the user's transaction when there is one, else that auto-commit unit, undoing the firing statement's writes and the body's so far — and `@@TRANCOUNT` reads 0 after it.
 The body runs on, what it writes afterwards commits on its own (a body `INSERT` after the `ROLLBACK` survives), and its `RAISERROR`s reach the client; when it returns, **Msg 3609** (`The transaction ended in the trigger. The batch has been aborted.`) ends the batch, attributed to the firing statement.
 `SimulatedDbConnection.TriggerTransactionEnded` carries the fact from the `ROLLBACK` to the body's return.
+A `COMMIT` that ends the same transaction — the auto-commit unit, or the user's when it brings `@@TRANCOUNT` to 0 — does the same with the writes kept: the firing statement's rows and the body's so far commit, and Msg 3609 follows; one that leaves a nested user transaction open ends nothing (probed 2026-09-28 against SQL Server 2025).
+An error after it ends the batch with its own number, and what was committed stays.
+`XACT_STATE()` reads 1 in the unit, as it does in any statement writing a table or table variable.
 
 ### Msg 3616 — the body's own TRY / CATCH doesn't rescue it
 
@@ -278,7 +282,7 @@ Individual-event names (`FOR CREATE_TABLE`) emit a single row with a NULL group.
 
 **Storage**: `DdlTrigger` class (`src/SqlServerSimulator/Schemas/DdlTrigger.cs`) carries name + object_id + event-type list + body source + body line offset + `is_disabled` flag, plus the `Covers` predicate that expands the declared events to their leaf closure once.
 `Database.DdlTriggers` is the per-database `ConcurrentDictionary<string, DdlTrigger>` (case-insensitive keys); not per-schema because DDL triggers belong to the database itself.
-The class extends `SchemaObject` for the object-id + create-date pattern but doesn't participate in any schema's shared namespace except for name collision detection at CREATE time (probe-confirmed: a DDL trigger named `foo` collides with a same-named DML trigger / table / view / proc in the same schema).
+The class extends `SchemaObject` for the object-id + create-date pattern but doesn't participate in any schema's shared namespace: its name clashes only with another database-scope trigger (Msg 2714 state 2), a same-named DML trigger, table or procedure is no conflict in either direction, and an `ALTER` of a missing one is Msg 208 state 6 (probed 2026-09-28 against SQL Server 2025).
 
 **Parser**: `Simulation.CreateTrigger.cs::TryParseCreateTrigger` — after `ON`, if the next token is `DATABASE`, dispatch to `ParseDdlTriggerBody` which handles `[WITH options] {FOR|AFTER} <event_type_list> AS <body>`.
 Event types parse as bare identifiers and store verbatim in `DdlTrigger.EventTypes`; matching at fire time is case-insensitive.
@@ -332,11 +336,14 @@ Element order is real's.
 `ServerName` is `SIMULATED`, matching `@@SERVERNAME`; `LoginName` / `UserName` read the session's effective principal, so `EXECUTE AS` shows through.
 `QUOTED_IDENTIFIER` reflects the session setting; the other `SetOptions` attributes are fixed.
 
-`CommandText` is the statement's own source span, trailing whitespace trimmed.
-For a statement whose body runs to end of batch (`CREATE VIEW` / `PROCEDURE` / `TRIGGER`) real keeps the batch's trailing newline and the simulator trims it — a cosmetic divergence.
+`CommandText` is the statement's source, over an extent real settles by the statement's kind (probed 2026-09-28 against SQL Server 2025; `Simulation.CommandTextExtentOf` reads it off the leading words):
+- a table, index, statistics or database statement, and the `DROP` of a table, view, module, index, sequence, synonym, user, default, rule or partition function, reports its own tokens, without its `;`;
+- a login, user (bar `DROP USER`), role, application-role, `GRANT` / `DENY` / `REVOKE`, `CREATE SYNONYM`, `CREATE` / `ALTER SEQUENCE`, `CREATE` / `DROP TYPE`, `DROP SCHEMA`, `ALTER AUTHORIZATION`, partition-scheme, `CREATE PARTITION FUNCTION`, `CREATE XML SCHEMA COLLECTION`, fulltext-catalog or `ALTER DATABASE SCOPED CONFIGURATION` statement reports everything up to the next statement's first token — its `;`, the whitespace and comments after it — or to the end of the batch;
+- a statement a batch must hold alone — `CREATE` / `ALTER` of a view, procedure, function or trigger, `CREATE DEFAULT` / `RULE` / `SCHEMA` — reports the whole batch, leading comments and whitespace included.
 
 ### Not modeled yet
 
+- **Events for `GRANT` / `DENY` / `REVOKE`, application roles, fulltext catalogs, XML schema collections, extended properties and `sp_bindefault` / `sp_bindrule`** — real raises one for each, which a `DDL_DATABASE_LEVEL_EVENTS` trigger sees (probed 2026-09-28 against SQL Server 2025).
 - **Per-event extra elements**: `AlterTableActionList` (which columns / constraints an `ALTER TABLE` touched), a principal's `SID` / `DefaultSchema` / `DefaultLanguage` (the role-member events carry `RoleName` but not these two, and `sp_addrolemember`'s event reports its own `EXEC` text where real reports the `ALTER ROLE` it runs), a schema's `OwnerName`, `sp_rename`'s `NewObjectName`, and the empty `TargetServerName` / `TargetDatabaseName` / `TargetSchemaName` trio real puts ahead of a synonym's `TargetObjectName`.
   The common header plus `TSQLCommand` is what an audit body reads.
 - **`ALTER SCHEMA … TRANSFER`'s `ObjectType`** reports `OBJECT` / `TYPE` — the transfer's own name class — where real reports the moved object's actual kind (`SYNONYM`, `TABLE`, …).
@@ -364,7 +371,8 @@ The body runs in `master` whatever database the login asked for, as the login's 
 `ORIGINAL_DB_NAME()` reads the requested database (empty when none was named), `APP_NAME()` / `HOST_NAME()` the client's, and `sys.dm_exec_sessions.status` reads `preconnect` while it runs.
 `NOCOUNT` is on and `SET NOCOUNT OFF` does nothing, `SET` options and a `#temp` table don't follow the session out, and `SESSION_CONTEXT` / `CONTEXT_INFO` do.
 
-Any of these fails the trigger, and the login is refused with **Msg 17892** (`Logon failed for login '…' due to trigger execution.`, class 14 as the client sees it; real logs it at 20):
+A `COMMIT` commits that unit: `@@TRANCOUNT` and `XACT_STATE()` read 0 after it, what the body wrote before and after it stays, and from then on nothing refuses the login — not the Msg 3609 it earns, a later error, a result set, a `ROLLBACK`, nor a transaction left open, which commits (probed 2026-09-28 against SQL Server 2025).
+Short of that, any of these fails the trigger, and the login is refused with **Msg 17892** (`Logon failed for login '…' due to trigger execution.`, class 14 as the client sees it; real logs it at 20):
 
 - a `ROLLBACK` — what the body writes after it commits on its own, as in a DML trigger;
 - an error the body leaves unhandled, or one it swallowed while `XACT_ABORT` was still on;

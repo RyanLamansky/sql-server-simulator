@@ -86,8 +86,14 @@ partial class Simulation
             });
         }
 
-        var insertedPseudo = MaterializePseudoTable(targetTable.Columns, "inserted", insertedRows ?? [], outerBatch);
-        var deletedPseudo = MaterializePseudoTable(targetTable.Columns, "deleted", deletedRows ?? [], outerBatch);
+        // An AFTER trigger reads its rows in the reverse of the order the
+        // statement wrote them, where an INSTEAD OF trigger reads them forward
+        // (probed 2026-09-28 against SQL Server 2025, across heap and keyed
+        // targets, INSERT VALUES / SELECT, UPDATE, DELETE and MERGE, a
+        // thousand rows included) — unordered on both, but visible to a body
+        // that reads row by row without an ORDER BY.
+        var insertedPseudo = MaterializePseudoTable(targetTable.Columns, "inserted", insertedRows ?? [], outerBatch, reversed: true);
+        var deletedPseudo = MaterializePseudoTable(targetTable.Columns, "deleted", deletedRows ?? [], outerBatch, reversed: true);
         var mask = BuildColumnsUpdatedMask(targetTable, targetTable.Columns.Length, action, updatedColumnOrdinals);
         RunTriggerBodies(outerBatch, targetDatabase, matching, action, insertedPseudo, deletedPseudo, affectedRowCount, mask);
     }
@@ -575,12 +581,13 @@ partial class Simulation
     /// fire. The pseudo HeapTable carries the supplied column array
     /// (parent table columns for a table target, view OutputColumns for
     /// a view target) and gets a fresh empty heap that this method
-    /// populates by encoding each supplied row.
+    /// populates by encoding each supplied row, last first when
+    /// <paramref name="reversed"/>.
     /// <see cref="HeapTable.IsTableVariable"/> is set so inserts bypass
     /// identity/default re-running and aren't tracked in the regular
     /// transaction undo log.
     /// </summary>
-    private static HeapTable MaterializePseudoTable(HeapColumn[] columns, string name, List<SqlValue[]> rows, BatchContext outerBatch)
+    private static HeapTable MaterializePseudoTable(HeapColumn[] columns, string name, List<SqlValue[]> rows, BatchContext outerBatch, bool reversed = false)
     {
         var pseudo = new HeapTable(
             name,
@@ -589,9 +596,9 @@ partial class Simulation
             schemaId: Database.DboSchemaId,
             createDate: outerBatch.CurrentStatement.UtcNow,
             isTableVariable: true);
-        foreach (var row in rows)
+        for (var i = 0; i < rows.Count; i++)
         {
-            var stored = ProjectStoredValuesForColumns(columns, pseudo.StorageOrdinals, row);
+            var stored = ProjectStoredValuesForColumns(columns, pseudo.StorageOrdinals, rows[reversed ? rows.Count - 1 - i : i]);
             _ = pseudo.Heap.Insert(RowEncoder.EncodeRow(pseudo.StoredColumns, stored, pseudo.Heap), undoLog: null);
         }
         return pseudo;

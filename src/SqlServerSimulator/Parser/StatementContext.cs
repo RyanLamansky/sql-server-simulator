@@ -207,6 +207,20 @@ internal sealed class StatementContext
     public bool BindsDeferredSource;
 
     /// <summary>
+    /// Set as the statement resolves a permanent table or view, and as it
+    /// resolves a <c>#temp</c> table or a table variable; read through
+    /// <see cref="FoldsConstantsAtCompile"/>.
+    /// </summary>
+    public bool ReadsPermanentObject, ReadsTemporaryObject;
+
+    /// <summary>
+    /// Whether real compiles this statement with its batch, folding its
+    /// written constants then: one naming permanent tables or views and no
+    /// temporary object, whose compilation isn't deferred to run time.
+    /// </summary>
+    public bool FoldsConstantsAtCompile() => this.ReadsPermanentObject && !this.ReadsTemporaryObject;
+
+    /// <summary>
     /// 0-based character offset within the batch text where this statement's
     /// leading token starts (taken from <see cref="Token.StartIndex"/> of the
     /// leading token at dispatch time). The <c>CREATE</c> / <c>ALTER</c>

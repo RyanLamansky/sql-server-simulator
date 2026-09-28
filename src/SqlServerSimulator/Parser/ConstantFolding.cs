@@ -243,6 +243,19 @@ internal static class ConstantFolding
     }
 
     /// <summary>
+    /// Whether <paramref name="failure"/> is a CLR type's <c>Parse</c> failing
+    /// over the written constant <paramref name="constant"/> in a statement
+    /// real compiles with its batch — so the fold it attempts there meets the
+    /// failure, and reports it at state 1 rather than the run-time failure's 2:
+    /// <c>CAST('bad' AS Point)</c>, or <c>'bad'</c> written to a column of the
+    /// type, over a permanent table, where a variable's value, a column's, a
+    /// statement naming no table or one naming a <c>#temp</c> table or table
+    /// variable report state 2 (probed 2026-09-28 against SQL Server 2025).
+    /// </summary>
+    internal static bool FoldsClrParseFailure(SimulatedSqlException failure, Expression constant, BatchContext batch) =>
+        failure.IsClrTypeParseFailure && constant.IsWrittenConstant && batch.CurrentStatement.FoldsConstantsAtCompile();
+
+    /// <summary>
     /// Adds to <paramref name="sink"/> the subexpressions of
     /// <paramref name="root"/> that SQL Server evaluates once when the plan
     /// starts rather than per row, and that can raise there: a written

@@ -560,7 +560,16 @@ partial class Simulation
 
                 var source = sourceRow[i];
                 source = EnforceMaxLength(source, targetColumn, destinationTable, context.Connection);
-                var coerced = CoerceForWrite(source, targetColumn, context.Batch);
+                SqlValue coerced;
+                try
+                {
+                    coerced = CoerceForWrite(source, targetColumn, context.Batch);
+                }
+                catch (SimulatedSqlException failure) when (valueTuples is not null && i < valueTuples[rowIndex].Length
+                    && ConstantFolding.FoldsClrParseFailure(failure, valueTuples[rowIndex][i], context.Batch))
+                {
+                    throw SimulatedSqlException.ClrTypeParseFoldedAtCompile(failure);
+                }
                 rowValues[ordinal] = coerced;
 
                 if (ReferenceEquals(targetColumn, identityColumn))
@@ -873,9 +882,16 @@ partial class Simulation
             var values = new SqlValue[tuple.Length];
             for (var i = 0; i < tuple.Length; i++)
             {
-                values[i] = tuple[i] is Parser.Expressions.DefaultValueExpression
-                    ? SqlValue.Null(SqlType.Int32)
-                    : tuple[i].Run(runtime);
+                try
+                {
+                    values[i] = tuple[i] is Parser.Expressions.DefaultValueExpression
+                        ? SqlValue.Null(SqlType.Int32)
+                        : tuple[i].Run(runtime);
+                }
+                catch (SimulatedSqlException failure) when (ConstantFolding.FoldsClrParseFailure(failure, tuple[i], batch))
+                {
+                    throw SimulatedSqlException.ClrTypeParseFoldedAtCompile(failure);
+                }
                 // A subquery reading a masked column inserts default() of the
                 // value's type, whatever the column's own function (probed
                 // 2026-09-27 against SQL Server 2025: a masked email column
@@ -1207,7 +1223,7 @@ partial class Simulation
         // A projected statement-wide value meets its target column as the plan
         // starts, so one too long for it raises Msg 2628 though no row
         // qualifies (probed 2026-09-26 against SQL Server 2025).
-        if (destinationTable is not null && selection.StartsConstants && selection.ProjectionExpressions is { } projections)
+        if (destinationTable is not null && (selection.StartsConstants || context.Batch.CurrentStatement.FoldsConstantsAtCompile()) && selection.ProjectionExpressions is { } projections)
         {
             var startupValues = new List<(HeapColumn Column, Expression Value)>();
             for (var i = 0; i < expectedColumnCount; i++)

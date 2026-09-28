@@ -2341,6 +2341,7 @@ internal sealed class BatchContext
             // replay would project the wrong table.
             this.HasSessionScopedReference = true;
             this.ResolvedTempTable = true;
+            this.CurrentStatement.ReadsTemporaryObject = true;
             return this.Connection.TempTables.TryGetValue(name.Leaf, out table);
         }
 
@@ -2357,6 +2358,7 @@ internal sealed class BatchContext
             // session-scoped and declines.
             this.HasSessionScopedReference = true;
             this.ResolvedTempTable = true;
+            this.CurrentStatement.ReadsTemporaryObject = true;
             return this.Connection.Simulation.GlobalTempTables.TryGetValue(name.Leaf, out table);
         }
 
@@ -2374,6 +2376,7 @@ internal sealed class BatchContext
                 return false;
             }
             this.HasSessionScopedReference = true;
+            this.CurrentStatement.ReadsTemporaryObject = true;
             return this.TableVariables.TryGetValue(name.Leaf[1..], out table);
         }
 
@@ -2393,6 +2396,7 @@ internal sealed class BatchContext
 
         if (schema.HeapTables.TryGetValue(name.Leaf, out table))
         {
+            this.CurrentStatement.ReadsPermanentObject = true;
             this.AcquireStatementLock(table.SchemaLock, LockMode.SchemaStability);
             _ = this.DependencySink?.Tables.Add(table);
             return true;
@@ -2568,6 +2572,7 @@ internal sealed class BatchContext
             return this.TryRedirectThroughSynonym(schema, name, out var viewBase)
                 && this.TryResolveView(viewBase, out view);
         }
+        this.CurrentStatement.ReadsPermanentObject = true;
         this.AcquireStatementLock(view.SchemaLock, LockMode.SchemaStability);
         _ = this.DependencySink?.Views.Add(view);
         return true;

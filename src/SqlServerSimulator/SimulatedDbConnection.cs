@@ -825,13 +825,21 @@ public sealed class SimulatedDbConnection : DbConnection
     internal Storage.UndoLog? TriggerStatementUndoLog;
 
     /// <summary>
-    /// Set when a <c>ROLLBACK</c> inside the running trigger body ended the
-    /// transaction — the user's, or the firing statement's own auto-commit
-    /// unit, which reads as <c>@@TRANCOUNT</c> 1 in the body. The body runs
-    /// on, and real then aborts the batch with Msg 3609 when it returns
-    /// (probed 2026-09-26 against SQL Server 2025).
+    /// Set when a <c>ROLLBACK</c> or <c>COMMIT</c> inside the running trigger
+    /// body ended the transaction — the user's, or the firing statement's own
+    /// auto-commit unit, which reads as <c>@@TRANCOUNT</c> 1 in the body. The
+    /// body runs on, and real then aborts the batch with Msg 3609 when it
+    /// returns (probed 2026-09-26 and 2026-09-28 against SQL Server 2025).
     /// </summary>
     internal bool TriggerTransactionEnded;
+
+    /// <summary>
+    /// Set when a logon trigger's <c>COMMIT</c> committed the unit the login
+    /// runs in, after which nothing the bodies do refuses the login (probed
+    /// 2026-09-28 against SQL Server 2025); read and cleared by
+    /// <c>Simulation.FireLogonTriggers</c>.
+    /// </summary>
+    internal bool LogonUnitCommitted;
 
     /// <summary>
     /// The pending-version list of the statement that fired the currently

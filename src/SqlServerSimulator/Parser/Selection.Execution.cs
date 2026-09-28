@@ -1735,7 +1735,16 @@ internal sealed partial class Selection
             return;
         var runtime = new RuntimeContext(static _ => throw new InvalidOperationException("A startup constant reads no column."), batch);
         foreach (var constant in constants)
-            _ = constant.Run(runtime);
+        {
+            try
+            {
+                _ = constant.Run(runtime);
+            }
+            catch (SimulatedSqlException failure) when (ConstantFolding.FoldsClrParseFailure(failure, constant, batch))
+            {
+                throw SimulatedSqlException.ClrTypeParseFoldedAtCompile(failure);
+            }
+        }
     }
 
     /// <summary>

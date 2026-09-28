@@ -514,6 +514,35 @@ partial class SimulatedSqlException
         new("Empty URI is not allowed in WITH XMLNAMESPACES clause.", 6874, 16, 1);
 
     /// <summary>
+    /// Msg 2722: an xml method in a <c>PRINT</c> operand, refused while the
+    /// batch compiles (probed 2026-09-28 against SQL Server 2025). The
+    /// statements that take an expression without a query around it otherwise
+    /// admit one (<c>SET</c>, <c>IF</c>, <c>RETURN</c>, <c>TOP</c>), or refuse
+    /// the method call's syntax outright (<c>RAISERROR</c>, <c>THROW</c>,
+    /// <c>EXEC</c> arguments, <c>WAITFOR</c>).
+    /// </summary>
+    internal static SimulatedSqlException XmlMethodNotAllowedInContext() =>
+        new("Xml data type methods are not allowed in expressions in this context.", 2722, 16, 1);
+
+    /// <summary>
+    /// Msg 423: an xml method in a <c>CHECK</c> constraint, followed by Msg
+    /// 1750 (probed 2026-09-28 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException XmlMethodInCheckConstraint(string tableName) =>
+        FollowedByConstraintNotCreated(new($"Xml data type methods are not supported in check constraints. Create a scalar user-defined function to wrap the method invocation. The error occurred at table \"{tableName}\".", 423, 16, 16), state: 0);
+
+    /// <summary>
+    /// Msg 435 — or Msg 424 for a table variable's column — an xml method in a
+    /// computed column's definition; <paramref name="statement"/> is
+    /// <c>CREATE TABLE</c> for every declaring form and <c>ALTER TABLE</c> for
+    /// an added column (probed 2026-09-28 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException XmlMethodInComputedColumn(string columnName, string tableName, string statement, bool tableVariable) =>
+        tableVariable
+            ? new($"Xml data type methods are not supported in computed column definitions of table variables and return tables of table-valued functions. The error occurred at column \"{columnName}\", table \"{tableName}\", in the {statement} statement.", 424, 16, 16)
+            : new($"Xml data type methods are not supported in computed column definitions. Create a scalar user-defined function to wrap the method invocation. The error occurred at column \"{columnName}\", table \"{tableName}\", in the {statement} statement.", 435, 16, 16);
+
+    /// <summary>
     /// Msg 8137: a mutator XML method (<c>.modify()</c>) appears where a value
     /// is expected — a select list, a predicate, the right-hand side of an
     /// assignment. Probe-confirmed wording against SQL Server 2025.

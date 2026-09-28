@@ -29,6 +29,21 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// </remarks>
 internal sealed class XmlMethodCall : Expression
 {
+    /// <summary>
+    /// Whether an xml method call sits anywhere in <paramref name="root"/>'s
+    /// own scope (a subquery binds in its own and isn't entered).
+    /// </summary>
+    internal static bool AppearsIn(ExpressionNode root)
+    {
+        var found = false;
+        root.Walk((node, _) =>
+        {
+            found |= node is XmlMethodCall;
+            return !found;
+        });
+        return found;
+    }
+
     /// <summary>The xml-valued expression the method is invoked on.</summary>
     public readonly Expression Target;
 

@@ -1907,6 +1907,7 @@ public sealed partial class Simulation
         batch.CurrentStatement.WritesRows = false;
         batch.CurrentStatement.TransactedWrite = false;
         batch.CurrentStatement.BindsDeferredSource = false;
+        batch.CurrentStatement.ReadsPermanentObject = batch.CurrentStatement.ReadsTemporaryObject = false;
         batch.CurrentStatement.PendingDdlEvents = null;
         batch.CurrentStatement.DdlTriggerCreatedThisStatement = null;
         batch.CurrentStatement.ChangesTableStructure = ChangesTableStructure(batch.Parser);
@@ -3625,8 +3626,25 @@ public sealed partial class Simulation
         if (context.Batch.IsSkipping)
             return true;
 
-        var tx = context.Connection.CurrentTransaction
-            ?? throw SimulatedSqlException.NoCorrespondingBeginCommit();
+        var connection = context.Connection;
+        var tx = connection.CurrentTransaction;
+        if (tx is null)
+        {
+            // In a trigger body fired by an auto-commit statement it commits
+            // that statement's own unit — the firing statement's writes and the
+            // body's so far — and the body runs on to Msg 3609 as after a
+            // ROLLBACK; a logon trigger's login then stands whatever follows
+            // (probed 2026-09-28 against SQL Server 2025).
+            var triggerUnit = connection.TriggerStatementUndoLog
+                ?? throw SimulatedSqlException.NoCorrespondingBeginCommit();
+            if (connection.TriggerStatementVersionEntries is { } unitVersions)
+                Storage.VersionStore.FinalizePendingEntries(unitVersions, connection.Simulation);
+            triggerUnit.Commit();
+            connection.TriggerStatementUndoLog = null;
+            connection.TriggerTransactionEnded = true;
+            connection.LogonUnitCommitted |= connection.RunningLogonTriggers;
+            return true;
+        }
 
         // A SQLCLR routine's context connection may commit only what it began
         // (probed 2026-09-28 against SQL Server 2025).
@@ -3639,10 +3657,21 @@ public sealed partial class Simulation
         // A COMMIT is a log write, so a doomed transaction refuses it with
         // Msg 3930 exactly as a DML statement does (probe-confirmed) — real
         // names the message's own advice: roll back instead.
-        RejectWriteInDoomedTransaction(context.Connection);
+        RejectWriteInDoomedTransaction(connection);
         tx.TranCount--;
         if (tx.TranCount == 0)
+        {
+            // A trigger body ending the transaction its firing statement runs
+            // in aborts the batch with Msg 3609 when it returns, as a ROLLBACK
+            // does; one the body began over an auto-commit unit is its own.
+            var endsFiringTransaction = connection.TriggerNestLevel > 0 && ReferenceEquals(connection.TriggerStatementUndoLog, tx.UndoLog);
             tx.Commit();
+            if (endsFiringTransaction)
+            {
+                connection.TriggerStatementUndoLog = null;
+                connection.TriggerTransactionEnded = true;
+            }
+        }
         return true;
     }
 

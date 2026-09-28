@@ -1667,7 +1667,16 @@ partial class Simulation
             return;
         var runtime = new RuntimeContext(static _ => throw new InvalidOperationException("A startup value reads no column."), context.Batch);
         foreach (var (column, value) in values)
-            _ = CoerceForWrite(EnforceMaxLength(value.Run(runtime), column, table, context.Connection), column, context.Batch);
+        {
+            try
+            {
+                _ = CoerceForWrite(EnforceMaxLength(value.Run(runtime), column, table, context.Connection), column, context.Batch);
+            }
+            catch (SimulatedSqlException failure) when (ConstantFolding.FoldsClrParseFailure(failure, value, context.Batch))
+            {
+                throw SimulatedSqlException.ClrTypeParseFoldedAtCompile(failure);
+            }
+        }
     }
 
     /// <summary>

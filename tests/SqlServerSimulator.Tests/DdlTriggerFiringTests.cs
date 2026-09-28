@@ -301,4 +301,30 @@ public sealed class DdlTriggerFiringTests
         IsTrue(reader.Read());
         AreEqual(42, reader.GetInt32(0));
     }
+
+    /// <summary>
+    /// How much source <c>CommandText</c> carries depends on the statement's
+    /// kind: a table, index or statistics statement its own tokens; a principal,
+    /// permission, sequence, synonym, type or partition-scheme statement
+    /// everything up to the next statement; a module the whole batch.
+    /// </summary>
+    [TestMethod]
+    [DataRow("create table t1 (a int);\nselect 1;", "create table t1 (a int)")]
+    [DataRow("create table t1 (a int);\ncreate statistics st on t1 (a) with fullscan;\n", "create statistics st on t1 (a) with fullscan")]
+    [DataRow("create user u1 without login;   \n\n  select 1;", "create user u1 without login;   \n\n  ")]
+    [DataRow("create user u1 without login; create role r1;\n", "create role r1;\n")]
+    [DataRow("create user u1 without login\n", "create user u1 without login\n")]
+    [DataRow("create user u1 without login;\ndrop user u1;\n", "drop user u1")]
+    [DataRow("create sequence sq; drop sequence sq;", "drop sequence sq")]
+    [DataRow("create type ty from int; drop type ty;", "drop type ty;")]
+    [DataRow("create table t1 (a int); create synonym sy for t1 -- c\n;", "create synonym sy for t1 -- c\n;")]
+    [DataRow("\n-- header\ncreate view v as select 1 a;\n", "\n-- header\ncreate view v as select 1 a;\n")]
+    [DataRow("create or alter procedure p as select 1\n\n", "create or alter procedure p as select 1\n\n")]
+    public void EventData_CommandTextExtent(string batch, string expected)
+    {
+        var sim = NewLoggingSimulation();
+        _ = sim.ExecuteNonQuery(batch);
+        AreEqual(expected, sim.ExecuteScalar(
+            "select top (1) cast(doc as xml).value('(/EVENT_INSTANCE/TSQLCommand/CommandText)[1]', 'nvarchar(max)') from ddl_log order by id desc"));
+    }
 }

@@ -236,8 +236,10 @@ partial class Simulation
         }
 
         var existed = triggerSchema.Triggers.TryGetValue(triggerName.Leaf, out var existing);
+        // A CLR trigger reports the clash at state 5, a T-SQL one at state 2
+        // (probed 2026-09-28 against SQL Server 2025).
         if (!isAlter && !createOrAlter && triggerSchema.HasNameInSharedNamespace(triggerName.Leaf))
-            throw SimulatedSqlException.ThereIsAlreadyAnObject(triggerName.Leaf, state: 2);
+            throw SimulatedSqlException.ThereIsAlreadyAnObject(triggerName.Leaf, state: clrEntry is null ? (byte)2 : (byte)5);
         // Replacement rules, in real's own order (the parent-object resolution
         // above already reported Msg 8197 for a target that doesn't exist, which
         // real reports ahead of these — probe-confirmed): a name another object
@@ -576,19 +578,16 @@ partial class Simulation
         }
         else
         {
-            // DDL triggers live in their own per-database dict, but the NAME
-            // collision check still applies against the per-schema shared
-            // namespace (probe-confirmed: a DDL trigger named [foo] collides
-            // with a DML trigger or any other schema object named [foo] in
-            // the same schema). triggerSchema is the resolved owner schema
-            // from the caller (default dbo for unqualified names). A
-            // server-scope trigger of the same name doesn't collide.
+            // DDL triggers live in a namespace of their own: a schema object
+            // or DML trigger of the same name is no conflict in either
+            // direction, and neither is a server-scope trigger (probed
+            // 2026-09-28 against SQL Server 2025).
             existed = context.CurrentDatabase.DdlTriggers.TryGetValue(triggerName.Leaf, out var existingDatabase);
             existing = existed ? existingDatabase : null;
-            if (!isAlter && !createOrAlter && (existed || triggerSchema.HasNameInSharedNamespace(triggerName.Leaf)))
+            if (!isAlter && !createOrAlter && existed)
                 throw SimulatedSqlException.ThereIsAlreadyAnObject(triggerName.Leaf, state: 2);
             if (isAlter && !existed)
-                throw SimulatedSqlException.InvalidObjectName(triggerName);
+                throw SimulatedSqlException.InvalidObjectName(triggerName, state: 6);
         }
         RejectClrTriggerKindChange(existing, clrEntry, triggerName);
         // A database-scope DDL trigger is gated on ALTER ANY DATABASE DDL

@@ -69,9 +69,10 @@ partial class Simulation
         bindErrors?.OpenScope(context.Token);
         bindErrors?.SetBarriers(BindClause.MergeInsertColumns);
 
-        // MERGE [INTO] target [AS] alias
-        var afterMerge = context.GetNextRequired();
-        if (afterMerge is ReservedKeyword { Keyword: Keyword.Into })
+        // MERGE [TOP (n) [PERCENT]] [INTO] target [AS] alias
+        context.MoveNextRequired();
+        var top = Selection.ParseDmlTopClause(context);
+        if (context.Token is ReservedKeyword { Keyword: Keyword.Into })
             context.MoveNextRequired();
 
         var destinationName = BatchContext.ParseObjectName(context, acceptTableVariable: true);
@@ -291,7 +292,7 @@ partial class Simulation
             foreach (var row in ReadViewRows(context.Batch, viewRowsTarget, destinationTable.Columns))
                 _ = destinationTable.Heap.Insert(RowEncoder.EncodeRow(destinationTable.StoredColumns, ProjectStoredValues(destinationTable, row), destinationTable.Heap), undoLog: null);
         }
-        return ExecuteMerge(context, destinationTable, sourceView, targetAlias, materializeSource, sourceAlias, sourceColumnNames, sourceSchema, onPredicate, whenClauses, output, serializableHint, viewRowsTarget, joinWrite);
+        return ExecuteMerge(context, destinationTable, sourceView, targetAlias, materializeSource, sourceAlias, sourceColumnNames, sourceSchema, onPredicate, whenClauses, output, serializableHint, viewRowsTarget, joinWrite, top);
     }
 
     /// <summary>Whether the view carries an INSTEAD OF trigger for any action.</summary>
@@ -713,7 +714,7 @@ partial class Simulation
             materialize = batch =>
             {
                 var rows = new List<SqlValue[]>();
-                foreach (var rowBytes in sourceTable.Heap.EnumerateRows())
+                foreach (var rowBytes in ClusteredScan.Rows(sourceTable))
                 {
                     var fullValues = DecodeFullRow(sourceTable, rowBytes);
                     EvaluateComputedColumns(sourceTable, fullValues, batch);
@@ -1452,7 +1453,8 @@ partial class Simulation
         OutputProjection? output,
         bool serializableHint,
         View? viewRowsTarget,
-        JoinViewMergePlan? joinWrite)
+        JoinViewMergePlan? joinWrite,
+        Selection.DmlTopLimit? top)
     {
         // Skip mode commits nothing (CommitMerge returns early), so the match
         // walk is pure cost — and running the ON predicate / WHEN actions
@@ -1512,13 +1514,10 @@ partial class Simulation
         var pendingUpdates = new List<(int Page, int Slot, SqlValue[] OldValues, SqlValue[] NewValues, SqlValue[]? SourceValues)>();
         var pendingDeletes = new List<(int Page, int Slot, SqlValue[] OldValues, SqlValue[]? SourceValues)>();
 
-        // SET ROWCOUNT caps the actions a MERGE takes, in the order it takes
-        // them: a source row every WHEN clause declines consumes nothing, and a
-        // NOT MATCHED BY SOURCE delete counts like any other action (probed
-        // 2026-09-25 against SQL Server 2025). Each apply step below queues at
-        // most one action, so checking before each step caps exactly.
-        var actionLimit = context.Connection.RowCountLimit is > 0 and var limit ? limit : long.MaxValue;
-        bool ActionCapReached() => pendingInserts.Count + pendingUpdates.Count + pendingDeletes.Count >= actionLimit;
+        var nmbtClause = whenClauses.FirstOrDefault(c => c.Kind == WhenClauseKind.NotMatchedByTarget);
+        // INSTEAD OF INSERT fires against the view when applicable; otherwise
+        // the action targets the base table directly.
+        var insteadOfInsertTarget = (SchemaObject?)viewRowsTarget ?? (SchemaObject?)sourceView ?? destinationTable;
 
         // OUTPUT lists the actions in source-row order, a NOT MATCHED BY
         // SOURCE delete after them all — the order real's usual plan, driven
@@ -1539,6 +1538,54 @@ partial class Simulation
             while (taggedDeletes < pendingDeletes.Count)
                 outputOrder.Add((key, MergeActionKind.Delete, taggedDeletes++));
         }
+
+        // SET ROWCOUNT and TOP cap the actions a MERGE takes, composing as a
+        // minimum: a row every WHEN clause declines consumes nothing, a NOT
+        // MATCHED BY SOURCE delete counts like any other action, and nothing
+        // past the cap is evaluated, so its multi-match Msg 8672 or conversion
+        // error never raises (probed 2026-09-25 and 2026-09-28 against SQL
+        // Server 2025). Which actions come first is the plan's to say — a TOP
+        // (1) and a TOP (2) over the same rows can pick disjoint ones — so a
+        // capped statement takes them in the order OUTPUT lists them, the order
+        // real's usual source-driven plan takes them in. TOP (n) PERCENT is a
+        // share, rounded up, of every action the statement would take (34.5
+        // PERCENT of three takes two).
+        var capped = top is not null || context.Connection.RowCountLimit > 0;
+        var deferredSteps = capped ? new List<MergeStep>() : null;
+        void Step(MergeStep step)
+        {
+            if (deferredSteps is not null)
+                deferredSteps.Add(step);
+            else
+                RunStep(step);
+        }
+        void RunStep(MergeStep step)
+        {
+            if (step.MatchedSources is { } matchedSources)
+            {
+                ApplyMergeMatched(context, destinationTable, sourceView, whenClauses, step.Page, step.Slot, step.TargetValues!, sourceRows, matchedSources, ResolveCombined, pendingUpdates, pendingDeletes);
+            }
+            else if (step.TargetValues is { } targetValues)
+            {
+                if (PickClause(whenClauses, WhenClauseKind.NotMatchedBySource, targetValues, sourceValues: null, context.Batch, ResolveCombined) is { } chosen)
+                    ApplyChosenMatchedAction(context, destinationTable, sourceView, chosen, step.Page, step.Slot, targetValues, sourceValues: null, ResolveCombined, pendingUpdates, pendingDeletes);
+            }
+            else if (NotMatchedByTargetApplies(step.Key))
+            {
+                // A join view's row is formed only to be carried to its base
+                // table, whose own INSERT path validates it.
+                ApplyInsert(context, destinationTable, sourceView, nmbtClause!, sourceRows[step.Key], ResolveCombined, pendingInserts, insteadOfInsert: joinWrite is not null || HasInsteadOfTrigger(context.Batch, insteadOfInsertTarget, TriggerActions.Insert));
+            }
+            Tag(step.Key);
+        }
+        bool NotMatchedByTargetApplies(int sourceIndex) =>
+            nmbtClause!.SearchCondition is not { } cond
+            || cond.Run(new RuntimeContext(name => ResolveCombined(null, sourceRows[sourceIndex], name), context.Batch)) == true;
+        bool StepQualifies(MergeStep step) => step.MatchedSources is { } matchedSources
+            ? PickClause(whenClauses, WhenClauseKind.Matched, step.TargetValues, sourceRows[matchedSources[0]], context.Batch, ResolveCombined) is not null
+            : step.TargetValues is not null
+            ? PickClause(whenClauses, WhenClauseKind.NotMatchedBySource, step.TargetValues, sourceValues: null, context.Batch, ResolveCombined) is not null
+            : NotMatchedByTargetApplies(step.Key);
 
         // Phase A finds, per matched target row, the source rows it matches, then
         // applies the WHEN MATCHED / WHEN NOT MATCHED BY SOURCE action. When the
@@ -1589,24 +1636,13 @@ partial class Simulation
                 // their precomputed source list, unmatched rows fall to WHEN NOT
                 // MATCHED BY SOURCE. Heap-order interleaving matches the scan path's
                 // discovery order, but with no per-target source loop.
-                foreach (var (pageIndex, slotIndex, rowBytes) in destinationTable.Heap.EnumerateRowsWithAddress())
+                foreach (var (pageIndex, slotIndex, rowBytes) in ClusteredScan.RowsWithAddress(destinationTable))
                 {
-                    if (ActionCapReached())
-                        break;
                     var targetValues = DecodeFullRow(destinationTable, rowBytes);
                     EvaluateComputedColumns(destinationTable, targetValues, context.Batch);
-                    if (matchedByTarget.TryGetValue((pageIndex, slotIndex), out var matchedSources))
-                    {
-                        ApplyMergeMatched(context, destinationTable, sourceView, whenClauses, pageIndex, slotIndex, targetValues, sourceRows, matchedSources, ResolveCombined, pendingUpdates, pendingDeletes);
-                        Tag(matchedSources[0]);
-                    }
-                    else
-                    {
-                        var chosen = PickClause(whenClauses, WhenClauseKind.NotMatchedBySource, targetValues, sourceValues: null, context.Batch, ResolveCombined);
-                        if (chosen is not null)
-                            ApplyChosenMatchedAction(context, destinationTable, sourceView, chosen, pageIndex, slotIndex, targetValues, sourceValues: null, ResolveCombined, pendingUpdates, pendingDeletes);
-                        Tag(sourceRows.Count);
-                    }
+                    Step(matchedByTarget.TryGetValue((pageIndex, slotIndex), out var matchedSources)
+                        ? new MergeStep(matchedSources[0], pageIndex, slotIndex, targetValues, matchedSources)
+                        : new MergeStep(sourceRows.Count, pageIndex, slotIndex, targetValues, null));
                 }
             }
             else
@@ -1616,12 +1652,10 @@ partial class Simulation
                 // the scan path's.
                 foreach (var address in matchedByTarget.Keys.OrderBy(a => a.Page).ThenBy(a => a.Slot))
                 {
-                    if (ActionCapReached())
-                        break;
                     var targetValues = DecodeFullRow(destinationTable, destinationTable.Heap.ReadSlotBytes(address.Page, address.Slot)!);
                     EvaluateComputedColumns(destinationTable, targetValues, context.Batch);
-                    ApplyMergeMatched(context, destinationTable, sourceView, whenClauses, address.Page, address.Slot, targetValues, sourceRows, matchedByTarget[address], ResolveCombined, pendingUpdates, pendingDeletes);
-                    Tag(matchedByTarget[address][0]);
+                    var matchedSources = matchedByTarget[address];
+                    Step(new MergeStep(matchedSources[0], address.Page, address.Slot, targetValues, matchedSources));
                 }
             }
         }
@@ -1645,10 +1679,8 @@ partial class Simulation
             // source row may fire before a target row asks.
             MergeSourceHash? sourceHash = null;
 
-            foreach (var (pageIndex, slotIndex, rowBytes) in destinationTable.Heap.EnumerateRowsWithAddress())
+            foreach (var (pageIndex, slotIndex, rowBytes) in ClusteredScan.RowsWithAddress(destinationTable))
             {
-                if (ActionCapReached())
-                    break;
                 var targetValues = DecodeFullRow(destinationTable, rowBytes);
                 EvaluateComputedColumns(destinationTable, targetValues, context.Batch);
 
@@ -1689,51 +1721,37 @@ partial class Simulation
                     }
                 }
 
-                if (matchedSources.Count > 0)
-                {
-                    var firstSourceIndex = matchedSources[0];
-                    var sourceValues = sourceRows[firstSourceIndex];
-                    var chosen = PickClause(whenClauses, WhenClauseKind.Matched, targetValues, sourceValues, context.Batch, ResolveCombined);
-                    if (chosen is null)
-                        continue;
-                    if (chosen.Action == MergeActionKind.Update && matchedSources.Count > 1)
-                        throw SimulatedSqlException.MergeMultiMatch();
-
-                    ApplyChosenMatchedAction(context, destinationTable, sourceView, chosen, pageIndex, slotIndex, targetValues, sourceValues, ResolveCombined, pendingUpdates, pendingDeletes);
-                    Tag(firstSourceIndex);
-                }
-                else
-                {
-                    var chosen = PickClause(whenClauses, WhenClauseKind.NotMatchedBySource, targetValues, sourceValues: null, context.Batch, ResolveCombined);
-                    if (chosen is null)
-                        continue;
-                    ApplyChosenMatchedAction(context, destinationTable, sourceView, chosen, pageIndex, slotIndex, targetValues, sourceValues: null, ResolveCombined, pendingUpdates, pendingDeletes);
-                    Tag(sourceRows.Count);
-                }
+                Step(matchedSources.Count > 0
+                    ? new MergeStep(matchedSources[0], pageIndex, slotIndex, targetValues, matchedSources)
+                    : new MergeStep(sourceRows.Count, pageIndex, slotIndex, targetValues, null));
             }
         }
 
         // Phase B: unmatched source rows → WHEN NOT MATCHED BY TARGET.
-        var nmbtClause = whenClauses.FirstOrDefault(c => c.Kind == WhenClauseKind.NotMatchedByTarget);
         if (nmbtClause is not null)
         {
-            // INSTEAD OF INSERT fires against the view when applicable;
-            // otherwise the action targets the base table directly.
-            var insteadOfInsertTarget = (SchemaObject?)viewRowsTarget ?? (SchemaObject?)sourceView ?? destinationTable;
-            for (var si = 0; si < sourceRows.Count && !ActionCapReached(); si++)
+            for (var si = 0; si < sourceRows.Count; si++)
             {
-                if (sourceMatched[si])
-                    continue;
-                var sourceValues = sourceRows[si];
-                if (nmbtClause.SearchCondition is { } cond
-                    && cond.Run(new RuntimeContext(name => ResolveCombined(null, sourceValues, name), context.Batch)) != true)
-                {
-                    continue;
-                }
-                // A join view's row is formed only to be carried to its base
-                // table, whose own INSERT path validates it.
-                ApplyInsert(context, destinationTable, sourceView, nmbtClause, sourceValues, ResolveCombined, pendingInserts, insteadOfInsert: joinWrite is not null || HasInsteadOfTrigger(context.Batch, insteadOfInsertTarget, TriggerActions.Insert));
-                Tag(si);
+                if (!sourceMatched[si])
+                    Step(new MergeStep(si, 0, 0, null, null));
+            }
+        }
+
+        if (deferredSteps is not null)
+        {
+            // Stable by key: a NOT MATCHED BY SOURCE delete, keyed past every
+            // source row, keeps its heap order.
+            var ordered = deferredSteps.OrderBy(step => step.Key).ToList();
+            var cap = top is { } limit
+                ? Selection.ResolveDmlTopCap(limit, limit.Percent ? ordered.Count(StepQualifies) : int.MaxValue, context.Batch)
+                : long.MaxValue;
+            if (context.Connection.RowCountLimit is > 0 and var rowCountLimit && rowCountLimit < cap)
+                cap = rowCountLimit;
+            foreach (var step in ordered)
+            {
+                if (pendingInserts.Count + pendingUpdates.Count + pendingDeletes.Count >= cap)
+                    break;
+                RunStep(step);
             }
         }
 
@@ -2322,6 +2340,21 @@ partial class Simulation
         Matched,
         NotMatchedByTarget,
         NotMatchedBySource,
+    }
+
+    /// <summary>
+    /// One row a MERGE may act on, keyed by the source row that drives it (a
+    /// NOT MATCHED BY SOURCE target is keyed past every source row): a matched
+    /// target carries its matching source rows, an unmatched target only its
+    /// values, and an unmatched source row neither.
+    /// </summary>
+    private readonly struct MergeStep(int key, int page, int slot, SqlValue[]? targetValues, List<int>? matchedSources)
+    {
+        public readonly int Key = key;
+        public readonly int Page = page;
+        public readonly int Slot = slot;
+        public readonly SqlValue[]? TargetValues = targetValues;
+        public readonly List<int>? MatchedSources = matchedSources;
     }
 
     private enum MergeActionKind

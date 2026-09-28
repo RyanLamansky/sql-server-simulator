@@ -114,6 +114,8 @@ partial class Simulation
 
         foreach (var pending in pendingComputed)
         {
+            if (Parser.Expressions.XmlMethodCall.AppearsIn(pending.Expression))
+                throw SimulatedSqlException.XmlMethodInComputedColumn(pending.Name, typeName.Leaf, "CREATE TABLE", tableVariable: false);
             var resolvedType = pending.Expression.GetSqlType(context.Batch, ResolveComputedReference);
             int? computedMaxLength = resolvedType switch
             {

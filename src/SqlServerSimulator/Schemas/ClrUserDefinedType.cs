@@ -278,7 +278,18 @@ internal sealed class ClrUserDefinedType
     /// A string converted to the type through <c>Parse</c> — the implicit
     /// conversion an assignment from a string literal takes.
     /// </summary>
-    public SqlValue ParseText(string text) => this.FromClr(this.Invoke(this.parse, null, [new SqlString(text)]));
+    public SqlValue ParseText(string text)
+    {
+        try
+        {
+            return this.FromClr(this.Invoke(this.parse, null, [new SqlString(text)]));
+        }
+        catch (SimulatedSqlException failure) when (failure.Number == 6522)
+        {
+            failure.IsClrTypeParseFailure = true;
+            throw;
+        }
+    }
 
     /// <summary>The type's <c>ToString()</c> of a non-NULL value.</summary>
     public string ToText(SqlValue value)
