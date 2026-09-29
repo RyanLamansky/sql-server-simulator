@@ -968,12 +968,22 @@ internal sealed partial class Selection
         context.WindowCollector = windows;
         var bindErrors = context.Batch.BindErrors;
         bindErrors?.OpenScope(context.Token);
+        var savedDeferNextValueFor = context.DeferNextValueRefusals;
+        var savedDeferredNextValueRefs = context.DeferredNextValueRefs;
+        context.DeferNextValueRefusals = true;
+        context.DeferredNextValueRefs = null;
         try
         {
-            return ParseInner(context, scope, aggregates, windows, allowOrderBy);
+            var parsed = ParseInner(context, scope, aggregates, windows, allowOrderBy);
+            // Settled where the ORDER BY is known; this is the backstop for a
+            // path that returned without passing there.
+            SettleDeferredNextValueRefs(context, orderBy: false, offset: false, projectionStart: 0, projectionEnd: 0);
+            return parsed;
         }
         finally
         {
+            context.DeferNextValueRefusals = savedDeferNextValueFor;
+            context.DeferredNextValueRefs = savedDeferredNextValueRefs;
             bindErrors?.CloseScope(context.Token);
             context.AggregateCollector = savedAggregateCollector;
             context.WindowCollector = savedWindowCollector;
@@ -995,6 +1005,14 @@ internal sealed partial class Selection
     private sealed class FromClause
     {
         public readonly List<BooleanExpression> Excluders = [];
+
+        /// <summary>
+        /// The slice of <see cref="ParserContext.DeferredNextValueRefs"/> the
+        /// select list itself parsed, which real binds after every clause
+        /// (<c>-1</c> until the list ends).
+        /// </summary>
+        public int ProjectionRefsStart;
+        public int ProjectionRefsEnd = -1;
 
         /// <summary>
         /// The aggregates the WHERE clause's own parse registered with this
@@ -1554,6 +1572,7 @@ internal sealed partial class Selection
         // the start and after a comma, false once an element (and any alias it
         // took) is complete.
         var elementExpected = true;
+        fromClause.ProjectionRefsStart = context.DeferredNextValueRefs?.Count ?? 0;
         do
         {
             // A keyword standing where an element belongs means the list never
@@ -1826,6 +1845,7 @@ internal sealed partial class Selection
                     continue;
 
                 case ReservedKeyword { Keyword: Keyword.From }:
+                    fromClause.ProjectionRefsEnd = context.DeferredNextValueRefs?.Count ?? 0;
                     context.Batch.BindErrors?.EnterClause(context.Token, BindClause.From);
                     List<FromSource> sources;
                     List<JoinSpec> joins;
@@ -1949,6 +1969,8 @@ internal sealed partial class Selection
             throw SimulatedSqlException.SyntaxErrorNear(context);
         } while (context.GetNextOptional() is not null);
     ExitWhileTokenLoop:
+        if (fromClause.ProjectionRefsEnd < 0)
+            fromClause.ProjectionRefsEnd = context.DeferredNextValueRefs?.Count ?? 0;
         ResolvePendingNamedWindows(context);
         RejectMisplacedIdentityFunction(context, expressions, intoTarget);
 
@@ -2035,6 +2057,7 @@ internal sealed partial class Selection
     /// </summary>
     private static void RejectSequenceDrawUnderOrderBy(ParserContext context, FromClause fromClause, int sequenceDrawsBefore, int unwindowedSequenceDrawsBefore)
     {
+        SettleDeferredNextValueRefs(context, fromClause.OrderBy.Count > 0, fromClause.OffsetExpression is not null, fromClause.ProjectionRefsStart, fromClause.ProjectionRefsEnd);
         if (fromClause.OrderBy.Count > 0 && context.UnwindowedSequenceDrawsParsed > unwindowedSequenceDrawsBefore)
             throw SimulatedSqlException.NextValueForNotAllowedWithOrderBy();
         // An OFFSET can only follow an ORDER BY, so this is reached only for a
@@ -2042,6 +2065,51 @@ internal sealed partial class Selection
         // that one too, since the OVER lifts the ORDER BY refusal alone.
         if (fromClause.OffsetExpression is not null && context.SequenceDrawsParsed > sequenceDrawsBefore)
             throw SimulatedSqlException.NextValueForNotAllowedWithRowLimit();
+    }
+
+    /// <summary>
+    /// Settles the references this query spec parsed under a restriction the
+    /// statement-level refusals outrank. Each reference takes the
+    /// highest-precedence refusal that applies to it — Msg 11723 for an
+    /// <c>ORDER BY</c> unless it names its own <c>OVER</c>, its clause's own
+    /// refusal, Msg 11739 for an <c>OFFSET</c> — and the first reference in
+    /// parse order that has one raises it (probed 2026-09-29 against SQL Server
+    /// 2025: a <c>WHERE</c>, <c>GROUP BY</c>, <c>HAVING</c>, <c>ON</c>, <c>TOP</c>
+    /// or conditional-arm reference in an ordered statement is Msg 11723, and a
+    /// windowed one under <c>TOP</c> stays Msg 11739). A branch a set operator
+    /// follows is left to the chain, whose Msg 11721 outranks all of these.
+    /// </summary>
+    private static void SettleDeferredNextValueRefs(ParserContext context, bool orderBy, bool offset, int projectionStart, int projectionEnd)
+    {
+        if (context.DeferredNextValueRefs is not { } refs)
+            return;
+        if (context.Token is ReservedKeyword { Keyword: Keyword.Union or Keyword.Except or Keyword.Intersect })
+            return;
+        context.DeferredNextValueRefs = null;
+        // Real binds the select list after the other clauses, so the
+        // references it parsed are judged last (probed 2026-09-29: a windowed
+        // one under TOP in the select list, with an unwindowed one in the
+        // WHERE, is the WHERE's Msg 11723).
+        for (var pass = 0; pass < 2; pass++)
+        {
+            for (var i = 0; i < refs.Count; i++)
+            {
+                if ((i >= projectionStart && i < projectionEnd) != (pass == 1))
+                    continue;
+                var reference = refs[i];
+                var refusal = NextValueForScope.Allowed;
+                // An OVER body's reference is one of the clauses Msg 11720
+                // names, and the ORDER BY refusal doesn't reach it.
+                if (orderBy && !reference.Windowed && !reference.OverBody)
+                    refusal = NextValueForScope.OrderedStatement;
+                if (reference.Scope != NextValueForScope.Allowed && (refusal == NextValueForScope.Allowed || reference.Scope < refusal))
+                    refusal = reference.Scope;
+                if (offset && (refusal == NextValueForScope.Allowed || NextValueForScope.RowLimited < refusal))
+                    refusal = NextValueForScope.RowLimited;
+                if (refusal != NextValueForScope.Allowed)
+                    throw Expressions.NextValueFor.RefusalFor(refusal);
+            }
+        }
     }
 
     /// <summary>
@@ -2904,6 +2972,19 @@ internal sealed partial class Selection
             // `CROSS APPLY sys.dm_os_volume_stats(...)` VolumeFreeSpace probe)
             // compiles and is discarded. A bare table name after APPLY stays a
             // genuine syntax error (Msg 102, probe-confirmed).
+            if (isFunctionCallShape && context.Batch.IsSkipping)
+            {
+                // The compile pass carries on past the missing function so a
+                // syntax error later in the statement outranks its Msg 208,
+                // as it does for a missing table (probed 2026-09-29).
+                context.RestoreCheckpoint(afterNameCheckpoint);
+                _ = BatchContext.ParseObjectName(context);
+                context.MoveNextRequired();
+                SkipBalancedParens(context);
+                context.Batch.CurrentStatement.BindsDeferredSource = true;
+                var placeholderAlias = ConsumeOptionalAlias(context);
+                return FromSource.DeferredPlaceholder(placeholderAlias ?? resolvedName.Leaf);
+            }
             throw isFunctionCallShape
                 ? SimulatedSqlException.InvalidObjectName(resolvedName)
                 : SimulatedSqlException.SyntaxErrorNear(context);
@@ -3496,6 +3577,7 @@ internal sealed partial class Selection
                         context.Batch.CurrentStatement.BindsDeferredSource = true;
                         _ = ParseOptionalForSystemTime(context, heapTable: null);
                         var placeholderAlias = ConsumeOptionalAlias(context);
+                        ParseOptionalTableSample(context);
                         _ = ParseOptionalTableHints(context);
                         return FromSource.DeferredPlaceholder(placeholderAlias ?? objectName.Leaf);
                     }
@@ -4940,6 +5022,21 @@ internal sealed partial class Selection
     /// rejected with Msg 408, and a bare variable with Msg 1008.
     /// </summary>
     private static void ParseOrderByItems(ParserContext context, List<OrderBySpec> orderBy)
+    {
+        // A reference in an ORDER BY item is refused where it parses.
+        var savedDeferNextValueFor = context.DeferNextValueRefusals;
+        context.DeferNextValueRefusals = false;
+        try
+        {
+            ParseOrderByItemsCore(context, orderBy);
+        }
+        finally
+        {
+            context.DeferNextValueRefusals = savedDeferNextValueFor;
+        }
+    }
+
+    private static void ParseOrderByItemsCore(ParserContext context, List<OrderBySpec> orderBy)
     {
         do
         {

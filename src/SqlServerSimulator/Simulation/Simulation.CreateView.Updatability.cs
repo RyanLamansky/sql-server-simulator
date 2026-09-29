@@ -149,6 +149,35 @@ partial class Simulation
     }
 
     /// <summary>
+    /// The view a single-source updatable view reads, and each of its output
+    /// columns' ordinal in that view's own output (<c>-1</c> for a derived
+    /// column) — the per-level link the ownership chain walks, since
+    /// <see cref="View.BaseColumnOrdinals"/> composes the whole chain down to
+    /// the base table. Null upstream when the body reads a table directly.
+    /// </summary>
+    private static (View? Upstream, int[] Ordinals) UpstreamLinkOf(Collation collation, Selection bodySelection)
+    {
+        if (bodySelection.UpdatabilityProfile is not { Sources: [{ BackingView: { } upstream } source] } profile)
+            return (null, []);
+        var ordinals = new int[profile.Projections.Length];
+        for (var i = 0; i < ordinals.Length; i++)
+        {
+            ordinals[i] = -1;
+            if (UnwrapDirectRef(profile.Projections[i]) is not { ReferencedName: { } refName })
+                continue;
+            for (var j = 0; j < source.ColumnNames.Length; j++)
+            {
+                if (collation.Equals(source.ColumnNames[j], refName.Leaf))
+                {
+                    ordinals[i] = j;
+                    break;
+                }
+            }
+        }
+        return (upstream, ordinals);
+    }
+
+    /// <summary>
     /// Returns the underlying <see cref="Reference"/> when <paramref name="expr"/>
     /// is a direct column reference (possibly wrapped in one or more
     /// <see cref="NamedExpression"/> layers from <c>AS alias</c>). Null

@@ -220,16 +220,16 @@ public sealed class RefusalFidelityTests
     /// <summary>
     /// An argument that doesn't bind reports line 0, as a procedure call's
     /// does — except a missing declared parameter where the call supplied no
-    /// arguments at all, which is the statement's line — and Msg 214 names
-    /// sp_executesql (probed 2026-09-26 against SQL Server 2025).
+    /// arguments at all, which is line 1 wherever the call sits, as is Msg 214,
+    /// which names sp_executesql (probed 2026-09-29 against SQL Server 2025).
     /// </summary>
     [TestMethod]
     [DataRow("exec sp_executesql N'select @a', N'@a int', @a = 5, @a = 6", 8144, 0, "")]
     [DataRow("exec sp_executesql N'select @a', N'@a int', 5, 6", 8144, 0, "")]
     [DataRow("exec sp_executesql N'select @a', N'@a int', @b = 5", 8178, 0, "")]
     [DataRow("exec sp_executesql N'select 1', N'', 5", 8146, 0, "")]
-    [DataRow("exec sp_executesql N'select @a', N'@a int'", 8178, 2, "")]
-    [DataRow("exec sp_executesql 'select 1'", 214, 2, "sp_executesql")]
+    [DataRow("exec sp_executesql N'select @a', N'@a int'", 8178, 1, "")]
+    [DataRow("exec sp_executesql 'select 1'", 214, 1, "sp_executesql")]
     public void SpExecuteSql_ArgumentErrors_ReportRealsLineAndProcedure(string sql, int number, int line, string procedure)
     {
         var error = new Simulation().AssertSqlError($"select 1\n{sql}", number).Errors[0];

@@ -19,10 +19,8 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// <c>sys.database_scoped_configurations</c>. Property matching is
 /// case-insensitive; a NULL expression, a NULL property, an unknown property,
 /// or a value whose type can't live in a sql_variant (MAX strings, LOB,
-/// xml, spatial) all return NULL. Because the simulator has a single decimal
-/// family, decimal-family values report <c>BaseType</c> <c>numeric</c> — this
-/// matches a numeric literal's inference but diverges from real, where
-/// <c>CAST(1 AS decimal)</c> reports <c>decimal</c>.
+/// xml, spatial) all return NULL. A decimal-family value reports the spelling
+/// it was declared with, <c>decimal</c> or <c>numeric</c>.
 /// </remarks>
 internal sealed class SqlVariantProperty : Expression
 {

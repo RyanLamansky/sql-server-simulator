@@ -7,7 +7,7 @@ EF emits all from `Math.X` LINQ; `Math.Truncate(x)` → `ROUND(x, 0, 1)`; `Math.
 **Type-widening rule** (shared across `ABS`/`FLOOR`/`CEILING`/`ROUND`/`SIGN`/`POWER`'s first arg): `tinyint`/`smallint` → `int`; `smallmoney` → `money`; `real`/`bit` → `float` (sic — bit widens to float, not int); everything else preserves.
 `FLOOR`/`CEILING` add one specialization to that rule (`MathScalars.FloorCeilingResult`): an exact-numeric input keeps its precision but drops to **scale 0** (the result is integer-valued), so `CEILING(1.1)` → `numeric(2, 0)` value `2`, `CEILING(CAST(1 AS decimal(38,10)))` → `decimal(38, 0)` — probe-confirmed against SQL Server 2025; `money` stays `money`, `float` stays `float`, `int` stays `int`.
 `POWER` returns the post-widen type of the *first* arg regardless of exponent — `POWER(int, float) → int` with truncation toward zero — but an exact-numeric base widens its precision to **38** while keeping its scale (`MathScalars.PowerResult`), so `POWER(2.0, 10)` → `numeric(38, 1)` value `1024` (the pre-fix `decimal(2, 1)` couldn't hold it), `POWER(CAST(2 AS decimal(5,3)), 10)` → `decimal(38, 3)`; `money` base stays `money`, `float`/`real` → `float`.
-(The simulator has one decimal family — it reports `numeric` for a variant's `BaseType` even where real would say `decimal`; only precision/scale are matched, not the `numeric`-vs-`decimal` name.)
+(A variant's `BaseType` follows the spelling the value was declared with, `decimal` or `numeric`, as real's does — see the `SQL_VARIANT_PROPERTY` section.)
 `SQRT`/`LOG`/`EXP`/`LOG10` always return float.
 
 **Implicit string coercion** (full math family — `ABS`/`FLOOR`/`CEILING`/`SIGN`/`SQRT`/`DEGREES`/`RADIANS`/`POWER`/`ROUND`/`LOG`/`LOG10`/`EXP`/`SQUARE`/`SIN`/`COS`/`TAN`/`ASIN`/`ACOS`/`ATAN`/`ATN2`/`COT`): string operands route through `MathScalars.CoerceImplicit` → `CoerceTo(SqlType.Float)`.
@@ -310,13 +310,12 @@ Msg 9818 follows Windows' own name grammar: a two- or three-letter language, an 
 - A `float` rounds to 15 significant digits (a `real` to 7) before any specifier sees it, then half away from zero: `'N2'` of 0.125 is `0.13`, a large value pads with zeros past the fifteenth digit, a value rounding to zero drops its sign, and `'R'` is `G15` unless that doesn't read back.
 - A decimal zero keeps one phantom digit its scale positions (`'P'` of a `decimal(5, 0)` zero is `000.00%`), and a custom pattern over a decimal or money value stops at its first quoted literal and copies the rest of the format verbatim (`'0''x''0.00'` of 123.456 is `12x0.00`).
 - Integers keep their width (`'X'` of `CAST(-1234567 AS int)` is `FFED2979`), and `'R'` is refused for everything but the floating-point types.
-- A `date` formats as a midnight `DateTime`, a `datetime` rounds its 1/300-second ticks to the millisecond as `SqlDateTime` does, `'U'` of a culture on a non-Gregorian calendar switches to that culture's Gregorian pattern and month names, and a `time`'s `'g'` writes the culture's decimal separator.
+- A `date` formats as a midnight `DateTime`, a `datetime` rounds its 1/300-second ticks to the millisecond as `SqlDateTime` does, `'U'` of a culture on a non-Gregorian calendar switches to that culture's Gregorian pattern, month names and — for the Persian- and Pashto-family cultures (`ckb-IR`, `lrc`, `lrc-IR`, `mzn`, `mzn-IR`, `ps`, `ps-AF`, and what inherits them), whose Gregorian day names are their own (`ps` writes `يونۍ` for Sunday, `lrc` and `mzn` `Sun`) — day names, read off `'U'` over twelve months and seven weekdays (probed 2026-09-29 against SQL Server 2025; all 929 names match on two dates), and a `time`'s `'g'` writes the culture's decimal separator.
 
 Measured over all 929 names: the battery the data was derived from went from 74.30% of cells matching real to 99.99%, and a held-out battery of 547 other calls (other values, types and patterns) from 66.87% to 99.99%.
 
 #### Divergences
 
-- `'U'` under seven Persian- and Pashto-family cultures (`ckb-IR`, `lrc`, `lrc-IR`, `mzn`, `mzn-IR`, `ps`, `ps-AF`) keeps the culture's own calendar pattern, where real switches to a Gregorian one whose day names the derivation couldn't isolate.
 - A `float` beyond 10^38 in magnitude, or one with digits below 10^-38, formats through .NET's own rounding.
 
 ## Argument counts
@@ -825,8 +824,7 @@ An expression whose type a `sql_variant` can't hold — a MAX string or binary, 
 Probe-confirmed against SQL Server 2025:
 
 - **BaseType** — the bare type name (`1` → `int`, `'abc'` → `varchar`, `N'abc'` → `nvarchar`, `CAST(1 AS bit)` → `bit`, `GETDATE()` → `datetime`).
-  Decimal-family values report **`numeric`** — matching a numeric literal's inference (`1.5` → `numeric`).
-  *Divergence*: the simulator has one decimal family, so `CAST(1 AS decimal)` also reports `numeric` where real reports `decimal`.
+  Decimal-family values report the spelling they were declared with — `CAST(1 AS decimal(5, 2))` is `decimal`, `CAST(1 AS numeric(5, 2))` and a numeric literal (`1.5`) are `numeric` — through variables, table and variant columns, `CASE` / `UNION`, functions, `SELECT … INTO` and the aggregates (probed 2026-09-29 against SQL Server 2025 over fifteen shapes).
 - **Precision / Scale** — the value type's numeric/temporal precision-scale (`1.25` → 3 / 2; `1` → 10 / 0; `datetime` → 23 / 3; `time(7)` → 16 / 7).
   String / binary / guid → 0 / 0.
 - **MaxLength** — the type's declared byte width, *not* the value's length: `varchar(10)` → 10, `nvarchar(10)` → 20, `int` → 4, `decimal(5,2)` → 5, `char(5)` → 5, `datetime` → 8.

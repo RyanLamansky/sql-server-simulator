@@ -257,6 +257,43 @@ public sealed class SequenceRestrictionMatrixTests
         AreEqual(1, sim.ExecuteScalar("select count(*) from sys.sequences where name = 's' and last_used_value is null"));
     }
 
+    /// <summary>
+    /// A statement carrying an <c>ORDER BY</c> reports Msg 11723 for a reference
+    /// in a restricted clause, a row-limited statement or a conditional arm —
+    /// the statement-level refusal outranks them — while a reference in an
+    /// <c>OVER</c> body stays Msg 11720, and each reference is judged in bind
+    /// order, the select list last (probed 2026-09-29 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select id from n where v > next value for dbo.s order by id", 11723)]
+    [DataRow("select coalesce(next value for dbo.s, 1) from n order by id", 11723)]
+    [DataRow("select top (1) next value for dbo.s from n order by id", 11723)]
+    [DataRow("select top (next value for dbo.s) id from n order by id", 11723)]
+    [DataRow("select id from n group by id having next value for dbo.s = 1 order by id", 11723)]
+    [DataRow("select n.id from n join n u on next value for dbo.s = 1 order by n.id", 11723)]
+    [DataRow("select case when id = 1 then next value for dbo.s end from n order by id offset 0 rows", 11723)]
+    [DataRow("insert m (id, v) select id, v from n where v > next value for dbo.s order by id", 11723)]
+    [DataRow("select sum(id) over (partition by next value for dbo.s) from n order by id", 11720)]
+    [DataRow("select row_number() over (order by next value for dbo.s) from n order by id", 11720)]
+    [DataRow("select sum(next value for dbo.s) over () from n order by id offset 0 rows", 11720)]
+    [DataRow("select next value for dbo.s, sum(id) over (partition by next value for dbo.s) from n order by id", 11723)]
+    [DataRow("select sum(id) over (partition by next value for dbo.s), next value for dbo.s from n order by id", 11720)]
+    [DataRow("select coalesce(next value for dbo.s over (order by id), 1) from n order by id", 11741)]
+    [DataRow("select isnull(next value for dbo.s over (order by id), 1) from n order by id offset 0 rows", 11739)]
+    [DataRow("select coalesce(next value for dbo.s, 1), id from n where v > next value for dbo.s over (order by id) order by id", 11720)]
+    [DataRow("select top (1) coalesce(next value for dbo.s over (order by id), 1) from n where v > next value for dbo.s order by id", 11723)]
+    [DataRow("select top (1) next value for dbo.s over (order by id), coalesce(next value for dbo.s, 1) from n order by id", 11739)]
+    [DataRow("select id from n where v > next value for dbo.s union select id from n", 11721)]
+    [DataRow("select id from n where v > next value for dbo.s union select id from n order by id", 11721)]
+    [DataRow("select id from n where v > next value for dbo.s", 11720)]
+    [DataRow("select coalesce(next value for dbo.s, 1)", 11741)]
+    public void AnOrderedStatement_OutranksTheRestrictedClauseRefusals(string sql, int number)
+    {
+        var sim = WithSequence();
+        _ = sim.AssertSqlError(sql, number);
+        AreEqual(1, sim.ExecuteScalar("select count(*) from sys.sequences where name = 's' and last_used_value is null"));
+    }
+
     // ---- keep-working controls --------------------------------------------
 
     /// <summary>

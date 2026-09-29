@@ -754,7 +754,10 @@ internal sealed class AggregateExpression : Expression
         // CASE refusals the same statement may also earn — probe-confirmed.
         // A windowed call is the exception: its trailing OVER makes the
         // reference one of the clauses Msg 11720 names (probed 2026-09-29).
-        var savedRejection = context.EnterNextValueForScope(IsWindowedCall(context) ? NextValueForScope.Clause : NextValueForScope.Aggregate);
+        var windowed = IsWindowedCall(context);
+        var savedRejection = context.EnterNextValueForScope(windowed ? NextValueForScope.Clause : NextValueForScope.Aggregate);
+        var savedInOver = context.InOverBody;
+        context.InOverBody |= windowed;
         try
         {
             var aggregate = ParseArguments(context, kind, out var allWritten);
@@ -764,6 +767,7 @@ internal sealed class AggregateExpression : Expression
         }
         finally
         {
+            context.InOverBody = savedInOver;
             context.NextValueForRejection = savedRejection;
         }
     }

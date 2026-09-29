@@ -130,6 +130,10 @@ Every neighbouring pair below was probed directly (SQL Server 2025, 2026-08-05).
 
 Two of the refusals are properties of the *finished statement* rather than of the reference's position, and neither is knowable when the reference parses — a set operator and an `ORDER BY` both sit past the select list.
 Those are settled by comparing `ParserContext.SequenceDrawsParsed` / `UnwindowedSequenceDrawsParsed` against a snapshot taken where the statement began: at each set operator as it is consumed (and eagerly for every branch after it), and once the query spec's `ORDER BY` / `OFFSET` have been read.
+A reference under a restriction those two statement-level refusals outrank — a clause (Msg 11720), a row limit (11739) or a conditional arm (11741) — can't be refused where it parses either, so it is **recorded** (`ParserContext.DeferredNextValueRefs`) and the query spec judges the list once its `ORDER BY` and `OFFSET` are read (`Selection.SettleDeferredNextValueRefs`).
+Each reference takes the highest-precedence refusal that applies to it and the first in bind order raises it: Msg 11723 for an `ORDER BY` unless the reference names its own `OVER`, its own restriction, Msg 11739 for an `OFFSET`.
+Real binds the select list after the other clauses, so its references are judged last, and a reference inside an **`OVER` body** — a window's `PARTITION BY` / `ORDER BY` or a windowed aggregate's argument — stays Msg 11720 whatever else the statement carries.
+A branch a set operator follows leaves its list to the chain, whose Msg 11721 outranks all of these, and an `ORDER BY` item's own reference is refused where it parses (all probed 2026-09-29 against SQL Server 2025).
 A **FROM-less** first branch of a set operation looks the one token ahead itself, because its projection would otherwise be *baked* — evaluated at parse — before the operator refused the statement, and real draws nothing there.
 
 **Msg 11719**'s own family, severity 15 state 1 (probed against SQL Server 2025, 2026-08-05):
@@ -155,13 +159,6 @@ One more is legal and looks like it shouldn't be: **a joined `UPDATE` / `DELETE`
 Probed both spellings — `UPDATE t SET … FROM (SELECT NEXT VALUE FOR s AS n) d` and the `JOIN` form — run and draw their value on real, where the identical derived table under a `SELECT`, an `INSERT … SELECT` or a `MERGE … USING` is refused (N2b.01-03 against N2b.04-05).
 `ParserContext.AllowNextValueForInFromClause`, set around the mutation's `ParseSourcesAndJoins`, is that exemption.
 Such a derived table is *uncorrelated*, so real evaluates it **once** for the whole statement — every target row takes the same value, and the sequence advances by one.
-
-### Divergences
-
-Each is a case where both engines refuse and only the message differs.
-
-- A reference sitting in a **restricted clause** (Msg 11720) or a **conditional arm** (Msg 11741) in a statement that *also* carries an `ORDER BY` reports its own message where real reports Msg 11723.
-  Those two refusals fire where the reference parses, which is before the `ORDER BY` is read; `DISTINCT` and `TOP` are known by then and do report real's message.
 
 ### A parse that isn't going to run draws nothing
 

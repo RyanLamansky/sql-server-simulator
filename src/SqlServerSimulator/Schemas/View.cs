@@ -215,6 +215,16 @@ internal sealed class View(
     /// </summary>
     public Parser.VolatileProjection? VolatileColumns;
 
+    /// <summary>
+    /// The view this single-source updatable view reads, when its one source is
+    /// a view rather than a table; the ownership chain compares owners one
+    /// link at a time down this list.
+    /// </summary>
+    public View? UpstreamView;
+
+    /// <summary>Each output column's ordinal (0-based) in <see cref="UpstreamView"/>'s output, or <c>-1</c> for a derived column.</summary>
+    public int[] UpstreamColumnOrdinals = [];
+
     /// <summary>The parsed body of a CTE target, which has no stored text to re-parse; null for a stored view.</summary>
     public Parser.Selection? UnstoredBody;
 

@@ -206,9 +206,9 @@ partial class Simulation
             yield break;
 
         if (!SqlType.IsNationalStringCategory(sqlRaw.Type))
-            throw SimulatedSqlException.SpExecuteSqlArgumentNotUnicode("@statement", 2);
+            throw SimulatedSqlException.SpExecuteSqlArgumentNotUnicode("@statement", 2).PinLine(1);
         if (paramDefsType is not null && !SqlType.IsNationalStringCategory(paramDefsType))
-            throw SimulatedSqlException.SpExecuteSqlArgumentNotUnicode("@params", 3);
+            throw SimulatedSqlException.SpExecuteSqlArgumentNotUnicode("@params", 3).PinLine(1);
 
         if (sqlValue.IsNull)
             yield break;
@@ -221,9 +221,9 @@ partial class Simulation
         // Bind declared params: positional fill first, then named lookup. An
         // error binding the arguments reports line 0, as a procedure's does —
         // but a declared parameter missing from a call that supplied none is
-        // the statement's own line (probed 2026-09-26 against SQL Server 2025).
+        // line 1 wherever the EXEC sits (probed 2026-09-29 against SQL Server 2025).
         SimulatedSqlException ArgumentBindingError(SimulatedSqlException error) =>
-            argumentValues.Count > 0 ? error.PinLine(0) : error;
+            error.PinLine(argumentValues.Count > 0 ? 0 : 1);
         var preDeclared = new Dictionary<string, VariableSlot>(BatchContext.VariableNameComparer);
         var outputBindings = new List<(SpExecuteSqlParam Param, VariableSlot CallerSlot)>();
         if (declaredParams is not null)
@@ -416,6 +416,20 @@ partial class Simulation
         if (string.IsNullOrWhiteSpace(source))
             return [];
 
+        // Real reads the declarations at line 1 of its own text, wherever the
+        // call sits (probed 2026-09-29 against SQL Server 2025).
+        try
+        {
+            return ParseSpExecuteSqlParamDefinitionsCore(source, connection);
+        }
+        catch (SimulatedSqlException error)
+        {
+            throw error.PinLine(1);
+        }
+    }
+
+    private static List<SpExecuteSqlParam> ParseSpExecuteSqlParamDefinitionsCore(string source, SimulatedDbConnection connection)
+    {
         // Real parses the definitions as the parenthesized list it prints in
         // Msg 8178 — `(@p int)` — so a list that ends early is a syntax error
         // near that closing `)`, and text after it is Msg 4124. A synthetic
@@ -427,6 +441,47 @@ partial class Simulation
         var defBatch = new BatchContext(defCommand);
         var defContext = defBatch.Parser;
         defContext.MoveNextOptional();
+        var open = defContext.SaveCheckpoint();
+        defContext.MoveNextRequired();
+
+        // A string that opens with a query is one real reads as a complete
+        // parenthesized query, reporting the statement text after it as Msg
+        // 4124; a nested `(` that isn't followed by one is a syntax error at
+        // the token after the parentheses (probed 2026-09-29 against SQL
+        // Server 2025). The parse runs at the declarations' own line, 1.
+        var nested = 0;
+        while (defContext.Token is Operator { Character: '(' })
+        {
+            nested++;
+            defContext.MoveNextRequired();
+        }
+        if (nested > 0 || defContext.Token is ReservedKeyword { Keyword: Keyword.Select })
+        {
+            if (defContext.Token is not ReservedKeyword { Keyword: Keyword.Select })
+                throw SimulatedSqlException.SyntaxErrorNear(defContext);
+            defContext.RestoreCheckpoint(open);
+            defContext.MoveNextRequired();
+            if (nested == 0 && defContext.GetNextRequired() is Operator { Character: ')' })
+                throw SimulatedSqlException.SyntaxErrorNear(defContext);
+            // The query is only read, never bound or run: a missing table is no
+            // error here and a sequence draw takes no value. Its grammar takes
+            // no ORDER BY, OPTION or `;` of its own.
+            defBatch.SkipModeFlag = true;
+            if (nested == 0)
+                RejectDeclarationQueryClauses(defContext);
+            defContext.RestoreCheckpoint(open);
+            defContext.MoveNextRequired();
+            _ = ParseBodyQuery(defContext, position: QueryPosition.ParenthesizedModuleBody);
+            if (defContext.Token is not Operator { Character: ')' })
+                throw SimulatedSqlException.SyntaxErrorNear(defContext);
+            // Text after the query's own closing parenthesis is the statement
+            // text real appends: a further statement reads, anything else is a
+            // syntax error at it.
+            if (defContext.GetNextOptional() is { } after && after is not ReservedKeyword { Keyword: Keyword.Select })
+                throw SimulatedSqlException.SyntaxErrorNear(defContext);
+            throw SimulatedSqlException.BatchParametersNotValid();
+        }
+        defContext.RestoreCheckpoint(open);
         defContext.MoveNextRequired();
 
         var parameters = new List<SpExecuteSqlParam>();
@@ -468,6 +523,36 @@ partial class Simulation
             if (defContext.GetNextOptional() is not null)
                 throw SimulatedSqlException.BatchParametersNotValid();
             return parameters;
+        }
+    }
+
+    /// <summary>
+    /// A declaration string read as a parenthesized query takes no clause of
+    /// its own past the query specification: <c>ORDER BY</c> and <c>OPTION</c>
+    /// are Msg 156 on the keyword and <c>;</c> Msg 102 (probed 2026-09-29
+    /// against SQL Server 2025). Entered on the token after the opening
+    /// parenthesis; leaves the cursor wherever the scan stopped.
+    /// </summary>
+    private static void RejectDeclarationQueryClauses(ParserContext context)
+    {
+        var depth = 1;
+        while (context.Token is { } token)
+        {
+            switch (token)
+            {
+                case Operator { Character: '(' }:
+                    depth++;
+                    break;
+                case Operator { Character: ')' }:
+                    depth--;
+                    break;
+                case ReservedKeyword { Keyword: Keyword.Order or Keyword.Option } keyword when depth == 1:
+                    throw SimulatedSqlException.SyntaxErrorNearKeyword(keyword);
+                case Operator { Character: ';' } when depth == 1:
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+            }
+            if (depth == 0 || !context.MoveNext())
+                return;
         }
     }
 

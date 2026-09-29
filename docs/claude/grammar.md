@@ -258,6 +258,7 @@ Two positions keep Msg 102: the last token named at the end of the input (`SELEC
 Real parses a batch before binding any of it, so a syntax error past a clause outranks the clause's own binding error: `GROUP BY 'a' 'b'` is Msg 102 at `'b'` where `GROUP BY 'a'` alone is Msg 164, and the same holds for the Msg 144 shape `GROUP BY (SELECT …) 'b'` (all three probe-confirmed).
 `ParserContext.PendingBindError` holds the clause's message until the statement's outermost query expression has parsed, and the flush yields to a trailing value literal — the same token class this rule rejects — so the syntax error wins.
 The first offending item still supplies the message, which is what an immediate throw produced.
+A missing **FROM source** waits the same way: the compile pass substitutes a placeholder for a missing table (with its `TABLESAMPLE`, hints, `FOR SYSTEM_TIME` and alias) or a missing `APPLY` / `JOIN` function so the rest of the statement parses, and `SELECT 1 FROM missing WHERE` is Msg 102 near `WHERE` where a well-formed statement over the same table is Msg 208 (probed 2026-09-29 against SQL Server 2025).
 
 `ALTER TABLE … ADD COLUMN c TYPE` is rejected with **Msg 156** near COLUMN (unlike `DROP COLUMN` / `ALTER COLUMN`, the ADD form names the column directly) — a prior "COLUMN is optional here" note was based on a mistaken probe; the live reference rejects it.
 
@@ -325,11 +326,12 @@ A window function is the one exception the check names: the bare `OVER w` named-
 **Msg 4145's own near-token is the token following the whole non-boolean expression**, parentheses included — `IF ((1)) PRINT 'x'` names `'PRINT'`, while `SELECT 1 WHERE (1)` names `')'` because nothing follows it.
 The simulator's predicate grammar consumes a boolean group's parens on the way in, so the factory steps back over one closer per still-open group (against a checkpoint, leaving the failing parse's cursor where it was) before reading the name.
 A group the batch *ends inside* is a syntax error instead, ahead of the type check: `IF ((1)` is Msg 102 near `')'` (probed 2026-08-05), so the same step-back that finds the name reports Msg 102 near the last token consumed when the input runs out before every closer is met; `SELECT 1 WHERE ((1)` takes the same arm (probed 2026-09-29).
-A stray token where a closer belongs keeps Msg 4145 here, as the row constructor `WHERE (a, b) IN (…)` does near `','`; real reads a statement keyword there as its own syntax error instead — `IF ((1) SELECT 1` is Msg 156 near `'select'` (probed 2026-09-29), which the simulator still reports as Msg 4145 (see [`backlog.md`](backlog.md)).
+A stray token where a closer belongs is the plain syntax error at it — Msg 156 for a reserved word (`IF ((1) SELECT 1`, `PRINT`, `UNION`, `NULL`, `CASE`, `END`), Msg 102 for anything else (`IF ((1) 2`, `x`, `(`, `@v`, `GO`) — except a comma, as the row constructor `WHERE (a, b) IN (…)` has near `','`, and `AND` / `OR`, which keep Msg 4145 (probed 2026-09-29 against SQL Server 2025 over fifty stray tokens).
 
 A parenthesized *boolean* followed by an operator only a value takes is a syntax error too (probed 2026-08-05): `WHERE (a = 'a') COLLATE X = 'x'` and `(a = 'a') LIKE 'x'` are Msg 156 on the keyword, `(a = 'a') + 1` Msg 102 on the operator.
 `LookaheadValueLhs` routes those shapes to the value-LHS parse, which fails at the inner `=`; `TrailingOperatorAfterBooleanGroup` then re-reads the group as a predicate and, when a `LIKE` / `COLLATE` keyword or an arithmetic or bitwise operator follows it, raises real's error in place of the inner one.
-`-`, `*`, `/`, `%`, `&`, `|` and `^` share the `+` arm (`-`, `*`, `&` and `|` probed 2026-09-29), and `IN` / `BETWEEN` / `IS` after a boolean group keep the value parse's Msg 102 near the inner operator, unprobed.
+`-`, `*`, `/`, `%`, `&`, `|` and `^` share the `+` arm (`-`, `*`, `&` and `|` probed 2026-09-29).
+`IN`, `BETWEEN`, `IS` and `NOT` after a boolean group are Msg 156 on the keyword, and `>`, `<` and `!` (so `<>`, `!=`, `!<` too) Msg 102 on the operator (probed 2026-09-29).
 
 ## A delimited one-part name doesn't call anything
 

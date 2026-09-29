@@ -36,7 +36,7 @@ internal sealed class FormatCulture
         Calendar, ShortDatePattern, LongDatePattern, ShortTimePattern, LongTimePattern, FullDateTimePattern, MonthDayPattern, YearMonthPattern,
         AMDesignator, PMDesignator, DateSeparator, TimeSeparator, Era,
         DayNames, AbbreviatedDayNames, MonthNames, AbbreviatedMonthNames, MonthGenitiveNames, AbbreviatedMonthGenitiveNames,
-        UniversalFullDateTimePattern, UniversalMonthNames,
+        UniversalFullDateTimePattern, UniversalMonthNames, UniversalDayNames,
         Count,
     }
 
@@ -195,8 +195,14 @@ internal sealed class FormatCulture
             u.FullDateTimePattern = f[(int)Field.UniversalFullDateTimePattern];
             u.AMDesignator = d.AMDesignator;
             u.PMDesignator = d.PMDesignator;
-            u.DayNames = d.DayNames;
-            u.AbbreviatedDayNames = d.AbbreviatedDayNames;
+            // The Gregorian pattern's day names are the culture's own unless
+            // real gives it others (`ps` writes `يونۍ` for Sunday where its
+            // Persian calendar's own list starts `یکشنبه`).
+            u.DayNames = u.AbbreviatedDayNames = f[(int)Field.UniversalDayNames].Length > 0
+                ? f[(int)Field.UniversalDayNames].Split('|')
+                : d.DayNames;
+            if (f[(int)Field.UniversalDayNames].Length == 0)
+                u.AbbreviatedDayNames = d.AbbreviatedDayNames;
             u.MonthNames = u.MonthGenitiveNames = [.. f[(int)Field.UniversalMonthNames].Split('|'), ""];
         }
 

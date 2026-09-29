@@ -559,23 +559,33 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException NonBooleanInConditionContext(ParserContext context)
     {
-        var token = TokenAfterOpenBooleanGroups(context, out var balanced);
+        var token = TokenAfterOpenBooleanGroups(context, out var balanced, out var stray);
         if (balanced)
             return NonBooleanInConditionContext(token?.ErrorText);
 
         // A group the batch ends inside is a syntax error, which real reports
         // ahead of the type check (probed 2026-08-05: `IF ((1)` is Msg 102
-        // near ')'), naming the last token consumed.
-        return SyntaxErrorNear(token);
+        // near ')'), naming the last token consumed. So is a stray token where
+        // a closer belongs: the plain syntax error at it — Msg 156 for a
+        // reserved word, Msg 102 for anything else (probed 2026-09-29 over
+        // fifty tokens, `IF ((1) SELECT 1` and `IF ((1) x` among them) — except
+        // a comma (the row constructor's) or AND / OR, which keep the type check.
+        return token switch
+        {
+            Operator { Character: ',' } or ReservedKeyword { Keyword: Keyword.And or Keyword.Or } when stray => NonBooleanInConditionContext(token.ErrorText),
+            ReservedKeyword keyword when stray => SyntaxErrorNearKeyword(keyword),
+            _ => SyntaxErrorNear(token),
+        };
     }
 
     /// <summary>Msg 4145 reported near a token the caller names.</summary>
     internal static SimulatedSqlException NonBooleanInConditionContext(string? near) =>
         new($"An expression of non-boolean type specified in a context where a condition is expected, near '{near}'.", 4145, 15, 1);
 
-    private static Token? TokenAfterOpenBooleanGroups(ParserContext context, out bool balanced)
+    private static Token? TokenAfterOpenBooleanGroups(ParserContext context, out bool balanced, out bool stray)
     {
         balanced = true;
+        stray = false;
         if (context.BooleanGroupDepth == 0)
             return context.Token ?? context.LastToken;
 
@@ -586,10 +596,11 @@ partial class SimulatedSqlException
             {
                 if (context.Token is not Operator { Character: ')' })
                 {
-                    // Only a batch that ends inside the group is the unclosed
-                    // paren; a stray token keeps the type check's message
-                    // (`(a, b) IN (…)` is Msg 4145 near ',').
-                    balanced = context.Token is not null;
+                    // The group is unclosed whether the batch ends inside it or a
+                    // stray token stands where the closer belongs; the caller
+                    // tells them apart by the token.
+                    balanced = false;
+                    stray = context.Token is not null;
                     break;
                 }
                 context.MoveNextOptional();

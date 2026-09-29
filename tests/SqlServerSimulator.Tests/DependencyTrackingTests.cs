@@ -152,6 +152,26 @@ public sealed class DependencyTrackingTests
         IsTrue(Flag(rows[0], "is_schema_bound_reference"));
     }
 
+    /// <summary>
+    /// The column rows a computed column, a CHECK and a DEFAULT contribute carry
+    /// no use flags — real reports all three 0 for that referencing kind
+    /// (probed 2026-09-29 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void TableExpressions_ReportNoUseFlags()
+    {
+        var sim = Fixture();
+        _ = sim.ExecuteNonQuery("create table dx (a int, b as a + 1, d int, constraint ck_dx check (d > 0 and a > 0))");
+        var legacy = Rows(sim, "select is_selected, is_updated, is_select_all from sys.sql_dependencies where object_id in (object_id('dbo.dx'), object_id('dbo.ck_dx'))");
+        HasCount(3, legacy);
+        foreach (var row in legacy)
+        {
+            IsFalse(Flag(row, "is_selected"));
+            IsFalse(Flag(row, "is_updated"));
+            IsFalse(Flag(row, "is_select_all"));
+        }
+    }
+
     [TestMethod]
     public void CheckConstraint_ReportsAColumnRowUnderItsOwnObjectId()
     {

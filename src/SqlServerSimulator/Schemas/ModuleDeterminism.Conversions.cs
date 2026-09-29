@@ -30,13 +30,13 @@ namespace SqlServerSimulator.Schemas;
 /// an aggregate over a date column still reads as a date.
 /// </para>
 /// <para>
-/// What stays undecidable, all erring toward <em>deterministic</em> — the
-/// answer the module already had, so the inference only ever moves a cell
-/// toward real: a column name the body's tables don't carry (a CTE or derived
-/// table's own output, an alias-type column), a user function whose return type
-/// isn't its argument's, a style written as an expression rather than a literal
-/// (<c>121 + 0</c>, which real folds), and an ANSI type synonym
-/// (<c>character varying</c>).
+/// A style written as a constant expression (<c>121 + 0</c>) is folded as
+/// real folds it, and a qualified call to a scalar user function contributes
+/// the function's declared return family. What stays undecidable, erring toward
+/// <em>deterministic</em> — the answer the module already had, so the
+/// inference only ever moves a cell toward real: a column name the body's
+/// tables don't carry, which is the output of a CTE or derived table that no
+/// aliased conversion typed (<c>CAST(a AS varchar(20)) s</c> types <c>s</c>).
 /// </para>
 /// </remarks>
 internal static partial class ModuleDeterminism
@@ -140,7 +140,9 @@ internal static partial class ModuleDeterminism
         _ = name.ToLowerInvariant(lowered);
         return lowered switch
         {
-            "char" or "nchar" or "ntext" or "nvarchar" or "sysname" or "text" or "varchar" => ConversionFamily.CharacterString,
+            // `character` and `national` open the ANSI spellings (`character
+            // varying`, `national char`), each a string type on real.
+            "char" or "character" or "national" or "nchar" or "ntext" or "nvarchar" or "sysname" or "text" or "varchar" => ConversionFamily.CharacterString,
             "date" or "datetime" or "datetime2" or "datetimeoffset" or "smalldatetime" or "time" => ConversionFamily.DateTimeValue,
             _ => ConversionFamily.Other,
         };
@@ -193,12 +195,15 @@ internal static partial class ModuleDeterminism
     /// integer literal — real folds a constant expression there, the scan
     /// doesn't).
     /// </summary>
-    private readonly struct ConversionSite(ConversionFamily target, int sourceFrom, int sourceTo, int style)
+    private readonly struct ConversionSite(ConversionFamily target, int sourceFrom, int sourceTo, int style, int close)
     {
         internal readonly ConversionFamily Target = target;
         internal readonly int SourceFrom = sourceFrom;
         internal readonly int SourceTo = sourceTo;
         internal readonly int Style = style;
+
+        /// <summary>The index of the call's closing parenthesis.</summary>
+        internal readonly int Close = close;
     }
 
     /// <summary>
@@ -252,7 +257,7 @@ internal static partial class ModuleDeterminism
             var asIndex = separators[^1];
             if (asIndex + 1 >= close)
                 return false;
-            conversion = new(FamilyOfTypeName(TypeNameText(tokens[asIndex + 1])), index + 2, asIndex, -1);
+            conversion = new(FamilyOfTypeName(TypeNameText(tokens[asIndex + 1])), index + 2, asIndex, -1, close);
             return true;
         }
 
@@ -270,10 +275,95 @@ internal static partial class ModuleDeterminism
             }
             if (styleTo == styleFrom + 1 && tokens[styleFrom] is Numeric { Value.Type: Int32SqlType } styleLiteral)
                 style = styleLiteral.Value.AsInt32;
+            else if (TryFoldStyle(tokens, styleFrom, styleTo, out var folded))
+                style = folded;
         }
-        conversion = new(FamilyOfTypeName(TypeNameText(tokens[index + 2])), separators[0] + 1, sourceTo, style);
+        conversion = new(FamilyOfTypeName(TypeNameText(tokens[index + 2])), separators[0] + 1, sourceTo, style, close);
         return true;
     }
+
+    /// <summary>
+    /// Folds a style written as integer arithmetic — <c>121 + 0</c>,
+    /// <c>60 * 2</c>, <c>-(-121)</c> — over literals, <c>+ - * / %</c> and
+    /// parentheses, which real folds to the constant it is (probed 2026-09-29
+    /// against SQL Server 2025). False for anything else.
+    /// </summary>
+    private static bool TryFoldStyle(List<Token> tokens, int from, int to, out int value)
+    {
+        var position = from;
+        value = 0;
+        if (!TryFoldSum(tokens, ref position, to, out var sum) || position != to)
+            return false;
+        value = sum;
+        return true;
+    }
+
+    private static bool TryFoldSum(List<Token> tokens, ref int position, int to, out int value)
+    {
+        if (!TryFoldProduct(tokens, ref position, to, out value))
+            return false;
+        while (position < to && tokens[position] is Operator { Character: '+' or '-' } op)
+        {
+            position++;
+            if (!TryFoldProduct(tokens, ref position, to, out var right))
+                return false;
+            value = op.Character == '+' ? value + right : value - right;
+        }
+        return true;
+    }
+
+    private static bool TryFoldProduct(List<Token> tokens, ref int position, int to, out int value)
+    {
+        if (!TryFoldUnary(tokens, ref position, to, out value))
+            return false;
+        while (position < to && tokens[position] is Operator { Character: '*' or '/' or '%' } op)
+        {
+            position++;
+            if (!TryFoldUnary(tokens, ref position, to, out var right))
+                return false;
+            if (op.Character != '*' && right == 0)
+                return false;
+            value = op.Character switch
+            {
+                '*' => value * right,
+                '/' => value / right,
+                _ => value % right,
+            };
+        }
+        return true;
+    }
+
+    private static bool TryFoldUnary(List<Token> tokens, ref int position, int to, out int value)
+    {
+        value = 0;
+        if (position >= to)
+            return false;
+        switch (tokens[position])
+        {
+            case Operator { Character: '-' or '+' } sign:
+                position++;
+                if (!TryFoldUnary(tokens, ref position, to, out value))
+                    return false;
+                if (sign.Character == '-')
+                    value = -value;
+                return true;
+            case Operator { Character: '(' }:
+                position++;
+                if (!TryFoldSum(tokens, ref position, to, out value) || position >= to || tokens[position] is not Operator { Character: ')' })
+                    return false;
+                position++;
+                return true;
+            case Numeric { Value.Type: Int32SqlType } number:
+                value = number.Value.AsInt32;
+                position++;
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    /// <summary>The <see cref="NameFamilies"/> key a scalar user function's return family is filed under.</summary>
+    private static string FunctionKey(string schema, string name) => $"fn:{schema}.{name}";
 
     /// <summary>
     /// Whether the expression spanning <c>[from, to)</c> carries evidence of
@@ -318,6 +408,16 @@ internal static partial class ModuleDeterminism
                             leaf += 2;
                         if (leaf + 1 < to && tokens[leaf + 1] is Operator { Character: '(' })
                         {
+                            // A qualified call to a scalar user function has the
+                            // function's declared type, whatever its arguments.
+                            if (leaf - 2 >= from && tokens[leaf - 1] is Operator { Character: '.' } && tokens[leaf - 2] is Name qualifier
+                                && nameFamilies.TryGetValue(FunctionKey(qualifier.Value, ((Name)tokens[leaf]).Value), out var functionFamily))
+                            {
+                                if (functionFamily == wanted)
+                                    return true;
+                                i = SkipCall(tokens, leaf + 1, to);
+                                continue;
+                            }
                             if (FixedResultFamilies.TryGetValue(((Name)tokens[leaf]).Value, out var resultFamily))
                             {
                                 if (resultFamily == wanted)
@@ -382,6 +482,8 @@ internal static partial class ModuleDeterminism
                 AddColumns(families, table.Columns);
             if (schema.Views.TryGetValue(leaf, out var view))
                 AddColumns(families, view.OutputColumns);
+            if (schema.Functions.TryGetValue(leaf, out var scalarFunction) && scalarFunction is ScalarFunction scalar)
+                families[FunctionKey(qualifier, leaf)] = FamilyOfSqlType(scalar.ReturnType);
         }
 
         if (module is UserDefinedFunction function)
@@ -400,6 +502,18 @@ internal static partial class ModuleDeterminism
             {
                 families[local.Value] = FamilyOfTypeName(localType.Source);
             }
+        }
+
+        // A column a derived table or CTE names by aliasing a conversion —
+        // `(SELECT CAST(a AS varchar(20)) s FROM t) q` — carries the
+        // conversion's named type wherever the body reads it back.
+        for (var i = 0; i < tokens.Count; i++)
+        {
+            if (!TryReadConversion(tokens, i, out var site) || site.Target == ConversionFamily.Other)
+                continue;
+            var aliasAt = site.Close + 1 < tokens.Count && tokens[site.Close + 1] is ReservedKeyword { Keyword: Keyword.As } ? site.Close + 2 : site.Close + 1;
+            if (aliasAt < tokens.Count && tokens[aliasAt] is Name alias && !families.ContainsKey(alias.Value))
+                families[alias.Value] = site.Target;
         }
         return families;
     }

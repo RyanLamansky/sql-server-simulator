@@ -119,4 +119,28 @@ public sealed class ParenthesizedCollateTests
         AreEqual(1, Count("(a = 'a') and b = 'b'"));
         AreEqual(1, Count("(a = 'a') or (b = 'b')"));
     }
+
+    /// <summary>
+    /// A token that can't continue a parenthesized group is the plain syntax
+    /// error at it — Msg 156 on a reserved word, Msg 102 otherwise — while a
+    /// comma or AND / OR keeps the type check (probed 2026-09-29 against SQL
+    /// Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("if ((1) select 1", 156, "Incorrect syntax near the keyword 'select'.")]
+    [DataRow("if ((1) print 'x'", 156, "Incorrect syntax near the keyword 'print'.")]
+    [DataRow("select 1 where ((1) union select 1", 156, "Incorrect syntax near the keyword 'union'.")]
+    [DataRow("if ((1) 2", 102, "Incorrect syntax near '2'.")]
+    [DataRow("if ((1) x", 102, "Incorrect syntax near 'x'.")]
+    [DataRow("if ((1) (", 102, "Incorrect syntax near '('.")]
+    [DataRow("if ((1) , 2", 4145, "An expression of non-boolean type specified in a context where a condition is expected, near ','.")]
+    [DataRow("if ((1) and 1 = 1", 4145, "An expression of non-boolean type specified in a context where a condition is expected, near 'and'.")]
+    [DataRow("select 1 where (1 = 1) in (1)", 156, "Incorrect syntax near the keyword 'in'.")]
+    [DataRow("select 1 where (1 = 1) between 1 and 2", 156, "Incorrect syntax near the keyword 'between'.")]
+    [DataRow("select 1 where (1 = 1) is null", 156, "Incorrect syntax near the keyword 'is'.")]
+    [DataRow("select 1 where (1 = 1) not in (1)", 156, "Incorrect syntax near the keyword 'not'.")]
+    [DataRow("select 1 where (1 = 1) > 1", 102, "Incorrect syntax near '>'.")]
+    [DataRow("select 1 where (1 = 1) <> 1", 102, "Incorrect syntax near '<'.")]
+    public void AStrayTokenAfterAParenGroup_IsThePlainSyntaxError(string sql, int number, string message)
+        => new Simulation().AssertSqlError(sql, number, message);
 }

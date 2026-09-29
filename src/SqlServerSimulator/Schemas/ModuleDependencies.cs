@@ -370,7 +370,10 @@ internal static class ModuleDependencies
                 Resolved = owner,
                 IsSchemaBound = true,
             });
-            ColumnFor(reference, column.Name).Selected = true;
+            // The column row exists, but its use flags stay 0: real reports none
+            // for a computed column, CHECK or DEFAULT (probed 2026-09-29 against
+            // SQL Server 2025 on sys.sql_dependencies and sp_depends).
+            _ = ColumnFor(reference, column.Name);
         }
         return ordered;
     }

@@ -440,6 +440,22 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     public int UnwindowedSequenceDrawsParsed;
 
     /// <summary>
+    /// True while a query spec is read whose <c>ORDER BY</c>, <c>OFFSET</c> and
+    /// set operators come after the reference: a <c>NEXT VALUE FOR</c> under a
+    /// restriction that real's statement-level refusals outrank (a clause, a
+    /// row limit, a conditional arm) is then recorded in
+    /// <see cref="DeferredNextValueRefs"/> rather than refused where it parses,
+    /// and the spec settles the whole list once it has read them.
+    /// </summary>
+    public bool DeferNextValueRefusals;
+
+    /// <summary>True while an <c>OVER</c> body is read, whose references are one of the clauses Msg 11720 names and escape the <c>ORDER BY</c> refusal.</summary>
+    public bool InOverBody;
+
+    /// <summary>Every reference parsed under <see cref="DeferNextValueRefusals"/>, in parse order; null until the first.</summary>
+    public List<DeferredNextValueRef>? DeferredNextValueRefs;
+
+    /// <summary>
     /// True while an <c>UPDATE</c> / <c>DELETE</c>'s own <c>FROM</c> clause is
     /// parsed, where real leaves a derived table's <c>NEXT VALUE FOR</c> legal
     /// (probe-confirmed) although every other derived table refuses it.
@@ -1151,6 +1167,18 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
         return new string(result);
     }
 #endif
+}
+
+/// <summary>One <c>NEXT VALUE FOR</c> reference recorded for its query spec to settle, with the restriction it parsed under.</summary>
+internal sealed class DeferredNextValueRef(NextValueForScope scope)
+{
+    public readonly NextValueForScope Scope = scope;
+
+    /// <summary>The reference names an <c>OVER</c> of its own, which exempts it from the <c>ORDER BY</c> refusal alone.</summary>
+    public bool Windowed;
+
+    /// <summary>The reference sits in an <c>OVER</c> body — a window's <c>PARTITION BY</c> / <c>ORDER BY</c>, or a windowed aggregate's argument.</summary>
+    public bool OverBody;
 }
 
 /// <summary>

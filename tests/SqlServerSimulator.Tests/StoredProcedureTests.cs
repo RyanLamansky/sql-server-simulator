@@ -540,6 +540,38 @@ public sealed class StoredProcedureTests
     public void SpExecuteSql_TextAfterTheDeclarationList_Raises4124()
         => new Simulation().AssertSqlError("exec sp_executesql N'select 1', N'@p int) select (1'", 4124, "The parameters supplied for the batch are not valid.");
 
+    // A declaration string that is itself a query — the transposed-arguments
+    // shape — reads as a complete parenthesized query, so the statement text
+    // after it is Msg 4124; a query the parse can't finish is its own syntax
+    // error, at line 1 (probed 2026-09-29 against SQL Server 2025).
+    [TestMethod]
+    [DataRow("select 2", 4124, "The parameters supplied for the batch are not valid.")]
+    [DataRow("select 2 from nosuch", 4124, "The parameters supplied for the batch are not valid.")]
+    [DataRow("select 1 union select 2", 4124, "The parameters supplied for the batch are not valid.")]
+    [DataRow("(select 2)", 4124, "The parameters supplied for the batch are not valid.")]
+    [DataRow("select", 102, "Incorrect syntax near ')'.")]
+    [DataRow("(1)", 102, "Incorrect syntax near '1'.")]
+    [DataRow("(@a int) x", 102, "Incorrect syntax near '@a'.")]
+    [DataRow("select 2 order by 1", 156, "Incorrect syntax near the keyword 'order'.")]
+    [DataRow("select 2 option (recompile)", 156, "Incorrect syntax near the keyword 'option'.")]
+    [DataRow("select 2; select 3", 102, "Incorrect syntax near ';'.")]
+    [DataRow("select 2) x (", 102, "Incorrect syntax near 'x'.")]
+    public void SpExecuteSql_DeclarationsThatAreAQuery_ReadAsAParenthesizedQuery(string declarations, int number, string message)
+    {
+        var error = new Simulation().AssertSqlError($"select 1\nexec sp_executesql N'select 1', N'{declarations}'", number).Errors[0];
+        AreEqual(message, error.Message);
+        AreEqual(1, error.LineNumber);
+    }
+
+    [TestMethod]
+    public void SpExecuteSql_DeclarationsThatAreAQuery_DrawNothingFromASequence()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create sequence s");
+        _ = sim.AssertSqlError("exec sp_executesql N'select 1', N'select next value for s'", 4124);
+        AreEqual(1, sim.ExecuteScalar("select count(*) from sys.sequences where name = 's' and last_used_value is null"));
+    }
+
     [TestMethod]
     public void SpExecuteSql_BlankDeclarations_DeclareNothing()
         => AreEqual(1, new Simulation().ExecuteScalar("exec sp_executesql N'select 1', N' '"));

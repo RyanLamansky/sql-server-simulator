@@ -105,7 +105,13 @@ internal sealed class WeightlessCharacters
         this.special = SearchValues.Create([.. dropped, .. minimal]);
         // Hyphen and apostrophe already weigh something to CompareInfo; the
         // stand-ins come from the top of the private-use area, one apiece.
-        var ignoredByCompareInfo = minimal.Where(static c => c is not ('\'' or '-')).Distinct().ToArray();
+        // The no-break space and the U+2000..U+200A spaces are spaces to
+        // CompareInfo but characters of their own to real (probed 2026-09-29
+        // against SQL Server 2025 over every BMP code unit: only U+0020 and
+        // the ideographic space U+3000 match a space), so a search holds them
+        // apart the same way.
+        var ignoredByCompareInfo = minimal.Where(static c => c is not ('\'' or '-')).Distinct()
+            .Concat(Enumerable.Range(0x2000, 11).Select(static c => (char)c).Append('\u00A0')).Distinct().ToArray();
         this.searchStandIns = ignoredByCompareInfo.Select(static (c, index) => (c, (char)(0xF8FF - index))).ToFrozenDictionary(static pair => pair.c, static pair => pair.Item2);
         this.searchSpecial = SearchValues.Create([.. dropped, .. ignoredByCompareInfo]);
     }

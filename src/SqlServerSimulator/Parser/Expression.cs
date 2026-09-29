@@ -2292,6 +2292,8 @@ internal abstract class Expression : ExpressionNode
             context.UnwindowedSequenceDrawsParsed++;
             return nvf;
         }
+        if (nvf.Deferred is { } deferred)
+            deferred.Windowed = true;
         // A named window (`OVER w`) is accepted as real accepts it (probed
         // 2026-09-24); like the inline body, the ordering it names is discarded.
         if (context.GetNextRequired() is Name)

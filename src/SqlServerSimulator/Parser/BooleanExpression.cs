@@ -441,8 +441,8 @@ internal abstract class BooleanExpression : ExpressionNode
         context.MoveNextOptional();
         return context.Token switch
         {
-            ReservedKeyword { Keyword: Keyword.Like or Keyword.Collate } keyword => SimulatedSqlException.SyntaxErrorNearKeyword(keyword),
-            Operator { Character: '+' or '-' or '*' or '/' or '%' or '&' or '|' or '^' } => SimulatedSqlException.SyntaxErrorNear(context),
+            ReservedKeyword { Keyword: Keyword.Like or Keyword.Collate or Keyword.In or Keyword.Between or Keyword.Is or Keyword.Not } keyword => SimulatedSqlException.SyntaxErrorNearKeyword(keyword),
+            Operator { Character: '=' or '<' or '>' or '!' or '+' or '-' or '*' or '/' or '%' or '&' or '|' or '^' } => SimulatedSqlException.SyntaxErrorNear(context),
             _ => null,
         };
     }

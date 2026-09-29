@@ -40,9 +40,25 @@ internal sealed class NextValueFor : Expression
     /// <summary>The sequence this reference advances.</summary>
     internal readonly Sequence Sequence;
 
+    /// <summary>The record this reference left for its query spec to settle, or null when it was refused or accepted where it parsed.</summary>
+    internal readonly DeferredNextValueRef? Deferred;
+
     public NextValueFor(ParserContext context, MultiPartName sequenceName)
     {
-        ThrowIfRejectedHere(context.NextValueForRejection);
+        var scope = context.NextValueForRejection;
+        if (context.DeferNextValueRefusals
+            && scope is NextValueForScope.Allowed or NextValueForScope.Clause or NextValueForScope.RowLimited or NextValueForScope.Conditional)
+        {
+            // Real settles the statement-level refusals (ORDER BY, OFFSET)
+            // ahead of these three, and those clauses are read after the
+            // reference; the spec judges it once it has them all.
+            this.Deferred = new DeferredNextValueRef(scope) { OverBody = context.InOverBody };
+            (context.DeferredNextValueRefs ??= []).Add(this.Deferred);
+        }
+        else
+        {
+            ThrowIfRejectedHere(scope);
+        }
         if (!context.Batch.TryResolveSequence(sequenceName, out var resolved))
         {
             // Real SQL Server distinguishes "object name doesn't resolve" (Msg 208)
@@ -71,22 +87,23 @@ internal sealed class NextValueFor : Expression
     /// </summary>
     private static void ThrowIfRejectedHere(NextValueForScope scope)
     {
-        if (scope == NextValueForScope.Allowed)
-            return;
-
-        throw scope switch
-        {
-            NextValueForScope.Nested => SimulatedSqlException.NextValueForNotAllowedNested(),
-            NextValueForScope.Aggregate => SimulatedSqlException.NextValueForNotAllowedInAggregate(),
-            NextValueForScope.Deduplicating => SimulatedSqlException.NextValueForNotAllowedWithDedup(),
-            NextValueForScope.OrderedStatement => SimulatedSqlException.NextValueForNotAllowedWithOrderBy(),
-            NextValueForScope.Clause => SimulatedSqlException.NextValueForNotAllowedHere(),
-            NextValueForScope.RowLimited => SimulatedSqlException.NextValueForNotAllowedWithRowLimit(),
-            NextValueForScope.Conditional => SimulatedSqlException.NextValueForNotAllowedInConditional(),
-            NextValueForScope.MergeAction => SimulatedSqlException.NextValueForNotAllowedInMergeAction(),
-            _ => SimulatedSqlException.NextValueForNotAllowedInThisContext(),
-        };
+        if (scope != NextValueForScope.Allowed)
+            throw RefusalFor(scope);
     }
+
+    /// <summary>The refusal real raises for a reference under <paramref name="scope"/>.</summary>
+    internal static SimulatedSqlException RefusalFor(NextValueForScope scope) => scope switch
+    {
+        NextValueForScope.Nested => SimulatedSqlException.NextValueForNotAllowedNested(),
+        NextValueForScope.Aggregate => SimulatedSqlException.NextValueForNotAllowedInAggregate(),
+        NextValueForScope.Deduplicating => SimulatedSqlException.NextValueForNotAllowedWithDedup(),
+        NextValueForScope.OrderedStatement => SimulatedSqlException.NextValueForNotAllowedWithOrderBy(),
+        NextValueForScope.Clause => SimulatedSqlException.NextValueForNotAllowedHere(),
+        NextValueForScope.RowLimited => SimulatedSqlException.NextValueForNotAllowedWithRowLimit(),
+        NextValueForScope.Conditional => SimulatedSqlException.NextValueForNotAllowedInConditional(),
+        NextValueForScope.MergeAction => SimulatedSqlException.NextValueForNotAllowedInMergeAction(),
+        _ => SimulatedSqlException.NextValueForNotAllowedInThisContext(),
+    };
 
     public override SqlValue Run(RuntimeContext runtime)
     {

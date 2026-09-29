@@ -535,6 +535,21 @@ internal static class PermissionEnforcement
     /// </summary>
     internal static void CheckBrokenChainWrite(BatchContext batch, string permission, Schemas.SchemaObject module, Schemas.SchemaObject target)
     {
+        // A view over a view is a chain of links, each compared with the next
+        // (the chain breaks and resumes at every owner change), so the walk
+        // checks the permission on each object whose owner differs from the
+        // one before it.
+        var from = module;
+        while (from is Schemas.View { UpstreamView: { } next })
+        {
+            CheckBrokenChainLink(batch, permission, from, next);
+            from = next;
+        }
+        CheckBrokenChainLink(batch, permission, from, target);
+    }
+
+    private static void CheckBrokenChainLink(BatchContext batch, string permission, Schemas.SchemaObject module, Schemas.SchemaObject target)
+    {
         if (TryResolveBrokenChain(batch, module, target, out var database, out var principalId)
             && !PermissionChecker.IsGranted(database, principalId, Permission.Resolve(permission), PermissionChecker.ClassObject, target.ObjectId, target.SchemaId, Rights(batch)))
         {
@@ -555,18 +570,40 @@ internal static class PermissionEnforcement
     /// </summary>
     internal static void CheckBrokenChainColumns(BatchContext batch, Permission permission, Schemas.View view, ColumnReadTarget? viewColumns)
     {
-        if (view.BaseTable is not { } baseTable
-            || viewColumns is { Ordinals.Count: 0 }
-            || !TryResolveBrokenChain(batch, view, baseTable, out var database, out var principalId))
+        var current = view;
+        var columns = viewColumns;
+        while (current.UpstreamView is { } next)
+        {
+            if (columns is { Ordinals.Count: 0 })
+                return;
+            var nextColumns = new ColumnReadTarget(next);
+            if (columns is not null)
+            {
+                foreach (var ordinal in columns.Ordinals)
+                {
+                    if (current.UpstreamColumnOrdinals[ordinal - 1] is var upstreamOrdinal and >= 0)
+                        _ = nextColumns.Ordinals.Add(upstreamOrdinal + 1);
+                }
+                if (nextColumns.Ordinals.Count == 0)
+                    return;
+            }
+            if (TryResolveBrokenChain(batch, current, next, out var linkDatabase, out var linkPrincipal))
+                CheckColumnGrants(linkDatabase, linkPrincipal, permission, nextColumns, Rights(batch));
+            current = next;
+            columns = columns is null ? null : nextColumns;
+        }
+        if (current.BaseTable is not { } baseTable
+            || columns is { Ordinals.Count: 0 }
+            || !TryResolveBrokenChain(batch, current, baseTable, out var database, out var principalId))
         {
             return;
         }
         var baseColumns = new ColumnReadTarget(baseTable);
-        if (viewColumns is not null)
+        if (columns is not null)
         {
-            foreach (var ordinal in viewColumns.Ordinals)
+            foreach (var ordinal in columns.Ordinals)
             {
-                if (view.BaseColumnOrdinals[ordinal - 1] is var baseOrdinal and >= 0)
+                if (current.BaseColumnOrdinals[ordinal - 1] is var baseOrdinal and >= 0)
                     _ = baseColumns.Ordinals.Add(baseOrdinal + 1);
             }
             if (baseColumns.Ordinals.Count == 0)

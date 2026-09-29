@@ -38,6 +38,20 @@ public sealed class FormatCultureTests
     [DataRow("format(cast('13:45:56.789' as time), 'g', 'fr-FR')", "13:45:56,789")]
     public void Dates_TakeWindowsCultureData(string expression, string expected) => AssertFormats(expression, expected);
 
+    // 'U' of a culture on a non-Gregorian calendar switches to a Gregorian pattern with
+    // the day names real gives it (probed 2026-09-29 against SQL Server 2025).
+    [TestMethod]
+    [DataRow("format(cast('2024-03-04 02:03:04' as datetime2), 'U', 'ckb-IR')", "2024 ئازار 4, دووشەممە 02:03:04")]
+    [DataRow("format(cast('2024-03-08 14:07:09' as datetime2), 'U', 'ckb-IR')", "2024 ئازار 8, ھەینی 14:07:09")]
+    [DataRow("format(cast('2024-01-04 02:03:04' as datetime2), 'U', 'lrc')", "2024 جانڤیە 4, Thu 02:03:04")]
+    [DataRow("format(cast('2024-12-04 02:03:04' as datetime2), 'U', 'lrc-IR')", "2024 دئسامر 4, Wed 02:03:04")]
+    [DataRow("format(cast('2024-03-10 14:07:09' as datetime2), 'U', 'mzn')", "2024 مارس 10, Sun 14:07:09")]
+    [DataRow("format(cast('2024-06-04 02:03:04' as datetime2), 'U', 'mzn-IR')", "2024 ژوئن 4, Tue 02:03:04")]
+    [DataRow("format(cast('2024-03-10 14:07:09' as datetime2), 'U', 'ps')", "يونۍ د 2024 د مارچ 10 14:07:09")]
+    [DataRow("format(cast('2024-03-04 00:07:09' as datetime2), 'U', 'ps-AF')", "دونۍ د 2024 د مارچ 4 0:07:09")]
+    [DataRow("format(cast('2024-09-04 02:03:04' as datetime2), 'U', 'ps')", "څلرنۍ د 2024 د سېپتمبر 4 2:03:04")]
+    public void UniversalPattern_OfThePersianAndPashtoFamilies_IsGregorianWithItsOwnDayNames(string expression, string expected) => AssertFormats(expression, expected);
+
     [TestMethod]
     [DataRow("format(cast(1234.5 as money), 'C', 'qq-QQ')", "¤1,234.50")]
     [DataRow("format(cast(1234.5 as money), 'C', 'de-US')", "1.234,50 $")]

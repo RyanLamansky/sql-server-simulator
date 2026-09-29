@@ -160,6 +160,19 @@ public sealed class ModuleDeterminismTests
     [DataRow("len(convert(varchar(20), dt, 126))", 1)]
     [DataRow("len(convert(varchar(20), dt, 131))", 1)]                    // the Hijri styles are deterministic too
     [DataRow("datepart(year, convert(datetime, s, 121))", 1)]
+    // A style written as a constant expression is folded, as real folds it.
+    [DataRow("len(convert(varchar(20), dt, 121 + 0))", 1)]
+    [DataRow("len(convert(varchar(20), dt, 60 * 2))", 1)]
+    [DataRow("len(convert(varchar(20), dt, 242 / 2))", 1)]
+    [DataRow("len(convert(varchar(20), dt, -(-121)))", 1)]
+    [DataRow("len(convert(varchar(20), dt, 100 + 0))", 0)]
+    [DataRow("len(convert(varchar(20), dt, 99 + 1))", 0)]
+    // The ANSI spellings of the string types are string types.
+    [DataRow("len(cast(dt as character varying(20)))", 0)]
+    [DataRow("len(cast(dt as national character varying(20)))", 0)]
+    [DataRow("len(convert(character(20), dt))", 0)]
+    [DataRow("len(convert(national char(20), dt))", 0)]
+    [DataRow("len(convert(character varying(20), dt, 121))", 1)]
     // Conversions the rule never touches: neither side is a date/time ↔
     // character-string pair.
     [DataRow("len(convert(varchar(20), i))", 1)]
@@ -184,10 +197,8 @@ public sealed class ModuleDeterminismTests
     }
 
     /// <summary>
-    /// A style the scan can't read as a literal is treated as no style at all,
-    /// which is what real answers for a variable one. Real additionally folds a
-    /// constant style expression (<c>121 + 0</c> reads deterministic there);
-    /// the scan reports that one nondeterministic.
+    /// A style the scan can't fold to a constant is treated as no style at all,
+    /// which is what real answers for a variable one.
     /// </summary>
     [TestMethod]
     public void SchemaBoundBody_NonLiteralConversionStyle_Reports0()
@@ -200,6 +211,37 @@ public sealed class ModuleDeterminismTests
             as begin return (select top 1 len(convert(varchar(20), dt, @a)) from dbo.t) end
             """);
         AreEqual(0, sim.ExecuteScalar("select objectproperty(object_id('dbo.f'), 'IsDeterministic')"));
+    }
+
+    /// <summary>
+    /// The converted expression's type can come from a qualified scalar user
+    /// function's declared return type, and from a derived table's column that a
+    /// conversion typed by aliasing it (probed 2026-09-29 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("convert(varchar(30), dbo.g(@x))", "datetime", 0)]
+    [DataRow("convert(varchar(30), dbo.g(@x), 121)", "datetime", 1)]
+    [DataRow("convert(datetime, dbo.g(@x))", "varchar(30)", 0)]
+    [DataRow("convert(varchar(30), dbo.g(@x))", "int", 1)]
+    public void SchemaBoundBody_FunctionCallTakesItsDeclaredReturnType(string expression, string returnType, int expected)
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            $"create function dbo.g(@x int) returns {returnType} with schemabinding as begin return null end",
+            $"create function dbo.f(@x int) returns sql_variant with schemabinding as begin return {expression} end");
+        AreEqual(expected, sim.ExecuteScalar("select objectproperty(object_id('dbo.f'), 'IsDeterministic')"));
+    }
+
+    [TestMethod]
+    [DataRow("convert(datetime, s)", 0)]
+    [DataRow("convert(datetime, s, 121)", 1)]
+    public void SchemaBoundBody_DerivedTableColumnTypedByAnAliasedConversion(string expression, int expected)
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table dbo.t (a int)",
+            $"create view dbo.v with schemabinding as select {expression} x from (select cast(a as varchar(20)) s from dbo.t) q");
+        AreEqual(expected, sim.ExecuteScalar("select objectproperty(object_id('dbo.v'), 'IsDeterministic')"));
     }
 
     /// <summary>

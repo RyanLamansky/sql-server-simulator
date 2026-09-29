@@ -203,6 +203,7 @@ partial class Simulation
         var (baseTable, baseColumnOrdinals, rejectionReason, visibilityCheck, checkOptionCheck, isJoinUpdatable) =
             AnalyzeViewUpdatability(context.CurrentDatabase.Collation, bodySelection, withCheckOption);
 
+        var (upstreamView, upstreamOrdinals) = baseTable is null ? (null, []) : UpstreamLinkOf(context.CurrentDatabase.Collation, bodySelection);
         var view = new View(
             schema,
             viewName.Leaf,
@@ -228,6 +229,8 @@ partial class Simulation
             IsRowLimited = IsRowLimitedBody(bodySelection),
             IsWindowed = IsWindowedBody(bodySelection),
             VolatileColumns = bodySelection.VolatileColumns,
+            UpstreamView = upstreamView,
+            UpstreamColumnOrdinals = upstreamOrdinals,
         };
         var replacedBases = replaced?.ReferencedBaseTables;
         if (replaced is not null)
