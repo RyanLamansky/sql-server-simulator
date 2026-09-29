@@ -119,14 +119,17 @@ internal sealed partial class Selection
         var perWindowResults = ComputeWindowResults(
             windows, perWindowKeys, buffered.Count, RuntimeAtBuffered, ResolveWindowColumnType, windowOperandTypes, windowResultTypes, batch);
 
-        // Step 3: walk buffered tuples in original order, bind each
-        // window's per-tuple result, then project. From here on,
+        // Step 3: walk buffered tuples in the order real's window sorts leave
+        // them in — arrival order when a statement ORDER BY settles it anyway —
+        // bind each window's per-tuple result, then project. From here on,
         // mirror ProjectBuffered's DISTINCT / ORDER BY / OFFSET / TAKE
         // post-processing.
+        var emitOrder = orderBy.Count == 0 && !batch.WindowRowsInArrivalOrder ? WindowEmitOrder(sources, windows, perWindowKeys, buffered.Count) : null;
         var projectionSources = ProjectionSourceReferences(expressions);
         var projectedBuffer = new List<(SqlValue[] Projected, SqlValue[] Keys)>(buffered.Count);
-        for (var i = 0; i < buffered.Count; i++)
+        for (var position = 0; position < buffered.Count; position++)
         {
+            var i = emitOrder is null ? position : emitOrder[position];
             for (var w = 0; w < windows.Count; w++)
                 windows[w].BindResult(batch, perWindowResults[w][i]);
 
@@ -159,6 +162,10 @@ internal sealed partial class Selection
         {
             materialized.Sort((a, b) => CompareOrderKeys(a.Keys, b.Keys, orderBy));
             NoteSortWorktable(batch, sources, orderBy, expressions);
+        }
+        else if (distinct)
+        {
+            SortDistinctRows(materialized, static item => item.Projected, sources, joins, expressions);
         }
 
         var cap = ComputeTopCap(materialized, item => item.Keys, orderBy, top, fetchCount);

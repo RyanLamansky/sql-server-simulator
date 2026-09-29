@@ -271,7 +271,7 @@ Where an entry carries a second clause it is because that fact changes what you'
 - **`Cast` / coercion** — CAST / CONVERT / TRY_* / PARSE, the string→date grammar with `SET DATEFORMAT` and the per-style CONVERT inputs, and the `float` / `real` → string style split.
   Conversion *legality* is settled from the two types while compiling, so a typed NULL and an empty rowset raise it too → [`casting.md`](docs/claude/casting.md).
 - **`SimulatedDbDataReader` client surface** — typed accessors, `GetOrdinal` precedence, and the client-side rounding and materialization divergences → [`data-reader.md`](docs/claude/data-reader.md).
-- **`Selection`, aggregates, window functions, set ops, CASE, OFFSET/FETCH, `TOP`, named windows, `TABLESAMPLE`, `SET ROWCOUNT`** — with the aggregate / GROUP BY binding rules and the frame-and-ordering gates.
+- **`Selection`, aggregates, window functions, set ops, CASE, OFFSET/FETCH, `TOP`, named windows, `TABLESAMPLE`, `SET ROWCOUNT`, the row order a query without ORDER BY returns** — with the aggregate / GROUP BY binding rules and the frame-and-ordering gates.
   A grouping *expression* covers a matching projection sub-expression rather than the columns it names, and the parallel grouped accumulation ships **off by default** → [`query.md`](docs/claude/query.md).
 - **Subqueries** — EXISTS / IN / scalar / quantified, three-valued rules, arbitrary-depth correlation, and the two decorrelation transforms.
   Whether an inner plan runs once per statement or once per outer row is decided by a **runtime probe**, not by parse-time inspection → [`subqueries.md`](docs/claude/subqueries.md).

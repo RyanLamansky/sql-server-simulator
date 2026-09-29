@@ -294,6 +294,14 @@ internal sealed class BatchContext
     /// </summary>
     public bool BindingViewDefinition;
 
+    /// <summary>
+    /// Set while a DML statement through a windowed view or CTE runs the body
+    /// to pair its rows, in order, with the base rows they came from, so the
+    /// window stage yields them in arrival order rather than in the order
+    /// real's window sort leaves a query's rows.
+    /// </summary>
+    public bool WindowRowsInArrivalOrder;
+
     /// <summary>The <c>#</c> / <c>##</c> tables a create-time bind has seen a statement create.</summary>
     private HashSet<string>? tempTablesCreatedWhileBinding;
 

@@ -477,19 +477,30 @@ partial class Selection
             collector.Offer(tuple, orderKeys, sequence++);
         }
 
-        // Rank each partition's retained rows, keep the ones inside the bound,
-        // then restore the arrival order the unbounded path yields in.
-        List<(int Sequence, byte[]?[] Tuple, long RowNumber)> kept = [];
-        foreach (var (_, collector) in partitions)
+        // Rank each partition's retained rows and keep the ones inside the
+        // bound, partition by partition in key order — the window sort's order,
+        // which the unbounded path yields in too.
+        var ordered = new List<KeyValuePair<SqlValue[], PartitionTopRows>>(partitions);
+        ordered.Sort(static (a, b) =>
+        {
+            for (var p = 0; p < a.Key.Length; p++)
+            {
+                var c = CompareSortValues(a.Key[p], b.Key[p]);
+                if (c != 0)
+                    return c;
+            }
+            return 0;
+        });
+        List<(byte[]?[] Tuple, long RowNumber)> kept = [];
+        foreach (var (_, collector) in ordered)
         {
             var ranked = collector.DrainOrdered();
             var limit = Math.Min(ranked.Count, upper);
             for (var i = lower - 1; i < limit; i++)
-                kept.Add((ranked[i].Sequence, ranked[i].Tuple, i + 1));
+                kept.Add((ranked[i].Tuple, i + 1));
         }
 
-        kept.Sort(static (a, b) => a.Sequence.CompareTo(b.Sequence));
-        foreach (var (_, tuple, rowNumber) in kept)
+        foreach (var (tuple, rowNumber) in kept)
         {
             window.BindResult(batch, SqlValue.FromInt64(rowNumber));
             currentTuple = tuple;

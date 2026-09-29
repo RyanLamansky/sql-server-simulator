@@ -219,37 +219,29 @@ internal sealed partial class Selection
     {
         for (var i = 0; i < a.Length; i++)
         {
-            var lk = a[i];
-            var rk = b[i];
-            int c;
-            if (lk.IsNull && rk.IsNull)
-            {
-                c = 0;
-            }
-            else if (lk.IsNull)
-            {
-                c = -1;
-            }
-            else if (rk.IsNull)
-            {
-                c = 1;
-            }
-            else if (lk.Type == rk.Type)
-            {
-                c = lk.CompareTo(rk);
-            }
-            else
-            {
-                var common = SqlType.Promote(lk.Type, rk.Type);
-                c = lk.CoerceTo(common).CompareTo(rk.CoerceTo(common));
-            }
-
+            var c = CompareSortValues(a[i], b[i]);
             if (orderBy[i].Descending)
                 c = -c;
             if (c != 0)
                 return c;
         }
         return 0;
+    }
+
+    /// <summary>
+    /// One key of <see cref="CompareOrderKeys"/>, ascending: NULL sorts first,
+    /// and keys of different declared types compare at their promoted type.
+    /// </summary>
+    private static int CompareSortValues(SqlValue lk, SqlValue rk)
+    {
+        if (lk.IsNull)
+            return rk.IsNull ? 0 : -1;
+        if (rk.IsNull)
+            return 1;
+        if (lk.Type == rk.Type)
+            return lk.CompareTo(rk);
+        var common = SqlType.Promote(lk.Type, rk.Type);
+        return lk.CoerceTo(common).CompareTo(rk.CoerceTo(common));
     }
 
     /// <summary>

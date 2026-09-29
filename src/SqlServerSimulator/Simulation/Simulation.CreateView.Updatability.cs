@@ -318,8 +318,10 @@ partial class Simulation
     /// </summary>
     /// <remarks>
     /// The body runs once. A windowed body's rows arrive in the base heap's
-    /// order — the window stage places each result back on its input row — so
-    /// they pair, in order, with the base rows the view's filter admits. A
+    /// order — the window stage places each result back on its input row and,
+    /// under <see cref="BatchContext.WindowRowsInArrivalOrder"/>, yields in
+    /// that order — so they pair, in order, with the base rows the view's
+    /// filter admits. A
     /// row-limited body yields a subset in its own order, so each of its rows
     /// is matched to an unclaimed base row whose direct columns agree; when two
     /// candidates differ in a column the body didn't project, which one the
@@ -331,7 +333,17 @@ partial class Simulation
         if (view is not ({ IsWindowed: true } or { IsRowLimited: true }) || positioned || context.Batch.IsSkipping)
             return null;
         var body = view.UnstoredBody ?? context.Connection.Simulation.ParseViewBodyPlan(context.Batch, view);
-        var outputRows = body.Execute(context.Batch, null).RowValues.ToList();
+        List<SqlValue[]> outputRows;
+        var savedArrivalOrder = context.Batch.WindowRowsInArrivalOrder;
+        context.Batch.WindowRowsInArrivalOrder = true;
+        try
+        {
+            outputRows = [.. body.Execute(context.Batch, null).RowValues];
+        }
+        finally
+        {
+            context.Batch.WindowRowsInArrivalOrder = savedArrivalOrder;
+        }
         var visible = new List<((int Page, int Slot) Address, SqlValue[] Values)>();
         foreach (var (page, slot, bytes) in table.Heap.EnumerateRowsWithAddress())
         {

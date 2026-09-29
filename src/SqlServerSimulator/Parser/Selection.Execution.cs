@@ -2856,6 +2856,10 @@ internal sealed partial class Selection
             materialized.Sort((a, b) => CompareOrderKeys(a.Keys, b.Keys, orderBy));
             NoteSortWorktable(batch, sources, orderBy, expressions);
         }
+        else if (distinct)
+        {
+            SortDistinctRows(materialized, static item => item.Projected, sources, joins, expressions);
+        }
 
         var cap = ComputeTopCap(materialized, item => item.Keys, orderBy, top, fetchCount);
 

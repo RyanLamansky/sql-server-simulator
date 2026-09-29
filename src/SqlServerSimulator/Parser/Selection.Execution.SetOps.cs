@@ -287,6 +287,7 @@ internal sealed partial class Selection
         }
 
         var isBareConstantRows = left.IsBareConstantRow && right.IsBareConstantRow;
+        var readsStorage = left.ReadsStorage || right.ReadsStorage;
         return new Selection(combinedSchema, combinedNames,
             hasOrderBy: false,
             hasTopOrOffsetOrFetch: left.HasTopOrOffsetOrFetch || right.HasTopOrOffsetOrFetch,
@@ -300,11 +301,14 @@ internal sealed partial class Selection
                 SetOpKind.Except => ExceptRows(left, right, combinedSchema, batch, outerResolver),
                 _ => throw new InvalidOperationException($"Unknown SetOpKind {kind}."),
             };
+            if (kind != SetOpKind.UnionAll && readsStorage)
+                rows = SortSetOpRows(rows, combinedSchema);
             // Computed whole before the first row goes out; see IsBareConstantRow.
             return isBareConstantRows ? [.. rows] : rows;
         }, intoTarget: left.IntoTarget, destColumnSchema: combinedDestSchema)
         {
             IsBareConstantRow = isBareConstantRows,
+            ReadsStorage = readsStorage,
             // A set operation reads its branches' rows as a whole, so a branch
             // that draws per call is drawn once per branch row on real, whatever
             // reads the result (probed 2026-09-28 against SQL Server 2025).
@@ -505,6 +509,44 @@ internal sealed partial class Selection
                 yield return rowBytes;
         }
         batch.Connection.StatementIo?.UseWorktable();
+    }
+
+    /// <summary>
+    /// A deduplicating set operation's rows in the order real's sort-based plan
+    /// leaves them — every column ascending, in select-list order — when there
+    /// are few enough (see <see cref="ImplicitOrderSortCap"/>). Real sorts both
+    /// a UNION's concatenation and an INTERSECT / EXCEPT's left input for a
+    /// small input and hashes a large one; over constants alone it proves the
+    /// rows distinct and concatenates, which is why the caller passes only a
+    /// plan that reads storage (probed 2026-09-29 against SQL Server 2025).
+    /// Past the cap the buffered rows go out in arrival order and the rest
+    /// stream after them.
+    /// </summary>
+    private static IEnumerable<byte[]> SortSetOpRows(IEnumerable<byte[]> rows, SqlType[] schema)
+    {
+        var buffered = new List<(byte[] Row, SqlValue[] Values)>();
+        using var enumerator = rows.GetEnumerator();
+        while (enumerator.MoveNext())
+        {
+            if (buffered.Count == ImplicitOrderSortCap)
+            {
+                foreach (var (row, _) in buffered)
+                    yield return row;
+                yield return enumerator.Current;
+                while (enumerator.MoveNext())
+                    yield return enumerator.Current;
+                yield break;
+            }
+            buffered.Add((enumerator.Current, DecodeRowToValues(enumerator.Current, schema)));
+        }
+
+        var positions = new int[schema.Length];
+        for (var i = 0; i < positions.Length; i++)
+            positions[i] = i;
+        var descending = new bool[schema.Length];
+        buffered.Sort((a, b) => CompareGroupKeys(a.Values, b.Values, positions, descending));
+        foreach (var (row, _) in buffered)
+            yield return row;
     }
 
     private static IEnumerable<byte[]> IntersectRows(Selection left, Selection right, SqlType[] schema, BatchContext batch, Func<MultiPartName, SqlValue>? outer)

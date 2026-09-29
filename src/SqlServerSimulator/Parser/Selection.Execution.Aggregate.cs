@@ -480,6 +480,26 @@ internal sealed partial class Selection
             }
         }
 
+        // With no ORDER BY, the groups leave in the order real's sort-fed Stream
+        // Aggregate produces them — see ImplicitKeyOrder and IsRollupChain. The
+        // key tuples ride in each output entry's otherwise empty order-key slot.
+        (int[] Positions, bool[] Descending)? groupOrder = null;
+        if (orderByItems.Count == 0)
+        {
+            if (fromClause.GroupingSets.Count == 1)
+            {
+                groupOrder = ImplicitKeyOrder(sources, joins, fromClause.GroupingSets[0], aggregates: aggregates.Count > 0);
+            }
+            else if (IsRollupChain(sources, fromClause.GroupingSets))
+            {
+                var width = fromClause.GroupingSets[0].Length;
+                var positions = new int[width];
+                for (var i = 0; i < width; i++)
+                    positions[i] = i;
+                groupOrder = (positions, new bool[width]);
+            }
+        }
+
         foreach (var groupingSet in effectiveSets)
         {
             currentGroupingSet = groupingSet;
@@ -604,7 +624,7 @@ internal sealed partial class Selection
                     if (topNGroups is not null)
                         topNGroups.OfferCopying(projected, orderKeys);
                     else
-                        output.Add((orderKeys, projected));
+                        output.Add((groupOrder is null ? orderKeys : currentState.KeyValues, projected));
                 }
                 finally
                 {
@@ -639,6 +659,9 @@ internal sealed partial class Selection
                     return groupRuntime;
                 }
 
+                if (groupOrder is var (groupPositions, groupDescending) && windowSurvivors.Count is > 1 and <= ImplicitOrderSortCap)
+                    windowSurvivors.Sort((a, b) => CompareGroupKeys(a.State.KeyValues, b.State.KeyValues, groupPositions, groupDescending));
+
                 var perWindowKeys = new List<(SqlValue[] PartitionKeys, SqlValue[] OrderKeys)[]>(windowSurvivors.Count);
                 for (var g = 0; g < windowSurvivors.Count; g++)
                 {
@@ -661,8 +684,10 @@ internal sealed partial class Selection
                 var groupWindowResults = ComputeWindowResults(
                     windows, perWindowKeys, windowSurvivors.Count, RuntimeAtGroup, resolveColumnType, windowOperandTypes, windowResultTypes, batch);
 
-                for (var g = 0; g < windowSurvivors.Count; g++)
+                var emitOrder = orderByItems.Count == 0 ? WindowEmitOrder(sources, windows, perWindowKeys, windowSurvivors.Count) : null;
+                for (var position = 0; position < windowSurvivors.Count; position++)
                 {
+                    var g = emitOrder is null ? position : emitOrder[position];
                     var groupContext = RuntimeAtGroup(g);
                     for (var w = 0; w < windows.Count; w++)
                         windows[w].BindResult(batch, groupWindowResults[w][g]);
@@ -709,10 +734,15 @@ internal sealed partial class Selection
         // pubdate` collapses one row per group to one row per distinct year
         // (probe-confirmed). Grouping alone doesn't imply distinct output —
         // the projection can be narrower than the grouping key.
+        if (windowSurvivors is null && groupOrder is var (outputPositions, outputDescending) && output.Count is > 1 and <= ImplicitOrderSortCap)
+            output.Sort((a, b) => CompareGroupKeys(a.OrderKeys, b.OrderKeys, outputPositions, outputDescending));
+
         if (distinct && output.Count > 1)
         {
             var seen = new HashSet<SqlValue[]>(RowEqualityComparer.Instance);
             _ = output.RemoveAll(o => !seen.Add(o.Row));
+            if (orderByItems.Count == 0)
+                SortDistinctRows(output, static o => o.Row, sources, joins, expressions);
         }
 
         // ORDER BY sorts the full grouped stream (across all grouping sets)

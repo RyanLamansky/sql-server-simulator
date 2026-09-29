@@ -96,7 +96,7 @@ public sealed class GroupedProjectionTests
             "create table dt (id int, pubdate date)",
             "insert dt values (1,'2008-01-01'), (2,'2008-06-01'), (3,'1991-01-01')");
 
-        AreEqual("2008,1991", string.Join(",", Rows(sim, "select distinct year(pubdate) from dt group by id, pubdate")));
+        AreEqual("1991,2008", string.Join(",", Rows(sim, "select distinct year(pubdate) from dt group by id, pubdate")));
         // Without DISTINCT the grouped rows stand.
         AreEqual("2008,2008,1991", string.Join(",", Rows(sim, "select year(pubdate) from dt group by id, pubdate")));
     }

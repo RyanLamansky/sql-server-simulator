@@ -459,6 +459,45 @@ The FROM-bearing SELECT projection paths — streaming, buffered (ORDER BY / DIS
 The **top-level ORDER BY after a set-op chain** (`ApplyTopLevelOrderBy`) is the exception: the inner UNION / INTERSECT / EXCEPT chain yields byte[] rows natively (branch dedup / coercion re-encode), so that path keeps the byte[] form through the sort and lets the drain cursor decode once — eagerly decoding every column into `SqlValue[]` for the whole buffer measured slower and heavier (strings re-materialized and retained across the sort).
 Sort keys decode only the ORDER BY columns off each row (`ComputeTopLevelOrderKeys`), not the full tuple.
 
+## Row order without ORDER BY
+
+A query without ORDER BY has no specified order, but real's plan often sorts on its own, and a client reading rows positionally — or a test written against real — sees that order.
+Where the order follows from the query's shape it is modeled (`Selection.Execution.ImplicitOrder.cs`); where it follows from real's cost choices or its hashing, arrival order stands.
+Probed 2026-09-29 against SQL Server 2025 with each query's showplan beside its rows; oracle `ImplicitOrderTests`.
+
+**Windows.**
+Real evaluates windows in written order, one Sort + Segment per distinct requirement, and the rows leave in the **last** sort's order.
+A window whose partition-then-order keys an earlier sort already satisfies joins that sort (partition keys in any order, ordering keys as a prefix), one whose own sort satisfies every window an earlier sort serves replaces it, and anything else sorts again.
+So `ROW_NUMBER() OVER (ORDER BY x), RANK() OVER (ORDER BY s DESC), SUM(x) OVER (ORDER BY x)` sorts by `x` for the first and third, then by `s DESC`, and returns rows by `s DESC`; swapping the first two returns them by `x`.
+`OVER ()` and an ordering by a constant (`ORDER BY (SELECT NULL)`) sort nothing.
+The same holds over a grouped query's groups, and for the bounded per-partition `ROW_NUMBER()` path, which yields partition by partition in key order.
+A DML statement through a windowed view or CTE runs its body with `BatchContext.WindowRowsInArrivalOrder` set, because it pairs the body's rows positionally with base rows.
+
+**GROUP BY and DISTINCT.**
+A small input takes a Sort + Stream Aggregate (or a Distinct Sort), so groups leave in key order:
+- The keys sort in written order — except that a GROUP BY of exactly **two** keys that computes an aggregate sorts them the other way round: `SELECT COUNT(*) … GROUP BY a, b` sorts by `b, a`, while three, four and five keys, a GROUP BY with no aggregate (real runs it as a DISTINCT) and every DISTINCT keep the written order.
+- Over one table, a key set equal to an index's leading columns reads in that index's order (the clustered index first), and a key set covering a unique key isn't aggregated at all, so the scan's order stands.
+- `ROLLUP` — and the `GROUPING SETS` chain spelling the same thing — sorts in written order and emits each subtotal after the groups it totals, the grand total last.
+- `DISTINCT` over a grouped query sorts the distinct rows again.
+
+Real hashes a large input instead, in an order nothing reproduces: in a sweep of `x % G` over an `int` heap, 100 and 300 rows always streamed, 1,000 rows streamed only at 500 or more groups, 3,000 rows only when every row was its own group, and 10,000 and 50,000 rows always hashed.
+Because a sort costs nothing in fidelity where real hashes, the rule sorts up to `ImplicitOrderSortCap` (4096) groups whatever real chose, and leaves arrival order past it.
+
+**Set operations.**
+`UNION`, `INTERSECT` and `EXCEPT` over a small input sort — the UNION's concatenation, or the INTERSECT / EXCEPT's left input — so their rows leave with every column ascending in select-list order; `UNION ALL` concatenates, and a `UNION ALL` after a `UNION` appends to the sorted part.
+Real hashes the same shapes from about a thousand rows, and the sort stops at the same cap.
+Over constants alone real proves the rows distinct and concatenates (`SELECT 2 UNION SELECT 1` is 2, 1), so a chain that reads no storage keeps arrival order.
+
+**TOP, OFFSET and a derived table's ORDER BY.**
+These already follow real: a bare `TOP` reads the scan's order (key order over a clustered table), a derived table's `TOP … ORDER BY` or `OFFSET` leaves its rows in that order, and `TOP 100 PERCENT … ORDER BY` in a derived table is dropped as real drops it.
+A `TOP` over a grouped, distinct or set-operation query picks from the sorted rows, so it keeps the rows real keeps.
+
+**Not modeled yet.**
+- The order among rows a sort ties: real's sort isn't stable, and its tie order matched no textbook quicksort, heapsort or insertion variant tried against it; here ties keep the earlier sorts' order and then arrival, which is what an index already supplying the order gives on real too.
+- `CUBE` and `GROUPING SETS` other than a rollup chain, which real runs as a concatenation of stream aggregates in an order of its choosing.
+- A constant-only set operation real sorts anyway: a chain of three or more `UNION`s over literals is a merge (`SELECT 3 UNION SELECT 1 UNION SELECT 2` is 1, 2, 3), as is one whose constants repeat.
+- Join order — see [`joins.md`](joins.md#row-order-of-a-join).
+
 ## Aggregates
 `COUNT(*)` / `COUNT(expr)` / `COUNT(DISTINCT)` / `COUNT_BIG`, `SUM` / `AVG`, `MAX` / `MIN`, statistical (`STDEV` / `STDEVP` / `VAR` / `VARP`), `STRING_AGG`, `CHECKSUM_AGG`, `APPROX_COUNT_DISTINCT`, and SQL Server 2025's `PRODUCT` (SUM's result types, save a fractional decimal multiplying at scale 6; `ProductAggregator`).
 `APPROX_COUNT_DISTINCT` counts exactly and `APPROX_PERCENTILE_CONT` / `APPROX_PERCENTILE_DISC` compute the exact percentile — see [the approximate aggregates](#the-approximate-aggregates) for where real's sketches part from that and why neither is reproduced.

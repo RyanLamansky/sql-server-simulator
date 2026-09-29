@@ -426,14 +426,15 @@ public sealed class WindowTopNBoundTests
     }
 
     [TestMethod]
-    public void RowsAreYieldedInArrivalOrder()
+    public void RowsAreYieldedInWindowSortOrder()
     {
         using var connection = OpenTied();
-        // The bounded path collects per partition and then restores the arrival
-        // order the full-sort path yields in — asserted by the row-for-row
-        // agreement, and pinned here as an absolute too.
+        // The bounded path yields partition by partition in key order, the order
+        // real's window sort leaves the full-sort path's rows in — asserted by
+        // the row-for-row agreement, and pinned here as an absolute too (probed
+        // 2026-09-29 against SQL Server 2025: partition 0's id 8 comes first).
         var rows = BoundedMatchesUnbounded(connection, "select id from (" + TiedBody + ") x where {rn} = 1");
-        AreEqual("1\n2\n3\n4\n5\n6\n7\n8", string.Join('\n', rows));
+        AreEqual("8\n1\n2\n3\n4\n5\n6\n7", string.Join('\n', rows));
     }
 
     // ---- past the selection heap's ceiling ----

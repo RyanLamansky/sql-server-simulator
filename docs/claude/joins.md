@@ -310,6 +310,12 @@ Real SQL Server raises Msg 4104 at bind time for the same shape; different code,
 **Table-value-constructor (`(VALUES …) alias(cols)`) sources** are one more `LateralPlan` shape: a `CROSS` / `OUTER APPLY` VALUES source correlates to the left row (its cell expressions re-evaluate per outer tuple through the joined-tuple resolver), and `JoinDriver` treats it exactly like a derived-table SELECT right side.
 Parsing / type-promotion / error surface live in [`query.md`](query.md) (projection section).
 
+## Row order of a join
+
+Without an ORDER BY, a join's rows leave in the order of whichever input real drives, and real picks it by cost (probed 2026-09-29 against SQL Server 2025): for two small unindexed heaps it builds or loops on the **smaller** input — a hash join then returns rows in the larger (probe) input's scan order, a nested loop in the smaller (outer) one's, and which of the two real takes turns on its estimates (over the same two nine- and five-row heaps, `ON h.id = h2.id` hashed and `ON h.g = h2.g` looped).
+A seekable clustered inner gets a nested loop driven by the other input, and two clustered inputs joined on their keys come back in key order.
+The simulator drives from the written left input (or the reorder's driver), so its order matches real's where the left input is the one real drives — the common `FROM big JOIN small` shape and every `LEFT JOIN` over small tables — and differs otherwise; modeling real's choice would need its cost model, so arrival order stands.
+
 ## EF Core mapping
 
 EF Core 10's LINQ `LeftJoin` / `RightJoin` operators translate to LEFT / RIGHT JOIN respectively and route through this pipeline.
