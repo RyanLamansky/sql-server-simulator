@@ -13,22 +13,21 @@ internal static partial class BuiltInResources
     /// </summary>
     /// <remarks>
     /// <para>
-    /// Query Store's <em>configuration</em> is live — see
-    /// <see cref="QueryStoreOptions"/> — but nothing is ever captured, so the
-    /// eleven capture views are permanently empty whatever the state says.
-    /// That is the one place this surface knowingly parts company with real: a
-    /// real store in READ_WRITE fills <c>sys.query_store_query</c> within an
-    /// interval, while here a database can report itself on and still show
-    /// nothing.
+    /// The capture views read the database's <see cref="QueryStoreData"/>,
+    /// which statements feed as they complete (see
+    /// <c>Simulation.QueryStore.cs</c>); each read snapshots it under the
+    /// store's lock. None of them is in the cross-statement catalog row cache:
+    /// every execution a store records changes them.
     /// </para>
     /// <para>
-    /// The two views real populates without capturing anything are populated
-    /// here too, because their contents are fixed metadata rather than
-    /// captured data: <c>sys.query_store_replicas</c>' four replica roles and
-    /// <c>sys.database_query_store_internal_state</c>' single counter row.
-    /// <c>sys.query_context_settings</c> and
-    /// <c>sys.query_store_runtime_stats_interval</c> stay empty — both probed
-    /// zero on a freshly-enabled store, so their rows are capture artifacts.
+    /// <c>sys.query_store_plan_feedback</c> and
+    /// <c>sys.query_store_query_variant</c> stay empty — the simulator has no
+    /// feedback loop and no parameter-sensitive plans — and
+    /// <c>sys.query_store_wait_stats</c> carries only lock waits. The two views real populates without capturing
+    /// anything are populated here too, because their contents are fixed
+    /// metadata rather than captured data: <c>sys.query_store_replicas</c>'
+    /// four replica roles and <c>sys.database_query_store_internal_state</c>'
+    /// single counter row.
     /// </para>
     /// </remarks>
     private static void RegisterQueryStore(Dictionary<string, CatalogView> views)
@@ -89,17 +88,17 @@ internal static partial class BuiltInResources
         // SSMS's Query Store probe does
         // IF EXISTS (SELECT TOP(1) 1 FROM sys.query_store_runtime_stats),
         // which must resolve and return zero rows.
-        SysEmpty("query_store_runtime_stats", BuildQueryStoreRuntimeStatsColumns(nvarchar60Catalog));
+        Sys("query_store_runtime_stats", BuildQueryStoreRuntimeStatsColumns(nvarchar60Catalog), EnumerateQueryStoreRuntimeStats);
 
-        SysEmpty("query_store_runtime_stats_interval",
+        Sys("query_store_runtime_stats_interval",
         [
             new("runtime_stats_interval_id", SqlType.BigInt, null, false),
             new("start_time", dateTimeOffset7, null, false),
             new("end_time", dateTimeOffset7, null, false),
             new("comment", SqlType.NVarcharMax, null, true),
-        ]);
+        ], EnumerateQueryStoreIntervals);
 
-        SysEmpty("query_store_query",
+        Sys("query_store_query",
         [
             new("query_id", SqlType.BigInt, null, false),
             new("query_text_id", SqlType.BigInt, null, false),
@@ -131,16 +130,16 @@ internal static partial class BuiltInResources
             new("last_compile_memory_kb", SqlType.BigInt, null, true),
             new("max_compile_memory_kb", SqlType.BigInt, null, true),
             new("is_clouddb_internal_query", SqlType.Bit, null, true),
-        ]);
+        ], EnumerateQueryStoreQueries);
 
-        SysEmpty("query_store_query_text",
+        Sys("query_store_query_text",
         [
             new("query_text_id", SqlType.BigInt, null, false),
             new("query_sql_text", SqlType.NVarcharMax, null, true),
             new("statement_sql_handle", SqlType.Varbinary, 44, true),
             new("is_part_of_encrypted_module", SqlType.Bit, null, false),
             new("has_restricted_text", SqlType.Bit, null, false),
-        ]);
+        ], EnumerateQueryStoreTexts);
 
         SysEmpty("query_store_query_variant",
         [
@@ -149,7 +148,7 @@ internal static partial class BuiltInResources
             new("dispatcher_plan_id", SqlType.BigInt, null, false),
         ]);
 
-        SysEmpty("query_store_plan",
+        Sys("query_store_plan",
         [
             new("plan_id", SqlType.BigInt, null, false),
             new("query_id", SqlType.BigInt, null, false),
@@ -178,7 +177,7 @@ internal static partial class BuiltInResources
             new("is_optimized_plan_forcing_disabled", SqlType.Bit, null, false),
             new("plan_type", SqlType.Int32, null, false),
             new("plan_type_desc", nvarchar60Catalog, 60, true),
-        ]);
+        ], EnumerateQueryStorePlans);
 
         SysEmpty("query_store_plan_feedback",
         [
@@ -194,7 +193,7 @@ internal static partial class BuiltInResources
             new("replica_group_id", SqlType.BigInt, null, false),
         ]);
 
-        SysEmpty("query_store_plan_forcing_locations",
+        Sys("query_store_plan_forcing_locations",
         [
             new("plan_forcing_location_id", SqlType.BigInt, null, false),
             new("query_id", SqlType.BigInt, null, false),
@@ -203,9 +202,9 @@ internal static partial class BuiltInResources
             new("timestamp", SqlType.DateTime, null, false),
             new("plan_forcing_type", SqlType.Int32, null, false),
             new("plan_forcing_type_desc", nvarchar60Catalog, 60, true),
-        ]);
+        ], EnumerateQueryStoreForcingLocations);
 
-        SysEmpty("query_store_query_hints",
+        Sys("query_store_query_hints",
         [
             new("query_hint_id", SqlType.BigInt, null, false),
             new("query_id", SqlType.BigInt, null, false),
@@ -217,9 +216,9 @@ internal static partial class BuiltInResources
             new("source", SqlType.Int32, null, true),
             new("source_desc", nvarchar128Desc, 128, true),
             new("comment", SqlType.NVarcharMax, null, true),
-        ]);
+        ], EnumerateQueryStoreHints);
 
-        SysEmpty("query_store_wait_stats",
+        Sys("query_store_wait_stats",
         [
             new("wait_stats_id", SqlType.BigInt, null, false),
             new("plan_id", SqlType.BigInt, null, false),
@@ -235,9 +234,9 @@ internal static partial class BuiltInResources
             new("max_query_wait_time_ms", SqlType.BigInt, null, false),
             new("stdev_query_wait_time_ms", SqlType.Float, null, true),
             new("replica_group_id", SqlType.BigInt, null, false),
-        ]);
+        ], EnumerateQueryStoreWaitStats);
 
-        SysEmpty("query_context_settings",
+        Sys("query_context_settings",
         [
             new("context_settings_id", SqlType.BigInt, null, false),
             new("set_options", SqlType.Varbinary, 8, true),
@@ -251,7 +250,7 @@ internal static partial class BuiltInResources
             new("default_schema_id", SqlType.Int32, null, false),
             new("is_replication_specific", SqlType.Bit, null, false),
             new("is_contained", SqlType.Varbinary, 1, true),
-        ]);
+        ], EnumerateQueryContextSettings);
     }
 
     /// <summary>
@@ -260,8 +259,7 @@ internal static partial class BuiltInResources
     /// dop, query_max_used_memory, rowcount) expose NOT NULL last/min/max
     /// columns; the four "extended" metrics (num_physical_io_reads,
     /// log_bytes_used, tempdb_space_used, page_server_io_reads) expose them
-    /// NULL — matching the probed SQL Server 2025 catalog shape. The view is
-    /// always empty, so the column set only ever backs metadata reads.
+    /// NULL — matching the probed SQL Server 2025 catalog shape.
     /// </summary>
     private static HeapColumn[] BuildQueryStoreRuntimeStatsColumns(NVarcharSqlType nvarchar60Catalog)
     {
@@ -352,8 +350,8 @@ internal static partial class BuiltInResources
     /// diverge only while a store is transitioning or has forced itself
     /// read-only, so <c>readonly_reason</c> stays 0 and
     /// <c>actual_state_additional_info</c> the empty string, both of which real
-    /// reports for a healthy store. <c>current_storage_size_mb</c> is 0 —
-    /// nothing is stored. The four <c>capture_policy_*</c> columns project NULL
+    /// reports for a healthy store. <c>current_storage_size_mb</c> rounds what
+    /// the store holds up to whole megabytes. The four <c>capture_policy_*</c> columns project NULL
     /// unless the capture mode is CUSTOM, which is real's own masking; the
     /// values behind them survive a trip through another mode.
     /// </remarks>
@@ -379,7 +377,7 @@ internal static partial class BuiltInResources
             state,                                  // actual_state
             stateDesc,                              // actual_state_desc
             SqlValue.FromInt32(0),                  // readonly_reason
-            SqlValue.FromInt64(0),                  // current_storage_size_mb
+            SqlValue.FromInt64(StorageSizeMb(database.QueryStoreData)),
             SqlValue.FromInt64(options.FlushIntervalSeconds),
             SqlValue.FromInt64(options.IntervalLengthMinutes),
             SqlValue.FromInt64(options.MaxStorageSizeMb),
@@ -403,5 +401,353 @@ internal static partial class BuiltInResources
             SqlValue.FromNVarchar(options.WaitStatsCaptureOn ? "ON" : "OFF"),
             SqlValue.FromNVarchar(string.Empty),    // actual_state_additional_info
         ];
+    }
+
+    private static long StorageSizeMb(QueryStoreData data)
+    {
+        lock (data.Gate)
+            return data.StorageSizeMb();
+    }
+
+    private static readonly SqlType QueryStoreTimeType = SqlType.GetDateTimeOffset(7);
+    private static readonly SqlType QueryStoreHashType = SqlType.GetBinary(8);
+
+    /// <summary>A Query Store timestamp, which real reports in UTC.</summary>
+    private static SqlValue QueryStoreTime(DateTime utc) =>
+        SqlValue.FromDateTimeOffset(QueryStoreTimeType, new DateTimeOffset(DateTime.SpecifyKind(utc, DateTimeKind.Unspecified), TimeSpan.Zero));
+
+    private static SqlValue QueryStoreHash(byte[] hash) => SqlValue.FromBinary(QueryStoreHashType, hash);
+
+    /// <summary>Rows for <c>sys.query_store_query_text</c>, one per distinct stored text.</summary>
+    private static List<SqlValue[]> EnumerateQueryStoreTexts(Parser.BatchContext batch, Database database)
+    {
+        _ = batch;
+        var data = database.QueryStoreData;
+        var rows = new List<SqlValue[]>();
+        lock (data.Gate)
+        {
+            foreach (var text in data.Texts)
+            {
+                rows.Add([
+                    SqlValue.FromInt64(text.Id),
+                    SqlValue.FromNVarchar(text.Text),
+                    SqlValue.FromVarbinary(text.StatementSqlHandle),
+                    SqlValue.FromBoolean(false),
+                    SqlValue.FromBoolean(false),
+                ]);
+            }
+        }
+        return rows;
+    }
+
+    /// <summary>
+    /// Rows for <c>sys.query_store_query</c>. The compile, bind and optimize
+    /// figures read 0 — the simulator compiles a statement as it runs it, so
+    /// there is no compile phase of its own to time — and each query compiles
+    /// once, as a plan real keeps cached does.
+    /// </summary>
+    private static List<SqlValue[]> EnumerateQueryStoreQueries(Parser.BatchContext batch, Database database)
+    {
+        _ = batch;
+        var data = database.QueryStoreData;
+        var rows = new List<SqlValue[]>();
+        var zeroFloat = SqlValue.FromDouble(0);
+        var zero = SqlValue.FromInt64(0);
+        lock (data.Gate)
+        {
+            foreach (var query in data.Queries)
+            {
+                var type = query.Key.ParameterizationType;
+                rows.Add([
+                    SqlValue.FromInt64(query.QueryId),
+                    SqlValue.FromInt64(query.Text.Id),
+                    SqlValue.FromInt64(query.Context.Id),
+                    SqlValue.FromInt64(query.Key.ObjectId),
+                    query.BatchSqlHandle is { } handle ? SqlValue.FromVarbinary(handle) : SqlValue.Null(SqlType.Varbinary),
+                    QueryStoreHash(query.QueryHash),
+                    SqlValue.FromBoolean(false),
+                    SqlValue.FromByte(type),
+                    SqlValue.FromNVarchar(type switch
+                    {
+                        1 => "User",
+                        2 => "Simple",
+                        3 => "Forced",
+                        _ => "None",
+                    }),
+                    QueryStoreTime(query.InitialCompileStartTime),
+                    QueryStoreTime(query.LastCompileStartTime),
+                    QueryStoreTime(query.LastExecutionTime),
+                    SqlValue.FromVarbinary(query.LastCompileBatchSqlHandle),
+                    SqlValue.FromInt64(query.LastCompileBatchOffsetStart),
+                    SqlValue.FromInt64(query.LastCompileBatchOffsetEnd),
+                    SqlValue.FromInt64(query.CountCompiles),
+                    zeroFloat, zero,    // compile duration
+                    zeroFloat, zero,    // bind duration
+                    zeroFloat, zero,    // bind CPU
+                    zeroFloat, zero,    // optimize duration
+                    zeroFloat, zero,    // optimize CPU
+                    zeroFloat, zero, zero, // compile memory
+                    SqlValue.FromBoolean(false),
+                ]);
+            }
+        }
+        return rows;
+    }
+
+    /// <summary>
+    /// Rows for <c>sys.query_store_plan</c>: one plan per query, whose
+    /// <c>query_plan</c> is a ShowPlan skeleton without an operator tree.
+    /// </summary>
+    private static List<SqlValue[]> EnumerateQueryStorePlans(Parser.BatchContext batch, Database database)
+    {
+        _ = batch;
+        var data = database.QueryStoreData;
+        var rows = new List<SqlValue[]>();
+        var engineVersion = SqlValue.FromNVarchar(ReferenceBuild.ProductVersion);
+        lock (data.Gate)
+        {
+            foreach (var plan in data.Plans)
+            {
+                rows.Add([
+                    SqlValue.FromInt64(plan.PlanId),
+                    SqlValue.FromInt64(plan.Query.QueryId),
+                    SqlValue.FromInt64(0),
+                    engineVersion,
+                    SqlValue.FromInt16(plan.CompatibilityLevel),
+                    QueryStoreHash(plan.QueryPlanHash),
+                    SqlValue.FromNVarchar(plan.PlanXml),
+                    SqlValue.FromBoolean(false),
+                    SqlValue.FromBoolean(plan.IsTrivial),
+                    SqlValue.FromBoolean(false),
+                    SqlValue.FromBoolean(plan.IsForced),
+                    SqlValue.FromBoolean(false),
+                    SqlValue.FromInt64(0),
+                    SqlValue.FromInt32(0),
+                    SqlValue.FromNVarchar("NONE"),
+                    SqlValue.FromInt64(1),
+                    QueryStoreTime(plan.InitialCompileStartTime),
+                    QueryStoreTime(plan.InitialCompileStartTime),
+                    QueryStoreTime(plan.LastExecutionTime),
+                    SqlValue.FromDouble(0),
+                    SqlValue.FromInt64(0),
+                    SqlValue.FromInt32(plan.IsForced ? 1 : 0),
+                    SqlValue.FromNVarchar(plan.IsForced ? "MANUAL" : "NONE"),
+                    SqlValue.FromBoolean(false),
+                    SqlValue.FromBoolean(plan.OptimizedPlanForcingDisabled),
+                    SqlValue.FromInt32(0),
+                    SqlValue.FromNVarchar("Compiled Plan"),
+                ]);
+            }
+        }
+        return rows;
+    }
+
+    /// <summary>
+    /// Rows for <c>sys.query_store_runtime_stats</c>, one per plan, interval
+    /// and execution type. Duration and CPU are measured, in microseconds;
+    /// logical reads are the pages the statement entered, as
+    /// <c>STATISTICS IO</c> counts them; every execution runs at DOP 1 with
+    /// no memory grant, and the physical, CLR, log and tempdb figures read 0.
+    /// </summary>
+    private static List<SqlValue[]> EnumerateQueryStoreRuntimeStats(Parser.BatchContext batch, Database database)
+    {
+        _ = batch;
+        var data = database.QueryStoreData;
+        var rows = new List<SqlValue[]>();
+        lock (data.Gate)
+        {
+            foreach (var stats in data.RuntimeStats)
+            {
+                var row = new List<SqlValue>(81)
+                {
+                    SqlValue.FromInt64(stats.Id),
+                    SqlValue.FromInt64(stats.PlanId),
+                    SqlValue.FromInt64(stats.IntervalId),
+                    SqlValue.FromByte(stats.ExecutionType),
+                    SqlValue.FromNVarchar(stats.ExecutionType switch
+                    {
+                        3 => "Aborted",
+                        4 => "Exception",
+                        _ => "Regular",
+                    }),
+                    QueryStoreTime(stats.FirstExecutionTime),
+                    QueryStoreTime(stats.LastExecutionTime),
+                    SqlValue.FromInt64(stats.Count),
+                };
+                void Measured(List<SqlValue> row, QueryStoreMetric metric, long count)
+                {
+                    row.Add(SqlValue.FromDouble(metric.Average(count)));
+                    row.Add(SqlValue.FromInt64(metric.Last));
+                    row.Add(SqlValue.FromInt64(metric.Min));
+                    row.Add(SqlValue.FromInt64(metric.Max));
+                    row.Add(SqlValue.FromDouble(metric.StandardDeviation(count)));
+                }
+                void Constant(List<SqlValue> row, long value)
+                {
+                    row.Add(SqlValue.FromDouble(value));
+                    row.Add(SqlValue.FromInt64(value));
+                    row.Add(SqlValue.FromInt64(value));
+                    row.Add(SqlValue.FromInt64(value));
+                    row.Add(SqlValue.FromDouble(0));
+                }
+                Measured(row, stats.Duration, stats.Count);
+                Measured(row, stats.CpuTime, stats.Count);
+                Measured(row, stats.LogicalIoReads, stats.Count);
+                Measured(row, stats.LogicalIoWrites, stats.Count);
+                Constant(row, 0);   // physical_io_reads
+                Constant(row, 0);   // clr_time
+                Constant(row, 1);   // dop
+                Constant(row, 0);   // query_max_used_memory
+                Measured(row, stats.RowCount, stats.Count);
+                Constant(row, 0);   // num_physical_io_reads
+                Constant(row, 0);   // log_bytes_used
+                Constant(row, 0);   // tempdb_space_used
+                Constant(row, 0);   // page_server_io_reads
+                row.Add(SqlValue.FromInt64(1));
+                rows.Add([.. row]);
+            }
+        }
+        return rows;
+    }
+
+    /// <summary>Rows for <c>sys.query_store_runtime_stats_interval</c>, opened by the first execution in each.</summary>
+    private static List<SqlValue[]> EnumerateQueryStoreIntervals(Parser.BatchContext batch, Database database)
+    {
+        _ = batch;
+        var data = database.QueryStoreData;
+        var rows = new List<SqlValue[]>();
+        lock (data.Gate)
+        {
+            foreach (var interval in data.Intervals)
+                rows.Add([SqlValue.FromInt64(interval.Id), QueryStoreTime(interval.Start), QueryStoreTime(interval.End), SqlValue.Null(SqlType.NVarcharMax)]);
+        }
+        return rows;
+    }
+
+    /// <summary>
+    /// Rows for <c>sys.query_context_settings</c>: <c>set_options</c> as real's
+    /// four big-endian bytes, the <c>status</c> real reports for an ordinary
+    /// session (0x0400), no cursor options.
+    /// </summary>
+    private static List<SqlValue[]> EnumerateQueryContextSettings(Parser.BatchContext batch, Database database)
+    {
+        _ = batch;
+        var data = database.QueryStoreData;
+        var rows = new List<SqlValue[]>();
+        lock (data.Gate)
+        {
+            foreach (var context in data.ContextSettings)
+            {
+                var key = context.Key;
+                var setOptions = new byte[4];
+                System.Buffers.Binary.BinaryPrimitives.WriteInt32BigEndian(setOptions, key.SetOptions);
+                rows.Add([
+                    SqlValue.FromInt64(context.Id),
+                    SqlValue.FromVarbinary(setOptions),
+                    SqlValue.FromInt16(key.LanguageId),
+                    SqlValue.FromInt16(key.DateFormat),
+                    SqlValue.FromByte(key.DateFirst),
+                    SqlValue.FromVarbinary([0x04, 0x00]),
+                    SqlValue.FromInt32(0),
+                    SqlValue.FromInt32(0),
+                    SqlValue.FromInt16(0),
+                    SqlValue.FromInt32(key.DefaultSchemaId),
+                    SqlValue.FromBoolean(false),
+                    SqlValue.FromVarbinary([0x00]),
+                ]);
+            }
+        }
+        return rows;
+    }
+
+    /// <summary>Rows for <c>sys.query_store_query_hints</c>, set by <c>sp_query_store_set_hints</c>.</summary>
+    private static List<SqlValue[]> EnumerateQueryStoreHints(Parser.BatchContext batch, Database database)
+    {
+        _ = batch;
+        var data = database.QueryStoreData;
+        var rows = new List<SqlValue[]>();
+        lock (data.Gate)
+        {
+            foreach (var hint in data.Hints)
+            {
+                rows.Add([
+                    SqlValue.FromInt64(hint.Id),
+                    SqlValue.FromInt64(hint.QueryId),
+                    SqlValue.FromInt64(1),
+                    SqlValue.FromNVarchar(hint.Text),
+                    SqlValue.FromInt32(0),
+                    SqlValue.FromNVarchar("NONE"),
+                    SqlValue.FromInt64(0),
+                    SqlValue.FromInt32(0),
+                    SqlValue.FromNVarchar("User"),
+                    SqlValue.Null(SqlType.NVarcharMax),
+                ]);
+            }
+        }
+        return rows;
+    }
+
+    /// <summary>Rows for <c>sys.query_store_plan_forcing_locations</c>, one per plan <c>sp_query_store_force_plan</c> forced.</summary>
+    private static List<SqlValue[]> EnumerateQueryStoreForcingLocations(Parser.BatchContext batch, Database database)
+    {
+        _ = batch;
+        var data = database.QueryStoreData;
+        var rows = new List<SqlValue[]>();
+        lock (data.Gate)
+        {
+            foreach (var location in data.ForcingLocations)
+            {
+                rows.Add([
+                    SqlValue.FromInt64(location.Id),
+                    SqlValue.FromInt64(location.QueryId),
+                    SqlValue.FromInt64(location.PlanId),
+                    SqlValue.FromInt64(1),
+                    SqlValue.FromDateTime(location.Timestamp.ToLocalTime()),
+                    SqlValue.FromInt32(1),
+                    SqlValue.FromNVarchar("MANUAL"),
+                ]);
+            }
+        }
+        return rows;
+    }
+
+    /// <summary>
+    /// Rows for <c>sys.query_store_wait_stats</c>: a plan's lock waits per
+    /// interval and execution type, category 3 (<c>Lock</c>), the only waits
+    /// the simulator has.
+    /// </summary>
+    private static List<SqlValue[]> EnumerateQueryStoreWaitStats(Parser.BatchContext batch, Database database)
+    {
+        _ = batch;
+        var data = database.QueryStoreData;
+        var rows = new List<SqlValue[]>();
+        lock (data.Gate)
+        {
+            foreach (var waits in data.WaitStats)
+            {
+                rows.Add([
+                    SqlValue.FromInt64(waits.Id),
+                    SqlValue.FromInt64(waits.PlanId),
+                    SqlValue.FromInt64(waits.IntervalId),
+                    SqlValue.FromInt16(3),
+                    SqlValue.FromNVarchar("Lock"),
+                    SqlValue.FromByte(waits.ExecutionType),
+                    SqlValue.FromNVarchar(waits.ExecutionType switch
+                    {
+                        3 => "Aborted",
+                        4 => "Exception",
+                        _ => "Regular",
+                    }),
+                    SqlValue.FromInt64((long)waits.WaitTime.Sum),
+                    SqlValue.FromDouble(waits.WaitTime.Average(waits.Count)),
+                    SqlValue.FromInt64(waits.WaitTime.Last),
+                    SqlValue.FromInt64(waits.WaitTime.Min),
+                    SqlValue.FromInt64(waits.WaitTime.Max),
+                    SqlValue.FromDouble(waits.WaitTime.StandardDeviation(waits.Count)),
+                    SqlValue.FromInt64(1),
+                ]);
+            }
+        }
+        return rows;
     }
 }

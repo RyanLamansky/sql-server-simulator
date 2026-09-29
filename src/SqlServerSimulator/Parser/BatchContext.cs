@@ -577,6 +577,13 @@ internal sealed class BatchContext
     public List<ReplayedLock[]>? PlanCacheSequenceLocks;
 
     /// <summary>
+    /// Where each <see cref="PlanCacheSequence"/> entry's text starts and
+    /// ends in the command, index for index — what a replay records the
+    /// statement's Query Store capture under.
+    /// </summary>
+    public List<(int Start, int End)>? PlanCacheSequenceSpans;
+
+    /// <summary>
     /// Records every lock acquisition and <c>NOWAIT</c> table while non-null —
     /// armed by the SELECT arm around a top-level statement's parse in a batch
     /// the plan cache may store. Taking schema-stability and table-level data

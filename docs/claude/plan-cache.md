@@ -150,6 +150,7 @@ Four rules keep a shared sequence honest — three of them found by things that 
 Tokens themselves are immutable: `Token` holds `(command, startIndex, length)` readonly, and the one mutable member in the hierarchy is `UnquotedString.ContextualKeyword`'s lazy classification, which is an idempotent pure function of the token's own span written to an enum field — a benign race whichever thread gets there first.
 
 Capacity is the plan cache's: 1024 entries, "first 1024 unique texts win", no LRU — until a [clear](#clearing-dbcc-freeproccache) empties it.
+A parse past capacity still collects its sequence and publishes nothing: Query Store reads a statement's tokens back from it (`ParserContext.StatementTokens`) rather than tokenizing the text again.
 
 ## The shared-plan contract: per-execution state lives per execution
 
@@ -208,6 +209,7 @@ A cache hit short-circuits the full dispatch via `ReplayCachedSelection`:
   `MaterializeRows()` drains them, mirroring the standard path's `LastStatementRowCount` accounting — and, like the standard path, keeping the producer's own row form (see [`data-reader.md`](data-reader.md#the-row-form-the-reader-reads)).
 - Outcome shape: `SimulatedSqlResultSet` (the only shape we cache — assignment-only Selections never cache).
 - `NOCOUNT` and `TEXTSIZE` are stamped on the outcome as the dispatch loop's post-statement walk would, `WriteBackOutputParameters` runs, and queued messages are placed in the outcome stream, same as the standard path.
+- Each statement records its Query Store execution, under the command-text span its entry kept (`PlanCacheEntry.Spans`), as the dispatch loop records a parsed one ([`database-options.md`](database-options.md#capture)).
 
 The replay path is also where `PlanCacheHits` increments; misses increment in `CreateResultSetsForCommand` on the fall-through.
 

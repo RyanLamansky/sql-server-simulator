@@ -37,7 +37,10 @@ partial class Simulation
         or "sp_datatype_info_100" or "sp_depends" or "sp_describe_first_result_set" or "sp_describe_undeclared_parameters"
         or "sp_executesql" or "sp_fkeys" or "sp_getapplock" or "sp_help" or "sp_helpconstraint" or "sp_helpdb"
         or "sp_helpfile" or "sp_helpindex" or "sp_helprotect" or "sp_helpsrvrole" or "sp_helpsrvrolemember" or "sp_helpstats" or "sp_helptext" or "sp_helptrigger"
-        or "sp_helpuser" or "sp_MSforeachdb" or "sp_MSforeachtable" or "sp_pkeys" or "sp_releaseapplock"
+        or "sp_helpuser" or "sp_MSforeachdb" or "sp_MSforeachtable" or "sp_pkeys" or "sp_query_store_clear_hints"
+        or "sp_query_store_clear_message_queues" or "sp_query_store_consistency_check" or "sp_query_store_flush_db" or "sp_query_store_force_plan"
+        or "sp_query_store_remove_plan" or "sp_query_store_remove_plan_feedback" or "sp_query_store_remove_query" or "sp_query_store_reset_exec_stats"
+        or "sp_query_store_set_hints" or "sp_query_store_unforce_plan" or "sp_releaseapplock"
         or "sp_server_info" or "sp_set_session_context" or "sp_spaceused" or "sp_special_columns"
         or "sp_special_columns_100" or "sp_sproc_columns" or "sp_sproc_columns_100" or "sp_statistics"
         or "sp_statistics_100" or "sp_stored_procedures" or "sp_table_privileges" or "sp_tablecollations_100"
@@ -272,6 +275,17 @@ partial class Simulation
             "sp_MSforeachdb" => this.InvokeSpMsForEachDb(batch),
             "sp_MSforeachtable" => this.InvokeSpMsForEachTable(batch),
             "sp_pkeys" => InvokeSpPkeys(batch),
+            "sp_query_store_clear_hints" => InvokeSpQueryStoreHints(batch, set: false),
+            "sp_query_store_clear_message_queues" => InvokeSpQueryStoreClearMessageQueues(batch),
+            "sp_query_store_consistency_check" => InvokeSpQueryStoreConsistencyCheck(batch),
+            "sp_query_store_flush_db" => InvokeSpQueryStoreFlushDb(batch),
+            "sp_query_store_force_plan" => InvokeSpQueryStoreForcePlan(batch, force: true),
+            "sp_query_store_remove_plan" => InvokeSpQueryStorePlanAction(batch, remove: true),
+            "sp_query_store_remove_plan_feedback" => InvokeSpQueryStoreRemovePlanFeedback(batch),
+            "sp_query_store_remove_query" => InvokeSpQueryStoreRemoveQuery(batch),
+            "sp_query_store_reset_exec_stats" => InvokeSpQueryStorePlanAction(batch, remove: false),
+            "sp_query_store_set_hints" => InvokeSpQueryStoreHints(batch, set: true),
+            "sp_query_store_unforce_plan" => InvokeSpQueryStoreForcePlan(batch, force: false),
             "sp_recompile" => InvokeSpRecompile(batch, CalledName(procName)),
             "sp_refreshsqlmodule" => this.InvokeSpRefreshSqlModule(batch),
             "sp_refreshview" => this.InvokeSpRefreshView(batch),

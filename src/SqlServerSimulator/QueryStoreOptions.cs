@@ -3,10 +3,11 @@ namespace SqlServerSimulator;
 /// <summary>
 /// A database's Query Store configuration — everything
 /// <c>ALTER DATABASE … SET QUERY_STORE</c> can set and
-/// <c>sys.database_query_store_options</c> projects. The simulator never
-/// captures a query, so nothing here changes how a statement runs; the values
-/// are retained so a database describes its configuration the way real does,
-/// which is what a management tool reads back after configuring it.
+/// <c>sys.database_query_store_options</c> projects. Capture reads the state,
+/// the capture mode and its policy, the interval length and the wait-stats
+/// switch; the rest is retained so a database describes its configuration the
+/// way real does, which is what a management tool reads back after
+/// configuring it.
 /// </summary>
 /// <remarks>
 /// Field defaults are a fresh SQL Server 2025 user database's (probe-confirmed

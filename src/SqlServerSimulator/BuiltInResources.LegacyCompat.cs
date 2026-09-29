@@ -75,6 +75,19 @@ internal static partial class BuiltInResources
         // sp_recompile: marks an object's plans for recompilation — answered
         // with its confirmation, there being nothing further to mark.
         "sp_recompile",
+        // The Query Store procedures, acting on a database's captured queries,
+        // plans and runtime statistics; see docs/claude/database-options.md.
+        "sp_query_store_clear_hints",
+        "sp_query_store_clear_message_queues",
+        "sp_query_store_consistency_check",
+        "sp_query_store_flush_db",
+        "sp_query_store_force_plan",
+        "sp_query_store_remove_plan",
+        "sp_query_store_remove_plan_feedback",
+        "sp_query_store_remove_query",
+        "sp_query_store_reset_exec_stats",
+        "sp_query_store_set_hints",
+        "sp_query_store_unforce_plan",
         // sp_settriggerorder: pins a trigger first / last among the AFTER
         // triggers an action runs; see docs/claude/triggers.md.
         "sp_settriggerorder",
@@ -790,6 +803,7 @@ internal static partial class BuiltInResources
             // Real types these as extended procedures although they're named
             // sp_ (probed 2026-09-24).
             var isExtended = proc.StartsWith("xp_", StringComparison.OrdinalIgnoreCase)
+                || proc.StartsWith("sp_query_store_", StringComparison.Ordinal)
                 || proc is "sp_describe_first_result_set" or "sp_describe_undeclared_parameters" or "sp_executesql" or "sp_set_session_context" or "sp_xml_preparedocument" or "sp_xml_removedocument";
             objects.Add(new SystemObject(
                 Schemas.CatalogViewObjectIds.ByProcedureName.TryGetValue(proc, out var realId) ? realId : SystemObjectId(proc), proc, Database.SysSchemaId,

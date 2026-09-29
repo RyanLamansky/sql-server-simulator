@@ -88,6 +88,18 @@ internal sealed class IoStatistics
     /// <summary>Whether the statement touched nothing to report.</summary>
     public bool IsEmpty => this.tables.Count == 0;
 
+    /// <summary>
+    /// Every logical read counted so far, LOB reads included — the figure
+    /// Query Store records as <c>logical_io_reads</c>.
+    /// </summary>
+    public long TotalLogicalReads()
+    {
+        long total = 0;
+        foreach (var counts in this.tables)
+            total += counts.LogicalReads + (counts.Table is { } table ? table.Heap.LobPagesRead - counts.LobPagesReadBefore : 0);
+        return total;
+    }
+
     /// <summary>Forgets everything recorded, once an <c>IF</c> or <c>WHILE</c> condition has reported.</summary>
     public void Clear() => this.tables.Clear();
 

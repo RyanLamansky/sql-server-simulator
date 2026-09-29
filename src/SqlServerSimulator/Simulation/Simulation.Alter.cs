@@ -273,12 +273,23 @@ partial class Simulation
         // 2026-09-27 against SQL Server 2025).
         var options = 0;
         var changeTracking = false;
+        var queryStore = false;
         combinesChangeTracking = false;
         while (true)
         {
             options++;
             var beforeOption = context.SaveCheckpoint();
-            changeTracking |= context.GetNextOptional() is UnquotedString word && BuiltInToken.Equals(word.Value, "CHANGE_TRACKING");
+            var optionName = context.GetNextOptional() as UnquotedString;
+            changeTracking |= optionName is not null && BuiltInToken.Equals(optionName.Value, "CHANGE_TRACKING");
+            // One QUERY_STORE clause per statement (Msg 12417, probed
+            // 2026-09-29 against SQL Server 2025), refused before the second
+            // clause's own values are read.
+            if (optionName is not null && BuiltInToken.Equals(optionName.Value, "QUERY_STORE"))
+            {
+                if (queryStore)
+                    throw SimulatedSqlException.QueryStoreOptionGivenTwice();
+                queryStore = true;
+            }
             context.RestoreCheckpoint(beforeOption);
             if (!TryParseAlterDatabaseSetOption(context, target, ref changesSnapshotIsolation))
             {
@@ -758,21 +769,21 @@ partial class Simulation
         };
 
     /// <summary>
-    /// Cursor on the QUERY_STORE name token. Accepts three shapes per probe:
-    /// <c>= OFF</c>, <c>= ON</c> [optional <c>( … )</c> options block], and
-    /// <c>CLEAR [ALL]</c>. Every form lands on <see cref="Database.QueryStore"/>
-    /// — see <see cref="QueryStoreOptions"/> for why the values are retained
-    /// even though nothing reads them at execution time.
+    /// Cursor on the QUERY_STORE name token. Accepts four shapes per probe:
+    /// <c>= OFF</c>, <c>= ON</c> [optional <c>( … )</c> options block], a bare
+    /// options block, and <c>CLEAR [ALL]</c>. Every form lands on
+    /// <see cref="Database.QueryStore"/>, whose state and capture mode decide
+    /// what the store records.
     /// </summary>
     /// <remarks>
     /// The whole tail parses into a copy and swaps in only at the end, so an
     /// options block that raises partway through leaves the configuration as it
-    /// was. <c>CLEAR</c> / <c>CLEAR ALL</c> purge captured runtime statistics —
-    /// there are none, and neither form touches the configuration. Real's
-    /// runtime validation of a sub-option's <em>value</em> isn't modeled: it is
-    /// patchy on real (<c>DATA_FLUSH_INTERVAL_SECONDS = 0</c> raises Msg 153
-    /// but <c>MAX_STORAGE_SIZE_MB = 0</c> is accepted, both probed 2026-08-08),
-    /// so any value the grammar admits is stored.
+    /// was. A bare options block configures without moving the state — an OFF
+    /// store stays OFF (probed 2026-09-29) — while its <c>OPERATION_MODE</c>
+    /// moves an enabled one. <c>CLEAR</c> / <c>CLEAR ALL</c> forget everything
+    /// captured and touch neither the state nor the configuration. The value
+    /// checks raise as the batch compiles, so a batch carrying one runs none of
+    /// its statements.
     /// </remarks>
     private static bool ParseQueryStoreTail(ParserContext context, Database target)
     {
@@ -786,32 +797,47 @@ partial class Simulation
             if (context.GetNextOptional() is not ReservedKeyword { Keyword: Keyword.All })
                 context.RestoreCheckpoint(checkpoint);
             RejectQueryStoreOnSystemDatabase(context, target);
+            if (!context.Batch.IsSkipping)
+                target.QueryStoreData.Clear();
             return true;
         }
-        if (next is not Operator { Character: '=' })
-            return false;
-        switch (context.GetNextRequired())
+        if (next is Operator { Character: '(' })
         {
-            case ReservedKeyword { Keyword: Keyword.Off }:
-                pending.DesiredState = QueryStoreState.Off;
-                break;
-            case ReservedKeyword { Keyword: Keyword.On }:
-                // A bare ON, and an ON carrying only unrelated sub-options,
-                // both land READ_WRITE; an OPERATION_MODE entry overrides it.
-                pending.DesiredState = QueryStoreState.ReadWrite;
-                var afterOn = context.SaveCheckpoint();
-                if (context.GetNextOptional() is Operator { Character: '(' })
-                {
-                    if (!ParseQueryStoreOptionsBlock(context, pending))
-                        return false;
-                }
-                else
-                {
-                    context.RestoreCheckpoint(afterOn);
-                }
-                break;
-            default:
+            var wasOff = pending.DesiredState == QueryStoreState.Off;
+            if (!ParseQueryStoreOptionsBlock(context, pending))
                 return false;
+            if (wasOff)
+                pending.DesiredState = QueryStoreState.Off;
+        }
+        else if (next is not Operator { Character: '=' })
+        {
+            return false;
+        }
+        else
+        {
+            switch (context.GetNextRequired())
+            {
+                case ReservedKeyword { Keyword: Keyword.Off }:
+                    pending.DesiredState = QueryStoreState.Off;
+                    break;
+                case ReservedKeyword { Keyword: Keyword.On }:
+                    // A bare ON, and an ON carrying only unrelated sub-options,
+                    // both land READ_WRITE; an OPERATION_MODE entry overrides it.
+                    pending.DesiredState = QueryStoreState.ReadWrite;
+                    var afterOn = context.SaveCheckpoint();
+                    if (context.GetNextOptional() is Operator { Character: '(' })
+                    {
+                        if (!ParseQueryStoreOptionsBlock(context, pending))
+                            return false;
+                    }
+                    else
+                    {
+                        context.RestoreCheckpoint(afterOn);
+                    }
+                    break;
+                default:
+                    return false;
+            }
         }
         RejectQueryStoreOnSystemDatabase(context, target);
         if (!context.Batch.IsSkipping)
@@ -841,11 +867,16 @@ partial class Simulation
     /// </summary>
     private static bool ParseQueryStoreOptionsBlock(ParserContext context, QueryStoreOptions pending)
     {
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         while (true)
         {
             context.MoveNextRequired();
             if (context.Token is not UnquotedString sub)
                 return false;
+            // A repeated entry is refused ahead of its value (Msg 12401,
+            // probed 2026-09-29 against SQL Server 2025).
+            if (!seen.Add(sub.Value) && IsQueryStoreSubOption(sub.Value))
+                throw SimulatedSqlException.QueryStoreOptionRepeated(sub.Value.ToUpperInvariant());
             if (context.GetNextRequired() is not Operator { Character: '=' })
                 return false;
             if (!ParseQueryStoreSubOption(context, pending, sub))
@@ -874,9 +905,17 @@ partial class Simulation
             case "CLEANUP_POLICY":
                 return ConsumeSubBlockOpen(context) && ParseQueryStoreCleanupPolicy(context, pending);
             case "DATA_FLUSH_INTERVAL_SECONDS":
-                return TryReadInteger(context, out pending.FlushIntervalSeconds);
+                if (!TryReadInteger(context, out pending.FlushIntervalSeconds))
+                    return false;
+                if (pending.FlushIntervalSeconds < 60)
+                    throw SimulatedSqlException.QueryStoreOptionInvalid("flush_interval_seconds", 15, 5);
+                return true;
             case "INTERVAL_LENGTH_MINUTES":
-                return TryReadInteger(context, out pending.IntervalLengthMinutes);
+                if (!TryReadInteger(context, out pending.IntervalLengthMinutes))
+                    return false;
+                if (pending.IntervalLengthMinutes is not (1 or 5 or 10 or 15 or 30 or 60 or 1440))
+                    throw SimulatedSqlException.QueryStoreOptionInvalid("interval_length_minutes", 16, 6);
+                return true;
             case "MAX_PLANS_PER_QUERY":
                 return TryReadInteger(context, out pending.MaxPlansPerQuery);
             case "MAX_STORAGE_SIZE_MB":
@@ -980,6 +1019,8 @@ partial class Simulation
                 case "EXECUTION_COUNT":
                     if (!TryReadInteger(context, out var executions))
                         return false;
+                    if (executions < 1)
+                        throw SimulatedSqlException.QueryStoreCapturePolicyValueInvalid(executions, "execution_count", 1);
                     pending.CapturePolicyExecutionCount = (int)executions;
                     break;
                 case "STALE_CAPTURE_POLICY_THRESHOLD":
@@ -989,15 +1030,21 @@ partial class Simulation
                     var hoursPerUnit = IsBareWord(unit, "DAYS") || IsBareWord(unit, "DAY") ? 24
                         : IsBareWord(unit, "HOURS") || IsBareWord(unit, "HOUR") ? 1
                         : throw SimulatedSqlException.SyntaxErrorNear(entry);
+                    if (threshold * hoursPerUnit is < 1 or > 7 * 24)
+                        throw SimulatedSqlException.QueryStoreStaleThresholdInvalid();
                     pending.CapturePolicyStaleThresholdHours = (int)threshold * hoursPerUnit;
                     break;
                 case "TOTAL_COMPILE_CPU_TIME_MS":
                     if (!TryReadInteger(context, out pending.CapturePolicyTotalCompileCpuTimeMs))
                         return false;
+                    if (pending.CapturePolicyTotalCompileCpuTimeMs < 1)
+                        throw SimulatedSqlException.QueryStoreCapturePolicyValueInvalid(pending.CapturePolicyTotalCompileCpuTimeMs, "total_compile_cpu_time_ms", 1);
                     break;
                 case "TOTAL_EXECUTION_CPU_TIME_MS":
                     if (!TryReadInteger(context, out pending.CapturePolicyTotalExecutionCpuTimeMs))
                         return false;
+                    if (pending.CapturePolicyTotalExecutionCpuTimeMs < 1)
+                        throw SimulatedSqlException.QueryStoreCapturePolicyValueInvalid(pending.CapturePolicyTotalExecutionCpuTimeMs, "total_execution_cpu_time_ms", 2);
                     break;
                 default:
                     throw SimulatedSqlException.SyntaxErrorNear(entry);
@@ -1010,18 +1057,26 @@ partial class Simulation
     }
 
     /// <summary>
-    /// Reads the integer value after a sub-option's <c>=</c>. A literal past
-    /// <c>int</c> range types as <c>numeric</c> rather than <c>int</c>, so the
-    /// coercion — not <c>AsInt32</c> — is what accepts the whole domain.
+    /// Reads the integer value after a sub-option's <c>=</c>: an unsigned
+    /// <c>int</c> literal. One past <c>int</c> range is Msg 102 at the number
+    /// and a sign Msg 102 at the sign, as real's grammar has them (probed
+    /// 2026-09-29 against SQL Server 2025).
     /// </summary>
     private static bool TryReadInteger(ParserContext context, out long value)
     {
         value = 0;
-        if (context.GetNextRequired() is not Numeric { Value: { IsNull: false } numeric })
+        if (context.GetNextRequired() is not Numeric { Value: { IsNull: false } numeric } token)
             return false;
-        value = numeric.CoerceTo(SqlType.BigInt).AsInt64;
+        if (numeric.Type is not Int32SqlType)
+            throw SimulatedSqlException.SyntaxErrorNear(token);
+        value = numeric.AsInt32;
         return true;
     }
+
+    /// <summary>Whether <paramref name="name"/> is one of the top-level QUERY_STORE sub-options, which may each appear once.</summary>
+    private static bool IsQueryStoreSubOption(string name) => BuiltInToken.EqualsAny(name,
+        "CLEANUP_POLICY", "DATA_FLUSH_INTERVAL_SECONDS", "INTERVAL_LENGTH_MINUTES", "MAX_PLANS_PER_QUERY", "MAX_STORAGE_SIZE_MB",
+        "OPERATION_MODE", "QUERY_CAPTURE_MODE", "QUERY_CAPTURE_POLICY", "SIZE_BASED_CLEANUP_MODE", "WAIT_STATS_CAPTURE_MODE");
 
     private static bool IsOffKeyword(Token token) => token is ReservedKeyword { Keyword: Keyword.Off };
 

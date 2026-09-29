@@ -73,6 +73,13 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     private List<Token>? memoCollector;
 
     /// <summary>
+    /// The sequence this parse collected and published on reaching the end of
+    /// its text, kept so <see cref="StatementTokens"/> can still read the last
+    /// statement's tokens once the collector is released.
+    /// </summary>
+    private List<Token>? publishedTokens;
+
+    /// <summary>
     /// The tokenization inputs this context bound to. Re-checked on every
     /// <see cref="MoveNext"/>: a mid-batch <c>SET QUOTED_IDENTIFIER</c> or
     /// <c>USE</c> changes what the remaining characters tokenize to, and both
@@ -176,6 +183,13 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     /// pointing past the restore, which no live parse can observe.
     /// </summary>
     public Token? LastToken;
+
+    /// <summary>
+    /// Where the token before <see cref="Token"/> ended — once a statement
+    /// has parsed, the end of its own text, which Query Store stores without
+    /// the separator or comment that follows it.
+    /// </summary>
+    public int PreviousTokenEnd;
 
     /// <summary>
     /// How many parenthesized <em>boolean</em> groups the predicate parser is
@@ -660,11 +674,12 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     /// scans ahead, rewinds to re-parse from an earlier point, then jumps back
     /// to where the scan stopped is the <c>FROM</c>-clause probe's shape.
     /// </summary>
-    public readonly struct Checkpoint(int index, Token? token, int memoPosition)
+    public readonly struct Checkpoint(int index, Token? token, int memoPosition, int previousTokenEnd)
     {
         public readonly int Index = index;
         public readonly Token? Token = token;
         public readonly int MemoPosition = memoPosition;
+        public readonly int PreviousTokenEnd = previousTokenEnd;
     }
 
     /// <summary>
@@ -675,7 +690,7 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     /// the saved index produces the same token sequence), so a checkpoint
     /// + restore round-trip is byte-stable.
     /// </summary>
-    public Checkpoint SaveCheckpoint() => new(this.index, this.Token, this.memoPosition);
+    public Checkpoint SaveCheckpoint() => new(this.index, this.Token, this.memoPosition, this.PreviousTokenEnd);
 
     /// <summary>
     /// Raw source text of the command from <paramref name="startIndex"/> up to the
@@ -728,6 +743,30 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
         || this.commandText.Contains("goto", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
+    /// The tokens from the one <paramref name="start"/> sat on up to, not
+    /// including, <see cref="Token"/> — a statement's own, once it has parsed —
+    /// when this parse holds its token sequence (replaying a memoized one or
+    /// collecting one), so a reader of the statement's tokens needn't
+    /// tokenize its text again; null otherwise.
+    /// </summary>
+    public List<Token>? StatementTokens(Checkpoint start)
+    {
+        var first = start.MemoPosition - 1;
+        var end = this.Token is null ? this.memoPosition : this.memoPosition - 1;
+        if (start.Token is null || first < 0 || end <= first)
+            return null;
+        if (this.memoTokens is { } sequence)
+        {
+            if (end > sequence.Length || !ReferenceEquals(sequence[first], start.Token))
+                return null;
+            return [.. sequence.AsSpan(first, end - first)];
+        }
+        if ((this.memoCollector ?? this.publishedTokens) is { } collected && end <= collected.Count && ReferenceEquals(collected[first], start.Token))
+            return collected.GetRange(first, end - first);
+        return null;
+    }
+
+    /// <summary>
     /// Restores a checkpoint captured by <see cref="SaveCheckpoint"/>.
     /// </summary>
     public void RestoreCheckpoint(Checkpoint checkpoint)
@@ -735,6 +774,7 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
         this.index = checkpoint.Index;
         this.Token = checkpoint.Token;
         this.memoPosition = checkpoint.MemoPosition;
+        this.PreviousTokenEnd = checkpoint.PreviousTokenEnd;
     }
 
     /// <summary>
@@ -852,6 +892,8 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
             {
                 var memoized = memo[this.memoPosition++];
                 this.index = memoized.EndIndex;
+                if (this.Token is { } previous)
+                    this.PreviousTokenEnd = previous.EndIndex;
 #if DEBUG
                 tokens.Add(memoized);
 #endif
@@ -860,6 +902,8 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
             }
 
             this.index = commandText.Length;
+            if (this.Token is { } last)
+                this.PreviousTokenEnd = last.EndIndex;
             this.LastToken = this.Token;
             this.Token = null;
             return false;
@@ -877,6 +921,8 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
 #endif
                 CollectToken(token);
                 this.memoPosition++;
+                if (this.Token is { } previous)
+                    this.PreviousTokenEnd = previous.EndIndex;
                 this.Token = token;
                 return true;
             }
@@ -905,11 +951,14 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
         // trusting to serve every later execution.
         if (this.memoCollector is { } collected && collected.Count == this.memoPosition)
         {
-            if (!RewritesTokenizationInputs(collected))
+            this.publishedTokens = collected;
+            if (this.Simulation.TokenMemo.HasCapacity && !RewritesTokenizationInputs(collected))
                 this.Simulation.TokenMemo.Publish(this.memoKey, [.. collected]);
             this.memoCollector = null;
         }
 
+        if (this.Token is { } final)
+            this.PreviousTokenEnd = final.EndIndex;
         this.LastToken = this.Token;
         this.Token = null;
         return false;
@@ -987,9 +1036,12 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
         var database = this.CurrentDatabase;
         this.memoKey = new TokenMemoKey(commandText, database.Collation, database.CompatibilityLevel, this.QuotedIdentifiers);
         var memo = this.Simulation.TokenMemo;
+        // A full memo publishes nothing more, but the sequence is collected
+        // anyway: Query Store reads a statement's tokens back rather than
+        // tokenizing its text a second time.
         if (memo.TryGet(this.memoKey) is { } stored)
             this.memoTokens = stored;
-        else if (memo.HasCapacity)
+        else
             this.memoCollector = [];
     }
 

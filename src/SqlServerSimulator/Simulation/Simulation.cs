@@ -998,9 +998,12 @@ public sealed partial class Simulation
     /// dispatch order, plus the <see cref="SchemaVersion"/> active when they
     /// were parsed. Usually one; a batch of several top-level SELECTs caches
     /// as the sequence it is.</summary>
-    private sealed class PlanCacheEntry(Selection[] plans, ReplayedLock[][] locks, long schemaVersionAtParse)
+    private sealed class PlanCacheEntry(Selection[] plans, ReplayedLock[][] locks, (int Start, int End)[] spans, long schemaVersionAtParse)
     {
         public readonly Selection[] Plans = plans;
+
+        /// <summary>Where each of <see cref="Plans"/> is written in the command, for its Query Store capture.</summary>
+        public readonly (int Start, int End)[] Spans = spans;
 
         /// <summary>The locks each of <see cref="Plans"/> took as it parsed, which its replay retakes.</summary>
         public readonly ReplayedLock[][] Locks = locks;
@@ -1394,7 +1397,7 @@ public sealed partial class Simulation
 #if DEBUG
         PlanCacheCaptureAudit.Verify(plans, text);
 #endif
-        var entry = new PlanCacheEntry([.. plans], [.. batch.PlanCacheSequenceLocks!], batch.PlanCacheSchemaVersion);
+        var entry = new PlanCacheEntry([.. plans], [.. batch.PlanCacheSequenceLocks!], [.. batch.PlanCacheSequenceSpans!], batch.PlanCacheSchemaVersion);
         if (this.planCache.ContainsKey(key))
             this.planCache[key] = entry;
         else if (this.PlanCacheCount < PlanCacheCapacity && this.planCache.TryAdd(key, entry))
@@ -1427,7 +1430,10 @@ public sealed partial class Simulation
                 _ = Interlocked.Decrement(ref this.compiledBatchCount);
         }
         if (sqlHandle is null && database is null)
+        {
             this.TokenMemo.Clear();
+            this.ClearQueryStoreShapes();
+        }
     }
 
     /// <summary>
@@ -1601,15 +1607,23 @@ public sealed partial class Simulation
                 SimulatedSqlResultSet? executed = null;
                 SimulatedSqlException? cutShort = null;
                 int rowCount;
+                // Query Store times a replayed statement as the dispatch loop
+                // does a parsed one.
+                var queryStore = BeginQueryStoreCapture(batch, io: null);
+                var queryStoreIo = queryStore is not null ? connection.StatementIo = new IoStatistics() : null;
                 try
                 {
                     executed = DataMasking.ForClient(selection.Execute(batch), selection.ColumnMasks, batch).WithRowCountLimit(connection.RowCountLimit);
                     rowCount = executed.MaterializeRows();
                     if (selection.CountsForClauseSourceRows)
                         rowCount = executed.ReportedRowCount = batch.CurrentStatement.ForClauseSourceRows;
+                    if (queryStore is { } capture)
+                        EndQueryStoreCapture(batch, capture, queryStoreIo, entry.Spans[statement].Start, entry.Spans[statement].End, 0, rowCount);
                 }
                 catch (SimulatedSqlException error) when (!selection.IsAssignmentOnly)
                 {
+                    if (queryStore is { } capture)
+                        EndQueryStoreCapture(batch, capture, queryStoreIo, entry.Spans[statement].Start, entry.Spans[statement].End, error.IsAttention ? (byte)3 : (byte)4, 0);
                     cutShort = error;
                     rowCount = 0;
                     executed ??= new SimulatedSqlResultSet(selection.Schema, selection.ColumnNames, new List<byte[]>())
@@ -1624,6 +1638,11 @@ public sealed partial class Simulation
                     };
                     executed.EndedByError = true;
                     executed.ErrorCaught = CaughtByTryFrame(batch, error);
+                }
+                finally
+                {
+                    if (queryStoreIo is not null)
+                        connection.StatementIo = null;
                 }
                 connection.LastStatementRowCount = rowCount;
                 var replayed = selection.IsAssignmentOnly
@@ -2202,10 +2221,14 @@ public sealed partial class Simulation
         connection.CurrentExecutingThreadId = Environment.CurrentManagedThreadId;
         // SET STATISTICS IO: the statement gathers its own reads, its caller's
         // put aside until it completes.
+        // Query Store times the statement and counts its reads the same way,
+        // for a database whose store is recording.
+        var queryStore = IsQueryStoreCandidate(batch.Parser.Token) ? BeginQueryStoreCapture(batch, io: null) : null;
         var enclosingIo = connection.StatementIo;
         if (reportsStatistics)
-            connection.StatementIo = connection.StatisticsIo ? new IoStatistics() : null;
-        var statementIo = reportsStatistics ? connection.StatementIo : null;
+            connection.StatementIo = connection.StatisticsIo || queryStore is not null ? new IoStatistics() : null;
+        var statementIo = reportsStatistics && connection.StatisticsIo ? connection.StatementIo : null;
+        var queryStoreIo = queryStore is not null ? connection.StatementIo : null;
         // Function body-shape recording (Msg 455 / 444 / 443) — active only
         // while a scalar UDF's / multi-statement TVF's body binds at CREATE.
         // An IF / WHILE brackets its contained statements so none of them can
@@ -2440,6 +2463,9 @@ public sealed partial class Simulation
             if (opensConditional)
                 shape!.ConditionalDepth--;
         }
+
+        if (queryStore is { } capture && !deferredNameError && !gatheredBindError)
+            EndFramedQueryStoreCapture(batch, capture, queryStoreIo, propagated ?? continuedError ?? caught, statementStart);
 
         if (propagated is not null)
         {
@@ -3429,6 +3455,7 @@ public sealed partial class Simulation
                     {
                         (batch.PlanCacheSequence ??= []).Add(selection);
                         (batch.PlanCacheSequenceLocks ??= []).Add(replayLocks is null ? [] : [.. replayLocks]);
+                        (batch.PlanCacheSequenceSpans ??= []).Add((batch.CurrentStatement.StartIndex, context.PreviousTokenEnd));
                         if (batch.PlanCacheSequence.Count == batch.TopLevelStatementsDispatched + 1
                             && IsAtEndOfBatch(context))
                         {

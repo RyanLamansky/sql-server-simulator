@@ -424,6 +424,7 @@ internal sealed class LockManager
                 // majority — doesn't write the session's wait fields at all.
                 if (waited)
                 {
+                    owner.LockWaitedMilliseconds += Environment.TickCount64 - owner.WaitStartedTicks;
                     owner.WaitingOnResource = null;
                     owner.WaitingForMode = null;
                     owner.ChosenAsDeadlockVictim = false;

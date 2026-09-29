@@ -44,8 +44,10 @@ partial class Simulation
         var context = batch.Parser;
         var connection = context.Connection;
 
+        var ifStart = batch.CurrentStatement.StartIndex;
         context.MoveNextRequired(); // consume IF
         var cond = ParseCondition(batch);
+        var conditionEnd = context.PreviousTokenEnd;
 
         var bindError = BindCondition(cond, batch);
 
@@ -58,7 +60,11 @@ partial class Simulation
         var outerSkipping = batch.IsSkipping || bindError is not null;
         SimulatedSqlException? conditionError = null;
         StatementClock? conditionClock = connection.StatisticsTime ? StatementClock.Start(connection) : null;
+        IoStatistics? conditionIo = null;
+        var conditionCapture = outerSkipping ? null : BeginConditionQueryStoreCapture(batch, out conditionIo);
         var condResult = !outerSkipping && RunCondition(cond, batch, out conditionError);
+        if (conditionCapture is { } capture)
+            EndConditionQueryStoreCapture(batch, capture, conditionIo, ifStart, conditionEnd, conditionError);
         batch.QueueNullEliminatedWarning();
         if (!outerSkipping && conditionError is null)
             QueueConditionStatistics(batch, conditionClock, batch.CurrentStatement.StartLine);
@@ -282,8 +288,10 @@ partial class Simulation
         var connection = context.Connection;
 
         var whileLine = batch.CurrentStatement.StartLine;
+        var whileStart = batch.CurrentStatement.StartIndex;
         context.MoveNextRequired(); // consume WHILE
         var cond = ParseCondition(batch);
+        var conditionEnd = context.PreviousTokenEnd;
         var bindError = BindCondition(cond, batch);
 
         var bodyStart = context.SaveCheckpoint();
@@ -324,7 +332,10 @@ partial class Simulation
 
                     context.RestoreCheckpoint(bodyStart);
                     StatementClock? conditionClock = connection.StatisticsTime ? StatementClock.Start(connection) : null;
+                    var conditionCapture = BeginConditionQueryStoreCapture(batch, out var conditionIo);
                     var condResult = RunCondition(cond, batch, out var conditionError);
+                    if (conditionCapture is { } capture)
+                        EndConditionQueryStoreCapture(batch, capture, conditionIo, whileStart, conditionEnd, conditionError);
                     batch.QueueNullEliminatedWarning();
                     if (conditionError is null)
                         QueueConditionStatistics(batch, conditionClock, whileLine);

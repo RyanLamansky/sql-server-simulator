@@ -89,6 +89,13 @@ internal sealed class SessionToken(int spid)
     public long WaitStartedTicks;
 
     /// <summary>
+    /// The milliseconds the session has spent blocked on locks, all told —
+    /// what Query Store takes as a statement's <c>Lock</c> wait and keeps out
+    /// of its CPU time.
+    /// </summary>
+    public long LockWaitedMilliseconds;
+
+    /// <summary>
     /// Set under <c>LockManager</c>'s gate when another session's request
     /// closed a deadlock cycle and this blocked session carries the lower
     /// <c>SET DEADLOCK_PRIORITY</c>: its wait ends with Msg 1205 instead of the

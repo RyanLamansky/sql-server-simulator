@@ -84,12 +84,13 @@ Neither flag is inherited from `model` — a new database starts with both off, 
 
 ## Query Store
 
-`SET QUERY_STORE = ON [( … )] | = OFF | CLEAR [ALL]`, parsed by `ParseQueryStoreTail` and retained on `Database.QueryStore` (a `QueryStoreOptions`).
-Nothing is ever captured — the eleven `sys.query_store_*` capture views are permanently empty (see [`catalog-views.md`](catalog-views.md)) — so the configuration drives no behavior; it is retained so a database describes its store the way real does, which is what a management tool reads back after configuring it.
+`SET QUERY_STORE = ON [( … )] | = OFF | ( … ) | CLEAR [ALL]`, parsed by `ParseQueryStoreTail` into `Database.QueryStore` (a `QueryStoreOptions`).
+A store in READ_WRITE records statements into `Database.QueryStoreData` as they complete (`Simulation/Simulation.QueryStore.cs`), the `sp_query_store_*` procedures act on what it holds (`Simulation.QueryStoreProcedures.cs`), and the `sys.query_store_*` views project it — see [`catalog-views.md`](catalog-views.md#query-store).
 
 **A fresh database's store is on in READ_WRITE**, the state SQL Server 2025 inherits from `model`, with capture mode AUTO, size-based cleanup AUTO, wait-stats capture ON, and the bigint knobs at 900 / 60 / 1000 / 30 / 200.
-This is the one place the surface knowingly parts company with real: a real store in READ_WRITE fills `sys.query_store_query` within an interval, while here a database reports itself on and shows nothing.
 `master` and `tempdb` are seeded OFF and refuse the option outright; `msdb` is seeded OFF and accepts it.
+
+### Configuration
 
 Sub-options, all probe-confirmed 2026-08-08:
 
@@ -97,36 +98,113 @@ Sub-options, all probe-confirmed 2026-08-08:
 |---|---|---|
 | `OPERATION_MODE` | `READ_WRITE` / `READ_ONLY` | `desired_state` (+ `actual_state`) |
 | `CLEANUP_POLICY = ( STALE_QUERY_THRESHOLD_DAYS = N )` | integer | `stale_query_threshold_days` |
-| `DATA_FLUSH_INTERVAL_SECONDS` | integer | `flush_interval_seconds` |
+| `DATA_FLUSH_INTERVAL_SECONDS` | integer, at least 60 | `flush_interval_seconds` |
 | `MAX_STORAGE_SIZE_MB` | integer | `max_storage_size_mb` |
-| `INTERVAL_LENGTH_MINUTES` | integer | `interval_length_minutes` |
+| `INTERVAL_LENGTH_MINUTES` | 1, 5, 10, 15, 30, 60 or 1440 | `interval_length_minutes` |
 | `SIZE_BASED_CLEANUP_MODE` | `AUTO` / `OFF` | `size_based_cleanup_mode` |
 | `QUERY_CAPTURE_MODE` | `ALL` / `AUTO` / `NONE` / `CUSTOM` | `query_capture_mode` |
 | `MAX_PLANS_PER_QUERY` | integer | `max_plans_per_query` |
 | `WAIT_STATS_CAPTURE_MODE` | `ON` / `OFF` | `wait_stats_capture_mode` |
-| `QUERY_CAPTURE_POLICY = ( … )` | `STALE_CAPTURE_POLICY_THRESHOLD = N {DAYS\|HOURS}`, `EXECUTION_COUNT`, `TOTAL_COMPILE_CPU_TIME_MS`, `TOTAL_EXECUTION_CPU_TIME_MS` | the four `capture_policy_*` |
+| `QUERY_CAPTURE_POLICY = ( … )` | `STALE_CAPTURE_POLICY_THRESHOLD = N {DAYS\|HOURS}` (an hour to seven days), `EXECUTION_COUNT`, `TOTAL_COMPILE_CPU_TIME_MS`, `TOTAL_EXECUTION_CPU_TIME_MS` (each at least 1) | the four `capture_policy_*` |
 
 Behaviors worth knowing before touching this:
 
 - **Every value survives `= OFF`.** Real reports the last-configured sub-options on a disabled store and restores them on re-enable, so the state is one more retained field rather than a reset.
 - **An `= ON` carrying only unrelated sub-options still enables**, at READ_WRITE — the sub-option block never means "configure without turning on".
   Which is why the bacpac loader can't emit one statement per property; see [Bacpac loader context](#bacpac-loader-context).
+- **A bare block, `SET QUERY_STORE ( … )`, configures without turning on**: an OFF store stays OFF, while its `OPERATION_MODE` moves an enabled one (probed 2026-09-29).
 - **The four `capture_policy_*` columns are masked, not cleared, by the capture mode**: projected NULL unless the mode is CUSTOM, and the values behind them survive a trip through another mode.
   A first switch to CUSTOM with no policy block reports real's 30 / 1000 / 100 / 24.
 - **`STALE_CAPTURE_POLICY_THRESHOLD`'s unit is mandatory** and normalizes to the hours the column reports (`DAY`/`DAYS` ×24, `HOUR`/`HOURS` ×1); a bare integer and an unrecognized unit are both Msg 102 *at the entry name*.
-- **`CLEAR` / `CLEAR ALL`** purge captured data, of which there is none, and touch neither the state nor the configuration.
+- **`CLEAR` / `CLEAR ALL`** forget everything captured — the id counters restart at 1 too — and touch neither the state nor the configuration; an OFF store clears as well.
 - **The whole tail parses into a copy and swaps in at the end**, so a block that raises partway through leaves the configuration standing.
-- **Runtime validation of a value isn't modeled.** Real's is patchy — `DATA_FLUSH_INTERVAL_SECONDS = 0` and `INTERVAL_LENGTH_MINUTES = 7` raise Msg 153 (at *different* class/state pairs, 15/5 and 16/6) while `MAX_STORAGE_SIZE_MB = 0` and `STALE_QUERY_THRESHOLD_DAYS = 0` are accepted — so any value the grammar admits is stored.
+- **A value check fails the batch's compile**, so none of the batch runs — the statements ahead of the `ALTER` included (probed 2026-09-29).
+  Real's checks are patchy, and the accepted values are as load-bearing as the refused ones: `MAX_STORAGE_SIZE_MB = 0`, `STALE_QUERY_THRESHOLD_DAYS = 0` and `MAX_PLANS_PER_QUERY = 0` are stored.
 
 Rejections, all real's own:
 
 | Statement | Error |
 |---|---|
 | any QUERY_STORE form on `master` / `tempdb` — `= OFF` and `CLEAR` included, all worded as being about enabling | **Msg 12438** class 16 state 1 — `Cannot perform action because Query Store cannot be enabled on system database <name>.` followed by Msg 5069 |
+| `DATA_FLUSH_INTERVAL_SECONDS` below 60 | **Msg 153** class 15 state 5, naming `flush_interval_seconds` |
+| `INTERVAL_LENGTH_MINUTES` outside its seven values | **Msg 153** class 16 state 6, naming `interval_length_minutes` |
+| `EXECUTION_COUNT` / `TOTAL_COMPILE_CPU_TIME_MS` / `TOTAL_EXECUTION_CPU_TIME_MS` of 0 | **Msg 12452** class 15, state 2 for the last and 1 for the others |
+| `STALE_CAPTURE_POLICY_THRESHOLD` outside an hour to seven days | **Msg 12453** class 16 state 1 |
+| a sub-option written twice in one block | **Msg 12401** class 15 state 2, ahead of the second value's own check |
+| two `QUERY_STORE` clauses in one `SET` list | **Msg 12417** class 16 state 1 |
+| a value past `int` range, or signed | **Msg 102** at the number or the sign |
 | an unrecognized sub-option name, at either nesting level | **Msg 102** at the name |
 | `OPERATION_MODE = OFF`, `SIZE_BASED_CLEANUP_MODE = ON` | **Msg 156** — the value is a reserved keyword where the grammar wants an identifier |
 | `WAIT_STATS_CAPTURE_MODE = AUTO`, `OPERATION_MODE = BOGUS` | **Msg 102** |
 | a sub-option block after `= OFF`; `STALE_QUERY_THRESHOLD_DAYS` outside its `CLEANUP_POLICY` wrapper | **Msg 102** |
+
+### Capture
+
+Probed 2026-09-29 against SQL Server 2025, with `sp_query_store_flush_db` and a few seconds' wait before each read, since real registers a new query asynchronously.
+
+- **What a store records.**
+  A query reading a table (or calling a user function, the one FROM-less query real keeps), every `INSERT` / `UPDATE` / `DELETE` / `MERGE` (a table variable's included), `SELECT … INTO`, a `DECLARE CURSOR`, and a `SET`, `DECLARE`, `RETURN` or `IF` / `WHILE` condition whose expression reads a table — the condition as `if <condition>`, each time it is evaluated.
+  A procedure's, trigger's and dynamic batch's statements record for themselves, and a replayed plan-cache hit records like a parsed statement.
+  Nothing else does: `SELECT 1`, `SELECT @x + 1`, a bare `SET` or condition, `EXEC`, DDL, and a statement whose compile failed (a syntax error, a missing object or column).
+- **Capture modes.**
+  ALL records a query's first execution; AUTO its 30th within a day, or the one that takes its CPU past 100 ms (a query run 31 times reports 2 executions, one run 42 times 13); CUSTOM the same by its own policy; NONE captures nothing new but keeps counting the queries it holds.
+  The uncaptured tally is bounded at 4,096 queries, past which it starts over.
+- **States.**
+  READ_ONLY and OFF record nothing and keep what is held, which the views still read.
+- **The stored text** is the statement as written, from its first token to its last — no separator or trailing comment, except that a `MERGE` keeps its terminating `;`.
+  A statement real simply parameterizes is stored in real's parameterized form, `(@1 tinyint)SELECT * FROM [t] WHERE [a]=@1`, whose rendering rules sit on `Parser/SimpleParameterization.cs`; `<>`, `!=`, `NOT`, `TOP` and a catalog view keep a statement as written.
+  A statement reading variables or parameters is prefixed with their declarations in the order it names them, spelled as declared — `(@X int,@s varchar(10))select …` — except a condition or `RETURN`, stored bare.
+  `query_parameterization_type` is 2 for the parameterized form, 1 for a parameterized command or `sp_executesql` whose text declares its parameters (only those it reads), 0 otherwise; a module body is never parameterized.
+- **What makes a query distinct**: its stored text, context settings, containing module (`object_id`) and parameterization type, and for a statement reading a table variable its batch — such a query carries a `batch_sql_handle`.
+- **Context settings.**
+  `set_options` carries real's plan-attribute bits for the session's options (0xFB for a SqlClient session, 0x10FB with `ARITHABORT`), with the language, `DATEFORMAT` (1 for mdy, 2 for dmy) and `DATEFIRST`; `default_schema_id` is the schema a one-part object name resolved through, -2 when the statement names none that way, and -2 always in a module.
+- **Handles.** `statement_sql_handle` is the type byte 9, a zero, and the MD5 of the stored text's UTF-16 bytes, zero-padded to 44 — real's own derivation, so the bytes match.
+- **Runtime statistics** are kept per plan, interval and execution type (0 regular, 3 aborted by an attention, 4 ended by a run-time error).
+  Duration and CPU are measured in microseconds, CPU less what the statement spent in `WAITFOR` or blocked on a lock; logical reads are counted as `STATISTICS IO` counts them ([`session-options.md`](session-options.md#statistics-io)); `rowcount` is the rows returned or affected.
+- **Intervals** are `INTERVAL_LENGTH_MINUTES` long and aligned to that length from midnight UTC; the latest runs to its end, so a changed length takes effect at the next.
+- **Lock waits** are the one wait category recorded (`Lock`, 3), per plan, interval and execution type, unless `WAIT_STATS_CAPTURE_MODE = OFF`.
+
+**Cost.** A database whose store is OFF pays two field reads per statement.
+A store in AUTO — every user database's default — times each candidate statement, counts its reads, and reads each distinct text's shape once (from the parser's own tokens when it still holds them), which measured about 3% on the index sqllogictest replay (60.9 / 59.7 / 61.3 s against 58.0 / 59.8 / 58.6 s with the change absent, measured 2026-09-29); a text's shape analysis is the bulk of it, which is why the tokens the parser collected — kept even once the token memo is full — are read back rather than the text tokenized again.
+
+### Procedures
+
+All eleven of real's, typed `X` in `sys.all_objects` as real's are, each reporting its errors at line 1 of itself.
+
+| Procedure | Behavior |
+|---|---|
+| `sp_query_store_flush_db` | nothing to flush, the store being visible as soon as a statement completes; Msg 8144 state 51 for an argument |
+| `sp_query_store_force_plan @query_id, @plan_id [, @disable_optimized_plan_forcing] [, @force_plan_scope]` | marks the plan forced (`MANUAL`) and records a forcing location; quiet when already forced |
+| `sp_query_store_unforce_plan @query_id, @plan_id [, @force_plan_scope]` | clears both; quiet when not forced |
+| `sp_query_store_remove_query @query_id` | removes the query, its plans and statistics, its hints, and its text once unshared |
+| `sp_query_store_remove_plan @plan_id` | removes the plan and its statistics, leaving the query |
+| `sp_query_store_reset_exec_stats @plan_id` | removes the plan's runtime and wait statistics |
+| `sp_query_store_set_hints @query_id, @query_hints [, …]` | replaces the query's hints under a new `query_hint_id`; an argument not opening `OPTION (`, or a hint no query hint begins with, is Msg 102 at the word |
+| `sp_query_store_clear_hints @query_id [, …]` | removes the query's hints, quietly when there are none |
+| `sp_query_store_consistency_check` | Msg 12427 state 3 while the store is on; quiet when OFF |
+| `sp_query_store_clear_message_queues` | nothing to clear; Msg 8144 state 51 for an argument |
+| `sp_query_store_remove_plan_feedback @feature_id [, @plan_id]` | Msg 12469 for a plan (checked first), Msg 12467 for a feature outside 1 to 4, Msg 12468 for 1 to 3, success for 4; Msg 201 state 62 without the feature, Msg 214 state 56 for NULL, Msg 8144 state 120 for a third argument |
+
+A query id the store doesn't hold is Msg 12402 class 11 — state 1 from `remove_query`, 2 from `force_plan` / `unforce_plan`, 5 from `set_hints`, 6 from `clear_hints` — and a plan id Msg 12403 class 11 (state 1 from `remove_plan`, 2 from `reset_exec_stats`); a plan that isn't the query's is Msg 12406.
+While the store is OFF, forcing and unforcing are Msg 12405 state 4, `set_hints` state 6 and `clear_hints` state 7, ahead of the id checks; the remove and reset procedures work on an OFF store.
+A missing id is Msg 313 and a NULL one Msg 214, both state 51.
+Forced plans and hints are recorded, not applied: the simulator has one plan per query and no optimizer they could steer.
+
+### Divergences
+
+- **Registration is immediate.** Real's views show a new query seconds after its execution, and in probes irregularly missed the first statements against a table created moments before; the simulator records every eligible execution as it completes.
+- **Hashes and batch handles are the simulator's own.** `query_hash` and `query_plan_hash` share real's property that texts differing only in literals, case or spacing hash alike, but not its bytes; `last_compile_batch_sql_handle` and `batch_sql_handle` are the simulator's `sql_handle` shape ([`catalog-views.md`](catalog-views.md)).
+- **Compile figures are 0** and `count_compiles` 1: the simulator compiles a statement as it runs it.
+- **Figures the simulator doesn't have** read constant: DOP 1, no memory grant, no physical, CLR, log or tempdb use, no logical writes.
+- **A module statement's offsets** are into the module's body rather than its `CREATE` text, and its context settings are the session's, where real gave some functions and procedures a context-settings row of their own.
+- **`sp_query_store_reset_exec_stats`' Msg 12403** names the plan and database asked about, where real's prints uninitialized numbers.
+- **A `DECLARE CURSOR`** records no rows, where real counts the rows its cursor fetched.
+
+### Not modeled yet
+
+- Size-based and stale-query cleanup, and `MAX_PLANS_PER_QUERY` (real enforced a `MAX_STORAGE_SIZE_MB` of 0 neither immediately nor by turning read-only in probes).
+- The statements of a non-inlined scalar function and of a multi-statement table-valued function, which real records under the function's `object_id`.
+- The AUTO / CUSTOM compile-CPU threshold, forced parameterization, plan feedback and query variants, the internal statistics queries real records, and an operator tree in `query_plan`.
 
 ## Read-only databases
 

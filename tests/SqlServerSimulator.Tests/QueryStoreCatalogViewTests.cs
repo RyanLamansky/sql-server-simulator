@@ -5,8 +5,9 @@ namespace SqlServerSimulator;
 /// <summary>
 /// Tests for the Query Store surface — the configuration
 /// <c>ALTER DATABASE … SET QUERY_STORE</c> retains and
-/// <c>sys.database_query_store_options</c> projects, the always-empty capture
-/// views, and the SSMS probe batch that reads them. Every expectation is
+/// <c>sys.database_query_store_options</c> projects, the capture views' shapes
+/// on a store that has captured nothing yet, and the SSMS probe batch that
+/// reads them. Capture itself is <c>QueryStoreCaptureTests</c>'. Every expectation is
 /// probe-confirmed against SQL Server 2025 (2026-08-08) except where a comment
 /// says otherwise.
 /// </summary>
@@ -16,8 +17,9 @@ public sealed class QueryStoreCatalogViewTests
     /// <summary>
     /// The exact SSMS Query Store probe batch: OBJECT_ID gates the block, the
     /// first SELECT reads actual_state (2, the READ_WRITE a fresh database
-    /// inherits from <c>model</c>), the nested IF EXISTS over the always-empty
-    /// runtime-stats view falls to its ELSE.
+    /// inherits from <c>model</c>), the nested IF EXISTS over the runtime-stats
+    /// view — empty, since AUTO captures nothing until a query's 30th
+    /// execution — falls to its ELSE.
     /// </summary>
     [TestMethod]
     [Timeout(60000)]
@@ -195,8 +197,8 @@ public sealed class QueryStoreCatalogViewTests
 
     /// <summary>
     /// An <c>= ON</c> carrying only unrelated sub-options still turns the store
-    /// on, and <c>CLEAR</c> — which purges captured data, of which there is
-    /// none — leaves both the state and the configuration alone.
+    /// on, and <c>CLEAR</c> — which purges captured data — leaves both the
+    /// state and the configuration alone.
     /// </summary>
     [TestMethod]
     public void QueryStore_OnWithSubOptionEnables_AndClearLeavesStateAlone()
@@ -348,9 +350,10 @@ public sealed class QueryStoreCatalogViewTests
     }
 
     /// <summary>
-    /// Every capture view resolves and reads empty — the simulator captures
-    /// nothing, whatever the configured state says. A <c>select *</c> is what
-    /// makes the column shape load-bearing rather than the row count.
+    /// Every capture view resolves and reads empty on a store that has
+    /// captured nothing yet — AUTO waits for a query's 30th execution. A
+    /// <c>select *</c> is what makes the column shape load-bearing rather than
+    /// the row count.
     /// </summary>
     [TestMethod]
     [DataRow("query_context_settings")]
@@ -364,7 +367,7 @@ public sealed class QueryStoreCatalogViewTests
     [DataRow("query_store_runtime_stats")]
     [DataRow("query_store_runtime_stats_interval")]
     [DataRow("query_store_wait_stats")]
-    public void QueryStoreCaptureViews_AreAlwaysEmpty(string view)
+    public void QueryStoreCaptureViews_BeforeAnyCapture_AreEmpty(string view)
     {
         var sim = new Simulation();
         _ = sim.ExecuteNonQuery("alter database simulated set query_store = on");

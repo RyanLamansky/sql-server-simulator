@@ -105,7 +105,7 @@ partial class Simulation
     /// </summary>
     internal static void QueueIoReport(BatchContext batch, int? line = null)
     {
-        if (batch.Connection.StatementIo is not { IsEmpty: false } io)
+        if (!batch.Connection.StatisticsIo || batch.Connection.StatementIo is not { IsEmpty: false } io)
             return;
         foreach (var text in io.Lines())
         {
