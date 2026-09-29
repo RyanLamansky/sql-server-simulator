@@ -15,8 +15,8 @@ partial class SimulatedSqlException
     /// (or <c>WHERE CURRENT OF</c>) names a cursor that was never declared.
     /// Probe-confirmed verbatim against SQL Server 2025.
     /// </summary>
-    internal static SimulatedSqlException CursorDoesNotExist(string name) =>
-        new($"A cursor with the name '{name}' does not exist.", 16916, 16, 1);
+    internal static SimulatedSqlException CursorDoesNotExist(string name, byte state = 1) =>
+        new($"A cursor with the name '{name}' does not exist.", 16916, 16, state);
 
     /// <summary>
     /// Msg 16902: <c>CURSOR_STATUS</c> was handed an argument it can't use —
@@ -147,4 +147,79 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException CursorVariableNotAllocated(string variableName) =>
         new($"The variable '@{variableName}' does not currently have a cursor allocated to it.", 16950, 16, 2);
+
+    /// <summary>
+    /// Msg 1048: a cursor declaration names two options that contradict each
+    /// other, named in the order real names that pair. Raised while the batch
+    /// compiles. Probed 2026-09-29 against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException ConflictingCursorOptions(string first, string second) =>
+        new($"Conflicting cursor options {first} and {second}.", 1048, 15, 1);
+
+    /// <summary>
+    /// Msg 1049: an SQL-92 declaration (<c>INSENSITIVE</c> / <c>SCROLL</c>
+    /// before <c>CURSOR</c>) also names a T-SQL option after it. Probed
+    /// 2026-09-29 against SQL Server 2025, whose line for it is 0 in most
+    /// placements.
+    /// </summary>
+    internal static SimulatedSqlException CursorSyntaxMixed() =>
+        new("Mixing old and new syntax to specify cursor options is not allowed.", 1049, 15, 1);
+
+    /// <summary>
+    /// Msg 1058: <c>READ_ONLY</c> and <c>FOR READ ONLY</c> on one cursor
+    /// declaration. Probed 2026-09-29 against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException CursorReadOnlyTwice() =>
+        new("Cannot specify both READ_ONLY and FOR READ ONLY on a cursor declaration.", 1058, 15, 1);
+
+    /// <summary>
+    /// Msg 153: <c>INSENSITIVE</c> written after <c>CURSOR</c>, where only
+    /// the SQL-92 form's position before it takes the word — reported
+    /// lower-cased whatever the declaration wrote, and for a <c>SET @c =
+    /// CURSOR</c> too. Probed 2026-09-29 against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException InvalidCursorOption(string option) =>
+        new($"Invalid usage of the option {option} in the DECLARE CURSOR statement.", 153, 15, 1);
+
+    /// <summary>
+    /// Msg 412: a cursor's <c>FOR UPDATE OF</c> list names a column only a
+    /// constructed rowset such as <c>VALUES</c> supplies. Probed 2026-09-29
+    /// against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException ColumnDerivedOrConstant(string column) =>
+        new($"The column \"{column}\" is not updatable because it is derived or constant.", 412, 16, 1);
+
+    /// <summary>
+    /// Msg 1051: a procedure's cursor parameter lacks <c>VARYING</c> or
+    /// <c>OUTPUT</c>, or writes them the other way round. Probed 2026-09-29
+    /// against SQL Server 2025, which goes on to report the body's uses of the
+    /// parameter as undeclared variables.
+    /// </summary>
+    internal static SimulatedSqlException CursorParameterNeedsVaryingOutput() =>
+        new("Cursor parameters in a stored procedure must be declared with OUTPUT and VARYING options, and they must be specified in the order CURSOR VARYING OUTPUT.", 1051, 15, 2);
+
+    /// <summary>
+    /// Msg 16951: <c>EXEC</c> passes a cursor variable that already holds a
+    /// cursor to a procedure's cursor OUTPUT parameter; the procedure doesn't
+    /// run. Probed 2026-09-29 against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException CursorOutputArgumentAllocated(string variable) =>
+        new($"The variable '@{variable}' cannot be used as a parameter because a CURSOR OUTPUT parameter must not have a cursor allocated to it before execution of the procedure.", 16951, 16, 1);
+
+    /// <summary>
+    /// Msg 137 as <c>sp_describe_cursor</c> and its siblings raise it for a
+    /// <c>variable</c>-sourced identity naming no declared cursor variable —
+    /// class 16 state 100, unlike the binder's. Probed 2026-09-29 against SQL
+    /// Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException CursorProcedureUndeclaredVariable(string variable) =>
+        new($"Must declare the scalar variable \"@{variable}\".", 137, 16, 100);
+
+    /// <summary>
+    /// Msg 16966: <c>sp_cursoropen</c> asked for a STATIC or FAST_FORWARD
+    /// cursor with a concurrency other than READ_ONLY — SCROLL_LOCKS (2) or
+    /// either OPTIMISTIC (4, 8). Probed 2026-09-29 against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException ApiCursorConcurrencyIncompatible(int ccopt) =>
+        new($"sp_cursoropen: Specified concurrency control option {ccopt} ({(ccopt == 2 ? "SCROLL_LOCKS" : "OPTIMISTIC")}) is incompatible with static or fast forward only cursors. Only read-only is compatible with static or fast forward only cursors.", 16966, 16, 1);
 }

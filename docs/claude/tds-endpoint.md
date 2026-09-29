@@ -221,21 +221,23 @@ The OUT scrollopt/ccopt are the *effective* (resolved) options, and @rowcount is
 | scrollopt (low bits) | requested | effective OUT scrollopt | @rowcount |
 |---|---|---|---|
 | 0x1 KEYSET | navigable (base tables, joined or not) | 0x1 | row count |
-| 0x2 DYNAMIC | navigable | 0x2 | −1 |
-| 0x4 FORWARD_ONLY | navigable | 0x4 | −1 |
+| 0x2 DYNAMIC / 0x4 FORWARD_ONLY | navigable | as requested | −1 |
+| 0x2 DYNAMIC / 0x4 FORWARD_ONLY | navigable, capped at KEYSET (an ORDER BY no index delivers, a row limit) | **0x1** | row count |
 | 0x8 STATIC | any | 0x8 | row count |
-| 0x10 FAST_FORWARD | navigable | 0x10 | −1 |
-| any | **non-navigable** (GROUP BY / DISTINCT / set op / a deferred source) | **0x8** (forced STATIC), ccopt → **0x1** READ_ONLY | row count |
+| 0x10 FAST_FORWARD | any | 0x10, ccopt → 0x1 | −1 |
+| any other | **non-navigable** (GROUP BY / DISTINCT / set op / a deferred source) | **0x8** (forced STATIC), ccopt → **0x1** READ_ONLY | row count |
 
 "Navigable" is the engine's cursor-plan eligibility — see [`cursors.md`](cursors.md#which-shapes-are-navigable).
 A JOIN qualifies, and the fetch buffer holds each row's per-source addresses so `sp_cursor`'s positioned edit reaches whichever participating table `@table` names.
+The rows probed 2026-09-29 against SQL Server 2025, the KEYSET cap and FAST_FORWARD's among them.
 
 ccopt low bits: 0x1 READ_ONLY, 0x2 SCROLL_LOCKS, 0x4 OPTIMISTIC (values), 0x8 OPTIMISTIC (rowversion).
-The `0x1000`-series flag bits (PARAMETERIZED_STMT / AUTO_FETCH / AUTO_CLOSE / …) are stripped from the effective value.
+A STATIC or FAST_FORWARD request with any of the last three is **Msg 16966** from `sp_cursoropen` at line 1, return status 1, a zero handle, the options echoed and a NULL row count.
+The UPDT_IN_PLACE bit (0x4000) comes back on the effective ccopt beside whatever concurrency the cursor settles on; the other `0x1000`-series flag bits are stripped from both values.
 On an **invalid statement**, the engine's error (e.g. Msg 208) plus **Msg 16945** (`The cursor was not declared.`, state 2) are emitted, the handle comes back 0, the option values echo the requested low bits, and the return status is the engine error number.
 
 **sp_cursorfetch**(@cursor, @fetchtype, @rownum, @nrows) — @rownum / @nrows are **input** for a data fetch (a real server rejects them ByRef with Msg 16902 for non-INFO fetch types; the simulator simply reads them as input).
-Rows come back as an ordinary result set of up to @nrows rows, each with the trailing ROWSTAT = 1 column. fetchtype: 0x1 FIRST, 0x2 NEXT, 0x4 PREV, 0x8 LAST, 0x10 ABSOLUTE (@rownum), 0x20 RELATIVE (@rownum), 0x100 INFO.
+Rows come back as an ordinary result set of up to @nrows rows, each with the trailing ROWSTAT column — 1 for a fetched row, 2 for a keyset member deleted (or key-moved) out from under the cursor, which fills its buffer row with the zeroed-or-NULL values a T-SQL `FETCH` reports and doesn't end the fetch (probed 2026-09-29 against SQL Server 2025). fetchtype: 0x1 FIRST, 0x2 NEXT, 0x4 PREV, 0x8 LAST, 0x10 ABSOLUTE (@rownum), 0x20 RELATIVE (@rownum), 0x100 INFO.
 The first buffer row uses the requested direction; subsequent rows advance NEXT.
 A **past-end** fetch returns an empty result set with return status 0.
 **INFO** writes no rows and reports the current 1-based position (@rownum) and total row count (@nrows) as OUT params.
@@ -260,10 +262,11 @@ Double-close or invalid handle → **Msg 16909** (state 1), return status 1.
 - **Concurrency control is not wired for the API path.** ccopt SCROLL_LOCKS / OPTIMISTIC keep the cursor updatable and echo in the OUT ccopt, but no scroll locks are held and **no optimistic conflict is raised** — probe-confirmed the real API cursor did **not** surface a conflict even with a second connection modifying a buffered row (unlike the T-SQL `OPTIMISTIC` cursor, which raises the Msg 16947 chain).
   The positioned DML uses the default relocate-and-rewrite.
 - **Handle values** are a simple per-session counter, not the real server's descriptor-derived integers (opaque to the client).
-- **FAST_FORWARD @rowcount** reports −1 (matching real) even though the engine materializes it as STATIC internally.
+- **FAST_FORWARD** reads live rows over a navigable shape and settles them at OPEN over a sort, a row limit or a non-navigable one, as the T-SQL `FAST_FORWARD` does — see [`cursors.md`](cursors.md#fast_forward).
 - **sp_cursor @rownum = 0** (real: "apply to every buffered row" batch update) is not modeled — only 1-based single-row positioned DML.
 - **REFRESH fetchtype (0x80)** maps to a plain re-fetch rather than an in-place buffer refresh.
 - The `0x1000` PARAMETERIZED_STMT flag requirement (real raises Msg 16902 when a parameterized prepexec omits it) is **not enforced** — the flag is simply stripped.
+- **Not modeled yet**: the rest of the scrollopt / ccopt flag protocol — real refuses PARAMETERIZED_STMT (0x1000) on an unparameterized `sp_cursoropen` with Msg 16902 state 22, reports a DYNAMIC request carrying AUTO_FETCH (0x2000) with its populated row count, and negotiates CHECK_ACCEPTED_TYPES (0x8000) against the `*_ACCEPTABLE` bits, refusing an open no acceptable type fits (probed 2026-09-29 against SQL Server 2025); the simulator strips all of them.
 
 ## Bulk load (SqlBulkCopy)
 

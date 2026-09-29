@@ -189,12 +189,14 @@ partial class SimulatedSqlException
         new("The TOP N WITH TIES clause is not allowed without a corresponding ORDER BY clause.", 1062, 15, 1);
 
     /// <summary>
-    /// Mimics SQL Server's Msg 5362 — a bare <c>OVER w</c> reference named a
-    /// window with no matching <c>WINDOW w AS (…)</c> definition. Wording
-    /// verbatim (SQL Server 2022+), Level 15 State 3.
+    /// Mimics SQL Server's Msg 5362 — an <c>OVER w</c> reference or a
+    /// <c>WINDOW</c> definition named a window with no matching
+    /// <c>WINDOW w AS (…)</c> definition. Wording verbatim (SQL Server 2022+),
+    /// Level 15; State 3 when the query block has no WINDOW clause, 4 when an
+    /// OVER names none of its windows, 7 when a definition does.
     /// </summary>
-    internal static SimulatedSqlException WindowIsUndefined(string windowName) =>
-        new($"Window '{windowName}' is undefined.", 5362, 15, 3);
+    internal static SimulatedSqlException WindowIsUndefined(string windowName, byte state) =>
+        new($"Window '{windowName}' is undefined.", 5362, 15, state);
 
     /// <summary>
     /// Mimics SQL Server's Msg 4123 — an <c>OVER (w …)</c> refinement supplied

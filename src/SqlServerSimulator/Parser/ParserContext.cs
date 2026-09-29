@@ -361,10 +361,9 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     /// consumed to resolve <c>OVER w</c> references. A list rather than a
     /// dictionary because window names compare under the database collation,
     /// which isn't reachable from a field initializer, and a clause never holds
-    /// more than a handful of entries. Query-block scoped in practice: resolved
-    /// and cleared at the block's projection build. (A WINDOW clause nested in
-    /// a subquery of the same statement is a known limitation of the shared
-    /// context list.)
+    /// more than a handful of entries. A nested query block owns the entries
+    /// past <see cref="NamedWindowScope"/>, so a subquery's clause neither sees
+    /// nor answers its enclosing block's.
     /// </summary>
     public readonly List<(string Name, Expressions.WindowExpression.WindowBody Body)> NamedWindowDefinitions = [];
 
@@ -376,6 +375,14 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     /// is read.
     /// </summary>
     public readonly List<(Expressions.WindowExpression Window, Expressions.WindowExpression.WindowBody Reference)> PendingNamedWindows = [];
+
+    /// <summary>
+    /// Where the query block being parsed starts in
+    /// <see cref="PendingNamedWindows"/> and <see cref="NamedWindowDefinitions"/>:
+    /// its references resolve only against its own definitions, and its
+    /// resolution removes only its own entries.
+    /// </summary>
+    public (int Pending, int Definitions) NamedWindowScope;
 
     /// <summary>
     /// When false, registering a <see cref="Expressions.WindowExpression"/>

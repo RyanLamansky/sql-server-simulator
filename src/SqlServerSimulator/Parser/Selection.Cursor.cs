@@ -94,6 +94,60 @@ internal sealed class CursorSlot
 }
 
 /// <summary>
+/// What a KEYSET cursor keys one base table's rows on, and the order a cursor
+/// walks them in, resolved once per plan (probed 2026-09-29 against SQL Server
+/// 2025). A table with a clustered index keys on that index's key, and one
+/// whose clustered index isn't unique completes the key with a uniquifier —
+/// so updating any key column, even to its own value, unmakes a KEYSET member.
+/// A heap keys on its PRIMARY KEY, else the UNIQUE constraint or unique index
+/// created first, and one carrying none of them keys on the row's address.
+/// </summary>
+internal sealed class CursorIdentityKey(int[]? ordinals, bool[]? clusteredDescending, bool uniquified)
+{
+    /// <summary>The key's storage ordinals, or null when the row's address is
+    /// its whole identity.</summary>
+    public readonly int[]? Ordinals = ordinals;
+
+    /// <summary>The clustered key's column directions, which a cursor walks
+    /// the table's rows in, or null for a heap, which a cursor walks in
+    /// address order.</summary>
+    public readonly bool[]? ClusteredDescending = clusteredDescending;
+
+    /// <summary>True for a non-unique clustered key, where the row's address
+    /// and <see cref="Heap.Uniquifiers"/> entry join the key values.</summary>
+    public readonly bool Uniquified = uniquified;
+
+    public static CursorIdentityKey For(HeapTable table)
+    {
+        if (ClusteredScan.Key(table) is var (ordinals, descending, unique))
+            return new(ordinals, descending, !unique);
+
+        // The PRIMARY KEY, else the unique key created first — a disabled
+        // unique index counts, as it does for the row-locator gate.
+        int[]? chosen = null;
+        var chosenId = int.MaxValue;
+        foreach (var key in table.KeyConstraints)
+        {
+            if (key.Kind == KeyConstraintKind.PrimaryKey)
+                return new(key.StorageOrdinals, null, false);
+            if (key.ObjectId < chosenId)
+                (chosen, chosenId) = (key.StorageOrdinals, key.ObjectId);
+        }
+        foreach (var index in table.Indexes)
+        {
+            if (!index.IsUnique || index.Filter is not null || index.IsColumnstore || index.ObjectId >= chosenId)
+                continue;
+            chosen = new int[index.KeyColumns.Length];
+            for (var i = 0; i < chosen.Length; i++)
+                chosen[i] = index.KeyColumns[i].StorageOrdinal;
+            chosenId = index.ObjectId;
+        }
+
+        return new(chosen, null, false);
+    }
+}
+
+/// <summary>
 /// The FROM-clause shape an updatable cursor navigates: the participating
 /// sources and their joins, the projection expressions, and the WHERE
 /// excluders. Resolved from a <see cref="CursorShape"/> by
@@ -153,6 +207,10 @@ internal sealed class CursorSourcePlan
     /// <c>FOR UPDATE OF</c> list narrows the updatable entries to those owning
     /// a listed column.</summary>
     public readonly HeapColumn[][] IdentityColumns;
+
+    /// <summary>What each <see cref="IdentityTables"/> entry's rows are keyed
+    /// and ordered on.</summary>
+    public readonly CursorIdentityKey[] IdentityKeys;
 
     /// <summary>Index into <see cref="IdentityTables"/> where slot <c>i</c>'s
     /// span begins.</summary>
@@ -218,6 +276,7 @@ internal sealed class CursorSourcePlan
         var tables = new List<HeapTable>();
         var views = new List<View?>();
         var columns = new List<HeapColumn[]>();
+        var keys = new List<CursorIdentityKey>();
         for (var i = 0; i < slots.Length; i++)
         {
             this.SlotIdentityOffset[i] = tables.Count;
@@ -227,6 +286,7 @@ internal sealed class CursorSourcePlan
                 tables.Add(table);
                 views.Add(null);
                 columns.Add(table.Columns);
+                keys.Add(CursorIdentityKey.For(table));
             }
             else
             {
@@ -239,6 +299,7 @@ internal sealed class CursorSourcePlan
                     // view's own name, overriding whatever the body wrote.
                     views.Add(slot.ThroughView ?? nested.IdentityViews[k]);
                     columns.Add(slot.ThroughView is { } outer ? outer.OutputColumns : nested.IdentityColumns[k]);
+                    keys.Add(nested.IdentityKeys[k]);
                 }
             }
             this.SlotIdentityWidth[i] = tables.Count - this.SlotIdentityOffset[i];
@@ -246,6 +307,7 @@ internal sealed class CursorSourcePlan
         this.IdentityTables = [.. tables];
         this.IdentityViews = [.. views];
         this.IdentityColumns = [.. columns];
+        this.IdentityKeys = [.. keys];
         this.OrderBySuppliedByIndex = OrderIsIndexSupplied(sources, slots, projections, columnNames, orderBy);
         this.SupportsKeyset = Array.TrueForAll(this.IdentityTables, KeysetIdentifiable);
     }
@@ -586,27 +648,25 @@ internal sealed class CursorSourcePlan
 /// through <see cref="Execute"/>, so column changes (and, for DYNAMIC,
 /// membership changes) made between <c>FETCH</c>es are visible — matching SQL
 /// Server's sensitivity model. Each row carries its projected output values,
-/// its ORDER BY key, the chosen unique-key tuple per base table (when that
-/// table has a PK or UNIQUE constraint — matches SQL Server's KEYSET
-/// identity), and each base row's stable <c>(page, slot)</c> address (always —
-/// used as the cursor identity when no unique key exists and as the
-/// deterministic tiebreak for the ORDER BY total order).
+/// its ORDER BY key, and per base table the <see cref="CursorIdentityKey"/>
+/// real's KEYSET keys on plus the row's stable <c>(page, slot)</c> address.
 /// </summary>
 internal sealed partial class Selection
 {
     /// <summary>
     /// One row produced by <see cref="EnumerateForCursor"/>: the projected
     /// output values, the ORDER BY key, and — one slot per base table the plan
-    /// reads, flattened through any deferred bodies — the optional unique-key
-    /// tuple (null when that table has no PK/UNIQUE, falling back to
-    /// <see cref="Rids"/> for cursor identity) and the base row's stable
-    /// address (null on a NULL-extended outer-join side).
+    /// reads, flattened through any deferred bodies — the base row's
+    /// <see cref="CursorIdentityKey"/> values (null when the table keys on its
+    /// address alone), its <see cref="Heap.Uniquifiers"/> entry, and its
+    /// stable address (null on a NULL-extended outer-join side).
     /// </summary>
-    internal sealed class CursorRow(SqlValue[] values, SqlValue[] orderKey, SqlValue[]?[] uniqueKeys, (int Page, int Slot)?[] rids)
+    internal sealed class CursorRow(SqlValue[] values, SqlValue[] orderKey, SqlValue[]?[] identityKeys, long[] uniquifiers, (int Page, int Slot)?[] rids)
     {
         public readonly SqlValue[] Values = values;
         public readonly SqlValue[] OrderKey = orderKey;
-        public readonly SqlValue[]?[] UniqueKeys = uniqueKeys;
+        public readonly SqlValue[]?[] IdentityKeys = identityKeys;
+        public readonly long[] Uniquifiers = uniquifiers;
         public readonly (int Page, int Slot)?[] Rids = rids;
     }
 
@@ -623,30 +683,8 @@ internal sealed partial class Selection
         public readonly int IdentityWidth = identityWidth;
         public readonly List<byte[]> Bytes = [];
         public readonly List<(int Page, int Slot)?> Rids = [];
-        public readonly List<SqlValue[]?> UniqueKeys = [];
-    }
-
-    /// <summary>
-    /// Storage ordinals of a base table's chosen unique key (PRIMARY KEY
-    /// preferred, else the first UNIQUE constraint), or null when the table
-    /// has neither. KEYSET cursors track by these columns when present —
-    /// matching SQL Server's "keyset is identified by the unique index"
-    /// behavior (probe-confirmed: an UPDATE to a unique-key column makes the
-    /// next fetch return <c>@@FETCH_STATUS = -2</c>). When null, the cursor
-    /// falls back to the row's stable <c>(page, slot)</c> address — a
-    /// simulator extension over real SQL Server's no-unique-key heap
-    /// behavior, which is documented as undefined.
-    /// </summary>
-    internal static int[]? CursorUniqueKeyOrdinals(HeapTable table)
-    {
-        KeyConstraint? chosen = null;
-        foreach (var key in table.KeyConstraints)
-        {
-            if (key.Kind == KeyConstraintKind.PrimaryKey)
-                return key.StorageOrdinals;
-            chosen ??= key;
-        }
-        return chosen?.StorageOrdinals;
+        public readonly List<SqlValue[]?> IdentityKeys = [];
+        public readonly List<long> Uniquifiers = [];
     }
 
     /// <summary>
@@ -794,7 +832,8 @@ internal sealed partial class Selection
         foreach (var tuple in tuples)
         {
             var rids = new (int Page, int Slot)?[identityWidth];
-            var uniqueKeys = new SqlValue[]?[identityWidth];
+            var identityKeys = new SqlValue[]?[identityWidth];
+            var uniquifiers = new long[identityWidth];
             for (var i = 0; i < width; i++)
             {
                 var scan = scans[i];
@@ -809,7 +848,8 @@ internal sealed partial class Selection
                 for (var k = 0; k < scan.IdentityWidth; k++)
                 {
                     rids[offset + k] = scan.Rids[span + k];
-                    uniqueKeys[offset + k] = scan.UniqueKeys[span + k];
+                    identityKeys[offset + k] = scan.IdentityKeys[span + k];
+                    uniquifiers[offset + k] = scan.Uniquifiers[span + k];
                 }
             }
 
@@ -833,7 +873,7 @@ internal sealed partial class Selection
                 ? []
                 : ComputeOrderKeys(orderBy, values, plan.ColumnNames, projectionSources: null, distinct: false, batch, resolve);
 
-            rows.Add(new CursorRow(values, orderKey, uniqueKeys, rids));
+            rows.Add(new CursorRow(values, orderKey, identityKeys, uniquifiers, rids));
         }
 
         rows.Sort((a, b) => CompareCursorRows(plan, a, b));
@@ -893,7 +933,9 @@ internal sealed partial class Selection
     {
         if (plan.Slots[index].Table is { } table)
         {
-            var ordinals = CursorUniqueKeyOrdinals(table);
+            var identity = plan.IdentityKeys[plan.SlotIdentityOffset[index]];
+            var ordinals = identity.Ordinals;
+            var uniquified = identity.Uniquified;
             var storedColumns = table.StoredColumns;
             // A cursor's read lists its work table ahead of the table it reads.
             var io = batch.Connection.StatementIo;
@@ -905,15 +947,16 @@ internal sealed partial class Selection
                 counts?.Enter(page, ref lastPage);
                 scan.Bytes.Add(bytes);
                 scan.Rids.Add((page, slot));
+                scan.Uniquifiers.Add(uniquified ? table.Heap.UniquifierOf((page, slot)) : 0);
                 if (ordinals is not { } keyOrdinals)
                 {
-                    scan.UniqueKeys.Add(null);
+                    scan.IdentityKeys.Add(null);
                     continue;
                 }
                 var key = new SqlValue[keyOrdinals.Length];
                 for (var k = 0; k < keyOrdinals.Length; k++)
                     key[k] = RowDecoder.DecodeColumn(storedColumns, bytes, keyOrdinals[k], table.Heap);
-                scan.UniqueKeys.Add(key);
+                scan.IdentityKeys.Add(key);
             }
             io?.UseWorktable();
             return;
@@ -935,7 +978,8 @@ internal sealed partial class Selection
             }
             scan.Bytes.Add(RowEncoder.EncodeRow(storedSchema, values));
             scan.Rids.AddRange(row.Rids);
-            scan.UniqueKeys.AddRange(row.UniqueKeys);
+            scan.IdentityKeys.AddRange(row.IdentityKeys);
+            scan.Uniquifiers.AddRange(row.Uniquifiers);
         }
     }
 
@@ -1040,18 +1084,31 @@ internal sealed partial class Selection
 
     /// <summary>
     /// Total-order comparison between two cursor rows: ORDER BY key first (per
-    /// the SELECT's ASC/DESC flags), then the flattened stable addresses
-    /// ascending as a deterministic tiebreak (addresses are unique within a
-    /// heap, so the tuple of them is unique across the join). Drives both the
-    /// stable sort in <see cref="EnumerateForCursor"/> and DYNAMIC next/prior
-    /// navigation.
+    /// the SELECT's ASC/DESC flags), then each base table's rows in the order
+    /// a scan walks them — a clustered table by its key, NULLs first under an
+    /// ascending column, then by uniquifier; a heap by address — with the
+    /// address as the final tiebreak, unique within a heap and so across the
+    /// join. Drives both the sort in <see cref="EnumerateForCursor"/> and
+    /// DYNAMIC next/prior navigation, so a DYNAMIC cursor meets a row whose
+    /// clustered key an UPDATE moved ahead of it again, as real's does.
     /// </summary>
     internal static int CompareCursorRows(CursorSourcePlan plan, CursorRow a, CursorRow b)
     {
         var orderBy = plan.OrderBy;
         var c = orderBy.Count == 0 ? 0 : CompareOrderKeys(a.OrderKey, b.OrderKey, orderBy);
         for (var i = 0; c == 0 && i < a.Rids.Length; i++)
-            c = CompareRids(a.Rids[i], b.Rids[i]);
+        {
+            if (plan.IdentityKeys[i].ClusteredDescending is { } descending
+                && a.IdentityKeys[i] is { } left
+                && b.IdentityKeys[i] is { } right)
+            {
+                c = CompareKeyTuples(left, right, descending);
+                if (c == 0)
+                    c = a.Uniquifiers[i].CompareTo(b.Uniquifiers[i]);
+            }
+            if (c == 0)
+                c = CompareRids(a.Rids[i], b.Rids[i]);
+        }
         return c;
     }
 
@@ -1068,18 +1125,28 @@ internal sealed partial class Selection
     }
 
     /// <summary>
-    /// True when <paramref name="row"/> is the same joined row a KEYSET
-    /// member snapshotted at OPEN: per base table, the unique-key tuple when
-    /// that table has one (so an UPDATE to those columns unmakes the match, as
-    /// on real SQL Server), else the stable address.
+    /// True when <paramref name="row"/> is the joined row KEYSET member
+    /// <paramref name="member"/> snapshotted at OPEN: per base table, the
+    /// <see cref="CursorIdentityKey"/> values when the table has a key — so an
+    /// UPDATE to those columns unmakes the match, as on real SQL Server —
+    /// joined by the address and uniquifier under a non-unique clustered key,
+    /// else the address alone.
     /// </summary>
-    internal static bool CursorIdentityMatches(CursorRow row, SqlValue[]?[] keys, (int Page, int Slot)?[] rids)
+    internal static bool CursorIdentityMatches(CursorSourcePlan plan, CursorRow row, CursorRow member)
     {
-        for (var i = 0; i < rids.Length; i++)
+        for (var i = 0; i < member.Rids.Length; i++)
         {
-            var same = keys[i] is { } key
-                ? row.UniqueKeys[i] is { } live && CompareKeyTuples(live, key) == 0
-                : Nullable.Equals(row.Rids[i], rids[i]);
+            bool same;
+            if (member.IdentityKeys[i] is { } key)
+            {
+                same = row.IdentityKeys[i] is { } live && CompareKeyTuples(live, key) == 0;
+                if (same && plan.IdentityKeys[i].Uniquified)
+                    same = row.Uniquifiers[i] == member.Uniquifiers[i] && Nullable.Equals(row.Rids[i], member.Rids[i]);
+            }
+            else
+            {
+                same = row.IdentityKeys[i] is null && Nullable.Equals(row.Rids[i], member.Rids[i]);
+            }
             if (!same)
                 return false;
         }
@@ -1091,7 +1158,7 @@ internal sealed partial class Selection
     /// cross-type promoted). Used by the keyset's identity-match step when
     /// the base table has a unique key.
     /// </summary>
-    internal static int CompareKeyTuples(SqlValue[] a, SqlValue[] b)
+    internal static int CompareKeyTuples(SqlValue[] a, SqlValue[] b, bool[]? descending = null)
     {
         for (var i = 0; i < a.Length; i++)
         {
@@ -1120,7 +1187,7 @@ internal sealed partial class Selection
                 c = lk.CoerceTo(common).CompareTo(rk.CoerceTo(common));
             }
             if (c != 0)
-                return c;
+                return descending is not null && descending[i] ? -c : c;
         }
         return 0;
     }

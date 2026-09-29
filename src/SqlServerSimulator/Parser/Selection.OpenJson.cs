@@ -345,28 +345,6 @@ internal sealed partial class Selection
     }
 
     /// <summary>
-    /// Variant of <see cref="ConsumeOptionalAlias"/> that doesn't pre-
-    /// advance: <see cref="ParseOpenJson"/> leaves <see cref="ParserContext.Token"/>
-    /// already past the closing <c>)</c>, so the alias check inspects the
-    /// current Token directly. Returns null when no alias is present.
-    /// </summary>
-    private static string? ConsumeOptionalAliasInPlace(ParserContext context)
-    {
-        if (context.Token is ReservedKeyword { Keyword: Keyword.As })
-        {
-            var alias = context.GetNextRequired<Name>().Value;
-            context.MoveNextOptional();
-            return alias;
-        }
-        if (context.Token is Name aliasName)
-        {
-            context.MoveNextOptional();
-            return aliasName.Value;
-        }
-        return null;
-    }
-
-    /// <summary>
     /// Parses the body of an OPENJSON <c>WITH (col TYPE [path] [AS JSON], ...)</c>
     /// clause. Enters with <see cref="ParserContext.Token"/> on the
     /// <c>WITH</c> keyword; on return Token sits on the closing <c>)</c>.

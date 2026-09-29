@@ -47,7 +47,8 @@ public sealed class CursorMultiSourceTests
     /// <summary>
     /// The sensitivity keywords resolve on a JOIN exactly as on a single table
     /// (probe-confirmed): bare is forward-only DYNAMIC, a plain SCROLL is
-    /// KEYSET, and an explicit STATIC is a read-only snapshot.
+    /// KEYSET, an explicit STATIC is a read-only snapshot, and FAST_FORWARD
+    /// reports no row count.
     /// </summary>
     [TestMethod]
     [DataRow("", -1)]
@@ -55,7 +56,7 @@ public sealed class CursorMultiSourceTests
     [DataRow("scroll", 3)]
     [DataRow("keyset", 3)]
     [DataRow("static", 3)]
-    [DataRow("fast_forward", 3)]
+    [DataRow("fast_forward", -1)]
     public void JoinCursorSensitivityKeywords(string declaration, int cursorRows)
         => AreEqual(cursorRows, ExecuteScalar<int>($"""
             {Seed}

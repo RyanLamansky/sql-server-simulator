@@ -114,18 +114,14 @@ public sealed class CursorKeysetIdentityTests
     }
 
     /// <summary>
-    /// Documented divergence. A table whose only locator is a clustered index
-    /// carries no PK / UNIQUE, so <c>CursorUniqueKeyOrdinals</c> finds nothing
-    /// and the KEYSET rides addresses alone: moving the clustered key leaves
-    /// the member matchable and the re-fetch reports status <c>0</c> with the
-    /// new values. Real keys such a keyset on the clustered key plus its
-    /// uniquifier, which the simulator has no equivalent of, and reports
-    /// <c>@@FETCH_STATUS = -2</c> with the INTO variables NULLed
-    /// (probe-confirmed).
+    /// A table whose only locator is a non-unique clustered index keys the
+    /// KEYSET on the clustered key plus its uniquifier, so moving the key
+    /// leaves a hole: status <c>-2</c>, the NOT NULL column zeroed (probed
+    /// 2026-09-29 against SQL Server 2025).
     /// </summary>
     [TestMethod]
-    public void AddressIdentityKeyset_ClusteredKeyChange_StaysMatchable()
-        => AreEqual("0|5", new Simulation().ExecuteScalar("""
+    public void ClusteredOnlyKeyset_ClusteredKeyChange_LeavesAHole()
+        => AreEqual("-2|0", new Simulation().ExecuteScalar("""
             create table t (id int not null, v int not null);
             create clustered index ix_t on t (id);
             insert t values (1, 10), (2, 20);

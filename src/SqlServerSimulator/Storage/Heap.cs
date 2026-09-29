@@ -52,6 +52,38 @@ internal sealed class Heap
     internal readonly HashSet<(int Page, int Slot)> ForwardTargets = [];
 
     /// <summary>
+    /// The stand-in for real's uniquifier under a non-unique clustered index:
+    /// a row's entry is drawn from <see cref="uniquifierCounter"/> each time an
+    /// UPDATE assigns one of the clustered key's columns, which real performs
+    /// as a delete and re-insert that gives the row a fresh, higher uniquifier
+    /// even when the value stands still (probed 2026-09-29 against SQL Server
+    /// 2025: a KEYSET member so updated fetches as <c>@@FETCH_STATUS = -2</c>,
+    /// and a DYNAMIC cursor meets it again after the key's other duplicates).
+    /// A row never so updated has no entry and reads 0. Null until the first
+    /// such update; read by cursor identity and order only.
+    /// </summary>
+    internal ConcurrentDictionary<(int Page, int Slot), long>? Uniquifiers;
+
+    private long uniquifierCounter;
+
+    /// <summary>The row's <see cref="Uniquifiers"/> entry, or 0 when it has none.</summary>
+    internal long UniquifierOf((int Page, int Slot) address) =>
+        this.Uniquifiers is { } map && map.TryGetValue(address, out var value) ? value : 0;
+
+    /// <summary>
+    /// Draws a fresh <see cref="Uniquifiers"/> entry for the row at
+    /// <paramref name="address"/>, recording the prior one so a rollback
+    /// restores it — real's rolled-back key update leaves the row's identity
+    /// as it was (probed 2026-09-29 against SQL Server 2025).
+    /// </summary>
+    internal void Reuniquify((int Page, int Slot) address, UndoLog? undoLog)
+    {
+        var map = this.Uniquifiers ?? Interlocked.CompareExchange(ref this.Uniquifiers, new(), null) ?? this.Uniquifiers;
+        undoLog?.RecordUniquifier(this, address, this.UniquifierOf(address));
+        map[address] = Interlocked.Increment(ref this.uniquifierCounter);
+    }
+
+    /// <summary>
     /// Monotonic counter bumped by every <see cref="Insert"/>,
     /// <see cref="DeleteAt"/>, and <see cref="UpdateAt"/>; the forwarding
     /// UPDATE path may bump multiple times (its internal Insert + Delete each

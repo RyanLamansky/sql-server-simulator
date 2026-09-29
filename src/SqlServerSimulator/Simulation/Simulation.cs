@@ -2120,6 +2120,19 @@ public sealed partial class Simulation
         }
     }
 
+    /// <summary>Whether the parser sits on a plain <c>BEGIN … END</c> block,
+    /// which real doesn't count as a statement it ran.</summary>
+    private static bool AtBareBeginBlock(ParserContext context)
+    {
+        if (context.Token is not ReservedKeyword { Keyword: Keyword.Begin })
+            return false;
+        var checkpoint = context.SaveCheckpoint();
+        var next = context.GetNextOptional();
+        context.RestoreCheckpoint(checkpoint);
+        return next is not (ReservedKeyword { Keyword: Keyword.Tran or Keyword.Transaction or Keyword.Distributed }
+            or UnquotedString { ContextualKeyword: ContextualKeyword.Try or ContextualKeyword.Catch or ContextualKeyword.Atomic });
+    }
+
     /// <summary>The body of <see cref="DispatchOneStatement"/>.</summary>
     private IEnumerable<SimulatedStatementOutcome> DispatchFramedStatement(BatchContext batch, bool requireSemicolonBeforeCte, bool atBatchStart)
     {
@@ -2127,6 +2140,12 @@ public sealed partial class Simulation
         // ERROR_LINE() default when an error fires inside this statement.
         batch.CurrentStatement.StartLine = batch.Parser.Token?.LineNumber ?? 1;
         batch.CurrentStatement.StartIndex = batch.Parser.Token?.StartIndex ?? 0;
+        if (!batch.IsSkipping)
+        {
+            batch.PriorStatementLine = batch.CountedStatementLine;
+            if (batch.Parser.Token is not ReservedKeyword { Keyword: Keyword.Declare } && !AtBareBeginBlock(batch.Parser))
+                batch.CountedStatementLine = batch.CurrentStatement.StartLine;
+        }
         var statementStart = batch.Parser.SaveCheckpoint();
         // What a bind gathered before this statement: a statement read for
         // its whole report binds its nested ones first, whose errors follow.
@@ -2282,6 +2301,11 @@ public sealed partial class Simulation
             }
             catch (SimulatedSqlException thrown)
             {
+                // After a failed statement, the next OPEN / FETCH to miss its
+                // cursor reports its own line (probed 2026-09-29 against SQL
+                // Server 2025).
+                batch.CountedStatementLine = -1;
+
                 // A binder error is the first of however many the statement
                 // carries; real reports them all, so the statement is read
                 // again for the whole report before anything below judges it.
@@ -2845,14 +2869,15 @@ public sealed partial class Simulation
     /// as does a CLR trigger's context connection ending the firing
     /// statement's transaction (Msg 6549, 3991, 3992; probed 2026-09-28), and so
     /// does a scalar subquery answering more than one row (Msg 512) inside a
-    /// writing statement (probed 2026-09-28).
+    /// writing statement (probed 2026-09-28), and so does a positioned update
+    /// or delete through a read-only cursor (Msg 16929; probed 2026-09-29).
     /// </summary>
     private static bool IsStatementTerminationNoticed(BatchContext batch, SimulatedSqlException error) =>
         error.Number == 1505
         || error.EndedColumnRewrite
         || ((!batch.BatchAborted || error.EndedTriggerBody || error.Number == 127)
             && (batch.CurrentStatement.WritesRows || error.EndedFunctionWrite)
-            && error.Number is 127 or 220 or 232 or 512 or 513 or 515 or 547 or 550 or 2601 or 2627 or 2628 or 3991 or 3992 or 6522 or 6549 or 8115 or 8134 or 8152 or 8705 or 13921 or 16947);
+            && error.Number is 127 or 220 or 232 or 512 or 513 or 515 or 547 or 550 or 2601 or 2627 or 2628 or 3991 or 3992 or 6522 or 6549 or 8115 or 8134 or 8152 or 8705 or 13921 or 16929 or 16947);
 
     /// <summary>
     /// True for the parse-time error real SQL Server defers to bind time —

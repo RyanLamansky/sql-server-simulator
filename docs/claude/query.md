@@ -281,12 +281,14 @@ Inner plans (a join's sources, a subquery, a view body) are untouched, matching 
 ## `WINDOW w AS (…)` named-window clause (SQL Server 2022+)
 - A trailing `WINDOW name AS (<over-body>) [, …]` clause (between HAVING and ORDER BY) defines named windows an `OVER w` reference resolves to.
 - Every window kind reaches one — the ranking family (`ROW_NUMBER` / `RANK` / `DENSE_RANK` / `NTILE`), the distribution pair (`CUME_DIST` / `PERCENT_RANK`), the offset pair (`LAG` / `LEAD`), the value pair (`FIRST_VALUE` / `LAST_VALUE`), the ordered-set pair (`PERCENTILE_CONT` / `PERCENTILE_DISC`) and aggregate-OVER.
-- The reference registers carrying only what it wrote inline (the definition follows the projection) and is patched once the WINDOW clause is read; an undefined name → **Msg 5362**.
+- The reference registers carrying only what it wrote inline (the definition follows the projection) and is patched once the WINDOW clause is read; an undefined name → **Msg 5362**, whose state says which miss it was — 3 when the query block has no WINDOW clause, 4 when an `OVER` names none of its windows, 7 when a definition names one (probed 2026-09-29 against SQL Server 2025).
 - Window names are identifiers: they resolve under the database collation, so `OVER W` finds `WINDOW w AS (…)` under a case-insensitive one.
   One clause defining the same name twice → **Msg 16211**.
 - References resolve from the statement's ORDER BY as well as its select list.
-- WINDOW is **contextual** (still a valid identifier / table alias) — recognized as the clause only in the `WINDOW <name> AS (` shape via lookahead.
-- Named windows are resolved per top-level query block; a WINDOW clause nested in a subquery of the same statement is a known limitation of the shared parse-context list.
+- WINDOW is **contextual** (still a valid identifier / table alias) — recognized as the clause only in the `WINDOW <name> AS (` shape via lookahead, which every alias position checks: a table's, a rowset function's (`generate_series`, `OPENJSON`, `STRING_SPLIT`, `CHANGETABLE`), and a select-list element's, where `SELECT 1 WINDOW w AS (…)` is an unnamed column and a clause.
+- The clause needs no FROM ahead of it, and the ORDER BY after it reads its windows (probed 2026-09-29 against SQL Server 2025).
+- Each query block owns its named windows (`ParserContext.NamedWindowScope`): a subquery's clause neither answers its enclosing block's references nor collides with its names, whatever the source — a table, `VALUES`, a derived table, a CTE, a view, a TVF or a rowset function.
+- A windowed function in a subquery's select list is legal wherever the subquery sits, a WHERE included; Msg 4108 is only for the block's own WHERE / GROUP BY / HAVING.
 
 ### Refinement (`OVER (w …)`) and definition chaining
 

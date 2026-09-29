@@ -154,9 +154,18 @@ partial class Simulation
         {
             var param = procedure.Parameters[i];
             // Cursor parameters carry no scalar value / default — the body
-            // assigns the cursor, and it binds back to the caller at exit.
+            // assigns the cursor, and it binds back to the caller at exit. A
+            // scalar variable passed OUTPUT there is Msg 206, and a cursor
+            // variable already holding a cursor Msg 16951, either one before
+            // the body runs (probed 2026-09-29 against SQL Server 2025).
             if (param.IsCursor)
+            {
+                if (boundOutputSlots[i] is { } scalarSlot)
+                    throw BindingError(SimulatedSqlException.OperandTypeClash(SimulatedSqlException.FamilyRootName(scalarSlot.DeclaredType), "cursor"));
+                if (boundCursorArgNames[i] is { } callerName && outerBatch.CursorVariables.TryGetValue(callerName, out var held) && held is not null)
+                    throw SimulatedSqlException.CursorOutputArgumentAllocated(callerName);
                 continue;
+            }
             if (param.TableType is { } tvpType)
             {
                 if (boundValues[i] is not null && boundTableValues[i] is null && !boundIsDefault[i])
@@ -383,8 +392,12 @@ partial class Simulation
             // frame is torn down (which drops the param's own reference).
             if (param.IsCursor)
             {
+                // Only an open cursor reaches the caller; one the body left
+                // closed leaves the variable unallocated (probed 2026-09-29
+                // against SQL Server 2025).
                 if (boundCursorArgNames[i] is { } callerCursorName && innerBatch is not null
-                    && innerBatch.CursorVariables.TryGetValue(param.Name, out var producedCursor))
+                    && innerBatch.CursorVariables.TryGetValue(param.Name, out var producedCursor)
+                    && producedCursor is { IsOpen: true })
                 {
                     RebindCursorVariable(outerBatch, callerCursorName, producedCursor);
                 }

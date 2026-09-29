@@ -58,7 +58,7 @@ internal sealed partial class Selection
         if (context.Token is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextOptional();
-        var alias = ConsumeOptionalAliasInPlace(context);
+        var alias = ConsumeOptionalAliasAtCurrent(context);
         List<string>? columnAliases = null;
         if (alias is not null && context.Token is Operator { Character: '(' })
         {

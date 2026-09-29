@@ -513,4 +513,60 @@ public sealed class CursorRpcTests
         AreEqual(2, reader.FieldCount);
         AreEqual(1, reader.VisibleFieldCount);
     }
+
+    /// <summary>
+    /// A keyset member whose non-unique clustered key an UPDATE moved still
+    /// fills its buffer row, marked ROWSTAT 2 with its NOT NULL column zeroed,
+    /// and the fetch carries on past it (probed 2026-09-29 against SQL Server
+    /// 2025, one row per <c>sp_cursorfetch</c>).
+    /// </summary>
+    [TestMethod]
+    public async Task Fetch_KeysetHoleFillsItsRowWithRowStat2()
+    {
+        var simulation = new Simulation();
+        await using var listener = await simulation.ListenLocalAsync(0, Token);
+        await using var connection = await Wire.OpenAsync(listener, Token);
+        await using (var setup = new SqlCommand("create table t (a int not null, b int); create clustered index ix on t (a); insert t values (1, 10), (2, 20), (3, 30);", connection))
+            _ = await setup.ExecuteNonQueryAsync(Token);
+
+        var (handle, _, _, rowcount) = await OpenAsync(connection, "select a, b from t", 0x1, 0x4, Token);
+        AreEqual(3, rowcount);
+        HasCount(1, await FetchAsync(connection, handle, 0x2, 0, 1, Token));
+        await using (var move = new SqlCommand("update t set a = a where a = 2", connection))
+            _ = await move.ExecuteNonQueryAsync(Token);
+
+        var rest = await FetchAsync(connection, handle, 0x2, 0, 2, Token);
+        HasCount(2, rest);
+        CollectionAssert.AreEqual(new object?[] { 0, null, 2 }, rest[0]);
+        CollectionAssert.AreEqual(new object?[] { 3, 30, 1 }, rest[1]);
+        AreEqual(0, await CloseAsync(connection, handle, Token));
+    }
+
+    /// <summary>
+    /// A STATIC or FAST_FORWARD request takes only READ_ONLY concurrency —
+    /// anything else is Msg 16966 with return status 1 and no handle — and a
+    /// DYNAMIC or FORWARD_ONLY request over a sort comes back as KEYSET with
+    /// its row count (probed 2026-09-29 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public async Task Open_NegotiatesTheCursorTypeAsReal()
+    {
+        var simulation = new Simulation();
+        await using var listener = await simulation.ListenLocalAsync(0, Token);
+        await using var connection = await OpenWithTableAsync(listener, Token);
+
+        var ex = await ThrowsExactlyAsync<SqlException>(() => OpenAsync(connection, "SELECT id FROM dbo.curp", 0x8, 0x4, Token));
+        AreEqual(16966, ex.Number);
+        Contains("option 4 (OPTIMISTIC) is incompatible with static or fast forward only cursors", ex.Message);
+
+        var (_, scroll, cc, rowcount) = await OpenAsync(connection, "SELECT id FROM dbo.curp ORDER BY name", 0x2, 0x4, Token);
+        AreEqual(0x1, scroll);
+        AreEqual(0x4, cc);
+        AreEqual(5, rowcount);
+
+        (_, scroll, cc, rowcount) = await OpenAsync(connection, "SELECT DISTINCT qty FROM dbo.curp", 0x10, 0x1, Token);
+        AreEqual(0x10, scroll);
+        AreEqual(0x1, cc);
+        AreEqual(-1, rowcount);
+    }
 }

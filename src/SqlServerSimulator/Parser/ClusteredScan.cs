@@ -188,6 +188,48 @@ internal static class ClusteredScan
         }
     }
 
+    /// <summary>
+    /// The clustered key's storage ordinals and column directions, and whether
+    /// it is unique, or null for a heap (or a disabled / filtered / columnstore
+    /// clustered index, which leaves one). A non-unique key is the one real
+    /// completes with a uniquifier.
+    /// </summary>
+    public static (int[] Ordinals, bool[] Descending, bool Unique)? Key(HeapTable table)
+    {
+        foreach (var key in table.KeyConstraints)
+        {
+            if (key.IsClustered)
+                return ClusteredKey(table) is var (ordinals, descending) ? (ordinals, descending, true) : null;
+        }
+        foreach (var index in table.Indexes)
+        {
+            if (index.IsClustered)
+                return ClusteredKey(table) is var (ordinals, descending) ? (ordinals, descending, index.IsUnique) : null;
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Redraws the <see cref="Heap.Uniquifiers"/> entry of the row an UPDATE
+    /// rewrites at <paramref name="address"/> when the statement assigns a
+    /// column of <paramref name="table"/>'s non-unique clustered key —
+    /// <paramref name="assignedColumns"/> are column ordinals — however the
+    /// value comes out; real moves such a row as a delete and re-insert.
+    /// </summary>
+    public static void NoteKeyAssignment(HeapTable table, IReadOnlyList<int> assignedColumns, (int Page, int Slot) address, UndoLog? undoLog)
+    {
+        if (Key(table) is not ({ } ordinals, _, false))
+            return;
+        foreach (var column in assignedColumns)
+        {
+            if (Array.IndexOf(ordinals, table.StorageOrdinals[column]) >= 0)
+            {
+                table.Heap.Reuniquify(address, undoLog);
+                return;
+            }
+        }
+    }
+
     // The clustered key's storage ordinals and column directions, or null for
     // a heap (or a disabled / filtered clustered index, which leaves one).
     private static (int[] Ordinals, bool[] Descending)? ClusteredKey(HeapTable table)

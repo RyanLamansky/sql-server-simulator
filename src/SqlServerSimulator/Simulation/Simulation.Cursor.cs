@@ -52,6 +52,7 @@ partial class Simulation
         var built = BuildCursorDefinition(batch, cursorName, reqStatic, scroll);
         if (built is not { } definition)
             return; // skipping — tokens consumed, nothing registered
+        batch.CountedStatementLine = batch.CurrentStatement.StartLine;
         DeclareCursorInScope(batch, cursorName, definition.Cursor, definition.Local);
     }
 
@@ -73,19 +74,14 @@ partial class Simulation
         context.MoveNextRequired(); // consume CURSOR
         batch.BeginImplicitTransaction();
 
-        var reqKeyset = false;
-        var reqDynamic = false;
-        var reqFastForward = false;
-        var forwardOnly = false;
-        var readOnlyOption = false;
-        var scrollLocks = false;
-        var optimistic = false;
-        var typeWarning = false;
-        var localScope = false;
+        // The SQL-92 form's INSENSITIVE / SCROLL come before CURSOR and take no
+        // T-SQL option after it; its INSENSITIVE is a snapshot that scrolls
+        // only when SCROLL is written too.
+        var sql92 = reqStatic || scroll;
+        var insensitive92 = reqStatic;
+        var options = CursorOptions.None;
 
-        // T-SQL post-CURSOR options, in any order, until FOR. LOCAL / GLOBAL
-        // (scope) and SCROLL_LOCKS / OPTIMISTIC / TYPE_WARNING (concurrency /
-        // warning) are accepted and discarded.
+        // T-SQL post-CURSOR options, in any order, until FOR.
         Span<char> buffer = stackalloc char[12];
         while (context.Token is not ReservedKeyword { Keyword: Keyword.For })
         {
@@ -94,25 +90,45 @@ partial class Simulation
 
             var upper = buffer[..option.Span.Length];
             _ = option.Span.ToUpperInvariant(upper);
-            switch (upper)
+            var named = upper switch
             {
-                case "DYNAMIC": reqDynamic = true; break;
-                case "FAST_FORWARD": reqFastForward = true; break;
-                case "FORWARD_ONLY": forwardOnly = true; break;
-                case "GLOBAL": break;
-                case "INSENSITIVE": reqStatic = true; break;
-                case "KEYSET": reqKeyset = true; break;
-                case "LOCAL": localScope = true; break;
-                case "OPTIMISTIC": optimistic = true; break;
-                case "READ_ONLY": readOnlyOption = true; break;
-                case "SCROLL": scroll = true; break;
-                case "SCROLL_LOCKS": scrollLocks = true; break;
-                case "STATIC": reqStatic = true; break;
-                case "TYPE_WARNING": typeWarning = true; break;
-                default: throw SimulatedSqlException.SyntaxErrorNear(context);
-            }
+                "DYNAMIC" => CursorOptions.Dynamic,
+                "FAST_FORWARD" => CursorOptions.FastForward,
+                "FORWARD_ONLY" => CursorOptions.ForwardOnly,
+                "GLOBAL" => CursorOptions.Global,
+                "INSENSITIVE" => CursorOptions.None,
+                "KEYSET" => CursorOptions.Keyset,
+                "LOCAL" => CursorOptions.Local,
+                "OPTIMISTIC" => CursorOptions.Optimistic,
+                "READ_ONLY" => CursorOptions.ReadOnly,
+                "SCROLL" => CursorOptions.Scroll,
+                "SCROLL_LOCKS" => CursorOptions.ScrollLocks,
+                "STATIC" => CursorOptions.Static,
+                "TYPE_WARNING" => CursorOptions.TypeWarning,
+                _ => throw SimulatedSqlException.SyntaxErrorNear(context),
+            };
+            // INSENSITIVE belongs to the SQL-92 form only, and any option at
+            // all after CURSOR mixes the two forms (probed 2026-09-29 against
+            // SQL Server 2025).
+            if (named == CursorOptions.None)
+                throw SimulatedSqlException.InvalidCursorOption("insensitive");
+            if (sql92)
+                throw SimulatedSqlException.CursorSyntaxMixed().PinLine(0);
+            options |= named;
             context.MoveNextRequired();
         }
+
+        var reqDynamic = (options & CursorOptions.Dynamic) != 0;
+        var reqFastForward = (options & CursorOptions.FastForward) != 0;
+        var forwardOnly = (options & CursorOptions.ForwardOnly) != 0;
+        var reqKeyset = (options & CursorOptions.Keyset) != 0;
+        var localScope = (options & CursorOptions.Local) != 0;
+        var optimistic = (options & CursorOptions.Optimistic) != 0;
+        var readOnlyOption = (options & CursorOptions.ReadOnly) != 0;
+        var scrollLocks = (options & CursorOptions.ScrollLocks) != 0;
+        var typeWarning = (options & CursorOptions.TypeWarning) != 0;
+        scroll |= (options & CursorOptions.Scroll) != 0;
+        reqStatic |= (options & CursorOptions.Static) != 0;
 
         context.MoveNextRequired(); // consume FOR
         context.CursorStatement = true;
@@ -138,9 +154,11 @@ partial class Simulation
                     if (!IsWord(context.Token, "ONLY"))
                         throw SimulatedSqlException.SyntaxErrorNear(context);
                     readOnlyOption = true;
+                    options |= CursorOptions.ForReadOnly;
                     context.MoveNextOptional();
                     break;
                 case ReservedKeyword { Keyword: Keyword.Update }:
+                    options |= CursorOptions.ForUpdate;
                     context.MoveNextOptional();
                     // Optional OF <col> [, <col>]… — captured so a positioned
                     // UPDATE of a column outside the list raises Msg 16932.
@@ -151,14 +169,33 @@ partial class Simulation
                         {
                             if (context.GetNextRequired() is not Name ofColumn)
                                 throw SimulatedSqlException.SyntaxErrorNear(context);
+                            // A qualified column (`t.v`) names its leaf.
+                            while (context.GetNextOptional() is Operator { Character: '.' })
+                            {
+                                if (context.GetNextRequired() is not Name leaf)
+                                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                                ofColumn = leaf;
+                            }
                             forUpdateColumns.Add(ofColumn.Value);
-                            context.MoveNextOptional();
                         } while (context.Token is Operator { Character: ',' });
+                        RejectUnboundUpdateColumns(batch, selection, forUpdateColumns);
                     }
                     break;
                 default:
                     throw SimulatedSqlException.SyntaxErrorNear(context);
             }
+        }
+
+        if (ConflictingCursorOptionsError(options, insensitive92) is { } conflict)
+        {
+            // Real reports it at the token after the declaration, or at the
+            // declaration's last line when the batch ends there.
+            if (context.Token is null && context.LastToken is { } last)
+            {
+                foreach (var error in conflict.Errors)
+                    error.LineNumber = last.LineNumber;
+            }
+            throw conflict;
         }
 
         if (batch.IsSkipping)
@@ -184,10 +221,19 @@ partial class Simulation
         // result is a materialized one.
         var keysetOnly = cursorPlan is { HasRowLimit: true } or { OrderBySuppliedByIndex: false };
 
+        // A forward-only read-only cursor naming no sensitivity is a
+        // FAST_FORWARD one, which sys.dm_exec_cursors reports it as (probed
+        // 2026-09-29 against SQL Server 2025) — READ_ONLY or FOR READ ONLY with
+        // neither SCROLL nor STATIC / INSENSITIVE / KEYSET / DYNAMIC.
+        // An API server cursor's FORWARD_ONLY READ_ONLY keeps its own
+        // negotiation (a sort converts it to KEYSET), so only the T-SQL form
+        // reads the pair that way.
+        var fastForward = reqFastForward || (readOnlyOption && !scroll && !reqStatic && !reqKeyset && !reqDynamic && !batch.ApiServerCursor);
+
         // The type the keywords ask for, before the shape has its say: naming
         // one takes it, and naming none means KEYSET for SCROLL and DYNAMIC for
         // the forward-only default.
-        var requested = reqStatic || reqFastForward
+        var requested = reqStatic
             ? CursorSensitivity.Static
             : reqKeyset
                 ? CursorSensitivity.Keyset
@@ -195,11 +241,20 @@ partial class Simulation
                     ? CursorSensitivity.Dynamic
                     : scroll ? CursorSensitivity.Keyset : CursorSensitivity.Dynamic;
 
+        // FAST_FORWARD runs its plan as the fetches go, so it reads live rows
+        // — inserts ahead appear, deletes ahead vanish, updates show — unless
+        // the plan has to finish a sort or a row limit first, which settles
+        // the rows at OPEN (probed 2026-09-29 against SQL Server 2025); either
+        // way it never needs a row locator.
         var sensitivity = !updatable
             ? CursorSensitivity.Static
-            : requested == CursorSensitivity.Dynamic && keysetOnly
-                ? CursorSensitivity.Keyset
-                : requested;
+            : fastForward
+                ? keysetOnly ? CursorSensitivity.Static : CursorSensitivity.Dynamic
+                : requested == CursorSensitivity.Dynamic && keysetOnly
+                    ? CursorSensitivity.Keyset
+                    : requested;
+        if (fastForward)
+            requested = sensitivity;
 
         // A T-SQL KEYSET keys on a row locator every participating base table
         // has to carry, so a table with none converts the cursor to a read-only
@@ -219,7 +274,7 @@ partial class Simulation
             cursorPlan = null;
         }
 
-        var readOnly = sensitivity == CursorSensitivity.Static || reqFastForward || readOnlyOption;
+        var readOnly = sensitivity == CursorSensitivity.Static || fastForward || readOnlyOption;
         // Naming a sensitivity implies SCROLL unless FORWARD_ONLY says
         // otherwise — probe-confirmed for DYNAMIC as well as STATIC / KEYSET.
         // A cursor that names none is forward-only whatever it resolved to:
@@ -228,7 +283,7 @@ partial class Simulation
         // Keyset) both report Msg 16911 for a scrolling direction. So the test
         // is on the requested keyword, never the resolved sensitivity.
         var scrollable = scroll
-            || ((reqStatic || reqKeyset || reqDynamic) && !forwardOnly && !reqFastForward);
+            || (((reqStatic && !insensitive92) || reqKeyset || reqDynamic) && !forwardOnly && !fastForward);
 
         // Concurrency model (updatable cursors only): SCROLL_LOCKS holds a
         // cursor-scoped U lock on the fetched row; OPTIMISTIC detects out-of-
@@ -261,13 +316,118 @@ partial class Simulation
             readOnly,
             cursorPlan,
             concurrency,
-            forUpdateColumns);
+            forUpdateColumns,
+            fastForward)
+        {
+            Handle = batch.Connection.LastCursorHandle += 2,
+        };
 
         // Scope: explicit LOCAL wins; otherwise the database's CURSOR_DEFAULT,
         // which the simulator models as GLOBAL (real SQL Server's install
         // default — is_local_cursor_default = 0 — for every system and freshly-
         // created database; the per-database option isn't separately modeled).
         return (cursor, localScope);
+    }
+
+    /// <summary>
+    /// Binds a <c>FOR UPDATE OF</c> list against the query's FROM sources as
+    /// real does while compiling the batch, whatever the cursor resolves to:
+    /// a name no source carries is Msg 207 — an output alias counts for
+    /// nothing — and one only a constructed rowset such as <c>VALUES</c>
+    /// carries is Msg 412 (probed 2026-09-29 against SQL Server 2025).
+    /// </summary>
+    private static void RejectUnboundUpdateColumns(BatchContext batch, Selection selection, List<string> columns)
+    {
+        if (selection.BranchFromSources is not { } sources)
+            return;
+        var collation = batch.CurrentDatabase.Collation;
+        foreach (var column in columns)
+        {
+            FromSource? owner = null;
+            foreach (var source in sources)
+            {
+                if (Array.Exists(source.ColumnNames, name => collation.Equals(name, column)))
+                {
+                    owner = source;
+                    break;
+                }
+            }
+            if (owner is null)
+                throw SimulatedSqlException.InvalidColumnName(column);
+            if (owner is { BackingTable: null, BackingView: null, LateralIsQueryBody: false })
+                throw SimulatedSqlException.ColumnDerivedOrConstant(column);
+        }
+    }
+
+    /// <summary>The options a cursor declaration writes, as the conflict
+    /// check reads them.</summary>
+    [Flags]
+    private enum CursorOptions
+    {
+        None = 0,
+        Local = 1 << 0,
+        Global = 1 << 1,
+        ForwardOnly = 1 << 2,
+        Scroll = 1 << 3,
+        Static = 1 << 4,
+        Keyset = 1 << 5,
+        Dynamic = 1 << 6,
+        FastForward = 1 << 7,
+        ReadOnly = 1 << 8,
+        ScrollLocks = 1 << 9,
+        Optimistic = 1 << 10,
+        TypeWarning = 1 << 11,
+        ForUpdate = 1 << 12,
+        ForReadOnly = 1 << 13,
+    }
+
+    /// <summary>
+    /// The option pairs real refuses together, each named in real's order,
+    /// in the order real checks them — the first pair present is the one
+    /// reported (probed 2026-09-29 against SQL Server 2025).
+    /// </summary>
+    private static readonly (CursorOptions First, string FirstName, CursorOptions Second, string SecondName)[] ConflictingCursorOptions =
+    [
+        (CursorOptions.Local, "LOCAL", CursorOptions.Global, "GLOBAL"),
+        (CursorOptions.Scroll, "SCROLL", CursorOptions.ForwardOnly, "FORWARD_ONLY"),
+        (CursorOptions.Scroll, "SCROLL", CursorOptions.FastForward, "FAST_FORWARD"),
+        (CursorOptions.Static, "STATIC", CursorOptions.Keyset, "KEYSET"),
+        (CursorOptions.Static, "STATIC", CursorOptions.Dynamic, "DYNAMIC"),
+        (CursorOptions.Static, "STATIC", CursorOptions.FastForward, "FAST_FORWARD"),
+        (CursorOptions.Static, "STATIC", CursorOptions.ScrollLocks, "SCROLL_LOCKS"),
+        (CursorOptions.Keyset, "KEYSET", CursorOptions.Dynamic, "DYNAMIC"),
+        (CursorOptions.Keyset, "KEYSET", CursorOptions.FastForward, "FAST_FORWARD"),
+        (CursorOptions.Dynamic, "DYNAMIC", CursorOptions.FastForward, "FAST_FORWARD"),
+        (CursorOptions.FastForward, "FAST_FORWARD", CursorOptions.ScrollLocks, "SCROLL_LOCKS"),
+        (CursorOptions.FastForward, "FAST_FORWARD", CursorOptions.Optimistic, "OPTIMISTIC"),
+        (CursorOptions.ReadOnly, "READ_ONLY", CursorOptions.ScrollLocks, "SCROLL_LOCKS"),
+        (CursorOptions.Optimistic, "OPTIMISTIC", CursorOptions.ReadOnly, "READ_ONLY"),
+        (CursorOptions.ScrollLocks, "SCROLL_LOCKS", CursorOptions.Optimistic, "OPTIMISTIC"),
+        (CursorOptions.ForUpdate, "FOR UPDATE", CursorOptions.Static, "STATIC"),
+        (CursorOptions.FastForward, "FAST_FORWARD", CursorOptions.ForUpdate, "FOR UPDATE"),
+        (CursorOptions.ForUpdate, "FOR UPDATE", CursorOptions.ReadOnly, "READ_ONLY"),
+    ];
+
+    /// <summary>
+    /// The refusal of a declaration whose options contradict each other —
+    /// Msg 1048 naming the pair, or Msg 1058 for READ_ONLY beside FOR READ
+    /// ONLY, which otherwise counts as READ_ONLY — or null. Real raises these
+    /// while compiling the batch, so they end it before anything runs.
+    /// </summary>
+    private static SimulatedSqlException? ConflictingCursorOptionsError(CursorOptions options, bool insensitive92)
+    {
+        if ((options & (CursorOptions.ReadOnly | CursorOptions.ForReadOnly)) == (CursorOptions.ReadOnly | CursorOptions.ForReadOnly))
+            return SimulatedSqlException.CursorReadOnlyTwice();
+        if ((options & CursorOptions.ForReadOnly) != 0)
+            options |= CursorOptions.ReadOnly;
+        if (insensitive92 && (options & CursorOptions.ForUpdate) != 0)
+            return SimulatedSqlException.ConflictingCursorOptions("FOR UPDATE", "INSENSITIVE");
+        foreach (var (first, firstName, second, secondName) in ConflictingCursorOptions)
+        {
+            if ((options & first) != 0 && (options & second) != 0)
+                return SimulatedSqlException.ConflictingCursorOptions(firstName, secondName);
+        }
+        return null;
     }
 
     /// <summary>Parses and runs <c>OPEN [GLOBAL] &lt;cursor&gt;</c> /
@@ -279,7 +439,7 @@ partial class Simulation
         var reference = ReadCursorReference(context);
         if (batch.IsSkipping)
             return;
-        var cursor = ResolveCursor(batch, reference, missingAtLineZero: true);
+        var cursor = ResolveCursor(batch, reference, missingAtPriorLine: true);
         batch.BeginImplicitTransaction();
         cursor.Open(batch);
     }
@@ -315,10 +475,11 @@ partial class Simulation
 
         if (reference.IsVariable)
         {
-            if (!batch.CursorVariables.TryGetValue(reference.Name, out var bound))
+            // An unallocated variable is Msg 16950 here too (probed
+            // 2026-09-29 against SQL Server 2025).
+            if (!batch.CursorVariables.TryGetValue(reference.Name, out var bound) || bound is null)
                 throw SimulatedSqlException.CursorVariableNotAllocated(reference.Name);
-            if (bound is not null)
-                ReleaseVariableReference(batch, bound);
+            ReleaseVariableReference(batch, bound);
             batch.CursorVariables[reference.Name] = null;
             return;
         }
@@ -396,7 +557,7 @@ partial class Simulation
         if (batch.IsSkipping)
             yield break;
 
-        var cursor = ResolveCursor(batch, reference, missingAtLineZero: true);
+        var cursor = ResolveCursor(batch, reference, missingAtPriorLine: true);
         batch.BeginImplicitTransaction();
 
         // The INTO-list cardinality check fires regardless of whether the
@@ -477,23 +638,44 @@ partial class Simulation
     /// GLOBAL-only when <c>GLOBAL</c>-qualified (Msg 16916 on a miss).
     /// </summary>
     /// <remarks>
-    /// <c>OPEN</c> and <c>FETCH</c> report a missing cursor at line 0, where
-    /// <c>CLOSE</c> and <c>DEALLOCATE</c> report the statement's line (probed
-    /// 2026-09-28 against SQL Server 2025); <paramref name="missingAtLineZero"/>
+    /// <c>OPEN</c> and <c>FETCH</c> report a missing cursor or an unallocated
+    /// variable at the line of the statement that ran before them, where
+    /// <c>CLOSE</c> and <c>DEALLOCATE</c> report their own line (probed
+    /// 2026-09-29 against SQL Server 2025); <paramref name="missingAtPriorLine"/>
     /// says which.
     /// </remarks>
-    private static Cursor ResolveCursor(BatchContext batch, CursorReference reference, bool missingAtLineZero = false) =>
+    private static Cursor ResolveCursor(BatchContext batch, CursorReference reference, bool missingAtPriorLine = false) =>
         reference.IsVariable
             ? batch.CursorVariables.TryGetValue(reference.Name, out var bound) && bound is not null
                 ? bound
-                : throw SimulatedSqlException.CursorVariableNotAllocated(reference.Name)
+                : missingAtPriorLine
+                    ? throw AtPriorStatementLine(batch, SimulatedSqlException.CursorVariableNotAllocated(reference.Name))
+                    : throw SimulatedSqlException.CursorVariableNotAllocated(reference.Name)
             : !reference.GlobalQualified && batch.LocalCursors.TryGetValue(reference.Name, out var local)
                 ? local
                 : batch.Connection.Cursors.TryGetValue(reference.Name, out var global)
                     ? global
-                    : missingAtLineZero
-                        ? throw SimulatedSqlException.CursorDoesNotExist(reference.Name).PinLine(0)
+                    : missingAtPriorLine
+                        ? throw AtPriorStatementLine(batch, SimulatedSqlException.CursorDoesNotExist(reference.Name))
                         : throw SimulatedSqlException.CursorDoesNotExist(reference.Name);
+
+    /// <summary>
+    /// Stamps <paramref name="error"/> with the line of the statement that ran
+    /// before this one, 0 when none did — where real reports a missing cursor
+    /// or an unallocated cursor variable met by <c>OPEN</c> or <c>FETCH</c>,
+    /// unless the statement before failed, which leaves the error at its own
+    /// line (probed 2026-09-29 against SQL Server 2025).
+    /// </summary>
+    private static SimulatedSqlException AtPriorStatementLine(BatchContext batch, SimulatedSqlException error)
+    {
+        if (batch.PriorStatementLine < 0)
+            return error;
+        if (batch.PriorStatementLine == 0)
+            return error.PinLine(0);
+        foreach (var entry in error.Errors)
+            entry.LineNumber = batch.PriorStatementLine;
+        return error;
+    }
 
     /// <summary>
     /// Registers a freshly-declared named cursor in its scope — the batch/proc-
@@ -673,6 +855,7 @@ partial class Simulation
 
         // OPTIMISTIC: raise the conflict chain if the row changed since fetch.
         cursor.CheckOptimisticConflict();
+        cursor.NotePositionedWrite(delete: assignedColumns is null);
         return new PositionedCursorTarget(cursor, slot);
     }
 

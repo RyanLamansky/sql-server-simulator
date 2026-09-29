@@ -199,6 +199,26 @@ internal sealed partial class TdsSession
         var parameters = request.Parameters;
         var boundParameters = BindTail(parameters, boundStart, preparedNames);
 
+        // A STATIC or FAST_FORWARD request takes only READ_ONLY concurrency:
+        // anything else is Msg 16966 from sp_cursoropen's line 1, return
+        // status 1, no handle and a NULL row count (probed 2026-09-29 against
+        // SQL Server 2025).
+        if ((scrollopt & 0x1F) is 0x8 or 0x10 && (ccopt & 0xF) is 0x2 or 0x4 or 0x8)
+        {
+            var refusal = SimulatedSqlException.ApiCursorConcurrencyIncompatible(ccopt & 0xF).Errors[0];
+            writer.WriteErrorOrInfo(Tds.TokenError, refusal.Number, refusal.State, refusal.Class, refusal.Message, TdsSession.ServerName, "sp_cursoropen", 1);
+            writer.WriteReturnStatus(1);
+            var refused = extraReturns is null ? [] : new List<(ushort, string, object?)>(extraReturns);
+            refused.Add(((ushort)cursorOrdinal, parameters[cursorOrdinal].Name, 0));
+            refused.Add(((ushort)scrollOrdinal, parameters[scrollOrdinal].Name, scrollopt));
+            refused.Add(((ushort)ccOrdinal, parameters[ccOrdinal].Name, ccopt));
+            refused.Add(((ushort)rowcountOrdinal, parameters[rowcountOrdinal].Name, null));
+            foreach (var (ordinal, pname, value) in refused)
+                TdsTypeCodec.WriteReturnValue(writer, ordinal, pname, DbType.Int32, value);
+            this.CompleteCursorRpc(writer, moreRequests, error: true);
+            return;
+        }
+
         var connection = this.connection!;
         var name = "sss_apicursor_" + this.nextApiCursorHandle.ToString(CultureInfo.InvariantCulture);
         var declareOpen = $"DECLARE {name} CURSOR {CursorOptionKeywords(scrollopt, ccopt)} FOR {statement};\nOPEN {name};";
@@ -299,9 +319,20 @@ internal sealed partial class TdsSession
             {
                 var direction = i == 0 ? firstDirection : FetchDirection.Next;
                 var (status, values) = api.Cursor.Fetch(batch, direction, offset);
+                if (status == -2)
+                {
+                    // A keyset member deleted out from under the cursor still
+                    // fills its buffer row, marked ROWSTAT 2, and the fetch
+                    // carries on past it (probed 2026-09-29 against SQL Server
+                    // 2025).
+                    rows.Add(Cursor.WithRowStat(api.Cursor.DeletedMemberValues(), 2));
+                    api.Buffer.Add(new (int Page, int Slot)?[api.Cursor.BaseTables.Length]);
+                    api.CurrentRowNumber += 1;
+                    continue;
+                }
                 if (status != 0 || values is null)
                     break;
-                rows.Add(values);
+                rows.Add(Cursor.WithRowStat(values, 1));
                 if (api.Cursor.CurrentRids is { } rids)
                     api.Buffer.Add(rids);
                 api.CurrentRowNumber += 1;
@@ -419,12 +450,13 @@ internal sealed partial class TdsSession
     /// <summary>
     /// Writes the cursor's COLMETADATA (<see cref="Cursor.FetchResult"/>'s shape,
     /// ending in the hidden <c>ROWSTAT</c> column) and,
-    /// when <paramref name="rows"/> is non-null, one ROW per fetched row with
-    /// ROWSTAT = 1. A null rows list is the metadata-only announce (sp_cursoropen).
+    /// when <paramref name="rows"/> is non-null, one ROW per fetched row, each
+    /// already ending in its ROWSTAT. A null rows list is the metadata-only
+    /// announce (sp_cursoropen).
     /// </summary>
     private static void WriteCursorMetadata(TdsTokenWriter writer, Cursor cursor, List<SqlValue[]>? rows)
     {
-        var result = cursor.FetchResult(rows is null ? [] : rows.ConvertAll(values => Cursor.WithRowStat(values, 1)));
+        var result = cursor.FetchResult(rows ?? []);
         TdsTypeCodec.WriteColMetadata(writer, result.Schema, result.ColumnNames, result.ColumnNullability, result.ColumnReportsNumeric, result.HiddenColumnCount, result.ColumnWireFlags);
 
         if (rows is null)
@@ -445,12 +477,23 @@ internal sealed partial class TdsSession
     private static (int Scroll, int Cc, int RowCount) ResolveEffectiveOptions(Cursor cursor, int scrollopt, int ccopt, int lastCursorRows)
     {
         var requestedScroll = scrollopt & 0x1F;
+        // UPDT_IN_PLACE (0x4000) comes back with whatever concurrency the
+        // cursor settles on (probed 2026-09-29 against SQL Server 2025).
+        var inPlace = ccopt & 0x4000;
         var requestedCc = ccopt & 0xF;
+        // FAST_FORWARD stays FAST_FORWARD over any shape; a DYNAMIC or
+        // FORWARD_ONLY request the shape caps at KEYSET (a sort, a row
+        // limit) reports KEYSET with its row count (probed 2026-09-29
+        // against SQL Server 2025).
+        if (requestedScroll == 0x10)
+            return (0x10, 0x1 | inPlace, -1);
         if (cursor.BaseTables.Length == 0)
-            return (0x8, 0x1, lastCursorRows);
+            return (0x8, 0x1 | inPlace, lastCursorRows);
+        var cc = (requestedCc == 0 ? 0x1 : requestedCc) | inPlace;
+        if (requestedScroll is 0x2 or 0x4 && cursor.Sensitivity == CursorSensitivity.Keyset)
+            return (0x1, cc, lastCursorRows);
 
-        var rowcount = requestedScroll is 0x2 or 0x4 or 0x10 ? -1 : lastCursorRows;
-        var cc = requestedCc == 0 ? 0x1 : requestedCc;
+        var rowcount = requestedScroll is 0x2 or 0x4 ? -1 : lastCursorRows;
         return (requestedScroll, cc, rowcount);
     }
 

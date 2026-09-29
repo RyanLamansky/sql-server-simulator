@@ -462,6 +462,7 @@ partial class Simulation
             }
             tracking?.RecordUpdate(context.Batch, childTable, keyOrdinals, oldClone, newRow, trackedColumns, ref keyMoves);
             childTable.Heap.UpdateAt(pageIndex, slotIndex, rewritten, undoLog, ReclaimSuperseded(childTable, context));
+            ClusteredScan.NoteKeyAssignment(childTable, fk.ChildColumnOrdinals, (pageIndex, slotIndex), undoLog);
             newPairs.Add((oldClone, newRow));
         }
         tracking?.RecordKeyMoves(context.Batch, childTable, keyMoves);
@@ -532,6 +533,7 @@ partial class Simulation
             }
             tracking?.RecordUpdate(context.Batch, childTable, keyOrdinals, oldClone, newRow, trackedColumns, ref keyMoves);
             childTable.Heap.UpdateAt(pageIndex, slotIndex, rewritten, undoLog, ReclaimSuperseded(childTable, context));
+            ClusteredScan.NoteKeyAssignment(childTable, fk.ChildColumnOrdinals, (pageIndex, slotIndex), undoLog);
             newPairs.Add((oldClone, newRow));
         }
         tracking?.RecordKeyMoves(context.Batch, childTable, keyMoves);

@@ -1335,6 +1335,26 @@ internal sealed partial class Selection
 
     private static Selection ParseInner(ParserContext context, QueryScope scope, List<AggregateExpression> aggregates, List<WindowExpression> windows, bool allowOrderBy)
     {
+        // A query block owns its named windows, and its select list takes a
+        // windowed function wherever the block itself sits — a subquery in an
+        // enclosing WHERE included (probed 2026-09-29 against SQL Server 2025).
+        var savedWindowScope = context.NamedWindowScope;
+        var savedAllowsWindows = context.AllowsWindowExpressions;
+        context.NamedWindowScope = (context.PendingNamedWindows.Count, context.NamedWindowDefinitions.Count);
+        context.AllowsWindowExpressions = true;
+        try
+        {
+            return ParseQueryBlock(context, scope, aggregates, windows, allowOrderBy);
+        }
+        finally
+        {
+            context.NamedWindowScope = savedWindowScope;
+            context.AllowsWindowExpressions = savedAllowsWindows;
+        }
+    }
+
+    private static Selection ParseQueryBlock(ParserContext context, QueryScope scope, List<AggregateExpression> aggregates, List<WindowExpression> windows, bool allowOrderBy)
+    {
         var distinct = false;
         Expression? topExpression = null;
         var topPercent = false;
@@ -1555,7 +1575,7 @@ internal sealed partial class Selection
             // element — `SELECT 1 xyz 2` is Msg 102 at the `2`, not a second
             // column. Only a comma or a clause keyword may follow a complete,
             // aliased element (probe-confirmed).
-            if (!elementExpected && StartsProjectionElement(context.Token))
+            if (!elementExpected && StartsProjectionElement(context.Token) && !IsWindowClauseAhead(context))
                 throw SimulatedSqlException.SyntaxErrorNear(context);
 
             switch (context.Token)
@@ -1574,6 +1594,7 @@ internal sealed partial class Selection
                 // synthesized row, but the clause must parse rather than raise.
                 case ReservedKeyword { Keyword: Keyword.Order }:
                 case ReservedKeyword { Keyword: Keyword.Where }:
+                case Name when IsWindowClauseAhead(context):
                     break;
 
                 // A trailing FOR (JSON / XML / BROWSE) after an aliased final
@@ -1778,6 +1799,13 @@ internal sealed partial class Selection
                         throw SimulatedSqlException.SyntaxErrorNear(context);
                     goto ExitWhileTokenLoop;
 
+                // A WINDOW clause with no FROM before it, read with the
+                // ORDER BY after it — never an alias, even where one could
+                // stand (probed 2026-09-29 against SQL Server 2025).
+                case Name when IsWindowClauseAhead(context):
+                    ConsumeWhereAndOrderBy(context, fromClause, allowOrderBy, scope);
+                    goto ExitWhileTokenLoop;
+
                 case Name name:
                     expressions[^1] = AssignColumnAlias(expressions[^1], name.Value);
                     continue;
@@ -1920,6 +1948,7 @@ internal sealed partial class Selection
             throw SimulatedSqlException.SyntaxErrorNear(context);
         } while (context.GetNextOptional() is not null);
     ExitWhileTokenLoop:
+        ResolvePendingNamedWindows(context);
         RejectMisplacedIdentityFunction(context, expressions, intoTarget);
 
         // A comma that promised an element the input never supplied — real
@@ -3689,7 +3718,7 @@ internal sealed partial class Selection
                         var targetCheckpoint = context.SaveCheckpoint();
                         var (targetServer, targetQuery) = ParseOpenQueryArguments(context);
                         context.MoveNextOptional();
-                        if (ConsumeOptionalAliasInPlace(context) is { } writtenTargetAlias && context.CurrentDatabase.Collation.Equals(writtenTargetAlias, openQueryTargetAlias))
+                        if (ConsumeOptionalAliasAtCurrent(context) is { } writtenTargetAlias && context.CurrentDatabase.Collation.Equals(writtenTargetAlias, openQueryTargetAlias))
                         {
                             var openQueryTarget = RemoteWrite.ForOpenQuery(context.Batch, targetServer, targetQuery, context.Batch.CurrentStatement.RemoteWriteAliasKind);
                             return RemoteTargetSource(context, openQueryTarget, writtenTargetAlias, openQueryTarget.Proxy.Name);
@@ -3698,7 +3727,7 @@ internal sealed partial class Selection
                     }
 
                     var openQueryPlan = ParseOpenQuery(context);
-                    var openQueryAlias = ConsumeOptionalAliasInPlace(context);
+                    var openQueryAlias = ConsumeOptionalAliasAtCurrent(context);
                     // A column-alias list — `OPENQUERY(...) q(c1, c2)` — is not
                     // allowed on OPENQUERY (real SQL Server: Msg 102 near the
                     // first alias identifier). The general FROM parser tolerates
@@ -3768,7 +3797,7 @@ internal sealed partial class Selection
         for (var ci = 0; ci < columns.Length; ci++)
             columns[ci] = new HeapColumn(plan.ColumnNames[ci], plan.Schema[ci], maxLength: null, nullable: plan.ColumnNullability?[ci] ?? true);
         return new FromSource(
-            qualifier: ConsumeOptionalAliasInPlace(context),
+            qualifier: ConsumeOptionalAliasAtCurrent(context),
             columnNames: plan.ColumnNames,
             columns: columns,
             storedSchema: columns,
@@ -4460,12 +4489,15 @@ internal sealed partial class Selection
     /// </summary>
     private static void ResolvePendingNamedWindows(ParserContext context)
     {
-        if (context.PendingNamedWindows.Count == 0)
-            return;
-        foreach (var (window, reference) in context.PendingNamedWindows)
-            window.ApplyNamedWindow(MergeWindowReference(context, reference, []));
-        context.PendingNamedWindows.Clear();
-        context.NamedWindowDefinitions.Clear();
+        var (pendingStart, definitionStart) = context.NamedWindowScope;
+        var pending = context.PendingNamedWindows;
+        for (var i = pendingStart; i < pending.Count; i++)
+            pending[i].Window.ApplyNamedWindow(MergeWindowReference(context, pending[i].Reference, []));
+        if (pending.Count > pendingStart)
+            pending.RemoveRange(pendingStart, pending.Count - pendingStart);
+        var definitions = context.NamedWindowDefinitions;
+        if (definitions.Count > definitionStart)
+            definitions.RemoveRange(definitionStart, definitions.Count - definitionStart);
     }
 
     /// <summary>
@@ -4476,11 +4508,12 @@ internal sealed partial class Selection
     private static bool TryFindWindowDefinition(ParserContext context, string name, out Expressions.WindowExpression.WindowBody body)
     {
         var collation = context.Batch.CurrentDatabase.Collation;
-        foreach (var (definedName, definedBody) in context.NamedWindowDefinitions)
+        var definitions = context.NamedWindowDefinitions;
+        for (var i = context.NamedWindowScope.Definitions; i < definitions.Count; i++)
         {
-            if (collation.Equals(definedName, name))
+            if (collation.Equals(definitions[i].Name, name))
             {
-                body = definedBody;
+                body = definitions[i].Body;
                 return true;
             }
         }
@@ -4508,8 +4541,18 @@ internal sealed partial class Selection
         var collation = context.Batch.CurrentDatabase.Collation;
         if (visiting.Exists(pending => collation.Equals(pending, name)))
             throw SimulatedSqlException.CyclicWindowReferences();
-        if (!TryFindWindowDefinition(context, name, out var definition) || collation.Equals(definition.BaseWindowName, name))
-            throw SimulatedSqlException.WindowIsUndefined(name);
+        // Real's state tells the three misses apart: a block with no WINDOW
+        // clause at all, an OVER naming none of the clause's windows, and a
+        // definition naming one — itself included, since real doesn't put a
+        // name in its own scope (probed 2026-09-29 against SQL Server 2025).
+        if (!TryFindWindowDefinition(context, name, out var definition))
+        {
+            throw SimulatedSqlException.WindowIsUndefined(name, (byte)(visiting.Count > 0
+                ? 7
+                : context.NamedWindowDefinitions.Count > context.NamedWindowScope.Definitions ? 4 : 3));
+        }
+        if (collation.Equals(definition.BaseWindowName, name))
+            throw SimulatedSqlException.WindowIsUndefined(name, 7);
 
         visiting.Add(name);
         var resolved = MergeWindowReference(context, definition, visiting);

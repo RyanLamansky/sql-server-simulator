@@ -1176,6 +1176,7 @@ partial class Simulation
             if (lockableTable)
                 context.Batch.ProbeKeyLocksForUpdate(table, pageIndex, slotIndex, newImage);
             table.Heap.UpdateAt(pageIndex, slotIndex, newImage, undoLog, ReclaimSuperseded(table, context));
+            ClusteredScan.NoteKeyAssignment(table, updatedColumnOrdinals, (pageIndex, slotIndex), undoLog);
             if (lockableTable && oldBytesPerAffected is not null)
                 Storage.VersionStore.CaptureWrite(context.Batch, table, (pageIndex, slotIndex), (pageIndex, slotIndex), oldBytesPerAffected[i], Storage.VersionWriteKind.Update);
         }

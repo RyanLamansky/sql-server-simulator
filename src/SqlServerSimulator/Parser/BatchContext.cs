@@ -806,6 +806,23 @@ internal sealed class BatchContext
     public int LineOffset;
 
     /// <summary>
+    /// The start line of the last statement this frame ran that real counts
+    /// as run — not a bare <c>BEGIN</c>, nor a <c>DECLARE</c> that neither
+    /// initializes a variable nor declares a cursor — or 0 before any, and -1
+    /// right after a statement failed. <see cref="PriorStatementLine"/> takes
+    /// it as each statement starts.
+    /// </summary>
+    public int CountedStatementLine;
+
+    /// <summary>
+    /// <see cref="CountedStatementLine"/> as the running statement began: the
+    /// line real reports an <c>OPEN</c> or <c>FETCH</c> of a missing cursor
+    /// or an unallocated cursor variable at (probed 2026-09-29 against SQL
+    /// Server 2025).
+    /// </summary>
+    public int PriorStatementLine;
+
+    /// <summary>
     /// Schema-qualified name of the procedure whose body this batch executes
     /// (<c>dbo.p1</c>), stamped onto a caught exception's
     /// <see cref="SimulatedError.Procedure"/> and thence <c>ERROR_PROCEDURE()</c>

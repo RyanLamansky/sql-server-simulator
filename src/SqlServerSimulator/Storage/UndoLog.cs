@@ -138,6 +138,14 @@ internal sealed class UndoLog
     public void RecordIdentityReseed(IdentityState state, (Int128? HighWaterMark, Int128? ReseededStart) snapshot) =>
         this.entries.Add(new IdentityReseed(state, snapshot));
 
+    /// <summary>
+    /// Records a row's prior <see cref="Heap.Uniquifiers"/> entry (0 for none)
+    /// before a clustered-key update redraws it, so a rollback restores the
+    /// row's cursor identity.
+    /// </summary>
+    public void RecordUniquifier(Heap heap, (int Page, int Slot) address, long previous) =>
+        this.entries.Add(new UniquifierChange(heap, address, previous));
+
     public void RecordTruncation(Heap heap, List<HeapPage> oldPages, List<HeapLobPage> oldLobPages, HashSet<(int Page, int Slot)> oldForwardTargets, int[] oldFreeLobPages, (IdentityState State, Int128? HighWaterMark)[] identitySnapshots) =>
         this.entries.Add(new HeapTruncation(heap, oldPages, oldLobPages, oldForwardTargets, oldFreeLobPages, identitySnapshots));
 
@@ -471,6 +479,17 @@ internal sealed class UndoLog
         {
             this.Heap.Pages[this.PageIndex].MarkSlotReclaimable(this.SlotIndex);
             this.Heap.MarkPageReclaimable(this.PageIndex);
+        }
+    }
+
+    private sealed class UniquifierChange(Heap heap, (int Page, int Slot) address, long previous) : UndoEntry
+    {
+        public override void Undo()
+        {
+            if (previous == 0)
+                _ = heap.Uniquifiers!.TryRemove(address, out _);
+            else
+                heap.Uniquifiers![address] = previous;
         }
     }
 

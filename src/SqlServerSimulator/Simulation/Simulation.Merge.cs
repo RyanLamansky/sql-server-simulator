@@ -2240,6 +2240,7 @@ partial class Simulation
                     context.Batch.ProbeKeyLocksForUpdate(destinationTable, page, slot, rewritten);
                 }
                 destinationTable.Heap.UpdateAt(page, slot, rewritten, undoLog, ReclaimSuperseded(destinationTable, context));
+                ClusteredScan.NoteKeyAssignment(destinationTable, updatedColumnOrdinals, (page, slot), undoLog);
             }
             tracking?.RecordKeyMoves(context.Batch, destinationTable, keyMoves);
         }

@@ -1122,6 +1122,14 @@ public sealed class SimulatedDbConnection : DbConnection
     internal int LastCursorRows;
 
     /// <summary>
+    /// The last handle given a cursor this session declared — the number
+    /// <c>sp_describe_cursor</c> reports as <c>cursor_handle</c>. Real hands a
+    /// fresh session's first cursor 180150003 and each later one the next odd
+    /// number (probed 2026-09-29 against SQL Server 2025).
+    /// </summary>
+    internal int LastCursorHandle = 180150001;
+
+    /// <summary>
     /// Name of the table currently under <c>SET IDENTITY_INSERT ... ON</c>
     /// for this connection, or <c>null</c> when no table is in that mode.
     /// SQL Server allows only one table at a time per session; the simulator

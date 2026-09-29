@@ -728,12 +728,30 @@ public sealed class CursorTests
             """, error, message);
 
     [TestMethod]
+    [DataRow("select 1\nopen nope", 1)]
+    [DataRow("select 1\n\nfetch next from nope", 1)]
+    [DataRow("select 1\nclose nope", 2)]
+    [DataRow("select 1\ndeallocate nope", 2)]
     [DataRow("open nope", 0)]
-    [DataRow("fetch next from nope", 0)]
-    [DataRow("close nope", 2)]
-    [DataRow("deallocate nope", 2)]
-    public void UndeclaredCursor_Msg16916_Line(string statement, int line)
-        // OPEN and FETCH report line 0, CLOSE and DEALLOCATE the statement's
-        // (probed 2026-09-28 against SQL Server 2025).
-        => AreEqual(line, new Simulation().AssertSqlError($"select 1\n{statement}", 16916).LineNumber);
+    [DataRow("declare @i int\nopen nope", 0)]
+    [DataRow("declare @i int = 1\nopen nope", 1)]
+    [DataRow("print 1\nbegin\nopen nope\nend", 1)]
+    [DataRow("print 1\nwhile 1 = 1 begin\nopen nope\nbreak\nend", 2)]
+    [DataRow("declare @x cursor\nselect 1\n\nopen @x", 2)]
+    public void UndeclaredCursor_Msg16916_Line(string batch, int line)
+        // OPEN and FETCH report the line of the statement that ran before
+        // them — 0 when none did, a bare BEGIN and a DECLARE initializing
+        // nothing not counting — and CLOSE and DEALLOCATE their own (probed
+        // 2026-09-29 against SQL Server 2025).
+        => AreEqual(line, new Simulation().AssertSqlError(batch, batch.Contains("@x", StringComparison.Ordinal) ? 16950 : 16916).LineNumber);
+
+    /// <summary>After a failed statement, an OPEN or FETCH missing its cursor
+    /// reports its own line (probed 2026-09-29 against SQL Server 2025).</summary>
+    [TestMethod]
+    public void UndeclaredCursor_AfterAFailedStatement_ReportsItsOwnLine()
+    {
+        var ex = new Simulation().AssertSqlError("select 1\nopen nope\n\n\nopen nope2", 16916);
+        AreEqual(1, ex.Errors[0].LineNumber);
+        AreEqual(5, ex.Errors[1].LineNumber);
+    }
 }

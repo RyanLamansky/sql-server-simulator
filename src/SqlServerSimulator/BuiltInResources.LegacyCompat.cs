@@ -65,6 +65,13 @@ internal static partial class BuiltInResources
         // sp_describe_first_result_set: the result metadata tools and ORMs
         // read without running the query, described through SET FMTONLY.
         "sp_describe_first_result_set",
+        // sp_cursor_list and the sp_describe_cursor family: a session's
+        // cursors described through a cursor variable they allocate; see
+        // docs/claude/cursors.md.
+        "sp_cursor_list",
+        "sp_describe_cursor",
+        "sp_describe_cursor_columns",
+        "sp_describe_cursor_tables",
         // sp_describe_undeclared_parameters: the parameter types ODBC's
         // SQLDescribeParam and JDBC's parameter metadata ask for.
         "sp_describe_undeclared_parameters",

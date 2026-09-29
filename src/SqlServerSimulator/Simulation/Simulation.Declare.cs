@@ -147,6 +147,8 @@ partial class Simulation
                 // SQL Server 2025).
                 context.Batch.CurrentStatement.DoneKind = StatementDoneKind.Select;
                 context.Batch.CurrentStatement.DoneCount = 1;
+                if (!context.Batch.IsSkipping)
+                    context.Batch.CountedStatementLine = context.Batch.CurrentStatement.StartLine;
                 context.MoveNextRequired();
                 var initExpression = Expression.Parse(context);
                 initExpressionForMask = initExpression;

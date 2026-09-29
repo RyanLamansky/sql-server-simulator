@@ -251,7 +251,11 @@ partial class Simulation
             "sp_datatype_info" => InvokeSpDatatypeInfo(batch, classic: true),
             "sp_datatype_info_100" => InvokeSpDatatypeInfo(batch, classic: false),
             "sp_databases" => Uncounted(InvokeSpDatabases(batch)),
+            "sp_cursor_list" => InvokeSpCursorList(batch, CalledName(procName)),
             "sp_depends" => Uncounted(InvokeSpDepends(batch, CalledName(procName))),
+            "sp_describe_cursor" => InvokeSpDescribeCursor(batch, CalledName(procName), CursorDescription.Cursor),
+            "sp_describe_cursor_columns" => InvokeSpDescribeCursor(batch, CalledName(procName), CursorDescription.Columns),
+            "sp_describe_cursor_tables" => InvokeSpDescribeCursor(batch, CalledName(procName), CursorDescription.Tables),
             "sp_describe_first_result_set" => this.InvokeSpDescribeFirstResultSet(batch),
             "sp_describe_undeclared_parameters" => this.InvokeSpDescribeUndeclaredParameters(batch),
             "sp_dropextendedproperty" => InvokeSpExtendedProperty(batch, ExtendedPropertyOp.Drop),
@@ -517,12 +521,18 @@ partial class Simulation
             // carry the caller's variable name so the invocation can bind the
             // proc's assigned cursor back into it. The trailing OUTPUT keyword
             // is consumed like the scalar path.
+            // Without OUTPUT the procedure's cursor never reaches the variable
+            // (probed 2026-09-29 against SQL Server 2025).
             if (batch.CursorVariables.ContainsKey(varRef.Value))
             {
                 context.MoveNextOptional();
+                string? boundName = null;
                 if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Output or ContextualKeyword.Out })
+                {
+                    boundName = varRef.Value;
                     context.MoveNextOptional();
-                return new ProcArgument(name, isDefault: false, value: SqlValue.Null(SqlType.Int32), outputSlot: null, cursorVariableName: varRef.Value);
+                }
+                return new ProcArgument(name, isDefault: false, value: SqlValue.Null(SqlType.Int32), outputSlot: null, cursorVariableName: boundName);
             }
             var slot = batch.GetVariableSlot(varRef.Value);
             context.MoveNextOptional();

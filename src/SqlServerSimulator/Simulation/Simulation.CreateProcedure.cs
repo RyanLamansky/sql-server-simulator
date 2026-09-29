@@ -343,17 +343,16 @@ partial class Simulation
         var name = variable.Value;
         context.MoveNextRequired();
 
-        // Cursor parameter: `@c CURSOR [VARYING] OUTPUT`. Real SQL Server
-        // requires VARYING OUTPUT (a cursor parameter is output-only); the
-        // simulator accepts VARYING / OUTPUT / OUT in any of the usual orders.
+        // Cursor parameter: `@c CURSOR VARYING OUTPUT`, the two options
+        // required and in that order (Msg 1051 otherwise; probed 2026-09-29
+        // against SQL Server 2025).
         if (context.Token is ReservedKeyword { Keyword: Keyword.Cursor })
         {
+            if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Varying })
+                throw SimulatedSqlException.CursorParameterNeedsVaryingOutput();
+            if (context.GetNextRequired() is not UnquotedString { ContextualKeyword: ContextualKeyword.Output or ContextualKeyword.Out })
+                throw SimulatedSqlException.CursorParameterNeedsVaryingOutput();
             context.MoveNextRequired();
-            while (context.Token is ReservedKeyword { Keyword: Keyword.Varying }
-                or UnquotedString { ContextualKeyword: ContextualKeyword.Output or ContextualKeyword.Out })
-            {
-                context.MoveNextRequired();
-            }
             return new ProcedureParameter(name, SqlType.Int32, declaredMaxLength: null, defaultExpression: null, isOutput: true, isCursor: true);
         }
 

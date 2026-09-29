@@ -973,6 +973,7 @@ partial class Simulation
                 if (BuildCursorDefinition(context.Batch, "", reqStatic: false, scroll: false) is not { } built)
                     return true; // skipping — tokens consumed
                 built.Cursor.IsUnnamed = true;
+                built.Cursor.OriginVariable = "@" + variableName;
                 newCursor = built.Cursor;
                 break;
             case AtPrefixedString sourceVar:

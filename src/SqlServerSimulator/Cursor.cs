@@ -12,8 +12,8 @@ namespace SqlServerSimulator;
 internal enum CursorSensitivity
 {
     /// <summary>Snapshot of projected rows taken at OPEN; immune to later
-    /// changes; read-only. Covers STATIC / INSENSITIVE / FAST_FORWARD and any
-    /// non-updatable query.</summary>
+    /// changes; read-only. Covers STATIC / INSENSITIVE, any non-updatable
+    /// query, and a FAST_FORWARD cursor whose plan sorts or limits rows.</summary>
     Static,
 
     /// <summary>Membership (the set of unique keys) frozen at OPEN; each FETCH
@@ -87,13 +87,23 @@ internal sealed class Cursor(
     bool readOnly,
     CursorSourcePlan? plan,
     CursorConcurrency concurrency = CursorConcurrency.Default,
-    List<string>? forUpdateColumns = null)
+    List<string>? forUpdateColumns = null,
+    bool fastForward = false)
 {
     public readonly string Name = name;
     public readonly Selection Selection = selection;
     public readonly CursorSensitivity Sensitivity = sensitivity;
     public readonly bool Scrollable = scrollable;
     public readonly bool ReadOnly = readOnly;
+
+    /// <summary>
+    /// A <c>FAST_FORWARD</c> cursor — named so, or forward-only and read-only
+    /// naming no sensitivity. Its <see cref="Sensitivity"/> says whether it
+    /// reads live (DYNAMIC) or settled its rows at OPEN (STATIC); either way
+    /// <c>@@CURSOR_ROWS</c> reads -1 and <c>CURSOR_STATUS</c> 1 while open, an
+    /// empty result included (probed 2026-09-29 against SQL Server 2025).
+    /// </summary>
+    public readonly bool FastForward = fastForward;
 
     /// <summary>The FROM shape this cursor re-folds per FETCH, resolved at
     /// DECLARE; null for a STATIC (non-navigable) cursor, which walks a
@@ -143,7 +153,44 @@ internal sealed class Cursor(
     /// destroyed when its last variable reference is deallocated.</summary>
     public bool IsUnnamed;
 
+    /// <summary>The variable (<c>@name</c>) whose <c>SET @c = CURSOR …</c>
+    /// built this cursor, which <c>sp_cursor_list</c> names it by.</summary>
+    public string? OriginVariable;
+
     public bool IsOpen;
+
+    /// <summary>The session-scoped number <c>sp_describe_cursor</c> reports as
+    /// <c>cursor_handle</c>, drawn at declaration.</summary>
+    public int Handle;
+
+    /// <summary>What the cursor last did, as <c>sp_describe_cursor</c>'s
+    /// <c>last_operation</c> numbers it: 0 nothing, 1 OPEN, 2 FETCH, 4 a
+    /// positioned UPDATE, 5 a positioned DELETE, 6 CLOSE.</summary>
+    public byte LastOperation;
+
+    /// <summary>The rows <see cref="LastOperation"/> reached, as
+    /// <c>row_count</c> reports them.</summary>
+    public int LastOperationRows;
+
+    /// <summary>This cursor's own last fetch status — -9 before any fetch,
+    /// kept through CLOSE — as <c>sp_describe_cursor</c> reports it.</summary>
+    public int FetchStatus = -9;
+
+    /// <summary>The qualifying rows <c>sp_describe_cursor</c> reports as
+    /// <c>cursor_rows</c>: 0 closed, -1 for a DYNAMIC or FAST_FORWARD cursor,
+    /// else the membership count.</summary>
+    public int DescribedRowCount => !this.IsOpen
+        ? 0
+        : this.Sensitivity == CursorSensitivity.Dynamic || this.FastForward
+            ? -1
+            : this.staticRows?.Count ?? this.keysetIdentities?.Count ?? 0;
+
+    /// <summary>Records a positioned UPDATE or DELETE through this cursor.</summary>
+    public void NotePositionedWrite(bool delete)
+    {
+        this.LastOperation = delete ? (byte)5 : (byte)4;
+        this.LastOperationRows = 1;
+    }
 
     /// <summary>
     /// OPTIMISTIC snapshot of the currently-fetched row's full stored bytes —
@@ -173,7 +220,7 @@ internal sealed class Cursor(
     /// </summary>
     public int StatusValue => !this.IsOpen
         ? -1
-        : this.Sensitivity == CursorSensitivity.Dynamic
+        : this.Sensitivity == CursorSensitivity.Dynamic || this.FastForward
             ? 1
             : (this.staticRows?.Count ?? this.keysetIdentities?.Count ?? 0) > 0 ? 1 : 0;
 
@@ -192,12 +239,9 @@ internal sealed class Cursor(
 
     // STATIC: frozen projected values, walked by index.
     private List<SqlValue[]>? staticRows;
-    // KEYSET: ordered snapshot of row identities (membership frozen at OPEN),
-    // one slot per FROM source. UniqueKeys carries the tuple when that source's
-    // table has a PK/UNIQUE — KEYSET membership tracks by that, matching SQL
-    // Server's keyset-is-identified-by-the-unique-index behavior. A null slot
-    // falls back to the address (no-unique-key heap path; simulator extension).
-    private List<(SqlValue[]?[] UniqueKeys, (int Page, int Slot)?[] Rids)>? keysetIdentities;
+    // KEYSET: ordered snapshot of the member rows (membership frozen at OPEN),
+    // matched per FETCH by Selection.CursorIdentityMatches.
+    private List<Selection.CursorRow>? keysetIdentities;
     // Position for indexed (STATIC / KEYSET): -1 before-first, == count after-last.
     private int position;
 
@@ -218,12 +262,12 @@ internal sealed class Cursor(
             case CursorSensitivity.Static:
                 this.staticRows = [.. this.Selection.Execute(batch).RowBytes.Select(b => RowDecoder.DecodeRow(this.Selection.Schema, b))];
                 this.position = -1;
-                batch.Connection.LastCursorRows = this.staticRows.Count;
+                batch.Connection.LastCursorRows = this.FastForward ? -1 : this.staticRows.Count;
                 break;
             case CursorSensitivity.Keyset:
                 // OPEN is where a TOP / OFFSET / FETCH limit picks membership;
                 // later FETCHes re-read the frozen key set without it.
-                this.keysetIdentities = [.. Selection.EnumerateForCursor(this.Plan!, batch, applyRowLimit: true).Select(r => (r.UniqueKeys, r.Rids))];
+                this.keysetIdentities = Selection.EnumerateForCursor(this.Plan!, batch, applyRowLimit: true);
                 this.position = -1;
                 batch.Connection.LastCursorRows = this.keysetIdentities.Count;
                 break;
@@ -238,6 +282,8 @@ internal sealed class Cursor(
         this.CurrentRids = null;
         this.OnKeysetHole = false;
         this.IsOpen = true;
+        this.LastOperation = 1;
+        this.LastOperationRows = 0;
         // SET CURSOR_CLOSE_ON_COMMIT closes, as the transaction ends, the
         // cursors opened inside it (probed 2026-09-28 against SQL Server 2025).
         if (batch.Connection.CurrentTransaction is { } transaction)
@@ -277,6 +323,8 @@ internal sealed class Cursor(
         this.optimisticSnapshot = null;
         this.OnKeysetHole = false;
         this.IsOpen = false;
+        this.LastOperation = 6;
+        this.LastOperationRows = 0;
     }
 
     /// <summary>
@@ -533,6 +581,9 @@ internal sealed class Cursor(
             _ => this.FetchDynamic(batch, direction, offset),
         };
         this.OnKeysetHole = status == -2;
+        this.FetchStatus = status;
+        this.LastOperation = 2;
+        this.LastOperationRows = status == -1 ? 0 : 1;
 
         // OPTIMISTIC: snapshot the landed row's live bytes (per source) so a
         // later positioned UPDATE / DELETE can detect out-of-band modification.
@@ -557,13 +608,15 @@ internal sealed class Cursor(
     /// <summary>
     /// A dynamic-sensitivity cursor can't position by ordinal, so ABSOLUTE
     /// raises Msg 16925 — real checks that before scrollability, which is why
-    /// a bare FORWARD_ONLY cursor reports it too. Anything other than NEXT on
+    /// a bare FORWARD_ONLY cursor reports it too — though not a FAST_FORWARD
+    /// one, which reports Msg 16911 (probed 2026-09-29 against SQL Server
+    /// 2025). Anything other than NEXT on
     /// a cursor that isn't scrollable raises Msg 16911. RELATIVE is legal on a
     /// scrollable dynamic cursor; only ABSOLUTE isn't (probe-confirmed).
     /// </summary>
     private void EnsureDirectionAllowed(FetchDirection direction)
     {
-        if (this.Sensitivity == CursorSensitivity.Dynamic && direction == FetchDirection.Absolute)
+        if (this.Sensitivity == CursorSensitivity.Dynamic && !this.FastForward && direction == FetchDirection.Absolute)
             throw SimulatedSqlException.CursorFetchTypeNotAllowed(direction.ToString());
         if (direction != FetchDirection.Next && !this.Scrollable)
             throw SimulatedSqlException.CursorFetchTypeForwardOnly(LowercaseDirection(direction));
@@ -601,16 +654,16 @@ internal sealed class Cursor(
             return (-1, null);
         }
 
-        var (keys, rids) = this.keysetIdentities[this.position];
+        var member = this.keysetIdentities[this.position];
         foreach (var row in Selection.EnumerateForCursor(this.Plan!, batch))
         {
-            if (Selection.CursorIdentityMatches(row, keys, rids))
+            if (Selection.CursorIdentityMatches(this.Plan!, row, member))
             {
                 this.CurrentRids = row.Rids;
                 return (0, row.Values);
             }
         }
-        // Member deleted out from under the keyset (or its unique-key columns
+        // Member deleted out from under the keyset (or its key columns
         // changed, making the row no longer findable by the snapshotted key —
         // on a join, either side going away is enough): status -2, no current
         // row.

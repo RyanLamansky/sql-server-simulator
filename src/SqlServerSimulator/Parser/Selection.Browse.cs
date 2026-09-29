@@ -155,4 +155,28 @@ internal sealed partial class Selection
 
     private static Expression Unaliased(Expression expression) =>
         expression is NamedExpression named ? named.Inner : expression;
+
+    /// <summary>
+    /// The base-table column output column <paramref name="index"/> reads
+    /// directly — the table and its column ordinal — or null for a computed
+    /// column, one read through anything but a base table, or a shape that
+    /// kept no sources.
+    /// </summary>
+    internal (HeapTable Table, int Ordinal)? ProjectionBaseColumn(int index)
+    {
+        if (this.BranchFromSources is not { } sources || this.ProjectionExpressions is not { } expressions
+            || index >= expressions.Length || Unaliased(expressions[index]) is not Reference reference)
+        {
+            return null;
+        }
+        var (sourceIndex, columnIndex) = FindSourceColumn(sources, reference.ReferencedName);
+        return sourceIndex >= 0 && sources[sourceIndex] is { BackingTable: { } table, IsPlaceholder: false, LateralPlan: null }
+            ? (table, columnIndex)
+            : null;
+    }
+
+    /// <summary>A selection that yields <paramref name="rows"/>, encoded to
+    /// <paramref name="schema"/>, every time it runs.</summary>
+    internal static Selection FromRows(SqlType[] schema, string[] columnNames, List<byte[]> rows) =>
+        new(schema, columnNames, hasOrderBy: false, hasTopOrOffsetOrFetch: false, (_, _) => rows);
 }
