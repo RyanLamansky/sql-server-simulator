@@ -224,6 +224,7 @@ Write to them up front to save a build round trip:
   `deliberate` / `intentional` may describe *how shipped behavior works* — an approximation, shortcut, or divergence chosen on purpose — but never *whether a gap closes*; attach those words to a shape, not to an absence.
   Skip the justifying clause too ("real rejects it anyway", "no consumer reads it"): it explains low priority but reads as closed.
   Only a call that genuinely shouldn't be revisited says **settled — don't re-pitch** with its reason.
+  A gap the user has parked says **Deferred until requested**: listed so its findings stay findable, picked up only when a user asks (see [`backlog.md`](docs/claude/backlog.md)).
   Heading vocabulary in `docs/claude/`: **Not modeled yet** for absences, **Divergences** for shipped-but-not-byte-identical, and real's-own-error rejections fold into the feature's modeled description rather than any gap list.
 - **AssemblyHooks**: each test project's `AssemblyHooks.cs` has a `static [TestClass] [AssemblyInitialize]` warming shared init once before the parallel run.
   Without it, the first test batch races to init hot shared state and serializes on contention.
