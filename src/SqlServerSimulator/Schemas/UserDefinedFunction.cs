@@ -418,6 +418,9 @@ internal sealed class UdfParameter(string name, SqlType type, Expression? defaul
     /// <summary>The user alias type the parameter was declared with; see <see cref="HeapColumn.AliasType"/>.</summary>
     public AliasType? AliasType;
 
+    /// <summary>The line of the parameter's name in the CREATE text, which a schema-bound alias-type refusal reports.</summary>
+    public int LineNumber;
+
     /// <summary>
     /// The declared width of a string or binary parameter (1 when written
     /// without one), which an argument is cut to as a variable assignment

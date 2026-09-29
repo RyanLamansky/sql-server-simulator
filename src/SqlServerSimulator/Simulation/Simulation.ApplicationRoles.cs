@@ -73,7 +73,7 @@ partial class Simulation
             throw SimulatedSqlException.UserDoesNotHavePermission();
         var database = context.CurrentDatabase;
         if (!TryGetApplicationRole(database, name, out var role))
-            throw SimulatedSqlException.CannotFindPrincipal(name);
+            throw SimulatedSqlException.CannotAlterApplicationRole(name);
         RecordSecurityUndo(context, database);
         if (password is not null)
         {
@@ -120,7 +120,7 @@ partial class Simulation
             throw SimulatedSqlException.UserDoesNotHavePermission();
         var database = context.CurrentDatabase;
         if (!TryGetApplicationRole(database, name, out var role))
-            throw SimulatedSqlException.CannotFindPrincipal(name);
+            throw SimulatedSqlException.CannotDropApplicationRole(name);
         Ownership.RejectDropOfOwner(database, role.PrincipalId);
         RecordSecurityUndo(context, database);
         _ = database.Principals.TryRemove(name, out _);

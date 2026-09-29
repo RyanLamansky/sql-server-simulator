@@ -611,15 +611,18 @@ partial class Simulation
             return true;
         RejectFullTextDdlInTransaction(context, "DROP FULLTEXT CATALOG");
         context.CurrentDatabase.RejectFullTextWriteWhenReadOnly(state: 102);
-        // Real gates the drop on ALTER ANY FULLTEXT CATALOG (or CONTROL on the
-        // catalog, a securable class the simulator's GRANT surface doesn't
-        // carry). Denial is Msg 7641 (probe-confirmed), and a db_ddladmin member
+        // Real gates the drop on ALTER ANY FULLTEXT CATALOG or CONTROL on the
+        // catalog. Denial is Msg 7641 (probe-confirmed), and a db_ddladmin member
         // passes through the permission's DDL category.
-        if (!context.CurrentDatabase.FullTextCatalogs.ContainsKey(name))
+        if (!context.CurrentDatabase.FullTextCatalogs.TryGetValue(name, out var existing))
             throw SimulatedSqlException.InvalidObjectName(new MultiPartName(name));
-        if (!PermissionEnforcement.HasDatabasePermission(context.Batch, context.CurrentDatabase, Permission.AlterAnyFullTextCatalog))
+        if (!PermissionEnforcement.HasDatabasePermission(context.Batch, context.CurrentDatabase, Permission.AlterAnyFullTextCatalog)
+            && !PermissionEnforcement.HoldsPermission(context.Batch, context.CurrentDatabase, Permission.Control, PermissionChecker.ClassFulltextCatalog, existing.Id, 0))
+        {
             throw SimulatedSqlException.FullTextCatalogNotFoundOrDenied(name, context.CurrentDatabase.Name);
+        }
         _ = context.CurrentDatabase.FullTextCatalogs.TryRemove(name, out _);
+        DropSecurablePermissions(context, context.CurrentDatabase, PermissionChecker.ClassFulltextCatalog, existing.Id);
         RecordDdlEvent(context, "DROP_FULLTEXT_CATALOG", schemaName: null, name, "FULLTEXT CATALOG");
         return true;
     }

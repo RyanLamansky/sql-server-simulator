@@ -56,6 +56,7 @@ partial class Simulation
             return ProcessViewInsert(destinationView, context, top, destinationName);
         if (!context.Batch.TryResolveTable(destinationName, out var destinationTable))
         {
+            ParseMissingInsertTail(context);
             throw BatchContext.IsTableVariableName(destinationName.Leaf)
                 ? SimulatedSqlException.MustDeclareTableVariable(destinationName.Leaf)
                 : context.Batch.UnresolvableObjectName(destinationName.WithoutOmittedLeading());

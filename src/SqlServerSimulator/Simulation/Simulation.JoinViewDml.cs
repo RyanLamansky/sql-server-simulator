@@ -424,8 +424,29 @@ partial class Simulation
         // and an INSERT checks only its own write there (probed 2026-09-27
         // against SQL Server 2025).
         if (!batch.IsSkipping)
-            PermissionEnforcement.CheckBrokenChainWrite(batch, "INSERT", destinationView, table);
+            CheckJoinViewInsertChain(batch, chain, path!, table);
         return ProcessHeapInsert(table, context, top, destinationName, destinationView, plan);
+    }
+
+    /// <summary>
+    /// The links an INSERT through a join view crosses, top down: each view
+    /// whose owner differs from the one above it needs INSERT at object grain,
+    /// a join view reading another join view descends into it, and the written
+    /// table closes the chain (probed 2026-09-29 against SQL Server 2025:
+    /// <c>dbo.v1</c> over a <c>u1</c>-owned join view is INSERT on the join
+    /// view, then on the table).
+    /// </summary>
+    private static void CheckJoinViewInsertChain(BatchContext batch, JoinViewChain chain, int[] path, HeapTable table)
+    {
+        for (var level = chain.Views.Length - 1; level >= 1; level--)
+            PermissionEnforcement.CheckBrokenChainLink(batch, "INSERT", chain.Views[level], chain.Views[level - 1]);
+        if (path.Length == 1 || chain.Sources[path[0]].BackingView is not { } sourceView)
+        {
+            PermissionEnforcement.CheckBrokenChainLink(batch, "INSERT", chain.Views[0], table);
+            return;
+        }
+        PermissionEnforcement.CheckBrokenChainLink(batch, "INSERT", chain.Views[0], sourceView);
+        CheckJoinViewInsertChain(batch, chain.Nested[path[0]]!, path[1..], table);
     }
 
     /// <summary>
@@ -446,13 +467,21 @@ partial class Simulation
     {
         if (batch.IsSkipping)
             return;
-        var view = chain.Views[^1];
+        // The join view reads the base tables, so it is the module their owners
+        // are compared with; the views above it are links of their own.
+        var view = chain.Views[0];
         var reads = new ColumnReadTarget?[chain.Sources.Length];
+        var viewReads = new ColumnReadTarget?[chain.Views.Length];
+        var sourceViewReads = new ColumnReadTarget?[chain.Sources.Length];
         void AddBottom(MultiPartName name)
         {
             var (sourceIndex, columnIndex) = Selection.FindSourceColumn(chain.Sources, name);
-            if (sourceIndex >= 0 && chain.Sources[sourceIndex].BackingTable is { } backing)
+            if (sourceIndex < 0)
+                return;
+            if (chain.Sources[sourceIndex].BackingTable is { } backing)
                 _ = (reads[sourceIndex] ??= new ColumnReadTarget(backing)).Ordinals.Add(columnIndex + 1);
+            else if (chain.Sources[sourceIndex].BackingView is { } sourceView)
+                _ = (sourceViewReads[sourceIndex] ??= new ColumnReadTarget(sourceView)).Ordinals.Add(columnIndex + 1);
         }
 
         var collation = batch.CurrentDatabase.Collation;
@@ -461,6 +490,7 @@ partial class Simulation
             var ordinal = IndexOfViewOutputColumn(collation, chain.Views[level], columnName);
             if (ordinal < 0)
                 return;
+            _ = (viewReads[level] ??= new ColumnReadTarget(chain.Views[level])).Ordinals.Add(ordinal + 1);
             chain.Profiles[level].Projections[ordinal].VisitColumnReferences(name =>
             {
                 if (level == 0)
@@ -489,12 +519,39 @@ partial class Simulation
         foreach (var columnName in readViewColumns)
             AddViewColumn(chain.Views.Length - 1, columnName);
 
-        foreach (var read in reads)
+        // Top down: the first view whose owner differs from the one above it
+        // is the one refused, ahead of anything under it.
+        for (var level = chain.Views.Length - 1; level >= 1; level--)
+            PermissionEnforcement.CheckBrokenChainViewLink(batch, chain.Views[level], chain.Views[level - 1], viewReads[level - 1]);
+
+        // The last-bound source is the one real names when several are denied.
+        for (var i = chain.Sources.Length - 1; i >= 0; i--)
         {
-            if (read is not null)
+            if (reads[i] is { } read)
                 PermissionEnforcement.CheckBrokenChainTableColumns(batch, Permission.Select, view, read);
+            if (chain.Sources[i].BackingView is not { } sourceView)
+                continue;
+            // A view the join reads is a link of its own — refused for the
+            // columns read of it, and for UPDATE too when the write goes
+            // through it — and a join view among them has its own tables
+            // (probed 2026-09-29 against SQL Server 2025).
+            var nested = chain.Nested[i];
+            var writesThrough = nested is not null || (sourceView.BaseTable is { } sourceTable && ReferenceEquals(sourceTable, table));
+            PermissionEnforcement.CheckBrokenChainViewLink(batch, view, sourceView, sourceViewReads[i], writesThrough);
+            if (nested is null)
+                continue;
+            var nestedRead = new List<string>();
+            if (sourceViewReads[i] is { } readOfNested)
+            {
+                foreach (var ordinal in readOfNested.Ordinals)
+                    nestedRead.Add(sourceView.OutputColumns[ordinal - 1].Name);
+            }
+            CheckJoinViewBrokenChains(batch, nested, table, nestedRead, assignments);
         }
 
+        // Only the chain whose own sources include the written table judges the write.
+        if (!Array.Exists(chain.Sources, source => ReferenceEquals(source.BackingTable, table)))
+            return;
         var assigned = new ColumnReadTarget(table);
         foreach (var (ordinal, _) in assignments)
         {

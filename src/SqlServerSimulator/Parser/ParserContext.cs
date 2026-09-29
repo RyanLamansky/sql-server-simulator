@@ -449,8 +449,30 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     /// </summary>
     public bool DeferNextValueRefusals;
 
+    /// <summary>
+    /// The <c>OVER</c> definition each sequence's first reference in the
+    /// statement starting at <see cref="SequenceOverStatementStart"/> wrote,
+    /// as a normalized token string (empty for none); a later reference must
+    /// write the same one.
+    /// </summary>
+    public Dictionary<Schemas.Sequence, string>? SequenceOverSignatures;
+
+    /// <summary>The statement <see cref="SequenceOverSignatures"/> belongs to.</summary>
+    public int SequenceOverStatementStart = -1;
+
+    /// <summary>
+    /// A reference wrote an <c>OVER</c> definition that differs from an earlier
+    /// one's. Real judges that after every refusal above (a clause, a row
+    /// limit, an <c>ORDER BY</c>, a conditional arm) has had its say, so the
+    /// query spec raises it once those are settled.
+    /// </summary>
+    public bool SequenceOverMismatch;
+
     /// <summary>True while an <c>OVER</c> body is read, whose references are one of the clauses Msg 11720 names and escape the <c>ORDER BY</c> refusal.</summary>
     public bool InOverBody;
+
+    /// <summary>True while a query's <c>TOP</c> count parses; a reference there is judged after every other one (<see cref="DeferredNextValueRef.InTop"/>).</summary>
+    public bool InTopCount;
 
     /// <summary>Every reference parsed under <see cref="DeferNextValueRefusals"/>, in parse order; null until the first.</summary>
     public List<DeferredNextValueRef>? DeferredNextValueRefs;
@@ -1179,6 +1201,9 @@ internal sealed class DeferredNextValueRef(NextValueForScope scope)
 
     /// <summary>The reference sits in an <c>OVER</c> body — a window's <c>PARTITION BY</c> / <c>ORDER BY</c>, or a windowed aggregate's argument.</summary>
     public bool OverBody;
+
+    /// <summary>The reference sits in the query's <c>TOP</c> count.</summary>
+    public bool InTop;
 }
 
 /// <summary>

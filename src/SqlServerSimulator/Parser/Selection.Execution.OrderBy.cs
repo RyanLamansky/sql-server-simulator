@@ -229,6 +229,30 @@ internal sealed partial class Selection
     }
 
     /// <summary>
+    /// <see cref="CompareOrderKeys"/> for a sort rather than a peer test: keys
+    /// that all tie under the collation still order by a <c>Pref</c> collation's
+    /// uppercase preference, key by key. Real applies that preference only once
+    /// every key ties, so a later key outranks it. A <c>WITH TIES</c> boundary
+    /// reads the same order (the other spelling after a boundary row is no
+    /// tie), while a window's peers (<c>RANK</c>, <c>DENSE_RANK</c>) and
+    /// equality read <see cref="CompareOrderKeys"/> (probed 2026-09-29 against
+    /// SQL Server 2025).
+    /// </summary>
+    private static int SortOrderKeys(SqlValue[] a, SqlValue[] b, List<OrderBySpec> orderBy)
+    {
+        var c = CompareOrderKeys(a, b, orderBy);
+        if (c != 0)
+            return c;
+        for (var i = 0; i < a.Length; i++)
+        {
+            var preference = a[i].PreferenceCompareTo(b[i]);
+            if (preference != 0)
+                return orderBy[i].Descending ? -preference : preference;
+        }
+        return 0;
+    }
+
+    /// <summary>
     /// One key of <see cref="CompareOrderKeys"/>, ascending: NULL sorts first,
     /// and keys of different declared types compare at their promoted type.
     /// </summary>
@@ -316,7 +340,7 @@ internal sealed partial class Selection
                 return;
             }
 
-            if (CompareOrderKeys(keys, this.entries[0].Keys, orderBy) >= 0)
+            if (SortOrderKeys(keys, this.entries[0].Keys, orderBy) >= 0)
                 return;
             this.entries[0] = (projected, keys);
             this.SiftDown();
@@ -333,7 +357,7 @@ internal sealed partial class Selection
         /// </summary>
         public void OfferCopying(SqlValue[] projected, SqlValue[] keys)
         {
-            if (this.entries.Count >= capacity && CompareOrderKeys(keys, this.entries[0].Keys, orderBy) >= 0)
+            if (this.entries.Count >= capacity && SortOrderKeys(keys, this.entries[0].Keys, orderBy) >= 0)
                 return;
             this.Offer([.. projected], [.. keys]);
         }
@@ -357,7 +381,7 @@ internal sealed partial class Selection
             while (index > 0)
             {
                 var parent = (index - 1) / 2;
-                if (CompareOrderKeys(this.entries[index].Keys, this.entries[parent].Keys, orderBy) <= 0)
+                if (SortOrderKeys(this.entries[index].Keys, this.entries[parent].Keys, orderBy) <= 0)
                     return;
                 (this.entries[parent], this.entries[index]) = (this.entries[index], this.entries[parent]);
                 index = parent;
@@ -372,10 +396,10 @@ internal sealed partial class Selection
                 var left = (index * 2) + 1;
                 if (left >= this.entries.Count)
                     return;
-                var largest = CompareOrderKeys(this.entries[left].Keys, this.entries[index].Keys, orderBy) > 0 ? left : index;
+                var largest = SortOrderKeys(this.entries[left].Keys, this.entries[index].Keys, orderBy) > 0 ? left : index;
                 var right = left + 1;
                 if (right < this.entries.Count
-                    && CompareOrderKeys(this.entries[right].Keys, this.entries[largest].Keys, orderBy) > 0)
+                    && SortOrderKeys(this.entries[right].Keys, this.entries[largest].Keys, orderBy) > 0)
                 {
                     largest = right;
                 }

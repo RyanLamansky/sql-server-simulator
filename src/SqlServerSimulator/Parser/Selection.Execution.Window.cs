@@ -160,7 +160,7 @@ internal sealed partial class Selection
         var materialized = filtered.ToList();
         if (orderBy.Count > 0)
         {
-            materialized.Sort((a, b) => CompareOrderKeys(a.Keys, b.Keys, orderBy));
+            materialized.Sort((a, b) => SortOrderKeys(a.Keys, b.Keys, orderBy));
             NoteSortWorktable(batch, sources, orderBy, expressions);
         }
         else if (distinct)
@@ -208,7 +208,7 @@ internal sealed partial class Selection
             if (orderByList.Count > 0)
             {
                 indices.Sort((a, b) =>
-                    CompareOrderKeys(perWindowKeys[a][w].OrderKeys, perWindowKeys[b][w].OrderKeys, orderByList));
+                    SortOrderKeys(perWindowKeys[a][w].OrderKeys, perWindowKeys[b][w].OrderKeys, orderByList));
             }
 
             var count = indices.Count;
@@ -458,7 +458,7 @@ internal sealed partial class Selection
                     foreach (var (_, indices) in partitions)
                     {
                         indices.Sort((a, b) =>
-                            CompareOrderKeys(perWindowKeys[a][w].OrderKeys, perWindowKeys[b][w].OrderKeys, orderByList));
+                            SortOrderKeys(perWindowKeys[a][w].OrderKeys, perWindowKeys[b][w].OrderKeys, orderByList));
                         long rankValue = 1;
                         for (var i = 0; i < indices.Count; i++)
                         {
@@ -482,7 +482,7 @@ internal sealed partial class Selection
                     foreach (var (_, indices) in partitions)
                     {
                         indices.Sort((a, b) =>
-                            CompareOrderKeys(perWindowKeys[a][w].OrderKeys, perWindowKeys[b][w].OrderKeys, orderByList));
+                            SortOrderKeys(perWindowKeys[a][w].OrderKeys, perWindowKeys[b][w].OrderKeys, orderByList));
                         long denseRank = 1;
                         for (var i = 0; i < indices.Count; i++)
                         {
@@ -514,7 +514,7 @@ internal sealed partial class Selection
                         foreach (var (_, indices) in partitions)
                         {
                             indices.Sort((a, b) =>
-                                CompareOrderKeys(perWindowKeys[a][w].OrderKeys, perWindowKeys[b][w].OrderKeys, orderByList));
+                                SortOrderKeys(perWindowKeys[a][w].OrderKeys, perWindowKeys[b][w].OrderKeys, orderByList));
                             var count = indices.Count;
                             var smallerSize = count / bucketCount;
                             var firstFewBuckets = count % bucketCount;
@@ -539,7 +539,7 @@ internal sealed partial class Selection
                     foreach (var (_, indices) in partitions)
                     {
                         indices.Sort((a, b) =>
-                            CompareOrderKeys(perWindowKeys[a][w].OrderKeys, perWindowKeys[b][w].OrderKeys, orderByList));
+                            SortOrderKeys(perWindowKeys[a][w].OrderKeys, perWindowKeys[b][w].OrderKeys, orderByList));
                         var n = indices.Count;
                         var i = 0;
                         while (i < n)
@@ -567,7 +567,7 @@ internal sealed partial class Selection
                     foreach (var (_, indices) in partitions)
                     {
                         indices.Sort((a, b) =>
-                            CompareOrderKeys(perWindowKeys[a][w].OrderKeys, perWindowKeys[b][w].OrderKeys, orderByList));
+                            SortOrderKeys(perWindowKeys[a][w].OrderKeys, perWindowKeys[b][w].OrderKeys, orderByList));
                         var n = indices.Count;
                         long rankValue = 1;
                         for (var i = 0; i < n; i++)
@@ -685,7 +685,7 @@ internal sealed partial class Selection
                         foreach (var (_, indices) in partitions)
                         {
                             indices.Sort((a, b) =>
-                                CompareOrderKeys(perWindowKeys[a][w].OrderKeys, perWindowKeys[b][w].OrderKeys, orderByList));
+                                SortOrderKeys(perWindowKeys[a][w].OrderKeys, perWindowKeys[b][w].OrderKeys, orderByList));
                             for (var i = 0; i < indices.Count; i++)
                             {
                                 // An offset past the partition — however far, a
@@ -742,7 +742,7 @@ internal sealed partial class Selection
                         foreach (var (_, indices) in partitions)
                         {
                             indices.Sort((a, b) =>
-                                CompareOrderKeys(perWindowKeys[a][w].OrderKeys, perWindowKeys[b][w].OrderKeys, orderByList));
+                                SortOrderKeys(perWindowKeys[a][w].OrderKeys, perWindowKeys[b][w].OrderKeys, orderByList));
                             for (var i = 0; i < indices.Count; i++)
                             {
                                 var (frameStart, frameEnd) = ComputeFrameExtent(win, indices, perWindowKeys, w, orderByList, i);
@@ -795,7 +795,7 @@ internal sealed partial class Selection
                             if (orderByList.Count > 0)
                             {
                                 indices.Sort((a, b) =>
-                                    CompareOrderKeys(perWindowKeys[a][w].OrderKeys, perWindowKeys[b][w].OrderKeys, orderByList));
+                                    SortOrderKeys(perWindowKeys[a][w].OrderKeys, perWindowKeys[b][w].OrderKeys, orderByList));
                             }
 
                             // Whole-partition fast path: no ORDER BY and no

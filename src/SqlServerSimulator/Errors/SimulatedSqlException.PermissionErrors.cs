@@ -333,6 +333,14 @@ public sealed partial class SimulatedSqlException
     internal static SimulatedSqlException DropUserPermissionDenied(string name) =>
         new($"Cannot drop the user '{name}', because it does not exist or you do not have permission.", 15151, 16, 1);
 
+    /// <summary>Mimics SQL Server error 15151: <c>ALTER APPLICATION ROLE</c> naming one that doesn't exist (probed 2026-09-29 against SQL Server 2025).</summary>
+    internal static SimulatedSqlException CannotAlterApplicationRole(string name) =>
+        new($"Cannot alter the application role '{name}', because it does not exist or you do not have permission.", 15151, 16, 1);
+
+    /// <summary>Mimics SQL Server error 15151: <c>DROP APPLICATION ROLE</c> naming one that doesn't exist (probed 2026-09-29 against SQL Server 2025).</summary>
+    internal static SimulatedSqlException CannotDropApplicationRole(string name) =>
+        new($"Cannot drop the application role '{name}', because it does not exist or you do not have permission.", 15151, 16, 1);
+
     /// <summary>Mimics SQL Server error 15151: <c>ALTER SERVER ROLE</c> naming a role that doesn't exist. Probe-confirmed wording (probe6 N6).</summary>
     internal static SimulatedSqlException CannotAlterServerRole(string roleName) =>
         new($"Cannot alter the server role '{roleName}', because it does not exist or you do not have permission.", 15151, 16, 1);

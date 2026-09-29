@@ -362,6 +362,16 @@ internal abstract partial class Collation : IComparer<string>, IEqualityComparer
     internal virtual Collation ForVarcharStorage() => this;
 
     /// <summary>
+    /// How a sort orders two values this collation ties — nonzero only for the
+    /// <c>Pref</c> names' <c>varchar</c> data, which puts an uppercase spelling
+    /// ahead of a lowercase one at the first character they differ in while
+    /// still treating the two as equal everywhere else (probed 2026-09-29
+    /// against SQL Server 2025: <c>ORDER BY</c> over <c>a, A</c> is <c>A a</c>,
+    /// <c>=</c>, <c>DISTINCT</c> and <c>MIN</c> see one value).
+    /// </summary>
+    internal virtual int PreferenceCompare(string x, string y) => 0;
+
+    /// <summary>
     /// Whether <c>CHAR(0)</c> is a character of its own here — the lowest
     /// weight, never ignored — as it is in <c>varchar</c> data under every
     /// non-binary <c>SQL_</c> collation, where a Windows collation and all
@@ -557,6 +567,10 @@ internal abstract partial class Collation : IComparer<string>, IEqualityComparer
         // Two strings that differ only in case order the other way round.
         private readonly bool uppercaseFirst;
 
+        // The Pref names' varchar data: equal under the collation, ordered
+        // uppercase first by a sort's final tiebreak (see PreferenceCompare).
+        private readonly bool prefersUppercase;
+
         private readonly CultureCollation? varcharBody;
 
         // The name's version (80 for an unversioned one), which decides the
@@ -586,6 +600,7 @@ internal abstract partial class Collation : IComparer<string>, IEqualityComparer
             this.uppercaseFirst = weightsNul && caseSensitive
                 && (name.Equals("SQL_Latin1_General_CP1_CS_AS", StringComparison.OrdinalIgnoreCase)
                     || name.Equals("SQL_Latin1_General_CP850_CS_AS", StringComparison.OrdinalIgnoreCase));
+            this.prefersUppercase = weightsNul && !caseSensitive && name.Contains("_Pref_", StringComparison.OrdinalIgnoreCase);
             this.primaryFamily = primaryFamily;
             this.primaryVersion = primaryVersion;
             this.name = name;
@@ -634,6 +649,21 @@ internal abstract partial class Collation : IComparer<string>, IEqualityComparer
         internal override SurrogateMatching SurrogateMatching => this.surrogateMatching;
 
         internal override bool WeightsNul => this.weightsNul;
+
+        internal override int PreferenceCompare(string x, string y)
+        {
+            if (!this.prefersUppercase)
+                return 0;
+            for (var i = 0; i < Math.Min(x.Length, y.Length); i++)
+            {
+                if (x[i] == y[i])
+                    continue;
+                var xUpper = char.IsUpper(x[i]);
+                if (xUpper != char.IsUpper(y[i]))
+                    return xUpper ? -1 : 1;
+            }
+            return 0;
+        }
 
         internal override Collation ForVarcharStorage() => this.varcharBody ?? this;
 

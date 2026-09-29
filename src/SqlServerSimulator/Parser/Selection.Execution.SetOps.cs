@@ -742,7 +742,7 @@ internal sealed partial class Selection
                 foreach (var rowBytes in allRows)
                     keyed.Add((rowBytes, ComputeTopLevelOrderKeys(orderBy, columnNames, keyColumns, projectionSources, rowBytes, batch)));
 
-                keyed.Sort((a, b) => CompareOrderKeys(a.Keys, b.Keys, orderBy));
+                keyed.Sort((a, b) => SortOrderKeys(a.Keys, b.Keys, orderBy));
                 ordered = keyed.Select(r => r.Row);
             }
 

@@ -750,7 +750,7 @@ internal sealed partial class Selection
         // rows rather than an arbitrary prefix.
         if (orderByItems.Count > 0)
         {
-            output.Sort((a, b) => CompareOrderKeys(a.OrderKeys, b.OrderKeys, orderByItems));
+            output.Sort((a, b) => SortOrderKeys(a.OrderKeys, b.OrderKeys, orderByItems));
             NoteSortWorktable(batch, sources, orderByItems, expressions);
         }
 

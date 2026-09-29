@@ -264,22 +264,29 @@ partial class Simulation
         _ = schema.AliasTypes.TryGetValue(name.Leaf, out var aliasType);
         if (tableType is null && aliasType is null)
             throw SimulatedSqlException.CannotFindType(name.Leaf);
-        if (!PermissionEnforcement.HoldsPermission(context.Batch, database, Permission.TakeOwnership, PermissionChecker.ClassSchema, schema.SchemaId, 0))
+        var typeId = tableType?.UserTypeId ?? aliasType!.UserTypeId;
+        if (!PermissionEnforcement.HoldsPermission(context.Batch, database, Permission.TakeOwnership, PermissionChecker.ClassType, typeId, schema.SchemaId))
             throw SimulatedSqlException.CannotFindType(name.Leaf);
         database.RejectWriteWhenReadOnly();
         var newOwner = ResolveNewOwner(context, database, ownerName, acceptsSchemaOwner: true);
+        var schemaOwner = Ownership.SchemaOwnerId(database, schema.SchemaId);
+        int? previousOwner;
         if (tableType is not null)
         {
-            var previous = tableType.OwnerPrincipalId;
+            var previous = previousOwner = tableType.OwnerPrincipalId;
             tableType.OwnerPrincipalId = newOwner;
             RecordDdlUndo(context, () => tableType.OwnerPrincipalId = previous);
         }
         else
         {
-            var previous = aliasType!.OwnerPrincipalId;
+            var previous = previousOwner = aliasType!.OwnerPrincipalId;
             aliasType.OwnerPrincipalId = newOwner;
             RecordDdlUndo(context, () => aliasType.OwnerPrincipalId = previous);
         }
+        // A change of effective owner drops the grants on the type (probed
+        // 2026-09-29 against SQL Server 2025, as for an object).
+        if ((previousOwner ?? schemaOwner) != (newOwner ?? schemaOwner))
+            DropSecurablePermissions(context, database, PermissionChecker.ClassType, typeId);
         RecordDdlEvent(context, "ALTER_AUTHORIZATION_DATABASE", schema.Name, name.Leaf, "TYPE",
             ownerName: Ownership.PrincipalName(database, newOwner ?? schema.PrincipalId));
     }
@@ -300,7 +307,7 @@ partial class Simulation
         var database = context.CurrentDatabase;
         if (name.Count > 2 || !context.Batch.TryResolveSchema(name, out var schema)
             || !schema.XmlSchemaCollections.TryGetValue(name.Leaf, out var collection)
-            || !PermissionEnforcement.HoldsPermission(context.Batch, database, Permission.TakeOwnership, PermissionChecker.ClassSchema, schema.SchemaId, 0))
+            || !PermissionEnforcement.HoldsPermission(context.Batch, database, Permission.TakeOwnership, PermissionChecker.ClassXmlSchemaCollection, collection.Id, schema.SchemaId))
         {
             throw SimulatedSqlException.CannotFindXmlSchemaCollection(name.Leaf);
         }
@@ -309,6 +316,9 @@ partial class Simulation
         var previous = collection.PrincipalId;
         collection.PrincipalId = newOwner;
         RecordDdlUndo(context, () => collection.PrincipalId = previous);
+        var collectionSchemaOwner = Ownership.SchemaOwnerId(database, schema.SchemaId);
+        if ((previous ?? collectionSchemaOwner) != (newOwner ?? collectionSchemaOwner))
+            DropSecurablePermissions(context, database, PermissionChecker.ClassXmlSchemaCollection, collection.Id);
         RecordDdlEvent(context, "ALTER_AUTHORIZATION_DATABASE", schema.Name, collection.Name, "XML SCHEMA COLLECTION",
             ownerName: Ownership.PrincipalName(database, newOwner ?? schema.PrincipalId));
     }
@@ -335,7 +345,7 @@ partial class Simulation
     {
         var database = context.CurrentDatabase;
         if (!database.FullTextCatalogs.TryGetValue(catalogName, out var catalog)
-            || !PermissionEnforcement.HoldsPermission(context.Batch, database, Permission.TakeOwnership, PermissionChecker.ClassDatabase, 0, 0))
+            || !PermissionEnforcement.HoldsPermission(context.Batch, database, Permission.TakeOwnership, PermissionChecker.ClassFulltextCatalog, catalog.Id, 0))
         {
             throw SimulatedSqlException.CannotFindSecurable("fulltext catalog", catalogName);
         }
@@ -344,6 +354,8 @@ partial class Simulation
         var previous = catalog.PrincipalId;
         catalog.PrincipalId = newOwner;
         RecordDdlUndo(context, () => catalog.PrincipalId = previous);
+        if (previous != newOwner)
+            DropSecurablePermissions(context, database, PermissionChecker.ClassFulltextCatalog, catalog.Id);
         RecordDdlEvent(context, "ALTER_AUTHORIZATION_DATABASE", null, catalog.Name, "FULLTEXT CATALOG", ownerName: ownerName);
     }
 

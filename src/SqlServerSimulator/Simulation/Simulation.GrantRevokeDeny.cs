@@ -97,30 +97,8 @@ partial class Simulation
         {
             hadOnClause = true;
             context.MoveNextRequired();
-            var classWord = context.Token switch
-            {
-                ReservedKeyword { Keyword: Keyword.User } => "USER",
-                ReservedKeyword { Keyword: Keyword.Database } => "DATABASE",
-                ReservedKeyword { Keyword: Keyword.Schema } => "SCHEMA",
-                Name named => named.Value,
-                _ => null,
-            };
-            var explicitClass = (string?)null;
-            if (classWord is not null)
-            {
-                var checkpoint = context.SaveCheckpoint();
-                _ = context.GetNextOptional();
-                if (context.Token is Operator { Character: ':' }
-                    && context.GetNextOptional() is Operator { Character: ':' })
-                {
-                    context.MoveNextRequired();
-                    explicitClass = classWord.ToUpperInvariant();
-                }
-                else
-                {
-                    context.RestoreCheckpoint(checkpoint);
-                }
-            }
+            // One to three class words and `::`, or none (an object).
+            var explicitClass = ParseAuthorizationClass(context);
             var securableName = BatchContext.ParseObjectName(context);
             context.MoveNextRequired();
             securableDisplayName = securableName.Leaf;
@@ -135,6 +113,10 @@ partial class Simulation
                     permClass = PermissionChecker.ClassDatabase;
                     if (!context.Batch.IsSkipping && !context.CurrentDatabase.Collation.Equals(securableName.Leaf, context.CurrentDatabase.Name))
                         throw SimulatedSqlException.GrantOnAnotherDatabase();
+                    break;
+                case "FULLTEXT CATALOG":
+                    permClass = PermissionChecker.ClassFulltextCatalog;
+                    objectSecurableName = securableName;
                     break;
                 case "LOGIN":
                     serverScopeSecurable = true;
@@ -153,9 +135,17 @@ partial class Simulation
                 case "SERVER":
                     serverScopeSecurable = true;
                     break;
+                case "TYPE":
+                    permClass = PermissionChecker.ClassType;
+                    objectSecurableName = securableName;
+                    break;
                 case "USER":
                     permClass = PermissionChecker.ClassDatabasePrincipal;
                     userSecurableName = securableName;
+                    break;
+                case "XML SCHEMA COLLECTION":
+                    permClass = PermissionChecker.ClassXmlSchemaCollection;
+                    objectSecurableName = securableName;
                     break;
                 default:
                     // Bare name or OBJECT::name → object scope (class 1).
@@ -273,6 +263,18 @@ partial class Simulation
             throw SimulatedSqlException.GrantSubEntityListNotAllowed();
         }
 
+        // The permissions a type, an XML schema collection and a full-text
+        // catalog carry; any other is a syntax error at compile, at line 0
+        // (probed 2026-09-29 against SQL Server 2025).
+        if (permClass is PermissionChecker.ClassType or PermissionChecker.ClassXmlSchemaCollection or PermissionChecker.ClassFulltextCatalog)
+        {
+            foreach (var (permName, _) in permissions)
+            {
+                if (!PermissionAcceptedOnDerivedClass(permClass, permName))
+                    throw SimulatedSqlException.SyntaxErrorNearText(permName.ToUpperInvariant()).PinLine(0);
+            }
+        }
+
         var database = context.CurrentDatabase;
         // A database-scope permission row is a write to that database's
         // catalog, so a read-only database refuses the whole family (the
@@ -285,8 +287,12 @@ partial class Simulation
         if (userSecurableName is { } targetName)
         {
             if (!database.Principals.TryGetValue(targetName.Leaf, out var targetPrincipal))
-                throw SimulatedSqlException.CannotFindPrincipal(targetName.Leaf);
+                throw SimulatedSqlException.CannotFindUser(targetName.Leaf);
             permMajorId = targetPrincipal.PrincipalId;
+        }
+        else if (permClass is PermissionChecker.ClassType or PermissionChecker.ClassXmlSchemaCollection or PermissionChecker.ClassFulltextCatalog)
+        {
+            permMajorId = ResolveDerivedSecurable(context, database, permClass, objectSecurableName!.Value);
         }
         // Resolve an object securable (bare / OBJECT:: / SCHEMA::) to (class,
         // major_id). An unknown securable raises the 15151 object-variant.
@@ -375,7 +381,7 @@ partial class Simulation
         foreach (var granteeName in granteeNames)
         {
             if (!database.Principals.TryGetValue(granteeName, out var grantee))
-                throw SimulatedSqlException.CannotFindPrincipal(granteeName);
+                throw SimulatedSqlException.CannotFindUser(granteeName);
             foreach (var (permName, columns) in permissions)
             {
                 if (columns is null)
@@ -428,6 +434,19 @@ partial class Simulation
         {
             objectName = objectSecurableName!.Value.Leaf;
             objectType = "SCHEMA";
+        }
+        else if (permClass is PermissionChecker.ClassType or PermissionChecker.ClassXmlSchemaCollection or PermissionChecker.ClassFulltextCatalog)
+        {
+            // Unprobed: the object types are the ones ALTER AUTHORIZATION reports for the same classes.
+            objectName = objectSecurableName!.Value.Leaf;
+            objectType = permClass switch
+            {
+                PermissionChecker.ClassType => "TYPE",
+                PermissionChecker.ClassXmlSchemaCollection => "XML SCHEMA COLLECTION",
+                _ => "FULLTEXT CATALOG",
+            };
+            if (permClass != PermissionChecker.ClassFulltextCatalog)
+                schemaName = EventSchemaName(objectSecurableName.Value);
         }
         else if (permClass == PermissionChecker.ClassDatabasePrincipal)
         {
@@ -556,8 +575,9 @@ partial class Simulation
     /// single G (or W with grant option) row, replacing any prior G/W;
     /// DENY stores a D row (coexisting with any G row); REVOKE removes the
     /// matching rows, honoring GRANT OPTION FOR (W→G downgrade) and CASCADE
-    /// (subtree removal), and raising Msg 4611 when a grantable row has
-    /// delegations but no CASCADE.
+    /// (subtree removal), and raising Msg 4611 when a grantable row is revoked
+    /// without CASCADE (probed 2026-09-29 against SQL Server 2025, delegations or
+    /// none, table, column, schema and type scope alike).
     /// </summary>
     private static void ApplyOnePermission(Database database, PermissionStatementKind kind, bool revokeGrantOptionOnly, bool cascade, bool withGrantOption,
         byte permClass, int permMajorId, int minorId, string permName, int granteeId, int grantorId)
@@ -607,7 +627,7 @@ partial class Simulation
                 var wRow = database.Permissions.Find(p => Matches(p, PermissionState.GrantWithGrantOption));
                 if (wRow is null)
                     return;
-                if (HasDelegations(database, granteeId, permClass, permMajorId, permName) && !cascade)
+                if (!cascade)
                     throw SimulatedSqlException.RevokeRequiresCascade();
                 _ = database.Permissions.Remove(wRow);
                 database.Permissions.Add(new DatabasePermission(
@@ -620,21 +640,13 @@ partial class Simulation
             default:
                 // Plain REVOKE removes both G/W and D rows for the triple.
                 var grantable = database.Permissions.Find(p => Matches(p, PermissionState.GrantWithGrantOption));
-                if (grantable is not null && HasDelegations(database, granteeId, permClass, permMajorId, permName) && !cascade)
+                if (grantable is not null && !cascade)
                     throw SimulatedSqlException.RevokeRequiresCascade();
                 _ = database.Permissions.RemoveAll(p => Matches(p, PermissionState.Grant) || Matches(p, PermissionState.GrantWithGrantOption) || Matches(p, PermissionState.Deny));
                 if (cascade)
                     CascadeRemoveDelegations(database, granteeId, permClass, permMajorId, permName);
                 break;
         }
-    }
-
-    /// <summary>Whether <paramref name="granteeId"/> has delegated this permission to anyone (a row whose grantor is this grantee).</summary>
-    private static bool HasDelegations(Database database, int granteeId, byte permClass, int permMajorId, string permName)
-    {
-        var permEnum = Permission.Resolve(permName);
-        return database.Permissions.Exists(p =>
-            p.GrantorPrincipalId == granteeId && p.IsFor(permClass, permMajorId, permEnum, permName, database));
     }
 
     /// <summary>
@@ -752,6 +764,54 @@ partial class Simulation
         // base table's grant (probed 2026-09-27 against SQL Server 2025).
         if (permName.Equals("UNMASK", StringComparison.OrdinalIgnoreCase) && objectTypeCode != "U ")
             throw SimulatedSqlException.PermissionIncompatibleWithObject("UNMASK");
+    }
+
+    /// <summary>
+    /// Whether <paramref name="permName"/> is one a type (or XML schema
+    /// collection, or full-text catalog) is granted: <c>CONTROL</c>,
+    /// <c>REFERENCES</c>, <c>TAKE OWNERSHIP</c> and <c>VIEW DEFINITION</c> on
+    /// all three, <c>EXECUTE</c> on a type and an XML schema collection, and
+    /// <c>ALTER</c> on an XML schema collection and a full-text catalog
+    /// (probed 2026-09-29 against SQL Server 2025).
+    /// </summary>
+    private static bool PermissionAcceptedOnDerivedClass(byte permClass, string permName) =>
+        BuiltInToken.EqualsAny(permName.Trim(), "CONTROL", "REFERENCES", "TAKE OWNERSHIP", "VIEW DEFINITION")
+        || (permClass != PermissionChecker.ClassFulltextCatalog && BuiltInToken.Equals(permName.Trim(), "EXECUTE"))
+        || (permClass != PermissionChecker.ClassType && BuiltInToken.Equals(permName.Trim(), "ALTER"));
+
+    /// <summary>
+    /// Resolves a <c>TYPE::</c>, <c>XML SCHEMA COLLECTION::</c> or
+    /// <c>FULLTEXT CATALOG::</c> securable to the id its permission rows key on
+    /// (<c>user_type_id</c>, <c>xml_collection_id</c>, <c>fulltext_catalog_id</c>).
+    /// A missing one is Msg 15151 naming the leaf (the catalog's name as
+    /// written, which takes no qualifier).
+    /// </summary>
+    private static int ResolveDerivedSecurable(ParserContext context, Database database, byte permClass, MultiPartName name)
+    {
+        var batch = context.Batch;
+        switch (permClass)
+        {
+            case PermissionChecker.ClassType:
+                // A built-in type is not a securable: real reads `sys.int` as a missing object.
+                if (BuiltInToken.Equals(name.ImmediateQualifier ?? "", "sys"))
+                    throw SimulatedSqlException.CannotFindObject(name.Leaf);
+                if (batch.TryResolveSchema(name, out var typeSchema))
+                {
+                    if (typeSchema.AliasTypes.TryGetValue(name.Leaf, out var alias))
+                        return alias.UserTypeId;
+                    if (typeSchema.TableTypes.TryGetValue(name.Leaf, out var tableType))
+                        return tableType.UserTypeId;
+                }
+                throw SimulatedSqlException.CannotFindType(name.Leaf);
+            case PermissionChecker.ClassXmlSchemaCollection:
+                return batch.TryResolveSchema(name, out var collectionSchema) && collectionSchema.XmlSchemaCollections.TryGetValue(name.Leaf, out var collection)
+                    ? collection.Id
+                    : throw SimulatedSqlException.CannotFindXmlSchemaCollection(name.Leaf);
+            default:
+                return name.Count == 1 && database.FullTextCatalogs.TryGetValue(name.Leaf, out var catalog)
+                    ? catalog.Id
+                    : throw SimulatedSqlException.CannotFindSecurable("fulltext catalog", name.ToString());
+        }
     }
 
     /// <summary>

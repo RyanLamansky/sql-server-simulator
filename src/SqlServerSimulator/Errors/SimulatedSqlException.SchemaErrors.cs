@@ -775,6 +775,14 @@ partial class SimulatedSqlException
             11721, 15, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 11727: two <c>NEXT VALUE FOR</c> references to
+    /// one sequence in a statement whose <c>OVER</c> definitions differ, the
+    /// absence of one included (probed 2026-09-29 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException NextValueForOverMismatch() =>
+        new("NEXT VALUE FOR functions for a given sequence object must have exactly the same OVER clause definition.", 11727, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 11723: <c>NEXT VALUE FOR</c> in a statement
     /// that carries an <c>ORDER BY</c>, where the reference names no
     /// <c>OVER</c> clause of its own. Probe-confirmed — an <c>OVER</c> is the
@@ -1590,6 +1598,22 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException CannotSchemaBindNotSchemaBound(
         string moduleKind, string qualifiedModuleName, string referencedName) =>
         new($"Cannot schema bind {moduleKind} '{qualifiedModuleName}'. '{referencedName}' is not schema bound.", 4513, 16, 2);
+
+    /// <summary>
+    /// Mimics SQL Server error 2792, once per site: a <c>WITH SCHEMABINDING</c>
+    /// function that spells an alias type for a parameter, its scalar return
+    /// type or a local variable (state 1, each at the line of its own site), or
+    /// — when no such site exists — for a table column, which real reports once
+    /// however many there are (state 2, probed 2026-09-29 against SQL Server
+    /// 2025).
+    /// </summary>
+    internal static SimulatedSqlException SchemaBoundAliasType(List<(int State, int Line)> sites)
+    {
+        var errors = new List<SimulatedSqlException>(sites.Count);
+        foreach (var (state, line) in sites)
+            errors.Add(new SimulatedSqlException("Cannot specify a sql CLR type in a Schema-bound object or a constraint expression.", 2792, 16, (byte)state).PinLine(line));
+        return Aggregate(errors);
+    }
 
     /// <summary>
     /// Mimics SQL Server error 15530: <c>ALTER SCHEMA dest TRANSFER source.obj</c>

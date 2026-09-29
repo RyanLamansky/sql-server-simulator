@@ -294,15 +294,17 @@ partial class Simulation
     /// the schema is completely empty.
     /// </summary>
     /// <summary>
-    /// The <c>DROP TYPE</c> gate — schema ALTER (or the CONTROL that covers it).
-    /// Real also accepts <c>CONTROL</c> on the type itself, a securable class the
-    /// simulator's GRANT surface doesn't carry. Denial is Msg 218, the same
-    /// record a missing type earns, naming the type as written.
+    /// The <c>DROP TYPE</c> gate — schema ALTER (or the CONTROL that covers it),
+    /// or CONTROL on the type itself. Denial is Msg 218, the same record a
+    /// missing type earns, naming the type as written.
     /// </summary>
-    private static void RejectUnauthorizedTypeDrop(ParserContext context, Schema schema, MultiPartName name)
+    private static void RejectUnauthorizedTypeDrop(ParserContext context, Schema schema, MultiPartName name, int userTypeId)
     {
-        if (!PermissionEnforcement.HasSchemaAlter(context.Batch, schema))
+        if (!PermissionEnforcement.HasSchemaAlter(context.Batch, schema)
+            && !PermissionEnforcement.HoldsPermission(context.Batch, schema.Database, Permission.Control, PermissionChecker.ClassType, userTypeId, schema.SchemaId))
+        {
             throw SimulatedSqlException.TypeDoesNotExist(name.ToString());
+        }
     }
 
     private static string? FirstSchemaResident(Schema schema)
@@ -512,11 +514,14 @@ partial class Simulation
         if (schema is not null && schema.AliasTypes.TryGetValue(name.Leaf, out var alias))
         {
             schema.Database.RejectWriteWhenReadOnly();
-            RejectUnauthorizedTypeDrop(context, schema, name);
+            RejectUnauthorizedTypeDrop(context, schema, name, alias.UserTypeId);
             if (FirstAliasTypeReference(schema.Database, alias) is { } referencing)
                 throw SimulatedSqlException.CannotDropTypeBecauseReferenced(name.ToString(), referencing);
             if (schema.AliasTypes.TryRemove(name.Leaf, out var droppedAlias))
+            {
                 RecordSlotUndo(context, schema.AliasTypes, name.Leaf, droppedAlias);
+                DropSecurablePermissions(context, schema.Database, PermissionChecker.ClassType, droppedAlias.UserTypeId);
+            }
             RecordDdlEvent(context, "DROP_TYPE", schema.Name, name.Leaf, "TYPE");
             return;
         }
@@ -531,7 +536,7 @@ partial class Simulation
         // is known to exist — real reports the ordinary not-found error first.
         schema.Database.RejectWriteWhenReadOnly();
 
-        RejectUnauthorizedTypeDrop(context, schema, name);
+        RejectUnauthorizedTypeDrop(context, schema, name, tableType.UserTypeId);
         context.Batch.AcquireStatementLock(tableType.SchemaLock, LockMode.SchemaModification);
         // Scan every procedure in every schema of the current database for
         // a parameter that references this table type. Procedures are the
@@ -549,7 +554,10 @@ partial class Simulation
             }
         }
         if (schema.TableTypes.TryRemove(name.Leaf, out var droppedTableType))
+        {
             RecordSlotUndo(context, schema.TableTypes, name.Leaf, droppedTableType);
+            DropSecurablePermissions(context, schema.Database, PermissionChecker.ClassType, droppedTableType.UserTypeId);
+        }
         RecordDdlEvent(context, "DROP_TYPE", schema.Name, name.Leaf, "TYPE");
     }
 

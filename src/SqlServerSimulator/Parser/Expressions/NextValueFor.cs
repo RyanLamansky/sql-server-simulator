@@ -52,7 +52,7 @@ internal sealed class NextValueFor : Expression
             // Real settles the statement-level refusals (ORDER BY, OFFSET)
             // ahead of these three, and those clauses are read after the
             // reference; the spec judges it once it has them all.
-            this.Deferred = new DeferredNextValueRef(scope) { OverBody = context.InOverBody };
+            this.Deferred = new DeferredNextValueRef(scope) { OverBody = context.InOverBody, InTop = context.InTopCount };
             (context.DeferredNextValueRefs ??= []).Add(this.Deferred);
         }
         else

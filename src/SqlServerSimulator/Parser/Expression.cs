@@ -2290,18 +2290,72 @@ internal abstract class Expression : ExpressionNode
         {
             context.RestoreCheckpoint(overCheckpoint);
             context.UnwindowedSequenceDrawsParsed++;
+            RequireSameOverDefinition(context, nvf, string.Empty);
             return nvf;
         }
         if (nvf.Deferred is { } deferred)
             deferred.Windowed = true;
         // A named window (`OVER w`) is accepted as real accepts it (probed
         // 2026-09-24); like the inline body, the ordering it names is discarded.
-        if (context.GetNextRequired() is Name)
+        if (context.GetNextRequired() is Name windowName)
+        {
+            RequireSameOverDefinition(context, nvf, "@" + windowName.Value.ToUpperInvariant());
             return nvf;
+        }
         if (context.Token is not Operator { Character: '(' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
+        var bodyStart = context.SaveCheckpoint();
+        var signature = new System.Text.StringBuilder();
+        var depth = 1;
+        var parts = new List<string>();
+        while (depth > 0 && context.GetNextOptional() is { } bodyToken)
+        {
+            switch (bodyToken)
+            {
+                case Operator { Character: '(' }:
+                    depth++;
+                    break;
+                case Operator { Character: ')' }:
+                    depth--;
+                    break;
+                // The default direction spelled out is the same definition, and
+                // a qualifier only names the source the column already reads.
+                case ReservedKeyword { Keyword: Keyword.Asc }:
+                    continue;
+                case Operator { Character: '.' } when parts.Count > 0:
+                    parts.RemoveAt(parts.Count - 1);
+                    _ = context.GetNextOptional();
+                    parts.Add(context.Token.ToString().ToUpperInvariant());
+                    continue;
+            }
+            parts.Add(bodyToken.ToString().ToUpperInvariant());
+        }
+        context.RestoreCheckpoint(bodyStart);
+        RequireSameOverDefinition(context, nvf, signature.AppendJoin(' ', parts).ToString());
         context.MoveNextRequired();
         _ = WindowExpression.ParseWindowBody(context);
         return nvf;
+    }
+
+    /// <summary>
+    /// Msg 11727, raised by the query spec once its other refusals are settled: within one statement every reference to a sequence must
+    /// write the same <c>OVER</c> definition — none counts as a definition, an
+    /// explicit ascending direction and a source qualifier don't change one
+    /// (probed 2026-09-29 against SQL Server 2025). The comparison is over
+    /// normalized tokens, so two qualifiers naming different sources' columns
+    /// of one name compare equal.
+    /// </summary>
+    private static void RequireSameOverDefinition(ParserContext context, NextValueFor reference, string signature)
+    {
+        var statement = context.Batch.CurrentStatement.StartIndex;
+        if (context.SequenceOverStatementStart != statement)
+        {
+            context.SequenceOverStatementStart = statement;
+            context.SequenceOverSignatures = null;
+            context.SequenceOverMismatch = false;
+        }
+        var seen = context.SequenceOverSignatures ??= [];
+        if (!seen.TryAdd(reference.Sequence, signature) && seen[reference.Sequence] != signature)
+            context.SequenceOverMismatch = true;
     }
 }

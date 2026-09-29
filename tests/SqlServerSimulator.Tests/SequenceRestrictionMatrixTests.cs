@@ -294,6 +294,86 @@ public sealed class SequenceRestrictionMatrixTests
         AreEqual(1, sim.ExecuteScalar("select count(*) from sys.sequences where name = 's' and last_used_value is null"));
     }
 
+    /// <summary>
+    /// A <c>TOP</c> count's reference is Msg 11720 when every <c>ORDER BY</c> key
+    /// names a written-constant select item — by ordinal or alias — since real
+    /// drops that sort; any other key, or an item that isn't a folded constant,
+    /// keeps the ordered statement's Msg 11723, and a select-list reference is
+    /// judged before the TOP's own (probed 2026-09-29 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select top (next value for dbo.s) 1 from n order by 1", 11720)]
+    [DataRow("select top (next value for dbo.s) 'a' x from n order by x", 11720)]
+    [DataRow("select top (next value for dbo.s) 1 x, 2 y from n order by y, 1 desc", 11720)]
+    [DataRow("select top (next value for dbo.s) abs(-1) x from n order by x", 11720)]
+    [DataRow("select top (next value for dbo.s) cast(1 as int) x from n order by x", 11720)]
+    [DataRow("select top (next value for dbo.s) 1 x from n group by id order by 1", 11720)]
+    [DataRow("select top (next value for dbo.s) 1 x from n order by 1 for xml path", 11720)]
+    [DataRow("select top (next value for dbo.s) id from n order by 1", 11723)]
+    [DataRow("select top (next value for dbo.s) 1 x, id from n order by 1, id", 11723)]
+    [DataRow("select top (next value for dbo.s) 1 x from n order by id", 11723)]
+    [DataRow("select top (next value for dbo.s) 1 x from n order by (select 1)", 11723)]
+    [DataRow("select top (next value for dbo.s) upper('a') x from n order by x", 11723)]
+    [DataRow("select top (next value for dbo.s) getdate() x from n order by x", 11723)]
+    [DataRow("declare @v int = 1; select top (next value for dbo.s) @v x from n order by x", 11723)]
+    [DataRow("select top (next value for dbo.s) 1 x from n where id = next value for dbo.s order by 1", 11723)]
+    [DataRow("select top (next value for dbo.s) 1 y, next value for dbo.s x from n order by y", 11723)]
+    [DataRow("select top (next value for dbo.s) 1 y, next value for dbo.s over (order by id) z from n order by 1", 11739)]
+    [DataRow("select top (next value for dbo.s) 1 y from n where id = next value for dbo.s over (order by id) order by y", 11720)]
+    [DataRow("select distinct top (next value for dbo.s) 1 y from n order by y", 11721)]
+    [DataRow("delete top (next value for dbo.s) from n", 11720)]
+    [DataRow("update top (next value for dbo.s) n set v = 1", 11720)]
+    public void ATopCountsReference_DependsOnWhetherTheOrderByIsAllConstant(string sql, int number)
+    {
+        var sim = WithSequence();
+        _ = sim.AssertSqlError(sql, number);
+        AreEqual(1, sim.ExecuteScalar("select count(*) from sys.sequences where name = 's' and last_used_value is null"));
+    }
+
+    // ---- Msg 11727: differing OVER definitions ----------------------------
+
+    /// <summary>
+    /// Every reference to one sequence in a statement writes the same <c>OVER</c>
+    /// definition, no <c>OVER</c> being a definition of its own (probed
+    /// 2026-09-29 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select next value for dbo.s over (order by id), next value for dbo.s from n")]
+    [DataRow("select next value for dbo.s over (order by id), next value for dbo.s over (order by v) from n")]
+    [DataRow("select next value for dbo.s over (order by id), next value for dbo.s over (order by id desc) from n")]
+    [DataRow("select next value for dbo.s over (order by id), next value for dbo.s over (order by id, v) from n")]
+    [DataRow("select next value for dbo.s over (order by id), next value for dbo.s over (order by id), next value for dbo.s from n")]
+    public void DifferingOverDefinitions_AreMsg11727(string sql)
+    {
+        var sim = WithSequence();
+        sim.AssertSqlError(sql, 11727, "NEXT VALUE FOR functions for a given sequence object must have exactly the same OVER clause definition.");
+        AreEqual(1, sim.ExecuteScalar("select count(*) from sys.sequences where name = 's' and last_used_value is null"));
+    }
+
+    /// <summary>The same definition — an explicit <c>ASC</c>, a qualifier, the schema spelled out — and different sequences are fine.</summary>
+    [TestMethod]
+    [DataRow("select next value for dbo.s over (order by id), next value for dbo.s over (order by id) from n")]
+    [DataRow("select next value for dbo.s over (order by id asc), next value for dbo.s over (order by id) from n")]
+    [DataRow("select next value for dbo.s over (order by n.id), next value for s over (order by id) from n")]
+    [DataRow("select next value for dbo.s, next value for dbo.s from n")]
+    [DataRow("select next value for dbo.s over (order by id), 1 + next value for dbo.s over (order by id) from n order by 1")]
+    public void MatchingOverDefinitions_Run(string sql)
+    {
+        var sim = WithSequence();
+        _ = sim.ExecuteNonQuery(sql);
+        AreEqual(3L, sim.ExecuteScalar("select cast(last_used_value as bigint) from sys.sequences where name = 's'"));
+    }
+
+    /// <summary>A later statement in the batch starts afresh.</summary>
+    [TestMethod]
+    public void OverDefinitions_AreJudgedPerStatement()
+        => AreEqual(6L, new Func<long>(() =>
+        {
+            var sim = WithSequence();
+            _ = sim.ExecuteNonQuery("select next value for dbo.s over (order by id) from n; select next value for dbo.s over (order by v desc) from n");
+            return Convert.ToInt64(sim.ExecuteScalar("select cast(last_used_value as bigint) from sys.sequences where name = 's'"));
+        })());
+
     // ---- keep-working controls --------------------------------------------
 
     /// <summary>

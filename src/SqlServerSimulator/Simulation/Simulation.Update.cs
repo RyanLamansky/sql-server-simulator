@@ -325,7 +325,11 @@ partial class Simulation
         }
         else if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Output })
         {
-            throw new NotSupportedException("OUTPUT with alias-form multi-source UPDATE isn't modeled — re-emit with the table name as the target if OUTPUT is required.");
+            // Only a FROM after it makes the leading name an alias; without
+            // one the target is a missing object, whose OUTPUT has nothing to bind.
+            SkipOutputClause(context);
+            if (context.Token is ReservedKeyword { Keyword: Keyword.From })
+                throw new NotSupportedException("OUTPUT with alias-form multi-source UPDATE isn't modeled — re-emit with the table name as the target if OUTPUT is required.");
         }
 
         if (context.Token is ReservedKeyword { Keyword: Keyword.From })
@@ -335,6 +339,8 @@ partial class Simulation
                 : ExecuteJoinedUpdate(context, leadingIdent, leadingTable, rawAssignments, output, top, preParsedFrom);
         }
 
+        if (leadingTable is null)
+            ParseMissingTargetTail(context);
         var table = leadingTable ?? throw (BatchContext.IsTableVariableName(leadingIdent.Leaf)
             ? SimulatedSqlException.MustDeclareTableVariable(leadingIdent.Leaf)
             : context.Batch.UnresolvableObjectName(leadingIdent));
@@ -983,6 +989,8 @@ partial class Simulation
                 context.AllowNextValueForInFromClause = savedAllowNextValueFor;
             }
         }
+        if (ReadJoinedTailPastMissingTarget(context, sourcesList, joinsList, leadingIdent, leadingTable))
+            return new SimulatedNonQuery(0);
         var targetIndex = FindOrAppendMutationTarget(context, sourcesList, joinsList, leadingIdent, leadingTable);
         var sources = sourcesList.ToArray();
         var joins = joinsList.ToArray();

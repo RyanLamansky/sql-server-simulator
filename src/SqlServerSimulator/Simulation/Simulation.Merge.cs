@@ -708,7 +708,7 @@ partial class Simulation
         }
         else if (context.Batch.TryResolveView(objectName, out var resolvedView))
         {
-            var viewColumns = context.Batch.Connection.Simulation.BindViewColumns(context.Batch, resolvedView, objectName);
+            var viewColumns = context.Batch.Connection.Simulation.BindViewColumns(context.Batch, resolvedView, objectName, out _);
             sourceSchema = new SqlType[viewColumns.Length];
             columnNames = new string[viewColumns.Length];
             for (var i = 0; i < viewColumns.Length; i++)

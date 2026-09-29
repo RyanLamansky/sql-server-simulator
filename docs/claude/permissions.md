@@ -103,6 +103,8 @@ DENY <perm_list> [ON <securable>] TO <principal_list> [AS <grantor>]
 - Permission list eats word sequences ending at comma / `ON` / `TO` / `AS` / `WITH`.
   A sequence of bare identifiers fuses into one permission name (e.g. `VIEW ANY COLUMN ENCRYPTION KEY DEFINITION` → single permission).
 - `ON` clause resolves to a real (class, major_id): a bare or `OBJECT::<name>` name → class 1 + the object's id (and its schema id, for the covering-scope walk); `SCHEMA::<name>` → class 3 + schema id; `USER::<name>` → class 4 + principal id (the IMPERSONATE gate); no `ON` clause / `DATABASE::<name>` → class 0.
+  `TYPE::<name>` → class 6 (`user_type_id`, alias and table types alike), `XML SCHEMA COLLECTION::<name>` → class 10 (`xml_collection_id`), `FULLTEXT CATALOG::<name>` → class 23 (`fulltext_catalog_id`, unqualified only); each takes `CONTROL`, `REFERENCES`, `TAKE OWNERSHIP` and `VIEW DEFINITION`, plus `EXECUTE` on a type and an XML schema collection and `ALTER` on an XML schema collection and a full-text catalog — any other permission is Msg 102 near its name at line 0, a missing securable Msg 15151 naming the leaf (the catalog as written, a `sys.` type as an object), and a dropped securable takes its rows with it (probed 2026-09-29 against SQL Server 2025).
+  `CONTROL` on one of them is the alternative the securable's DROP accepts beside schema `ALTER` (or `ALTER ANY FULLTEXT CATALOG`); the other permissions are stored and projected but enforced nowhere yet — not `REFERENCES` on a type a column uses, which real refuses with Msg 15247, and not a `DENY` of any of them.
   `SERVER::<name>` and `LOGIN::<name>` route out of the database entirely, to `Simulation.ServerPermissions` — see [Server roles + server-scope permissions](#server-roles--server-scope-permissions-simulationsimulationserverrolescs).
   An unknown securable raises the Msg 15151 object-variant (`Cannot find the object '<name>', because it does not exist or you do not have permission.`), and a `DATABASE::` naming another database **Msg 4610** (probed 2026-09-28 against SQL Server 2025).
   A permission incompatible with the object kind (SELECT on a proc, EXECUTE on a table / view / TVF, anything but UPDATE among the four DML permissions on a sequence) raises **Msg 4606**.
@@ -114,7 +116,7 @@ DENY <perm_list> [ON <securable>] TO <principal_list> [AS <grantor>]
   A table-level (`minor_id 0`) GRANT / REVOKE of the same permission subsumes the grantee's column rows for it (probe-confirmed: a later `GRANT SELECT ON t` collapses the prior `GRANT SELECT (col)` rows); a column-level apply keys on its own `minor_id`.
   See [Column-level grants](#column-level-grants).
 - `WITH GRANT OPTION` stores a **single `W` row** (not `G`+`W`).
-- `REVOKE GRANT OPTION FOR … [CASCADE]` downgrades `W`→`G` and (with CASCADE) removes the rows the grantee delegated; a plain `REVOKE` of a grantable row that has live delegations, without CASCADE, raises **Msg 4611**.
+- `REVOKE GRANT OPTION FOR … [CASCADE]` downgrades `W`→`G` and (with CASCADE) removes the rows the grantee delegated; a `REVOKE` (or `REVOKE GRANT OPTION FOR`) of a grantable row without CASCADE raises **Msg 4611**, delegated or not, at every scope (probed 2026-09-29 against SQL Server 2025; a `DENY` of one is 4611 on real too, which the missing `DENY … CASCADE` grammar keeps out of reach).
   Full `REVOKE … CASCADE` removes the whole delegation subtree (rows whose grantor is in the revoked-from set, transitively via `grantor_principal_id`).
 - A triple holds one row: `GRANT` replaces a `D` row and `DENY` a `G` / `W` one (probed 2026-09-28 against SQL Server 2025); a plain REVOKE removes whichever is there.
 - A GRANT / DENY / REVOKE targeting `sa` / `dbo` / `sys` / `INFORMATION_SCHEMA` / self silently no-ops and delivers **Msg 4624 on the info-message channel** at class 0 state 2 (`SimulatedDbConnection.InfoMessage`) — not catchable by TRY/CATCH, no row stored.
@@ -192,9 +194,9 @@ Two shapes recur, and the difference between them is load-bearing:
 | `TRUNCATE TABLE` | ALTER-shaped, on the table | **Msg 1088** **state 7**, leaf-named |
 | `ALTER SEQUENCE` | ALTER-shaped, on the sequence | **Msg 15151** state 1, `Cannot alter the sequence '<leaf>'…` |
 | `DROP TABLE` / `VIEW` / `PROCEDURE` / `FUNCTION` / `SEQUENCE` / `SYNONYM` | DROP-shaped | **Msg 3701** sev 14 state 20, `Cannot drop the <kind> '<leaf>'…` |
-| `DROP TYPE` (alias + table) | schema ALTER | **Msg 218** sev 16 state 1, naming the type **as written** |
-| `DROP XML SCHEMA COLLECTION` | schema ALTER | **Msg 15151** state 1, `Cannot drop the xml schema collection '<leaf>'…` |
-| `DROP FULLTEXT CATALOG` | db-scope `ALTER ANY FULLTEXT CATALOG` | **Msg 7641** sev 16 state 5 |
+| `DROP TYPE` (alias + table) | schema ALTER, or CONTROL on the type | **Msg 218** sev 16 state 1, naming the type **as written** |
+| `DROP XML SCHEMA COLLECTION` | schema ALTER, or CONTROL on the collection | **Msg 15151** state 1, `Cannot drop the xml schema collection '<leaf>'…` |
+| `DROP FULLTEXT CATALOG` | db-scope `ALTER ANY FULLTEXT CATALOG`, or CONTROL on the catalog | **Msg 7641** sev 16 state 5 |
 | `DROP SCHEMA` | CONTROL on the schema, or db-scope `ALTER ANY SCHEMA` — schema **ALTER is not enough** here | **Msg 15151** state 1 |
 | `ALTER SCHEMA … TRANSFER` | ALTER on the **destination** schema, then CONTROL on the moved object — ALTER on the *source* schema is not enough | **Msg 15151** `Cannot alter the schema '<dest>'…`, then **Msg 15151** `Cannot transfer the object '<leaf>'…` |
 | `ALTER ROLE … ADD / DROP MEMBER` | db-scope `ALTER ANY ROLE` (ALTER / CONTROL on the role cover it) | **Msg 15151** **state 2**, `Cannot alter the role '<n>'…` |
@@ -385,7 +387,7 @@ The same goes for a database-scoped frame out of a non-`TRUSTWORTHY` database: t
 ### Principal DDL
 
 - `CREATE USER name [{FOR | FROM} ...] [WITH option = value, …]` — name + principal_id allocation; `type_code='S'`.
-  `FOR / FROM LOGIN` and `WITHOUT LOGIN` are read; the `WITH` list records `DEFAULT_SCHEMA` (as written, even when no such schema exists) and reads the other options without effect; anything else parses-and-discards through the next statement boundary.
+  `FOR / FROM LOGIN` and `WITHOUT LOGIN` are read, and a login the server doesn't know is **Msg 15007** (probed 2026-09-29 against SQL Server 2025); the `WITH` list records `DEFAULT_SCHEMA` (as written, even when no such schema exists) and reads the other options without effect; anything else parses-and-discards through the next statement boundary.
 - `ALTER USER name WITH option = value, …` — `NAME` renames, `DEFAULT_SCHEMA` sets the default schema, the rest are read without effect; a missing user is **Msg 15151** state 1 and a taken name **Msg 15023** state 10.
   The default schema is catalog-only: an unqualified name still resolves through `dbo` for every user (not built yet).
 - `CREATE ROLE name [AUTHORIZATION owner]` — `type_code='R'`.
@@ -394,6 +396,7 @@ The same goes for a database-scoped frame out of a non-`TRUSTWORTHY` database: t
   `sp_addrolemember` / `sp_droprolemember` run the same change, differing only in a missing member to add (**Msg 15410**, class 11); both spellings raise `ADD_ROLE_MEMBER` / `DROP_ROLE_MEMBER` naming the member (probed 2026-09-25 against SQL Server 2025).
 - `DROP USER [IF EXISTS] name` and `DROP ROLE [IF EXISTS] name` — drop from `Database.Principals`; a user's memberships go with it, while a role that still has members is **Msg 15144**.
   All probed 2026-09-25 against SQL Server 2025.
+  Each sees only its own kind: a role named to `DROP USER`, or a user to `DROP ROLE`, reads as missing (`Cannot drop the user 'x', …`, `Cannot drop the role 'x', …`), and a missing grantee or `USER::` securable of `GRANT` / `DENY` / `REVOKE` is `Cannot find the user 'x', …`, while `ALTER ROLE … ADD MEMBER` keeps `Cannot find the user, login, role, or principal` and the application-role statements say `Cannot alter` / `Cannot drop the application role` (probed 2026-09-29).
   A principal that still owns something can't be dropped — see [Ownership](#ownership).
   Dispatched ahead of the generic DROP-target switch in `Simulation.Drop.cs` because principals don't live in a per-schema dict.
 
@@ -426,7 +429,12 @@ A procedure, scalar function or DML trigger body records its module's effective 
 A view or inline TVF, inlined into the referencing statement, checks its body's other-owner reads once at invocation (`PermissionEnforcement.CheckModuleBodyReads`), and DML through a single-table updatable view checks the base table after the view when the two owners differ — even from a module body whose reference to the view is chained.
 A **view over a view** is a chain of links, each object's owner compared with the next's (`View.UpstreamView` / `UpstreamColumnOrdinals` carry the per-level link `BaseTable` composes away): every object whose owner differs from its predecessor's needs the permission itself, in order, so `dbo.v1` over `u1`'s `v2` over `dbo`'s table needs SELECT on `v2` and then on the table, while `dbo.v1` over `u1`'s `v2` over `u1`'s table needs only `v2` (probed 2026-09-29 against SQL Server 2025 for `SELECT`, `UPDATE`, `INSERT`, `DELETE` and `MERGE`; the read path already walked the same rule).
 `INSERT` and `DELETE` check the write object-grain (`CheckBrokenChainWrite`); `UPDATE`'s SELECT and UPDATE and `DELETE`'s SELECT are column-grain on the base columns the view's columns read (`CheckBrokenChainColumns`, Msg 230 naming the base column); `MERGE` checks SELECT and each action's permission object-grain.
-Through a **join view** every other-owner base table is checked for SELECT on the columns the statement reads of it — its join and filter columns included, so an UPDATE writing the other table still needs SELECT on the join column — and the written table for UPDATE column-grain; an INSERT checks only INSERT on the table written (`CheckJoinViewBrokenChains`).
+Through a **join view** the chain is judged link by link, top down, and stops at the first link whose owners differ and whose permission is missing (probed 2026-09-29 against SQL Server 2025, `CheckJoinViewBrokenChains` / `CheckJoinViewInsertChain`).
+An UPDATE needs, on each view below the one named whose owner differs from the one above it, SELECT on the columns read through it and then UPDATE at object grain — real reports both where both are missing, SELECT first — and a view the join only *reads* takes the SELECT alone.
+Under the join view, every other-owner base table is checked for SELECT on the columns the statement reads of it — its join and filter columns included, so an UPDATE writing the other table still needs SELECT on the join column — and the written table for UPDATE column-grain.
+A join view reading another join view descends into it, so the tables under the inner one are judged from the inner view's owner; an INSERT checks INSERT at object grain on each differing view and then on the table written.
+**Where several denied objects are reachable, real names the last one bound** — a join over two ungranted tables names the second, a subquery's the subquery's, and `INSERT … SELECT` the source's — so `CheckReadSources` and `CheckModuleBodyReads` walk their lists backwards (probed 2026-09-29: joins, subqueries, unions, view bodies).
+A `SELECT` through a view checks the body's other-owner reads with the statement (`ReferencedSecurable.ModuleReads`, carried by the view's own reference and nested through views it reads), so the refusal arrives from `ExecuteReader` rather than the first `Read`; an inline TVF's body is still checked when it is invoked.
 Under an `INSTEAD OF` trigger an `INSERT` checks nothing on the base, while an `UPDATE` or `DELETE` still needs SELECT on every base column for the pseudo-tables.
 All probed 2026-09-27 against SQL Server 2025, which raises the SELECT denial and the write denial together where the simulator raises the first.
 
@@ -436,13 +444,13 @@ All probed 2026-09-27 against SQL Server 2025, which raises the SELECT denial an
 `principal_id` reports the explicit owner in `sys.objects` / `all_objects` / `tables` / `views` / `procedures` / `sequences` / `synonyms` / `types` / `table_types` / `xml_schema_collections`, but stays NULL on a table type's `TT` row; `sys.schemas.principal_id` and `INFORMATION_SCHEMA.SCHEMATA.SCHEMA_OWNER` follow the schema owner, `sys.databases.owner_sid` / `dbo`'s `sid` / `sp_helpdb`'s `owner` / `sp_helpuser`'s dbo `LoginName` the database owner.
 
 **Divergences.**
-The type-class and XML-schema-collection gates ask for `TAKE OWNERSHIP` on the owning schema, and the full-text-catalog and assembly gates on the database, since `GRANT` models none of those classes.
+The assembly gate asks for `TAKE OWNERSHIP` on the database, since `GRANT` models no assembly class; the type, XML-schema-collection and full-text-catalog gates ask on the securable itself (its schema and the database cover it), and a change of effective owner drops that securable's grants (probed 2026-09-29 against SQL Server 2025).
 A `WITHOUT LOGIN` owner's or creator's `SYSTEM_USER` under `EXECUTE AS OWNER` / `SELF` is the deterministic SID every such user reports, where real's is random.
 
 **Not modeled yet.**
 The `ALTER AUTHORIZATION` classes past the eight above raise `NotSupportedException`.
-Through a join view over a join view, only the outer view's own base tables are checked.
-A chain through **nested views** compares only the outermost view's owner with the base table's, where real compares each link.
+A `MERGE` through a join view checks no broken chain (probed 2026-09-29: real names the join view for SELECT and UPDATE, then the last-bound table), and a write through a join view whose source is a *single-table* view of another owner is Msg 4405 here where real runs it.
+An `INSERT … SELECT` over two denied objects raises the target's INSERT denial with the source's, where real names only the source.
 Server-scope DDL triggers aren't modeled, so `ALTER AUTHORIZATION ON DATABASE` raises no `ALTER_AUTHORIZATION_SERVER` event.
 
 ### Server logins (`Simulation/Simulation.LoginDdl.cs`)
@@ -771,7 +779,7 @@ Registered in `BuiltInResources.Security.cs` via the shared `EmptyCatalogRows`.
 | 1088 | TRUNCATE (state 7) / ALTER TABLE (state 13) — double-quoted leaf; CREATE INDEX (state 12) and ALTER / DROP INDEX (state 9) — double-quoted table name *as written*, the DROP form suffixed with the index leaf. |
 | 3701 | An object DROP or a module ALTER denied — sev 14 state 20, leaf-named, with the kind noun real spells (`table` / `view` / `procedure` / `function` / `trigger` / `sequence` / `synonym`). DROP DATABASE has its own shape: **sev 11 state 2**. |
 | 4606 | Permission incompatible with the object kind (SELECT on a proc, EXECUTE on a table / view / TVF). |
-| 4611 | Plain REVOKE of a grantable permission with live delegations, without CASCADE. |
+| 4611 | REVOKE of a grantable permission without CASCADE. |
 | 4621 | Server-scope GRANT / DENY / REVOKE (incl. `ON SERVER::` / `ON LOGIN::`) outside the `master` database — severity 16 **state 10**, no trailing period. |
 | 15161 | `sp_setapprole` on a missing application role or with the wrong password (one wording for both). |
 | 2762 | `sp_setapprole` on a session that already has an application role set. |
@@ -832,12 +840,12 @@ The current-principal / id scalars read the session's effective principal; `HAS_
 - **`sys.server_permissions` endpoint rows** — real seeds `public` with per-endpoint `CONNECT` (class 105) alongside the class-100 rows the simulator seeds; the simulator models no endpoint class.
 - **Application-role edges** — DDL is gated on the `db_owner` / `db_ddladmin` capability rather than `ALTER ANY APPLICATION ROLE`; a pooled TDS reset clears the role instead of killing the session (real's Msg 596).
   See [Application roles](#application-roles).
-- **DDL statement gates** cover every modeled CREATE / ALTER / DROP — see [DDL statement gates](#ddl-statement-gates). Residue: three securable classes real accepts a grant on have no GRANT surface here, so the alternative each offers isn't honored — `CONTROL ON TYPE::t` (DROP TYPE takes schema ALTER only), `CONTROL ON XML SCHEMA COLLECTION::c` (same), and `CONTROL` on a full-text catalog (DROP FULLTEXT CATALOG takes `ALTER ANY FULLTEXT CATALOG` only). The simulator is the stricter side in all three.
+- **DDL statement gates** cover every modeled CREATE / ALTER / DROP — see [DDL statement gates](#ddl-statement-gates).
   `CREATE ASSEMBLY` covers through `CONTROL` rather than real's `ALTER ANY ASSEMBLY`, which isn't in the catalog.
   Real pairs the ALTER DATABASE refusal with a terminating Msg 5069 and the CREATE INDEX / TRUNCATE family with no second record; the simulator raises the single leading error, matching how the DMV 300 / 262 pair is modeled.
 - **`db_accessadmin` / `db_securityadmin` / `db_backupoperator`** — membership is tracked and projected, but carries no enforced effect (the DDL gates treat `db_owner` / `db_ddladmin` as the "may run any DDL" pair per probe).
 - **Msg 229 multi-error round trip** — when both SELECT and the write permission are missing, a single SELECT-first denial is raised, not real's paired SELECT-then-write error records.
 - **`ALTER TABLE ADD`-column SET-reads detection** on the joined form isn't distinguished — a joined UPDATE / DELETE SELECT-checks all backing-table sources unconditionally.
 - **Guest enable/disable**, **`CREATE USER … FROM EXTERNAL PROVIDER`** + the `WITH` option tail — parse-and-discard.
-- **Grammar residue** — `DENY … CASCADE` is Msg 156 here where real accepts it and cascades the denial to the grantee's own grantees, `GRANT ALL` omits real's class-0 **Msg 4628** deprecation notice, and the `TYPE::`, `XML SCHEMA COLLECTION::` and `APPLICATION ROLE::` securable classes aren't parsed (probed 2026-09-28 against SQL Server 2025).
+- **Grammar residue** — `DENY … CASCADE` is Msg 156 here where real accepts it and cascades the denial to the grantee's own grantees, `GRANT ALL` omits real's class-0 **Msg 4628** deprecation notice, and the `APPLICATION ROLE::` securable class isn't parsed (probed 2026-09-28 against SQL Server 2025).
 - **Login-model edges** — password policy (`CHECK_POLICY` / expiration / lockout) is not enforced.

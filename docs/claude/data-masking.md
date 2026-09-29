@@ -66,7 +66,7 @@ The functions:
 
 NULL stays NULL, and a non-NULL result of an expression over a NULL masked value still masks (`ISNULL(masked_null, 'q')` reads `xxxx`).
 How the function reaches an output column, and which clauses read the stored value instead, is `DataMask`'s XML doc.
-Past a single query it rides the same seams: a derived table's, CTE's, view's, inline TVF's and `PIVOT`'s column carries its query's mask as `HeapColumn.DerivedMask`, a computed column over a masked column reads as `default()`, a FOR JSON / FOR XML subquery's whole document reads as `default()`, and `UNPIVOT` over a masked column masks both its value and its name column as `default()`.
+Past a single query it rides the same seams: a derived table's, CTE's, view's, inline TVF's and `PIVOT`'s column carries its query's mask as `HeapColumn.DerivedMask` — a view's and an inline TVF's re-settled at each reference, so a mask the base table gained or lost since `CREATE` reaches them (probed 2026-09-29) — and so does a `VALUES` constructor column whose cells read an enclosing query's masked column, the masks of its cells meeting as a set operation's branches do; a user table-valued function's argument reading a masked column masks every column it returns as `default()`, an `email()` one included (probed 2026-09-29), a computed column over a masked column reads as `default()`, a FOR JSON / FOR XML subquery's whole document reads as `default()`, and `UNPIVOT` over a masked column masks both its value and its name column as `default()`.
 
 The sinks, each applying its plan's masks for the executing principal:
 - a SELECT's result set, a cursor's `FETCH`, a statement-level FOR JSON / untyped FOR XML document (its rows masked before serializing — a nested FOR JSON column inside it reads as a bare `xxxx`); a statement-level `FOR XML … TYPE` document reads as `<masked />` whole;
@@ -98,6 +98,4 @@ The projection walk that fills it is skipped outright until the simulation's fir
 
 ## Not modeled yet
 
-- **A derived table in `FROM` correlating to an enclosing query** reads the outer column unmasked: only the select list and an `APPLY` body chain the outer masks.
-- **An inline TVF's column masks** are settled when it is created, so a mask its base table gains or loses later reaches it only when it is re-created or altered.
 - **Masking a `geography`, `geometry` or `vector` value** raises `NotSupportedException`: real sends a single `0x00` byte its own client can't read back, and the simulator's values of those types are parsed, so there is no such value to send.

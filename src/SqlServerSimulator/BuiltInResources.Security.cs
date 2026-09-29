@@ -661,6 +661,9 @@ internal static partial class BuiltInResources
                 1 => "OBJECT_OR_COLUMN",
                 3 => "SCHEMA",
                 4 => "DATABASE_PRINCIPAL",
+                6 => "TYPE",
+                10 => "XML_SCHEMA_COLLECTION",
+                23 => "FULLTEXT_CATALOG",
                 _ => "DATABASE",
             };
             yield return [

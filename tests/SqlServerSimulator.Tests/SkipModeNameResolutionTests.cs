@@ -278,4 +278,44 @@ public sealed class SkipModeNameResolutionTests
     public void SkippedIf_QualifiedColumnsOnMissingTable_ElseRuns()
         => AreEqual("else", new Simulation().ExecuteScalar(
             "if 1 = 0 select m.foo, m.bar from missing m else select 'else' as r"));
+
+    /// <summary>
+    /// A syntax error past a DML statement's missing target or a missing
+    /// source's <c>FOR SYSTEM_TIME</c> clause outranks the missing object, as
+    /// real parses the whole batch before binding it (probed 2026-09-29
+    /// against SQL Server 2025); the well-formed statement stays Msg 208.
+    /// </summary>
+    [TestMethod]
+    [DataRow("update missing set a = 1 where", 102)]
+    [DataRow("update missing set a = 1 where b = 1 foo", 102)]
+    [DataRow("update missing set a = 1 output inserted.a where", 102)]
+    [DataRow("delete from missing where", 102)]
+    [DataRow("delete missing where a = 1 foo", 102)]
+    [DataRow("delete from missing option (maxdop 1) where", 156)]
+    [DataRow("insert missing values (", 102)]
+    [DataRow("insert missing (a, b values (1, 2)", 156)]
+    [DataRow("insert missing (a) values (1) foo", 102)]
+    [DataRow("insert missing select 1 from other where", 102)]
+    [DataRow("update m set a = 1 from missing m where", 102)]
+    [DataRow("delete m from other m where a in (select 1 from", 102)]
+    [DataRow("select 1 from missing for system_time all where", 102)]
+    [DataRow("select 1 from missing for system_time as of '2020-01-01' where", 102)]
+    [DataRow("update missing set a = 1 where a = 1", 208)]
+    [DataRow("update missing set a = 1 where a = 1 option (maxdop 1)", 208)]
+    [DataRow("delete from missing where a = 1;", 208)]
+    [DataRow("insert missing (a, b) values (1, 2)", 208)]
+    [DataRow("insert missing default values", 208)]
+    [DataRow("update m set a = 1 from missing m where m.a = 1", 208)]
+    [DataRow("select 1 from missing for system_time all where a = 1", 208)]
+    public void MissingDmlTarget_SyntaxErrorOutranksTheMissingObject(string sql, int number)
+        => _ = new Simulation().AssertSqlError(sql, number);
+
+    /// <summary>A dead branch over a missing DML target still parses whole and lets the ELSE run.</summary>
+    [TestMethod]
+    [DataRow("if 1 = 0 update missing set a = 1 where a = 1 else select 'else'")]
+    [DataRow("if 1 = 0 delete from missing where a in (select b from other) else select 'else'")]
+    [DataRow("if 1 = 0 insert missing (a) values (1) else select 'else'")]
+    [DataRow("if 1 = 0 update m set a = 1 from missing m where m.a = 1 else select 'else'")]
+    public void DeadBranchOverMissingDmlTarget_ElseRuns(string sql)
+        => AreEqual("else", new Simulation().ExecuteScalar(sql));
 }

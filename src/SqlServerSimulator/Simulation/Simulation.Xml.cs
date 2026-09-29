@@ -450,14 +450,17 @@ partial class Simulation
         var schemaName = name.ImmediateQualifier ?? Database.DefaultSchemaName;
         if (!context.CurrentDatabase.Schemas.TryGetValue(schemaName, out var ownerSchema))
             throw SimulatedSqlException.InvalidObjectName(name);
-        // Real gates the drop on ALTER of the owning schema (or CONTROL on the
-        // collection, a securable class the simulator's GRANT surface doesn't
-        // carry) and reports Msg 15151 naming the collection's leaf.
-        if (!ownerSchema.XmlSchemaCollections.ContainsKey(name.Leaf))
+        // Real gates the drop on ALTER of the owning schema or CONTROL on the
+        // collection, and reports Msg 15151 naming the collection's leaf.
+        if (!ownerSchema.XmlSchemaCollections.TryGetValue(name.Leaf, out var existing))
             throw SimulatedSqlException.InvalidObjectName(name);
-        if (!PermissionEnforcement.HasSchemaAlter(context.Batch, ownerSchema))
+        if (!PermissionEnforcement.HasSchemaAlter(context.Batch, ownerSchema)
+            && !PermissionEnforcement.HoldsPermission(context.Batch, ownerSchema.Database, Permission.Control, PermissionChecker.ClassXmlSchemaCollection, existing.Id, ownerSchema.SchemaId))
+        {
             throw SimulatedSqlException.CannotDropXmlSchemaCollection(name.Leaf);
+        }
         _ = ownerSchema.XmlSchemaCollections.TryRemove(name.Leaf, out _);
+        DropSecurablePermissions(context, ownerSchema.Database, PermissionChecker.ClassXmlSchemaCollection, existing.Id);
         RecordDdlEvent(context, "DROP_XML_SCHEMA_COLLECTION", schemaName, name.Leaf, "XML SCHEMA COLLECTION");
         return true;
     }

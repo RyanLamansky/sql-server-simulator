@@ -67,8 +67,9 @@ partial class Simulation
     /// statement compiles; any other failure returns the recorded columns
     /// unchanged, so the body's own error surfaces at execution.
     /// </remarks>
-    internal HeapColumn[] BindViewColumns(BatchContext outerBatch, View view, MultiPartName writtenName)
+    internal HeapColumn[] BindViewColumns(BatchContext outerBatch, View view, MultiPartName writtenName, out Selection? body)
     {
+        body = null;
         Selection plan;
         try
         {
@@ -83,6 +84,7 @@ partial class Simulation
             return view.OutputColumns;
         }
 
+        body = plan;
         var recorded = view.OutputColumns;
         var bound = plan.Schema;
         if (bound.Length < recorded.Length)

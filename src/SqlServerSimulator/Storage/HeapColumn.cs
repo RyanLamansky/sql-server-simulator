@@ -306,5 +306,13 @@ internal sealed class HeapColumn(string name, SqlType type, int? maxLength, bool
             GraphKind = this.GraphKind,
         };
 
+    /// <summary>This column with <see cref="DerivedMask"/> replaced by <paramref name="mask"/>, every other attribute carried over.</summary>
+    internal HeapColumn WithDerivedMask(DataMask? mask)
+    {
+        var copy = this.WithPersisted(this.IsPersisted);
+        copy.DerivedMask = mask;
+        return copy;
+    }
+
     internal string DebugDisplay() => $"{this.Name} {this.Type}{(this.MaxLength is int n ? $"({n})" : "")}";
 }

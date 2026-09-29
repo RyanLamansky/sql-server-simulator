@@ -977,7 +977,7 @@ internal sealed partial class Selection
             var parsed = ParseInner(context, scope, aggregates, windows, allowOrderBy);
             // Settled where the ORDER BY is known; this is the backstop for a
             // path that returned without passing there.
-            SettleDeferredNextValueRefs(context, orderBy: false, offset: false, projectionStart: 0, projectionEnd: 0);
+            SettleDeferredNextValueRefs(context, orderBy: false, constantOrderBy: false, offset: false, projectionStart: 0, projectionEnd: 0);
             return parsed;
         }
         finally
@@ -1255,7 +1255,7 @@ internal sealed partial class Selection
         if (cap is not { } c || !top.WithTies || orderBy.Count == 0 || c <= 0 || c >= rows.Count)
             return cap;
         var boundary = keysOf(rows[c - 1]);
-        while (c < rows.Count && CompareOrderKeys(keysOf(rows[c]), boundary, orderBy) == 0)
+        while (c < rows.Count && SortOrderKeys(keysOf(rows[c]), boundary, orderBy) == 0)
             c++;
         return c;
     }
@@ -1290,7 +1290,16 @@ internal sealed partial class Selection
         // Passing the cursor at '(' lets Expression.Parse consume the whole
         // parenthesized expression (numeric, arithmetic, @variable, or a
         // parenthesized scalar subquery) and land on the following token.
-        var expression = Expression.Parse(context);
+        Expression expression;
+        var savedRejection = context.EnterNextValueForScope(NextValueForScope.Clause);
+        try
+        {
+            expression = Expression.Parse(context);
+        }
+        finally
+        {
+            context.NextValueForRejection = savedRejection;
+        }
         var percent = false;
         if (context.Token is ReservedKeyword { Keyword: Keyword.Percent })
         {
@@ -1402,6 +1411,10 @@ internal sealed partial class Selection
                 break;
         }
 
+        // A DISTINCT statement's Msg 11721 outranks the TOP count's own clause refusal.
+        if (distinct)
+            _ = context.EnterNextValueForScope(NextValueForScope.Deduplicating);
+
         if (firstToken is ReservedKeyword { Keyword: Keyword.Top })
         {
             context.Batch.BindErrors?.EnterClause(firstToken, BindClause.Top);
@@ -1418,6 +1431,7 @@ internal sealed partial class Selection
             // stops-before-any-binary-operator path — a sign would otherwise
             // absorb the following multiplicative chain, star included.
             var savedRejectInTop = context.EnterNextValueForScope(NextValueForScope.Clause);
+            context.InTopCount = true;
             try
             {
                 context.RecursiveBranchConstructs.TopOrOffset = true;
@@ -1429,6 +1443,7 @@ internal sealed partial class Selection
             }
             finally
             {
+                context.InTopCount = false;
                 context.NextValueForRejection = savedRejectInTop;
             }
             // `TOP n PERCENT` — cap becomes ceil(n% × rowcount). PERCENT is a
@@ -1867,7 +1882,7 @@ internal sealed partial class Selection
 
                     if (topExpression is not null && fromClause.OffsetExpression is not null)
                         throw SimulatedSqlException.TopAndOffsetMutuallyExclusive();
-                    RejectSequenceDrawUnderOrderBy(context, fromClause, sequenceDrawsBefore, unwindowedSequenceDrawsBefore);
+                    RejectSequenceDrawUnderOrderBy(context, fromClause, expressions, sequenceDrawsBefore, unwindowedSequenceDrawsBefore);
                     // A nested query — a derived table or a view's body — whose
                     // TOP is a constant 100 PERCENT keeps every row, so real
                     // drops its ORDER BY and returns the rows in scan order
@@ -1985,7 +2000,7 @@ internal sealed partial class Selection
             throw SimulatedSqlException.TopAndOffsetMutuallyExclusive();
         if (topWithTies && fromClause.OrderBy.Count == 0)
             throw SimulatedSqlException.TopWithTiesRequiresOrderBy();
-        RejectSequenceDrawUnderOrderBy(context, fromClause, sequenceDrawsBefore, unwindowedSequenceDrawsBefore);
+        RejectSequenceDrawUnderOrderBy(context, fromClause, expressions, sequenceDrawsBefore, unwindowedSequenceDrawsBefore);
 
         // A source-less SELECT that aggregates, groups, filters groups or
         // windows takes the ordinary projection builder over an empty source
@@ -2055,9 +2070,9 @@ internal sealed partial class Selection
     /// that is the one exemption real's message names, and the one exemption
     /// it grants anywhere (probe-confirmed 2026-08-05).
     /// </summary>
-    private static void RejectSequenceDrawUnderOrderBy(ParserContext context, FromClause fromClause, int sequenceDrawsBefore, int unwindowedSequenceDrawsBefore)
+    private static void RejectSequenceDrawUnderOrderBy(ParserContext context, FromClause fromClause, List<Expression> projection, int sequenceDrawsBefore, int unwindowedSequenceDrawsBefore)
     {
-        SettleDeferredNextValueRefs(context, fromClause.OrderBy.Count > 0, fromClause.OffsetExpression is not null, fromClause.ProjectionRefsStart, fromClause.ProjectionRefsEnd);
+        SettleDeferredNextValueRefs(context, fromClause.OrderBy.Count > 0, OrderByNamesOnlyConstants(fromClause, projection), fromClause.OffsetExpression is not null, fromClause.ProjectionRefsStart, fromClause.ProjectionRefsEnd);
         if (fromClause.OrderBy.Count > 0 && context.UnwindowedSequenceDrawsParsed > unwindowedSequenceDrawsBefore)
             throw SimulatedSqlException.NextValueForNotAllowedWithOrderBy();
         // An OFFSET can only follow an ORDER BY, so this is reached only for a
@@ -2065,6 +2080,45 @@ internal sealed partial class Selection
         // that one too, since the OVER lifts the ORDER BY refusal alone.
         if (fromClause.OffsetExpression is not null && context.SequenceDrawsParsed > sequenceDrawsBefore)
             throw SimulatedSqlException.NextValueForNotAllowedWithRowLimit();
+        if (context.SequenceOverMismatch)
+        {
+            context.SequenceOverMismatch = false;
+            throw SimulatedSqlException.NextValueForOverMismatch();
+        }
+    }
+
+    /// <summary>
+    /// Whether every <c>ORDER BY</c> key names a select-list item that is a
+    /// written constant, by ordinal or by its alias — the statement's sort is
+    /// then one real removes before it judges a <c>TOP</c> count's
+    /// <c>NEXT VALUE FOR</c> (probed 2026-09-29 against SQL Server 2025: a
+    /// column, a variable, <c>GETDATE()</c>, <c>UPPER('a')</c> or a subquery
+    /// item keeps the ordered refusal). A star in the list leaves ordinals
+    /// unknowable, so it answers false.
+    /// </summary>
+    private static Expression UnwrapParentheses(Expression expression) =>
+        expression is Parenthesized { Wrapped: var inner } ? UnwrapParentheses(inner) : expression;
+
+    private static bool OrderByNamesOnlyConstants(FromClause fromClause, List<Expression> projection)
+    {
+        if (fromClause.OrderBy.Count == 0 || projection.Exists(static item => item is StarProjection))
+            return false;
+        foreach (var key in fromClause.OrderBy)
+        {
+            Expression? item = null;
+            if (key.IsOrdinal)
+            {
+                if (key.Ordinal >= 1 && key.Ordinal <= projection.Count)
+                    item = projection[key.Ordinal - 1];
+            }
+            else if (key is { MayNameAlias: true, Expr: { } written } && UnwrapParentheses(written) is Reference { ReferencedName: { ImmediateQualifier: null } name })
+            {
+                item = projection.Find(candidate => candidate is NamedExpression named && Collation.Baseline.Equals(named.Name, name.Leaf));
+            }
+            if ((item is NamedExpression alias ? alias.Inner : item) is not { IsWrittenConstant: true })
+                return false;
+        }
+        return true;
     }
 
     /// <summary>
@@ -2079,7 +2133,7 @@ internal sealed partial class Selection
     /// windowed one under <c>TOP</c> stays Msg 11739). A branch a set operator
     /// follows is left to the chain, whose Msg 11721 outranks all of these.
     /// </summary>
-    private static void SettleDeferredNextValueRefs(ParserContext context, bool orderBy, bool offset, int projectionStart, int projectionEnd)
+    private static void SettleDeferredNextValueRefs(ParserContext context, bool orderBy, bool constantOrderBy, bool offset, int projectionStart, int projectionEnd)
     {
         if (context.DeferredNextValueRefs is not { } refs)
             return;
@@ -2090,17 +2144,24 @@ internal sealed partial class Selection
         // references it parsed are judged last (probed 2026-09-29: a windowed
         // one under TOP in the select list, with an unwindowed one in the
         // WHERE, is the WHERE's Msg 11723).
-        for (var pass = 0; pass < 2; pass++)
+        // A TOP count's references are judged after the select list's
+        // (probed 2026-09-29: a windowed select-list reference beside one in
+        // the TOP is Msg 11739, the TOP's own being left for last).
+        for (var pass = 0; pass < 3; pass++)
         {
             for (var i = 0; i < refs.Count; i++)
             {
-                if ((i >= projectionStart && i < projectionEnd) != (pass == 1))
+                var isTop = refs[i].InTop;
+                if (isTop ? pass != 2 : (i >= projectionStart && i < projectionEnd) != (pass == 1))
                     continue;
                 var reference = refs[i];
                 var refusal = NextValueForScope.Allowed;
                 // An OVER body's reference is one of the clauses Msg 11720
                 // names, and the ORDER BY refusal doesn't reach it.
-                if (orderBy && !reference.Windowed && !reference.OverBody)
+                // An ORDER BY whose keys all name constant select items is one
+                // real drops from the statement, which a TOP count's reference
+                // then never sees (probed 2026-09-29: Msg 11720 rather than 11723).
+                if (orderBy && !reference.Windowed && !reference.OverBody && !(reference.InTop && constantOrderBy))
                     refusal = NextValueForScope.OrderedStatement;
                 if (reference.Scope != NextValueForScope.Allowed && (refusal == NextValueForScope.Allowed || reference.Scope < refusal))
                     refusal = reference.Scope;
@@ -2964,7 +3025,20 @@ internal sealed partial class Selection
             var isFunctionCallShape = context.MoveNext() && context.Token is Operator { Character: '(' };
             context.RestoreCheckpoint(checkpoint);
             if (resolvedIsTvf)
-                return AcrossApplyBoundary(context, leftSnapshotForName, () => ParseSingleFromSource(context, scope.WithOuter(chainedResolverForName)));
+            {
+                // An argument reading the left side's masked column masks the function's columns.
+                var tvfOuterMask = context.OuterMaskResolver;
+                if (context.Batch.Connection.Simulation.DeclaresDataMasks)
+                    context.OuterMaskResolver = name => ScopedColumnMask(leftSnapshotForName, name, tvfOuterMask);
+                try
+                {
+                    return AcrossApplyBoundary(context, leftSnapshotForName, () => ParseSingleFromSource(context, scope.WithOuter(chainedResolverForName)));
+                }
+                finally
+                {
+                    context.OuterMaskResolver = tvfOuterMask;
+                }
+            }
             // A function-call shape that didn't resolve to a known TVF is a
             // deferred name-resolution error (Msg 208), not a syntax error:
             // real SQL Server binds the TVF name lazily, so an un-taken IF
@@ -3001,7 +3075,20 @@ internal sealed partial class Selection
         // dm_os_host_info server-properties shape. The chained resolver wires
         // that correlation in at parse and (via ForValuesConstructor) runtime.
         if (afterApplyParen is ReservedKeyword { Keyword: Keyword.Values })
-            return AcrossApplyBoundary(context, leftSnapshot, () => ParseValuesDerivedTable(context, chainedResolver));
+        {
+            // A cell reading the left side's masked column masks the column it feeds.
+            var valuesOuterMask = context.OuterMaskResolver;
+            if (context.Batch.Connection.Simulation.DeclaresDataMasks)
+                context.OuterMaskResolver = name => ScopedColumnMask(leftSnapshot, name, valuesOuterMask);
+            try
+            {
+                return AcrossApplyBoundary(context, leftSnapshot, () => ParseValuesDerivedTable(context, chainedResolver));
+            }
+            finally
+            {
+                context.OuterMaskResolver = valuesOuterMask;
+            }
+        }
 
         if (afterApplyParen is not ReservedKeyword { Keyword: Keyword.Select })
             throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -3092,13 +3179,13 @@ internal sealed partial class Selection
     /// isn't tracking reads); the synonym is resolved either way, since the
     /// joined UPDATE / DELETE paths read it off the source without a sink.
     /// </summary>
-    private static Schemas.Synonym? RecordSecurableRead(ParserContext context, Schemas.SchemaObject obj, MultiPartName name)
+    private static Schemas.Synonym? RecordSecurableRead(ParserContext context, Schemas.SchemaObject obj, MultiPartName name, Selection? moduleBody = null)
     {
         var synonym = context.Batch.TryResolveSynonym(name, out var resolved) ? resolved : null;
         if (context.SecurableSink is { } sink && !name.Leaf.StartsWith('#'))
         {
             var securable = (Schemas.SchemaObject?)synonym ?? obj;
-            sink.Add(new ReferencedSecurable(context.Batch.DatabaseFor(securable), securable.ObjectId, securable.SchemaId, securable.Name, name.ImmediateQualifier ?? Database.DefaultSchemaName));
+            sink.Add(new ReferencedSecurable(context.Batch.DatabaseFor(securable), securable.ObjectId, securable.SchemaId, securable.Name, name.ImmediateQualifier ?? Database.DefaultSchemaName, module: moduleBody is null ? null : obj as Schemas.View, moduleBody: moduleBody));
         }
         return synonym;
     }
@@ -3472,7 +3559,7 @@ internal sealed partial class Selection
                 // the caller's parser cursor.
                 if (context.Batch.TryResolveView(objectName, out var resolvedView))
                 {
-                    var viewColumns = context.Batch.Connection.Simulation.BindViewColumns(context.Batch, resolvedView, objectName);
+                    var viewColumns = context.Batch.Connection.Simulation.BindViewColumns(context.Batch, resolvedView, objectName, out var viewBody);
                     var viewColumnNames = new string[viewColumns.Length];
                     for (var ci = 0; ci < viewColumnNames.Length; ci++)
                         viewColumnNames[ci] = viewColumns[ci].Name;
@@ -3494,7 +3581,7 @@ internal sealed partial class Selection
                     {
                         throw SimulatedSqlException.IncorrectSetOptions(context.Batch.CurrentStatement.StatementVerb, noExpandSetOptions);
                     }
-                    var viewSynonym = RecordSecurableRead(context, resolvedView, objectName);
+                    var viewSynonym = RecordSecurableRead(context, resolvedView, objectName, viewBody);
                     return new FromSource(
                         qualifier: viewAlias ?? resolvedView.Name,
                         columnNames: viewColumnNames,
@@ -3531,10 +3618,24 @@ internal sealed partial class Selection
                         var tvfAlias = ConsumeOptionalAlias(context);
                         var outputColumns = function switch
                         {
-                            InlineTableValuedFunction inline => inline.OutputColumns,
+                            InlineTableValuedFunction inline => Simulation.InlineTvfColumnsWithCurrentMasks(context, inline),
                             ClrTableValuedFunction clr => clr.OutputColumns,
                             _ => ((MultiStatementTableValuedFunction)function).OutputColumns,
                         };
+                        // An argument reading a masked column taints every column the
+                        // function returns, as default() (probed 2026-09-29 against SQL
+                        // Server 2025: an email() argument reads `xxxx` too).
+                        if (context.Batch.Connection.Simulation.DeclaresDataMasks && context.OuterMaskResolver is { } argumentMasks)
+                        {
+                            DataMask? taint = null;
+                            foreach (var argument in tvfArgs)
+                            {
+                                if (argument is not null && DataMask.Of(argument, argumentMasks, typeOf: null) is { } argumentMask)
+                                    taint = DataMask.Merge(taint, new DataMask(MaskingFunction.Default, argumentMask.Sources));
+                            }
+                            if (taint is not null)
+                                outputColumns = [.. outputColumns.Select(column => column.WithDerivedMask(DataMask.Merge(column.DerivedMask, taint)))];
+                        }
                         _ = RecordSecurableRead(context, function, objectName);
                         var lateralPlan = function switch
                         {
@@ -3575,8 +3676,13 @@ internal sealed partial class Selection
                         else
                             context.RestoreCheckpoint(probe);
                         context.Batch.CurrentStatement.BindsDeferredSource = true;
+                        // A clause leaves the cursor on the token after it, where an
+                        // absent one leaves it on the name (see the resolved path below).
+                        var beforeClause = context.Token?.StartIndex;
                         _ = ParseOptionalForSystemTime(context, heapTable: null);
-                        var placeholderAlias = ConsumeOptionalAlias(context);
+                        var placeholderAlias = context.Token?.StartIndex == beforeClause
+                            ? ConsumeOptionalAlias(context)
+                            : ConsumeOptionalAliasAtCurrent(context);
                         ParseOptionalTableSample(context);
                         _ = ParseOptionalTableHints(context);
                         return FromSource.DeferredPlaceholder(placeholderAlias ?? objectName.Leaf);
@@ -4011,9 +4117,19 @@ internal sealed partial class Selection
                     }
                 }
             }
+            // A cell reading an enclosing query's masked column masks the
+            // column as a set operation's branches do (probed 2026-09-29
+            // against SQL Server 2025: `(VALUES (t.s), ('z')) x(v)`).
+            DataMask? cellMask = null;
+            if (context.OuterMaskResolver is { } outerMask && context.Batch.Connection.Simulation.DeclaresDataMasks)
+            {
+                foreach (var tuple in tuples)
+                    cellMask = DataMask.Merge(cellMask, DataMask.Of(tuple[c], outerMask, cell => cell.GetSqlType(context.Batch, TypeResolver)));
+            }
             columns[c] = new HeapColumn(columnNames[c], schema[c], maxLength: null, nullable: nullable, spelledNumeric: spelledNumeric)
             {
                 IsUntypedNull = untypedNull[c],
+                DerivedMask = cellMask,
             };
         }
 

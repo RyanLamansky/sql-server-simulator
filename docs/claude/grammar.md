@@ -259,6 +259,9 @@ Real parses a batch before binding any of it, so a syntax error past a clause ou
 `ParserContext.PendingBindError` holds the clause's message until the statement's outermost query expression has parsed, and the flush yields to a trailing value literal — the same token class this rule rejects — so the syntax error wins.
 The first offending item still supplies the message, which is what an immediate throw produced.
 A missing **FROM source** waits the same way: the compile pass substitutes a placeholder for a missing table (with its `TABLESAMPLE`, hints, `FOR SYSTEM_TIME` and alias) or a missing `APPLY` / `JOIN` function so the rest of the statement parses, and `SELECT 1 FROM missing WHERE` is Msg 102 near `WHERE` where a well-formed statement over the same table is Msg 208 (probed 2026-09-29 against SQL Server 2025).
+A missing **DML target** does too: the compile pass reads an UPDATE's or DELETE's `WHERE` (and `WHERE CURRENT OF`), an INSERT's column list and source (`VALUES` tuples, a query or `DEFAULT VALUES`), the `OPTION` list and the stray token after them against placeholder columns (`Simulation.MissingDmlTarget.cs`), so `UPDATE missing SET a = 1 WHERE` is Msg 102 near `where` where the well-formed statement is Msg 208 (probed 2026-09-29 against SQL Server 2025).
+An `OUTPUT` clause over such a target is stepped over unbound, the joined `UPDATE m … FROM missing m` / `DELETE … FROM` forms read their `WHERE` over the FROM sources plus a placeholder for the target, and a `FOR SYSTEM_TIME` clause on a missing source leaves the cursor past itself as it does on a resolved one.
+An `INSERT … EXEC` source is left unread.
 
 `ALTER TABLE … ADD COLUMN c TYPE` is rejected with **Msg 156** near COLUMN (unlike `DROP COLUMN` / `ALTER COLUMN`, the ADD form names the column directly) — a prior "COLUMN is optional here" note was based on a mistaken probe; the live reference rejects it.
 

@@ -575,7 +575,7 @@ partial class Selection
 
         private int Compare(SqlValue[] keys, int sequence, (byte[]?[] Tuple, SqlValue[] Keys, int Sequence) other)
         {
-            var comparison = CompareOrderKeys(keys, other.Keys, orderBy);
+            var comparison = SortOrderKeys(keys, other.Keys, orderBy);
             return comparison != 0 ? comparison : sequence.CompareTo(other.Sequence);
         }
 

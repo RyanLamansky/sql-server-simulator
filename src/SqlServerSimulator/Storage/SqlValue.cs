@@ -1112,6 +1112,17 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
             };
 
     /// <summary>
+    /// How a sort orders this value against one it ties with under the string
+    /// collation — zero except for the <c>Pref</c> collations' <c>varchar</c>
+    /// data (see <see cref="Collation.PreferenceCompare"/>). Applied only once
+    /// every sort key ties.
+    /// </summary>
+    internal int PreferenceCompareTo(SqlValue other) =>
+        this.IsNull || other.IsNull || this.Type != other.Type || this.Type.Category != SqlTypeCategory.String
+            ? 0
+            : this.Type.Collation!.PreferenceCompare((string)this.reference!, (string)other.reference!);
+
+    /// <summary>
     /// Stricter than <see cref="Equals(SqlValue)"/>: true when the two values
     /// would <em>render</em> identically, not merely compare equal. Case,
     /// trailing spaces, a decimal's declared scale and a

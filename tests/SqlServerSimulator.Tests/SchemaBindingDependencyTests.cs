@@ -566,4 +566,63 @@ public sealed class SchemaBindingDependencyTests
     [DataRow("create view v with schemabinding as select id from dbo.p")]
     public void SchemaBoundModule_OverMissingObject_RaisesMsg208(string ddl)
         => new Simulation().AssertSqlError(ddl, 208);
+
+    /// <summary>
+    /// A schema-bound function may spell no alias type (Msg 2792, probed
+    /// 2026-09-29 against SQL Server 2025): a parameter, a scalar return type
+    /// or a local variable is state 1, a table column state 2.
+    /// </summary>
+    [TestMethod]
+    [DataRow("create function f(@a dbo.myint) returns int with schemabinding as begin return 1 end", 1)]
+    [DataRow("create function f(@a int) returns dbo.myint with schemabinding as begin return 1 end", 1)]
+    [DataRow("create function f(@a int) returns int with schemabinding as begin declare @x dbo.myint return 1 end", 1)]
+    [DataRow("create function f(@a dbo.myint) returns table with schemabinding as return select 1 c", 1)]
+    [DataRow("create function f(@a int) returns int with schemabinding as begin declare @t table (c dbo.myint) return 1 end", 2)]
+    [DataRow("create function f(@a int) returns @r table (c dbo.myint) with schemabinding as begin return end", 2)]
+    public void SchemaBoundFunction_WithAliasType_RaisesMsg2792(string ddl, int state)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create type dbo.myint from int");
+        var ex = sim.AssertSqlError(ddl, 2792);
+        AreEqual(state, ex.State);
+        AreEqual("Cannot specify a sql CLR type in a Schema-bound object or a constraint expression.", ex.Errors[0].Message);
+    }
+
+    /// <summary>Each state-1 site is its own error at its own line; a table column joins only when none exists (probed 2026-09-29).</summary>
+    [TestMethod]
+    public void SchemaBoundFunction_WithSeveralAliasSites_ReportsEachAtItsLine()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create type dbo.myint from int");
+        var ex = sim.AssertSqlError("""
+            create function f(
+            @a dbo.myint,
+            @b int
+            )
+            returns dbo.myint
+            with schemabinding
+            as
+            begin
+            declare @t table (c dbo.myint)
+            declare @z dbo.myint
+            return 1
+            end
+            """, 2792);
+        AreEqual(3, ex.Errors.Count);
+        CollectionAssert.AreEqual(new[] { 12, 2, 10 }, ex.Errors.Select(error => error.LineNumber).ToArray());
+    }
+
+    /// <summary>What real accepts: <c>sysname</c>, built-in types, a function that isn't schema bound, and a view over an alias-typed column.</summary>
+    [TestMethod]
+    public void SchemaBoundModule_WithoutSchemaBoundAliasType_Creates()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create type dbo.myint from int",
+            "create table dbo.t (c dbo.myint)",
+            "create function dbo.f1(@a sysname) returns int with schemabinding as begin return 1 end",
+            "create function dbo.f2(@a dbo.myint) returns int as begin declare @t table (c dbo.myint) return 1 end",
+            "create view dbo.v with schemabinding as select c from dbo.t");
+        AreEqual(1, sim.ExecuteScalar("select dbo.f1(N'x')"));
+    }
 }

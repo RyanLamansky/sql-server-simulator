@@ -214,6 +214,145 @@ internal static class SchemaBinding
     }
 
     /// <summary>
+    /// Msg 2792: a schema-bound function may not spell a user alias type
+    /// anywhere — a parameter, a scalar return type, a local variable, or a
+    /// table column (the return table's or a local table variable's).
+    /// </summary>
+    /// <remarks>
+    /// Real reports the state-1 sites — the scalar return type first, at the
+    /// closing <c>END</c>'s line, then parameters and variables each at its own
+    /// line — and a table column only when none of those exist, once, at the last
+    /// statement's line (probed 2026-09-29 against SQL Server 2025). The check
+    /// precedes the body's own name rules. Local variables come from the body's
+    /// token stream, the same walk the rest of this class reads; a
+    /// <c>CAST</c> to an alias type is a different error and untouched here.
+    /// </remarks>
+    internal static void EnforceNoAliasTypes(
+        BatchContext batch, List<UdfParameter> parameters, bool returnsAliasScalar, HeapColumn[]? returnTable,
+        string bodyText, int bodyLineBase, int endLine)
+    {
+        List<(int State, int Line)> sites = [];
+        if (returnsAliasScalar)
+            sites.Add((1, endLine));
+        foreach (var parameter in parameters)
+        {
+            if (parameter.AliasType is not null)
+                sites.Add((1, parameter.LineNumber));
+        }
+
+        var tableColumnSeen = returnTable is not null && Array.Exists(returnTable, static column => column.AliasType is not null);
+        var lastLine = endLine;
+        if (bodyText.Length > 0)
+        {
+            var tokens = Tokenize(bodyText);
+            if (tokens.Count > 0)
+                lastLine = tokens[^1].LineNumber + bodyLineBase;
+            for (var i = 0; i < tokens.Count; i++)
+            {
+                if (tokens[i] is ReservedKeyword { Keyword: Keyword.Declare })
+                    i = ScanDeclare(batch, tokens, i + 1, bodyLineBase, sites, ref tableColumnSeen);
+            }
+        }
+
+        if (sites.Count == 0 && tableColumnSeen)
+            sites.Add((2, lastLine));
+        if (sites.Count > 0)
+            throw SimulatedSqlException.SchemaBoundAliasType(sites);
+    }
+
+    /// <summary>
+    /// Walks one <c>DECLARE</c>'s declarators from <paramref name="index"/>,
+    /// recording each alias-typed variable and noting an alias-typed table
+    /// column; returns the index its last token ended at.
+    /// </summary>
+    private static int ScanDeclare(
+        BatchContext batch, List<Token> tokens, int index, int bodyLineBase,
+        List<(int State, int Line)> sites, ref bool tableColumnSeen)
+    {
+        var i = index;
+        while (i < tokens.Count && tokens[i] is AtPrefixedString)
+        {
+            i++;
+            if (i < tokens.Count && tokens[i] is ReservedKeyword { Keyword: Keyword.As })
+                i++;
+            if (i >= tokens.Count)
+                break;
+            if (tokens[i] is ReservedKeyword { Keyword: Keyword.Table })
+            {
+                var open = i + 1;
+                var end = PastParenGroup(tokens, open);
+                var depth = 0;
+                for (var k = open; k < end; k++)
+                {
+                    switch (tokens[k])
+                    {
+                        case Operator { Character: '(' }:
+                            depth++;
+                            if (depth == 1)
+                                tableColumnSeen |= ColumnTypeIsAlias(batch, tokens, k + 1);
+                            break;
+                        case Operator { Character: ')' }:
+                            depth--;
+                            break;
+                        case Operator { Character: ',' } when depth == 1:
+                            tableColumnSeen |= ColumnTypeIsAlias(batch, tokens, k + 1);
+                            break;
+                    }
+                }
+                i = end;
+            }
+            else
+            {
+                if (TypeNameAt(batch, tokens, i, out var next))
+                    sites.Add((1, tokens[i].LineNumber + bodyLineBase));
+                i = next;
+            }
+
+            // Past the type: a width, a default, then either the next declarator or the end of the statement.
+            var parenDepth = 0;
+            while (i < tokens.Count)
+            {
+                if (tokens[i] is Operator { Character: '(' })
+                    parenDepth++;
+                else if (tokens[i] is Operator { Character: ')' })
+                    parenDepth--;
+                else if (parenDepth == 0 && tokens[i] is ReservedKeyword { Keyword: Keyword.Declare or Keyword.Select or Keyword.Set or Keyword.If or Keyword.While or Keyword.Return or Keyword.Begin or Keyword.End })
+                    return i - 1;
+                else if (parenDepth == 0 && tokens[i] is Operator { Character: ',' } && i + 1 < tokens.Count && tokens[i + 1] is AtPrefixedString)
+                    break;
+                i++;
+            }
+            if (i < tokens.Count && tokens[i] is Operator { Character: ',' })
+                i++;
+        }
+        return Math.Max(index, i - 1);
+    }
+
+    /// <summary>Whether the column definition starting at <paramref name="index"/> (its name first) spells an alias type.</summary>
+    private static bool ColumnTypeIsAlias(BatchContext batch, List<Token> tokens, int index) =>
+        index + 1 < tokens.Count && tokens[index] is Name && TypeNameAt(batch, tokens, index + 1, out _);
+
+    /// <summary>
+    /// Reads the dotted type name at <paramref name="index"/> and reports
+    /// whether it names a user alias type; <paramref name="next"/> is the
+    /// index just past the name.
+    /// </summary>
+    private static bool TypeNameAt(BatchContext batch, List<Token> tokens, int index, out int next)
+    {
+        next = index;
+        if (tokens[index] is not Name first)
+            return false;
+        var name = new MultiPartName(first.Value);
+        next = index + 1;
+        while (next + 1 < tokens.Count && tokens[next] is Operator { Character: '.' } && tokens[next + 1] is Name part)
+        {
+            name = name.WithAddedPart(part.Value);
+            next += 2;
+        }
+        return batch.TryResolveAliasType(name, out _);
+    }
+
+    /// <summary>
     /// Every schema-bound module referencing <paramref name="target"/> —
     /// and, when <paramref name="columnName"/> is non-null, also mentioning
     /// that identifier — ordered by object id. A module never blocks itself.

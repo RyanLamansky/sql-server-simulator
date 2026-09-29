@@ -191,6 +191,13 @@ internal sealed class StringAggAggregator : Aggregator
             if (cmp != 0)
                 return this.orderDescending[i] ? -cmp : cmp;
         }
+        // Rows tied on every key still order by a Pref collation's uppercase preference.
+        for (var i = 0; i < this.orderDescending.Length; i++)
+        {
+            var preference = left.OrderKeys[i].PreferenceCompareTo(right.OrderKeys[i]);
+            if (preference != 0)
+                return this.orderDescending[i] ? -preference : preference;
+        }
         return 0;
     }
 

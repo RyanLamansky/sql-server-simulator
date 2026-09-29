@@ -320,4 +320,36 @@ public sealed class CollationBehaviorTests
         AreEqual(ordered, sim.ExecuteScalar("select string_agg(v, ' ') within group (order by v) from t"));
         AreEqual(minMax, sim.ExecuteScalar("select concat(min(v), '|', max(v)) from t where v in ('a', 'A')"));
     }
+
+    /// <summary>
+    /// The <c>Pref</c> names' <c>varchar</c> data compares equal but sorts a
+    /// case pair uppercase first once every key ties, at the first character
+    /// the spellings differ in; <c>nvarchar</c> data doesn't (probed 2026-09-29
+    /// against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("varchar", "SQL_Latin1_General_Pref_CP1_CI_AS", "A a B b")]
+    [DataRow("varchar", "SQL_Latin1_General_Pref_CP437_CI_AS", "A a B b")]
+    [DataRow("varchar", "SQL_Danish_Pref_CP1_CI_AS", "A a B b")]
+    public void PrefCollations_OrderACasePair_UppercaseFirst(string type, string collation, string ordered)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery($"create table t (id int identity, v {type}(5) collate {collation}); insert t (v) values ('a'), ('A'), ('b'), ('B')");
+        AreEqual(ordered, sim.ExecuteScalar("select string_agg(v, ' ') within group (order by v) from t"));
+    }
+
+    /// <summary>A later key outranks the preference, the pair stays equal, and the preference reverses under <c>DESC</c> and moves a <c>TOP … WITH TIES</c> boundary.</summary>
+    [TestMethod]
+    public void PrefCollation_PreferenceIsTheFinalTiebreak()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (id int identity, v varchar(5) collate SQL_Latin1_General_Pref_CP1_CI_AS, w int); insert t (v, w) values ('a', 2), ('A', 3), ('AB', 1), ('ab', 1), ('Ab', 1)");
+        AreEqual("1 2", sim.ExecuteScalar("select string_agg(id, ' ') within group (order by v, w) from t where id <= 2"));
+        AreEqual("2 1", sim.ExecuteScalar("select string_agg(id, ' ') within group (order by v) from t where id <= 2"));
+        AreEqual("1 2", sim.ExecuteScalar("select string_agg(id, ' ') within group (order by v desc) from t where id <= 2"));
+        AreEqual(2, sim.ExecuteScalar("select count(*) from t where v = 'A'"));
+        AreEqual("3 5 4", sim.ExecuteScalar("select string_agg(id, ' ') within group (order by v) from t where id > 2"));
+        AreEqual(1, sim.ExecuteScalar("select count(*) from (select top (1) with ties v from t order by v) d"));
+        AreEqual(1, sim.ExecuteScalar("select count(*) from (select distinct v from t where id <= 2) d"));
+    }
 }

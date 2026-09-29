@@ -8,13 +8,25 @@ namespace SqlServerSimulator;
 /// permission check can run at execution against the current principal — the
 /// list is principal-independent, so it caches with the plan.
 /// </summary>
-internal readonly struct ReferencedSecurable(Database database, int objectId, int schemaId, string objectName, string schemaName, string permission = "SELECT")
+internal readonly struct ReferencedSecurable(Database database, int objectId, int schemaId, string objectName, string schemaName, string permission = "SELECT", Schemas.View? module = null, Parser.Selection? moduleBody = null)
 {
     /// <summary>
-    /// The database the securable lives in — the session's for an ordinary
-    /// reference, the named one for a three-part name. Permission checks
-    /// resolve the login's principal <em>there</em>, and a denial names it.
+    /// For a reference to a view, the view and what the body its reference
+    /// parsed reads: once the view itself passes, those reads are checked in
+    /// the same step, so a broken ownership chain is refused with the
+    /// statement rather than when the first row is read (see
+    /// <see cref="PermissionEnforcement.CheckModuleBodyReads(BatchContext, Schemas.SchemaObject, Database, List{ReferencedSecurable}?, Dictionary{int, ColumnReadTarget}?)"/>).
+    /// Only the lists are kept — a cached plan is shared, and a body plan
+    /// reaches the batch that parsed it.
     /// </summary>
+    public readonly Schemas.View? Module = moduleBody is null ? null : module;
+
+    /// <summary>What <see cref="Module"/>'s body reads, itself carrying its own views' reads.</summary>
+    public readonly List<ReferencedSecurable>? ModuleReads = moduleBody?.ReferencedSecurables;
+
+    /// <summary>The columns of <see cref="ModuleReads"/> the body names.</summary>
+    public readonly Dictionary<int, ColumnReadTarget>? ModuleReadColumns = moduleBody?.ReadColumnsByObject;
+
     public readonly Database Database = database;
 
     public readonly int ObjectId = objectId;
@@ -408,25 +420,37 @@ internal static class PermissionEnforcement
             throw SimulatedSqlException.RestrictedDataAccess();
         if (BypassesEverywhere(batch.Connection))
             return;
-        foreach (var s in securables)
+        // Real names the last-bound denied object, not the first: with no
+        // grant on either of two joined tables the error names the second
+        // (probed 2026-09-29 against SQL Server 2025, joins, subqueries,
+        // unions and INSERT … SELECT alike), so the list is walked backwards.
+        for (var i = securables.Count - 1; i >= 0; i--)
         {
-            var database = s.Database;
-            if (!TryResolveScope(batch, database, s.ObjectId, out var principalId))
-                continue;
-            var permission = Permission.Resolve(s.Permission);
-            // Column-grain path: a SELECT read with tracked columns.
-            if (permission == Permission.Select && readColumns is not null && readColumns.TryGetValue(s.ObjectId, out var target))
-            {
-                CheckColumnGrants(database, principalId, Permission.Select, target, Rights(batch));
-                continue;
-            }
-            if (!PermissionChecker.IsGranted(database, principalId, permission, PermissionChecker.ClassObject, s.ObjectId, s.SchemaId, Rights(batch)))
-                throw SimulatedSqlException.PermissionDenied(s.Permission.ToUpperInvariant(), s.ObjectName, database.Name, s.SchemaName);
-            // A passed EXECUTE check on a scalar UDF invoked in this query memos
-            // the object so the per-row invocation seam skips the re-check.
-            if (s.Permission.Equals("EXECUTE", StringComparison.OrdinalIgnoreCase))
-                _ = (batch.ExecuteCheckedFunctionIds ??= []).Add(s.ObjectId);
+            var s = securables[i];
+            CheckReadSource(batch, s, readColumns);
+            if (s.Module is { } module)
+                CheckModuleBodyReads(batch, module, module.Schema.Database, s.ModuleReads, s.ModuleReadColumns);
         }
+    }
+
+    private static void CheckReadSource(BatchContext batch, ReferencedSecurable s, Dictionary<int, ColumnReadTarget>? readColumns)
+    {
+        var database = s.Database;
+        if (!TryResolveScope(batch, database, s.ObjectId, out var principalId))
+            return;
+        var permission = Permission.Resolve(s.Permission);
+        // Column-grain path: a SELECT read with tracked columns.
+        if (permission == Permission.Select && readColumns is not null && readColumns.TryGetValue(s.ObjectId, out var target))
+        {
+            CheckColumnGrants(database, principalId, Permission.Select, target, Rights(batch));
+            return;
+        }
+        if (!PermissionChecker.IsGranted(database, principalId, permission, PermissionChecker.ClassObject, s.ObjectId, s.SchemaId, Rights(batch)))
+            throw SimulatedSqlException.PermissionDenied(s.Permission.ToUpperInvariant(), s.ObjectName, database.Name, s.SchemaName);
+        // A passed EXECUTE check on a scalar UDF invoked in this query memos
+        // the object so the per-row invocation seam skips the re-check.
+        if (s.Permission.Equals("EXECUTE", StringComparison.OrdinalIgnoreCase))
+            _ = (batch.ExecuteCheckedFunctionIds ??= []).Add(s.ObjectId);
     }
 
     /// <summary>
@@ -496,30 +520,43 @@ internal static class PermissionEnforcement
     /// dbo-owned table is Msg 229 naming the table). A chain that holds costs a
     /// dbo session nothing and a restricted one a linear owner lookup.
     /// </summary>
-    internal static void CheckModuleBodyReads(BatchContext batch, Schemas.SchemaObject module, Database moduleDatabase, Selection body)
+    internal static void CheckModuleBodyReads(BatchContext batch, Schemas.SchemaObject module, Database moduleDatabase, Selection body) =>
+        CheckModuleBodyReads(batch, module, moduleDatabase, body.ReferencedSecurables, body.ReadColumnsByObject);
+
+    internal static void CheckModuleBodyReads(
+        BatchContext batch, Schemas.SchemaObject module, Database moduleDatabase, List<ReferencedSecurable>? securables, Dictionary<int, ColumnReadTarget>? bodyReadColumns)
     {
-        var securables = body.ReferencedSecurables;
         CheckCrossDatabaseReads(batch, moduleDatabase, Ownership.EffectiveOwnerId(moduleDatabase, module), securables);
         if (securables is null || batch.CreateTimeBinding || Bypasses(batch.Connection, moduleDatabase))
             return;
         int? moduleOwner = null;
-        foreach (var s in securables)
+        for (var i = securables.Count - 1; i >= 0; i--)
+        {
+            var s = securables[i];
+            CheckModuleLink(s);
+            // A view the body reads carries its own reads, whose chain is
+            // judged from that view's owner on.
+            if (s.Module is { } nested)
+                CheckModuleBodyReads(batch, nested, nested.Schema.Database, s.ModuleReads, s.ModuleReadColumns);
+        }
+
+        void CheckModuleLink(ReferencedSecurable s)
         {
             if (!ReferenceEquals(s.Database, moduleDatabase))
-                continue;
+                return;
             moduleOwner ??= Ownership.EffectiveOwnerId(moduleDatabase, module);
             if (Ownership.EffectiveOwnerId(moduleDatabase, s.ObjectId) is not int owner || owner == moduleOwner)
-                continue;
+                return;
             var principalId = ReferenceEquals(moduleDatabase, batch.CurrentDatabase)
                 ? batch.Connection.Security.Effective.DatabasePrincipalId
                 : ResolveCrossDatabasePrincipal(batch.Connection, moduleDatabase).PrincipalId;
             if (principalId == Database.DboPrincipalId)
-                continue;
+                return;
             var permission = Permission.Resolve(s.Permission);
-            if (permission == Permission.Select && body.ReadColumnsByObject is { } readColumns && readColumns.TryGetValue(s.ObjectId, out var target))
+            if (permission == Permission.Select && bodyReadColumns is { } readColumns && readColumns.TryGetValue(s.ObjectId, out var target))
             {
                 CheckColumnGrants(moduleDatabase, principalId, Permission.Select, target, Rights(batch));
-                continue;
+                return;
             }
             if (!PermissionChecker.IsGranted(moduleDatabase, principalId, permission, PermissionChecker.ClassObject, s.ObjectId, s.SchemaId, Rights(batch)))
                 throw SimulatedSqlException.PermissionDenied(s.Permission.ToUpperInvariant(), s.ObjectName, moduleDatabase.Name, s.SchemaName);
@@ -548,7 +585,7 @@ internal static class PermissionEnforcement
         CheckBrokenChainLink(batch, permission, from, target);
     }
 
-    private static void CheckBrokenChainLink(BatchContext batch, string permission, Schemas.SchemaObject module, Schemas.SchemaObject target)
+    internal static void CheckBrokenChainLink(BatchContext batch, string permission, Schemas.SchemaObject module, Schemas.SchemaObject target)
     {
         if (TryResolveBrokenChain(batch, module, target, out var database, out var principalId)
             && !PermissionChecker.IsGranted(database, principalId, Permission.Resolve(permission), PermissionChecker.ClassObject, target.ObjectId, target.SchemaId, Rights(batch)))
@@ -610,6 +647,42 @@ internal static class PermissionEnforcement
                 return;
         }
         CheckColumnGrants(database, principalId, permission, baseColumns, Rights(batch));
+    }
+
+    /// <summary>
+    /// One link of the chain an UPDATE through a join view crosses above the
+    /// join itself — <paramref name="from"/> reading <paramref name="to"/>, the
+    /// next view down. When their owners differ the caller needs SELECT on the
+    /// columns of <paramref name="to"/> the statement reads, then UPDATE on it
+    /// at object grain when <paramref name="write"/> (probed 2026-09-29 against
+    /// SQL Server 2025: a write through <c>dbo.v1</c> over a <c>u1</c>-owned
+    /// join view is Msg 229 naming the join view, SELECT before UPDATE, while a
+    /// view the join only reads takes the SELECT alone).
+    /// </summary>
+    internal static void CheckBrokenChainViewLink(BatchContext batch, Schemas.View from, Schemas.View to, ColumnReadTarget? reads, bool write = true)
+    {
+        if (!TryResolveBrokenChain(batch, from, to, out var database, out var principalId))
+            return;
+        // Real reports both denials, SELECT first, where each is missing.
+        SimulatedSqlException? selectDenied = null;
+        if (reads is { Ordinals.Count: > 0 })
+        {
+            try
+            {
+                CheckColumnGrants(database, principalId, Permission.Select, reads, Rights(batch));
+            }
+            catch (SimulatedSqlException denied)
+            {
+                selectDenied = denied;
+            }
+        }
+        var updateDenied = !write || PermissionChecker.IsGranted(database, principalId, Permission.Update, PermissionChecker.ClassObject, to.ObjectId, to.SchemaId, Rights(batch))
+            ? null
+            : SimulatedSqlException.PermissionDenied("UPDATE", to.Name, database.Name, SchemaNameFor(database, to.SchemaId));
+        if (selectDenied is not null && updateDenied is not null)
+            throw SimulatedSqlException.Aggregate([selectDenied, updateDenied]);
+        if ((selectDenied ?? updateDenied) is { } denial)
+            throw denial;
     }
 
     /// <summary>
@@ -930,6 +1003,9 @@ internal static class PermissionChecker
     internal const byte ClassObject = 1;
     internal const byte ClassSchema = 3;
     internal const byte ClassDatabasePrincipal = 4;
+    internal const byte ClassType = 6;
+    internal const byte ClassXmlSchemaCollection = 10;
+    internal const byte ClassFulltextCatalog = 23;
 
     // Server-scope permissions (sys.server_permissions.class = 100) live on
     // Simulation.ServerPermissions, not a Database; Simulation.HoldsServerPermission
@@ -1300,6 +1376,15 @@ internal static class PermissionChecker
                 break;
             case ClassDatabasePrincipal:
                 AddScope(result, ClassDatabasePrincipal, majorId, minorId: 0, permission);
+                break;
+            case ClassType or ClassXmlSchemaCollection:
+                AddScope(result, securableClass, majorId, minorId: 0, permission);
+                AddScope(result, ClassSchema, schemaId, minorId: 0, permission);
+                AddScope(result, ClassDatabase, 0, minorId: 0, permission);
+                break;
+            case ClassFulltextCatalog:
+                AddScope(result, ClassFulltextCatalog, majorId, minorId: 0, permission);
+                AddScope(result, ClassDatabase, 0, minorId: 0, permission);
                 break;
             default:
                 AddScope(result, ClassDatabase, 0, minorId: 0, permission);

@@ -359,6 +359,10 @@ Both checks run at CREATE / ALTER of the schema-bound module, off the same extra
 
 - A FROM-clause source named with anything other than a two-part name → **Msg 4512** state 3 (`Cannot schema bind view 'dbo.v' because name 't' is invalid for schema binding. Names must be in two-part format and an object cannot reference itself.`), for the one-part (`FROM t`) and three-part (`FROM other.dbo.t`) forms alike.
 - A referenced view or function that isn't itself schema bound → **Msg 4513** state 2 (`Cannot schema bind view 'dbo.v'. 'dbo.plain' is not schema bound.`) — the rule that keeps the dependency graph closed under schema binding.
+- A user alias type spelled anywhere in a schema-bound **function** → **Msg 2792**, ahead of every rule above: a parameter, the scalar return type, a local variable, or a table column of the return table or a local table variable (probed 2026-09-29 against SQL Server 2025).
+  A scalar return type is reported first, at the closing `END`'s line, then each parameter and variable at its own line, one error each (state 1); a table column is reported (state 2, once however many columns, at the last statement's line) only when no state-1 site exists.
+  `sysname` and the built-in types are accepted, a `CAST` to an alias type is Msg 243 either way, and a view over an alias-typed column is accepted.
+  Variables are found by a token walk of the body's `DECLARE` statements (`SchemaBinding.EnforceNoAliasTypes`), not the bound tree.
 - A two-part name that doesn't resolve → **Msg 208** at CREATE, even in a scalar function's body, whose unbound names otherwise defer — schema binding defers nothing (probed 2026-09-26).
 
 **Divergences**:

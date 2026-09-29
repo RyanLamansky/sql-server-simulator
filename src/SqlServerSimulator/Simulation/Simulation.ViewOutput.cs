@@ -80,7 +80,7 @@ partial class Simulation
     /// are the ones its definition recorded.
     /// </summary>
     private static HeapColumn[] ViewColumnsFor(BatchContext batch, View view, MultiPartName writtenName) =>
-        view.UnstoredBody is null ? batch.Connection.Simulation.BindViewColumns(batch, view, writtenName) : view.OutputColumns;
+        view.UnstoredBody is null ? batch.Connection.Simulation.BindViewColumns(batch, view, writtenName, out _) : view.OutputColumns;
 
     /// <summary>
     /// Reads a view column off a row of the one base table the view's chain

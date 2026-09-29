@@ -276,6 +276,7 @@ partial class Simulation
         }
     bodyCaptured:
         var bodyEnd = context.Token.StartIndex;
+        var endLine = context.Token.LineNumber;
         var bodyText = commandText[bodyStart..bodyEnd];
         context.MoveNextOptional(); // consume END
 
@@ -294,6 +295,9 @@ partial class Simulation
         CheckModuleDdlPermission(
             context, "CREATE FUNCTION", functionName, schema, isAlter, createOrAlter,
             schema.Functions.GetValueOrDefault(functionName.Leaf));
+
+        if (isSchemaBound)
+            SchemaBinding.EnforceNoAliasTypes(context.Batch, parameters, returnsAliasScalar: false, outputColumns, bodyText, CountNewlines(commandText, 0, bodyStart), endLine);
 
         // Bind the body before the schema dict is touched — see
         // BindModuleBodyAtCreate. Value-form RETURN raises Msg 178 from here,
@@ -418,6 +422,7 @@ partial class Simulation
         }
     bodyCaptured:
         var bodyEnd = context.Token.StartIndex;
+        var endLine = context.Token.LineNumber;
         var bodyText = commandText[bodyStart..bodyEnd];
         context.MoveNextOptional(); // consume END
 
@@ -436,6 +441,9 @@ partial class Simulation
         CheckModuleDdlPermission(
             context, "CREATE FUNCTION", functionName, schema, isAlter, createOrAlter,
             schema.Functions.GetValueOrDefault(functionName.Leaf));
+
+        if (isSchemaBound)
+            SchemaBinding.EnforceNoAliasTypes(context.Batch, parameters, returnsAliasScalar: returnAliasType is not null, null, bodyText, CountNewlines(commandText, 0, bodyStart), endLine);
 
         // Bind the body before the schema dict is touched — see
         // BindModuleBodyAtCreate.
@@ -563,6 +571,9 @@ partial class Simulation
             context, "CREATE FUNCTION", functionName, schema, isAlter, createOrAlter,
             schema.Functions.GetValueOrDefault(functionName.Leaf));
 
+        if (isSchemaBound)
+            SchemaBinding.EnforceNoAliasTypes(context.Batch, parameters, returnsAliasScalar: false, null, "", 0, 0);
+
         var replaced = ResolveFunctionAlterTarget<InlineTableValuedFunction>(context, schema, functionName, isAlter, createOrAlter);
 
         if (isSchemaBound)
@@ -660,6 +671,35 @@ partial class Simulation
             context.MoveNextOptional();
         }
         return lastBodyEnd;
+    }
+
+    /// <summary>
+    /// The columns a reference to <paramref name="function"/> reads, with each
+    /// mask settled as the body binds now: a mask its base table gained or lost
+    /// since <c>CREATE FUNCTION</c> reaches the reference (probed 2026-09-29
+    /// against SQL Server 2025), as it does a view's. The recorded columns come
+    /// back unchanged while no mask has been declared or when the body no
+    /// longer binds.
+    /// </summary>
+    internal static HeapColumn[] InlineTvfColumnsWithCurrentMasks(ParserContext context, InlineTableValuedFunction function)
+    {
+        if (!context.Batch.Connection.Simulation.DeclaresDataMasks)
+            return function.OutputColumns;
+        HeapColumn[] fresh;
+        try
+        {
+            fresh = InferInlineTvfOutputColumns(context, function.Parameters, function.BodyText, function.Name, 0, out _);
+        }
+        catch (Exception error) when (error is SimulatedSqlException or NotSupportedException)
+        {
+            return function.OutputColumns;
+        }
+        if (fresh.Length != function.OutputColumns.Length)
+            return function.OutputColumns;
+        var columns = new HeapColumn[fresh.Length];
+        for (var i = 0; i < columns.Length; i++)
+            columns[i] = ReferenceEquals(fresh[i].DerivedMask, function.OutputColumns[i].DerivedMask) ? function.OutputColumns[i] : function.OutputColumns[i].WithDerivedMask(fresh[i].DerivedMask);
+        return columns;
     }
 
     /// <summary>
@@ -789,7 +829,7 @@ partial class Simulation
             context.MoveNextRequired();
             defaultExpression = Expression.Parse(context);
         }
-        return new UdfParameter(name, paramType, defaultExpression) { SpelledNumeric = spelledNumeric, AliasType = aliasType, DeclaredMaxLength = paramMaxLength };
+        return new UdfParameter(name, paramType, defaultExpression) { SpelledNumeric = spelledNumeric, AliasType = aliasType, DeclaredMaxLength = paramMaxLength, LineNumber = variable.LineNumber };
     }
 
     /// <summary>

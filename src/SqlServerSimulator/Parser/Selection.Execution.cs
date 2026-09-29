@@ -2853,7 +2853,7 @@ internal sealed partial class Selection
 
         if (orderBy.Count > 0)
         {
-            materialized.Sort((a, b) => CompareOrderKeys(a.Keys, b.Keys, orderBy));
+            materialized.Sort((a, b) => SortOrderKeys(a.Keys, b.Keys, orderBy));
             NoteSortWorktable(batch, sources, orderBy, expressions);
         }
         else if (distinct)

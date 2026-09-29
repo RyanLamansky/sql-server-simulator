@@ -551,4 +551,50 @@ public sealed class DataMaskingTests
     [DataRow("select cast(plain as int) from t where id = 1", 245, "Conversion failed when converting the varchar value 'p1' to data type int.")]
     public void ConversionError_HidesMaskedValue(string query, int number, string message) =>
         Seeded().AssertSqlError($"execute as user = 'u'; {query}", number, message);
+
+    /// <summary>
+    /// An inline function reads the mask its base table has when it is
+    /// referenced, not the one it had at CREATE, as a view does (probed
+    /// 2026-09-29 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void InlineFunction_ReadsTheMaskItsTableHasNow()
+    {
+        var sim = Seeded("create function f() returns table as return select id, s, plain from t", "grant select on f to u");
+        AreEqual("xxxx", AsUser(sim, "select s from f() where id = 1"));
+        _ = sim.ExecuteNonQuery("alter table t alter column s drop masked; alter table t alter column plain add masked with (function = 'default()')");
+        AreEqual("hello", AsUser(sim, "select s from f() where id = 1"));
+        AreEqual("xxxx", AsUser(sim, "select plain from f() where id = 1"));
+    }
+
+    /// <summary>
+    /// A <c>VALUES</c> table constructor cell reading an enclosing query's masked
+    /// column masks the column it feeds, as a derived table's projection does;
+    /// a masked and an unmasked cell in one column meet as a set operation's
+    /// branches (probed 2026-09-29 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select (select max(x.v) from (values (t.s)) x(v)) from t where id = 1", "xxxx")]
+    [DataRow("select (select max(v) from (values (t.s), ('z')) x(v)) from t where id = 1", "xxxx")]
+    [DataRow("select (select x.v from (values (t.e)) x(v)) from t where id = 1", "jXXX@XXXX.com")]
+    [DataRow("select (select upper(x.v) from (values (t.s)) x(v)) from t where id = 1", "xxxx")]
+    [DataRow("select x.v from t cross apply (values (t.s)) x(v) where id = 1", "xxxx")]
+    [DataRow("select x.v from t cross apply (values (t.plain)) x(v) where id = 1", "p1")]
+    public void ValuesConstructor_OverAMaskedOuterColumn_Masks(string query, string expected) => AreEqual(expected, AsUser(Seeded(), query));
+
+    /// <summary>
+    /// A table-valued function's argument reading a masked column masks every
+    /// column the function returns as <c>default()</c>, whatever the function
+    /// on the column (probed 2026-09-29 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select (select x.v from dbo.tv(t.s) x) from t where id = 1", "xxxx")]
+    [DataRow("select x.v from t cross apply dbo.tv(t.e) x where id = 1", "xxxx")]
+    [DataRow("select x.v from t cross apply dbo.tv(upper(t.s)) x where id = 1", "xxxx")]
+    [DataRow("select x.v from t cross apply dbo.tv(t.plain) x where id = 1", "p1")]
+    public void TableValuedFunctionArgument_OverAMaskedColumn_MasksItsColumns(string query, string expected)
+    {
+        var sim = Seeded("create function dbo.tv(@p varchar(20)) returns table as return select @p v", "grant select on dbo.tv to u");
+        AreEqual(expected, AsUser(sim, query));
+    }
 }
