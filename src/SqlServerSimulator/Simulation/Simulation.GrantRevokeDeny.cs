@@ -431,7 +431,7 @@ partial class Simulation
         }
         else if (permClass == PermissionChecker.ClassDatabasePrincipal)
         {
-            foreach (var principal in database.Principals.Values)
+            foreach (var (_, principal) in database.Principals)
             {
                 if (principal.PrincipalId != permMajorId)
                     continue;

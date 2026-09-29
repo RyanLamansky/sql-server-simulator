@@ -39,7 +39,7 @@ internal static class Ownership
     /// </summary>
     internal static int SchemaOwnerId(Database database, int schemaId)
     {
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
             if (schema.SchemaId == schemaId)
                 return schema.PrincipalId;
@@ -58,7 +58,7 @@ internal static class Ownership
     /// </summary>
     internal static void RejectDropOfOwner(Database database, int principalId)
     {
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
             foreach (var obj in schema.SchemaObjects())
             {
@@ -66,20 +66,20 @@ internal static class Ownership
                     throw SimulatedSqlException.PrincipalOwnsObjects();
             }
         }
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
-            foreach (var type in schema.TableTypes.Values)
+            foreach (var (_, type) in schema.TableTypes)
             {
                 if (type.OwnerPrincipalId == principalId)
                     throw SimulatedSqlException.PrincipalOwnsTypes();
             }
-            foreach (var type in schema.AliasTypes.Values)
+            foreach (var (_, type) in schema.AliasTypes)
             {
                 if (type.OwnerPrincipalId == principalId)
                     throw SimulatedSqlException.PrincipalOwnsTypes();
             }
         }
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
             if (schema.PrincipalId == principalId)
                 throw SimulatedSqlException.PrincipalOwnsASchema();
@@ -89,20 +89,20 @@ internal static class Ownership
             if (owner == principalId)
                 throw SimulatedSqlException.PrincipalOwnsASchema();
         }
-        foreach (var principal in database.Principals.Values)
+        foreach (var (_, principal) in database.Principals)
         {
             if (principal.TypeCode == "R" && principal.OwningPrincipalId == principalId)
                 throw SimulatedSqlException.PrincipalOwnsRole();
         }
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
-            foreach (var collection in schema.XmlSchemaCollections.Values)
+            foreach (var (_, collection) in schema.XmlSchemaCollections)
             {
                 if (collection.PrincipalId == principalId)
                     throw SimulatedSqlException.PrincipalOwnsA("a XML namespace");
             }
         }
-        foreach (var catalog in database.FullTextCatalogs.Values)
+        foreach (var (_, catalog) in database.FullTextCatalogs)
         {
             if (catalog.PrincipalId == principalId)
                 throw SimulatedSqlException.PrincipalOwnsA("a fulltext catalog");
@@ -116,7 +116,7 @@ internal static class Ownership
     /// <summary>The name <paramref name="principalId"/> carries in <paramref name="database"/>, or null when no principal has it.</summary>
     internal static string? PrincipalName(Database database, int principalId)
     {
-        foreach (var principal in database.Principals.Values)
+        foreach (var (_, principal) in database.Principals)
         {
             if (principal.PrincipalId == principalId)
                 return principal.Name;
@@ -145,7 +145,7 @@ internal static class Ownership
     {
         if (principalId == Database.DboPrincipalId)
             return database.OwnerLoginName;
-        foreach (var principal in database.Principals.Values)
+        foreach (var (_, principal) in database.Principals)
         {
             if (principal.PrincipalId == principalId)
                 return principal.LoginName;

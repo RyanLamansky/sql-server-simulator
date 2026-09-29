@@ -455,7 +455,7 @@ partial class Simulation
         // name neither the principal nor what it owns (probe-confirmed).
         Ownership.RejectDropOfOwner(context.CurrentDatabase, removed.PrincipalId);
         // Nor can one a module runs as — the OWNER sentinel names no principal.
-        foreach (var schema in context.CurrentDatabase.Schemas.Values)
+        foreach (var (_, schema) in context.CurrentDatabase.Schemas)
         {
             foreach (var obj in schema.SchemaObjects())
             {

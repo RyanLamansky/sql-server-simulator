@@ -1847,7 +1847,7 @@ internal sealed class BatchContext
     // tests a nonclustered index once it knows the update touches it).
     private void TestKeyLocksForWrite(HeapTable table, byte[] image, RowLockPurpose purpose)
     {
-        foreach (var group in table.KeyLockGroups.Values)
+        foreach (var (_, group) in table.KeyLockGroups)
         {
             if (Volatile.Read(ref group.Holds) == 0
                 || (purpose == RowLockPurpose.UpdatePreImage && !group.IsRowGroup)
@@ -1919,7 +1919,7 @@ internal sealed class BatchContext
     {
         if (Volatile.Read(ref table.ActiveKeyRangeLocks) == 0 || table.Heap.ReadSlotBytes(pageIndex, slotIndex) is not { } oldImage)
             return;
-        foreach (var group in table.KeyLockGroups.Values)
+        foreach (var (_, group) in table.KeyLockGroups)
         {
             if (Volatile.Read(ref group.Holds) == 0)
                 continue;

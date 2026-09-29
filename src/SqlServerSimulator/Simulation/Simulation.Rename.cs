@@ -249,7 +249,7 @@ partial class Simulation
 
         // A constraint shares the namespace but lives on its table.
         var collation = database.Collation;
-        foreach (var table in schema.HeapTables.Values)
+        foreach (var (_, table) in schema.HeapTables)
         {
             var eventType = RenameConstraintOn(table);
             if (eventType is null)

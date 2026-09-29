@@ -189,15 +189,15 @@ internal sealed class Schema
     /// </summary>
     public IEnumerable<SchemaObject> SchemaObjects()
     {
-        foreach (var t in this.HeapTables.Values) yield return t;
-        foreach (var v in this.Views.Values) yield return v;
-        foreach (var fn in this.Functions.Values) yield return fn;
-        foreach (var p in this.Procedures.Values) yield return p;
-        foreach (var s in this.Sequences.Values) yield return s;
-        foreach (var tr in this.Triggers.Values) yield return tr;
-        foreach (var sn in this.Synonyms.Values) yield return sn;
-        foreach (var d in this.Defaults.Values) yield return d;
-        foreach (var r in this.Rules.Values) yield return r;
+        foreach (var (_, t) in this.HeapTables) yield return t;
+        foreach (var (_, v) in this.Views) yield return v;
+        foreach (var (_, fn) in this.Functions) yield return fn;
+        foreach (var (_, p) in this.Procedures) yield return p;
+        foreach (var (_, s) in this.Sequences) yield return s;
+        foreach (var (_, tr) in this.Triggers) yield return tr;
+        foreach (var (_, sn) in this.Synonyms) yield return sn;
+        foreach (var (_, d) in this.Defaults) yield return d;
+        foreach (var (_, r) in this.Rules) yield return r;
     }
 
     /// <summary>
@@ -220,7 +220,7 @@ internal sealed class Schema
     public bool HasConstraintNamed(string leaf)
     {
         var collation = this.Database.Collation;
-        foreach (var table in this.HeapTables.Values)
+        foreach (var (_, table) in this.HeapTables)
         {
             foreach (var key in table.KeyConstraints)
             {

@@ -817,7 +817,7 @@ partial class Simulation
     private static IEnumerable<(string Name, string TypeCode, HeapTable Table, string? Definition)> HelpConstraintObjects(
         Schema schema)
     {
-        foreach (var table in schema.HeapTables.Values)
+        foreach (var (_, table) in schema.HeapTables)
         {
             foreach (var check in table.CheckConstraints)
                 yield return (check.Name, "C ", table, check.Definition);

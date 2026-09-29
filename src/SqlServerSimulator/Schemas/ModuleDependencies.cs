@@ -188,21 +188,21 @@ internal static class ModuleDependencies
     internal static List<Entity> Enumerate(Database database, bool includeIndexes = false)
     {
         List<Entity> entities = [];
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
-            foreach (var view in schema.Views.Values)
+            foreach (var (_, view) in schema.Views)
                 AddModule(database, entities, view, schema.Name, view.BodyText, view.IsSchemaBound);
-            foreach (var procedure in schema.Procedures.Values)
+            foreach (var (_, procedure) in schema.Procedures)
             {
                 var references = AnalyzeBody(database, procedure.BodyText, isSchemaBound: false);
                 AddTableTypeParameters(database, procedure, references);
                 Add(entities, procedure, ObjectOrColumnClass, schema.Name, references);
             }
-            foreach (var function in schema.Functions.Values)
+            foreach (var (_, function) in schema.Functions)
                 AddModule(database, entities, function, schema.Name, function.BodyText, function.IsSchemaBound);
-            foreach (var trigger in schema.Triggers.Values)
+            foreach (var (_, trigger) in schema.Triggers)
                 AddModule(database, entities, trigger, schema.Name, trigger.BodyText, isSchemaBound: false);
-            foreach (var table in schema.HeapTables.Values)
+            foreach (var (_, table) in schema.HeapTables)
             {
                 AddTableExpressions(database, entities, schema, table);
                 if (includeIndexes)
@@ -210,7 +210,7 @@ internal static class ModuleDependencies
             }
         }
 
-        foreach (var ddlTrigger in database.DdlTriggers.Values)
+        foreach (var (_, ddlTrigger) in database.DdlTriggers)
         {
             var references = AnalyzeBody(database, ddlTrigger.BodyText, isSchemaBound: false);
             if (references.Count > 0)
@@ -1011,7 +1011,7 @@ internal static class ModuleDependencies
 
     private static string SchemaNameOf(Database database, int schemaId)
     {
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
             if (schema.SchemaId == schemaId)
                 return schema.Name;

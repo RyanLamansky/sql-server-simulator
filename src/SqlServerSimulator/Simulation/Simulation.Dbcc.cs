@@ -390,9 +390,9 @@ partial class Simulation
     private static void ShrinkDatabaseStorage(Simulation simulation, Database database)
     {
         VersionStore.RunGarbageCollection(simulation, database);
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
-            foreach (var table in schema.HeapTables.Values)
+            foreach (var (_, table) in schema.HeapTables)
             {
                 _ = table.Heap.TrimTrailingDeadPages(p => PageIsPinned(table, p));
                 _ = table.Heap.TrimTrailingFreeLobPages();
@@ -407,7 +407,7 @@ partial class Simulation
     /// </summary>
     private static bool PageIsPinned(HeapTable table, int pageIndex)
     {
-        foreach (var (versionPage, _) in table.RowVersions.Keys)
+        foreach (var ((versionPage, _), _) in table.RowVersions)
         {
             if (versionPage == pageIndex)
                 return true;
@@ -424,9 +424,9 @@ partial class Simulation
     private static int TotalHeapPages(Database database)
     {
         var total = 0;
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
-            foreach (var table in schema.HeapTables.Values)
+            foreach (var (_, table) in schema.HeapTables)
                 total += table.Heap.Pages.Count + table.Heap.LobPages.Count;
         }
         return total;

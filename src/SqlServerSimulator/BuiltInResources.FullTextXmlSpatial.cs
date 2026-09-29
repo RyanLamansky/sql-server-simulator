@@ -348,7 +348,7 @@ internal static partial class BuiltInResources
         var nullPath = SqlValue.Null(SqlType.NVarchar);
         var nullDataSpaceId = SqlValue.Null(SqlType.Int32);
         var nullFileId = SqlValue.Null(SqlType.Int32);
-        foreach (var cat in database.FullTextCatalogs.Values.OrderBy(c => c.Id))
+        foreach (var cat in database.FullTextCatalogs.EnumerateValues().OrderBy(c => c.Id))
         {
             yield return [
                 SqlValue.FromInt32(cat.Id),
@@ -400,7 +400,7 @@ internal static partial class BuiltInResources
         // from the source which uses the system stoplist (DoUseSystemStopList
         // default).
         var systemStoplistId = SqlValue.FromInt32(0);
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
             foreach (var table in CatalogTables(schema, batch).OrderBy(t => t.ObjectId))
             {
@@ -436,7 +436,7 @@ internal static partial class BuiltInResources
     private static IEnumerable<SqlValue[]> EnumerateSysFullTextIndexColumns(Parser.BatchContext batch, Database database)
     {
         var noSemantics = SqlValue.FromInt32(0);
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
             foreach (var table in CatalogTables(schema, batch))
             {
@@ -465,9 +465,9 @@ internal static partial class BuiltInResources
     /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateSysXmlSchemaCollections(Parser.BatchContext batch, Database database)
     {
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
-            foreach (var coll in schema.XmlSchemaCollections.Values.OrderBy(c => c.Id))
+            foreach (var coll in schema.XmlSchemaCollections.EnumerateValues().OrderBy(c => c.Id))
             {
                 yield return [
                     SqlValue.FromInt32(coll.Id),
@@ -516,7 +516,7 @@ internal static partial class BuiltInResources
         var secondaryXmlType = SqlValue.FromByte(1);
         var primaryXmlDesc = SqlValue.FromNVarchar("PRIMARY_XML");
         var secondaryXmlDesc = SqlValue.FromNVarchar("SECONDARY_XML");
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
             foreach (var table in CatalogTables(schema, batch))
             {
@@ -603,7 +603,7 @@ internal static partial class BuiltInResources
         var nullDesc = SqlValue.Null(NVarcharSqlType.Get(60, Collation.Catalog, Coercibility.Implicit));
         var geometryTypeDesc = SqlValue.FromNVarchar("GEOMETRY");
         var geographyTypeDesc = SqlValue.FromNVarchar("GEOGRAPHY");
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
             foreach (var table in CatalogTables(schema, batch))
             {
@@ -654,7 +654,7 @@ internal static partial class BuiltInResources
         var nullShort = SqlValue.Null(SqlType.SmallInt);
         var nullDesc = SqlValue.Null(SqlType.NVarchar);
         var nullInt = SqlValue.Null(SqlType.Int32);
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
             foreach (var table in CatalogTables(schema, batch))
             {

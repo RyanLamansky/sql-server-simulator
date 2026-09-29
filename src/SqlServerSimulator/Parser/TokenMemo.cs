@@ -100,7 +100,7 @@ internal sealed class TokenMemo
     /// </summary>
     public void Clear()
     {
-        foreach (var key in this.entries.Keys)
+        foreach (var (key, _) in this.entries)
         {
             if (this.entries.TryRemove(key, out _))
                 _ = Interlocked.Decrement(ref this.count);

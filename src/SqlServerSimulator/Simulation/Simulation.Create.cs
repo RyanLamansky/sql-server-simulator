@@ -3676,9 +3676,9 @@ partial class Simulation
         // this statement — CREATE TABLE resolves its whole FK list before
         // committing any of it, so neither set alone is the full graph.
         var edges = new List<ForeignKey>();
-        foreach (var schema in context.CurrentDatabase.Schemas.Values)
+        foreach (var (_, schema) in context.CurrentDatabase.Schemas)
         {
-            foreach (var table in schema.HeapTables.Values)
+            foreach (var (_, table) in schema.HeapTables)
                 edges.AddRange(table.OutgoingForeignKeys);
         }
         edges.AddRange(resolvedDuringThisStatement);
@@ -3866,9 +3866,9 @@ partial class Simulation
     /// </summary>
     private static bool HasInsteadOfTriggerFor(Database database, HeapTable table, TriggerActions verbs)
     {
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
-            foreach (var trigger in schema.Triggers.Values)
+            foreach (var (_, trigger) in schema.Triggers)
             {
                 if (ReferenceEquals(trigger.Parent, table)
                     && trigger.Timing == TriggerTiming.InsteadOf

@@ -148,7 +148,7 @@ partial class Simulation
 
     private static bool HasDefaultConstraintNamed(Schema schema, string leaf)
     {
-        foreach (var table in schema.HeapTables.Values)
+        foreach (var (_, table) in schema.HeapTables)
         {
             foreach (var column in table.Columns)
             {
@@ -381,9 +381,9 @@ partial class Simulation
 
     private static IEnumerable<HeapColumn> ColumnsOfAliasType(Database database, AliasType alias)
     {
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
-            foreach (var table in schema.HeapTables.Values)
+            foreach (var (_, table) in schema.HeapTables)
             {
                 foreach (var column in table.Columns)
                 {

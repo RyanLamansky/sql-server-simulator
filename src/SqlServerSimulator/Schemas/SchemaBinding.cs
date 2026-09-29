@@ -97,14 +97,14 @@ internal static class SchemaBinding
     internal static SchemaObject? FindPartitionFunctionReference(Database database, string functionName)
     {
         List<SchemaObject> matches = [];
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
-            foreach (var view in schema.Views.Values)
+            foreach (var (_, view) in schema.Views)
             {
                 if (view.IsSchemaBound && CallsPartitionFunction(database, view.BodyText, functionName))
                     matches.Add(view);
             }
-            foreach (var function in schema.Functions.Values)
+            foreach (var (_, function) in schema.Functions)
             {
                 if (function.IsSchemaBound && CallsPartitionFunction(database, function.BodyText, functionName))
                     matches.Add(function);
@@ -221,14 +221,14 @@ internal static class SchemaBinding
     private static List<SchemaObject> ReferencingModules(Database database, SchemaObject target, string? columnName)
     {
         List<SchemaObject> matches = [];
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
-            foreach (var view in schema.Views.Values)
+            foreach (var (_, view) in schema.Views)
             {
                 if (view.IsSchemaBound)
                     AddWhenReferencing(database, view, view.BodyText, target, columnName, matches);
             }
-            foreach (var function in schema.Functions.Values)
+            foreach (var (_, function) in schema.Functions)
             {
                 if (function.IsSchemaBound)
                     AddWhenReferencing(database, function, function.BodyText, target, columnName, matches);

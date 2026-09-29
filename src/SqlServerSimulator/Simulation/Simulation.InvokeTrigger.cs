@@ -53,22 +53,17 @@ partial class Simulation
         // another; the order they fire in is settled below.
         var targetDatabase = outerBatch.DatabaseFor(targetTable);
         var matching = new List<Trigger>();
-        foreach (var schema in targetDatabase.Schemas.Values)
+        foreach (var trigger in TriggersAttachedTo(outerBatch, targetTable))
         {
-            foreach (var trigger in schema.Triggers.Values)
-            {
-                if (!ReferenceEquals(trigger.Parent, targetTable))
-                    continue;
-                if (trigger.Timing != TriggerTiming.After)
-                    continue;
-                if ((trigger.Actions & action) == 0)
-                    continue;
-                if (trigger.IsDisabled)
-                    continue;
-                if (!CanFireTrigger(outerBatch, trigger))
-                    continue;
-                matching.Add(trigger);
-            }
+            if (trigger.Timing != TriggerTiming.After)
+                continue;
+            if ((trigger.Actions & action) == 0)
+                continue;
+            if (trigger.IsDisabled)
+                continue;
+            if (!CanFireTrigger(outerBatch, trigger))
+                continue;
+            matching.Add(trigger);
         }
         if (matching.Count == 0)
             return;
@@ -194,19 +189,14 @@ partial class Simulation
     {
         Trigger? matched = null;
         var targetDatabase = outerBatch.DatabaseFor(parent);
-        foreach (var schema in targetDatabase.Schemas.Values)
+        foreach (var trigger in TriggersAttachedTo(outerBatch, parent))
         {
-            foreach (var trigger in schema.Triggers.Values)
-            {
-                if (!ReferenceEquals(trigger.Parent, parent)) continue;
-                if (trigger.Timing != TriggerTiming.InsteadOf) continue;
-                if ((trigger.Actions & action) == 0) continue;
-                if (trigger.IsDisabled) continue;
-                if (!CanFireTrigger(outerBatch, trigger)) continue;
-                matched = trigger;
-                break;
-            }
-            if (matched is not null) break;
+            if (trigger.Timing != TriggerTiming.InsteadOf) continue;
+            if ((trigger.Actions & action) == 0) continue;
+            if (trigger.IsDisabled) continue;
+            if (!CanFireTrigger(outerBatch, trigger)) continue;
+            matched = trigger;
+            break;
         }
         if (matched is null)
             return false;
@@ -547,19 +537,57 @@ partial class Simulation
         // reach the heap, because the trigger can't run a second time.
         // Probe-confirmed: real SQL Server's INSTEAD OF body's nested INSERT
         // writes the heap directly.
-        foreach (var schema in batch.DatabaseFor(parent).Schemas.Values)
+        foreach (var trigger in TriggersAttachedTo(batch, parent))
         {
-            foreach (var trigger in schema.Triggers.Values)
-            {
-                if (!ReferenceEquals(trigger.Parent, parent)) continue;
-                if (trigger.Timing != timing) continue;
-                if ((trigger.Actions & action) == 0) continue;
-                if (trigger.IsDisabled) continue;
-                if (!CanFireTrigger(batch, trigger)) continue;
-                return true;
-            }
+            if (trigger.Timing != timing) continue;
+            if ((trigger.Actions & action) == 0) continue;
+            if (trigger.IsDisabled) continue;
+            if (!CanFireTrigger(batch, trigger)) continue;
+            return true;
         }
         return false;
+    }
+
+    /// <summary>
+    /// Every DML trigger attached to <paramref name="parent"/>, enabled or not,
+    /// in no particular order. DML asks this several times per statement, so
+    /// the walk over every schema's <see cref="Schema.Triggers"/> it stands for
+    /// is kept on the parent (<see cref="SchemaObject.AttachedTriggers"/>)
+    /// until the next <see cref="SchemaVersion"/> bump.
+    /// </summary>
+    /// <remarks>
+    /// That stamp is sound because everything that changes which triggers a
+    /// parent carries bumps it: the CREATE / ALTER / DROP dispatch arm once the
+    /// statement has run (<c>ALTER VIEW</c> reseating triggers onto the
+    /// replacement view, a <c>DROP TABLE</c> cascade and <c>ALTER SCHEMA …
+    /// TRANSFER</c> included) and the undo of a rolled-back DDL statement.
+    /// The version is read before the walk, so a change racing it is stamped
+    /// older and rebuilt on the next read. What a trigger's own state decides —
+    /// enabled or not, its firing order — is read off the trigger at each use
+    /// and never memoized.
+    /// </remarks>
+    internal static Trigger[] TriggersAttachedTo(BatchContext batch, SchemaObject parent)
+    {
+        // A table variable (inserted / deleted included) never carries one.
+        if (parent is HeapTable { IsTableVariable: true })
+            return [];
+        var simulation = batch.Connection.Simulation;
+        var version = Volatile.Read(ref simulation.SchemaVersion);
+        if (parent.AttachedTriggers is { } memo && memo.SchemaVersion == version)
+            return memo.Triggers;
+
+        var attached = new List<Trigger>();
+        foreach (var (_, schema) in batch.DatabaseFor(parent).Schemas)
+        {
+            foreach (var (_, trigger) in schema.Triggers)
+            {
+                if (ReferenceEquals(trigger.Parent, parent))
+                    attached.Add(trigger);
+            }
+        }
+        Trigger[] triggers = [.. attached];
+        parent.AttachedTriggers = new(version, triggers);
+        return triggers;
     }
 
     /// <summary>

@@ -522,7 +522,7 @@ internal static partial class BuiltInResources
         var rangeType = SqlValue.FromChar(charTwo, "R");
         var rangeDesc = SqlValue.FromNVarchar("RANGE");
         var falseBit = SqlValue.FromBoolean(false);
-        foreach (var function in database.PartitionFunctions.Values.OrderBy(function => function.FunctionId))
+        foreach (var function in database.PartitionFunctions.EnumerateValues().OrderBy(function => function.FunctionId))
         {
             yield return
             [
@@ -548,7 +548,7 @@ internal static partial class BuiltInResources
         var schemeType = SqlValue.FromChar(charTwo, "PS");
         var schemeDesc = SqlValue.FromNVarchar("PARTITION_SCHEME");
         var falseBit = SqlValue.FromBoolean(false);
-        foreach (var scheme in database.PartitionSchemes.Values.OrderBy(scheme => scheme.DataSpaceId))
+        foreach (var scheme in database.PartitionSchemes.EnumerateValues().OrderBy(scheme => scheme.DataSpaceId))
         {
             SqlValue[] row = [SqlValue.FromSystemName(scheme.Name), SqlValue.FromInt32(scheme.DataSpaceId), schemeType, schemeDesc, falseBit, falseBit];
             yield return withFunctionId ? [.. row, SqlValue.FromInt32(scheme.Function.FunctionId)] : row;
@@ -560,7 +560,7 @@ internal static partial class BuiltInResources
     {
         var parameterId = SqlValue.FromInt32(1);
         var nullVariant = SqlValue.Null(SqlType.SqlVariant);
-        foreach (var function in database.PartitionFunctions.Values.OrderBy(function => function.FunctionId))
+        foreach (var function in database.PartitionFunctions.EnumerateValues().OrderBy(function => function.FunctionId))
         {
             var functionId = SqlValue.FromInt32(function.FunctionId);
             var boundaries = function.Boundaries;
@@ -574,7 +574,7 @@ internal static partial class BuiltInResources
     {
         var parameterId = SqlValue.FromInt32(1);
         var nullCollation = SqlValue.Null(SqlType.SystemName);
-        foreach (var function in database.PartitionFunctions.Values.OrderBy(function => function.FunctionId))
+        foreach (var function in database.PartitionFunctions.EnumerateValues().OrderBy(function => function.FunctionId))
         {
             var type = function.ParameterType;
             var (maxLength, precision, scale) = GetSysColumnMetadata(new HeapColumn(string.Empty, type, function.DeclaredMaxLength, nullable: true));
@@ -598,7 +598,7 @@ internal static partial class BuiltInResources
     /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateDestinationDataSpaces(Database database)
     {
-        foreach (var scheme in database.PartitionSchemes.Values.OrderBy(scheme => scheme.DataSpaceId))
+        foreach (var scheme in database.PartitionSchemes.EnumerateValues().OrderBy(scheme => scheme.DataSpaceId))
         {
             var schemeId = SqlValue.FromInt32(scheme.DataSpaceId);
             var destinations = scheme.Destinations;
@@ -666,7 +666,7 @@ internal static partial class BuiltInResources
         var xmlDesc = SqlValue.FromNVarchar("XML");
         var spatialDesc = SqlValue.FromNVarchar("SPATIAL");
         var primaryDataSpace = SqlValue.FromInt32(1);
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
             foreach (var table in ConstraintHosts(schema, batch))
             {
@@ -688,7 +688,7 @@ internal static partial class BuiltInResources
             // Indexed views: one row per index the view carries (no HEAP row —
             // an ordinary view contributes nothing, probe-confirmed). The
             // clustered unique index lands at index_id = 1 / CLUSTERED.
-            foreach (var view in schema.Views.Values)
+            foreach (var (_, view) in schema.Views)
             {
                 if (view.Indexes.Count == 0)
                     continue;
@@ -843,9 +843,9 @@ internal static partial class BuiltInResources
     /// </summary>
     private static IEnumerable<(HeapTable Table, int IndexId, string? Name, bool IsHeap, Storage.Index? Index, PartitionPlacement? Placement)> TypeTableIndexIdentities(Database database)
     {
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
-            foreach (var tableType in schema.TableTypes.Values.OrderBy(t => t.ObjectId))
+            foreach (var tableType in schema.TableTypes.EnumerateValues().OrderBy(t => t.ObjectId))
             {
                 foreach (var identity in tableType.CatalogShape.IndexIdentities())
                     yield return (tableType.CatalogShape, identity.IndexId, identity.Name, identity.IsHeap, identity.Index, null);
@@ -855,7 +855,7 @@ internal static partial class BuiltInResources
 
     private static IEnumerable<(HeapTable Table, int IndexId, string? Name, bool IsHeap, Storage.Index? Index, PartitionPlacement? Placement)> EnumerateTableIndexIdentities(Database database, Parser.BatchContext? batch)
     {
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
             foreach (var table in CatalogTables(schema, batch))
             {
@@ -964,7 +964,7 @@ internal static partial class BuiltInResources
     private static IEnumerable<(long ContainerId, byte Type, long TotalPages, long UsedPages, long DataPages, int DataSpaceId)> EnumerateAllocationUnitData(Database database)
     {
         var census = new PartitionCensus();
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
             foreach (var table in CatalogTables(schema, batch: null))
             {
@@ -1258,7 +1258,7 @@ internal static partial class BuiltInResources
         }
         // CREATE STATISTICS-declared standalone statistics: user_created = 1,
         // stats_id drawn from the same per-table sequence the index ids use.
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
             foreach (var table in CatalogTables(schema, batch))
             {
@@ -1290,9 +1290,9 @@ internal static partial class BuiltInResources
         }
         // Indexed-view statistics: one index-backed stat per view index
         // (stats_id = index_id, name = index name), matching real SQL Server.
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
-            foreach (var view in schema.Views.Values)
+            foreach (var (_, view) in schema.Views)
             {
                 if (view.Indexes.Count == 0)
                     continue;
@@ -1361,7 +1361,7 @@ internal static partial class BuiltInResources
     /// </summary>
     private static IEnumerable<(int InternalTableObjectId, int StatsId, string IndexName)> EnumerateXmlIndexStats(Database database, Parser.BatchContext batch)
     {
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
             foreach (var table in CatalogTables(schema, batch))
             {
@@ -1404,9 +1404,9 @@ internal static partial class BuiltInResources
     private static IEnumerable<SqlValue[]> EnumerateSysStatsColumns(Parser.BatchContext batch, Database database)
     {
         _ = batch;
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
-            foreach (var table in CatalogTables(schema, batch).Concat(schema.TableTypes.Values.OrderBy(t => t.ObjectId).Select(t => t.CatalogShape)))
+            foreach (var table in CatalogTables(schema, batch).Concat(schema.TableTypes.EnumerateValues().OrderBy(t => t.ObjectId).Select(t => t.CatalogShape)))
             {
                 var tableObjectId = SqlValue.FromInt32(table.ObjectId);
                 foreach (var identity in table.IndexIdentities())
@@ -1457,7 +1457,7 @@ internal static partial class BuiltInResources
             }
             // Indexed views: one stats_columns row per view-index key column
             // (column_id = view OUTPUT ordinal + 1). No INCLUDE columns.
-            foreach (var view in schema.Views.Values)
+            foreach (var (_, view) in schema.Views)
             {
                 if (view.Indexes.Count == 0)
                     continue;
@@ -1519,7 +1519,7 @@ internal static partial class BuiltInResources
         var falseBit = SqlValue.FromBoolean(false);
         var trueBit = SqlValue.FromBoolean(true);
         var zeroByte = SqlValue.FromByte(0);
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
             foreach (var table in ConstraintHosts(schema, batch))
             {
@@ -1598,7 +1598,7 @@ internal static partial class BuiltInResources
             }
             // Indexed views: KEY / INCLUDE columns keyed on the view OUTPUT
             // ordinal (column_id = ordinal + 1, matching sys.columns of views).
-            foreach (var view in schema.Views.Values)
+            foreach (var (_, view) in schema.Views)
             {
                 if (view.Indexes.Count == 0)
                     continue;
@@ -1851,7 +1851,7 @@ internal static partial class BuiltInResources
     {
         var trueBit = SqlValue.FromBoolean(true);
         var falseBit = SqlValue.FromBoolean(false);
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
             foreach (var table in CatalogTables(schema, batch))
             {
@@ -1864,7 +1864,7 @@ internal static partial class BuiltInResources
 
     private static IEnumerable<SqlValue[]> EnumerateSysJsonIndexPaths(Parser.BatchContext batch, Database database)
     {
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
             foreach (var table in CatalogTables(schema, batch))
             {

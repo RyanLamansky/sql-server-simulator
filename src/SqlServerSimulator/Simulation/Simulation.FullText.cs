@@ -159,7 +159,7 @@ partial class Simulation
         // AS DEFAULT semantics: demote any existing default before assigning.
         if (asDefault)
         {
-            foreach (var existing in context.CurrentDatabase.FullTextCatalogs.Values)
+            foreach (var (_, existing) in context.CurrentDatabase.FullTextCatalogs)
                 existing.IsDefault = false;
         }
 
@@ -282,7 +282,7 @@ partial class Simulation
         }
         else
         {
-            catalog = context.CurrentDatabase.FullTextCatalogs.Values.FirstOrDefault(c => c.IsDefault)
+            catalog = context.CurrentDatabase.FullTextCatalogs.EnumerateValues().FirstOrDefault(c => c.IsDefault)
                 ?? throw SimulatedSqlException.InvalidObjectName(new MultiPartName("<default fulltext catalog>"));
         }
 

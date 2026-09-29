@@ -297,7 +297,7 @@ partial class Simulation
     private static SimulatedSqlResultSet HelpObjectListResultSet(Database database)
     {
         var rows = new List<SqlValue[]>();
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
             void Add(string name, string typeCode, SchemaObject owned) => rows.Add([
                 SqlValue.FromSystemName(name),
@@ -459,11 +459,11 @@ partial class Simulation
     private static List<SqlValue[]> HelpUserTypes(Database database)
     {
         var rows = new List<SqlValue[]>();
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
-            foreach (var alias in schema.AliasTypes.Values)
+            foreach (var (_, alias) in schema.AliasTypes)
                 rows.Add(HelpAliasTypeRow(database, alias));
-            foreach (var tableType in schema.TableTypes.Values)
+            foreach (var (_, tableType) in schema.TableTypes)
                 rows.Add(HelpTableTypeRow(tableType));
         }
 

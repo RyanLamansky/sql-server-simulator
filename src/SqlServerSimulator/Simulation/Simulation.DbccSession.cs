@@ -65,14 +65,14 @@ partial class Simulation
     private static (SimulatedDbConnection Connection, SimulatedDbTransaction Transaction)? OldestWritingTransaction(Simulation simulation, Database database)
     {
         var tables = new List<HeapTable>();
-        foreach (var schema in database.Schemas.Values)
-            tables.AddRange(schema.HeapTables.Values);
+        foreach (var (_, schema) in database.Schemas)
+            tables.AddRange(schema.HeapTables.EnumerateValues());
         var connections = simulation.SnapshotConnections();
         if (database.Name == TempdbDatabaseName)
         {
-            tables.AddRange(simulation.GlobalTempTables.Values);
+            tables.AddRange(simulation.GlobalTempTables.EnumerateValues());
             foreach (var connection in connections)
-                tables.AddRange(connection.TempTables.Values);
+                tables.AddRange(connection.TempTables.EnumerateValues());
         }
 
         var heaps = new HashSet<Heap>(ReferenceEqualityComparer.Instance);

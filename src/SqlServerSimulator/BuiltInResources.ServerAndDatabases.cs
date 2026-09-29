@@ -1807,7 +1807,7 @@ internal static partial class BuiltInResources
 
         yield return Row(0, "SIMULATED", "SQL Server", "SQLNCLI", "SIMULATED", null, null, null, linked: false, remoteLogin: true, rpcOut: true, dataAccess: false, promotion: true, simulation.SeedDate);
         var serverId = 1;
-        foreach (var ls in simulation.ActiveLinkedServers.Values.OrderBy(s => s.Name, StringComparer.OrdinalIgnoreCase))
+        foreach (var ls in simulation.ActiveLinkedServers.EnumerateValues().OrderBy(s => s.Name, StringComparer.OrdinalIgnoreCase))
         {
             yield return Row(serverId++, ls.Name, ls.SrvProduct, ls.Provider, ls.DataSource, ls.Location, ls.ProviderString, ls.Catalog,
                 linked: true, remoteLogin: ls.IsSqlServerProduct, ls.RpcOut, ls.DataAccess, ls.RemoteProcTransactionPromotion, ls.CreateDate);

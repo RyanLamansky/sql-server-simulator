@@ -47,7 +47,7 @@ internal sealed class ObjectDefinition : Expression
         var id = ScalarArguments.CoerceToInt(idValue);
 
         var database = runtime.Batch.CurrentDatabase;
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
             foreach (var obj in schema.SchemaObjects())
             {
@@ -55,7 +55,7 @@ internal sealed class ObjectDefinition : Expression
                     return Definition(obj.DefinitionText);
             }
         }
-        foreach (var ddlTrigger in database.DdlTriggers.Values)
+        foreach (var (_, ddlTrigger) in database.DdlTriggers)
         {
             if (ddlTrigger.ObjectId == id)
                 return Definition(ddlTrigger.DefinitionText);

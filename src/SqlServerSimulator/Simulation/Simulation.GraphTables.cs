@@ -337,9 +337,9 @@ partial class Simulation
     internal static List<(HeapTable Edge, EdgeConstraint Constraint)> EdgeConstraintsReferencing(Database database, HeapTable node)
     {
         var found = new List<(HeapTable, EdgeConstraint)>();
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
-            foreach (var table in schema.HeapTables.Values)
+            foreach (var (_, table) in schema.HeapTables)
             {
                 foreach (var constraint in table.EdgeConstraints)
                 {

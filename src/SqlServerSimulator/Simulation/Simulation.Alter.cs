@@ -1805,9 +1805,9 @@ partial class Simulation
             throw SimulatedSqlException.CannotFindObjectForAlterTable(tableName.ToString());
 
         var tableTriggers = new List<Trigger>();
-        foreach (var schema in context.CurrentDatabase.Schemas.Values)
+        foreach (var (_, schema) in context.CurrentDatabase.Schemas)
         {
-            foreach (var trigger in schema.Triggers.Values)
+            foreach (var (_, trigger) in schema.Triggers)
             {
                 if (ReferenceEquals(trigger.Parent, table))
                     tableTriggers.Add(trigger);
@@ -1988,7 +1988,7 @@ partial class Simulation
                 ? named
                 : throw SimulatedSqlException.SpecifiedSchemaNameDoesNotExist(name.ImmediateQualifier!);
         }
-        foreach (var schema in context.CurrentDatabase.Schemas.Values)
+        foreach (var (_, schema) in context.CurrentDatabase.Schemas)
         {
             if (schema.SchemaId == baseTable.SchemaId)
                 return schema;

@@ -1403,10 +1403,10 @@ public sealed class SimulatedDbConnection : DbConnection
             // Global temp tables: drop every ##foo owned by this connection.
             // Probe-confirmed against SQL Server 2025 (pooling disabled) that
             // owner-disconnect drops ##foo unconditionally, regardless of
-            // other sessions' prior or in-flight references. Walk a snapshot
-            // of the keys so concurrent reads / drops by other connections
-            // don't trip dictionary mutation.
-            foreach (var name in this.Simulation.GlobalTempTables.Keys)
+            // other sessions' prior or in-flight references. Enumerating a
+            // ConcurrentDictionary tolerates removals mid-walk, this loop's own
+            // and other connections' alike.
+            foreach (var (name, _) in this.Simulation.GlobalTempTables)
             {
                 if (this.Simulation.GlobalTempTables.TryGetValue(name, out var table)
                     && ReferenceEquals(table.OwnerSession, this.Session))

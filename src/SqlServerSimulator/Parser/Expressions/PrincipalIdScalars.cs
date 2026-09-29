@@ -173,14 +173,14 @@ internal sealed class Permissions : Expression
 
     private static bool ObjectExists(Database database, int objectId)
     {
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
             foreach (var obj in schema.SchemaObjects())
             {
                 if (obj.ObjectId == objectId)
                     return true;
             }
-            foreach (var tableType in schema.TableTypes.Values)
+            foreach (var (_, tableType) in schema.TableTypes)
             {
                 if (tableType.ObjectId == objectId)
                     return true;
@@ -191,9 +191,9 @@ internal sealed class Permissions : Expression
 
     internal static bool TableColumnExists(Database database, int objectId, string columnName)
     {
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
-            foreach (var table in schema.HeapTables.Values)
+            foreach (var (_, table) in schema.HeapTables)
             {
                 if (table.ObjectId != objectId)
                     continue;
@@ -402,9 +402,9 @@ internal sealed class HasPermsByName : Expression
 
     private static bool IsTable(Database database, int objectId)
     {
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
-            foreach (var table in schema.HeapTables.Values)
+            foreach (var (_, table) in schema.HeapTables)
             {
                 if (table.ObjectId == objectId)
                     return true;
@@ -447,7 +447,7 @@ internal sealed class HasPermsByName : Expression
     private static bool TryResolveObjectByName(Database database, string name, out int objectId, out int schemaId)
     {
         var leaf = name.Contains('.', StringComparison.Ordinal) ? name[(name.LastIndexOf('.') + 1)..] : name;
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
             foreach (var obj in schema.SchemaObjects())
             {

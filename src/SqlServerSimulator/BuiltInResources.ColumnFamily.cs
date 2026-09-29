@@ -29,7 +29,7 @@ internal static partial class BuiltInResources
             new("start_column_id", SqlType.Int32, null, false),
             new("end_column_id", SqlType.Int32, null, false),
         ], (batch, database) =>
-            database.Schemas.Values
+            database.Schemas.EnumerateValues()
                 .SelectMany(s => CatalogTables(s, batch))
                 .Where(t => t.PeriodColumns is not null && !t.IsHistoryTable && !t.PeriodInheritedFromBase)
                 .OrderBy(t => t.ObjectId)
@@ -54,8 +54,8 @@ internal static partial class BuiltInResources
             new("begin_version", SqlType.BigInt, null, true),
             new("cleanup_version", SqlType.BigInt, null, true),
         ], static (batch, database) =>
-            database.Schemas.Values
-                .SelectMany(s => s.HeapTables.Values)
+            database.Schemas.EnumerateValues()
+                .SelectMany(s => s.HeapTables.EnumerateValues())
                 .Where(t => t.ChangeTracking is not null)
                 .OrderBy(t => t.ObjectId)
                 .Select(t => new SqlValue[]
@@ -353,7 +353,7 @@ internal static partial class BuiltInResources
             ];
         }
 
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
             foreach (var obj in schema.SchemaObjects().OrderBy(o => o.ObjectId))
             {
@@ -364,7 +364,7 @@ internal static partial class BuiltInResources
                     yield return Row(obj);
             }
         }
-        foreach (var ddlTrigger in database.DdlTriggers.Values.OrderBy(t => t.ObjectId))
+        foreach (var ddlTrigger in database.DdlTriggers.EnumerateValues().OrderBy(t => t.ObjectId))
         {
             if (SchemaObject.IsSqlModule(ddlTrigger))
                 yield return Row(ddlTrigger);

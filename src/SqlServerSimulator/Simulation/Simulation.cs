@@ -1421,17 +1421,17 @@ public sealed partial class Simulation
         bool Matches(PlanCacheKey key) =>
             (sqlHandle is null || BuiltInResources.SqlHandleOf(key.CommandText).AsSpan().SequenceEqual(sqlHandle.AsSpan(0, BuiltInResources.SqlHandleLength)))
             && (database is null || BuiltInToken.Equals(key.DatabaseName, database.Name));
-        foreach (var key in this.planCache.Keys)
+        foreach (var (key, _) in this.planCache)
         {
             if (Matches(key) && this.planCache.TryRemove(key, out _))
                 _ = Interlocked.Decrement(ref this.planCacheCount);
         }
-        foreach (var key in this.compiledBatches.Keys)
+        foreach (var (key, _) in this.compiledBatches)
         {
             if (Matches(key) && this.compiledBatches.TryRemove(key, out _))
                 _ = Interlocked.Decrement(ref this.compiledBatchCount);
         }
-        foreach (var key in this.dmlPlanSets.Keys)
+        foreach (var (key, _) in this.dmlPlanSets)
         {
             if (Matches(key) && this.dmlPlanSets.TryRemove(key, out _))
                 _ = Interlocked.Decrement(ref this.dmlPlanSetCount);

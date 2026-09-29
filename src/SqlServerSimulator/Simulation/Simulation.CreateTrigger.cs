@@ -220,9 +220,9 @@ partial class Simulation
 
         if (timing == TriggerTiming.InsteadOf)
         {
-            foreach (var schema in context.CurrentDatabase.Schemas.Values)
+            foreach (var (_, schema) in context.CurrentDatabase.Schemas)
             {
-                foreach (var t in schema.Triggers.Values)
+                foreach (var (_, t) in schema.Triggers)
                 {
                     if (!ReferenceEquals(t.Parent, parent)) continue;
                     if (t.Timing != TriggerTiming.InsteadOf) continue;
@@ -362,7 +362,7 @@ partial class Simulation
                 throw SimulatedSqlException.SchemaPrefixOnScopedTrigger();
             if (context.Batch.IsSkipping)
                 return true;
-            IEnumerable<DdlTrigger> scoped = serverScope ? context.Simulation.ServerTriggers.All : context.CurrentDatabase.DdlTriggers.Values;
+            var scoped = serverScope ? context.Simulation.ServerTriggers.All : context.CurrentDatabase.DdlTriggers.EnumerateValues();
             if (allTriggers)
             {
                 foreach (var ddlTrigger in scoped)
@@ -391,9 +391,9 @@ partial class Simulation
 
         if (allTriggers)
         {
-            foreach (var schema in context.CurrentDatabase.Schemas.Values)
+            foreach (var (_, schema) in context.CurrentDatabase.Schemas)
             {
-                foreach (var trigger in schema.Triggers.Values)
+                foreach (var (_, trigger) in schema.Triggers)
                 {
                     if (ReferenceEquals(trigger.Parent, parent))
                         trigger.IsDisabled = disable;

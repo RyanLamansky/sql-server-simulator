@@ -70,7 +70,7 @@ partial class Simulation
         var owner = SqlValue.FromSystemName("dbo");
         var schemaName = SqlValue.FromSystemName(target.Schema.Name);
         var rows = new List<SqlValue[]>();
-        foreach (var trigger in target.Schema.Triggers.Values)
+        foreach (var (_, trigger) in target.Schema.Triggers)
         {
             if (!ReferenceEquals(trigger.Parent, target.Object))
                 continue;
@@ -149,7 +149,7 @@ partial class Simulation
         {
             if (roleId2 != role.PrincipalId)
                 continue;
-            foreach (var principal in database.Principals.Values)
+            foreach (var (_, principal) in database.Principals)
             {
                 if (principal.PrincipalId != memberId)
                     continue;
@@ -177,7 +177,7 @@ partial class Simulation
     {
         var members = HelpUserRoleMembers(database);
         var rows = new List<(string User, string Role, string? Login, int UserId)>();
-        foreach (var principal in database.Principals.Values)
+        foreach (var (_, principal) in database.Principals)
         {
             if (principal.TypeCode == "R")
                 continue;
@@ -191,7 +191,7 @@ partial class Simulation
             {
                 if (memberId != principal.PrincipalId)
                     continue;
-                foreach (var role in database.Principals.Values)
+                foreach (var (_, role) in database.Principals)
                 {
                     if (role.PrincipalId == roleId)
                         rows.Add((principal.Name, role.Name, login, principal.PrincipalId));

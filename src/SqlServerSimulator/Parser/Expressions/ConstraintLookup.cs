@@ -47,7 +47,7 @@ internal static class ConstraintLookup
         if (!batch.TryResolveSchema(name, out var schema))
             return false;
         var collation = schema.Database.Collation;
-        foreach (var table in schema.HeapTables.Values)
+        foreach (var (_, table) in schema.HeapTables)
         {
             foreach (var reference in Constraints(table, schema))
             {
@@ -68,9 +68,9 @@ internal static class ConstraintLookup
     /// </summary>
     public static bool TryResolveById(Database database, int objectId, out ConstraintReference found)
     {
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
-            foreach (var table in schema.HeapTables.Values)
+            foreach (var (_, table) in schema.HeapTables)
             {
                 foreach (var reference in Constraints(table, schema))
                 {

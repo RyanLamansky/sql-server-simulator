@@ -80,9 +80,9 @@ partial class Simulation
     private static string? FindClrTypeDependent(Database database, SqlAssembly assembly)
     {
         AliasType? first = null;
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
-            foreach (var alias in schema.AliasTypes.Values)
+            foreach (var (_, alias) in schema.AliasTypes)
             {
                 if (alias.UnderlyingType is ClrUdtSqlType { Udt.Assembly: var owner } && owner == assembly
                     && (first is null || alias.UserTypeId < first.UserTypeId))

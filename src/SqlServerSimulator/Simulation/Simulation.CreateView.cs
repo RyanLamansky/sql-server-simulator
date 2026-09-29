@@ -291,9 +291,9 @@ partial class Simulation
     /// </summary>
     private static void ReseatTriggerParents(Database database, SchemaObject replaced, SchemaObject replacement)
     {
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
-            foreach (var trigger in schema.Triggers.Values)
+            foreach (var (_, trigger) in schema.Triggers)
             {
                 if (ReferenceEquals(trigger.Parent, replaced))
                     trigger.Parent = replacement;

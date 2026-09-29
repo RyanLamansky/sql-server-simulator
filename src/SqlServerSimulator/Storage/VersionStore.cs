@@ -320,9 +320,9 @@ internal static class VersionStore
         // version store shrinks once a dead client's session is reset.
         _ = simulation.ReclaimAbandonedSessions();
         var cutoff = OldestActiveSnapshotXid(simulation);
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
-            foreach (var table in schema.HeapTables.Values)
+            foreach (var (_, table) in schema.HeapTables)
             {
                 if (table.RowVersions.IsEmpty)
                     continue;

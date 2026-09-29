@@ -46,8 +46,9 @@ internal enum TriggerTiming
 /// views / functions / procs (Msg 2714 on collision). The trigger holds
 /// a reference to its parent — a <see cref="HeapTable"/> (AFTER or
 /// INSTEAD OF) or a <see cref="View"/> (INSTEAD OF only). DML against
-/// the parent looks up attached triggers via the schema's
-/// <see cref="Schema.Triggers"/> dict + parent-reference match.
+/// the parent looks up attached triggers through
+/// <see cref="Simulation.TriggersAttachedTo"/>, a parent-reference match
+/// over every schema's <see cref="Schema.Triggers"/> dict.
 /// </para>
 /// <para>
 /// Body source is captured at CREATE time and re-tokenized per call
@@ -100,8 +101,7 @@ internal sealed class Trigger(
     /// (INSTEAD OF only) — both are <see cref="SchemaObject"/>s so
     /// <c>sys.objects.parent_object_id</c> reads through
     /// <see cref="SchemaObject.ObjectId"/> directly. DML against the
-    /// parent at runtime walks the schema's <see cref="Schema.Triggers"/>
-    /// dict and fires every trigger whose <see cref="Parent"/> matches
+    /// parent fires every trigger whose <see cref="Parent"/> matches
     /// and whose <see cref="Actions"/> include the current DML kind.
     /// Mutable so <c>ALTER VIEW</c> — which swaps in a fresh
     /// <see cref="View"/> instance under the same object identity — can carry

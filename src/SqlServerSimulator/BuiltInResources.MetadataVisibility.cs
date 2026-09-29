@@ -185,7 +185,7 @@ internal static partial class BuiltInResources
     {
         var closure = PermissionChecker.BuildPrincipalClosure(database, principalId);
         var visible = new HashSet<int>();
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
             foreach (var obj in schema.SchemaObjects())
             {
@@ -196,7 +196,7 @@ internal static partial class BuiltInResources
                 if (obj is HeapTable table)
                     AddConstraintIds(visible, table);
             }
-            foreach (var tableType in schema.TableTypes.Values)
+            foreach (var (_, tableType) in schema.TableTypes)
                 _ = visible.Add(tableType.ObjectId);
         }
         return visible;
@@ -206,7 +206,7 @@ internal static partial class BuiltInResources
     {
         var closure = PermissionChecker.BuildPrincipalClosure(database, principalId);
         var visible = new HashSet<string>(BuiltInToken.Comparer);
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
             foreach (var obj in schema.SchemaObjects())
             {

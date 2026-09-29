@@ -118,7 +118,7 @@ partial class Simulation
         ClrAssemblyMetadata.Verify(content, assemblyName, permissionSet, "CREATE");
 
         var identity = ClrAssemblyMetadata.ReadIdentity(content, "CREATE", assemblyName);
-        foreach (var existing in database.Assemblies.Values)
+        foreach (var (_, existing) in database.Assemblies)
         {
             if (ClrAssemblyMetadata.ReadIdentity(existing.Content, "CREATE", existing.Name).Mvid == identity.Mvid)
                 throw SimulatedSqlException.AssemblyDuplicateMvid("CREATE", existing.Name);
@@ -354,17 +354,17 @@ partial class Simulation
                 first = module;
         }
 
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
-            foreach (var function in schema.Functions.Values)
+            foreach (var (_, function) in schema.Functions)
                 Consider(function, (function as ClrFunction)?.Entry);
-            foreach (var procedure in schema.Procedures.Values)
+            foreach (var (_, procedure) in schema.Procedures)
                 Consider(procedure, procedure.ClrEntry);
-            foreach (var trigger in schema.Triggers.Values)
+            foreach (var (_, trigger) in schema.Triggers)
                 Consider(trigger, trigger.ClrEntry);
         }
 
-        foreach (var ddl in database.DdlTriggers.Values)
+        foreach (var (_, ddl) in database.DdlTriggers)
             Consider(ddl, ddl.ClrEntry);
 
         return first?.Name;

@@ -343,6 +343,23 @@ A `Stopwatch` split of the interleaved statement before the change put its parse
 The `SaveChanges` saving is about twice that (8.5 µs for the one-row update); the difference wasn't isolated.
 The `MERGE` rows are the reason `MERGE` stays declined: a 10-row `MERGE` spends about 17 µs parsing and about 450 µs executing.
 
+**The per-statement trigger lookup** is memoized per parent.
+A DML statement asks two to five times whether its target carries a trigger, and each ask walked every schema's `Triggers` through `ConcurrentDictionary.Values`, which takes every bucket lock and copies the contents.
+In a 10-row EF `MERGE` insert those asks were 8.2% of the simulator's time, `GetValues` alone 6.9%, most of it `AcquireAllLocks`.
+`Simulation.TriggersAttachedTo` keeps the answer on the parent stamped with `SchemaVersion`, and the catalog walks that read `.Values` enumerate the dictionary instead (SSS012).
+Same method, the build with neither change (A) against both (B) (measured 2026-09-29):
+
+| Case | A | B | Δ |
+|---|---|---|---|
+| Insert (`MERGE`), 10 rows | 279.3 µs | 272.5 µs | −2% |
+| Insert, 1 row | 30.9 µs | 28.6 µs | −7% |
+| Update, 1 row | 26.5 µs | 25.4 µs | −4% |
+| `OBJECTPROPERTY` / `OBJECT_ID` over `sys.objects`, 50 tables in 3 schemas (ADO.NET, one `SELECT`) | 745.9 µs | 490.0 µs | −34% |
+
+The lookup disappears from the `MERGE` profile, but the `MERGE` stays dominated by its execution, so the EF-level saving there is small.
+The catalog query gains most because `OBJECTPROPERTY` finds its object by id through every schema's nine object dictionaries, which each row copied through `.Values`.
+The sqllogictest index replay (60.3 s against 61.5 s) and the `SqlServerSimulator.Tests` run (39 s either way) didn't move.
+
 The token memo's EF-level figures above (~200 µs for a one-row insert) came from shorter runs; after a time-based warm-up the same insert measures ~39 µs, so read those as un-warmed.
 
 ## Not modeled / future

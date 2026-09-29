@@ -73,15 +73,15 @@ partial class Simulation
         var rows = new List<SqlValue[]>();
         if (qualifier is null || collation.Equals(qualifier, database.Name))
         {
-            foreach (var schema in database.Schemas.Values.OrderBy(s => s.Name, StringComparer.OrdinalIgnoreCase))
+            foreach (var schema in database.Schemas.EnumerateValues().OrderBy(s => s.Name, StringComparer.OrdinalIgnoreCase))
             {
                 if (!NameMatches(ownerPattern, owner, schema.Name))
                     continue;
                 var ownerValue = SqlValue.FromSystemName(schema.Name);
                 IEnumerable<(string Name, bool IsProcedure, SchemaObject Routine)> routines =
                 [
-                    .. schema.Procedures.Values.Select(p => (p.Name, true, (SchemaObject)p)),
-                    .. schema.Functions.Values.Select(f => (f.Name, false, (SchemaObject)f)),
+                    .. schema.Procedures.EnumerateValues().Select(p => (p.Name, true, (SchemaObject)p)),
+                    .. schema.Functions.EnumerateValues().Select(f => (f.Name, false, (SchemaObject)f)),
                 ];
                 foreach (var (routineName, isProcedure, routine) in routines.OrderBy(r => r.Name, StringComparer.OrdinalIgnoreCase))
                 {

@@ -339,9 +339,9 @@ partial class Simulation
     /// </summary>
     internal static bool FilegroupHoldsObjects(Database database, int dataSpaceId, bool withRowsOnly)
     {
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
-            foreach (var table in schema.HeapTables.Values)
+            foreach (var (_, table) in schema.HeapTables)
             {
                 // A table keeps its pages when its rows are deleted.
                 if (withRowsOnly && table.Heap.RowCount == 0 && table.Heap.Pages.Count == 0)
@@ -414,7 +414,7 @@ partial class Simulation
             throw SimulatedSqlException.FilegroupNotEmpty(name.Value, state: 6);
         if (FileCount(target, dataSpaceId) > 0)
             throw SimulatedSqlException.FilegroupHasFiles(name.Value);
-        if (target.PartitionSchemes.Values.Any(scheme => scheme.NextUsed == dataSpaceId || scheme.Destinations.Contains(dataSpaceId)))
+        if (target.PartitionSchemes.EnumerateValues().Any(scheme => scheme.NextUsed == dataSpaceId || scheme.Destinations.Contains(dataSpaceId)))
             throw SimulatedSqlException.FilegroupNotEmpty(name.Value, state: 12);
         if (FilegroupHoldsObjects(target, dataSpaceId, withRowsOnly: false))
             throw SimulatedSqlException.FilegroupNotEmpty(name.Value, state: 8);

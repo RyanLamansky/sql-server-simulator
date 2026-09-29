@@ -637,7 +637,7 @@ partial class Simulation
     {
         if (candidateName is null || table.OwningDatabase is not { } database)
             return;
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
             if (schema.SchemaId == table.SchemaId && schema.HasNameInSharedNamespace(candidateName))
                 throw SimulatedSqlException.ConstraintNameTaken(candidateName);

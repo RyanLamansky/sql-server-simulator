@@ -169,9 +169,9 @@ internal sealed class ColumnProperty : Expression
         };
         if (columns is not null)
             return columns;
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
-            foreach (var tableType in schema.TableTypes.Values)
+            foreach (var (_, tableType) in schema.TableTypes)
             {
                 if (tableType.ObjectId == id)
                     return tableType.Columns;

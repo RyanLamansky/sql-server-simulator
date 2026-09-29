@@ -391,7 +391,7 @@ internal static partial class BuiltInResources
             new("delete_referential_action", SqlType.TinyInt, null, true),
             new("delete_referential_action_desc", nvarchar60Catalog, 60, true),
         ], (batch, database) =>
-            from schema in database.Schemas.Values
+            from schema in database.Schemas.EnumerateValues()
             from table in CatalogTables(schema, batch)
             from ec in table.EdgeConstraints
             orderby ec.ObjectId
@@ -422,7 +422,7 @@ internal static partial class BuiltInResources
             new("from_object_id", SqlType.Int32, null, false),
             new("to_object_id", SqlType.Int32, null, false),
         ], (batch, database) =>
-            from schema in database.Schemas.Values
+            from schema in database.Schemas.EnumerateValues()
             from table in CatalogTables(schema, batch)
             from ec in table.EdgeConstraints
             orderby ec.ObjectId
@@ -496,9 +496,9 @@ internal static partial class BuiltInResources
         var parentClassDatabase = SqlValue.FromByte(0);
         var parentClassDatabaseDesc = SqlValue.FromNVarchar("DATABASE");
         var parentIdZero = SqlValue.FromInt32(0);
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
-            foreach (var trigger in schema.Triggers.Values.OrderBy(t => t.ObjectId))
+            foreach (var trigger in schema.Triggers.EnumerateValues().OrderBy(t => t.ObjectId))
             {
                 yield return [
                     SqlValue.FromSystemName(trigger.Name),
@@ -521,7 +521,7 @@ internal static partial class BuiltInResources
         // (DATABASE), parent_class_desc='DATABASE', parent_id=0 — probe-
         // confirmed against SQL Server 2025's sys.triggers for AW's
         // [ddlDatabaseTriggerLog].
-        foreach (var ddl in database.DdlTriggers.Values.OrderBy(t => t.ObjectId))
+        foreach (var ddl in database.DdlTriggers.EnumerateValues().OrderBy(t => t.ObjectId))
         {
             yield return [
                 SqlValue.FromSystemName(ddl.Name),
@@ -575,9 +575,9 @@ internal static partial class BuiltInResources
             (3, "DELETE"),
         ];
         var flags = new[] { TriggerActions.Insert, TriggerActions.Update, TriggerActions.Delete };
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
-            foreach (var trigger in schema.Triggers.Values.OrderBy(t => t.ObjectId))
+            foreach (var trigger in schema.Triggers.EnumerateValues().OrderBy(t => t.ObjectId))
             {
                 var objectId = SqlValue.FromInt32(trigger.ObjectId);
                 for (var i = 0; i < flags.Length; i++)
@@ -602,7 +602,7 @@ internal static partial class BuiltInResources
         // (expand to the leaf events in its transitive closure, tagging each
         // with the group's id/desc) or an individual event (one row, NULL
         // group).
-        foreach (var ddl in database.DdlTriggers.Values.OrderBy(t => t.ObjectId))
+        foreach (var ddl in database.DdlTriggers.EnumerateValues().OrderBy(t => t.ObjectId))
         {
             var objectId = SqlValue.FromInt32(ddl.ObjectId);
             foreach (var (type, desc, groupType, groupDesc) in ExpandDdlTriggerEvents(ddl))
@@ -765,7 +765,7 @@ internal static partial class BuiltInResources
         var nullPrincipal = SqlValue.Null(SqlType.Int32);
         var fkType = SqlValue.FromChar(CharSqlType.Get(2, Collation.Catalog, Coercibility.Implicit), "F ");
         var fkTypeDesc = SqlValue.FromNVarchar("FOREIGN_KEY_CONSTRAINT");
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
             var schemaId = SqlValue.FromInt32(schema.SchemaId);
             foreach (var table in CatalogTables(schema, batch))
@@ -860,7 +860,7 @@ internal static partial class BuiltInResources
     /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateSysForeignKeyColumns(Parser.BatchContext batch, Database database)
     {
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
             foreach (var table in CatalogTables(schema, batch))
             {
@@ -907,7 +907,7 @@ internal static partial class BuiltInResources
         var ckType = SqlValue.FromChar(CharSqlType.Get(2, Collation.Catalog, Coercibility.Implicit), "C ");
         var ckTypeDesc = SqlValue.FromNVarchar("CHECK_CONSTRAINT");
         var sysSchemaId = SqlValue.FromInt32(Database.SysSchemaId);
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
             var schemaId = SqlValue.FromInt32(schema.SchemaId);
             foreach (var table in ConstraintHosts(schema, batch))
@@ -970,7 +970,7 @@ internal static partial class BuiltInResources
         var pkTypeDesc = SqlValue.FromNVarchar("PRIMARY_KEY_CONSTRAINT");
         var uqTypeDesc = SqlValue.FromNVarchar("UNIQUE_CONSTRAINT");
         var sysSchemaId = SqlValue.FromInt32(Database.SysSchemaId);
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
             var schemaId = SqlValue.FromInt32(schema.SchemaId);
             foreach (var table in ConstraintHosts(schema, batch))
@@ -1037,7 +1037,7 @@ internal static partial class BuiltInResources
         var dfType = SqlValue.FromChar(CharSqlType.Get(2, Collation.Catalog, Coercibility.Implicit), "D ");
         var dfTypeDesc = SqlValue.FromNVarchar("DEFAULT_CONSTRAINT");
         var sysSchemaId = SqlValue.FromInt32(Database.SysSchemaId);
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
             var schemaId = SqlValue.FromInt32(schema.SchemaId);
             foreach (var (hostId, columns, positional, isTypeTable) in DeclaredColumnHosts(schema, batch))
@@ -1088,8 +1088,8 @@ internal static partial class BuiltInResources
         var tableTypeDataType = SqlValue.FromNVarchar("table type");
         var databaseCollation = SqlValue.FromSystemName(database.CollationName);
 
-        var types = database.Schemas.Values.SelectMany(schema => schema.AliasTypes.Values.Select(a => (a.UserTypeId, schema, Alias: (AliasType?)a, a.Name))
-            .Concat(schema.TableTypes.Values.Select(t => (t.UserTypeId, schema, Alias: (AliasType?)null, t.Name))))
+        var types = database.Schemas.EnumerateValues().SelectMany(schema => schema.AliasTypes.EnumerateValues().Select(a => (a.UserTypeId, schema, Alias: (AliasType?)a, a.Name))
+            .Concat(schema.TableTypes.EnumerateValues().Select(t => (t.UserTypeId, schema, Alias: (AliasType?)null, t.Name))))
             .OrderBy(t => t.UserTypeId);
         foreach (var (_, schema, alias, name) in types)
         {
@@ -1143,7 +1143,7 @@ internal static partial class BuiltInResources
         var check = SqlValue.FromVarchar("CHECK");
         var no = SqlValue.FromVarchar("NO");
         var sysSchemaName = SqlValue.FromSystemName("sys");
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
             var schemaName = SqlValue.FromSystemName(schema.Name);
             foreach (var table in CatalogTables(schema, batch))
@@ -1171,7 +1171,7 @@ internal static partial class BuiltInResources
 
             // A table type's constraints list under the sys schema with no
             // table named (probed 2026-09-26 against SQL Server 2025).
-            foreach (var tableType in schema.TableTypes.Values.OrderBy(t => t.ObjectId))
+            foreach (var tableType in schema.TableTypes.EnumerateValues().OrderBy(t => t.ObjectId))
             {
                 var shape = tableType.CatalogShape;
                 SqlValue[] TypeRow(string constraintName, SqlValue constraintType) =>
@@ -1206,7 +1206,7 @@ internal static partial class BuiltInResources
     {
         _ = batch;
         var catalog = SqlValue.FromSystemName(database.Name);
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
             var schemaName = SqlValue.FromSystemName(schema.Name);
             foreach (var table in CatalogTables(schema, batch))
@@ -1258,7 +1258,7 @@ internal static partial class BuiltInResources
     {
         _ = batch;
         var catalog = SqlValue.FromSystemName(database.Name);
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
             var schemaName = SqlValue.FromSystemName(schema.Name);
             foreach (var table in CatalogTables(schema, batch))
@@ -1293,7 +1293,7 @@ internal static partial class BuiltInResources
 
             // A table type contributes only its CHECKs, named against its type
             // table in the sys schema (probed 2026-09-26 against SQL Server 2025).
-            foreach (var tableType in schema.TableTypes.Values.OrderBy(t => t.ObjectId))
+            foreach (var tableType in schema.TableTypes.EnumerateValues().OrderBy(t => t.ObjectId))
             {
                 var shape = tableType.CatalogShape;
                 var sysSchema = SqlValue.FromSystemName("sys");
@@ -1351,7 +1351,7 @@ internal static partial class BuiltInResources
     {
         _ = batch;
         var catalog = SqlValue.FromSystemName(database.Name);
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
             var schemaName = SqlValue.FromSystemName(schema.Name);
             foreach (var table in CatalogTables(schema, batch))
@@ -1389,7 +1389,7 @@ internal static partial class BuiltInResources
         var catalog = SqlValue.FromSystemName(database.Name);
         var simple = SqlValue.FromVarchar("SIMPLE");
         var nullName = SqlValue.Null(SqlType.SystemName);
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
             var schemaName = SqlValue.FromSystemName(schema.Name);
             foreach (var table in CatalogTables(schema, batch))
@@ -1444,7 +1444,7 @@ internal static partial class BuiltInResources
 
     private static string SchemaNameForTable(Database database, HeapTable table)
     {
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
             if (schema.SchemaId == table.SchemaId)
                 return schema.Name;
@@ -1500,7 +1500,7 @@ internal static partial class BuiltInResources
     {
         yield return SystemAssemblyRow();
 
-        foreach (var assembly in database.Assemblies.Values.OrderBy(a => a.AssemblyId))
+        foreach (var assembly in database.Assemblies.EnumerateValues().OrderBy(a => a.AssemblyId))
         {
             yield return
             [
@@ -1525,7 +1525,7 @@ internal static partial class BuiltInResources
     /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateAssemblyFiles(Database database)
     {
-        foreach (var assembly in database.Assemblies.Values.OrderBy(a => a.AssemblyId))
+        foreach (var assembly in database.Assemblies.EnumerateValues().OrderBy(a => a.AssemblyId))
         {
             yield return
             [
@@ -1547,28 +1547,28 @@ internal static partial class BuiltInResources
     /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateAssemblyModules(Database database)
     {
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
-            foreach (var function in schema.Functions.Values)
+            foreach (var (_, function) in schema.Functions)
             {
                 if (function is ClrFunction clr)
                     yield return AssemblyModuleRow(clr.ObjectId, clr.Entry);
             }
 
-            foreach (var procedure in schema.Procedures.Values)
+            foreach (var (_, procedure) in schema.Procedures)
             {
                 if (procedure.ClrEntry is { } entry)
                     yield return AssemblyModuleRow(procedure.ObjectId, entry);
             }
 
-            foreach (var trigger in schema.Triggers.Values)
+            foreach (var (_, trigger) in schema.Triggers)
             {
                 if (trigger.ClrEntry is { } entry)
                     yield return AssemblyModuleRow(trigger.ObjectId, entry);
             }
         }
 
-        foreach (var ddl in database.DdlTriggers.Values)
+        foreach (var (_, ddl) in database.DdlTriggers)
         {
             if (ddl.ClrEntry is { } entry)
                 yield return AssemblyModuleRow(ddl.ObjectId, entry);

@@ -27,9 +27,9 @@ internal abstract class BindableObject : SchemaObject
     /// </summary>
     public bool IsBound()
     {
-        foreach (var schema in this.Schema.Database.Schemas.Values)
+        foreach (var (_, schema) in this.Schema.Database.Schemas)
         {
-            foreach (var table in schema.HeapTables.Values)
+            foreach (var (_, table) in schema.HeapTables)
             {
                 foreach (var column in table.Columns)
                 {
@@ -37,7 +37,7 @@ internal abstract class BindableObject : SchemaObject
                         return true;
                 }
             }
-            foreach (var alias in schema.AliasTypes.Values)
+            foreach (var (_, alias) in schema.AliasTypes)
             {
                 if (ReferenceEquals(alias.BoundDefault, this) || ReferenceEquals(alias.BoundRule, this))
                     return true;

@@ -62,7 +62,7 @@ internal sealed class ObjectSchemaName : Expression
         // login can't reach at all, exactly as the sibling OBJECT_NAME does.
         if (!PermissionEnforcement.TryMetadataVisibilityPrincipal(runtime.Batch, database, out var principalId))
             return SqlValue.Null(MetadataNameType(runtime.Batch));
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
             foreach (var obj in schema.SchemaObjects())
             {
@@ -75,7 +75,7 @@ internal sealed class ObjectSchemaName : Expression
                     ? SqlValue.Null(MetadataNameType(runtime.Batch))
                     : SqlValue.FromNVarchar(MetadataNameType(runtime.Batch), schema.Name);
             }
-            foreach (var tableType in schema.TableTypes.Values)
+            foreach (var (_, tableType) in schema.TableTypes)
             {
                 if (tableType.ObjectId == id)
                     return SqlValue.FromNVarchar(MetadataNameType(runtime.Batch), schema.Name);

@@ -68,25 +68,25 @@ internal sealed class ObjectProperty : Expression
 
     internal static SchemaObject? FindObject(Database database, int id)
     {
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
-            foreach (var t in schema.HeapTables.Values)
+            foreach (var (_, t) in schema.HeapTables)
                 if (t.ObjectId == id) return t;
-            foreach (var v in schema.Views.Values)
+            foreach (var (_, v) in schema.Views)
                 if (v.ObjectId == id) return v;
-            foreach (var p in schema.Procedures.Values)
+            foreach (var (_, p) in schema.Procedures)
                 if (p.ObjectId == id) return p;
-            foreach (var f in schema.Functions.Values)
+            foreach (var (_, f) in schema.Functions)
                 if (f.ObjectId == id) return f;
-            foreach (var tr in schema.Triggers.Values)
+            foreach (var (_, tr) in schema.Triggers)
                 if (tr.ObjectId == id) return tr;
-            foreach (var s in schema.Sequences.Values)
+            foreach (var (_, s) in schema.Sequences)
                 if (s.ObjectId == id) return s;
-            foreach (var sn in schema.Synonyms.Values)
+            foreach (var (_, sn) in schema.Synonyms)
                 if (sn.ObjectId == id) return sn;
-            foreach (var d in schema.Defaults.Values)
+            foreach (var (_, d) in schema.Defaults)
                 if (d.ObjectId == id) return d;
-            foreach (var r in schema.Rules.Values)
+            foreach (var (_, r) in schema.Rules)
                 if (r.ObjectId == id) return r;
         }
         return null;
@@ -161,20 +161,10 @@ internal sealed class ObjectProperty : Expression
     /// </summary>
     internal static Schema? FindOwningSchema(Database database, SchemaObject obj)
     {
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
-            if (schema.HeapTables.Values.Contains(obj)
-                || schema.Views.Values.Contains(obj)
-                || schema.Procedures.Values.Contains(obj)
-                || schema.Functions.Values.Contains(obj)
-                || schema.Triggers.Values.Contains(obj)
-                || schema.Sequences.Values.Contains(obj)
-                || schema.Synonyms.Values.Contains(obj)
-                || schema.Defaults.Values.Contains(obj)
-                || schema.Rules.Values.Contains(obj))
-            {
+            if (schema.SchemaObjects().Contains(obj))
                 return schema;
-            }
         }
         return null;
     }
@@ -364,9 +354,9 @@ internal sealed class ObjectProperty : Expression
 
     private static IEnumerable<Trigger> TriggersOn(Database database, SchemaObject parent)
     {
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
-            foreach (var trigger in schema.Triggers.Values)
+            foreach (var (_, trigger) in schema.Triggers)
             {
                 if (ReferenceEquals(trigger.Parent, parent))
                     yield return trigger;

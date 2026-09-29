@@ -68,6 +68,7 @@ The subsections that follow carry the areas with work in flight.
 - **DML plan residue** — `INSERT … VALUES` and the single-table `UPDATE` / `DELETE` cache a plan per statement and replay it inside any batch, the EF Core `SaveChanges` shapes included ([`plan-cache.md`](plan-cache.md#dml-statement-plans)).
   Open: `MERGE` (every EF multi-row insert), `INSERT … SELECT`, the joined forms, DML through a view, `OUTPUT … INTO`, a statement holding a subquery, and a principal permission checks apply to → [`plan-cache.md`](plan-cache.md#not-modeled--future).
   `MERGE` is last in value: a 10-row EF insert's `MERGE` measured ~470 µs in the simulator of which ~17 µs is its parse (2026-09-29), so its execution is the lever there, not a plan.
+  Its per-statement trigger lookup, 8.2% of its simulator time, is memoized per parent ([`plan-cache.md`](plan-cache.md#performance-impact)).
   **Benchmark note**: naive in-process A/B here is worthless — measuring the cases in one process made results order-dependent by up to 2× (whichever case ran first absorbed tiered-JIT warmup; "fixed text" read 28.3 µs first and 14.5 µs last). One case per process is the only shape that reproduced.
   Warm-up is also longer than it looks: a single-row `UPDATE` batch read ~100 µs after 3,000 iterations and 12 µs after 100,000, so a run warms by elapsed time (seconds), not by an iteration count.
 

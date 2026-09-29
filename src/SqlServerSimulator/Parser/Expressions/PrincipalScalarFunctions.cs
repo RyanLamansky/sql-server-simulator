@@ -44,7 +44,7 @@ internal sealed class UserName : Expression
         if (idValue.IsNull)
             return SqlValue.Null(MetadataNameType(runtime.Batch));
         var id = ScalarArguments.CoerceToInt(idValue);
-        foreach (var principal in runtime.Batch.CurrentDatabase.Principals.Values)
+        foreach (var (_, principal) in runtime.Batch.CurrentDatabase.Principals)
         {
             if (principal.PrincipalId == id)
                 return SqlValue.FromNVarchar(MetadataNameType(runtime.Batch), principal.Name);

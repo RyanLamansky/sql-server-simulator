@@ -161,9 +161,9 @@ partial class Simulation
             case false:
                 if (target.ChangeTracking is null)
                     throw SimulatedSqlException.ChangeTrackingDisabledOnDatabase(target.Name, state: 1);
-                foreach (var schema in target.Schemas.Values)
+                foreach (var (_, schema) in target.Schemas)
                 {
-                    foreach (var table in schema.HeapTables.Values)
+                    foreach (var (_, table) in schema.HeapTables)
                     {
                         if (table.ChangeTracking is not null)
                             throw SimulatedSqlException.ChangeTrackingTablesStillEnabled(target.Name);

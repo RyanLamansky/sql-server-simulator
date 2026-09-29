@@ -229,9 +229,9 @@ internal sealed class ClrUserDefinedType
     /// </summary>
     public static ClrUserDefinedType? FindByClrType(Database database, Type clrType)
     {
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
-            foreach (var alias in schema.AliasTypes.Values)
+            foreach (var (_, alias) in schema.AliasTypes)
             {
                 if (alias.UnderlyingType is ClrUdtSqlType { Udt: var udt } && udt.Type == clrType)
                     return udt;

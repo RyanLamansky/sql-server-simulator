@@ -362,7 +362,7 @@ partial class Simulation
 
         if (asDefault)
         {
-            foreach (var other in database.FullTextCatalogs.Values)
+            foreach (var (_, other) in database.FullTextCatalogs)
                 other.IsDefault = false;
             catalog.IsDefault = true;
         }

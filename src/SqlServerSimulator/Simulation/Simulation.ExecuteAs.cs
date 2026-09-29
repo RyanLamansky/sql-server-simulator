@@ -223,7 +223,7 @@ partial class Simulation
         }
         if (principalId is int id)
         {
-            foreach (var principal in database.Principals.Values)
+            foreach (var (_, principal) in database.Principals)
             {
                 if (principal.PrincipalId != id)
                     continue;

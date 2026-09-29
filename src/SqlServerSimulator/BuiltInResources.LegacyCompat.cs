@@ -277,7 +277,7 @@ internal static partial class BuiltInResources
     private static IEnumerable<SqlValue[]> EnumerateSyscomments(Database database)
     {
         var entries = new List<(int Id, short Number, string? Text)>();
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
             foreach (var obj in schema.SchemaObjects())
             {
@@ -304,7 +304,7 @@ internal static partial class BuiltInResources
                 }
             }
         }
-        foreach (var ddlTrigger in database.DdlTriggers.Values)
+        foreach (var (_, ddlTrigger) in database.DdlTriggers)
             entries.Add((ddlTrigger.ObjectId, 0, ddlTrigger.DefinitionText));
         entries.Sort(static (a, b) => a.Id != b.Id ? a.Id.CompareTo(b.Id) : a.Number.CompareTo(b.Number));
 
@@ -636,7 +636,7 @@ internal static partial class BuiltInResources
             zeroSmall,
         ];
 
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
             foreach (var obj in schema.SchemaObjects().OrderBy(o => o.ObjectId))
             {
@@ -669,7 +669,7 @@ internal static partial class BuiltInResources
         var oneInt = SqlValue.FromInt32(1);
         var nullSid = SqlValue.Null(SqlType.Varbinary);
         var nullVarchar = SqlValue.Null(SqlType.Varchar);
-        foreach (var p in database.Principals.Values.OrderBy(p => p.PrincipalId))
+        foreach (var p in database.Principals.EnumerateValues().OrderBy(p => p.PrincipalId))
         {
             var isUser = Collation.Baseline.Equals(p.TypeCode, "S") || Collation.Baseline.Equals(p.TypeCode, "U") || Collation.Baseline.Equals(p.TypeCode, "G");
             var isRole = Collation.Baseline.Equals(p.TypeCode, "R");

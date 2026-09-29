@@ -34,9 +34,9 @@ internal static class VersionStoreDmvs
         var zeroSmallInt = SqlValue.FromInt16(0);
         var nullVarbinary = SqlValue.Null(VarbinarySqlType.MaxForm);
         var perTxCounter = new Dictionary<long, int>();
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
-            foreach (var table in schema.HeapTables.Values)
+            foreach (var (_, table) in schema.HeapTables)
             {
                 if (table.RowVersions.IsEmpty)
                     continue;
@@ -85,9 +85,9 @@ internal static class VersionStoreDmvs
     {
         _ = batch;
         long totalBytes = 0;
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
-            foreach (var table in schema.HeapTables.Values)
+            foreach (var (_, table) in schema.HeapTables)
             {
                 if (table.RowVersions.IsEmpty)
                     continue;

@@ -567,7 +567,7 @@ internal static partial class BuiltInResources
         // char(1): a principal's discriminator is a single letter and real
         // declares the column that width, unlike sys.objects' char(2) type.
         var charOne = SqlType.GetChar(1);
-        foreach (var p in database.Principals.Values.OrderBy(p => p.PrincipalId))
+        foreach (var p in database.Principals.EnumerateValues().OrderBy(p => p.PrincipalId))
         {
             var createDate = SqlValue.FromDateTime(p.CreateDate);
             var isCatalogPrincipal = p.PrincipalId is Database.SysPrincipalId or Database.InformationSchemaPrincipalId;
@@ -764,7 +764,7 @@ internal static partial class BuiltInResources
             ]));
         }
 
-        foreach (var login in simulation.Logins.Values)
+        foreach (var (_, login) in simulation.Logins)
         {
             rows.Add((login.PrincipalId, [
                 SqlValue.FromSystemName(login.Name), SqlValue.FromInt32(login.PrincipalId), SqlValue.FromVarbinary(DeriveLoginSid(login.Name)),
@@ -773,7 +773,7 @@ internal static partial class BuiltInResources
             ]));
         }
 
-        foreach (var role in simulation.ServerRoles.Values)
+        foreach (var (_, role) in simulation.ServerRoles)
         {
             rows.Add((role.PrincipalId, [
                 SqlValue.FromSystemName(role.Name), SqlValue.FromInt32(role.PrincipalId), SqlValue.FromVarbinary(DeriveLoginSid(role.Name)),
@@ -941,7 +941,7 @@ internal static partial class BuiltInResources
         ];
 
         var visibility = ServerPrincipalVisibility(batch);
-        foreach (var login in simulation.Logins.Values.OrderBy(l => l.PrincipalId))
+        foreach (var login in simulation.Logins.EnumerateValues().OrderBy(l => l.PrincipalId))
         {
             if (visibility is not null && !visibility(login.PrincipalId))
                 continue;

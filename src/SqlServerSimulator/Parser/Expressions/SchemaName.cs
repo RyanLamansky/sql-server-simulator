@@ -32,7 +32,7 @@ internal sealed class SchemaName : Expression
         if (idValue.IsNull)
             return SqlValue.Null(MetadataNameType(runtime.Batch));
         var id = ScalarArguments.CoerceToInt(idValue);
-        foreach (var schema in runtime.Batch.CurrentDatabase.Schemas.Values)
+        foreach (var (_, schema) in runtime.Batch.CurrentDatabase.Schemas)
         {
             if (schema.SchemaId == id)
                 return SqlValue.FromNVarchar(MetadataNameType(runtime.Batch), schema.Name);

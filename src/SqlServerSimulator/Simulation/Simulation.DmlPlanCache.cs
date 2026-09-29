@@ -229,16 +229,6 @@ partial class Simulation
         || (clientOutput && TableHasAnyTrigger(batch, table));
 
     /// <summary>Whether any DML trigger, enabled or not, is attached to <paramref name="table"/>.</summary>
-    private static bool TableHasAnyTrigger(BatchContext batch, Storage.HeapTable table)
-    {
-        foreach (var schema in batch.DatabaseFor(table).Schemas.Values)
-        {
-            foreach (var trigger in schema.Triggers.Values)
-            {
-                if (ReferenceEquals(trigger.Parent, table))
-                    return true;
-            }
-        }
-        return false;
-    }
+    private static bool TableHasAnyTrigger(BatchContext batch, Storage.HeapTable table) =>
+        TriggersAttachedTo(batch, table).Length != 0;
 }

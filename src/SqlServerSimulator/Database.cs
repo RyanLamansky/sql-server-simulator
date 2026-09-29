@@ -621,7 +621,7 @@ internal sealed partial class Database
     public int RegisterFilegroup(string name)
     {
         lock (this.Filegroups)
-            return this.Filegroups.GetOrAdd(name, _ => this.Filegroups.Values.Max() + 1);
+            return this.Filegroups.GetOrAdd(name, _ => this.Filegroups.EnumerateValues().Max() + 1);
     }
 
     /// <summary>

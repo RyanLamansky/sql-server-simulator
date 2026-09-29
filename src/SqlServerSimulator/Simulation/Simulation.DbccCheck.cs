@@ -694,7 +694,7 @@ partial class Simulation
         var tables = new List<(HeapTable, string)>();
         foreach (var (schemaName, schema) in database.Schemas)
         {
-            foreach (var table in schema.HeapTables.Values)
+            foreach (var (_, table) in schema.HeapTables)
             {
                 if (filegroupId is { } only && table.FilegroupId != only)
                     continue;

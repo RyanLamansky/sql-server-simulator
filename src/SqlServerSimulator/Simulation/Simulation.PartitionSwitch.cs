@@ -113,7 +113,7 @@ partial class Simulation
     private static string SwitchTableName(BatchContext batch, HeapTable table)
     {
         var database = batch.DatabaseFor(table);
-        var schema = database.Schemas.Values.FirstOrDefault(candidate => candidate.SchemaId == table.SchemaId)?.Name ?? Database.DefaultSchemaName;
+        var schema = database.Schemas.EnumerateValues().FirstOrDefault(candidate => candidate.SchemaId == table.SchemaId)?.Name ?? Database.DefaultSchemaName;
         return $"{database.Name}.{schema}.{table.Name}";
     }
 

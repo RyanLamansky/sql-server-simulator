@@ -212,14 +212,14 @@ partial class Simulation
         var rows = new List<SqlValue[]>();
         if (tableQualifier is null || batch.CurrentDatabase.Collation.Equals(tableQualifier, database.Name))
         {
-            foreach (var schema in database.Schemas.Values)
+            foreach (var (_, schema) in database.Schemas)
             {
                 if (!Matches(ownerPattern, schema.Name))
                     continue;
                 var owner = SqlValue.FromSystemName(schema.Name);
-                foreach (var table in schema.HeapTables.Values)
+                foreach (var (_, table) in schema.HeapTables)
                     AddTableRow(rows, owner, table.Name, "TABLE");
-                foreach (var view in schema.Views.Values)
+                foreach (var (_, view) in schema.Views)
                     AddTableRow(rows, owner, view.Name, "VIEW");
             }
 
@@ -328,18 +328,18 @@ partial class Simulation
         var rows = new List<SqlValue[]>();
         if (tableQualifier is null || batch.CurrentDatabase.Collation.Equals(tableQualifier, database.Name))
         {
-            foreach (var schema in database.Schemas.Values.OrderBy(s => s.Name, StringComparer.OrdinalIgnoreCase))
+            foreach (var schema in database.Schemas.EnumerateValues().OrderBy(s => s.Name, StringComparer.OrdinalIgnoreCase))
             {
                 if (!Matches(ownerPattern, schema.Name))
                     continue;
                 var owner = SqlValue.FromSystemName(schema.Name);
-                foreach (var table in schema.HeapTables.Values.OrderBy(t => t.Name, StringComparer.OrdinalIgnoreCase))
+                foreach (var table in schema.HeapTables.EnumerateValues().OrderBy(t => t.Name, StringComparer.OrdinalIgnoreCase))
                 {
                     if (Matches(namePattern, table.Name))
                         AppendColumnRows(rows, qualifier, owner, table.Name, table.Columns, byName, columnPattern, classic);
                 }
 
-                foreach (var view in schema.Views.Values.OrderBy(v => v.Name, StringComparer.OrdinalIgnoreCase))
+                foreach (var view in schema.Views.EnumerateValues().OrderBy(v => v.Name, StringComparer.OrdinalIgnoreCase))
                 {
                     if (Matches(namePattern, view.Name))
                         AppendColumnRows(rows, qualifier, owner, view.Name, view.OutputColumns, byName, columnPattern, classic);
@@ -728,7 +728,7 @@ partial class Simulation
         var rows = new List<SqlValue[]>();
         if (tableName is not null && (tableQualifier is null || collation.Equals(tableQualifier, database.Name)))
         {
-            foreach (var schema in database.Schemas.Values)
+            foreach (var (_, schema) in database.Schemas)
             {
                 if (tableOwner is not null && !collation.Equals(tableOwner, schema.Name))
                     continue;
@@ -849,7 +849,7 @@ partial class Simulation
         var rows = new List<SqlValue[]>();
         if (tableName is not null && (tableQualifier is null || collation.Equals(tableQualifier, database.Name)))
         {
-            foreach (var schema in database.Schemas.Values)
+            foreach (var (_, schema) in database.Schemas)
             {
                 if (tableOwner is not null && !collation.Equals(tableOwner, schema.Name))
                     continue;
@@ -1053,12 +1053,12 @@ partial class Simulation
         var rows = new List<SqlValue[]>();
         if (spQualifier is null || database.Collation.Equals(spQualifier, database.Name))
         {
-            foreach (var schema in database.Schemas.Values)
+            foreach (var (_, schema) in database.Schemas)
             {
                 if (!Matches(ownerPattern, schema.Name))
                     continue;
                 var owner = SqlValue.FromSystemName(schema.Name);
-                foreach (var procedure in schema.Procedures.Values)
+                foreach (var (_, procedure) in schema.Procedures)
                 {
                     if (!Matches(namePattern, procedure.Name))
                         continue;
@@ -1079,7 +1079,7 @@ partial class Simulation
                 }
                 // Functions list too, numbered ;0 but typed as procedures
                 // (probed 2026-09-26 against SQL Server 2025).
-                foreach (var function in schema.Functions.Values)
+                foreach (var (_, function) in schema.Functions)
                 {
                     if (!Matches(namePattern, function.Name))
                         continue;

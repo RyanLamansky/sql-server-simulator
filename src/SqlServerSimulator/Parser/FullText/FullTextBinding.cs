@@ -211,7 +211,7 @@ internal static class FullTextColumnSpec
             throw SimulatedSqlException.FullTextTableNotIndexed(reportedTableName);
 
         var accentSensitive = true;
-        foreach (var catalog in database.FullTextCatalogs.Values)
+        foreach (var (_, catalog) in database.FullTextCatalogs)
         {
             if (catalog.Id == index.CatalogId)
             {

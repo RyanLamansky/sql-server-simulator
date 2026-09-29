@@ -343,7 +343,7 @@ partial class Simulation
                 continue;
             }
             var schemaName = Database.DefaultSchemaName;
-            foreach (var schema in database.Schemas.Values)
+            foreach (var (_, schema) in database.Schemas)
             {
                 if (schema.SchemaId == named.SchemaId)
                     schemaName = schema.Name;

@@ -58,7 +58,7 @@ partial class Simulation
         {
             if (!database.PartitionFunctions.TryGetValue(name, out var function))
                 throw SimulatedSqlException.PartitionObjectNotFound("drop", "function", name);
-            if (database.PartitionSchemes.Values.Any(scheme => ReferenceEquals(scheme.Function, function)))
+            if (database.PartitionSchemes.EnumerateValues().Any(scheme => ReferenceEquals(scheme.Function, function)))
                 throw SimulatedSqlException.PartitionFunctionInUse(function.Name);
             if (SchemaBinding.FindPartitionFunctionReference(database, function.Name) is { } module)
                 throw SimulatedSqlException.PartitionFunctionReferenced(name, module.Name);
@@ -359,7 +359,7 @@ partial class Simulation
         if (position < 0)
             position = boundaries.Length;
         var found = position < boundaries.Length && PartitionFunction.Compare(boundaries[position], boundary) == 0;
-        var schemes = database.PartitionSchemes.Values
+        var schemes = database.PartitionSchemes.EnumerateValues()
             .Where(scheme => ReferenceEquals(scheme.Function, function))
             .OrderBy(scheme => scheme.DataSpaceId)
             .ToArray();
@@ -571,9 +571,9 @@ partial class Simulation
     /// <summary>Whether a table or index in <paramref name="database"/> is placed on <paramref name="scheme"/>.</summary>
     private static bool PartitionSchemeIsInUse(Database database, PartitionScheme scheme)
     {
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
-            foreach (var table in schema.HeapTables.Values)
+            foreach (var (_, table) in schema.HeapTables)
             {
                 if (ReferenceEquals(table.Partitioning?.Scheme, scheme)
                     || table.Indexes.Exists(index => ReferenceEquals(index.Partitioning?.Scheme, scheme))

@@ -111,9 +111,9 @@ internal sealed class FullTextCatalogProperty : Expression
 
     private static IEnumerable<HeapTable> IndexedTables(RuntimeContext runtime, int catalogId)
     {
-        foreach (var schema in runtime.Batch.CurrentDatabase.Schemas.Values)
+        foreach (var (_, schema) in runtime.Batch.CurrentDatabase.Schemas)
         {
-            foreach (var table in schema.HeapTables.Values)
+            foreach (var (_, table) in schema.HeapTables)
             {
                 if (table.FullTextIndex?.CatalogId == catalogId)
                     yield return table;

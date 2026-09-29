@@ -25,7 +25,7 @@ internal sealed class ExtendedPropertyTargets
 
     public ExtendedPropertyTargets(Database database)
     {
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
             this.schemaNames[schema.SchemaId] = schema.Name;
             foreach (var obj in schema.SchemaObjects())
@@ -45,16 +45,16 @@ internal sealed class ExtendedPropertyTargets
                         this.objects[defaultConstraint.ObjectId] = (defaultConstraint, table);
                 }
             }
-            foreach (var tableType in schema.TableTypes.Values)
+            foreach (var (_, tableType) in schema.TableTypes)
                 this.userTypes[tableType.UserTypeId] = (schema.Name, tableType.Name, tableType);
-            foreach (var aliasType in schema.AliasTypes.Values)
+            foreach (var (_, aliasType) in schema.AliasTypes)
                 this.userTypes[aliasType.UserTypeId] = (schema.Name, aliasType.Name, null);
-            foreach (var collection in schema.XmlSchemaCollections.Values)
+            foreach (var (_, collection) in schema.XmlSchemaCollections)
                 this.xmlSchemaCollections[collection.Id] = (schema.Name, collection.Name);
         }
-        foreach (var ddlTrigger in database.DdlTriggers.Values)
+        foreach (var (_, ddlTrigger) in database.DdlTriggers)
             this.objects[ddlTrigger.ObjectId] = (ddlTrigger, null);
-        foreach (var principal in database.Principals.Values)
+        foreach (var (_, principal) in database.Principals)
             this.principalNames[principal.PrincipalId] = principal.Name;
         foreach (var (name, dataSpaceId) in database.Filegroups)
             this.dataSpaceNames[dataSpaceId] = name;

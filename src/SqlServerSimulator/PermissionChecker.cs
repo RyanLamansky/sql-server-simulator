@@ -714,7 +714,7 @@ internal static class PermissionEnforcement
 
     private static string SchemaNameFor(Database database, int schemaId)
     {
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
             if (schema.SchemaId == schemaId)
                 return schema.Name;
@@ -978,7 +978,7 @@ internal static class PermissionChecker
             case ClassSchema:
                 return closure.Contains(Ownership.SchemaOwnerId(database, majorId));
             case ClassDatabasePrincipal:
-                foreach (var principal in database.Principals.Values)
+                foreach (var (_, principal) in database.Principals)
                 {
                     if (principal.PrincipalId == majorId)
                         return principal.TypeCode == "R" && closure.Contains(principal.OwningPrincipalId);

@@ -35,7 +35,7 @@ internal static partial class BuiltInResources
         ], (batch, database) =>
         {
             var rows = new List<SqlValue[]>();
-            foreach (var s in database.Schemas.Values)
+            foreach (var (_, s) in database.Schemas)
                 rows.Add(SchemaRow(s.Name, s.SchemaId, s.PrincipalId));
             foreach (var (name, id) in FixedCatalogOnlySchemas)
             {
@@ -186,7 +186,7 @@ internal static partial class BuiltInResources
             new("history_retention_period_unit", SqlType.Int32, null, true),
             new("history_retention_period_unit_desc", NVarcharSqlType.Get(10, Collation.Catalog, Coercibility.Implicit), 10, true),
         ], (batch, database) =>
-            database.Schemas.Values
+            database.Schemas.EnumerateValues()
                 .SelectMany(s => CatalogTables(s, batch))
                 .OrderBy(t => t.ObjectId)
                 .Select(t =>
@@ -689,7 +689,7 @@ internal static partial class BuiltInResources
         if (!userColumns)
             yield break;
 
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
             foreach (var t in CatalogTables(schema, batch).OrderBy(t => t.ObjectId))
             {
@@ -699,7 +699,7 @@ internal static partial class BuiltInResources
                 foreach (var col in t.Columns)
                     yield return (Row(objectId, col, col.ColumnId, declared: true), col, ColumnHost.Table);
             }
-            foreach (var fn in schema.Functions.Values.OrderBy(f => f.ObjectId))
+            foreach (var fn in schema.Functions.EnumerateValues().OrderBy(f => f.ObjectId))
             {
                 if (hasIdFilter && fn.ObjectId != wantObjectId)
                     continue;
@@ -714,7 +714,7 @@ internal static partial class BuiltInResources
                 for (var i = 0; i < outputColumns.Length; i++)
                     yield return (Row(fnObjectId, outputColumns[i], i + 1, declared), outputColumns[i], declared ? ColumnHost.ReturnTable : ColumnHost.Projection);
             }
-            foreach (var view in schema.Views.Values.OrderBy(v => v.ObjectId))
+            foreach (var view in schema.Views.EnumerateValues().OrderBy(v => v.ObjectId))
             {
                 if (hasIdFilter && view.ObjectId != wantObjectId)
                     continue;
@@ -724,7 +724,7 @@ internal static partial class BuiltInResources
             }
             // Table types surface their columns keyed by type_table_object_id
             // (probe G3).
-            foreach (var tt in schema.TableTypes.Values.OrderBy(t => t.ObjectId))
+            foreach (var tt in schema.TableTypes.EnumerateValues().OrderBy(t => t.ObjectId))
             {
                 if (hasIdFilter && tt.ObjectId != wantObjectId)
                     continue;
@@ -853,10 +853,10 @@ internal static partial class BuiltInResources
         var notPublished = SqlValue.FromBoolean(false);
         var typeCode = SqlValue.FromChar(charTwo, "SN");
         var typeDesc = SqlValue.FromNVarchar("SYNONYM");
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
             var schemaId = SqlValue.FromInt32(schema.SchemaId);
-            foreach (var synonym in schema.Synonyms.Values.OrderBy(s => s.ObjectId))
+            foreach (var synonym in schema.Synonyms.EnumerateValues().OrderBy(s => s.ObjectId))
             {
                 yield return [
                     SqlValue.FromSystemName(synonym.Name),
@@ -919,7 +919,7 @@ internal static partial class BuiltInResources
         var msShipped = SqlValue.FromBoolean(true);
         var defaultType = SqlValue.FromChar(charTwo, "D ");
         var defaultTypeDesc = SqlValue.FromNVarchar("DEFAULT_CONSTRAINT");
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
             // Table types' internal type tables: one TYPE_TABLE ('TT') row per
             // user table type, named TT_<type>_<object_id:X8>, homed in the
@@ -928,7 +928,7 @@ internal static partial class BuiltInResources
             // real's convention). DacFx's table-type populator INNER JOINs
             // sys.objects on type_table_object_id and NREs client-side when
             // the parent row is absent.
-            foreach (var tt in schema.TableTypes.Values.OrderBy(t => t.ObjectId))
+            foreach (var tt in schema.TableTypes.EnumerateValues().OrderBy(t => t.ObjectId))
             {
                 yield return [
                     SqlValue.FromInt32(tt.ObjectId),

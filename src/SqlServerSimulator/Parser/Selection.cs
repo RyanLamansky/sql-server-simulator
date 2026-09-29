@@ -5496,7 +5496,7 @@ internal sealed partial class Selection
         if (heapTable.Name.StartsWith('#'))
             return $"tempdb.dbo.{heapTable.Name}";
         var db = context.Batch.CurrentDatabase;
-        var schemaName = db.Schemas.Values.FirstOrDefault(s => s.SchemaId == heapTable.SchemaId)?.Name ?? Database.DefaultSchemaName;
+        var schemaName = db.Schemas.EnumerateValues().FirstOrDefault(s => s.SchemaId == heapTable.SchemaId)?.Name ?? Database.DefaultSchemaName;
         return $"{db.Name}.{schemaName}.{heapTable.Name}";
     }
 }

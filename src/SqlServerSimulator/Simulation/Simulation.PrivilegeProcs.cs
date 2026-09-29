@@ -217,15 +217,15 @@ partial class Simulation
     /// </summary>
     private static IEnumerable<(string Schema, string Owner, int ObjectId, string Name)> PrivilegeObjects(Database database)
     {
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
             // The fixed schemas own their catalog views under their own names.
             var ownerName = schema.SchemaId is Database.InformationSchemaId or Database.SysSchemaId
                 ? schema.Name
                 : PrincipalName(database, schema.PrincipalId) ?? schema.Name;
-            foreach (var table in schema.HeapTables.Values)
+            foreach (var (_, table) in schema.HeapTables)
                 yield return (schema.Name, ownerName, table.ObjectId, table.Name);
-            foreach (var view in schema.Views.Values)
+            foreach (var (_, view) in schema.Views)
                 yield return (schema.Name, ownerName, view.ObjectId, view.Name);
             foreach (var (systemView, schemaId) in BuiltInResources.SystemViews.Value)
             {
@@ -269,7 +269,7 @@ partial class Simulation
 
     private static string? PrincipalName(Database database, int principalId)
     {
-        foreach (var principal in database.Principals.Values)
+        foreach (var (_, principal) in database.Principals)
         {
             if (principal.PrincipalId == principalId)
                 return principal.Name;

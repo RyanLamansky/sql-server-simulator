@@ -76,7 +76,7 @@ partial class Simulation
             return true;
         }
 
-        foreach (var candidate in target.Principals.Values)
+        foreach (var (_, candidate) in target.Principals)
         {
             if (candidate.LoginName is { } linked && target.Collation.Equals(linked, loginName))
             {

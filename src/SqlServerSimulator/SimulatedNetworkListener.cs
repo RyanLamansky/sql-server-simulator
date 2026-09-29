@@ -84,7 +84,7 @@ public sealed class SimulatedNetworkListener : IDisposable, IAsyncDisposable
         this.stopSource.Cancel();
         this.primaryListener.Dispose();
         this.secondaryListener?.Dispose();
-        foreach (var session in this.sessions.Keys)
+        foreach (var (session, _) in this.sessions)
             session.Abort();
 
         this.ServerCertificate.Dispose();

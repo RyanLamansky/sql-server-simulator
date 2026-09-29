@@ -209,7 +209,7 @@ partial class Simulation
             var schemaId = schemaName == "INFORMATION_SCHEMA" ? Database.InformationSchemaId : Database.SysSchemaId;
             objects[id] = new HelpProtectObject(schemaName, view.Name, schemaId, isTable: false, view.Columns);
         }
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
             foreach (var schemaObject in schema.SchemaObjects())
             {
@@ -490,7 +490,7 @@ partial class Simulation
     // as text when nothing owns it any more.
     private static string HelpProtectPrincipalName(Database database, int principalId)
     {
-        foreach (var principal in database.Principals.Values)
+        foreach (var (_, principal) in database.Principals)
         {
             if (principal.PrincipalId == principalId)
                 return principal.Name;

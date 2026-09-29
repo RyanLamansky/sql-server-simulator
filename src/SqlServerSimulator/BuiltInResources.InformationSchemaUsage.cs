@@ -78,7 +78,7 @@ internal static partial class BuiltInResources
     private static IEnumerable<SqlValue[]> EnumerateInformationSchemaCheckConstraints(Parser.BatchContext batch, Database database)
     {
         var catalog = SqlValue.FromNVarchar(database.Name);
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
             var schemaName = SqlValue.FromNVarchar(schema.Name);
             var sysSchemaName = SqlValue.FromNVarchar("sys");
@@ -109,10 +109,10 @@ internal static partial class BuiltInResources
         var catalog = SqlValue.FromNVarchar(database.Name);
         var schemaNames = new Dictionary<int, string>();
         var views = new Dictionary<int, View>();
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
             schemaNames[schema.SchemaId] = schema.Name;
-            foreach (var view in schema.Views.Values)
+            foreach (var (_, view) in schema.Views)
                 views[view.ObjectId] = view;
         }
 
@@ -164,10 +164,10 @@ internal static partial class BuiltInResources
         _ = batch;
         var catalog = SqlValue.FromNVarchar(database.Name);
         var radix10 = SqlValue.FromInt16(10);
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
             var schemaName = SqlValue.FromNVarchar(schema.Name);
-            foreach (var sequence in schema.Sequences.Values.OrderBy(s => s.ObjectId))
+            foreach (var sequence in schema.Sequences.EnumerateValues().OrderBy(s => s.ObjectId))
             {
                 var type = sequence.DeclaredType;
                 var (precision, scale) = SequencePrecisionScale(type);
@@ -203,20 +203,20 @@ internal static partial class BuiltInResources
     private static IEnumerable<SqlValue[]> EnumerateInformationSchemaColumnDomainUsage(Parser.BatchContext batch, Database database)
     {
         var catalog = SqlValue.FromNVarchar(database.Name);
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
             var schemaName = SqlValue.FromNVarchar(schema.Name);
             IEnumerable<(string Name, HeapColumn[] Columns)> hosts =
             [
                 .. CatalogTables(schema, batch).OrderBy(t => t.ObjectId).Select(t => (t.Name, t.Columns)),
-                .. schema.Functions.Values.OrderBy(f => f.ObjectId).Select(f => (f.Name, f switch
+                .. schema.Functions.EnumerateValues().OrderBy(f => f.ObjectId).Select(f => (f.Name, f switch
                 {
                     InlineTableValuedFunction inline => inline.OutputColumns,
                     MultiStatementTableValuedFunction multiStatement => multiStatement.OutputColumns,
                     _ => [],
                 })),
-                .. schema.Views.Values.OrderBy(v => v.ObjectId).Select(v => (v.Name, v.OutputColumns)),
-                .. schema.TableTypes.Values.OrderBy(t => t.ObjectId).Select(t => (t.BackingTableName, t.Columns)),
+                .. schema.Views.EnumerateValues().OrderBy(v => v.ObjectId).Select(v => (v.Name, v.OutputColumns)),
+                .. schema.TableTypes.EnumerateValues().OrderBy(t => t.ObjectId).Select(t => (t.BackingTableName, t.Columns)),
             ];
             foreach (var (hostName, columns) in hosts)
             {

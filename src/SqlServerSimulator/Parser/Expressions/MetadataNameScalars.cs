@@ -46,14 +46,14 @@ internal sealed class TypeName : Expression
         // User-defined table types and scalar alias types — only the
         // current database's schemas are searched (matching real
         // SQL Server's single-database TYPE_NAME scope).
-        foreach (var schema in runtime.Batch.CurrentDatabase.Schemas.Values)
+        foreach (var (_, schema) in runtime.Batch.CurrentDatabase.Schemas)
         {
-            foreach (var tt in schema.TableTypes.Values)
+            foreach (var (_, tt) in schema.TableTypes)
             {
                 if (tt.UserTypeId == id)
                     return SqlValue.FromNVarchar(MetadataNameType(runtime.Batch), tt.Name);
             }
-            foreach (var alias in schema.AliasTypes.Values)
+            foreach (var (_, alias) in schema.AliasTypes)
             {
                 if (alias.UserTypeId == id)
                     return SqlValue.FromNVarchar(MetadataNameType(runtime.Batch), alias.Name);

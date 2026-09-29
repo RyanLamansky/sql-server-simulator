@@ -66,9 +66,9 @@ internal static class LockDmvs
 
         var waitsByResource = SnapshotWaiters(sim);
 
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
-            foreach (var t in schema.HeapTables.Values)
+            foreach (var (_, t) in schema.HeapTables)
             {
                 foreach (var row in EmitRowsForResource(objectType, dbId, t.Name, t.ObjectId, t.SchemaLock, waitsByResource, grantStatus, waitStatus))
                     yield return row;
@@ -84,7 +84,7 @@ internal static class LockDmvs
                     foreach (var row in EmitRowsForResource(rowType, dbId, desc, t.ObjectId, kv.Value, waitsByResource, grantStatus, waitStatus, folded))
                         yield return row;
                 }
-                foreach (var group in t.KeyLockGroups.Values)
+                foreach (var (_, group) in t.KeyLockGroups)
                 {
                     foreach (var row in EmitRowsForResource(keyType, dbId, KeyLockGroup.Describe(null), t.ObjectId, group.Infinity, waitsByResource, grantStatus, waitStatus, folded))
                         yield return row;
@@ -95,32 +95,32 @@ internal static class LockDmvs
                     }
                 }
             }
-            foreach (var v in schema.Views.Values)
+            foreach (var (_, v) in schema.Views)
             {
                 foreach (var row in EmitRowsForResource(objectType, dbId, v.Name, v.ObjectId, v.SchemaLock, waitsByResource, grantStatus, waitStatus))
                     yield return row;
             }
-            foreach (var f in schema.Functions.Values)
+            foreach (var (_, f) in schema.Functions)
             {
                 foreach (var row in EmitRowsForResource(objectType, dbId, f.Name, f.ObjectId, f.SchemaLock, waitsByResource, grantStatus, waitStatus))
                     yield return row;
             }
-            foreach (var p in schema.Procedures.Values)
+            foreach (var (_, p) in schema.Procedures)
             {
                 foreach (var row in EmitRowsForResource(objectType, dbId, p.Name, p.ObjectId, p.SchemaLock, waitsByResource, grantStatus, waitStatus))
                     yield return row;
             }
-            foreach (var s in schema.Sequences.Values)
+            foreach (var (_, s) in schema.Sequences)
             {
                 foreach (var row in EmitRowsForResource(objectType, dbId, s.Name, s.ObjectId, s.SchemaLock, waitsByResource, grantStatus, waitStatus))
                     yield return row;
             }
-            foreach (var tt in schema.TableTypes.Values)
+            foreach (var (_, tt) in schema.TableTypes)
             {
                 foreach (var row in EmitRowsForResource(objectType, dbId, tt.Name, tt.ObjectId, tt.SchemaLock, waitsByResource, grantStatus, waitStatus))
                     yield return row;
             }
-            foreach (var tr in schema.Triggers.Values)
+            foreach (var (_, tr) in schema.Triggers)
             {
                 foreach (var row in EmitRowsForResource(objectType, dbId, tr.Name, tr.ObjectId, tr.SchemaLock, waitsByResource, grantStatus, waitStatus))
                     yield return row;
@@ -365,9 +365,9 @@ internal static class LockDmvs
     {
         foreach (var db in sim.Databases.Values)
         {
-            foreach (var schema in db.Schemas.Values)
+            foreach (var (_, schema) in db.Schemas)
             {
-                foreach (var t in schema.HeapTables.Values)
+                foreach (var (_, t) in schema.HeapTables)
                 {
                     if (ReferenceEquals(t.SchemaLock, resource))
                         return $"OBJECT: {t.Name}";

@@ -91,7 +91,7 @@ internal sealed class HeapTableSnapshot
         this.jsonIndexState = [.. table.JsonIndexes.Select(static index => (index.Name, index.ColumnOrdinal, index.IsDisabled))];
         this.triggers = database is null
             ? []
-            : [.. database.Schemas.Values.SelectMany(schema => schema.Triggers.Values)
+            : [.. database.Schemas.EnumerateValues().SelectMany(schema => schema.Triggers.EnumerateValues())
                 .Where(trigger => ReferenceEquals(trigger.Parent, table))
                 .Select(trigger => (trigger, trigger.IsDisabled))];
     }

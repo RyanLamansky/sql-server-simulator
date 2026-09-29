@@ -309,7 +309,7 @@ partial class Simulation
     {
         foreach (var obj in schema.SchemaObjects())
             return obj.Name;
-        foreach (var tt in schema.TableTypes.Values)
+        foreach (var (_, tt) in schema.TableTypes)
             return tt.Name;
         return null;
     }
@@ -537,9 +537,9 @@ partial class Simulation
         // a parameter that references this table type. Procedures are the
         // only object kind that can take a TVP today; views / functions
         // grow this surface when those features land.
-        foreach (var s in context.CurrentDatabase.Schemas.Values)
+        foreach (var (_, s) in context.CurrentDatabase.Schemas)
         {
-            foreach (var proc in s.Procedures.Values)
+            foreach (var (_, proc) in s.Procedures)
             {
                 foreach (var param in proc.Parameters)
                 {
@@ -570,24 +570,24 @@ partial class Simulation
         static bool Types(HeapColumn[] columns, AliasType alias) =>
             Array.Exists(columns, column => ReferenceEquals(column.AliasType, alias));
 
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
-            foreach (var table in schema.HeapTables.Values)
+            foreach (var (_, table) in schema.HeapTables)
             {
                 if (Types(table.Columns, alias))
                     Consider(table.ObjectId, table.Name);
             }
-            foreach (var tableType in schema.TableTypes.Values)
+            foreach (var (_, tableType) in schema.TableTypes)
             {
                 if (Types(tableType.Columns, alias))
                     Consider(tableType.ObjectId, tableType.BackingTableName);
             }
-            foreach (var procedure in schema.Procedures.Values)
+            foreach (var (_, procedure) in schema.Procedures)
             {
                 if (Array.Exists(procedure.Parameters, parameter => ReferenceEquals(parameter.AliasType, alias)))
                     Consider(procedure.ObjectId, procedure.Name);
             }
-            foreach (var function in schema.Functions.Values)
+            foreach (var (_, function) in schema.Functions)
             {
                 if (Array.Exists(function.Parameters, parameter => ReferenceEquals(parameter.AliasType, alias))
                     || (function is ScalarFunction scalar && ReferenceEquals(scalar.ReturnAliasType, alias))
@@ -1065,9 +1065,9 @@ partial class Simulation
     {
         if (!table.IsHistoryTable)
             return false;
-        foreach (var schema in context.Batch.DatabaseFor(table).Schemas.Values)
+        foreach (var (_, schema) in context.Batch.DatabaseFor(table).Schemas)
         {
-            foreach (var candidate in schema.HeapTables.Values)
+            foreach (var (_, candidate) in schema.HeapTables)
             {
                 if (ReferenceEquals(candidate.SystemVersioning, table))
                     return candidate.HistoryRetentionUnit != HistoryRetentionUnit.Infinite;
@@ -1103,7 +1103,7 @@ partial class Simulation
     /// </summary>
     private static void CascadeDropTriggers(ParserContext context, SchemaObject droppedParent)
     {
-        foreach (var schema in context.CurrentDatabase.Schemas.Values)
+        foreach (var (_, schema) in context.CurrentDatabase.Schemas)
         {
             string[]? names = null;
             foreach (var kv in schema.Triggers)

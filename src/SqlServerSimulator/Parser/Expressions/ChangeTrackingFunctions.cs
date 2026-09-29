@@ -56,9 +56,9 @@ internal sealed class ChangeTrackingMinValidVersion : Expression
         if (idValue.IsNull)
             return SqlValue.Null(SqlType.BigInt);
         var id = idValue.AsInt32;
-        foreach (var schema in runtime.Batch.CurrentDatabase.Schemas.Values)
+        foreach (var (_, schema) in runtime.Batch.CurrentDatabase.Schemas)
         {
-            foreach (var table in schema.HeapTables.Values)
+            foreach (var (_, table) in schema.HeapTables)
             {
                 if (table.ObjectId == id)
                     return table.ChangeTracking is { } tracking ? SqlValue.FromInt64(tracking.MinValidVersion) : SqlValue.Null(SqlType.BigInt);

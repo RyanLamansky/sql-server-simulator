@@ -414,7 +414,7 @@ partial class Simulation
         {
             throw SimulatedSqlException.CannotFindSecurable("principal", loginName);
         }
-        foreach (var principal in target.Principals.Values)
+        foreach (var (_, principal) in target.Principals)
         {
             if (principal.LoginName is { } mapped && target.Collation.Equals(mapped, canonical))
                 throw SimulatedSqlException.ProposedDatabaseOwnerIsUser();

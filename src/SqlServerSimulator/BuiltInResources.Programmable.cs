@@ -715,9 +715,9 @@ internal static partial class BuiltInResources
 
         // The CLR user-defined types, after the system three (probed
         // 2026-09-28 against SQL Server 2025).
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
-            foreach (var alias in schema.AliasTypes.Values.OrderBy(a => a.UserTypeId))
+            foreach (var alias in schema.AliasTypes.EnumerateValues().OrderBy(a => a.UserTypeId))
             {
                 if (alias.UnderlyingType is not ClrUdtSqlType { Udt: var udt })
                     continue;
@@ -754,9 +754,9 @@ internal static partial class BuiltInResources
         yield return [SqlValue.FromInt32(128), systemAssembly];
         yield return [SqlValue.FromInt32(129), systemAssembly];
         yield return [SqlValue.FromInt32(130), systemAssembly];
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
-            foreach (var alias in schema.AliasTypes.Values.OrderBy(a => a.UserTypeId))
+            foreach (var alias in schema.AliasTypes.EnumerateValues().OrderBy(a => a.UserTypeId))
             {
                 if (alias.UnderlyingType is ClrUdtSqlType { Udt.Assembly: var assembly })
                     yield return [SqlValue.FromInt32(alias.UserTypeId), SqlValue.FromInt32(assembly.AssemblyId)];
@@ -815,10 +815,10 @@ internal static partial class BuiltInResources
         }
         // User-defined table types: probe-confirmed system_type_id 243,
         // max_length -1 / precision 0 / scale 0.
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
             var schemaId = SqlValue.FromInt32(schema.SchemaId);
-            foreach (var tt in schema.TableTypes.Values.OrderBy(t => t.UserTypeId))
+            foreach (var tt in schema.TableTypes.EnumerateValues().OrderBy(t => t.UserTypeId))
             {
                 yield return [
                     SqlValue.FromSystemName(tt.Name),
@@ -844,10 +844,10 @@ internal static partial class BuiltInResources
         // an alias of int, 231 for an alias of nvarchar), `is_user_defined`
         // is true, `is_table_type` is false, and `is_nullable` reflects the
         // alias-defined NULL/NOT NULL marker from CREATE TYPE.
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
             var schemaId = SqlValue.FromInt32(schema.SchemaId);
-            foreach (var alias in schema.AliasTypes.Values.OrderBy(a => a.UserTypeId))
+            foreach (var alias in schema.AliasTypes.EnumerateValues().OrderBy(a => a.UserTypeId))
             {
                 // max_length / precision / scale come from the underlying
                 // built-in — reuse the sys.columns metadata computation via a
@@ -885,10 +885,10 @@ internal static partial class BuiltInResources
         var negOneLength = SqlValue.FromInt16(-1);
         var zeroByte = SqlValue.FromByte(0);
         var nullCollation = SqlValue.Null(SqlType.SystemName);
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
             var schemaId = SqlValue.FromInt32(schema.SchemaId);
-            foreach (var tt in schema.TableTypes.Values.OrderBy(t => t.UserTypeId))
+            foreach (var tt in schema.TableTypes.EnumerateValues().OrderBy(t => t.UserTypeId))
             {
                 yield return [
                     SqlValue.FromSystemName(tt.Name),
@@ -924,10 +924,10 @@ internal static partial class BuiltInResources
         var nullPrincipal = SqlValue.Null(SqlType.Int32);
         var trueBit = SqlValue.FromBoolean(true);
         var falseBit = SqlValue.FromBoolean(false);
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
             var schemaId = SqlValue.FromInt32(schema.SchemaId);
-            foreach (var seq in schema.Sequences.Values.OrderBy(s => s.ObjectId))
+            foreach (var seq in schema.Sequences.EnumerateValues().OrderBy(s => s.ObjectId))
             {
                 var (systemTypeId, userTypeId) = SequenceTypeIds(seq.DeclaredType);
                 var (precision, scale) = SequencePrecisionScale(seq.DeclaredType);
@@ -1010,9 +1010,9 @@ internal static partial class BuiltInResources
         var procType = SqlValue.FromChar(charTwo, "P ");
         var procTypeDesc = SqlValue.FromNVarchar("SQL_STORED_PROCEDURE");
         var notAutoExecuted = SqlValue.FromBoolean(false);
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
-            foreach (var proc in schema.Procedures.Values.OrderBy(p => p.ObjectId))
+            foreach (var proc in schema.Procedures.EnumerateValues().OrderBy(p => p.ObjectId))
             {
                 yield return [
                     SqlValue.FromInt32(proc.ObjectId),
@@ -1071,9 +1071,9 @@ internal static partial class BuiltInResources
 
     private static IEnumerable<Procedure> NumberedProcedures(Database database)
     {
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
-            foreach (var proc in schema.Procedures.Values.OrderBy(p => p.ObjectId))
+            foreach (var proc in schema.Procedures.EnumerateValues().OrderBy(p => p.ObjectId))
             {
                 if (proc.Numbered is { } numbered)
                 {
@@ -1131,9 +1131,9 @@ internal static partial class BuiltInResources
         var viewTypeDesc = SqlValue.FromNVarchar("VIEW");
         var nullPrincipal = SqlValue.Null(SqlType.Int32);
         var ledgerViewTypeNone = SqlValue.FromByte(0);
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
-            foreach (var view in schema.Views.Values.OrderBy(v => v.ObjectId))
+            foreach (var view in schema.Views.EnumerateValues().OrderBy(v => v.ObjectId))
             {
                 yield return [
                     SqlValue.FromInt32(view.ObjectId),
@@ -1184,9 +1184,9 @@ internal static partial class BuiltInResources
         var float32Desc = SqlValue.FromString(NVarcharSqlType.Get(10, Collation.Catalog, Coercibility.Implicit), "float32");
         SqlValue VectorDims(SqlType type) => type is VectorSqlType vector ? SqlValue.FromInt32(vector.dimensions) : nullVectorDims;
         SqlValue VectorDesc(SqlType type) => type is VectorSqlType ? float32Desc : nullVectorDesc;
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
-            foreach (var proc in schema.Procedures.Values.OrderBy(p => p.ObjectId))
+            foreach (var proc in schema.Procedures.EnumerateValues().OrderBy(p => p.ObjectId))
             {
                 if (hasIdFilter && proc.ObjectId != wantObjectId)
                     continue;
@@ -1226,7 +1226,7 @@ internal static partial class BuiltInResources
                     ];
                 }
             }
-            foreach (var fn in schema.Functions.Values.OrderBy(f => f.ObjectId))
+            foreach (var fn in schema.Functions.EnumerateValues().OrderBy(f => f.ObjectId))
             {
                 if (hasIdFilter && fn.ObjectId != wantObjectId)
                     continue;
@@ -1330,7 +1330,7 @@ internal static partial class BuiltInResources
                 defaultCsName,
             ]));
 
-        foreach (var s in database.Schemas.Values)
+        foreach (var (_, s) in database.Schemas)
             Add(s.Name, s.SchemaId);
         foreach (var (name, id) in FixedCatalogOnlySchemas)
         {
@@ -1346,7 +1346,7 @@ internal static partial class BuiltInResources
     {
         _ = batch;
         var catalog = SqlValue.FromSystemName(database.Name);
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
             var schemaName = SqlValue.FromSystemName(schema.Name);
             foreach (var t in CatalogTables(schema, batch).OrderBy(t => t.ObjectId))
@@ -1358,7 +1358,7 @@ internal static partial class BuiltInResources
                     baseTable,
                 ];
             }
-            foreach (var view in schema.Views.Values.OrderBy(v => v.ObjectId))
+            foreach (var view in schema.Views.EnumerateValues().OrderBy(v => v.ObjectId))
             {
                 yield return [
                     catalog,
@@ -1433,12 +1433,12 @@ internal static partial class BuiltInResources
             ];
         }
 
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
             var schemaName = SqlValue.FromSystemName(schema.Name);
             if (routineColumns)
             {
-                foreach (var fn in schema.Functions.Values.OrderBy(f => f.ObjectId))
+                foreach (var fn in schema.Functions.EnumerateValues().OrderBy(f => f.ObjectId))
                 {
                     var outputColumns = fn switch
                     {
@@ -1463,7 +1463,7 @@ internal static partial class BuiltInResources
             // sys.columns — real lists them alongside base-table columns
             // (probe-confirmed), and INFORMATION_SCHEMA.TABLES already reports
             // the view itself.
-            foreach (var view in schema.Views.Values.OrderBy(v => v.ObjectId))
+            foreach (var view in schema.Views.EnumerateValues().OrderBy(v => v.ObjectId))
             {
                 var viewName = SqlValue.FromSystemName(view.Name);
                 for (var i = 0; i < view.OutputColumns.Length; i++)
@@ -1622,12 +1622,12 @@ internal static partial class BuiltInResources
             ];
         }
 
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
             var schemaName = SqlValue.FromNVarchar(schema.Name);
-            foreach (var proc in schema.Procedures.Values.OrderBy(p => p.ObjectId))
+            foreach (var proc in schema.Procedures.EnumerateValues().OrderBy(p => p.ObjectId))
                 yield return Row(schemaName, proc, isProcedure: true, null, false, proc.DefinitionText);
-            foreach (var fn in schema.Functions.Values.OrderBy(f => f.ObjectId))
+            foreach (var fn in schema.Functions.EnumerateValues().OrderBy(f => f.ObjectId))
             {
                 yield return fn switch
                 {
@@ -1735,10 +1735,10 @@ internal static partial class BuiltInResources
             ];
         }
 
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
             var schemaName = SqlValue.FromSystemName(schema.Name);
-            foreach (var proc in schema.Procedures.Values.OrderBy(p => p.ObjectId))
+            foreach (var proc in schema.Procedures.EnumerateValues().OrderBy(p => p.ObjectId))
             {
                 for (var i = 0; i < proc.Parameters.Length; i++)
                 {
@@ -1747,7 +1747,7 @@ internal static partial class BuiltInResources
                         param.Type, param.SpelledNumeric, param.DeclaredMaxLength, param.TableType, param.AliasType);
                 }
             }
-            foreach (var fn in schema.Functions.Values.OrderBy(f => f.ObjectId))
+            foreach (var fn in schema.Functions.EnumerateValues().OrderBy(f => f.ObjectId))
             {
                 // Table-valued functions have no return-value row.
                 if (fn is ScalarFunction scalar)
@@ -1799,10 +1799,10 @@ internal static partial class BuiltInResources
     {
         _ = batch;
         var catalog = SqlValue.FromSystemName(database.Name);
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
             var schemaName = SqlValue.FromSystemName(schema.Name);
-            foreach (var view in schema.Views.Values.OrderBy(v => v.ObjectId))
+            foreach (var view in schema.Views.EnumerateValues().OrderBy(v => v.ObjectId))
             {
                 yield return [
                     catalog,

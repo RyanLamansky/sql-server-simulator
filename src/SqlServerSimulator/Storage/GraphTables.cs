@@ -225,7 +225,7 @@ internal static class GraphColumns
     /// <summary>The schema holding <paramref name="table"/>, or null when it isn't in <paramref name="database"/>.</summary>
     public static Schema? SchemaOf(Database database, HeapTable table)
     {
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
             if (schema.SchemaId == table.SchemaId)
                 return schema;
@@ -236,9 +236,9 @@ internal static class GraphColumns
     /// <summary>The node or edge table <paramref name="objectId"/> names in <paramref name="database"/>, or null.</summary>
     public static HeapTable? FindByObjectId(Database database, int objectId)
     {
-        foreach (var schema in database.Schemas.Values)
+        foreach (var (_, schema) in database.Schemas)
         {
-            foreach (var table in schema.HeapTables.Values)
+            foreach (var (_, table) in schema.HeapTables)
             {
                 if (table.ObjectId == objectId)
                     return table.GraphKind == GraphTableKind.None ? null : table;

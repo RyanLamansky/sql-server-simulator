@@ -76,6 +76,14 @@ internal abstract class SchemaObject(string name, int objectId, int schemaId, Da
     public int? OwnerPrincipalId;
 
     /// <summary>
+    /// The DML triggers attached to this table or view as of one
+    /// <see cref="Simulation.SchemaVersion"/>, kept by
+    /// <see cref="Simulation.TriggersAttachedTo"/>; null until first asked, and
+    /// never read for an object that can't carry a trigger.
+    /// </summary>
+    public AttachedTriggerSet? AttachedTriggers;
+
+    /// <summary>
     /// UTC creation timestamp — captured at CREATE time from the executing
     /// statement's frozen UtcNow on
     /// <see cref="Parser.StatementContext"/>. Surfaces in
@@ -174,4 +182,16 @@ internal abstract class SchemaObject(string name, int objectId, int schemaId, Da
     /// </summary>
     public static bool IsSqlModule(SchemaObject? obj) =>
         obj is Procedure { ClrEntry: null } or View or Trigger { ClrEntry: null } or DdlTrigger { ClrEntry: null } or (UserDefinedFunction and not ClrFunction);
+}
+
+/// <summary>
+/// One memoized answer of <see cref="Simulation.TriggersAttachedTo"/>: the
+/// triggers and the <see cref="Simulation.SchemaVersion"/> they were found
+/// under, published as one reference so a reader never sees one version's
+/// triggers beside another version's stamp.
+/// </summary>
+internal sealed class AttachedTriggerSet(long schemaVersion, Trigger[] triggers)
+{
+    public readonly long SchemaVersion = schemaVersion;
+    public readonly Trigger[] Triggers = triggers;
 }

@@ -261,7 +261,7 @@ partial class Simulation
         }
         else
         {
-            peers = batch.CurrentDatabase.DdlTriggers.Values;
+            peers = batch.CurrentDatabase.DdlTriggers.EnumerateValues();
             trigger = batch.CurrentDatabase.DdlTriggers.TryGetValue(leaf, out var databaseTrigger) ? databaseTrigger : null;
         }
         if (trigger is null)

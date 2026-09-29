@@ -97,9 +97,9 @@ partial class Simulation
         if (dot >= 0)
             leaf = triggerName[(dot + 1)..].Trim('[', ']');
         leaf = leaf.Trim('[', ']');
-        foreach (var schema in batch.CurrentDatabase.Schemas.Values)
+        foreach (var (_, schema) in batch.CurrentDatabase.Schemas)
         {
-            foreach (var candidate in schema.Triggers.Values)
+            foreach (var (_, candidate) in schema.Triggers)
             {
                 if (batch.CurrentDatabase.Collation.Equals(candidate.Name, leaf))
                     return candidate;
@@ -111,9 +111,9 @@ partial class Simulation
     /// <summary>Every DML trigger attached to <paramref name="parent"/>.</summary>
     private static IEnumerable<Trigger> EnumerateTriggersOn(BatchContext batch, object parent)
     {
-        foreach (var schema in batch.CurrentDatabase.Schemas.Values)
+        foreach (var (_, schema) in batch.CurrentDatabase.Schemas)
         {
-            foreach (var candidate in schema.Triggers.Values)
+            foreach (var (_, candidate) in schema.Triggers)
             {
                 if (ReferenceEquals(candidate.Parent, parent))
                     yield return candidate;

@@ -20,10 +20,10 @@ partial class BuiltInResources
     /// </summary>
     internal static IEnumerable<HeapTable> CatalogTables(Schema schema, BatchContext? batch) =>
         batch is not null && schema.Name == Database.DefaultSchemaName && schema.Database.Name == Simulation.TempdbDatabaseName
-            ? schema.HeapTables.Values
-                .Concat(batch.Connection.TempTables.Values)
-                .Concat(batch.Connection.Simulation.GlobalTempTables.Values)
-            : schema.HeapTables.Values;
+            ? schema.HeapTables.EnumerateValues()
+                .Concat(batch.Connection.TempTables.EnumerateValues())
+                .Concat(batch.Connection.Simulation.GlobalTempTables.EnumerateValues())
+            : schema.HeapTables.EnumerateValues();
 
     /// <summary>
     /// The tables whose constraints and indexes a catalog view lists under
@@ -36,11 +36,11 @@ partial class BuiltInResources
     /// </summary>
     internal static IEnumerable<HeapTable> ConstraintHosts(Schema schema, BatchContext? batch) =>
         CatalogTables(schema, batch)
-            .Concat(schema.Functions.Values
+            .Concat(schema.Functions.EnumerateValues()
                 .OfType<MultiStatementTableValuedFunction>()
                 .OrderBy(f => f.ObjectId)
                 .Select(f => f.CatalogShape()))
-            .Concat(schema.TableTypes.Values.OrderBy(t => t.ObjectId).Select(t => t.CatalogShape));
+            .Concat(schema.TableTypes.EnumerateValues().OrderBy(t => t.ObjectId).Select(t => t.CatalogShape));
 
     /// <summary>
     /// The objects whose declared columns the column-family catalog views
@@ -56,9 +56,9 @@ partial class BuiltInResources
     {
         foreach (var table in CatalogTables(schema, batch).OrderBy(t => t.ObjectId))
             yield return (table.ObjectId, table.Columns, false, false);
-        foreach (var function in schema.Functions.Values.OfType<MultiStatementTableValuedFunction>().OrderBy(f => f.ObjectId))
+        foreach (var function in schema.Functions.EnumerateValues().OfType<MultiStatementTableValuedFunction>().OrderBy(f => f.ObjectId))
             yield return (function.ObjectId, function.OutputColumns, true, false);
-        foreach (var tableType in schema.TableTypes.Values.OrderBy(t => t.ObjectId))
+        foreach (var tableType in schema.TableTypes.EnumerateValues().OrderBy(t => t.ObjectId))
             yield return (tableType.ObjectId, tableType.Columns, true, true);
     }
 }

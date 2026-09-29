@@ -196,7 +196,7 @@ partial class Simulation
             if (info.ServerLevelDatabase is not null)
                 continue;
             List<DdlTrigger>? databaseMatched = null;
-            foreach (var trigger in database.DdlTriggers.Values)
+            foreach (var (_, trigger) in database.DdlTriggers)
             {
                 if (trigger.ObjectId == createdThisStatement)
                     continue;
