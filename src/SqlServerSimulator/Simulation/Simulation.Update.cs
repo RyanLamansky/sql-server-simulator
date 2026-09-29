@@ -54,16 +54,25 @@ partial class Simulation
         var top = Selection.ParseDmlTopClause(context);
         MultiPartName leadingIdent;
         RemoteWrite? remoteWrite;
-        if (context.Token is ReservedKeyword { Keyword: Keyword.OpenQuery })
+        switch (context.Token)
         {
-            var (serverName, query) = Selection.ParseOpenQueryArguments(context);
-            remoteWrite = RemoteWrite.ForOpenQuery(context.Batch, serverName, query, RemoteWriteKind.Update);
-            leadingIdent = new MultiPartName(remoteWrite.Proxy.Name);
-        }
-        else
-        {
-            leadingIdent = BatchContext.ParseObjectName(context, acceptTableVariable: true);
-            remoteWrite = RemoteWrite.ForTarget(context.Batch, leadingIdent, RemoteWriteKind.Update);
+            case ReservedKeyword { Keyword: Keyword.OpenQuery }:
+                {
+                    var (serverName, query) = Selection.ParseOpenQueryArguments(context);
+                    remoteWrite = RemoteWrite.ForOpenQuery(context.Batch, serverName, query, RemoteWriteKind.Update);
+                    leadingIdent = new MultiPartName(remoteWrite.Proxy.Name);
+                    break;
+                }
+            case ReservedKeyword { Keyword: Keyword.OpenRowSet }:
+                remoteWrite = Selection.ParseAdHocWriteTarget(context, RemoteWriteKind.Update);
+                leadingIdent = new MultiPartName(remoteWrite.Proxy.Name);
+                break;
+            case ReservedKeyword { Keyword: Keyword.OpenDataSource }:
+                throw Selection.ParseOpenDataSource(context);
+            default:
+                leadingIdent = BatchContext.ParseObjectName(context, acceptTableVariable: true);
+                remoteWrite = RemoteWrite.ForTarget(context.Batch, leadingIdent, RemoteWriteKind.Update);
+                break;
         }
 
         // View target: route to base table with view-aware column lookups,

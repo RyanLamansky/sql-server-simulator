@@ -2961,7 +2961,7 @@ internal sealed partial class Selection
         // and a constant pass-through string, OPENXML's a session document
         // handle and its patterns — so route them straight back through
         // ParseSingleFromSource.
-        if (next is ReservedKeyword { Keyword: Keyword.OpenQuery or Keyword.OpenXml })
+        if (next is ReservedKeyword { Keyword: Keyword.OpenQuery or Keyword.OpenXml or Keyword.OpenRowSet or Keyword.OpenDataSource })
         {
             context.RestoreCheckpoint(checkpoint);
             return ParseSingleFromSource(context, scope);
@@ -3940,6 +3940,14 @@ internal sealed partial class Selection
                         rows: [],
                         lateralPlan: openQueryPlan);
                 }
+
+            // OPENROWSET: a data file through BULK, or an ad hoc provider
+            // rowset — see Selection.OpenRowset.cs.
+            case ReservedKeyword { Keyword: Keyword.OpenRowSet }:
+                return ParseOpenRowsetSource(context);
+
+            case ReservedKeyword { Keyword: Keyword.OpenDataSource }:
+                throw ParseOpenDataSource(context);
 
             // CONTAINSTABLE / FREETEXTTABLE dispatch: the rowset forms of the
             // two full-text predicates, projecting KEY and RANK. Both names are

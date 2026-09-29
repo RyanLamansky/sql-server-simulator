@@ -75,6 +75,11 @@ partial class Simulation
         if (context.Token is ReservedKeyword { Keyword: Keyword.Into })
             context.MoveNextRequired();
 
+        if (context.Token is ReservedKeyword { Keyword: Keyword.OpenRowSet })
+        {
+            _ = Selection.ParseAdHocWriteTarget(context, RemoteWriteKind.Insert);
+            throw SimulatedSqlException.MergeTargetIsRemote();
+        }
         var destinationName = BatchContext.ParseObjectName(context, acceptTableVariable: true);
         if (context.Batch.ExpandSynonym(destinationName).Count >= 4)
             throw SimulatedSqlException.MergeTargetIsRemote();

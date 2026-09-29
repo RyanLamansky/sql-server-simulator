@@ -121,7 +121,19 @@ internal sealed class RemoteWrite
         if (batch.CurrentStatement.RemoteWrite is { WrittenName: { } written } existing && written.ToString() == name.ToString())
             return existing;
 
-        var server = ResolveServer(batch, name[0]);
+        return ForServerTarget(batch, ResolveServer(batch, name[0]), name, kind);
+    }
+
+    /// <summary>
+    /// <see cref="ForTarget"/> once the server is known: the four-part
+    /// <paramref name="name"/>'s last three segments on
+    /// <paramref name="server"/>, a linked server or the one an ad hoc
+    /// <c>OPENROWSET</c> names.
+    /// </summary>
+    public static RemoteWrite ForServerTarget(BatchContext batch, LinkedServer server, MultiPartName name, RemoteWriteKind kind)
+    {
+        if (batch.CurrentStatement.RemoteWrite is { WrittenName: { } written } existing && written.ToString() == name.ToString() && ReferenceEquals(existing.Server, server))
+            return existing;
         if (name.SchemaOmitted)
             throw SimulatedSqlException.RemoteSchemaOrCatalogInvalid(server);
         var target = server.Target;
@@ -180,7 +192,17 @@ internal sealed class RemoteWrite
         // A joined write's FROM clause parses twice.
         if (batch.CurrentStatement.RemoteWrite is { OpenQueryText: { } text } existing && text == query && existing.Server.Name == serverName)
             return existing;
-        var server = ResolveServer(batch, serverName);
+        return ForServerQuery(batch, ResolveServer(batch, serverName), query, kind);
+    }
+
+    /// <summary>
+    /// <see cref="ForOpenQuery"/> once the server is known — a linked server,
+    /// or the one an ad hoc <c>OPENROWSET</c> names.
+    /// </summary>
+    public static RemoteWrite ForServerQuery(BatchContext batch, LinkedServer server, string query, RemoteWriteKind kind)
+    {
+        if (batch.CurrentStatement.RemoteWrite is { OpenQueryText: { } text } existing && text == query && ReferenceEquals(existing.Server, server))
+            return existing;
         batch.HasSessionScopedReference = true;
         if (!batch.IsSkipping)
             RequireNoTransaction(batch, server);

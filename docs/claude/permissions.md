@@ -659,6 +659,8 @@ A `DENY` binds even a login that also holds `ALTER ANY DATABASE`.
 | `DBCC SQLPERF(LOGSPACE)` / `SQLPERF(<wait or latch DMV>, CLEAR)` | `VIEW SERVER STATE` / `ALTER SERVER STATE` | **Msg 297**, ending the batch and rolling the transaction back, catchable by a `TRY` |
 | `DBCC FREESESSIONCACHE` / `TRACEON` / `TRACEOFF` / `LOGINFO` / `HELP` | `sysadmin` alone — neither `CONTROL SERVER` nor `ALTER SERVER STATE` / `ALTER TRACE` | **Msg 2571**, naming the user as `USER_NAME()` does — `public` for a login in through `CONNECT ANY DATABASE` |
 | `RAISERROR … WITH LOG` | `ALTER TRACE` | **Msg 2778** |
+| `BULK INSERT` | `ADMINISTER BULK OPERATIONS` (`bulkadmin`) | **Msg 4834**, ending the batch uncaught; see [`bulk-and-adhoc.md`](bulk-and-adhoc.md) |
+| any file a bulk load reads | `CONTROL SERVER` — the Linux server lets no other login reach a file | **Msg 4860** at state 75 |
 | `CREATE` / `ALTER` / `DROP TRIGGER … ON ALL SERVER` | `CONTROL SERVER` | see [DDL statement gates](#ddl-statement-gates) |
 | `CREATE SERVER ROLE` | `CREATE SERVER ROLE` (under `ALTER ANY SERVER ROLE`) | **Msg 15247** |
 | `ALTER SERVER ROLE <custom> ADD` / `DROP MEMBER`, `DROP SERVER ROLE` | `ALTER ANY SERVER ROLE` | **Msg 15151**, the missing-role wording |
@@ -686,7 +688,7 @@ A `DENY` binds even a login that also holds `ALTER ANY DATABASE`.
 
 #### Not modeled yet
 
-- The permissions whose statements the simulator doesn't have stay catalog truth: `SHUTDOWN`, `ALTER ANY CONNECTION` (`KILL`), `ADMINISTER BULK OPERATIONS` (`BULK INSERT`, `OPENROWSET(BULK …)`), `ALTER ANY CREDENTIAL`, the endpoint, event-session, event-notification, audit and availability-group families, `ALTER TRACE` past `RAISERROR … WITH LOG`, `ALTER RESOURCES` and `VIEW ANY ERROR LOG`.
+- The permissions whose statements the simulator doesn't have stay catalog truth: `SHUTDOWN`, `ALTER ANY CONNECTION` (`KILL`), `ALTER ANY CREDENTIAL`, the endpoint, event-session, event-notification, audit and availability-group families, `ALTER TRACE` past `RAISERROR … WITH LOG`, `ALTER RESOURCES` and `VIEW ANY ERROR LOG`.
 - `UNSAFE ASSEMBLY` / `EXTERNAL ACCESS ASSEMBLY` for `CREATE ASSEMBLY`, which waits on `clr strict security` itself (see [`backlog.md`](backlog.md)).
 - `fn_my_permissions` for the database-scope classes lists more permissions than the checker models, so it raises `NotSupportedException` rather than answer partially; `HAS_PERMS_BY_NAME`'s `SERVER ROLE` class answers only for a `dbo` session.
 - `ALTER LOGIN [sa] DISABLE` is discarded, since `sa` isn't in the registry.
@@ -835,7 +837,7 @@ The current-principal / id scalars read the session's effective principal; `HAS_
 ## Known gaps
 
 - **Column-level grants** ship for SELECT / UPDATE / REFERENCES reads and writes, on tables and views alike — see [Column-level grants](#column-level-grants). Residual gaps: **column-level INSERT** grants (INSERT stays object-grain) and the structural-visitor coverage gap for columns buried in some non-arithmetic function containers.
-- **Server permissions whose statements aren't built** — `SHUTDOWN`, `KILL`, bulk operations, credentials, endpoints, event sessions, audits, traces, the error log, and `CREATE ASSEMBLY`'s `UNSAFE ASSEMBLY`; every modeled server-scope statement is gated — see [Server permissions and the fixed server roles](#not-modeled-yet).
+- **Server permissions whose statements aren't built** — `SHUTDOWN`, `KILL`, credentials, endpoints, event sessions, audits, traces, the error log, and `CREATE ASSEMBLY`'s `UNSAFE ASSEMBLY`; every modeled server-scope statement is gated — see [Server permissions and the fixed server roles](#not-modeled-yet).
 - **`master`'s and `msdb`'s own seeded grants** — `EXECUTE` on the system procedures and the grants to principals the simulator doesn't carry; a grant naming a system procedure is refused in a user database on real and unresolved here.
 - **`sys.server_permissions` endpoint rows** — real seeds `public` with per-endpoint `CONNECT` (class 105) alongside the class-100 rows the simulator seeds; the simulator models no endpoint class.
 - **Application-role edges** — DDL is gated on the `db_owner` / `db_ddladmin` capability rather than `ALTER ANY APPLICATION ROLE`; a pooled TDS reset clears the role instead of killing the session (real's Msg 596).

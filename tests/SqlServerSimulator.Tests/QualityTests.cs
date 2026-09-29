@@ -31,6 +31,7 @@ public partial class QualityTests
                 nameof(Simulation.AddRemoteSimulation),
                 nameof(Simulation.ServerCollationName),
                 nameof(Simulation.EnableClr),
+                nameof(Simulation.OpenBulkFile),
                 nameof(Simulation.ListenLocalAsync),
                 nameof(Simulation.ListenNetworkAsync),
             ],
@@ -580,8 +581,8 @@ public partial class QualityTests
     private static readonly int[] CitedButNotRaised = [
         185, 346, 557, 1724, 1784,
         1789, 2023, 2219, 2308, 2390, 2724, 3604, 3920, 3997,
-        4624, 4628, 4860, 5232, 5592, 6338, 6947,
-        7222, 8105, 8628, 8711, 9341,
+        4624, 4628, 5232, 5592, 6338, 6947,
+        8105, 8628, 8711, 9341,
         10343, 11406, 11509, 11521, 11525, 13519, 13643, 13656, 15249, 15457, 15459, 15460,
         15461, 15477, 15574, 15575, 15622, 16909, 16930, 16945, 16956, 16961,
         41337,

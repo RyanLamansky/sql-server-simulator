@@ -135,7 +135,8 @@ Committing across two `Simulation`s would need a coordinator that real's default
 - **Predicate / projection pushdown**: every four-part-name read pulls the full remote table, and so does a write's stand-in.
 - **LOB columns**: the remote projection uses the type-only `RowEncoder.EncodeRow` overload (no LOB store), so a MAX payload large enough to overflow the 65535-byte var-section cap raises during encoding on the remote.
 - **`@@SERVERNAME`** isn't routed — the local-server row in `sys.servers` uses the constant `"SIMULATED"` for `name` regardless of any host-configured value.
-- **`EXEC … AT DATA_SOURCE`** and `OPENROWSET` / `OPENDATASOURCE` (see [`backlog.md`](backlog.md)).
+- **`EXEC … AT DATA_SOURCE`**.
+  The ad hoc `OPENROWSET` over a provider rides this machinery with a transient server named `(null)` — see [`bulk-and-adhoc.md`](bulk-and-adhoc.md#ad-hoc-provider-rowsets).
 
 ## sys.servers shape
 

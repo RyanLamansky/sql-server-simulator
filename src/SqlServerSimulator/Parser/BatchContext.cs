@@ -3335,11 +3335,29 @@ internal sealed class BatchContext
         remoteColumns = null;
         remoteDatabaseName = null;
         remoteSchemaName = null;
-        if (name.Count != 4)
-            return false;
-        var simulation = this.Connection.Simulation;
-        if (!simulation.ActiveLinkedServers.TryGetValue(name[0], out linkedServer))
-            return false;
+        return name.Count == 4
+            && this.Connection.Simulation.ActiveLinkedServers.TryGetValue(name[0], out linkedServer)
+            && TryResolveRemoteTable(linkedServer, name, out remoteName, out remoteColumns, out remoteDatabaseName, out remoteSchemaName);
+    }
+
+    /// <summary>
+    /// The table or view the last three segments of the four-part
+    /// <paramref name="name"/> name on <paramref name="linkedServer"/> — a
+    /// linked server, or the one an ad hoc <c>OPENROWSET</c> connects to —
+    /// as <see cref="TryResolveLinkedServerTable"/> describes.
+    /// </summary>
+    public static bool TryResolveRemoteTable(
+        LinkedServer linkedServer,
+        MultiPartName name,
+        [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out string? remoteName,
+        [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out HeapColumn[]? remoteColumns,
+        [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out string? remoteDatabaseName,
+        [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out string? remoteSchemaName)
+    {
+        remoteName = null;
+        remoteColumns = null;
+        remoteDatabaseName = null;
+        remoteSchemaName = null;
 
         // Empty middle segments fall back to defaults: missing db → the
         // database a fresh session of the server starts in; missing schema →

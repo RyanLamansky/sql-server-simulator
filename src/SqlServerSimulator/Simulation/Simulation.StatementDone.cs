@@ -27,6 +27,8 @@ partial class Simulation
                 ? StatementDoneKind.BeginTransaction
                 : null,
             Keyword.Break or Keyword.Continue or Keyword.Goto => StatementDoneKind.Goto,
+            // BULK INSERT's own code isn't captured; it closes as an INSERT.
+            Keyword.Bulk => StatementDoneKind.Insert,
             Keyword.Checkpoint => StatementDoneKind.Checkpoint,
             Keyword.Close => StatementDoneKind.CloseCursor,
             Keyword.Commit => StatementDoneKind.Commit,

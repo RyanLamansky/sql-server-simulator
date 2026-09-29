@@ -62,8 +62,9 @@ partial class Simulation
     /// base table serves its new first column under the old name, typed as
     /// the new column; a body left with fewer columns than recorded names is
     /// Msg 4502. <c>sp_refreshview</c> is what re-records the names on real.
-    /// A body that no longer binds — a missing object, column or qualifier —
-    /// is that binder error followed by Msg 4413, while the referencing
+    /// A body that no longer binds — a missing object, column or qualifier,
+    /// or an ad hoc <c>OPENROWSET</c> once <c>Ad Hoc Distributed Queries</c>
+    /// is off — is that error followed by Msg 4413, while the referencing
     /// statement compiles; any other failure returns the recorded columns
     /// unchanged, so the body's own error surfaces at execution.
     /// </remarks>
@@ -75,7 +76,7 @@ partial class Simulation
         {
             plan = ParseViewBodyPlan(outerBatch, view, releaseStatementSchemaLocks: true);
         }
-        catch (SimulatedSqlException error) when (error.Number is 207 or 208 or 4104)
+        catch (SimulatedSqlException error) when (error.Number is 207 or 208 or 4104 or 15281)
         {
             throw SimulatedSqlException.FollowedByViewBindingFailure(error, writtenName, view.Name);
         }

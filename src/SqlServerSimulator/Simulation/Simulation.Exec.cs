@@ -159,6 +159,11 @@ partial class Simulation
                 }
             }
 
+            // EXEC OPENDATASOURCE(…).db.schema.proc meets what every
+            // OPENDATASOURCE does as the batch compiles.
+            if (context.Token is ReservedKeyword { Keyword: Keyword.OpenDataSource })
+                throw Selection.ParseOpenDataSource(context);
+
             // EXEC (<string-expr>) — dynamic-SQL form. The expression's value
             // is re-tokenized as a fresh batch inside its own child
             // BatchContext (so outer @vars aren't visible, matching probed

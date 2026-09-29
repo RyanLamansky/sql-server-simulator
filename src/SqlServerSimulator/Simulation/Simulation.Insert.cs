@@ -19,11 +19,21 @@ partial class Simulation
         if (context.Token is ReservedKeyword { Keyword: Keyword.Into })
             context.MoveNextRequired();
 
-        if (context.Token is ReservedKeyword { Keyword: Keyword.OpenQuery })
+        switch (context.Token)
         {
-            var (serverName, query) = Selection.ParseOpenQueryArguments(context);
-            var openQueryTarget = RemoteWrite.ForOpenQuery(context.Batch, serverName, query, RemoteWriteKind.Insert);
-            return ProcessRemoteInsert(context, openQueryTarget, top, new MultiPartName(openQueryTarget.Proxy.Name));
+            case ReservedKeyword { Keyword: Keyword.OpenQuery }:
+                {
+                    var (serverName, query) = Selection.ParseOpenQueryArguments(context);
+                    var openQueryTarget = RemoteWrite.ForOpenQuery(context.Batch, serverName, query, RemoteWriteKind.Insert);
+                    return ProcessRemoteInsert(context, openQueryTarget, top, new MultiPartName(openQueryTarget.Proxy.Name));
+                }
+            case ReservedKeyword { Keyword: Keyword.OpenRowSet }:
+                {
+                    var adHocTarget = Selection.ParseAdHocWriteTarget(context, RemoteWriteKind.Insert);
+                    return ProcessRemoteInsert(context, adHocTarget, top, new MultiPartName(adHocTarget.Proxy.Name));
+                }
+            case ReservedKeyword { Keyword: Keyword.OpenDataSource }:
+                throw Selection.ParseOpenDataSource(context);
         }
         var destinationName = BatchContext.ParseObjectName(context, acceptTableVariable: true);
         if (RemoteWrite.ForTarget(context.Batch, destinationName, RemoteWriteKind.Insert) is { } remoteWrite)

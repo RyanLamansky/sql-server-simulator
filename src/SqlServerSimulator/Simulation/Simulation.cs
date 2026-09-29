@@ -371,6 +371,33 @@ public sealed partial class Simulation
     public bool EnableClr { get; init; }
 
     /// <summary>
+    /// Opens the data and format files that <c>BULK INSERT</c> and
+    /// <c>OPENROWSET(BULK …)</c> name, standing in for the server's file
+    /// system. Defaults to <see langword="null"/>, under which every path
+    /// behaves as a file that doesn't exist; set it in an object initializer
+    /// (<c>new Simulation { OpenBulkFile = path =&gt; … }</c>).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The delegate receives the path exactly as the statement spells it and
+    /// returns a readable <see cref="Stream"/>, which the simulator reads to
+    /// its end and disposes, or <see langword="null"/> for a file that doesn't
+    /// exist. Tests can serve files from memory
+    /// (<c>path =&gt; new MemoryStream(bytes)</c>); a host wanting real disk
+    /// access supplies something like
+    /// <c>path =&gt; File.Exists(path) ? File.OpenRead(path) : null</c>.
+    /// </para>
+    /// <para>
+    /// <strong>Anything the delegate returns becomes readable to every
+    /// session</strong>, as real SQL Server's file access is. Keep the
+    /// mapping as narrow as the content allows, above all when a
+    /// <c>Simulation</c> is exposed over the network endpoint. Files are only
+    /// read: an <c>ERRORFILE</c> is never written.
+    /// </para>
+    /// </remarks>
+    public Func<string, Stream?>? OpenBulkFile { get; init; }
+
+    /// <summary>
     /// Server-wide default collation name. Used as the seed for every
     /// database created on this simulation — both the lazy
     /// <c>"simulated"</c> seed picked up on first
@@ -2476,7 +2503,7 @@ public sealed partial class Simulation
                     // A procedure's, dynamic SQL's or called function's batch
                     // is as far as a batch-aborting name-resolution error
                     // reaches.
-                    if ((batch.ProcFrame is not null || batch.CalledFunctionBody) && IsBatchAbortingNameResolution(ex) && !ex.EndedCalledBatch)
+                    if ((batch.ProcFrame is not null || batch.CalledFunctionBody) && (IsBatchAbortingNameResolution(ex) || IsBulkRefusal(ex)) && !ex.EndedCalledBatch)
                     {
                         ex.EndedCalledBatch = true;
                         ex.EndedCalledBatchIn = batch;
@@ -3046,6 +3073,14 @@ public sealed partial class Simulation
         => (ex.Class == 16 && ex.Number != 1710) || ex.Number == 1087;
 
     /// <summary>
+    /// A bulk load's refusal of its permission or files — Msg 4834, 4860,
+    /// 4861 — which, like a name-resolution miss, ends only the procedure's
+    /// or dynamic batch it is raised in (probed 2026-09-29 against SQL Server
+    /// 2025).
+    /// </summary>
+    private static bool IsBulkRefusal(SimulatedSqlException ex) => ex.Number is 4834 or 4860 or 4861;
+
+    /// <summary>
     /// True for the bind-class name-resolution failures that abort the whole
     /// batch on real SQL Server rather than merely terminating their statement.
     /// Probe-confirmed against SQL Server 2025 (2026-07-16): with a
@@ -3075,11 +3110,13 @@ public sealed partial class Simulation
     /// raised where the batch's compile deferred the statement, ends the batch
     /// uncatchable by the same scope's TRY as a name-resolution miss does
     /// (probed 2026-09-26 against SQL Server 2025, each after a CREATE TABLE
-    /// deferred its statement; Msg 8124 2026-09-28). An error not listed keeps a run-time error's
-    /// handling.
+    /// deferred its statement; Msg 8124 2026-09-28). The bulk loads' refusals
+    /// of their permission and files — Msg 4834, 4860, 4861 — end the batch
+    /// the same way wherever they are raised (probed 2026-09-29). An error not
+    /// listed keeps a run-time error's handling.
     /// </summary>
     internal static bool IsDeferredCompileError(SimulatedSqlException ex)
-        => IsBatchAbortingNameResolution(ex) || ex.Number is 4902 or 2705
+        => IsBatchAbortingNameResolution(ex) || IsBulkRefusal(ex) || ex.Number is 4902 or 2705
             || ex.Number is 107 or 108 or 130 or 145 or 147 or 164 or 174 or 205 or 206 or 213 or 243 or 264 or 321 or 447 or 448 or 529
                 or 1011 or 1012 or 1013 or 4108 or 4115 or 5318 or 8117 or 8120 or 8121 or 8124 or 8155 or 8622;
 
@@ -3668,6 +3705,11 @@ public sealed partial class Simulation
                         yield return readText;
                     }
                 }
+                break;
+
+            case ReservedKeyword { Keyword: Keyword.Bulk }:
+                foreach (var bulkOutcome in this.RunBulkInsertStatement(batch))
+                    yield return bulkOutcome;
                 break;
 
             case ReservedKeyword { Keyword: Keyword.WriteText }:

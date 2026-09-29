@@ -34,16 +34,25 @@ partial class Simulation
 
         MultiPartName leadingIdent;
         RemoteWrite? remoteWrite;
-        if (context.Token is ReservedKeyword { Keyword: Keyword.OpenQuery })
+        switch (context.Token)
         {
-            var (serverName, query) = Selection.ParseOpenQueryArguments(context);
-            remoteWrite = RemoteWrite.ForOpenQuery(context.Batch, serverName, query, RemoteWriteKind.Delete);
-            leadingIdent = new MultiPartName(remoteWrite.Proxy.Name);
-        }
-        else
-        {
-            leadingIdent = BatchContext.ParseObjectName(context, acceptTableVariable: true);
-            remoteWrite = RemoteWrite.ForTarget(context.Batch, leadingIdent, RemoteWriteKind.Delete);
+            case ReservedKeyword { Keyword: Keyword.OpenQuery }:
+                {
+                    var (serverName, query) = Selection.ParseOpenQueryArguments(context);
+                    remoteWrite = RemoteWrite.ForOpenQuery(context.Batch, serverName, query, RemoteWriteKind.Delete);
+                    leadingIdent = new MultiPartName(remoteWrite.Proxy.Name);
+                    break;
+                }
+            case ReservedKeyword { Keyword: Keyword.OpenRowSet }:
+                remoteWrite = Selection.ParseAdHocWriteTarget(context, RemoteWriteKind.Delete);
+                leadingIdent = new MultiPartName(remoteWrite.Proxy.Name);
+                break;
+            case ReservedKeyword { Keyword: Keyword.OpenDataSource }:
+                throw Selection.ParseOpenDataSource(context);
+            default:
+                leadingIdent = BatchContext.ParseObjectName(context, acceptTableVariable: true);
+                remoteWrite = RemoteWrite.ForTarget(context.Batch, leadingIdent, RemoteWriteKind.Delete);
+                break;
         }
 
         View? leadingView = null;

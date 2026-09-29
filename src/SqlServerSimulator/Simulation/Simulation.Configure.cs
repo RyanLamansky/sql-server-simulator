@@ -159,9 +159,15 @@ partial class Simulation
         if (!batch.Connection.Simulation.SessionHoldsServerPermission(batch.Connection, Permission.AlterSettings))
             throw SimulatedSqlException.ReconfigurePermissionDenied();
 
-        var configuration = batch.Connection.Simulation.ServerConfiguration;
+        var simulation = batch.Connection.Simulation;
+        var configuration = simulation.ServerConfiguration;
+        var adHocWas = simulation.AdHocDistributedQueriesEnabled;
         foreach (var entry in configuration)
             configuration[entry.Key] = (entry.Value.Configured, entry.Value.Configured);
+        // Compiled plans over an ad hoc rowset were checked against the option
+        // when they compiled, so a change retires them.
+        if (simulation.AdHocDistributedQueriesEnabled != adHocWas)
+            simulation.BumpSchemaVersion();
     }
 
     /// <summary>

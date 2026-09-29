@@ -171,9 +171,21 @@ partial class Simulation
         for (var i = 0; i < plan.TargetColumns.Length; i++)
             targetOrdinals[i] = Array.IndexOf(table.Columns, plan.TargetColumns[i]);
 
-        var hasTriggers = plan.FireTriggers && HasAfterTrigger(batch, table, TriggerActions.Insert);
+        // FIRE_TRIGGERS hands the rows to an INSTEAD OF trigger rather than
+        // the table; without it the load bypasses one as it does AFTER
+        // triggers (probed 2026-09-29 against SQL Server 2025).
+        var insteadOf = plan.FireTriggers && HasInsteadOfTrigger(batch, table, TriggerActions.Insert);
+        var hasTriggers = plan.FireTriggers && (insteadOf || HasAfterTrigger(batch, table, TriggerActions.Insert));
         var triggerRows = hasTriggers ? new List<SqlValue[]>(rows.Count) : null;
         var nullResolver = new RuntimeContext(name => throw SimulatedSqlException.InvalidColumnName(name), batch);
+        // SCOPE_IDENTITY() and @@IDENTITY read the last identity a load
+        // generated, as after an INSERT, and stay as they were when it kept
+        // the file's (probed 2026-09-29 against SQL Server 2025 through BULK
+        // INSERT).
+        Int128? lastIdentity = null;
+        // What the load wrote, which an IGNORE_DUP_KEY index's skipped rows
+        // don't count toward.
+        var inserted = 0;
         // One encoded-row buffer for the whole load — Insert copies into the page.
         byte[]? encoded = null;
 
@@ -235,6 +247,11 @@ partial class Simulation
             }
 
             EvaluateComputedColumns(table, rowValues, batch);
+            if (insteadOf)
+            {
+                triggerRows!.Add(rowValues);
+                continue;
+            }
             EnforceNotNull(table, rowValues);
             if (plan.CheckConstraints)
                 EnforceCheckConstraints(table, rowValues, batch);
@@ -258,11 +275,26 @@ partial class Simulation
                 VersionStore.CaptureWrite(batch, table, (pageIndex, slotIndex), oldRid: null, oldPayload: null, VersionWriteKind.Insert);
             }
             table.ChangeTracking?.RecordRow(batch, table, rowValues, ChangeTrackingOperation.Insert);
+            if (identityColumn is not null && !keepIdentity)
+                lastIdentity = IdentityState.FromSqlValue(rowValues[identityOrdinal]);
+            inserted++;
 
             triggerRows?.Add((SqlValue[])rowValues.Clone());
         }
 
+        if (insteadOf)
+        {
+            // As with AFTER triggers, an empty load fires nothing.
+            if (triggerRows!.Count == 0)
+                return new SimulatedNonQuery(0);
+            batch.Connection.LastStatementRowCount = triggerRows.Count;
+            _ = this.TryFireInsteadOfTrigger(batch, table, TriggerActions.Insert, table.Columns, insertedRows: triggerRows, deletedRows: null, affectedRowCount: triggerRows.Count);
+            return new SimulatedNonQuery(rows.Count);
+        }
+
         this.EnforceIndexedViews(table, batch);
+        if (lastIdentity is not null)
+            batch.Connection.RecordInsertIdentity(lastIdentity);
 
         // Default bulk (no CHECK_CONSTRAINTS) leaves the table's CHECK and
         // outgoing FK constraints unvalidated against the streamed rows, so
@@ -282,7 +314,7 @@ partial class Simulation
             this.FireTriggers(batch, table, TriggerActions.Insert, insertedRows: triggerRows, deletedRows: null, affectedRowCount: triggerRows.Count);
         }
 
-        return new SimulatedNonQuery(rows.Count);
+        return new SimulatedNonQuery(inserted);
     }
 }
 

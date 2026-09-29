@@ -296,8 +296,9 @@ Double-close or invalid handle → **Msg 16909** (state 1), return status 1.
 | NOT NULL | always enforces (Msg 515) | matches |
 | triggers | AFTER triggers do **not** fire by default | matches |
 | `FireTriggers` | AFTER triggers fire (INSERTED populated) | matches |
+| `FireTriggers` + INSTEAD OF trigger | the trigger takes the rows, the table none | modeled as `BULK INSERT` probes it, which shares the engine (see [`bulk-and-adhoc.md`](bulk-and-adhoc.md#row-errors-batches-and-transactions)) |
 | KeepIdentity | expressed by the **identity column's presence in the column list**, not a WITH option; source values kept, seed advances past the max | matches (via IDENTITY_INSERT-style `ObserveExplicit`) |
-| no KeepIdentity | identity column omitted from the list; server generates | matches |
+| no KeepIdentity | identity column omitted from the list; server generates | matches; `SCOPE_IDENTITY()` reads the last generated value, as after `BULK INSERT` |
 | `KeepNulls` off | a NULL supplied for a defaulted column takes the DEFAULT | matches |
 | `KeepNulls` on | NULL stored as NULL; omitted columns still take their DEFAULT | matches |
 | computed / rowversion / period | client never sends them; server computes / stamps | matches (shared INSERT machinery) |
