@@ -2287,7 +2287,7 @@ partial class Simulation
         }
 
         // Build OUTPUT result, in the order the match phase keyed the actions.
-        var outputRows = output is null ? null : ProjectMergeOutput(output, outputOrder!, destinationTable.Columns, pendingInserts, pendingUpdates, pendingDeletes);
+        var outputRows = output is null ? null : ProjectMergeOutput(context.Batch, output, outputOrder!, destinationTable.Columns, pendingInserts, pendingUpdates, pendingDeletes);
 
         // Fire triggers in INSERT → UPDATE → DELETE order (probe-confirmed).
         // For each action, route to INSTEAD OF if attached, else AFTER (if

@@ -240,7 +240,7 @@ partial class Simulation
                 rowValues[ordinal] = CoerceForInsert(sourceRow[i], targetColumn);
             }
             insertedRows.Add(rowValues);
-            _ = output?.ProjectRow(insertedValues: rowValues, deletedValues: null);
+            _ = output?.ProjectRow(context.Batch, insertedValues: rowValues, deletedValues: null);
         }
 
         _ = context.Batch.Connection.Simulation.TryFireInsteadOfTrigger(
@@ -289,21 +289,8 @@ partial class Simulation
         if (destinationTable.IsHistoryTable)
             throw SimulatedSqlException.CannotInsertIntoTemporalHistoryTable(QualifyTableName(destinationTable, context));
 
-        // INSTEAD OF INSERT on the table target replaces the heap-write
-        // path entirely: identity allocation is skipped (the column shows
-        // the type's typed default in INSERTED — probe-confirmed), CHECK /
-        // NOT NULL / key constraints aren't enforced, and AFTER triggers
-        // don't run. The trigger body is responsible for any side effects.
-        // A view target with an INSTEAD OF trigger is routed through
-        // ProcessInsteadOfInsertOnView before ever reaching this method.
-        var insteadOfActive = destinationView is null
-            && HasInsteadOfTrigger(context.Batch, destinationTable, TriggerActions.Insert);
-
         var identityOrdinal = destinationTable.IdentityOrdinal;
         var identityColumn = identityOrdinal >= 0 ? destinationTable.Columns[identityOrdinal] : null;
-        var identityInsertOn = identityColumn is not null
-            && context.Connection.IdentityInsertTable is string activeTable
-            && context.Batch.CurrentDatabase.Collation.Equals(activeTable, destinationTable.Name);
 
         // Which arity diagnostic a mismatch reports turns on this: an explicit
         // list is measured against itself (Msg 109 / 110, or Msg 120 / 121 for
@@ -434,18 +421,21 @@ partial class Simulation
             ReportingArity(context, () => RejectValuesArityMismatch(valueTuples, destinationColumns, hasExplicitColumnList, identityColumn, destinationTable));
         }
 
-        List<SqlValue[]> sourceRows;
-        long[]? valueTupleStamps = null;
         if (valueTuples is not null)
         {
-            // Parsing the tuples is the binding; evaluating them is execution,
-            // and in skip mode it is pure side effect — a `NEXT VALUE FOR`
-            // cell would burn a sequence value for a row that never lands.
-            sourceRows = context.Batch.IsSkipping
-                ? []
-                : EvaluateParsedTuples(valueTuples, context.Batch, out valueTupleStamps);
+            var plan = new InsertPlan(destinationTable, destinationView, joinViewPlan, destinationColumns, output, top, valueTuples);
+            NoteDmlPlan(
+                context,
+                plan,
+                admitted: destinationView is null
+                    && joinViewPlan is null
+                    && output is not { HasTarget: true }
+                    && !BlocksDmlPlan(context.Batch, destinationTable, clientOutput: output is not null));
+            return RunInsertValues(context, plan);
         }
-        else if (context.Token is ReservedKeyword { Keyword: Keyword.Default })
+
+        List<SqlValue[]> sourceRows;
+        if (context.Token is ReservedKeyword { Keyword: Keyword.Default })
         {
             // `INSERT INTO t DEFAULT VALUES` — one row with every column
             // defaulted. Clearing the destination list routes every column
@@ -469,6 +459,82 @@ partial class Simulation
                 _ => throw SimulatedSqlException.SyntaxErrorNear(context),
             };
         }
+
+        return InsertRows(
+            context,
+            new InsertPlan(destinationTable, destinationView, joinViewPlan, destinationColumns, output, top, valueTuples: null),
+            sourceRows,
+            valueTupleStamps: null);
+    }
+
+    /// <summary>
+    /// An <c>INSERT</c>'s parse, which <see cref="InsertRows"/> executes. The
+    /// <c>VALUES</c> form carries its tuples, and is the one whose plan the
+    /// plan cache replays (<see cref="RunInsertValues"/>); a <c>SELECT</c>,
+    /// <c>EXEC</c> or <c>DEFAULT VALUES</c> source is read as it parses.
+    /// </summary>
+    private sealed class InsertPlan(
+        HeapTable destinationTable,
+        View? destinationView,
+        JoinViewInsertPlan? joinViewPlan,
+        HeapColumn[] destinationColumns,
+        OutputProjection? output,
+        Selection.DmlTopLimit? top,
+        List<Expression[]>? valueTuples) : DmlStatementPlan
+    {
+        public readonly HeapTable DestinationTable = destinationTable;
+        public readonly View? DestinationView = destinationView;
+        public readonly JoinViewInsertPlan? JoinViewPlan = joinViewPlan;
+        public readonly HeapColumn[] DestinationColumns = destinationColumns;
+        public readonly OutputProjection? Output = output;
+        public readonly Selection.DmlTopLimit? Top = top;
+        public readonly List<Expression[]>? ValueTuples = valueTuples;
+
+        public override SimulatedStatementOutcome Run(ParserContext context) => RunInsertValues(context, this);
+    }
+
+    /// <summary>
+    /// The execution half of <c>INSERT … VALUES</c>: evaluates the parsed
+    /// tuples, then writes them. Reads no tokens.
+    /// </summary>
+    private static SimulatedStatementOutcome RunInsertValues(ParserContext context, InsertPlan plan)
+    {
+        // Parsing the tuples is the binding; evaluating them is execution,
+        // and in skip mode it is pure side effect — a `NEXT VALUE FOR`
+        // cell would burn a sequence value for a row that never lands.
+        long[]? valueTupleStamps = null;
+        var sourceRows = context.Batch.IsSkipping
+            ? []
+            : EvaluateParsedTuples(plan.ValueTuples!, context.Batch, out valueTupleStamps);
+        return InsertRows(context, plan, sourceRows, valueTupleStamps);
+    }
+
+    /// <summary>
+    /// Writes an <c>INSERT</c>'s source rows: the checks real makes once the
+    /// source is read, then per row the defaults, identity, computed columns,
+    /// constraints and the heap write, then the triggers and <c>OUTPUT</c>.
+    /// </summary>
+    private static SimulatedStatementOutcome InsertRows(ParserContext context, InsertPlan plan, List<SqlValue[]> sourceRows, long[]? valueTupleStamps)
+    {
+        var (destinationTable, destinationView, joinViewPlan, destinationColumns) = (plan.DestinationTable, plan.DestinationView, plan.JoinViewPlan, plan.DestinationColumns);
+        var (output, top, valueTuples) = (plan.Output, plan.Top, plan.ValueTuples);
+        var identityOrdinal = destinationTable.IdentityOrdinal;
+        var identityColumn = identityOrdinal >= 0 ? destinationTable.Columns[identityOrdinal] : null;
+
+        // INSTEAD OF INSERT on the table target replaces the heap-write
+        // path entirely: identity allocation is skipped (the column shows
+        // the type's typed default in INSERTED — probe-confirmed), CHECK /
+        // NOT NULL / key constraints aren't enforced, and AFTER triggers
+        // don't run. The trigger body is responsible for any side effects.
+        // A view target with an INSTEAD OF trigger is routed through
+        // ProcessInsteadOfInsertOnView before ever reaching this method.
+        // Whether the trigger is enabled, like IDENTITY_INSERT, is read as the
+        // statement runs.
+        var insteadOfActive = destinationView is null
+            && HasInsteadOfTrigger(context.Batch, destinationTable, TriggerActions.Insert);
+        var identityInsertOn = identityColumn is not null
+            && context.Connection.IdentityInsertTable is string activeTable
+            && context.Batch.CurrentDatabase.Collation.Equals(activeTable, destinationTable.Name);
 
         // A rowversion / GENERATED ALWAYS column holds a position in the list
         // but accepts only the DEFAULT keyword there. The scan runs after the
@@ -511,9 +577,10 @@ partial class Simulation
         ApplyDmlTopCap(top, sourceRows, context.Batch);
         // Keep the parsed tuples aligned 1:1 with sourceRows so per-cell DEFAULT
         // lookup by row index stays valid — TOP trims from the tail, matching
-        // ApplyDmlTopCap's tail removal on sourceRows.
+        // ApplyDmlTopCap's tail removal on sourceRows. A copy, since the plan
+        // owns the parsed list.
         if (valueTuples is not null && valueTuples.Count > sourceRows.Count)
-            valueTuples.RemoveRange(sourceRows.Count, valueTuples.Count - sourceRows.Count);
+            valueTuples = valueTuples.GetRange(0, sourceRows.Count);
 
         // Skip mode never writes a row, so none of the per-row work below is
         // reachable behavior either: DEFAULT evaluation, identity / rowversion
@@ -742,7 +809,7 @@ partial class Simulation
 
                 if (output is { } o)
                 {
-                    var projectedBytes = o.ProjectRow(insertedValues: rowValues, deletedValues: null);
+                    var projectedBytes = o.ProjectRow(context.Batch, insertedValues: rowValues, deletedValues: null);
                     if (projectedBytes is not null)
                         outputRows!.Add(projectedBytes);
                 }

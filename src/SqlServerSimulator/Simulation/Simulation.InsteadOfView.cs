@@ -128,7 +128,7 @@ partial class Simulation
         if (output is not null)
         {
             for (var i = 0; i < deletedRows.Count; i++)
-                _ = output.ProjectRow(insertedValues: insertedRows[i], deletedValues: deletedRows[i]);
+                _ = output.ProjectRow(batch, insertedValues: insertedRows[i], deletedValues: deletedRows[i]);
         }
 
         context.Connection.LastStatementRowCount = deletedRows.Count;
@@ -204,7 +204,7 @@ partial class Simulation
         if (output is not null)
         {
             foreach (var row in deletedRows)
-                _ = output.ProjectRow(insertedValues: null, deletedValues: row);
+                _ = output.ProjectRow(batch, insertedValues: null, deletedValues: row);
         }
 
         context.Connection.LastStatementRowCount = deletedRows.Count;

@@ -164,6 +164,53 @@ partial class Simulation
                 where = Selection.ParseAndBindPredicate(context, Selection.TargetColumnTypeResolver(context.Batch, targetName, table, sourceView));
         }
 
+        var plan = new DeletePlan(targetName, table, where, positionedCursor, output, top, serializableHint, sourceView);
+        NoteDmlPlan(
+            context,
+            plan,
+            admitted: sourceView is null
+                && positionedCursor is null
+                && output is not { HasTarget: true }
+                && !BlocksDmlPlan(context.Batch, table, clientOutput: output is not null));
+        return RunDelete(context, plan);
+    }
+
+    /// <summary>
+    /// A single-table <c>DELETE</c>'s parse, which <see cref="RunDelete"/>
+    /// executes — once as the statement parses, and again for each replay of
+    /// a cached plan.
+    /// </summary>
+    private sealed class DeletePlan(
+        MultiPartName targetName,
+        HeapTable table,
+        BooleanExpression? where,
+        PositionedCursorTarget? positionedCursor,
+        OutputProjection? output,
+        Selection.DmlTopLimit? top,
+        bool serializableHint,
+        View? sourceView) : DmlStatementPlan
+    {
+        public readonly MultiPartName TargetName = targetName;
+        public readonly HeapTable Table = table;
+        public readonly BooleanExpression? Where = where;
+        public readonly PositionedCursorTarget? PositionedCursor = positionedCursor;
+        public readonly OutputProjection? Output = output;
+        public readonly Selection.DmlTopLimit? Top = top;
+        public readonly bool SerializableHint = serializableHint;
+        public readonly View? SourceView = sourceView;
+
+        public override SimulatedStatementOutcome Run(ParserContext context) => RunDelete(context, this);
+    }
+
+    /// <summary>
+    /// The execution half of a single-table <c>DELETE</c>: the permission
+    /// checks, the row walk evaluating WHERE, and the commit. Reads no tokens.
+    /// </summary>
+    private static SimulatedStatementOutcome RunDelete(ParserContext context, DeletePlan plan)
+    {
+        var (targetName, table, where, positionedCursor) = (plan.TargetName, plan.Table, plan.Where, plan.PositionedCursor);
+        var (output, top, serializableHint, sourceView) = (plan.Output, plan.Top, plan.SerializableHint, plan.SourceView);
+
         // DELETE reads the target when it has a WHERE clause — real then
         // also requires SELECT, checked first so the SELECT denial surfaces
         // when both SELECT and DELETE are missing (probe M1d). A bare DELETE
@@ -485,7 +532,7 @@ partial class Simulation
         {
             // OUTPUT INTO's rows land before the body runs (probed 2026-09-27
             // against SQL Server 2025); to the client it is Msg 334.
-            var outputRows = output is null ? null : ProjectDeleteOutput(deleted, output);
+            var outputRows = output is null ? null : ProjectDeleteOutput(deleted, output, context.Batch);
             FireInsteadOfDeleteTrigger(context, table, sourceView, deleted);
             return output is null || output.HasTarget
                 ? new SimulatedNonQuery(deleted.Count)
@@ -558,7 +605,7 @@ partial class Simulation
 
         if (output is not null)
         {
-            var rows = ProjectDeleteOutput(deleted, output);
+            var rows = ProjectDeleteOutput(deleted, output, context.Batch);
             // OUTPUT INTO @t suppresses the result set (probe-confirmed).
             if (!output.HasTarget)
             {
@@ -572,12 +619,13 @@ partial class Simulation
 
     private static List<byte[]> ProjectDeleteOutput(
         List<(int PageIndex, int SlotIndex, SqlValue[]? FullOld)> deleted,
-        OutputProjection output)
+        OutputProjection output,
+        BatchContext batch)
     {
         var rows = new List<byte[]>(deleted.Count);
         foreach (var (_, _, fullOld) in deleted)
         {
-            var projectedBytes = output.ProjectRow(insertedValues: null, deletedValues: fullOld);
+            var projectedBytes = output.ProjectRow(batch, insertedValues: null, deletedValues: fullOld);
             if (projectedBytes is not null)
                 rows.Add(projectedBytes);
         }

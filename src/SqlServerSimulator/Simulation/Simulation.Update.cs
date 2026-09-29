@@ -608,6 +608,60 @@ partial class Simulation
                 where = Selection.ParseAndBindPredicate(context, targetTypeResolver);
         }
 
+        var plan = new UpdatePlan(targetName, table, rawAssignments, assignments, setMasks, where, positionedCursor, output, top, serializableHint, sourceView);
+        NoteDmlPlan(
+            context,
+            plan,
+            admitted: sourceView is null
+                && positionedCursor is null
+                && output is not { HasTarget: true }
+                && !rawAssignments.Exists(assignment => assignment.ColumnName is null || assignment.Expr is AssignmentExpression or XmlModify or JsonModify or ClrTypeMutation)
+                && !BlocksDmlPlan(context.Batch, table, clientOutput: output is not null));
+        return RunUpdate(context, plan);
+    }
+
+    /// <summary>
+    /// A single-table <c>UPDATE</c>'s parse, which <see cref="RunUpdate"/>
+    /// executes — once as the statement parses, and again for each replay of
+    /// a cached plan.
+    /// </summary>
+    private sealed class UpdatePlan(
+        MultiPartName targetName,
+        HeapTable table,
+        List<(string? ColumnName, Expression Expr)> rawAssignments,
+        List<(int Ordinal, Expression Expr)> assignments,
+        MaskingFunction?[]? setMasks,
+        BooleanExpression? where,
+        PositionedCursorTarget? positionedCursor,
+        OutputProjection? output,
+        Selection.DmlTopLimit? top,
+        bool serializableHint,
+        View? sourceView) : DmlStatementPlan
+    {
+        public readonly MultiPartName TargetName = targetName;
+        public readonly HeapTable Table = table;
+        public readonly List<(string? ColumnName, Expression Expr)> RawAssignments = rawAssignments;
+        public readonly List<(int Ordinal, Expression Expr)> Assignments = assignments;
+        public readonly MaskingFunction?[]? SetMasks = setMasks;
+        public readonly BooleanExpression? Where = where;
+        public readonly PositionedCursorTarget? PositionedCursor = positionedCursor;
+        public readonly OutputProjection? Output = output;
+        public readonly Selection.DmlTopLimit? Top = top;
+        public readonly bool SerializableHint = serializableHint;
+        public readonly View? SourceView = sourceView;
+
+        public override SimulatedStatementOutcome Run(ParserContext context) => RunUpdate(context, this);
+    }
+
+    /// <summary>
+    /// The execution half of a single-table <c>UPDATE</c>: the permission
+    /// checks, the row walk evaluating WHERE and the SET list against each
+    /// row's pre-update image, and the commit. Reads no tokens.
+    /// </summary>
+    private static SimulatedStatementOutcome RunUpdate(ParserContext context, UpdatePlan plan)
+    {
+        var (targetName, table, rawAssignments, assignments, setMasks, where) = (plan.TargetName, plan.Table, plan.RawAssignments, plan.Assignments, plan.SetMasks, plan.Where);
+        var (positionedCursor, output, top, serializableHint, sourceView) = (plan.PositionedCursor, plan.Output, plan.Top, plan.SerializableHint, plan.SourceView);
         CheckUpdatePermissions(context, targetName, table, sourceView, rawAssignments, where);
         if (positionedCursor is null)
             Selection.SettleSerializableWriteFence(table, where, serializableHint, context.Batch);
@@ -1111,7 +1165,7 @@ partial class Simulation
         {
             // OUTPUT INTO's rows land before the body runs (probed 2026-09-27
             // against SQL Server 2025); to the client it is Msg 334.
-            var outputRows = output is null ? null : ProjectMutationOutput(affected, output);
+            var outputRows = output is null ? null : ProjectMutationOutput(affected, output, context.Batch);
             FireInsteadOfUpdateTrigger(context, table, sourceView, affected);
             return output is null || output.HasTarget
                 ? new SimulatedNonQuery(affected.Count)
@@ -1205,7 +1259,7 @@ partial class Simulation
 
         if (output is not null)
         {
-            var rows = ProjectMutationOutput(affected, output);
+            var rows = ProjectMutationOutput(affected, output, context.Batch);
             // OUTPUT INTO @t suppresses the result set (probe-confirmed).
             if (!output.HasTarget)
             {
@@ -1271,12 +1325,13 @@ partial class Simulation
 
     private static List<byte[]> ProjectMutationOutput(
         List<(int PageIndex, int SlotIndex, SqlValue[] FullNew, SqlValue[]? FullOld)> affected,
-        OutputProjection output)
+        OutputProjection output,
+        BatchContext batch)
     {
         var rows = new List<byte[]>(affected.Count);
         foreach (var (_, _, fullNew, fullOld) in affected)
         {
-            var projectedBytes = output.ProjectRow(insertedValues: fullNew, deletedValues: fullOld);
+            var projectedBytes = output.ProjectRow(batch, insertedValues: fullNew, deletedValues: fullOld);
             if (projectedBytes is not null)
                 rows.Add(projectedBytes);
         }

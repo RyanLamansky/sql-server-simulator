@@ -9,7 +9,8 @@ namespace SqlServerSimulator;
 /// <summary>
 /// Debug-build check that a plan entering the plan cache holds nothing that
 /// belongs to the session or the execution that parsed it. Walks every field
-/// reachable from the cached <see cref="Selection"/>s — through closures,
+/// reachable from the cached <see cref="Selection"/>s and DML statement plans
+/// (<see cref="DmlStatementPlan"/>) — through closures,
 /// iterator state machines, collections and structs — stopping at the shared
 /// server objects a plan may legitimately hold (tables, databases, schema
 /// objects, collations, types), and raises naming the path to the first
@@ -23,12 +24,12 @@ internal static class PlanCacheCaptureAudit
     /// Raises <see cref="InvalidOperationException"/> when any of
     /// <paramref name="plans"/> reaches a per-session or per-execution object.
     /// </summary>
-    public static void Verify(List<Selection> plans, string commandText)
+    public static void Verify(IEnumerable<object> plans, string commandText)
     {
         var seen = new HashSet<object>(ReferenceEqualityComparer.Instance);
         var pending = new Stack<(object Value, string Path)>();
         foreach (var plan in plans)
-            pending.Push((plan, "Selection"));
+            pending.Push((plan, plan.GetType().Name));
         while (pending.TryPop(out var item))
         {
             var (value, path) = item;

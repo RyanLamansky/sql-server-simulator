@@ -65,12 +65,11 @@ The subsections that follow carry the areas with work in flight.
   Open: an indexed view's and a nonclustered columnstore index's placement, `FILESTREAM_ON`, LOB data spilling onto a filegroup without files (Msg 622), per-partition data compression, `SELECT … INTO … ON`, partition-level lock escalation, and SWITCH's filegroup / index-alignment checks → [`partitioning.md`](partitioning.md#not-modeled-yet).
 - **Query Store residue** — capture, the runtime statistics, lock waits and all eleven `sp_query_store_*` procedures ship ([`database-options.md`](database-options.md#query-store)).
   Open: size-based and stale-query cleanup and `MAX_PLANS_PER_QUERY`, the statements of non-inlined scalar and multi-statement table-valued functions (real records them under the function), module-relative offsets and module context settings, the compile-CPU capture threshold, and applying a forced plan or a hint → [`database-options.md`](database-options.md#not-modeled-yet).
-- **A re-executable plan artifact for DML** — `INSERT` / `UPDATE` / `DELETE` / `MERGE` parse and execute in one interleaved pass, so the plan cache has nothing to store for them and a `SaveChanges` batch re-parses (its tokens are memoized; see [`plan-cache.md`](plan-cache.md#statement-kind-eligibility-what-can-be-replayed)).
-  Each would need the parse/execute split `Selection` already has, preserving an error ordering that is probe-pinned to the interleaving.
-  Same for `SET` / `DECLARE` as recordable effects, which is what would let the EF modification-batch prefix cache as a sequence rather than declining the batch.
-  **The ceiling was measured 2026-07-30** and is real but bounded: a plan-cache hit costs 14.4 µs/op against 26.8 forced to miss, so ~46% where it applies, and ~5.7 µs/op (~28%) is the headroom on the two-statement shape.
-  That reading is of the *plan* half only; the token half shipped separately and turned out larger than it was first measured to be — [`plan-cache.md`](plan-cache.md#the-token-memo) carries both the numbers and why the first measurement was low.
+- **DML plan residue** — `INSERT … VALUES` and the single-table `UPDATE` / `DELETE` cache a plan per statement and replay it inside any batch, the EF Core `SaveChanges` shapes included ([`plan-cache.md`](plan-cache.md#dml-statement-plans)).
+  Open: `MERGE` (every EF multi-row insert), `INSERT … SELECT`, the joined forms, DML through a view, `OUTPUT … INTO`, a statement holding a subquery, and a principal permission checks apply to → [`plan-cache.md`](plan-cache.md#not-modeled--future).
+  `MERGE` is last in value: a 10-row EF insert's `MERGE` measured ~470 µs in the simulator of which ~17 µs is its parse (2026-09-29), so its execution is the lever there, not a plan.
   **Benchmark note**: naive in-process A/B here is worthless — measuring the cases in one process made results order-dependent by up to 2× (whichever case ran first absorbed tiered-JIT warmup; "fixed text" read 28.3 µs first and 14.5 µs last). One case per process is the only shape that reproduced.
+  Warm-up is also longer than it looks: a single-row `UPDATE` batch read ~100 µs after 3,000 iterations and 12 µs after 100,000, so a run warms by elapsed time (seconds), not by an iteration count.
 
 ### TDS network endpoint — follow-up phases
 

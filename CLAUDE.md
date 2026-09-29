@@ -323,7 +323,7 @@ Where an entry carries a second clause it is because that fact changes what you'
 - **Heap page lifecycle** — reclamation / reuse, tail-only shrink, `DBCC SHRINKDATABASE` / `SHRINKFILE`, `Heap.RowCount`, and which callers may take the reused encode buffer → [`heap-storage.md`](docs/claude/heap-storage.md).
 - **DBCC and `CHECKPOINT`** — the cache commands, `USEROPTIONS`, `OPENTRAN`, `SQLPERF`, `LOGINFO`, the `TRACE*` trio, `HELP`, `CHECKCONSTRAINTS`, the consistency checks and table maintenance, with their messages, permissions and `@@ROWCOUNT` rules.
   A `WITH` word that is no DBCC option stops the batch at compile, everything else raises as the statement runs → [`dbcc.md`](docs/claude/dbcc.md).
-- **Per-`Simulation` plan cache and token memo** — the two reuse layers over a repeated `CommandText`.
+- **Per-`Simulation` plan cache and token memo** — the two reuse layers over a repeated `CommandText`; the plan cache holds SELECT sequences and per-statement `INSERT … VALUES` / `UPDATE` / `DELETE` plans.
   Cached plans are **shared**, so per-execution state belongs on `StatementContext`, never on the plan → [`plan-cache.md`](docs/claude/plan-cache.md).
 - **Transactions** — statement atomicity, the undo log, BEGIN / COMMIT / ROLLBACK / SAVE, `SET XACT_ABORT`, `SET IMPLICIT_TRANSACTIONS`, and the rare transaction-*aborting* error class that unwinds the whole stack → [`transactions.md`](docs/claude/transactions.md).
 - **Session `SET` options** — which carry state, the parse-time pair against the run-time rest, how far a module body's `SET` reaches, `@@OPTIONS` / `ANSI_DEFAULTS` / `ANSI_NULL_DFLT_*` / `NOEXEC` / `PARSEONLY` / `DEADLOCK_PRIORITY`, and the `STATISTICS IO` / `TIME` messages.

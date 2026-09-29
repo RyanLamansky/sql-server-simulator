@@ -939,7 +939,7 @@ public sealed partial class Simulation
     /// <summary>Test-observable: live count of entries in the plan cache.</summary>
     internal int PlanCacheCount => Volatile.Read(ref this.planCacheCount);
 
-    /// <summary>Cache key for <see cref="planCache"/>. The schema-version
+    /// <summary>Cache key for <see cref="planCache"/> and <see cref="dmlPlanSets"/>. The schema-version
     /// is intentionally NOT part of the key — it sits on the entry so a stale
     /// lookup overwrites in place rather than orphaning entries on every DDL.
     /// The session's QUOTED_IDENTIFIER setting IS part of the key: it changes
@@ -954,7 +954,7 @@ public sealed partial class Simulation
     /// fence most visibly. Anything but the default READ COMMITTED therefore
     /// skips both the lookup and the promotion and re-parses per execution.
     /// </para></summary>
-    private readonly struct PlanCacheKey(string commandText, string databaseName, string parameterSignature, bool quotedIdentifiers, DateOrder dateFormat, bool ansiNulls, bool concatNullYieldsNull)
+    internal readonly struct PlanCacheKey(string commandText, string databaseName, string parameterSignature, bool quotedIdentifiers, DateOrder dateFormat, bool ansiNulls, bool concatNullYieldsNull)
         : IEquatable<PlanCacheKey>
     {
         public readonly string CommandText = commandText;
@@ -1227,6 +1227,8 @@ public sealed partial class Simulation
             batch.PlanCacheDatabaseName = prepared.DatabaseName;
             batch.PlanCacheParameterSignature = prepared.ParameterSignature;
             batch.PlanCacheSchemaVersion = schemaVersionAtStart;
+            batch.PlanCacheKey = prepared;
+            batch.DmlPlans = this.dmlPlanSets.TryGetValue(prepared, out var dmlPlans) ? dmlPlans : null;
         }
 
         // A command carrying parameters is an ad-hoc scope, not a plain batch:
@@ -1428,6 +1430,11 @@ public sealed partial class Simulation
         {
             if (Matches(key) && this.compiledBatches.TryRemove(key, out _))
                 _ = Interlocked.Decrement(ref this.compiledBatchCount);
+        }
+        foreach (var key in this.dmlPlanSets.Keys)
+        {
+            if (Matches(key) && this.dmlPlanSets.TryRemove(key, out _))
+                _ = Interlocked.Decrement(ref this.dmlPlanSetCount);
         }
         if (sqlHandle is null && database is null)
         {
@@ -3494,7 +3501,7 @@ public sealed partial class Simulation
                 }
 
             case ReservedKeyword { Keyword: Keyword.Insert }:
-                outcome = RunMutation(context, ParseInsert);
+                outcome = this.RunDmlStatement(context, ParseInsert);
                 context.RejectTrailingToken();
                 if (!batch.IsSkipping)
                 {
@@ -3535,7 +3542,7 @@ public sealed partial class Simulation
                 break;
 
             case ReservedKeyword { Keyword: Keyword.Update }:
-                outcome = RunMutation(context, ParseUpdate);
+                outcome = this.RunDmlStatement(context, ParseUpdate);
                 context.RejectTrailingToken();
                 if (!batch.IsSkipping)
                 {
@@ -3545,7 +3552,7 @@ public sealed partial class Simulation
                 break;
 
             case ReservedKeyword { Keyword: Keyword.Delete }:
-                outcome = RunMutation(context, ParseDelete);
+                outcome = this.RunDmlStatement(context, ParseDelete);
                 context.RejectTrailingToken();
                 if (!batch.IsSkipping)
                 {

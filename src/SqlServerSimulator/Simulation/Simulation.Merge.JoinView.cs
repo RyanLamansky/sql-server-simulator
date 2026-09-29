@@ -331,7 +331,7 @@ partial class Simulation
 
         // OUTPUT reads the view's rows, landing an INTO target's before the
         // base table's triggers run, as a MERGE into the table itself does.
-        var outputRows = output is null ? null : ProjectMergeOutput(output, outputOrder!, viewRows.Columns, pendingInserts, pendingUpdates, pendingDeletes, deleteKept);
+        var outputRows = output is null ? null : ProjectMergeOutput(context.Batch, output, outputOrder!, viewRows.Columns, pendingInserts, pendingUpdates, pendingDeletes, deleteKept);
 
         _ = CommitMerge(context, table, sourceView: null, baseInserts, baseUpdates, baseDeletes, output: null, outputOrder: null, whenClauses, viewRowsTarget: null, updatedColumnOrdinals: updatedColumnOrdinals);
 
@@ -348,6 +348,7 @@ partial class Simulation
     /// as not taken is left out.
     /// </summary>
     private static List<byte[]> ProjectMergeOutput(
+        BatchContext batch,
         OutputProjection output,
         List<(int Key, MergeActionKind Kind, int Index)> outputOrder,
         HeapColumn[] columns,
@@ -367,9 +368,9 @@ partial class Simulation
                 continue;
             var bytes = kind switch
             {
-                MergeActionKind.Insert => output.ProjectRow(insertedValues: pendingInserts[index].NewValues, deletedValues: nullTarget, sourceValues: pendingInserts[index].SourceValues, action: "INSERT"),
-                MergeActionKind.Update => output.ProjectRow(insertedValues: pendingUpdates[index].NewValues, deletedValues: pendingUpdates[index].OldValues, sourceValues: pendingUpdates[index].SourceValues, action: "UPDATE"),
-                _ => output.ProjectRow(insertedValues: nullTarget, deletedValues: pendingDeletes[index].OldValues, sourceValues: pendingDeletes[index].SourceValues, action: "DELETE"),
+                MergeActionKind.Insert => output.ProjectRow(batch, insertedValues: pendingInserts[index].NewValues, deletedValues: nullTarget, sourceValues: pendingInserts[index].SourceValues, action: "INSERT"),
+                MergeActionKind.Update => output.ProjectRow(batch, insertedValues: pendingUpdates[index].NewValues, deletedValues: pendingUpdates[index].OldValues, sourceValues: pendingUpdates[index].SourceValues, action: "UPDATE"),
+                _ => output.ProjectRow(batch, insertedValues: nullTarget, deletedValues: pendingDeletes[index].OldValues, sourceValues: pendingDeletes[index].SourceValues, action: "DELETE"),
             };
             if (bytes is not null)
                 rows.Add(bytes);

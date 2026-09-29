@@ -244,6 +244,12 @@ Both expose the row count of the most-recently-completed statement on the sessio
 `@@ROWCOUNT` projects as `int`; `ROWCOUNT_BIG()` (`Parser/Expressions/TransactionScalarFunctions.cs`) is its `bigint` sibling — same source, wider projection.
 Same set + reset rules: every DML statement updates the count; control-flow statements (IF / WHILE / SET / DECLARE) leave it unchanged on the failure path but set it to the result on success; SELECT inside a `set @v = (select ...)` reports the inner-SELECT's affected row count.
 
+## The parse / execute split
+`INSERT … VALUES` and the single-table `UPDATE` and `DELETE` build a plan (`InsertPlan` / `UpdatePlan` / `DeletePlan`) at the point their last token is consumed, and run it through an execution half (`RunInsertValues` / `RunUpdate` / `RunDelete`) that reads no tokens — on every execution, so the plan cache's replay of one ([`plan-cache.md`](plan-cache.md#dml-statement-plans)) runs the same code a fresh parse does.
+The split sits where the interleaved statement already stopped reading: `UPDATE` and `DELETE` start their execution with the permission checks and the SERIALIZABLE fence, and `INSERT` with evaluating the tuples, ahead of the checks real makes once the source is read (auto-generated columns, identity, ragged tuples), so no error changes place.
+Two session reads moved across it — `IDENTITY_INSERT` and whether an `INSTEAD OF INSERT` trigger is enabled are read as the `INSERT` runs rather than as it parses — and neither raises.
+An `INSERT` reading a `SELECT`, `EXEC` or `DEFAULT VALUES` source reads it as it parses and then writes through the same `InsertRows`.
+
 ## INSERT … SELECT
 `INSERT [INTO] target [(cols)] SELECT …` accepts the full Selection grammar — WHERE/JOIN/GROUP BY/aggregates/ORDER BY/TOP/OFFSET-FETCH/UNION/INTERSECT/EXCEPT all work source-side.
 

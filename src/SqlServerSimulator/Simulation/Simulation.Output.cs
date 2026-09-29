@@ -348,7 +348,7 @@ partial class Simulation
             columnOrdinals = [.. fillable];
         }
 
-        return new OutputTarget(targetTable, columnOrdinals, context.Batch);
+        return new OutputTarget(targetTable, columnOrdinals);
     }
 
     /// <summary>
@@ -358,11 +358,10 @@ partial class Simulation
     /// column index to target table column ordinal (positional fill if INTO
     /// had no explicit column list).
     /// </summary>
-    private sealed class OutputTarget(HeapTable target, int[] projectionToTargetOrdinal, BatchContext batch)
+    private sealed class OutputTarget(HeapTable target, int[] projectionToTargetOrdinal)
     {
         public readonly HeapTable Target = target;
         public readonly int[] ProjectionToTargetOrdinal = projectionToTargetOrdinal;
-        private readonly BatchContext batch = batch;
 
         /// <summary>
         /// Appends one row to <see cref="Target"/>. Columns named in the
@@ -377,9 +376,9 @@ partial class Simulation
         /// table variables use the per-statement
         /// <see cref="BatchContext.CurrentTableVarUndoLog"/>; regular tables
         /// use the connection's
-        /// <see cref="BatchContext.CurrentUndoLog"/>.
+        /// <see cref="BatchContext.CurrentUndoLog"/> of the executing <paramref name="batch"/>.
         /// </summary>
-        public void Append(SqlValue[] projectedValues)
+        public void Append(SqlValue[] projectedValues, BatchContext batch)
         {
             var targetValues = new SqlValue[this.Target.Columns.Length];
             var covered = new bool[this.Target.Columns.Length];
@@ -409,17 +408,17 @@ partial class Simulation
                 targetValues[i] = column.Identity is not null
                     ? CoerceForIdentity(GenerateIdentity(column), column)
                     : column.Default is { } defaultExpression
-                        ? CoerceForInsert(defaultExpression.Run(new RuntimeContext(NoColumnResolver, this.batch)), column)
+                        ? CoerceForInsert(defaultExpression.Run(new RuntimeContext(NoColumnResolver, batch)), column)
                         : SqlValue.Null(column.Type);
             }
-            var undoLog = this.Target.IsTableVariable ? this.batch.CurrentTableVarUndoLog : this.batch.CurrentUndoLog;
+            var undoLog = this.Target.IsTableVariable ? batch.CurrentTableVarUndoLog : batch.CurrentUndoLog;
             var (newPage, newSlot) = this.Target.Heap.Insert(
                 RowEncoder.EncodeRow(this.Target.StoredColumns, targetValues, this.Target.Heap),
                 undoLog);
-            this.batch.Connection.StatementIo?.CountWrite(this.Target);
+            batch.Connection.StatementIo?.CountWrite(this.Target);
             if (Simulation.IsLockableTable(this.Target))
-                this.batch.AcquireRowLockTxScoped(this.Target, newPage, newSlot, LockMode.Exclusive, RowLockPurpose.Insert);
-            this.Target.ChangeTracking?.RecordRow(this.batch, this.Target, targetValues, ChangeTrackingOperation.Insert);
+                batch.AcquireRowLockTxScoped(this.Target, newPage, newSlot, LockMode.Exclusive, RowLockPurpose.Insert);
+            this.Target.ChangeTracking?.RecordRow(batch, this.Target, targetValues, ChangeTrackingOperation.Insert);
         }
     }
 
@@ -557,7 +556,9 @@ partial class Simulation
     /// Holds the parsed <c>OUTPUT</c> projection together with its statically
     /// resolved schema and the column-name resolvers it needs at row time.
     /// Backs both <c>INSERT ... OUTPUT</c> and <c>MERGE ... OUTPUT</c>; the
-    /// MERGE source-alias plumbing is opt-in via the constructor.
+    /// MERGE source-alias plumbing is opt-in via the constructor. Holds no
+    /// batch: a cached DML plan shares it across executions, so each row
+    /// projects against the batch its caller passes.
     /// </summary>
     private sealed class OutputProjection(
         IReadOnlyList<Expression> expressions,
@@ -565,7 +566,7 @@ partial class Simulation
         SqlType[] schema,
         HeapTable destinationTable,
         (string SourceAlias, string[] SourceColumns, SqlType[] SourceTypes)? source,
-        BatchContext batch,
+        BatchContext parseBatch,
         OutputTarget? outputTarget,
         DataMask?[]? sourceMasks = null,
         ViewOutputShape? view = null)
@@ -578,7 +579,6 @@ partial class Simulation
         /// </summary>
         private readonly HeapColumn[] columns = view?.Columns ?? destinationTable.Columns;
         public readonly string[] ColumnNames = columnNames;
-        private readonly BatchContext batch = batch;
 
         /// <summary>
         /// Per OUTPUT column, how it masks for a principal without
@@ -587,23 +587,29 @@ partial class Simulation
         /// Server 2025), both to the client and into an <c>INTO</c> target,
         /// and a MERGE's source columns as its source query projects them.
         /// </summary>
-        private readonly DataMask?[]? masks = DataMask.OfProjection(
-            batch,
-            [.. expressions],
-            name => BuiltInToken.Equals(name.ImmediateQualifier, "INSERTED") || BuiltInToken.Equals(name.ImmediateQualifier, "DELETED")
-                ? Array.FindIndex(view?.Columns ?? destinationTable.Columns, column => batch.CurrentDatabase.Collation.Equals(column.Name, name.Leaf)) is var ordinal and >= 0
-                    ? view is not null ? view.Columns[ordinal].DerivedMask : DataMask.ForTableColumn(destinationTable, ordinal)
-                    : null
-                : source is var (sourceAlias, sourceColumns, _) && batch.CurrentDatabase.Collation.Equals(name.ImmediateQualifier, sourceAlias)
-                    && Array.FindIndex(sourceColumns, column => batch.CurrentDatabase.Collation.Equals(column, name.Leaf)) is var sourceOrdinal and >= 0
-                    ? sourceMasks?[sourceOrdinal]
-                    : null,
-            typeOf: null);
+        private readonly DataMask?[]? masks = MasksOf(parseBatch, expressions, destinationTable, source, sourceMasks, view);
 
-        // Which masks apply is the executing principal's to answer, once per
-        // statement: the identity can't change while its rows project.
-        private MaskingFunction?[]? applyingMasks;
-        private bool masksResolved;
+        // A static helper rather than a field initializer's lambdas, so no
+        // closure over the parsing batch outlives the constructor.
+        private static DataMask?[]? MasksOf(
+            BatchContext batch,
+            IReadOnlyList<Expression> expressions,
+            HeapTable destinationTable,
+            (string SourceAlias, string[] SourceColumns, SqlType[] SourceTypes)? source,
+            DataMask?[]? sourceMasks,
+            ViewOutputShape? view) =>
+            DataMask.OfProjection(
+                batch,
+                [.. expressions],
+                name => BuiltInToken.Equals(name.ImmediateQualifier, "INSERTED") || BuiltInToken.Equals(name.ImmediateQualifier, "DELETED")
+                    ? Array.FindIndex(view?.Columns ?? destinationTable.Columns, column => batch.CurrentDatabase.Collation.Equals(column.Name, name.Leaf)) is var ordinal and >= 0
+                        ? view is not null ? view.Columns[ordinal].DerivedMask : DataMask.ForTableColumn(destinationTable, ordinal)
+                        : null
+                    : source is var (sourceAlias, sourceColumns, _) && batch.CurrentDatabase.Collation.Equals(name.ImmediateQualifier, sourceAlias)
+                        && Array.FindIndex(sourceColumns, column => batch.CurrentDatabase.Collation.Equals(column, name.Leaf)) is var sourceOrdinal and >= 0
+                        ? sourceMasks?[sourceOrdinal]
+                        : null,
+                typeOf: null);
 
         /// <summary>
         /// True when this OUTPUT clause includes an <c>INTO</c> target.
@@ -617,11 +623,11 @@ partial class Simulation
         // A non-persisted computed column is evaluated when OUTPUT reads it,
         // so an expression that fails for the row raises here rather than
         // having failed the write.
-        private SqlValue ReadOutputColumn(SqlValue[] row, int ordinal) =>
+        private SqlValue ReadOutputColumn(SqlValue[] row, int ordinal, BatchContext batch) =>
             view is not null
                 ? view.Read is { } read ? read(row, ordinal) : row[ordinal]
                 : destinationTable.Columns[ordinal] is { Computed: not null, IsPersisted: false }
-                ? EvaluateComputedColumn(destinationTable, row, ordinal, this.batch)
+                ? EvaluateComputedColumn(destinationTable, row, ordinal, batch)
                 : row[ordinal];
 
         /// <summary>
@@ -631,6 +637,7 @@ partial class Simulation
         /// <see langword="null"/> when an INTO target consumed the row (the
         /// caller then skips its per-row result-set append).
         /// </summary>
+        /// <param name="batch">The executing batch.</param>
         /// <param name="insertedValues">Post-image row, or null where the statement has none (DELETE).</param>
         /// <param name="deletedValues">Pre-image row, or null where the statement has none (INSERT).</param>
         /// <param name="sourceValues">MERGE's matched source row; null for the other statements.</param>
@@ -647,6 +654,7 @@ partial class Simulation
         /// the old values.
         /// </remarks>
         public byte[]? ProjectRow(
+            BatchContext batch,
             SqlValue[]? insertedValues,
             SqlValue[]? deletedValues,
             SqlValue[]? sourceValues = null,
@@ -658,24 +666,24 @@ partial class Simulation
                 {
                     for (var i = 0; i < this.columns.Length; i++)
                     {
-                        if (this.batch.CurrentDatabase.Collation.Equals(this.columns[i].Name, name.Leaf))
-                            return insertedValues is null ? SqlValue.Null(this.columns[i].Type) : this.ReadOutputColumn(insertedValues, i);
+                        if (batch.CurrentDatabase.Collation.Equals(this.columns[i].Name, name.Leaf))
+                            return insertedValues is null ? SqlValue.Null(this.columns[i].Type) : this.ReadOutputColumn(insertedValues, i, batch);
                     }
                 }
                 else if (BuiltInToken.Equals(name.ImmediateQualifier, "DELETED"))
                 {
                     for (var i = 0; i < this.columns.Length; i++)
                     {
-                        if (this.batch.CurrentDatabase.Collation.Equals(this.columns[i].Name, name.Leaf))
-                            return deletedValues is null ? SqlValue.Null(this.columns[i].Type) : this.ReadOutputColumn(deletedValues, i);
+                        if (batch.CurrentDatabase.Collation.Equals(this.columns[i].Name, name.Leaf))
+                            return deletedValues is null ? SqlValue.Null(this.columns[i].Type) : this.ReadOutputColumn(deletedValues, i, batch);
                     }
                 }
                 else if (source is var (sourceAlias, sourceCols, sourceTypes)
-                    && this.batch.CurrentDatabase.Collation.Equals(name.ImmediateQualifier, sourceAlias))
+                    && batch.CurrentDatabase.Collation.Equals(name.ImmediateQualifier, sourceAlias))
                 {
                     for (var i = 0; i < sourceCols.Length; i++)
                     {
-                        if (this.batch.CurrentDatabase.Collation.Equals(sourceCols[i], name.Leaf))
+                        if (batch.CurrentDatabase.Collation.Equals(sourceCols[i], name.Leaf))
                             return sourceValues is null ? SqlValue.Null(sourceTypes[i]) : sourceValues[i];
                     }
                 }
@@ -687,23 +695,17 @@ partial class Simulation
             {
                 projected[i] = action is not null && IsMergeActionRef(expressions[i])
                     ? SqlValue.FromNVarchar(action)
-                    : expressions[i].Run(new RuntimeContext(Resolve, this.batch));
+                    : expressions[i].Run(new RuntimeContext(Resolve, batch));
             }
 
-            if (this.masks is not null)
-            {
-                if (!this.masksResolved)
-                {
-                    this.applyingMasks = DataMasking.Applying(this.batch, this.masks);
-                    this.masksResolved = true;
-                }
-                if (this.applyingMasks is { } applying)
-                    projected = DataMasking.MaskRowForStorage(projected, applying, this.Schema);
-            }
+            // Which masks apply is the executing principal's to answer; an
+            // OUTPUT clause declaring none never asks.
+            if (this.masks is not null && DataMasking.Applying(batch, this.masks) is { } applying)
+                projected = DataMasking.MaskRowForStorage(projected, applying, this.Schema);
 
             if (outputTarget is null)
                 return RowEncoder.EncodeRow(this.Schema, projected);
-            outputTarget.Append(projected);
+            outputTarget.Append(projected, batch);
             return null;
         }
     }

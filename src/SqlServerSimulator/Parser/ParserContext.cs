@@ -774,6 +774,53 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     }
 
     /// <summary>
+    /// How many queries — statements, subqueries, derived tables — this parse
+    /// has entered through <see cref="Selection.Parse"/>. A DML statement whose
+    /// parse entered one holds a nested plan with closures over the parse, so
+    /// its plan isn't cached (see <see cref="DmlStatementPlan"/>).
+    /// </summary>
+    public int QueriesParsed;
+
+    /// <summary>
+    /// Whether this parse walks a token sequence it shares or is collecting
+    /// one — the precondition for recording where a statement ends so a later
+    /// parse of the same text can jump there (<see cref="CanJumpTo"/>).
+    /// </summary>
+    public bool HoldsTokenSequence => this.memoTokens is not null || this.memoCollector is not null;
+
+    /// <summary>
+    /// Whether <paramref name="checkpoint"/>, captured by another parse of the
+    /// same text, names a position in the memoized sequence this parse walks:
+    /// the token it sat on is the sequence's own at that ordinal. Only then can
+    /// <see cref="RestoreCheckpoint"/> move this parse there without reading
+    /// the tokens between.
+    /// </summary>
+    /// <remarks>
+    /// A checkpoint past the last token — a statement ending the text with no
+    /// separator — sits on no token, and names the end of the sequence.
+    /// </remarks>
+    public bool CanJumpTo(Checkpoint checkpoint) =>
+        this.memoTokens is { } sequence
+        && checkpoint.MemoPosition > 0
+        && checkpoint.MemoPosition <= sequence.Length
+        && this.memoPosition <= checkpoint.MemoPosition
+        && (checkpoint.Token is null
+            ? checkpoint.MemoPosition == sequence.Length
+            : ReferenceEquals(sequence[checkpoint.MemoPosition - 1], checkpoint.Token));
+
+    /// <summary>
+    /// Moves this parse to <paramref name="checkpoint"/>, which
+    /// <see cref="CanJumpTo"/> accepted, as reading the tokens up to it would
+    /// have — including, at the end of the text, the last token read.
+    /// </summary>
+    public void JumpTo(Checkpoint checkpoint)
+    {
+        this.RestoreCheckpoint(checkpoint);
+        if (checkpoint.Token is null)
+            this.LastToken = this.memoTokens![^1];
+    }
+
+    /// <summary>
     /// Restores a checkpoint captured by <see cref="SaveCheckpoint"/>.
     /// </summary>
     public void RestoreCheckpoint(Checkpoint checkpoint)

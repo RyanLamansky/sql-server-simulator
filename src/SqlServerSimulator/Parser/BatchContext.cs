@@ -592,6 +592,25 @@ internal sealed class BatchContext
     public List<(int Start, int End)>? PlanCacheSequenceSpans;
 
     /// <summary>
+    /// The plan-cache key this batch runs under, when it has one; the DML
+    /// statements' plans are filed under it (<see cref="DmlPlans"/>).
+    /// </summary>
+    public Simulation.PlanCacheKey? PlanCacheKey;
+
+    /// <summary>
+    /// The DML statement plans cached for this batch's text, looked up once as
+    /// the batch starts, or created by its first recording.
+    /// </summary>
+    public DmlPlanSet? DmlPlans;
+
+    /// <summary>
+    /// Armed around a top-level DML statement's parse when its plan may be
+    /// cached; the statement's split point fills it (see
+    /// <see cref="DmlPlanRecording"/>).
+    /// </summary>
+    public DmlPlanRecording? DmlPlanRecording;
+
+    /// <summary>
     /// Records every lock acquisition and <c>NOWAIT</c> table while non-null —
     /// armed by the SELECT arm around a top-level statement's parse in a batch
     /// the plan cache may store. Taking schema-stability and table-level data

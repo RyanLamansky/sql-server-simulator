@@ -609,6 +609,7 @@ internal sealed partial class Selection
         // the quantified comparisons) would otherwise leave an enclosing
         // constant-fold frame believing every operand was a literal.
         context.FoldableArguments = false;
+        context.QueriesParsed++;
         return ParseQueryExpression(context, scope);
     }
 
