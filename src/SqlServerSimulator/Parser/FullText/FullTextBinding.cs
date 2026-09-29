@@ -9,7 +9,7 @@ namespace SqlServerSimulator.Parser.FullText;
 /// table, the columns the search reads, and the accent fold its catalog
 /// imposes.
 /// </summary>
-internal sealed class FullTextBinding(HeapTable table, int[] columnOrdinals, MultiPartName[] columnNames, bool accentSensitive)
+internal sealed class FullTextBinding(HeapTable table, int[] columnOrdinals, MultiPartName[] columnNames, FullTextLanguage[] columnLanguages, bool accentSensitive)
 {
     public readonly HeapTable Table = table;
 
@@ -22,6 +22,18 @@ internal sealed class FullTextBinding(HeapTable table, int[] columnOrdinals, Mul
     /// instances stay distinguishable.
     /// </summary>
     public readonly MultiPartName[] ColumnNames = columnNames;
+
+    /// <summary>
+    /// Each searched column's full-text language, from its <c>LANGUAGE</c>
+    /// in the index: the stoplist its content is indexed under.
+    /// </summary>
+    public readonly FullTextLanguage[] ColumnLanguages = columnLanguages;
+
+    /// <summary>
+    /// The language a condition is read in when the call names none: the
+    /// first searched column's.
+    /// </summary>
+    public FullTextLanguage DefaultQueryLanguage => this.ColumnLanguages.Length == 0 ? FullTextLanguage.English : this.ColumnLanguages[0];
 
     /// <summary>
     /// From the backing catalog's <c>ACCENT_SENSITIVITY</c> option (default
@@ -44,8 +56,9 @@ internal sealed class FullTextBinding(HeapTable table, int[] columnOrdinals, Mul
     public FullTextDocument BuildDocument(Func<MultiPartName, SqlValue> resolveColumn)
     {
         var document = new FullTextDocument();
-        foreach (var name in this.ColumnNames)
-            document.AddColumn(TextOf(resolveColumn(name)), this.AccentSensitive);
+        var stoplist = this.UsesStoplist;
+        for (var i = 0; i < this.ColumnNames.Length; i++)
+            document.AddColumn(TextOf(resolveColumn(this.ColumnNames[i])), this.AccentSensitive, stoplist ? this.ColumnLanguages[i] : null);
         return document;
     }
 
@@ -209,6 +222,7 @@ internal static class FullTextColumnSpec
 
         List<int> ordinals = [];
         List<MultiPartName> names = [];
+        List<FullTextLanguage> languages = [];
         if (spec.AllColumns)
         {
             foreach (var column in index.Columns)
@@ -218,6 +232,7 @@ internal static class FullTextColumnSpec
                     continue;
                 ordinals.Add(ordinal);
                 names.Add(Qualify(qualifier, table.Columns[ordinal].Name));
+                languages.Add(FullTextLanguage.For(column.LanguageId));
             }
         }
         else
@@ -235,22 +250,23 @@ internal static class FullTextColumnSpec
                 }
                 if (ordinal < 0)
                     throw SimulatedSqlException.InvalidColumnName(written.Leaf);
-                var indexed = false;
+                var languageId = -1;
                 foreach (var column in index.Columns)
                 {
                     if (column.ColumnId == ordinal + 1)
                     {
-                        indexed = true;
+                        languageId = column.LanguageId;
                         break;
                     }
                 }
-                if (!indexed)
+                if (languageId < 0)
                     throw SimulatedSqlException.FullTextColumnNotIndexed(written.Leaf);
+                languages.Add(FullTextLanguage.For(languageId));
                 ordinals.Add(ordinal);
                 names.Add(written.Count > 1 ? written : Qualify(qualifier, table.Columns[ordinal].Name));
             }
         }
-        return new FullTextBinding(table, [.. ordinals], [.. names], accentSensitive);
+        return new FullTextBinding(table, [.. ordinals], [.. names], [.. languages], accentSensitive);
     }
 
     private static MultiPartName Qualify(string? qualifier, string columnName) =>

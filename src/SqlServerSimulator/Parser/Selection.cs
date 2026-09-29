@@ -3177,6 +3177,8 @@ internal sealed partial class Selection
                         return BuiltInRowsetSource(context, ParseSqlText(context, objectName.ToString()));
                     if (BuiltInToken.Equals(objectName.Leaf, "dm_exec_input_buffer"))
                         return BuiltInRowsetSource(context, ParseInputBuffer(context, objectName.ToString()));
+                    if (BuiltInToken.Equals(objectName.Leaf, "dm_fts_parser"))
+                        return BuiltInRowsetSource(context, ParseFtsParser(context, objectName.ToString()));
                 }
 
                 // Linked-server fork: four-part `server.db.schema.t` routes
@@ -3789,7 +3791,7 @@ internal sealed partial class Selection
     private static bool IsSysRowsetFunction(MultiPartName name) =>
         name.Count == 2
         && BuiltInToken.Equals(name.ImmediateQualifier, "sys")
-        && BuiltInToken.EqualsAny(name.Leaf, "dm_exec_describe_first_result_set", "dm_exec_input_buffer", "dm_exec_sql_text", "dm_sql_referenced_entities", "dm_sql_referencing_entities", "fn_virtualfilestats");
+        && BuiltInToken.EqualsAny(name.Leaf, "dm_exec_describe_first_result_set", "dm_exec_input_buffer", "dm_exec_sql_text", "dm_fts_parser", "dm_sql_referenced_entities", "dm_sql_referencing_entities", "fn_virtualfilestats");
 
     private static FromSource BuiltInRowsetSource(ParserContext context, Selection plan)
     {

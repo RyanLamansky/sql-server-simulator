@@ -60,11 +60,15 @@ internal sealed class FullTextSearchCondition(FullTextNode root, bool sawStopwor
     /// <summary>
     /// Parses a <c>CONTAINS</c>-style condition. <paramref name="accentSensitive"/>
     /// comes from the catalog backing the table's index, so the condition's own
-    /// terms fold exactly the way the indexed content did.
+    /// terms fold exactly the way the indexed content did;
+    /// <paramref name="language"/> names the stoplist and morphology, and
+    /// <paramref name="stoplist"/> is false when the index uses none.
+    /// <paramref name="report"/>, when given, collects the leaves the way
+    /// <c>sys.dm_fts_parser</c> lists them.
     /// </summary>
-    public static FullTextSearchCondition ParseContains(string condition, bool accentSensitive, bool stoplist)
+    public static FullTextSearchCondition ParseContains(string condition, bool accentSensitive, FullTextLanguage language, bool stoplist, FullTextParserReport? report = null)
     {
-        var parser = new ConditionParser(condition, accentSensitive, stoplist);
+        var parser = new ConditionParser(condition, accentSensitive, language, stoplist ? language : null, report);
         var root = parser.ParseOr();
         parser.ExpectEnd();
         return new FullTextSearchCondition(root, parser.SawStopword);
@@ -78,18 +82,20 @@ internal sealed class FullTextSearchCondition(FullTextNode root, bool sawStopwor
     /// holding <c>mice</c>). Punctuation and quotes carry no operator meaning
     /// here; they are break characters like any other.
     /// </summary>
-    public static FullTextSearchCondition ParseFreeText(string condition, bool accentSensitive, bool stoplist)
+    public static FullTextSearchCondition ParseFreeText(string condition, bool accentSensitive, FullTextLanguage language, bool stoplist)
     {
         var sawStopword = false;
         List<FullTextNode> alternatives = [];
+        HashSet<string> seen = new(StringComparer.Ordinal);
         foreach (var term in FullTextWordBreaker.Break(condition, accentSensitive))
         {
-            if (stoplist && FullTextLexicon.IsStopword(term.Text))
+            if (stoplist && language.IsNoise(term.Text))
             {
                 sawStopword = true;
                 continue;
             }
-            alternatives.Add(FullTextTermNode.Word(term.Text, inflectional: true, stoplist));
+            if (seen.Add(term.Text))
+                alternatives.Add(FullTextTermNode.Word(term.Text, inflectional: language.EnglishMorphology));
         }
         var root = alternatives.Count switch
         {
@@ -105,7 +111,7 @@ internal sealed class FullTextSearchCondition(FullTextNode root, bool sawStopwor
     /// the accent fold; every error it raises carries the whole original
     /// condition, matching real's message.
     /// </summary>
-    private sealed class ConditionParser(string condition, bool accentSensitive, bool stoplist)
+    private sealed class ConditionParser(string condition, bool accentSensitive, FullTextLanguage language, FullTextLanguage? stoplist, FullTextParserReport? report)
     {
         private readonly string text = condition;
         private int index;
@@ -188,7 +194,7 @@ internal sealed class FullTextSearchCondition(FullTextNode root, bool sawStopwor
                     return grouped;
 
                 case '"':
-                    return ParseQuotedTerm();
+                    return ParseQuotedTerm(inflectional: false);
 
                 case ')':
                 case ',':
@@ -225,7 +231,7 @@ internal sealed class FullTextSearchCondition(FullTextNode root, bool sawStopwor
                     return ParseGenericNear();
             }
             this.index = afterWord;
-            return BuildTermFromText(word, allowPrefix: false, inflectional: false);
+            return BuildTermFromText(word, quoted: false, inflectional: false);
         }
 
         /// <summary>
@@ -234,7 +240,7 @@ internal sealed class FullTextSearchCondition(FullTextNode root, bool sawStopwor
         /// just a break character (probe: <c>'"*quick"'</c> matches rows holding
         /// <c>quick</c>).
         /// </summary>
-        private FullTextNode ParseQuotedTerm()
+        private FullTextNode ParseQuotedTerm(bool inflectional)
         {
             this.index++; // opening quote
             var start = this.index;
@@ -245,62 +251,119 @@ internal sealed class FullTextSearchCondition(FullTextNode root, bool sawStopwor
             var body = this.text[start..this.index];
             this.index++; // closing quote
 
-            return BuildTermFromText(body, allowPrefix: true, inflectional: false);
+            return BuildTermFromText(body, quoted: true, inflectional);
         }
 
         /// <summary>
         /// Word-breaks a term's own text the same way the indexed content was
-        /// broken, so a multi-position result becomes a phrase and a compound
-        /// contributes its parts. A whitespace-separated word written with a
-        /// trailing star becomes a prefix element: real applies the star per
-        /// word, not once per quoted term (probe: <c>'"al* be*"'</c> matches
-        /// <c>alpha beta</c>). Records whether any element was a stopword.
+        /// broken, so a multi-position result becomes a phrase whose positions
+        /// each accept any term the breaker put there — a compound's composite
+        /// or its first part, a number or its <c>nn</c> companion. A
+        /// whitespace-separated word written with a trailing star inside quotes
+        /// becomes a prefix element: real applies the star per word, not once
+        /// per quoted term (probe: <c>'"al* be*"'</c> matches <c>alpha beta</c>),
+        /// so a starred phrase breaks word by word. Records whether any
+        /// position held only noise.
         /// </summary>
-        private FullTextNode BuildTermFromText(string body, bool allowPrefix, bool inflectional)
+        private FullTextNode BuildTermFromText(string body, bool quoted, bool inflectional)
         {
-            List<string> elements = [];
-            List<bool> prefixes = [];
-            foreach (var chunk in body.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries))
+            List<FullTextTerm> terms;
+            HashSet<int> prefixPositions = [];
+            var words = body.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+            var starred = false;
+            foreach (var word in words)
+                starred |= quoted && word.EndsWith('*');
+            if (!starred)
             {
-                var word = chunk;
-                // The star means "prefix" only inside quotes; unquoted `ch*` is
-                // the ordinary word `ch`, which is what real matches on.
-                var starred = allowPrefix && word.EndsWith('*');
-                if (starred)
-                    word = word[..^1];
-                var terms = FullTextWordBreaker.Break(word, accentSensitive);
-                if (terms.Count == 0)
-                    continue;
-
-                // A compound emits its composite at the same position as its
-                // first part; keep the part, so a phrase reads as the sequence
-                // of parts (`"red-hot"` becomes `red` then `hot`, which is how
-                // real matches it).
-                var chunkStart = elements.Count;
-                var lastPosition = -1;
-                foreach (var term in terms)
+                terms = FullTextWordBreaker.BreakWithMarkers(body, accentSensitive);
+            }
+            else
+            {
+                terms = [];
+                var basePosition = 0;
+                foreach (var chunk in words)
                 {
-                    if (term.Position == lastPosition)
+                    // The star means "prefix" only inside quotes; unquoted
+                    // `ch*` is the ordinary word `ch`, which is what real
+                    // matches on.
+                    var word = chunk.TrimEnd('*');
+                    var broken = FullTextWordBreaker.BreakWithMarkers(word, accentSensitive);
+                    var last = 0;
+                    foreach (var term in broken)
                     {
-                        elements[^1] = term.Text;
-                        continue;
+                        terms.Add(new FullTextTerm(term.Text, basePosition + term.Position, term.Kind));
+                        last = Math.Max(last, term.Position);
+                        // A starred compound prefixes every part (`"red-hot*"`
+                        // finds `reds hotter`).
+                        if (chunk.EndsWith('*') && term.Kind == FullTextTermKind.Word)
+                            _ = prefixPositions.Add(basePosition + term.Position);
                     }
-                    lastPosition = term.Position;
-                    elements.Add(term.Text);
-                    prefixes.Add(false);
+                    basePosition += last;
                 }
-                if (starred && elements.Count > chunkStart)
-                    prefixes[^1] = true;
             }
 
-            foreach (var element in elements)
+            var morphological = inflectional && language.EnglishMorphology;
+            // The source a report lists is the term as written, a quoted one
+            // without its stars.
+            report?.AddLeaf(quoted ? string.Join(' ', body.Split(' ').Select(static w => w.TrimEnd('*'))) : body, terms, morphological, stoplist);
+
+            List<FullTextElement> elements = [];
+            var firstPosition = 0;
+            for (var i = 0; i < terms.Count;)
             {
-                if (stoplist && FullTextLexicon.IsStopword(element))
-                    this.SawStopword = true;
+                if (terms[i].Kind != FullTextTermKind.Word)
+                {
+                    i++;
+                    continue;
+                }
+                var position = terms[i].Position;
+                if (firstPosition == 0)
+                    firstPosition = position;
+                List<string> all = [];
+                List<string> searchable = [];
+                for (; i < terms.Count && terms[i].Position == position; i++)
+                {
+                    if (terms[i].Kind != FullTextTermKind.Word)
+                        continue;
+                    all.Add(terms[i].Text);
+                    if (stoplist is null || !stoplist.IsNoise(terms[i].Text))
+                        searchable.Add(terms[i].Text);
+                }
+                var offset = position - firstPosition;
+                if (prefixPositions.Contains(position))
+                {
+                    // A starred position prefixes every term there, noise
+                    // included: `"the*"` finds `theory`, and `"07/26/*"`
+                    // reaches `nn79` through `07`'s companion `nn7`.
+                    elements.Add(new FullTextElement(offset, [.. all], prefix: true, wildcard: false));
+                    continue;
+                }
+                if (searchable.Count > 0)
+                {
+                    elements.Add(new FullTextElement(offset, [.. searchable], prefix: false, wildcard: false));
+                    continue;
+                }
+                this.SawStopword = true;
+                var singleCharacter = all.Find(static t => t.Length == 1 && char.IsLetterOrDigit(t[0]));
+                if (morphological && singleCharacter is not null)
+                {
+                    // Inflection reaches a noise word of a single character:
+                    // a letter becomes its forms (`x` → `x's`), which then
+                    // have to match, and a digit has none, so its leaf
+                    // matches nothing; a longer one (`of`) has no forms and
+                    // stays out.
+                    elements.Add(new FullTextElement(offset, [.. FullTextLexicon.InflectionalForms(singleCharacter)], prefix: false, wildcard: false));
+                    continue;
+                }
+                elements.Add(new FullTextElement(offset, [], prefix: false, wildcard: true));
             }
-            return elements.Count == 0
+            // A starred phrase holding a noise word matches nothing (probe:
+            // `"word of mou*"` found no `word of mouth`, `"red-ho*"` found
+            // `red-hot`).
+            var noiseInPrefix = prefixPositions.Count > 0 && elements.Exists(static e => e.Wildcard);
+            return elements.Count == 0 || noiseInPrefix
                 ? FullTextNode.NeverMatches
-                : FullTextTermNode.Create([.. elements], [.. prefixes], inflectional, stoplist);
+                : FullTextTermNode.Create([.. elements], morphological);
         }
 
         private FullTextNode ParseFormsOf()
@@ -322,7 +385,7 @@ internal sealed class FullTextSearchCondition(FullTextNode root, bool sawStopwor
                 SkipWhitespace();
                 if (this.index < this.text.Length && this.text[this.index] == '"')
                 {
-                    alternatives.Add(ParseQuotedTerm());
+                    alternatives.Add(ParseQuotedTerm(inflectional));
                 }
                 else
                 {
@@ -332,7 +395,7 @@ internal sealed class FullTextSearchCondition(FullTextNode root, bool sawStopwor
                     // THESAURUS expands through the shipped thesaurus files,
                     // which are empty out of the box — probe: FORMSOF(THESAURUS,
                     // run) matches only literal `run`.
-                    alternatives.Add(BuildTermFromText(word, allowPrefix: false, inflectional));
+                    alternatives.Add(BuildTermFromText(word, quoted: false, inflectional));
                 }
                 SkipWhitespace();
             }
@@ -555,7 +618,7 @@ internal sealed class FullTextSearchCondition(FullTextNode root, bool sawStopwor
             while (this.index < this.text.Length)
             {
                 var ch = this.text[this.index];
-                if (char.IsWhiteSpace(ch) || ch is '(' or ')' or ',' or '"' or '&' or '|' or '~')
+                if (char.IsWhiteSpace(ch) || ch is '(' or ')' or ',' or '"' or '&' or '|' or '~' or '!')
                     break;
                 this.index++;
             }

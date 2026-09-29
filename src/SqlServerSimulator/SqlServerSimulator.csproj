@@ -41,6 +41,10 @@
     <ProjectReference Include="..\SqlServerSimulator.ClrShim\SqlServerSimulator.ClrShim.csproj" OutputItemType="ClrShimAssembly" ReferenceOutputAssembly="false" PrivateAssets="all" />
   </ItemGroup>
 
+  <ItemGroup>
+    <EmbeddedResource Include="Parser/FullText/SystemStopwords.tsv" LogicalName="SqlServerSimulator.FullText.SystemStopwords.tsv" />
+  </ItemGroup>
+
   <Target Name="EmbedClrShimAssembly" AfterTargets="ResolveProjectReferences">
     <ItemGroup>
       <EmbeddedResource Include="@(ClrShimAssembly)" LogicalName="Microsoft.SqlServer.Server.dll" />

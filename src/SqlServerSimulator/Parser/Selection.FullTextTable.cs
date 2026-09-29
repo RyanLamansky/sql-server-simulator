@@ -60,15 +60,16 @@ internal sealed partial class Selection
         var condition = Expression.Parse(context.MoveNextRequiredReturnSelf());
 
         Expression? topByRank = null;
+        Expression? language = null;
         while (context.Token is Operator { Character: ',' })
         {
             context.MoveNextRequired();
-            // `LANGUAGE n` picks the word breaker; the simulator models English
-            // only, so the argument is parsed for shape and discarded.
+            // `LANGUAGE n` picks the stoplist and morphology the condition is
+            // read with.
             if (context.Token is Name languageToken
                 && context.Batch.CurrentDatabase.Collation.Equals(languageToken.Value, "LANGUAGE"))
             {
-                _ = Expression.Parse(context.MoveNextRequiredReturnSelf());
+                language = Expression.Parse(context.MoveNextRequiredReturnSelf());
                 continue;
             }
             topByRank = Expression.Parse(context);
@@ -89,7 +90,7 @@ internal sealed partial class Selection
             hasOrderBy: false,
             hasTopOrOffsetOrFetch: false,
             (batch, outerResolver) => EnumerateFullTextTableRows(
-                binding, condition, freeText, topByRank, keyStorageOrdinal, schema, batch, outerResolver));
+                binding, condition, language, freeText, topByRank, keyStorageOrdinal, schema, batch, outerResolver));
     }
 
     /// <summary>
@@ -135,6 +136,7 @@ internal sealed partial class Selection
     private static IEnumerable<byte[]> EnumerateFullTextTableRows(
         FullTextBinding binding,
         Expression condition,
+        Expression? language,
         bool freeText,
         Expression? topByRank,
         int keyStorageOrdinal,
@@ -152,9 +154,10 @@ internal sealed partial class Selection
         if (string.IsNullOrWhiteSpace(conditionText))
             throw SimulatedSqlException.FullTextNullOrEmptyPredicate();
 
+        var queryLanguage = language is null ? binding.DefaultQueryLanguage : FullTextLanguage.Resolve(language.Run(runtime));
         var compiled = freeText
-            ? FullTextSearchCondition.ParseFreeText(conditionText, binding.AccentSensitive, binding.UsesStoplist)
-            : FullTextSearchCondition.ParseContains(conditionText, binding.AccentSensitive, binding.UsesStoplist);
+            ? FullTextSearchCondition.ParseFreeText(conditionText, binding.AccentSensitive, queryLanguage, binding.UsesStoplist)
+            : FullTextSearchCondition.ParseContains(conditionText, binding.AccentSensitive, queryLanguage, binding.UsesStoplist);
         if (compiled.SawStopword)
             batch.AppendFullTextNoiseWordMessage();
 
@@ -180,10 +183,11 @@ internal sealed partial class Selection
         {
             rowCount++;
             var document = new FullTextDocument();
-            foreach (var storageOrdinal in searchedStorageOrdinals)
+            var usesStoplist = binding.UsesStoplist;
+            for (var c = 0; c < searchedStorageOrdinals.Length; c++)
             {
-                var value = RowDecoder.DecodeColumn(storedSchema, bytes, storageOrdinal, table.Heap);
-                document.AddColumn(FullTextBinding.TextOf(value), binding.AccentSensitive);
+                var value = RowDecoder.DecodeColumn(storedSchema, bytes, searchedStorageOrdinals[c], table.Heap);
+                document.AddColumn(FullTextBinding.TextOf(value), binding.AccentSensitive, usesStoplist ? binding.ColumnLanguages[c] : null);
             }
             totalLength += document.Length;
 

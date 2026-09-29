@@ -45,59 +45,77 @@ internal sealed class FullTextNeverMatchNode : FullTextNode
 }
 
 /// <summary>
-/// A leaf: one word, one prefix, or one phrase. A phrase element that is a
-/// system stopword matches whatever term occupies that position — real's
-/// behavior, which is why <c>"over the lazy dog"</c> matches text reading
-/// exactly that and <c>"jumps over lazy"</c> matches nothing in text reading
-/// <c>jumps over the lazy</c>.
+/// One position of a leaf: the terms the word breaker put there — a word, or a
+/// word with its companions (<c>42</c> and <c>nn42</c>, a compound's composite
+/// and its first part) — any one of which matches, at its offset from the
+/// leaf's first position.
+/// </summary>
+internal readonly struct FullTextElement(int offset, string[] alternatives, bool prefix, bool wildcard)
+{
+    public readonly int Offset = offset;
+
+    /// <summary>
+    /// The terms that match at this position: noise words left out unless the
+    /// position is starred, and a single-letter noise word replaced by its
+    /// forms in an inflectional leaf.
+    /// </summary>
+    public readonly string[] Alternatives = alternatives;
+
+    /// <summary>A <c>"word*"</c> element, matching any term the alternative starts.</summary>
+    public readonly bool Prefix = prefix;
+
+    /// <summary>
+    /// Every term here was a noise word, which constrains nothing but the
+    /// distance between the terms around it: <c>"jumps over lazy"</c> matches
+    /// nothing in text reading <c>jumps over the lazy</c>, while a noise word
+    /// leading or trailing a phrase drops out — <c>"with ships"</c> finds
+    /// <c>ships</c> as a document's first word (probed 2026-09-29 against SQL
+    /// Server 2025).
+    /// </summary>
+    public readonly bool Wildcard = wildcard;
+}
+
+/// <summary>One place a leaf matched: its first and last position.</summary>
+internal readonly struct FullTextOccurrence(int start, int end)
+{
+    public readonly int Start = start;
+    public readonly int End = end;
+}
+
+/// <summary>
+/// A leaf: one word, one prefix, or one phrase, as the word breaker read it —
+/// a run of positions, each with the terms it may hold.
 /// </summary>
 internal sealed class FullTextTermNode : FullTextNode
 {
-    private readonly string[] elements;
-
-    /// <summary>
-    /// Per-element prefix flags. A quoted term carries one for each of its
-    /// whitespace-separated words that was written with a trailing star, so
-    /// <c>"al* be*"</c> asks for two prefixes rather than one.
-    /// </summary>
-    private readonly bool[] prefixes;
+    private readonly FullTextElement[] elements;
     private readonly bool inflectional;
 
-    /// <summary>Whether the index applies the system stoplist; see <see cref="Schemas.FullTextIndex.StoplistOff"/>.</summary>
-    private readonly bool stoplist;
-
-    private FullTextTermNode(string[] elements, bool[] prefixes, bool inflectional, bool stoplist)
+    private FullTextTermNode(FullTextElement[] elements, bool inflectional)
     {
         this.elements = elements;
-        this.prefixes = prefixes;
         this.inflectional = inflectional;
-        this.stoplist = stoplist;
     }
 
-    public static FullTextTermNode Create(string[] elements, bool[] prefixes, bool inflectional, bool stoplist) =>
-        new(elements, prefixes, inflectional, stoplist);
+    public static FullTextTermNode Create(FullTextElement[] elements, bool inflectional) => new(elements, inflectional);
 
     /// <summary>
     /// Builds a single-word leaf that already carries its inflectional flag —
     /// the shape <c>FREETEXT</c> produces for each surviving word.
     /// </summary>
-    public static FullTextTermNode Word(string term, bool inflectional, bool stoplist) =>
-        new([term], [false], inflectional, stoplist);
+    public static FullTextTermNode Word(string term, bool inflectional) =>
+        new([new FullTextElement(0, [term], prefix: false, wildcard: false)], inflectional);
 
-    public override bool Matches(FullTextDocument document) => StartPositions(document).Count > 0;
+    public override bool Matches(FullTextDocument document) => Occurrences(document).Count > 0;
 
-    /// <summary>
-    /// True when every element was a stopword the engine dropped. A phrase
-    /// holding at least one real term keeps its stopword elements as position
-    /// wildcards instead.
-    /// </summary>
+    /// <summary>True when every position was noise, which the engine drops.</summary>
     public override bool IsIgnored
     {
         get
         {
-            for (var i = 0; i < this.elements.Length; i++)
+            foreach (var element in this.elements)
             {
-                if (this.prefixes[i] || !this.stoplist || !FullTextLexicon.IsStopword(this.elements[i]))
+                if (!element.Wildcard)
                     return false;
             }
             return true;
@@ -105,78 +123,91 @@ internal sealed class FullTextTermNode : FullTextNode
     }
 
     /// <summary>
-    /// Positions where this leaf begins. A single word reports every position
-    /// it occupies; a phrase reports the position of each occurrence's first
-    /// element, which is what <c>NEAR</c> measures from.
+    /// Every place this leaf matches, by first position ascending, each
+    /// spanning the whole phrase — what <c>NEAR</c> measures between.
     /// </summary>
-    public List<int> StartPositions(FullTextDocument document)
+    public List<FullTextOccurrence> Occurrences(FullTextDocument document)
     {
-        List<int> starts = [];
-        if (this.IsIgnored)
-            return starts;
-
-        var onlyElement = this.elements.Length == 1;
-        if (IsWildcardElement(0))
+        List<FullTextOccurrence> occurrences = [];
+        var anchor = 0;
+        while (anchor < this.elements.Length && this.elements[anchor].Wildcard)
+            anchor++;
+        if (anchor == this.elements.Length)
+            return occurrences;
+        var previous = int.MinValue;
+        foreach (var start in PositionsOf(document, this.elements[anchor]))
         {
-            // A leading stopword is a wildcard, so every occupied position is a
-            // candidate start.
-            for (var position = 1; position <= document.MaxPosition; position++)
+            if (start == previous)
+                continue;
+            previous = start;
+            // An occurrence spans the whole phrase, noise positions at its
+            // ends included: `UTF-8` covers `utf` and `8`, so two terms lie
+            // between it and `account` in `UTF-8 bike customer account`.
+            if (MatchFrom(document, anchor, start))
             {
-                if (document.IsOccupied(position) && MatchesFrom(document, position))
-                    starts.Add(position);
+                var first = start - this.elements[anchor].Offset;
+                occurrences.Add(new FullTextOccurrence(first, first + this.elements[^1].Offset));
             }
-            return starts;
         }
-
-        foreach (var position in PositionsOfElement(document, 0))
-        {
-            if (onlyElement || MatchesFrom(document, position))
-                starts.Add(position);
-        }
-        return starts;
+        return occurrences;
     }
 
     /// <summary>
-    /// True when the element matches whatever term occupies its position — a
-    /// stopword the engine dropped, unless the writer asked for a prefix there.
+    /// True when the elements from <paramref name="index"/> on match, the
+    /// first at <paramref name="position"/>. Each position is matched by one
+    /// of its own terms: a compound's composite stands for its first position
+    /// only, so a phrase still needs the parts after it — real finds no
+    /// <c>August 2, 2026</c> for <c>"2026-08-02"</c> although both carry
+    /// <c>dd20260802</c>.
     /// </summary>
-    private bool IsWildcardElement(int elementIndex) =>
-        !this.prefixes[elementIndex] && this.stoplist && FullTextLexicon.IsStopword(this.elements[elementIndex]);
-
-    private bool MatchesFrom(FullTextDocument document, int start)
+    private bool MatchFrom(FullTextDocument document, int index, int position)
     {
-        for (var i = 1; i < this.elements.Length; i++)
+        for (; index < this.elements.Length; index++)
         {
-            if (!ElementMatchesAt(document, i, start + i))
+            var element = this.elements[index];
+            if (!element.Wildcard && !HoldsAny(document, element, position))
                 return false;
+            if (index + 1 < this.elements.Length)
+                position += this.elements[index + 1].Offset - element.Offset;
         }
         return true;
     }
 
-    private List<int> PositionsOfElement(FullTextDocument document, int elementIndex)
+    private bool HoldsAny(FullTextDocument document, FullTextElement element, int position)
     {
-        var element = this.elements[elementIndex];
-        return this.prefixes[elementIndex] ? document.Prefixed(element)
-            : this.inflectional ? document.Stemmed(FullTextLexicon.Stem(element))
-            : document.Exact(element);
-    }
-
-    private bool ElementMatchesAt(FullTextDocument document, int elementIndex, int position)
-    {
-        if (IsWildcardElement(elementIndex))
-            return document.IsOccupied(position);
-        foreach (var candidate in PositionsOfElement(document, elementIndex))
+        foreach (var alternative in element.Alternatives)
         {
-            if (candidate == position)
+            if (Holds(document, alternative, element.Prefix, position))
                 return true;
         }
         return false;
     }
 
+    private bool Holds(FullTextDocument document, string term, bool prefix, int position) =>
+        prefix ? document.HoldsPrefix(term, position)
+        : this.inflectional ? document.HoldsStem(FullTextLexicon.Stem(term), position)
+        : document.HoldsExact(term, position);
+
+    /// <summary>Every position holding one of the element's terms, ascending.</summary>
+    private List<int> PositionsOf(FullTextDocument document, FullTextElement element)
+    {
+        if (element.Alternatives.Length == 1)
+            return PositionsOf(document, element.Alternatives[0], element.Prefix);
+        var merged = new SortedSet<int>();
+        foreach (var alternative in element.Alternatives)
+            merged.UnionWith(PositionsOf(document, alternative, element.Prefix));
+        return [.. merged];
+    }
+
+    private List<int> PositionsOf(FullTextDocument document, string term, bool prefix) =>
+        prefix ? document.Prefixed(term)
+        : this.inflectional ? document.Stemmed(FullTextLexicon.Stem(term))
+        : document.Exact(term);
+
     /// <summary>
     /// How many times this leaf occurs — the <c>tf</c> the rank model reads.
     /// </summary>
-    public int TermFrequency(FullTextDocument document) => StartPositions(document).Count;
+    public int TermFrequency(FullTextDocument document) => Occurrences(document).Count;
 
     public override void CollectLeaves(List<(FullTextTermNode Leaf, double Weight)> into, double weight) =>
         into.Add((this, weight));
@@ -296,76 +327,86 @@ internal sealed class FullTextProximityNode : FullTextNode
 
     public override bool Matches(FullTextDocument document)
     {
-        var positions = new List<int>[this.terms.Length];
+        var occurrences = new List<FullTextOccurrence>[this.terms.Length];
         for (var i = 0; i < this.terms.Length; i++)
         {
-            positions[i] = this.terms[i].StartPositions(document);
-            if (positions[i].Count == 0)
+            occurrences[i] = this.terms[i].Occurrences(document);
+            if (occurrences[i].Count == 0)
                 return false;
         }
         // The ordered form still constrains the sequence when the distance is
         // MAX or absent (probe: `NEAR((bbb, aaa), MAX, TRUE)` matched only the
-        // row spelling them that way round); the unordered form with no bound
-        // asks nothing beyond "both occur in this row".
+        // row spelling them that way round). Either form needs one
+        // occurrence per operand, no two overlapping, so the same term named
+        // twice needs two occurrences.
         return this.ordered
-            ? SearchOrdered(positions, this.maximumDistance, 0, previous: int.MinValue)
-            : this.maximumDistance is not { } bound || SearchUnordered(positions, bound);
+            ? SearchOrdered(occurrences, this.maximumDistance, 0, previousEnd: int.MinValue)
+            : SearchUnordered(occurrences, this.maximumDistance ?? int.MaxValue);
     }
 
     /// <summary>
-    /// Walks one occurrence per operand in the written order, each sitting
-    /// after the previous and — when bounded — within the distance of it.
+    /// Walks one occurrence per operand in the written order, each starting
+    /// after the previous ends and — when bounded — within the distance of it.
     /// </summary>
-    private static bool SearchOrdered(List<int>[] positions, int? limit, int index, int previous)
+    private static bool SearchOrdered(List<FullTextOccurrence>[] occurrences, int? limit, int index, int previousEnd)
     {
-        if (index == positions.Length)
+        if (index == occurrences.Length)
             return true;
-        foreach (var candidate in positions[index])
+        foreach (var candidate in occurrences[index])
         {
-            if (previous != int.MinValue)
+            if (previousEnd != int.MinValue)
             {
-                if (candidate <= previous)
+                if (candidate.Start <= previousEnd)
                     continue;
-                if (limit is { } bound && candidate - previous - 1 > bound)
+                if (limit is { } bound && candidate.Start - previousEnd - 1 > bound)
                     continue;
             }
-            if (SearchOrdered(positions, limit, index + 1, candidate))
+            if (SearchOrdered(occurrences, limit, index + 1, candidate.End))
                 return true;
         }
         return false;
     }
 
     /// <summary>
-    /// Any permutation counts: the span between the smallest and largest chosen
-    /// positions must leave no more than <paramref name="bound"/> terms between
-    /// the operands.
+    /// Any permutation counts: the terms lying between the operands — the
+    /// span from the first start to the last end, less the operands' own
+    /// lengths — must number no more than <paramref name="bound"/>.
     /// </summary>
-    private static bool SearchUnordered(List<int>[] positions, int bound)
+    private static bool SearchUnordered(List<FullTextOccurrence>[] occurrences, int bound)
     {
-        var chosen = new int[positions.Length];
-        return Choose(positions, bound, 0, chosen);
+        var chosen = new FullTextOccurrence[occurrences.Length];
+        return Choose(occurrences, bound, 0, chosen);
 
-        static bool Choose(List<int>[] positions, int bound, int index, int[] chosen)
+        static bool Choose(List<FullTextOccurrence>[] occurrences, int bound, int index, FullTextOccurrence[] chosen)
         {
-            if (index == positions.Length)
+            if (index == occurrences.Length)
             {
-                var lowest = chosen[0];
-                var highest = chosen[0];
-                foreach (var value in chosen)
+                var lowest = int.MaxValue;
+                var highest = int.MinValue;
+                var covered = 0L;
+                foreach (var occurrence in chosen)
                 {
-                    if (value < lowest)
-                        lowest = value;
-                    if (value > highest)
-                        highest = value;
+                    lowest = Math.Min(lowest, occurrence.Start);
+                    highest = Math.Max(highest, occurrence.End);
+                    covered += occurrence.End - occurrence.Start + 1;
                 }
-                // The bound counts the terms lying between the two ends, so an
-                // adjacent pair spans one position and leaves zero between.
-                return highest - lowest - (positions.Length - 1) <= bound;
+                return (long)highest - lowest + 1 - covered <= bound;
             }
-            foreach (var candidate in positions[index])
+            foreach (var candidate in occurrences[index])
             {
+                var overlaps = false;
+                for (var i = 0; i < index; i++)
+                {
+                    if (candidate.Start <= chosen[i].End && chosen[i].Start <= candidate.End)
+                    {
+                        overlaps = true;
+                        break;
+                    }
+                }
+                if (overlaps)
+                    continue;
                 chosen[index] = candidate;
-                if (Choose(positions, bound, index + 1, chosen))
+                if (Choose(occurrences, bound, index + 1, chosen))
                     return true;
             }
             return false;

@@ -10,7 +10,7 @@ internal static partial class BuiltInResources
     /// <c>sys.fulltext_languages</c> (probe-confirmed against the reference).
     /// Static reference data — the same registry every database exposes.
     /// </summary>
-    private static readonly (int Lcid, string Name)[] FullTextLanguages =
+    internal static readonly (int Lcid, string Name)[] FullTextLanguages =
     [
         (0, "Neutral"), (1025, "Arabic"), (1026, "Bulgarian"), (1027, "Catalan"),
         (1028, "Traditional Chinese"), (1029, "Czech"), (1030, "Danish"), (1031, "German"),
@@ -138,6 +138,23 @@ internal static partial class BuiltInResources
             {
                 SqlValue.FromInt32(lang.Lcid),
                 SqlValue.FromSystemName(lang.Name),
+            });
+        });
+
+        // sys.fulltext_system_stopwords: every language's system stoplist,
+        // real's rows verbatim (probed 2026-09-29) — the lists the query
+        // pipeline drops noise words by.
+        Sys("fulltext_system_stopwords",
+        [
+            new("stopword", NVarcharSqlType.Get(64, Collation.Get("SQL_Latin1_General_CP1_CI_AS"), Coercibility.Implicit), 64, true),
+            new("language_id", SqlType.Int32, null, false),
+        ], static (batch, database) =>
+        {
+            _ = (batch, database);
+            return Parser.FullText.FullTextLanguage.SystemStopwords.Select(static row => new[]
+            {
+                SqlValue.FromNVarchar(row.Stopword),
+                SqlValue.FromInt32(row.Lcid),
             });
         });
 

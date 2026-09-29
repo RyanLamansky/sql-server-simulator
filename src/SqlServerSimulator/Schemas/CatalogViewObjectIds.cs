@@ -109,6 +109,7 @@ internal static class CatalogViewObjectIds
         ["sys.fulltext_index_columns"] = -405,
         ["sys.fulltext_indexes"] = -404,
         ["sys.fulltext_languages"] = -242583247,
+        ["sys.fulltext_system_stopwords"] = -377091052,
         ["sys.fulltext_stoplists"] = -504,
         ["sys.function_order_columns"] = -496,
         ["sys.hash_indexes"] = -535,

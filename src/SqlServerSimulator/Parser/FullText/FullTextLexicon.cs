@@ -5,70 +5,13 @@ using System.Text;
 namespace SqlServerSimulator.Parser.FullText;
 
 /// <summary>
-/// The language resources the full-text query pipeline reads: the English
-/// system stoplist, the accent fold an accent-insensitive catalog applies, and
-/// the inflectional stemmer <c>FREETEXT</c> / <c>FORMSOF(INFLECTIONAL, …)</c>
-/// expand through.
+/// The English morphology the query pipeline reads: the accent fold an
+/// accent-insensitive catalog applies, and the inflectional stemmer
+/// <c>FREETEXT</c> / <c>FORMSOF(INFLECTIONAL, …)</c> expand through. The
+/// stoplists live with <see cref="FullTextLanguage"/>.
 /// </summary>
-/// <remarks>
-/// <para>
-/// Real SQL Server ships a per-language word breaker and a proprietary
-/// morphological lexicon per language. The simulator models one language —
-/// English (LCID 1033) — and applies it whatever LCID a column carries, so a
-/// non-English column is broken and stemmed by the English rules rather than
-/// its own. See <c>docs/claude/full-text.md</c> for the boundary.
-/// </para>
-/// <para>
-/// <see cref="EnglishStopwords"/> is the exact 154-entry list
-/// <c>sys.fulltext_system_stopwords</c> reports for <c>language_id = 1033</c> on
-/// SQL Server 2025 — the single letters and digits included, which is why
-/// <c>CONTAINS(col, '7')</c> and <c>CONTAINS(col, 'o')</c> match nothing while
-/// <c>CONTAINS(col, '42')</c> matches.
-/// </para>
-/// </remarks>
 internal static class FullTextLexicon
 {
-    /// <summary>
-    /// The English (LCID 1033) system stoplist, verbatim from
-    /// <c>sys.fulltext_system_stopwords</c>. Stored folded to lower case
-    /// because every lookup arrives already case-folded by the word breaker.
-    /// </summary>
-    public static readonly FrozenSet<string> EnglishStopwords = new[]
-    {
-        "$", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9",
-        "a", "about", "after", "all", "also", "an", "and", "another", "any", "are", "as", "at",
-        "b", "be", "because", "been", "before", "being", "between", "both", "but", "by",
-        "c", "came", "can", "come", "could",
-        "d", "did", "do", "does",
-        "e", "each", "else",
-        "f", "for", "from",
-        "g", "get", "got",
-        "h", "had", "has", "have", "he", "her", "here", "him", "himself", "his", "how",
-        "i", "if", "in", "into", "is", "it", "its",
-        "j", "just",
-        "k",
-        "l", "like",
-        "m", "make", "many", "me", "might", "more", "most", "much", "must", "my",
-        "n", "never", "no", "now",
-        "o", "of", "on", "only", "or", "other", "our", "out", "over",
-        "p",
-        "q",
-        "r", "re",
-        "s", "said", "same", "see", "should", "since", "so", "some", "still", "such",
-        "t", "take", "than", "that", "the", "their", "them", "then", "there", "these", "they",
-        "this", "those", "through", "to", "too",
-        "u", "under", "up", "use",
-        "v", "very",
-        "w", "want", "was", "way", "we", "well", "were", "what", "when", "where", "which",
-        "while", "who", "will", "with", "would",
-        "x",
-        "y", "you", "your",
-        "z",
-    }.ToFrozenSet(StringComparer.Ordinal);
-
-    /// <summary>True when <paramref name="term"/> is a system stopword.</summary>
-    public static bool IsStopword(string term) => EnglishStopwords.Contains(term);
-
     /// <summary>
     /// Strips diacritics the way an accent-<i>insensitive</i> catalog folds
     /// them — <c>café</c> → <c>cafe</c>, <c>ÄÖÜ</c> → <c>aou</c>. Decomposes to
@@ -83,12 +26,26 @@ internal static class FullTextLexicon
         var expanded = ExpandNonDecomposing(term);
         var decomposed = expanded.Normalize(NormalizationForm.FormD);
         var builder = new StringBuilder(decomposed.Length);
+        var baseFolds = false;
         foreach (var ch in decomposed)
         {
             if (CharUnicodeInfo.GetUnicodeCategory(ch) != UnicodeCategory.NonSpacingMark)
+            {
+                // Only the European scripts' marks are accents to real: a
+                // Devanagari virama or a kana voicing mark stays.
+                baseFolds = ch is < '\u0530' or (>= '\u1E00' and < '\u2000');
                 _ = builder.Append(ch);
+            }
+            else if (!baseFolds)
+            {
+                _ = builder.Append(ch);
+            }
         }
-        return builder.ToString().Normalize(NormalizationForm.FormC);
+        // A capital whose lower case decomposes (`İ`) folds to lower case only
+        // once its mark is gone.
+#pragma warning disable CA1308
+        return builder.ToString().Normalize(NormalizationForm.FormC).ToLowerInvariant();
+#pragma warning restore CA1308
     }
 
     /// <summary>
@@ -100,7 +57,7 @@ internal static class FullTextLexicon
         var needsExpansion = false;
         foreach (var ch in term)
         {
-            if (ch is 'ß' or 'æ' or 'Æ' or 'ø' or 'Ø' or 'đ' or 'Đ' or 'ð' or 'Ð' or 'þ' or 'Þ' or 'ł' or 'Ł' or 'œ' or 'Œ')
+            if (ch is 'ß' or 'æ' or 'Æ' or 'ø' or 'Ø' or 'đ' or 'Đ' or 'ð' or 'Ð' or 'þ' or 'Þ' or 'ł' or 'Ł' or 'œ' or 'Œ' or 'ı' or 'ŉ')
             {
                 needsExpansion = true;
                 break;
@@ -121,6 +78,8 @@ internal static class FullTextLexicon
                 'đ' or 'Đ' or 'ð' or 'Ð' => "d",
                 'þ' or 'Þ' => "th",
                 'ł' or 'Ł' => "l",
+                'ı' => "i",
+                'ŉ' => "n",
                 _ => null,
             };
             _ = replacement is null ? builder.Append(ch) : builder.Append(replacement);
@@ -265,6 +224,86 @@ internal static class FullTextLexicon
         // (`children` → `children`, but `leaves` → `leave`), so ask again.
         return IrregularLemmas.TryGetValue(reduced, out var reducedLemma) ? reducedLemma : reduced;
     }
+
+    /// <summary>
+    /// The inflectional forms <c>sys.dm_fts_parser</c> lists for a word under
+    /// <c>FORMSOF(INFLECTIONAL, …)</c>, ordinal-sorted and without the word
+    /// itself: the irregular row's forms, or the regular noun and verb
+    /// paradigm — plural, past, gerund — with the two possessives, kept only
+    /// where <see cref="Stem"/> maps the form back to the word's own key, so
+    /// the list is exactly what an inflectional search here matches. Real
+    /// consults a part-of-speech lexicon and lists only the paradigms a word
+    /// has (<c>quick</c> gets no verb forms), which this doesn't model.
+    /// </summary>
+    public static List<string> InflectionalForms(string word)
+    {
+        foreach (var ch in word)
+        {
+            if (!char.IsLetter(ch) && ch != '\'')
+                return [];
+        }
+        var key = Stem(word);
+        var candidates = new SortedSet<string>(StringComparer.Ordinal);
+        var irregular = false;
+        foreach (var row in IrregularForms)
+        {
+            if (row[0] != key)
+                continue;
+            irregular = true;
+            foreach (var form in row)
+                _ = candidates.Add(form);
+            break;
+        }
+        if (!irregular)
+        {
+            _ = candidates.Add(key);
+            _ = candidates.Add(Plural(key));
+            _ = candidates.Add(Past(key));
+            _ = candidates.Add(Gerund(key));
+        }
+        _ = candidates.Add(key + "'s");
+        _ = candidates.Add(Plural(key) + "'");
+        List<string> forms = [];
+        foreach (var form in candidates)
+        {
+            if (form != word && Stem(form) == key)
+                forms.Add(form);
+        }
+        return forms;
+    }
+
+    /// <summary>
+    /// True for a noise word an inflectional leaf still expands: a single
+    /// letter (<c>x</c> → <c>x's</c>, <c>xs'</c> on real), where a function
+    /// word such as <c>of</c> has no forms — which is why real's
+    /// <c>FORMSOF(INFLECTIONAL, "vitamin b complex")</c> finds nothing and
+    /// <c>FORMSOF(INFLECTIONAL, "word of mouth")</c> finds the phrase.
+    /// </summary>
+    public static bool ExpandsAsNoise(string term) => term.Length == 1 && char.IsLetter(term[0]);
+
+    private static bool IsVowel(char ch) => ch is 'a' or 'e' or 'i' or 'o' or 'u';
+
+    private static bool EndsConsonantVowelConsonant(string word) =>
+        word.Length == 3 && !IsVowel(word[0]) && IsVowel(word[1]) && !IsVowel(word[2]) && word[2] is not ('w' or 'x' or 'y');
+
+    private static string Plural(string word) =>
+        word.EndsWith('s') || word.EndsWith('x') || word.EndsWith('z') || word.EndsWith("ch", StringComparison.Ordinal) || word.EndsWith("sh", StringComparison.Ordinal)
+            ? word + "es"
+        : word.Length > 1 && word[^1] == 'y' && !IsVowel(word[^2]) ? word[..^1] + "ies"
+        : word + "s";
+
+    private static string Past(string word) =>
+        word.EndsWith('e') ? word + "d"
+        : word.Length > 1 && word[^1] == 'y' && !IsVowel(word[^2]) ? word[..^1] + "ied"
+        : EndsConsonantVowelConsonant(word) ? word + word[^1] + "ed"
+        : word + "ed";
+
+    private static string Gerund(string word) =>
+        word.EndsWith("ie", StringComparison.Ordinal) ? word[..^2] + "ying"
+        : word.Length > 2 && word.EndsWith('e') && !word.EndsWith("ee", StringComparison.Ordinal) && !word.EndsWith("ye", StringComparison.Ordinal) && !word.EndsWith("oe", StringComparison.Ordinal)
+            ? word[..^1] + "ing"
+        : EndsConsonantVowelConsonant(word) ? word + word[^1] + "ing"
+        : word + "ing";
 
     /// <summary>
     /// Drops a trailing <c>'s</c> or bare <c>'</c> — the possessive forms real's

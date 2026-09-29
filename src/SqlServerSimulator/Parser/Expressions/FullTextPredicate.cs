@@ -36,13 +36,15 @@ internal sealed class FullTextPredicate : BooleanExpression
 {
     private readonly FullTextBinding binding;
     private readonly Expression condition;
+    private readonly Expression? language;
     private readonly bool freeText;
     private readonly FullTextSearchCondition? parsedCondition;
 
-    private FullTextPredicate(FullTextBinding binding, Expression condition, bool freeText, FullTextSearchCondition? parsedCondition)
+    private FullTextPredicate(FullTextBinding binding, Expression condition, Expression? language, bool freeText, FullTextSearchCondition? parsedCondition)
     {
         this.binding = binding;
         this.condition = condition;
+        this.language = language;
         this.freeText = freeText;
         this.parsedCondition = parsedCondition;
     }
@@ -64,9 +66,9 @@ internal sealed class FullTextPredicate : BooleanExpression
             throw SimulatedSqlException.SyntaxErrorNear(context);
         var condition = Expression.Parse(context.MoveNextRequiredReturnSelf());
 
-        // `, LANGUAGE n` selects the word breaker and stemmer for the
-        // condition. The simulator models English only, so the argument is
-        // validated for shape and then discarded.
+        // `, LANGUAGE n` selects the stoplist and morphology the condition
+        // is read with; without it, the first searched column's language.
+        Expression? language = null;
         if (context.Token is Operator { Character: ',' })
         {
             if (context.GetNextRequired() is not Name languageToken
@@ -74,7 +76,7 @@ internal sealed class FullTextPredicate : BooleanExpression
             {
                 throw SimulatedSqlException.SyntaxErrorNear(context);
             }
-            _ = Expression.Parse(context.MoveNextRequiredReturnSelf());
+            language = Expression.Parse(context.MoveNextRequiredReturnSelf());
         }
 
         if (context.Token is not Operator { Character: ')' })
@@ -82,8 +84,8 @@ internal sealed class FullTextPredicate : BooleanExpression
         context.MoveNextOptional();
 
         var binding = FullTextScope.Bind(context, spec);
-        var parsed = TryParseLiteralCondition(context, condition, binding, freeText);
-        return new FullTextPredicate(binding, condition, freeText, parsed);
+        var parsed = TryParseLiteralCondition(context, condition, language, binding, freeText);
+        return new FullTextPredicate(binding, condition, language, freeText, parsed);
     }
 
     /// <summary>
@@ -91,48 +93,57 @@ internal sealed class FullTextPredicate : BooleanExpression
     /// constant, so its syntax errors land where real puts them. Returns null
     /// when the condition can only be read per row.
     /// </summary>
-    private static FullTextSearchCondition? TryParseLiteralCondition(ParserContext context, Expression condition, FullTextBinding binding, bool freeText)
+    private static FullTextSearchCondition? TryParseLiteralCondition(ParserContext context, Expression condition, Expression? language, FullTextBinding binding, bool freeText)
     {
-        if (context.Batch.CreateTimeBinding || condition.ContainsVariableReference)
+        if (context.Batch.CreateTimeBinding || condition.ContainsVariableReference || language is { ContainsVariableReference: true })
             return null;
         SqlValue value;
+        SqlValue? languageValue = null;
         try
         {
             var probe = new RuntimeContext(
                 _ => throw new InvalidOperationException("Not parse-time constant."),
                 context.Batch);
             value = condition.Run(probe);
+            if (language is not null)
+                languageValue = language.Run(probe);
         }
         catch (InvalidOperationException)
         {
             return null;
         }
-        return Compile(value, binding, freeText);
+        return Compile(value, languageValue, binding, freeText);
     }
 
     /// <summary>
     /// Turns a condition value into a match tree, applying real's NULL / empty
     /// rejection first (Msg 7645).
     /// </summary>
-    private static FullTextSearchCondition Compile(SqlValue value, FullTextBinding binding, bool freeText)
+    private static FullTextSearchCondition Compile(SqlValue value, SqlValue? languageValue, FullTextBinding binding, bool freeText)
     {
         if (value.IsNull || string.IsNullOrWhiteSpace(value.AsString))
             throw SimulatedSqlException.FullTextNullOrEmptyPredicate();
         var text = value.AsString;
+        var language = languageValue is { } written ? FullTextLanguage.Resolve(written) : binding.DefaultQueryLanguage;
         return freeText
-            ? FullTextSearchCondition.ParseFreeText(text, binding.AccentSensitive, binding.UsesStoplist)
-            : FullTextSearchCondition.ParseContains(text, binding.AccentSensitive, binding.UsesStoplist);
+            ? FullTextSearchCondition.ParseFreeText(text, binding.AccentSensitive, language, binding.UsesStoplist)
+            : FullTextSearchCondition.ParseContains(text, binding.AccentSensitive, language, binding.UsesStoplist);
     }
 
     public override bool? Run(RuntimeContext runtime)
     {
-        var compiled = this.parsedCondition ?? Compile(this.condition.Run(runtime), this.binding, this.freeText);
+        var compiled = this.parsedCondition ?? Compile(this.condition.Run(runtime), this.language?.Run(runtime), this.binding, this.freeText);
         if (compiled.SawStopword)
             runtime.Batch.AppendFullTextNoiseWordMessage();
         return compiled.Matches(this.binding.BuildDocument(runtime.ResolveColumn));
     }
 
-    internal override void VisitOperandExpressions(Action<Expression> visitor) => visitor(this.condition);
+    internal override void VisitOperandExpressions(Action<Expression> visitor)
+    {
+        visitor(this.condition);
+        if (this.language is not null)
+            visitor(this.language);
+    }
 
     internal override string DebugDisplay() =>
         $"{(this.freeText ? "FREETEXT" : "CONTAINS")}({string.Join(", ", this.binding.ColumnNames)}, {this.condition.DebugDisplay()})";
@@ -143,5 +154,7 @@ internal sealed class FullTextPredicate : BooleanExpression
         foreach (var name in this.binding.ColumnNames)
             _ = shape.Local(name.ToString());
         _ = shape.Child(this.condition);
+        if (this.language is not null)
+            _ = shape.Child(this.language);
     }
 }

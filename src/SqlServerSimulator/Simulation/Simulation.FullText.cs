@@ -361,7 +361,8 @@ partial class Simulation
                 throw SimulatedSqlException.SyntaxErrorNear(context);
             var columnName = columnToken.Value;
             string? typeColumnName = null;
-            var languageId = 0;
+            // Real's `default full-text language` server option is 1033.
+            var languageId = 1033;
             context.MoveNextRequired();
 
             // Optional TYPE COLUMN typeCol
@@ -383,19 +384,14 @@ partial class Simulation
                 && langWord.Equals("LANGUAGE", StringComparison.OrdinalIgnoreCase))
             {
                 context.MoveNextRequired();
-                switch (context.Token)
+                // A language named rather than numbered resolves as the
+                // predicates' `LANGUAGE` argument does.
+                languageId = context.Token switch
                 {
-                    case Numeric n:
-                        languageId = n.Value.AsInt32;
-                        break;
-                    case Literal:
-                        // Language by name — parse-and-discard, leave LCID at
-                        // 0 (matches the column's stored shape if AW emits a
-                        // literal name in some other model).
-                        break;
-                    default:
-                        throw SimulatedSqlException.SyntaxErrorNear(context);
-                }
+                    Numeric n => n.Value.AsInt32,
+                    Literal { Value: var languageName } => Parser.FullText.FullTextLanguage.ResolveName(languageName.AsString),
+                    _ => throw SimulatedSqlException.SyntaxErrorNear(context),
+                };
                 context.MoveNextRequired();
             }
 

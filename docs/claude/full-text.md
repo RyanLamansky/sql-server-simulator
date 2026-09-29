@@ -2,6 +2,7 @@
 
 The catalog and index DDL, the catalog views, the property scalars, the BACPAC round-trip, and the **query pipeline** — `CONTAINS` / `FREETEXT` and the `CONTAINSTABLE` / `FREETEXTTABLE` rowsets — all ship.
 The two `SEMANTIC*` rowsets still raise `NotSupportedException`.
+`sys.dm_fts_parser` and `sys.fulltext_system_stopwords` report what the pipeline does.
 
 The bacpac-loaded AW procedure `uspSearchCandidateResumes` — which runs `CONTAINSTABLE` over `HumanResources.JobCandidate`'s `xml` resume column — executes and returns rows.
 
@@ -58,7 +59,7 @@ DROP FULLTEXT INDEX ON table
 - `AS DEFAULT` demotes any prior default before promoting the new catalog.
 - `AUTHORIZATION owner` resolves against `Database.Principals` (default `dbo`).
 - Multi-column lists supported; the `TYPE COLUMN` nested reference handles AW's `[Production].[Document]` shape (varbinary doc + extension-column pairing).
-- `LANGUAGE` accepts an integer LCID literal; language-name literal parse-and-discards.
+- `LANGUAGE` accepts an LCID or a language name (`'German'`), resolved as the predicates' argument is (see [Languages](#languages)); a column without one gets 1033.
 - Both paren and bare `ON catalog` forms work.
 - `WITH` takes `CHANGE_TRACKING [=] {MANUAL | AUTO | OFF [, NO POPULATION]}`, `STOPLIST [=] {OFF | SYSTEM | name}` and `SEARCH PROPERTY LIST [=] name`, parenthesized or bare.
   The tracking mode, `is_enabled` and the stoplist are kept on the `FullTextIndex` and reported by `sys.fulltext_indexes`; the tracking mode carries no search behavior — the simulator searches the live rows rather than a crawled index (see [the query pipeline](#no-index--the-rows-are-read-not-crawled)).
@@ -98,36 +99,93 @@ Both reach the same answer; real takes seconds to get there.
 
 ### Word breaking
 
-`FullTextWordBreaker` models the English (LCID 1033) breaker as a rule set.
-A term is a maximal run of Unicode letters and digits, plus these joins:
+`FullTextWordBreaker` reproduces SQL Server 2025's English (LCID 1033) breaker, which the neutral (0) and British English (2057) breakers match term for term.
+It was fitted and measured against `sys.dm_fts_parser` (probed 2026-09-29), comparing every row a text breaks to — term, occurrence, noise flag, and the sentence and paragraph markers:
 
-| Rule | Example | Terms |
+| Corpus | Inputs | Identical output |
 | --- | --- | --- |
-| Interior apostrophe joins | `O'Brien`, `don't`, `rock'n'roll` | `o'brien` — so `obrien` and `brien` match nothing |
-| Interior hyphen / underscore compounds | `red-hot` | `red-hot`@1, `red`@1, `hot`@2 |
-| | `under_score` | `under_score`@3, `under`@3, `score`@4 |
-| Interior period / comma between digits joins | `3.14`, `1,000` | one term each |
-| Everything else breaks | `a.b.c`, `end.`, `..dots` | `a` `b` `c`; `end`; `dots` |
+| Generated classes: every punctuation mark between and around letters and digits, apostrophes, hyphens, dotted words, numbers, currencies, units, dates, times, addresses, paths, non-ASCII scripts, emoji — English and neutral | 5,298 | 99.7% (99.8% accent-insensitive) |
+| Held out: realistic sentences and paragraphs mixing all of the above | 1,500 | 99.9% |
+| Held out: random punctuation-heavy strings and shuffled tokens | 2,989 | 99.5% |
 
-A compound's composite shares its first part's position, and each part advances one — real's own numbering, readable from `sys.dm_fts_parser`'s `occurrence` column.
-Positions matter: they are what a phrase and `NEAR` measure over.
+The index side agrees: for all 1,500 held-out texts, a real full-text index's `sys.dm_fts_index_keywords_position_by_document` held exactly the parser's non-noise terms at the parser's occurrences.
+`FullTextWordBreakerTests` pins a hundred-odd of the probed inputs.
 
-Two folds apply to every term:
+A text breaks at whitespace into chunks, and each chunk left to right into terms.
+The classes the breaker recognizes, most of them emitting a composite and its parts at successive positions:
+
+| Class | Example | Terms |
+| --- | --- | --- |
+| Interior apostrophe joins (`'`, `‘`, `’`, `` ` ``) | `O'Brien`, `5'10` | `o'brien`; a trailing one drops (`dogs'` → `dogs`) |
+| Hyphen or underscore compound (`-`, `_`, `–`, `—`) | `red-hot` | `red-hot`@1, `red`@1, `hot`@2 — but `e-mail` stays whole |
+| `&` beside a single letter | `at&t`, `q&a` | one term; `abc&def` breaks |
+| Dotted compound, when the last segment reads as a file extension or top-level domain | `file.txt`, `www.example.com` | composite and parts; `ab.cd` breaks, `abc.cd` doesn't (the domain needs three characters before it) |
+| Dotted acronym of single letters | `U.S.A.` | `u.s.a.` and `usa`, with `e.g.` / `i.e.` / `ph.d.` kept as `e.g` … |
+| Lexicon tokens | `c#`, `c++`, `j#`, `j++`, `.net`, `km/h`, `m/s`, `it!`, `yahoo!` | one term each — `f#` breaks to `f` |
+| Numbers | `42`, `1,000.50`, `-5`, `007` | the written form and `nn42`, `nn1000d5`, `nn5-`, `nn7` |
+| Currency, attached or spaced, before or after | `$5`, `5€`, `USD 5`, `$405 USD` | `nn5$`, `nn5€`, `nn5usd` — ISO codes in upper case only, plus a few local spellings (`kr`, `Ft`, `R$`) |
+| Space-grouped digits | `1 000 000` | the composite with `nn1000000`, then each group |
+| Dates, numeric or with a capitalized month name | `2026-08-02`, `08/02/2026`, `Aug 2, 2026` | the written form, `dd20260802` (both `dd19…` and `dd20…` for a two-digit year) and the three fields |
+| Times | `10:30`, `5pm`, `10 am`, `3 o'clock` | the written form with `tt24103000`, and an hour from 1 to 12 alone also `tt24223000` |
+| E-mail addresses, URLs, drive and UNC paths | `foo@bar.com` | the whole and each letter-and-digit run |
+| Emoticons | `:)`, `;-(` | one term |
+
+The rules behind each row are documented on `FullTextWordBreaker` and its lexicon partial, whose tables — the abbreviations that suppress a sentence break, the extensions and domains, the currency codes — were read off the parser by sweeping candidate lists: every one- to three-letter word in three casings, the English stopwords, a few hundred abbreviations and common words, every two-letter domain.
+Numeric dates read year-month-day with a four-digit year first (year-day-month with periods) and day-month-year with it last, the two fields swapping when the month would be over 12; years run from 1000 to 2999, and a shape that isn't a valid date falls back to a number compound.
+
+**Positions skip at sentence and paragraph breaks.**
+A sentence break — `!`, `?`, `…`, or one or two periods, closed at most by a quote or bracket, unless the word before is an abbreviation (`Mr.`, `etc.`, a single capital) — puts the next word nine positions past the last, and a line break 129 past; `sys.dm_fts_parser` reports the marker one short of the word.
+Three periods (`one... two`) end no sentence.
+The gap is what makes `"end next"` miss `end. Next`, and it counts toward `NEAR`'s distance.
+
+Three folds apply:
 
 - **Case**, always.
   Matching is case-insensitive whatever the column's collation says — probe-confirmed against a `Latin1_General_CS_AS` column, where `apple` and `APPLE` both matched both `Apple Banana` and `apple cherry`.
+- **Compatibility forms**, always: full-width and half-width forms, ligatures and the `dž` digraphs to their plain spelling, and `ß` / `æ` / `œ` / `ĳ` to two letters, so `straße` is `strasse` even to an accent-sensitive catalog.
 - **Accents**, only when the backing catalog was created `WITH ACCENT_SENSITIVITY = OFF`.
-  The default is ON, so `café` and `cafe` are distinct terms.
+  The default is ON, so `café` and `cafe` are distinct terms; the fold strips Latin, Greek and Cyrillic marks and leaves a Devanagari virama or a kana voicing mark alone.
 
 An **`xml` column** contributes its content and not its markup, which is what real indexes: probing `<r kind="cv"><skill>Engineer</skill></r>` found `Engineer` and the attribute *value* `cv`, but neither the element name `skill` nor the attribute name `kind`.
 A **`varbinary` column paired through `TYPE COLUMN`** contributes nothing — real filters the document into text first, and the simulator has no filter, so the column is searchable but empty rather than word-broken as bytes.
 
-**Stopwords** come from `FullTextLexicon.EnglishStopwords` — the exact 154 entries `sys.fulltext_system_stopwords` reports for `language_id = 1033`, single letters and single digits included.
-That list is why `CONTAINS(col, '7')` and `CONTAINS(col, 'o')` match nothing while `CONTAINS(col, '42')` matches.
-A stopword still **occupies a position** in the term list, which is what makes `"over the lazy dog"` match text reading exactly that while `"jumps over lazy"` matches nothing in `jumps over the lazy dog`.
+**Stopwords** come from each column's language: `FullTextLanguage` carries every system stoplist `sys.fulltext_system_stopwords` reports — 15,829 words over 46 languages, kept verbatim in the embedded `SystemStopwords.tsv` and served by that view.
+English's 154 hold the single letters and digits, which is why `CONTAINS(col, '7')` and `CONTAINS(col, 'o')` match nothing while `CONTAINS(col, '42')` matches; a number's companion is noise when the number is (`nn5`).
+A noise word is never indexed — so `the` finds nothing even searched under a language whose stoplist lacks it — but it keeps its position.
 
 An ignored word doesn't merely fail to match — it collapses the clause holding it, matching real: `the AND quick` and `quick AND NOT the` both return nothing, while `the OR quick` returns `quick`'s rows.
 Any ignored word in the condition also raises real's severity-10 **Msg 9927** (`Informational: The full-text search condition contained noise word(s).`) through the `InfoMessage` surface, once per statement.
+
+### How a search reads the breaker's output
+
+A condition's term breaks exactly as indexed text does, into a run of positions each holding the terms the breaker put there, any one of which matches.
+The rules below were fitted with a differential of 4,334 `CONTAINS` / `FREETEXT` conditions — phrases, prefixes, `NEAR`, `FORMSOF`, boolean combinations, formatted numbers, dates and amounts — over 300 and 600 indexed rows (probed 2026-09-29): every one of the first 2,089 and all but 2 of the next 2,245 returned real's rows, the two misses reading one document where an `o'clock` time splits a date.
+
+- **A position matches through any of its terms**, so `42` finds `42.0` through `nn42`, `"22:30"` finds `10:30`'s afternoon reading, and `"red hot"` finds `red-hot`.
+- **A composite stands for its first position only.**
+  A phrase still needs the parts after it, so `"2026-08-02"` does not find `August 2, 2026`, though both carry `dd20260802`, and `10` does not find `10:30`.
+- **A noise word constrains only the distance around it.**
+  `"jumps over lazy"` misses `jumps over the lazy`, but a noise word leading or trailing a phrase drops out: `"with ships"` finds a row starting `ships`.
+- **`NEAR` measures between whole occurrences**: a phrase spans its positions, trailing noise included, so nothing lies between `carbon-fiber` and `requires` in `carbon-fiber requires`.
+  Each operand needs its own occurrence, so `NEAR((requires, requires), 0)` needs the word twice, adjacent.
+- **A star prefixes every part of the word it ends**, and every term at those positions: `"red-hot*"` finds `reds hotter`, `"the*"` finds `theory`, and `"07/26/*"` reaches `nn79` through `07`'s companion `nn7`.
+  A starred phrase holding an unstarred noise word matches nothing (`"word of mou*"`).
+- **`FORMSOF(INFLECTIONAL, …)` expands a single-letter noise word** (`x` to `x's`), which then has to match, while a longer one stays out as in a phrase — so `FORMSOF(INFLECTIONAL, "vitamin b complex")` finds nothing and `FORMSOF(INFLECTIONAL, "word of mouth")` finds the phrase; a single digit has no forms, so its leaf matches nothing.
+
+### Languages
+
+The column's `LANGUAGE` (1033 when the index names none, real's `default full-text language`) picks the stoplist its content is indexed under, and the condition is read in the first searched column's language unless the call names one.
+`LANGUAGE n` takes an LCID, a binary such as `0x407`, or a name or alias `sys.syslanguages` knows (`'German'`), and refuses an LCID without a full-text language (**Msg 7696**) and an unknown name (**Msg 7678**).
+
+Only English morphology is modeled: under neutral, English and British English, inflectional searches expand through the stemmer below; under any other language they match the written form, as real's German `FREETEXT(s, 'run', LANGUAGE 1031)` fails to find `running`.
+Every language breaks words by the English rules; how far the real breakers differ is in [Divergences](#divergences).
+
+### `sys.dm_fts_parser`
+
+`sys.dm_fts_parser('condition', lcid, stoplist_id, accent_sensitivity)` (`Parser/Selection.FullTextParser.cs`) parses a condition the way `CONTAINS` does and lists what the engine makes of it: one group per leaf in written order (a word, a phrase, each `FORMSOF` argument), each term at its occurrence with its noise flag, the markers, an inflectional leaf's expansions ahead of the word they grow from, and the leaf's source text.
+The stoplist argument is 0 for the language's system stoplist or NULL for none (anything else is **Msg 30092**); an accent sensitivity of 0 folds accents; a NULL condition, LCID or accent sensitivity is **Msg 7645** at severity 16 with states 201, 202 and 203.
+A differential over 44 conditions matched real in every column but `keyword` for 43; the other lists verb forms real's lexicon withholds (see [The stemmer](#the-stemmer)).
+`keyword` is the term in UTF-16 big-endian, which is real's too except for an accented term, whose keyword real encodes its own way.
 
 ### The `contains_search_condition` grammar
 
@@ -151,10 +209,11 @@ The infix `a NEAR b`, the generic `NEAR(a, b)` with no distance, and `MAX` all m
 A third argument of `TRUE` additionally requires the written order, `MAX` included.
 
 **`FORMSOF(INFLECTIONAL, …)`** expands through the stemmer below.
-**`FORMSOF(THESAURUS, …)`** matches only the written word, which is what real's shipped (empty) thesaurus files give.
+**`FORMSOF(THESAURUS, …)`** matches only the written word — see [The thesaurus](#the-thesaurus).
 **`ISABOUT`** is an OR for row matching; its weights steer `RANK` only.
+An unquoted word ends at `!` as at the other operator marks, so `'lightweight!'` is **Msg 7630** near `!`.
 
-`, LANGUAGE n` parses on all four members and is discarded — the simulator models English and applies it whatever LCID a column carries.
+`, LANGUAGE n` works on all four members — see [Languages](#languages).
 
 ### `FREETEXT`
 
@@ -169,6 +228,15 @@ Rules: strip a possessive `'s` / `'`, then one of `-ies` / `-ied` → `y`, the `
 An irregular table sits ahead of the rules, carrying the strong verbs, the irregular plurals (`child` / `children`, `mouse` / `mice`, `foot` / `feet`), the Latin and Greek pairs (`analysis` / `analyses`, `index` / `indices`, `datum` / `data`, `matrix` / `matrices`), and the `-f` / `-ves` family.
 
 A 68-word differential — one word per row, `FREETEXT` for each — put the simulator on real's answer for every word but one class, and `Inflectional_Equivalence_Classes_Match_Reference` pins twenty of them.
+
+`sys.dm_fts_parser` lists a word's forms as those the stemmer maps back to it: the irregular row, or the regular plural, past and gerund with the two possessives — `run` gets real's exact five, `ran`, `run's`, `running`, `runs`, `runs'`.
+Real consults a part-of-speech lexicon and lists only the paradigms a word has, so `red` gets no verb forms there where the simulator lists `redded` and `redding`.
+
+### The thesaurus
+
+Real's out-of-the-box thesaurus is empty — the shipped files hold commented-out samples — and `FORMSOF(THESAURUS, IE)`, `NT5` and `jog`, the sample entries, each expand to nothing but themselves (probed 2026-09-29).
+The simulator models that: `FORMSOF(THESAURUS, …)` and `FREETEXT`'s thesaurus pass match the written word only.
+Populating a thesaurus means editing XML files in the server's install tree and loading them with `sys.sp_fulltext_load_thesaurus_file`, which isn't modeled; see [Not modeled yet](#not-modeled-yet).
 
 ### `CONTAINSTABLE` / `FREETEXTTABLE`
 
@@ -198,6 +266,8 @@ Consumers that order by `RANK` or filter `RANK > n` behave; consumers that asser
 | Punctuation where a term belonged (`'ISABOUT()'`; an unterminated quote reports near `"`) | **Msg 7630** state 2 |
 | A word where an operator or the end belonged (`'NOT x'`, `'quick AND AND fox'`, `'FORMSOF(BOGUS, run)'`) | **Msg 7630** state 3 |
 | The predicate where only a scalar may stand (CHECK constraint) | **Msg 1046**, real's subquery-not-allowed wording |
+| `LANGUAGE` naming an LCID with no full-text language | **Msg 7696** state 10 |
+| `LANGUAGE` naming no language `sys.syslanguages` knows | **Msg 7678** state 12, quoting the name |
 
 Msg 7630's message quotes the condition whole.
 State 3 is what an operator keyword standing in *operand* position produces — real reads `AND` there as an ordinary word, which is why `'quick AND AND fox'` reports near `fox` and `'NOT x'` reports near `x`.
@@ -212,15 +282,14 @@ State 3 is what an operator keyword standing in *operand* position produces — 
 
 ### Divergences
 
-Everything here is the word breaker's or the stemmer's lexicon, which is a data set rather than a rule and is tracked in [`backlog.md`](backlog.md).
-
-- **Real's word breaker keeps some tokens whole that the rules break**: `.net`, `c#`, `at&t`, `u.s.a.`, `foo@bar.com` and `http://x.com` are each one term on real (alongside their parts), and real emits normalized companions beside numbers and dates (`42` → `42` + `nn42`, `2026-08-02` → the date plus `dd20260802` plus each field). The simulator breaks at every one of those punctuation marks, so `CONTAINS(col, 'net')` matches a row holding `.NET` on the simulator and not on real. Real is lexicon-driven here rather than rule-driven — `c#` is one term but `f#` breaks to `f` — so no rule set reproduces it.
+- **The breaker's last residue** — the inputs the corpora above still miss: a URL's odd leftovers (real emits `:/` as a term, and a port as `:8080`), a punctuation run such as `%/` real keeps as a term, a signed chain like `+1-555-123-4567` real reads as four signed numbers, and a spaced currency reached from inside a chunk a time or date split.
+- **Other languages' breakers.**
+  Every language breaks by the English rules with its own stoplist, which real matches only for neutral and British English.
+  The rest carry locale rules — German reads `33,667.95` with a decimal comma, splits `d'angelo`, and knows no English month or meridiem — so on 400 English-text inputs per language the parser's output matched real's for 24–33% of them (German, French, Spanish, Italian, Dutch, Brazilian Portuguese, Russian); searched as a German column, the same differential's conditions returned real's rows for 94.7% of 505.
+- **Other languages' morphology** — see [Languages](#languages).
 - **The stemmer holds one lemma per surface form.**
   Real's expansion can span two: `leaves` reaches `leaf` *and* `leave`, where the simulator picks `leaf`.
-  Every other class in the 68-word differential agreed.
-- **Only English is modeled.** A column declared with another LCID is broken and stemmed by the English rules and reads the English stoplist.
-- **`FORMSOF(THESAURUS, …)`** matches only the written word.
-  That is what real's out-of-the-box empty thesaurus files give, so the two agree until a thesaurus is populated.
+- **`sys.dm_fts_parser` for an accented term** reports the lower-cased term, where real's `display_term` reconstructs it from its keyword (`σοφΊα`) and its `keyword` encodes the accents apart.
 - **`RANK` values** — see above.
 - **No crawl lag** — see above.
 - A phrase or `NEAR` can't span two columns of a multi-column index in either engine; the simulator gets that by leaving a wide position gap between columns rather than by tracking column identity.
@@ -236,6 +305,8 @@ Everything here is the word breaker's or the stemmer's lexicon, which is a data 
 
 **`sys.fulltext_languages`** (2-col): `lcid` / `name` — the 59 languages a stock SQL Server 2025 instance ships (probed from the reference; static reference data).
 DacFx's full-text-index-column populator INNER JOINs it by `language_id`, so an empty view NREs the column-specifier build; AW's indexes use LCID 1033 (English).
+
+**`sys.fulltext_system_stopwords`** (2-col): `stopword` / `language_id` — real's 15,829 rows verbatim (probed 2026-09-29), the stoplists the search drops noise words by.
 
 Column shapes are probe-confirmed against the local SQL Server 2025 (CU7) reference, which has Full-Text installed.
 
@@ -264,9 +335,12 @@ An unknown catalog name or unrecognized property returns NULL; property names ar
 - **The `SEMANTIC*` rowsets** (`SEMANTICKEYPHRASETABLE`, `SEMANTICSIMILARITYTABLE`, `SEMANTICSIMILARITYDETAILSTABLE`) — `NotSupportedException` at parse, naming the function. `STATISTICAL_SEMANTICS` on a column is real's Msg 41209, as no semantic language statistics database is ever registered.
 - **Filesystem-placement semantics** (`ON FILEGROUP` / `IN PATH`) — parse-and-discard.
 - **Custom stoplists and search property lists** (`CREATE FULLTEXT STOPLIST`, `CREATE SEARCH PROPERTY LIST`) — `sys.fulltext_stoplists` ships empty, so naming a stoplist or property list is refused as a missing one; `sys.fulltext_document_types` ships empty too.
-- **`sys.dm_fts_parser`** — real's word-breaker inspection DMV, the probe instrument behind the [word breaking](#word-breaking) rules above.
+- **The index keyword DMVs** — `sys.dm_fts_index_keywords`, `…_by_document`, `…_position_by_document` and `…_by_property` — which the breaker already has what it takes to answer.
+- **`sys.sp_fulltext_load_thesaurus_file`** and a populated thesaurus.
+  Probed 2026-09-29: the procedure succeeds silently for a known LCID, refuses to run inside a transaction, and for an unknown or NULL LCID rethrows real's error 30050 (`Both the thesaurus file for lcid '9999' and the global thesaurus could not be loaded.`) as a user error from `sys.sp_fulltext_rethrow_error`.
+  A thesaurus of one's own is XML edited into the server's install tree, which no statement reaches.
 - **`TYPE COLUMN` document extraction** — a `varbinary` column paired with an extension column is stored and projected through the catalog views, but its bytes are not filtered into text, so a search over one matches nothing. `xml` columns *are* indexed, by content — see [word breaking](#word-breaking).
-- The linguistic residue — real's word-breaker token list, the thesaurus, and languages other than English — is in [Divergences](#divergences) and [`backlog.md`](backlog.md).
+- **Other languages' breakers and morphologies** — see [Divergences](#divergences).
 
 ## BACPAC round-trip
 

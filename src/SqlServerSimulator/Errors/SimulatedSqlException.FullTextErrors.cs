@@ -36,6 +36,37 @@ partial class SimulatedSqlException
         new("Null or empty full-text predicate.", 7645, 15, 1);
 
     /// <summary>
+    /// Mimics SQL Server's Msg 7645 as <c>sys.dm_fts_parser</c> raises it for
+    /// a NULL argument: severity 16, state 201 for the query string, 202 for
+    /// the LCID and 203 for the accent sensitivity.
+    /// </summary>
+    internal static SimulatedSqlException FullTextParserNullArgument(byte state) =>
+        new("Null or empty full-text predicate.", 7645, 16, state);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 7696 state 10 — an LCID with no full-text
+    /// language behind it, from a <c>LANGUAGE</c> argument or
+    /// <c>sys.dm_fts_parser</c>.
+    /// </summary>
+    internal static SimulatedSqlException FullTextInvalidLocale() =>
+        new("Invalid locale ID was specified. Please verify that the locale ID is correct and corresponding language resource has been installed.", 7696, 16, 10);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 7678 state 12 — a <c>LANGUAGE</c> argument
+    /// naming no language <c>sys.syslanguages</c> knows by name or alias.
+    /// </summary>
+    internal static SimulatedSqlException FullTextLanguageAliasUnknown(string name) =>
+        new($"The following string is not defined as a language alias in syslanguages: {name}.", 7678, 16, 12);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 30092 — <c>sys.dm_fts_parser</c> given a
+    /// stoplist id other than 0 (the system stoplist) or NULL; no other
+    /// stoplist exists here.
+    /// </summary>
+    internal static SimulatedSqlException FullTextStoplistIdNotFound(int stoplistId) =>
+        new($"Full-text stoplist ID '{stoplistId}' does not exist.", 30092, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server's Msg 7630 state 1 — the condition ran out while a
     /// term or a closing parenthesis was still owed.
     /// </summary>

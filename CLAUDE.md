@@ -342,7 +342,7 @@ Where an entry carries a second clause it is because that fact changes what you'
   Each output column's mask compiles onto the plan and applies only at the statement's output sinks, so predicates, joins and ordering read stored values → [`data-masking.md`](docs/claude/data-masking.md).
 - **Graph tables** — `AS NODE` / `AS EDGE`, the `$node_id` / `$edge_id` / `$from_id` / `$to_id` pseudo-columns and their JSON identifiers, edge constraints, `MATCH`, `SHORTEST_PATH` with its graph path aggregates, and the six identifier functions.
   A pseudo-column is a computed column over hidden ones, resolved by name prefix, and a `MATCH` hop desugars into equalities the join planner hashes → [`graph.md`](docs/claude/graph.md).
-- **Full-text search** — the catalogs and indexes, `CONTAINS` / `FREETEXT`, the two rowset functions, the whole `contains_search_condition` grammar, the word breaker, stoplist and stemmer.
+- **Full-text search** — the catalogs and indexes, `CONTAINS` / `FREETEXT`, the two rowset functions, the whole `contains_search_condition` grammar, the word breaker (fitted to real's `sys.dm_fts_parser`, which ships too), every language's stoplist and the English stemmer.
   Searches read live rows rather than a crawled index, so a write is searchable immediately where real's lags → [`full-text.md`](docs/claude/full-text.md).
 - **`xml` type and XML schema collections** — typed writes and canonical form, the XQuery-subset evaluator behind `.value()` / `.nodes()` / `.query()` / `.exist()`, `.modify()` XML-DML, XML indexes, `FOR XML` in all four modes, and `OPENXML`.
   `OPENXML`'s patterns are **XPath 1.0** through the DOM, not the XQuery translator → [`xml.md`](docs/claude/xml.md).
