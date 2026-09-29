@@ -1222,8 +1222,8 @@ public sealed partial class Simulation
         // Eligibility is gated by TryBuildPlanCacheKey (non-empty text, live
         // connection) and the entry's recorded schema version must match the
         // current one — a stale entry falls through to the standard dispatch
-        // and overwrites itself on the way out (the SELECT arm of
-        // DispatchOneStatementCore does the inline promotion).
+        // and overwrites itself on the way out (RunSelectStatement does the
+        // inline promotion).
         var cacheKey = TryBuildPlanCacheKey(command);
         var schemaVersionAtStart = Volatile.Read(ref this.SchemaVersion);
         if (cacheKey is { } key
@@ -1401,9 +1401,9 @@ public sealed partial class Simulation
     /// Promotes a freshly-parsed top-level <see cref="Selection"/> into the
     /// per-instance plan cache when the batch context's stashed key
     /// components are set and the live <see cref="SchemaVersion"/> still
-    /// matches the version captured at batch start. Called from the SELECT
-    /// arm of <see cref="DispatchOneStatementCore"/> AFTER row materialization
-    /// but BEFORE the iterator yields the outcome — so the entry is in the
+    /// matches the version captured at batch start. Called from
+    /// <see cref="RunSelectStatement"/> AFTER row materialization but BEFORE
+    /// the dispatch yields the outcome — so the entry is in the
     /// cache by the time the consumer sees the first row, even if the
     /// consumer disposes the reader without draining the rest of the
     /// iterator. The caller is responsible for the upstream gates (block
@@ -1582,7 +1582,7 @@ public sealed partial class Simulation
     /// <summary>
     /// Replays a cached batch's <see cref="Selection"/> sequence against a fresh
     /// <see cref="BatchContext"/> for the incoming command, mirroring the
-    /// SELECT arm of <see cref="DispatchOneStatementCore"/> for outcome
+    /// <see cref="RunSelectStatement"/> for outcome
     /// shape (result-set vs assignment-only NonQuery) and for
     /// <see cref="SimulatedDbConnection.LastStatementRowCount"/>
     /// maintenance. Bypasses tokenization and parsing entirely.
@@ -2160,619 +2160,53 @@ public sealed partial class Simulation
             or UnquotedString { ContextualKeyword: ContextualKeyword.Try or ContextualKeyword.Catch or ContextualKeyword.Atomic });
     }
 
-    /// <summary>The body of <see cref="DispatchOneStatement"/>.</summary>
+    /// <summary>
+    /// The body of <see cref="DispatchOneStatement"/>: drives the statement
+    /// through its <see cref="StatementLifecycle"/>, then sends what its
+    /// <see cref="StatementEnding"/> owes.
+    /// </summary>
     private IEnumerable<SimulatedStatementOutcome> DispatchFramedStatement(BatchContext batch, bool requireSemicolonBeforeCte, bool atBatchStart)
     {
-        // Snapshot the statement-start line before parser advance — used as
-        // ERROR_LINE() default when an error fires inside this statement.
-        batch.CurrentStatement.StartLine = batch.Parser.Token?.LineNumber ?? 1;
-        batch.CurrentStatement.StartIndex = batch.Parser.Token?.StartIndex ?? 0;
-        if (!batch.IsSkipping)
-        {
-            batch.CurrentStatement.PriorStatementLine = batch.CountedStatementLine;
-            if (batch.Parser.Token is not ReservedKeyword { Keyword: Keyword.Declare } && !AtBareBeginBlock(batch.Parser))
-                batch.CountedStatementLine = batch.CurrentStatement.StartLine;
-        }
-        var statementStart = batch.Parser.SaveCheckpoint();
-        // What a bind gathered before this statement: a statement read for
-        // its whole report binds its nested ones first, whose errors follow.
-        var gatheredBefore = batch.CreateTimeBindErrors?.Count ?? 0;
-        // The string → date-time conversion reads the session's order from
-        // here, having no session of its own; an unchanged order republishes
-        // for free.
-        DateOrder.Current = batch.Connection.DateFormat;
-        batch.CurrentStatement.SuppressErrorReset = false;
-        batch.CurrentStatement.ReportedIgnoredDuplicate = false;
-        batch.CurrentStatement.ReportedNoiseWords = false;
-        batch.CurrentStatement.NullEliminated = false;
-        batch.CurrentStatement.OwesOverflowNotice = batch.CurrentStatement.OwesDivideByZeroNotice = false;
-        batch.CurrentStatement.WritesRows = false;
-        batch.CurrentStatement.ClientOutputShape = null;
-        batch.CurrentStatement.TransactedWrite = false;
-        batch.CurrentStatement.BindsDeferredSource = false;
-        batch.CurrentStatement.ReadsPermanentObject = batch.CurrentStatement.ReadsTemporaryObject = false;
-        batch.CurrentStatement.OpensTransaction = false;
-        batch.CurrentStatement.BeganImplicitTransaction = false;
-        batch.CurrentStatement.CallsUserFunction = false;
-        batch.CurrentStatement.TransactionMark = null;
-        batch.CurrentStatement.PendingDdlEvents = null;
-        batch.CurrentStatement.DdlTriggerCreatedThisStatement = null;
-        batch.CurrentStatement.ChangesTableStructure = ChangesTableStructure(batch.Parser);
-        // What this statement names in its own DONE token, which only a
-        // connection serving a TDS session renders; null for a compound
-        // statement, whose parts send their own.
-        var framesStatement = batch.Connection.FramesEveryStatement && !batch.IsSkipping;
-        var startDoneKind = framesStatement ? StatementDoneKindOf(batch.Parser) : null;
-        var isCall = framesStatement && IsProcedureCall(batch.Parser, atBatchStart);
-        // SET STATISTICS TIME reports each statement that closes with a DONE,
-        // and a procedure call after its body (probed 2026-09-28 against SQL
-        // Server 2025); a function or view body inlines into its caller's.
-        var reportsStatistics = ReportsStatistics(batch);
-        var timedKind = reportsStatistics && batch.Connection.StatisticsTime ? startDoneKind ?? StatementDoneKindOf(batch.Parser) : null;
-        var timedCall = reportsStatistics && batch.Connection.StatisticsTime && (isCall || IsProcedureCall(batch.Parser, atBatchStart));
-        var statementClock = timedKind is not null || timedCall ? StatementClock.Start(batch.Connection) : default;
-        var createdModule = timedKind is not null ? CreatedModuleName(batch.Parser) : null;
-        batch.CurrentStatement.DoneKind = startDoneKind ?? timedKind ?? StatementDoneKind.NoDone;
-        batch.CurrentStatement.DoneCount = -1;
-        batch.CurrentStatement.StatementVerb = batch.Parser.Token switch
-        {
-            ReservedKeyword { Keyword: Keyword.Insert } => "INSERT",
-            ReservedKeyword { Keyword: Keyword.Update } => "UPDATE",
-            ReservedKeyword { Keyword: Keyword.Delete } => "DELETE",
-            ReservedKeyword { Keyword: Keyword.Merge } => "MERGE",
-            _ => "SELECT",
-        };
-        if (!batch.IsSkipping)
-        {
-            var session = batch.Connection.Session;
-            session.CurrentCommand = batch.Parser.Token is ReservedKeyword { Keyword: Keyword.WaitFor }
-                ? "WAITFOR"
-                : batch.CurrentStatement.StatementVerb;
-            // Offsets are into the command's own text, so only a top-level
-            // statement moves them; a module or dynamic-SQL body runs inside
-            // the statement that called it.
-            if (batch.Connection.NestingLevel == 0)
-                session.StatementStartIndex = batch.Parser.Token!.StartIndex;
-        }
-        // READ_COMMITTED_SNAPSHOT readers take a fresh snapshot per statement;
-        // clearing here ensures the next statement allocates a new Xid on its
-        // first user-table read.
-        batch.RcsiStatementSnapshotXid = null;
-        // Per-statement stamp bump — establishes a fresh "row" context for
-        // NEXT VALUE FOR caching at the statement boundary. Multi-row DML
-        // and SELECT iterators bump again per-row, but one-shot statements
-        // (SET, DECLARE init, RETURN, scalar SELECT) inherit this baseline
-        // bump and don't need to advance the stamp themselves.
-        batch.BumpRowStamp();
-
-        // Two-phase dispatch: the core iterator runs the statement body
-        // (parser + execution); the wrapper materializes its outcomes and
-        // intercepts SimulatedSqlException only when an enclosing TRY frame
-        // is active (TryFrameDepth > 0). Iterator methods can't have catch
-        // clauses around yield, so the materialize-then-yield split is the
-        // structural workaround. Materialization is cheap — every statement
-        // produces ≤ 1 outcome and SELECT already materializes its rows to
-        // a List before yielding the result set.
-        //
-        // Statement-scoped Sch-S / Sch-M locks released in `finally` here so
-        // they unwind on success, error, or TRY-caught exception alike.
-        // The connection's `CurrentExecutingThreadId` is set to the current
-        // managed thread for the statement's duration so concurrent acquirers
-        // on the same thread can short-circuit to Msg 1205 (no progress is
-        // possible while this thread is the executor). Save+restore handles
-        // the nested-body case (proc / trigger / UDF dispatch enters this
-        // method recursively under the same connection).
-        var connection = batch.Connection;
-        var savedThreadId = connection.CurrentExecutingThreadId;
-        connection.CurrentExecutingThreadId = Environment.CurrentManagedThreadId;
-        // SET STATISTICS IO: the statement gathers its own reads, its caller's
-        // put aside until it completes.
-        // Query Store times the statement and counts its reads the same way,
-        // for a database whose store is recording.
-        var queryStore = IsQueryStoreCandidate(batch.Parser.Token) ? BeginQueryStoreCapture(batch, io: null) : null;
-        var enclosingIo = connection.StatementIo;
-        if (reportsStatistics)
-            connection.StatementIo = connection.StatisticsIo || queryStore is not null ? new IoStatistics() : null;
-        var statementIo = reportsStatistics && connection.StatisticsIo ? connection.StatementIo : null;
-        var queryStoreIo = queryStore is not null ? connection.StatementIo : null;
-        // Function body-shape recording (Msg 455 / 444 / 443) — active only
-        // while a scalar UDF's / multi-statement TVF's body binds at CREATE.
-        // An IF / WHILE brackets its contained statements so none of them can
-        // satisfy the last-statement rule; the nested dispatch has completed by
-        // the finally below, which materializes every outcome.
-        var shape = batch.FunctionBodyShape;
-        var opensConditional = shape is not null && NoteFunctionBodyStatement(batch, shape);
-        if (opensConditional)
-            shape!.ConditionalDepth++;
-        // Filled as the statement produces them, so what a failing statement
-        // sent before its error — a body's messages and result sets ahead of
-        // the error that ended it — still reaches the client first, as real
-        // streams it.
+        var lifecycle = new StatementLifecycle(batch, atBatchStart);
+        lifecycle.Enter(batch);
         List<SimulatedStatementOutcome> outcomes = [];
-        SimulatedSqlException? caught = null;
-        SimulatedSqlException? continuedError = null;
-        SimulatedSqlException? propagated = null;
-        var deferredNameError = false;
-        var gatheredBindError = false;
-        var resumedAtStatementEnd = false;
-        try
+        lifecycle.Run(this, batch, outcomes, requireSemicolonBeforeCte, atBatchStart);
+
+        if (lifecycle.QueryStore is { } capture && lifecycle.Ending is not (StatementEnding.Deferred or StatementEnding.GatheredBindError))
+            EndFramedQueryStoreCapture(batch, capture, lifecycle.QueryStoreIo, lifecycle.Error, lifecycle.StatementStart);
+
+        switch (lifecycle.Ending)
         {
-            try
-            {
-                if (!batch.IsSkipping && batch.Connection.CurrentTransaction is not null && DatabaseDdlInTransaction(batch.Parser) is { } refusal)
-                {
-                    // Parsed without running, so the refusal leaves the cursor
-                    // past the statement for the recovery scan.
-                    batch.SkipModeFlag = true;
-                    try
-                    {
-                        foreach (var _ in DispatchOneStatementCore(batch, requireSemicolonBeforeCte, atBatchStart))
-                        {
-                        }
-                    }
-                    finally
-                    {
-                        batch.SkipModeFlag = false;
-                    }
-                    throw refusal;
-                }
-                if (connection.ImplicitTransactions && connection.CurrentTransaction is null && OpensImplicitTransactionAsDdl(batch.Parser))
-                    batch.BeginImplicitTransaction();
-                foreach (var outcome in DispatchOneStatementCore(batch, requireSemicolonBeforeCte, atBatchStart))
-                    outcomes.Add(outcome);
-                // Database-scope DDL triggers fire after the statement's own
-                // work completed but inside its error handling, so a body-side
-                // error surfaces as the statement's (and reaches an enclosing
-                // TRY / CATCH, and trips the Msg 3616 swallowed-error rule).
-                FireDdlTriggers(batch);
-            }
-            catch (SimulatedSqlException thrown)
-            {
-                // After a failed statement, the next OPEN / FETCH to miss its
-                // cursor reports its own line (probed 2026-09-29 against SQL
-                // Server 2025).
-                batch.CountedStatementLine = -1;
-
-                // A binder error is the first of however many the statement
-                // carries; real reports them all, so the statement is read
-                // again for the whole report before anything below judges it.
-                var ex = thrown;
-                if (!thrown.BindReportSettled)
-                    (ex, resumedAtStatementEnd) = this.ReportEveryBindError(batch, thrown, statementStart, requireSemicolonBeforeCte, atBatchStart);
-
-                // Stamp the batch-relative line / server / procedure the static
-                // factories couldn't know at throw time — the ambient-capture
-                // point. Syntax errors (severity 15) report the parser's
-                // current-token line; runtime / bind errors report the failing
-                // statement's start line. The innermost dispatch frame wins:
-                // ResolveDiagnostics no-ops on an already-resolved error as it
-                // propagates outward (matching SQL Server's innermost-frame
-                // attribution for nested calls).
-                // Scalar-UDF / TVF / view bodies inline for attribution: they
-                // leave the error unresolved so the enclosing invoking
-                // statement's frame stamps it (probe-confirmed — real reports
-                // the outer statement's line, no procedure). All other frames
-                // (top-level, procedure, trigger, dynamic-SQL) resolve here.
-                // A function body's failing write ends the calling statement,
-                // which real follows with the Msg 3621 a write earns (probed
-                // 2026-09-28 against SQL Server 2025).
-                if (batch.SuppressDiagnosticsResolution && batch.CurrentStatement.WritesRows && !batch.IsSkipping)
-                    ex.EndedFunctionWrite = true;
-                if (!batch.SuppressDiagnosticsResolution)
-                {
-                    var diagnosticLine = ex.Class == 15
-                        ? batch.Parser.Token?.LineNumber ?? batch.CurrentStatement.StartLine
-                        : batch.CurrentStatement.StartLine;
-                    ex.ResolveDiagnostics(diagnosticLine, batch.LineOffset, batch.ErrorProcedureName);
-                    if (!ex.RaisingScopeRecorded)
-                    {
-                        ex.RaisingScopeRecorded = true;
-                        if (!batch.IsSkipping && batch.ProcFrame is { } procFrame && ex.Class > procFrame.MaxErrorSeverity)
-                            procFrame.MaxErrorSeverity = ex.Class;
-                    }
-                }
-                // Class 13 = deadlock victim. Real SQL Server auto-rolls
-                // back the active transaction before propagating (probe-
-                // confirmed: @@TRANCOUNT reads 0 in the catch handler).
-                // Done BEFORE the TRY-frame check so both the propagating
-                // path and the TRY-caught path observe the same rollback.
-                if (ex.Class == 13)
-                    connection.CurrentTransaction?.EndRollback();
-                // The transaction-aborting error class does the same, for the
-                // same reason and at the same point: real rolls the whole
-                // stack back (@@TRANCOUNT 2 reads 0 afterwards, not 1) before
-                // the error reaches anyone. Unlike the deadlock victim it also
-                // refuses to be caught, so the TRY-frame arm below skips it.
-                if (ex.AbortsTransaction)
-                    connection.CurrentTransaction?.EndRollback();
-                // Real opens an implicit transaction only once its statement
-                // compiled, so a compile error met here takes back the one the
-                // statement opened.
-                if (batch.CurrentStatement.BeganImplicitTransaction && (IsDeferredCompileError(ex) || ex.Number == 201) && connection.CurrentTransaction is { TranCount: 1 } implicitTransaction)
-                    implicitTransaction.EndRollback();
-                // SET XACT_ABORT ON generalizes that class conditionally: while
-                // the option is on, a run-time error that would ordinarily end
-                // only its own statement ends the batch and rolls the whole
-                // stack back instead. It is NOT the same shape as the
-                // unconditional class above — a TRY frame anywhere on the
-                // session still catches it, and what the transaction gets is
-                // the doomed state rather than a rollback. Applied at the
-                // innermost frame and marked, so an outer frame re-raising the
-                // same exception doesn't ask twice.
-                ApplyXactAbortPromotion(connection, ex, batch.CurrentStatement.ChangesTableStructure);
-                // Deferred name resolution: real SQL Server binds object /
-                // column names lazily, so an un-taken IF / WHILE branch (or a
-                // block skipped after BREAK / CONTINUE / RETURN) that names a
-                // nonexistent table or column compiles fine and is discarded.
-                // The simulator resolves names inline with parsing, so in skip
-                // mode such a failure just means the discarded statement
-                // referenced something absent — drop the statement instead of
-                // surfacing the error. Checked ahead of the TRY-frame path: a
-                // skipped BEGIN TRY body must not activate its CATCH. Only
-                // name resolution defers, along with any binder error in a
-                // statement that parsed over a missing FROM source — syntax /
-                // structural errors carry other numbers and still propagate.
-                if (batch.IsSkipping
-                    && (IsDeferrableNameResolutionError(ex) || (IsBinderError(ex) && batch.CurrentStatement.BindsDeferredSource)))
-                {
-                    deferredNameError = true;
-                    // CREATE-time module binding stops at the first deferral.
-                    // Real keeps binding the statements after a missing-object
-                    // one, but it knows exactly where that statement ended; the
-                    // simulator only has the recovery scan below, which stops at
-                    // the first statement-boundary token — and that token can
-                    // still be inside the failed statement (an `INSERT INTO
-                    // missing SELECT …` throws with the cursor already on
-                    // `SELECT`). Binding on from there would report errors
-                    // against fragments, so the rest of the body falls back to
-                    // the pre-existing behavior of binding at first invocation.
-                    if (batch.CreateTimeBinding)
-                        batch.BatchAborted = true;
-                }
-                else if (batch.CreateTimeBindErrors is { } bindErrors && IsBinderError(ex))
-                {
-                    // A module body reports every binder error it contains, so
-                    // this one is gathered and the bind resumes at the next
-                    // statement boundary. Checked ahead of the TRY-frame path
-                    // because a body's own TRY / CATCH doesn't shield a binder
-                    // error — binding precedes any of it running
-                    // (probe-confirmed). Severity 15 is real's parse phase,
-                    // which preempts the whole report rather than joining it,
-                    // so those keep propagating from the arm below.
-                    bindErrors.Insert(Math.Min(gatheredBefore, bindErrors.Count), ex);
-                    gatheredBindError = true;
-
-                    // An illegal explicit conversion ends the report where it
-                    // is: real gathers name-resolution errors across the whole
-                    // body but stops at a Msg 529, so a body whose first
-                    // statement carries one reports it alone even when a later
-                    // statement names a missing column (probed 2026-08-05).
-                    if (ex.Number is 529 or 8622)
-                        batch.BatchAborted = true;
-                }
-                else if (CaughtByTryFrame(batch, ex))
-                {
-                    // Only a batch that runs raises into a TRY frame: an error
-                    // met while the batch compiles — a syntax error in the TRY
-                    // body — refuses the whole batch on real rather than
-                    // reaching the CATCH (probed 2026-09-25 against SQL Server
-                    // 2025). At run time this arm also absorbs the tail of a
-                    // statement that failed mid-parse, which the rest of the
-                    // TRY body skips.
-                    caught = ex;
-                    // A failed statement leaves @@ROWCOUNT at 0, whatever ran
-                    // before it (probed 2026-09-27 against SQL Server 2025).
-                    connection.LastStatementRowCount = 0;
-                }
-                else if (batch.ContinueOnError && batch.ProcFrame is null && batch.TriggerFrame is null && EndsBatch(ex))
-                {
-                    // Batch-aborting error: a bind-class name-resolution
-                    // failure (missing object / column / ambiguous / could-not-
-                    // be-bound), an uncaught THROW (ex.TerminatesBatch), or an
-                    // error XACT_ABORT ON promoted with no TRY frame to catch
-                    // it (the transaction has already been rolled back). Real
-                    // SQL Server ends the batch rather than continuing to the
-                    // next statement — probe-confirmed that a mid-batch THROW
-                    // leaves the following statement unrun (contrast a
-                    // severity-16 RAISERROR, which continues). Emit the one
-                    // error, then set the flag the dispatch loop breaks on — no
-                    // cursor recovery scan, so the OPTION (USE HINT(...)) tail's
-                    // `USE` token is never mis-dispatched as a `USE <database>`
-                    // statement.
-                    continuedError = ex;
-                    batch.BatchAborted = true;
-                }
-                else if (batch.ContinueOnError && !EndsBatch(ex) && IsStatementTerminating(ex) && !(ex.EndedCalledBatch && ReferenceEquals(ex.EndedCalledBatchIn, batch)))
-                {
-                    // A continuing procedure, trigger or dynamic-SQL body takes this arm
-                    // too, and its error travels up among the body's outcomes;
-                    // one that ends the batch propagates below instead, so it
-                    // unwinds every caller it reaches.
-                    continuedError = ex;
-                    connection.LastStatementRowCount = 0;
-                }
-                else
-                {
-                    // A procedure's, dynamic SQL's or called function's batch
-                    // is as far as a batch-aborting name-resolution error
-                    // reaches.
-                    if ((batch.ProcFrame is not null || batch.CalledFunctionBody) && (IsBatchAbortingNameResolution(ex) || IsBulkRefusal(ex)) && !ex.EndedCalledBatch)
-                    {
-                        ex.EndedCalledBatch = true;
-                        ex.EndedCalledBatchIn = batch;
-                    }
-                    propagated = ex;
-                }
-            }
-        }
-        finally
-        {
-            batch.ReleaseStatementSchemaLocks();
-            connection.CurrentExecutingThreadId = savedThreadId;
-            if (reportsStatistics)
-                connection.StatementIo = enclosingIo;
-            if (opensConditional)
-                shape!.ConditionalDepth--;
+            case StatementEnding.Propagated:
+                foreach (var outcome in lifecycle.EndPropagated(batch, outcomes))
+                    yield return outcome;
+                ExceptionDispatchInfo.Throw(lifecycle.Error!);
+                yield break;
+            case StatementEnding.Deferred:
+            case StatementEnding.GatheredBindError:
+                foreach (var outcome in lifecycle.EndSkipped(batch, outcomes))
+                    yield return outcome;
+                yield break;
+            case StatementEnding.Continued:
+                foreach (var outcome in lifecycle.EndContinued(batch, outcomes))
+                    yield return outcome;
+                yield break;
+            case StatementEnding.Caught:
+                foreach (var outcome in lifecycle.EndCaught(batch, outcomes))
+                    yield return outcome;
+                yield break;
         }
 
-        if (queryStore is { } capture && !deferredNameError && !gatheredBindError)
-            EndFramedQueryStoreCapture(batch, capture, queryStoreIo, propagated ?? continuedError ?? caught, statementStart);
-
-        if (propagated is not null)
-        {
-            // A module or dynamic batch's failing statement closes with its
-            // DONE at its own level when a TRY frame further out is what
-            // catches the error — a write with its count — as a caught error's
-            // statement does (probed 2026-09-28 against SQL Server 2025).
-            var caughtFurtherOut = !batch.IsSkipping && !batch.CreateTimeBinding && connection.OpenTryFrames > 0
-                && !propagated.AbortsTransaction && !propagated.IsAttention;
-            var count = caughtFurtherOut ? CaughtWriteCount(batch) : null;
-            if (startDoneKind is not null)
-                _ = FrameStatement(batch, outcomes, standInForNone: framesStatement && caughtFurtherOut && count is null && !isCall);
-            foreach (var outcome in ProducedOutcomes(batch, outcomes))
-                yield return outcome;
-            if (count is not null)
-            {
-                count.DoneKind = batch.CurrentStatement.DoneKind;
-                yield return count;
-            }
-            ExceptionDispatchInfo.Throw(propagated);
-        }
-
-        if (deferredNameError || gatheredBindError)
-        {
-            // The parser threw mid-statement; advance to the next statement
-            // boundary so the outer dispatch loop resumes cleanly (same
-            // cursor-recovery scan the TRY-caught path uses below). No
-            // @@ERROR / InFlightError mutation — a skipped statement is
-            // conceptually never compiled, not run-and-failed, and a gathered
-            // bind error belongs to the CREATE the bind serves.
-            var parser = batch.Parser;
-            while (parser.Token is not null && !IsStatementBoundary(parser.Token))
-                parser.MoveNextOptional();
-            // A scan that stopped on a separator (or ran out of body) resumed
-            // where a statement really begins; one that stopped on a keyword
-            // guessed, and the bind reads a later severity-15 error from a
-            // guessed position as recovery noise.
-            if (gatheredBindError)
-                batch.BindResumedCleanly = resumedAtStatementEnd || parser.Token is null or Operator { Character: ';' };
-            foreach (var outcome in ProducedOutcomes(batch, outcomes))
-                yield return outcome;
-            yield break;
-        }
-
-        if (continuedError is not null)
-        {
-            // Top-level statement-terminating continuation: the statement
-            // failed but the batch proceeds to the next one (real SQL Server's
-            // default, non-XACT_ABORT severity model). Set @@ERROR so a
-            // following statement observes it, but do NOT touch InFlightError /
-            // ErrorSignaled — those are TRY/CATCH-only state, and this error is
-            // bound for the client, not a CATCH block. Same cursor-recovery
-            // scan the deferred-name and TRY-caught paths use, then emit the
-            // error into the shared outcome stream so both front doors render
-            // it (the wire writes error token(s); the in-process reader
-            // converts it to a throw); the outer dispatch loop resumes at the
-            // next statement.
-            connection.LastErrorNumber = continuedError.Number;
-            // A batch-aborting error skips the cursor-recovery scan: the outer
-            // dispatch loop breaks on BatchAborted, so the cursor position no
-            // longer matters and scanning could only mis-stop on a keyword-like
-            // token inside the failed statement's own tail.
-            if (!batch.BatchAborted)
-            {
-                var parser = batch.Parser;
-                while (parser.Token is not null && !IsStatementBoundary(parser.Token))
-                    parser.MoveNextOptional();
-            }
-            // The error closes with its statement's DONE — or, when it ended
-            // the batch, with the batch's closing one, and when it ended a
-            // procedure call, with that call's DONEPROC (probed 2026-09-28
-            // against SQL Server 2025).
-            var errorOutcome = new SimulatedErrorOutcome(continuedError);
-            List<SimulatedStatementOutcome>? closedScopes = null;
-            if (framesStatement)
-            {
-                if (startDoneKind is not null)
-                    _ = FrameStatement(batch, outcomes, standInForNone: false);
-                if (batch.BatchAborted)
-                {
-                    errorOutcome.DoneKind = StatementDoneKind.Batch;
-                }
-                else if (isCall && continuedError.RaisedBySystemProcedure && OpenProcScopes(outcomes) == 1)
-                {
-                    errorOutcome.DoneKind = StatementDoneKind.RaisError;
-                    closedScopes = [ScopeExit(batch, 1)];
-                }
-                else if (isCall || OpenProcScopes(outcomes) > 0)
-                {
-                    errorOutcome.DoneKind = StatementDoneKind.ClosedByScope;
-                    closedScopes = [];
-                    CloseAbandonedProcScopes(batch, [.. outcomes], closedScopes, isCall, endedByError: true);
-                }
-                else
-                {
-                    errorOutcome.DoneKind = batch.CurrentStatement.DoneKind is StatementDoneKind.NoDone ? StatementDoneKind.Batch : batch.CurrentStatement.DoneKind;
-                }
-                errorOutcome.InModule = batch.ProcFrame is not null || batch.TriggerFrame is not null;
-                errorOutcome.TransactionEventMark = connection.TransactionEventsRecorded;
-            }
-            // A statement compiled before its error ran into it.
-            if (timedKind is not null && !batch.BatchAborted && connection.StatisticsTime && (batch.CurrentStatement.CallsUserFunction || CompilesParameterized(batch, statementStart)))
-                yield return new SimulatedInfoOutcome(CompileTime(batch, clock: null, batch.CurrentStatement.StartLine + batch.LineOffset, batch.ErrorProcedureName));
-            foreach (var outcome in ProducedOutcomes(batch, outcomes))
-                yield return outcome;
-            yield return errorOutcome;
-            // A statement its error ended still reports its time, after the
-            // error and ahead of Msg 3621; one that ended the batch doesn't
-            // (probed 2026-09-28 against SQL Server 2025).
-            if ((timedKind is not null || timedCall) && !batch.BatchAborted && connection.StatisticsTime)
-                yield return new SimulatedInfoOutcome(ExecutionTimes(batch, statementClock, createdModule), followsRows: true);
-            // Msg 3621 goes out ahead of the statement's DONE, as real sends it.
-            if (IsStatementTerminationNoticed(batch, continuedError))
-            {
-                yield return new SimulatedInfoOutcome(
-                    continuedError.IsIdentityOverflow
-                        ? SimulatedSqlException.ArithmeticOverflowOccurredMessage(batch)
-                        : SimulatedSqlException.StatementTerminatedMessage(batch, continuedError),
-                    followsRows: true);
-            }
-            else if (continuedError.IsIdentityOverflow && batch.BatchAborted)
-            {
-                // The overflow ends the batch and rolls back, and its Msg 3606
-                // then names no statement: line 1, outside any module (probed
-                // 2026-09-28 against SQL Server 2025).
-                var notice = SimulatedSqlException.ArithmeticOverflowOccurredMessage(batch);
-                notice.LineNumber = 1;
-                notice.Procedure = string.Empty;
-                yield return new SimulatedInfoOutcome(notice);
-            }
-            if (closedScopes is not null)
-            {
-                foreach (var closed in closedScopes)
-                    yield return closed;
-            }
-            yield break;
-        }
-
-        if (caught is not null)
-        {
-            var caughtCount = batch.IsSkipping ? null : CaughtWriteCount(batch);
-            // First error in this TRY body wins; subsequent throws while
-            // already-signaled (from skip-mode parsers that still hit
-            // runtime errors) silently swallow — the captured first error
-            // is what CATCH sees.
-            if (!batch.ErrorSignaled)
-            {
-                // The exception's diagnostics were resolved at the catch
-                // above, so ERROR_LINE() / ERROR_PROCEDURE() report the same
-                // values the exception carries (probe-confirmed parity).
-                // An error raised as several — a constraint failure and its
-                // Msg 1750, a CREATE SCHEMA failure and its Msg 2759 — is the
-                // last of them to ERROR_NUMBER() and its siblings, as on real
-                // (probed 2026-09-24 against SQL Server 2025); a compile-time
-                // report is its first.
-                var shown = caught.CatchReadsFirstEntry ? caught.Errors[0] : caught.Errors[^1];
-                batch.InFlightError = new CaughtError(
-                    shown.Number,
-                    shown.Message,
-                    shown.Class,
-                    shown.State,
-                    shown.LineNumber,
-                    shown.Procedure.Length == 0 ? null : shown.Procedure);
-                batch.ErrorSignaled = true;
-            }
-            connection.LastErrorNumber = caught.Number;
-            // Any error of severity >= 11 raised while a trigger body runs
-            // aborts the firing statement at trigger exit (Msg 3616) even
-            // though this CATCH swallowed it — real doesn't let a body's own
-            // TRY / CATCH rescue the statement that fired it (probe-confirmed,
-            // including for a module the body called; severity <= 10 is
-            // informational and leaves the unit intact). A body that turned
-            // XACT_ABORT off first keeps the error from dooming anything, and
-            // the statement stands (probed 2026-09-28 against SQL Server 2025).
-            if (connection.TriggerNestLevel > 0 && caught.Class >= 11 && connection.XactAbort)
-                connection.TriggerBodyErrorRaised = true;
-
-            // The parser threw mid-statement, so the cursor is at an
-            // unpredictable position. Advance to the next statement boundary
-            // (a `;`, statement-starting keyword like `END`, or EOB) so the
-            // outer DispatchStatementsUntil loop can resume cleanly — without
-            // this scan it'd re-dispatch the same partially-parsed statement
-            // and infinite-loop. IsStatementBoundary treats `END` as a stop,
-            // so we land at `END TRY` for the typical case.
-            var parser = batch.Parser;
-            while (parser.Token is not null && !IsStatementBoundary(parser.Token))
-                parser.MoveNextOptional();
-            // A caught error's statement still closes with its DONE, the error
-            // bit clear — a procedure call with its DONEPROC, no return status
-            // (probed 2026-09-28 against SQL Server 2025).
-            if (framesStatement)
-            {
-                if (isCall || OpenProcScopes(outcomes) > 0)
-                {
-                    CloseAbandonedProcScopes(batch, [.. outcomes], outcomes, isCall, endedByError: false);
-                }
-                else if (startDoneKind is not null)
-                {
-                    _ = caughtCount?.DoneKind = batch.CurrentStatement.DoneKind;
-                    _ = FrameStatement(batch, outcomes, standInForNone: caughtCount is null);
-                }
-            }
-            foreach (var outcome in ProducedOutcomes(batch, outcomes))
-                yield return outcome;
-            if (caughtCount is not null)
-                yield return caughtCount;
-            if ((timedKind is not null || timedCall) && connection.StatisticsTime)
-                yield return new SimulatedInfoOutcome(ExecutionTimes(batch, statementClock, createdModule));
-            yield break;
-        }
-
-        // Skip-mode statements don't count toward @@ERROR reset (skip-mode
-        // dispatch is conceptually "didn't run" — the surrounding scope owns
-        // @@ERROR). Successful real statements clear @@ERROR to 0 unless the
-        // statement explicitly opted out (RAISERROR sev ≤ 10 WITH SETERROR
-        // wrote its own number and asked us not to clobber it).
-        if (!batch.IsSkipping && !batch.CurrentStatement.SuppressErrorReset)
-            connection.LastErrorNumber = 0;
-
-        // Stamp the session TEXTSIZE in effect when this statement produced
-        // its rows: client-boundary cursors truncate under the producing
-        // statement's cap even when the session value changes before the
-        // (lazily-read) result is drained — notably a proc body's SET
-        // TEXTSIZE, which reverts at proc exit while its result sets keep it.
-        // Stamped in the same walk: the producing statement's line and
-        // enclosing procedure, which a downstream projection (EXEC … WITH
-        // RESULT SETS) attributes its errors to. Already-stamped results pass
-        // through untouched so the innermost producing frame wins.
-        if (startDoneKind is not null)
-            _ = FrameStatement(batch, outcomes, standInForNone: true);
-        foreach (var o in outcomes)
-        {
-            // SET NOCOUNT ON suppresses the statement's count wherever a client
-            // reads one. Recorded per outcome rather than read at consumption
-            // time because a procedure body's SET NOCOUNT reverts when the body
-            // exits, which is before the caller pulls the outcomes the body
-            // produced; the null-coalescing assignment keeps the innermost
-            // producing frame's setting for the same reason the stamps below
-            // do.
-            o.CountSuppressed ??= connection.NoCount;
-            if (o is not SimulatedQueryResult query)
-                continue;
-            if (connection.TextSize >= 0)
-                query.ClientTextSize = connection.TextSize;
-            if (query.OriginLine == 0)
-            {
-                query.OriginLine = batch.CurrentStatement.StartLine + batch.LineOffset;
-                query.OriginProcedure = batch.ErrorProcedureName;
-            }
-        }
+        // A completed statement's ending is sent here rather than through an
+        // iterator of its own, which every statement would allocate.
+        var connection = batch.Connection;
+        lifecycle.Complete(batch, outcomes);
 
         // A statement calling a user function compiles it as it runs, and a
         // simply parameterized one compiles its parameterized form, which
         // STATISTICS TIME reports ahead of the statement's output (probed
         // 2026-09-28 against SQL Server 2025).
-        if (timedKind is not null && connection.StatisticsTime && (batch.CurrentStatement.CallsUserFunction || CompilesParameterized(batch, statementStart)))
+        if (lifecycle.TimedKind is not null && connection.StatisticsTime && (batch.CurrentStatement.CallsUserFunction || CompilesParameterized(batch, lifecycle.StatementStart)))
             yield return new SimulatedInfoOutcome(CompileTime(batch, clock: null, batch.CurrentStatement.StartLine + batch.LineOffset, batch.ErrorProcedureName));
         foreach (var outcome in ProducedOutcomes(batch, outcomes))
             yield return outcome;
@@ -2790,8 +2224,8 @@ public sealed partial class Simulation
             yield return notice;
         // A statement that turns STATISTICS TIME on or off reports no time,
         // having started or ended without it.
-        var timed = timedCall || (timedKind is not null && batch.CurrentStatement.DoneKind != StatementDoneKind.NoDone);
-        foreach (var notice in StatisticsReport(batch, statementIo, outcomes, timed && connection.StatisticsTime, statementClock, timedCall, createdModule))
+        var timed = lifecycle.TimedCall || (lifecycle.TimedKind is not null && batch.CurrentStatement.DoneKind != StatementDoneKind.NoDone);
+        foreach (var notice in StatisticsReport(batch, lifecycle.StatementIo, outcomes, timed && connection.StatisticsTime, lifecycle.Clock, lifecycle.TimedCall, lifecycle.CreatedModule))
             yield return notice;
     }
 
@@ -3250,19 +2684,7 @@ public sealed partial class Simulation
         context.CteBindings = null;
         context.CtePrefixLeadsSelectStatement = false;
         context.XmlNamespaces = null;
-        batch.CurrentStatement.UtcNow = DateTime.UtcNow;
-        batch.CurrentStatement.StatementScopedValues = null;
-        batch.CurrentStatement.SubqueryResults = null;
-        batch.CurrentStatement.CatalogViewRows = null;
-#if DEBUG
-        batch.CurrentStatement.AuditedCatalogRowSets = null;
-#endif
-        batch.CurrentStatement.AutocommitTransactionId = 0;
-        batch.CurrentStatement.ChangeTrackingContext = null;
-        batch.CurrentStatement.LockTallies = null;
-        batch.CurrentStatement.EscalatedTables = null;
-        batch.CurrentStatement.RemoteWrite = null;
-        batch.CurrentStatement.RemoteWriteAlias = null;
+        batch.CurrentStatement.BeginExecution();
 
         // WITH prefix applies to the immediately-following SELECT / INSERT /
         // UPDATE / DELETE / MERGE. ParseCteBindings sets context.CteBindings
@@ -3300,235 +2722,24 @@ public sealed partial class Simulation
             && context.Token is ReservedKeyword { Keyword: var fmtKeyword }
             && fmtKeyword is Keyword.Select or Keyword.Insert or Keyword.Update or Keyword.Delete or Keyword.Merge)
         {
-            if (fmtKeyword == Keyword.Select)
-            {
-                var metadataSelection = Selection.Parse(context, QueryScope.Statement).AsStatementResult();
-                connection.LastStatementRowCount = 0;
-                if (metadataSelection.IntoTarget is null)
-                {
-                    yield return new SimulatedSqlResultSet(metadataSelection.Schema, metadataSelection.ColumnNames, new List<byte[]>())
-                    {
-                        ColumnNullability = metadataSelection.ColumnNullability,
-                        ColumnReportsNumeric = metadataSelection.ColumnReportsNumeric,
-                        ColumnAliasTypes = metadataSelection.ColumnAliasTypes,
-                        ColumnIdentitySources = metadataSelection.ColumnIdentitySources,
-                        ColumnWireFlags = metadataSelection.ColumnWireFlags,
-                        ColumnOrigins = Selection.BaseColumnOrigins(metadataSelection),
-                        ColumnIsComputed = Selection.ComputedColumnsOf(metadataSelection),
-                        IsGrouped = metadataSelection.IsGrouped,
-                    };
-                }
-                else
-                {
-                    // SELECT … INTO closes with a DONE counting 0, as the
-                    // suppressed DML below does.
-                    yield return new SimulatedNonQuery(0) { CountSuppressed = false, DoneKind = StatementDoneKind.SelectInto };
-                }
-
-                yield break;
-            }
-
-            // Parse the DML under skip mode so the cursor advances and syntax
-            // errors still surface, but no heap write happens.
-            batch.SkipModeFlag = true;
-            SimulatedStatementOutcome suppressed;
-            try
-            {
-                switch (fmtKeyword)
-                {
-                    case Keyword.Insert:
-                        suppressed = RunMutation(context, ParseInsert);
-                        break;
-                    case Keyword.Update:
-                        suppressed = RunMutation(context, ParseUpdate);
-                        break;
-                    case Keyword.Delete:
-                        suppressed = RunMutation(context, ParseDelete);
-                        break;
-                    default:
-                        suppressed = RunMutation(context, ParseMerge);
-                        if (context.Token is not Operator { Character: ';' })
-                            throw SimulatedSqlException.MergeMustBeTerminated();
-                        break;
-                }
-            }
-            finally
-            {
-                batch.SkipModeFlag = false;
-            }
-
-            // Real closes the suppressed statement with a DONE counting 0 —
-            // under NOCOUNT too — or, for an OUTPUT clause, with its empty
-            // result set (probed 2026-09-28 against SQL Server 2025).
-            connection.LastStatementRowCount = 0;
-            yield return suppressed is SimulatedSqlResultSet output
-                ? new SimulatedSqlResultSet(output.Schema, output.ColumnNames, new List<byte[]>())
-                : new SimulatedNonQuery(0) { CountSuppressed = false };
-
+            yield return RunUnderFmtOnly(batch, fmtKeyword);
             yield break;
         }
 
         SimulatedStatementOutcome? outcome;
+        int? rowCount = null;
         switch (context.Token)
         {
             // A query expression written in parentheses is a SELECT statement
             // too, `(SELECT 1) UNION (SELECT 2)` (probed 2026-09-26).
             case ReservedKeyword { Keyword: Keyword.Select }:
             case Operator { Character: '(' }:
-                {
-                    var statementStart = context.SaveCheckpoint();
-                    context.ForBrowseSeen = false;
-                    List<ReplayedLock>? replayLocks;
-                    // A statement the plan cache may store records the locks
-                    // its parse takes, which a replay takes again as its own
-                    // session.
-                    batch.ReplayLockLog = batch.PlanCacheCommandText is not null && batch.BlockDepth == 0 && !batch.IsSkipping ? [] : null;
-                    Selection selection;
-                    try
-                    {
-                        selection = ParseSelectStatement(context, browse: connection.NoBrowseTable);
-                        // A trailing FOR BROWSE puts the one statement in browse
-                        // mode, which decides its projection, so the statement is
-                        // read again as a browse statement (probed 2026-09-26).
-                        if (context.ForBrowseSeen && !connection.NoBrowseTable)
-                        {
-                            context.RestoreCheckpoint(statementStart);
-                            selection = ParseSelectStatement(context, browse: true);
-                        }
-                        else if (connection.NoBrowseTable && selection.IsSetOperationResult)
-                        {
-                            selection.Browse = Selection.SetOperationBrowseInfo(selection.Schema.Length);
-                        }
-                    }
-                    finally
-                    {
-                        replayLocks = batch.ReplayLockLog;
-                        batch.ReplayLockLog = null;
-                    }
-                    // A value literal or a name left dangling after a complete
-                    // SELECT is always unconsumed trailing input — real SQL
-                    // Server raises Msg 102 rather than silently ignoring it
-                    // (the non-T-SQL `SELECT id FROM t LIMIT 2` parses `LIMIT`
-                    // as the source's alias and leaves `2` dangling;
-                    // `FROM t a hash` leaves `hash`, probed 2026-09-24). A
-                    // well-formed SELECT never ends on one, nor on a comma
-                    // (`SELECT 1 WHERE 1 IN (NULL), 2` is near ',', probed
-                    // 2026-09-26); any other token is left to the generic
-                    // end-of-dispatch normalizer.
-                    if (context.Token is Numeric or Literal or Name or Operator { Character: ',' })
-                        throw SimulatedSqlException.SyntaxErrorNear(context);
-                    if (!batch.IsSkipping)
-                        PermissionEnforcement.CheckReadSources(batch, selection.ReferencedSecurables, selection.ReadColumnsByObject);
-                    // Inside a function body real splits the SELECT three ways:
-                    // an assignment-only SELECT is legal, SELECT … INTO is a
-                    // side-effecting operator of its own, and anything else
-                    // would send rows to the client.
-                    if (batch.FunctionBodyShape is not null)
-                    {
-                        if (selection.IntoTarget is not null)
-                            FunctionBodyShape.NoteSideEffect(batch, "SELECT INTO", FunctionBodyShape.StatementOperatorState);
-                        else if (!selection.IsAssignmentOnly)
-                            FunctionBodyShape.NoteClientSelect(batch);
-                    }
-                    if (selection.IntoTarget is not null)
-                    {
-                        // SELECT INTO: creates the destination table and
-                        // inserts each projected row. RunMutation gives
-                        // the executor access to the active undo log so
-                        // transactional CREATE+INSERT can roll back. In
-                        // skip mode, ExecuteSelectInto returns SimulatedNonQuery(0)
-                        // without touching the heap.
-                        outcome = RunMutation(context, _ => ExecuteSelectInto(selection, batch));
-                        outcome.DoneKind = StatementDoneKind.SelectInto;
-                        if (!batch.IsSkipping)
-                        {
-                            connection.LastStatementRowCount = outcome.RecordsAffected;
-                            yield return outcome;
-                        }
-                        break;
-                    }
-                    if (batch.IsSkipping)
-                        break;
-                    if (connection.InsertExecTargetTypes is { } insertExecTargets && !selection.IsAssignmentOnly)
-                        RequireInsertExecAssignable(selection, insertExecTargets, batch);
-                    // Materialize rows up-front so @@ROWCOUNT reflects the
-                    // statement's full row count for the next statement in
-                    // the same batch (real SQL Server runs server-side and
-                    // sets @@ROWCOUNT on completion; the simulator
-                    // materializes to mirror that). The rows are held in
-                    // whichever form the plan produced — a projecting SELECT's
-                    // SqlValue rows travel to the reader as they are.
-                    // SET ROWCOUNT caps what the statement returns, including
-                    // the rows a `SELECT @v = …` assignment walks
-                    // (probe-confirmed: the assignment keeps the value from the
-                    // last row inside the cap, and @@ROWCOUNT reads the cap).
-                    // A row that raises ends the statement, but real has sent
-                    // the column metadata and the rows before it by then, so
-                    // they go out ahead of the error (see EndedByError) — an
-                    // empty result set when the plan failed before its first.
-                    SimulatedSqlResultSet? executed = null;
-                    SimulatedSqlException? cutShort = null;
-                    int rowCount;
-                    try
-                    {
-                        executed = DataMasking.ForClient(selection.Execute(batch), selection.ColumnMasks, batch).WithRowCountLimit(connection.RowCountLimit);
-                        rowCount = executed.MaterializeRows();
-                        if (selection.CountsForClauseSourceRows)
-                            rowCount = executed.ReportedRowCount = batch.CurrentStatement.ForClauseSourceRows;
-                    }
-                    catch (SimulatedSqlException error) when (!selection.IsAssignmentOnly)
-                    {
-                        cutShort = error;
-                        rowCount = 0;
-                        executed ??= new SimulatedSqlResultSet(selection.Schema, selection.ColumnNames, new List<byte[]>())
-                        {
-                            ColumnNullability = selection.ColumnNullability,
-                            ColumnReportsNumeric = selection.ColumnReportsNumeric,
-                            ColumnAliasTypes = selection.ColumnAliasTypes,
-                            ColumnIdentitySources = selection.ColumnIdentitySources,
-                            ColumnWireFlags = selection.ColumnWireFlags,
-                            HiddenColumnCount = selection.HiddenColumnCount,
-                            Browse = selection.Browse,
-                        };
-                        executed.EndedByError = true;
-                        executed.ErrorCaught = CaughtByTryFrame(batch, error);
-                    }
-                    connection.LastStatementRowCount = rowCount;
-                    outcome = selection.IsAssignmentOnly
-                        ? new SimulatedNonQuery(rowCount, countsRowsReturned: true)
-                        : executed;
-
-                    // Plan-cache accumulation and promotion, inline before the
-                    // yield. Gates: top-level (BlockDepth == 0 → not inside
-                    // IF / WHILE / BEGIN…END / TRY/CATCH); shape (not
-                    // assignment-only — those yield NonQuery and aren't worth
-                    // caching); no session-scoped table reference.
-                    //
-                    // A qualifying SELECT joins the batch's candidate
-                    // sequence; the batch is promoted at the LAST statement,
-                    // which is the one that finds nothing but separators left.
-                    // Comparing the sequence's length against the count of
-                    // top-level statements dispatched is what proves no other
-                    // statement kind ran: the loop counts this statement only
-                    // after this method returns, hence the +1.
-                    if (batch.BlockDepth == 0
-                        && !selection.IsAssignmentOnly
-                        && !batch.HasSessionScopedReference)
-                    {
-                        (batch.PlanCacheSequence ??= []).Add(selection);
-                        (batch.PlanCacheSequenceLocks ??= []).Add(replayLocks is null ? [] : [.. replayLocks]);
-                        (batch.PlanCacheSequenceSpans ??= []).Add((batch.CurrentStatement.StartIndex, context.PreviousTokenEnd));
-                        if (batch.PlanCacheSequence.Count == batch.TopLevelStatementsDispatched + 1
-                            && IsAtEndOfBatch(context))
-                        {
-                            TryPromoteSelectionsToPlanCache(batch);
-                        }
-                    }
+                outcome = this.RunSelectStatement(batch, out var cutShort);
+                if (outcome is not null)
                     yield return outcome;
-                    if (cutShort is not null)
-                        ExceptionDispatchInfo.Throw(cutShort);
-                    break;
-                }
+                if (cutShort is not null)
+                    ExceptionDispatchInfo.Throw(cutShort);
+                break;
 
             case ReservedKeyword { Keyword: Keyword.Insert }:
                 outcome = this.RunDmlStatement(context, ParseInsert);
@@ -3563,12 +2774,10 @@ public sealed partial class Simulation
             case ReservedKeyword { Keyword: Keyword.Update } when IsUpdateStatistics(context):
                 _ = TryParseUpdateStatistics(context);
                 context.RejectTrailingToken();
+                rowCount = 0;
+                // NORECOMPUTE surfaces in sys.stats.
                 if (!batch.IsSkipping)
-                {
-                    connection.LastStatementRowCount = 0;
-                    // NORECOMPUTE surfaces in sys.stats.
                     this.CatalogRows.Invalidate();
-                }
                 break;
 
             case ReservedKeyword { Keyword: Keyword.Update }:
@@ -3642,22 +2851,19 @@ public sealed partial class Simulation
             case ReservedKeyword { Keyword: Keyword.Reconfigure }:
                 ParseReconfigureStatement(batch);
                 context.RejectTrailingToken();
-                if (!batch.IsSkipping)
-                    connection.LastStatementRowCount = 0;
+                rowCount = 0;
                 break;
 
             case ReservedKeyword { Keyword: Keyword.Revert }:
                 RevertStatement(batch);
                 context.RejectTrailingToken();
-                if (!batch.IsSkipping)
-                    connection.LastStatementRowCount = 0;
+                rowCount = 0;
                 break;
 
             case UnquotedString { ContextualKeyword: ContextualKeyword.Throw }:
                 ParseThrowStatement(batch);
                 context.RejectTrailingToken();
-                if (!batch.IsSkipping)
-                    connection.LastStatementRowCount = 0;
+                rowCount = 0;
                 break;
 
             case ReservedKeyword { Keyword: Keyword.Goto }:
@@ -3671,22 +2877,19 @@ public sealed partial class Simulation
             case ReservedKeyword { Keyword: Keyword.Print }:
                 ParsePrintStatement(batch);
                 context.RejectTrailingToken();
-                if (!batch.IsSkipping)
-                    connection.LastStatementRowCount = 0;
+                rowCount = 0;
                 break;
 
             case ReservedKeyword { Keyword: Keyword.RaisError }:
                 ParseRaiserrorStatement(batch);
                 context.RejectTrailingToken();
-                if (!batch.IsSkipping)
-                    connection.LastStatementRowCount = 0;
+                rowCount = 0;
                 break;
 
             case ReservedKeyword { Keyword: Keyword.WaitFor }:
                 ParseWaitForStatement(batch);
                 context.RejectTrailingToken();
-                if (!batch.IsSkipping)
-                    connection.LastStatementRowCount = 0;
+                rowCount = 0;
                 break;
 
             case ReservedKeyword { Keyword: Keyword.ReadText }:
@@ -3707,27 +2910,23 @@ public sealed partial class Simulation
 
             case ReservedKeyword { Keyword: Keyword.WriteText }:
                 outcome = RunMutation(context, ParseWriteTextStatement);
-                if (!batch.IsSkipping)
-                    connection.LastStatementRowCount = outcome.RecordsAffected;
+                rowCount = outcome.RecordsAffected;
                 break;
 
             case ReservedKeyword { Keyword: Keyword.UpdateText }:
                 outcome = RunMutation(context, ParseUpdateTextStatement);
-                if (!batch.IsSkipping)
-                    connection.LastStatementRowCount = outcome.RecordsAffected;
+                rowCount = outcome.RecordsAffected;
                 break;
 
             case ReservedKeyword { Keyword: Keyword.Truncate }:
                 ParseTruncateStatement(batch);
-                if (!batch.IsSkipping)
-                    connection.LastStatementRowCount = 0;
+                rowCount = 0;
                 break;
 
             case ReservedKeyword { Keyword: Keyword.Use }:
                 ParseUseStatement(batch);
                 context.RejectTrailingToken();
-                if (!batch.IsSkipping)
-                    connection.LastStatementRowCount = 0;
+                rowCount = 0;
                 break;
 
             case ReservedKeyword { Keyword: Keyword.Begin }:
@@ -3745,8 +2944,8 @@ public sealed partial class Simulation
                     switch (afterBegin)
                     {
                         case ReservedKeyword { Keyword: Keyword.Tran or Keyword.Transaction or Keyword.Distributed }:
-                            if (TryParseBeginTransaction(context) && !batch.IsSkipping)
-                                connection.LastStatementRowCount = 0;
+                            if (TryParseBeginTransaction(context))
+                                rowCount = 0;
                             break;
                         case UnquotedString { ContextualKeyword: ContextualKeyword.Try }:
                             foreach (var o in ParseTryCatch(batch))
@@ -3761,8 +2960,7 @@ public sealed partial class Simulation
                         case UnquotedString { ContextualKeyword: ContextualKeyword.Atomic }:
                             foreach (var o in ParseBeginAtomicBlock(batch))
                                 yield return o;
-                            if (!batch.IsSkipping)
-                                connection.LastStatementRowCount = 0;
+                            rowCount = 0;
                             break;
                         default:
                             // A block leaves @@ROWCOUNT as its last statement
@@ -3818,10 +3016,10 @@ public sealed partial class Simulation
                 // schema version. Skip-mode statements don't actually execute
                 // the DDL (their parse-only walk has no schema effect), so the
                 // bump is gated on !IsSkipping.
+                rowCount = 0;
                 if (!batch.IsSkipping)
                 {
                     BumpSchemaVersion();
-                    connection.LastStatementRowCount = 0;
                     if (connection.CurrentTransaction is { } ddlTransaction)
                     {
                         lock (ddlTransaction.CatalogChanges)
@@ -3836,24 +3034,20 @@ public sealed partial class Simulation
             case ReservedKeyword { Keyword: Keyword.Grant } when RejectingTrailingToken(context, TryParseGrantRevokeDeny(context, PermissionStatementKind.Grant)):
             case ReservedKeyword { Keyword: Keyword.Revoke } when RejectingTrailingToken(context, TryParseGrantRevokeDeny(context, PermissionStatementKind.Revoke)):
             case ReservedKeyword { Keyword: Keyword.Deny } when RejectingTrailingToken(context, TryParseGrantRevokeDeny(context, PermissionStatementKind.Deny)):
-                if (!batch.IsSkipping)
-                    connection.LastStatementRowCount = 0;
+                rowCount = 0;
                 break;
             case UnquotedString { ContextualKeyword: ContextualKeyword.Disable } when TryParseEnableOrDisableTrigger(context, disable: true):
             case UnquotedString { ContextualKeyword: ContextualKeyword.Enable } when TryParseEnableOrDisableTrigger(context, disable: false):
+                rowCount = 0;
+                // A trigger's is_disabled surfaces in sys.triggers.
                 if (!batch.IsSkipping)
-                {
-                    connection.LastStatementRowCount = 0;
-                    // A trigger's is_disabled surfaces in sys.triggers.
                     this.CatalogRows.Invalidate();
-                }
                 break;
             case ReservedKeyword { Keyword: Keyword.Set } when TryParseSet(context, out var assignsVariable):
                 // SET @v = expr sets @@ROWCOUNT to 1; setting a session option
                 // (NOCOUNT, ANSI_NULLS, LANGUAGE, ROWCOUNT, …) resets it to 0
                 // (probed 2026-09-24 against SQL Server 2025).
-                if (!batch.IsSkipping)
-                    connection.LastStatementRowCount = assignsVariable ? 1 : 0;
+                rowCount = assignsVariable ? 1 : 0;
                 break;
             case ReservedKeyword { Keyword: Keyword.Declare }:
                 {
@@ -3867,8 +3061,7 @@ public sealed partial class Simulation
                     if (isCursorDeclaration)
                     {
                         ParseDeclareCursor(batch);
-                        if (!batch.IsSkipping)
-                            connection.LastStatementRowCount = 0;
+                        rowCount = 0;
                     }
                     else
                     {
@@ -3876,8 +3069,7 @@ public sealed partial class Simulation
                         // preserved (probe-confirmed; @@ERROR probed 2026-09-24).
                         if (TryParseDeclare(context) is int n)
                         {
-                            if (!batch.IsSkipping)
-                                connection.LastStatementRowCount = n;
+                            rowCount = n;
                         }
                         else
                         {
@@ -3890,8 +3082,7 @@ public sealed partial class Simulation
 
             case ReservedKeyword { Keyword: Keyword.Open }:
                 ParseOpenCursor(batch);
-                if (!batch.IsSkipping)
-                    connection.LastStatementRowCount = 0;
+                rowCount = 0;
                 break;
 
             case ReservedKeyword { Keyword: Keyword.Fetch }:
@@ -3901,14 +3092,12 @@ public sealed partial class Simulation
 
             case ReservedKeyword { Keyword: Keyword.Close }:
                 ParseCloseCursor(batch);
-                if (!batch.IsSkipping)
-                    connection.LastStatementRowCount = 0;
+                rowCount = 0;
                 break;
 
             case ReservedKeyword { Keyword: Keyword.Deallocate }:
                 ParseDeallocateCursor(batch);
-                if (!batch.IsSkipping)
-                    connection.LastStatementRowCount = 0;
+                rowCount = 0;
                 break;
 
             // Bare object name at batch start → implicit EXECUTE (the form
@@ -3933,6 +3122,12 @@ public sealed partial class Simulation
             default:
                 throw SimulatedSqlException.SyntaxErrorNear(context);
         }
+
+        // @@ROWCOUNT as the statement leaves it, for the arms that name it in
+        // rowCount; an arm yielding its own outcome sets it ahead of that
+        // yield, and a skipped statement leaves it alone.
+        if (rowCount is { } count && !batch.IsSkipping)
+            connection.LastStatementRowCount = count;
 
         // Cursor normalization, and the batch's trailing-token rule.
         //
@@ -3964,6 +3159,243 @@ public sealed partial class Simulation
                 throw SimulatedSqlException.SyntaxErrorNear(context);
             context.MoveNextOptional();
         }
+    }
+
+    /// <summary>
+    /// Runs a <c>SELECT</c> or a data-modifying statement under
+    /// <c>SET FMTONLY ON</c>: a query answers its metadata with no rows, and a
+    /// write parses in skip mode, so its syntax errors still surface, and
+    /// closes as real closes the suppressed statement.
+    /// </summary>
+    private static SimulatedStatementOutcome RunUnderFmtOnly(BatchContext batch, Keyword fmtKeyword)
+    {
+        var context = batch.Parser;
+        var connection = context.Connection;
+        if (fmtKeyword == Keyword.Select)
+        {
+            var metadataSelection = Selection.Parse(context, QueryScope.Statement).AsStatementResult();
+            connection.LastStatementRowCount = 0;
+            if (metadataSelection.IntoTarget is null)
+            {
+                return new SimulatedSqlResultSet(metadataSelection.Schema, metadataSelection.ColumnNames, new List<byte[]>())
+                {
+                    ColumnNullability = metadataSelection.ColumnNullability,
+                    ColumnReportsNumeric = metadataSelection.ColumnReportsNumeric,
+                    ColumnAliasTypes = metadataSelection.ColumnAliasTypes,
+                    ColumnIdentitySources = metadataSelection.ColumnIdentitySources,
+                    ColumnWireFlags = metadataSelection.ColumnWireFlags,
+                    ColumnOrigins = Selection.BaseColumnOrigins(metadataSelection),
+                    ColumnIsComputed = Selection.ComputedColumnsOf(metadataSelection),
+                    IsGrouped = metadataSelection.IsGrouped,
+                };
+            }
+            else
+            {
+                // SELECT … INTO closes with a DONE counting 0, as the
+                // suppressed DML below does.
+                return new SimulatedNonQuery(0) { CountSuppressed = false, DoneKind = StatementDoneKind.SelectInto };
+            }
+        }
+
+        // Parse the DML under skip mode so the cursor advances and syntax
+        // errors still surface, but no heap write happens.
+        batch.SkipModeFlag = true;
+        SimulatedStatementOutcome suppressed;
+        try
+        {
+            switch (fmtKeyword)
+            {
+                case Keyword.Insert:
+                    suppressed = RunMutation(context, ParseInsert);
+                    break;
+                case Keyword.Update:
+                    suppressed = RunMutation(context, ParseUpdate);
+                    break;
+                case Keyword.Delete:
+                    suppressed = RunMutation(context, ParseDelete);
+                    break;
+                default:
+                    suppressed = RunMutation(context, ParseMerge);
+                    if (context.Token is not Operator { Character: ';' })
+                        throw SimulatedSqlException.MergeMustBeTerminated();
+                    break;
+            }
+        }
+        finally
+        {
+            batch.SkipModeFlag = false;
+        }
+
+        // Real closes the suppressed statement with a DONE counting 0 —
+        // under NOCOUNT too — or, for an OUTPUT clause, with its empty
+        // result set (probed 2026-09-28 against SQL Server 2025).
+        connection.LastStatementRowCount = 0;
+        return suppressed is SimulatedSqlResultSet output
+            ? new SimulatedSqlResultSet(output.Schema, output.ColumnNames, new List<byte[]>())
+            : new SimulatedNonQuery(0) { CountSuppressed = false };
+    }
+
+    /// <summary>
+    /// Runs a <c>SELECT</c> statement: parses it, runs it and materializes its
+    /// rows, and joins it to the batch's plan-cache candidates. Returns what
+    /// the statement sends — null for none — and in
+    /// <paramref name="cutShort"/> the error a row raised after the rows ahead
+    /// of it, which the caller throws once it has sent them.
+    /// </summary>
+    private SimulatedStatementOutcome? RunSelectStatement(BatchContext batch, out SimulatedSqlException? cutShort)
+    {
+        var context = batch.Parser;
+        var connection = batch.Connection;
+        SimulatedStatementOutcome outcome;
+        cutShort = null;
+        var statementStart = context.SaveCheckpoint();
+        context.ForBrowseSeen = false;
+        List<ReplayedLock>? replayLocks;
+        // A statement the plan cache may store records the locks
+        // its parse takes, which a replay takes again as its own
+        // session.
+        batch.ReplayLockLog = batch.PlanCacheCommandText is not null && batch.BlockDepth == 0 && !batch.IsSkipping ? [] : null;
+        Selection selection;
+        try
+        {
+            selection = ParseSelectStatement(context, browse: connection.NoBrowseTable);
+            // A trailing FOR BROWSE puts the one statement in browse
+            // mode, which decides its projection, so the statement is
+            // read again as a browse statement (probed 2026-09-26).
+            if (context.ForBrowseSeen && !connection.NoBrowseTable)
+            {
+                context.RestoreCheckpoint(statementStart);
+                selection = ParseSelectStatement(context, browse: true);
+            }
+            else if (connection.NoBrowseTable && selection.IsSetOperationResult)
+            {
+                selection.Browse = Selection.SetOperationBrowseInfo(selection.Schema.Length);
+            }
+        }
+        finally
+        {
+            replayLocks = batch.ReplayLockLog;
+            batch.ReplayLockLog = null;
+        }
+        // A value literal or a name left dangling after a complete
+        // SELECT is always unconsumed trailing input — real SQL
+        // Server raises Msg 102 rather than silently ignoring it
+        // (the non-T-SQL `SELECT id FROM t LIMIT 2` parses `LIMIT`
+        // as the source's alias and leaves `2` dangling;
+        // `FROM t a hash` leaves `hash`, probed 2026-09-24). A
+        // well-formed SELECT never ends on one, nor on a comma
+        // (`SELECT 1 WHERE 1 IN (NULL), 2` is near ',', probed
+        // 2026-09-26); any other token is left to the generic
+        // end-of-dispatch normalizer.
+        if (context.Token is Numeric or Literal or Name or Operator { Character: ',' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        if (!batch.IsSkipping)
+            PermissionEnforcement.CheckReadSources(batch, selection.ReferencedSecurables, selection.ReadColumnsByObject);
+        // Inside a function body real splits the SELECT three ways:
+        // an assignment-only SELECT is legal, SELECT … INTO is a
+        // side-effecting operator of its own, and anything else
+        // would send rows to the client.
+        if (batch.FunctionBodyShape is not null)
+        {
+            if (selection.IntoTarget is not null)
+                FunctionBodyShape.NoteSideEffect(batch, "SELECT INTO", FunctionBodyShape.StatementOperatorState);
+            else if (!selection.IsAssignmentOnly)
+                FunctionBodyShape.NoteClientSelect(batch);
+        }
+        if (selection.IntoTarget is not null)
+        {
+            // SELECT INTO: creates the destination table and
+            // inserts each projected row. RunMutation gives
+            // the executor access to the active undo log so
+            // transactional CREATE+INSERT can roll back. In
+            // skip mode, ExecuteSelectInto returns SimulatedNonQuery(0)
+            // without touching the heap.
+            outcome = RunMutation(context, _ => ExecuteSelectInto(selection, batch));
+            outcome.DoneKind = StatementDoneKind.SelectInto;
+            if (!batch.IsSkipping)
+            {
+                connection.LastStatementRowCount = outcome.RecordsAffected;
+                return outcome;
+            }
+            return null;
+        }
+        if (batch.IsSkipping)
+            return null;
+        if (connection.InsertExecTargetTypes is { } insertExecTargets && !selection.IsAssignmentOnly)
+            RequireInsertExecAssignable(selection, insertExecTargets, batch);
+        // Materialize rows up-front so @@ROWCOUNT reflects the
+        // statement's full row count for the next statement in
+        // the same batch (real SQL Server runs server-side and
+        // sets @@ROWCOUNT on completion; the simulator
+        // materializes to mirror that). The rows are held in
+        // whichever form the plan produced — a projecting SELECT's
+        // SqlValue rows travel to the reader as they are.
+        // SET ROWCOUNT caps what the statement returns, including
+        // the rows a `SELECT @v = …` assignment walks
+        // (probe-confirmed: the assignment keeps the value from the
+        // last row inside the cap, and @@ROWCOUNT reads the cap).
+        // A row that raises ends the statement, but real has sent
+        // the column metadata and the rows before it by then, so
+        // they go out ahead of the error (see EndedByError) — an
+        // empty result set when the plan failed before its first.
+        SimulatedSqlResultSet? executed = null;
+        int rowCount;
+        try
+        {
+            executed = DataMasking.ForClient(selection.Execute(batch), selection.ColumnMasks, batch).WithRowCountLimit(connection.RowCountLimit);
+            rowCount = executed.MaterializeRows();
+            if (selection.CountsForClauseSourceRows)
+                rowCount = executed.ReportedRowCount = batch.CurrentStatement.ForClauseSourceRows;
+        }
+        catch (SimulatedSqlException error) when (!selection.IsAssignmentOnly)
+        {
+            cutShort = error;
+            rowCount = 0;
+            executed ??= new SimulatedSqlResultSet(selection.Schema, selection.ColumnNames, new List<byte[]>())
+            {
+                ColumnNullability = selection.ColumnNullability,
+                ColumnReportsNumeric = selection.ColumnReportsNumeric,
+                ColumnAliasTypes = selection.ColumnAliasTypes,
+                ColumnIdentitySources = selection.ColumnIdentitySources,
+                ColumnWireFlags = selection.ColumnWireFlags,
+                HiddenColumnCount = selection.HiddenColumnCount,
+                Browse = selection.Browse,
+            };
+            executed.EndedByError = true;
+            executed.ErrorCaught = CaughtByTryFrame(batch, error);
+        }
+        connection.LastStatementRowCount = rowCount;
+        outcome = selection.IsAssignmentOnly
+            ? new SimulatedNonQuery(rowCount, countsRowsReturned: true)
+            : executed;
+
+        // Plan-cache accumulation and promotion, inline before the
+        // dispatch yields the outcome. Gates: top-level (BlockDepth == 0 → not inside
+        // IF / WHILE / BEGIN…END / TRY/CATCH); shape (not
+        // assignment-only — those yield NonQuery and aren't worth
+        // caching); no session-scoped table reference.
+        //
+        // A qualifying SELECT joins the batch's candidate
+        // sequence; the batch is promoted at the LAST statement,
+        // which is the one that finds nothing but separators left.
+        // Comparing the sequence's length against the count of
+        // top-level statements dispatched is what proves no other
+        // statement kind ran: the loop counts this statement only
+        // after its dispatch returns, hence the +1.
+        if (batch.BlockDepth == 0
+            && !selection.IsAssignmentOnly
+            && !batch.HasSessionScopedReference)
+        {
+            (batch.PlanCacheSequence ??= []).Add(selection);
+            (batch.PlanCacheSequenceLocks ??= []).Add(replayLocks is null ? [] : [.. replayLocks]);
+            (batch.PlanCacheSequenceSpans ??= []).Add((batch.CurrentStatement.StartIndex, context.PreviousTokenEnd));
+            if (batch.PlanCacheSequence.Count == batch.TopLevelStatementsDispatched + 1
+                && IsAtEndOfBatch(context))
+            {
+                TryPromoteSelectionsToPlanCache(batch);
+            }
+        }
+        return outcome;
     }
 
     /// <summary>

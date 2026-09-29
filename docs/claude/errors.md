@@ -135,7 +135,7 @@ The static exception factories (`SimulatedSqlException.*Errors.cs`) can't reach 
   Matches the in-process `DataSource` and the info-message path.
 - **`SimulatedError.LineNumber` / `.Procedure`** gain an `internal set` (public contract stays get-only, mirroring `SqlError`) so the boundary can stamp them.
 - **`SimulatedSqlException.ResolveDiagnostics(baseLine, lineOffset, procedure)`** runs once per exception, guarded by a `diagnosticsResolved` flag so the **innermost** dispatch frame — where the error was born — wins as it propagates outward (matching SQL Server's innermost-frame attribution).
-  - `baseLine`: chosen at the boundary in `Simulation.DispatchOneStatement` — the parser's **current-token line** for severity-15 (syntax) errors, else the failing statement's `StatementContext.StartLine`.
+  - `baseLine`: chosen at the boundary in `Simulation.StatementLifecycle.SettleError` — the parser's **current-token line** for severity-15 (syntax) errors, else the failing statement's `StatementContext.StartLine`.
   - `lineOffset`: `BatchContext.LineOffset`, the newline count preceding a procedure/trigger body's start within the batch that created it, so body errors report that batch's line.
     Zero for top-level and dynamic-SQL batches.
   - `procedure`: `BatchContext.ErrorProcedureName` — the invocation's spelling for a stored-procedure body (`p` / `dbo.p`), the **unqualified** name for a trigger body (`tr`, matching real's `ERROR_PROCEDURE()` / `SqlError.Procedure` for triggers) and for **every** module kind's CREATE-time bind batch (see [`programmable.md`](programmable.md#create-time-body-binding)), empty otherwise.

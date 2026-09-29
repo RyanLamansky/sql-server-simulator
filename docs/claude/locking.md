@@ -121,7 +121,7 @@ They live directly on the `Cursor` (`scrollTableLock` / `scrollRowLock`), *not* 
 Each FETCH moves the row-U (`Cursor.MoveScrollLock` releases the row scrolled off, acquires U on the new one); `Cursor.ReleaseScrollLocks` frees both on CLOSE, the last DEALLOCATE, frame teardown (LOCAL cursor), and connection dispose.
 A concurrent writer of the held row blocks on the U-X conflict; a positioned UPDATE upgrades the row to X via the normal writer path (same-owner re-entrance lets the cursor's U and the writer's X coexist).
 
-Statement-scoped locks live in `BatchContext.StatementSchemaLocks` and release in `DispatchOneStatement`'s `finally`.
+Statement-scoped locks live in `BatchContext.StatementSchemaLocks` and release in `DispatchOneStatement`'s `finally` (`StatementLifecycle.Leave`).
 **A synthesized child batch has its own list that the dispatch loop never sees**, so every site that builds one to parse or run a module body has to release it itself — a view or inline-TVF body binding takes Sch-S / IS on everything it names, and nothing else will let them go.
 Missing that release does not merely hold a lock for too long: the locks outlive the connection (teardown releases the transaction, the application locks and the temp tables, not these), so they persist for the life of the `Simulation`, held by a SPID whose session no longer exists.
 The symptom is a later Sch-M — an `ALTER`, a startup re-applying its programmable objects — blocking forever against a holder nobody can find.
@@ -373,7 +373,7 @@ When a conflict-driven wait would block, `LockManager.Acquire`:
    Each connection's `WaitingOnResource` is read consistently under the manager's gate.
    If any walk reaches the caller's connection, a cycle exists, and its victim is the session in it with the lowest `SET DEADLOCK_PRIORITY`, the caller on a tie (probed 2026-09-28 against SQL Server 2025, whose tie picks the requester in the two-session shape).
    A victim other than the caller is blocked in its own wait: it is flagged (`SessionToken.ChosenAsDeadlockVictim`) and woken, its wait ends with Msg 1205, and the caller waits on until the victim's rollback releases what it held.
-3. **Auto-rollback on Msg 1205**: `DispatchOneStatement` catches the exception, rolls back the connection's current transaction (releasing every held lock and waking the survivor), and propagates.
+3. **Auto-rollback on Msg 1205**: `DispatchOneStatement` catches the exception (`StatementLifecycle.SettleError`), rolls back the connection's current transaction (releasing every held lock and waking the survivor), and propagates.
    Done BEFORE the TRY/CATCH frame check so both the propagating and TRY-captured paths observe the auto-rollback (probe-confirmed: `@@TRANCOUNT` reads 0 in the catch handler).
 
 ## Lock-timeout semantics

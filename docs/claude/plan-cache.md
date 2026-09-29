@@ -55,7 +55,7 @@ For `ExecuteReader` with a single SELECT — the dominant EF shape — the consu
 A post-yield promotion wouldn't fire until then — too late for a caller that reuses the plan while the reader is still open.
 (Reader `Dispose` *does* drain the outcome stream — the statement-level drain for batch-error continuation — so it would eventually reach the post-yield code, but relying on that would still miss the pre-dispose window.)
 
-So `Simulation.CreateResultSetsForCommand` stashes the cache-key components on the `BatchContext`, and the SELECT arm of `DispatchOneStatementCore` calls `TryPromoteSelectionsToPlanCache` **inline before the `yield return outcome`**, after rows are materialized.
+So `Simulation.CreateResultSetsForCommand` stashes the cache-key components on the `BatchContext`, and the SELECT arm (`RunSelectStatement`) calls `TryPromoteSelectionsToPlanCache` **inline, before the dispatch yields the outcome**, after rows are materialized.
 Gates checked at the SELECT arm: `BlockDepth == 0` (top-level statement, not inside an IF / WHILE / BEGIN / TRY block), `!IsAssignmentOnly`, and `!HasSessionScopedReference` (next section).
 A SELECT passing those joins `BatchContext.PlanCacheSequence`; the promotion itself fires at the statement that finds nothing but separators left.
 

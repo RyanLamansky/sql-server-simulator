@@ -413,6 +413,54 @@ internal sealed class StatementContext
     /// against SQL Server 2025). Set at dispatch entry.
     /// </summary>
     public bool ChangesTableStructure;
+
+    /// <summary>
+    /// Clears what a statement latches as it runs for its dispatch to read
+    /// once it ends — once per dispatch of a statement, before its first token
+    /// is read. A statement nested in this one (an <c>IF</c>'s branch, a
+    /// block's body) clears them again as it starts.
+    /// </summary>
+    public void BeginDispatch()
+    {
+        this.SuppressErrorReset = false;
+        this.ReportedIgnoredDuplicate = false;
+        this.ReportedNoiseWords = false;
+        this.NullEliminated = false;
+        this.OwesOverflowNotice = this.OwesDivideByZeroNotice = false;
+        this.WritesRows = false;
+        this.ClientOutputShape = null;
+        this.TransactedWrite = false;
+        this.BindsDeferredSource = false;
+        this.ReadsPermanentObject = this.ReadsTemporaryObject = false;
+        this.OpensTransaction = false;
+        this.BeganImplicitTransaction = false;
+        this.CallsUserFunction = false;
+        this.TransactionMark = null;
+        this.PendingDdlEvents = null;
+        this.DdlTriggerCreatedThisStatement = null;
+    }
+
+    /// <summary>
+    /// Freezes the current time for one run of the statement's text and
+    /// clears the caches that run fills — once per run, a re-read for the
+    /// statement's whole binder report included.
+    /// </summary>
+    public void BeginExecution()
+    {
+        this.UtcNow = DateTime.UtcNow;
+        this.StatementScopedValues = null;
+        this.SubqueryResults = null;
+        this.CatalogViewRows = null;
+#if DEBUG
+        this.AuditedCatalogRowSets = null;
+#endif
+        this.AutocommitTransactionId = 0;
+        this.ChangeTrackingContext = null;
+        this.LockTallies = null;
+        this.EscalatedTables = null;
+        this.RemoteWrite = null;
+        this.RemoteWriteAlias = null;
+    }
 }
 
 /// <summary>

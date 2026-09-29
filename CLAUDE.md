@@ -173,6 +173,7 @@ Field rosters live in the source XML docs; this captures only identity + load-be
     UDF bodies discard yielded result sets; proc bodies forward them.
 - **`StatementContext`** (internal, `Parser/`) = the dispatch loop's per-statement frame.
   Allocated once per batch and overwritten at the top of each iteration; holds `UtcNow` (the per-statement freeze the time scalars read).
+  Nested statements overwrite it too, so what one statement's dispatch reads after its nested ones ran lives on its `StatementLifecycle` (`Simulation.StatementLifecycle.cs`), a struct local whose phases — begin, enter / leave, run, settle and route an error, then what the ending sends — are where a new cross-cutting per-statement concern plugs in.
 
 **Don't stack misfit state into these buckets unthinkingly**: if no scope fits, introduce the missing one, don't squat on a neighbor.
 

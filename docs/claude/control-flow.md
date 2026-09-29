@@ -270,7 +270,7 @@ Behavior was probed against real SQL Server 2025 + `Microsoft.Data.SqlClient` an
 `Simulation.CreateResultSetsForCommand(command, continueOnError = true)` defaults its flag to `true`; both the in-process front door (`SimulatedDbCommand`) and `TdsSession.StreamOutcomesAsync` set it, so both render the same stream.
 The flag marks a **top-level batch** (threaded onto `BatchContext.ContinueOnError`), and a procedure, trigger or dynamic-SQL body inherits it as [below](#procedure-and-dynamic-sql-bodies); UDF and view bodies leave it `false`, so their errors **throw** and surface at the invoking statement rather than being emitted as outcomes (the parameter survives only because `TdsSession` — which must not be edited — passes it by name).
 
-**The seam** is `DispatchOneStatement`'s catch (`Simulation.cs`).
+**The seam** is the catch in `StatementLifecycle.Run` (`Simulation.StatementLifecycle.cs`), one phase of the per-statement lifecycle `DispatchOneStatement` drives.
 Its materialize-then-catch wrapper (a) rolls back on deadlock class 13, (b) defers name-resolution errors in skip mode, (c) records the error into a `CATCH` frame when `TryFrameDepth > 0`.
 Continuation adds: when `TryFrameDepth == 0` and `ContinueOnError` is set, a statement-terminating error is captured into a local and — after the `finally` — the cursor is advanced to the next statement boundary (the same recovery scan the TRY-caught and deferred-name paths use), `@@ERROR` (`connection.LastErrorNumber`) is set to the error number, and a `SimulatedErrorOutcome` carrying the exception (and a **`RowReturning`** flag, below) is `yield return`ed before `yield break`.
 This path deliberately does **not** touch `InFlightError` / `ErrorSignaled` — those are TRY/CATCH-only state; outside a TRY the error goes to the client, not a CATCH block.
@@ -327,7 +327,7 @@ TRY and CATCH aren't reserved keywords (contextual identifiers), so the BEGIN di
 Probed against SQL Server 2025.
 
 **Catch boundary mechanism.**
-`DispatchOneStatement` is split into an outer wrapper + a `DispatchOneStatementCore` iterator (yield-return inside try/catch isn't legal in C#, so the wrapper collects Core's outcomes into a list as they arrive and runs the C# `try { ... } catch (SimulatedSqlException ex) { ... }` around that, the TRY frame being one arm of the catch).
+`DispatchOneStatement` is split into an outer wrapper + a `DispatchOneStatementCore` iterator (yield-return inside try/catch isn't legal in C#, so the wrapper's `StatementLifecycle.Run` collects Core's outcomes into a list as they arrive and runs the C# `try { ... } catch (SimulatedSqlException ex) { ... }` around that, the TRY frame being one route of the catch's `RouteError`).
 On catch: captures into `BatchContext.InFlightError` (struct: number / message / severity / state / line / procedure), sets `BatchContext.ErrorSignaled = true` so `IsSkipping` picks it up, writes `Connection.LastErrorNumber = ex.Number` (backs live `@@ERROR`), then advances the cursor forward to the next statement boundary (`IsStatementBoundary`-token / `;` / EOB) so the outer dispatch loop can resume cleanly instead of re-dispatching the same partially-parsed statement (which infinite-loops).
 Successful statements clear `LastErrorNumber` back to 0.
 **This is exception-handling for actual error handling, not control-flow-via-exceptions** — the in-band signal "now run CATCH" still flows through the existing skip-mode flag plumbing.
