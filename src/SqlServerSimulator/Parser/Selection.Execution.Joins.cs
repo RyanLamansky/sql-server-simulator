@@ -1135,9 +1135,19 @@ internal sealed partial class Selection
             return RowDecoder.DecodeColumn(source.StoredSchema, bytes, columnIndex, source.LobStore);
 
         var column = source.Columns[columnIndex];
-        return column.Computed is { } computedExpr && !column.IsPersisted
-            ? computedExpr.Run(new RuntimeContext(name => ResolveWithinSource(source, bytes, batch, name), batch))
-            : RowDecoder.DecodeColumn(source.StoredSchema, bytes, source.StorageOrdinals[columnIndex], source.LobStore);
+        if (column.Computed is not { } computedExpr || column.IsPersisted)
+            return RowDecoder.DecodeColumn(source.StoredSchema, bytes, source.StorageOrdinals[columnIndex], source.LobStore);
+
+        // The expression reads its own table's database, as a module body does.
+        var scope = source.BackingTable?.OwningDatabase is { } owner ? ModuleDatabaseScope.Enter(batch.Connection, owner, bindsIdentity: false) : default;
+        try
+        {
+            return computedExpr.Run(new RuntimeContext(name => ResolveWithinSource(source, bytes, batch, name), batch));
+        }
+        finally
+        {
+            scope.Exit();
+        }
     }
 
     /// <summary>

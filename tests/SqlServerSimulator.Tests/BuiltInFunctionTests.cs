@@ -122,6 +122,14 @@ public sealed class BuiltInFunctionTests
     }
 
     [TestMethod]
+    public void ConstantNegativeLength_AbortsTheBatchBeforeAnyStatementRunsAndTryCannotCatchIt()
+    {
+        var sim = new Simulation();
+        _ = sim.AssertSqlError("create table neg (a int); begin try select substring('abc', 1, -1) end try begin catch select 99 end catch", 536);
+        _ = sim.AssertSqlError("select * from neg", 208);
+    }
+
+    [TestMethod]
     [DataRow("1/0")]
     [DataRow("1%0")]
     [DataRow("cast(1 as bigint) / 0")]

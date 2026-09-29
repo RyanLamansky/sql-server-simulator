@@ -116,6 +116,16 @@ public sealed class SequenceRestrictionMatrixTests
     public void AggregateArgument_IsMsg11725(string sql)
         => Refuses(11725, "cannot be passed as an argument to an aggregate", sql);
 
+    /// <summary>
+    /// A windowed aggregate's trailing <c>OVER</c> makes the reference one of
+    /// the clauses Msg 11720 names (probed 2026-09-29).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select sum(next value for dbo.s) over () from n")]
+    [DataRow("select max(next value for dbo.s + 1) over (partition by id) from n")]
+    public void WindowedAggregateArgument_IsMsg11720(string sql)
+        => Refuses(11720, "not allowed in the TOP, OVER, OUTPUT", sql);
+
     // ---- Msg 11738: a statement real declines to define it in -------------
 
     [TestMethod]

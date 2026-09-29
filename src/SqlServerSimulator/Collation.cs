@@ -554,6 +554,9 @@ internal abstract partial class Collation : IComparer<string>, IEqualityComparer
 
         private readonly bool weightsNul;
 
+        // Two strings that differ only in case order the other way round.
+        private readonly bool uppercaseFirst;
+
         private readonly CultureCollation? varcharBody;
 
         // The name's version (80 for an unversioned one), which decides the
@@ -576,6 +579,13 @@ internal abstract partial class Collation : IComparer<string>, IEqualityComparer
         // which weights CHAR(0) (see WeightsNul).
         internal CultureCollation(string name, string description, string cultureName, bool caseSensitive, bool accentInsensitive, bool kanaTypeSensitive, bool widthSensitive, Encoding storageEncoding, int ansiCodePage, bool isSupplementaryCharacterAware, SurrogateMatching surrogateMatching, int version, bool weightsNul = false, string? primaryFamily = null, int? primaryVersion = null)
         {
+            // The legacy varchar sort orders 51 and 41 order the two spellings
+            // of a case pair uppercase first, where the Windows-weight
+            // nvarchar data of the same names sorts lowercase first (probed
+            // 2026-09-29 against SQL Server 2025).
+            this.uppercaseFirst = weightsNul && caseSensitive
+                && (name.Equals("SQL_Latin1_General_CP1_CS_AS", StringComparison.OrdinalIgnoreCase)
+                    || name.Equals("SQL_Latin1_General_CP850_CS_AS", StringComparison.OrdinalIgnoreCase));
             this.primaryFamily = primaryFamily;
             this.primaryVersion = primaryVersion;
             this.name = name;
@@ -667,6 +677,9 @@ internal abstract partial class Collation : IComparer<string>, IEqualityComparer
                 var primary = this.compareInfo.Compare(weightless.StripMinimal(x), weightless.StripMinimal(y), this.equalityOptions);
                 result = primary != 0 ? primary : weightless.MinimalTiebreak(x, y);
             }
+
+            if (this.uppercaseFirst && result != 0 && this.compareInfo.Compare(x, y, this.equalityOptions | CompareOptions.IgnoreCase) == 0)
+                result = -result;
 
             // An East Asian family orders its scripts and ideographs by real's
             // own primary table; CompareInfo keeps equality and breaks the ties

@@ -287,7 +287,19 @@ partial class Simulation
         }
 
         var column = table.Columns[ordinal];
-        return CoerceForInsert(column.Computed!.Run(new RuntimeContext(ResolveByName, batch)), column.Type);
+
+        // The expression reads its own table's database, as a module body does
+        // (probed 2026-09-28: `c AS DB_NAME()` reads the target of a
+        // cross-database statement).
+        var scope = table.OwningDatabase is { } owner ? ModuleDatabaseScope.Enter(batch.Connection, owner, bindsIdentity: false) : default;
+        try
+        {
+            return CoerceForInsert(column.Computed!.Run(new RuntimeContext(ResolveByName, batch)), column.Type);
+        }
+        finally
+        {
+            scope.Exit();
+        }
     }
 
     /// <summary>Whether a key constraint or an index keys or includes the column at <paramref name="ordinal"/>.</summary>

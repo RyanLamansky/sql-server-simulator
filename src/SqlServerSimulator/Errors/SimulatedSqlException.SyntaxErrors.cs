@@ -557,23 +557,43 @@ partial class SimulatedSqlException
     /// parse's cursor where it was.
     /// </para>
     /// </summary>
-    internal static SimulatedSqlException NonBooleanInConditionContext(ParserContext context) =>
-        NonBooleanInConditionContext(TokenAfterOpenBooleanGroups(context)?.ErrorText);
+    internal static SimulatedSqlException NonBooleanInConditionContext(ParserContext context)
+    {
+        var token = TokenAfterOpenBooleanGroups(context, out var balanced);
+        if (balanced)
+            return NonBooleanInConditionContext(token?.ErrorText);
+
+        // A group the batch ends inside is a syntax error, which real reports
+        // ahead of the type check (probed 2026-08-05: `IF ((1)` is Msg 102
+        // near ')'), naming the last token consumed.
+        return SyntaxErrorNear(token);
+    }
 
     /// <summary>Msg 4145 reported near a token the caller names.</summary>
     internal static SimulatedSqlException NonBooleanInConditionContext(string? near) =>
         new($"An expression of non-boolean type specified in a context where a condition is expected, near '{near}'.", 4145, 15, 1);
 
-    private static Token? TokenAfterOpenBooleanGroups(ParserContext context)
+    private static Token? TokenAfterOpenBooleanGroups(ParserContext context, out bool balanced)
     {
-        if (context.Token is not Operator { Character: ')' } || context.BooleanGroupDepth == 0)
+        balanced = true;
+        if (context.BooleanGroupDepth == 0)
             return context.Token ?? context.LastToken;
 
         var checkpoint = context.SaveCheckpoint();
         try
         {
-            for (var remaining = context.BooleanGroupDepth; remaining > 0 && context.Token is Operator { Character: ')' }; remaining--)
+            for (var remaining = context.BooleanGroupDepth; remaining > 0; remaining--)
+            {
+                if (context.Token is not Operator { Character: ')' })
+                {
+                    // Only a batch that ends inside the group is the unclosed
+                    // paren; a stray token keeps the type check's message
+                    // (`(a, b) IN (…)` is Msg 4145 near ',').
+                    balanced = context.Token is not null;
+                    break;
+                }
                 context.MoveNextOptional();
+            }
             return context.Token ?? context.LastToken;
         }
         finally

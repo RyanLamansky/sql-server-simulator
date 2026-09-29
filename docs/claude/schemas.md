@@ -87,7 +87,6 @@ Locks likewise: the `LockManager` is per-`Simulation` and its resources hang off
 **Not modeled yet**
 
 - **The `OBJECT_*` scalars' metadata-visibility gate** reads the session's database rather than the one a three-part argument names; catalog-view visibility already follows the target.
-- **A computed column's database-reading built-ins** (`DB_NAME()`, a one-part `OBJECT_ID`) read the session's database when a cross-database statement evaluates the column, where real reads the table's (probed 2026-09-28 against SQL Server 2025: `c AS DB_NAME()` reads the target, while a `DEFAULT (DB_NAME())` reads the session's, as here).
 - **`CREATE VIEW` / `PROCEDURE` / `FUNCTION` / `TRIGGER` with a db prefix** — real raises Msg 166 (`does not allow specifying the database name as a prefix`); the simulator doesn't enforce that yet.
 
 ## Modules reached through a three-part name
@@ -98,6 +97,7 @@ Probed 2026-09-28 against SQL Server 2025 for every module kind:
 - **What follows the module:** unqualified names (tables, procedures, functions — a nested `EXEC inner_p` finds `otherdb`'s), `DB_NAME()`, `OBJECT_ID` / `OBJECT_NAME(@@PROCID)`, the catalog views, a table the body creates, and dynamic SQL the body runs.
   A view's or inline function's body reads its own database too, while the referencing statement's own expressions around it — `SELECT DB_NAME(), * FROM otherdb.dbo.v`, an `UPDATE otherdb.dbo.v SET d = DB_NAME()` — read the session's.
   A cross-database write's CHECK function and sequence default bind in the target, while a `DEFAULT (DB_NAME())` reads the session's.
+  A computed column's expression reads its table's database as well (`c AS DB_NAME()`, a one-part `OBJECT_ID`) when a cross-database statement writes or reads the column, entered through `ModuleDatabaseScope` at `EvaluateComputedColumn` and `DecodeOrCompute` (probed 2026-09-28).
 - **What stays the session's:** `@@ROWCOUNT`, the transaction, `#temp` tables, and `SCOPE_IDENTITY()` / `@@IDENTITY`, which scope per module as they do in one database.
 - **Identity:** a login that doesn't bypass permission checks runs the body as its user in the module's database (`USER_NAME()` reads it, or `guest` where `GRANT CONNECT TO guest` enabled it), so the body's same-database references chain from there, a reference back into the session's database is checked as a cross-database one, and dynamic SQL is checked as that user.
   A login with no user there is Msg 916 at the calling statement, unattributed, where a missing `EXECUTE` grant is Msg 229 attributed to the module.
@@ -215,7 +215,7 @@ Any database principal will do, roles included.
 A principal the database doesn't carry is **Msg 15151**'s *user* variant (`Cannot find the user 'nobody', …`, distinct from the object variant a `GRANT` element reports), and a principal that owns a schema cannot be dropped — `DROP USER` / `DROP ROLE` is **Msg 15138** (`The database principal owns a schema in the database, and cannot be dropped.`).
 Written without a schema name the clause supplies one: `CREATE SCHEMA AUTHORIZATION dbo` claims the name `dbo`, which is then the ordinary reserved-name Msg 2760.
 
-**Every failure the statement meets as it runs carries a trailing Msg 2759** (`CREATE SCHEMA failed due to previous errors.`) — the duplicate-name Msg 2714, the owner's Msg 15151 and an element's own error alike — and the statement is **atomic**: an element that raises leaves neither the schema nor its earlier elements behind.
+**Every failure the statement meets as it runs carries a trailing Msg 2759** (`CREATE SCHEMA failed due to previous errors.`) — the duplicate-name Msg 2714, the owner's Msg 15151 and an element's own error alike — and the statement is **atomic**: an element that raises leaves neither the schema, its earlier elements nor the permission rows an earlier `GRANT` / `DENY` element wrote behind.
 A syntax error inside the element list is the batch's parse failing instead, and stands alone (probed 2026-09-26).
 
 **`CREATE SCHEMA` is its batch's only statement**, not merely its first: a `;` ends the element list, and anything after it — a `SELECT`, a `CREATE TABLE`, a second `CREATE SCHEMA` — is Msg 156 (Msg 102 at a non-keyword) at its first token, failing the whole batch so the schema isn't created either (probed 2026-09-26).

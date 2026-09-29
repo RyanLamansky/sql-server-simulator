@@ -147,13 +147,21 @@ partial class Simulation
         if (!context.CurrentDatabase.Schemas.TryAdd(schemaName, schema))
             throw SimulatedSqlException.NameTakenEndingOnlyStatement(schemaName, state: 6);
 
+        // The element list's GRANT / REVOKE / DENY rows go with the schema when
+        // an element fails, which the permission rows keyed on the schema's
+        // objects would otherwise outlive, unreachable.
+        var database = context.CurrentDatabase;
+        DatabasePermission[] permissionsBefore = [.. database.Permissions];
         try
         {
             _ = this.ParseSchemaElements(context, schemaName);
         }
         catch
         {
-            _ = context.CurrentDatabase.Schemas.TryRemove(schemaName, out _);
+            _ = database.Schemas.TryRemove(schemaName, out _);
+            var kept = permissionsBefore.ToHashSet();
+            _ = database.Permissions.RemoveAll(row => !kept.Contains(row));
+            database.Permissions.AddRange([.. permissionsBefore.Where(row => !database.Permissions.Contains(row))]);
             throw;
         }
 

@@ -302,4 +302,22 @@ public sealed class CollationBehaviorTests
                 len(replace(@s collate {collation}, char(0), '')),
                 (select count(distinct v) from (values (@s collate {collation}), ('a' + char(0) + 'B')) d(v)))
             """));
+
+    /// <summary>
+    /// Sort orders 51 and 41 order a case pair uppercase first in <c>varchar</c>
+    /// data, where the same names' <c>nvarchar</c> data and the CP1250 sibling
+    /// sort lowercase first (probed 2026-09-29 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("varchar", "SQL_Latin1_General_CP1_CS_AS", "A a B b", "A|a")]
+    [DataRow("varchar", "SQL_Latin1_General_CP850_CS_AS", "A a B b", "A|a")]
+    [DataRow("nvarchar", "SQL_Latin1_General_CP1_CS_AS", "a A b B", "a|A")]
+    [DataRow("varchar", "SQL_Latin1_General_CP1250_CS_AS", "a A b B", "a|A")]
+    public void CaseSensitiveLegacySortOrders_OrderACasePair(string type, string collation, string ordered, string minMax)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery($"create table t (v {type}(5) collate {collation}); insert t values ('a'), ('A'), ('b'), ('B')");
+        AreEqual(ordered, sim.ExecuteScalar("select string_agg(v, ' ') within group (order by v) from t"));
+        AreEqual(minMax, sim.ExecuteScalar("select concat(min(v), '|', max(v)) from t where v in ('a', 'A')"));
+    }
 }

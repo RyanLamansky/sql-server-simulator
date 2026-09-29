@@ -101,4 +101,27 @@ public sealed class EndOfBatchTokenTests
     [TestMethod]
     public void DoublyParenthesizedNonBooleanAtEndOfBatch_NamesTheClosingParen()
         => AssertNonBooleanNear("select 1 where ((1))", ")");
+
+    // --- An unbalanced group is a syntax error ahead of the type check ---
+
+    [TestMethod]
+    public void UnbalancedGroupAroundNonBoolean_IsMsg102NearTheLastClosingParen()
+        => AssertNear("if ((1)", ")");
+
+    [TestMethod]
+    public void UnbalancedGroupInWhere_IsMsg102NearTheLastToken()
+        => AssertNear("select 1 where (1", "1");
+
+    // --- A parenthesized boolean carrying a trailing value operator ---
+
+    [TestMethod]
+    [DataRow("(a = 'a') collate Latin1_General_CI_AS = 'x'", "collate")]
+    [DataRow("(a = 'a') like 'x'", "like")]
+    [DataRow("((a = 'a')) like 'x'", "like")]
+    public void ParenthesizedBooleanWithTrailingKeyword_IsMsg156OnTheKeyword(string predicate, string keyword)
+        => new Simulation().AssertSqlError($"create table t (a varchar(5)); select 1 from t where {predicate}", 156, $"Incorrect syntax near the keyword '{keyword}'.");
+
+    [TestMethod]
+    public void ParenthesizedBooleanWithTrailingArithmetic_IsMsg102OnTheOperator()
+        => AssertNear("create table t (a varchar(5)); select 1 from t where (a = 'a') + 1", "+");
 }

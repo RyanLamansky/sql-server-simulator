@@ -268,4 +268,16 @@ public sealed class CreateSchemaElementTests
     [TestMethod]
     public void CreateTypeElement_IsMsg102()
         => new Simulation().AssertSqlError("create schema s1 create type ty from int", 102);
+
+    [TestMethod]
+    public void FailedElementList_TakesItsPermissionRowsWithIt()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create user u without login");
+        var before = sim.ExecuteScalar<int>("select count(*) from sys.database_permissions");
+        _ = sim.AssertSqlError("create schema s create table t (a int) grant select on t to u create table t (b int)", 2714);
+        AreEqual(before, sim.ExecuteScalar<int>("select count(*) from sys.database_permissions"));
+        _ = sim.ExecuteNonQuery("create schema s2 create table t (a int) grant select on t to u");
+        AreEqual(before + 1, sim.ExecuteScalar<int>("select count(*) from sys.database_permissions"));
+    }
 }

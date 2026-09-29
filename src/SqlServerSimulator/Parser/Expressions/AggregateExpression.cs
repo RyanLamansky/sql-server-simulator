@@ -752,7 +752,9 @@ internal sealed class AggregateExpression : Expression
         // Real refuses NEXT VALUE FOR anywhere in an aggregate's arguments
         // with its own message (Msg 11725), ahead of the DISTINCT, TOP and
         // CASE refusals the same statement may also earn — probe-confirmed.
-        var savedRejection = context.EnterNextValueForScope(NextValueForScope.Aggregate);
+        // A windowed call is the exception: its trailing OVER makes the
+        // reference one of the clauses Msg 11720 names (probed 2026-09-29).
+        var savedRejection = context.EnterNextValueForScope(IsWindowedCall(context) ? NextValueForScope.Clause : NextValueForScope.Aggregate);
         try
         {
             var aggregate = ParseArguments(context, kind, out var allWritten);
@@ -763,6 +765,39 @@ internal sealed class AggregateExpression : Expression
         finally
         {
             context.NextValueForRejection = savedRejection;
+        }
+    }
+
+    /// <summary>
+    /// True when the call whose first argument the cursor is on closes with a
+    /// <c>)</c> that <c>OVER</c> follows. A token-only scan against a
+    /// checkpoint, so nothing the arguments parse is affected.
+    /// </summary>
+    private static bool IsWindowedCall(ParserContext context)
+    {
+        var checkpoint = context.SaveCheckpoint();
+        try
+        {
+            var depth = 1;
+            while (depth > 0)
+            {
+                switch (context.Token)
+                {
+                    case Operator { Character: '(' }:
+                        depth++;
+                        break;
+                    case Operator { Character: ')' }:
+                        depth--;
+                        break;
+                }
+                if (!context.MoveNext())
+                    return false;
+            }
+            return context.Token is ReservedKeyword { Keyword: Keyword.Over };
+        }
+        finally
+        {
+            context.RestoreCheckpoint(checkpoint);
         }
     }
 

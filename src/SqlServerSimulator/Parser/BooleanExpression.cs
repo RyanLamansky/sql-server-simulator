@@ -355,7 +355,18 @@ internal abstract class BooleanExpression : ExpressionNode
         if (context.Token is Operator { Character: '(' })
         {
             if (LookaheadValueLhs(context))
-                return ParseComparison(Expression.Parse(context), context);
+            {
+                var groupStart = context.SaveCheckpoint();
+                try
+                {
+                    return ParseComparison(Expression.Parse(context), context);
+                }
+                catch (SimulatedSqlException error) when (error.Number == 102)
+                {
+                    context.RestoreCheckpoint(groupStart);
+                    throw TrailingOperatorAfterBooleanGroup(context) ?? error;
+                }
+            }
 
             context.MoveNextRequired();
             BooleanExpression inner;
@@ -397,6 +408,42 @@ internal abstract class BooleanExpression : ExpressionNode
             // than in ResolveBuiltIn.
             ReservedKeyword { Keyword: Keyword.Update } => Expressions.UpdatePredicate.Parse(context),
             _ => ParseComparison(Expression.Parse(context), context),
+        };
+    }
+
+    /// <summary>
+    /// The syntax error real reports for a parenthesized *boolean* followed by
+    /// a value-only operator — <c>(a = 'a') LIKE 'x'</c> and
+    /// <c>(a = 'a') COLLATE X</c> name the keyword (Msg 156), and
+    /// <c>(a = 'a') + 1</c> the operator (Msg 102), probed 2026-08-05 against
+    /// SQL Server 2025. Entered on the opening <c>(</c> after the value-LHS
+    /// parse failed; <c>null</c> when the group isn't a boolean or nothing of
+    /// that shape follows it, leaving the value parse's own error to stand.
+    /// </summary>
+    private static SimulatedSqlException? TrailingOperatorAfterBooleanGroup(ParserContext context)
+    {
+        context.MoveNextRequired();
+        context.BooleanGroupDepth++;
+        try
+        {
+            _ = ParseOr(context);
+        }
+        catch (SimulatedSqlException)
+        {
+            return null;
+        }
+        finally
+        {
+            context.BooleanGroupDepth--;
+        }
+        if (context.Token is not Operator { Character: ')' })
+            return null;
+        context.MoveNextOptional();
+        return context.Token switch
+        {
+            ReservedKeyword { Keyword: Keyword.Like or Keyword.Collate } keyword => SimulatedSqlException.SyntaxErrorNearKeyword(keyword),
+            Operator { Character: '+' or '-' or '*' or '/' or '%' or '&' or '|' or '^' } => SimulatedSqlException.SyntaxErrorNear(context),
+            _ => null,
         };
     }
 

@@ -60,6 +60,7 @@ The state follows the source's bound type: 2 over a bounded ANSI string or binar
 The binary form takes the same split.
 
 The simulator raises the constant case from the result-type resolution the three scalars share, so it fires while the batch compiles, over an empty rowset and before any statement runs, the way real's check does.
+It is a batch-level compile failure: no earlier statement in the batch runs and a `BEGIN TRY` in the same batch doesn't catch it, while the same text inside `EXEC('…')` is caught by the caller's `TRY`.
 
 ## Text pointers: `TEXTPTR` / `TEXTVALID`
 

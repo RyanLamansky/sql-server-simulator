@@ -114,7 +114,7 @@ Every neighbouring pair below was probed directly (SQL Server 2025, 2026-08-05).
 | # | Msg | the reference sits in | probed refusals |
 |---|---|---|---|
 | 1 | **11719** | a nested query or stored expression | derived table, CTE, subquery, `EXISTS` / `APPLY` body, view / function body, **CHECK constraint**, **computed column**, a `MERGE`'s `USING` derived table |
-| 2 | **11725** | an aggregate's argument | `SUM` / `MAX` / `MIN` / `COUNT` / `STRING_AGG`, `DISTINCT` argument, the reference nested inside a larger argument expression |
+| 2 | **11725** | an aggregate's argument | `SUM` / `MAX` / `MIN` / `COUNT` / `STRING_AGG`, `DISTINCT` argument, the reference nested inside a larger argument expression; a **windowed** call (`SUM(…) OVER ()`) is 11720 instead, the trailing `OVER` being found by a token scan past the argument list |
 | 3 | **11721** | a statement that dedupes or combines rowsets | `DISTINCT`, `UNION`, `UNION ALL`, `EXCEPT`, `INTERSECT` — in *either* branch; a nested query's own `DISTINCT` doesn't count |
 | 4 | **11723** | a statement carrying an `ORDER BY`, the reference naming no `OVER` | the select list, or a clause of the same statement |
 | 5 | **11720** | one of the eight clauses its own text names | `TOP`, `OVER`, `OUTPUT`, `ON` (a `MERGE`'s as well as a join's), `WHERE` (an `UPDATE` / `DELETE`'s as well as a `SELECT`'s), `GROUP BY`, `HAVING`, `ORDER BY` |
@@ -162,7 +162,6 @@ Each is a case where both engines refuse and only the message differs.
 
 - A reference sitting in a **restricted clause** (Msg 11720) or a **conditional arm** (Msg 11741) in a statement that *also* carries an `ORDER BY` reports its own message where real reports Msg 11723.
   Those two refusals fire where the reference parses, which is before the `ORDER BY` is read; `DISTINCT` and `TOP` are known by then and do report real's message.
-- A `NEXT VALUE FOR` inside a **windowed aggregate**'s argument (`SUM(NEXT VALUE FOR s) OVER ()`) reports Msg 11725 where real reports 11720, since the trailing `OVER` is read after the argument.
 
 ### A parse that isn't going to run draws nothing
 

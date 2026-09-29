@@ -155,4 +155,19 @@ public sealed class CrossDatabaseModuleTests
                 end catch
                 """)
             .ExecuteScalar("exec other.dbo.p"));
+
+    /// <summary>
+    /// A computed column's expression reads its table's database when a
+    /// cross-database statement writes or reads it, while a
+    /// <c>DEFAULT (DB_NAME())</c> reads the session's (probed 2026-09-28).
+    /// </summary>
+    [TestMethod]
+    public void ComputedColumn_ReadsItsTablesDatabase()
+    {
+        var simulation = Fixture("create table tc (a int, c as db_name(), o as object_id('tc'), d sysname default (db_name()))");
+        _ = simulation.ExecuteNonQuery("insert other.dbo.tc (a) values (1)");
+        AreEqual("other|1|simulated", simulation.ExecuteScalar("select concat(c, '|', o / o, '|', d) from other.dbo.tc"));
+        _ = simulation.ExecuteNonQuery("update other.dbo.tc set a = 2");
+        AreEqual("other|simulated", simulation.ExecuteScalar("select concat(c, '|', d) from other.dbo.tc where c = 'other'"));
+    }
 }
