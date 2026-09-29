@@ -249,7 +249,7 @@ internal static class SpatialMeasures
     /// every chord up to the whole diameter; taking <c>R</c> as the ellipsoid's
     /// smallest radius keeps the bound on the safe side.
     /// </summary>
-    private static double ChordThreshold(double chord) =>
+    public static double ChordThreshold(double chord) =>
         chord * (1 + (chord * chord / (6 * SpatialEllipsoid.SemiMinor * SpatialEllipsoid.SemiMinor)));
 
     /// <summary>True when any vertex of <paramref name="other"/> lies inside <paramref name="area"/>'s rings.</summary>
@@ -286,7 +286,7 @@ internal static class SpatialMeasures
         ChordDistance(first.From, first.To, second.From, second.To);
 
     /// <summary>Distance from a point to a straight chord in three dimensions.</summary>
-    private static double PointChordDistance(SpatialVector point, SpatialVector from, SpatialVector to)
+    public static double PointChordDistance(SpatialVector point, SpatialVector from, SpatialVector to)
     {
         var along = to - from;
         var squaredLength = along.Dot(along);
@@ -298,7 +298,7 @@ internal static class SpatialMeasures
     /// Distance between two straight chords in three dimensions — the standard
     /// clamped parametric solution, used only as the pruning bound.
     /// </summary>
-    private static double ChordDistance(SpatialVector p0, SpatialVector p1, SpatialVector q0, SpatialVector q1)
+    public static double ChordDistance(SpatialVector p0, SpatialVector p1, SpatialVector q0, SpatialVector q1)
     {
         var u = p1 - p0;
         var v = q1 - q0;

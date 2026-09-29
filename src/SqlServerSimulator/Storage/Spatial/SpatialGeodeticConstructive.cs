@@ -12,23 +12,23 @@ namespace SqlServerSimulator.Storage.Spatial;
 /// maps every edge onto the straight segment between its projected ends. The
 /// planar engine's crossings are then exactly the arcs' crossings, and mapping
 /// back is the inverse projection. The plane touches the ellipsoid at the
-/// normalized sum of the operands' directions.</para>
-/// <para>The plane is turned so that its sweep order runs west to east, then
-/// north to south, which is the order real's output follows: a ring starts at
-/// its westernmost (then northernmost) vertex, a polygon lists before one
-/// further west, and a hull pivots on its southernmost (then westernmost)
-/// vertex (probe-derived, SQL Server 2025, 2026-09-28). The turn is a
-/// rotation, so a ring's direction, and with it which side is the interior,
-/// is kept.</para>
+/// normalized sum of the operands' directions, or at the centre of the
+/// smallest cap holding them where the sum leaves a vertex too near the
+/// horizon.</para>
+/// <para>A set operation's result is then written in real's order, the sweep
+/// of a plane whose primary axis is the Earth-centred y axis (see
+/// <see cref="InRealOrder"/>); a hull pivots on its southernmost, then
+/// westernmost vertex, in a frame turned so the sweep runs west to east
+/// (probe-derived, SQL Server 2025, 2026-09-28).</para>
 /// <para>A gnomonic projection holds less than a hemisphere, so operands
-/// reaching 80° or more from their common centre, and a polygon whose ring
-/// runs clockwise — a region larger than a hemisphere — raise
-/// <see cref="NotSupportedException"/>.</para>
+/// reaching 89.5° or more from their common centre raise
+/// <see cref="NotSupportedException"/>; a polygon larger than a hemisphere
+/// is taken through its complement (see <see cref="Overlay"/>).</para>
 /// </remarks>
 internal sealed class SpatialGeodeticConstructive
 {
-    /// <summary>The largest angle from the projection centre a vertex may sit at: cos 80°.</summary>
-    private const double MinimumCosine = 0.17364817766693041;
+    /// <summary>The largest angle from the projection centre a vertex may sit at: cos 89.5°.</summary>
+    private const double MinimumCosine = 0.0087265354983739347;
 
     private readonly SpatialVector center;
     private readonly SpatialVector east;
@@ -46,37 +46,61 @@ internal sealed class SpatialGeodeticConstructive
         this.north = center.Cross(this.east).Normalized;
     }
 
-    /// <summary>Builds the projection over the given shapes, or raises when they span too much of the globe.</summary>
+    /// <summary>
+    /// Builds the projection over the given shapes, or raises when they span
+    /// too much of the globe. The plane touches at the normalized sum of the
+    /// shapes' directions; when that leaves a vertex too near the horizon, it
+    /// touches at the centre of the smallest cap holding them instead.
+    /// </summary>
     private static SpatialGeodeticConstructive Over(params SpatialShape[] shapes)
     {
+        var directions = new List<SpatialVector>();
         double x = 0, y = 0, z = 0;
         foreach (var shape in shapes)
         {
             foreach (var point in shape.Coordinates())
             {
                 var direction = SpatialEllipsoid.ToCartesian(point).Normalized;
+                directions.Add(direction);
                 x += direction.X;
                 y += direction.Y;
                 z += direction.Z;
             }
         }
         var sum = new SpatialVector(x, y, z);
-        if (sum.Length < 1e-9)
-            throw TooWide();
-        var projection = new SpatialGeodeticConstructive(sum.Normalized);
-        foreach (var shape in shapes)
+        if (sum.Length >= 1e-9 && Fits(sum.Normalized, directions))
+            return new SpatialGeodeticConstructive(sum.Normalized);
+        var centre = sum.Length >= 1e-9 ? sum.Normalized : directions[0];
+        // Bădoiu–Clarkson: step toward the farthest direction by a shrinking
+        // share, which converges on the smallest enclosing cap's centre.
+        for (var round = 1; round <= 2000; round++)
         {
-            foreach (var point in shape.Coordinates())
+            var farthest = directions[0];
+            foreach (var direction in directions)
             {
-                if (SpatialEllipsoid.ToCartesian(point).Normalized.Dot(projection.center) < MinimumCosine)
-                    throw TooWide();
+                if (direction.Dot(centre) < farthest.Dot(centre))
+                    farthest = direction;
             }
+            var next = centre + ((farthest - centre) * (1.0 / (round + 1)));
+            if (next.Length < 1e-12)
+                break;
+            centre = next.Normalized;
         }
-        return projection;
+        return Fits(centre, directions) ? new SpatialGeodeticConstructive(centre) : throw TooWide();
+    }
+
+    private static bool Fits(SpatialVector centre, List<SpatialVector> directions)
+    {
+        foreach (var direction in directions)
+        {
+            if (direction.Dot(centre) < MinimumCosine)
+                return false;
+        }
+        return true;
     }
 
     private static NotSupportedException TooWide() =>
-        new("geography constructive operations over instances reaching 80° or more from their common centre are not modeled.");
+        new("geography constructive operations over instances reaching 89.5° or more from their common centre are not modeled.");
 
     private SpatialCoordinate Project(SpatialCoordinate point)
     {
@@ -133,8 +157,155 @@ internal sealed class SpatialGeodeticConstructive
         }
     }
 
-    /// <summary>One of the four set operations between two round-earth instances.</summary>
+    /// <summary>
+    /// One of the four set operations between two round-earth instances. A
+    /// polygon naming more than a hemisphere is the complement of the small
+    /// polygons its reversed rings enclose, and the operation is rewritten
+    /// over that complement — <c>¬X ∩ B = B − X</c>, <c>¬X ∪ B = ¬(X − B)</c>
+    /// and so on — so every projection holds only small regions.
+    /// </summary>
     public static SpatialShape Overlay(SpatialOverlayOperation operation, SpatialShape a, SpatialShape b)
+    {
+        if (a.IsEmpty && b.IsEmpty)
+            return SpatialShape.Empty(SpatialShapeType.GeometryCollection);
+        var x = Complement(a);
+        var y = Complement(b);
+        if (x is null && y is null)
+            return Direct(operation, a, b);
+        if (x is not null && y is not null)
+        {
+            return operation switch
+            {
+                SpatialOverlayOperation.Intersection => Negate(Direct(SpatialOverlayOperation.Union, x, y), null),
+                SpatialOverlayOperation.Union => Negate(Direct(SpatialOverlayOperation.Intersection, x, y), null),
+                SpatialOverlayOperation.Difference => Direct(SpatialOverlayOperation.Difference, y, x),
+                _ => Direct(SpatialOverlayOperation.SymmetricDifference, x, y),
+            };
+        }
+        // One side is the complement of a small region; the other stands as written.
+        var small = x ?? y!;
+        var other = x is null ? a : b;
+        var complementFirst = x is not null;
+        var (areal, lower) = Split(other);
+        SpatialShape? Inside() => lower is null ? null : Direct(SpatialOverlayOperation.Intersection, lower, small);
+        return operation switch
+        {
+            SpatialOverlayOperation.Intersection => Direct(SpatialOverlayOperation.Difference, other, small),
+            // The other side's lines node the complement's rings where they
+            // cross, as real's do, so the small region is always overlaid with
+            // the whole of it and only the areas are negated.
+            SpatialOverlayOperation.Union => Negate(Direct(SpatialOverlayOperation.Difference, small, other), InsideUncovered()),
+            SpatialOverlayOperation.Difference when complementFirst => Negate(Direct(SpatialOverlayOperation.Union, small, other), null),
+            SpatialOverlayOperation.Difference => Direct(SpatialOverlayOperation.Intersection, other, small),
+            _ => Negate(areal is null ? Direct(SpatialOverlayOperation.Union, small, other) : Direct(SpatialOverlayOperation.SymmetricDifference, small, other), Inside()),
+        };
+
+        SpatialShape? InsideUncovered() =>
+            Inside() is { } inside && areal is not null ? Direct(SpatialOverlayOperation.Difference, inside, areal) : Inside();
+    }
+
+    /// <summary>The small region a polygon larger than a hemisphere leaves out, or null for any other instance.</summary>
+    private static SpatialShape? Complement(SpatialShape shape)
+    {
+        if (shape.Type != SpatialShapeType.Polygon || shape.IsEmpty || SpatialMeasures.GeographyArea(shape) <= SpatialEllipsoid.SurfaceArea / 2)
+            return null;
+        var pieces = new SpatialShape[shape.Figures.Length];
+        for (var i = 0; i < pieces.Length; i++)
+            pieces[i] = SpatialShape.Leaf(SpatialShapeType.Polygon, [Reversed(shape.Figures[i])]);
+        return pieces.Length == 1 ? pieces[0] : SpatialShape.Collection(SpatialShapeType.MultiPolygon, pieces);
+    }
+
+    private static SpatialCoordinate[] Reversed(SpatialCoordinate[] ring)
+    {
+        var reversed = new SpatialCoordinate[ring.Length];
+        for (var i = 0; i < ring.Length; i++)
+            reversed[i] = ring[ring.Length - 1 - i];
+        return reversed;
+    }
+
+    /// <summary>An instance's polygons and its points and lines, each as one shape or null when there are none.</summary>
+    private static (SpatialShape? Areal, SpatialShape? Lower) Split(SpatialShape shape)
+    {
+        var polygons = new List<SpatialShape>();
+        var others = new List<SpatialShape>();
+        void Walk(SpatialShape part)
+        {
+            switch (part.Type)
+            {
+                case SpatialShapeType.Polygon:
+                    if (!part.IsEmpty)
+                        polygons.Add(part);
+                    break;
+                case SpatialShapeType.Point:
+                case SpatialShapeType.LineString:
+                    if (!part.IsEmpty)
+                        others.Add(part);
+                    break;
+                default:
+                    foreach (var child in part.Children)
+                        Walk(child);
+                    break;
+            }
+        }
+        Walk(shape);
+        return (
+            polygons.Count == 0 ? null : SpatialShape.Collection(SpatialShapeType.GeometryCollection, [.. polygons]),
+            others.Count == 0 ? null : SpatialShape.Collection(SpatialShapeType.GeometryCollection, [.. others]));
+    }
+
+    /// <summary>
+    /// The complement of a result's areas — one polygon whose rings are the
+    /// areas' shells reversed, plus each hole as a polygon of its own — with
+    /// <paramref name="extra"/>'s points and lines alongside.
+    /// </summary>
+    private static SpatialShape Negate(SpatialShape areas, SpatialShape? extra)
+    {
+        var (areal, _) = Split(areas);
+        if (areal is null)
+            throw new NotSupportedException("geography results covering the whole globe (FULLGLOBE) are not modeled.");
+        var shells = new List<SpatialCoordinate[]>();
+        var holes = new List<SpatialShape>();
+        foreach (var polygon in areal.Children)
+        {
+            shells.Add(Reversed(polygon.Figures[0]));
+            for (var i = 1; i < polygon.Figures.Length; i++)
+                holes.Add(SpatialShape.Leaf(SpatialShapeType.Polygon, [Reversed(polygon.Figures[i])]));
+        }
+        var outside = SpatialShape.Leaf(SpatialShapeType.Polygon, [.. shells]);
+        var result = holes.Count == 0 ? outside : SpatialShape.Collection(SpatialShapeType.MultiPolygon, [outside, .. holes]);
+        if (extra is null || extra.IsEmpty)
+            return result;
+        var (_, lower) = Split(extra);
+        return lower is null ? result : SpatialShape.Collection(SpatialShapeType.GeometryCollection, [result, .. lower.Children]);
+    }
+
+    /// <summary>
+    /// The union of many small pieces in one projection — a buffer's bands,
+    /// fans and caps — folded pairwise by the planar engine so every crossing
+    /// is computed in the one frame rather than re-projected at each step.
+    /// </summary>
+    public static SpatialShape UnionAll(List<SpatialShape> pieces)
+    {
+        if (pieces.Count == 0)
+            return SpatialShape.Empty(SpatialShapeType.GeometryCollection);
+        var projection = Over([.. pieces]);
+        var level = new List<SpatialShape>(pieces.Count);
+        foreach (var piece in pieces)
+            level.Add(projection.Map(piece, forward: true));
+        while (level.Count > 1)
+        {
+            var next = new List<SpatialShape>((level.Count + 1) / 2);
+            for (var i = 0; i + 1 < level.Count; i += 2)
+                next.Add(SpatialConstructive.Overlay(SpatialOverlayOperation.Union, level[i], level[i + 1]));
+            if (level.Count % 2 == 1)
+                next.Add(level[^1]);
+            level = next;
+        }
+        return InRealOrder(projection.Map(SpatialConstructive.Overlay(SpatialOverlayOperation.Union, level[0], SpatialShape.Empty(SpatialShapeType.GeometryCollection)), forward: false));
+    }
+
+    /// <summary>A set operation between two instances that each fit one projection.</summary>
+    private static SpatialShape Direct(SpatialOverlayOperation operation, SpatialShape a, SpatialShape b)
     {
         if (a.IsEmpty && b.IsEmpty)
             return SpatialShape.Empty(SpatialShapeType.GeometryCollection);
@@ -144,17 +315,110 @@ internal sealed class SpatialGeodeticConstructive
     }
 
     /// <summary>
-    /// Rewrites a result in real's output order, which follows the plain
-    /// coordinates rather than the projection: turned so the sweep runs west
-    /// to east and then north to south, a ring starts at its westernmost,
-    /// then northernmost vertex. The pass re-reads the finished result through
-    /// the planar engine in that frame, which orders it without moving a
-    /// vertex.
+    /// Rewrites a result in real's output order: the sweep of the gnomonic
+    /// plane at the result's centre whose primary axis is the Earth-centred y
+    /// axis, pointing along it for a result centred north of the equator and
+    /// against it otherwise, so a ring starts at the vertex least (or most)
+    /// along that axis — its westernmost near the prime meridian in the north,
+    /// its northernmost at longitude 90° (probed 2026-09-29 against SQL Server
+    /// 2025). The pass re-reads the finished result through the planar engine
+    /// in that frame and maps each vertex back by lookup, and a collection's
+    /// points and lines then precede its polygons, as real's usually do.
     /// </summary>
     private static SpatialShape InRealOrder(SpatialShape shape)
     {
+        if (shape.IsEmpty)
+            return shape;
+        double x = 0, y = 0, z = 0;
+        foreach (var point in shape.Coordinates())
+        {
+            var direction = Spherical(point);
+            x += direction.X;
+            y += direction.Y;
+            z += direction.Z;
+        }
+        var sum = new SpatialVector(x, y, z);
+        if (sum.Length < 1e-9)
+            return shape;
+        var centre = sum.Normalized;
+        var sign = centre.Z > 0 ? 1.0 : -1.0;
+        var axis = new SpatialVector(0, 1, 0);
+        var up = (axis - (centre * axis.Dot(centre))) * sign;
+        if (up.Length < 1e-9)
+            return shape;
+        up = up.Normalized;
+        var across = up.Cross(centre);
+        var originals = new Dictionary<(double X, double Y), SpatialCoordinate>();
+        SpatialCoordinate Forward(SpatialCoordinate point)
+        {
+            var direction = Spherical(point);
+            var scale = 1 / direction.Dot(centre);
+            var projected = new SpatialCoordinate(direction.Dot(across) * scale, direction.Dot(up) * scale);
+            _ = originals.TryAdd((projected.X, projected.Y), new SpatialCoordinate(point.X, point.Y));
+            return projected;
+        }
+        var moved = false;
+        SpatialCoordinate Back(SpatialCoordinate point)
+        {
+            if (originals.TryGetValue((point.X, point.Y), out var original))
+                return original;
+            moved = true;
+            return point;
+        }
+        var planar = Rewrite(shape, Forward);
+        var ordered = Rewrite(SpatialConstructive.Overlay(SpatialOverlayOperation.Union, planar, SpatialShape.Empty(SpatialShapeType.GeometryCollection)), Back);
+        if (!moved)
+            return LowerDimensionsFirst(ordered);
+        // Two vertices a hair apart can meet on the re-read's grid; the plain
+        // turned frame, which maps back by arithmetic, orders those instead.
         var turned = Turn(shape, forward: true);
         return Turn(SpatialConstructive.Overlay(SpatialOverlayOperation.Union, turned, SpatialShape.Empty(SpatialShapeType.GeometryCollection)), forward: false);
+    }
+
+    /// <summary>
+    /// A collection's points and lines ahead of its polygons, each group kept
+    /// in sweep order — real's usual arrangement of a mixed result.
+    /// </summary>
+    private static SpatialShape LowerDimensionsFirst(SpatialShape shape)
+    {
+        if (shape.Type != SpatialShapeType.GeometryCollection)
+            return shape;
+        var ordered = new List<SpatialShape>(shape.Children.Length);
+        foreach (var child in shape.Children)
+        {
+            if (child.Type is not (SpatialShapeType.Polygon or SpatialShapeType.MultiPolygon))
+                ordered.Add(child);
+        }
+        foreach (var child in shape.Children)
+        {
+            if (child.Type is SpatialShapeType.Polygon or SpatialShapeType.MultiPolygon)
+                ordered.Add(child);
+        }
+        return SpatialShape.Collection(SpatialShapeType.GeometryCollection, [.. ordered]);
+    }
+
+    private static SpatialVector Spherical(SpatialCoordinate point)
+    {
+        var lat = point.Y * SpatialEllipsoid.RadiansPerDegree;
+        var lon = point.X * SpatialEllipsoid.RadiansPerDegree;
+        return new SpatialVector(Math.Cos(lat) * Math.Cos(lon), Math.Cos(lat) * Math.Sin(lon), Math.Sin(lat));
+    }
+
+    private static SpatialShape Rewrite(SpatialShape shape, Func<SpatialCoordinate, SpatialCoordinate> map)
+    {
+        var figures = new SpatialCoordinate[shape.Figures.Length][];
+        for (var i = 0; i < figures.Length; i++)
+        {
+            var figure = shape.Figures[i];
+            var mapped = new SpatialCoordinate[figure.Length];
+            for (var j = 0; j < figure.Length; j++)
+                mapped[j] = map(figure[j]);
+            figures[i] = mapped;
+        }
+        var children = new SpatialShape[shape.Children.Length];
+        for (var i = 0; i < children.Length; i++)
+            children[i] = Rewrite(shape.Children[i], map);
+        return new SpatialShape(shape.Type, figures, children);
     }
 
     private static SpatialShape Turn(SpatialShape shape, bool forward)
@@ -194,104 +458,5 @@ internal sealed class SpatialGeodeticConstructive
         var projection = Over(shape);
         var hull = projection.Map(SpatialConstructive.ConvexHull(projection.Map(shape, forward: true)), forward: false);
         return hull.Type == SpatialShapeType.Point ? hull : Turn(SpatialConstructive.ConvexHull(Turn(hull, forward: true)), forward: false);
-    }
-}
-
-/// <summary>
-/// <c>geography</c>'s <c>STBuffer</c> / <c>BufferWithTolerance</c> for points.
-/// </summary>
-/// <remarks>
-/// Real draws a point's buffer as a circle in the gnomonic plane centred on
-/// the point, sized so the four arc ends — at 45°, 135°, 225° and 315° of the
-/// local east–north frame — lie exactly the distance away along the great
-/// elliptic arc, and starts the ring at the north-east one; the points between
-/// the arc ends sit on the planar circle, so they fall slightly short of the
-/// distance on a large buffer (probed 2026-09-28 against SQL Server 2025).
-/// Several points buffer separately and union.
-/// </remarks>
-internal static class SpatialGeodeticBuffer
-{
-    public static SpatialShape Buffer(SpatialShape shape, double distance, double tolerance, bool relative)
-    {
-        if (distance == 0)
-            return shape;
-        if (shape.IsEmpty || !(distance > 0))
-            return SpatialShape.Empty(SpatialShapeType.GeometryCollection);
-        var points = new List<SpatialCoordinate>();
-        if (!CollectPoints(shape, points))
-            throw new NotSupportedException("geography '.STBuffer' of a line or polygon is not modeled.");
-        var result = Circle(points[0], distance, tolerance, relative);
-        for (var i = 1; i < points.Count; i++)
-            result = SpatialGeodeticConstructive.Overlay(SpatialOverlayOperation.Union, result, Circle(points[i], distance, tolerance, relative));
-        return result;
-    }
-
-    private static bool CollectPoints(SpatialShape shape, List<SpatialCoordinate> points)
-    {
-        switch (shape.Type)
-        {
-            case SpatialShapeType.Point:
-                foreach (var figure in shape.Figures)
-                    points.AddRange(figure);
-                return true;
-            case SpatialShapeType.MultiPoint:
-            case SpatialShapeType.GeometryCollection:
-                foreach (var child in shape.Children)
-                {
-                    if (!CollectPoints(child, points))
-                        return false;
-                }
-                return true;
-            default:
-                return shape.IsEmpty;
-        }
-    }
-
-    private static SpatialShape Circle(SpatialCoordinate point, double distance, double tolerance, bool relative)
-    {
-        // The plane is the unit sphere's, reading latitude as a spherical
-        // angle — the frame real's round-earth envelope uses too.
-        var lat = double.DegreesToRadians(point.Y);
-        var lon = double.DegreesToRadians(point.X);
-        var center = new SpatialVector(Math.Cos(lat) * Math.Cos(lon), Math.Cos(lat) * Math.Sin(lon), Math.Sin(lat));
-        var axis = new SpatialVector(0, 0, 1);
-        var east = axis.Cross(center);
-        east = east.Length < 1e-12 ? new SpatialVector(0, 1, 0) : east.Normalized;
-        var north = center.Cross(east).Normalized;
-        var origin = SpatialShape.Leaf(SpatialShapeType.Point, [[new SpatialCoordinate(point.X, point.Y)]]);
-
-        SpatialCoordinate At(double e, double n)
-        {
-            var direction = center + (east * e) + (north * n);
-            return new SpatialCoordinate(
-                double.RadiansToDegrees(Math.Atan2(direction.Y, direction.X)),
-                double.RadiansToDegrees(Math.Atan2(direction.Z, direction.AxialRadius)));
-        }
-
-        // The planar radius whose north-east point lies the distance away.
-        var diagonal = Math.Sqrt(0.5);
-        double low = 0, high = Math.Tan(Math.Min(distance / SpatialEllipsoid.SemiMinor * 2, 1.4));
-        for (var i = 0; i < 200 && high - low > high * 1e-16; i++)
-        {
-            var mid = (low + high) / 2;
-            var probe = SpatialShape.Leaf(SpatialShapeType.Point, [[At(mid * diagonal, mid * diagonal)]]);
-            if (SpatialMeasures.GeographyDistance(origin, probe) < distance)
-                low = mid;
-            else
-                high = mid;
-        }
-        var radius = (low + high) / 2;
-        var allowance = relative ? tolerance : tolerance / distance;
-        var steps = 1;
-        while (steps < 1 << 20 && Math.Pow(Math.PI / 2 / steps, 2) / 8 > allowance)
-            steps *= 2;
-        var ring = new SpatialCoordinate[(4 * steps) + 1];
-        for (var i = 0; i < 4 * steps; i++)
-        {
-            var angle = (Math.PI / 4) + (i * Math.PI / 2 / steps);
-            ring[i] = At(radius * Math.Cos(angle), radius * Math.Sin(angle));
-        }
-        ring[^1] = ring[0];
-        return SpatialShape.Leaf(SpatialShapeType.Polygon, [ring]);
     }
 }

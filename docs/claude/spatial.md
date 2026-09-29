@@ -4,8 +4,8 @@ Spatial values are parsed instances, stored in SQL Server's own UDT serializatio
 WKT parsing (with real's validation failures), canonical WKT rendering, per-value SRID, Z / M ordinates, EMPTY instances, the OGC binary encodings, the constructor family and the whole structural member surface all ship.
 So do all three measures for both spatial types — area, length and distance, planar and round-earth — and the whole topological surface of both: `geometry`'s eight predicates plus `STRelate`, `geography`'s six, `STIsValid` for each, and the Msg 24144 gate an invalid instance puts on most instance methods.
 So do the derived-point members each type carries alone — `geometry`'s `STCentroid` / `STPointOnSurface` / `STIsSimple` and `geography`'s `EnvelopeAngle` / `EnvelopeCenter`.
-So do the [constructive operations](#constructive-operations): the four set operations for both types, `geometry`'s envelope, hull, boundary, buffers, `Reduce` and `MakeValid`, `geography`'s hull, and the four spatial aggregates.
-The rest — `geography`'s buffers, the curve forms and a handful of members — parse cleanly and raise `NotSupportedException` at execute; see [Not modeled yet](#not-modeled-yet).
+So do the [constructive operations](#constructive-operations): the four set operations, the buffers, `ShortestLineTo`, `Reduce` and `MakeValid` for both types, `geometry`'s envelope, hull and boundary, `geography`'s hull, and the four spatial aggregates but `geography`'s `EnvelopeAggregate`.
+The rest — that aggregate, the curve forms and a handful of members — parse cleanly and raise `NotSupportedException` at execute; see [Not modeled yet](#not-modeled-yet).
 
 The sole AW spatial column (`Person.Address.SpatialLocation`, geography) loads as a first-class spatial-typed column rather than degrading to `varbinary(MAX)`.
 
@@ -615,9 +615,29 @@ A collection holding an area answers with the boundary of the union of its membe
 
 A zero distance returns the instance as it stands, unnormalized; a negative one erodes an area by the same pieces and empties a point or a line.
 
-`geography` buffers a point (and each point of a multipoint, unioned) as a circle in the gnomonic plane of the unit sphere centred on it — latitude read as a spherical angle — sized so the arc ends at 45°, 135°, 225° and 315° lie exactly the distance away along the great elliptic arc, with the ring starting at the north-east one.
-Real's points in between sit on its circle too, within millimetres of the distance, but not at the angles the simulator's frame puts them, so they differ by up to about half a percent of the distance along the circle; a line or polygon raises `NotSupportedException`.
 A tolerance that isn't positive is **Msg 6522** carrying 24108, and a NULL argument to either form is **Msg 6569**.
+
+#### `geography` buffers
+
+Real builds a `geography` point's buffer as `BufferWithCurves` answers — a `CURVEPOLYGON` of two half circles through four control points — and linearizes it (probed 2026-09-29 against SQL Server 2025):
+
+- The control points sit at 45°, 135°, 225° and 315° about the point on the unit sphere, reading latitude as a spherical angle, each at its own angle so it lies the distance away along the great elliptic arc; the northern pair and the southern pair differ off the equator.
+  The ring starts at the north-east one and the first half ends at the south-west one.
+- A **circular arc** on `geography` is a circle in a gnomonic plane, stepped at equal angles about its centre — the linearized points identify the plane to about 1e-10° on arcs 40° across.
+  Points are read as the directions of their positions on the ellipsoid, and the plane touches the unit sphere where the geocentric latitude has the tangent `tan L / (1 - e²)`, `L` being the latitude of the circumcentre of the arc's three points read on the unit sphere with latitude as a spherical angle.
+  A circle drawn on the unit sphere instead misses real's vertices by up to half a percent of the distance; a circle in real's plane lands on them.
+- Each half takes the same power-of-two step count, the larger of two.
+  One follows the tolerance — the fewest steps whose estimate `K·d·θ²` stays within it, `K` being 0.13866 at the equator and growing as `(1 - e²sin²φ)^-1.5`, and never more than 64 however small the tolerance.
+  The other follows the distance alone — the fewest whose `|sin 2ρ|/2·(1 - e²sin²φ)^1.5·θ²/8` stays within 1e-6, with `ρ` the distance in radians of the major semi-axis — which is what gives a 30 km buffer 256 sides, a 100 km one 512, and a 10,000 km one, whose `ρ` sits at a right angle, only 128.
+  Both were fitted to real's step-count thresholds, bisected to twelve digits, and hold them to within 3e-4 of the threshold distance.
+- A single step a half leaves a ring retracing one chord, and real answers that chord as a `LINESTRING`.
+- A distance past about 19,883 km is **Msg 6522** carrying 24207 (`The specified buffer distance exceeds the full globe.`), bisected to the millimetre and the same for points and lines.
+
+A **line or polygon** buffers as the union of the pieces it sweeps, taken through one projection: a band either side of each edge whose short sides pass through the edge's own ends, an arc filling each turn on its outer side, a half-circle cap at a line's free ends, and for a polygon the polygon itself.
+A band's sides follow the curve at the distance from the edge, stepped where it bows off the chord joining its ends by more than the tolerance; the arcs are real's circular arcs at a half circle's step density.
+A negative distance erodes a polygon by the bands of all its rings and empties a line.
+Real's own outline for these is a curve polygon whose sides it writes sometimes as a chord, sometimes as two chords through the edge's midpoint and sometimes as an arc, by a rule the probes don't pin down, and whose ring start follows its curve construction rather than any ordering pass — so a line's or polygon's buffer matches real's area, not its vertices (see [Divergences](#divergences-1)).
+Several points buffer separately and union, which real does with curves instead, so a multipoint's ring is split where real's curve union restarts it and carries more vertices than real's.
 
 ### Reduce and MakeValid
 
@@ -633,7 +653,12 @@ A negative tolerance is **Msg 6522** carrying 24125.
 
 `ShortestLineTo(other)` runs from the receiver's point nearest the other instance to the other's point nearest it, and is `LINESTRING EMPTY` where the two meet and NULL for an empty operand.
 Ties go to the first pair found walking the receiver's pieces and, for each, the other's; real breaks some ties the other way, apparently on the last bit of the two distances, and writes a foot on a segment with a last digit the simulator's `A + t·(B - A)` doesn't always reproduce (`3.0000000000000004` for 3).
-Over 165 random pairs (2026-09-28) 118 match exactly, 43 within 1e-9 and 4 are ties real resolves differently; `geography`'s raises `NotSupportedException`.
+Over 165 random pairs (2026-09-28) 118 match exactly, 43 within 1e-9 and 4 are ties real resolves differently.
+
+`geography`'s runs between the points where the least great elliptic distance is reached.
+A foot on an edge is found where the distance's slope along the edge crosses zero, not where the distance is least: a minimum is flat, so a search on the value stalls at the square root of its rounding — metres of foot — where the slope's zero is sharp.
+Real writes both ends through a unit vector and back, reading latitude as a spherical angle and converting by one multiplication with `π/180` and `180/π` each way, so an input vertex comes back with its last digit disturbed: `POINT (1 1)` ends a line as `0.99999999999999978 1` (probed 2026-09-29).
+`double.DegreesToRadians` multiplies by π and then divides, which rounds differently in the last place, so the conversion is spelled out.
 
 `Filter(other)` is `STIntersects` for both types, which is Microsoft's documented contract when no spatial index serves the query.
 
@@ -645,13 +670,19 @@ They skip NULL without the Msg 8153 warning, answer NULL for a group with no non
 
 ### Round earth
 
-`geography`'s set operations and hull run the planar engine on a **gnomonic projection** centred on the normalized sum of the operands' directions.
+`geography`'s set operations and hull run the planar engine on a **gnomonic projection** centred on the normalized sum of the operands' directions, or, where that leaves a vertex 89.5° or more away, on the centre of the smallest cap holding them.
 A `geography` edge is cut from the ellipsoid by the plane through its ends and the centre, and the gnomonic projection maps every such plane onto a straight line, so the planar crossings are the arcs' crossings: `POLYGON((0 0,10 0,10 10,0 10,0 0))` meets the square from (5 5) at latitude 10.0374 on longitude 5, where the top edge bows north of its written latitude.
 Input vertices come back as written; a computed vertex unprojects to geodetic latitude.
 
-Real writes a `geography` result in the order of a plane turned so that its sweep runs west to east and then north to south: a ring starts at its westernmost, then northernmost vertex, and a hull pivots on its southernmost, then westernmost one.
-The turn is a rotation, so a ring's direction — and with it which side a `geography` ring encloses — is kept.
-The simulator orders the finished result by re-reading it through the planar engine in that turned frame.
+Real writes a `geography` set operation's result in the sweep order of a plane whose primary axis is the **Earth-centred y axis** — the direction of longitude 90° on the equator — pointing along it for a result centred north of the equator and against it for one centred on or south of it (probed 2026-09-29 over small squares and diamonds across the globe).
+So near the prime meridian in the north a ring starts at its westernmost, then northernmost vertex, while at longitude 90° it starts at its northernmost, beyond longitude 150° at its easternmost, and south of the equator the whole picture turns half round.
+A mixed collection lists its points and lines, in that sweep's order, ahead of its polygons.
+The simulator orders the finished result by re-reading it through the planar engine in the gnomonic plane at the result's centre with those axes; where two vertices a hair apart meet on that re-read's grid it falls back to the plain turned longitude / latitude frame, which maps back by arithmetic.
+A hull still pivots on its southernmost, then westernmost vertex.
+
+A polygon naming more than a hemisphere — a ring wound clockwise around a small region — is the complement of the small polygons its reversed rings enclose, and the set operation is rewritten over that complement so every projection holds only small regions: `¬X ∩ B = B − X`, `¬X ∪ B = ¬(X − B)` with `B`'s lines inside `X` alongside, `¬X − B = ¬(X ∪ B)`, `B − ¬X = B ∩ X`, `¬X △ B = ¬(X △ B)`, and with both sides complemented `¬X ∩ ¬Y = ¬(X ∪ Y)`, `¬X ∪ ¬Y = ¬(X ∩ Y)`, `¬X − ¬Y = Y − X`, `¬X △ ¬Y = X △ Y`.
+A complemented result is one polygon whose rings are the result's shells reversed, beside each of its holes as a polygon of its own; the other side's lines are overlaid with the small region so they node its rings where they cross, as real's do.
+Real answers the complement of nothing as `FULLGLOBE` (probed 2026-09-29), which the value model doesn't hold.
 
 ### Agreement with real
 
@@ -664,8 +695,16 @@ Randomly generated cases diffed against SQL Server 2025 (2026-09-28), counting a
 | 1,500 envelopes, hulls and boundaries | 98.7% | 99.7% |
 | 300 `Reduce` calls | 99.3% | 99.3% |
 | 300 buffers of points, lines and polygons | 20.7% | 78.7% |
-| 400 `geography` set operations | 50.0% | 71.3% |
-| 120 `geography` point buffers | 0% | 0.8% |
+| 400 `geography` set operations | 57.0% | 90.8% |
+| 400 more, held out while the ordering was fitted | 60.3% | 94.3% |
+| 600 `geography` set operations reaching up to 170° across, a third over a clockwise ring | 64.8% | 66.5% |
+| 200 `geography` point buffers, 1 m to 1,500 km | 0% | 90.5% |
+| 120 `geography` point and multipoint buffers | 0% | 80.8% |
+| 300 `geography` `ShortestLineTo` calls | 72.7% | 90.0% |
+| 300 `geography` line and polygon buffers | 12.3% | 12.7% |
+
+The `geography` rows were measured 2026-09-29.
+The exact line and polygon buffers are the negative ones that erode to nothing; the rest agree with real on area — half of them within 3e-5 of real's, nine in ten within 5e-4 — and not on vertices.
 
 Nearly every case outside tolerance falls in a class under [Divergences](#divergences-1).
 
@@ -695,8 +734,10 @@ A dotted name that binds neither way reports **Msg 207** where real reports **Ms
 
 - **`STRelate`'s matrix on `geography`** — the round-earth engine computes the nine cells but nothing reads them out, since real exposes no `STRelate` there to compare a matrix against.
   The six predicates are masks over it; a `geography`-shaped `STRelate` would need a probe oracle that doesn't exist.
-- **The remaining constructive members** — `geography`'s buffer of a line or polygon, its `EnvelopeAggregate` (whose answer is a curve polygon) and `ShortestLineTo`, and the curve-producing `BufferWithCurves` and `CurveToLineWithTolerance` for both types.
-- **`geography` constructive operations across much of the globe** — the gnomonic projection holds less than a hemisphere, so operands reaching 80° or more from their common centre, and a polygon whose ring encloses more than a hemisphere, raise `NotSupportedException`.
+- **The remaining constructive members** — `geography`'s `EnvelopeAggregate` and the curve-producing `BufferWithCurves` and `CurveToLineWithTolerance` for both types.
+  Real's `EnvelopeAggregate` answers a `CURVEPOLYGON` of one `CIRCULARSTRING` through four control points at 45°, 135°, 225° and 315° about the `EnvelopeCenter`, a little further out than the `EnvelopeAngle` — about 0.67% at half a degree, 0.64% at 25° — so that real's own arc through them holds the instance; the exact placement wasn't pinned (probed 2026-09-29), and the value model holds no curve.
+- **`geography` constructive operations spanning a hemisphere** — operands that no cap narrower than 89.5° holds, other than through a single polygon larger than a hemisphere, raise `NotSupportedException`, and so does a result real writes as `FULLGLOBE`.
+  A buffer reaching 80° from its instance does too.
 - **A spatial column's property form outside a query scope** — see [The property form of a spatial column](#the-property-form-of-a-spatial-column) for what ships and what an UPDATE's SET list, a CHECK constraint and a computed column still read as a two-part column name.
 - **Curved shapes and FULLGLOBE** — `CIRCULARSTRING` / `COMPOUNDCURVE` / `CURVEPOLYGON` / `FULLGLOBE` are recognized labels (real accepts them, so reporting them as unknown would be the wrong error) that raise `NotSupportedException` naming the kind.
 - **GML** — `AsGml` / `STAsGML`, and the `GeomFromGml` constructors.
@@ -747,8 +788,12 @@ A dotted name that binds neither way reports **Msg 207** where real reports **Ms
   A buffer's vertex layout matches real's, but its coordinates carry noise of a few units in the fourteenth or fifteenth digit that the simulator's single grid reproduces for axis-parallel outlines and not in general.
   Where a cap or join runs back over the band of another segment — a hairpin, a line doubling back — real's outline meets it at points a little way from the simulator's.
 - **A collection's boundary** takes some of its ring vertices through the grid on real, where the simulator restores them.
-- **`geography`'s last digits and the order of a mixed collection.**
-  Real's round-earth crossings carry noise of about 1e-13 degrees, and its sweep plane is not quite the turned longitude / latitude frame: a line climbing steeply north-east runs the other way round, and a `GEOMETRYCOLLECTION` lists lines before polygons more often than the frame predicts.
+- **`geography`'s last digits and the order of a result far across the globe.**
+  Real's round-earth crossings carry noise of about 1e-13 degrees, and over results spanning tens of degrees its line directions, and the ring starts of a complemented result, follow no rule the y-axis sweep reproduces.
+- **`geography` buffers of lines and polygons match real's area, not its vertices.**
+  Real's outline comes from its curve construction, whose side representation and ring start weren't pinned; the simulator's sweeps the same shape through different vertices, and a multipoint's circles union as polygons where real unions curves.
+  The point buffers' last digits follow real's control points, whose placement differs from an exact great elliptic distance by about 1e-8 of the distance — real's own distance residual — which past a few hundred kilometres reaches the ninth significant digit.
+- **`geography` `ShortestLineTo`'s foot points** carry real's distance residual too: real's foot sits where its own slightly-off distance is least, up to about 1e-8 degrees from the exact one on a long edge.
 - **Near-retrace validity.**
   A handful of lines retracing themselves to within a grid step are valid on real in a way neither the size nor the sign of the snapped offset predicts, so an operation real answers over one can raise 24144 here.
 - **Msg 6522 omits the .NET stack-frame block** — see [The Msg 6522 wrapper](#the-msg-6522-wrapper).

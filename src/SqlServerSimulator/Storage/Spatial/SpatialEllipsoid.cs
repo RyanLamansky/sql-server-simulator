@@ -53,6 +53,18 @@ internal readonly struct SpatialVector(double x, double y, double z)
 /// </remarks>
 internal static class SpatialEllipsoid
 {
+    /// <summary>
+    /// Degrees to radians as real converts a coordinate: one multiplication by
+    /// the precomputed ratio. <c>double.DegreesToRadians</c> multiplies by π
+    /// and then divides, which rounds differently in the last place — and the
+    /// last place shows wherever real writes a coordinate back through a unit
+    /// vector (probed 2026-09-29 against SQL Server 2025).
+    /// </summary>
+    public const double RadiansPerDegree = Math.PI / 180;
+
+    /// <summary>Radians to degrees as real converts them; see <see cref="RadiansPerDegree"/>.</summary>
+    public const double DegreesPerRadian = 180 / Math.PI;
+
     /// <summary>Semi-major axis, metres.</summary>
     public const double SemiMajor = 6378137.0;
 

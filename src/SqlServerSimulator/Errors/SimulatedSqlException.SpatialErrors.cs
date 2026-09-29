@@ -138,6 +138,10 @@ partial class SimulatedSqlException
         "The specified input cannot be accepted because it contains an edge with antipodal points. For information about "
         + "using spatial methods with FullGlobe objects, see Types of Spatial Data in SQL Server Books Online.");
 
+    /// <summary>24207 — a <c>geography</c> buffer distance past about half the globe's circumference.</summary>
+    internal static SimulatedSqlException SpatialBufferExceedsGlobe() => SpatialFailure(
+        isGeography: true, SpatialGeodetic, 24207, "The specified buffer distance exceeds the full globe. Decrease the buffer distance.");
+
     /// <summary>24102 — <c>STPointN</c> index below 1. Real's wording differs from <see cref="SpatialGeometryIndexTooSmall"/> by one word ("This number" vs "The number"), reproduced verbatim.</summary>
     internal static SimulatedSqlException SpatialPointIndexTooSmall(bool isGeography, int n) => SpatialFailure(
         isGeography, SpatialOutOfRange, 24102,

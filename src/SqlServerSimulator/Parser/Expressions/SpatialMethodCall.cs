@@ -524,9 +524,10 @@ internal sealed class SpatialMethodCall : Expression
     {
         if (Operand(runtime, 0, value, type.IsGeography) is not { } other)
             return SqlValue.Null(type);
-        if (type.IsGeography)
-            throw new NotSupportedException("geography '.ShortestLineTo' is not modeled.");
-        return SpatialConstructive.ShortestLine(value.Root, other.Root) is { } line ? Constructed(value, line) : SqlValue.Null(type);
+        var line = type.IsGeography
+            ? SpatialGeodeticShortestLine.ShortestLine(value.Root, other.Root)
+            : SpatialConstructive.ShortestLine(value.Root, other.Root);
+        return line is null ? SqlValue.Null(type) : SqlValue.FromSpatial(new SpatialGeometry(value.Srid, line), type.IsGeography);
     }
 
     /// <summary><c>Reduce(tolerance)</c>: NULL is Msg 6569 and a negative tolerance 24125.</summary>

@@ -372,9 +372,10 @@ public sealed class SpatialConstructiveTests
     {
         var text = Text("geography::Parse('POLYGON((0 0,10 0,10 10,0 10,0 0))').STIntersection(geography::Parse('POLYGON((5 5,15 5,15 15,5 15,5 5))'))")!;
         var sim = new Simulation();
-        // The top edge of the first square bows north of latitude 10 at longitude 5.
-        AreEqual(10.037423045910833, (double)sim.ExecuteScalar($"select geography::Parse('{text}').STPointN(4).Lat")!, 1e-9);
-        AreEqual(5.0190018174896718, (double)sim.ExecuteScalar($"select geography::Parse('{text}').STPointN(2).Lat")!, 1e-9);
+        // The top edge of the first square bows north of latitude 10 at
+        // longitude 5, and the ring starts there, least along the y axis.
+        AreEqual(10.037423045910833, (double)sim.ExecuteScalar($"select geography::Parse('{text}').STPointN(1).Lat")!, 1e-9);
+        AreEqual(5.0190018174896718, (double)sim.ExecuteScalar($"select geography::Parse('{text}').STPointN(3).Lat")!, 1e-9);
     }
 
     [TestMethod]
@@ -465,5 +466,80 @@ public sealed class SpatialConstructiveTests
     {
         IsTrue((bool)Eval("geometry::Parse('POINT(0 0)').Filter(geometry::Parse('POINT(0 0)'))")!);
         IsFalse((bool)Eval("geometry::Parse('POINT(0 0)').Filter(geometry::Parse('POINT(1 1)'))")!);
+    }
+
+    [TestMethod]
+    public void Geography_PointBuffer_StepsItsHalvesAboutTheGnomonicCircle()
+    {
+        // Probed 2026-09-29: the vertices between the control points sit on
+        // real's own arc, which the unit-sphere circle misses by ~1e-8 degrees.
+        AreEqual(10.008534033166589, (double)Eval("geography::Point(45, 10, 4326).STBuffer(1000).STPointN(2).Long")!, 1e-9);
+        AreEqual(45.006656819309505, (double)Eval("geography::Point(45, 10, 4326).STBuffer(1000).STPointN(2).Lat")!, 1e-9);
+        AreEqual(-38.405224041813725, (double)Eval("geography::Point(-14.17, -38.53, 4326).STBuffer(20000).STPointN(2).Long")!, 1e-9);
+    }
+
+    [TestMethod]
+    public void Geography_PointBuffer_StepCountFollowsTheDistance()
+    {
+        AreEqual(129, Eval("geography::Point(45, 10, 4326).STBuffer(20000).STNumPoints()"));
+        AreEqual(257, Eval("geography::Point(45, 10, 4326).STBuffer(30000).STNumPoints()"));
+        AreEqual(513, Eval("geography::Point(45, 10, 4326).STBuffer(100000).STNumPoints()"));
+        AreEqual(33, Eval("geography::Point(45, 10, 4326).BufferWithTolerance(1000, 100, 0).STNumPoints()"));
+        AreEqual("LineString", Eval("geography::Point(45, 10, 4326).BufferWithTolerance(1, 10, 0).STGeometryType()"));
+    }
+
+    [TestMethod]
+    public void Geography_Buffer_PastHalfTheGlobe_Is24207()
+    {
+        var ex = new Simulation().AssertSqlError("select geography::Point(45, 10, 4326).STBuffer(20000000)", 6522);
+        Assert.Contains("24207: The specified buffer distance exceeds the full globe.", ex.Message);
+    }
+
+    [TestMethod]
+    public void Geography_LineBuffer_BandsCapsAndJoins()
+    {
+        AreEqual(131, Eval("geography::Parse('LINESTRING(0 45, 1 45)').STBuffer(1000).STNumPoints()"));
+        AreEqual(-0.012682561702143821, (double)Eval("geography::Parse('LINESTRING(0 45, 1 45)').STBuffer(1000).STPointN(1).Long")!, 1e-9);
+        // Areas probed 2026-09-29.
+        AreEqual(225784963.37947562, (double)Eval("geography::Parse('LINESTRING(0 0, 1 0)').STBuffer(1000).STArea()")!, 225784963.0 * 1e-8);
+        AreEqual(446720214.91173047, (double)Eval("geography::Parse('LINESTRING(0 0, 1 0, 1 1)').STBuffer(1000).STArea()")!, 446720214.0 * 1e-4);
+        AreEqual(12755694405.137461, (double)Eval("geography::Parse('POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))').STBuffer(1000).STArea()")!, 12755694405.0 * 1e-5);
+        AreEqual(11868998007.083227, (double)Eval("geography::Parse('POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))').STBuffer(-1000).STArea()")!, 11868998007.0 * 1e-5);
+        AreEqual("GEOMETRYCOLLECTION EMPTY", Text("geography::Parse('LINESTRING(0 0, 1 0)').STBuffer(-1000)"));
+    }
+
+    [TestMethod]
+    public void Geography_ShortestLineTo_WritesEndsThroughAUnitVector()
+    {
+        AreEqual("LINESTRING (0 0, 0.99999999999999978 1)", Text("geography::Parse('POINT(0 0)').ShortestLineTo(geography::Parse('POINT(1 1)'))"));
+        AreEqual("LINESTRING EMPTY", Text("geography::Parse('POINT(0 42)').ShortestLineTo(geography::Parse('POLYGON((-1 40, 1 40, 1 44, -1 44, -1 40))'))"));
+        IsNull(Text("geography::Parse('POINT EMPTY').ShortestLineTo(geography::Parse('POINT(1 1)'))"));
+        // The foot on the line bows north with the great elliptic arc.
+        AreEqual(44.004360898092408, (double)Eval("geography::Parse('POINT(0 45)').ShortestLineTo(geography::Parse('LINESTRING(-1 44, 1 44)')).STEndPoint().Lat")!, 1e-9);
+        AreEqual(2.4879513251438476, (double)Eval("geography::Parse('LINESTRING(0 0, 10 10)').ShortestLineTo(geography::Parse('LINESTRING(0 5, 5 20)')).STStartPoint().Long")!, 1e-8);
+    }
+
+    [TestMethod]
+    public void Geography_SetOperations_OrderRingsByTheSweepAlongTheYAxis()
+    {
+        // Northern results start at the vertex least along the Earth-centred
+        // y axis, southern ones at the vertex furthest along it.
+        AreEqual("POLYGON ((-10.6 -52.3, -10.6 -31.5, -39.6 -31.5, -39.6 -52.3, -10.6 -52.3))",
+            Text("geography::Parse('POLYGON((-39.6 -31.5, -39.6 -52.3, -10.6 -52.3, -10.6 -31.5, -39.6 -31.5))').STUnion(geography::Parse('POINT(-39.6 -31.5)'))"));
+        AreEqual("GEOMETRYCOLLECTION (LINESTRING (10 8, 1 8), POLYGON ((10.7 6, 11.3 4.8, 12.6 4.9, 13.4 6, 12.7 7.1, 11 7.8, 10.7 6)))",
+            Text("geography::Parse('LINESTRING(1 8, 10 8)').STUnion(geography::Parse('POLYGON((12.6 4.9, 13.4 6, 12.7 7.1, 11 7.8, 10.7 6, 11.3 4.8, 12.6 4.9))'))"));
+        AreEqual("MULTIPOINT ((0 0), (170 0))", Text("geography::Parse('POINT(0 0)').STUnion(geography::Parse('POINT(170 0)'))"));
+    }
+
+    [TestMethod]
+    public void Geography_SetOperations_TakeAPolygonLargerThanAHemisphereThroughItsComplement()
+    {
+        // The clockwise square names the globe less the square.
+        AreEqual("Polygon", Eval("geography::Parse('POLYGON((0 0, 0 10, 10 10, 10 0, 0 0))').STUnion(geography::Parse('POINT(50 50)')).STGeometryType()"));
+        var text = Text("geography::Parse('POLYGON((0 0, 0 10, 10 10, 10 0, 0 0))').STIntersection(geography::Parse('POLYGON((5 5, 15 5, 15 15, 5 15, 5 5))'))")!;
+        Assert.StartsWith("POLYGON ((5 15, ", text);
+        AreEqual(7, (int)Eval($"geography::Parse('{text}').STNumPoints()")!);
+        AreEqual(2, Eval("geography::Parse('POLYGON((0 0, 0 10, 10 10, 10 0, 0 0))').STIntersection(geography::Parse('POLYGON((20 20, 20 30, 30 30, 30 20, 20 20))')).NumRings()"));
+        _ = Throws<NotSupportedException>(() => Eval("geography::Parse('POLYGON((0 0, 0 10, 10 10, 10 0, 0 0))').STUnion(geography::Parse('POLYGON((0 0, 10 0, 10 10, 0 10, 0 0))')).ToString()"));
     }
 }
